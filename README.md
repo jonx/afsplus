@@ -20,7 +20,7 @@ Examples include:
 - `GetChangesSince()` for persistent incremental change tracking
 - `StatBatch()` and other bulk metadata operations
 - stable object IDs and content generations
-- race-free access to a specific committed content generation
+- generation-stable read handles where the requested committed data generation is still retained by the filesystem's versioning policy
 - `SealContent()` for immutable finalized content
 - access-intent and preallocation hints for streaming, mmap, large files, and temporary data
 - first-class security/content-inspection feeds that avoid repeated rescans of unchanged files
@@ -29,6 +29,8 @@ Examples include:
 These primitives must remain filesystem-neutral at the public API layer. Applications should not need to understand AFS+ block layouts to benefit from them, and other filesystem handlers should be able to implement equivalent capabilities or report that they are unsupported.
 
 This developer contract is a design filter. A feature does not belong in AFS+ merely because another filesystem has it. It belongs when it solves a real workload or developer problem with acceptable complexity, resource cost, portability, and recovery semantics.
+
+Just as importantly, an experimental feature is not a lifetime commitment merely because it once appeared in the design. Feature identities are permanent and never reused, but implementations may deprecate or retire unused features. Existing active volumes remain readable through retained support or explicit migration; new volumes need not keep enabling a feature that proved unnecessary.
 
 ## Why AFS+
 
@@ -68,12 +70,13 @@ AFS+ 1.0 is built around:
 - little-endian explicit on-disk encoding
 - 64-bit block numbers, object IDs, offsets, and file sizes
 - 4 KiB default logical blocks, with format support for other powers of two
-- allocation regions with bounded-size local bitmaps
+- allocation regions with bounded-size local free-space state
 - object IDs independent from paths
 - extent-based files
 - an extent model capable of supporting shared extents/reflinks
 - B+ tree directory indexes
-- UTF-8 names normalized to NFC, pending interoperability validation before epoch freeze
+- valid UTF-8 names whose original bytes are preserved, with lookup through a versioned normalized comparison key
+- binary B+ tree key ordering, never host-locale collation
 - configurable case-sensitive or case-insensitive namespaces
 - atomic metadata transactions with explicit durability semantics
 - copy-on-write metadata plus alternating checksummed checkpoints as the leading transaction design candidate
@@ -84,11 +87,11 @@ AFS+ 1.0 is built around:
 - sparse files
 - TRIM/discard support through the storage layer
 - stable object identity, content generations, and modern file notifications
-- an optional derived global catalog for extremely fast full-volume enumeration
-- an optional persistent change stream for incremental indexing, backup, security, and developer tooling
-- portable ACL/security semantics that can survive movement between operating systems
+- an optional non-authoritative, rebuildable global catalog for extremely fast full-volume enumeration
+- an optional non-authoritative, discardable but non-reconstructible persistent change stream for incremental indexing, backup, security, and developer tooling
+- portable ACL/security semantics under active prototype review
 - first-class observability, deterministic fault injection, replay, and explain APIs for development and repair
-- feature flags and compatibility profiles for long-term evolution
+- feature flags, lifecycle metadata, and compatibility profiles for long-term evolution and safe feature retirement
 - a Rust reference implementation path plus a portable C implementation path, with the specification remaining authoritative over either implementation
 
 ## Amiga-native design ancestry
@@ -101,9 +104,7 @@ See `docs/22-pfs3-and-pfs4-lessons.md`, `docs/23-pfs3-stage0-review.md`, and `ad
 
 ### Allocation regions
 
-A single enormous global free-space structure scales badly and makes low-memory implementations unattractive. AFS+ divides the volume into allocation regions. Each region owns a compact allocation bitmap and summary.
-
-With a 1 GiB region and 4 KiB blocks, the region bitmap is only 32 KiB. A constrained implementation can operate on one region at a time.
+A single enormous global free-space structure scales badly and makes low-memory implementations unattractive. AFS+ divides the volume into allocation regions so allocation/repair work can remain bounded. The exact transactional representation of region free-space state is intentionally still an implementation question to be resolved by the allocator prototype.
 
 ### Compatibility profiles
 
@@ -125,9 +126,15 @@ A normal read-only mount can still modify media in some filesystem designs, for 
 
 Filesystem repair logic must not become an unrelated second interpretation of the format. The Rust and portable C implementations, checker, AROS handler, host tools, and FUSE adapter should be checked against the same normative specification, conformance images, and invariant corpus.
 
-### Rebuildable accelerators
+### Optional accelerators have explicit failure semantics
 
-The global catalog, change stream, reverse mapping, directory statistics, and similar accelerators improve performance or repairability but should be derived and rebuildable whenever practical. A volume must remain correct when a non-authoritative accelerator is absent, stale, unsupported, or rebuilt.
+Optional structures are classified by what may safely happen to them:
+
+- the catalog is non-authoritative and rebuildable
+- the change stream is non-authoritative and discardable, but lost history is not reconstructible and forces `RESCAN_REQUIRED`
+- future reverse maps/directory statistics should be rebuildable whenever practical
+
+The feature registry records these properties separately rather than hiding them behind one `derived` flag.
 
 ### Tiny-file optimization is measured, not assumed
 
@@ -148,4 +155,4 @@ Tiny files dominate source trees, Cargo metadata, package caches, editor state, 
 
 ## Status
 
-This is a development specification. Fields marked `TBD`, Proposed, or otherwise unfrozen are not format commitments. Once implementation begins, incompatible format changes must update the format epoch or be represented through feature negotiation as defined in the compatibility specification.
+This is a development specification. Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen are not format commitments. Once implementation begins, incompatible format changes must update the format epoch or be represented through feature negotiation as defined in the compatibility specification.
