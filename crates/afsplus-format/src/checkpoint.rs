@@ -66,8 +66,8 @@ pub struct Checkpoint {
     pub object_map_block: u64,
     /// AFST allocation-region root. Zero selects transitional inline records.
     pub allocation_root_block: u64,
-    /// 0 when no blocks are currently retired.
-    pub retired_list_block: u64,
+    /// Root of the reclaim queue (ADR-036); always nonzero.
+    pub reclaim_root_block: u64,
     pub next_object_id: u64,
     pub committed_tx_id: u64,
     pub free_blocks_total: u64,
@@ -102,7 +102,7 @@ impl Checkpoint {
         le::put_u64(&mut p[24..32], self.root_object_id);
         le::put_u64(&mut p[32..40], self.object_map_block);
         le::put_u64(&mut p[40..48], self.allocation_root_block);
-        le::put_u64(&mut p[48..56], self.retired_list_block);
+        le::put_u64(&mut p[48..56], self.reclaim_root_block);
         le::put_u64(&mut p[56..64], self.next_object_id);
         le::put_u64(&mut p[64..72], self.committed_tx_id);
         le::put_u64(&mut p[72..80], self.free_blocks_total);
@@ -168,7 +168,7 @@ impl Checkpoint {
             root_object_id: le::get_u64(&p[24..32]),
             object_map_block: le::get_u64(&p[32..40]),
             allocation_root_block: le::get_u64(&p[40..48]),
-            retired_list_block: le::get_u64(&p[48..56]),
+            reclaim_root_block: le::get_u64(&p[48..56]),
             next_object_id: le::get_u64(&p[56..64]),
             committed_tx_id: le::get_u64(&p[64..72]),
             free_blocks_total: le::get_u64(&p[72..80]),
@@ -234,8 +234,8 @@ impl Checkpoint {
         if !geo.is_allocatable(self.object_map_block) {
             return Err(FormatError::Invalid("object map block out of allocatable bounds"));
         }
-        if self.retired_list_block != 0 && !geo.is_allocatable(self.retired_list_block) {
-            return Err(FormatError::Invalid("retired list block out of allocatable bounds"));
+        if !geo.is_allocatable(self.reclaim_root_block) {
+            return Err(FormatError::Invalid("reclaim root block out of allocatable bounds"));
         }
         if self.next_object_id < OBJECT_FIRST_DYNAMIC {
             return Err(FormatError::Invalid("next object ID below dynamic range"));

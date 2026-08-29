@@ -5,10 +5,13 @@
 //! selects the pages. Dirty pages and the replacement descriptor are written
 //! to slots referenced by neither retained checkpoint before publication.
 //!
-//! A block removed in transaction N remains allocated and enters the retired
-//! list. Transaction N+1 may clear that bit only after N is the newest durable
-//! checkpoint, so no physical block is reused while a selectable checkpoint
-//! can still reach its previous contents.
+//! A block run removed in transaction N remains allocated and enters the
+//! reclaim queue (ADR-036). A later transaction clears those bits only in
+//! bounded batches, after N is the newest durable checkpoint, so no physical
+//! block is reused while a selectable checkpoint can still reach its previous
+//! contents. Blocks allocated by an in-flight transaction and discarded
+//! before publication are released back to free immediately: no committed
+//! state can reference them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,10 +20,62 @@ use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::{Checkpoint, RegionRecord};
 use afsplus_format::geometry::{Geometry, BITMAP_SLOTS, DESCRIPTOR_SLOTS};
 use afsplus_format::region::RegionDescriptor;
-use afsplus_format::retired::{RetiredEntry, RetiredList};
 
 use crate::allocation_root;
+use crate::reclaim::{ReclaimStats, ReclaimTx};
 use crate::CoreError;
+
+/// Compact interval set used to track this transaction's own allocations
+/// and retirements without one map entry per block.
+#[derive(Debug, Default)]
+struct RunSet {
+    /// start -> end (exclusive), non-overlapping, non-adjacent runs.
+    runs: std::collections::BTreeMap<u64, u64>,
+}
+
+impl RunSet {
+    fn overlaps(&self, start: u64, end: u64) -> bool {
+        if let Some((_, prev_end)) = self.runs.range(..=start).next_back() {
+            if *prev_end > start {
+                return true;
+            }
+        }
+        self.runs.range(start..end).next().is_some()
+    }
+
+    /// Inserts a run; fails when it overlaps an existing one.
+    fn insert(&mut self, start: u64, end: u64) -> bool {
+        debug_assert!(start < end);
+        if self.overlaps(start, end) {
+            return false;
+        }
+        self.runs.insert(start, end);
+        true
+    }
+
+    /// Removes one block, splitting its run if needed.
+    fn remove_block(&mut self, lba: u64) -> bool {
+        let Some((start, end)) = self
+            .runs
+            .range(..=lba)
+            .next_back()
+            .map(|(s, e)| (*s, *e))
+        else {
+            return false;
+        };
+        if lba >= end {
+            return false;
+        }
+        self.runs.remove(&start);
+        if start < lba {
+            self.runs.insert(start, lba);
+        }
+        if lba + 1 < end {
+            self.runs.insert(lba + 1, end);
+        }
+        true
+    }
+}
 
 fn checkpoint_records<D: BlockDevice>(
     dev: &mut D,
@@ -200,6 +255,9 @@ pub struct AllocStats {
     pub blocks_allocated: u64,
     pub blocks_retired: u64,
     pub blocks_promoted: u64,
+    /// Blocks allocated by this transaction and released before publication
+    /// (never quarantined: no committed state can reference them).
+    pub blocks_released: u64,
     pub reclaim_latency_generations: u64,
     pub bitmap_pages_dirty: u64,
     pub region_descriptors_dirty: u64,
@@ -207,6 +265,7 @@ pub struct AllocStats {
     pub allocation_records_loaded: u64,
     /// Peak resident bitmap payload bytes (descriptor objects excluded).
     pub allocator_ram_bytes: u64,
+    pub reclaim: ReclaimStats,
 }
 
 pub struct TxAllocator {
@@ -224,19 +283,31 @@ pub struct TxAllocator {
     new_generation: u64,
     dirty_pages: BTreeSet<(u32, u32)>,
     dirty_regions: BTreeSet<u32>,
-    new_retired: RetiredList,
+    reclaim: Option<ReclaimTx>,
+    allocated_this_tx: RunSet,
+    retired_this_tx: RunSet,
     stats: AllocStats,
 }
 
 impl TxAllocator {
+    /// Starts a transaction: reads the committed reclaim queue and consumes
+    /// up to `batch_blocks` from its head, clearing the promoted runs' bits.
     pub fn begin<D: BlockDevice>(
         dev: &mut D,
         geo: &Geometry,
         current: &Checkpoint,
         other: Option<&Checkpoint>,
-        committed_retired: &RetiredList,
         new_generation: u64,
+        batch_blocks: u64,
     ) -> Result<TxAllocator, CoreError> {
+        let reclaim = ReclaimTx::begin(
+            dev,
+            geo,
+            current.reclaim_root_block,
+            current.generation,
+            new_generation,
+            batch_blocks,
+        )?;
         let mut tx = TxAllocator {
             geo: *geo,
             current_checkpoint: current.clone(),
@@ -250,24 +321,33 @@ impl TxAllocator {
             new_generation,
             dirty_pages: BTreeSet::new(),
             dirty_regions: BTreeSet::new(),
-            new_retired: RetiredList::default(),
+            reclaim: Some(reclaim),
+            allocated_this_tx: RunSet::default(),
+            retired_this_tx: RunSet::default(),
             stats: AllocStats::default(),
         };
-        for entry in &committed_retired.entries {
-            let region = tx.geo.region_of(entry.lba);
-            let region_index = (entry.lba - tx.geo.region_base(region)) as u32;
-            let (page_index, local_index) = tx.geo.bitmap_page_for_index(region_index);
-            let page = tx.page_mut(dev, region, page_index)?;
-            if !page.set_allocated(local_index, false) {
-                return Err(CoreError::Corrupt(format!(
-                    "retired block {} was not marked allocated",
-                    entry.lba
-                )));
+        let promoted: Vec<_> = tx
+            .reclaim
+            .as_ref()
+            .expect("reclaim initialized above")
+            .promoted_runs()
+            .to_vec();
+        for run in promoted {
+            for lba in run.start..run.start + run.blocks as u64 {
+                let region = tx.geo.region_of(lba);
+                let region_index = (lba - tx.geo.region_base(region)) as u32;
+                let (page_index, local_index) = tx.geo.bitmap_page_for_index(region_index);
+                let page = tx.page_mut(dev, region, page_index)?;
+                if !page.set_allocated(local_index, false) {
+                    return Err(CoreError::Corrupt(format!(
+                        "quarantined block {lba} was not marked allocated"
+                    )));
+                }
+                tx.mark_dirty(region, page_index);
             }
-            tx.mark_dirty(region, page_index);
-            tx.stats.blocks_promoted += 1;
-            tx.stats.reclaim_latency_generations +=
-                new_generation.saturating_sub(entry.retire_generation);
+            tx.stats.blocks_promoted += run.blocks as u64;
+            tx.stats.reclaim_latency_generations += (run.blocks as u64)
+                .saturating_mul(new_generation.saturating_sub(run.retire_generation));
         }
         Ok(tx)
     }
@@ -326,17 +406,87 @@ impl TxAllocator {
                         .set_allocated(local_index, true);
                     self.mark_dirty(region, page_index);
                 }
+                let lba = base + start as u64;
+                if !self.allocated_this_tx.insert(lba, lba + len) {
+                    return Err(CoreError::Corrupt(format!(
+                        "allocator returned overlapping run at {lba}"
+                    )));
+                }
                 self.stats.blocks_allocated += len;
-                return Ok(base + start as u64);
+                return Ok(lba);
             }
         }
         Err(CoreError::NoSpace)
     }
 
     pub fn retire<D: BlockDevice>(&mut self, dev: &mut D, lba: u64) -> Result<(), CoreError> {
-        if !self.geo.is_allocatable(lba) {
+        self.retire_run(dev, lba, 1)
+    }
+
+    /// Quarantines a committed run: its bits stay allocated and it enters
+    /// the reclaim queue. Blocks allocated by this same transaction must use
+    /// [`TxAllocator::release_uncommitted`] instead.
+    pub fn retire_run<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        start: u64,
+        blocks: u64,
+    ) -> Result<(), CoreError> {
+        if blocks == 0 || blocks > u32::MAX as u64 {
             return Err(CoreError::Corrupt(format!(
-                "retiring block {lba} that is not live"
+                "retiring invalid run length {blocks}"
+            )));
+        }
+        let end = start
+            .checked_add(blocks)
+            .ok_or_else(|| CoreError::Corrupt("retired run end overflows".into()))?;
+        if self.allocated_this_tx.overlaps(start, end) {
+            return Err(CoreError::Corrupt(format!(
+                "retiring run {start}+{blocks} allocated by this transaction; release it instead"
+            )));
+        }
+        if !self.retired_this_tx.insert(start, end) {
+            return Err(CoreError::Corrupt(format!(
+                "run {start}+{blocks} retired twice"
+            )));
+        }
+        for lba in start..end {
+            if !self.geo.is_allocatable(lba) {
+                return Err(CoreError::Corrupt(format!(
+                    "retiring block {lba} that is not live"
+                )));
+            }
+            let region = self.geo.region_of(lba);
+            let region_index = (lba - self.geo.region_base(region)) as u32;
+            let (page_index, local_index) = self.geo.bitmap_page_for_index(region_index);
+            if !self
+                .page_mut(dev, region, page_index)?
+                .is_allocated(local_index)
+            {
+                return Err(CoreError::Corrupt(format!(
+                    "retiring block {lba} that is not live"
+                )));
+            }
+        }
+        self.reclaim
+            .as_mut()
+            .expect("reclaim lives until finish")
+            .append_run(&self.geo, start, blocks as u32)?;
+        self.stats.blocks_retired += blocks;
+        Ok(())
+    }
+
+    /// Releases a block this transaction allocated and no longer needs. It
+    /// returns to FREE immediately — no committed state can reference it, so
+    /// quarantine would only delay reuse for no protection.
+    pub fn release_uncommitted<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        lba: u64,
+    ) -> Result<(), CoreError> {
+        if !self.allocated_this_tx.remove_block(lba) {
+            return Err(CoreError::Corrupt(format!(
+                "releasing block {lba} that this transaction did not allocate"
             )));
         }
         let region = self.geo.region_of(lba);
@@ -344,21 +494,15 @@ impl TxAllocator {
         let (page_index, local_index) = self.geo.bitmap_page_for_index(region_index);
         if !self
             .page_mut(dev, region, page_index)?
-            .is_allocated(local_index)
+            .set_allocated(local_index, false)
         {
             return Err(CoreError::Corrupt(format!(
-                "retiring block {lba} that is not live"
+                "released block {lba} was not marked allocated"
             )));
         }
-        self.new_retired
-            .insert(lba, self.new_generation)
-            .map_err(|_| CoreError::Corrupt(format!("block {lba} retired twice")))?;
-        self.stats.blocks_retired += 1;
+        self.mark_dirty(region, page_index);
+        self.stats.blocks_released += 1;
         Ok(())
-    }
-
-    pub fn new_retired(&self) -> &RetiredList {
-        &self.new_retired
     }
 
     fn mark_dirty(&mut self, region: u32, page_index: u32) {
@@ -415,11 +559,26 @@ impl TxAllocator {
         Ok(self.pages.get_mut(&key).expect("inserted above"))
     }
 
-    pub fn finish(
+    pub fn finish<D: BlockDevice>(
         mut self,
+        dev: &mut D,
         _current: &Checkpoint,
         _other: Option<&Checkpoint>,
     ) -> Result<FinishedAlloc, CoreError> {
+        // Rebuild the reclaim queue first: sealing and the new root allocate
+        // ordinary blocks, which must land in the dirty bitmap state emitted
+        // below. The allocation count is known before allocating (ADR-036),
+        // so recording an allocation never allocates in turn.
+        let mut reclaim = self.reclaim.take().expect("reclaim lives until finish");
+        let needed = reclaim.plan()?;
+        let mut structure_lbas = Vec::with_capacity(needed);
+        for _ in 0..needed {
+            structure_lbas.push(self.allocate(dev)?);
+        }
+        let geo = self.geo;
+        let build = reclaim.build(&geo, structure_lbas)?;
+        self.stats.reclaim = build.stats;
+
         let mut bitmap_writes = Vec::new();
         let mut descriptor_writes = Vec::new();
         let mut dirty_records = Vec::with_capacity(self.dirty_regions.len());
@@ -503,7 +662,9 @@ impl TxAllocator {
             descriptor_writes,
             dirty_records,
             free_blocks_total,
-            retired: self.new_retired,
+            reclaim_root_lba: build.root_lba,
+            reclaim_writes: build.writes,
+            reclaim_pending_blocks: build.pending_blocks,
             stats: self.stats,
         })
     }
@@ -516,7 +677,11 @@ pub struct FinishedAlloc {
     /// transaction, for dirty-path allocation-root COW.
     pub dirty_records: Vec<(u32, RegionRecord)>,
     pub free_blocks_total: u64,
-    pub retired: RetiredList,
+    /// New reclaim-queue root and the sealed blocks written with it; part of
+    /// the metadata barrier group.
+    pub reclaim_root_lba: u64,
+    pub reclaim_writes: Vec<(u64, Vec<u8>)>,
+    pub reclaim_pending_blocks: u64,
     pub stats: AllocStats,
 }
 
@@ -526,9 +691,6 @@ fn choose_slot(slot_count: u8, current: u8, other: Option<u8>) -> u8 {
         .expect("three slots minus at most two references")
 }
 
-pub fn retired_entries(list: &RetiredList) -> &[RetiredEntry] {
-    &list.entries
-}
 
 #[cfg(test)]
 mod tests {
@@ -559,24 +721,25 @@ mod tests {
                 uuid: [17u8; 16],
                 label: "MultiPage".into(),
                 region_size: 262_144,
-                timestamp: Timespec::default(),
+                reclaim_caps: Default::default(),
+            timestamp: Timespec::default(),
             },
         )
         .unwrap();
         let vol = mount(dev).unwrap();
         let geo = vol.ident().geometry();
         let checkpoint = vol.checkpoint().clone();
-        let retired = vol.retired().clone();
         let mut dev = vol.into_device();
 
-        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, &retired, 2).unwrap();
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096).unwrap();
         let start = tx
             .allocate_run(&mut dev, BITMAP_PAGE_BLOCKS as u64 + 1)
             .unwrap();
-        // Three bootstrap namespace blocks plus the three-image allocation
-        // root pool precede ordinary free space.
-        assert_eq!(start, geo.region0_reserved_blocks() + 6);
-        let finished = tx.finish(&checkpoint, None).unwrap();
+        // Four bootstrap metadata blocks (root record, root directory,
+        // object map, reclaim root) plus the three-image allocation-root
+        // pool precede ordinary free space.
+        assert_eq!(start, geo.region0_reserved_blocks() + 7);
+        let finished = tx.finish(&mut dev, &checkpoint, None).unwrap();
         assert_eq!(finished.bitmap_writes.len(), 2);
         assert_eq!(finished.descriptor_writes.len(), 1);
         assert_eq!(finished.stats.bitmap_pages_dirty, 2);

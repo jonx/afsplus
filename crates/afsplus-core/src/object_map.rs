@@ -153,16 +153,16 @@ mod tests {
                 uuid: [93u8; 16],
                 label: "ObjectMapTree".into(),
                 region_size: 4096,
-                timestamp: Timespec::default(),
+                reclaim_caps: Default::default(),
+            timestamp: Timespec::default(),
             },
         )
         .unwrap();
         let vol = mount(dev).unwrap();
         let geo = vol.ident().geometry();
         let checkpoint = vol.checkpoint().clone();
-        let retired = vol.retired().clone();
         let mut dev = vol.into_device();
-        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, &retired, 2).unwrap();
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096).unwrap();
 
         let mut encoded = Vec::new();
         for offset in 0..1000u64 {

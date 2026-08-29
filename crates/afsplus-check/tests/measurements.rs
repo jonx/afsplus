@@ -32,6 +32,7 @@ fn per_transaction_resource_accounting() {
             uuid: [42u8; 16],
             label: "MeasureVol".into(),
             region_size: 16,
+            reclaim_caps: Default::default(),
             timestamp: ts(0),
         },
     )
@@ -55,9 +56,11 @@ fn per_transaction_resource_accounting() {
         "create file-3 (reuses quarantine)".into(),
         vol.last_commit_stats().unwrap(),
     ));
+    vol.reclaim_step(ts(12)).unwrap();
+    rows.push(("reclaim step".into(), vol.last_commit_stats().unwrap()));
 
     println!(
-        "\n{:<34} {:>4} {:>4} {:>4} {:>4} {:>6} {:>7} {:>8} {:>8} {:>7}",
+        "\n{:<34} {:>4} {:>4} {:>4} {:>4} {:>6} {:>7} {:>8} {:>7} {:>5} {:>5} {:>7} {:>7}",
         "transaction",
         "data",
         "meta",
@@ -67,11 +70,14 @@ fn per_transaction_resource_accounting() {
         "retired",
         "promoted",
         "latency",
+        "qapp",
+        "qseal",
+        "qpend",
         "bytes"
     );
     for (label, s) in &rows {
         println!(
-            "{:<34} {:>4} {:>4} {:>4} {:>4} {:>6} {:>7} {:>8} {:>8} {:>7}",
+            "{:<34} {:>4} {:>4} {:>4} {:>4} {:>6} {:>7} {:>8} {:>7} {:>5} {:>5} {:>7} {:>7}",
             label,
             s.data_blocks_written,
             s.metadata_blocks_written,
@@ -81,14 +87,17 @@ fn per_transaction_resource_accounting() {
             s.alloc.blocks_retired,
             s.alloc.blocks_promoted,
             s.alloc.reclaim_latency_generations,
+            s.alloc.reclaim.entries_appended,
+            s.alloc.reclaim.segments_sealed,
+            s.alloc.reclaim.pending_blocks_after,
             s.bytes_written,
         );
     }
     println!(
-        "allocator RAM: {} bytes for {} regions; retired now: {}; free: {}\n",
+        "allocator RAM: {} bytes for {} regions; pending reclaim: {}; free: {}\n",
         vol.allocator_ram_bytes(),
         vol.ident().geometry().region_count(),
-        vol.retired().entries.len(),
+        vol.reclaim_pending_blocks(),
         vol.free_blocks(),
     );
 
@@ -122,10 +131,10 @@ fn per_transaction_resource_accounting() {
             "{label}"
         );
     }
-    // The permanent allocation-root pool changes locality on this deliberately
-    // tiny geometry: the last transaction touched three of four 2-byte region
-    // pages, while still avoiding retention of the full 8-byte bitmap.
-    assert_eq!(vol.allocator_ram_bytes(), 3 * 2);
+    // The last transaction (a reclaim step) touched two of the four 2-byte
+    // region pages — promotion targets plus the rebuilt queue root — while
+    // still avoiding retention of the full 8-byte bitmap.
+    assert_eq!(vol.allocator_ram_bytes(), 2 * 2);
 
     let mut dev = vol.into_device();
     let report = check_device(&mut dev);
@@ -148,6 +157,7 @@ fn one_tib_sparse_image_formats_and_mounts_without_a_block_count_scan() {
             uuid: [0x1A; 16],
             label: "OneTiB".into(),
             region_size: afsplus_format::geometry::MAX_REGION_BLOCKS,
+            reclaim_caps: Default::default(),
             timestamp: ts(0),
         },
     )

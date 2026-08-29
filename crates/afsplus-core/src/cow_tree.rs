@@ -20,7 +20,12 @@ use crate::CoreError;
 /// reserved triple-version pool to avoid describing its own allocations.
 pub trait TreeAllocator<D: BlockDevice> {
     fn allocate_tree_block(&mut self, dev: &mut D) -> Result<u64, CoreError>;
+    /// Quarantines a node the committed state reaches.
     fn retire_tree_block(&mut self, dev: &mut D, lba: u64) -> Result<(), CoreError>;
+    /// Frees a node this transaction allocated and then discarded — no
+    /// committed state can reference it, so it skips quarantine entirely
+    /// and may be reused immediately.
+    fn release_tree_block(&mut self, dev: &mut D, lba: u64) -> Result<(), CoreError>;
 }
 
 impl<D: BlockDevice> TreeAllocator<D> for TxAllocator {
@@ -30,6 +35,10 @@ impl<D: BlockDevice> TreeAllocator<D> for TxAllocator {
 
     fn retire_tree_block(&mut self, dev: &mut D, lba: u64) -> Result<(), CoreError> {
         self.retire(dev, lba)
+    }
+
+    fn release_tree_block(&mut self, dev: &mut D, lba: u64) -> Result<(), CoreError> {
+        self.release_uncommitted(dev, lba)
     }
 }
 
@@ -779,7 +788,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         while reusable.len() > outputs.len() {
             let lba = reusable.pop().expect("length checked above");
             self.remove_staged(lba);
-            self.tx.retire_tree_block(self.dev, lba)?;
+            self.tx.release_tree_block(self.dev, lba)?;
             self.stats.staged_nodes_discarded += 1;
         }
         let mut replacement = Vec::with_capacity(outputs.len());
@@ -801,7 +810,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                     "staged tree source has no write image".into(),
                 ));
             }
-            self.tx.retire_tree_block(self.dev, pending.old_lba)?;
+            self.tx.release_tree_block(self.dev, pending.old_lba)?;
             self.stats.staged_nodes_discarded += 1;
         } else {
             self.tx.retire_tree_block(self.dev, pending.old_lba)?;
@@ -1196,7 +1205,8 @@ mod tests {
                 uuid: [91u8; 16],
                 label: "CowTree".into(),
                 region_size: 2048,
-                timestamp: Timespec::default(),
+                reclaim_caps: Default::default(),
+            timestamp: Timespec::default(),
             },
         )
         .unwrap();
@@ -1204,13 +1214,12 @@ mod tests {
         let geo = vol.ident().geometry();
         let checkpoint = vol.checkpoint().clone();
         let old_root = checkpoint.object_map_block;
-        let retired = vol.retired().clone();
         let mut dev = vol.into_device();
         let empty = TreeNode::leaf(TreeKind::ObjectMap, 0)
             .encode(4096, 1)
             .unwrap();
         dev.write_block(old_root, &empty).unwrap();
-        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, &retired, 2).unwrap();
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096).unwrap();
         let mut entries: Vec<_> = (0..300u64)
             .map(|ordinal| {
                 let key = (ordinal * 137) % 300;
@@ -1256,7 +1265,7 @@ mod tests {
                 .0
                 .is_none()
         );
-        let finished = tx.finish(&checkpoint, None).unwrap();
+        let finished = tx.finish(&mut dev, &checkpoint, None).unwrap();
         assert!(finished.stats.blocks_allocated >= mutation.stats.nodes_allocated);
         for (lba, block) in &finished.bitmap_writes {
             dev.write_block(*lba, block).unwrap();
@@ -1310,15 +1319,12 @@ mod tests {
         checkpoint2.allocation_root_block = allocation_mutation.root_lba;
         checkpoint2.free_blocks_total = finished.free_blocks_total;
         checkpoint2.regions.clear();
-        let mut tx2 = TxAllocator::begin(
-            &mut dev,
-            &geo,
-            &checkpoint2,
-            Some(&checkpoint),
-            &finished.retired,
-            3,
-        )
-        .unwrap();
+        for (lba, block) in &finished.reclaim_writes {
+            dev.write_block(*lba, block).unwrap();
+        }
+        checkpoint2.reclaim_root_block = finished.reclaim_root_lba;
+        let mut tx2 = TxAllocator::begin(&mut dev, &geo, &checkpoint2, Some(&checkpoint), 3, 4096)
+            .unwrap();
         assert!(matches!(
             delete_many(
                 &mut dev,
@@ -1376,7 +1382,7 @@ mod tests {
             .0,
             Some(surviving_value)
         );
-        tx2.finish(&checkpoint2, Some(&checkpoint)).unwrap();
+        tx2.finish(&mut dev, &checkpoint2, Some(&checkpoint)).unwrap();
     }
 
     #[test]
@@ -1593,7 +1599,8 @@ mod tests {
                 uuid: [92u8; 16],
                 label: "CowTreeBadLevel".into(),
                 region_size: 2048,
-                timestamp: Timespec::default(),
+                reclaim_caps: Default::default(),
+            timestamp: Timespec::default(),
             },
         )
         .unwrap();
@@ -1601,7 +1608,6 @@ mod tests {
         let geo = vol.ident().geometry();
         let checkpoint = vol.checkpoint().clone();
         let root = checkpoint.object_map_block;
-        let retired = vol.retired().clone();
         let mut dev = vol.into_device();
         let corrupt_root = TreeNode {
             kind: TreeKind::ObjectMap,
@@ -1622,7 +1628,7 @@ mod tests {
         .encode(4096, 1)
         .unwrap();
         dev.write_block(root, &corrupt_root).unwrap();
-        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, &retired, 2).unwrap();
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096).unwrap();
         let error = upsert_many(
             &mut dev,
             &geo,

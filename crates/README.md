@@ -30,8 +30,12 @@ as such in the crate docs.
   The allocator keeps free-space state in multi-page region bitmaps selected
   through triple-buffered region descriptors. Every descriptor and logical
   page has three reserved generational slots, which breaks the bitmap-COW
-  self-reference; freed blocks are quarantined via a retired
-  list for one full generation before reuse. Per-transaction resource
+  self-reference; freed block runs are quarantined
+  in a segmented reclaim queue (ADR-036): appends seal into immutable
+  segment/table blocks, each transaction reclaims a bounded block budget
+  from the head, and a persistent cursor resumes after crashes. Blocks a
+  transaction allocates and discards before publication are released back
+  to free immediately. Per-transaction resource
   accounting (metadata/bitmap/flush counts, retired/promoted blocks, reclaim
   latency, allocator RAM) is collected from the start.
 - `afsplus-check` — verify-only checker (library + CLI) sharing the core's
@@ -112,6 +116,18 @@ covers format, bounded mount, commits, and exhaustive checking. Remaining
 post-Scale-1 work includes atomic replacement/orphan handling and the broader
 workload suite. Delta-log/spacemap alternatives are built only if the measured
 bitmap design fails on correctness, amplification, or scale.
+
+Reclaim Scale-2 replaces the single-block retired list with the ADR-036
+queue. Entries are runs, so a large truncate or unlink costs a handful of
+entries; a 600-block COW rewrite, a 400-block truncate plus 400-block bulk
+unlink, and an ignored ~1.9M-block preallocate/unlink qualification all
+quarantine and drain in strictly bounded reclaim steps (the millions-scale
+drain completes in ~0.2 s release, under 32 structure writes per step).
+Dedicated crash matrices cover a sealing transaction, a batch that consumes
+and retires a whole segment, and a mid-run cursor advance that must resume
+after remount; the tiny-caps drain test forces segment *and* table sealing
+and returns the volume to a one-block steady state where only the previous
+queue root cycles through quarantine.
 
 ADR-035 defines the authoritative allocation-root representation. The shared
 engine accepts either the ordinary transaction allocator or a permanently

@@ -23,7 +23,7 @@ use afsplus_core::verify::{full_sweep, load_committed_state};
 use afsplus_core::CoreError;
 
 /// Versioned structured-output schema (ADR-025).
-pub const REPORT_SCHEMA_VERSION: u32 = 2;
+pub const REPORT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Default)]
 pub struct CheckReport {
@@ -45,7 +45,8 @@ pub struct VolumeSummary {
     pub object_count: usize,
     pub reachable_metadata_blocks: usize,
     pub reachable_data_blocks: usize,
-    pub retired_blocks: usize,
+    pub reclaim_pending_blocks: u64,
+    pub reclaim_runs: usize,
     pub free_blocks: u64,
 }
 
@@ -59,7 +60,7 @@ impl CheckReport {
         if let Some(v) = &self.volume {
             out.push_str(&format!(
                 "volume {} label \"{}\" blocks {} region size {} generation {} (slot {})\n\
-                 objects {} metadata blocks {} data blocks {} retired {} free {}\n",
+                 objects {} metadata blocks {} data blocks {} pending reclaim {} ({} runs) free {}\n",
                 v.uuid_hex,
                 v.label,
                 v.total_blocks,
@@ -69,7 +70,8 @@ impl CheckReport {
                 v.object_count,
                 v.reachable_metadata_blocks,
                 v.reachable_data_blocks,
-                v.retired_blocks,
+                v.reclaim_pending_blocks,
+                v.reclaim_runs,
                 v.free_blocks,
             ));
         }
@@ -96,8 +98,8 @@ impl CheckReport {
             out.push_str(&format!(
                 "\"volume\":{{\"uuid\":{},\"label\":{},\"total_blocks\":{},\
                  \"region_size\":{},\"generation\":{},\"chosen_slot\":{},\"objects\":{},\
-                 \"metadata_blocks\":{},\"data_blocks\":{},\"retired_blocks\":{},\
-                 \"free_blocks\":{}}},",
+                 \"metadata_blocks\":{},\"data_blocks\":{},\"reclaim_pending_blocks\":{},\
+                 \"reclaim_runs\":{},\"free_blocks\":{}}},",
                 json_string(&v.uuid_hex),
                 json_string(&v.label),
                 v.total_blocks,
@@ -107,7 +109,8 @@ impl CheckReport {
                 v.object_count,
                 v.reachable_metadata_blocks,
                 v.reachable_data_blocks,
-                v.retired_blocks,
+                v.reclaim_pending_blocks,
+                v.reclaim_runs,
                 v.free_blocks,
             ));
         } else {
@@ -182,7 +185,8 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
                 object_count: state.objects.len(),
                 reachable_metadata_blocks: state.metadata_blocks.len(),
                 reachable_data_blocks: state.data_blocks.len(),
-                retired_blocks: state.retired.entries.len(),
+                reclaim_pending_blocks: state.reclaim_pending_blocks,
+                reclaim_runs: state.reclaim_runs.len(),
                 free_blocks: state.bitmaps.free_blocks_total(),
             });
         }

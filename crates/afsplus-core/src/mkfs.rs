@@ -1,7 +1,8 @@
 //! Formatter for the smallest mountable image.
 //!
 //! Writes the initial metadata (root record, empty root directory, object
-//! map), region descriptors and bitmap pages into slot 0 at generation 1,
+//! map, empty reclaim-queue root), region descriptors and bitmap pages into
+//! slot 0 at generation 1,
 //! the identification block, then checkpoint generation 1 into slot A. Slot B is
 //! explicitly zeroed so a reused device cannot present a stale-but-valid
 //! second checkpoint (the UUID binding already rejects foreign checkpoints;
@@ -18,6 +19,7 @@ use afsplus_format::crc32c::CHECKSUM_CRC32C;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::ident::Identification;
 use afsplus_format::object::{ObjectRecord, ObjectType};
+use afsplus_format::reclaim::{ReclaimCaps, ReclaimRoot};
 use afsplus_format::region::{BitmapBinding, RegionDescriptor};
 use afsplus_format::{
     Timespec, DEFAULT_BLOCK_SHIFT, DEFAULT_BLOCK_SIZE, OBJECT_FIRST_DYNAMIC, OBJECT_ROOT,
@@ -34,6 +36,9 @@ pub struct MkfsParams {
     pub label: String,
     /// Allocation region size in blocks (power of two).
     pub region_size: u32,
+    /// Reclaim-queue root-area capacities (ADR-036). Tests shrink these to
+    /// force sealing and consumption with tiny transactions.
+    pub reclaim_caps: ReclaimCaps,
     pub timestamp: Timespec,
 }
 
@@ -60,6 +65,7 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
     let root_record_lba = metadata_start;
     let root_dir_lba = metadata_start + 1;
     let omap_lba = metadata_start + 2;
+    let reclaim_root_lba = metadata_start + 3;
 
     let root_record = ObjectRecord {
         object_id: OBJECT_ROOT,
@@ -85,6 +91,13 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
     )?;
     dev.write_block(root_dir_lba, &root_dir.encode(block_size, generation)?)?;
     dev.write_block(omap_lba, &omap.encode(block_size, generation)?)?;
+    let reclaim_root = ReclaimRoot::empty(params.reclaim_caps);
+    dev.write_block(
+        reclaim_root_lba,
+        &reclaim_root
+            .encode(block_size, generation)
+            .map_err(CoreError::Format)?,
+    )?;
 
     let provisional_records: Vec<_> = (0..geo.region_count())
         .map(|_| RegionRecord {
@@ -103,6 +116,7 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
     initially_allocated.insert(root_record_lba);
     initially_allocated.insert(root_dir_lba);
     initially_allocated.insert(omap_lba);
+    initially_allocated.insert(reclaim_root_lba);
 
     // Descriptor slot 0 binds bitmap-page slot 0. Reserved blocks and the
     // initial metadata are allocated; everything else is free.
@@ -193,7 +207,7 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         root_object_id: OBJECT_ROOT,
         object_map_block: omap_lba,
         allocation_root_block: allocation_root.root_lba,
-        retired_list_block: 0,
+        reclaim_root_block: reclaim_root_lba,
         next_object_id: OBJECT_FIRST_DYNAMIC,
         committed_tx_id: generation,
         free_blocks_total: regions.iter().map(|record| record.free_blocks as u64).sum(),

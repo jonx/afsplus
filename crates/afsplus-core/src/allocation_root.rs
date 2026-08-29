@@ -19,7 +19,9 @@ use crate::tree::{lookup, visit_tree_nodes, TreeSpec, TreeSummary};
 use crate::CoreError;
 
 const VALUE_BYTES: usize = 16;
-const BOOTSTRAP_METADATA_BLOCKS: usize = 3;
+/// Root record, root directory, object-map root, and reclaim-queue root
+/// written by mkfs at the first allocatable blocks; the pool starts after.
+const BOOTSTRAP_METADATA_BLOCKS: usize = 4;
 
 pub struct LoadedAllocationRoot {
     pub records: Vec<RegionRecord>,
@@ -490,14 +492,24 @@ impl<D: BlockDevice> TreeAllocator<D> for ReservedTreePool {
     }
 
     fn retire_tree_block(&mut self, _dev: &mut D, lba: u64) -> Result<(), CoreError> {
-        if !self.pool.contains(&lba) || !self.retired_here.insert(lba) {
+        if !self.pool.contains(&lba)
+            || self.allocated_here.contains(&lba)
+            || !self.retired_here.insert(lba)
+        {
             return Err(CoreError::Corrupt(format!(
                 "allocation-root pool block {lba} retired invalidly"
             )));
         }
-        if self.allocated_here.remove(&lba) {
-            self.available.insert(lba);
+        Ok(())
+    }
+
+    fn release_tree_block(&mut self, _dev: &mut D, lba: u64) -> Result<(), CoreError> {
+        if !self.pool.contains(&lba) || !self.allocated_here.remove(&lba) {
+            return Err(CoreError::Corrupt(format!(
+                "allocation-root pool block {lba} released invalidly"
+            )));
         }
+        self.available.insert(lba);
         Ok(())
     }
 }

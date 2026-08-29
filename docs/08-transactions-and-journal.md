@@ -141,6 +141,8 @@ AFS+ therefore tracks retired storage until it is older than every recovery stat
 
 On uncertainty the allocator must quarantine/leak space rather than reuse it early.
 
+Blocks allocated by an in-flight transaction and discarded before publication are the one exception: no committed state can reference them, so they return to free immediately instead of entering quarantine.
+
 Shared/reflink extents additionally remain allocated until no live object or retained recovery state references them.
 
 ## 7. Deferred reclamation
@@ -151,6 +153,8 @@ Large deletes/truncates are split into:
 - bounded resumable reclamation work
 
 This avoids enormous temporary free lists and long uninterruptible commits.
+
+The executable prototype implements this as a segmented reclaim queue (ADR-036): retired runs are appended to a FIFO of immutable sealed blocks, each transaction reclaims at most a bounded block budget from the head, and a persistent cursor makes the work resumable across crashes and reboots. Multiple retire generations coexist in the queue; normal mount reads only its root block.
 
 ## 8. Epoch-1 blocker B: fsync and small durability commits
 

@@ -42,8 +42,14 @@ pub mod block_type {
     pub const REGION_DESCRIPTOR: u32 = u32::from_le_bytes(*b"AFSG");
     /// Shared COW B+ tree node, `"AFST"`.
     pub const TREE_NODE: u32 = u32::from_le_bytes(*b"AFST");
-    /// Retired-block list, `"AFSR"`.
+    /// Retired-block list, `"AFSR"` (transitional; replaced by the reclaim queue).
     pub const RETIRED: u32 = u32::from_le_bytes(*b"AFSR");
+    /// Reclaim-queue root, `"AFSH"`.
+    pub const RECLAIM_ROOT: u32 = u32::from_le_bytes(*b"AFSH");
+    /// Sealed reclaim segment, `"AFSS"`.
+    pub const RECLAIM_SEGMENT: u32 = u32::from_le_bytes(*b"AFSS");
+    /// Sealed reclaim table, `"AFSL"`.
+    pub const RECLAIM_TABLE: u32 = u32::from_le_bytes(*b"AFSL");
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -15,7 +15,8 @@ fn params(region_size: u32) -> MkfsParams {
         uuid: [42u8; 16],
         label: "TestVol".into(),
         region_size,
-        timestamp: Timespec {
+        reclaim_caps: Default::default(),
+            timestamp: Timespec {
             seconds: 1_780_000_000,
             nanoseconds: 0,
         },
@@ -47,9 +48,9 @@ fn mkfs_then_mount_yields_empty_root_at_generation_1() {
     assert_eq!(root.object_type, ObjectType::Directory);
     assert_eq!(root.link_count, 1);
     // 64 blocks minus 9 reserved (bootstrap + descriptor + bitmap slots),
-    // 3 initial namespace metadata blocks, and the 3-block triple-version
-    // allocation-root pool.
-    assert_eq!(vol.free_blocks(), 49);
+    // 4 initial metadata blocks (root record, root directory, object map,
+    // reclaim root), and the 3-block triple-version allocation-root pool.
+    assert_eq!(vol.free_blocks(), 48);
 }
 
 #[test]
@@ -106,7 +107,7 @@ fn offset_writes_are_cow_and_create_sparse_holes() {
     let fragmented = vol.stat(id).unwrap().unwrap();
     assert_ne!(fragmented.flags & OBJECT_FLAG_EXTENT_TREE, 0);
     assert_eq!(fragmented.data_blocks, 2);
-    assert!(vol.retired().contains(original_data_root + 1));
+    assert!(vol.quarantine_contains(original_data_root + 1).unwrap());
 
     let tail_offset = BS as u64 * 4 + 7;
     vol.write_file_at(id, tail_offset, b"tail", ts(3)).unwrap();
@@ -261,7 +262,7 @@ fn delete_retires_storage_and_checker_stays_clean() {
     assert_eq!(vol.lookup_root("victim.txt").unwrap(), None);
     assert!(vol.stat(id).unwrap().is_none());
     assert!(
-        vol.retired().contains(data_lba),
+        vol.quarantine_contains(data_lba).unwrap(),
         "deleted data must be quarantined, not freed"
     );
 
@@ -537,8 +538,8 @@ fn mount_reads_are_bounded_and_descendants_are_loaded_on_demand() {
     let after_mount = vol.device_mut().stats();
 
     // ident + 2 checkpoints + object-map root + root record + directory root +
-    // retired list. Object count and allocation-region pages do not add
-    // reads to ordinary mount.
+    // reclaim root. Object count, queue depth, and allocation-region pages do
+    // not add reads to ordinary mount.
     assert_eq!(after_mount.reads, 7);
     assert_eq!(vol.allocator_ram_bytes(), 0);
     assert_eq!(vol.list_root().unwrap().len(), 10);
@@ -561,7 +562,7 @@ fn one_gib_region_mount_is_bounded_and_small_commit_dirties_one_page() {
     let traced = TraceBackend::new(dev);
     let mut vol = mount(traced).unwrap();
     assert_eq!(vol.ident().geometry().bitmap_page_count(0), 9);
-    assert_eq!(vol.device_mut().stats().reads, 6);
+    assert_eq!(vol.device_mut().stats().reads, 7);
     assert_eq!(vol.allocator_ram_bytes(), 0);
 
     vol.device_mut().reset();
@@ -653,7 +654,7 @@ fn transaction_io_accounting() {
     assert_eq!(stats.writes, 10);
     assert_eq!(stats.flushes, 3);
     assert!(
-        stats.reads <= 13,
+        stats.reads <= 14,
         "post-commit re-walk grew unexpectedly: {} reads",
         stats.reads
     );
@@ -668,9 +669,10 @@ fn transaction_io_accounting() {
         "empty commit must use exactly two barriers"
     );
 
-    // Mount: ident + 2 checkpoint slots + omap + root record + directory root.
-    // Allocation pages are not read until the first mutation.
-    assert_eq!(mount_stats.reads, 6);
+    // Mount: ident + 2 checkpoint slots + omap + root record + directory
+    // root + reclaim root. Allocation pages are not read until the first
+    // mutation.
+    assert_eq!(mount_stats.reads, 7);
     assert_eq!(mount_stats.writes, 0);
 }
 
@@ -691,7 +693,7 @@ fn file_image_end_to_end_with_json_report() {
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "checker findings: {:?}", report.errors);
     let json = report.render_json();
-    assert!(json.contains("\"schema_version\":2"));
+    assert!(json.contains("\"schema_version\":3"));
     assert!(json.contains("\"clean\":true"));
     assert!(json.contains("\"generation\":2"));
     assert!(json.contains("\"region_size\":128"));

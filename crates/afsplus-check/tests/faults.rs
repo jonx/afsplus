@@ -17,6 +17,7 @@ fn formatted() -> MemoryBackend {
             uuid: [42u8; 16],
             label: "FaultVol".into(),
             region_size: 64,
+            reclaim_caps: Default::default(),
             timestamp: Timespec { seconds: 1_780_000_000, nanoseconds: 0 },
         },
     )

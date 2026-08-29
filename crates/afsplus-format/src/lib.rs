@@ -32,6 +32,7 @@ pub mod ident;
 pub mod le;
 pub mod object;
 pub mod omap;
+pub mod reclaim;
 pub mod retired;
 pub mod region;
 pub mod tree;

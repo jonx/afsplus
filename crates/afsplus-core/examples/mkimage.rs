@@ -28,7 +28,8 @@ fn main() {
     uuid[8..].copy_from_slice(&std::process::id().to_le_bytes().repeat(2));
 
     let mut dev = FileBackend::create(&path, DEFAULT_BLOCK_SIZE, 256).unwrap();
-    mkfs(&mut dev, &MkfsParams { uuid, label: "DemoVol".into(), region_size: 64, timestamp: now })
+    mkfs(&mut dev, &MkfsParams { uuid, label: "DemoVol".into(), region_size: 64, reclaim_caps: Default::default(),
+            timestamp: now })
         .unwrap();
 
     let mut vol = mount(dev).unwrap();

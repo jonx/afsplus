@@ -1,3 +1,7 @@
+//! Transitional single-block retired list. Superseded by the reclaim queue
+//! (ADR-036, `reclaim`); newly formatted volumes do not reference this
+//! codec. Kept as legacy format/test coverage only.
+//!
 //! Retired-block list (ADR-021, `docs/23-pfs3-stage0-review.md` §4).
 //!
 //! Blocks that became unreachable in a transaction are *retired*, not free:

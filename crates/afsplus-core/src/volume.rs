@@ -24,7 +24,6 @@ use afsplus_format::ident::Identification;
 use afsplus_format::object::{
     ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_EXTENT_TREE,
 };
-use afsplus_format::retired::RetiredList;
 use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 
 use crate::alloc::{AllocStats, TxAllocator};
@@ -66,6 +65,8 @@ pub struct Volume<D: BlockDevice> {
     /// slots and quarantined blocks must stay untouched.
     other_checkpoint: Option<Checkpoint>,
     state: MountState,
+    /// Per-transaction reclamation budget in blocks (runtime policy).
+    reclaim_batch_blocks: u64,
     last_commit: Option<CommitStats>,
 }
 
@@ -83,6 +84,7 @@ impl<D: BlockDevice> Volume<D> {
             current_slot: selection.chosen_slot,
             other_checkpoint: selection.other,
             state,
+            reclaim_batch_blocks: crate::reclaim::DEFAULT_RECLAIM_BATCH_BLOCKS,
             last_commit: None,
         }
     }
@@ -99,8 +101,56 @@ impl<D: BlockDevice> Volume<D> {
         &self.checkpoint
     }
 
-    pub fn retired(&self) -> &RetiredList {
-        &self.state.retired
+    /// Blocks currently quarantined in the reclaim queue.
+    pub fn reclaim_pending_blocks(&self) -> u64 {
+        self.state.reclaim_root.pending_blocks
+    }
+
+    /// Sets the per-transaction reclamation budget (blocks promoted from the
+    /// queue head before each transaction allocates).
+    pub fn set_reclaim_batch_blocks(&mut self, blocks: u64) {
+        self.reclaim_batch_blocks = blocks.max(1);
+    }
+
+    /// Diagnostic: whether `lba` is currently quarantined. Walks the queue;
+    /// intended for tests and tooling, not the I/O path.
+    pub fn quarantine_contains(&mut self, lba: u64) -> Result<bool, CoreError> {
+        crate::reclaim::contains(
+            &mut self.dev,
+            &self.ident.geometry(),
+            self.checkpoint.reclaim_root_block,
+            self.checkpoint.generation,
+            lba,
+        )
+    }
+
+    /// Runs one maintenance transaction that only advances reclamation:
+    /// promotes up to the configured budget from the queue head and commits.
+    /// Returns the number of blocks reclaimed (zero means the queue could
+    /// not shrink further and no commit was made).
+    pub fn reclaim_step(&mut self, _now: Timespec) -> Result<u64, CoreError> {
+        if self.state.reclaim_root.pending_blocks == 0 {
+            return Ok(0);
+        }
+        let before = self.state.reclaim_root.pending_blocks;
+        let generation = self.next_generation()?;
+        let tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            generation,
+            self.reclaim_batch_blocks,
+        )?;
+        self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            Vec::new(),
+            Vec::new(),
+            self.checkpoint.object_map_block,
+        )?;
+        Ok(before.saturating_sub(self.state.reclaim_root.pending_blocks))
     }
 
     pub fn free_blocks(&self) -> u64 {
@@ -283,8 +333,8 @@ impl<D: BlockDevice> Volume<D> {
             &self.ident.geometry(),
             &self.checkpoint,
             self.other_checkpoint.as_ref(),
-            &self.state.retired,
             generation,
+            self.reclaim_batch_blocks,
         )?;
         let additions = allocate_extent_runs(
             &mut tx,
@@ -378,8 +428,8 @@ impl<D: BlockDevice> Volume<D> {
             &self.ident.geometry(),
             &self.checkpoint,
             self.other_checkpoint.as_ref(),
-            &self.state.retired,
             generation,
+            self.reclaim_batch_blocks,
         )?;
         let mut data_writes = Vec::new();
         if let Some((logical_block, block)) = tail_rewrite {
@@ -455,8 +505,8 @@ impl<D: BlockDevice> Volume<D> {
             &self.ident.geometry(),
             &self.checkpoint,
             self.other_checkpoint.as_ref(),
-            &self.state.retired,
             generation,
+            self.reclaim_batch_blocks,
         )?;
         let mut additions = Vec::new();
         for (logical_start, logical_end) in holes {
@@ -541,8 +591,8 @@ impl<D: BlockDevice> Volume<D> {
             &self.ident.geometry(),
             &self.checkpoint,
             self.other_checkpoint.as_ref(),
-            &self.state.retired,
             generation,
+            self.reclaim_batch_blocks,
         )?;
 
         // Data first: allocate one contiguous extent and stage its blocks.
@@ -565,11 +615,9 @@ impl<D: BlockDevice> Volume<D> {
         // Fresh blocks for every COW'd structure.
         let file_record_lba = tx.allocate(&mut self.dev)?;
         let parent_record_new_lba = tx.allocate(&mut self.dev)?;
-        let retired_list_lba = tx.allocate(&mut self.dev)?;
 
         // Everything the new state no longer reaches goes into quarantine.
         tx.retire(&mut self.dev, parent_record_lba)?;
-        self.retire_previous_list(&mut tx)?;
 
         let file_record = ObjectRecord {
             object_id,
@@ -656,7 +704,6 @@ impl<D: BlockDevice> Volume<D> {
             tx,
             data_writes,
             meta_writes,
-            retired_list_lba,
             omap_lba,
         )?;
         Ok(object_id)
@@ -702,16 +749,14 @@ impl<D: BlockDevice> Volume<D> {
             &self.ident.geometry(),
             &self.checkpoint,
             self.other_checkpoint.as_ref(),
-            &self.state.retired,
             generation,
+            self.reclaim_batch_blocks,
         )?;
         let directory_root_lba = tx.allocate(&mut self.dev)?;
         let directory_record_lba = tx.allocate(&mut self.dev)?;
         let parent_record_new_lba = tx.allocate(&mut self.dev)?;
-        let retired_list_lba = tx.allocate(&mut self.dev)?;
 
         tx.retire(&mut self.dev, parent_record_lba)?;
-        self.retire_previous_list(&mut tx)?;
 
         let new_directory = ObjectRecord {
             object_id,
@@ -803,7 +848,6 @@ impl<D: BlockDevice> Volume<D> {
             tx,
             Vec::new(),
             metadata_writes,
-            retired_list_lba,
             object_map_mutation.root_lba,
         )?;
         Ok(object_id)
@@ -923,8 +967,8 @@ impl<D: BlockDevice> Volume<D> {
             &self.ident.geometry(),
             &self.checkpoint,
             self.other_checkpoint.as_ref(),
-            &self.state.retired,
             generation,
+            self.reclaim_batch_blocks,
         )?;
 
         let parent_record_new_lba = tx.allocate(&mut self.dev)?;
@@ -933,7 +977,6 @@ impl<D: BlockDevice> Volume<D> {
         } else {
             None
         };
-        let retired_list_lba = tx.allocate(&mut self.dev)?;
 
         // Quarantine the object's storage and the COW'd originals.
         let victim_record_lba = self
@@ -946,21 +989,16 @@ impl<D: BlockDevice> Volume<D> {
                     tx.retire(&mut self.dev, lba)?;
                 }
                 for extent in map.extents {
-                    for lba in extent.physical_start..extent.physical_end()? {
-                        tx.retire(&mut self.dev, lba)?;
-                    }
+                    tx.retire_run(&mut self.dev, extent.physical_start, extent.block_count)?;
                 }
-            } else {
-                for i in 0..victim.data_blocks {
-                    tx.retire(&mut self.dev, victim.data_root + i)?;
-                }
+            } else if victim.data_blocks > 0 {
+                tx.retire_run(&mut self.dev, victim.data_root, victim.data_blocks)?;
             }
             for lba in victim_directory_blocks {
                 tx.retire(&mut self.dev, lba)?;
             }
         }
         tx.retire(&mut self.dev, parent_record_lba)?;
-        self.retire_previous_list(&mut tx)?;
 
         let directory_mutation = mutate_many(
             &mut self.dev,
@@ -1028,7 +1066,6 @@ impl<D: BlockDevice> Volume<D> {
             tx,
             Vec::new(),
             meta_writes,
-            retired_list_lba,
             omap_lba,
         )
     }
@@ -1072,15 +1109,13 @@ impl<D: BlockDevice> Volume<D> {
             &self.ident.geometry(),
             &self.checkpoint,
             self.other_checkpoint.as_ref(),
-            &self.state.retired,
             generation,
+            self.reclaim_batch_blocks,
         )?;
         let file_new_lba = tx.allocate(&mut self.dev)?;
         let parent_new_lba = tx.allocate(&mut self.dev)?;
-        let retired_list_lba = tx.allocate(&mut self.dev)?;
         tx.retire(&mut self.dev, file_lba)?;
         tx.retire(&mut self.dev, parent_lba)?;
-        self.retire_previous_list(&mut tx)?;
 
         let entry = DirEntry {
             key: comparison_key(name.as_bytes()),
@@ -1149,7 +1184,6 @@ impl<D: BlockDevice> Volume<D> {
             tx,
             Vec::new(),
             metadata_writes,
-            retired_list_lba,
             object_map_mutation.root_lba,
         )
     }
@@ -1249,8 +1283,8 @@ impl<D: BlockDevice> Volume<D> {
             &self.ident.geometry(),
             &self.checkpoint,
             self.other_checkpoint.as_ref(),
-            &self.state.retired,
             generation,
+            self.reclaim_batch_blocks,
         )?;
         let source_parent_new_lba = tx.allocate(&mut self.dev)?;
         let target_parent_new_lba = if target_parent_id == source_parent_id {
@@ -1259,14 +1293,12 @@ impl<D: BlockDevice> Volume<D> {
             tx.allocate(&mut self.dev)?
         };
         let moved_new_lba = tx.allocate(&mut self.dev)?;
-        let retired_list_lba = tx.allocate(&mut self.dev)?;
 
         tx.retire(&mut self.dev, source_parent_lba)?;
         if target_parent_id != source_parent_id {
             tx.retire(&mut self.dev, target_parent_lba)?;
         }
         tx.retire(&mut self.dev, moved_lba)?;
-        self.retire_previous_list(&mut tx)?;
 
         let target_entry = DirEntry {
             key: target_key,
@@ -1390,7 +1422,6 @@ impl<D: BlockDevice> Volume<D> {
             tx,
             Vec::new(),
             metadata_writes,
-            retired_list_lba,
             object_map_mutation.root_lba,
         )
     }
@@ -1576,14 +1607,10 @@ impl<D: BlockDevice> Volume<D> {
         };
 
         let new_record_lba = tx.allocate(&mut self.dev)?;
-        let retired_list_lba = tx.allocate(&mut self.dev)?;
         tx.retire(&mut self.dev, record_lba)?;
         for extent in removed_extents {
-            for lba in extent.physical_start..extent.physical_end()? {
-                tx.retire(&mut self.dev, lba)?;
-            }
+            tx.retire_run(&mut self.dev, extent.physical_start, extent.block_count)?;
         }
-        self.retire_previous_list(&mut tx)?;
 
         let new_record = ObjectRecord {
             flags,
@@ -1630,7 +1657,6 @@ impl<D: BlockDevice> Volume<D> {
             tx,
             data_writes,
             metadata_writes,
-            retired_list_lba,
             object_map_mutation.root_lba,
         )
     }
@@ -1763,16 +1789,6 @@ impl<D: BlockDevice> Volume<D> {
         )
     }
 
-    /// Retires the previous generation's bounded retired-list root. Callers
-    /// separately retire each object-record block they replace; tree engines
-    /// retire exactly the committed COW paths they replace.
-    fn retire_previous_list(&mut self, tx: &mut TxAllocator) -> Result<(), CoreError> {
-        if self.checkpoint.retired_list_block != 0 {
-            tx.retire(&mut self.dev, self.checkpoint.retired_list_block)?;
-        }
-        Ok(())
-    }
-
     /// The common commit tail: durability ordering, checkpoint write, state
     /// adoption, accounting. On any error the committed state is untouched
     /// and the in-memory volume still serves the old generation.
@@ -1784,19 +1800,14 @@ impl<D: BlockDevice> Volume<D> {
         tx: TxAllocator,
         data_writes: Vec<(u64, Vec<u8>)>,
         mut meta_writes: Vec<(u64, Vec<u8>)>,
-        retired_list_lba: u64,
         new_object_map_block: u64,
     ) -> Result<(), CoreError> {
         let block_size = self.dev.block_size();
-        let finished = tx.finish(&self.checkpoint, self.other_checkpoint.as_ref())?;
-        debug_assert!(!finished.retired.entries.is_empty());
+        let finished = tx.finish(&mut self.dev, &self.checkpoint, self.other_checkpoint.as_ref())?;
         let allocation_root = self.mutate_allocation_root(generation, &finished.dirty_records)?;
         let new_allocation_root_block = allocation_root.root_lba;
         meta_writes.extend(allocation_root.writes);
-        meta_writes.push((
-            retired_list_lba,
-            finished.retired.encode(block_size, generation)?,
-        ));
+        meta_writes.extend(finished.reclaim_writes);
 
         let mut stats = CommitStats {
             data_blocks_written: data_writes.len() as u64,
@@ -1840,7 +1851,7 @@ impl<D: BlockDevice> Volume<D> {
             root_object_id: OBJECT_ROOT,
             object_map_block: new_object_map_block,
             allocation_root_block: new_allocation_root_block,
-            retired_list_block: retired_list_lba,
+            reclaim_root_block: finished.reclaim_root_lba,
             next_object_id,
             committed_tx_id: generation,
             free_blocks_total,

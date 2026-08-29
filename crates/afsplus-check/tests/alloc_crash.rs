@@ -39,6 +39,7 @@ fn setup_g1() -> (MemoryBackend, u64) {
             uuid: [42u8; 16],
             label: "AllocVol".into(),
             region_size: 64,
+            reclaim_caps: Default::default(),
             timestamp: ts(0),
         },
     )
@@ -80,7 +81,7 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
     let g2_image = {
         let mut vol = mount(g1_image.clone()).unwrap();
         vol.delete_file_in_root("A", ts(2)).unwrap();
-        assert!(vol.retired().contains(x), "X must be quarantined after the delete");
+        assert!(vol.quarantine_contains(x).unwrap(), "X must be quarantined after the delete");
         assert_eq!(vol.lookup_root("A").unwrap(), None);
         vol.into_device()
     };
@@ -113,7 +114,7 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
                 }
                 g if g == g1_generation + 1 => {
                     assert_eq!(vol.lookup_root("A").unwrap(), None, "{context}: A must be gone");
-                    assert!(vol.retired().contains(x), "{context}: X must be retired, not reused");
+                    assert!(vol.quarantine_contains(x).unwrap(), "{context}: X must be retired, not reused");
                 }
                 g => panic!("{context}: recovered to disallowed generation {g}"),
             }
@@ -132,7 +133,7 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
                     // half-written bytes inside X, they are unreachable.
                     assert_eq!(vol.lookup_root("A").unwrap(), None, "{context}");
                     assert_eq!(vol.lookup_root("B").unwrap(), None, "{context}");
-                    assert!(vol.retired().contains(x), "{context}: X left quarantine early");
+                    assert!(vol.quarantine_contains(x).unwrap(), "{context}: X left quarantine early");
                 }
                 g if g == g1_generation + 2 => {
                     assert_eq!(vol.lookup_root("A").unwrap(), None, "{context}");
@@ -143,7 +144,7 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
                     let record = vol.stat(b).unwrap().unwrap();
                     assert_eq!(record.data_root, x, "{context}: B must own X");
                     assert_eq!(vol.read_file(b).unwrap(), PB.to_vec(), "{context}: B content damaged");
-                    assert!(!vol.retired().contains(x), "{context}: X still retired after reuse");
+                    assert!(!vol.quarantine_contains(x).unwrap(), "{context}: X still retired after reuse");
                 }
                 g => panic!("{context}: recovered to disallowed generation {g}"),
             }
@@ -158,12 +159,12 @@ fn reuse_needs_a_full_generation_of_quarantine() {
     let (g1_image, x) = setup_g1();
     let mut vol = mount(g1_image).unwrap();
     vol.delete_file_in_root("A", ts(2)).unwrap();
-    assert!(vol.retired().contains(x));
+    assert!(vol.quarantine_contains(x).unwrap());
 
     // The very next transaction promotes and may reuse X.
     let b = vol.create_file_in_root("B", &PB, ts(3)).unwrap();
     assert_eq!(vol.stat(b).unwrap().unwrap().data_root, x);
-    assert!(!vol.retired().contains(x));
+    assert!(!vol.quarantine_contains(x).unwrap());
 
     // Reclaim latency measured by the allocator: one generation, for every
     // promoted block.

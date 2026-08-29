@@ -2,8 +2,9 @@
 //! core and the checker (ADR-015) but with distinct roles:
 //!
 //! - [`load_mount_state`] reads only the object-map root, root object/root
-//!   directory, and the bounded retired-list root. Normal mount uses this
-//!   path and never walks every object or allocation bitmap.
+//!   directory, and the bounded reclaim-queue root. Normal mount uses this
+//!   path and never walks every object, allocation bitmap, or the sealed
+//!   reclaim segments.
 //! - [`load_committed_state`] decodes everything the chosen checkpoint
 //!   references, with per-structure validation, bounds checks, and unique
 //!   block ownership. The checker and explicit shadow verification use it.
@@ -19,7 +20,7 @@ use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::geometry::{Geometry, DESCRIPTOR_SLOTS};
 use afsplus_format::ident::Identification;
 use afsplus_format::object::{ObjectRecord, ObjectType, OBJECT_FLAG_EXTENT_TREE};
-use afsplus_format::retired::RetiredList;
+use afsplus_format::reclaim::{ReclaimEntry, ReclaimRoot};
 use afsplus_format::{OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
 
 use crate::alloc::Bitmaps;
@@ -37,10 +38,12 @@ pub struct CommittedState {
     pub objects: BTreeMap<u64, ObjectRecord>,
     /// Directory trees keyed by owning directory object ID.
     pub directories: BTreeMap<u64, LoadedDirectory>,
-    pub retired: RetiredList,
+    /// Every unconsumed quarantined run, cursor-adjusted, FIFO order.
+    pub reclaim_runs: Vec<ReclaimEntry>,
+    pub reclaim_pending_blocks: u64,
     pub bitmaps: Bitmaps,
     /// Every reachable metadata block (object map, records, directory trees,
-    /// retired list) — excludes reserved blocks and file data.
+    /// reclaim-queue structure) — excludes reserved blocks and file data.
     pub metadata_blocks: Vec<u64>,
     /// Every reachable file-data block.
     pub data_blocks: Vec<u64>,
@@ -52,7 +55,7 @@ pub struct MountState {
     pub root_record_lba: u64,
     pub root_object: ObjectRecord,
     pub root_directory_root_lba: u64,
-    pub retired: RetiredList,
+    pub reclaim_root: ReclaimRoot,
 }
 
 /// Loads only bounded roots for normal operation. This intentionally does
@@ -109,30 +112,28 @@ pub fn load_mount_state<D: BlockDevice>(
         checkpoint.generation,
     )?;
 
-    let retired = if checkpoint.retired_list_block != 0 {
-        claim_root(checkpoint.retired_list_block, &mut roots)?;
-        dev.read_block(checkpoint.retired_list_block, &mut buf)?;
-        RetiredList::decode(&buf)?
-    } else {
-        RetiredList::default()
-    };
-    for entry in &retired.entries {
-        if !geo.is_allocatable(entry.lba) {
-            return Err(CoreError::Corrupt(format!(
-                "retired block {} out of bounds",
-                entry.lba
-            )));
-        }
+    // Bounded reclaim view: decode and validate only the root block. The
+    // sealed segments/tables behind it are batch and checker territory.
+    claim_root(checkpoint.reclaim_root_block, &mut roots)?;
+    dev.read_block(checkpoint.reclaim_root_block, &mut buf)?;
+    let (reclaim_root, reclaim_generation) = ReclaimRoot::decode(&buf)
+        .map_err(|e| CoreError::Corrupt(format!("reclaim root: {e}")))?;
+    if reclaim_generation > checkpoint.generation {
+        return Err(CoreError::Corrupt(
+            "reclaim root generation is from the future".into(),
+        ));
+    }
+    for entry in &reclaim_root.inline_entries {
+        crate::reclaim::validate_run(&geo, entry)?;
         if entry.retire_generation > checkpoint.generation {
-            return Err(CoreError::Corrupt(format!(
-                "retired block {} from future generation {}",
-                entry.lba, entry.retire_generation
-            )));
+            return Err(CoreError::Corrupt(
+                "reclaim entry generation is from the future".into(),
+            ));
         }
-        if roots.contains(&entry.lba) {
+        if roots.contains(&entry.start) {
             return Err(CoreError::Corrupt(format!(
-                "retired block {} is still a mounted root",
-                entry.lba
+                "quarantined block {} is still a mounted root",
+                entry.start
             )));
         }
     }
@@ -141,7 +142,7 @@ pub fn load_mount_state<D: BlockDevice>(
         root_record_lba,
         root_object,
         root_directory_root_lba: root_object.data_root,
-        retired,
+        reclaim_root,
     })
 }
 
@@ -320,33 +321,30 @@ pub fn load_committed_state<D: BlockDevice>(
         }
     }
 
-    let retired = if checkpoint.retired_list_block != 0 {
-        claim(checkpoint.retired_list_block, &mut claimed)?;
-        metadata_blocks.push(checkpoint.retired_list_block);
-        dev.read_block(checkpoint.retired_list_block, &mut buf)?;
-        RetiredList::decode(&buf)?
-    } else {
-        RetiredList::default()
-    };
-    for entry in &retired.entries {
-        if claimed.contains(&entry.lba) {
-            return Err(CoreError::Corrupt(format!(
-                "retired block {} is still reachable",
-                entry.lba
-            )));
-        }
+    // Exhaustive reclaim-queue walk: every structure block is reachable
+    // metadata; every unconsumed run must be disjoint from reachable state.
+    let reclaim = crate::reclaim::load_all(
+        dev,
+        &geo,
+        checkpoint.reclaim_root_block,
+        checkpoint.generation,
+    )?;
+    for lba in &reclaim.structure_blocks {
+        claim(*lba, &mut claimed)?;
+        metadata_blocks.push(*lba);
     }
-    for entry in &retired.entries {
-        if !geo.is_allocatable(entry.lba) {
-            return Err(CoreError::Corrupt(format!(
-                "retired block {} out of bounds",
-                entry.lba
-            )));
+    for run in &reclaim.runs {
+        for lba in run.start..run.end().map_err(CoreError::Format)? {
+            if claimed.contains(&lba) {
+                return Err(CoreError::Corrupt(format!(
+                    "quarantined block {lba} is still reachable"
+                )));
+            }
         }
-        if entry.retire_generation > checkpoint.generation {
+        if run.retire_generation > checkpoint.generation {
             return Err(CoreError::Corrupt(format!(
-                "retired block {} from future generation {}",
-                entry.lba, entry.retire_generation
+                "quarantined run {} from future generation {}",
+                run.start, run.retire_generation
             )));
         }
     }
@@ -359,7 +357,8 @@ pub fn load_committed_state<D: BlockDevice>(
         allocation_pool_blocks: allocation_layout.pool_lbas,
         objects,
         directories,
-        retired,
+        reclaim_runs: reclaim.runs,
+        reclaim_pending_blocks: reclaim.pending_blocks,
         bitmaps,
         metadata_blocks,
         data_blocks,
@@ -395,19 +394,21 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
         }
     }
 
-    // Retired entries must be quarantined: allocated bit set, unreachable.
-    for entry in &state.retired.entries {
-        if !state.bitmaps.is_allocated(entry.lba) {
-            findings.push(format!("retired block {} is marked free", entry.lba));
-        }
-        if state.metadata_blocks.contains(&entry.lba) || state.data_blocks.contains(&entry.lba) {
-            findings.push(format!("retired block {} is still reachable", entry.lba));
-        }
-        if state.allocation_pool_blocks.contains(&entry.lba) {
-            findings.push(format!(
-                "retired block {} belongs to the permanent allocation-root pool",
-                entry.lba
-            ));
+    // Quarantined runs: every block allocated, unreachable, and outside the
+    // permanent allocation-root pool.
+    for run in &state.reclaim_runs {
+        for lba in run.start..run.start + run.blocks as u64 {
+            if !state.bitmaps.is_allocated(lba) {
+                findings.push(format!("quarantined block {lba} is marked free"));
+            }
+            if state.metadata_blocks.contains(&lba) || state.data_blocks.contains(&lba) {
+                findings.push(format!("quarantined block {lba} is still reachable"));
+            }
+            if state.allocation_pool_blocks.contains(&lba) {
+                findings.push(format!(
+                    "quarantined block {lba} belongs to the permanent allocation-root pool"
+                ));
+            }
         }
     }
 
@@ -429,7 +430,9 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
     accounted.extend(state.metadata_blocks.iter().copied());
     accounted.extend(state.data_blocks.iter().copied());
     accounted.extend(state.allocation_pool_blocks.iter().copied());
-    accounted.extend(state.retired.entries.iter().map(|entry| entry.lba));
+    for run in &state.reclaim_runs {
+        accounted.extend(run.start..run.start + run.blocks as u64);
+    }
     for lba in &accounted {
         if !state.bitmaps.is_allocated(*lba) {
             findings.push(format!(

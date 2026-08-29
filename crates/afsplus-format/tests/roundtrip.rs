@@ -11,6 +11,9 @@ use afsplus_format::header::BlockHeader;
 use afsplus_format::ident::Identification;
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::omap::ObjectMap;
+use afsplus_format::reclaim::{
+    ReclaimCaps, ReclaimEntry, ReclaimRoot, ReclaimSegment, ReclaimTable, SegmentRef, TableRef,
+};
 use afsplus_format::retired::RetiredList;
 use afsplus_format::region::{BitmapBinding, RegionDescriptor};
 use afsplus_format::tree::{
@@ -44,7 +47,7 @@ fn sample_checkpoint() -> Checkpoint {
         root_object_id: OBJECT_ROOT,
         object_map_block: 10,
         allocation_root_block: 0,
-        retired_list_block: 11,
+        reclaim_root_block: 11,
         next_object_id: 20,
         committed_tx_id: 5,
         free_blocks_total: 800,
@@ -275,6 +278,87 @@ fn retired_list_roundtrip_and_double_retire() {
     assert!(!list.contains(43));
     let mut list = sample_retired();
     assert!(list.insert(42, 5).is_err(), "double retire must be rejected");
+}
+
+fn sample_reclaim_root() -> ReclaimRoot {
+    let mut root = ReclaimRoot::empty(ReclaimCaps { inline_entries: 8, segment_refs: 4, table_refs: 4 });
+    root.table_refs.push(TableRef { lba: 40, ref_count: 2 });
+    root.segment_refs.push(SegmentRef { lba: 41, entry_count: 3 });
+    root.inline_entries.push(ReclaimEntry { start: 100, blocks: 5, retire_generation: 7 });
+    root.head_segment_offset = 1;
+    root.head_entry_offset = 2;
+    root.head_block_offset = 1;
+    root.appended_blocks_total = 60;
+    root.reclaimed_blocks_total = 20;
+    root.pending_blocks = 40;
+    root
+}
+
+fn sample_reclaim_segment() -> ReclaimSegment {
+    ReclaimSegment {
+        entries: vec![
+            ReclaimEntry { start: 100, blocks: 5, retire_generation: 3 },
+            ReclaimEntry { start: 200, blocks: 1, retire_generation: 4 },
+        ],
+    }
+}
+
+fn sample_reclaim_table() -> ReclaimTable {
+    ReclaimTable {
+        refs: vec![
+            SegmentRef { lba: 300, entry_count: 10 },
+            SegmentRef { lba: 301, entry_count: 202 },
+        ],
+    }
+}
+
+#[test]
+fn reclaim_structures_roundtrip() {
+    let root = sample_reclaim_root();
+    let block = root.encode(BS, 9).unwrap();
+    let (decoded, generation) = ReclaimRoot::decode(&block).unwrap();
+    assert_eq!(decoded, root);
+    assert_eq!(generation, 9);
+
+    let segment = sample_reclaim_segment();
+    let block = segment.encode(BS, 4).unwrap();
+    assert_eq!(ReclaimSegment::decode(&block).unwrap(), (segment, 4));
+
+    let table = sample_reclaim_table();
+    let block = table.encode(BS, 5).unwrap();
+    assert_eq!(ReclaimTable::decode(&block).unwrap(), (table, 5));
+}
+
+#[test]
+fn reclaim_structures_reject_inconsistencies() {
+    // Cursor pointing past the first table's refs.
+    let mut root = sample_reclaim_root();
+    root.head_segment_offset = 2;
+    assert!(root.encode(BS, 9).is_err());
+    // Totals that do not reconcile with pending.
+    let mut root = sample_reclaim_root();
+    root.pending_blocks = 39;
+    assert!(root.encode(BS, 9).is_err());
+    // Areas exceeding their recorded capacities.
+    let mut root = sample_reclaim_root();
+    for i in 0..9 {
+        root.inline_entries.push(ReclaimEntry { start: 500 + i, blocks: 1, retire_generation: 1 });
+    }
+    assert!(root.encode(BS, 9).is_err());
+    // Zero-length runs and zero generations.
+    assert!(ReclaimSegment {
+        entries: vec![ReclaimEntry { start: 1, blocks: 0, retire_generation: 1 }],
+    }
+    .encode(BS, 1)
+    .is_err());
+    assert!(ReclaimSegment {
+        entries: vec![ReclaimEntry { start: 1, blocks: 1, retire_generation: 0 }],
+    }
+    .encode(BS, 1)
+    .is_err());
+    // Empty sealed blocks are invalid by construction.
+    assert!(ReclaimSegment::default().encode(BS, 1).is_err());
+    assert!(ReclaimTable::default().encode(BS, 1).is_err());
 }
 
 #[test]
