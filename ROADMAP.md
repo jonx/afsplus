@@ -46,6 +46,10 @@ Observability, virtual block backends, deterministic replay, fault injection, an
 - extent mapping
 - shared-extent/refcount prototype for reflinks
 - CloneFile and CloneRange semantics
+- canonical portable principal model
+- shared immutable security-descriptor prototype
+- ALLOW/DENY ACL evaluation and inheritance vectors
+- classic protection-bit projection without destroying rich ACLs
 - prototype checkpoint-COW transaction engine
 - prototype redo-journal alternative
 - compare transaction engines under identical crash/write-amplification tests
@@ -59,6 +63,8 @@ Observability, virtual block backends, deterministic replay, fault injection, an
 Do not freeze the transaction format until checkpoint-COW and redo-journal prototypes have been compared experimentally.
 
 The epoch-1 extent model must support shared extents even if every clone API is not production-complete at the first writable milestone.
+
+The epoch-1 security model must preserve rich ACL metadata on hosts that expose only a simpler permission view.
 
 ## Stage C: integrate AROS
 
@@ -75,6 +81,9 @@ The epoch-1 extent model must support shared extents even if every clone API is 
 - Rust/C integration boundary
 - generic file-backed virtual block device for mounting disk images
 - native AROS benchmark runner using the same workload descriptions
+- classic/single-user security adapter
+- optional AROS multi-user principal/security service integration
+- strict/preserve/compat security mount modes
 
 ## Stage D: make it portable and pleasant
 
@@ -88,6 +97,9 @@ The epoch-1 extent model must support shared extents even if every clone API is 
 - host-side inspect/check/repair workflow
 - easy sparse-image create/mount/fork/replay workflow
 - cross-OS interoperability test matrix
+- POSIX ACL/principal mapping adapter
+- Windows ACL/SID mapping adapter
+- cross-OS security round-trip and fidelity reporting
 
 ## Stage E: modern accelerators
 
@@ -100,6 +112,9 @@ The epoch-1 extent model must support shared extents even if every clone API is 
 - evaluate recursive directory statistics
 - evaluate optional data checksums
 - evaluate CloneTree separately from file/range cloning
+- prototype shared subtree security domains
+- benchmark security-domain policy updates against recursively materialized ACL changes
+- separate design review for optional encrypted security domains / key hierarchy
 
 ## Stage F: production
 
@@ -112,6 +127,7 @@ The epoch-1 extent model must support shared extents even if every clone API is 
 - low-memory qualification
 - CPU-efficiency qualification
 - Rust-vs-C resource qualification
+- security access-check performance qualification
 - real SSD qualification
 - exhaustive crash-point qualification
 - independent format review
@@ -132,4 +148,8 @@ Do not freeze the format until:
 - repair/check tools share format/invariant code where appropriate without making one implementation the specification
 - machine-readable tools and errors are versioned
 - classic/minimal reader profile is demonstrably implementable
+- canonical ACL tests produce identical decisions in Rust and C
+- unknown/unmapped principals survive round-trip without identity loss
+- a host unable to enforce active security semantics cannot silently mount read-write in strict mode
+- classic protection-bit edits do not accidentally erase richer security metadata
 - Cargo/Git/Zed-style/Ferail workloads are qualified
