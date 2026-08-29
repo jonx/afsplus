@@ -14,6 +14,8 @@ It is intended for:
 - auditing
 - cache invalidation
 
+The change stream is **non-authoritative and discardable, but it is not reconstructible history**. Current filesystem state can tell us what exists now, not the exact ordered sequence of past committed events.
+
 ## 2. Sequence
 
 Every change record has a monotonically increasing 64-bit sequence number.
@@ -58,9 +60,11 @@ The stream publishes:
 - oldest available sequence
 - newest committed sequence
 
+Discarding old history does not corrupt the filesystem. It can, however, make an incremental consumer unable to continue from its saved cursor.
+
 ## 6. Rescan rule
 
-If a consumer asks for changes older than the oldest available sequence:
+If a consumer asks for changes older than the oldest available sequence, or if the stream was intentionally discarded/reinitialized:
 
 ```text
 FSV2_ERR_RESCAN_REQUIRED
@@ -70,11 +74,15 @@ The consumer then performs `FSV2_EnumerateObjects()` and records the resulting c
 
 This fallback is part of the API contract.
 
+Repair tools must describe this operation as **discard/reset**, not as a rebuild of the lost event history.
+
 ## 7. Transaction relationship
 
 Change records become visible only for committed filesystem transactions.
 
 A crash must not expose notifications for operations that never committed.
+
+The stream itself may lag or be absent when the feature contract permits that state, but it must never fabricate committed history.
 
 ## 8. Relationship to transient Notify
 
