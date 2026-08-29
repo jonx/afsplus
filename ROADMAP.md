@@ -15,10 +15,12 @@ Status: initial review complete, continue subsystem-by-subsystem during implemen
 - establish Rust workspace and `afsplus-core`
 - keep core disk semantics independent from host namespaces
 - define language-neutral C ABI boundary
+- define portable C implementation profiles
 - freeze minimal reader subset
-- retain tiny portable C reader target
+- implement tiny portable C reader
 - create binary encoder/decoder tests
 - create conformance images
+- create cross-implementation Rust/C interoperability tests
 - create sparse raw image backend
 - create memory block backend
 - create SliceBackend for partition/disk-image viewports
@@ -30,12 +32,14 @@ Status: initial review complete, continue subsystem-by-subsystem during implemen
 - operation record/replay
 - tiny-cache test matrix
 - fuzzing and property tests
+- benchmark harness with CPU/RAM/I/O/write-amplification accounting
 
-Observability, virtual block backends, deterministic replay, and fault injection are required before the writable format is considered stable enough to develop aggressively.
+Observability, virtual block backends, deterministic replay, fault injection, and repeatable resource benchmarks are required before the writable format is considered stable enough to develop aggressively.
 
 ## Stage B: make images mutable
 
-- formatter
+- Rust formatter
+- portable C read/write baseline
 - allocation regions
 - object mutation
 - B+ tree directories
@@ -50,6 +54,7 @@ Observability, virtual block backends, deterministic replay, and fault injection
 - explain APIs
 - semantic image diff
 - read-only retained-checkpoint viewport for debugging/recovery
+- continuously compare Rust and C CPU, RAM, I/O, and semantic results
 
 Do not freeze the transaction format until checkpoint-COW and redo-journal prototypes have been compared experimentally.
 
@@ -69,6 +74,7 @@ The epoch-1 extent model must support shared extents even if every clone API is 
 - structured management APIs
 - Rust/C integration boundary
 - generic file-backed virtual block device for mounting disk images
+- native AROS benchmark runner using the same workload descriptions
 
 ## Stage D: make it portable and pleasant
 
@@ -76,9 +82,12 @@ The epoch-1 extent model must support shared extents even if every clone API is 
 - third-party probe kit
 - compatibility profiles
 - classic reader
+- portable C `classic-rw` qualification
+- portable C `full-portable` qualification where feasible
 - JSON/structured tooling schemas
 - host-side inspect/check/repair workflow
 - easy sparse-image create/mount/fork/replay workflow
+- cross-OS interoperability test matrix
 
 ## Stage E: modern accelerators
 
@@ -101,6 +110,8 @@ The epoch-1 extent model must support shared extents even if every clone API is 
 - online repair where justified
 - performance qualification
 - low-memory qualification
+- CPU-efficiency qualification
+- Rust-vs-C resource qualification
 - real SSD qualification
 - exhaustive crash-point qualification
 - independent format review
@@ -116,7 +127,9 @@ Do not freeze the format until:
 - metadata ownership can be explained from supported tools
 - shared extents cannot be freed while referenced by any live object or retained checkpoint
 - sparse raw images and physical devices exercise the same disk format
-- repair/check tools share format/invariant code with the portable core
+- Rust and portable C implementations interoperate against the same conformance corpus
+- performance reports include CPU, peak RAM, block I/O, flush count, and write amplification
+- repair/check tools share format/invariant code where appropriate without making one implementation the specification
 - machine-readable tools and errors are versioned
 - classic/minimal reader profile is demonstrably implementable
 - Cargo/Git/Zed-style/Ferail workloads are qualified
