@@ -113,6 +113,13 @@ A partially written newer checkpoint is ignored.
 
 No full-volume scan is required for ordinary metadata crash recovery.
 
+Normal mount validates the identification/checkpoint records and a bounded
+set of root pages. It does not prove the integrity of every descendant before
+returning. A corrupt descendant is reported when accessed; `afsplus-check`,
+shadow verification, and the crash harness perform exhaustive walks. This is
+the necessary distinction between bounded recovery and whole-volume
+verification.
+
 The exact user-data semantics after a crash are determined by the selected data-update policy in section 4 and must be documented separately from metadata consistency.
 
 ## 6. Retired blocks and quarantine

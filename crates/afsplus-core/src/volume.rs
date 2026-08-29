@@ -22,9 +22,9 @@ use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::retired::RetiredList;
 use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 
-use crate::alloc::{AllocStats, TxAllocator};
+use crate::alloc::{AllocStats, Bitmaps, TxAllocator};
 use crate::mount::Selection;
-use crate::verify::{load_committed_state, CommittedState};
+use crate::verify::{load_mount_state, MountState};
 use crate::CoreError;
 
 /// Measured cost of the last committed transaction.
@@ -50,12 +50,16 @@ pub struct Volume<D: BlockDevice> {
     /// The other slot's structurally valid checkpoint, if any: its bitmap
     /// slots and quarantined blocks must stay untouched.
     other_checkpoint: Option<Checkpoint>,
-    state: CommittedState,
+    state: MountState,
+    /// Authoritative allocation pages are loaded only when a mutation needs
+    /// them. Modern ports may keep this cache hot; constrained readers never
+    /// need to instantiate it merely to mount or read files.
+    bitmaps: Option<Bitmaps>,
     last_commit: Option<CommitStats>,
 }
 
 impl<D: BlockDevice> Volume<D> {
-    pub(crate) fn new(dev: D, ident: Identification, selection: Selection, state: CommittedState) -> Self {
+    pub(crate) fn new(dev: D, ident: Identification, selection: Selection, state: MountState) -> Self {
         Volume {
             dev,
             ident,
@@ -63,6 +67,7 @@ impl<D: BlockDevice> Volume<D> {
             current_slot: selection.chosen_slot,
             other_checkpoint: selection.other,
             state,
+            bitmaps: None,
             last_commit: None,
         }
     }
@@ -84,11 +89,15 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     pub fn free_blocks(&self) -> u64 {
-        self.state.bitmaps.free_blocks_total()
+        self.checkpoint
+            .regions
+            .iter()
+            .map(|record| record.free_blocks as u64)
+            .sum()
     }
 
     pub fn allocator_ram_bytes(&self) -> usize {
-        self.state.bitmaps.ram_bytes()
+        self.bitmaps.as_ref().map(Bitmaps::ram_bytes).unwrap_or(0)
     }
 
     pub fn last_commit_stats(&self) -> Option<CommitStats> {
@@ -98,31 +107,31 @@ impl<D: BlockDevice> Volume<D> {
     /// Looks a name up in the root directory.
     pub fn lookup_root(&self, name: &str) -> Option<u64> {
         let key = comparison_key(name.as_bytes());
-        self.state.directories.get(&OBJECT_ROOT)?.lookup(&key).map(|e| e.child_id)
+        self.state.root_directory.lookup(&key).map(|e| e.child_id)
     }
 
     /// Lists the root directory as (original name, object ID) pairs.
     pub fn list_root(&self) -> Vec<(String, u64)> {
-        match self.state.directories.get(&OBJECT_ROOT) {
-            Some(dir) => dir
-                .entries
-                .iter()
-                .map(|e| (String::from_utf8_lossy(&e.name).into_owned(), e.child_id))
-                .collect(),
-            None => Vec::new(),
-        }
+        self.state
+            .root_directory
+            .entries
+            .iter()
+            .map(|e| (String::from_utf8_lossy(&e.name).into_owned(), e.child_id))
+            .collect()
     }
 
-    pub fn stat(&self, object_id: u64) -> Option<&ObjectRecord> {
-        self.state.objects.get(&object_id)
+    /// Reads and validates one object record on demand. Returning the record
+    /// by value keeps the low-memory path independent of a mandatory object
+    /// cache; modern implementations may add a bounded or aggressive cache
+    /// above this API.
+    pub fn stat(&mut self, object_id: u64) -> Result<Option<ObjectRecord>, CoreError> {
+        self.read_object(object_id)
     }
 
     /// Reads a file's committed content.
     pub fn read_file(&mut self, object_id: u64) -> Result<Vec<u8>, CoreError> {
-        let record = *self
-            .state
-            .objects
-            .get(&object_id)
+        let record = self
+            .read_object(object_id)?
             .ok_or_else(|| CoreError::Corrupt(format!("no object {object_id}")))?;
         if record.object_type != ObjectType::File {
             return Err(CoreError::Corrupt(format!("object {object_id} is not a file")));
@@ -131,8 +140,12 @@ impl<D: BlockDevice> Volume<D> {
         let mut content = vec![0u8; (record.data_blocks as usize) * block_size];
         for i in 0..record.data_blocks {
             let offset = i as usize * block_size;
+            let lba = record
+                .data_root
+                .checked_add(i)
+                .ok_or_else(|| CoreError::Corrupt(format!("object {object_id} extent overflow")))?;
             self.dev
-                .read_block(record.data_root + i, &mut content[offset..offset + block_size])?;
+                .read_block(lba, &mut content[offset..offset + block_size])?;
         }
         content.truncate(record.size_bytes as usize);
         Ok(content)
@@ -155,11 +168,7 @@ impl<D: BlockDevice> Volume<D> {
     ) -> Result<u64, CoreError> {
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
         let key = comparison_key(name.as_bytes());
-        let root_dir = self
-            .state
-            .directories
-            .get(&OBJECT_ROOT)
-            .ok_or_else(|| CoreError::Corrupt("root directory block missing".into()))?;
+        let root_dir = self.state.root_directory.clone();
         if root_dir.lookup(&key).is_some() {
             return Err(CoreError::AlreadyExists);
         }
@@ -171,7 +180,12 @@ impl<D: BlockDevice> Volume<D> {
             .checked_add(1)
             .ok_or(CoreError::PrototypeLimit("object ID space exhausted"))?;
 
-        let mut tx = TxAllocator::begin(&self.state.bitmaps, &self.state.retired, generation)?;
+        self.ensure_bitmaps_loaded()?;
+        let mut tx = TxAllocator::begin(
+            self.bitmaps.as_ref().expect("loaded above"),
+            &self.state.retired,
+            generation,
+        )?;
 
         // Data first: allocate one contiguous extent and stage its blocks.
         let data_block_count = (content.len() as u64).div_ceil(block_size as u64);
@@ -216,7 +230,7 @@ impl<D: BlockDevice> Volume<D> {
             data_blocks: data_block_count,
         };
 
-        let mut new_dir = root_dir.clone();
+        let mut new_dir = root_dir;
         new_dir.insert(DirEntry {
             key,
             name: name.as_bytes().to_vec(),
@@ -224,7 +238,7 @@ impl<D: BlockDevice> Volume<D> {
             child_id: object_id,
         })?;
 
-        let old_root = self.state.objects[&OBJECT_ROOT];
+        let old_root = self.state.root_object;
         let new_root = ObjectRecord {
             modified: now,
             changed: now,
@@ -261,13 +275,11 @@ impl<D: BlockDevice> Volume<D> {
     /// checkpoint can reference them.
     pub fn delete_file_in_root(&mut self, name: &str, now: Timespec) -> Result<(), CoreError> {
         let key = comparison_key(name.as_bytes());
-        let root_dir = self
-            .state
-            .directories
-            .get(&OBJECT_ROOT)
-            .ok_or_else(|| CoreError::Corrupt("root directory block missing".into()))?;
+        let root_dir = self.state.root_directory.clone();
         let entry = root_dir.lookup(&key).ok_or(CoreError::NotFound)?.clone();
-        let victim = self.state.objects[&entry.child_id];
+        let victim = self
+            .read_object(entry.child_id)?
+            .ok_or_else(|| CoreError::Corrupt("victim missing from object map".into()))?;
         if victim.object_type != ObjectType::File {
             return Err(CoreError::PrototypeLimit("only file deletion is implemented"));
         }
@@ -275,7 +287,12 @@ impl<D: BlockDevice> Volume<D> {
         let block_size = self.dev.block_size();
         let generation = self.next_generation()?;
 
-        let mut tx = TxAllocator::begin(&self.state.bitmaps, &self.state.retired, generation)?;
+        self.ensure_bitmaps_loaded()?;
+        let mut tx = TxAllocator::begin(
+            self.bitmaps.as_ref().expect("loaded above"),
+            &self.state.retired,
+            generation,
+        )?;
 
         let dir_lba = tx.allocate()?;
         let root_record_lba = tx.allocate()?;
@@ -294,10 +311,10 @@ impl<D: BlockDevice> Volume<D> {
         }
         self.retire_cow_originals(&mut tx)?;
 
-        let mut new_dir = root_dir.clone();
+        let mut new_dir = root_dir;
         new_dir.remove(&key);
 
-        let old_root = self.state.objects[&OBJECT_ROOT];
+        let old_root = self.state.root_object;
         let new_root = ObjectRecord {
             modified: now,
             changed: now,
@@ -334,6 +351,51 @@ impl<D: BlockDevice> Volume<D> {
             .ok_or(CoreError::PrototypeLimit("generation counter exhausted"))
     }
 
+    fn ensure_bitmaps_loaded(&mut self) -> Result<(), CoreError> {
+        if self.bitmaps.is_none() {
+            self.bitmaps = Some(Bitmaps::load(&mut self.dev, &self.ident.geometry(), &self.checkpoint)?);
+        }
+        Ok(())
+    }
+
+    fn read_object(&mut self, object_id: u64) -> Result<Option<ObjectRecord>, CoreError> {
+        if object_id == OBJECT_ROOT {
+            return Ok(Some(self.state.root_object));
+        }
+        let Some(lba) = self.state.object_map.lookup(object_id) else {
+            return Ok(None);
+        };
+        if !self.ident.geometry().is_allocatable(lba) {
+            return Err(CoreError::Corrupt(format!(
+                "object {object_id} record block {lba} outside allocatable bounds"
+            )));
+        }
+        let mut buf = vec![0u8; self.dev.block_size()];
+        self.dev.read_block(lba, &mut buf)?;
+        let record = ObjectRecord::decode(&buf)
+            .map_err(|e| CoreError::Corrupt(format!("object {object_id} record invalid: {e}")))?;
+        if record.object_id != object_id {
+            return Err(CoreError::Corrupt(format!(
+                "object record at block {lba} claims ID {}, map says {object_id}",
+                record.object_id
+            )));
+        }
+        if record.object_type == ObjectType::File {
+            let data_end = record
+                .data_root
+                .checked_add(record.data_blocks)
+                .ok_or_else(|| CoreError::Corrupt(format!("object {object_id} extent overflow")))?;
+            for block in record.data_root..data_end {
+                if !self.ident.geometry().is_allocatable(block) {
+                    return Err(CoreError::Corrupt(format!(
+                        "object {object_id} data block {block} outside allocatable bounds"
+                    )));
+                }
+            }
+        }
+        Ok(Some(record))
+    }
+
     /// Retires the committed blocks every transaction replaces: the object
     /// map, the root object record, the root directory block, and the
     /// previous retired list.
@@ -345,7 +407,7 @@ impl<D: BlockDevice> Volume<D> {
             .lookup(OBJECT_ROOT)
             .ok_or_else(|| CoreError::Corrupt("root missing from object map".into()))?;
         tx.retire(old_root_record)?;
-        tx.retire(self.state.objects[&OBJECT_ROOT].data_root)?;
+        tx.retire(self.state.root_object.data_root)?;
         if self.checkpoint.retired_list_block != 0 {
             tx.retire(self.checkpoint.retired_list_block)?;
         }
@@ -420,10 +482,11 @@ impl<D: BlockDevice> Volume<D> {
             + stats.checkpoint_blocks_written)
             * block_size as u64;
 
-        // Adopt the committed state. Re-loading from disk (rather than
-        // patching caches) keeps the in-memory state provably equal to what
-        // a remount would see; acceptable at prototype scale.
-        self.state = load_committed_state(&mut self.dev, &self.ident, &new_checkpoint)?;
+        // Adopt the committed roots through the same bounded loader as a
+        // remount. The transaction already owns the exact new bitmap state,
+        // so no post-commit full-volume reload is needed.
+        self.state = load_mount_state(&mut self.dev, &self.ident, &new_checkpoint)?;
+        self.bitmaps = Some(finished.bitmaps);
         self.other_checkpoint = Some(std::mem::replace(&mut self.checkpoint, new_checkpoint));
         self.current_slot = new_slot;
         self.last_commit = Some(stats);

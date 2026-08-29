@@ -63,7 +63,7 @@ A host file, USB disk, Apple NVMe device, or classic trackdisk implementation ca
 
 ## 2. Bounded-memory rule
 
-The core must not require:
+The on-disk structures and core algorithms must not require:
 
 - loading the full allocation bitmap
 - loading the full catalog
@@ -74,6 +74,13 @@ The core must not require:
 Iterators and indexes operate page by page.
 
 Allocation regions are specifically intended to make free-space operations bounded.
+
+This rule defines the minimum implementation path needed for classic and
+constrained profiles. It does not forbid a modern implementation from using
+all available RAM productively. Macaros Native and workstation-class ports
+may retain many regions, directories, and objects in cache, run prefetch in
+parallel, and enable advanced accelerators. Cache size changes performance,
+not disk semantics or correctness.
 
 ## 3. Authoritative versus derived structures
 

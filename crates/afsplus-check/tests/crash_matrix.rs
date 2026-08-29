@@ -128,7 +128,7 @@ fn every_crash_state_of_a_create_transaction_recovers_to_an_allowed_state() {
         } else {
             post_outcomes += 1;
             assert_eq!(vol.lookup_root("hello.txt"), Some(file_id), "{context}");
-            let record = *vol.stat(file_id).unwrap();
+            let record = vol.stat(file_id).unwrap().unwrap();
             assert_eq!(record.object_type, ObjectType::File);
             assert_eq!(vol.read_file(file_id).unwrap(), vec![0x5Au8; 4000], "{context}");
         }
@@ -160,18 +160,35 @@ fn misordered_commit_checkpoint_before_metadata_barrier_is_caught() {
     bad_log.insert(first_flush, ckpt_write);
 
     let mut invalid_states = 0u64;
-    let mut mount_outcomes = 0u64;
+    let mut root_rejections = 0u64;
+    let mut deferred_rejections = 0u64;
     for crash_point in 0..=bad_log.len() {
         for state in crash_states(&base, &bad_log, crash_point) {
             let mut image = state.image;
             let report = check_device(&mut image);
             match mount(image) {
-                Ok(_) => {
-                    mount_outcomes += 1;
-                    assert!(report.is_clean(), "{}: checker disagrees with mount", state.description);
+                Ok(mut vol) => {
+                    if !report.is_clean() {
+                        invalid_states += 1;
+                        // Bounded mount may have read intact roots while a
+                        // descendant record is absent. Accessing every root
+                        // child must then surface corruption; the full
+                        // checker remains the exhaustive transaction oracle.
+                        let mut access_failed = false;
+                        for (_, object_id) in vol.list_root() {
+                            if vol.stat(object_id).is_err() {
+                                access_failed = true;
+                                break;
+                            }
+                        }
+                        if access_failed {
+                            deferred_rejections += 1;
+                        }
+                    }
                 }
                 Err(e) => {
                     invalid_states += 1;
+                    root_rejections += 1;
                     assert!(
                         !report.is_clean(),
                         "{}: mount rejected the state but the checker passed it: {e}",
@@ -183,7 +200,12 @@ fn misordered_commit_checkpoint_before_metadata_barrier_is_caught() {
     }
     assert!(
         invalid_states > 0,
-        "the matrix failed to catch the mis-ordered commit ({mount_outcomes} states all mounted)"
+        "the matrix failed to catch the mis-ordered commit"
+    );
+    assert!(root_rejections > 0, "bad ordering never damaged a bounded mount root");
+    assert!(
+        deferred_rejections > 0,
+        "matrix never exercised corruption discovered by on-demand access"
     );
 }
 

@@ -171,6 +171,9 @@ impl ObjectRecord {
                         return Err(FormatError::Invalid("empty file with data references"));
                     }
                 } else {
+                    self.data_root
+                        .checked_add(self.data_blocks)
+                        .ok_or(FormatError::Overflow("file extent end overflows block address"))?;
                     let capacity = self.data_blocks * block_size as u64;
                     let minimum = (self.data_blocks - 1) * block_size as u64;
                     if self.data_root == 0 || self.size_bytes > capacity || self.size_bytes <= minimum {

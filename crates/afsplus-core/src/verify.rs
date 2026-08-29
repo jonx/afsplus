@@ -1,13 +1,12 @@
 //! Committed-state loading and full invariant verification, shared by the
 //! core and the checker (ADR-015) but with distinct roles:
 //!
+//! - [`load_mount_state`] reads only the object-map root, root object/root
+//!   directory, and the bounded retired-list root. Normal mount uses this
+//!   path and never walks every object or allocation bitmap.
 //! - [`load_committed_state`] decodes everything the chosen checkpoint
 //!   references, with per-structure validation, bounds checks, and unique
-//!   block ownership. Normal mount uses it *after* checkpoint selection; a
-//!   failure here is reported as corruption — mount never masks it by
-//!   silently falling back to an older checkpoint. (The prototype loads the
-//!   whole state eagerly; a real implementation loads on demand. Selection
-//!   itself never walks the filesystem.)
+//!   block ownership. The checker and explicit shadow verification use it.
 //! - [`full_sweep`] is the checker/shadow-verification layer: link counts,
 //!   orphaned objects, bitmap-versus-reachability equality, retired-list
 //!   quarantine invariants, reserved-bit checks.
@@ -40,6 +39,149 @@ pub struct CommittedState {
     pub metadata_blocks: Vec<u64>,
     /// Every reachable file-data block.
     pub data_blocks: Vec<u64>,
+}
+
+/// Bounded state needed to expose a mounted root namespace. Every structure
+/// is one prototype page; future tree implementations retain the same rule by
+/// loading roots and descending on demand.
+pub struct MountState {
+    pub object_map: ObjectMap,
+    pub root_object: ObjectRecord,
+    pub root_directory: DirBlock,
+    pub retired: RetiredList,
+}
+
+/// Loads only bounded roots for normal operation. This intentionally does
+/// not prove whole-volume reachability, link counts, bitmap equality, or the
+/// integrity of every descendant record; those checks belong to
+/// [`load_committed_state`] plus [`full_sweep`]. Descendants are decoded when
+/// accessed.
+pub fn load_mount_state<D: BlockDevice>(
+    dev: &mut D,
+    ident: &Identification,
+    checkpoint: &Checkpoint,
+) -> Result<MountState, CoreError> {
+    let geo = ident.geometry();
+    let mut buf = vec![0u8; geo.block_size];
+    let mut roots = BTreeSet::new();
+    let claim_root = |lba: u64, roots: &mut BTreeSet<u64>| -> Result<(), CoreError> {
+        if !geo.is_allocatable(lba) {
+            return Err(CoreError::Corrupt(format!(
+                "mount root block {lba} outside allocatable bounds"
+            )));
+        }
+        if !roots.insert(lba) {
+            return Err(CoreError::Corrupt(format!(
+                "mount root block {lba} referenced twice"
+            )));
+        }
+        Ok(())
+    };
+
+    claim_root(checkpoint.object_map_block, &mut roots)?;
+    dev.read_block(checkpoint.object_map_block, &mut buf)?;
+    let object_map = ObjectMap::decode(&buf)?;
+    for entry in &object_map.entries {
+        validate_mapped_object_id(entry.object_id, checkpoint)?;
+        if !geo.is_allocatable(entry.block) {
+            return Err(CoreError::Corrupt(format!(
+                "object {} record block {} outside allocatable bounds",
+                entry.object_id, entry.block
+            )));
+        }
+    }
+
+    let root_record_lba = object_map
+        .lookup(OBJECT_ROOT)
+        .ok_or_else(|| CoreError::Corrupt("root object missing from object map".into()))?;
+    claim_root(root_record_lba, &mut roots)?;
+    dev.read_block(root_record_lba, &mut buf)?;
+    let root_object = ObjectRecord::decode(&buf)?;
+    if root_object.object_id != OBJECT_ROOT || root_object.object_type != ObjectType::Directory {
+        return Err(CoreError::Corrupt("root object is not the root directory".into()));
+    }
+
+    claim_root(root_object.data_root, &mut roots)?;
+    dev.read_block(root_object.data_root, &mut buf)?;
+    let root_directory = DirBlock::decode(&buf)?;
+    if root_directory.owner != OBJECT_ROOT {
+        return Err(CoreError::Corrupt(format!(
+            "root directory block owned by {}, expected {OBJECT_ROOT}",
+            root_directory.owner
+        )));
+    }
+    for entry in &root_directory.entries {
+        if entry.key != comparison_key(&entry.name) {
+            return Err(CoreError::Corrupt(
+                "root directory entry key does not match its name".into(),
+            ));
+        }
+        if object_map.lookup(entry.child_id).is_none() {
+            return Err(CoreError::Corrupt(format!(
+                "root directory references missing object {}",
+                entry.child_id
+            )));
+        }
+        if !matches!(entry.child_type_hint, 1 | 2) {
+            return Err(CoreError::Corrupt(format!(
+                "root directory has invalid type hint for object {}",
+                entry.child_id
+            )));
+        }
+    }
+
+    let retired = if checkpoint.retired_list_block != 0 {
+        claim_root(checkpoint.retired_list_block, &mut roots)?;
+        dev.read_block(checkpoint.retired_list_block, &mut buf)?;
+        RetiredList::decode(&buf)?
+    } else {
+        RetiredList::default()
+    };
+    for entry in &retired.entries {
+        if !geo.is_allocatable(entry.lba) {
+            return Err(CoreError::Corrupt(format!(
+                "retired block {} out of bounds",
+                entry.lba
+            )));
+        }
+        if entry.retire_generation > checkpoint.generation {
+            return Err(CoreError::Corrupt(format!(
+                "retired block {} from future generation {}",
+                entry.lba, entry.retire_generation
+            )));
+        }
+        if roots.contains(&entry.lba) {
+            return Err(CoreError::Corrupt(format!(
+                "retired block {} is still a mounted root",
+                entry.lba
+            )));
+        }
+    }
+
+    Ok(MountState {
+        object_map,
+        root_object,
+        root_directory,
+        retired,
+    })
+}
+
+fn validate_mapped_object_id(
+    object_id: u64,
+    checkpoint: &Checkpoint,
+) -> Result<(), CoreError> {
+    if object_id >= checkpoint.next_object_id {
+        return Err(CoreError::Corrupt(format!(
+            "object {object_id} at or above next_object_id {}",
+            checkpoint.next_object_id
+        )));
+    }
+    if object_id != OBJECT_ROOT && object_id < OBJECT_FIRST_DYNAMIC {
+        return Err(CoreError::Corrupt(format!(
+            "object {object_id} in reserved internal ID range"
+        )));
+    }
+    Ok(())
 }
 
 /// Decodes and cross-validates the state referenced by `checkpoint`.
@@ -76,18 +218,7 @@ pub fn load_committed_state<D: BlockDevice>(
     let mut directories = BTreeMap::new();
 
     for entry in &object_map.entries {
-        if entry.object_id >= checkpoint.next_object_id {
-            return Err(CoreError::Corrupt(format!(
-                "object {} at or above next_object_id {}",
-                entry.object_id, checkpoint.next_object_id
-            )));
-        }
-        if entry.object_id != OBJECT_ROOT && entry.object_id < OBJECT_FIRST_DYNAMIC {
-            return Err(CoreError::Corrupt(format!(
-                "object {} in reserved internal ID range",
-                entry.object_id
-            )));
-        }
+        validate_mapped_object_id(entry.object_id, checkpoint)?;
         claim(entry.block, &mut claimed)?;
         metadata_blocks.push(entry.block);
         dev.read_block(entry.block, &mut buf)?;
@@ -123,7 +254,16 @@ pub fn load_committed_state<D: BlockDevice>(
                 directories.insert(record.object_id, dir);
             }
             ObjectType::File => {
-                for lba in record.data_root..record.data_root + record.data_blocks {
+                let data_end = record
+                    .data_root
+                    .checked_add(record.data_blocks)
+                    .ok_or_else(|| {
+                        CoreError::Corrupt(format!(
+                            "object {} extent end overflows block address",
+                            record.object_id
+                        ))
+                    })?;
+                for lba in record.data_root..data_end {
                     claim(lba, &mut claimed)?;
                     data_blocks.push(lba);
                 }

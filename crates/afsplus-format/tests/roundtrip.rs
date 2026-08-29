@@ -174,6 +174,14 @@ fn object_record_rejects_zero_link_count_and_bad_extents() {
     let mut record = sample_record();
     record.data_blocks = u64::MAX;
     assert!(record.encode(BS, 5).is_err());
+
+    // A short extent whose exclusive end wraps the block address space must
+    // also be rejected before any caller can construct an overflowing range.
+    let mut record = sample_record();
+    record.data_root = u64::MAX;
+    record.data_blocks = 1;
+    record.size_bytes = BS as u64;
+    assert!(matches!(record.encode(BS, 5), Err(FormatError::Overflow(_))));
 }
 
 #[test]

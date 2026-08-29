@@ -47,7 +47,15 @@ The format and API must support assumptions made by current software:
 
 ### G4. Lightweight implementations
 
-An implementation must be able to operate with bounded memory. No core structure may require loading metadata proportional to total volume size or file count.
+The format and core algorithms must permit an implementation to operate with
+bounded memory. No core structure may *require* loading metadata proportional
+to total volume size or file count.
+
+This is a portability capability, not a performance ceiling for every host.
+A classic or `reader-minimal` implementation may stream pages through a tiny
+cache, while Macaros Native and other modern systems may cache allocation and
+metadata state aggressively, prefetch, and parallelize. Both strategies must
+produce the same on-disk results and preserve the same correctness rules.
 
 ### G5. Portable independent implementations
 

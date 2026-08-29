@@ -6,12 +6,10 @@
 //! are ambiguous and refuse to mount — a state no correct commit sequence
 //! can produce.
 //!
-//! Loading the selected checkpoint's state comes second; if it references
-//! corrupt metadata, mount reports corruption. It deliberately does NOT fall
-//! back to the older checkpoint: a structurally valid newest checkpoint with
-//! broken reachable state means the commit contract was violated (or the
-//! media is failing), and masking that by silently rescanning would hide
-//! exactly the class of bug the crash matrix exists to catch. Recovery from
+//! Loading bounded roots comes second; corrupt root metadata is reported and
+//! never causes fallback. Descendant object records and allocation pages are
+//! decoded on demand, so corruption outside those roots is reported by the
+//! access that encounters it and by the exhaustive checker. Recovery from
 //! such a volume is repair-tool territory.
 
 use afsplus_block::BlockDevice;
@@ -19,7 +17,7 @@ use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::ident::Identification;
 use afsplus_format::DEFAULT_BLOCK_SIZE;
 
-use crate::verify::load_committed_state;
+use crate::verify::load_mount_state;
 use crate::volume::Volume;
 use crate::{layout, CoreError};
 
@@ -103,7 +101,7 @@ pub fn mount<D: BlockDevice>(mut dev: D) -> Result<Volume<D>, CoreError> {
     }
 
     let selection = select_checkpoint(&mut dev, &ident)?;
-    let state = load_committed_state(&mut dev, &ident, &selection.chosen).map_err(|e| {
+    let state = load_mount_state(&mut dev, &ident, &selection.chosen).map_err(|e| {
         CoreError::Corrupt(format!(
             "checkpoint generation {} (slot {}) references invalid state: {e}",
             selection.chosen.generation,

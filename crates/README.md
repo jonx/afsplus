@@ -21,9 +21,11 @@ as such in the crate docs.
   states — see the module docs for what the model does not cover).
 - `afsplus-core` — mkfs, mount, transactions, and the region allocator
   experiment. Mount *selects* the newest structurally valid checkpoint
-  without walking the filesystem, then loads its state; corrupt reachable
-  state under the chosen checkpoint is reported, never masked by falling
-  back. The allocator keeps free-space state in per-region bitmap pages
+  without walking the filesystem, then reads only the object-map/root
+  namespace and retired-list roots. Descendant objects are decoded on demand;
+  allocation bitmaps are loaded only for mutation. Corruption is reported
+  when the relevant root/descendant is read, never masked by falling back.
+  The allocator keeps free-space state in per-region bitmap pages
   written to reserved generational slot blocks (3 per region), which breaks
   the bitmap-COW self-reference; freed blocks are quarantined via a retired
   list for one full generation before reuse. Per-transaction resource

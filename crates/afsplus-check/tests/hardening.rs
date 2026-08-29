@@ -9,6 +9,7 @@ use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::dir::{DirBlock, DirEntry};
 use afsplus_format::header::BlockHeader;
 use afsplus_format::ident::Identification;
+use afsplus_format::omap::ObjectMap;
 use afsplus_format::Timespec;
 
 const BS: usize = 4096;
@@ -96,11 +97,40 @@ fn corrupt_state_under_the_chosen_checkpoint_is_an_error_not_a_fallback() {
 }
 
 #[test]
+fn corrupt_descendant_is_reported_on_access_without_a_mount_scan() {
+    let mut dev = formatted();
+    let mut vol = mount(dev).unwrap();
+    let id = vol.create_file_in_root("hello.txt", b"x", ts(1)).unwrap();
+    dev = vol.into_device();
+
+    let ident = read_ident(&dev);
+    let newest = Checkpoint::decode(&dev.peek(2), &ident.uuid).unwrap();
+    let omap = ObjectMap::decode(&dev.peek(newest.object_map_block)).unwrap();
+    let record_lba = omap.lookup(id).unwrap();
+    let mut record = dev.peek(record_lba);
+    record[100] ^= 0xFF;
+    dev.apply_raw(record_lba, &record);
+
+    // Roots remain valid, so bounded mount succeeds and namespace lookup is
+    // available. The first access to the damaged descendant reports it.
+    let mut vol = mount(dev.clone()).unwrap();
+    assert_eq!(vol.lookup_root("hello.txt"), Some(id));
+    assert!(matches!(vol.stat(id), Err(CoreError::Corrupt(_))));
+
+    let report = check_device(&mut dev);
+    assert!(!report.is_clean(), "full checker must find the damaged descendant");
+}
+
+#[test]
 fn stored_comparison_key_must_match_the_name() {
     let mut dev = formatted();
     let mut vol = mount(dev).unwrap();
     let id = vol.create_file_in_root("aaa.txt", b"", ts(1)).unwrap();
-    let dir_lba = vol.stat(afsplus_format::OBJECT_ROOT).unwrap().data_root;
+    let dir_lba = vol
+        .stat(afsplus_format::OBJECT_ROOT)
+        .unwrap()
+        .unwrap()
+        .data_root;
     dev = vol.into_device();
 
     // Re-encode the root directory block with a key that does not derive

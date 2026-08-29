@@ -31,11 +31,11 @@ fn mkfs_then_mount_yields_empty_root_at_generation_1() {
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "checker findings: {:?}", report.errors);
 
-    let vol = mount(dev).unwrap();
+    let mut vol = mount(dev).unwrap();
     assert_eq!(vol.generation(), 1);
     assert!(vol.list_root().is_empty());
     assert_eq!(vol.ident().label, "TestVol");
-    let root = vol.stat(afsplus_format::OBJECT_ROOT).unwrap();
+    let root = vol.stat(afsplus_format::OBJECT_ROOT).unwrap().unwrap();
     assert_eq!(root.object_type, ObjectType::Directory);
     assert_eq!(root.link_count, 1);
     // 64 blocks minus 6 reserved minus 3 initial metadata.
@@ -59,7 +59,7 @@ fn create_with_content_commit_remount_read_back() {
     let mut vol = mount(dev).unwrap();
     assert_eq!(vol.generation(), 2);
     assert_eq!(vol.lookup_root("hello.txt"), Some(id));
-    let record = *vol.stat(id).unwrap();
+    let record = vol.stat(id).unwrap().unwrap();
     assert_eq!(record.object_type, ObjectType::File);
     assert_eq!(record.link_count, 1);
     assert_eq!(record.size_bytes, content.len() as u64);
@@ -79,11 +79,11 @@ fn delete_retires_storage_and_checker_stays_clean() {
     let mut vol = mount(dev).unwrap();
 
     let id = vol.create_file_in_root("victim.txt", &[0xA5u8; 4000], ts(1)).unwrap();
-    let data_lba = vol.stat(id).unwrap().data_root;
+    let data_lba = vol.stat(id).unwrap().unwrap().data_root;
     vol.delete_file_in_root("victim.txt", ts(2)).unwrap();
 
     assert_eq!(vol.lookup_root("victim.txt"), None);
-    assert!(vol.stat(id).is_none());
+    assert!(vol.stat(id).unwrap().is_none());
     assert!(vol.retired().contains(data_lba), "deleted data must be quarantined, not freed");
 
     let mut dev = vol.into_device();
@@ -120,6 +120,39 @@ fn several_transactions_alternate_checkpoint_slots_and_recycle_space() {
     let mut dev = vol.into_device();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+}
+
+#[test]
+fn mount_reads_are_bounded_and_descendants_are_loaded_on_demand() {
+    let mut dev = MemoryBackend::new(BS, 256);
+    mkfs(&mut dev, &params(256)).unwrap();
+    let mut vol = mount(dev).unwrap();
+    let mut first_id = 0;
+    for i in 0..10 {
+        let id = vol
+            .create_file_in_root(&format!("file-{i}.txt"), b"data", ts(i))
+            .unwrap();
+        if i == 0 {
+            first_id = id;
+        }
+    }
+
+    let traced = TraceBackend::new(vol.into_device());
+    let mut vol = mount(traced).unwrap();
+    let after_mount = vol.device_mut().stats();
+
+    // ident + 2 checkpoints + object map + root record + root directory +
+    // retired list. Object count and allocation-region pages do not add
+    // reads to ordinary mount.
+    assert_eq!(after_mount.reads, 7);
+    assert_eq!(vol.allocator_ram_bytes(), 0);
+    assert_eq!(vol.list_root().len(), 10);
+    assert!(vol.free_blocks() > 0);
+    assert_eq!(vol.device_mut().stats().reads, after_mount.reads);
+
+    // One stat decodes exactly the requested descendant record.
+    assert!(vol.stat(first_id).unwrap().is_some());
+    assert_eq!(vol.device_mut().stats().reads, after_mount.reads + 1);
 }
 
 #[test]
@@ -192,9 +225,10 @@ fn transaction_io_accounting() {
     assert_eq!(commit.data_blocks_written, 0);
     assert_eq!(commit.flushes, 2, "empty commit must use exactly two barriers");
 
-    // Mount: ident + 2 checkpoint slots + omap + root record + root dir +
-    // 1 bitmap page (single region) = 7 reads, no writes.
-    assert!(mount_stats.reads <= 8 && mount_stats.writes == 0);
+    // Mount: ident + 2 checkpoint slots + omap + root record + root dir.
+    // Allocation pages are not read until the first mutation.
+    assert_eq!(mount_stats.reads, 6);
+    assert_eq!(mount_stats.writes, 0);
 }
 
 #[test]

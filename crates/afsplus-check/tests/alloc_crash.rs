@@ -45,7 +45,7 @@ fn setup_g1() -> (MemoryBackend, u64) {
     .unwrap();
     let mut vol = mount(dev).unwrap();
     let a = vol.create_file_in_root("A", &PA, ts(1)).unwrap();
-    let record = *vol.stat(a).unwrap();
+    let record = vol.stat(a).unwrap().unwrap();
     assert_eq!(record.data_blocks, 1);
     (vol.into_device(), record.data_root)
 }
@@ -88,7 +88,7 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
     // --- G3: create B, which must reuse X --------------------------------
     let g3_log = record_tx(&g2_image, |vol| {
         let b = vol.create_file_in_root("B", &PB, ts(3)).unwrap();
-        let record = *vol.stat(b).unwrap();
+        let record = vol.stat(b).unwrap().unwrap();
         assert_eq!(
             record.data_root, x,
             "test precondition: B must reuse the quarantined block X"
@@ -105,7 +105,7 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
                     // A present, content byte-for-byte intact: the delete
                     // transaction must never have touched X.
                     let a = vol.lookup_root("A").unwrap_or_else(|| panic!("{context}: A missing"));
-                    assert_eq!(vol.stat(a).unwrap().data_root, x, "{context}");
+                    assert_eq!(vol.stat(a).unwrap().unwrap().data_root, x, "{context}");
                     assert_eq!(vol.read_file(a).unwrap(), PA.to_vec(), "{context}: A content damaged");
                 }
                 g if g == g1_generation + 1 => {
@@ -134,7 +134,7 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
                 g if g == g1_generation + 2 => {
                     assert_eq!(vol.lookup_root("A"), None, "{context}");
                     let b = vol.lookup_root("B").unwrap_or_else(|| panic!("{context}: B missing"));
-                    let record = *vol.stat(b).unwrap();
+                    let record = vol.stat(b).unwrap().unwrap();
                     assert_eq!(record.data_root, x, "{context}: B must own X");
                     assert_eq!(vol.read_file(b).unwrap(), PB.to_vec(), "{context}: B content damaged");
                     assert!(!vol.retired().contains(x), "{context}: X still retired after reuse");
@@ -156,7 +156,7 @@ fn reuse_needs_a_full_generation_of_quarantine() {
 
     // The very next transaction promotes and may reuse X.
     let b = vol.create_file_in_root("B", &PB, ts(3)).unwrap();
-    assert_eq!(vol.stat(b).unwrap().data_root, x);
+    assert_eq!(vol.stat(b).unwrap().unwrap().data_root, x);
     assert!(!vol.retired().contains(x));
 
     // Reclaim latency measured by the allocator: one generation, for every

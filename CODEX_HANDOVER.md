@@ -74,7 +74,9 @@ Its founding developer contract appears near the top of `README.md`:
 
 The intention is not to win a feature-checkbox contest. The intended differentiation is the combination of:
 
-- low and bounded resource use
+- a bounded-resource implementation path for classic/constrained profiles,
+  without limiting the caches, parallelism, or advanced features used by
+  Macaros Native and other modern systems
 - modern 64-bit storage semantics
 - strong and testable crash consistency
 - portable independent implementations
@@ -124,6 +126,24 @@ Add first executable prototype: Rust workspace with checkpoint COW core
 ```
 
 Always inspect current HEAD before working because newer commits may exist.
+
+Current HEAD after that baseline includes commit `7a61c06`, which completed
+the immediate hardening and the first Stage 6 allocator experiment:
+
+- checkpoint selection is structural and never falls back over corrupt state
+- same-generation slots are ambiguous
+- the negative bad-ordering crash test is present
+- three reserved generational bitmap slots per region break allocator
+  self-reference
+- retired blocks spend one generation in quarantine before reuse
+- create-with-content, delete, the G1/G2/G3 reuse crash workload, and resource
+  measurements are implemented
+
+The continuation after `7a61c06` replaced the eager mount walk with bounded
+root loading. Ordinary mount now reads identification/checkpoints, the
+single-page prototype object map, root object/root directory, and the retired
+list root. Descendant records are decoded on access and allocation bitmaps are
+loaded only when a mutation begins. The checker retains the exhaustive walk.
 
 At that baseline, steps 1-5 of `implementation/peer-review-prototype-plan.md` are implemented and green:
 
@@ -792,7 +812,7 @@ Be equally willing to defend an unusual design when the criticism is answered by
 
 ## 23. Current next action
 
-The immediate sequence is:
+The hardening and Stage 6 sequence below is complete at `7a61c06`:
 
 ```text
 A. harden current checkpoint/mount/crash prototype
@@ -810,7 +830,22 @@ It is:
 
 > AFS+ can reuse storage after deletes without any selectable checkpoint ever observing stale metadata that points at newly reused content.
 
-That invariant is the next major architecture gate.
+That invariant now passes the modeled crash matrix. The immediate continuation
+is:
+
+```text
+H. finish checked block/range arithmetic hardening (complete)
+I. make ordinary mount load only bounded roots; keep exhaustive walks in the
+   checker and provide on-demand/cacheable access (complete for the current
+   single-page object-map/root prototype)
+J. preserve a tiny-cache implementation path while allowing modern ports to
+   cache and parallelize aggressively (documented; cache policy remains a
+   later implementation layer)
+K. prototype multi-page region bitmaps/larger regions, then compare their
+   measured cost with the current one-page baseline
+L. measure the fsync checkpoint path before deciding whether an auxiliary
+   durability/intent log is justified
+```
 
 ---
 
@@ -818,4 +853,4 @@ That invariant is the next major architecture gate.
 
 If you need one sentence to resume the project:
 
-> Continue as AFS+'s filesystem tech lead and architecture reviewer: inspect current HEAD, apply the hardening in `CODEX_HANDOVER.md` section 7, then supervise the Stage 6 allocator/reuse experiment without silently deciding the five architecture blockers.
+> Continue as AFS+'s filesystem tech lead and architecture reviewer: inspect current HEAD, keep the five architecture blockers explicit, make normal mount genuinely bounded, then use measurements to choose between larger multi-page regions and the fsync durability-path experiment.
