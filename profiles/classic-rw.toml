@@ -1,0 +1,9 @@
+name = "classic-rw"
+description = "Conservative read/write profile for constrained Amiga-family implementations."
+
+allow_catalog = false
+allow_change_stream = false
+allow_inline_data = false
+allow_xattrs = true
+allow_sparse = true
+require_metadata_journal = true

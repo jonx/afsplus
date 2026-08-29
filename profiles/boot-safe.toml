@@ -1,0 +1,10 @@
+name = "boot-safe"
+description = "Feature set appropriate for boot and recovery volumes."
+
+allow_catalog = false
+allow_change_stream = false
+allow_inline_data = false
+allow_xattrs = false
+allow_sparse = false
+require_metadata_journal = true
+require_metadata_checksums = true

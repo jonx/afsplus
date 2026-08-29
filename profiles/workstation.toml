@@ -1,0 +1,10 @@
+name = "workstation"
+description = "Default modern AROS profile."
+
+allow_catalog = true
+allow_change_stream = true
+allow_inline_data = false
+allow_xattrs = true
+allow_sparse = true
+require_metadata_journal = true
+require_metadata_checksums = true

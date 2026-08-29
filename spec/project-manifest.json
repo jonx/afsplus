@@ -1,0 +1,23 @@
+{
+  "project": "AFS+",
+  "status": "development specification",
+  "format_epoch": 1,
+  "default_block_size": 4096,
+  "default_allocation_region_bytes": 1073741824,
+  "core": {
+    "endianness": "little",
+    "file_size_bits": 64,
+    "block_number_bits": 64,
+    "object_id_bits": 64,
+    "name_encoding": "UTF-8",
+    "normalization": "NFC (proposed pending interop validation)"
+  },
+  "optional_features": [
+    "catalog",
+    "change-stream",
+    "inline-data",
+    "xattrs",
+    "sparse",
+    "discard"
+  ]
+}

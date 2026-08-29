@@ -1,0 +1,49 @@
+registry_version = 1
+
+[[feature]]
+id = "org.aros.afsplus:catalog"
+short = "catalog"
+class = "compat"
+state_model = "disabled-enabled-active"
+derived = true
+description = "Rebuildable global object catalog for fast bulk enumeration."
+
+[[feature]]
+id = "org.aros.afsplus:change-stream"
+short = "change-stream"
+class = "compat"
+state_model = "disabled-enabled-active"
+derived = true
+description = "Bounded persistent stream of committed object and namespace changes."
+
+[[feature]]
+id = "org.aros.afsplus:inline-data"
+short = "inline-data"
+class = "incompat"
+state_model = "disabled-enabled-active"
+derived = false
+description = "Permits small regular-file payloads inside object metadata."
+
+[[feature]]
+id = "org.aros.afsplus:xattrs"
+short = "xattrs"
+class = "ro_compat"
+state_model = "disabled-enabled-active"
+derived = false
+description = "Extended attribute storage."
+
+[[feature]]
+id = "org.aros.afsplus:sparse"
+short = "sparse"
+class = "incompat"
+state_model = "disabled-enabled-active"
+derived = false
+description = "Sparse logical file ranges."
+
+[[feature]]
+id = "org.aros.afsplus:discard"
+short = "discard"
+class = "compat"
+state_model = "disabled-enabled-active"
+derived = true
+description = "Implementation may issue discard hints. No disk semantics depend on support."

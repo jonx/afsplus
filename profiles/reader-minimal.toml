@@ -1,0 +1,9 @@
+name = "reader-minimal"
+description = "Smallest profile intended for recovery and constrained read-only implementations."
+
+allow_catalog = false
+allow_change_stream = false
+allow_inline_data = false
+allow_xattrs = false
+allow_sparse = true
+require_journal_write_support = false
