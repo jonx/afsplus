@@ -19,8 +19,8 @@ use afsplus_format::geometry::{Geometry, BITMAP_SLOTS, DESCRIPTOR_SLOTS};
 use afsplus_format::region::RegionDescriptor;
 use afsplus_format::retired::{RetiredEntry, RetiredList};
 
-use crate::CoreError;
 use crate::allocation_root;
+use crate::CoreError;
 
 fn checkpoint_records<D: BlockDevice>(
     dev: &mut D,
@@ -37,6 +37,30 @@ fn checkpoint_records<D: BlockDevice>(
             checkpoint.generation,
         )?
         .records)
+    }
+}
+
+fn checkpoint_record<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    checkpoint: &Checkpoint,
+    region: u32,
+) -> Result<RegionRecord, CoreError> {
+    if checkpoint.allocation_root_block == 0 {
+        checkpoint
+            .regions
+            .get(region as usize)
+            .copied()
+            .ok_or_else(|| CoreError::Corrupt(format!("checkpoint missing region {region}")))
+    } else {
+        allocation_root::lookup_record(
+            dev,
+            geo,
+            checkpoint.allocation_root_block,
+            checkpoint.generation,
+            region,
+        )?
+        .ok_or_else(|| CoreError::Corrupt(format!("allocation root missing region {region}")))
     }
 }
 
@@ -179,14 +203,19 @@ pub struct AllocStats {
     pub reclaim_latency_generations: u64,
     pub bitmap_pages_dirty: u64,
     pub region_descriptors_dirty: u64,
+    /// Current/older allocation-root region records fetched on demand.
+    pub allocation_records_loaded: u64,
     /// Peak resident bitmap payload bytes (descriptor objects excluded).
     pub allocator_ram_bytes: u64,
 }
 
 pub struct TxAllocator {
     geo: Geometry,
-    current_records: Vec<RegionRecord>,
-    other_records: Option<Vec<RegionRecord>>,
+    current_checkpoint: Checkpoint,
+    other_checkpoint: Option<Checkpoint>,
+    current_records: BTreeMap<u32, RegionRecord>,
+    other_records: BTreeMap<u32, RegionRecord>,
+    current_free_blocks_total: u64,
     descriptors: BTreeMap<u32, RegionDescriptor>,
     other_descriptors: BTreeMap<u32, RegionDescriptor>,
     /// Transaction working set. Clean scan pages are evicted immediately;
@@ -210,10 +239,11 @@ impl TxAllocator {
     ) -> Result<TxAllocator, CoreError> {
         let mut tx = TxAllocator {
             geo: *geo,
-            current_records: checkpoint_records(dev, geo, current)?,
-            other_records: other
-                .map(|checkpoint| checkpoint_records(dev, geo, checkpoint))
-                .transpose()?,
+            current_checkpoint: current.clone(),
+            other_checkpoint: other.cloned(),
+            current_records: BTreeMap::new(),
+            other_records: BTreeMap::new(),
+            current_free_blocks_total: current.free_blocks_total,
             descriptors: BTreeMap::new(),
             other_descriptors: BTreeMap::new(),
             pages: BTreeMap::new(),
@@ -342,18 +372,24 @@ impl TxAllocator {
         region: u32,
     ) -> Result<(), CoreError> {
         if !self.descriptors.contains_key(&region) {
-            let record = self.current_records.get(region as usize).ok_or_else(|| {
-                CoreError::Corrupt(format!("missing descriptor record for region {region}"))
-            })?;
+            let record = if let Some(record) = self.current_records.get(&region) {
+                *record
+            } else {
+                let record = checkpoint_record(dev, &self.geo, &self.current_checkpoint, region)?;
+                self.current_records.insert(region, record);
+                self.stats.allocation_records_loaded += 1;
+                record
+            };
             let mut buf = vec![0u8; self.geo.block_size];
-            let descriptor = load_region_descriptor(dev, &self.geo, region, record, &mut buf)?;
+            let descriptor = load_region_descriptor(dev, &self.geo, region, &record, &mut buf)?;
             self.descriptors.insert(region, descriptor);
 
-            if let Some(other_records) = &self.other_records {
-                let other_record = other_records.get(region as usize).ok_or_else(|| {
-                    CoreError::Corrupt(format!("older checkpoint missing region {region}"))
-                })?;
-                let other = load_region_descriptor(dev, &self.geo, region, other_record, &mut buf)?;
+            if let Some(other_checkpoint) = &self.other_checkpoint {
+                let other_record = checkpoint_record(dev, &self.geo, other_checkpoint, region)?;
+                self.other_records.insert(region, other_record);
+                self.stats.allocation_records_loaded += 1;
+                let other =
+                    load_region_descriptor(dev, &self.geo, region, &other_record, &mut buf)?;
                 self.other_descriptors.insert(region, other);
             }
         }
@@ -386,13 +422,12 @@ impl TxAllocator {
     ) -> Result<FinishedAlloc, CoreError> {
         let mut bitmap_writes = Vec::new();
         let mut descriptor_writes = Vec::new();
-        let mut records = Vec::with_capacity(self.current_records.len());
-        for (region_index, current_record) in self.current_records.iter().enumerate() {
-            let region = region_index as u32;
-            if !self.dirty_regions.contains(&region) {
-                records.push(*current_record);
-                continue;
-            }
+        let mut dirty_records = Vec::with_capacity(self.dirty_regions.len());
+        let mut free_blocks_total = self.current_free_blocks_total;
+        for region in self.dirty_regions.iter().copied() {
+            let current_record = self.current_records.get(&region).ok_or_else(|| {
+                CoreError::Corrupt(format!("dirty region {region} has no root record"))
+            })?;
             let mut descriptor = self.descriptors.get(&region).cloned().ok_or_else(|| {
                 CoreError::Corrupt(format!("dirty region {region} has no descriptor"))
             })?;
@@ -430,8 +465,7 @@ impl TxAllocator {
                 .sum();
             let older_descriptor_slot = self
                 .other_records
-                .as_ref()
-                .and_then(|records| records.get(region_index))
+                .get(&region)
                 .map(|record| record.descriptor_slot);
             let descriptor_slot = choose_slot(
                 DESCRIPTOR_SLOTS,
@@ -444,11 +478,21 @@ impl TxAllocator {
                     .encode(self.geo.block_size, self.new_generation)
                     .map_err(CoreError::Format)?,
             ));
-            records.push(RegionRecord {
+            let new_record = RegionRecord {
                 descriptor_slot,
                 free_blocks: descriptor.free_blocks,
                 descriptor_generation: self.new_generation,
-            });
+            };
+            if new_record.free_blocks >= current_record.free_blocks {
+                free_blocks_total = free_blocks_total
+                    .checked_add((new_record.free_blocks - current_record.free_blocks) as u64)
+                    .ok_or_else(|| CoreError::Corrupt("free block total overflows".into()))?;
+            } else {
+                free_blocks_total = free_blocks_total
+                    .checked_sub((current_record.free_blocks - new_record.free_blocks) as u64)
+                    .ok_or_else(|| CoreError::Corrupt("free block total underflows".into()))?;
+            }
+            dirty_records.push((region, new_record));
         }
         self.stats.bitmap_pages_dirty = bitmap_writes.len() as u64;
         self.stats.region_descriptors_dirty = descriptor_writes.len() as u64;
@@ -457,7 +501,8 @@ impl TxAllocator {
         Ok(FinishedAlloc {
             bitmap_writes,
             descriptor_writes,
-            records,
+            dirty_records,
+            free_blocks_total,
             retired: self.new_retired,
             stats: self.stats,
         })
@@ -467,7 +512,10 @@ impl TxAllocator {
 pub struct FinishedAlloc {
     pub bitmap_writes: Vec<(u64, Vec<u8>)>,
     pub descriptor_writes: Vec<(u64, Vec<u8>)>,
-    pub records: Vec<RegionRecord>,
+    /// Only records whose descriptor/bitmap state changed in this
+    /// transaction, for dirty-path allocation-root COW.
+    pub dirty_records: Vec<(u32, RegionRecord)>,
+    pub free_blocks_total: u64,
     pub retired: RetiredList,
     pub stats: AllocStats,
 }

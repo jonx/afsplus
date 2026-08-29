@@ -223,10 +223,15 @@ publication, allocator reads, checker accounting, commits, and ordinary crash
 matrices now use the typed root; inline checkpoint records are empty. A 1 TiB
 geometry bulk-build test creates the expected 1,024 typed records. Reserved-bit
 initialization is now page/range based, and an explicit sparse 1 TiB image
-qualification formats and bounded-mounts in about 1.24 seconds on the
-development Apple-Silicon/APFS host (roughly 112 MiB physical in one passing
-run). On-demand record loading, dirty-path-only small commits, an exhaustive
-1 TiB checker pass, and multi-node crash matrices remain.
+qualification formats, bounded-mounts, and performs two small commits in about
+1.20 seconds total on the development Apple-Silicon/APFS host (commits about
+20.8/13.1 ms, roughly 112 MiB physical in one passing run). Allocation-root
+publication now upserts only dirty region records and wrote at most three tree
+nodes per measured commit. Current/older region records are loaded on demand
+(one, then two records in the measured commits); retained-pool discovery walks
+only generic allocation-tree nodes without materializing all typed records.
+An exhaustive 1 TiB checker pass and multi-node allocation-root crash matrices
+remain.
 
 At that baseline, steps 1-5 of `implementation/peer-review-prototype-plan.md` are implemented and green:
 

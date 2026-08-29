@@ -1101,20 +1101,18 @@ mod tests {
             checkpoint.generation,
         )
         .unwrap();
-        let allocation_layout = allocation_root::bulk_build(&geo, &finished.records).unwrap();
         let mut allocation_pool = ReservedTreePool::new(
-            allocation_layout.pool_lbas,
+            allocation_root::reserved_pool_lbas(&geo).unwrap(),
             &current_allocation.tree_blocks,
             &[],
         )
         .unwrap();
         let allocation_values: Vec<_> = finished
-            .records
+            .dirty_records
             .iter()
-            .enumerate()
             .map(|(region, record)| {
                 (
-                    allocation_root::key(region as u32),
+                    allocation_root::key(*region),
                     allocation_root::value(*record).unwrap(),
                 )
             })
@@ -1137,11 +1135,7 @@ mod tests {
             dev.write_block(*lba, block).unwrap();
         }
         checkpoint2.allocation_root_block = allocation_mutation.root_lba;
-        checkpoint2.free_blocks_total = finished
-            .records
-            .iter()
-            .map(|record| record.free_blocks as u64)
-            .sum();
+        checkpoint2.free_blocks_total = finished.free_blocks_total;
         checkpoint2.regions.clear();
         let mut tx2 = TxAllocator::begin(
             &mut dev,

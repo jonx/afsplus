@@ -84,11 +84,8 @@ pub fn bulk_build(
     let leaf_capacity = leaf_capacity(geo.block_size)?;
     let internal_fanout = internal_fanout(geo.block_size)?;
     let leaf_groups = balanced_groups(records.len(), leaf_capacity)?;
-    let logical_nodes = logical_node_count(leaf_groups.len(), internal_fanout)?;
-    let pool_blocks = logical_nodes
-        .checked_mul(3)
-        .ok_or_else(|| CoreError::Corrupt("allocation-root pool size overflow".into()))?;
-    let pool_lbas = derive_pool_lbas(geo, pool_blocks)?;
+    let pool_lbas = reserved_pool_lbas(geo)?;
+    let logical_nodes = pool_lbas.len() / 3;
     let mut next_lba = pool_lbas[..logical_nodes].iter().copied();
     let mut nodes = Vec::with_capacity(logical_nodes);
     let mut level_nodes = Vec::with_capacity(leaf_groups.len());
@@ -177,6 +174,19 @@ pub fn bulk_build(
         pool_lbas,
         nodes,
     })
+}
+
+/// Deterministic permanent `3N` node pool for the fixed region-key topology,
+/// independent of the current record values.
+pub fn reserved_pool_lbas(geo: &Geometry) -> Result<Vec<u64>, CoreError> {
+    let leaf_capacity = leaf_capacity(geo.block_size)?;
+    let internal_fanout = internal_fanout(geo.block_size)?;
+    let leaf_nodes = (geo.region_count() as usize).div_ceil(leaf_capacity);
+    let logical_nodes = logical_node_count(leaf_nodes, internal_fanout)?;
+    let pool_blocks = logical_nodes
+        .checked_mul(3)
+        .ok_or_else(|| CoreError::Corrupt("allocation-root pool size overflow".into()))?;
+    derive_pool_lbas(geo, pool_blocks)
 }
 
 #[derive(Clone)]
@@ -356,6 +366,23 @@ pub fn load_all<D: BlockDevice>(
         tree_blocks,
         summary,
     })
+}
+
+/// Traverses only generic tree structure to discover the retained physical
+/// node set. Ordinary allocation transactions use this to protect the fixed
+/// `3N` pool without materializing every typed region record.
+pub fn load_tree_blocks<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    max_generation: u64,
+) -> Result<Vec<u64>, CoreError> {
+    let mut tree_blocks = Vec::new();
+    visit_tree_nodes(dev, geo, root_lba, spec(max_generation), |lba, _| {
+        tree_blocks.push(lba);
+        Ok(())
+    })?;
+    Ok(tree_blocks)
 }
 
 fn decode_key(encoded: &[u8]) -> Result<u32, CoreError> {

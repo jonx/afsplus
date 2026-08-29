@@ -45,6 +45,10 @@ pub struct CommitStats {
     pub metadata_blocks_written: u64,
     pub bitmap_pages_written: u64,
     pub region_descriptors_written: u64,
+    /// Allocation-region records changed in the authoritative AFST root.
+    pub allocation_records_updated: u64,
+    /// COW allocation-root nodes written for those record changes.
+    pub allocation_tree_nodes_written: u64,
     pub checkpoint_blocks_written: u64,
     pub flushes: u64,
     /// Total bytes issued to the device by this transaction.
@@ -1705,7 +1709,7 @@ impl<D: BlockDevice> Volume<D> {
     fn mutate_allocation_root(
         &mut self,
         generation: u64,
-        records: &[afsplus_format::checkpoint::RegionRecord],
+        dirty_records: &[(u32, afsplus_format::checkpoint::RegionRecord)],
     ) -> Result<TreeMutation, CoreError> {
         if self.checkpoint.allocation_root_block == 0 {
             return Err(CoreError::PrototypeLimit(
@@ -1713,7 +1717,7 @@ impl<D: BlockDevice> Volume<D> {
             ));
         }
         let geo = self.ident.geometry();
-        let current = allocation_root::load_all(
+        let current_blocks = allocation_root::load_tree_blocks(
             &mut self.dev,
             &geo,
             self.checkpoint.allocation_root_block,
@@ -1724,25 +1728,22 @@ impl<D: BlockDevice> Volume<D> {
             .as_ref()
             .filter(|checkpoint| checkpoint.allocation_root_block != 0)
         {
-            allocation_root::load_all(
+            allocation_root::load_tree_blocks(
                 &mut self.dev,
                 &geo,
                 older.allocation_root_block,
                 older.generation,
             )?
-            .tree_blocks
         } else {
             Vec::new()
         };
-        let layout = allocation_root::bulk_build(&geo, records)?;
-        let mut pool =
-            ReservedTreePool::new(layout.pool_lbas, &current.tree_blocks, &older_blocks)?;
-        let encoded: Vec<_> = records
+        let pool_lbas = allocation_root::reserved_pool_lbas(&geo)?;
+        let mut pool = ReservedTreePool::new(pool_lbas, &current_blocks, &older_blocks)?;
+        let encoded: Vec<_> = dirty_records
             .iter()
-            .enumerate()
             .map(|(region, record)| {
                 Ok((
-                    allocation_root::key(region as u32),
+                    allocation_root::key(*region),
                     allocation_root::value(*record)?,
                 ))
             })
@@ -1789,7 +1790,7 @@ impl<D: BlockDevice> Volume<D> {
         let block_size = self.dev.block_size();
         let finished = tx.finish(&self.checkpoint, self.other_checkpoint.as_ref())?;
         debug_assert!(!finished.retired.entries.is_empty());
-        let allocation_root = self.mutate_allocation_root(generation, &finished.records)?;
+        let allocation_root = self.mutate_allocation_root(generation, &finished.dirty_records)?;
         let new_allocation_root_block = allocation_root.root_lba;
         meta_writes.extend(allocation_root.writes);
         meta_writes.push((
@@ -1802,6 +1803,8 @@ impl<D: BlockDevice> Volume<D> {
             metadata_blocks_written: meta_writes.len() as u64,
             bitmap_pages_written: finished.bitmap_writes.len() as u64,
             region_descriptors_written: finished.descriptor_writes.len() as u64,
+            allocation_records_updated: finished.dirty_records.len() as u64,
+            allocation_tree_nodes_written: allocation_root.stats.final_nodes_written,
             checkpoint_blocks_written: 1,
             alloc: finished.stats,
             ..CommitStats::default()
@@ -1830,11 +1833,7 @@ impl<D: BlockDevice> Volume<D> {
 
         // 3. Alternate checkpoint slot, then the commit barrier.
         let new_slot = 1 - self.current_slot;
-        let free_blocks_total = finished
-            .records
-            .iter()
-            .map(|record| record.free_blocks as u64)
-            .sum();
+        let free_blocks_total = finished.free_blocks_total;
         let new_checkpoint = Checkpoint {
             uuid: self.ident.uuid,
             generation,
