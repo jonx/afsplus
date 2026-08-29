@@ -2,6 +2,8 @@
 
 ## Stage 0: Amiga-native design review
 
+Status: initial review complete, continue subsystem-by-subsystem during implementation.
+
 - review PFS3 source subsystem by subsystem
 - document PFS3 atomic commit
 - evaluate PFS4 B+ tree, tiny-file, and fragmentation ideas
@@ -15,23 +17,43 @@
 - create conformance images
 - portable reader
 - fuzzing
+- host-file block backend
+- structured flight recorder
+- deterministic test mode
+- named fault injection points
+- power-cut simulation backend
+- operation record/replay
+- tiny-cache test matrix
+
+Observability and fault injection are required before the writable format is considered stable enough to develop aggressively.
 
 ## Stage B: make images mutable
 
 - formatter
-- allocator
+- allocation regions
 - object mutation
-- journal
-- crash injection
+- B+ tree directories
+- extent mapping
+- prototype checkpoint-COW transaction engine
+- prototype redo-journal alternative
+- compare transaction engines under identical crash/write-amplification tests
+- deferred reclamation
 - checker
+- explain APIs
+
+Do not freeze the transaction format until checkpoint-COW and redo-journal prototypes have been compared experimentally.
 
 ## Stage C: integrate AROS
 
 - handler
 - DOS compatibility
 - Filesystem API v2
+- modern 64-bit API
 - modern path semantics
 - notifications
+- health reporting
+- trace streaming / developer attachment
+- structured management APIs
 
 ## Stage D: make it portable and pleasant
 
@@ -39,18 +61,43 @@
 - third-party probe kit
 - compatibility profiles
 - classic reader
+- JSON/structured tooling schemas
+- host-side inspect/check/repair workflow
 
 ## Stage E: modern accelerators
 
 - global catalog
-- change stream
+- persistent change stream
 - fast enumeration API
+- benchmark tiny-file storage alternatives
+- evaluate rebuildable reverse map
+- evaluate recursive directory statistics
+- evaluate optional data checksums
+- evaluate reflink/block cloning after base reclamation is proven
 
 ## Stage F: production
 
-- resize
-- scrub
+- grow resize
+- minimum-size query
+- shrink/relocation after safe mover exists
+- targeted scrub
+- online repair where justified
 - performance qualification
+- low-memory qualification
 - real SSD qualification
+- exhaustive crash-point qualification
 - independent format review
 - epoch 1 freeze
+
+## Epoch 1 freeze gates
+
+Do not freeze the format until:
+
+- normal crash recovery never requires a full-volume scan
+- deterministic crash injection covers every transaction boundary
+- NO_CHANGES performs zero media writes
+- metadata ownership can be explained from supported tools
+- repair/check tools share format/invariant code with the portable core
+- machine-readable tools and errors are versioned
+- classic/minimal reader profile is demonstrably implementable
+- Cargo/Git/Zed-style/Ferail workloads are qualified
