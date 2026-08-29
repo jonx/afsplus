@@ -2,7 +2,7 @@
 
 ## Stage 0: Amiga-native design review
 
-Status: initial review complete, continue subsystem-by-subsystem during implementation.
+Status: initial review complete. Continue subsystem-by-subsystem only when implementation reaches that subsystem.
 
 - review PFS3 source subsystem by subsystem
 - document PFS3 atomic commit
@@ -10,124 +10,194 @@ Status: initial review complete, continue subsystem-by-subsystem during implemen
 - produce adopt/adapt/reject matrix
 - revise AFS+ transaction and small-file ADRs before format freeze
 
-## Stage A: make the specification executable
+**Specification expansion is now secondary to implementation. Proposed features remain unfrozen until they have real consumers, code, measurements, and crash semantics.**
 
-- establish Rust workspace and `afsplus-core`
+See `implementation/peer-review-prototype-plan.md`.
+
+## Stage A: make the core executable
+
+Primary goal:
+
+```text
+format image
+ -> mutate
+ -> checkpoint
+ -> kill power at every point
+ -> remount
+ -> verify exact allowed state
+```
+
+Build first:
+
+- establish Rust workspace
+- `afsplus-format`
+- `afsplus-block`
+- `afsplus-core`
+- `afsplus-check`
 - keep core disk semantics independent from host namespaces
-- define language-neutral C ABI boundary
-- define portable C implementation profiles
-- freeze minimal reader subset
-- implement tiny portable C reader
-- create binary encoder/decoder tests
-- create conformance images
-- create cross-implementation Rust/C interoperability tests
-- create sparse raw image backend
-- create memory block backend
-- create SliceBackend for partition/disk-image viewports
-- create OverlayBackend for cheap writable test branches
-- structured flight recorder
-- deterministic test mode
-- named fault injection points
+- sparse raw host-file backend
+- memory block backend
+- trace wrapper
+- deterministic fault-injection wrapper
 - power-cut simulation backend
+- minimal format/checkpoint descriptor
+- checkpoint slots A/B
+- root object
+- minimal metadata encoding
+- first create-object transaction
+- remount/invariant checker
+- deterministic crash matrix after every write/flush
+- benchmark harness with CPU/RAM/I/O/flush/write-amplification accounting
+
+Then add:
+
+- SliceBackend for partition/disk-image viewports
+- OverlayBackend for cheap writable test branches
+- structured flight recorder
 - operation record/replay
 - tiny-cache test matrix
-- fuzzing and property tests
-- benchmark harness with CPU/RAM/I/O/write-amplification accounting
-- implement workload-description format shared by host and AROS benchmark runners
+- fuzzing/property tests
 
-Observability, virtual block backends, deterministic replay, fault injection, and repeatable resource benchmarks are required before the writable format is considered stable enough to develop aggressively.
+Do not block this stage on:
 
-## Stage B: make images mutable
+- full ACL engine
+- catalog/change stream
+- AtomicBatch
+- content inspection
+- FUSE
+- native AROS handler
+- tiny-file packing
+- LLM-specific tuning
 
-- Rust formatter
-- portable C read/write baseline
-- allocation regions
-- object mutation
+## Stage B: resolve the epoch-1 architecture blockers
+
+### B1. Allocation state
+
+- prototype allocation regions
+- explicitly test the COW free-space self-reference problem
+- compare PFS3-like metadata reserve, bitmap+delta, spacemap/log-like, or proven hybrid
+- verify nearly-full-volume behavior
+
+Do not freeze the authoritative region free-space encoding before this passes crash tests.
+
+### B2. User-data update policy
+
+Prototype/measure:
+
+- full data COW
+- in-place overwrite for unshared committed data
+- hybrid policy only if measurements justify its extra semantics
+
+Required workloads:
+
+- random 4 KiB rewrites
+- VM/database-style files
+- reflink/shared-range writes
+- crash before/after metadata commit
+- historical content-generation handle cost
+
+Reflink-shared ranges always COW.
+
+### B3. Checkpoint and fsync
+
+- implement checkpoint-COW transaction engine first
+- benchmark repeated small write + `fsync`
+- benchmark Git/package-manager rename/fsync patterns
+- add a small durability/intent-log prototype **only if measurements show the checkpoint path needs it**
+
+Do not build a second complete redo-journal engine solely for a bake-off.
+
+The format keeps a discoverable extension point for future auxiliary durability-log state without freezing its record encoding yet.
+
+### B4. Core filesystem structures
+
 - B+ tree directories
+- normalized/versioned Unicode comparison keys while preserving original UTF-8 names
 - extent mapping
-- preallocation and best-effort contiguous placement API
-- advisory access-intent API
-- shared-extent/refcount prototype for reflinks
-- CloneFile and CloneRange semantics
-- prototype sealed-content semantics
-- canonical portable principal model
-- shared immutable security-descriptor prototype
-- ALLOW/DENY ACL evaluation and inheritance vectors
-- classic protection-bit projection without destroying rich ACLs
-- prototype checkpoint-COW transaction engine
-- prototype redo-journal alternative
-- compare transaction engines under identical crash/write-amplification tests
+- sparse files
+- preallocation
+- shared-extent/reference prototype for reflinks
+- CloneFile/CloneRange semantics
 - deferred reclamation
 - checker
 - explain APIs
 - semantic image diff
-- read-only retained-checkpoint viewport for debugging/recovery
-- continuously compare Rust and C CPU, RAM, I/O, and semantic results
 
-Do not freeze the transaction format until checkpoint-COW and redo-journal prototypes have been compared experimentally.
+### B5. Security preservation container
 
-The epoch-1 extent model must support shared extents even if every clone API is not production-complete at the first writable milestone.
+- versioned security descriptor/blob reference path
+- preserve unknown rich security metadata
+- classic/simple-host projection must not destroy it
 
-The epoch-1 security model must preserve rich ACL metadata on hosts that expose only a simpler permission view.
+Do **not** require full canonical NFSv4/Windows ACL evaluation semantics in the base writable milestone.
 
-## Stage C: integrate AROS
+## Stage C: integrate AROS and begin independent C portability
 
-- handler
+- AROS handler
 - DOS compatibility
 - Filesystem API v2
 - modern 64-bit API
 - clone/reflink capability API
-- access-intent and preallocation mapping
-- mmap-friendly file backing and large-file path qualification
-- modern path semantics
+- access-intent/preallocation mapping
+- mmap-friendly large-file path
 - notifications
 - health reporting
 - trace streaming / developer attachment
 - structured management APIs
 - Rust/C integration boundary
-- generic file-backed virtual block device for mounting disk images
-- native AROS benchmark runner using the same workload descriptions
-- classic/single-user security adapter
-- optional AROS multi-user principal/security service integration
-- strict/preserve/compat security mount modes
+- generic file-backed virtual block device for mounting images
+- native AROS benchmark runner
+- classic/single-user security preservation adapter
 
-## Stage D: make it portable and pleasant
+Portable C work begins from the stable executable spec/conformance corpus:
+
+- language-neutral C ABI boundary
+- tiny portable C reader
+- cross-implementation read/validation tests
+- grow toward `classic-rw` after the Rust writable format stops moving rapidly
+
+## Stage D: portability and host tooling
 
 - FUSE host mount
 - third-party probe kit
 - compatibility profiles
-- classic reader
 - portable C `classic-rw` qualification
 - portable C `full-portable` qualification where feasible
 - JSON/structured tooling schemas
 - host-side inspect/check/repair workflow
-- easy sparse-image create/mount/fork/replay workflow
+- sparse-image create/mount/fork/replay workflow
 - cross-OS interoperability test matrix
-- POSIX ACL/principal mapping adapter
-- Windows ACL/SID mapping adapter
-- cross-OS security round-trip and fidelity reporting
 - FUSE mmap and parallel page-fault qualification
 
-## Stage E: modern accelerators
+If rich multi-user ACL semantics remain a project goal, this is the earliest sensible point to build real POSIX and Windows mapping adapters and use them to validate or revise the canonical ACL proposal.
+
+## Stage E: developer-contract accelerators and optional features
+
+A proposed feature enters this stage only after the core is proven and at least one real consumer exists.
+
+Candidates:
 
 - global catalog
 - persistent change stream
-- fast enumeration API
-- Git/FSMonitor-style adapter using persistent change sequence
+- Git/FSMonitor-style adapter
 - bulk metadata APIs (`StatBatch`, `LookupBatch`, streamed tree enumeration)
 - directory namespace generations
-- production reflink/block cloning
-- benchmark tiny-file storage alternatives
-- evaluate rebuildable reverse map
-- evaluate recursive directory statistics
-- evaluate optional data checksums
-- evaluate CloneTree separately from file/range cloning
-- evaluate derived content fingerprints for sealed generations
-- prototype shared subtree security domains
-- benchmark security-domain policy updates against recursively materialized ACL changes
-- separate design review for optional encrypted security domains / key hierarchy
+- bounded AtomicBatch
+- sealed content
+- content-inspection/security feed
+- tiny-file storage alternatives
+- rebuildable reverse map
+- recursive directory statistics
+- optional data checksums using the already reserved feature/extent association path
+- CloneTree evaluation
+- derived content fingerprints
+- full portable ACL semantics if real multi-user adapters validate them
+- subtree security domains
+- optional encryption/key hierarchy review
 
-## Stage F: production
+Features that fail to earn real use may be deprecated/retired. Their IDs remain reserved and existing active volumes require retained support or explicit migration.
+
+## Stage F: production qualification
 
 - grow resize
 - minimum-size query
@@ -137,8 +207,7 @@ The epoch-1 security model must preserve rich ACL metadata on hosts that expose 
 - performance qualification
 - low-memory qualification
 - CPU-efficiency qualification
-- Rust-vs-C resource qualification
-- security access-check performance qualification
+- Rust-vs-C resource qualification where both implementations cover the workload
 - streaming/video/large-file qualification
 - Git 100k/1M/4M file qualification
 - LLM mmap/range-load/model-larger-than-cache qualification
@@ -153,23 +222,21 @@ The epoch-1 security model must preserve rich ACL metadata on hosts that expose 
 
 Do not freeze the format until:
 
-- normal crash recovery never requires a full-volume scan
+- normal metadata crash recovery never requires a full-volume scan
 - deterministic crash injection covers every transaction boundary
-- NO_CHANGES performs zero media writes
-- metadata ownership can be explained from supported tools
-- shared extents cannot be freed while referenced by any live object or retained checkpoint
+- the user-data crash/durability contract is explicit and tested
+- free-space metadata cannot recursively corrupt its own allocation state
+- repeated small-file `fsync` has measured/acceptable cost, with a durability log added if required
+- `NO_CHANGES` performs zero media writes
+- shared extents cannot be freed while referenced by any live object or retained recovery state
+- timestamps have one portable UTC Unix-epoch wire definition
+- Unicode key generation uses a recorded table version and binary tree-key ordering
+- catalog hard-link semantics are explicit
+- change-stream loss/reset semantics are explicit (`RESCAN_REQUIRED`, not fake rebuild)
 - sparse raw images and physical devices exercise the same disk format
-- Rust and portable C implementations interoperate against the same conformance corpus
 - performance reports include CPU, peak RAM, block I/O, flush count, and write amplification
-- repair/check tools share format/invariant code where appropriate without making one implementation the specification
-- machine-readable tools and errors are versioned
+- machine-readable tools/errors are versioned
 - classic/minimal reader profile is demonstrably implementable
-- canonical ACL tests produce identical decisions in Rust and C
-- unknown/unmapped principals survive round-trip without identity loss
-- a host unable to enforce active security semantics cannot silently mount read-write in strict mode
-- classic protection-bit edits do not accidentally erase richer security metadata
-- access-intent hints cannot change correctness/durability/security semantics
-- streaming a huge file does not catastrophically evict essential filesystem metadata
-- Git-scale change detection can avoid full-tree scans when the persistent change stream is available
-- large model files are qualified for mmap/range-read and parallel access paths
+- unknown security metadata can survive a simple-host round-trip without silent downgrade
+- iterator/concurrency visibility rules are documented and tested
 - Cargo/Git/Zed-style/Ferail workloads are qualified
