@@ -1,76 +1,119 @@
-# 08. Transactions and Journal
+# 08. Transactions, Checkpoints, and Recovery
 
-## 1. Purpose
+## 1. Requirement, not mechanism
 
-The journal protects metadata consistency across crashes and sudden power loss.
+AFS+ requires atomic metadata transactions, bounded recovery, and explicit durability semantics.
 
-AFS+ 1.0 does not require full user-data journaling.
+A conventional metadata redo journal was the original proposal. After the PFS3/PFS4 Stage 0 review it is no longer a predetermined requirement.
+
+The leading candidate is copy-on-write metadata with alternating checksummed checkpoint records. See ADR-009 and ADR-020.
 
 ## 2. Transaction boundary
 
-Operations that must appear atomically include:
+Operations that must expose an atomic logical result include:
 
 - rename
 - atomic replacement
 - directory insertion/removal
-- allocation plus extent-map update
 - object creation
-- final unlink
-- metadata updates that span multiple structures
+- link/unlink
+- allocation plus extent-map update
+- metadata updates spanning multiple structures
 
-## 3. Journal style
+Large physical cleanup need not be part of the same transaction if the user-visible change can commit and cleanup can safely continue through deferred reclamation.
 
-The initial implementation should prefer a simple metadata redo journal using checksummed records and explicit commit markers.
+## 3. Proposed COW checkpoint commit
 
-The exact record encoding must be specified before epoch 1.
+Changed authoritative metadata is written to new blocks rather than overwriting blocks reachable from the current checkpoint.
 
-A transaction is visible after its durable commit record and required ordering guarantees have been satisfied.
+Proposed ordering:
 
-## 4. Mount recovery
+1. write required new user data
+2. durability barrier/flush
+3. write COW metadata from leaves toward roots
+4. durability barrier/flush
+5. write alternate checkpoint with new generation/checksum/root references
+6. durability barrier/flush
+7. report durable commit
 
-On dirty mount:
+The previous checkpoint remains untouched until the new checkpoint is independently valid.
 
-1. identify the last valid committed transaction
-2. validate journal checksums and sequence continuity
-3. replay committed metadata updates as required
-4. ignore incomplete uncommitted tail records
-5. update filesystem state only if the mount mode permits writes
+## 4. Recovery
 
-## 5. NO_CHANGES mode
+Mount examines checkpoint candidates and chooses the newest valid generation.
 
-If mounted with `NO_CHANGES`:
+Validation includes:
 
-- do not replay journal to disk
-- do not clear dirty state
-- do not update mount counters
-- do not rebuild catalog
-- do not repair summaries
-- do not change timestamps
+- checkpoint checksum
+- filesystem UUID/epoch
+- root references in bounds
+- root metadata checksums
+- feature compatibility
 
-The implementation may replay committed metadata into an in-memory overlay for read access if that can be done without changing the underlying media.
+A partially written newer checkpoint is ignored.
 
-## 6. fsync contract
+No full-volume scan is required for ordinary crash recovery.
 
-The specification must define what is guaranteed after successful:
+## 5. Retired blocks and quarantine
 
-- file data flush
-- metadata flush
+A block that becomes unreachable in the new state is not necessarily safe to reuse immediately because an older retained checkpoint may still reference it.
+
+AFS+ therefore tracks retired storage until it is older than every recovery state that may still be selected.
+
+On uncertainty the allocator must quarantine/leak space rather than reuse it early.
+
+## 6. Deferred reclamation
+
+Large deletes/truncates are split into:
+
+- a small atomic logical transaction
+- bounded resumable reclamation work
+
+This avoids enormous journal records, huge temporary free lists, and long uninterruptible commits.
+
+## 7. Alternative redo journal
+
+A redo journal remains a prototype/reference implementation candidate.
+
+Before epoch 1, compare checkpoint COW and redo journal using identical workloads:
+
+- metadata bytes written
+- user-data write amplification
+- commit latency
+- peak RAM
+- recovery latency
+- low-free-space behavior
+- implementation complexity
+- crash-state count and repair complexity
+
+The simpler design that meets correctness and resource goals wins.
+
+## 8. NO_CHANGES mode
+
+`NO_CHANGES` never writes media.
+
+It may construct an in-memory recovered view if necessary, but it must not:
+
+- replay anything to disk
+- clear dirty state
+- advance checkpoints
+- reclaim blocks
+- rebuild catalog
+- repair summaries
+- update timestamps/counters
+
+## 9. Durability contract
+
+The block-provider API must define what `flush`/barrier means. AFS+ cannot promise durable commit on a device/backend that cannot make prior writes durable in the required order.
+
+The filesystem API must separately document guarantees for:
+
+- data write without fsync
+- file fsync
 - directory fsync
+- atomic replace + fsync
 - filesystem sync
-- atomic rename followed by sync
 
-The contract must be strong enough for databases, Git, Cargo, editors, and package managers to make correct durability decisions.
+## 10. Testing gate
 
-## 7. Journal sizing
-
-The journal is bounded.
-
-Large operations may be split into multiple transactions if atomic semantics are not required across the entire operation.
-
-Operations that require atomicity must fail cleanly if they cannot fit within supported transaction limits.
-
-## 8. Write amplification
-
-The journal must not become an excuse to write full metadata trees repeatedly.
-
-Implementation benchmarks must track bytes written per logical metadata operation.
+No transaction mechanism is accepted for epoch 1 until deterministic fault injection demonstrates that after every modeled crash the mounted state is one of the explicitly allowed pre-commit or post-commit states and all allocation/object invariants hold.
