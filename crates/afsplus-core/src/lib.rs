@@ -25,6 +25,7 @@
 //! the retired-block quarantine.
 
 pub mod alloc;
+pub mod allocation_root;
 pub mod cow_tree;
 pub mod mkfs;
 pub mod mount;

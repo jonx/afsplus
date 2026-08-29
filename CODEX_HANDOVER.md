@@ -180,6 +180,15 @@ COW mutation correctness but does not yet satisfy the 2/4/8-page cache gate.
 That gate needs staged-node spill/reload to allocated-but-unreachable blocks,
 with only the active path and split peer resident.
 
+ADR-035 fixes the allocation-root self-reference direction before checkpoint
+migration. Its AFST nodes use a permanently allocated `3N` pool for an
+`N`-node fixed-topology region tree, leaving a complete writable generation
+while two checkpoints remain selectable. `TreeAllocator` now decouples the
+COW engine from ordinary free-space allocation; the typed allocation-root
+codec and a three-generation reserved-pool test are executable. Bulk mkfs,
+checkpoint publication, allocator lookup, checker accounting, and crash/1 TiB
+qualification are the next pieces.
+
 At that baseline, steps 1-5 of `implementation/peer-review-prototype-plan.md` are implemented and green:
 
 - 29 tests

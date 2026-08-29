@@ -12,6 +12,24 @@ use crate::alloc::TxAllocator;
 use crate::tree::{check_tree_lba, validate_node_identity, validate_node_range, TreeSpec};
 use crate::CoreError;
 
+/// Block lifecycle required by the shared COW engine. Ordinary trees use the
+/// region transaction allocator; the allocation-root tree uses a permanently
+/// reserved triple-version pool to avoid describing its own allocations.
+pub trait TreeAllocator<D: BlockDevice> {
+    fn allocate_tree_block(&mut self, dev: &mut D) -> Result<u64, CoreError>;
+    fn retire_tree_block(&mut self, dev: &mut D, lba: u64) -> Result<(), CoreError>;
+}
+
+impl<D: BlockDevice> TreeAllocator<D> for TxAllocator {
+    fn allocate_tree_block(&mut self, dev: &mut D) -> Result<u64, CoreError> {
+        self.allocate(dev)
+    }
+
+    fn retire_tree_block(&mut self, dev: &mut D, lba: u64) -> Result<(), CoreError> {
+        self.retire(dev, lba)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TreeMutationStats {
     pub node_reads: u64,
@@ -50,15 +68,19 @@ pub enum TreeOperation<'a> {
 /// any error, the caller must abort and discard the surrounding allocator
 /// transaction rather than reuse its partially prepared state.
 #[allow(clippy::too_many_arguments)]
-pub fn upsert_many<D: BlockDevice>(
+pub fn upsert_many<D, A>(
     dev: &mut D,
     geo: &Geometry,
-    tx: &mut TxAllocator,
+    tx: &mut A,
     root_lba: u64,
     spec: TreeSpec,
     new_generation: u64,
     entries: &[(Vec<u8>, Vec<u8>)],
-) -> Result<TreeMutation, CoreError> {
+) -> Result<TreeMutation, CoreError>
+where
+    D: BlockDevice,
+    A: TreeAllocator<D>,
+{
     let operations: Vec<_> = entries
         .iter()
         .map(|(key, value)| TreeOperation::Upsert { key, value })
@@ -72,15 +94,19 @@ pub fn upsert_many<D: BlockDevice>(
 /// layer; committed blocks are never overwritten. An error requires aborting
 /// and discarding the surrounding allocator transaction.
 #[allow(clippy::too_many_arguments)]
-pub fn delete_many<D: BlockDevice>(
+pub fn delete_many<D, A>(
     dev: &mut D,
     geo: &Geometry,
-    tx: &mut TxAllocator,
+    tx: &mut A,
     root_lba: u64,
     spec: TreeSpec,
     new_generation: u64,
     keys: &[Vec<u8>],
-) -> Result<TreeMutation, CoreError> {
+) -> Result<TreeMutation, CoreError>
+where
+    D: BlockDevice,
+    A: TreeAllocator<D>,
+{
     let operations: Vec<_> = keys
         .iter()
         .map(|key| TreeOperation::Delete { key })
@@ -90,15 +116,19 @@ pub fn delete_many<D: BlockDevice>(
 
 /// Applies an ordered mix of upserts and deletes under one COW overlay.
 #[allow(clippy::too_many_arguments)]
-pub fn mutate_many<D: BlockDevice>(
+pub fn mutate_many<D, A>(
     dev: &mut D,
     geo: &Geometry,
-    tx: &mut TxAllocator,
+    tx: &mut A,
     root_lba: u64,
     spec: TreeSpec,
     new_generation: u64,
     operations: &[TreeOperation<'_>],
-) -> Result<TreeMutation, CoreError> {
+) -> Result<TreeMutation, CoreError>
+where
+    D: BlockDevice,
+    A: TreeAllocator<D>,
+{
     if new_generation <= spec.max_generation {
         return Err(CoreError::Corrupt(
             "tree mutation generation is not newer than committed state".into(),
@@ -147,7 +177,7 @@ pub fn mutate_many<D: BlockDevice>(
                             value: child_value(right.reference).map_err(CoreError::Format)?,
                         }],
                     };
-                    let lba = context.tx.allocate(context.dev)?;
+                    let lba = context.tx.allocate_tree_block(context.dev)?;
                     context.stats.nodes_allocated += 1;
                     context.stage_node(lba, &root_node)?;
                     context.stats.root_splits += 1;
@@ -180,10 +210,10 @@ pub fn mutate_many<D: BlockDevice>(
     })
 }
 
-struct MutationContext<'a, D: BlockDevice> {
+struct MutationContext<'a, D: BlockDevice, A: TreeAllocator<D>> {
     dev: &'a mut D,
     geo: Geometry,
-    tx: &'a mut TxAllocator,
+    tx: &'a mut A,
     spec: TreeSpec,
     new_generation: u64,
     writes: BTreeMap<u64, Vec<u8>>,
@@ -213,7 +243,7 @@ struct PendingNode {
 
 type NodeImage = (TreeNode, Option<Vec<u8>>);
 
-impl<D: BlockDevice> MutationContext<'_, D> {
+impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
     #[allow(clippy::too_many_arguments)]
     fn upsert_node(
         &mut self,
@@ -493,11 +523,11 @@ impl<D: BlockDevice> MutationContext<'_, D> {
         if old_staged {
             lbas.push(old_lba);
         } else {
-            self.tx.retire(self.dev, old_lba)?;
+            self.tx.retire_tree_block(self.dev, old_lba)?;
             self.stats.committed_nodes_retired += 1;
         }
         while lbas.len() < nodes.len() {
-            lbas.push(self.tx.allocate(self.dev)?);
+            lbas.push(self.tx.allocate_tree_block(self.dev)?);
             self.stats.nodes_allocated += 1;
         }
         let mut children = Vec::with_capacity(nodes.len());
@@ -536,18 +566,18 @@ impl<D: BlockDevice> MutationContext<'_, D> {
                 }
                 reusable.push(lba);
             } else {
-                self.tx.retire(self.dev, lba)?;
+                self.tx.retire_tree_block(self.dev, lba)?;
                 self.stats.committed_nodes_retired += 1;
             }
         }
         while reusable.len() < outputs.len() {
-            reusable.push(self.tx.allocate(self.dev)?);
+            reusable.push(self.tx.allocate_tree_block(self.dev)?);
             self.stats.nodes_allocated += 1;
         }
         while reusable.len() > outputs.len() {
             let lba = reusable.pop().expect("length checked above");
             self.writes.remove(&lba);
-            self.tx.retire(self.dev, lba)?;
+            self.tx.retire_tree_block(self.dev, lba)?;
             self.stats.staged_nodes_discarded += 1;
         }
         let mut replacement = Vec::with_capacity(outputs.len());
@@ -569,10 +599,10 @@ impl<D: BlockDevice> MutationContext<'_, D> {
                     "staged tree source has no write image".into(),
                 ));
             }
-            self.tx.retire(self.dev, pending.old_lba)?;
+            self.tx.retire_tree_block(self.dev, pending.old_lba)?;
             self.stats.staged_nodes_discarded += 1;
         } else {
-            self.tx.retire(self.dev, pending.old_lba)?;
+            self.tx.retire_tree_block(self.dev, pending.old_lba)?;
             self.stats.committed_nodes_retired += 1;
         }
         Ok(())

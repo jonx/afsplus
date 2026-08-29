@@ -88,3 +88,8 @@ directory B+ trees beyond one leaf, and the delta-log/spacemap
 allocation alternatives — to be built only if this design fails on
 correctness, write amplification, or scalability (the measurements test is
 the baseline to beat).
+
+ADR-035 defines the in-progress allocation-root migration. The shared engine
+now accepts either the ordinary transaction allocator or a permanently
+allocated triple-version node pool, avoiding free-space self-reference while
+keeping one AFST implementation.
