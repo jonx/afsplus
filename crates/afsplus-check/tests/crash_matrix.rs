@@ -14,7 +14,7 @@ use afsplus_block::{crash_states, BlockDevice, MemoryBackend, RecordedOp, Record
 use afsplus_check::check_device;
 use afsplus_core::mount::select_checkpoint;
 use afsplus_core::verify::load_committed_state;
-use afsplus_core::{mkfs, mount, MkfsParams};
+use afsplus_core::{allocation_root, mkfs, mount, MkfsParams};
 use afsplus_format::ident::Identification;
 use afsplus_format::object::ObjectType;
 use afsplus_format::region::RegionDescriptor;
@@ -56,7 +56,15 @@ fn forbidden_targets(base: &MemoryBackend) -> BTreeSet<u64> {
     // Quarantined blocks may be *reused by allocation* in the next
     // transaction — that is the whole point — so they are not forbidden.
     for ckpt in std::iter::once(&selection.chosen).chain(selection.other.iter()) {
-        for (r, record) in ckpt.regions.iter().enumerate() {
+        let allocation = allocation_root::load_all(
+            &mut dev,
+            &geo,
+            ckpt.allocation_root_block,
+            ckpt.generation,
+        )
+        .unwrap();
+        forbidden.extend(allocation.tree_blocks);
+        for (r, record) in allocation.records.iter().enumerate() {
             let region = r as u32;
             let descriptor_lba = geo.descriptor_slot_lba(region, record.descriptor_slot);
             forbidden.insert(descriptor_lba);
@@ -106,7 +114,8 @@ fn every_crash_state_of_a_create_transaction_recovers_to_an_allowed_state() {
     let (_, log) = vol.into_device().into_parts();
 
     // --- Structural discipline of the commit sequence -------------------
-    // data, barrier, 5 metadata + 1 bitmap page + 1 region descriptor,
+    // data, barrier, 6 metadata (including allocation-root COW) + 1 bitmap
+    // page + 1 region descriptor,
     // barrier, checkpoint, barrier.
     let shape: Vec<&'static str> = log
         .iter()
@@ -117,7 +126,9 @@ fn every_crash_state_of_a_create_transaction_recovers_to_an_allowed_state() {
         .collect();
     assert_eq!(
         shape,
-        ["w", "F", "w", "w", "w", "w", "w", "w", "w", "F", "w", "F"],
+        [
+            "w", "F", "w", "w", "w", "w", "w", "w", "w", "w", "F", "w", "F"
+        ],
         "commit sequence changed"
     );
     for op in &log {

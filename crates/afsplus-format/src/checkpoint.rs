@@ -24,13 +24,15 @@
 //! 16     8    checkpoint generation
 //! 24     8    root object ID
 //! 32     8    object map LBA
-//! 40     8    retired list LBA (0 = empty list)
-//! 48     8    next dynamic object ID
-//! 56     8    committed transaction ID
-//! 64     8    flags (zero; reserved)
-//! 72     4    region record count
-//! 76     4    reserved
-//! 80     ...  region records: descriptor slot (1), reserved (3), free
+//! 40     8    allocation-root LBA (0 = transitional inline records)
+//! 48     8    retired list LBA (0 = empty list)
+//! 56     8    next dynamic object ID
+//! 64     8    committed transaction ID
+//! 72     8    total free blocks
+//! 80     8    flags (zero; reserved)
+//! 88     4    transitional inline region record count
+//! 92     4    reserved
+//! 96     ...  region records: descriptor slot (1), reserved (3), free
 //!             blocks (4), descriptor generation (8)
 //! ```
 
@@ -41,7 +43,7 @@ use crate::geometry::{Geometry, DESCRIPTOR_SLOTS};
 use crate::header::{block_type, BlockHeader, HEADER_SIZE};
 use crate::{le, FormatError, OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
 
-const FIXED_PAYLOAD: usize = 80;
+const FIXED_PAYLOAD: usize = 96;
 const REGION_RECORD_SIZE: usize = 16;
 
 /// Per-region allocation-state binding.
@@ -62,11 +64,16 @@ pub struct Checkpoint {
     pub generation: u64,
     pub root_object_id: u64,
     pub object_map_block: u64,
+    /// AFST allocation-region root. Zero selects transitional inline records.
+    pub allocation_root_block: u64,
     /// 0 when no blocks are currently retired.
     pub retired_list_block: u64,
     pub next_object_id: u64,
     pub committed_tx_id: u64,
+    pub free_blocks_total: u64,
     pub flags: u64,
+    /// Transitional representation removed once every allocator path uses
+    /// `allocation_root_block`.
     pub regions: Vec<RegionRecord>,
 }
 
@@ -77,6 +84,11 @@ impl Checkpoint {
         }
         if self.root_object_id != OBJECT_ROOT {
             return Err(FormatError::Invalid("root object ID is invalid"));
+        }
+        if self.allocation_root_block != 0 && !self.regions.is_empty() {
+            return Err(FormatError::Invalid(
+                "checkpoint mixes allocation root with inline records",
+            ));
         }
         let payload_len = FIXED_PAYLOAD + self.regions.len() * REGION_RECORD_SIZE;
         if payload_len > block_size - HEADER_SIZE {
@@ -89,11 +101,13 @@ impl Checkpoint {
         le::put_u64(&mut p[16..24], self.generation);
         le::put_u64(&mut p[24..32], self.root_object_id);
         le::put_u64(&mut p[32..40], self.object_map_block);
-        le::put_u64(&mut p[40..48], self.retired_list_block);
-        le::put_u64(&mut p[48..56], self.next_object_id);
-        le::put_u64(&mut p[56..64], self.committed_tx_id);
-        le::put_u64(&mut p[64..72], self.flags);
-        le::put_u32(&mut p[72..76], self.regions.len() as u32);
+        le::put_u64(&mut p[40..48], self.allocation_root_block);
+        le::put_u64(&mut p[48..56], self.retired_list_block);
+        le::put_u64(&mut p[56..64], self.next_object_id);
+        le::put_u64(&mut p[64..72], self.committed_tx_id);
+        le::put_u64(&mut p[72..80], self.free_blocks_total);
+        le::put_u64(&mut p[80..88], self.flags);
+        le::put_u32(&mut p[88..92], self.regions.len() as u32);
         for (i, record) in self.regions.iter().enumerate() {
             let offset = FIXED_PAYLOAD + i * REGION_RECORD_SIZE;
             p[offset] = record.descriptor_slot;
@@ -132,7 +146,7 @@ impl Checkpoint {
         if generation == 0 || generation != header.generation {
             return Err(FormatError::Invalid("checkpoint generation invalid or inconsistent"));
         }
-        let region_count = le::get_u32(&p[72..76]) as usize;
+        let region_count = le::get_u32(&p[88..92]) as usize;
         if region_count > (p.len() - FIXED_PAYLOAD) / REGION_RECORD_SIZE {
             return Err(FormatError::Invalid("checkpoint region count exceeds payload"));
         }
@@ -153,10 +167,12 @@ impl Checkpoint {
             generation,
             root_object_id: le::get_u64(&p[24..32]),
             object_map_block: le::get_u64(&p[32..40]),
-            retired_list_block: le::get_u64(&p[40..48]),
-            next_object_id: le::get_u64(&p[48..56]),
-            committed_tx_id: le::get_u64(&p[56..64]),
-            flags: le::get_u64(&p[64..72]),
+            allocation_root_block: le::get_u64(&p[40..48]),
+            retired_list_block: le::get_u64(&p[48..56]),
+            next_object_id: le::get_u64(&p[56..64]),
+            committed_tx_id: le::get_u64(&p[64..72]),
+            free_blocks_total: le::get_u64(&p[72..80]),
+            flags: le::get_u64(&p[80..88]),
             regions,
         };
         if checkpoint.root_object_id != OBJECT_ROOT {
@@ -168,20 +184,51 @@ impl Checkpoint {
     /// Everything checkable without any further I/O. This is the whole basis
     /// on which mount *selects* a checkpoint.
     pub fn validate_structural(&self, geo: &Geometry) -> Result<(), FormatError> {
-        if self.regions.len() != geo.region_count() as usize {
-            return Err(FormatError::Invalid("checkpoint region count does not match geometry"));
-        }
-        for (i, record) in self.regions.iter().enumerate() {
-            if record.descriptor_slot >= DESCRIPTOR_SLOTS {
-                return Err(FormatError::Invalid("region descriptor slot out of range"));
+        if self.allocation_root_block == 0 {
+            if self.regions.len() != geo.region_count() as usize {
+                return Err(FormatError::Invalid(
+                    "checkpoint region count does not match geometry",
+                ));
             }
-            if record.descriptor_generation == 0
-                || record.descriptor_generation > self.generation
-            {
-                return Err(FormatError::Invalid("region descriptor generation out of range"));
+            let mut free_total = 0u64;
+            for (i, record) in self.regions.iter().enumerate() {
+                if record.descriptor_slot >= DESCRIPTOR_SLOTS {
+                    return Err(FormatError::Invalid("region descriptor slot out of range"));
+                }
+                if record.descriptor_generation == 0
+                    || record.descriptor_generation > self.generation
+                {
+                    return Err(FormatError::Invalid(
+                        "region descriptor generation out of range",
+                    ));
+                }
+                if record.free_blocks > geo.region_valid_blocks(i as u32) {
+                    return Err(FormatError::Invalid("region free count exceeds region size"));
+                }
+                free_total = free_total
+                    .checked_add(record.free_blocks as u64)
+                    .ok_or(FormatError::Overflow("checkpoint free-block total"))?;
             }
-            if record.free_blocks > geo.region_valid_blocks(i as u32) {
-                return Err(FormatError::Invalid("region free count exceeds region size"));
+            if free_total != self.free_blocks_total {
+                return Err(FormatError::Invalid(
+                    "checkpoint free total does not match inline records",
+                ));
+            }
+        } else {
+            if !self.regions.is_empty() {
+                return Err(FormatError::Invalid(
+                    "allocation-root checkpoint has inline records",
+                ));
+            }
+            if !geo.is_allocatable(self.allocation_root_block) {
+                return Err(FormatError::Invalid(
+                    "allocation root block out of allocatable bounds",
+                ));
+            }
+            if self.free_blocks_total > geo.total_blocks {
+                return Err(FormatError::Invalid(
+                    "checkpoint free total exceeds volume size",
+                ));
             }
         }
         if !geo.is_allocatable(self.object_map_block) {

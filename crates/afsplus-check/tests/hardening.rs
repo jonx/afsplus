@@ -4,7 +4,7 @@
 
 use afsplus_block::MemoryBackend;
 use afsplus_check::check_device;
-use afsplus_core::{mkfs, mount, object_map, CoreError, MkfsParams};
+use afsplus_core::{allocation_root, mkfs, mount, object_map, CoreError, MkfsParams};
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::dir::{DirBlock, DirEntry};
 use afsplus_format::header::BlockHeader;
@@ -39,11 +39,19 @@ fn read_ident(dev: &MemoryBackend) -> Identification {
 
 #[test]
 fn allocator_descriptor_and_page_corruption_are_deferred_but_never_accepted() {
-    let base = formatted();
+    let mut base = formatted();
     let ident = read_ident(&base);
     let checkpoint = Checkpoint::decode(&base.peek(1), &ident.uuid).unwrap();
     let geo = ident.geometry();
-    let record = checkpoint.regions[0];
+    let record = allocation_root::lookup_record(
+        &mut base,
+        &geo,
+        checkpoint.allocation_root_block,
+        checkpoint.generation,
+        0,
+    )
+    .unwrap()
+    .unwrap();
     let descriptor_lba = geo.descriptor_slot_lba(0, record.descriptor_slot);
     let (descriptor, _) = RegionDescriptor::decode(&base.peek(descriptor_lba)).unwrap();
     let bitmap_lba = geo.bitmap_slot_lba(0, 0, descriptor.pages[0].slot);

@@ -859,6 +859,7 @@ mod tests {
 
     use super::{delete_many, mutate_many, upsert_many, TreeOperation};
     use crate::alloc::TxAllocator;
+    use crate::allocation_root::{self, ReservedTreePool};
     use crate::tree::{lookup, validate_tree, TreeSpec};
     use crate::{mkfs, mount, MkfsParams};
 
@@ -948,7 +949,55 @@ mod tests {
         let mut checkpoint2 = checkpoint.clone();
         checkpoint2.generation = 2;
         checkpoint2.object_map_block = mutation.root_lba;
-        checkpoint2.regions = finished.records.clone();
+        let current_allocation = allocation_root::load_all(
+            &mut dev,
+            &geo,
+            checkpoint.allocation_root_block,
+            checkpoint.generation,
+        )
+        .unwrap();
+        let allocation_layout = allocation_root::bulk_build(&geo, &finished.records).unwrap();
+        let mut allocation_pool = ReservedTreePool::new(
+            allocation_layout.pool_lbas,
+            &current_allocation.tree_blocks,
+            &[],
+        )
+        .unwrap();
+        let allocation_values: Vec<_> = finished
+            .records
+            .iter()
+            .enumerate()
+            .map(|(region, record)| {
+                (
+                    allocation_root::key(region as u32),
+                    allocation_root::value(*record).unwrap(),
+                )
+            })
+            .collect();
+        let allocation_operations: Vec<_> = allocation_values
+            .iter()
+            .map(|(key, value)| TreeOperation::Upsert { key, value })
+            .collect();
+        let allocation_mutation = mutate_many(
+            &mut dev,
+            &geo,
+            &mut allocation_pool,
+            checkpoint.allocation_root_block,
+            allocation_root::spec(1),
+            2,
+            &allocation_operations,
+        )
+        .unwrap();
+        for (lba, block) in &allocation_mutation.writes {
+            dev.write_block(*lba, block).unwrap();
+        }
+        checkpoint2.allocation_root_block = allocation_mutation.root_lba;
+        checkpoint2.free_blocks_total = finished
+            .records
+            .iter()
+            .map(|record| record.free_blocks as u64)
+            .sum();
+        checkpoint2.regions.clear();
         let mut tx2 = TxAllocator::begin(
             &mut dev,
             &geo,

@@ -24,7 +24,8 @@ use afsplus_format::retired::RetiredList;
 use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 
 use crate::alloc::{AllocStats, TxAllocator};
-use crate::cow_tree::{mutate_many, TreeOperation};
+use crate::allocation_root::{self, ReservedTreePool};
+use crate::cow_tree::{mutate_many, TreeMutation, TreeOperation};
 use crate::mount::Selection;
 use crate::object_map;
 use crate::verify::{load_mount_state, MountState};
@@ -93,11 +94,7 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     pub fn free_blocks(&self) -> u64 {
-        self.checkpoint
-            .regions
-            .iter()
-            .map(|record| record.free_blocks as u64)
-            .sum()
+        self.checkpoint.free_blocks_total
     }
 
     /// Peak bitmap bytes resident during the most recent transaction (zero
@@ -449,6 +446,69 @@ impl<D: BlockDevice> Volume<D> {
         )
     }
 
+    fn mutate_allocation_root(
+        &mut self,
+        generation: u64,
+        records: &[afsplus_format::checkpoint::RegionRecord],
+    ) -> Result<TreeMutation, CoreError> {
+        if self.checkpoint.allocation_root_block == 0 {
+            return Err(CoreError::PrototypeLimit(
+                "inline allocation checkpoint cannot be mutated",
+            ));
+        }
+        let geo = self.ident.geometry();
+        let current = allocation_root::load_all(
+            &mut self.dev,
+            &geo,
+            self.checkpoint.allocation_root_block,
+            self.checkpoint.generation,
+        )?;
+        let older_blocks = if let Some(older) = self
+            .other_checkpoint
+            .as_ref()
+            .filter(|checkpoint| checkpoint.allocation_root_block != 0)
+        {
+            allocation_root::load_all(
+                &mut self.dev,
+                &geo,
+                older.allocation_root_block,
+                older.generation,
+            )?
+            .tree_blocks
+        } else {
+            Vec::new()
+        };
+        let layout = allocation_root::bulk_build(&geo, records)?;
+        let mut pool = ReservedTreePool::new(
+            layout.pool_lbas,
+            &current.tree_blocks,
+            &older_blocks,
+        )?;
+        let encoded: Vec<_> = records
+            .iter()
+            .enumerate()
+            .map(|(region, record)| {
+                Ok((
+                    allocation_root::key(region as u32),
+                    allocation_root::value(*record)?,
+                ))
+            })
+            .collect::<Result<_, CoreError>>()?;
+        let operations: Vec<_> = encoded
+            .iter()
+            .map(|(key, value)| TreeOperation::Upsert { key, value })
+            .collect();
+        mutate_many(
+            &mut self.dev,
+            &geo,
+            &mut pool,
+            self.checkpoint.allocation_root_block,
+            allocation_root::spec(self.checkpoint.generation),
+            generation,
+            &operations,
+        )
+    }
+
     /// Retires the committed blocks every transaction replaces: the object
     /// root object record, the root directory block, and the previous retired
     /// list. The object-map engine retires exactly the COW paths it replaces.
@@ -478,6 +538,9 @@ impl<D: BlockDevice> Volume<D> {
         let block_size = self.dev.block_size();
         let finished = tx.finish(&self.checkpoint, self.other_checkpoint.as_ref())?;
         debug_assert!(!finished.retired.entries.is_empty());
+        let allocation_root = self.mutate_allocation_root(generation, &finished.records)?;
+        let new_allocation_root_block = allocation_root.root_lba;
+        meta_writes.extend(allocation_root.writes);
         meta_writes.push((
             retired_list_lba,
             finished.retired.encode(block_size, generation)?,
@@ -516,16 +579,23 @@ impl<D: BlockDevice> Volume<D> {
 
         // 3. Alternate checkpoint slot, then the commit barrier.
         let new_slot = 1 - self.current_slot;
+        let free_blocks_total = finished
+            .records
+            .iter()
+            .map(|record| record.free_blocks as u64)
+            .sum();
         let new_checkpoint = Checkpoint {
             uuid: self.ident.uuid,
             generation,
             root_object_id: OBJECT_ROOT,
             object_map_block: new_object_map_block,
+            allocation_root_block: new_allocation_root_block,
             retired_list_block: retired_list_lba,
             next_object_id,
             committed_tx_id: generation,
+            free_blocks_total,
             flags: 0,
-            regions: finished.records,
+            regions: Vec::new(),
         };
         self.dev.write_block(
             self.ident.checkpoint_slots[new_slot],

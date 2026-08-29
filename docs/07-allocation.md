@@ -85,7 +85,10 @@ The prototype instead uses one reserved, triple-buffered region descriptor
 plus triple-buffered bitmap pages:
 
 ```text
-checkpoint region record
+checkpoint allocation-root pointer
+        |
+        v
+shared AFST: region -> descriptor slot/generation/free count
         |
         v
 region descriptor slot A/B/C
@@ -97,8 +100,9 @@ region descriptor slot A/B/C
 
 The region descriptor records, for each logical bitmap page, its selected
 physical slot, generation, free count, and any required integrity binding.
-The checkpoint keeps only one bounded record per region: descriptor slot,
-descriptor generation, and region free count.
+The typed allocation-root leaves keep one record per region: descriptor slot,
+descriptor generation, and region free count. The checkpoint itself keeps one
+root LBA plus the total free count used by cheap status queries.
 
 A transaction changing one allocation page:
 
@@ -127,10 +131,12 @@ write amplification, on-demand loading, crash safety, and repairability. If
 the descriptor indirection performs poorly or becomes too complex, the
 delta-log/spacemap candidates remain open.
 
-The current single-block checkpoint also limits the number of region records.
-Larger-volume work must eventually replace that prototype limit with a
-bounded allocation-root structure rather than silently increasing mount I/O
-in proportion to the volume.
+The earlier inline checkpoint array has now been replaced by ADR-035's bounded
+allocation-root tree. Its nodes live in a permanent triple-version pool, so
+updating the allocator does not recursively allocate from the free space being
+described. The first implementation still loads and rewrites all region
+records at transaction boundaries; on-demand lookup and dirty-path-only COW
+remain required before the 1 TiB scale gate is complete.
 
 ## 4. Allocation strategy
 

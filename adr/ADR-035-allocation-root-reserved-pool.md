@@ -1,6 +1,6 @@
 # ADR-035: Allocation-root tree in a reserved triple-version node pool
 
-Status: Accepted for executable prototype; checkpoint migration in progress
+Status: Accepted and authoritative in the executable prototype
 
 ## Context
 
@@ -66,6 +66,14 @@ slot, generation, and exact region coverage. A reserved-pool test retains
 generation-1 and generation-2 roots while generation 3 is written to the sole
 remaining pool block.
 
-Checkpoint encoding, deterministic bulk build/pool sizing, allocator on-demand
-lookups, checker reserve accounting, 1 TiB sparse-image qualification, and
-power-cut matrices across multi-node allocation-root updates remain required.
+Checkpoint encoding now carries the root LBA and an O(1) total-free count;
+new checkpoints contain no inline region records. Mkfs bulk-builds the tree,
+marks the complete `3N` pool permanently allocated, and commits its root.
+Ordinary commits COW all fixed region records through an unused pool image;
+the checker claims active nodes and accounts for unused reserve blocks. The
+ordinary create/delete/reuse power-cut matrices cover the one-node root.
+
+Allocator record loading is temporarily exhaustive at transaction begin and
+all records are rewritten per commit. On-demand lookup/dirty-leaf mutation,
+the full sparse 1 TiB mkfs/check/remount path, and crash matrices that exercise
+a multi-node allocation root remain required performance/scale gates.

@@ -43,9 +43,11 @@ fn sample_checkpoint() -> Checkpoint {
         generation: 5,
         root_object_id: OBJECT_ROOT,
         object_map_block: 10,
+        allocation_root_block: 0,
         retired_list_block: 11,
         next_object_id: 20,
         committed_tx_id: 5,
+        free_blocks_total: 800,
         flags: 0,
         regions: vec![
             RegionRecord { descriptor_slot: 0, free_blocks: 100, descriptor_generation: 5 },
@@ -177,6 +179,34 @@ fn checkpoint_structural_validation() {
     let mut ckpt = sample_checkpoint();
     ckpt.regions[0].free_blocks = 257;
     assert!(ckpt.validate_structural(&geo).is_err());
+}
+
+#[test]
+fn checkpoint_allocation_root_replaces_inline_region_records() {
+    let geo = Geometry {
+        block_size: BS,
+        total_blocks: 1024,
+        region_size: 256,
+    };
+    let mut checkpoint = sample_checkpoint();
+    checkpoint.allocation_root_block = 12;
+    checkpoint.regions.clear();
+    checkpoint.validate_structural(&geo).unwrap();
+    let encoded = checkpoint.encode(BS).unwrap();
+    let decoded = Checkpoint::decode(&encoded, &checkpoint.uuid).unwrap();
+    assert_eq!(decoded, checkpoint);
+
+    let mut mixed = checkpoint.clone();
+    mixed.regions.push(RegionRecord {
+        descriptor_slot: 0,
+        free_blocks: 1,
+        descriptor_generation: 1,
+    });
+    assert!(mixed.encode(BS).is_err());
+
+    let mut out_of_bounds = checkpoint;
+    out_of_bounds.allocation_root_block = geo.total_blocks;
+    assert!(out_of_bounds.validate_structural(&geo).is_err());
 }
 
 #[test]

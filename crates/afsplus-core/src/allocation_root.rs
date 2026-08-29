@@ -12,18 +12,25 @@ use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::RegionRecord;
 use afsplus_format::geometry::{Geometry, DESCRIPTOR_SLOTS};
 use afsplus_format::le;
-use afsplus_format::tree::{TreeItem, TreeKind, TreeNode};
+use afsplus_format::tree::{child_value, ChildRef, TreeItem, TreeKind, TreeNode};
 
 use crate::cow_tree::TreeAllocator;
 use crate::tree::{lookup, visit_tree_nodes, TreeSpec, TreeSummary};
 use crate::CoreError;
 
 const VALUE_BYTES: usize = 16;
+const BOOTSTRAP_METADATA_BLOCKS: usize = 3;
 
 pub struct LoadedAllocationRoot {
     pub records: Vec<RegionRecord>,
     pub tree_blocks: Vec<u64>,
     pub summary: TreeSummary,
+}
+
+pub struct BuiltAllocationRoot {
+    pub root_lba: u64,
+    pub pool_lbas: Vec<u64>,
+    pub nodes: Vec<(u64, TreeNode)>,
 }
 
 pub fn spec(max_generation: u64) -> TreeSpec {
@@ -60,6 +67,236 @@ pub fn initial_leaf(region: u32, record: RegionRecord) -> Result<TreeNode, CoreE
             value: value(record)?.to_vec(),
         }],
     })
+}
+
+/// Deterministically bulk-builds the fixed region-key tree and reserves three
+/// physical images per logical node. `records` must describe every region in
+/// numeric order.
+pub fn bulk_build(
+    geo: &Geometry,
+    records: &[RegionRecord],
+) -> Result<BuiltAllocationRoot, CoreError> {
+    if records.len() != geo.region_count() as usize || records.is_empty() {
+        return Err(CoreError::Corrupt(
+            "allocation-root bulk build record count mismatch".into(),
+        ));
+    }
+    let leaf_capacity = leaf_capacity(geo.block_size)?;
+    let internal_fanout = internal_fanout(geo.block_size)?;
+    let leaf_groups = balanced_groups(records.len(), leaf_capacity)?;
+    let logical_nodes = logical_node_count(leaf_groups.len(), internal_fanout)?;
+    let pool_blocks = logical_nodes
+        .checked_mul(3)
+        .ok_or_else(|| CoreError::Corrupt("allocation-root pool size overflow".into()))?;
+    let pool_lbas = derive_pool_lbas(geo, pool_blocks)?;
+    let mut next_lba = pool_lbas[..logical_nodes].iter().copied();
+    let mut nodes = Vec::with_capacity(logical_nodes);
+    let mut level_nodes = Vec::with_capacity(leaf_groups.len());
+    let mut record_offset = 0usize;
+    for group_len in leaf_groups {
+        let lba = next_lba
+            .next()
+            .ok_or_else(|| CoreError::Corrupt("allocation-root active pool exhausted".into()))?;
+        let mut node = TreeNode::leaf(TreeKind::AllocationRoot, 0);
+        for (region, record) in records
+            .iter()
+            .enumerate()
+            .skip(record_offset)
+            .take(group_len)
+        {
+            node.items.push(TreeItem {
+                key: key(region as u32).to_vec(),
+                value: value(*record)?.to_vec(),
+            });
+        }
+        node.subtree_items = node.items.len() as u64;
+        let min_key = node.items[0].key.clone();
+        level_nodes.push(BulkChild {
+            lba,
+            min_key,
+            items: node.subtree_items,
+        });
+        nodes.push((lba, node));
+        record_offset += group_len;
+    }
+
+    let mut level = 0u8;
+    while level_nodes.len() > 1 {
+        level = level
+            .checked_add(1)
+            .ok_or_else(|| CoreError::Corrupt("allocation-root level overflow".into()))?;
+        let groups = balanced_groups(level_nodes.len(), internal_fanout)?;
+        let mut next_level = Vec::with_capacity(groups.len());
+        let mut child_offset = 0usize;
+        for group_len in groups {
+            let children = &level_nodes[child_offset..child_offset + group_len];
+            let lba = next_lba.next().ok_or_else(|| {
+                CoreError::Corrupt("allocation-root active pool exhausted".into())
+            })?;
+            let mut total = children[0].items;
+            let mut items = Vec::with_capacity(children.len() - 1);
+            for child in &children[1..] {
+                total = total.checked_add(child.items).ok_or_else(|| {
+                    CoreError::Corrupt("allocation-root item count overflow".into())
+                })?;
+                items.push(TreeItem {
+                    key: child.min_key.clone(),
+                    value: child_value(ChildRef {
+                        lba: child.lba,
+                        subtree_items: child.items,
+                    })
+                    .map_err(CoreError::Format)?,
+                });
+            }
+            let node = TreeNode {
+                kind: TreeKind::AllocationRoot,
+                owner: 0,
+                level,
+                subtree_items: total,
+                leftmost_child: children[0].lba,
+                leftmost_items: children[0].items,
+                items,
+            };
+            next_level.push(BulkChild {
+                lba,
+                min_key: children[0].min_key.clone(),
+                items: total,
+            });
+            nodes.push((lba, node));
+            child_offset += group_len;
+        }
+        level_nodes = next_level;
+    }
+    if next_lba.next().is_some() || nodes.len() != logical_nodes {
+        return Err(CoreError::Corrupt(
+            "allocation-root logical node count mismatch".into(),
+        ));
+    }
+    Ok(BuiltAllocationRoot {
+        root_lba: level_nodes[0].lba,
+        pool_lbas,
+        nodes,
+    })
+}
+
+#[derive(Clone)]
+struct BulkChild {
+    lba: u64,
+    min_key: Vec<u8>,
+    items: u64,
+}
+
+fn leaf_capacity(block_size: usize) -> Result<usize, CoreError> {
+    let record = RegionRecord {
+        descriptor_slot: 0,
+        free_blocks: 0,
+        descriptor_generation: 1,
+    };
+    let mut node = TreeNode::leaf(TreeKind::AllocationRoot, 0);
+    let mut capacity = 0usize;
+    loop {
+        node.items.push(TreeItem {
+            key: key(capacity as u32).to_vec(),
+            value: value(record)?.to_vec(),
+        });
+        node.subtree_items = node.items.len() as u64;
+        if !node.fits(block_size) {
+            break;
+        }
+        capacity += 1;
+    }
+    if capacity == 0 {
+        return Err(CoreError::UnsupportedGeometry(
+            "block cannot hold one allocation-root record",
+        ));
+    }
+    Ok(capacity)
+}
+
+fn internal_fanout(block_size: usize) -> Result<usize, CoreError> {
+    let mut node = TreeNode {
+        kind: TreeKind::AllocationRoot,
+        owner: 0,
+        level: 1,
+        subtree_items: 1,
+        leftmost_child: 1,
+        leftmost_items: 1,
+        items: Vec::new(),
+    };
+    let mut separators = 0usize;
+    loop {
+        node.items.push(TreeItem {
+            key: key((separators + 1) as u32).to_vec(),
+            value: child_value(ChildRef {
+                lba: separators as u64 + 2,
+                subtree_items: 1,
+            })
+            .map_err(CoreError::Format)?,
+        });
+        node.subtree_items += 1;
+        if !node.fits(block_size) {
+            break;
+        }
+        separators += 1;
+    }
+    let fanout = separators + 1;
+    if fanout < 2 {
+        return Err(CoreError::UnsupportedGeometry(
+            "block cannot hold an internal allocation-root node",
+        ));
+    }
+    Ok(fanout)
+}
+
+fn logical_node_count(mut leaves: usize, fanout: usize) -> Result<usize, CoreError> {
+    let mut total = leaves;
+    while leaves > 1 {
+        leaves = leaves.div_ceil(fanout);
+        total = total
+            .checked_add(leaves)
+            .ok_or_else(|| CoreError::Corrupt("allocation-root node count overflow".into()))?;
+    }
+    Ok(total)
+}
+
+fn balanced_groups(total: usize, maximum: usize) -> Result<Vec<usize>, CoreError> {
+    if total == 0 || maximum == 0 {
+        return Err(CoreError::Corrupt(
+            "cannot partition empty allocation-root level".into(),
+        ));
+    }
+    let groups = total.div_ceil(maximum);
+    let base = total / groups;
+    let remainder = total % groups;
+    if groups > 1 && base < 2 {
+        return Err(CoreError::UnsupportedGeometry(
+            "allocation-root fanout cannot form valid internal nodes",
+        ));
+    }
+    Ok((0..groups)
+        .map(|index| base + usize::from(index < remainder))
+        .collect())
+}
+
+fn derive_pool_lbas(geo: &Geometry, count: usize) -> Result<Vec<u64>, CoreError> {
+    let mut bootstrap_left = BOOTSTRAP_METADATA_BLOCKS;
+    let mut pool = Vec::with_capacity(count);
+    for lba in geo.region0_reserved_blocks()..geo.total_blocks {
+        if !geo.is_allocatable(lba) {
+            continue;
+        }
+        if bootstrap_left > 0 {
+            bootstrap_left -= 1;
+            continue;
+        }
+        pool.push(lba);
+        if pool.len() == count {
+            return Ok(pool);
+        }
+    }
+    Err(CoreError::UnsupportedGeometry(
+        "volume cannot hold allocation-root reserve pool",
+    ))
 }
 
 pub fn lookup_record<D: BlockDevice>(
@@ -244,7 +481,9 @@ mod tests {
     use afsplus_format::checkpoint::RegionRecord;
     use afsplus_format::geometry::Geometry;
 
-    use super::{initial_leaf, key, load_all, lookup_record, spec, value, ReservedTreePool};
+    use super::{
+        bulk_build, initial_leaf, key, load_all, lookup_record, spec, value, ReservedTreePool,
+    };
     use crate::cow_tree::{mutate_many, TreeOperation};
 
     #[test]
@@ -323,5 +562,41 @@ mod tests {
         let loaded = load_all(&mut dev, &geo, 12, 3).unwrap();
         assert_eq!(loaded.records, vec![record3]);
         assert_eq!(loaded.tree_blocks, vec![12]);
+    }
+
+    #[test]
+    fn one_tib_geometry_bulk_builds_a_multi_node_allocation_root() {
+        let geo = Geometry {
+            block_size: 4096,
+            total_blocks: 1u64 << 28,
+            region_size: 262_144,
+        };
+        geo.validate().unwrap();
+        assert_eq!(geo.total_blocks * geo.block_size as u64, 1u64 << 40);
+        assert_eq!(geo.region_count(), 1024);
+        let records: Vec<_> = (0..geo.region_count())
+            .map(|region| RegionRecord {
+                descriptor_slot: 0,
+                free_blocks: geo.region_valid_blocks(region),
+                descriptor_generation: 1,
+            })
+            .collect();
+        let built = bulk_build(&geo, &records).unwrap();
+        assert!(built.nodes.len() > 1);
+        assert_eq!(built.pool_lbas.len(), built.nodes.len() * 3);
+        assert!(built
+            .nodes
+            .iter()
+            .all(|(lba, _)| built.pool_lbas.contains(lba)));
+
+        let mut dev = MemoryBackend::new(geo.block_size, geo.total_blocks);
+        for (lba, node) in &built.nodes {
+            dev.write_block(*lba, &node.encode(geo.block_size, 1).unwrap())
+                .unwrap();
+        }
+        let loaded = load_all(&mut dev, &geo, built.root_lba, 1).unwrap();
+        assert_eq!(loaded.records, records);
+        assert_eq!(loaded.summary.items, 1024);
+        assert!(loaded.summary.height >= 2);
     }
 }

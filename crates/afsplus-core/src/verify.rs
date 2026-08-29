@@ -24,12 +24,15 @@ use afsplus_format::retired::RetiredList;
 use afsplus_format::{OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
 
 use crate::alloc::Bitmaps;
+use crate::allocation_root;
 use crate::object_map::{self, LoadedObjectMap};
 use crate::CoreError;
 
 /// Everything reachable from one committed checkpoint, fully decoded.
 pub struct CommittedState {
     pub object_map: LoadedObjectMap,
+    pub allocation_records: Vec<afsplus_format::checkpoint::RegionRecord>,
+    pub allocation_pool_blocks: Vec<u64>,
     pub objects: BTreeMap<u64, ObjectRecord>,
     /// Directory blocks keyed by owning directory object ID.
     pub directories: BTreeMap<u64, DirBlock>,
@@ -198,6 +201,24 @@ pub fn load_committed_state<D: BlockDevice>(
         Ok(())
     };
 
+    let allocation = if checkpoint.allocation_root_block != 0 {
+        allocation_root::load_all(
+            dev,
+            &geo,
+            checkpoint.allocation_root_block,
+            checkpoint.generation,
+        )?
+    } else {
+        return Err(CoreError::PrototypeLimit(
+            "checker requires the AFST allocation root",
+        ));
+    };
+    for lba in &allocation.tree_blocks {
+        claim(*lba, &mut claimed)?;
+        metadata_blocks.push(*lba);
+    }
+    let allocation_layout = allocation_root::bulk_build(&geo, &allocation.records)?;
+
     let object_map = object_map::load_all(
         dev,
         &geo,
@@ -331,6 +352,8 @@ pub fn load_committed_state<D: BlockDevice>(
 
     Ok(CommittedState {
         object_map,
+        allocation_records: allocation.records,
+        allocation_pool_blocks: allocation_layout.pool_lbas,
         objects,
         directories,
         retired,
@@ -377,6 +400,12 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
         if state.metadata_blocks.contains(&entry.lba) || state.data_blocks.contains(&entry.lba) {
             findings.push(format!("retired block {} is still reachable", entry.lba));
         }
+        if state.allocation_pool_blocks.contains(&entry.lba) {
+            findings.push(format!(
+                "retired block {} belongs to the permanent allocation-root pool",
+                entry.lba
+            ));
+        }
     }
 
     // Bitmap versus accounting: allocated ⟺ reserved ∪ reachable ∪ retired.
@@ -385,6 +414,7 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
         let accounted = geo.is_reserved(lba)
             || state.metadata_blocks.contains(&lba)
             || state.data_blocks.contains(&lba)
+            || state.allocation_pool_blocks.contains(&lba)
             || state.retired.contains(lba);
         if allocated && !accounted {
             findings.push(format!(
@@ -400,7 +430,8 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
 
     // Checkpoint free counts must match the pages (already enforced on load;
     // kept here as a cheap cross-check for states built by other writers).
-    for (r, record) in checkpoint.regions.iter().enumerate() {
+    let mut free_total = 0u64;
+    for (r, record) in state.allocation_records.iter().enumerate() {
         let counted: u32 = state.bitmaps.pages[r]
             .iter()
             .map(BitmapPage::free_blocks)
@@ -417,6 +448,13 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
                 record.descriptor_slot
             ));
         }
+        free_total += record.free_blocks as u64;
+    }
+    if free_total != checkpoint.free_blocks_total {
+        findings.push(format!(
+            "checkpoint free total {} does not match allocation root {free_total}",
+            checkpoint.free_blocks_total
+        ));
     }
 
     findings

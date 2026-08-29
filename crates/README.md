@@ -83,13 +83,14 @@ claims every tree node. A typed 1,001-entry test proves the map crosses page
 boundaries, while the existing power-cut and reuse matrices cover its ordinary
 transaction path.
 
-Next: migration of the allocation root, extent trees beyond one direct extent,
-directory B+ trees beyond one leaf, and the delta-log/spacemap
+Next: extent trees beyond one direct extent, directory B+ trees beyond one
+leaf, allocation-root on-demand/dirty-path optimization, and the delta-log/spacemap
 allocation alternatives — to be built only if this design fails on
 correctness, write amplification, or scalability (the measurements test is
 the baseline to beat).
 
-ADR-035 defines the in-progress allocation-root migration. The shared engine
-now accepts either the ordinary transaction allocator or a permanently
+ADR-035 defines the authoritative allocation-root representation. The shared
+engine accepts either the ordinary transaction allocator or a permanently
 allocated triple-version node pool, avoiding free-space self-reference while
-keeping one AFST implementation.
+keeping one AFST implementation. Checkpoints now publish its root and total
+free count instead of inline per-region records.

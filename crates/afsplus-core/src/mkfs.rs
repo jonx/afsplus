@@ -25,6 +25,7 @@ use afsplus_format::{
 };
 
 use crate::layout;
+use crate::allocation_root;
 use crate::object_map;
 use crate::CoreError;
 
@@ -85,6 +86,20 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
     dev.write_block(root_dir_lba, &root_dir.encode(block_size, generation)?)?;
     dev.write_block(omap_lba, &omap.encode(block_size, generation)?)?;
 
+    let provisional_records: Vec<_> = (0..geo.region_count())
+        .map(|_| RegionRecord {
+            descriptor_slot: 0,
+            free_blocks: 0,
+            descriptor_generation: generation,
+        })
+        .collect();
+    let provisional_allocation_root = allocation_root::bulk_build(&geo, &provisional_records)?;
+    let allocation_pool: std::collections::BTreeSet<_> = provisional_allocation_root
+        .pool_lbas
+        .iter()
+        .copied()
+        .collect();
+
     // Descriptor slot 0 binds bitmap-page slot 0. Reserved blocks and the
     // initial metadata are allocated; everything else is free.
     let mut regions = Vec::with_capacity(geo.region_count() as usize);
@@ -102,7 +117,10 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
             for local_index in 0..page.valid_blocks {
                 let lba = base + first_block as u64 + local_index as u64;
                 let initial_metadata =
-                    lba == root_record_lba || lba == root_dir_lba || lba == omap_lba;
+                    lba == root_record_lba
+                        || lba == root_dir_lba
+                        || lba == omap_lba
+                        || allocation_pool.contains(&lba);
                 if geo.is_reserved(lba) || initial_metadata {
                     page.set_allocated(local_index, true);
                 }
@@ -135,6 +153,16 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         });
     }
 
+    let allocation_root = allocation_root::bulk_build(&geo, &regions)?;
+    if allocation_root.pool_lbas != provisional_allocation_root.pool_lbas {
+        return Err(CoreError::Corrupt(
+            "allocation-root pool changed with record values".into(),
+        ));
+    }
+    for (lba, node) in &allocation_root.nodes {
+        dev.write_block(*lba, &node.encode(block_size, generation)?)?;
+    }
+
     let ident = Identification {
         uuid: params.uuid,
         block_shift: DEFAULT_BLOCK_SHIFT,
@@ -156,11 +184,16 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         generation,
         root_object_id: OBJECT_ROOT,
         object_map_block: omap_lba,
+        allocation_root_block: allocation_root.root_lba,
         retired_list_block: 0,
         next_object_id: OBJECT_FIRST_DYNAMIC,
         committed_tx_id: generation,
+        free_blocks_total: regions
+            .iter()
+            .map(|record| record.free_blocks as u64)
+            .sum(),
         flags: 0,
-        regions,
+        regions: Vec::new(),
     };
     dev.write_block(layout::CKPT_SLOT_A, &checkpoint.encode(block_size)?)?;
     dev.flush()?;

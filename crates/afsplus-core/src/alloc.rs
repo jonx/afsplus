@@ -20,6 +20,25 @@ use afsplus_format::region::RegionDescriptor;
 use afsplus_format::retired::{RetiredEntry, RetiredList};
 
 use crate::CoreError;
+use crate::allocation_root;
+
+fn checkpoint_records<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    checkpoint: &Checkpoint,
+) -> Result<Vec<RegionRecord>, CoreError> {
+    if checkpoint.allocation_root_block == 0 {
+        Ok(checkpoint.regions.clone())
+    } else {
+        Ok(allocation_root::load_all(
+            dev,
+            geo,
+            checkpoint.allocation_root_block,
+            checkpoint.generation,
+        )?
+        .records)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Bitmaps {
@@ -37,8 +56,9 @@ impl Bitmaps {
         checkpoint: &Checkpoint,
     ) -> Result<Bitmaps, CoreError> {
         let mut buf = vec![0u8; geo.block_size];
-        let mut regions = Vec::with_capacity(checkpoint.regions.len());
-        for (region_index, record) in checkpoint.regions.iter().enumerate() {
+        let records = checkpoint_records(dev, geo, checkpoint)?;
+        let mut regions = Vec::with_capacity(records.len());
+        for (region_index, record) in records.iter().enumerate() {
             let region = region_index as u32;
             let descriptor = load_region_descriptor(dev, geo, region, record, &mut buf)?;
             let mut pages = Vec::with_capacity(descriptor.pages.len());
@@ -190,8 +210,10 @@ impl TxAllocator {
     ) -> Result<TxAllocator, CoreError> {
         let mut tx = TxAllocator {
             geo: *geo,
-            current_records: current.regions.clone(),
-            other_records: other.map(|checkpoint| checkpoint.regions.clone()),
+            current_records: checkpoint_records(dev, geo, current)?,
+            other_records: other
+                .map(|checkpoint| checkpoint_records(dev, geo, checkpoint))
+                .transpose()?,
             descriptors: BTreeMap::new(),
             other_descriptors: BTreeMap::new(),
             pages: BTreeMap::new(),
@@ -359,13 +381,13 @@ impl TxAllocator {
 
     pub fn finish(
         mut self,
-        current: &Checkpoint,
-        other: Option<&Checkpoint>,
+        _current: &Checkpoint,
+        _other: Option<&Checkpoint>,
     ) -> Result<FinishedAlloc, CoreError> {
         let mut bitmap_writes = Vec::new();
         let mut descriptor_writes = Vec::new();
-        let mut records = Vec::with_capacity(current.regions.len());
-        for (region_index, current_record) in current.regions.iter().enumerate() {
+        let mut records = Vec::with_capacity(self.current_records.len());
+        for (region_index, current_record) in self.current_records.iter().enumerate() {
             let region = region_index as u32;
             if !self.dirty_regions.contains(&region) {
                 records.push(*current_record);
@@ -406,8 +428,10 @@ impl TxAllocator {
                 .iter()
                 .map(|binding| binding.free_blocks)
                 .sum();
-            let older_descriptor_slot = other
-                .and_then(|checkpoint| checkpoint.regions.get(region_index))
+            let older_descriptor_slot = self
+                .other_records
+                .as_ref()
+                .and_then(|records| records.get(region_index))
                 .map(|record| record.descriptor_slot);
             let descriptor_slot = choose_slot(
                 DESCRIPTOR_SLOTS,
@@ -501,7 +525,9 @@ mod tests {
         let start = tx
             .allocate_run(&mut dev, BITMAP_PAGE_BLOCKS as u64 + 1)
             .unwrap();
-        assert_eq!(start, geo.region0_reserved_blocks() + 3);
+        // Three bootstrap namespace blocks plus the three-image allocation
+        // root pool precede ordinary free space.
+        assert_eq!(start, geo.region0_reserved_blocks() + 6);
         let finished = tx.finish(&checkpoint, None).unwrap();
         assert_eq!(finished.bitmap_writes.len(), 2);
         assert_eq!(finished.descriptor_writes.len(), 1);

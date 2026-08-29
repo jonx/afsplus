@@ -33,14 +33,17 @@ fn mkfs_then_mount_yields_empty_root_at_generation_1() {
 
     let mut vol = mount(dev).unwrap();
     assert_eq!(vol.generation(), 1);
+    assert_ne!(vol.checkpoint().allocation_root_block, 0);
+    assert!(vol.checkpoint().regions.is_empty());
     assert!(vol.list_root().is_empty());
     assert_eq!(vol.ident().label, "TestVol");
     let root = vol.stat(afsplus_format::OBJECT_ROOT).unwrap().unwrap();
     assert_eq!(root.object_type, ObjectType::Directory);
     assert_eq!(root.link_count, 1);
-    // 64 blocks minus 9 reserved (bootstrap + descriptor + bitmap slots)
-    // minus 3 initial metadata.
-    assert_eq!(vol.free_blocks(), 52);
+    // 64 blocks minus 9 reserved (bootstrap + descriptor + bitmap slots),
+    // 3 initial namespace metadata blocks, and the 3-block triple-version
+    // allocation-root pool.
+    assert_eq!(vol.free_blocks(), 49);
 }
 
 #[test]
@@ -52,6 +55,8 @@ fn create_with_content_commit_remount_read_back() {
     let content = b"bonjour AFS+\n".repeat(400); // ~5 KiB -> 2 data blocks
     let id = vol.create_file_in_root("hello.txt", &content, ts(1_780_000_100)).unwrap();
     assert_eq!(vol.generation(), 2);
+    assert_ne!(vol.checkpoint().allocation_root_block, 0);
+    assert!(vol.checkpoint().regions.is_empty());
     assert_eq!(vol.lookup_root("hello.txt"), Some(id));
     assert_eq!(vol.read_file(id).unwrap(), content);
 
@@ -196,10 +201,11 @@ fn duplicate_and_invalid_names_are_rejected_without_state_change() {
 
 #[test]
 fn out_of_space_is_reported_and_state_survives() {
-    // 25 blocks in two tiny regions: 15 reserved + 3 mkfs metadata leaves 7 free. An empty-file
-    // transaction needs 5 fresh blocks; quarantine recycling keeps two
+    // 28 blocks in two tiny regions: the allocation-root pool consumes three
+    // permanently reserved blocks. An empty-file transaction needs 5 fresh
+    // blocks; quarantine recycling keeps two
     // transactions viable, the third must fail cleanly.
-    let mut dev = MemoryBackend::new(BS, 25);
+    let mut dev = MemoryBackend::new(BS, 28);
     mkfs(&mut dev, &params(16)).unwrap();
     let mut vol = mount(dev).unwrap();
     vol.create_file_in_root("first.txt", b"", ts(0)).unwrap();
@@ -230,15 +236,15 @@ fn transaction_io_accounting() {
     let commit = vol.last_commit_stats().unwrap();
 
     // 1 data block, then file record + dir + root record + object map +
-    // retired list, 1 bitmap page, 1 region descriptor, 1 checkpoint. Three
-    // barriers (data, metadata, commit).
+    // allocation root + retired list, 1 bitmap page, 1 region descriptor,
+    // 1 checkpoint. Three barriers (data, metadata, commit).
     assert_eq!(commit.data_blocks_written, 1);
-    assert_eq!(commit.metadata_blocks_written, 5, "unexpected metadata write amplification");
+    assert_eq!(commit.metadata_blocks_written, 6, "unexpected metadata write amplification");
     assert_eq!(commit.bitmap_pages_written, 1);
     assert_eq!(commit.region_descriptors_written, 1);
     assert_eq!(commit.checkpoint_blocks_written, 1);
     assert_eq!(commit.flushes, 3, "data commit must use exactly three barriers");
-    assert_eq!(stats.writes, 9);
+    assert_eq!(stats.writes, 10);
     assert_eq!(stats.flushes, 3);
     assert!(stats.reads <= 12, "post-commit re-walk grew unexpectedly: {} reads", stats.reads);
 
