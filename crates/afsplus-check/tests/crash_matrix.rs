@@ -10,7 +10,9 @@
 
 use std::collections::BTreeSet;
 
-use afsplus_block::{crash_states, BlockDevice, MemoryBackend, RecordedOp, RecordingBackend};
+use afsplus_block::{
+    crash_states, for_each_crash_state, BlockDevice, MemoryBackend, RecordedOp, RecordingBackend,
+};
 use afsplus_check::check_device;
 use afsplus_core::mount::select_checkpoint;
 use afsplus_core::verify::load_committed_state;
@@ -87,7 +89,7 @@ fn run_matrix(
     mut verify: impl FnMut(&str, afsplus_core::Volume<MemoryBackend>),
 ) {
     for crash_point in 0..=log.len() {
-        for state in crash_states(base, log, crash_point) {
+        for_each_crash_state(base, log, crash_point, |state| {
             let context = state.description.clone();
             let mut image = state.image;
             let report = check_device(&mut image);
@@ -103,7 +105,7 @@ fn run_matrix(
                 vol.generation()
             );
             verify(&context, vol);
-        }
+        });
     }
 }
 
@@ -314,6 +316,74 @@ fn every_crash_state_of_a_sparse_write_is_atomic() {
         post_outcomes > 0,
         "matrix never produced the post-write state"
     );
+}
+
+#[test]
+fn multi_node_allocation_root_commit_has_an_exhaustive_crash_matrix() {
+    // 4 KiB AFST allocation leaves hold 144 region records. Crossing that
+    // boundary forces a two-level authoritative allocation root while keeping
+    // the sparse in-memory base small enough for an exhaustive matrix.
+    const REGIONS: u64 = 145;
+    const REGION_BLOCKS: u32 = 16;
+    let mut base = MemoryBackend::new(BS, REGIONS * REGION_BLOCKS as u64);
+    mkfs(
+        &mut base,
+        &MkfsParams {
+            uuid: [99u8; 16],
+            label: "MultiAllocCrash".into(),
+            region_size: REGION_BLOCKS,
+            timestamp: ts(0),
+        },
+    )
+    .unwrap();
+    let mut inspection = base.clone();
+    let mounted = mount(inspection.clone()).unwrap();
+    let pre_generation = mounted.generation();
+    let allocation = allocation_root::load_all(
+        &mut inspection,
+        &mounted.ident().geometry(),
+        mounted.checkpoint().allocation_root_block,
+        pre_generation,
+    )
+    .unwrap();
+    assert!(allocation.summary.nodes > 1);
+    let forbidden = forbidden_targets(&base);
+
+    let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
+    let file = vol
+        .create_file_in_root("multi-root.txt", b"", ts(1))
+        .unwrap();
+    let (_, log) = vol.into_device().into_parts();
+    for operation in &log {
+        if let RecordedOp::Write { lba, .. } = operation {
+            assert!(
+                !forbidden.contains(lba),
+                "multi-node allocation transaction overwrote committed block {lba}"
+            );
+        }
+    }
+
+    let mut pre_outcomes = 0u64;
+    let mut post_outcomes = 0u64;
+    run_matrix(&base, &log, pre_generation, |context, mut vol| {
+        if vol.generation() == pre_generation {
+            pre_outcomes += 1;
+            assert_eq!(
+                vol.lookup_root("multi-root.txt").unwrap(),
+                None,
+                "{context}"
+            );
+        } else {
+            post_outcomes += 1;
+            assert_eq!(
+                vol.lookup_root("multi-root.txt").unwrap(),
+                Some(file),
+                "{context}"
+            );
+        }
+    });
+    assert!(pre_outcomes > 0);
+    assert!(post_outcomes > 0);
 }
 
 #[test]

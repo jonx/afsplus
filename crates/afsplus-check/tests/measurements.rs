@@ -174,6 +174,13 @@ fn one_tib_sparse_image_formats_and_mounts_without_a_block_count_scan() {
     assert_eq!(vol.list_root().unwrap().len(), 2);
     drop(vol);
 
+    let checker_started = std::time::Instant::now();
+    let mut checker_dev = FileBackend::open(&path, BS, TOTAL_BLOCKS).unwrap();
+    let report = check_device(&mut checker_dev);
+    let checker_elapsed = checker_started.elapsed();
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+    drop(checker_dev);
+
     let metadata = std::fs::metadata(&path).unwrap();
     assert!(metadata.len() > (1u64 << 40) - (2u64 << 30));
     #[cfg(unix)]
@@ -181,10 +188,11 @@ fn one_tib_sparse_image_formats_and_mounts_without_a_block_count_scan() {
         use std::os::unix::fs::MetadataExt;
         let physical_bytes = metadata.blocks() * 512;
         println!(
-            "1 TiB sparse mkfs+mount+2 commits: {:?}, commits {:?}/{:?}, physical bytes: {}",
+            "1 TiB sparse format+mount+2 commits: {:?}, commits {:?}/{:?}, checker {:?}, physical bytes: {}",
             started.elapsed(),
             first_commit,
             second_commit,
+            checker_elapsed,
             physical_bytes
         );
         // APFS allocation around widely separated writes varied from roughly

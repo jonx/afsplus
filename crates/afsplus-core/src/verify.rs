@@ -412,22 +412,50 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
     }
 
     // Bitmap versus accounting: allocated ⟺ reserved ∪ reachable ∪ retired.
-    for lba in 0..geo.total_blocks {
-        let allocated = state.bitmaps.is_allocated(lba);
-        let accounted = geo.is_reserved(lba)
-            || state.metadata_blocks.contains(&lba)
-            || state.data_blocks.contains(&lba)
-            || state.allocation_pool_blocks.contains(&lba)
-            || state.retired.contains(lba);
-        if allocated && !accounted {
-            findings.push(format!(
-                "block {lba} is allocated but owned by nothing (leak)"
-            ));
-        }
-        if !allocated && accounted {
+    // Build the sparse expected set, verify every expected block directly,
+    // then scan set bits byte-wise. This remains exhaustive without one loop
+    // iteration per logical LBA on mostly-free multi-terabyte volumes.
+    let mut accounted = BTreeSet::new();
+    for region in 0..geo.region_count() {
+        let reserved = geo.region_reserved_blocks(region)
+            + if region == 0 {
+                afsplus_format::geometry::BOOTSTRAP_BLOCKS
+            } else {
+                0
+            };
+        let base = geo.region_base(region);
+        accounted.extend((0..reserved).map(|offset| base + offset));
+    }
+    accounted.extend(state.metadata_blocks.iter().copied());
+    accounted.extend(state.data_blocks.iter().copied());
+    accounted.extend(state.allocation_pool_blocks.iter().copied());
+    accounted.extend(state.retired.entries.iter().map(|entry| entry.lba));
+    for lba in &accounted {
+        if !state.bitmaps.is_allocated(*lba) {
             findings.push(format!(
                 "block {lba} is marked FREE but reachable from this checkpoint"
             ));
+        }
+    }
+    for (region, pages) in state.bitmaps.pages.iter().enumerate() {
+        let base = geo.region_base(region as u32);
+        for page in pages {
+            for (byte_index, raw) in page.bits.iter().copied().enumerate() {
+                let mut set_bits = raw;
+                while set_bits != 0 {
+                    let bit = set_bits.trailing_zeros();
+                    let local_index = byte_index as u32 * 8 + bit;
+                    if local_index < page.valid_blocks {
+                        let lba = base + page.first_block as u64 + local_index as u64;
+                        if !accounted.contains(&lba) {
+                            findings.push(format!(
+                                "block {lba} is allocated but owned by nothing (leak)"
+                            ));
+                        }
+                    }
+                    set_bits &= set_bits - 1;
+                }
+            }
         }
     }
 

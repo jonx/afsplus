@@ -129,13 +129,13 @@ the first allocator access without turning normal mount into a bitmap scan.
 The formatter no longer loops over every logical block merely to seal reserved
 bits; it touches reserved ranges and bitmap pages directly. An explicit host
 qualification now formats and bounded-mounts a sparse 1 TiB image (1,024 full
-regions) and performs two small commits in about 1.20 seconds total on the
-development Apple-Silicon/APFS host. The commits measured about 20.8 ms and
-13.1 ms; each changed one region record and at most three allocation-root
-nodes. One observed run consumed roughly 112 MiB of host physical blocks for
-the sparse image. Host sparse-allocation amplification varies and is not an
-AFS+ format guarantee, so the test enforces only an orders-of-magnitude sparse
-bound.
+regions), performs two small commits, and runs the exhaustive checker in about
+3.51 seconds total on the development Apple-Silicon/APFS host. The commits
+measured about 18.6 ms and 12.0 ms; each changed one region record and at most
+three allocation-root nodes. The checker took about 2.34 seconds. Host physical
+allocation varied from roughly 112 MiB to 2.13 GiB between runs, so the test
+enforces a relative sparse bound below 1% rather than making APFS allocation an
+AFS+ format guarantee.
 
 This remains an experiment, not an epoch-1 commitment. It preserves page-level
 write amplification, on-demand loading, crash safety, and repairability. If
@@ -150,8 +150,18 @@ allocation-root mutation emits upserts only for dirty regions, therefore
 writing only their COW paths. The measured 1 TiB commits fetched one current
 record, then one current plus one retained-checkpoint record. Pool protection
 still walks the small set of retained allocation-tree nodes, without
-materializing all typed records. The qualification does not yet include an
-exhaustive 1 TiB checker pass.
+materializing all typed records.
+
+Checker bitmap equality is exhaustive but sparse-aware: it verifies every
+expected reserved/reachable/retired block, then walks set bits byte-wise to find
+unowned allocations. It no longer performs one map lookup for every logical
+LBA, which is what makes the 1 TiB checker qualification practical.
+
+The first leaf-capacity boundary is crash-qualified separately: 145 regions
+force a two-level allocation root, and the every-write/every-flush matrix
+accepts only the complete pre- or post-commit state. The power-cut harness
+streams each cloned image to the verifier, preserving exhaustive subset/torn
+coverage without retaining the whole matrix in RAM.
 
 ## 4. Allocation strategy
 

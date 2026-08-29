@@ -223,15 +223,19 @@ publication, allocator reads, checker accounting, commits, and ordinary crash
 matrices now use the typed root; inline checkpoint records are empty. A 1 TiB
 geometry bulk-build test creates the expected 1,024 typed records. Reserved-bit
 initialization is now page/range based, and an explicit sparse 1 TiB image
-qualification formats, bounded-mounts, and performs two small commits in about
-1.20 seconds total on the development Apple-Silicon/APFS host (commits about
-20.8/13.1 ms, roughly 112 MiB physical in one passing run). Allocation-root
+qualification formats, bounded-mounts, performs two small commits, and runs the
+exhaustive checker in about 3.51 seconds total on the development
+Apple-Silicon/APFS host (commits about 18.6/12.0 ms, checker about 2.34 s).
+Host physical allocation varied from about 112 MiB to 2.13 GiB, so the test
+uses a relative <1% sparse bound. Allocation-root
 publication now upserts only dirty region records and wrote at most three tree
 nodes per measured commit. Current/older region records are loaded on demand
 (one, then two records in the measured commits); retained-pool discovery walks
 only generic allocation-tree nodes without materializing all typed records.
-An exhaustive 1 TiB checker pass and multi-node allocation-root crash matrices
-remain.
+The 145-region boundary forces a two-level allocation root and now has an
+exhaustive every-write/every-flush crash matrix; the harness streams images to
+avoid retaining every clone. Checker bitmap equality now compares a sparse
+accounted set against set bits byte-wise rather than looping over every LBA.
 
 At that baseline, steps 1-5 of `implementation/peer-review-prototype-plan.md` are implemented and green:
 

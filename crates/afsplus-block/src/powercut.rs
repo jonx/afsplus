@@ -40,7 +40,10 @@ pub struct RecordingBackend<D: BlockDevice> {
 
 impl<D: BlockDevice> RecordingBackend<D> {
     pub fn new(inner: D) -> Self {
-        RecordingBackend { inner, log: Vec::new() }
+        RecordingBackend {
+            inner,
+            log: Vec::new(),
+        }
     }
 
     pub fn log(&self) -> &[RecordedOp] {
@@ -67,7 +70,10 @@ impl<D: BlockDevice> BlockDevice for RecordingBackend<D> {
 
     fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
         self.inner.write_block(lba, data)?;
-        self.log.push(RecordedOp::Write { lba, data: data.to_vec() });
+        self.log.push(RecordedOp::Write {
+            lba,
+            data: data.to_vec(),
+        });
         Ok(())
     }
 
@@ -97,7 +103,24 @@ const MAX_ENUMERATED_TAIL: usize = 12;
 /// representative tears; see the module docs) when power is lost immediately
 /// after `log[..crash_point]` has been issued (`crash_point` in
 /// `0..=log.len()`), starting from the durable image `base`.
-pub fn crash_states(base: &MemoryBackend, log: &[RecordedOp], crash_point: usize) -> Vec<CrashState> {
+pub fn crash_states(
+    base: &MemoryBackend,
+    log: &[RecordedOp],
+    crash_point: usize,
+) -> Vec<CrashState> {
+    let mut states = Vec::new();
+    for_each_crash_state(base, log, crash_point, |state| states.push(state));
+    states
+}
+
+/// Streams the same exhaustive states as [`crash_states`] without retaining
+/// every cloned image simultaneously. Scale matrices should prefer this form.
+pub fn for_each_crash_state(
+    base: &MemoryBackend,
+    log: &[RecordedOp],
+    crash_point: usize,
+    mut visit: impl FnMut(CrashState),
+) {
     assert!(crash_point <= log.len());
     let prefix = &log[..crash_point];
 
@@ -129,8 +152,6 @@ pub fn crash_states(base: &MemoryBackend, log: &[RecordedOp], crash_point: usize
         tail.len()
     );
 
-    let mut states = Vec::new();
-
     // Every subset of the unflushed tail (covers loss and reordering).
     for subset in 0u64..(1u64 << tail.len()) {
         let mut image = durable.clone();
@@ -139,7 +160,7 @@ pub fn crash_states(base: &MemoryBackend, log: &[RecordedOp], crash_point: usize
                 image.apply_raw(*lba, data);
             }
         }
-        states.push(CrashState {
+        visit(CrashState {
             image,
             description: format!(
                 "crash at op {crash_point}: unflushed subset {subset:#b} of {} writes",
@@ -161,7 +182,7 @@ pub fn crash_states(base: &MemoryBackend, log: &[RecordedOp], crash_point: usize
             let mut torn = image.peek(*lba);
             torn[..tear].copy_from_slice(&data[..tear]);
             image.apply_raw(*lba, &torn);
-            states.push(CrashState {
+            visit(CrashState {
                 image,
                 description: format!(
                     "crash at op {crash_point}: unflushed write {i} (lba {lba}) torn at byte {tear}"
@@ -169,6 +190,4 @@ pub fn crash_states(base: &MemoryBackend, log: &[RecordedOp], crash_point: usize
             });
         }
     }
-
-    states
 }

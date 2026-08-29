@@ -24,7 +24,7 @@ pub use activity::{
 pub use fault::{FaultBackend, FaultPlan};
 pub use file::FileBackend;
 pub use memory::MemoryBackend;
-pub use powercut::{crash_states, CrashState, RecordedOp, RecordingBackend};
+pub use powercut::{crash_states, for_each_crash_state, CrashState, RecordedOp, RecordingBackend};
 pub use trace::{IoStats, TraceBackend, TraceEvent};
 
 #[derive(Debug)]
@@ -43,7 +43,10 @@ impl fmt::Display for BlockError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BlockError::OutOfBounds { lba, total_blocks } => {
-                write!(f, "block {lba} out of bounds (device has {total_blocks} blocks)")
+                write!(
+                    f,
+                    "block {lba} out of bounds (device has {total_blocks} blocks)"
+                )
             }
             BlockError::WrongBufferSize { expected, actual } => {
                 write!(f, "wrong buffer size: expected {expected}, got {actual}")
@@ -85,7 +88,10 @@ pub(crate) fn check_access(
         return Err(BlockError::OutOfBounds { lba, total_blocks });
     }
     if buf_len != block_size {
-        return Err(BlockError::WrongBufferSize { expected: block_size, actual: buf_len });
+        return Err(BlockError::WrongBufferSize {
+            expected: block_size,
+            actual: buf_len,
+        });
     }
     Ok(())
 }
