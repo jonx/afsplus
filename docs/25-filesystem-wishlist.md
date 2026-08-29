@@ -1,6 +1,6 @@
 # 25. What People Actually Want From a Filesystem
 
-Status: product/design exploration. Nothing in this document is automatically a 1.0 requirement.
+Status: product/design exploration. Nothing in this document is automatically a 1.0 requirement unless promoted by an ADR.
 
 A new filesystem is rare. That makes it worth asking a different question from "which features do existing filesystems have?":
 
@@ -224,19 +224,60 @@ Potential users:
 
 This must be benchmarked and kept optional at API level.
 
-## 9. Cheap copy semantics
+## 9. Cheap independent copies as a baseline capability
 
-Reflink/block cloning is now common in APFS, Btrfs, XFS, ZFS, and ReFS because copying large files by rewriting every byte wastes time, flash endurance, and power.
+### Problem
 
-AFS+ should reserve a clean extension path for shared extents and reference counts, but should not add it before the base allocator/reclaimer is proven.
+Users and applications frequently want a new independent copy of a large file, not a symlink and not a hard link.
 
-A future API should be filesystem-neutral:
+A traditional physical copy reads and rewrites every byte even when source and destination are on the same filesystem. That wastes time, flash endurance, bandwidth, energy, and cache capacity.
+
+### AFS+ direction
+
+Reflink/block cloning is promoted by ADR-027 into the epoch-1 extent-model requirements.
+
+The disk format must permit multiple file objects to reference the same physical data extents safely.
+
+Filesystem API v2 will expose semantic operations equivalent to:
 
 ```text
-CloneRange(src, dst, range)
+CloneFile(source, destination)
+CloneRange(source, source_offset, destination, destination_offset, length)
 ```
 
-with normal copy fallback on filesystems that do not support it.
+The destination is a distinct object. Future writes are independent through copy-on-write.
+
+Example:
+
+```text
+A -> X Y Z
+B -> X Y Z
+
+B modifies Y
+
+A -> X Y  Z
+B -> X Y' Z
+```
+
+This differs from:
+
+- move/rename: same object, namespace metadata only
+- hard link: same object through multiple names
+- symlink: separate link object referring to another path/target
+- physical copy: separate object and separate data from the start
+
+AFS+ should make these distinctions explicit in the developer API rather than relying on applications to guess which cheap-copy primitive exists.
+
+Potential users include:
+
+- package/build caches
+- VM and disk-image workflows
+- editor temporary copies
+- backup staging
+- large media/project files
+- test environments
+
+`CloneTree()` remains a separate future design because directory/object identity and change-stream semantics make it significantly more complex than file/range cloning.
 
 ## 10. Integrity policy that can vary by workload
 
@@ -303,7 +344,28 @@ allocation_region_degraded
 
 Health should be queryable and observable through Filesystem API v2 and tools.
 
-## 14. Things we deliberately do not promise
+## 14. Virtual disk images that are easy to branch and inspect
+
+Filesystem developers and OS developers repeatedly need disposable disks, snapshots of failing state, and huge-capacity test media without provisioning real hardware.
+
+AFS+ development should treat a sparse raw image as a first-class real volume, then layer virtual block backends around it:
+
+```text
+FileBackend
+SliceBackend
+OverlayBackend
+TraceBackend
+FaultBackend
+PowerCutBackend
+```
+
+A writable overlay should make a new test branch essentially instant while preserving the immutable base image.
+
+Read-only checkpoint viewports should permit inspection of retained previous generations without pretending AFS+ already has a full user snapshot product.
+
+See `docs/28-virtual-images-and-viewports.md`.
+
+## 15. Things we deliberately do not promise
 
 A new filesystem is not an excuse to embed every storage technology.
 
@@ -319,7 +381,7 @@ AFS+ should not add without a proven requirement:
 
 Those are better built above or below the filesystem unless a concrete AROS use case proves otherwise.
 
-## 15. Product differentiation target
+## 16. Product differentiation target
 
 If AFS+ succeeds, its unusual strength should be this combination:
 
@@ -330,13 +392,15 @@ PFS3-style resource discipline
 +
 modern COW/integrity
 +
+cheap reflink clones
++
 NTFS-like enumeration/change intelligence
 +
 XFS-like repairability
 +
-portable reference implementation
+portable Rust reference implementation with C interoperability
 +
-developer-first observability
+developer-first observability and virtual-image tooling
 ```
 
 That is a stronger reason to create AFS+ than simply saying "AROS needs files larger than 4 GB."
