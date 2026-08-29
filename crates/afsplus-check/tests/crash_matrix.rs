@@ -143,11 +143,18 @@ fn every_crash_state_of_a_create_transaction_recovers_to_an_allowed_state() {
     run_matrix(&base, &log, 1, |context, mut vol| {
         if vol.generation() == 1 {
             pre_outcomes += 1;
-            assert!(vol.list_root().is_empty(), "{context}: pre state shows the new file");
+            assert!(
+                vol.list_root().unwrap().is_empty(),
+                "{context}: pre state shows the new file"
+            );
             assert_eq!(vol.free_blocks(), pre_free, "{context}");
         } else {
             post_outcomes += 1;
-            assert_eq!(vol.lookup_root("hello.txt"), Some(file_id), "{context}");
+            assert_eq!(
+                vol.lookup_root("hello.txt").unwrap(),
+                Some(file_id),
+                "{context}"
+            );
             let record = vol.stat(file_id).unwrap().unwrap();
             assert_eq!(record.object_type, ObjectType::File);
             assert_eq!(vol.read_file(file_id).unwrap(), vec![0x5Au8; 4000], "{context}");
@@ -199,7 +206,7 @@ fn misordered_commit_checkpoint_before_metadata_barrier_is_caught() {
                         // child must then surface corruption; the full
                         // checker remains the exhaustive transaction oracle.
                         let mut access_failed = false;
-                        for (_, object_id) in vol.list_root() {
+                        for (_, object_id) in vol.list_root().unwrap() {
                             if vol.stat(object_id).is_err() {
                                 access_failed = true;
                                 break;
@@ -254,12 +261,20 @@ fn crash_matrix_across_a_second_transaction() {
         }
     }
 
-    run_matrix(&base, &log, 2, |context, vol| {
-        assert_eq!(vol.lookup_root("first.txt"), Some(first_id), "{context}");
+    run_matrix(&base, &log, 2, |context, mut vol| {
+        assert_eq!(
+            vol.lookup_root("first.txt").unwrap(),
+            Some(first_id),
+            "{context}"
+        );
         if vol.generation() == 2 {
-            assert_eq!(vol.lookup_root("second.txt"), None, "{context}");
+            assert_eq!(vol.lookup_root("second.txt").unwrap(), None, "{context}");
         } else {
-            assert_eq!(vol.lookup_root("second.txt"), Some(second_id), "{context}");
+            assert_eq!(
+                vol.lookup_root("second.txt").unwrap(),
+                Some(second_id),
+                "{context}"
+            );
         }
     });
 }

@@ -2,9 +2,9 @@
 //!
 //! Scope and status: this implements the *prototype* wire structures needed by
 //! the first-contributor plan in `implementation/peer-review-prototype-plan.md`
-//! (identification block, A/B checkpoints, object records, single-block
-//! directories, single-block object map). Nothing here is a frozen epoch-1
-//! commitment; see `spec/disk-layout.md`.
+//! (identification block, A/B checkpoints, object records, shared typed COW
+//! trees, allocation metadata, plus transitional legacy codecs). Nothing here
+//! is a frozen epoch-1 commitment; see `spec/disk-layout.md`.
 //!
 //! Rules followed from `docs/03-on-disk-format.md` and `docs/21-security-and-corruption.md`:
 //!

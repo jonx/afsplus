@@ -49,9 +49,9 @@ fn failed_write_at_every_index_leaves_committed_state_untouched() {
         let mut dev = vol.into_device().into_inner();
         let report = check_device(&mut dev);
         assert!(report.is_clean(), "write {write_index}: {:?}", report.errors);
-        let vol = mount(dev).unwrap();
+        let mut vol = mount(dev).unwrap();
         assert_eq!(vol.generation(), 1);
-        assert!(vol.list_root().is_empty());
+        assert!(vol.list_root().unwrap().is_empty());
     }
 }
 
@@ -82,6 +82,6 @@ fn transient_fault_is_retryable() {
     let mut dev = vol.into_device().into_inner();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "{:?}", report.errors);
-    let vol = mount(dev).unwrap();
-    assert_eq!(vol.lookup_root("hello.txt"), Some(id));
+    let mut vol = mount(dev).unwrap();
+    assert_eq!(vol.lookup_root("hello.txt").unwrap(), Some(id));
 }

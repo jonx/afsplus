@@ -5,7 +5,7 @@
 //!
 //! Files carry at most one direct data extent (`data_root` = start LBA,
 //! `data_blocks` = length); the inline-extents-plus-tree model comes later.
-//! Directories use `data_root` for their directory block.
+//! Directories use `data_root` for their directory-tree root.
 //!
 //! `link_count == 0` is invalid: the prototype has no orphan handling yet,
 //! so an unreferenced object must not exist at all.
@@ -26,7 +26,7 @@
 //! 56     12   metadata-change timestamp
 //! 68     4    AROS protection flags
 //! 72     8    content generation
-//! 80     8    data root LBA (directory: directory block; file: extent start)
+//! 80     8    data root LBA (directory: tree root; file: extent start)
 //! 88     8    data extent length in blocks (files; 0 = empty file)
 //! ```
 

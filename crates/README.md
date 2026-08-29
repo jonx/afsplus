@@ -8,9 +8,9 @@ as such in the crate docs.
 ## Crates
 
 - `afsplus-format` — on-disk structure encode/decode (identification, A/B
-  checkpoints with per-region descriptor records, object records with one
-  direct data extent, single-block directories, shared AFST object-map nodes,
-  region bitmap pages and region descriptors, retired-block list), CRC32C,
+  checkpoints, object records with one direct data extent, shared typed AFST
+  nodes for object maps/directories/allocation records, region bitmap pages
+  and descriptors, retired-block list, plus transitional legacy codecs), CRC32C,
   explicit little-endian codecs, region
   geometry. `no_std` + `alloc` (verified against a bare-metal target), zero
   dependencies. Bounds-first validation; every decoder rejects corrupted
@@ -75,16 +75,18 @@ nodes in RAM. Explicit staged-node spill/reload is still required for the
 2/4/8-page tiny-cache qualification; this limitation is not hidden behind the
 bounded lookup claim.
 
-The checkpoint object-map root now points to the typed shared tree rather than
-the legacy one-block codec. Normal mount performs a bounded ROOT lookup;
-`stat` descends on demand; create/delete publish mixed tree mutations through
-the existing metadata barrier/checkpoint protocol; and the checker visits and
-claims every tree node. A typed 1,001-entry test proves the map crosses page
-boundaries, while the existing power-cut and reuse matrices cover its ordinary
-transaction path.
+The checkpoint object-map root and every newly formatted directory now point
+to typed shared trees rather than legacy one-block codecs. Normal mount checks
+only their roots; `stat` and name lookup descend on demand; create/delete
+publish both mutations through the existing metadata barrier/checkpoint
+protocol; and the checker visits and claims every tree node. Typed 1,001-entry
+object-map and 1,000-entry directory tests cross page boundaries. An
+end-to-end 300-entry namespace test also exceeds the old directory limit,
+checks the image, remounts it, and verifies enumeration/lookup. Existing
+power-cut, fault, and reuse matrices cover the ordinary publication path.
 
-Next: extent trees beyond one direct extent, directory B+ trees beyond one
-leaf, allocation-root on-demand/dirty-path optimization, and the delta-log/spacemap
+Next: extent trees beyond one direct extent, namespace operations beyond
+root create/delete, allocation-root on-demand/dirty-path optimization, and the delta-log/spacemap
 allocation alternatives — to be built only if this design fails on
 correctness, write amplification, or scalability (the measurements test is
 the baseline to beat).

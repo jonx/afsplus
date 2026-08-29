@@ -35,7 +35,7 @@ fn mkfs_then_mount_yields_empty_root_at_generation_1() {
     assert_eq!(vol.generation(), 1);
     assert_ne!(vol.checkpoint().allocation_root_block, 0);
     assert!(vol.checkpoint().regions.is_empty());
-    assert!(vol.list_root().is_empty());
+    assert!(vol.list_root().unwrap().is_empty());
     assert_eq!(vol.ident().label, "TestVol");
     let root = vol.stat(afsplus_format::OBJECT_ROOT).unwrap().unwrap();
     assert_eq!(root.object_type, ObjectType::Directory);
@@ -57,14 +57,14 @@ fn create_with_content_commit_remount_read_back() {
     assert_eq!(vol.generation(), 2);
     assert_ne!(vol.checkpoint().allocation_root_block, 0);
     assert!(vol.checkpoint().regions.is_empty());
-    assert_eq!(vol.lookup_root("hello.txt"), Some(id));
+    assert_eq!(vol.lookup_root("hello.txt").unwrap(), Some(id));
     assert_eq!(vol.read_file(id).unwrap(), content);
 
     // Remount from the same device: the committed state must be identical.
     let dev = vol.into_device();
     let mut vol = mount(dev).unwrap();
     assert_eq!(vol.generation(), 2);
-    assert_eq!(vol.lookup_root("hello.txt"), Some(id));
+    assert_eq!(vol.lookup_root("hello.txt").unwrap(), Some(id));
     let record = vol.stat(id).unwrap().unwrap();
     assert_eq!(record.object_type, ObjectType::File);
     assert_eq!(record.link_count, 1);
@@ -88,15 +88,15 @@ fn delete_retires_storage_and_checker_stays_clean() {
     let data_lba = vol.stat(id).unwrap().unwrap().data_root;
     vol.delete_file_in_root("victim.txt", ts(2)).unwrap();
 
-    assert_eq!(vol.lookup_root("victim.txt"), None);
+    assert_eq!(vol.lookup_root("victim.txt").unwrap(), None);
     assert!(vol.stat(id).unwrap().is_none());
     assert!(vol.retired().contains(data_lba), "deleted data must be quarantined, not freed");
 
     let mut dev = vol.into_device();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "checker findings: {:?}", report.errors);
-    let vol = mount(dev).unwrap();
-    assert_eq!(vol.lookup_root("victim.txt"), None);
+    let mut vol = mount(dev).unwrap();
+    assert_eq!(vol.lookup_root("victim.txt").unwrap(), None);
 }
 
 #[test]
@@ -117,15 +117,39 @@ fn several_transactions_alternate_checkpoint_slots_and_recycle_space() {
         vol.create_file_in_root(&format!("file-{i}.txt"), b"data", ts(1_780_000_000 + i)).unwrap();
     }
     assert_eq!(vol.generation(), 11);
-    assert_eq!(vol.list_root().len(), 10);
+    assert_eq!(vol.list_root().unwrap().len(), 10);
 
-    let vol = mount(vol.into_device()).unwrap();
+    let mut vol = mount(vol.into_device()).unwrap();
     assert_eq!(vol.generation(), 11);
-    assert_eq!(vol.list_root().len(), 10);
+    assert_eq!(vol.list_root().unwrap().len(), 10);
 
     let mut dev = vol.into_device();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+}
+
+#[test]
+fn root_directory_grows_beyond_the_legacy_single_block_limit() {
+    let mut dev = MemoryBackend::new(BS, 4096);
+    mkfs(&mut dev, &params(4096)).unwrap();
+    let mut vol = mount(dev).unwrap();
+
+    for i in 0..300 {
+        vol.create_file_in_root(&format!("entry-{i:04}.txt"), b"", ts(i))
+            .unwrap();
+    }
+
+    assert_eq!(vol.list_root().unwrap().len(), 300);
+    assert!(vol.lookup_root("entry-0000.txt").unwrap().is_some());
+    assert!(vol.lookup_root("entry-0299.txt").unwrap().is_some());
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+
+    let mut vol = mount(dev).unwrap();
+    assert_eq!(vol.list_root().unwrap().len(), 300);
+    assert!(vol.lookup_root("entry-0173.txt").unwrap().is_some());
 }
 
 #[test]
@@ -147,20 +171,20 @@ fn mount_reads_are_bounded_and_descendants_are_loaded_on_demand() {
     let mut vol = mount(traced).unwrap();
     let after_mount = vol.device_mut().stats();
 
-    // ident + 2 checkpoints + object map + root record + root directory +
+    // ident + 2 checkpoints + object-map root + root record + directory root +
     // retired list. Object count and allocation-region pages do not add
     // reads to ordinary mount.
     assert_eq!(after_mount.reads, 7);
     assert_eq!(vol.allocator_ram_bytes(), 0);
-    assert_eq!(vol.list_root().len(), 10);
+    assert_eq!(vol.list_root().unwrap().len(), 10);
     assert!(vol.free_blocks() > 0);
-    assert_eq!(vol.device_mut().stats().reads, after_mount.reads);
+    assert_eq!(vol.device_mut().stats().reads, after_mount.reads + 1);
 
     // One stat descends the one-level object-map tree, then decodes exactly
     // the requested descendant record. Tree height, not object count, bounds
     // the additional reads.
     assert!(vol.stat(first_id).unwrap().is_some());
-    assert_eq!(vol.device_mut().stats().reads, after_mount.reads + 2);
+    assert_eq!(vol.device_mut().stats().reads, after_mount.reads + 3);
 }
 
 #[test]
@@ -215,9 +239,9 @@ fn out_of_space_is_reported_and_state_survives() {
         Err(CoreError::NoSpace)
     ));
 
-    let vol = mount(vol.into_device()).unwrap();
+    let mut vol = mount(vol.into_device()).unwrap();
     assert_eq!(vol.generation(), 3);
-    assert_eq!(vol.list_root().len(), 2);
+    assert_eq!(vol.list_root().unwrap().len(), 2);
 }
 
 #[test]
@@ -235,7 +259,7 @@ fn transaction_io_accounting() {
     let stats = vol.device_mut().stats();
     let commit = vol.last_commit_stats().unwrap();
 
-    // 1 data block, then file record + dir + root record + object map +
+    // 1 data block, then file record + directory path + root record + object map +
     // allocation root + retired list, 1 bitmap page, 1 region descriptor,
     // 1 checkpoint. Three barriers (data, metadata, commit).
     assert_eq!(commit.data_blocks_written, 1);
@@ -246,7 +270,7 @@ fn transaction_io_accounting() {
     assert_eq!(commit.flushes, 3, "data commit must use exactly three barriers");
     assert_eq!(stats.writes, 10);
     assert_eq!(stats.flushes, 3);
-    assert!(stats.reads <= 12, "post-commit re-walk grew unexpectedly: {} reads", stats.reads);
+    assert!(stats.reads <= 13, "post-commit re-walk grew unexpectedly: {} reads", stats.reads);
 
     // Empty-file transaction: no data barrier.
     vol.device_mut().reset();
@@ -255,7 +279,7 @@ fn transaction_io_accounting() {
     assert_eq!(commit.data_blocks_written, 0);
     assert_eq!(commit.flushes, 2, "empty commit must use exactly two barriers");
 
-    // Mount: ident + 2 checkpoint slots + omap + root record + root dir.
+    // Mount: ident + 2 checkpoint slots + omap + root record + directory root.
     // Allocation pages are not read until the first mutation.
     assert_eq!(mount_stats.reads, 6);
     assert_eq!(mount_stats.writes, 0);
@@ -305,7 +329,7 @@ fn torn_newest_checkpoint_falls_back_to_previous_generation() {
 
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "structural fallback is an allowed state: {:?}", report.errors);
-    let vol = mount(dev).unwrap();
+    let mut vol = mount(dev).unwrap();
     assert_eq!(vol.generation(), 1, "mount must fall back to the intact checkpoint");
-    assert!(vol.list_root().is_empty());
+    assert!(vol.list_root().unwrap().is_empty());
 }

@@ -41,6 +41,6 @@ fn main() {
         "image {} at generation {} with {} root entries",
         path.display(),
         vol.generation(),
-        vol.list_root().len()
+        vol.list_root().expect("list root").len()
     );
 }

@@ -7,7 +7,7 @@
 //! 3. write the alternate checkpoint slot with generation + 1, barrier
 //!
 //! Every transaction retires the blocks it makes unreachable (replaced
-//! object-map paths, old records, old directory blocks, old retired list,
+//! object-map paths, old records, old directory paths, old retired list,
 //! deleted data) and promotes the previous transaction's retirees; see
 //! `alloc`.
 //!
@@ -26,6 +26,7 @@ use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 use crate::alloc::{AllocStats, TxAllocator};
 use crate::allocation_root::{self, ReservedTreePool};
 use crate::cow_tree::{mutate_many, TreeMutation, TreeOperation};
+use crate::directory;
 use crate::mount::Selection;
 use crate::object_map;
 use crate::verify::{load_mount_state, MountState};
@@ -110,19 +111,32 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     /// Looks a name up in the root directory.
-    pub fn lookup_root(&self, name: &str) -> Option<u64> {
+    pub fn lookup_root(&mut self, name: &str) -> Result<Option<u64>, CoreError> {
         let key = comparison_key(name.as_bytes());
-        self.state.root_directory.lookup(&key).map(|e| e.child_id)
+        Ok(directory::lookup_entry(
+            &mut self.dev,
+            &self.ident.geometry(),
+            self.state.root_directory_root_lba,
+            OBJECT_ROOT,
+            self.checkpoint.generation,
+            &key,
+        )?
+        .map(|entry| entry.child_id))
     }
 
     /// Lists the root directory as (original name, object ID) pairs.
-    pub fn list_root(&self) -> Vec<(String, u64)> {
-        self.state
-            .root_directory
+    pub fn list_root(&mut self) -> Result<Vec<(String, u64)>, CoreError> {
+        Ok(directory::load_all(
+            &mut self.dev,
+            &self.ident.geometry(),
+            self.state.root_directory_root_lba,
+            OBJECT_ROOT,
+            self.checkpoint.generation,
+        )?
             .entries
             .iter()
             .map(|e| (String::from_utf8_lossy(&e.name).into_owned(), e.child_id))
-            .collect()
+            .collect())
     }
 
     /// Reads and validates one object record on demand. Returning the record
@@ -175,8 +189,7 @@ impl<D: BlockDevice> Volume<D> {
     ) -> Result<u64, CoreError> {
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
         let key = comparison_key(name.as_bytes());
-        let root_dir = self.state.root_directory.clone();
-        if root_dir.lookup(&key).is_some() {
+        if self.lookup_root(name)?.is_some() {
             return Err(CoreError::AlreadyExists);
         }
 
@@ -215,7 +228,6 @@ impl<D: BlockDevice> Volume<D> {
 
         // Fresh blocks for every COW'd structure.
         let file_record_lba = tx.allocate(&mut self.dev)?;
-        let dir_lba = tx.allocate(&mut self.dev)?;
         let root_record_lba = tx.allocate(&mut self.dev)?;
         let retired_list_lba = tx.allocate(&mut self.dev)?;
 
@@ -238,20 +250,32 @@ impl<D: BlockDevice> Volume<D> {
             data_blocks: data_block_count,
         };
 
-        let mut new_dir = root_dir;
-        new_dir.insert(DirEntry {
+        let directory_entry = DirEntry {
             key,
             name: name.as_bytes().to_vec(),
             child_type_hint: 1,
             child_id: object_id,
-        })?;
+        };
+        let (directory_key, directory_value) = directory::encode_entry(&directory_entry)?;
+        let directory_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.state.root_directory_root_lba,
+            directory::spec(OBJECT_ROOT, self.checkpoint.generation),
+            generation,
+            &[TreeOperation::Upsert {
+                key: &directory_key,
+                value: &directory_value,
+            }],
+        )?;
 
         let old_root = self.state.root_object;
         let new_root = ObjectRecord {
             modified: now,
             changed: now,
             content_generation: generation,
-            data_root: dir_lba,
+            data_root: directory_mutation.root_lba,
             ..old_root
         };
 
@@ -282,9 +306,9 @@ impl<D: BlockDevice> Volume<D> {
 
         let mut meta_writes = vec![
             (file_record_lba, file_record.encode(block_size, generation)?),
-            (dir_lba, new_dir.encode(block_size, generation)?),
             (root_record_lba, new_root.encode(block_size, generation)?),
         ];
+        meta_writes.extend(directory_mutation.writes);
         meta_writes.extend(omap_mutation.writes);
 
         self.commit_transaction(
@@ -304,8 +328,15 @@ impl<D: BlockDevice> Volume<D> {
     /// checkpoint can reference them.
     pub fn delete_file_in_root(&mut self, name: &str, now: Timespec) -> Result<(), CoreError> {
         let key = comparison_key(name.as_bytes());
-        let root_dir = self.state.root_directory.clone();
-        let entry = root_dir.lookup(&key).ok_or(CoreError::NotFound)?.clone();
+        let entry = directory::lookup_entry(
+            &mut self.dev,
+            &self.ident.geometry(),
+            self.state.root_directory_root_lba,
+            OBJECT_ROOT,
+            self.checkpoint.generation,
+            &key,
+        )?
+        .ok_or(CoreError::NotFound)?;
         let victim = self
             .read_object(entry.child_id)?
             .ok_or_else(|| CoreError::Corrupt("victim missing from object map".into()))?;
@@ -327,7 +358,6 @@ impl<D: BlockDevice> Volume<D> {
             generation,
         )?;
 
-        let dir_lba = tx.allocate(&mut self.dev)?;
         let root_record_lba = tx.allocate(&mut self.dev)?;
         let retired_list_lba = tx.allocate(&mut self.dev)?;
 
@@ -341,15 +371,22 @@ impl<D: BlockDevice> Volume<D> {
         }
         self.retire_cow_originals(&mut tx)?;
 
-        let mut new_dir = root_dir;
-        new_dir.remove(&key);
+        let directory_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.state.root_directory_root_lba,
+            directory::spec(OBJECT_ROOT, self.checkpoint.generation),
+            generation,
+            &[TreeOperation::Delete { key: &key }],
+        )?;
 
         let old_root = self.state.root_object;
         let new_root = ObjectRecord {
             modified: now,
             changed: now,
             content_generation: generation,
-            data_root: dir_lba,
+            data_root: directory_mutation.root_lba,
             ..old_root
         };
 
@@ -374,10 +411,8 @@ impl<D: BlockDevice> Volume<D> {
         )?;
         let omap_lba = omap_mutation.root_lba;
 
-        let mut meta_writes = vec![
-            (dir_lba, new_dir.encode(block_size, generation)?),
-            (root_record_lba, new_root.encode(block_size, generation)?),
-        ];
+        let mut meta_writes = vec![(root_record_lba, new_root.encode(block_size, generation)?)];
+        meta_writes.extend(directory_mutation.writes);
         meta_writes.extend(omap_mutation.writes);
 
         self.commit_transaction(
@@ -510,11 +545,10 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     /// Retires the committed blocks every transaction replaces: the object
-    /// root object record, the root directory block, and the previous retired
-    /// list. The object-map engine retires exactly the COW paths it replaces.
+    /// root object record and previous retired list. The object-map and
+    /// directory engines retire exactly the COW paths they replace.
     fn retire_cow_originals(&mut self, tx: &mut TxAllocator) -> Result<(), CoreError> {
         tx.retire(&mut self.dev, self.state.root_record_lba)?;
-        tx.retire(&mut self.dev, self.state.root_object.data_root)?;
         if self.checkpoint.retired_list_block != 0 {
             tx.retire(&mut self.dev, self.checkpoint.retired_list_block)?;
         }

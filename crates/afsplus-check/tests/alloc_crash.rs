@@ -81,7 +81,7 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
         let mut vol = mount(g1_image.clone()).unwrap();
         vol.delete_file_in_root("A", ts(2)).unwrap();
         assert!(vol.retired().contains(x), "X must be quarantined after the delete");
-        assert_eq!(vol.lookup_root("A"), None);
+        assert_eq!(vol.lookup_root("A").unwrap(), None);
         vol.into_device()
     };
 
@@ -104,12 +104,15 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
                 g if g == g1_generation => {
                     // A present, content byte-for-byte intact: the delete
                     // transaction must never have touched X.
-                    let a = vol.lookup_root("A").unwrap_or_else(|| panic!("{context}: A missing"));
+                    let a = vol
+                        .lookup_root("A")
+                        .unwrap()
+                        .unwrap_or_else(|| panic!("{context}: A missing"));
                     assert_eq!(vol.stat(a).unwrap().unwrap().data_root, x, "{context}");
                     assert_eq!(vol.read_file(a).unwrap(), PA.to_vec(), "{context}: A content damaged");
                 }
                 g if g == g1_generation + 1 => {
-                    assert_eq!(vol.lookup_root("A"), None, "{context}: A must be gone");
+                    assert_eq!(vol.lookup_root("A").unwrap(), None, "{context}: A must be gone");
                     assert!(vol.retired().contains(x), "{context}: X must be retired, not reused");
                 }
                 g => panic!("{context}: recovered to disallowed generation {g}"),
@@ -127,13 +130,16 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
                     // Pre-commit: nothing visible, X still quarantined —
                     // even though the crash state may already carry B's
                     // half-written bytes inside X, they are unreachable.
-                    assert_eq!(vol.lookup_root("A"), None, "{context}");
-                    assert_eq!(vol.lookup_root("B"), None, "{context}");
+                    assert_eq!(vol.lookup_root("A").unwrap(), None, "{context}");
+                    assert_eq!(vol.lookup_root("B").unwrap(), None, "{context}");
                     assert!(vol.retired().contains(x), "{context}: X left quarantine early");
                 }
                 g if g == g1_generation + 2 => {
-                    assert_eq!(vol.lookup_root("A"), None, "{context}");
-                    let b = vol.lookup_root("B").unwrap_or_else(|| panic!("{context}: B missing"));
+                    assert_eq!(vol.lookup_root("A").unwrap(), None, "{context}");
+                    let b = vol
+                        .lookup_root("B")
+                        .unwrap()
+                        .unwrap_or_else(|| panic!("{context}: B missing"));
                     let record = vol.stat(b).unwrap().unwrap();
                     assert_eq!(record.data_root, x, "{context}: B must own X");
                     assert_eq!(vol.read_file(b).unwrap(), PB.to_vec(), "{context}: B content damaged");

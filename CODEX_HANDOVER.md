@@ -141,8 +141,8 @@ the immediate hardening and the first Stage 6 allocator experiment:
 
 The continuation after `7a61c06` replaced the eager mount walk with bounded
 root loading. Ordinary mount now reads identification/checkpoints, the
-single-page prototype object map, root object/root directory, and the retired
-list root. Descendant records are decoded on access and allocation bitmaps are
+object-map root, root object/directory-tree root, and the retired-list root.
+Descendant records are decoded on access and allocation bitmaps are
 split across independently checksummed pages, loaded as a mutation touches
 them through the selected region descriptor. Clean pages that fail an
 allocation scan are evicted immediately; the checker retains the exhaustive
@@ -169,11 +169,15 @@ grows the root. Deletion now merges or redistributes underfull siblings before
 staging a valid parent and collapses one-child roots. A permuted 300-key test
 grows three levels, then deletes 299 keys in another permutation and returns
 to one root leaf; a bad-level corruption test is also executable. The
-object-map adapter is now authoritative: mkfs/checkpoints, bounded mount/stat,
+object-map adapter is authoritative: mkfs/checkpoints, bounded mount/stat,
 mixed create/delete mutation, checker ownership, existing transaction crash
-matrices, and a typed 1,001-entry multi-page test all use AFST. Directory,
-extent, and allocation-root adapters are next; their legacy single-block
-structures remain authoritative until each migration has its crash matrix.
+matrices, and a typed 1,001-entry multi-page test all use AFST. The directory
+adapter is authoritative too: mkfs creates a typed leaf, bounded mount/lookup
+and exhaustive enumeration/checking use the tree, and create/delete publish
+its COW paths alongside the object map. A typed 1,000-entry test and an
+end-to-end 300-entry checked/remounted namespace test cross the old one-block
+limit. Legacy object-map and directory block codecs remain transitional tests.
+Extent migration is next.
 
 The current multi-upsert overlay keeps every dirty tree node in RAM. It proves
 COW mutation correctness but does not yet satisfy the 2/4/8-page cache gate.

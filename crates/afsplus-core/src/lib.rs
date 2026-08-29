@@ -27,6 +27,7 @@
 pub mod alloc;
 pub mod allocation_root;
 pub mod cow_tree;
+pub mod directory;
 pub mod mkfs;
 pub mod mount;
 pub mod object_map;

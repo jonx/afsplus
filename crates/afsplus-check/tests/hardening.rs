@@ -6,10 +6,9 @@ use afsplus_block::MemoryBackend;
 use afsplus_check::check_device;
 use afsplus_core::{allocation_root, mkfs, mount, object_map, CoreError, MkfsParams};
 use afsplus_format::checkpoint::Checkpoint;
-use afsplus_format::dir::{DirBlock, DirEntry};
-use afsplus_format::header::BlockHeader;
 use afsplus_format::ident::Identification;
 use afsplus_format::region::RegionDescriptor;
+use afsplus_format::tree::TreeNode;
 use afsplus_format::Timespec;
 
 const BS: usize = 4096;
@@ -159,7 +158,7 @@ fn corrupt_descendant_is_reported_on_access_without_a_mount_scan() {
     // Roots remain valid, so bounded mount succeeds and namespace lookup is
     // available. The first access to the damaged descendant reports it.
     let mut vol = mount(dev.clone()).unwrap();
-    assert_eq!(vol.lookup_root("hello.txt"), Some(id));
+    assert_eq!(vol.lookup_root("hello.txt").unwrap(), Some(id));
     assert!(matches!(vol.stat(id), Err(CoreError::Corrupt(_))));
 
     let report = check_device(&mut dev);
@@ -170,7 +169,7 @@ fn corrupt_descendant_is_reported_on_access_without_a_mount_scan() {
 fn stored_comparison_key_must_match_the_name() {
     let mut dev = formatted();
     let mut vol = mount(dev).unwrap();
-    let id = vol.create_file_in_root("aaa.txt", b"", ts(1)).unwrap();
+    let _id = vol.create_file_in_root("aaa.txt", b"", ts(1)).unwrap();
     let dir_lba = vol
         .stat(afsplus_format::OBJECT_ROOT)
         .unwrap()
@@ -178,29 +177,20 @@ fn stored_comparison_key_must_match_the_name() {
         .data_root;
     dev = vol.into_device();
 
-    // Re-encode the root directory block with a key that does not derive
-    // from the name (a mis-keyed entry breaks lookup determinism).
-    let generation = BlockHeader::verify(&dev.peek(dir_lba), afsplus_format::header::block_type::DIRECTORY)
-        .unwrap()
-        .generation;
-    let mut forged = DirBlock::new(afsplus_format::OBJECT_ROOT);
-    forged
-        .insert(DirEntry {
-            key: b"zzz-not-the-name".to_vec(),
-            name: b"aaa.txt".to_vec(),
-            child_type_hint: 1,
-            child_id: id,
-        })
-        .unwrap();
+    // Keep the AFST node structurally valid but change the stored key without
+    // changing the original name inside its typed value.
+    let (mut forged, generation) = TreeNode::decode(&dev.peek(dir_lba)).unwrap();
+    assert_eq!(forged.items.len(), 1);
+    forged.items[0].key = b"zzz-not-the-name".to_vec();
     dev.apply_raw(dir_lba, &forged.encode(BS, generation).unwrap());
 
-    match mount(dev.clone()) {
-        Err(CoreError::Corrupt(message)) => {
-            assert!(message.contains("key"), "unhelpful diagnostics: {message}");
-        }
-        Err(e) => panic!("mount must report the mis-keyed directory, got: {e}"),
-        Ok(_) => panic!("mount must reject the mis-keyed directory"),
-    }
+    // Bounded mount validates only the root structure. The first lookup that
+    // reaches the forged typed record reports the semantic mismatch.
+    let mut vol = mount(dev.clone()).unwrap();
+    assert!(matches!(
+        vol.lookup_root("zzz-not-the-name"),
+        Err(CoreError::Corrupt(message)) if message.contains("key")
+    ));
     let report = check_device(&mut dev);
     assert!(!report.is_clean());
 }

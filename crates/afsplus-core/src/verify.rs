@@ -16,7 +16,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use afsplus_block::BlockDevice;
 use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::Checkpoint;
-use afsplus_format::dir::{comparison_key, DirBlock};
 use afsplus_format::geometry::{Geometry, DESCRIPTOR_SLOTS};
 use afsplus_format::ident::Identification;
 use afsplus_format::object::{ObjectRecord, ObjectType};
@@ -25,6 +24,7 @@ use afsplus_format::{OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
 
 use crate::alloc::Bitmaps;
 use crate::allocation_root;
+use crate::directory::{self, LoadedDirectory};
 use crate::object_map::{self, LoadedObjectMap};
 use crate::CoreError;
 
@@ -34,24 +34,23 @@ pub struct CommittedState {
     pub allocation_records: Vec<afsplus_format::checkpoint::RegionRecord>,
     pub allocation_pool_blocks: Vec<u64>,
     pub objects: BTreeMap<u64, ObjectRecord>,
-    /// Directory blocks keyed by owning directory object ID.
-    pub directories: BTreeMap<u64, DirBlock>,
+    /// Directory trees keyed by owning directory object ID.
+    pub directories: BTreeMap<u64, LoadedDirectory>,
     pub retired: RetiredList,
     pub bitmaps: Bitmaps,
-    /// Every reachable metadata block (object map, records, directory
-    /// blocks, retired list) — excludes reserved blocks and file data.
+    /// Every reachable metadata block (object map, records, directory trees,
+    /// retired list) — excludes reserved blocks and file data.
     pub metadata_blocks: Vec<u64>,
     /// Every reachable file-data block.
     pub data_blocks: Vec<u64>,
 }
 
-/// Bounded state needed to expose a mounted root namespace. The object map is
-/// already a tree and is descended on demand; the directory remains one
-/// prototype page until its own migration.
+/// Bounded state needed to expose a mounted root namespace. The object map and
+/// directory are trees: mount validates their roots and descends on demand.
 pub struct MountState {
     pub root_record_lba: u64,
     pub root_object: ObjectRecord,
-    pub root_directory: DirBlock,
+    pub root_directory_root_lba: u64,
     pub retired: RetiredList,
 }
 
@@ -101,27 +100,13 @@ pub fn load_mount_state<D: BlockDevice>(
     }
 
     claim_root(root_object.data_root, &mut roots)?;
-    dev.read_block(root_object.data_root, &mut buf)?;
-    let root_directory = DirBlock::decode(&buf)?;
-    if root_directory.owner != OBJECT_ROOT {
-        return Err(CoreError::Corrupt(format!(
-            "root directory block owned by {}, expected {OBJECT_ROOT}",
-            root_directory.owner
-        )));
-    }
-    for entry in &root_directory.entries {
-        if entry.key != comparison_key(&entry.name) {
-            return Err(CoreError::Corrupt(
-                "root directory entry key does not match its name".into(),
-            ));
-        }
-        if !matches!(entry.child_type_hint, 1 | 2) {
-            return Err(CoreError::Corrupt(format!(
-                "root directory has invalid type hint for object {}",
-                entry.child_id
-            )));
-        }
-    }
+    directory::validate_root(
+        dev,
+        &geo,
+        root_object.data_root,
+        OBJECT_ROOT,
+        checkpoint.generation,
+    )?;
 
     let retired = if checkpoint.retired_list_block != 0 {
         claim_root(checkpoint.retired_list_block, &mut roots)?;
@@ -154,7 +139,7 @@ pub fn load_mount_state<D: BlockDevice>(
     Ok(MountState {
         root_record_lba,
         root_object,
-        root_directory,
+        root_directory_root_lba: root_object.data_root,
         retired,
     })
 }
@@ -247,25 +232,16 @@ pub fn load_committed_state<D: BlockDevice>(
         }
         match record.object_type {
             ObjectType::Directory => {
-                claim(record.data_root, &mut claimed)?;
-                metadata_blocks.push(record.data_root);
-                dev.read_block(record.data_root, &mut buf)?;
-                let dir = DirBlock::decode(&buf)?;
-                if dir.owner != record.object_id {
-                    return Err(CoreError::Corrupt(format!(
-                        "directory block at {} owned by {}, expected {}",
-                        record.data_root, dir.owner, record.object_id
-                    )));
-                }
-                for dir_entry in &dir.entries {
-                    // Hardening: the stored comparison key must be exactly
-                    // what the key encoder derives from the original name.
-                    if dir_entry.key != comparison_key(&dir_entry.name) {
-                        return Err(CoreError::Corrupt(format!(
-                            "directory {} entry key does not match its name",
-                            record.object_id
-                        )));
-                    }
+                let dir = directory::load_all(
+                    dev,
+                    &geo,
+                    record.data_root,
+                    record.object_id,
+                    checkpoint.generation,
+                )?;
+                for lba in &dir.tree_blocks {
+                    claim(*lba, &mut claimed)?;
+                    metadata_blocks.push(*lba);
                 }
                 directories.insert(record.object_id, dir);
             }

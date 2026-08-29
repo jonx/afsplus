@@ -100,10 +100,23 @@ or redistributed into two balanced nodes otherwise. This prevents transient
 empty leaves or one-child internal nodes from becoming on-disk states. Only a
 one-child root may collapse directly to its child.
 
-The checkpoint object-map pointer is the first authoritative root migrated to
-this engine. Typed leaves encode `object_id` as an eight-byte big-endian key
-and the object-record LBA as an eight-byte little-endian value. Ordinary mount
-looks up only the root object; the checker performs exhaustive traversal.
+The checkpoint object-map pointer was the first authoritative root migrated
+to this engine. Typed leaves encode `object_id` as an eight-byte big-endian
+key and the object-record LBA as an eight-byte little-endian value. Ordinary
+mount looks up only the root object; the checker performs exhaustive traversal.
+
+Newly formatted directories use the same engine with comparison-key leaves
+whose typed values preserve the original UTF-8 name, child object ID, and type
+hint. Ordinary mount validates the directory root only, lookup descends one
+path, and enumeration/checking walks the tree. Root create/delete publishes
+the directory mutation atomically with the object-map mutation. An executable
+300-entry volume test crosses the removed legacy one-page limit, runs the
+checker, remounts, and verifies enumeration and lookup.
+
+The authoritative allocation-region root is also AFST-backed, using a
+permanently allocated triple-version node pool to avoid allocator
+self-reference (ADR-035). Its current prototype update still loads and
+rewrites all region records; dirty-path-only mutation remains scale work.
 
 Allocation regions are specifically intended to make free-space operations bounded.
 

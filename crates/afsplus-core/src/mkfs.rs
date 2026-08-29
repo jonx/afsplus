@@ -15,7 +15,6 @@ use afsplus_block::BlockDevice;
 use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::{Checkpoint, RegionRecord};
 use afsplus_format::crc32c::CHECKSUM_CRC32C;
-use afsplus_format::dir::DirBlock;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::ident::Identification;
 use afsplus_format::object::{ObjectRecord, ObjectType};
@@ -26,6 +25,7 @@ use afsplus_format::{
 
 use crate::layout;
 use crate::allocation_root;
+use crate::directory;
 use crate::object_map;
 use crate::CoreError;
 
@@ -76,7 +76,7 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         data_root: root_dir_lba,
         data_blocks: 0,
     };
-    let root_dir = DirBlock::new(OBJECT_ROOT);
+    let root_dir = directory::empty_leaf(OBJECT_ROOT);
     let omap = object_map::initial_leaf(OBJECT_ROOT, root_record_lba)?;
 
     dev.write_block(

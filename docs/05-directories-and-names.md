@@ -22,6 +22,22 @@ The design must handle directories containing millions of entries without linear
 
 The tree must also support bounded-memory traversal. An implementation should need only a small number of pages in memory for lookup or iteration.
 
+### Executable prototype status
+
+Newly formatted prototype volumes store directories in the shared typed AFST
+COW tree. Leaves map the binary comparison key to the original name, child ID,
+and type hint. Mount validates only the root; lookup descends one path; the
+checker validates and claims the full tree. Create and delete publish the
+directory path together with the corresponding object-map change through the
+normal metadata barrier and alternate checkpoint.
+
+The current tests bulk-build 1,000 typed entries across leaf/internal pages
+and exercise 300 root-namespace creates through real transactions, followed
+by exhaustive checking, remount, enumeration, and lookup. This removes the
+old one-block directory limit. The 100,000-entry scale gate, bounded iterator,
+non-root directory operations, rename/link, and the explicit 2/4/8-page
+mutation-cache matrix remain Core Scale-1 work.
+
 ## 3. UTF-8
 
 AFS+ names are valid UTF-8.

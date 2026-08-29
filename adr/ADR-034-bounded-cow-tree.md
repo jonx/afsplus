@@ -1,10 +1,10 @@
 # ADR-034: Shared bounded copy-on-write tree engine
 
-Status: Accepted for the prototype; mutation engine in progress
+Status: Accepted for the prototype; three authoritative adapters published
 
 ## Context
 
-The current executable core has four independent one-block limits:
+The executable core began with four independent one-block limits:
 
 - checkpoint object map
 - each directory
@@ -112,15 +112,13 @@ crash matrices may revise it. Rust data structures and allocation behavior are
 not normative; the byte encoding and invariants must remain implementable by
 the portable C profile.
 
-The executable engine currently covers bounded lookup, exhaustive validation,
+The executable engine covers bounded lookup, exhaustive validation,
 transactional multi-upsert/delete, leaf/internal split, sibling
 merge/redistribution, and root height growth/reduction. A permuted 300-key
 test grows a three-level tree, replaces a key, then deletes 299 keys in a
 different permutation and returns to a one-item root leaf; the exhaustive
-verifier runs at both ends. Typed adapters, publication through the checkpoint
-transaction, and the associated power-cut matrices remain required before
-Core Scale-1 is complete. So does staged-node spill/reload under the explicit
-2/4/8-page cache matrix.
+verifier runs at both ends. Staged-node spill/reload under the explicit
+2/4/8-page cache matrix remains required before Core Scale-1 is complete.
 
 The object map is the first authoritative consumer. `mkfs` writes an AFST
 leaf, checkpoints reference its root, normal mount/stat use bounded typed
@@ -128,3 +126,20 @@ lookups, create/delete share mixed-operation overlays, and the checker
 exhaustively visits typed leaves plus all internal blocks. The legacy
 single-block object-map codec remains only as transitional format/test code;
 newly formatted volumes do not reference it.
+
+Directories are the second ordinary-allocator consumer. `mkfs` creates an
+empty typed AFST leaf; bounded mount validates only the directory root;
+lookup descends one path; enumeration and the checker traverse exhaustively.
+Root create/delete publish directory and object-map mutations in the same
+checkpoint transaction, and each engine retires only the committed COW paths
+it replaces. A typed 1,000-entry unit test crosses leaf/internal boundaries;
+an end-to-end 300-entry volume test exceeds the legacy one-block capacity,
+then checks, remounts, enumerates, and looks up entries. Ordinary transaction,
+fault-injection, and power-cut matrices all exercise this authoritative path.
+The legacy `DirBlock` codec remains transitional test coverage only.
+
+The allocation root is the third authoritative consumer and uses the same
+engine with the permanent triple-version node pool defined by ADR-035.
+Checkpoints publish its root instead of inline region records. Its current
+transaction path still loads all region records and rewrites the complete
+fixed-topology tree; on-demand loading and dirty-path-only writes remain.

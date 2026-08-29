@@ -1,8 +1,9 @@
-//! Directory block (`docs/05-directories-and-names.md`).
+//! Legacy directory block (`docs/05-directories-and-names.md`).
 //!
-//! The prototype stores a directory as a single sorted leaf block; the B+
-//! tree grows from this leaf format later. Exceeding one block is a reported
-//! prototype limit, never silent truncation.
+//! This codec preserves the pre-AFST prototype format for transition tests.
+//! Newly formatted volumes use typed leaves in the shared COW tree and never
+//! reference this one-block representation. Exceeding one legacy block is a
+//! reported limit, never silent truncation.
 //!
 //! Each entry carries both the normalized comparison key and the original
 //! UTF-8 name, per the accepted normalization-preserving correction: original
