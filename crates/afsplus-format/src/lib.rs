@@ -33,6 +33,7 @@ pub mod le;
 pub mod object;
 pub mod omap;
 pub mod retired;
+pub mod region;
 
 use core::fmt;
 

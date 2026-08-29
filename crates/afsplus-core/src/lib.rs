@@ -41,7 +41,8 @@ pub use volume::Volume;
 
 /// Fixed prototype placement (`spec/disk-layout.md` marks exact offsets TBD;
 /// these are prototype constants, not frozen format commitments). Region
-/// bitmap slot placement lives in `afsplus_format::geometry`.
+/// region-descriptor and bitmap-slot placement lives in
+/// `afsplus_format::geometry`.
 pub mod layout {
     /// Identification block, immutable after mkfs.
     pub const IDENT_LBA: u64 = 0;

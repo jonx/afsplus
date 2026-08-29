@@ -38,8 +38,9 @@ fn mkfs_then_mount_yields_empty_root_at_generation_1() {
     let root = vol.stat(afsplus_format::OBJECT_ROOT).unwrap().unwrap();
     assert_eq!(root.object_type, ObjectType::Directory);
     assert_eq!(root.link_count, 1);
-    // 64 blocks minus 6 reserved minus 3 initial metadata.
-    assert_eq!(vol.free_blocks(), 55);
+    // 64 blocks minus 9 reserved (bootstrap + descriptor + bitmap slots)
+    // minus 3 initial metadata.
+    assert_eq!(vol.free_blocks(), 52);
 }
 
 #[test]
@@ -156,6 +157,26 @@ fn mount_reads_are_bounded_and_descendants_are_loaded_on_demand() {
 }
 
 #[test]
+fn one_gib_region_mount_is_bounded_and_small_commit_dirties_one_page() {
+    // Sparse backend: exercises the full proposed region geometry without
+    // allocating a 1 GiB host buffer.
+    let mut dev = MemoryBackend::new(BS, 262_144);
+    mkfs(&mut dev, &params(262_144)).unwrap();
+    let traced = TraceBackend::new(dev);
+    let mut vol = mount(traced).unwrap();
+    assert_eq!(vol.ident().geometry().bitmap_page_count(0), 9);
+    assert_eq!(vol.device_mut().stats().reads, 6);
+    assert_eq!(vol.allocator_ram_bytes(), 0);
+
+    vol.device_mut().reset();
+    vol.create_file_in_root("small", b"x", ts(1)).unwrap();
+    let stats = vol.last_commit_stats().unwrap();
+    assert_eq!(stats.bitmap_pages_written, 1);
+    assert_eq!(stats.region_descriptors_written, 1);
+    assert!(stats.alloc.allocator_ram_bytes <= 4096);
+}
+
+#[test]
 fn duplicate_and_invalid_names_are_rejected_without_state_change() {
     let mut dev = MemoryBackend::new(BS, 64);
     mkfs(&mut dev, &params(64)).unwrap();
@@ -173,10 +194,10 @@ fn duplicate_and_invalid_names_are_rejected_without_state_change() {
 
 #[test]
 fn out_of_space_is_reported_and_state_survives() {
-    // 16 blocks: 6 reserved + 3 mkfs metadata leaves 7 free. An empty-file
+    // 25 blocks in two tiny regions: 15 reserved + 3 mkfs metadata leaves 7 free. An empty-file
     // transaction needs 5 fresh blocks; quarantine recycling keeps two
     // transactions viable, the third must fail cleanly.
-    let mut dev = MemoryBackend::new(BS, 16);
+    let mut dev = MemoryBackend::new(BS, 25);
     mkfs(&mut dev, &params(16)).unwrap();
     let mut vol = mount(dev).unwrap();
     vol.create_file_in_root("first.txt", b"", ts(0)).unwrap();
@@ -207,14 +228,15 @@ fn transaction_io_accounting() {
     let commit = vol.last_commit_stats().unwrap();
 
     // 1 data block, then file record + dir + root record + object map +
-    // retired list, 1 bitmap page, 1 checkpoint. Three barriers (data,
-    // metadata, commit).
+    // retired list, 1 bitmap page, 1 region descriptor, 1 checkpoint. Three
+    // barriers (data, metadata, commit).
     assert_eq!(commit.data_blocks_written, 1);
     assert_eq!(commit.metadata_blocks_written, 5, "unexpected metadata write amplification");
     assert_eq!(commit.bitmap_pages_written, 1);
+    assert_eq!(commit.region_descriptors_written, 1);
     assert_eq!(commit.checkpoint_blocks_written, 1);
     assert_eq!(commit.flushes, 3, "data commit must use exactly three barriers");
-    assert_eq!(stats.writes, 8);
+    assert_eq!(stats.writes, 9);
     assert_eq!(stats.flushes, 3);
     assert!(stats.reads <= 12, "post-commit re-walk grew unexpectedly: {} reads", stats.reads);
 

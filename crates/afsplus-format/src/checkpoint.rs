@@ -6,9 +6,9 @@
 //! incomplete checkpoint fails its CRC and mount falls back to the previous
 //! slot.
 //!
-//! The checkpoint binds the allocation state: one record per region naming
-//! the bitmap slot and the bitmap generation that this checkpoint's
-//! allocation state lives in, plus a reference to the retired-block list.
+//! The checkpoint binds the allocation state with one record per region. The
+//! record selects a reserved region-descriptor slot; that descriptor selects
+//! the independently versioned bitmap pages.
 //!
 //! Structural validation (`validate_structural`) is everything that can be
 //! checked without reading any other block; mount uses it to *select* a
@@ -30,14 +30,14 @@
 //! 64     8    flags (zero; reserved)
 //! 72     4    region record count
 //! 76     4    reserved
-//! 80     ...  region records: slot (1), reserved (3), free blocks (4),
-//!             bitmap generation (8)
+//! 80     ...  region records: descriptor slot (1), reserved (3), free
+//!             blocks (4), descriptor generation (8)
 //! ```
 
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::geometry::{Geometry, BITMAP_SLOTS};
+use crate::geometry::{Geometry, DESCRIPTOR_SLOTS};
 use crate::header::{block_type, BlockHeader, HEADER_SIZE};
 use crate::{le, FormatError, OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
 
@@ -47,13 +47,13 @@ const REGION_RECORD_SIZE: usize = 16;
 /// Per-region allocation-state binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionRecord {
-    /// Which of the region's reserved bitmap slot blocks holds this state.
-    pub slot: u8,
+    /// Which reserved region-descriptor slot holds this state.
+    pub descriptor_slot: u8,
     /// Free blocks in the region at this checkpoint (also cross-checked
-    /// against the decoded bitmap page).
+    /// against the decoded descriptor and bitmap pages).
     pub free_blocks: u32,
-    /// Generation stamped in the bitmap page this record references.
-    pub bitmap_generation: u64,
+    /// Generation stamped in the region descriptor.
+    pub descriptor_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,9 +96,9 @@ impl Checkpoint {
         le::put_u32(&mut p[72..76], self.regions.len() as u32);
         for (i, record) in self.regions.iter().enumerate() {
             let offset = FIXED_PAYLOAD + i * REGION_RECORD_SIZE;
-            p[offset] = record.slot;
+            p[offset] = record.descriptor_slot;
             le::put_u32(&mut p[offset + 4..offset + 8], record.free_blocks);
-            le::put_u64(&mut p[offset + 8..offset + 16], record.bitmap_generation);
+            le::put_u64(&mut p[offset + 8..offset + 16], record.descriptor_generation);
         }
 
         BlockHeader {
@@ -143,9 +143,9 @@ impl Checkpoint {
         for i in 0..region_count {
             let offset = FIXED_PAYLOAD + i * REGION_RECORD_SIZE;
             regions.push(RegionRecord {
-                slot: p[offset],
+                descriptor_slot: p[offset],
                 free_blocks: le::get_u32(&p[offset + 4..offset + 8]),
-                bitmap_generation: le::get_u64(&p[offset + 8..offset + 16]),
+                descriptor_generation: le::get_u64(&p[offset + 8..offset + 16]),
             });
         }
         let checkpoint = Checkpoint {
@@ -172,11 +172,13 @@ impl Checkpoint {
             return Err(FormatError::Invalid("checkpoint region count does not match geometry"));
         }
         for (i, record) in self.regions.iter().enumerate() {
-            if record.slot >= BITMAP_SLOTS {
-                return Err(FormatError::Invalid("region record slot out of range"));
+            if record.descriptor_slot >= DESCRIPTOR_SLOTS {
+                return Err(FormatError::Invalid("region descriptor slot out of range"));
             }
-            if record.bitmap_generation == 0 || record.bitmap_generation > self.generation {
-                return Err(FormatError::Invalid("region bitmap generation out of range"));
+            if record.descriptor_generation == 0
+                || record.descriptor_generation > self.generation
+            {
+                return Err(FormatError::Invalid("region descriptor generation out of range"));
             }
             if record.free_blocks > geo.region_valid_blocks(i as u32) {
                 return Err(FormatError::Invalid("region free count exceeds region size"));

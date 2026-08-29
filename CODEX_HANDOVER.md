@@ -133,8 +133,8 @@ the immediate hardening and the first Stage 6 allocator experiment:
 - checkpoint selection is structural and never falls back over corrupt state
 - same-generation slots are ambiguous
 - the negative bad-ordering crash test is present
-- three reserved generational bitmap slots per region break allocator
-  self-reference
+- triple-buffered region descriptors and three reserved generational slots
+  per logical bitmap page break allocator self-reference
 - retired blocks spend one generation in quarantine before reuse
 - create-with-content, delete, the G1/G2/G3 reuse crash workload, and resource
   measurements are implemented
@@ -143,9 +143,19 @@ The continuation after `7a61c06` replaced the eager mount walk with bounded
 root loading. Ordinary mount now reads identification/checkpoints, the
 single-page prototype object map, root object/root directory, and the retired
 list root. Descendant records are decoded on access and allocation bitmaps are
-loaded page-by-page as a mutation touches regions. Clean pages that fail an
+split across independently checksummed pages, loaded as a mutation touches
+them through the selected region descriptor. Clean pages that fail an
 allocation scan are evicted immediately; the checker retains the exhaustive
 whole-volume view.
+
+The Stage B1 continuation supports the proposed 262,144-block (1 GiB at 4
+KiB) region. The verifiable wire representation needs nine bitmap pages, not
+the earlier rough estimate of eight. Three region-descriptor slots plus three
+slots per bitmap page reserve 30 blocks (120 KiB, about 0.0114%) per full
+region; region 0 additionally contains ident and the two checkpoints. A small
+transaction writes one dirty bitmap page and one descriptor before the
+checkpoint. Cross-page allocation, corruption deferral/detection, quarantine,
+and power-cut behavior are covered by executable tests.
 
 At that baseline, steps 1-5 of `implementation/peer-review-prototype-plan.md` are implemented and green:
 

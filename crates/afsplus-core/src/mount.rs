@@ -27,7 +27,7 @@ pub struct Selection {
     /// Slot index (0 = A, 1 = B) holding the chosen checkpoint.
     pub chosen_slot: usize,
     /// The other slot's checkpoint when it is also structurally valid
-    /// (needed to keep its bitmap slots untouched by the next commit).
+    /// (needed to keep its descriptor and bitmap slots untouched by the next commit).
     pub other: Option<Checkpoint>,
     /// Human-readable status per slot, for diagnostics and the checker.
     pub slot_status: [String; 2],

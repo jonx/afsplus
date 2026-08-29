@@ -17,6 +17,7 @@ use afsplus_core::verify::load_committed_state;
 use afsplus_core::{mkfs, mount, MkfsParams};
 use afsplus_format::ident::Identification;
 use afsplus_format::object::ObjectType;
+use afsplus_format::region::RegionDescriptor;
 use afsplus_format::Timespec;
 
 const BS: usize = 4096;
@@ -36,8 +37,8 @@ fn ts(seconds: i64) -> Timespec {
 
 /// Blocks a correct transaction must never write: everything reachable from
 /// the committed state, its quarantined blocks, the identification block,
-/// the current checkpoint slot, and every bitmap slot referenced by a
-/// retained checkpoint.
+/// the current checkpoint slot, and every descriptor/bitmap slot referenced
+/// by a retained checkpoint.
 fn forbidden_targets(base: &MemoryBackend) -> BTreeSet<u64> {
     let mut dev = base.clone();
     let mut buf = vec![0u8; BS];
@@ -56,7 +57,14 @@ fn forbidden_targets(base: &MemoryBackend) -> BTreeSet<u64> {
     // transaction — that is the whole point — so they are not forbidden.
     for ckpt in std::iter::once(&selection.chosen).chain(selection.other.iter()) {
         for (r, record) in ckpt.regions.iter().enumerate() {
-            forbidden.insert(geo.bitmap_slot_lba(r as u32, record.slot));
+            let region = r as u32;
+            let descriptor_lba = geo.descriptor_slot_lba(region, record.descriptor_slot);
+            forbidden.insert(descriptor_lba);
+            dev.read_block(descriptor_lba, &mut buf).unwrap();
+            let (descriptor, _) = RegionDescriptor::decode(&buf).unwrap();
+            for (page_index, binding) in descriptor.pages.iter().enumerate() {
+                forbidden.insert(geo.bitmap_slot_lba(region, page_index as u32, binding.slot));
+            }
         }
     }
     forbidden
@@ -98,7 +106,8 @@ fn every_crash_state_of_a_create_transaction_recovers_to_an_allowed_state() {
     let (_, log) = vol.into_device().into_parts();
 
     // --- Structural discipline of the commit sequence -------------------
-    // data, barrier, 5 metadata + 1 bitmap page, barrier, checkpoint, barrier.
+    // data, barrier, 5 metadata + 1 bitmap page + 1 region descriptor,
+    // barrier, checkpoint, barrier.
     let shape: Vec<&'static str> = log
         .iter()
         .map(|op| match op {
@@ -108,7 +117,7 @@ fn every_crash_state_of_a_create_transaction_recovers_to_an_allowed_state() {
         .collect();
     assert_eq!(
         shape,
-        ["w", "F", "w", "w", "w", "w", "w", "w", "F", "w", "F"],
+        ["w", "F", "w", "w", "w", "w", "w", "w", "w", "F", "w", "F"],
         "commit sequence changed"
     );
     for op in &log {
@@ -152,9 +161,13 @@ fn misordered_commit_checkpoint_before_metadata_barrier_is_caught() {
     vol.create_file_in_root("hello.txt", b"", ts(1)).unwrap();
     let (_, log) = vol.into_device().into_parts();
 
-    // Good log: [w x6, F, w(ckpt), F]. Mangled: [w x6, w(ckpt), F, F].
+    // Move the alternate-checkpoint write before the metadata barrier.
     let mut bad_log = log.clone();
-    let ckpt_write = bad_log.remove(7);
+    let checkpoint_index = bad_log
+        .iter()
+        .position(|op| matches!(op, RecordedOp::Write { lba: 2, .. }))
+        .unwrap();
+    let ckpt_write = bad_log.remove(checkpoint_index);
     assert!(matches!(ckpt_write, RecordedOp::Write { .. }));
     let first_flush = bad_log.iter().position(|op| matches!(op, RecordedOp::Flush)).unwrap();
     bad_log.insert(first_flush, ckpt_write);

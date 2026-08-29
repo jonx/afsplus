@@ -14,9 +14,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use afsplus_block::BlockDevice;
+use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::dir::{comparison_key, DirBlock};
-use afsplus_format::geometry::{Geometry, BITMAP_SLOTS};
+use afsplus_format::geometry::{Geometry, DESCRIPTOR_SLOTS};
 use afsplus_format::ident::Identification;
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::omap::ObjectMap;
@@ -401,15 +402,21 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
     // Checkpoint free counts must match the pages (already enforced on load;
     // kept here as a cheap cross-check for states built by other writers).
     for (r, record) in checkpoint.regions.iter().enumerate() {
-        let counted = state.bitmaps.pages[r].free_blocks();
+        let counted: u32 = state.bitmaps.pages[r]
+            .iter()
+            .map(BitmapPage::free_blocks)
+            .sum();
         if counted != record.free_blocks {
             findings.push(format!(
                 "region {r} free count drift: bitmap {counted}, checkpoint {}",
                 record.free_blocks
             ));
         }
-        if record.slot >= BITMAP_SLOTS {
-            findings.push(format!("region {r} references invalid bitmap slot {}", record.slot));
+        if record.descriptor_slot >= DESCRIPTOR_SLOTS {
+            findings.push(format!(
+                "region {r} references invalid descriptor slot {}",
+                record.descriptor_slot
+            ));
         }
     }
 

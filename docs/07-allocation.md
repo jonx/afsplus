@@ -71,15 +71,18 @@ may layer a larger persistent bitmap cache over the same semantics. The
 checker deliberately retains the option to load all pages for an exhaustive
 whole-volume comparison.
 
-### 3.1 Next experiment: multi-page region binding
+### 3.1 Multi-page region binding experiment
 
-The proposed 1 GiB region needs roughly eight 4 KiB bitmap pages. A naïve
-checkpoint record for every bitmap page would make the checkpoint grow with
+The executable prototype now implements the descriptor indirection below.
+The proposed 1 GiB region needs nine 4 KiB bitmap pages: the raw bits occupy
+32 KiB, but every independently verifiable page also needs its common header
+and page identity. A naïve checkpoint record for every bitmap page would make
+the checkpoint grow with
 the number of pages and would quickly turn the checkpoint block itself into a
 volume-size limit.
 
-The next prototype should instead test one reserved, triple-buffered region
-descriptor plus triple-buffered bitmap pages:
+The prototype instead uses one reserved, triple-buffered region descriptor
+plus triple-buffered bitmap pages:
 
 ```text
 checkpoint region record
@@ -97,7 +100,7 @@ physical slot, generation, free count, and any required integrity binding.
 The checkpoint keeps only one bounded record per region: descriptor slot,
 descriptor generation, and region free count.
 
-A transaction changing one allocation page would:
+A transaction changing one allocation page:
 
 1. write that page to a slot referenced by neither retained descriptor
 2. write a new region descriptor to its unused slot, reusing bindings for
@@ -105,12 +108,21 @@ A transaction changing one allocation page would:
 3. include both writes in the pre-checkpoint metadata barrier
 4. publish the alternate checkpoint
 
-For a 1 GiB region with eight bitmap pages, three descriptor blocks plus
-three slots for each page reserve 27 blocks, or 108 KiB (about 0.0103% of the
-region). These blocks remain outside the allocator they describe, so the COW
-self-reference stays broken.
+For a 1 GiB region with nine bitmap pages, three descriptor blocks plus three
+slots for each page reserve 30 blocks, or 120 KiB (about 0.0114% of the
+region). Region 0 also contains the identification block and two global
+checkpoint slots. These blocks remain outside the allocator they describe,
+so the COW self-reference stays broken.
 
-This is an experiment, not an epoch-1 commitment. It must preserve page-level
+The host tests format the full 262,144-block region geometry sparsely, force a
+single allocation run across a bitmap-page boundary, and verify that exactly
+two pages plus one descriptor are dirtied. Ordinary small transactions dirty
+one page plus one descriptor. The G1/G2/G3 quarantine crash matrix passes with
+the descriptor write included before the metadata barrier, and separate
+corruption tests prove that descriptor/page damage is found by the checker or
+the first allocator access without turning normal mount into a bitmap scan.
+
+This remains an experiment, not an epoch-1 commitment. It preserves page-level
 write amplification, on-demand loading, crash safety, and repairability. If
 the descriptor indirection performs poorly or becomes too complex, the
 delta-log/spacemap candidates remain open.

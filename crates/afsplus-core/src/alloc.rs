@@ -1,163 +1,218 @@
-//! Region allocator prototype (architecture blocker 3, step 6 of the
-//! first-contributor plan).
+//! Region allocator with COW region descriptors and multi-page bitmaps.
 //!
-//! Free-space state lives in per-region bitmap pages written to *reserved*
-//! generational slot blocks (three per region, `geometry`), chosen so the
-//! states referenced by both retained checkpoints are never overwritten.
-//! Because the pages are never allocated through the allocator they
-//! describe, the "allocate bitmap COW → bitmap changes → allocate again"
-//! recursion does not exist.
+//! Every region reserves three descriptor slots and three slots for each
+//! logical bitmap page. A checkpoint selects one descriptor; the descriptor
+//! selects the pages. Dirty pages and the replacement descriptor are written
+//! to slots referenced by neither retained checkpoint before publication.
 //!
-//! Retired/quarantine semantics: a block that becomes unreachable in
-//! transaction N keeps its allocated bit and is listed in the retired list
-//! committed with generation N. The next transaction (N + 1) *promotes* all
-//! committed retired entries — clears their bits — because the only
-//! checkpoint still selectable after N is durable is N itself, which does
-//! not reference them. A block is therefore never reusable in the same
-//! transaction that freed it, and always survives a crash back to the
-//! newest committed state.
+//! A block removed in transaction N remains allocated and enters the retired
+//! list. Transaction N+1 may clear that bit only after N is the newest durable
+//! checkpoint, so no physical block is reused while a selectable checkpoint
+//! can still reach its previous contents.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use afsplus_block::BlockDevice;
 use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::{Checkpoint, RegionRecord};
-use afsplus_format::geometry::{Geometry, BITMAP_SLOTS};
+use afsplus_format::geometry::{Geometry, BITMAP_SLOTS, DESCRIPTOR_SLOTS};
+use afsplus_format::region::RegionDescriptor;
 use afsplus_format::retired::{RetiredEntry, RetiredList};
 
 use crate::CoreError;
 
-/// Fully decoded allocation state used by the exhaustive checker. Normal
-/// mount and transactions do not instantiate this volume-sized view.
 #[derive(Debug, Clone)]
 pub struct Bitmaps {
     pub geo: Geometry,
-    pub pages: Vec<BitmapPage>,
+    /// Logical bitmap pages, grouped by region.
+    pub pages: Vec<Vec<BitmapPage>>,
 }
 
 impl Bitmaps {
-    /// Loads and validates the allocation state referenced by a checkpoint.
-    /// Every page must decode, belong to the right region, and carry exactly
-    /// the generation and free count the checkpoint recorded.
+    /// Exhaustively loads every descriptor and bitmap page. Normal mount does
+    /// not use this path; it is the checker's authoritative allocation view.
     pub fn load<D: BlockDevice>(
         dev: &mut D,
         geo: &Geometry,
         checkpoint: &Checkpoint,
     ) -> Result<Bitmaps, CoreError> {
         let mut buf = vec![0u8; geo.block_size];
-        let mut pages = Vec::with_capacity(checkpoint.regions.len());
-        for (r, record) in checkpoint.regions.iter().enumerate() {
-            let region = r as u32;
-            let page = load_region_page(dev, geo, region, record, &mut buf)?;
-            pages.push(page);
+        let mut regions = Vec::with_capacity(checkpoint.regions.len());
+        for (region_index, record) in checkpoint.regions.iter().enumerate() {
+            let region = region_index as u32;
+            let descriptor = load_region_descriptor(dev, geo, region, record, &mut buf)?;
+            let mut pages = Vec::with_capacity(descriptor.pages.len());
+            for page_index in 0..descriptor.pages.len() as u32 {
+                pages.push(load_bitmap_page(
+                    dev,
+                    geo,
+                    region,
+                    page_index,
+                    &descriptor,
+                    &mut buf,
+                )?);
+            }
+            regions.push(pages);
         }
-        Ok(Bitmaps { geo: *geo, pages })
+        Ok(Bitmaps {
+            geo: *geo,
+            pages: regions,
+        })
     }
 
     pub fn is_allocated(&self, lba: u64) -> bool {
         let region = self.geo.region_of(lba);
-        let index = (lba - self.geo.region_base(region)) as u32;
-        self.pages[region as usize].is_allocated(index)
+        let region_index = (lba - self.geo.region_base(region)) as u32;
+        let (page_index, local_index) = self.geo.bitmap_page_for_index(region_index);
+        self.pages[region as usize][page_index as usize].is_allocated(local_index)
     }
 
     pub fn free_blocks_total(&self) -> u64 {
-        self.pages.iter().map(|p| p.free_blocks() as u64).sum()
+        self.pages
+            .iter()
+            .flatten()
+            .map(|page| page.free_blocks() as u64)
+            .sum()
     }
 
-    /// Bytes of allocator state held in memory (the loaded bitmap pages).
     pub fn ram_bytes(&self) -> usize {
-        self.pages.iter().map(|p| p.bits.len()).sum()
+        self.pages
+            .iter()
+            .flatten()
+            .map(|page| page.bits.len())
+            .sum()
     }
 }
 
-fn load_region_page<D: BlockDevice>(
+fn load_region_descriptor<D: BlockDevice>(
     dev: &mut D,
     geo: &Geometry,
     region: u32,
     record: &RegionRecord,
     buf: &mut [u8],
-) -> Result<BitmapPage, CoreError> {
-    let lba = geo.bitmap_slot_lba(region, record.slot);
+) -> Result<RegionDescriptor, CoreError> {
+    let lba = geo.descriptor_slot_lba(region, record.descriptor_slot);
     dev.read_block(lba, buf)?;
-    let (page, generation) = BitmapPage::decode(buf)
-        .map_err(|e| CoreError::Corrupt(format!("region {region} bitmap: {e}")))?;
-    if page.region != region || page.valid_blocks != geo.region_valid_blocks(region) {
-        return Err(CoreError::Corrupt(format!("region {region} bitmap geometry mismatch")));
-    }
-    if generation != record.bitmap_generation {
+    let (descriptor, generation) = RegionDescriptor::decode(buf)
+        .map_err(|e| CoreError::Corrupt(format!("region {region} descriptor: {e}")))?;
+    if generation != record.descriptor_generation {
         return Err(CoreError::Corrupt(format!(
-            "region {region} bitmap generation {generation} does not match checkpoint record {}",
-            record.bitmap_generation
+            "region {region} descriptor generation {generation} does not match checkpoint record {}",
+            record.descriptor_generation
         )));
     }
-    if page.free_blocks() != record.free_blocks {
+    descriptor
+        .validate(geo, region, generation)
+        .map_err(|e| CoreError::Corrupt(format!("region {region} descriptor: {e}")))?;
+    if descriptor.free_blocks != record.free_blocks {
         return Err(CoreError::Corrupt(format!(
-            "region {region} free count mismatch: bitmap {}, checkpoint {}",
-            page.free_blocks(),
-            record.free_blocks
+            "region {region} free count mismatch: descriptor {}, checkpoint {}",
+            descriptor.free_blocks, record.free_blocks
+        )));
+    }
+    Ok(descriptor)
+}
+
+fn load_bitmap_page<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    region: u32,
+    page_index: u32,
+    descriptor: &RegionDescriptor,
+    buf: &mut [u8],
+) -> Result<BitmapPage, CoreError> {
+    let binding = descriptor.pages.get(page_index as usize).ok_or_else(|| {
+        CoreError::Corrupt(format!("region {region} missing bitmap page {page_index}"))
+    })?;
+    dev.read_block(geo.bitmap_slot_lba(region, page_index, binding.slot), buf)?;
+    let (page, generation) = BitmapPage::decode(buf).map_err(|e| {
+        CoreError::Corrupt(format!("region {region} bitmap page {page_index}: {e}"))
+    })?;
+    if page.region != region
+        || page.page_index != page_index
+        || page.valid_blocks != geo.bitmap_page_valid_blocks(region, page_index)
+    {
+        return Err(CoreError::Corrupt(format!(
+            "region {region} bitmap page {page_index} geometry mismatch"
+        )));
+    }
+    if generation != binding.generation {
+        return Err(CoreError::Corrupt(format!(
+            "region {region} bitmap page {page_index} generation {generation} does not match descriptor binding {}",
+            binding.generation
+        )));
+    }
+    if page.free_blocks() != binding.free_blocks {
+        return Err(CoreError::Corrupt(format!(
+            "region {region} bitmap page {page_index} free count mismatch: bitmap {}, descriptor {}",
+            page.free_blocks(), binding.free_blocks
         )));
     }
     Ok(page)
 }
 
-/// Measured allocator behavior for one transaction.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AllocStats {
     pub blocks_allocated: u64,
     pub blocks_retired: u64,
     pub blocks_promoted: u64,
-    /// Generations spent in quarantine by each promoted block, summed
-    /// (divide by `blocks_promoted` for the mean; 1 by construction today).
     pub reclaim_latency_generations: u64,
     pub bitmap_pages_dirty: u64,
+    pub region_descriptors_dirty: u64,
+    /// Peak resident bitmap payload bytes (descriptor objects excluded).
     pub allocator_ram_bytes: u64,
 }
 
-/// Working allocation state of one in-flight transaction. Dropped on any
-/// error, leaving the committed state untouched; adopted on durable commit.
 pub struct TxAllocator {
     geo: Geometry,
     current_records: Vec<RegionRecord>,
-    /// Transaction working set. Clean pages that fail an allocation scan are
-    /// evicted immediately; dirty pages stay until commit.
-    pages: BTreeMap<u32, BitmapPage>,
+    other_records: Option<Vec<RegionRecord>>,
+    descriptors: BTreeMap<u32, RegionDescriptor>,
+    other_descriptors: BTreeMap<u32, RegionDescriptor>,
+    /// Transaction working set. Clean scan pages are evicted immediately;
+    /// dirty pages remain through commit.
+    pages: BTreeMap<(u32, u32), BitmapPage>,
     new_generation: u64,
+    dirty_pages: BTreeSet<(u32, u32)>,
     dirty_regions: BTreeSet<u32>,
     new_retired: RetiredList,
     stats: AllocStats,
 }
 
 impl TxAllocator {
-    /// Starts a transaction: clones the committed bitmaps and promotes every
-    /// committed retired entry (they are unreachable from the only still
-    /// selectable checkpoint, so their quarantine ends now).
     pub fn begin<D: BlockDevice>(
         dev: &mut D,
         geo: &Geometry,
         current: &Checkpoint,
+        other: Option<&Checkpoint>,
         committed_retired: &RetiredList,
         new_generation: u64,
     ) -> Result<TxAllocator, CoreError> {
         let mut tx = TxAllocator {
             geo: *geo,
             current_records: current.regions.clone(),
+            other_records: other.map(|checkpoint| checkpoint.regions.clone()),
+            descriptors: BTreeMap::new(),
+            other_descriptors: BTreeMap::new(),
             pages: BTreeMap::new(),
             new_generation,
+            dirty_pages: BTreeSet::new(),
             dirty_regions: BTreeSet::new(),
             new_retired: RetiredList::default(),
             stats: AllocStats::default(),
         };
         for entry in &committed_retired.entries {
             let region = tx.geo.region_of(entry.lba);
-            let index = (entry.lba - tx.geo.region_base(region)) as u32;
-            let page = tx.page_mut(dev, region)?;
-            if !page.set_allocated(index, false) {
+            let region_index = (entry.lba - tx.geo.region_base(region)) as u32;
+            let (page_index, local_index) = tx.geo.bitmap_page_for_index(region_index);
+            let page = tx.page_mut(dev, region, page_index)?;
+            if !page.set_allocated(local_index, false) {
                 return Err(CoreError::Corrupt(format!(
                     "retired block {} was not marked allocated",
                     entry.lba
                 )));
             }
-            tx.dirty_regions.insert(region);
+            tx.mark_dirty(region, page_index);
             tx.stats.blocks_promoted += 1;
             tx.stats.reclaim_latency_generations +=
                 new_generation.saturating_sub(entry.retire_generation);
@@ -165,69 +220,83 @@ impl TxAllocator {
         Ok(tx)
     }
 
-    /// Allocates one block, lowest-address first fit.
     pub fn allocate<D: BlockDevice>(&mut self, dev: &mut D) -> Result<u64, CoreError> {
         self.allocate_run(dev, 1)
     }
 
-    /// Allocates `len` physically contiguous blocks, lowest first fit.
     pub fn allocate_run<D: BlockDevice>(
         &mut self,
         dev: &mut D,
         len: u64,
     ) -> Result<u64, CoreError> {
         assert!(len > 0);
+        if len > self.geo.region_size as u64 {
+            return Err(CoreError::NoSpace);
+        }
         let geo = self.geo;
         for region in 0..geo.region_count() {
             let base = geo.region_base(region);
-            let valid = geo.region_valid_blocks(region);
+            let mut run_start = 0u32;
+            let mut run_len = 0u64;
             let mut found = None;
-            {
-                let page = self.page_mut(dev, region)?;
-                let mut run_start = 0u32;
-                let mut run_len = 0u64;
-                for index in 0..valid {
-                    let lba = base + index as u64;
-                    if geo.is_allocatable(lba) && !page.is_allocated(index) {
-                        if run_len == 0 {
-                            run_start = index;
+            for page_index in 0..geo.bitmap_page_count(region) {
+                let first_block = page_index * afsplus_format::bitmap::BITMAP_PAGE_BLOCKS;
+                {
+                    let page = self.page_mut(dev, region, page_index)?;
+                    for local_index in 0..page.valid_blocks {
+                        let region_index = first_block + local_index;
+                        let lba = base + region_index as u64;
+                        if geo.is_allocatable(lba) && !page.is_allocated(local_index) {
+                            if run_len == 0 {
+                                run_start = region_index;
+                            }
+                            run_len += 1;
+                            if run_len == len {
+                                found = Some(run_start);
+                                break;
+                            }
+                        } else {
+                            run_len = 0;
                         }
-                        run_len += 1;
-                        if run_len == len {
-                            found = Some(run_start);
-                            break;
-                        }
-                    } else {
-                        run_len = 0;
                     }
                 }
-            }
-            if let Some(start_index) = found {
-                let page = self.pages.get_mut(&region).expect("loaded above");
-                for index in start_index..start_index + len as u32 {
-                    page.set_allocated(index, true);
+                if !self.dirty_pages.contains(&(region, page_index)) {
+                    self.pages.remove(&(region, page_index));
                 }
-                self.dirty_regions.insert(region);
-                self.stats.blocks_allocated += len;
-                return Ok(base + start_index as u64);
+                if found.is_some() {
+                    break;
+                }
             }
-            if !self.dirty_regions.contains(&region) {
-                self.pages.remove(&region);
+            if let Some(start) = found {
+                for region_index in start..start + len as u32 {
+                    let (page_index, local_index) = geo.bitmap_page_for_index(region_index);
+                    self.page_mut(dev, region, page_index)?
+                        .set_allocated(local_index, true);
+                    self.mark_dirty(region, page_index);
+                }
+                self.stats.blocks_allocated += len;
+                return Ok(base + start as u64);
             }
         }
         Err(CoreError::NoSpace)
     }
 
-    /// Retires a block that the new state no longer reaches. Its bit stays
-    /// allocated; it enters quarantine via the new retired list.
     pub fn retire<D: BlockDevice>(&mut self, dev: &mut D, lba: u64) -> Result<(), CoreError> {
         if !self.geo.is_allocatable(lba) {
-            return Err(CoreError::Corrupt(format!("retiring block {lba} that is not live")));
+            return Err(CoreError::Corrupt(format!(
+                "retiring block {lba} that is not live"
+            )));
         }
         let region = self.geo.region_of(lba);
-        let index = (lba - self.geo.region_base(region)) as u32;
-        if !self.page_mut(dev, region)?.is_allocated(index) {
-            return Err(CoreError::Corrupt(format!("retiring block {lba} that is not live")));
+        let region_index = (lba - self.geo.region_base(region)) as u32;
+        let (page_index, local_index) = self.geo.bitmap_page_for_index(region_index);
+        if !self
+            .page_mut(dev, region, page_index)?
+            .is_allocated(local_index)
+        {
+            return Err(CoreError::Corrupt(format!(
+                "retiring block {lba} that is not live"
+            )));
         }
         self.new_retired
             .insert(lba, self.new_generation)
@@ -240,72 +309,130 @@ impl TxAllocator {
         &self.new_retired
     }
 
+    fn mark_dirty(&mut self, region: u32, page_index: u32) {
+        self.dirty_pages.insert((region, page_index));
+        self.dirty_regions.insert(region);
+    }
+
+    fn ensure_descriptors<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        region: u32,
+    ) -> Result<(), CoreError> {
+        if !self.descriptors.contains_key(&region) {
+            let record = self.current_records.get(region as usize).ok_or_else(|| {
+                CoreError::Corrupt(format!("missing descriptor record for region {region}"))
+            })?;
+            let mut buf = vec![0u8; self.geo.block_size];
+            let descriptor = load_region_descriptor(dev, &self.geo, region, record, &mut buf)?;
+            self.descriptors.insert(region, descriptor);
+
+            if let Some(other_records) = &self.other_records {
+                let other_record = other_records.get(region as usize).ok_or_else(|| {
+                    CoreError::Corrupt(format!("older checkpoint missing region {region}"))
+                })?;
+                let other = load_region_descriptor(dev, &self.geo, region, other_record, &mut buf)?;
+                self.other_descriptors.insert(region, other);
+            }
+        }
+        Ok(())
+    }
+
     fn page_mut<D: BlockDevice>(
         &mut self,
         dev: &mut D,
         region: u32,
+        page_index: u32,
     ) -> Result<&mut BitmapPage, CoreError> {
-        if !self.pages.contains_key(&region) {
-            let record = self
-                .current_records
-                .get(region as usize)
-                .ok_or_else(|| CoreError::Corrupt(format!("missing bitmap record for region {region}")))?;
+        let key = (region, page_index);
+        if !self.pages.contains_key(&key) {
+            self.ensure_descriptors(dev, region)?;
+            let descriptor = self.descriptors.get(&region).expect("loaded above");
             let mut buf = vec![0u8; self.geo.block_size];
-            let page = load_region_page(dev, &self.geo, region, record, &mut buf)?;
-            self.pages.insert(region, page);
-            let resident: u64 = self
-                .pages
-                .values()
-                .map(|loaded| loaded.bits.len() as u64)
-                .sum();
+            let page = load_bitmap_page(dev, &self.geo, region, page_index, descriptor, &mut buf)?;
+            self.pages.insert(key, page);
+            let resident = self.pages.values().map(|page| page.bits.len() as u64).sum();
             self.stats.allocator_ram_bytes = self.stats.allocator_ram_bytes.max(resident);
         }
-        Ok(self.pages.get_mut(&region).expect("inserted above"))
+        Ok(self.pages.get_mut(&key).expect("inserted above"))
     }
 
-    /// Finalizes the transaction's allocation state: encoded bitmap pages
-    /// for every dirty region (each written to a slot that neither retained
-    /// checkpoint references) and the region records for the new checkpoint.
     pub fn finish(
         mut self,
         current: &Checkpoint,
         other: Option<&Checkpoint>,
     ) -> Result<FinishedAlloc, CoreError> {
-        let geo = self.geo;
-        let mut page_writes = Vec::new();
+        let mut bitmap_writes = Vec::new();
+        let mut descriptor_writes = Vec::new();
         let mut records = Vec::with_capacity(current.regions.len());
-        for (r, current_record) in current.regions.iter().enumerate() {
-            let region = r as u32;
-            if self.dirty_regions.contains(&region) {
-                let slot = choose_slot(
-                    current_record.slot,
-                    other.and_then(|c| c.regions.get(r)).map(|rec| rec.slot),
-                );
-                let page = self.pages.get(&region).ok_or_else(|| {
-                    CoreError::Corrupt(format!("dirty region {region} has no working bitmap"))
+        for (region_index, current_record) in current.regions.iter().enumerate() {
+            let region = region_index as u32;
+            if !self.dirty_regions.contains(&region) {
+                records.push(*current_record);
+                continue;
+            }
+            let mut descriptor = self.descriptors.get(&region).cloned().ok_or_else(|| {
+                CoreError::Corrupt(format!("dirty region {region} has no descriptor"))
+            })?;
+            for page_index in 0..descriptor.pages.len() as u32 {
+                if !self.dirty_pages.contains(&(region, page_index)) {
+                    continue;
+                }
+                let current_binding = descriptor.pages[page_index as usize];
+                let older_slot = self
+                    .other_descriptors
+                    .get(&region)
+                    .and_then(|older| older.pages.get(page_index as usize))
+                    .map(|binding| binding.slot);
+                let slot = choose_slot(BITMAP_SLOTS, current_binding.slot, older_slot);
+                let page = self.pages.get(&(region, page_index)).ok_or_else(|| {
+                    CoreError::Corrupt(format!(
+                        "dirty region {region} bitmap page {page_index} is not resident"
+                    ))
                 })?;
-                let encoded = page
-                    .encode(geo.block_size, self.new_generation)
-                    .map_err(CoreError::Format)?;
-                page_writes.push((geo.bitmap_slot_lba(region, slot), encoded));
-                records.push(RegionRecord {
+                bitmap_writes.push((
+                    self.geo.bitmap_slot_lba(region, page_index, slot),
+                    page.encode(self.geo.block_size, self.new_generation)
+                        .map_err(CoreError::Format)?,
+                ));
+                descriptor.pages[page_index as usize] = afsplus_format::region::BitmapBinding {
                     slot,
                     free_blocks: page.free_blocks(),
-                    bitmap_generation: self.new_generation,
-                });
-            } else {
-                records.push(*current_record);
+                    generation: self.new_generation,
+                };
             }
+            descriptor.free_blocks = descriptor
+                .pages
+                .iter()
+                .map(|binding| binding.free_blocks)
+                .sum();
+            let older_descriptor_slot = other
+                .and_then(|checkpoint| checkpoint.regions.get(region_index))
+                .map(|record| record.descriptor_slot);
+            let descriptor_slot = choose_slot(
+                DESCRIPTOR_SLOTS,
+                current_record.descriptor_slot,
+                older_descriptor_slot,
+            );
+            descriptor_writes.push((
+                self.geo.descriptor_slot_lba(region, descriptor_slot),
+                descriptor
+                    .encode(self.geo.block_size, self.new_generation)
+                    .map_err(CoreError::Format)?,
+            ));
+            records.push(RegionRecord {
+                descriptor_slot,
+                free_blocks: descriptor.free_blocks,
+                descriptor_generation: self.new_generation,
+            });
         }
-        self.stats.bitmap_pages_dirty = page_writes.len() as u64;
-        let resident: u64 = self
-            .pages
-            .values()
-            .map(|page| page.bits.len() as u64)
-            .sum();
+        self.stats.bitmap_pages_dirty = bitmap_writes.len() as u64;
+        self.stats.region_descriptors_dirty = descriptor_writes.len() as u64;
+        let resident = self.pages.values().map(|page| page.bits.len() as u64).sum();
         self.stats.allocator_ram_bytes = self.stats.allocator_ram_bytes.max(resident);
         Ok(FinishedAlloc {
-            page_writes,
+            bitmap_writes,
+            descriptor_writes,
             records,
             retired: self.new_retired,
             stats: self.stats,
@@ -314,23 +441,19 @@ impl TxAllocator {
 }
 
 pub struct FinishedAlloc {
-    /// (lba, encoded page) for every dirty region.
-    pub page_writes: Vec<(u64, Vec<u8>)>,
-    /// Region records for the new checkpoint, in region order.
+    pub bitmap_writes: Vec<(u64, Vec<u8>)>,
+    pub descriptor_writes: Vec<(u64, Vec<u8>)>,
     pub records: Vec<RegionRecord>,
     pub retired: RetiredList,
     pub stats: AllocStats,
 }
 
-/// Picks the smallest bitmap slot referenced by neither retained checkpoint.
-/// With three slots and at most two retained references, one always remains.
-fn choose_slot(current: u8, other: Option<u8>) -> u8 {
-    (0..BITMAP_SLOTS)
-        .find(|s| *s != current && Some(*s) != other)
+fn choose_slot(slot_count: u8, current: u8, other: Option<u8>) -> u8 {
+    (0..slot_count)
+        .find(|slot| *slot != current && Some(*slot) != other)
         .expect("three slots minus at most two references")
 }
 
-/// Convenience for tests and the checker.
 pub fn retired_entries(list: &RetiredList) -> &[RetiredEntry] {
     &list.entries
 }
@@ -338,14 +461,52 @@ pub fn retired_entries(list: &RetiredList) -> &[RetiredEntry] {
 #[cfg(test)]
 mod tests {
     use super::choose_slot;
+    use super::TxAllocator;
+    use afsplus_block::MemoryBackend;
+    use afsplus_format::bitmap::BITMAP_PAGE_BLOCKS;
+    use afsplus_format::Timespec;
+
+    use crate::{mkfs, mount, MkfsParams};
 
     #[test]
     fn slot_choice_avoids_both_retained_references() {
-        assert_eq!(choose_slot(0, Some(1)), 2);
-        assert_eq!(choose_slot(1, Some(0)), 2);
-        assert_eq!(choose_slot(2, Some(0)), 1);
-        assert_eq!(choose_slot(2, Some(1)), 0);
-        assert_eq!(choose_slot(0, None), 1);
-        assert_eq!(choose_slot(0, Some(0)), 1);
+        assert_eq!(choose_slot(3, 0, Some(1)), 2);
+        assert_eq!(choose_slot(3, 1, Some(0)), 2);
+        assert_eq!(choose_slot(3, 2, Some(0)), 1);
+        assert_eq!(choose_slot(3, 2, Some(1)), 0);
+        assert_eq!(choose_slot(3, 0, None), 1);
+        assert_eq!(choose_slot(3, 0, Some(0)), 1);
+    }
+
+    #[test]
+    fn one_run_can_cross_bitmap_pages_with_page_level_writes() {
+        let mut dev = MemoryBackend::new(4096, 262_144);
+        mkfs(
+            &mut dev,
+            &MkfsParams {
+                uuid: [17u8; 16],
+                label: "MultiPage".into(),
+                region_size: 262_144,
+                timestamp: Timespec::default(),
+            },
+        )
+        .unwrap();
+        let vol = mount(dev).unwrap();
+        let geo = vol.ident().geometry();
+        let checkpoint = vol.checkpoint().clone();
+        let retired = vol.retired().clone();
+        let mut dev = vol.into_device();
+
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, &retired, 2).unwrap();
+        let start = tx
+            .allocate_run(&mut dev, BITMAP_PAGE_BLOCKS as u64 + 1)
+            .unwrap();
+        assert_eq!(start, geo.region0_reserved_blocks() + 3);
+        let finished = tx.finish(&checkpoint, None).unwrap();
+        assert_eq!(finished.bitmap_writes.len(), 2);
+        assert_eq!(finished.descriptor_writes.len(), 1);
+        assert_eq!(finished.stats.bitmap_pages_dirty, 2);
+        assert_eq!(finished.stats.region_descriptors_dirty, 1);
+        assert!(finished.stats.allocator_ram_bytes <= 2 * 4096);
     }
 }

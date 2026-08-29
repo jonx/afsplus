@@ -104,7 +104,7 @@ See `docs/22-pfs3-and-pfs4-lessons.md`, `docs/23-pfs3-stage0-review.md`, and `ad
 
 ### Allocation regions
 
-A single enormous global free-space structure scales badly and makes low-memory implementations unattractive. AFS+ divides the volume into allocation regions so allocation/repair work can remain bounded. The exact transactional representation of region free-space state is intentionally still an implementation question to be resolved by the allocator prototype.
+A single enormous global free-space structure scales badly and makes low-memory implementations unattractive. AFS+ divides the volume into allocation regions so allocation/repair work can remain bounded. The current executable candidate uses independently checksummed bitmap pages selected by triple-buffered region descriptors; it supports the proposed 1 GiB region while loading pages on demand. This remains an experimental format decision until the Stage B1 measurements and crash semantics are accepted.
 
 ### Compatibility profiles
 

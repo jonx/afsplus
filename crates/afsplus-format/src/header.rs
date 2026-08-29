@@ -38,6 +38,8 @@ pub mod block_type {
     pub const OBJECT_MAP: u32 = u32::from_le_bytes(*b"AFSM");
     /// Region bitmap page, `"AFSB"`.
     pub const BITMAP: u32 = u32::from_le_bytes(*b"AFSB");
+    /// Region allocation descriptor, `"AFSG"`.
+    pub const REGION_DESCRIPTOR: u32 = u32::from_le_bytes(*b"AFSG");
     /// Retired-block list, `"AFSR"`.
     pub const RETIRED: u32 = u32::from_le_bytes(*b"AFSR");
 }

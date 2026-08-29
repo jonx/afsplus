@@ -10,6 +10,7 @@ use afsplus_format::dir::{DirBlock, DirEntry};
 use afsplus_format::header::BlockHeader;
 use afsplus_format::ident::Identification;
 use afsplus_format::omap::ObjectMap;
+use afsplus_format::region::RegionDescriptor;
 use afsplus_format::Timespec;
 
 const BS: usize = 4096;
@@ -35,6 +36,36 @@ fn ts(seconds: i64) -> Timespec {
 
 fn read_ident(dev: &MemoryBackend) -> Identification {
     Identification::decode(&dev.peek(0)).unwrap()
+}
+
+#[test]
+fn allocator_descriptor_and_page_corruption_are_deferred_but_never_accepted() {
+    let base = formatted();
+    let ident = read_ident(&base);
+    let checkpoint = Checkpoint::decode(&base.peek(1), &ident.uuid).unwrap();
+    let geo = ident.geometry();
+    let record = checkpoint.regions[0];
+    let descriptor_lba = geo.descriptor_slot_lba(0, record.descriptor_slot);
+    let (descriptor, _) = RegionDescriptor::decode(&base.peek(descriptor_lba)).unwrap();
+    let bitmap_lba = geo.bitmap_slot_lba(0, 0, descriptor.pages[0].slot);
+
+    for (kind, lba) in [("descriptor", descriptor_lba), ("bitmap", bitmap_lba)] {
+        let mut dev = base.clone();
+        let mut block = dev.peek(lba);
+        block[100] ^= 0x80;
+        dev.apply_raw(lba, &block);
+
+        // Mount reads namespace roots only, so unrelated allocator damage is
+        // discovered by the exhaustive checker or when allocation begins.
+        let report = check_device(&mut dev);
+        assert!(!report.is_clean(), "{kind} corruption escaped the checker");
+        let mut vol = mount(dev).expect("bounded mount must not scan allocator pages");
+        assert!(matches!(
+            vol.create_file_in_root("probe", b"", ts(1)),
+            Err(CoreError::Corrupt(_))
+        ));
+        assert_eq!(vol.generation(), 1, "failed mutation changed committed state");
+    }
 }
 
 #[test]

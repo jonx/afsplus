@@ -11,8 +11,8 @@
 //! and promotes the previous transaction's retirees; see `alloc`.
 //!
 //! Per-transaction resource accounting is collected from the start
-//! ([`CommitStats`]) — metadata bytes, bitmap pages, flushes, retired and
-//! promoted blocks, reclaim latency, allocator RAM.
+//! ([`CommitStats`]) — metadata bytes, bitmap pages, region descriptors,
+//! flushes, retired and promoted blocks, reclaim latency, allocator RAM.
 
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
@@ -34,6 +34,7 @@ pub struct CommitStats {
     /// COW metadata blocks (records, directories, object map, retired list).
     pub metadata_blocks_written: u64,
     pub bitmap_pages_written: u64,
+    pub region_descriptors_written: u64,
     pub checkpoint_blocks_written: u64,
     pub flushes: u64,
     /// Total bytes issued to the device by this transaction.
@@ -183,6 +184,7 @@ impl<D: BlockDevice> Volume<D> {
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
+            self.other_checkpoint.as_ref(),
             &self.state.retired,
             generation,
         )?;
@@ -291,6 +293,7 @@ impl<D: BlockDevice> Volume<D> {
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
+            self.other_checkpoint.as_ref(),
             &self.state.retired,
             generation,
         )?;
@@ -430,7 +433,8 @@ impl<D: BlockDevice> Volume<D> {
         let mut stats = CommitStats {
             data_blocks_written: data_writes.len() as u64,
             metadata_blocks_written: meta_writes.len() as u64,
-            bitmap_pages_written: finished.page_writes.len() as u64,
+            bitmap_pages_written: finished.bitmap_writes.len() as u64,
+            region_descriptors_written: finished.descriptor_writes.len() as u64,
             checkpoint_blocks_written: 1,
             alloc: finished.stats,
             ..CommitStats::default()
@@ -445,8 +449,13 @@ impl<D: BlockDevice> Volume<D> {
             stats.flushes += 1;
         }
 
-        // 2. COW metadata and dirty bitmap pages, then barrier.
-        for (lba, block) in meta_writes.iter().chain(finished.page_writes.iter()) {
+        // 2. COW metadata, dirty bitmap pages, then their new region
+        // descriptors, all before the publication barrier.
+        for (lba, block) in meta_writes
+            .iter()
+            .chain(finished.bitmap_writes.iter())
+            .chain(finished.descriptor_writes.iter())
+        {
             self.dev.write_block(*lba, block)?;
         }
         self.dev.flush()?;
@@ -473,6 +482,7 @@ impl<D: BlockDevice> Volume<D> {
         stats.bytes_written = (stats.data_blocks_written
             + stats.metadata_blocks_written
             + stats.bitmap_pages_written
+            + stats.region_descriptors_written
             + stats.checkpoint_blocks_written)
             * block_size as u64;
 

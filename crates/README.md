@@ -8,9 +8,9 @@ as such in the crate docs.
 ## Crates
 
 - `afsplus-format` — on-disk structure encode/decode (identification, A/B
-  checkpoints with per-region allocation records, object records with one
+  checkpoints with per-region descriptor records, object records with one
   direct data extent, single-block directories/object map, region bitmap
-  pages, retired-block list), CRC32C, explicit little-endian codecs, region
+  pages and region descriptors, retired-block list), CRC32C, explicit little-endian codecs, region
   geometry. `no_std` + `alloc` (verified against a bare-metal target), zero
   dependencies. Bounds-first validation; every decoder rejects corrupted
   input via checksums and never panics on garbage.
@@ -26,9 +26,10 @@ as such in the crate docs.
   allocation bitmaps are loaded page-by-page only as a transaction touches
   regions, while the exhaustive checker may load them all. Corruption is reported
   when the relevant root/descendant is read, never masked by falling back.
-  The allocator keeps free-space state in per-region bitmap pages
-  written to reserved generational slot blocks (3 per region), which breaks
-  the bitmap-COW self-reference; freed blocks are quarantined via a retired
+  The allocator keeps free-space state in multi-page region bitmaps selected
+  through triple-buffered region descriptors. Every descriptor and logical
+  page has three reserved generational slots, which breaks the bitmap-COW
+  self-reference; freed blocks are quarantined via a retired
   list for one full generation before reuse. Per-transaction resource
   accounting (metadata/bitmap/flush counts, retired/promoted blocks, reclaim
   latency, allocator RAM) is collected from the start.
@@ -58,8 +59,8 @@ recovery states accepted. A negative-control test replays a deliberately
 mis-ordered commit (checkpoint before the metadata barrier) and proves the
 matrix catches it.
 
-Next: multi-page region bitmaps and larger regions, extent trees beyond one
-direct extent, directory B+ trees beyond one leaf, and the delta-log/spacemap
+Next: extent trees beyond one direct extent, directory B+ trees beyond one
+leaf, and the delta-log/spacemap
 allocation alternatives — to be built only if this design fails on
 correctness, write amplification, or scalability (the measurements test is
 the baseline to beat).

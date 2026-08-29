@@ -11,6 +11,7 @@ use afsplus_format::ident::Identification;
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::omap::ObjectMap;
 use afsplus_format::retired::RetiredList;
+use afsplus_format::region::{BitmapBinding, RegionDescriptor};
 use afsplus_format::{FormatError, Timespec, DEFAULT_BLOCK_SHIFT, DEFAULT_BLOCK_SIZE, OBJECT_ROOT};
 
 const BS: usize = DEFAULT_BLOCK_SIZE;
@@ -27,7 +28,7 @@ fn sample_ident() -> Identification {
         region_size: 256,
         total_blocks: 1024,
         checkpoint_slots: [1, 2],
-        metadata_start: 6,
+        metadata_start: 9,
         label: "Test Volume".into(),
     }
 }
@@ -43,10 +44,10 @@ fn sample_checkpoint() -> Checkpoint {
         committed_tx_id: 5,
         flags: 0,
         regions: vec![
-            RegionRecord { slot: 0, free_blocks: 100, bitmap_generation: 5 },
-            RegionRecord { slot: 2, free_blocks: 200, bitmap_generation: 3 },
-            RegionRecord { slot: 1, free_blocks: 250, bitmap_generation: 1 },
-            RegionRecord { slot: 0, free_blocks: 250, bitmap_generation: 1 },
+            RegionRecord { descriptor_slot: 0, free_blocks: 100, descriptor_generation: 5 },
+            RegionRecord { descriptor_slot: 2, free_blocks: 200, descriptor_generation: 3 },
+            RegionRecord { descriptor_slot: 1, free_blocks: 250, descriptor_generation: 1 },
+            RegionRecord { descriptor_slot: 0, free_blocks: 250, descriptor_generation: 1 },
         ],
     }
 }
@@ -84,11 +85,20 @@ fn sample_dir() -> DirBlock {
 }
 
 fn sample_bitmap() -> BitmapPage {
-    let mut page = BitmapPage::all_free(3, 100);
+    let mut page = BitmapPage::all_free(3, 0, 0, 100);
     for index in [0, 1, 2, 50, 99] {
         page.set_allocated(index, true);
     }
     page
+}
+
+fn sample_region_descriptor() -> RegionDescriptor {
+    RegionDescriptor {
+        region: 3,
+        valid_blocks: 100,
+        free_blocks: 95,
+        pages: vec![BitmapBinding { slot: 1, free_blocks: 95, generation: 5 }],
+    }
 }
 
 fn sample_retired() -> RetiredList {
@@ -127,12 +137,12 @@ fn checkpoint_structural_validation() {
 
     // Slot out of range.
     let mut ckpt = sample_checkpoint();
-    ckpt.regions[0].slot = 3;
+    ckpt.regions[0].descriptor_slot = 3;
     assert!(ckpt.validate_structural(&geo).is_err());
 
     // Bitmap generation from the future.
     let mut ckpt = sample_checkpoint();
-    ckpt.regions[1].bitmap_generation = 6;
+    ckpt.regions[1].descriptor_generation = 6;
     assert!(ckpt.validate_structural(&geo).is_err());
 
     // Object map inside the reserved area.
@@ -196,8 +206,8 @@ fn bitmap_roundtrip_and_free_count() {
     assert!(!decoded.is_allocated(51));
     // Trailing bits beyond valid range must be sealed as allocated.
     let mut torn = block.clone();
-    // Bit 101 lives in payload byte 8 + 12; clearing it must be detected.
-    let byte_index = 32 + 8 + (101 / 8);
+    // Bit 101 lives in payload byte 16 + 12; clearing it must be detected.
+    let byte_index = 32 + 16 + (101 / 8);
     torn[byte_index] &= !(1 << (101 % 8));
     assert!(BitmapPage::decode(&torn).is_err());
 }
@@ -228,20 +238,51 @@ fn geometry_reserved_blocks() {
     geo.validate().unwrap();
     assert_eq!(geo.region_count(), 3);
     assert_eq!(geo.region_valid_blocks(2), 44);
-    // Region 0: ident, checkpoints, bitmap slots.
-    for lba in 0..6 {
+    // Region 0: ident, checkpoints, descriptor slots, bitmap slots.
+    for lba in 0..9 {
         assert!(geo.is_reserved(lba), "lba {lba}");
     }
-    assert!(!geo.is_reserved(6));
-    // Region 1: three bitmap slots at its base.
-    for lba in 128..131 {
+    assert!(!geo.is_reserved(9));
+    // Region 1: three descriptor plus three bitmap slots at its base.
+    for lba in 128..134 {
         assert!(geo.is_reserved(lba), "lba {lba}");
     }
-    assert!(!geo.is_reserved(131));
-    assert_eq!(geo.bitmap_slot_lba(0, 0), 3);
-    assert_eq!(geo.bitmap_slot_lba(0, 2), 5);
-    assert_eq!(geo.bitmap_slot_lba(1, 1), 129);
+    assert!(!geo.is_reserved(134));
+    assert_eq!(geo.descriptor_slot_lba(0, 0), 3);
+    assert_eq!(geo.descriptor_slot_lba(0, 2), 5);
+    assert_eq!(geo.bitmap_slot_lba(0, 0, 0), 6);
+    assert_eq!(geo.bitmap_slot_lba(0, 0, 2), 8);
+    assert_eq!(geo.descriptor_slot_lba(1, 1), 129);
+    assert_eq!(geo.bitmap_slot_lba(1, 0, 1), 132);
     assert!(!geo.is_allocatable(299 + 1));
+}
+
+#[test]
+fn multi_page_region_descriptor_roundtrip() {
+    let geo = Geometry { block_size: BS, total_blocks: 262_144, region_size: 262_144 };
+    geo.validate().unwrap();
+    assert_eq!(geo.bitmap_page_count(0), 9);
+    // 30 allocation-metadata blocks plus ident and two checkpoints.
+    assert_eq!(geo.region0_reserved_blocks(), 33);
+
+    let pages: Vec<_> = (0..geo.bitmap_page_count(0))
+        .map(|page_index| BitmapBinding {
+            slot: (page_index % 3) as u8,
+            free_blocks: geo.bitmap_page_valid_blocks(0, page_index),
+            generation: 4,
+        })
+        .collect();
+    let descriptor = RegionDescriptor {
+        region: 0,
+        valid_blocks: geo.region_valid_blocks(0),
+        free_blocks: pages.iter().map(|binding| binding.free_blocks).sum(),
+        pages,
+    };
+    let encoded = descriptor.encode(BS, 4).unwrap();
+    let (decoded, generation) = RegionDescriptor::decode(&encoded).unwrap();
+    assert_eq!(generation, 4);
+    decoded.validate(&geo, 0, generation).unwrap();
+    assert_eq!(decoded, descriptor);
 }
 
 #[test]
@@ -297,6 +338,7 @@ fn every_flipped_byte_is_detected() {
         sample_record().encode(BS, 5).unwrap(),
         sample_dir().encode(BS, 5).unwrap(),
         sample_bitmap().encode(BS, 5).unwrap(),
+        sample_region_descriptor().encode(BS, 5).unwrap(),
         sample_retired().encode(BS, 5).unwrap(),
     ];
     for block in blocks {
@@ -310,6 +352,7 @@ fn every_flipped_byte_is_detected() {
                     && DirBlock::decode(&corrupt).is_err()
                     && ObjectMap::decode(&corrupt).is_err()
                     && BitmapPage::decode(&corrupt).is_err()
+                    && RegionDescriptor::decode(&corrupt).is_err()
                     && RetiredList::decode(&corrupt).is_err(),
                 "corruption at offset {offset} was not detected"
             );
@@ -329,6 +372,7 @@ fn decoders_reject_garbage_without_panicking() {
     assert!(DirBlock::decode(&garbage).is_err());
     assert!(ObjectMap::decode(&garbage).is_err());
     assert!(BitmapPage::decode(&garbage).is_err());
+    assert!(RegionDescriptor::decode(&garbage).is_err());
     assert!(RetiredList::decode(&garbage).is_err());
     // Truncated buffers.
     assert!(Identification::decode(&garbage[..16]).is_err());

@@ -45,15 +45,16 @@ fn per_transaction_resource_accounting() {
     vol.create_file_in_root("file-3", &[9u8; 6000], ts(11)).unwrap();
     rows.push(("create file-3 (reuses quarantine)".into(), vol.last_commit_stats().unwrap()));
 
-    println!("\n{:<34} {:>4} {:>4} {:>4} {:>6} {:>7} {:>8} {:>8} {:>7}",
-        "transaction", "data", "meta", "bmap", "flush", "retired", "promoted", "latency", "bytes");
+    println!("\n{:<34} {:>4} {:>4} {:>4} {:>4} {:>6} {:>7} {:>8} {:>8} {:>7}",
+        "transaction", "data", "meta", "bmap", "desc", "flush", "retired", "promoted", "latency", "bytes");
     for (label, s) in &rows {
         println!(
-            "{:<34} {:>4} {:>4} {:>4} {:>6} {:>7} {:>8} {:>8} {:>7}",
+            "{:<34} {:>4} {:>4} {:>4} {:>4} {:>6} {:>7} {:>8} {:>8} {:>7}",
             label,
             s.data_blocks_written,
             s.metadata_blocks_written,
             s.bitmap_pages_written,
+            s.region_descriptors_written,
             s.flushes,
             s.alloc.blocks_retired,
             s.alloc.blocks_promoted,
@@ -76,6 +77,12 @@ fn per_transaction_resource_accounting() {
         assert!(s.metadata_blocks_written <= 5, "{label}");
         // Single-region working sets must not dirty every region.
         assert!(s.bitmap_pages_written <= 2, "{label}: bitmap write amplification");
+        assert_eq!(
+            s.region_descriptors_written,
+            s.alloc.region_descriptors_dirty,
+            "{label}: descriptor accounting drift"
+        );
+        assert!(s.region_descriptors_written <= 2, "{label}: descriptor write amplification");
         assert!(s.flushes <= 3, "{label}");
         // Reclaim latency: exactly one generation per promoted block.
         assert_eq!(s.alloc.reclaim_latency_generations, s.alloc.blocks_promoted, "{label}");

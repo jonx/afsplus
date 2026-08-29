@@ -31,7 +31,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::crc32c::CHECKSUM_CRC32C;
-use crate::geometry::{Geometry, REGION0_RESERVED};
+use crate::geometry::Geometry;
 use crate::header::{block_type, BlockHeader, HEADER_SIZE};
 use crate::{le, FormatError, DEFAULT_BLOCK_SHIFT, FORMAT_EPOCH, FS_MAGIC};
 
@@ -163,7 +163,7 @@ impl Identification {
         if self.checkpoint_slots != [1, 2] {
             return Err(FormatError::Invalid("prototype requires checkpoint slots at LBA 1 and 2"));
         }
-        if self.metadata_start != REGION0_RESERVED {
+        if self.metadata_start != self.geometry().region0_reserved_blocks() {
             return Err(FormatError::Invalid("metadata start does not match reserved layout"));
         }
         Ok(())
