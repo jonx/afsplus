@@ -1,0 +1,15 @@
+[package]
+name = "afsplus-check"
+description = "AFS+ volume checker: shared-core validation with human and versioned JSON output."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+afsplus-format = { path = "../afsplus-format" }
+afsplus-block = { path = "../afsplus-block" }
+afsplus-core = { path = "../afsplus-core" }
+
+[lints]
+workspace = true

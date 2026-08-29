@@ -1,0 +1,14 @@
+[package]
+name = "afsplus-core"
+description = "Portable AFS+ core prototype: mkfs, mount, checkpoint COW commit."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+afsplus-format = { path = "../afsplus-format" }
+afsplus-block = { path = "../afsplus-block" }
+
+[lints]
+workspace = true

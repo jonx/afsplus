@@ -1,0 +1,12 @@
+[package]
+name = "afsplus-block"
+description = "Block-provider abstraction and test backends for AFS+ (memory, sparse file, trace, fault injection, power-cut simulation)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
