@@ -24,7 +24,7 @@ All format-level quantities that can reasonably grow must use 64-bit representat
 - file sizes
 - volume block counts
 - allocation generation numbers
-- journal transaction numbers
+- transaction/checkpoint generation numbers
 - change-stream sequence numbers
 
 ### G3. Modern developer workloads
@@ -53,9 +53,11 @@ An implementation must be able to operate with bounded memory. No core structure
 
 A developer must be able to implement a conforming reader using only the published specification.
 
-### G6. Safe evolution
+### G6. Safe evolution and retirement
 
 Future format additions must not require a new global filesystem version whenever possible.
+
+Experimental features must also be able to become deprecated or retired without reusing their identifiers or making existing volumes silently unreadable. Active incompatible state may be removed only through an explicit conversion/migration that leaves no remaining dependency on the retired feature.
 
 ### G7. Repairability
 
@@ -83,16 +85,17 @@ The format should permit small implementations, but modern AROS is not limited t
 
 AFS+ 1.0 does not require:
 
-- snapshots
+- general user-visible snapshot management/history
 - data deduplication
 - filesystem RAID
 - send/receive
 - transparent data compression
 - transparent data encryption
-- reflinks
-- full data checksumming
+- mandatory full data checksumming
 
-The architecture must permit carefully specified future extensions.
+Shared extents/reflinks are no longer listed as a non-goal because the epoch-1 extent architecture is intended to support them. Optional data checksums have a reserved extension path but are not required for the first production profile.
+
+Retaining one or more previous checkpoints, or temporarily retaining an exact object/content generation for correctness, recovery, testing, or a privileged scan handle, does **not** by itself commit AFS+ to a general snapshot product/API. The storage/versioning cost of those guarantees must still be proven by the prototype.
 
 ### N6. Application-specific filesystem behavior
 
