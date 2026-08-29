@@ -1,6 +1,6 @@
 # ADR-034: Shared bounded copy-on-write tree engine
 
-Status: Accepted for the prototype; three authoritative adapters published
+Status: Accepted for the prototype; four authoritative adapters published
 
 ## Context
 
@@ -69,11 +69,14 @@ overlay is emitted as one final image per LBA, so intermediate node images are
 never sent to the block device. Every descent validates that the child level
 is exactly one less than its parent and remains within the depth cap.
 
-The first mutation prototype retains that complete dirty overlay in memory.
-This proves COW topology and eliminates repeated device reads, but is not yet
-the cache-2/4/8 proof: the tiny-cache tranche must be able to spill an
-unreachable staged node to its allocated block and reload it later while
-keeping only the active path and split peer resident.
+Modern mutation retains that complete dirty overlay in memory. Constrained
+mutation may instead spill an unreachable staged node to its allocated block
+and reload it later through an LRU. The implementation qualifies budgets of
+2, 4, and 8 staged pages. It drops decoded ancestors before recursive descent,
+keeps compact coordinates, and re-reads parents on unwind; RAII counters cover
+decoded and derived nodes and observe a maximum of two during insertion and
+merge-heavy deletion. The compact per-LBA overlay index and caller-owned
+operation batch remain proportional to transaction size.
 
 Deletion rebalances an underfull child with an adjacent sibling before the
 parent is staged. If their combined image fits, they merge; otherwise their
@@ -117,8 +120,12 @@ transactional multi-upsert/delete, leaf/internal split, sibling
 merge/redistribution, and root height growth/reduction. A permuted 300-key
 test grows a three-level tree, replaces a key, then deletes 299 keys in a
 different permutation and returns to a one-item root leaf; the exhaustive
-verifier runs at both ends. Staged-node spill/reload under the explicit
-2/4/8-page cache matrix remains required before Core Scale-1 is complete.
+verifier runs at both ends. Staged-node spill/reload passes the explicit
+2/4/8-page matrix for insertion and deletion, including merges and root
+collapse. Split selection computes candidate encoded sizes without repeatedly
+cloning whole nodes. A transaction-level power-cut matrix also discovers and
+publishes the directory-root 1→2 split boundary, then qualifies the merge and
+root collapse back to height 1 under every recorded write and flush.
 
 The object map is the first authoritative consumer. `mkfs` writes an AFST
 leaf, checkpoints reference its root, normal mount/stat use bounded typed
@@ -140,8 +147,9 @@ then checks, remounts, enumerates, and looks up entries. Ordinary transaction,
 fault-injection, and power-cut matrices all exercise this authoritative path.
 The legacy `DirBlock` codec remains transitional test coverage only.
 
-The allocation root is the third authoritative consumer and uses the same
+The allocation root is another authoritative consumer and uses the same
 engine with the permanent triple-version node pool defined by ADR-035.
-Checkpoints publish its root instead of inline region records. Its current
-transaction path still loads all region records and rewrites the complete
-fixed-topology tree; on-demand loading and dirty-path-only writes remain.
+Checkpoints publish its root instead of inline region records. Transactions
+load current and retained region records on demand and upsert only dirty
+records. A 145-region crash matrix crosses the first leaf-capacity boundary,
+and the sparse 1 TiB qualification exercises a 1,024-record multi-level root.

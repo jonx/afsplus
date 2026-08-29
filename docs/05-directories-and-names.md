@@ -35,12 +35,32 @@ rename preserves object identity, rejects topology cycles, and has an
 every-write/every-flush power-cut matrix accepting only the complete before or
 after namespace.
 
-The current tests bulk-build 1,000 typed entries across leaf/internal pages
-and exercise 300 root-namespace creates through real transactions, followed
-by exhaustive checking, remount, enumeration, and lookup. This removes the
-old one-block directory limit. The 100,000-entry scale gate, bounded iterator,
-atomic replacement, symlinks/orphan handling, and the explicit 2/4/8-page
-mutation-cache matrix remain Core Scale-1 work.
+The tests bulk-build 1,000 typed entries across leaf/internal pages and
+exercise 300 root-namespace creates through real transactions, followed by
+exhaustive checking, remount, enumeration, and lookup. This removes the old
+one-block directory limit. An explicit release qualification inserts 100,000
+permuted typed entries, producing a height-three tree with 2,011 nodes, then
+streams them in binary order while validating every original name, comparison
+key, type hint, and child ID. Boundary lookups are checked separately.
+
+The constrained run retains at most eight final staged images and two decoded
+or derived nodes. The latest standalone release run on the development host
+completed in 7.44 seconds, with
+172,409 device reads, 174,411 provisional spill writes, 172,408 spill reloads,
+and 36.5 MB process peak RSS. The RSS includes the 100,000-entry caller-owned
+test batch, sparse memory backend, overlay index, allocator, and test harness;
+the page-residency counters isolate the engine's full-page cache. The high
+spill amplification is the explicit low-memory tradeoff, not the modern-host
+default.
+
+A separate every-write/every-flush matrix publishes the exact entry that
+changes the root directory from height 1 to 2, then removes it to force sibling
+merge and root collapse back to height 1. Every modeled crash image checks and
+recovers to exactly the complete pre- or post-transaction namespace.
+
+Opaque resumable directory cookies, atomic replacement, symlinks, and a
+formal orphan lifecycle remain later API/format work; they are not hidden
+inside the completed Scale-1 directory-capacity gate.
 
 ## 3. UTF-8
 

@@ -1,6 +1,9 @@
 //! Copy-on-write insertion and splitting for the shared bounded tree.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 
 use afsplus_block::BlockDevice;
 use afsplus_format::geometry::Geometry;
@@ -51,6 +54,9 @@ pub struct TreeMutationStats {
     pub staged_spill_reloads: u64,
     /// Maximum final staged images retained in memory at once.
     pub max_resident_staged_nodes: u64,
+    /// Maximum decoded or derived full nodes alive at once. Compact descent
+    /// frames and child descriptors are not full-page equivalents.
+    pub max_live_decoded_nodes: u64,
     pub max_depth: u8,
 }
 
@@ -191,6 +197,7 @@ where
         resident_staged_nodes: 0,
         access_clock: 0,
         resident_lru: BTreeSet::new(),
+        decoded_residency: Rc::new(NodeResidency::default()),
         stats: TreeMutationStats::default(),
     };
     let mut root = root_lba;
@@ -209,7 +216,7 @@ where
                     }
                     let left = replacement.children[0].reference;
                     let right = &replacement.children[1];
-                    let root_node = TreeNode {
+                    let root_node = context.track_node(TreeNode {
                         kind: spec.kind,
                         owner: spec.owner,
                         level: old_level + 1,
@@ -225,7 +232,7 @@ where
                             })?,
                             value: child_value(right.reference).map_err(CoreError::Format)?,
                         }],
-                    };
+                    });
                     let lba = context.tx.allocate_tree_block(context.dev)?;
                     context.stats.nodes_allocated += 1;
                     context.stage_node(lba, &root_node)?;
@@ -252,6 +259,8 @@ where
         }
     }
     context.stats.final_nodes_written = context.writes.len() as u64;
+    context.stats.max_live_decoded_nodes = context.decoded_residency.peak.get();
+    debug_assert_eq!(context.decoded_residency.live.get(), 0);
     let writes = context
         .writes
         .into_iter()
@@ -275,7 +284,68 @@ struct MutationContext<'a, D: BlockDevice, A: TreeAllocator<D>> {
     resident_staged_nodes: usize,
     access_clock: u64,
     resident_lru: BTreeSet<(u64, u64)>,
+    decoded_residency: Rc<NodeResidency>,
     stats: TreeMutationStats,
+}
+
+#[derive(Default)]
+struct NodeResidency {
+    live: Cell<u64>,
+    peak: Cell<u64>,
+}
+
+impl NodeResidency {
+    fn track(self: &Rc<Self>, node: TreeNode) -> TrackedNode {
+        let live = self.live.get().saturating_add(1);
+        self.live.set(live);
+        self.peak.set(self.peak.get().max(live));
+        TrackedNode {
+            node: Some(node),
+            residency: Rc::clone(self),
+        }
+    }
+}
+
+/// RAII accounting for decoded and derived full tree nodes. Keeping this guard
+/// attached to the node makes the tiny-cache measurement follow actual Rust
+/// lifetimes rather than hand-maintained recursion counters.
+struct TrackedNode {
+    node: Option<TreeNode>,
+    residency: Rc<NodeResidency>,
+}
+
+impl TrackedNode {
+    fn fork(&self, node: TreeNode) -> Self {
+        self.residency.track(node)
+    }
+}
+
+impl Deref for TrackedNode {
+    type Target = TreeNode;
+
+    fn deref(&self) -> &Self::Target {
+        self.node.as_ref().expect("tracked node is always present")
+    }
+}
+
+impl DerefMut for TrackedNode {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.node.as_mut().expect("tracked node is always present")
+    }
+}
+
+impl Drop for TrackedNode {
+    fn drop(&mut self) {
+        if self.node.take().is_some() {
+            self.residency.live.set(
+                self.residency
+                    .live
+                    .get()
+                    .checked_sub(1)
+                    .expect("tracked node residency underflow"),
+            );
+        }
+    }
 }
 
 struct StagedImage {
@@ -298,13 +368,13 @@ struct Replacement {
 struct PendingNode {
     old_lba: u64,
     old_staged: bool,
-    node: TreeNode,
+    node: TrackedNode,
     /// Exact subtree minimum. It is absent only for an empty tree or where a
     /// root boundary does not need to expose the value to a parent.
     min_key: Option<Vec<u8>>,
 }
 
-type NodeImage = (TreeNode, Option<Vec<u8>>);
+type NodeImage = (TrackedNode, Option<Vec<u8>>);
 
 impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
     #[allow(clippy::too_many_arguments)]
@@ -363,7 +433,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         let child_index = node
             .items
             .partition_point(|item| item.key.as_slice() <= key);
-        let mut children = children_from_node(&node)?;
+        let children = children_from_node(&node)?;
         let child_lower = if child_index == 0 {
             lower.clone()
         } else {
@@ -375,9 +445,15 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             .map(|item| item.key.clone())
             .or_else(|| upper.clone());
         let child = children[child_index].clone();
+        let child_level = node.level - 1;
+        // Keep only the compact descent frame across recursion. The parent
+        // page is re-read from the staged LRU or committed device on unwind,
+        // so tree height does not multiply decoded-page residency.
+        drop(children);
+        drop(node);
         let replacement = self.upsert_node(
             child.reference.lba,
-            Some(node.level - 1),
+            Some(child_level),
             child.min_key.clone(),
             child_lower,
             child_upper,
@@ -386,11 +462,20 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             key,
             value,
         )?;
+        let (node, staged, _) = self.read_node(
+            lba,
+            expected_level,
+            lower.as_deref(),
+            upper.as_deref(),
+            is_root,
+            depth,
+        )?;
+        let mut children = children_from_node(&node)?;
         children.splice(child_index..=child_index, replacement.children);
         if child_index == 0 {
             children[0].min_key = None;
         }
-        node = internal_from_children(node, &children)?;
+        let node = internal_from_children(node, &children)?;
         if node.fits(self.geo.block_size) {
             return self.persist(lba, staged, vec![(node, known_min)]);
         }
@@ -451,9 +536,12 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         children[0].min_key = known_min.clone();
         let (child_lower, child_upper) = child_range(&node, child_index, &lower, &upper);
         let child = children[child_index].clone();
+        let child_level = node.level - 1;
+        drop(children);
+        drop(node);
         let edited = self.delete_node(
             child.reference.lba,
-            Some(node.level - 1),
+            Some(child_level),
             child.min_key,
             child_lower,
             child_upper,
@@ -461,56 +549,80 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             depth + 1,
             key,
         )?;
+        let (replace_start, replace_end, replacement) =
+            if needs_rebalance(&edited.node, self.geo.block_size)? {
+                let (parent, _, _) = self.read_node(
+                    lba,
+                    expected_level,
+                    lower.as_deref(),
+                    upper.as_deref(),
+                    is_root,
+                    depth,
+                )?;
+                let mut parent_children = children_from_node(&parent)?;
+                parent_children[0].min_key = known_min.clone();
+                let sibling_index = if child_index + 1 < parent_children.len() {
+                    child_index + 1
+                } else {
+                    child_index - 1
+                };
+                let (sibling_lower, sibling_upper) =
+                    child_range(&parent, sibling_index, &lower, &upper);
+                let sibling_desc = parent_children[sibling_index].clone();
+                drop(parent_children);
+                drop(parent);
+                let (sibling_node, sibling_staged, _) = self.read_node(
+                    sibling_desc.reference.lba,
+                    Some(child_level),
+                    sibling_lower.as_deref(),
+                    sibling_upper.as_deref(),
+                    false,
+                    depth + 1,
+                )?;
+                let sibling = PendingNode {
+                    old_lba: sibling_desc.reference.lba,
+                    old_staged: sibling_staged,
+                    node: sibling_node,
+                    min_key: sibling_desc.min_key,
+                };
+                let (left_index, left, right) = if child_index < sibling_index {
+                    (child_index, edited, sibling)
+                } else {
+                    (sibling_index, sibling, edited)
+                };
+                let sources = vec![
+                    (left.old_lba, left.old_staged),
+                    (right.old_lba, right.old_staged),
+                ];
+                let outputs = rebalance_pair(left, right, self.geo.block_size)?;
+                let output_count = outputs.len();
+                let replacement = self.persist_sources(sources, outputs)?;
+                if output_count == 1 {
+                    self.stats.merges += 1;
+                } else {
+                    self.stats.redistributions += 1;
+                }
+                (left_index, left_index + 1, replacement)
+            } else {
+                let source = (edited.old_lba, edited.old_staged);
+                let output = (edited.node, edited.min_key);
+                let replacement = self.persist_sources(vec![source], vec![output])?;
+                (child_index, child_index, replacement)
+            };
 
-        if needs_rebalance(&edited.node, self.geo.block_size)? {
-            let sibling_index = if child_index + 1 < children.len() {
-                child_index + 1
-            } else {
-                child_index - 1
-            };
-            let (sibling_lower, sibling_upper) = child_range(&node, sibling_index, &lower, &upper);
-            let sibling_desc = children[sibling_index].clone();
-            let (sibling_node, sibling_staged, _) = self.read_node(
-                sibling_desc.reference.lba,
-                Some(node.level - 1),
-                sibling_lower.as_deref(),
-                sibling_upper.as_deref(),
-                false,
-                depth + 1,
-            )?;
-            let sibling = PendingNode {
-                old_lba: sibling_desc.reference.lba,
-                old_staged: sibling_staged,
-                node: sibling_node,
-                min_key: sibling_desc.min_key,
-            };
-            let (left_index, left, right) = if child_index < sibling_index {
-                (child_index, edited, sibling)
-            } else {
-                (sibling_index, sibling, edited)
-            };
-            let outputs = rebalance_pair(&left, &right, self.geo.block_size)?;
-            let output_count = outputs.len();
-            let sources = vec![
-                (left.old_lba, left.old_staged),
-                (right.old_lba, right.old_staged),
-            ];
-            let replacement = self.persist_sources(sources, outputs)?;
-            if output_count == 1 {
-                self.stats.merges += 1;
-            } else {
-                self.stats.redistributions += 1;
-            }
-            children.splice(left_index..=left_index + 1, replacement);
-        } else {
-            let source = (edited.old_lba, edited.old_staged);
-            let output = (edited.node, edited.min_key);
-            let replacement = self.persist_sources(vec![source], vec![output])?;
-            children.splice(child_index..=child_index, replacement);
-        }
-
+        let (node, staged, _) = self.read_node(
+            lba,
+            expected_level,
+            lower.as_deref(),
+            upper.as_deref(),
+            is_root,
+            depth,
+        )?;
+        let mut children = children_from_node(&node)?;
+        children[0].min_key = known_min.clone();
+        children.splice(replace_start..=replace_end, replacement);
         let min_key = children[0].min_key.clone().or(known_min);
-        node = internal_allow_one(node, &children)?;
+        let node = internal_allow_one(node, &children)?;
         Ok(PendingNode {
             old_lba: lba,
             old_staged: staged,
@@ -528,7 +640,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         upper: Option<&[u8]>,
         is_root: bool,
         depth: u8,
-    ) -> Result<(TreeNode, bool, u64), CoreError> {
+    ) -> Result<(TrackedNode, bool, u64), CoreError> {
         if depth > MAX_TREE_LEVEL {
             return Err(CoreError::Corrupt(
                 "tree mutation exceeded maximum depth".into(),
@@ -590,7 +702,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             ));
         }
         validate_node_range(&node, lower, upper, is_root)?;
-        Ok((node, is_staged, generation))
+        Ok((self.track_node(node), is_staged, generation))
     }
 
     fn persist(
@@ -758,6 +870,10 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         self.access_clock = self.access_clock.saturating_add(1);
         self.access_clock
     }
+
+    fn track_node(&self, node: TreeNode) -> TrackedNode {
+        self.decoded_residency.track(node)
+    }
 }
 
 fn children_from_node(node: &TreeNode) -> Result<Vec<ChildDesc>, CoreError> {
@@ -816,9 +932,9 @@ fn needs_rebalance(node: &TreeNode, block_size: usize) -> Result<bool, CoreError
 }
 
 fn internal_allow_one(
-    mut template: TreeNode,
+    mut template: TrackedNode,
     children: &[ChildDesc],
-) -> Result<TreeNode, CoreError> {
+) -> Result<TrackedNode, CoreError> {
     if children.is_empty() {
         return Err(CoreError::Corrupt(
             "internal tree node lost every child".into(),
@@ -835,8 +951,8 @@ fn internal_allow_one(
 }
 
 fn rebalance_pair(
-    left: &PendingNode,
-    right: &PendingNode,
+    left: PendingNode,
+    mut right: PendingNode,
     block_size: usize,
 ) -> Result<Vec<NodeImage>, CoreError> {
     if left.node.level != right.node.level
@@ -857,9 +973,10 @@ fn rebalance_pair(
         {
             return Err(CoreError::Corrupt("tree rebalance siblings overlap".into()));
         }
-        let mut combined = left.node.clone();
-        combined.items.extend(right.node.items.iter().cloned());
+        let mut combined = left.node;
+        combined.items.append(&mut right.node.items);
         combined.subtree_items = combined.items.len() as u64;
+        drop(right.node);
         let combined_min = combined.items.first().map(|item| item.key.clone());
         if combined.fits(block_size) {
             return Ok(vec![(combined, combined_min)]);
@@ -880,8 +997,9 @@ fn rebalance_pair(
         ));
     }
     children.extend(right_children);
+    drop(right.node);
     let combined_min = children[0].min_key.clone();
-    let combined = internal_from_children(left.node.clone(), &children)?;
+    let combined = internal_from_children(left.node, &children)?;
     if combined.fits(block_size) {
         return Ok(vec![(combined, combined_min)]);
     }
@@ -893,9 +1011,9 @@ fn rebalance_pair(
 }
 
 fn internal_from_children(
-    mut template: TreeNode,
+    mut template: TrackedNode,
     children: &[ChildDesc],
-) -> Result<TreeNode, CoreError> {
+) -> Result<TrackedNode, CoreError> {
     if children.len() < 2 {
         return Err(CoreError::Corrupt(
             "internal tree node has fewer than two children".into(),
@@ -921,60 +1039,115 @@ fn internal_from_children(
     Ok(template)
 }
 
-fn split_leaf(node: TreeNode, block_size: usize) -> Result<(TreeNode, TreeNode), CoreError> {
-    let mut best = None;
+fn split_leaf(
+    mut node: TrackedNode,
+    block_size: usize,
+) -> Result<(TrackedNode, TrackedNode), CoreError> {
+    let capacity = block_size.saturating_sub(afsplus_format::header::HEADER_SIZE);
+    let mut best: Option<(usize, usize)> = None;
     for split in 1..node.items.len() {
-        let mut left = node.clone();
-        let mut right = node.clone();
-        left.items = node.items[..split].to_vec();
-        right.items = node.items[split..].to_vec();
-        left.subtree_items = left.items.len() as u64;
-        right.subtree_items = right.items.len() as u64;
-        if left.fits(block_size) && right.fits(block_size) {
-            let difference = left.encoded_len()?.abs_diff(right.encoded_len()?);
+        let left_len = encoded_items_len(&node.items[..split])?;
+        let right_len = encoded_items_len(&node.items[split..])?;
+        if left_len <= capacity && right_len <= capacity {
+            let difference = left_len.abs_diff(right_len);
             if best
                 .as_ref()
-                .is_none_or(|(best_difference, _, _)| difference < *best_difference)
+                .is_none_or(|(best_difference, _)| difference < *best_difference)
             {
-                best = Some((difference, left, right));
+                best = Some((difference, split));
             }
         }
     }
-    best.map(|(_, left, right)| (left, right))
+    let split = best
+        .map(|(_, split)| split)
         .ok_or(CoreError::PrototypeLimit(
             "tree leaf item cannot be split to fit",
-        ))
+        ))?;
+    let right_items = node.items.split_off(split);
+    node.subtree_items = node.items.len() as u64;
+    let right = node.fork(TreeNode {
+        kind: node.kind,
+        owner: node.owner,
+        level: node.level,
+        subtree_items: right_items.len() as u64,
+        leftmost_child: 0,
+        leftmost_items: 0,
+        items: right_items,
+    });
+    Ok((node, right))
 }
 
 fn split_internal(
-    node: TreeNode,
+    node: TrackedNode,
     children: &[ChildDesc],
     block_size: usize,
-) -> Result<(TreeNode, TreeNode, Vec<u8>), CoreError> {
-    let mut best = None;
+) -> Result<(TrackedNode, TrackedNode, Vec<u8>), CoreError> {
+    let capacity = block_size.saturating_sub(afsplus_format::header::HEADER_SIZE);
+    let mut best: Option<(usize, usize)> = None;
     for split in 2..children.len().saturating_sub(1) {
-        let left_children = &children[..split];
-        let mut right_children = children[split..].to_vec();
-        let promoted = right_children[0]
-            .min_key
-            .take()
-            .ok_or_else(|| CoreError::Corrupt("internal split has no promoted key".into()))?;
-        let left = internal_from_children(node.clone(), left_children)?;
-        let right = internal_from_children(node.clone(), &right_children)?;
-        if left.fits(block_size) && right.fits(block_size) {
-            let difference = left.encoded_len()?.abs_diff(right.encoded_len()?);
+        let left_len = encoded_children_len(&children[..split])?;
+        let right_len = encoded_children_len(&children[split..])?;
+        if left_len <= capacity && right_len <= capacity {
+            let difference = left_len.abs_diff(right_len);
             if best
                 .as_ref()
-                .is_none_or(|(best_difference, _, _, _)| difference < *best_difference)
+                .is_none_or(|(best_difference, _)| difference < *best_difference)
             {
-                best = Some((difference, left, right, promoted));
+                best = Some((difference, split));
             }
         }
     }
-    best.map(|(_, left, right, promoted)| (left, right, promoted))
+    let split = best
+        .map(|(_, split)| split)
         .ok_or(CoreError::PrototypeLimit(
             "internal tree node cannot be split to fit",
-        ))
+        ))?;
+    let promoted = children[split]
+        .min_key
+        .clone()
+        .ok_or_else(|| CoreError::Corrupt("internal split has no promoted key".into()))?;
+    let right_template = node.fork(TreeNode {
+        kind: node.kind,
+        owner: node.owner,
+        level: node.level,
+        subtree_items: 0,
+        leftmost_child: 0,
+        leftmost_items: 0,
+        items: Vec::new(),
+    });
+    let left = internal_from_children(node, &children[..split])?;
+    let mut right_children = children[split..].to_vec();
+    right_children[0].min_key = None;
+    let right = internal_from_children(right_template, &right_children)?;
+    Ok((left, right, promoted))
+}
+
+fn encoded_items_len(items: &[TreeItem]) -> Result<usize, CoreError> {
+    items.iter().try_fold(32usize, |length, item| {
+        length
+            .checked_add(8)
+            .and_then(|value| value.checked_add(item.key.len()))
+            .and_then(|value| value.checked_add(item.value.len()))
+            .ok_or_else(|| CoreError::Corrupt("tree node size overflow".into()))
+    })
+}
+
+fn encoded_children_len(children: &[ChildDesc]) -> Result<usize, CoreError> {
+    if children.len() < 2 {
+        return Err(CoreError::Corrupt(
+            "internal split side has fewer than two children".into(),
+        ));
+    }
+    children[1..].iter().try_fold(32usize, |length, child| {
+        let key = child
+            .min_key
+            .as_ref()
+            .ok_or_else(|| CoreError::Corrupt("internal child has no minimum".into()))?;
+        length
+            .checked_add(8 + 16)
+            .and_then(|value| value.checked_add(key.len()))
+            .ok_or_else(|| CoreError::Corrupt("tree node size overflow".into()))
+    })
 }
 
 fn validate_upsert(key: &[u8], value: &[u8]) -> Result<(), CoreError> {
@@ -1005,7 +1178,7 @@ mod tests {
     };
     use crate::alloc::TxAllocator;
     use crate::allocation_root::{self, ReservedTreePool};
-    use crate::tree::{lookup, validate_tree, TreeSpec};
+    use crate::tree::{lookup, validate_tree, visit_tree_nodes, TreeSpec};
     use crate::{mkfs, mount, MkfsParams};
 
     fn wide_key(value: u64) -> Vec<u8> {
@@ -1253,6 +1426,11 @@ mod tests {
             assert!(mutation.stats.staged_spill_writes > 0);
             assert!(mutation.stats.staged_spill_reloads > 0);
             assert!(mutation.stats.max_resident_staged_nodes <= cache_pages as u64);
+            assert!(
+                mutation.stats.max_live_decoded_nodes <= 2,
+                "insertion retained {} decoded nodes with a {cache_pages}-page staged cache",
+                mutation.stats.max_live_decoded_nodes
+            );
             assert!(mutation.writes.len() < mutation.stats.final_nodes_written as usize);
             for (lba, block) in &mutation.writes {
                 dev.write_block(*lba, block).unwrap();
@@ -1269,11 +1447,73 @@ mod tests {
             .unwrap();
             assert_eq!(summary.items, 1_000);
             assert!(summary.height >= 3);
+
+            let generation_two_spec = TreeSpec {
+                max_generation: 2,
+                ..spec
+            };
+            let mut current_blocks = Vec::new();
+            visit_tree_nodes(
+                &mut dev,
+                &geo,
+                mutation.root_lba,
+                generation_two_spec,
+                |lba, _| {
+                    current_blocks.push(lba);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let delete_keys: Vec<_> = (0..999u64)
+                .map(|ordinal| wide_key((ordinal * 137) % 999))
+                .collect();
+            let delete_operations: Vec<_> = delete_keys
+                .iter()
+                .map(|key| TreeOperation::Delete { key })
+                .collect();
+            let mut delete_pool = ReservedTreePool::new(100..4000, &current_blocks, &[]).unwrap();
+            let deletion = mutate_many_with_cache_limit(
+                &mut dev,
+                &geo,
+                &mut delete_pool,
+                mutation.root_lba,
+                generation_two_spec,
+                3,
+                &delete_operations,
+                cache_pages,
+            )
+            .unwrap();
+            assert_eq!(deletion.stats.deletes, 999);
+            assert!(deletion.stats.merges > 0);
+            assert!(deletion.stats.root_collapses > 0);
+            assert!(deletion.stats.staged_spill_writes > 0);
+            assert!(deletion.stats.staged_spill_reloads > 0);
+            assert!(deletion.stats.max_resident_staged_nodes <= cache_pages as u64);
+            assert!(
+                deletion.stats.max_live_decoded_nodes <= 2,
+                "deletion retained {} decoded nodes with a {cache_pages}-page staged cache",
+                deletion.stats.max_live_decoded_nodes
+            );
+            for (lba, block) in &deletion.writes {
+                dev.write_block(*lba, block).unwrap();
+            }
+            let final_summary = validate_tree(
+                &mut dev,
+                &geo,
+                deletion.root_lba,
+                TreeSpec {
+                    max_generation: 3,
+                    ..spec
+                },
+            )
+            .unwrap();
+            assert_eq!(final_summary.items, 1);
+            assert_eq!(final_summary.height, 1);
         }
     }
 
     #[test]
-    #[ignore = "explicit 100k-key scale qualification; about 53s in a debug build"]
+    #[ignore = "explicit 100k-key scale qualification"]
     fn bounded_overlay_qualifies_one_hundred_thousand_compact_keys() {
         let geo = afsplus_format::geometry::Geometry {
             block_size: 4096,

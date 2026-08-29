@@ -215,7 +215,46 @@ where
         true,
         &mut visited,
         &mut visitor,
+        true,
     )?;
+    Ok(TreeSummary {
+        items: checked.items,
+        nodes: checked.nodes,
+        height: checked.level + 1,
+    })
+}
+
+/// Validates and visits a tree while retaining only the current root-to-node
+/// path in the cycle set. This gives streaming adapters O(height) traversal
+/// bookkeeping. The exhaustive checker should use [`visit_tree_nodes`], whose
+/// volume-wide set additionally diagnoses duplicate ownership directly.
+pub fn visit_tree_nodes_bounded<D, F>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    spec: TreeSpec,
+    mut visitor: F,
+) -> Result<TreeSummary, CoreError>
+where
+    D: BlockDevice,
+    F: FnMut(u64, &TreeNode) -> Result<(), CoreError>,
+{
+    check_tree_lba(geo, root_lba)?;
+    let mut path = BTreeSet::new();
+    let checked = validate_subtree(
+        dev,
+        geo,
+        root_lba,
+        spec,
+        None,
+        None,
+        None,
+        true,
+        &mut path,
+        &mut visitor,
+        false,
+    )?;
+    debug_assert!(path.is_empty());
     Ok(TreeSummary {
         items: checked.items,
         nodes: checked.nodes,
@@ -243,6 +282,7 @@ fn validate_subtree<D, F>(
     is_root: bool,
     visited: &mut BTreeSet<u64>,
     visitor: &mut F,
+    retain_visited: bool,
 ) -> Result<CheckedSubtree, CoreError>
 where
     D: BlockDevice,
@@ -262,13 +302,17 @@ where
     visitor(lba, &node)?;
 
     if node.is_leaf() {
-        return Ok(CheckedSubtree {
+        let checked = CheckedSubtree {
             items: node.subtree_items,
             nodes: 1,
             level: 0,
             min_key: node.items.first().map(|item| item.key.clone()),
             max_key: node.items.last().map(|item| item.key.clone()),
-        });
+        };
+        if !retain_visited {
+            visited.remove(&lba);
+        }
+        return Ok(checked);
     }
 
     let mut total_items = 0u64;
@@ -306,6 +350,7 @@ where
             false,
             visited,
             visitor,
+            retain_visited,
         )?;
         if checked.items != child.subtree_items {
             return Err(CoreError::Corrupt(format!(
@@ -340,13 +385,17 @@ where
             node.subtree_items
         )));
     }
-    Ok(CheckedSubtree {
+    let checked = CheckedSubtree {
         items: total_items,
         nodes: total_nodes,
         level: node.level,
         min_key: tree_min,
         max_key: tree_max,
-    })
+    };
+    if !retain_visited {
+        visited.remove(&lba);
+    }
+    Ok(checked)
 }
 
 pub(crate) fn validate_node_identity(

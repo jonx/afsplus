@@ -130,9 +130,9 @@ The formatter no longer loops over every logical block merely to seal reserved
 bits; it touches reserved ranges and bitmap pages directly. An explicit host
 qualification now formats and bounded-mounts a sparse 1 TiB image (1,024 full
 regions), performs two small commits, and runs the exhaustive checker in about
-3.51 seconds total on the development Apple-Silicon/APFS host. The commits
-measured about 18.6 ms and 12.0 ms; each changed one region record and at most
-three allocation-root nodes. The checker took about 2.34 seconds. Host physical
+3.57 seconds total on the development Apple-Silicon/APFS host. The latest
+commits measured about 24.5 ms and 12.1 ms; each changed one region record and
+at most three allocation-root nodes. The checker took about 2.28 seconds. Host physical
 allocation varied from roughly 112 MiB to 2.13 GiB between runs, so the test
 enforces a relative sparse bound below 1% rather than making APFS allocation an
 AFS+ format guarantee.

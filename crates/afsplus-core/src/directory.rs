@@ -6,7 +6,7 @@ use afsplus_format::geometry::Geometry;
 use afsplus_format::tree::{TreeKind, TreeNode};
 use afsplus_format::{le, validate_name, OBJECT_INVALID};
 
-use crate::tree::{lookup, visit_tree_nodes, TreeSpec, TreeSummary};
+use crate::tree::{lookup, visit_tree_nodes, visit_tree_nodes_bounded, TreeSpec, TreeSummary};
 use crate::CoreError;
 
 const VALUE_FIXED: usize = 16;
@@ -118,6 +118,49 @@ pub fn load_all<D: BlockDevice>(
     })
 }
 
+/// Exhaustively validates the directory tree and yields each typed entry in
+/// binary key order without retaining the directory contents. The verifier's
+/// memory is bounded by the format's maximum tree height; only one decoded
+/// entry is materialized for the callback at a time.
+pub fn visit_entries<D, F>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    owner: u64,
+    max_generation: u64,
+    mut visitor: F,
+) -> Result<TreeSummary, CoreError>
+where
+    D: BlockDevice,
+    F: FnMut(&DirEntry) -> Result<(), CoreError>,
+{
+    let mut entries = 0u64;
+    let summary = visit_tree_nodes_bounded(
+        dev,
+        geo,
+        root_lba,
+        spec(owner, max_generation),
+        |_, node| {
+            if node.is_leaf() {
+                for item in &node.items {
+                    let entry = decode_entry(&item.key, &item.value)?;
+                    visitor(&entry)?;
+                    entries = entries.checked_add(1).ok_or_else(|| {
+                        CoreError::Corrupt("directory entry count overflow".into())
+                    })?;
+                }
+            }
+            Ok(())
+        },
+    )?;
+    if entries != summary.items {
+        return Err(CoreError::Corrupt(
+            "directory leaf count does not match tree summary".into(),
+        ));
+    }
+    Ok(summary)
+}
+
 fn decode_entry(key: &[u8], encoded: &[u8]) -> Result<DirEntry, CoreError> {
     if encoded.len() < VALUE_FIXED {
         return Err(CoreError::Corrupt(
@@ -171,9 +214,9 @@ mod tests {
     use afsplus_format::dir::DirEntry;
     use afsplus_format::geometry::Geometry;
 
-    use super::{empty_leaf, encode_entry, load_all, lookup_entry, spec};
+    use super::{empty_leaf, encode_entry, load_all, lookup_entry, spec, visit_entries};
     use crate::allocation_root::ReservedTreePool;
-    use crate::cow_tree::{mutate_many, TreeOperation};
+    use crate::cow_tree::{mutate_many, mutate_many_with_cache_limit, TreeOperation};
 
     #[test]
     fn typed_directory_crosses_leaf_and_internal_boundaries() {
@@ -217,6 +260,107 @@ mod tests {
                 .unwrap()
                 .child_id,
             1099
+        );
+    }
+
+    #[test]
+    #[ignore = "explicit 100k-entry typed-directory scale qualification"]
+    fn typed_directory_qualifies_one_hundred_thousand_entries_bounded() {
+        let geo = Geometry {
+            block_size: 4096,
+            total_blocks: 16_384,
+            region_size: 16_384,
+        };
+        let owner = 17;
+        let mut dev = MemoryBackend::new(4096, geo.total_blocks);
+        dev.write_block(100, &empty_leaf(owner).encode(4096, 1).unwrap())
+            .unwrap();
+        let entries: Vec<_> = (0..100_000u64)
+            .map(|ordinal| {
+                let id = (ordinal * 7_919) % 100_000;
+                let name = format!("entry-{id:06}").into_bytes();
+                DirEntry {
+                    key: name.clone(),
+                    name,
+                    child_type_hint: if id.is_multiple_of(11) { 2 } else { 1 },
+                    child_id: id + 100,
+                }
+            })
+            .collect();
+        let encoded: Vec<_> = entries
+            .iter()
+            .map(encode_entry)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let operations: Vec<_> = encoded
+            .iter()
+            .map(|(key, value)| TreeOperation::Upsert { key, value })
+            .collect();
+        let mut pool = ReservedTreePool::new(100..16_000, &[100], &[]).unwrap();
+        let mutation_started = std::time::Instant::now();
+        let mutation = mutate_many_with_cache_limit(
+            &mut dev,
+            &geo,
+            &mut pool,
+            100,
+            spec(owner, 1),
+            2,
+            &operations,
+            8,
+        )
+        .unwrap();
+        let mutation_elapsed = mutation_started.elapsed();
+        assert!(mutation.stats.staged_spill_writes > 0);
+        assert!(mutation.stats.staged_spill_reloads > 0);
+        assert!(mutation.stats.max_resident_staged_nodes <= 8);
+        assert!(mutation.stats.max_live_decoded_nodes <= 2);
+        for (lba, block) in &mutation.writes {
+            dev.write_block(*lba, block).unwrap();
+        }
+
+        let mut visited = 0u64;
+        let mut previous_name = None;
+        let visit_started = std::time::Instant::now();
+        let summary = visit_entries(&mut dev, &geo, mutation.root_lba, owner, 2, |entry| {
+            if let Some(previous) = &previous_name {
+                assert!(previous < &entry.name);
+            }
+            let id: u64 = std::str::from_utf8(&entry.name[6..])
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(entry.child_id, id + 100);
+            assert_eq!(
+                entry.child_type_hint,
+                if id.is_multiple_of(11) { 2 } else { 1 }
+            );
+            previous_name = Some(entry.name.clone());
+            visited += 1;
+            Ok(())
+        })
+        .unwrap();
+        let visit_elapsed = visit_started.elapsed();
+        assert_eq!(visited, 100_000);
+        assert_eq!(summary.items, 100_000);
+        assert!(summary.height >= 3);
+        for id in [0u64, 49_999, 99_999] {
+            let name = format!("entry-{id:06}");
+            let entry = lookup_entry(&mut dev, &geo, mutation.root_lba, owner, 2, name.as_bytes())
+                .unwrap()
+                .unwrap();
+            assert_eq!(entry.child_id, id + 100);
+        }
+        eprintln!(
+            "100k typed directory: build {:?}, stream {:?}, height {}, nodes {}, reads {}, spill writes/reloads {}/{}, max staged/decoded {}/{}",
+            mutation_elapsed,
+            visit_elapsed,
+            summary.height,
+            summary.nodes,
+            mutation.stats.device_reads,
+            mutation.stats.staged_spill_writes,
+            mutation.stats.staged_spill_reloads,
+            mutation.stats.max_resident_staged_nodes,
+            mutation.stats.max_live_decoded_nodes,
         );
     }
 }

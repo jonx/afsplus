@@ -70,20 +70,31 @@ kind/owner/generation, separator ranges, exact per-child subtree counts, child
 bounds, cycles, and duplicate child ownership. ADR-034 records the
 experimental contract.
 
-The current write overlay is a correctness vehicle and retains all dirty tree
-nodes in RAM. Explicit staged-node spill/reload is still required for the
-2/4/8-page tiny-cache qualification; this limitation is not hidden behind the
-bounded lookup claim.
+Modern-host mutation retains final dirty images for speed. The same engine now
+has a constrained mode that spills only freshly allocated, unreachable images
+and enforces staged-image budgets of 2, 4, and 8 pages. Recursive descent keeps
+only compact coordinates, re-reads parents on unwind, and RAII instrumentation
+proves that insertion and merge-heavy deletion retain at most two decoded or
+derived full nodes at once. The per-final-node overlay index and caller-owned
+operation batch remain proportional to the mutation, so this is a bounded
+page-cache result rather than a claim of constant total RAM.
 
 The checkpoint object-map root and every newly formatted directory now point
 to typed shared trees rather than legacy one-block codecs. Normal mount checks
 only their roots; `stat` and name lookup descend on demand; create/delete
 publish both mutations through the existing metadata barrier/checkpoint
 protocol; and the checker visits and claims every tree node. Typed 1,001-entry
-object-map and 1,000-entry directory tests cross page boundaries. An
-end-to-end 300-entry namespace test also exceeds the old directory limit,
+object-map and 1,000-entry directory tests cross page boundaries. An explicit
+release qualification builds and streams 100,000 typed directory entries
+through a height-three tree under an eight-page staged cache; every original
+name, comparison key, child ID, and type hint is validated without collecting
+the directory in the iterator. An end-to-end 300-entry namespace test also
+exceeds the old directory limit,
 checks the image, remounts it, and verifies enumeration/lookup. Existing
 power-cut, fault, and reuse matrices cover the ordinary publication path.
+An additional boundary test discovers the exact root-directory 1→2 height
+transition, crash-qualifies its split, then deletes the boundary entry and
+crash-qualifies the merge/root collapse back to height 1.
 
 The namespace API now addresses arbitrary directories by stable object ID and
 implements create, mkdir, unlink, empty-directory removal, file hard links,
@@ -93,11 +104,14 @@ descendant, and passes an every-write/every-flush power-cut matrix. Hard-link
 counts are checked against the complete namespace; storage survives the first
 unlink and is retired only after the final link disappears.
 
-Next: extent trees beyond one direct extent, atomic replacement and orphan
-handling, allocation-root on-demand/dirty-path optimization, and the delta-log/spacemap
-allocation alternatives — to be built only if this design fails on
-correctness, write amplification, or scalability (the measurements test is
-the baseline to beat).
+Extent maps now support direct and multi-level representations, sparse range
+writes, truncate, and unwritten preallocation. Allocation-root updates load
+retained records on demand and mutate only dirty paths; a 145-region power-cut
+matrix crosses its first height boundary, while a sparse 1 TiB qualification
+covers format, bounded mount, commits, and exhaustive checking. Remaining
+post-Scale-1 work includes atomic replacement/orphan handling and the broader
+workload suite. Delta-log/spacemap alternatives are built only if the measured
+bitmap design fails on correctness, amplification, or scale.
 
 ADR-035 defines the authoritative allocation-root representation. The shared
 engine accepts either the ordinary transaction allocator or a permanently

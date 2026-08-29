@@ -16,11 +16,11 @@ use afsplus_block::{
 use afsplus_check::check_device;
 use afsplus_core::mount::select_checkpoint;
 use afsplus_core::verify::load_committed_state;
-use afsplus_core::{allocation_root, mkfs, mount, MkfsParams};
+use afsplus_core::{allocation_root, directory, mkfs, mount, MkfsParams};
 use afsplus_format::ident::Identification;
 use afsplus_format::object::ObjectType;
 use afsplus_format::region::RegionDescriptor;
-use afsplus_format::Timespec;
+use afsplus_format::{Timespec, OBJECT_ROOT};
 
 const BS: usize = 4096;
 
@@ -107,6 +107,22 @@ fn run_matrix(
             verify(&context, vol);
         });
     }
+}
+
+fn root_directory_height<D: BlockDevice>(vol: &mut afsplus_core::Volume<D>) -> u8 {
+    let root = vol.stat(OBJECT_ROOT).unwrap().unwrap();
+    let geo = vol.ident().geometry();
+    let generation = vol.generation();
+    directory::load_all(
+        vol.device_mut(),
+        &geo,
+        root.data_root,
+        OBJECT_ROOT,
+        generation,
+    )
+    .unwrap()
+    .summary
+    .height
 }
 
 #[test]
@@ -256,6 +272,140 @@ fn every_crash_state_of_cross_directory_rename_is_atomic() {
         post_outcomes > 0,
         "matrix never produced a post-rename state"
     );
+}
+
+#[test]
+fn directory_root_split_and_collapse_are_crash_atomic() {
+    let mut initial = MemoryBackend::new(BS, 2_048);
+    mkfs(
+        &mut initial,
+        &MkfsParams {
+            uuid: [0x5c; 16],
+            label: "DirectoryHeightCrash".into(),
+            region_size: 2_048,
+            timestamp: ts(0),
+        },
+    )
+    .unwrap();
+    let mut vol = mount(initial).unwrap();
+    let mut boundary = None;
+    for index in 0..200u64 {
+        let height_before = root_directory_height(&mut vol);
+        let base = vol.device_mut().clone();
+        let name = format!("height-{index:04}");
+        let object_id = vol
+            .create_file_in_root(&name, b"", ts(index as i64 + 1))
+            .unwrap();
+        let height_after = root_directory_height(&mut vol);
+        if height_after > height_before {
+            boundary = Some((base, name, object_id));
+            break;
+        }
+    }
+    let (split_base, boundary_name, boundary_id) =
+        boundary.expect("directory did not split within the qualification bound");
+    let mut pre = mount(split_base.clone()).unwrap();
+    let split_generation = pre.generation();
+    let entries_before = pre.list_root().unwrap().len();
+    assert_eq!(root_directory_height(&mut pre), 1);
+
+    let forbidden = forbidden_targets(&split_base);
+    let mut split = mount(RecordingBackend::new(split_base.clone())).unwrap();
+    let replayed_id = split
+        .create_file_in_root(&boundary_name, b"", ts(1_000))
+        .unwrap();
+    assert_eq!(replayed_id, boundary_id);
+    assert_eq!(root_directory_height(&mut split), 2);
+    let (collapse_base, split_log) = split.into_device().into_parts();
+    for operation in &split_log {
+        if let RecordedOp::Write { lba, .. } = operation {
+            assert!(
+                !forbidden.contains(lba),
+                "directory split overwrote committed block {lba}"
+            );
+        }
+    }
+    let mut split_pre = 0u64;
+    let mut split_post = 0u64;
+    run_matrix(
+        &split_base,
+        &split_log,
+        split_generation,
+        |context, mut recovered| {
+            if recovered.generation() == split_generation {
+                split_pre += 1;
+                assert_eq!(
+                    recovered.lookup_root(&boundary_name).unwrap(),
+                    None,
+                    "{context}"
+                );
+                assert_eq!(root_directory_height(&mut recovered), 1, "{context}");
+                assert_eq!(
+                    recovered.list_root().unwrap().len(),
+                    entries_before,
+                    "{context}"
+                );
+            } else {
+                split_post += 1;
+                assert_eq!(
+                    recovered.lookup_root(&boundary_name).unwrap(),
+                    Some(boundary_id),
+                    "{context}"
+                );
+                assert_eq!(root_directory_height(&mut recovered), 2, "{context}");
+                assert_eq!(
+                    recovered.list_root().unwrap().len(),
+                    entries_before + 1,
+                    "{context}"
+                );
+            }
+        },
+    );
+    assert!(split_pre > 0 && split_post > 0);
+
+    let collapse_generation = split_generation + 1;
+    let forbidden = forbidden_targets(&collapse_base);
+    let mut collapse = mount(RecordingBackend::new(collapse_base.clone())).unwrap();
+    collapse
+        .delete_file_in_root(&boundary_name, ts(2_000))
+        .unwrap();
+    assert_eq!(root_directory_height(&mut collapse), 1);
+    let (_, collapse_log) = collapse.into_device().into_parts();
+    for operation in &collapse_log {
+        if let RecordedOp::Write { lba, .. } = operation {
+            assert!(
+                !forbidden.contains(lba),
+                "directory collapse overwrote committed block {lba}"
+            );
+        }
+    }
+    let mut collapse_pre = 0u64;
+    let mut collapse_post = 0u64;
+    run_matrix(
+        &collapse_base,
+        &collapse_log,
+        collapse_generation,
+        |context, mut recovered| {
+            if recovered.generation() == collapse_generation {
+                collapse_pre += 1;
+                assert_eq!(
+                    recovered.lookup_root(&boundary_name).unwrap(),
+                    Some(boundary_id),
+                    "{context}"
+                );
+                assert_eq!(root_directory_height(&mut recovered), 2, "{context}");
+            } else {
+                collapse_post += 1;
+                assert_eq!(
+                    recovered.lookup_root(&boundary_name).unwrap(),
+                    None,
+                    "{context}"
+                );
+                assert_eq!(root_directory_height(&mut recovered), 1, "{context}");
+            }
+        },
+    );
+    assert!(collapse_pre > 0 && collapse_post > 0);
 }
 
 #[test]
