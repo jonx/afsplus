@@ -43,10 +43,33 @@ enum afsp_mount_intent {
     AFSP_MOUNT_RECOVERY = 4
 };
 
+/*
+ * Timestamp wire contract:
+ *
+ * seconds_le is a signed two's-complement 64-bit count of SI seconds since
+ * 1970-01-01 00:00:00 UTC (Unix epoch), encoded little-endian.
+ * nanoseconds_le is an unsigned little-endian value in 0..999,999,999.
+ *
+ * No local timezone, daylight-saving state, or Amiga epoch is stored on disk.
+ * Host adapters convert to/from their native time representation.
+ */
 struct afsp_timespec_wire {
     uint8_t seconds_le[8];
     uint8_t nanoseconds_le[4];
     uint8_t reserved[4];
+};
+
+/*
+ * Extent flags are a versioned namespace. Unknown semantic flags must be
+ * handled according to the owning feature's compatibility class.
+ * Reserve a bit now for optional data-checksum association so adding that
+ * feature later does not require redefining the base extent record.
+ */
+enum afsp_extent_flag {
+    AFSP_EXTENT_FLAG_NONE = 0,
+    AFSP_EXTENT_FLAG_SHARED = 1u << 0,
+    AFSP_EXTENT_FLAG_PREALLOC = 1u << 1,
+    AFSP_EXTENT_FLAG_DATA_CHECKSUM_PRESENT = 1u << 2 /* reserved feature */
 };
 
 #endif
