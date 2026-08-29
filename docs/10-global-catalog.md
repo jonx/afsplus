@@ -2,9 +2,9 @@
 
 ## 1. Purpose
 
-The global catalog is an optional derived index optimized for reading metadata about very large numbers of objects with mostly sequential I/O.
+The global catalog is an optional non-authoritative, rebuildable index optimized for reading metadata about very large numbers of namespace entries with mostly sequential I/O.
 
-It is inspired by the practical benefit of centralized object metadata systems such as the NTFS MFT, but it is not authoritative.
+It is inspired by the practical benefit of centralized metadata systems such as the NTFS MFT, but it is not authoritative.
 
 Primary target workloads include:
 
@@ -22,9 +22,9 @@ The filesystem remains correct and fully navigable without the catalog.
 
 Directory indexes and object records are authoritative.
 
-## 3. Catalog record
+## 3. Catalog records represent namespace links
 
-A catalog record should contain enough metadata for bulk discovery without resolving each path individually:
+A catalog record contains enough metadata for bulk discovery without resolving each path individually:
 
 - object ID
 - parent object ID
@@ -37,9 +37,24 @@ A catalog record should contain enough metadata for bulk discovery without resol
 
 Absolute paths are never stored.
 
+A record represents a **namespace link/name**, not a unique object row.
+
+Therefore a file with multiple hard links appears once for each linked name/parent combination:
+
+```text
+(parent A, name x) -> object 42
+(parent B, name y) -> object 42
+```
+
+Consumers that want unique filesystem objects must deduplicate by stable object ID. Consumers that want namespace inventory keep every catalog record.
+
+This distinction is part of the API contract and must not be inferred by applications.
+
 ## 4. Rename behavior
 
 Because records use parent IDs, renaming or moving a directory does not require rewriting records for every descendant.
+
+A rename changes the link record for the renamed object, not the stored parent IDs of all descendants.
 
 ## 5. Physical layout
 
@@ -69,7 +84,7 @@ Stale catalogs are never silently trusted.
 
 ## 7. Writers that do not support the catalog
 
-Because the catalog is derived, a basic writer may modify the filesystem without updating it.
+Because the catalog is non-authoritative and rebuildable, a basic writer may modify the filesystem without updating it.
 
 Such a writer must still update the core metadata generation.
 
@@ -94,12 +109,14 @@ Filesystem API v2 exposes semantic bulk enumeration:
 FSV2_EnumerateObjects()
 ```
 
+The final API must make explicit whether enumeration is link-oriented or unique-object-oriented. AFS+ may implement either view efficiently from the catalog, but applications must not guess.
+
 It does not expose catalog blocks.
 
 AFS+ may use the catalog. Another filesystem may use an MFT, optimized traversal, or another mechanism.
 
 ## 10. Performance target
 
-The benchmark suite must include multi-million-object sequential catalog scans and compare them with fallback directory traversal.
+The benchmark suite must include multi-million-link sequential catalog scans and compare them with fallback directory traversal.
 
 The specification defines the workload; numeric release targets are set from measured reference hardware rather than guessed in advance.
