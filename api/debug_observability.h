@@ -51,6 +51,52 @@ struct afsp_trace_sink {
     uint64_t category_mask;
 };
 
+/*
+ * Lightweight live device activity. This is separate from the detailed trace
+ * stream: a volume with no sink installed pays no callback or clock cost.
+ */
+enum afsp_io_activity_operation {
+    AFSP_IO_ACTIVITY_READ = 1,
+    AFSP_IO_ACTIVITY_WRITE,
+    AFSP_IO_ACTIVITY_FLUSH
+};
+
+enum afsp_io_activity_phase {
+    AFSP_IO_ACTIVITY_BEGIN = 1,
+    AFSP_IO_ACTIVITY_END
+};
+
+enum afsp_io_activity_flags {
+    AFSP_IO_ACTIVITY_LBA_VALID = UINT32_C(1) << 0,
+    AFSP_IO_ACTIVITY_SUCCESS = UINT32_C(1) << 1
+};
+
+enum afsp_io_activity_mask {
+    AFSP_IO_ACTIVITY_MASK_READ = UINT32_C(1) << 0,
+    AFSP_IO_ACTIVITY_MASK_WRITE = UINT32_C(1) << 1,
+    AFSP_IO_ACTIVITY_MASK_FLUSH = UINT32_C(1) << 2
+};
+
+struct afsp_io_activity_event {
+    uint32_t size;
+    uint16_t version;
+    uint8_t operation;
+    uint8_t phase;
+    uint32_t flags;
+    uint32_t reserved;
+    uint64_t lba;
+    uint64_t block_count;
+};
+
+typedef void (*afsp_io_activity_sink_fn)(
+    void *ctx, const struct afsp_io_activity_event *event);
+
+struct afsp_io_activity_sink {
+    afsp_io_activity_sink_fn emit;
+    void *ctx;
+    uint32_t operation_mask;
+};
+
 enum afsp_check_level {
     AFSP_CHECK_ALWAYS = 0,
     AFSP_CHECK_DEBUG,
@@ -80,6 +126,8 @@ struct afsp_fault_rule {
 
 /* Proposed debug/introspection operations. */
 int afsp_debug_set_trace_sink(void *volume, const struct afsp_trace_sink *sink);
+int afsp_debug_set_io_activity_sink(
+    void *volume, const struct afsp_io_activity_sink *sink);
 int afsp_debug_set_check_level(void *volume, enum afsp_check_level level);
 int afsp_debug_add_fault_rule(void *volume, const struct afsp_fault_rule *rule);
 int afsp_debug_clear_fault_rules(void *volume);

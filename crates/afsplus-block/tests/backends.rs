@@ -2,8 +2,9 @@
 //! fault injection, and the power-cut crash-state generator itself.
 
 use afsplus_block::{
-    crash_states, BlockDevice, BlockError, FaultBackend, FaultPlan, FileBackend, MemoryBackend,
-    RecordedOp, RecordingBackend, TraceBackend,
+    crash_states, ActivityBackend, ActivityEvent, ActivityOperation, ActivityPhase, ActivitySink,
+    BlockDevice, BlockError, FaultBackend, FaultPlan, FileBackend, MemoryBackend, RecordedOp,
+    RecordingBackend, TraceBackend,
 };
 
 const BS: usize = 4096;
@@ -58,6 +59,119 @@ fn trace_backend_accounts_operations() {
     assert_eq!(stats.reads, 1);
     assert_eq!(stats.flushes, 1);
     assert_eq!(stats.bytes_written, 2 * BS as u64);
+}
+
+#[derive(Debug, Default)]
+struct ActivityLog(Vec<ActivityEvent>);
+
+impl ActivitySink for ActivityLog {
+    fn on_activity(&mut self, event: ActivityEvent) {
+        self.0.push(event);
+    }
+}
+
+#[derive(Debug, Default)]
+struct WriteActivityLog(Vec<ActivityEvent>);
+
+impl ActivitySink for WriteActivityLog {
+    fn is_enabled(&self, operation: ActivityOperation) -> bool {
+        matches!(
+            operation,
+            ActivityOperation::Write | ActivityOperation::Flush
+        )
+    }
+
+    fn on_activity(&mut self, event: ActivityEvent) {
+        self.0.push(event);
+    }
+}
+
+#[test]
+fn activity_backend_brackets_io_without_copying_payloads() {
+    let mut dev = ActivityBackend::new(MemoryBackend::new(BS, 8), ActivityLog::default());
+    let mut buf = block(0);
+    dev.write_block(3, &block(7)).unwrap();
+    dev.read_block(3, &mut buf).unwrap();
+    dev.flush().unwrap();
+
+    let (_, log) = dev.into_parts();
+    assert_eq!(
+        log.0,
+        vec![
+            ActivityEvent {
+                operation: ActivityOperation::Write,
+                phase: ActivityPhase::Begin,
+                lba: Some(3),
+                block_count: 1,
+            },
+            ActivityEvent {
+                operation: ActivityOperation::Write,
+                phase: ActivityPhase::End { success: true },
+                lba: Some(3),
+                block_count: 1,
+            },
+            ActivityEvent {
+                operation: ActivityOperation::Read,
+                phase: ActivityPhase::Begin,
+                lba: Some(3),
+                block_count: 1,
+            },
+            ActivityEvent {
+                operation: ActivityOperation::Read,
+                phase: ActivityPhase::End { success: true },
+                lba: Some(3),
+                block_count: 1,
+            },
+            ActivityEvent {
+                operation: ActivityOperation::Flush,
+                phase: ActivityPhase::Begin,
+                lba: None,
+                block_count: 0,
+            },
+            ActivityEvent {
+                operation: ActivityOperation::Flush,
+                phase: ActivityPhase::End { success: true },
+                lba: None,
+                block_count: 0,
+            },
+        ]
+    );
+}
+
+#[test]
+fn activity_backend_reports_failed_completion() {
+    let plan = FaultPlan {
+        fail_write_index: Some(0),
+        fail_flush_index: None,
+        fail_hard: false,
+    };
+    let inner = FaultBackend::new(MemoryBackend::new(BS, 8), plan);
+    let mut dev = ActivityBackend::new(inner, ActivityLog::default());
+    assert!(matches!(
+        dev.write_block(2, &block(4)),
+        Err(BlockError::Injected(_))
+    ));
+
+    let (_, log) = dev.into_parts();
+    assert_eq!(log.0.len(), 2);
+    assert_eq!(log.0[0].phase, ActivityPhase::Begin);
+    assert_eq!(log.0[1].phase, ActivityPhase::End { success: false });
+}
+
+#[test]
+fn write_led_sink_can_filter_reads_before_emission() {
+    let mut dev = ActivityBackend::new(MemoryBackend::new(BS, 8), WriteActivityLog::default());
+    let mut buf = block(0);
+    dev.read_block(1, &mut buf).unwrap();
+    dev.write_block(1, &block(1)).unwrap();
+    dev.flush().unwrap();
+
+    let (_, log) = dev.into_parts();
+    assert_eq!(log.0.len(), 4);
+    assert!(log.0.iter().all(|event| matches!(
+        event.operation,
+        ActivityOperation::Write | ActivityOperation::Flush
+    )));
 }
 
 #[test]

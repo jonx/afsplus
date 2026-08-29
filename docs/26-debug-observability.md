@@ -124,6 +124,31 @@ afsplus-trace Work: --follow --categories TX,ALLOC,IO
 
 For Macaros Native development, the same sink can be forwarded to the M5 development host so a developer can watch filesystem activity on the M1 without interacting with the target UI.
 
+### 4.1 Virtual drive activity LED
+
+AFS+ also exposes a much smaller, optional block-activity sink for front-ends
+that want to reproduce the Amiga drive LED. It emits `BEGIN` and `END` around
+`READ`, `WRITE`, and `FLUSH`, including the LBA and block count when those
+fields apply. A failed operation still gets an `END` event marked unsuccessful.
+
+This facility is deliberately not implemented by enabling the full trace
+stream. In the Rust prototype, `ActivityBackend` is an opt-in generic wrapper
+around `BlockDevice`. If it is not installed, the normal I/O path contains no
+test, callback, timestamp read, allocation, or copied payload. If it is
+installed, emission is a synchronous, fixed-size callback; an operation mask
+filters unwanted classes before events are built. The receiver must stay fast
+and must not re-enter the same block device.
+
+The Macaros virtual write LED should treat both `WRITE` and `FLUSH` as write
+activity. The UI may keep the light visible for a short minimum interval so
+fast operations do not flicker invisibly, but that timing policy belongs to the
+UI and must never introduce a sleep or delay in the filesystem. A queue or UI
+adapter may timestamp and coalesce events after reception.
+
+The contract is portable: an AROS handler, a host-image tool, another OS, or a
+physical driver can expose the same event model. It changes no on-disk data and
+is neither a persistent log nor part of the filesystem change stream.
+
 ## 5. Explain API
 
 Tracing tells us what happened. Explain APIs tell us what the current filesystem believes.

@@ -9,6 +9,7 @@
 //! The power-cut harness in [`powercut`] enumerates all full-write subsets
 //! of that tail plus representative torn-write states.
 
+pub mod activity;
 pub mod fault;
 pub mod file;
 pub mod memory;
@@ -17,6 +18,9 @@ pub mod trace;
 
 use std::fmt;
 
+pub use activity::{
+    ActivityBackend, ActivityEvent, ActivityOperation, ActivityPhase, ActivitySink,
+};
 pub use fault::{FaultBackend, FaultPlan};
 pub use file::FileBackend;
 pub use memory::MemoryBackend;
