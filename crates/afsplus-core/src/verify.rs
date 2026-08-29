@@ -20,16 +20,16 @@ use afsplus_format::dir::{comparison_key, DirBlock};
 use afsplus_format::geometry::{Geometry, DESCRIPTOR_SLOTS};
 use afsplus_format::ident::Identification;
 use afsplus_format::object::{ObjectRecord, ObjectType};
-use afsplus_format::omap::ObjectMap;
 use afsplus_format::retired::RetiredList;
 use afsplus_format::{OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
 
 use crate::alloc::Bitmaps;
+use crate::object_map::{self, LoadedObjectMap};
 use crate::CoreError;
 
 /// Everything reachable from one committed checkpoint, fully decoded.
 pub struct CommittedState {
-    pub object_map: ObjectMap,
+    pub object_map: LoadedObjectMap,
     pub objects: BTreeMap<u64, ObjectRecord>,
     /// Directory blocks keyed by owning directory object ID.
     pub directories: BTreeMap<u64, DirBlock>,
@@ -42,11 +42,11 @@ pub struct CommittedState {
     pub data_blocks: Vec<u64>,
 }
 
-/// Bounded state needed to expose a mounted root namespace. Every structure
-/// is one prototype page; future tree implementations retain the same rule by
-/// loading roots and descending on demand.
+/// Bounded state needed to expose a mounted root namespace. The object map is
+/// already a tree and is descended on demand; the directory remains one
+/// prototype page until its own migration.
 pub struct MountState {
-    pub object_map: ObjectMap,
+    pub root_record_lba: u64,
     pub root_object: ObjectRecord,
     pub root_directory: DirBlock,
     pub retired: RetiredList,
@@ -80,26 +80,21 @@ pub fn load_mount_state<D: BlockDevice>(
     };
 
     claim_root(checkpoint.object_map_block, &mut roots)?;
-    dev.read_block(checkpoint.object_map_block, &mut buf)?;
-    let object_map = ObjectMap::decode(&buf)?;
-    for entry in &object_map.entries {
-        validate_mapped_object_id(entry.object_id, checkpoint)?;
-        if !geo.is_allocatable(entry.block) {
-            return Err(CoreError::Corrupt(format!(
-                "object {} record block {} outside allocatable bounds",
-                entry.object_id, entry.block
-            )));
-        }
-    }
-
-    let root_record_lba = object_map
-        .lookup(OBJECT_ROOT)
-        .ok_or_else(|| CoreError::Corrupt("root object missing from object map".into()))?;
+    let root_record_lba = object_map::lookup_lba(
+        dev,
+        &geo,
+        checkpoint.object_map_block,
+        checkpoint.generation,
+        OBJECT_ROOT,
+    )?
+    .ok_or_else(|| CoreError::Corrupt("root object missing from object map".into()))?;
     claim_root(root_record_lba, &mut roots)?;
     dev.read_block(root_record_lba, &mut buf)?;
     let root_object = ObjectRecord::decode(&buf)?;
     if root_object.object_id != OBJECT_ROOT || root_object.object_type != ObjectType::Directory {
-        return Err(CoreError::Corrupt("root object is not the root directory".into()));
+        return Err(CoreError::Corrupt(
+            "root object is not the root directory".into(),
+        ));
     }
 
     claim_root(root_object.data_root, &mut roots)?;
@@ -116,12 +111,6 @@ pub fn load_mount_state<D: BlockDevice>(
             return Err(CoreError::Corrupt(
                 "root directory entry key does not match its name".into(),
             ));
-        }
-        if object_map.lookup(entry.child_id).is_none() {
-            return Err(CoreError::Corrupt(format!(
-                "root directory references missing object {}",
-                entry.child_id
-            )));
         }
         if !matches!(entry.child_type_hint, 1 | 2) {
             return Err(CoreError::Corrupt(format!(
@@ -160,17 +149,14 @@ pub fn load_mount_state<D: BlockDevice>(
     }
 
     Ok(MountState {
-        object_map,
+        root_record_lba,
         root_object,
         root_directory,
         retired,
     })
 }
 
-fn validate_mapped_object_id(
-    object_id: u64,
-    checkpoint: &Checkpoint,
-) -> Result<(), CoreError> {
+fn validate_mapped_object_id(object_id: u64, checkpoint: &Checkpoint) -> Result<(), CoreError> {
     if object_id >= checkpoint.next_object_id {
         return Err(CoreError::Corrupt(format!(
             "object {object_id} at or above next_object_id {}",
@@ -202,7 +188,9 @@ pub fn load_committed_state<D: BlockDevice>(
     let mut data_blocks: Vec<u64> = Vec::new();
     let claim = |lba: u64, claimed: &mut BTreeSet<u64>| -> Result<(), CoreError> {
         if !geo.is_allocatable(lba) {
-            return Err(CoreError::Corrupt(format!("block {lba} outside allocatable bounds")));
+            return Err(CoreError::Corrupt(format!(
+                "block {lba} outside allocatable bounds"
+            )));
         }
         if !claimed.insert(lba) {
             return Err(CoreError::Corrupt(format!("block {lba} referenced twice")));
@@ -210,10 +198,16 @@ pub fn load_committed_state<D: BlockDevice>(
         Ok(())
     };
 
-    claim(checkpoint.object_map_block, &mut claimed)?;
-    metadata_blocks.push(checkpoint.object_map_block);
-    dev.read_block(checkpoint.object_map_block, &mut buf)?;
-    let object_map = ObjectMap::decode(&buf)?;
+    let object_map = object_map::load_all(
+        dev,
+        &geo,
+        checkpoint.object_map_block,
+        checkpoint.generation,
+    )?;
+    for lba in &object_map.tree_blocks {
+        claim(*lba, &mut claimed)?;
+        metadata_blocks.push(*lba);
+    }
 
     let mut objects = BTreeMap::new();
     let mut directories = BTreeMap::new();
@@ -320,7 +314,10 @@ pub fn load_committed_state<D: BlockDevice>(
     }
     for entry in &retired.entries {
         if !geo.is_allocatable(entry.lba) {
-            return Err(CoreError::Corrupt(format!("retired block {} out of bounds", entry.lba)));
+            return Err(CoreError::Corrupt(format!(
+                "retired block {} out of bounds",
+                entry.lba
+            )));
         }
         if entry.retire_generation > checkpoint.generation {
             return Err(CoreError::Corrupt(format!(
@@ -390,7 +387,9 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
             || state.data_blocks.contains(&lba)
             || state.retired.contains(lba);
         if allocated && !accounted {
-            findings.push(format!("block {lba} is allocated but owned by nothing (leak)"));
+            findings.push(format!(
+                "block {lba} is allocated but owned by nothing (leak)"
+            ));
         }
         if !allocated && accounted {
             findings.push(format!(

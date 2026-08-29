@@ -28,6 +28,7 @@ pub mod alloc;
 pub mod cow_tree;
 pub mod mkfs;
 pub mod mount;
+pub mod object_map;
 pub mod tree;
 pub mod verify;
 pub mod volume;

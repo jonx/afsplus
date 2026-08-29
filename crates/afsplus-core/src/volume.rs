@@ -6,9 +6,10 @@
 //! 2. write COW metadata and the dirty region bitmap pages, barrier
 //! 3. write the alternate checkpoint slot with generation + 1, barrier
 //!
-//! Every transaction retires the blocks it makes unreachable (old object
-//! map, old records, old directory blocks, old retired list, deleted data)
-//! and promotes the previous transaction's retirees; see `alloc`.
+//! Every transaction retires the blocks it makes unreachable (replaced
+//! object-map paths, old records, old directory blocks, old retired list,
+//! deleted data) and promotes the previous transaction's retirees; see
+//! `alloc`.
 //!
 //! Per-transaction resource accounting is collected from the start
 //! ([`CommitStats`]) — metadata bytes, bitmap pages, region descriptors,
@@ -23,7 +24,9 @@ use afsplus_format::retired::RetiredList;
 use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 
 use crate::alloc::{AllocStats, TxAllocator};
+use crate::cow_tree::{mutate_many, TreeOperation};
 use crate::mount::Selection;
+use crate::object_map;
 use crate::verify::{load_mount_state, MountState};
 use crate::CoreError;
 
@@ -56,7 +59,12 @@ pub struct Volume<D: BlockDevice> {
 }
 
 impl<D: BlockDevice> Volume<D> {
-    pub(crate) fn new(dev: D, ident: Identification, selection: Selection, state: MountState) -> Self {
+    pub(crate) fn new(
+        dev: D,
+        ident: Identification,
+        selection: Selection,
+        state: MountState,
+    ) -> Self {
         Volume {
             dev,
             ident,
@@ -134,7 +142,9 @@ impl<D: BlockDevice> Volume<D> {
             .read_object(object_id)?
             .ok_or_else(|| CoreError::Corrupt(format!("no object {object_id}")))?;
         if record.object_type != ObjectType::File {
-            return Err(CoreError::Corrupt(format!("object {object_id} is not a file")));
+            return Err(CoreError::Corrupt(format!(
+                "object {object_id} is not a file"
+            )));
         }
         let block_size = self.dev.block_size();
         let mut content = vec![0u8; (record.data_blocks as usize) * block_size];
@@ -210,7 +220,6 @@ impl<D: BlockDevice> Volume<D> {
         let file_record_lba = tx.allocate(&mut self.dev)?;
         let dir_lba = tx.allocate(&mut self.dev)?;
         let root_record_lba = tx.allocate(&mut self.dev)?;
-        let omap_lba = tx.allocate(&mut self.dev)?;
         let retired_list_lba = tx.allocate(&mut self.dev)?;
 
         // Everything the new state no longer reaches goes into quarantine.
@@ -249,16 +258,37 @@ impl<D: BlockDevice> Volume<D> {
             ..old_root
         };
 
-        let mut new_omap = self.state.object_map.clone();
-        new_omap.upsert(OBJECT_ROOT, root_record_lba)?;
-        new_omap.upsert(object_id, file_record_lba)?;
+        let root_key = object_map::key(OBJECT_ROOT);
+        let root_value = object_map::value(root_record_lba)?;
+        let file_key = object_map::key(object_id);
+        let file_value = object_map::value(file_record_lba)?;
+        let operations = [
+            TreeOperation::Upsert {
+                key: &root_key,
+                value: &root_value,
+            },
+            TreeOperation::Upsert {
+                key: &file_key,
+                value: &file_value,
+            },
+        ];
+        let omap_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &operations,
+        )?;
+        let omap_lba = omap_mutation.root_lba;
 
-        let meta_writes = vec![
+        let mut meta_writes = vec![
             (file_record_lba, file_record.encode(block_size, generation)?),
             (dir_lba, new_dir.encode(block_size, generation)?),
             (root_record_lba, new_root.encode(block_size, generation)?),
-            (omap_lba, new_omap.encode(block_size, generation)?),
         ];
+        meta_writes.extend(omap_mutation.writes);
 
         self.commit_transaction(
             generation,
@@ -283,7 +313,9 @@ impl<D: BlockDevice> Volume<D> {
             .read_object(entry.child_id)?
             .ok_or_else(|| CoreError::Corrupt("victim missing from object map".into()))?;
         if victim.object_type != ObjectType::File {
-            return Err(CoreError::PrototypeLimit("only file deletion is implemented"));
+            return Err(CoreError::PrototypeLimit(
+                "only file deletion is implemented",
+            ));
         }
 
         let block_size = self.dev.block_size();
@@ -300,14 +332,11 @@ impl<D: BlockDevice> Volume<D> {
 
         let dir_lba = tx.allocate(&mut self.dev)?;
         let root_record_lba = tx.allocate(&mut self.dev)?;
-        let omap_lba = tx.allocate(&mut self.dev)?;
         let retired_list_lba = tx.allocate(&mut self.dev)?;
 
         // Quarantine the object's storage and the COW'd originals.
         let victim_record_lba = self
-            .state
-            .object_map
-            .lookup(entry.child_id)
+            .lookup_object_lba(entry.child_id)?
             .ok_or_else(|| CoreError::Corrupt("victim missing from object map".into()))?;
         tx.retire(&mut self.dev, victim_record_lba)?;
         for i in 0..victim.data_blocks {
@@ -327,15 +356,32 @@ impl<D: BlockDevice> Volume<D> {
             ..old_root
         };
 
-        let mut new_omap = self.state.object_map.clone();
-        new_omap.remove(entry.child_id);
-        new_omap.upsert(OBJECT_ROOT, root_record_lba)?;
+        let root_key = object_map::key(OBJECT_ROOT);
+        let root_value = object_map::value(root_record_lba)?;
+        let victim_key = object_map::key(entry.child_id);
+        let operations = [
+            TreeOperation::Upsert {
+                key: &root_key,
+                value: &root_value,
+            },
+            TreeOperation::Delete { key: &victim_key },
+        ];
+        let omap_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &operations,
+        )?;
+        let omap_lba = omap_mutation.root_lba;
 
-        let meta_writes = vec![
+        let mut meta_writes = vec![
             (dir_lba, new_dir.encode(block_size, generation)?),
             (root_record_lba, new_root.encode(block_size, generation)?),
-            (omap_lba, new_omap.encode(block_size, generation)?),
         ];
+        meta_writes.extend(omap_mutation.writes);
 
         self.commit_transaction(
             generation,
@@ -359,7 +405,7 @@ impl<D: BlockDevice> Volume<D> {
         if object_id == OBJECT_ROOT {
             return Ok(Some(self.state.root_object));
         }
-        let Some(lba) = self.state.object_map.lookup(object_id) else {
+        let Some(lba) = self.lookup_object_lba(object_id)? else {
             return Ok(None);
         };
         if !self.ident.geometry().is_allocatable(lba) {
@@ -393,17 +439,21 @@ impl<D: BlockDevice> Volume<D> {
         Ok(Some(record))
     }
 
+    fn lookup_object_lba(&mut self, object_id: u64) -> Result<Option<u64>, CoreError> {
+        object_map::lookup_lba(
+            &mut self.dev,
+            &self.ident.geometry(),
+            self.checkpoint.object_map_block,
+            self.checkpoint.generation,
+            object_id,
+        )
+    }
+
     /// Retires the committed blocks every transaction replaces: the object
-    /// map, the root object record, the root directory block, and the
-    /// previous retired list.
+    /// root object record, the root directory block, and the previous retired
+    /// list. The object-map engine retires exactly the COW paths it replaces.
     fn retire_cow_originals(&mut self, tx: &mut TxAllocator) -> Result<(), CoreError> {
-        tx.retire(&mut self.dev, self.checkpoint.object_map_block)?;
-        let old_root_record = self
-            .state
-            .object_map
-            .lookup(OBJECT_ROOT)
-            .ok_or_else(|| CoreError::Corrupt("root missing from object map".into()))?;
-        tx.retire(&mut self.dev, old_root_record)?;
+        tx.retire(&mut self.dev, self.state.root_record_lba)?;
         tx.retire(&mut self.dev, self.state.root_object.data_root)?;
         if self.checkpoint.retired_list_block != 0 {
             tx.retire(&mut self.dev, self.checkpoint.retired_list_block)?;
@@ -428,7 +478,10 @@ impl<D: BlockDevice> Volume<D> {
         let block_size = self.dev.block_size();
         let finished = tx.finish(&self.checkpoint, self.other_checkpoint.as_ref())?;
         debug_assert!(!finished.retired.entries.is_empty());
-        meta_writes.push((retired_list_lba, finished.retired.encode(block_size, generation)?));
+        meta_writes.push((
+            retired_list_lba,
+            finished.retired.encode(block_size, generation)?,
+        ));
 
         let mut stats = CommitStats {
             data_blocks_written: data_writes.len() as u64,
@@ -474,8 +527,10 @@ impl<D: BlockDevice> Volume<D> {
             flags: 0,
             regions: finished.records,
         };
-        self.dev
-            .write_block(self.ident.checkpoint_slots[new_slot], &new_checkpoint.encode(block_size)?)?;
+        self.dev.write_block(
+            self.ident.checkpoint_slots[new_slot],
+            &new_checkpoint.encode(block_size)?,
+        )?;
         self.dev.flush()?;
         stats.flushes += 1;
 

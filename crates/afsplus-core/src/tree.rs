@@ -107,6 +107,23 @@ pub fn validate_tree<D: BlockDevice>(
     root_lba: u64,
     spec: TreeSpec,
 ) -> Result<TreeSummary, CoreError> {
+    visit_tree_nodes(dev, geo, root_lba, spec, |_, _| Ok(()))
+}
+
+/// Exhaustively validates a tree and visits every valid node exactly once.
+/// The checker uses this to decode typed leaf records and claim all tree
+/// blocks without duplicating the structural verifier.
+pub fn visit_tree_nodes<D, F>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    spec: TreeSpec,
+    mut visitor: F,
+) -> Result<TreeSummary, CoreError>
+where
+    D: BlockDevice,
+    F: FnMut(u64, &TreeNode) -> Result<(), CoreError>,
+{
     check_tree_lba(geo, root_lba)?;
     let mut visited = BTreeSet::new();
     let checked = validate_subtree(
@@ -119,6 +136,7 @@ pub fn validate_tree<D: BlockDevice>(
         None,
         true,
         &mut visited,
+        &mut visitor,
     )?;
     Ok(TreeSummary {
         items: checked.items,
@@ -136,7 +154,7 @@ struct CheckedSubtree {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_subtree<D: BlockDevice>(
+fn validate_subtree<D, F>(
     dev: &mut D,
     geo: &Geometry,
     lba: u64,
@@ -146,7 +164,12 @@ fn validate_subtree<D: BlockDevice>(
     upper: Option<&[u8]>,
     is_root: bool,
     visited: &mut BTreeSet<u64>,
-) -> Result<CheckedSubtree, CoreError> {
+    visitor: &mut F,
+) -> Result<CheckedSubtree, CoreError>
+where
+    D: BlockDevice,
+    F: FnMut(u64, &TreeNode) -> Result<(), CoreError>,
+{
     if !visited.insert(lba) {
         return Err(CoreError::Corrupt(format!(
             "tree cycle or duplicate child at block {lba}"
@@ -158,6 +181,7 @@ fn validate_subtree<D: BlockDevice>(
         .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
     validate_node_identity(&node, generation, spec, expected_level, lba)?;
     validate_node_range(&node, lower, upper, is_root)?;
+    visitor(lba, &node)?;
 
     if node.is_leaf() {
         return Ok(CheckedSubtree {
@@ -203,6 +227,7 @@ fn validate_subtree<D: BlockDevice>(
             child_upper,
             false,
             visited,
+            visitor,
         )?;
         if checked.items != child.subtree_items {
             return Err(CoreError::Corrupt(format!(

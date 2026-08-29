@@ -19,11 +19,13 @@ use afsplus_format::dir::DirBlock;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::ident::Identification;
 use afsplus_format::object::{ObjectRecord, ObjectType};
-use afsplus_format::omap::ObjectMap;
 use afsplus_format::region::{BitmapBinding, RegionDescriptor};
-use afsplus_format::{Timespec, DEFAULT_BLOCK_SHIFT, DEFAULT_BLOCK_SIZE, OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
+use afsplus_format::{
+    Timespec, DEFAULT_BLOCK_SHIFT, DEFAULT_BLOCK_SIZE, OBJECT_FIRST_DYNAMIC, OBJECT_ROOT,
+};
 
 use crate::layout;
+use crate::object_map;
 use crate::CoreError;
 
 pub struct MkfsParams {
@@ -36,7 +38,9 @@ pub struct MkfsParams {
 
 pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), CoreError> {
     if dev.block_size() != DEFAULT_BLOCK_SIZE {
-        return Err(CoreError::UnsupportedGeometry("prototype supports only 4 KiB blocks"));
+        return Err(CoreError::UnsupportedGeometry(
+            "prototype supports only 4 KiB blocks",
+        ));
     }
     let geo = Geometry {
         block_size: dev.block_size(),
@@ -72,10 +76,12 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         data_blocks: 0,
     };
     let root_dir = DirBlock::new(OBJECT_ROOT);
-    let mut omap = ObjectMap::default();
-    omap.upsert(OBJECT_ROOT, root_record_lba)?;
+    let omap = object_map::initial_leaf(OBJECT_ROOT, root_record_lba)?;
 
-    dev.write_block(root_record_lba, &root_record.encode(block_size, generation)?)?;
+    dev.write_block(
+        root_record_lba,
+        &root_record.encode(block_size, generation)?,
+    )?;
     dev.write_block(root_dir_lba, &root_dir.encode(block_size, generation)?)?;
     dev.write_block(omap_lba, &omap.encode(block_size, generation)?)?;
 

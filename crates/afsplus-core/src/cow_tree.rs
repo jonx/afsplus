@@ -36,6 +36,12 @@ pub struct TreeMutation {
     pub stats: TreeMutationStats,
 }
 
+/// One ordered mutation in a transaction-local tree overlay.
+pub enum TreeOperation<'a> {
+    Upsert { key: &'a [u8], value: &'a [u8] },
+    Delete { key: &'a [u8] },
+}
+
 /// Applies multiple upserts under one COW overlay. Repeated changes to a node
 /// allocated by this transaction update its staged image in place; committed
 /// nodes are never overwritten. This correctness prototype retains the whole
@@ -53,64 +59,11 @@ pub fn upsert_many<D: BlockDevice>(
     new_generation: u64,
     entries: &[(Vec<u8>, Vec<u8>)],
 ) -> Result<TreeMutation, CoreError> {
-    if new_generation <= spec.max_generation {
-        return Err(CoreError::Corrupt(
-            "tree mutation generation is not newer than committed state".into(),
-        ));
-    }
-    check_tree_lba(geo, root_lba)?;
-    let mut context = MutationContext {
-        dev,
-        geo: *geo,
-        tx,
-        spec,
-        new_generation,
-        writes: BTreeMap::new(),
-        stats: TreeMutationStats::default(),
-    };
-    let mut root = root_lba;
-    for (key, value) in entries {
-        validate_upsert(key, value)?;
-        let replacement = context.upsert_node(root, None, None, None, None, true, 0, key, value)?;
-        let old_level = replacement.level;
-        root = if replacement.children.len() == 1 {
-            replacement.children[0].reference.lba
-        } else {
-            if old_level == MAX_TREE_LEVEL {
-                return Err(CoreError::PrototypeLimit("tree height limit reached"));
-            }
-            let left = replacement.children[0].reference;
-            let right = &replacement.children[1];
-            let root_node = TreeNode {
-                kind: spec.kind,
-                owner: spec.owner,
-                level: old_level + 1,
-                subtree_items: left
-                    .subtree_items
-                    .checked_add(right.reference.subtree_items)
-                    .ok_or_else(|| CoreError::Corrupt("tree item count overflow".into()))?,
-                leftmost_child: left.lba,
-                leftmost_items: left.subtree_items,
-                items: vec![TreeItem {
-                    key: right.min_key.clone().ok_or_else(|| {
-                        CoreError::Corrupt("split child has no minimum key".into())
-                    })?,
-                    value: child_value(right.reference).map_err(CoreError::Format)?,
-                }],
-            };
-            let lba = context.tx.allocate(context.dev)?;
-            context.stats.nodes_allocated += 1;
-            context.stage_node(lba, &root_node)?;
-            context.stats.root_splits += 1;
-            lba
-        };
-    }
-    context.stats.final_nodes_written = context.writes.len() as u64;
-    Ok(TreeMutation {
-        root_lba: root,
-        writes: context.writes.into_iter().collect(),
-        stats: context.stats,
-    })
+    let operations: Vec<_> = entries
+        .iter()
+        .map(|(key, value)| TreeOperation::Upsert { key, value })
+        .collect();
+    mutate_many(dev, geo, tx, root_lba, spec, new_generation, &operations)
 }
 
 /// Deletes several keys under one COW overlay. Empty children are removed,
@@ -128,6 +81,24 @@ pub fn delete_many<D: BlockDevice>(
     new_generation: u64,
     keys: &[Vec<u8>],
 ) -> Result<TreeMutation, CoreError> {
+    let operations: Vec<_> = keys
+        .iter()
+        .map(|key| TreeOperation::Delete { key })
+        .collect();
+    mutate_many(dev, geo, tx, root_lba, spec, new_generation, &operations)
+}
+
+/// Applies an ordered mix of upserts and deletes under one COW overlay.
+#[allow(clippy::too_many_arguments)]
+pub fn mutate_many<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    tx: &mut TxAllocator,
+    root_lba: u64,
+    spec: TreeSpec,
+    new_generation: u64,
+    operations: &[TreeOperation<'_>],
+) -> Result<TreeMutation, CoreError> {
     if new_generation <= spec.max_generation {
         return Err(CoreError::Corrupt(
             "tree mutation generation is not newer than committed state".into(),
@@ -144,21 +115,62 @@ pub fn delete_many<D: BlockDevice>(
         stats: TreeMutationStats::default(),
     };
     let mut root = root_lba;
-    for key in keys {
-        validate_key(key)?;
-        let pending = context.delete_node(root, None, None, None, None, true, 0, key)?;
-        if pending.node.level > 0 && pending.node.items.is_empty() {
-            let child = pending.node.leftmost_child;
-            context.discard_pending(pending)?;
-            root = child;
-            context.stats.root_collapses += 1;
-        } else {
-            let source = (pending.old_lba, pending.old_staged);
-            let output = (pending.node, pending.min_key);
-            let replacement = context.persist_sources(vec![source], vec![output])?;
-            root = replacement[0].reference.lba;
+    for operation in operations {
+        match operation {
+            TreeOperation::Upsert { key, value } => {
+                validate_upsert(key, value)?;
+                let replacement =
+                    context.upsert_node(root, None, None, None, None, true, 0, key, value)?;
+                let old_level = replacement.level;
+                root = if replacement.children.len() == 1 {
+                    replacement.children[0].reference.lba
+                } else {
+                    if old_level == MAX_TREE_LEVEL {
+                        return Err(CoreError::PrototypeLimit("tree height limit reached"));
+                    }
+                    let left = replacement.children[0].reference;
+                    let right = &replacement.children[1];
+                    let root_node = TreeNode {
+                        kind: spec.kind,
+                        owner: spec.owner,
+                        level: old_level + 1,
+                        subtree_items: left
+                            .subtree_items
+                            .checked_add(right.reference.subtree_items)
+                            .ok_or_else(|| CoreError::Corrupt("tree item count overflow".into()))?,
+                        leftmost_child: left.lba,
+                        leftmost_items: left.subtree_items,
+                        items: vec![TreeItem {
+                            key: right.min_key.clone().ok_or_else(|| {
+                                CoreError::Corrupt("split child has no minimum key".into())
+                            })?,
+                            value: child_value(right.reference).map_err(CoreError::Format)?,
+                        }],
+                    };
+                    let lba = context.tx.allocate(context.dev)?;
+                    context.stats.nodes_allocated += 1;
+                    context.stage_node(lba, &root_node)?;
+                    context.stats.root_splits += 1;
+                    lba
+                };
+            }
+            TreeOperation::Delete { key } => {
+                validate_key(key)?;
+                let pending = context.delete_node(root, None, None, None, None, true, 0, key)?;
+                if pending.node.level > 0 && pending.node.items.is_empty() {
+                    let child = pending.node.leftmost_child;
+                    context.discard_pending(pending)?;
+                    root = child;
+                    context.stats.root_collapses += 1;
+                } else {
+                    let source = (pending.old_lba, pending.old_staged);
+                    let output = (pending.node, pending.min_key);
+                    let replacement = context.persist_sources(vec![source], vec![output])?;
+                    root = replacement[0].reference.lba;
+                }
+                context.stats.deletes += 1;
+            }
         }
-        context.stats.deletes += 1;
     }
     context.stats.final_nodes_written = context.writes.len() as u64;
     Ok(TreeMutation {
@@ -815,7 +827,7 @@ mod tests {
     use afsplus_format::tree::{child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode};
     use afsplus_format::Timespec;
 
-    use super::{delete_many, upsert_many};
+    use super::{delete_many, mutate_many, upsert_many, TreeOperation};
     use crate::alloc::TxAllocator;
     use crate::tree::{lookup, validate_tree, TreeSpec};
     use crate::{mkfs, mount, MkfsParams};
@@ -931,14 +943,21 @@ mod tests {
         let delete_keys: Vec<_> = (0..299u64)
             .map(|ordinal| wide_key((ordinal * 137) % 299))
             .collect();
-        let deletion = delete_many(
+        let surviving_key = wide_key(299);
+        let surviving_value = vec![0xab; 80];
+        let mut operations = vec![TreeOperation::Upsert {
+            key: &surviving_key,
+            value: &surviving_value,
+        }];
+        operations.extend(delete_keys.iter().map(|key| TreeOperation::Delete { key }));
+        let deletion = mutate_many(
             &mut dev,
             &geo,
             &mut tx2,
             mutation.root_lba,
             new_spec,
             3,
-            &delete_keys,
+            &operations,
         )
         .unwrap();
         assert_eq!(deletion.stats.deletes, 299);
@@ -954,16 +973,18 @@ mod tests {
         let summary = validate_tree(&mut dev, &geo, deletion.root_lba, final_spec).unwrap();
         assert_eq!(summary.items, 1);
         assert_eq!(summary.height, 1);
-        assert!(lookup(
-            &mut dev,
-            &geo,
-            deletion.root_lba,
-            final_spec,
-            &wide_key(299)
-        )
-        .unwrap()
-        .0
-        .is_some());
+        assert_eq!(
+            lookup(
+                &mut dev,
+                &geo,
+                deletion.root_lba,
+                final_spec,
+                &surviving_key,
+            )
+            .unwrap()
+            .0,
+            Some(surviving_value)
+        );
         tx2.finish(&checkpoint2, Some(&checkpoint)).unwrap();
     }
 

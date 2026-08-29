@@ -4,12 +4,11 @@
 
 use afsplus_block::MemoryBackend;
 use afsplus_check::check_device;
-use afsplus_core::{mkfs, mount, CoreError, MkfsParams};
+use afsplus_core::{mkfs, mount, object_map, CoreError, MkfsParams};
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::dir::{DirBlock, DirEntry};
 use afsplus_format::header::BlockHeader;
 use afsplus_format::ident::Identification;
-use afsplus_format::omap::ObjectMap;
 use afsplus_format::region::RegionDescriptor;
 use afsplus_format::Timespec;
 
@@ -136,8 +135,15 @@ fn corrupt_descendant_is_reported_on_access_without_a_mount_scan() {
 
     let ident = read_ident(&dev);
     let newest = Checkpoint::decode(&dev.peek(2), &ident.uuid).unwrap();
-    let omap = ObjectMap::decode(&dev.peek(newest.object_map_block)).unwrap();
-    let record_lba = omap.lookup(id).unwrap();
+    let record_lba = object_map::lookup_lba(
+        &mut dev,
+        &ident.geometry(),
+        newest.object_map_block,
+        newest.generation,
+        id,
+    )
+    .unwrap()
+    .unwrap();
     let mut record = dev.peek(record_lba);
     record[100] ^= 0xFF;
     dev.apply_raw(record_lba, &record);

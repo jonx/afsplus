@@ -121,3 +121,10 @@ verifier runs at both ends. Typed adapters, publication through the checkpoint
 transaction, and the associated power-cut matrices remain required before
 Core Scale-1 is complete. So does staged-node spill/reload under the explicit
 2/4/8-page cache matrix.
+
+The object map is the first authoritative consumer. `mkfs` writes an AFST
+leaf, checkpoints reference its root, normal mount/stat use bounded typed
+lookups, create/delete share mixed-operation overlays, and the checker
+exhaustively visits typed leaves plus all internal blocks. The legacy
+single-block object-map codec remains only as transitional format/test code;
+newly formatted volumes do not reference it.

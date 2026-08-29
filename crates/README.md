@@ -9,8 +9,9 @@ as such in the crate docs.
 
 - `afsplus-format` — on-disk structure encode/decode (identification, A/B
   checkpoints with per-region descriptor records, object records with one
-  direct data extent, single-block directories/object map, region bitmap
-  pages and region descriptors, retired-block list), CRC32C, explicit little-endian codecs, region
+  direct data extent, single-block directories, shared AFST object-map nodes,
+  region bitmap pages and region descriptors, retired-block list), CRC32C,
+  explicit little-endian codecs, region
   geometry. `no_std` + `alloc` (verified against a bare-metal target), zero
   dependencies. Bounds-first validation; every decoder rejects corrupted
   input via checksums and never panics on garbage.
@@ -74,8 +75,16 @@ nodes in RAM. Explicit staged-node spill/reload is still required for the
 2/4/8-page tiny-cache qualification; this limitation is not hidden behind the
 bounded lookup claim.
 
-Next: migration of the object/allocation roots, extent trees beyond one direct
-extent, directory B+ trees beyond one leaf, and the delta-log/spacemap
+The checkpoint object-map root now points to the typed shared tree rather than
+the legacy one-block codec. Normal mount performs a bounded ROOT lookup;
+`stat` descends on demand; create/delete publish mixed tree mutations through
+the existing metadata barrier/checkpoint protocol; and the checker visits and
+claims every tree node. A typed 1,001-entry test proves the map crosses page
+boundaries, while the existing power-cut and reuse matrices cover its ordinary
+transaction path.
+
+Next: migration of the allocation root, extent trees beyond one direct extent,
+directory B+ trees beyond one leaf, and the delta-log/spacemap
 allocation alternatives — to be built only if this design fails on
 correctness, write amplification, or scalability (the measurements test is
 the baseline to beat).

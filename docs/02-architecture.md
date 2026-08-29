@@ -100,6 +100,11 @@ or redistributed into two balanced nodes otherwise. This prevents transient
 empty leaves or one-child internal nodes from becoming on-disk states. Only a
 one-child root may collapse directly to its child.
 
+The checkpoint object-map pointer is the first authoritative root migrated to
+this engine. Typed leaves encode `object_id` as an eight-byte big-endian key
+and the object-record LBA as an eight-byte little-endian value. Ordinary mount
+looks up only the root object; the checker performs exhaustive traversal.
+
 Allocation regions are specifically intended to make free-space operations bounded.
 
 The executable allocator prototype follows this rule: normal mount reads no

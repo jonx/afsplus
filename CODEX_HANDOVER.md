@@ -169,9 +169,11 @@ grows the root. Deletion now merges or redistributes underfull siblings before
 staging a valid parent and collapses one-child roots. A permuted 300-key test
 grows three levels, then deletes 299 keys in another permutation and returns
 to one root leaf; a bad-level corruption test is also executable. The
-object-map, directory, extent, and allocation-root adapters are next; the
-legacy single-block structures remain authoritative until each migration has
-its crash matrix.
+object-map adapter is now authoritative: mkfs/checkpoints, bounded mount/stat,
+mixed create/delete mutation, checker ownership, existing transaction crash
+matrices, and a typed 1,001-entry multi-page test all use AFST. Directory,
+extent, and allocation-root adapters are next; their legacy single-block
+structures remain authoritative until each migration has its crash matrix.
 
 The current multi-upsert overlay keeps every dirty tree node in RAM. It proves
 COW mutation correctness but does not yet satisfy the 2/4/8-page cache gate.

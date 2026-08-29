@@ -151,9 +151,11 @@ fn mount_reads_are_bounded_and_descendants_are_loaded_on_demand() {
     assert!(vol.free_blocks() > 0);
     assert_eq!(vol.device_mut().stats().reads, after_mount.reads);
 
-    // One stat decodes exactly the requested descendant record.
+    // One stat descends the one-level object-map tree, then decodes exactly
+    // the requested descendant record. Tree height, not object count, bounds
+    // the additional reads.
     assert!(vol.stat(first_id).unwrap().is_some());
-    assert_eq!(vol.device_mut().stats().reads, after_mount.reads + 1);
+    assert_eq!(vol.device_mut().stats().reads, after_mount.reads + 2);
 }
 
 #[test]
