@@ -88,11 +88,20 @@ reuse the transaction-local image, and splits allocate only the additional
 nodes. This bounds device reads independently of the number of operations that
 hit the same path and avoids writing intermediate tree states.
 
-The first executable mutation overlay retains all dirty nodes in memory. It is
-therefore not the tiny-cache implementation yet. A constrained implementation
-must be able to spill those still-unreachable staged images to their allocated
-blocks, reload them on demand, and keep only the active path/split peer in its
-2/4/8-page cache; the on-disk tree semantics do not change.
+Modern-host mutation keeps all dirty nodes in memory by default. The same
+engine now also accepts an explicit staged-image budget: a constrained run can
+retain only 2, 4, or 8 final COW images, spill evicted images to their freshly
+allocated and still-unreachable blocks, and reload them through a small LRU.
+Those provisional writes are harmless on abort and become durable at the later
+metadata barrier before checkpoint publication. Tests exercise all three
+budgets and an explicit 100,000-key qualification.
+
+This is the first tiny-cache layer, not the completed classic-memory gate. The
+recursive mutation path still owns decoded ancestor nodes and a possible split
+peer outside the staged-image LRU. A follow-up must compact ancestors into
+bounded path frames or make descent iterative, then measure the total live page
+working set rather than only final staged images. The on-disk tree semantics do
+not change.
 
 Deletion defers staging the changed node until its parent has rebalanced it
 with an adjacent sibling. The pair is merged when its combined encoding fits,

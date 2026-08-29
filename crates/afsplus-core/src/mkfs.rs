@@ -23,9 +23,9 @@ use afsplus_format::{
     Timespec, DEFAULT_BLOCK_SHIFT, DEFAULT_BLOCK_SIZE, OBJECT_FIRST_DYNAMIC, OBJECT_ROOT,
 };
 
-use crate::layout;
 use crate::allocation_root;
 use crate::directory;
+use crate::layout;
 use crate::object_map;
 use crate::CoreError;
 
@@ -99,6 +99,10 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         .iter()
         .copied()
         .collect();
+    let mut initially_allocated = allocation_pool.clone();
+    initially_allocated.insert(root_record_lba);
+    initially_allocated.insert(root_dir_lba);
+    initially_allocated.insert(omap_lba);
 
     // Descriptor slot 0 binds bitmap-page slot 0. Reserved blocks and the
     // initial metadata are allocated; everything else is free.
@@ -114,16 +118,20 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
                 first_block,
                 geo.bitmap_page_valid_blocks(r, page_index),
             );
-            for local_index in 0..page.valid_blocks {
-                let lba = base + first_block as u64 + local_index as u64;
-                let initial_metadata =
-                    lba == root_record_lba
-                        || lba == root_dir_lba
-                        || lba == omap_lba
-                        || allocation_pool.contains(&lba);
-                if geo.is_reserved(lba) || initial_metadata {
-                    page.set_allocated(local_index, true);
-                }
+            let page_end = first_block + page.valid_blocks;
+            let reserved = geo.region_reserved_blocks(r) as u32
+                + if r == 0 {
+                    afsplus_format::geometry::BOOTSTRAP_BLOCKS as u32
+                } else {
+                    0
+                };
+            for region_index in first_block..page_end.min(reserved) {
+                page.set_allocated(region_index - first_block, true);
+            }
+            let page_lba_start = base + first_block as u64;
+            let page_lba_end = base + page_end as u64;
+            for lba in initially_allocated.range(page_lba_start..page_lba_end) {
+                page.set_allocated((*lba - page_lba_start) as u32, true);
             }
             dev.write_block(
                 geo.bitmap_slot_lba(r, page_index, 0),
@@ -188,10 +196,7 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         retired_list_block: 0,
         next_object_id: OBJECT_FIRST_DYNAMIC,
         committed_tx_id: generation,
-        free_blocks_total: regions
-            .iter()
-            .map(|record| record.free_blocks as u64)
-            .sum(),
+        free_blocks_total: regions.iter().map(|record| record.free_blocks as u64).sum(),
         flags: 0,
         regions: Vec::new(),
     };

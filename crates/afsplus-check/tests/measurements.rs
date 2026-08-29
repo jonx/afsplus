@@ -6,7 +6,7 @@
 //! guarantees; the point is that silent regressions get caught and that the
 //! delta-log/spacemap alternatives have a baseline to beat.
 
-use afsplus_block::MemoryBackend;
+use afsplus_block::{FileBackend, MemoryBackend};
 use afsplus_check::check_device;
 use afsplus_core::volume::CommitStats;
 use afsplus_core::{mkfs, mount, MkfsParams};
@@ -15,7 +15,10 @@ use afsplus_format::Timespec;
 const BS: usize = 4096;
 
 fn ts(seconds: i64) -> Timespec {
-    Timespec { seconds, nanoseconds: 0 }
+    Timespec {
+        seconds,
+        nanoseconds: 0,
+    }
 }
 
 #[test]
@@ -37,16 +40,35 @@ fn per_transaction_resource_accounting() {
 
     let mut rows: Vec<(String, CommitStats)> = Vec::new();
     for i in 0..3 {
-        vol.create_file_in_root(&format!("file-{i}"), &[i as u8; 6000], ts(i as i64 + 1)).unwrap();
-        rows.push((format!("create file-{i} (2 data blocks)"), vol.last_commit_stats().unwrap()));
+        vol.create_file_in_root(&format!("file-{i}"), &[i as u8; 6000], ts(i as i64 + 1))
+            .unwrap();
+        rows.push((
+            format!("create file-{i} (2 data blocks)"),
+            vol.last_commit_stats().unwrap(),
+        ));
     }
     vol.delete_file_in_root("file-1", ts(10)).unwrap();
     rows.push(("delete file-1".into(), vol.last_commit_stats().unwrap()));
-    vol.create_file_in_root("file-3", &[9u8; 6000], ts(11)).unwrap();
-    rows.push(("create file-3 (reuses quarantine)".into(), vol.last_commit_stats().unwrap()));
+    vol.create_file_in_root("file-3", &[9u8; 6000], ts(11))
+        .unwrap();
+    rows.push((
+        "create file-3 (reuses quarantine)".into(),
+        vol.last_commit_stats().unwrap(),
+    ));
 
-    println!("\n{:<34} {:>4} {:>4} {:>4} {:>4} {:>6} {:>7} {:>8} {:>8} {:>7}",
-        "transaction", "data", "meta", "bmap", "desc", "flush", "retired", "promoted", "latency", "bytes");
+    println!(
+        "\n{:<34} {:>4} {:>4} {:>4} {:>4} {:>6} {:>7} {:>8} {:>8} {:>7}",
+        "transaction",
+        "data",
+        "meta",
+        "bmap",
+        "desc",
+        "flush",
+        "retired",
+        "promoted",
+        "latency",
+        "bytes"
+    );
     for (label, s) in &rows {
         println!(
             "{:<34} {:>4} {:>4} {:>4} {:>4} {:>6} {:>7} {:>8} {:>8} {:>7}",
@@ -77,16 +99,24 @@ fn per_transaction_resource_accounting() {
         assert_eq!(s.checkpoint_blocks_written, 1, "{label}");
         assert!(s.metadata_blocks_written <= 6, "{label}");
         // Single-region working sets must not dirty every region.
-        assert!(s.bitmap_pages_written <= 3, "{label}: bitmap write amplification");
+        assert!(
+            s.bitmap_pages_written <= 3,
+            "{label}: bitmap write amplification"
+        );
         assert_eq!(
-            s.region_descriptors_written,
-            s.alloc.region_descriptors_dirty,
+            s.region_descriptors_written, s.alloc.region_descriptors_dirty,
             "{label}: descriptor accounting drift"
         );
-        assert!(s.region_descriptors_written <= 3, "{label}: descriptor write amplification");
+        assert!(
+            s.region_descriptors_written <= 3,
+            "{label}: descriptor write amplification"
+        );
         assert!(s.flushes <= 3, "{label}");
         // Reclaim latency: exactly one generation per promoted block.
-        assert_eq!(s.alloc.reclaim_latency_generations, s.alloc.blocks_promoted, "{label}");
+        assert_eq!(
+            s.alloc.reclaim_latency_generations, s.alloc.blocks_promoted,
+            "{label}"
+        );
     }
     // The permanent allocation-root pool changes locality on this deliberately
     // tiny geometry: the last transaction touched three of four 2-byte region
@@ -96,4 +126,49 @@ fn per_transaction_resource_accounting() {
     let mut dev = vol.into_device();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "{:?}", report.errors);
+}
+
+#[test]
+#[ignore = "explicit 1 TiB sparse-image qualification"]
+fn one_tib_sparse_image_formats_and_mounts_without_a_block_count_scan() {
+    const TOTAL_BLOCKS: u64 = (1u64 << 40) / BS as u64;
+    let dir =
+        std::env::temp_dir().join(format!("afsplus-1tib-qualification-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("volume.img");
+    let started = std::time::Instant::now();
+    let mut dev = FileBackend::create(&path, BS, TOTAL_BLOCKS).unwrap();
+    mkfs(
+        &mut dev,
+        &MkfsParams {
+            uuid: [0x1A; 16],
+            label: "OneTiB".into(),
+            region_size: afsplus_format::geometry::MAX_REGION_BLOCKS,
+            timestamp: ts(0),
+        },
+    )
+    .unwrap();
+    let mut vol = mount(dev).unwrap();
+    assert_eq!(vol.ident().geometry().region_count(), 1_024);
+    assert!(vol.list_root().unwrap().is_empty());
+    drop(vol);
+
+    let metadata = std::fs::metadata(&path).unwrap();
+    assert!(metadata.len() > (1u64 << 40) - (2u64 << 30));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let physical_bytes = metadata.blocks() * 512;
+        println!(
+            "1 TiB sparse mkfs+mount: {:?}, physical bytes: {}",
+            started.elapsed(),
+            physical_bytes
+        );
+        // APFS may allocate roughly one host allocation unit around each
+        // widely separated metadata write. Keep the qualification sparse by
+        // orders of magnitude without pretending host allocation equals the
+        // ~40 MiB of AFS+ metadata payloads issued here.
+        assert!(physical_bytes < 2 * 1024 * 1024 * 1024);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }

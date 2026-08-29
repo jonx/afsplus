@@ -44,6 +44,13 @@ pub struct TreeMutationStats {
     pub redistributions: u64,
     pub root_collapses: u64,
     pub staged_nodes_discarded: u64,
+    /// Provisional, unreachable node images written early to enforce a
+    /// constrained mutation-cache budget.
+    pub staged_spill_writes: u64,
+    /// Provisional images reloaded while the same transaction continues.
+    pub staged_spill_reloads: u64,
+    /// Maximum final staged images retained in memory at once.
+    pub max_resident_staged_nodes: u64,
     pub max_depth: u8,
 }
 
@@ -62,10 +69,10 @@ pub enum TreeOperation<'a> {
 
 /// Applies multiple upserts under one COW overlay. Repeated changes to a node
 /// allocated by this transaction update its staged image in place; committed
-/// nodes are never overwritten. This correctness prototype retains the whole
-/// dirty overlay in memory; the tiny-cache tranche must add spill/reload of
-/// unreachable staged blocks without changing the mutation semantics. After
-/// any error, the caller must abort and discard the surrounding allocator
+/// nodes are never overwritten. This default entry point keeps the complete
+/// dirty overlay in memory for modern hosts; [`mutate_many_with_cache_limit`]
+/// provides provisional spill/reload for constrained profiles. After any
+/// error, the caller must abort and discard the surrounding allocator
 /// transaction rather than reuse its partially prepared state.
 #[allow(clippy::too_many_arguments)]
 pub fn upsert_many<D, A>(
@@ -129,6 +136,44 @@ where
     D: BlockDevice,
     A: TreeAllocator<D>,
 {
+    mutate_many_with_cache_limit(
+        dev,
+        geo,
+        tx,
+        root_lba,
+        spec,
+        new_generation,
+        operations,
+        usize::MAX,
+    )
+}
+
+/// Applies a mixed mutation while retaining at most `cache_pages` final
+/// staged node images in RAM. Evicted images are written only to freshly
+/// allocated, still-unreachable blocks and reloaded on demand. The caller's
+/// later metadata barrier makes those provisional writes durable before
+/// checkpoint publication; aborting leaves only harmless garbage in blocks
+/// that the committed allocator still considers free.
+#[allow(clippy::too_many_arguments)]
+pub fn mutate_many_with_cache_limit<D, A>(
+    dev: &mut D,
+    geo: &Geometry,
+    tx: &mut A,
+    root_lba: u64,
+    spec: TreeSpec,
+    new_generation: u64,
+    operations: &[TreeOperation<'_>],
+    cache_pages: usize,
+) -> Result<TreeMutation, CoreError>
+where
+    D: BlockDevice,
+    A: TreeAllocator<D>,
+{
+    if cache_pages == 0 {
+        return Err(CoreError::PrototypeLimit(
+            "tree mutation cache must retain at least one page",
+        ));
+    }
     if new_generation <= spec.max_generation {
         return Err(CoreError::Corrupt(
             "tree mutation generation is not newer than committed state".into(),
@@ -142,6 +187,10 @@ where
         spec,
         new_generation,
         writes: BTreeMap::new(),
+        cache_pages,
+        resident_staged_nodes: 0,
+        access_clock: 0,
+        resident_lru: BTreeSet::new(),
         stats: TreeMutationStats::default(),
     };
     let mut root = root_lba;
@@ -203,9 +252,14 @@ where
         }
     }
     context.stats.final_nodes_written = context.writes.len() as u64;
+    let writes = context
+        .writes
+        .into_iter()
+        .filter_map(|(lba, image)| image.resident.map(|block| (lba, block)))
+        .collect();
     Ok(TreeMutation {
         root_lba: root,
-        writes: context.writes.into_iter().collect(),
+        writes,
         stats: context.stats,
     })
 }
@@ -216,8 +270,17 @@ struct MutationContext<'a, D: BlockDevice, A: TreeAllocator<D>> {
     tx: &'a mut A,
     spec: TreeSpec,
     new_generation: u64,
-    writes: BTreeMap<u64, Vec<u8>>,
+    writes: BTreeMap<u64, StagedImage>,
+    cache_pages: usize,
+    resident_staged_nodes: usize,
+    access_clock: u64,
+    resident_lru: BTreeSet<(u64, u64)>,
     stats: TreeMutationStats,
+}
+
+struct StagedImage {
+    resident: Option<Vec<u8>>,
+    last_used: u64,
 }
 
 #[derive(Clone)]
@@ -472,14 +535,41 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             ));
         }
         check_tree_lba(&self.geo, lba)?;
-        let staged = self.writes.get(&lba).cloned();
-        let (block, is_staged) = if let Some(block) = staged {
-            (block, true)
+        let is_staged = self.writes.contains_key(&lba);
+        let block = if is_staged {
+            let access = self.next_access();
+            let resident = {
+                let image = self.writes.get_mut(&lba).ok_or_else(|| {
+                    CoreError::Corrupt("staged tree membership changed during read".into())
+                })?;
+                if image.resident.is_some() {
+                    self.resident_lru.remove(&(image.last_used, lba));
+                }
+                image.last_used = access;
+                image.resident.clone()
+            };
+            if let Some(block) = resident {
+                self.resident_lru.insert((access, lba));
+                block
+            } else {
+                let mut block = vec![0u8; self.geo.block_size];
+                self.dev.read_block(lba, &mut block)?;
+                self.stats.device_reads += 1;
+                self.stats.staged_spill_reloads += 1;
+                self.writes
+                    .get_mut(&lba)
+                    .ok_or_else(|| CoreError::Corrupt("staged tree image disappeared".into()))?
+                    .resident = Some(block.clone());
+                self.resident_staged_nodes += 1;
+                self.resident_lru.insert((access, lba));
+                self.enforce_cache_limit()?;
+                block
+            }
         } else {
             let mut block = vec![0u8; self.geo.block_size];
             self.dev.read_block(lba, &mut block)?;
             self.stats.device_reads += 1;
-            (block, false)
+            block
         };
         self.stats.node_reads += 1;
         self.stats.max_depth = self.stats.max_depth.max(depth + 1);
@@ -576,7 +666,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         }
         while reusable.len() > outputs.len() {
             let lba = reusable.pop().expect("length checked above");
-            self.writes.remove(&lba);
+            self.remove_staged(lba);
             self.tx.retire_tree_block(self.dev, lba)?;
             self.stats.staged_nodes_discarded += 1;
         }
@@ -594,7 +684,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
 
     fn discard_pending(&mut self, pending: PendingNode) -> Result<(), CoreError> {
         if pending.old_staged {
-            if self.writes.remove(&pending.old_lba).is_none() {
+            if self.remove_staged(pending.old_lba).is_none() {
                 return Err(CoreError::Corrupt(
                     "staged tree source has no write image".into(),
                 ));
@@ -612,8 +702,61 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         let encoded = node
             .encode(self.geo.block_size, self.new_generation)
             .map_err(CoreError::Format)?;
-        self.writes.insert(lba, encoded);
+        let access = self.next_access();
+        let previous = self.writes.insert(
+            lba,
+            StagedImage {
+                resident: Some(encoded),
+                last_used: access,
+            },
+        );
+        if let Some(previous) = &previous {
+            if previous.resident.is_some() {
+                self.resident_lru.remove(&(previous.last_used, lba));
+            }
+        }
+        if previous.is_none_or(|image| image.resident.is_none()) {
+            self.resident_staged_nodes += 1;
+        }
+        self.resident_lru.insert((access, lba));
+        self.enforce_cache_limit()?;
         Ok(())
+    }
+
+    fn enforce_cache_limit(&mut self) -> Result<(), CoreError> {
+        while self.resident_staged_nodes > self.cache_pages {
+            let (_, lba) = self
+                .resident_lru
+                .pop_first()
+                .ok_or_else(|| CoreError::Corrupt("staged cache accounting mismatch".into()))?;
+            let block = self
+                .writes
+                .get_mut(&lba)
+                .and_then(|image| image.resident.take())
+                .ok_or_else(|| CoreError::Corrupt("staged cache victim has no image".into()))?;
+            self.dev.write_block(lba, &block)?;
+            self.resident_staged_nodes -= 1;
+            self.stats.staged_spill_writes += 1;
+        }
+        self.stats.max_resident_staged_nodes = self
+            .stats
+            .max_resident_staged_nodes
+            .max(self.resident_staged_nodes as u64);
+        Ok(())
+    }
+
+    fn remove_staged(&mut self, lba: u64) -> Option<StagedImage> {
+        let image = self.writes.remove(&lba)?;
+        if image.resident.is_some() {
+            self.resident_lru.remove(&(image.last_used, lba));
+            self.resident_staged_nodes -= 1;
+        }
+        Some(image)
+    }
+
+    fn next_access(&mut self) -> u64 {
+        self.access_clock = self.access_clock.saturating_add(1);
+        self.access_clock
     }
 }
 
@@ -857,7 +1000,9 @@ mod tests {
     use afsplus_format::tree::{child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode};
     use afsplus_format::Timespec;
 
-    use super::{delete_many, mutate_many, upsert_many, TreeOperation};
+    use super::{
+        delete_many, mutate_many, mutate_many_with_cache_limit, upsert_many, TreeOperation,
+    };
     use crate::alloc::TxAllocator;
     use crate::allocation_root::{self, ReservedTreePool};
     use crate::tree::{lookup, validate_tree, TreeSpec};
@@ -1065,6 +1210,144 @@ mod tests {
             Some(surviving_value)
         );
         tx2.finish(&checkpoint2, Some(&checkpoint)).unwrap();
+    }
+
+    #[test]
+    fn constrained_mutation_cache_spills_and_reloads_at_two_four_and_eight_pages() {
+        let geo = afsplus_format::geometry::Geometry {
+            block_size: 4096,
+            total_blocks: 8192,
+            region_size: 8192,
+        };
+        let spec = TreeSpec {
+            kind: TreeKind::ObjectMap,
+            owner: 0,
+            max_generation: 1,
+        };
+        let entries: Vec<_> = (0..1_000u64)
+            .map(|ordinal| {
+                let key = (ordinal * 137) % 1_000;
+                (wide_key(key), vec![key as u8; 80])
+            })
+            .collect();
+        let operations: Vec<_> = entries
+            .iter()
+            .map(|(key, value)| TreeOperation::Upsert { key, value })
+            .collect();
+
+        for cache_pages in [2, 4, 8] {
+            let mut dev = MemoryBackend::new(4096, 8192);
+            dev.write_block(
+                100,
+                &TreeNode::leaf(TreeKind::ObjectMap, 0)
+                    .encode(4096, 1)
+                    .unwrap(),
+            )
+            .unwrap();
+            let mut pool = ReservedTreePool::new(100..4000, &[100], &[]).unwrap();
+            let mutation = mutate_many_with_cache_limit(
+                &mut dev,
+                &geo,
+                &mut pool,
+                100,
+                spec,
+                2,
+                &operations,
+                cache_pages,
+            )
+            .unwrap();
+            assert!(mutation.stats.staged_spill_writes > 0);
+            assert!(mutation.stats.staged_spill_reloads > 0);
+            assert!(mutation.stats.max_resident_staged_nodes <= cache_pages as u64);
+            assert!(mutation.writes.len() < mutation.stats.final_nodes_written as usize);
+            for (lba, block) in &mutation.writes {
+                dev.write_block(*lba, block).unwrap();
+            }
+            let summary = validate_tree(
+                &mut dev,
+                &geo,
+                mutation.root_lba,
+                TreeSpec {
+                    max_generation: 2,
+                    ..spec
+                },
+            )
+            .unwrap();
+            assert_eq!(summary.items, 1_000);
+            assert!(summary.height >= 3);
+        }
+    }
+
+    #[test]
+    #[ignore = "explicit 100k-key scale qualification; about 53s in a debug build"]
+    fn bounded_overlay_qualifies_one_hundred_thousand_compact_keys() {
+        let geo = afsplus_format::geometry::Geometry {
+            block_size: 4096,
+            total_blocks: 8192,
+            region_size: 8192,
+        };
+        let spec = TreeSpec {
+            kind: TreeKind::ObjectMap,
+            owner: 0,
+            max_generation: 1,
+        };
+        let entries: Vec<_> = (0..100_000u64)
+            .map(|ordinal| {
+                let key = (ordinal * 7_919) % 100_000;
+                (key_u64(key), key.to_le_bytes())
+            })
+            .collect();
+        let operations: Vec<_> = entries
+            .iter()
+            .map(|(key, value)| TreeOperation::Upsert { key, value })
+            .collect();
+        let mut dev = MemoryBackend::new(4096, 8192);
+        dev.write_block(
+            100,
+            &TreeNode::leaf(TreeKind::ObjectMap, 0)
+                .encode(4096, 1)
+                .unwrap(),
+        )
+        .unwrap();
+        let mut pool = ReservedTreePool::new(100..8000, &[100], &[]).unwrap();
+        let mutation =
+            mutate_many_with_cache_limit(&mut dev, &geo, &mut pool, 100, spec, 2, &operations, 8)
+                .unwrap();
+        assert!(mutation.stats.staged_spill_writes > 0);
+        assert!(mutation.stats.staged_spill_reloads > 0);
+        assert!(mutation.stats.max_resident_staged_nodes <= 8);
+        for (lba, block) in &mutation.writes {
+            dev.write_block(*lba, block).unwrap();
+        }
+        let summary = validate_tree(
+            &mut dev,
+            &geo,
+            mutation.root_lba,
+            TreeSpec {
+                max_generation: 2,
+                ..spec
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.items, 100_000);
+        assert!(summary.height >= 3);
+        for key in [0u64, 49_999, 99_999] {
+            assert_eq!(
+                lookup(
+                    &mut dev,
+                    &geo,
+                    mutation.root_lba,
+                    TreeSpec {
+                        max_generation: 2,
+                        ..spec
+                    },
+                    &key_u64(key),
+                )
+                .unwrap()
+                .0,
+                Some(key.to_le_bytes().to_vec())
+            );
+        }
     }
 
     #[test]

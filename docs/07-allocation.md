@@ -126,6 +126,14 @@ the descriptor write included before the metadata barrier, and separate
 corruption tests prove that descriptor/page damage is found by the checker or
 the first allocator access without turning normal mount into a bitmap scan.
 
+The formatter no longer loops over every logical block merely to seal reserved
+bits; it touches reserved ranges and bitmap pages directly. An explicit host
+qualification now formats and bounded-mounts a sparse 1 TiB image (1,024 full
+regions) in about 1.24 seconds on the development Apple-Silicon/APFS host. One
+observed run consumed roughly 112 MiB of host physical blocks for the sparse
+image. Host sparse-allocation amplification varies and is not an AFS+ format
+guarantee, so the test enforces only an orders-of-magnitude sparse bound.
+
 This remains an experiment, not an epoch-1 commitment. It preserves page-level
 write amplification, on-demand loading, crash safety, and repairability. If
 the descriptor indirection performs poorly or becomes too complex, the
@@ -134,9 +142,11 @@ delta-log/spacemap candidates remain open.
 The earlier inline checkpoint array has now been replaced by ADR-035's bounded
 allocation-root tree. Its nodes live in a permanent triple-version pool, so
 updating the allocator does not recursively allocate from the free space being
-described. The first implementation still loads and rewrites all region
-records at transaction boundaries; on-demand lookup and dirty-path-only COW
-remain required before the 1 TiB scale gate is complete.
+described. The first implementation still loads and rewrites all region records
+at transaction boundaries; on-demand lookup and dirty-path-only COW remain
+required before the **mutation** side of the 1 TiB scale gate is complete. The
+new qualification proves formatter and bounded mount scale, not small-commit
+cost or an exhaustive 1 TiB checker pass.
 
 ## 4. Allocation strategy
 

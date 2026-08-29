@@ -203,10 +203,16 @@ dedicated every-write/every-flush matrix proves sparse range writes recover to
 exactly the pre- or post-transaction content. Workload measurement and the
 tiny-cache mutation overlay remain the next Core Scale-1 gates.
 
-The current multi-upsert overlay keeps every dirty tree node in RAM. It proves
-COW mutation correctness but does not yet satisfy the 2/4/8-page cache gate.
-That gate needs staged-node spill/reload to allocated-but-unreachable blocks,
-with only the active path and split peer resident.
+The multi-upsert overlay defaults to retaining every dirty tree node in RAM for
+modern hosts, but now has a constrained mode with a 2/4/8-page final-image LRU.
+It spills to allocated-but-unreachable blocks and reloads on demand; all three
+budgets pass a multi-level mutation test. A 100,000-key, eight-page structural
+qualification also passes (about 8.1 seconds optimized and 53 seconds in a
+debug build, so it is an explicit ignored scale test rather than a default CI
+test). This does not yet
+close the classic-memory gate: decoded recursive ancestors and the split peer
+remain outside the measured staged-image budget and must be converted to
+compact path frames or an iterative mutation walk.
 
 ADR-035 fixes the allocation-root self-reference direction. Its AFST nodes use
 a permanently allocated `3N` pool for an
@@ -215,9 +221,12 @@ while two checkpoints remain selectable. `TreeAllocator` now decouples the
 COW engine from ordinary free-space allocation. Bulk mkfs, checkpoint
 publication, allocator reads, checker accounting, commits, and ordinary crash
 matrices now use the typed root; inline checkpoint records are empty. A 1 TiB
-geometry bulk-build test creates the expected 1,024 typed records. On-demand
-record loading, dirty-path-only writes, full sparse-image qualification, and
-multi-node crash matrices remain.
+geometry bulk-build test creates the expected 1,024 typed records. Reserved-bit
+initialization is now page/range based, and an explicit sparse 1 TiB image
+qualification formats and bounded-mounts in about 1.24 seconds on the
+development Apple-Silicon/APFS host (roughly 112 MiB physical in one passing
+run). On-demand record loading, dirty-path-only small commits, an exhaustive
+1 TiB checker pass, and multi-node crash matrices remain.
 
 At that baseline, steps 1-5 of `implementation/peer-review-prototype-plan.md` are implemented and green:
 
