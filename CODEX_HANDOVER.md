@@ -163,9 +163,17 @@ item count, and a counted reference for every internal child. Counted child
 references are required so an internal split can be planned from the current
 page without reading every child. The core has bounded lookup and an
 exhaustive verifier for levels, ranges, separator minima, counts, bounds, and
-cycles. Object map/directory/extent/allocation adapters and COW mutation are
-the next implementation tranche; the legacy single-block structures remain
-authoritative until each migration has its crash matrix.
+cycles. Transactional multi-upsert now copies a committed path once, keeps
+later changes in a write overlay, performs balanced leaf/internal splits, and
+grows the root. A 300-key split test plus a bad-level corruption test are
+executable. Deletion/merge/root shrink and the object-map, directory, extent,
+and allocation-root adapters are next; the legacy single-block structures
+remain authoritative until each migration has its crash matrix.
+
+The current multi-upsert overlay keeps every dirty tree node in RAM. It proves
+COW mutation correctness but does not yet satisfy the 2/4/8-page cache gate.
+That gate needs staged-node spill/reload to allocated-but-unreachable blocks,
+with only the active path and split peer resident.
 
 At that baseline, steps 1-5 of `implementation/peer-review-prototype-plan.md` are implemented and green:
 

@@ -1,6 +1,6 @@
 # ADR-034: Shared bounded copy-on-write tree engine
 
-Status: Proposed, executable prototype in progress
+Status: Accepted for the prototype; mutation engine in progress
 
 ## Context
 
@@ -62,6 +62,19 @@ a new root. None of those blocks may be reachable from either retained
 checkpoint. The new root becomes visible only through the normal metadata
 barrier and alternate checkpoint publication.
 
+Several upserts in one transaction share an in-memory write overlay. The
+first change copies and retires each committed node on its path; later changes
+rewrite already-staged nodes in place and allocate only for new splits. The
+overlay is emitted as one final image per LBA, so intermediate node images are
+never sent to the block device. Every descent validates that the child level
+is exactly one less than its parent and remains within the depth cap.
+
+The first mutation prototype retains that complete dirty overlay in memory.
+This proves COW topology and eliminates repeated device reads, but is not yet
+the cache-2/4/8 proof: the tiny-cache tranche must be able to spill an
+unreachable staged node to its allocated block and reload it later while
+keeping only the active path and split peer resident.
+
 Deletion may initially defer occupancy rebalancing only if it still removes
 empty children, keeps search correct, caps depth, and documents the resulting
 space cost. The Core Scale-1 exit gate nevertheless requires tested merge and
@@ -97,3 +110,12 @@ This is an experimental wire format, not an epoch-1 freeze. Measurements and
 crash matrices may revise it. Rust data structures and allocation behavior are
 not normative; the byte encoding and invariants must remain implementable by
 the portable C profile.
+
+The executable engine currently covers bounded lookup, exhaustive validation,
+transactional multi-upsert, leaf/internal splitting, and root height growth.
+A 300-key test reaches multiple leaves while reading the original committed
+tree node only once; a repeated key updates its value without changing the
+subtree count. Deletion, redistribution/merge, root-height reduction, typed
+adapters, publication through the checkpoint transaction, and the associated
+power-cut matrices remain required before Core Scale-1 is complete. So does
+staged-node spill/reload under the explicit 2/4/8-page cache matrix.

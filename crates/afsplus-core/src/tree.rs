@@ -246,7 +246,7 @@ fn validate_subtree<D: BlockDevice>(
     })
 }
 
-fn validate_node_identity(
+pub(crate) fn validate_node_identity(
     node: &TreeNode,
     generation: u64,
     spec: TreeSpec,
@@ -271,7 +271,7 @@ fn validate_node_identity(
     Ok(())
 }
 
-fn validate_node_range(
+pub(crate) fn validate_node_range(
     node: &TreeNode,
     lower: Option<&[u8]>,
     upper: Option<&[u8]>,
@@ -302,7 +302,7 @@ fn validate_node_range(
     Ok(())
 }
 
-fn check_tree_lba(geo: &Geometry, lba: u64) -> Result<(), CoreError> {
+pub(crate) fn check_tree_lba(geo: &Geometry, lba: u64) -> Result<(), CoreError> {
     if !geo.is_allocatable(lba) {
         return Err(CoreError::Corrupt(format!(
             "tree block {lba} outside allocatable bounds"

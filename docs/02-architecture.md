@@ -82,6 +82,18 @@ Persistent leaf-neighbor pointers are intentionally absent because updating a
 neighbor under COW would expand an otherwise local mutation. Iteration uses a
 bounded path stack instead.
 
+Multi-operation transactions keep one final staged image per modified tree
+LBA. A committed node is copied and retired on first touch; subsequent touches
+reuse the transaction-local image, and splits allocate only the additional
+nodes. This bounds device reads independently of the number of operations that
+hit the same path and avoids writing intermediate tree states.
+
+The first executable mutation overlay retains all dirty nodes in memory. It is
+therefore not the tiny-cache implementation yet. A constrained implementation
+must be able to spill those still-unreachable staged images to their allocated
+blocks, reload them on demand, and keep only the active path/split peer in its
+2/4/8-page cache; the on-disk tree semantics do not change.
+
 Allocation regions are specifically intended to make free-space operations bounded.
 
 The executable allocator prototype follows this rule: normal mount reads no
