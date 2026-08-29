@@ -21,7 +21,7 @@ use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::dir::{comparison_key, DirEntry};
 use afsplus_format::ident::Identification;
-use afsplus_format::object::{ObjectRecord, ObjectType};
+use afsplus_format::object::{ObjectRecord, ObjectType, OBJECT_FLAG_EXTENT_TREE};
 use afsplus_format::retired::RetiredList;
 use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 
@@ -29,6 +29,7 @@ use crate::alloc::{AllocStats, TxAllocator};
 use crate::allocation_root::{self, ReservedTreePool};
 use crate::cow_tree::{mutate_many, TreeMutation, TreeOperation};
 use crate::directory;
+use crate::extent_map::{self, EXTENT_UNWRITTEN};
 use crate::mount::Selection;
 use crate::object_map;
 use crate::verify::{load_mount_state, MountState};
@@ -190,17 +191,38 @@ impl<D: BlockDevice> Volume<D> {
             )));
         }
         let block_size = self.dev.block_size();
-        let mut content = vec![0u8; (record.data_blocks as usize) * block_size];
-        for i in 0..record.data_blocks {
-            let offset = i as usize * block_size;
-            let lba = record
-                .data_root
-                .checked_add(i)
-                .ok_or_else(|| CoreError::Corrupt(format!("object {object_id} extent overflow")))?;
-            self.dev
-                .read_block(lba, &mut content[offset..offset + block_size])?;
+        let content_len = usize::try_from(record.size_bytes)
+            .map_err(|_| CoreError::PrototypeLimit("file is too large to read into one buffer"))?;
+        let mut content = vec![0u8; content_len];
+        let logical_blocks = record.size_bytes.div_ceil(block_size as u64);
+        let mut block = vec![0u8; block_size];
+        for logical_block in 0..logical_blocks {
+            let lba = if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
+                let Some(extent) = extent_map::lookup_extent(
+                    &mut self.dev,
+                    &self.ident.geometry(),
+                    record.data_root,
+                    object_id,
+                    self.checkpoint.generation,
+                    logical_block,
+                )?
+                else {
+                    continue;
+                };
+                if extent.flags & EXTENT_UNWRITTEN != 0 {
+                    continue;
+                }
+                extent.physical_start + logical_block - extent.logical_start
+            } else {
+                record.data_root.checked_add(logical_block).ok_or_else(|| {
+                    CoreError::Corrupt(format!("object {object_id} extent overflow"))
+                })?
+            };
+            self.dev.read_block(lba, &mut block)?;
+            let offset = logical_block as usize * block_size;
+            let length = block_size.min(content.len() - offset);
+            content[offset..offset + length].copy_from_slice(&block[..length]);
         }
-        content.truncate(record.size_bytes as usize);
         Ok(content)
     }
 
@@ -614,6 +636,20 @@ impl<D: BlockDevice> Volume<D> {
             Vec::new()
         };
         let keep_file_object = victim.object_type == ObjectType::File && victim.link_count > 1;
+        let victim_extent_map = if victim.object_type == ObjectType::File
+            && victim.flags & OBJECT_FLAG_EXTENT_TREE != 0
+            && !keep_file_object
+        {
+            Some(extent_map::load_all(
+                &mut self.dev,
+                &self.ident.geometry(),
+                victim.data_root,
+                victim.object_id,
+                self.checkpoint.generation,
+            )?)
+        } else {
+            None
+        };
 
         let block_size = self.dev.block_size();
         let generation = self.next_generation()?;
@@ -641,8 +677,19 @@ impl<D: BlockDevice> Volume<D> {
             .ok_or_else(|| CoreError::Corrupt("victim missing from object map".into()))?;
         tx.retire(&mut self.dev, victim_record_lba)?;
         if !keep_file_object {
-            for i in 0..victim.data_blocks {
-                tx.retire(&mut self.dev, victim.data_root + i)?;
+            if let Some(map) = victim_extent_map {
+                for lba in map.tree_blocks {
+                    tx.retire(&mut self.dev, lba)?;
+                }
+                for extent in map.extents {
+                    for lba in extent.physical_start..extent.physical_end()? {
+                        tx.retire(&mut self.dev, lba)?;
+                    }
+                }
+            } else {
+                for i in 0..victim.data_blocks {
+                    tx.retire(&mut self.dev, victim.data_root + i)?;
+                }
             }
             for lba in victim_directory_blocks {
                 tx.retire(&mut self.dev, lba)?;
@@ -1173,7 +1220,17 @@ impl<D: BlockDevice> Volume<D> {
                 record.object_id
             )));
         }
-        if record.object_type == ObjectType::File {
+        if record.object_type == ObjectType::File
+            && record.flags & OBJECT_FLAG_EXTENT_TREE != 0
+        {
+            extent_map::validate_root(
+                &mut self.dev,
+                &self.ident.geometry(),
+                record.data_root,
+                object_id,
+                self.checkpoint.generation,
+            )?;
+        } else if record.object_type == ObjectType::File {
             let data_end = record
                 .data_root
                 .checked_add(record.data_blocks)

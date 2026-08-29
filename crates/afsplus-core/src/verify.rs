@@ -18,13 +18,14 @@ use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::geometry::{Geometry, DESCRIPTOR_SLOTS};
 use afsplus_format::ident::Identification;
-use afsplus_format::object::{ObjectRecord, ObjectType};
+use afsplus_format::object::{ObjectRecord, ObjectType, OBJECT_FLAG_EXTENT_TREE};
 use afsplus_format::retired::RetiredList;
 use afsplus_format::{OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
 
 use crate::alloc::Bitmaps;
 use crate::allocation_root;
 use crate::directory::{self, LoadedDirectory};
+use crate::extent_map;
 use crate::object_map::{self, LoadedObjectMap};
 use crate::CoreError;
 
@@ -246,18 +247,44 @@ pub fn load_committed_state<D: BlockDevice>(
                 directories.insert(record.object_id, dir);
             }
             ObjectType::File => {
-                let data_end = record
-                    .data_root
-                    .checked_add(record.data_blocks)
-                    .ok_or_else(|| {
-                        CoreError::Corrupt(format!(
-                            "object {} extent end overflows block address",
-                            record.object_id
-                        ))
-                    })?;
-                for lba in record.data_root..data_end {
-                    claim(lba, &mut claimed)?;
-                    data_blocks.push(lba);
+                if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
+                    let map = extent_map::load_all(
+                        dev,
+                        &geo,
+                        record.data_root,
+                        record.object_id,
+                        checkpoint.generation,
+                    )?;
+                    if map.allocated_blocks != record.data_blocks {
+                        return Err(CoreError::Corrupt(format!(
+                            "object {} records {} allocated blocks, extent map has {}",
+                            record.object_id, record.data_blocks, map.allocated_blocks
+                        )));
+                    }
+                    for lba in map.tree_blocks {
+                        claim(lba, &mut claimed)?;
+                        metadata_blocks.push(lba);
+                    }
+                    for extent in map.extents {
+                        for lba in extent.physical_start..extent.physical_end()? {
+                            claim(lba, &mut claimed)?;
+                            data_blocks.push(lba);
+                        }
+                    }
+                } else {
+                    let data_end = record
+                        .data_root
+                        .checked_add(record.data_blocks)
+                        .ok_or_else(|| {
+                            CoreError::Corrupt(format!(
+                                "object {} extent end overflows block address",
+                                record.object_id
+                            ))
+                        })?;
+                    for lba in record.data_root..data_end {
+                        claim(lba, &mut claimed)?;
+                        data_blocks.push(lba);
+                    }
                 }
             }
             _ => unreachable!("rejected by ObjectRecord::decode"),

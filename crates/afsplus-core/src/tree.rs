@@ -22,6 +22,8 @@ pub struct TreeLookupStats {
     pub peak_page_buffers: u8,
 }
 
+pub type TreeFloorItem = (Vec<u8>, Vec<u8>);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TreeSummary {
     pub items: u64,
@@ -71,6 +73,82 @@ pub fn lookup<D: BlockDevice>(
                 .binary_search_by(|item| item.key.as_slice().cmp(key))
                 .ok()
                 .map(|index| node.items[index].value.clone());
+            return Ok((value, stats));
+        }
+
+        let separator_index = node
+            .items
+            .partition_point(|item| item.key.as_slice() <= key);
+        let child = if separator_index == 0 {
+            upper = node.items.first().map(|item| item.key.clone());
+            afsplus_format::tree::ChildRef {
+                lba: node.leftmost_child,
+                subtree_items: node.leftmost_items,
+            }
+        } else {
+            lower = Some(node.items[separator_index - 1].key.clone());
+            if let Some(next_separator) = node.items.get(separator_index) {
+                upper = Some(next_separator.key.clone());
+            }
+            TreeNode::child_ref(&node.items[separator_index - 1]).map_err(CoreError::Format)?
+        };
+        check_tree_lba(geo, child.lba)?;
+        lba = child.lba;
+        expected_level = Some(node.level - 1);
+    }
+    Err(CoreError::Corrupt(
+        "tree traversal exceeded maximum depth".into(),
+    ))
+}
+
+/// Finds the greatest stored key less than or equal to `key` with the same
+/// bounded working set as [`lookup`]. Extent maps use this to find a mapping
+/// that begins before the requested logical block.
+pub fn lookup_floor<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    spec: TreeSpec,
+    key: &[u8],
+) -> Result<(Option<TreeFloorItem>, TreeLookupStats), CoreError> {
+    if key.is_empty() || key.len() > MAX_TREE_KEY_BYTES {
+        return Err(CoreError::Corrupt(
+            "tree lookup key length out of range".into(),
+        ));
+    }
+    check_tree_lba(geo, root_lba)?;
+    let mut lba = root_lba;
+    let mut expected_level = None;
+    let mut lower: Option<Vec<u8>> = None;
+    let mut upper: Option<Vec<u8>> = None;
+    let mut visited = BTreeSet::new();
+    let mut buf = vec![0u8; geo.block_size];
+    let mut stats = TreeLookupStats {
+        pages_read: 0,
+        peak_page_buffers: 2,
+    };
+
+    for depth in 0..=MAX_TREE_LEVEL {
+        if !visited.insert(lba) {
+            return Err(CoreError::Corrupt(format!("tree cycle at block {lba}")));
+        }
+        dev.read_block(lba, &mut buf)?;
+        stats.pages_read += 1;
+        let (node, generation) = TreeNode::decode(&buf)
+            .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        validate_node_identity(&node, generation, spec, expected_level, lba)?;
+        validate_node_range(&node, lower.as_deref(), upper.as_deref(), depth == 0)?;
+
+        if node.is_leaf() {
+            let position = node
+                .items
+                .partition_point(|item| item.key.as_slice() <= key);
+            let value = position.checked_sub(1).map(|index| {
+                (
+                    node.items[index].key.clone(),
+                    node.items[index].value.clone(),
+                )
+            });
             return Ok((value, stats));
         }
 
@@ -341,7 +419,7 @@ mod tests {
     use afsplus_block::{BlockDevice, MemoryBackend};
     use afsplus_format::tree::{child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode};
 
-    use super::{lookup, validate_tree, TreeSpec};
+    use super::{lookup, lookup_floor, validate_tree, TreeSpec};
     use afsplus_format::geometry::Geometry;
 
     fn leaf(keys: &[u64]) -> TreeNode {
@@ -403,6 +481,14 @@ mod tests {
         assert_eq!(stats.pages_read, 2);
         assert_eq!(stats.peak_page_buffers, 2);
         assert!(lookup(&mut dev, &geo, 22, spec, &key_u64(40))
+            .unwrap()
+            .0
+            .is_none());
+        let (floor, _) = lookup_floor(&mut dev, &geo, 22, spec, &key_u64(55)).unwrap();
+        let (floor_key, floor_value) = floor.unwrap();
+        assert_eq!(u64::from_be_bytes(floor_key.try_into().unwrap()), 50);
+        assert_eq!(u64::from_le_bytes(floor_value.try_into().unwrap()), 1050);
+        assert!(lookup_floor(&mut dev, &geo, 22, spec, &key_u64(0))
             .unwrap()
             .0
             .is_none());

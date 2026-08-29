@@ -244,6 +244,7 @@ fn object_record_rejects_zero_link_count_and_bad_extents() {
     record.data_root = u64::MAX;
     record.data_blocks = 1;
     record.size_bytes = BS as u64;
+    record.allocated_bytes = BS as u64;
     assert!(matches!(record.encode(BS, 5), Err(FormatError::Overflow(_))));
 }
 

@@ -3,8 +3,9 @@
 //! One object per block in the prototype; the header's owner field carries
 //! the object ID so repair tooling can attribute the block without context.
 //!
-//! Files carry at most one direct data extent (`data_root` = start LBA,
-//! `data_blocks` = length); the inline-extents-plus-tree model comes later.
+//! Files either carry one direct data extent (`data_root` = start LBA,
+//! `data_blocks` = length) or set [`OBJECT_FLAG_EXTENT_TREE`] and use
+//! `data_root` as the root of their typed AFST extent map.
 //! Directories use `data_root` for their directory-tree root.
 //!
 //! `link_count == 0` is invalid: the prototype has no orphan handling yet,
@@ -41,6 +42,10 @@ const PAYLOAD_LEN: usize = 96;
 /// Resource-exhaustion guard (`docs/21-security-and-corruption.md` §5): a
 /// corrupt record must not be able to demand absurd extent walks.
 pub const MAX_EXTENT_BLOCKS: u64 = 4096;
+
+/// `data_root` references a typed AFST extent map instead of one direct
+/// physical extent. This experimental flag is not an epoch-1 commitment.
+pub const OBJECT_FLAG_EXTENT_TREE: u16 = 1 << 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectType {
@@ -153,8 +158,14 @@ impl ObjectRecord {
         if self.link_count == 0 {
             return Err(FormatError::Invalid("link count zero without orphan support"));
         }
+        if self.flags & !OBJECT_FLAG_EXTENT_TREE != 0 {
+            return Err(FormatError::Invalid("object has unsupported flags"));
+        }
         match self.object_type {
             ObjectType::Directory => {
+                if self.flags != 0 {
+                    return Err(FormatError::Invalid("directory has file extent flags"));
+                }
                 if self.data_root == 0 {
                     return Err(FormatError::Invalid("directory must reference a directory block"));
                 }
@@ -163,10 +174,24 @@ impl ObjectRecord {
                 }
             }
             ObjectType::File => {
-                if self.data_blocks > MAX_EXTENT_BLOCKS {
-                    return Err(FormatError::Invalid("file extent exceeds prototype cap"));
+                let expected_allocated = self
+                    .data_blocks
+                    .checked_mul(block_size as u64)
+                    .ok_or(FormatError::Overflow("allocated byte count"))?;
+                if self.allocated_bytes != expected_allocated {
+                    return Err(FormatError::Invalid(
+                        "allocated bytes do not match data block count",
+                    ));
                 }
-                if self.data_blocks == 0 {
+                if self.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
+                    if self.data_root == 0 {
+                        return Err(FormatError::Invalid(
+                            "extent-tree file has no tree root",
+                        ));
+                    }
+                } else if self.data_blocks > MAX_EXTENT_BLOCKS {
+                    return Err(FormatError::Invalid("file extent exceeds prototype cap"));
+                } else if self.data_blocks == 0 {
                     if self.data_root != 0 || self.size_bytes != 0 {
                         return Err(FormatError::Invalid("empty file with data references"));
                     }
