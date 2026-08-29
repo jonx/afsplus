@@ -157,6 +157,16 @@ transaction writes one dirty bitmap page and one descriptor before the
 checkpoint. Cross-page allocation, corruption deferral/detection, quarantine,
 and power-cut behavior are covered by executable tests.
 
+Core Scale-1 then began with ADR-034 and the shared `AFST` node format. The
+format carries a tree kind, owner, level, strict binary keys, exact subtree
+item count, and a counted reference for every internal child. Counted child
+references are required so an internal split can be planned from the current
+page without reading every child. The core has bounded lookup and an
+exhaustive verifier for levels, ranges, separator minima, counts, bounds, and
+cycles. Object map/directory/extent/allocation adapters and COW mutation are
+the next implementation tranche; the legacy single-block structures remain
+authoritative until each migration has its crash matrix.
+
 At that baseline, steps 1-5 of `implementation/peer-review-prototype-plan.md` are implemented and green:
 
 - 29 tests

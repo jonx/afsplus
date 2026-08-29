@@ -59,8 +59,15 @@ recovery states accepted. A negative-control test replays a deliberately
 mis-ordered commit (checkpoint before the metadata barrier) and proves the
 matrix catches it.
 
-Next: extent trees beyond one direct extent, directory B+ trees beyond one
-leaf, and the delta-log/spacemap
+Core Scale-1 is in progress. Its first executable tranche adds a shared,
+checksummed COW tree-node codec plus a bounded lookup path and exhaustive tree
+verifier. The verifier checks kind/owner/generation, level transitions,
+separator ranges, exact per-child subtree counts, child bounds, cycles, and
+duplicate child ownership. ADR-034 records the experimental contract.
+
+Next: COW insertion/split/merge over that shared engine, migration of the
+object/allocation roots, extent trees beyond one direct extent, directory B+
+trees beyond one leaf, and the delta-log/spacemap
 allocation alternatives — to be built only if this design fails on
 correctness, write amplification, or scalability (the measurements test is
 the baseline to beat).

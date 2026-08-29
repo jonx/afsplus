@@ -27,6 +27,7 @@
 pub mod alloc;
 pub mod mkfs;
 pub mod mount;
+pub mod tree;
 pub mod verify;
 pub mod volume;
 

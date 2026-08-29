@@ -73,6 +73,15 @@ The on-disk structures and core algorithms must not require:
 
 Iterators and indexes operate page by page.
 
+The Core Scale-1 prototype uses one structurally shared COW B+ tree node
+format for object maps, directories, extent maps, and the allocation-region
+root. Typed adapters keep their semantic records distinct. Lookup reuses a
+single raw block buffer plus one decoded node and discards ancestors; full
+cycle, separator, range, and subtree-count validation remains checker work.
+Persistent leaf-neighbor pointers are intentionally absent because updating a
+neighbor under COW would expand an otherwise local mutation. Iteration uses a
+bounded path stack instead.
+
 Allocation regions are specifically intended to make free-space operations bounded.
 
 The executable allocator prototype follows this rule: normal mount reads no

@@ -40,6 +40,8 @@ pub mod block_type {
     pub const BITMAP: u32 = u32::from_le_bytes(*b"AFSB");
     /// Region allocation descriptor, `"AFSG"`.
     pub const REGION_DESCRIPTOR: u32 = u32::from_le_bytes(*b"AFSG");
+    /// Shared COW B+ tree node, `"AFST"`.
+    pub const TREE_NODE: u32 = u32::from_le_bytes(*b"AFST");
     /// Retired-block list, `"AFSR"`.
     pub const RETIRED: u32 = u32::from_le_bytes(*b"AFSR");
 }

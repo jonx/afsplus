@@ -34,6 +34,7 @@ pub mod object;
 pub mod omap;
 pub mod retired;
 pub mod region;
+pub mod tree;
 
 use core::fmt;
 

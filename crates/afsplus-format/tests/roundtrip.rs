@@ -7,11 +7,15 @@ use afsplus_format::checkpoint::{Checkpoint, RegionRecord};
 use afsplus_format::crc32c::CHECKSUM_CRC32C;
 use afsplus_format::dir::{comparison_key, DirBlock, DirEntry};
 use afsplus_format::geometry::Geometry;
+use afsplus_format::header::BlockHeader;
 use afsplus_format::ident::Identification;
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::omap::ObjectMap;
 use afsplus_format::retired::RetiredList;
 use afsplus_format::region::{BitmapBinding, RegionDescriptor};
+use afsplus_format::tree::{
+    child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode, MAX_TREE_LEVEL,
+};
 use afsplus_format::{FormatError, Timespec, DEFAULT_BLOCK_SHIFT, DEFAULT_BLOCK_SIZE, OBJECT_ROOT};
 
 const BS: usize = DEFAULT_BLOCK_SIZE;
@@ -98,6 +102,25 @@ fn sample_region_descriptor() -> RegionDescriptor {
         valid_blocks: 100,
         free_blocks: 95,
         pages: vec![BitmapBinding { slot: 1, free_blocks: 95, generation: 5 }],
+    }
+}
+
+fn sample_tree_leaf() -> TreeNode {
+    TreeNode {
+        kind: TreeKind::ObjectMap,
+        owner: 0,
+        level: 0,
+        subtree_items: 3,
+        leftmost_child: 0,
+        leftmost_items: 0,
+        items: [1u64, 17, u64::MAX]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| TreeItem {
+                key: key_u64(id).to_vec(),
+                value: (100 + index as u64).to_le_bytes().to_vec(),
+            })
+            .collect(),
     }
 }
 
@@ -286,6 +309,72 @@ fn multi_page_region_descriptor_roundtrip() {
 }
 
 #[test]
+fn shared_tree_leaf_and_internal_nodes_roundtrip() {
+    let leaf = sample_tree_leaf();
+    let encoded = leaf.encode(BS, 7).unwrap();
+    let (decoded, generation) = TreeNode::decode(&encoded).unwrap();
+    assert_eq!(decoded, leaf);
+    assert_eq!(generation, 7);
+    assert!(leaf.fits(BS));
+
+    let internal = TreeNode {
+        kind: TreeKind::ObjectMap,
+        owner: 0,
+        level: 1,
+        subtree_items: 300,
+        leftmost_child: 40,
+        leftmost_items: 100,
+        items: vec![
+            TreeItem {
+                key: key_u64(100).to_vec(),
+                value: child_value(ChildRef { lba: 41, subtree_items: 100 }).unwrap(),
+            },
+            TreeItem {
+                key: key_u64(200).to_vec(),
+                value: child_value(ChildRef { lba: 42, subtree_items: 100 }).unwrap(),
+            },
+        ],
+    };
+    let encoded = internal.encode(BS, 8).unwrap();
+    assert_eq!(TreeNode::decode(&encoded).unwrap(), (internal, 8));
+}
+
+#[test]
+fn shared_tree_rejects_bad_order_depth_children_and_hostile_counts() {
+    let mut node = sample_tree_leaf();
+    node.items.swap(0, 1);
+    assert!(node.encode(BS, 1).is_err());
+
+    let mut node = sample_tree_leaf();
+    node.level = MAX_TREE_LEVEL + 1;
+    assert!(node.encode(BS, 1).is_err());
+
+    let bad_internal = TreeNode {
+        kind: TreeKind::Directory,
+        owner: 1,
+        level: 1,
+        subtree_items: 2,
+        leftmost_child: 10,
+        leftmost_items: 1,
+        items: vec![TreeItem { key: b"x".to_vec(), value: vec![1, 2, 3] }],
+    };
+    assert!(bad_internal.encode(BS, 1).is_err());
+
+    // A checksummed but hostile count must fail bounds-first, without trying
+    // to reserve attacker-controlled memory.
+    let mut encoded = sample_tree_leaf().encode(BS, 1).unwrap();
+    let header = BlockHeader::verify(&encoded, afsplus_format::header::block_type::TREE_NODE).unwrap();
+    afsplus_format::le::put_u32(&mut encoded[32 + 4..32 + 8], u32::MAX);
+    header.seal(&mut encoded);
+    assert!(TreeNode::decode(&encoded).is_err());
+
+    let numeric = [0u64, 1, 255, 256, u64::MAX]
+        .map(key_u64)
+        .map(|key| key.to_vec());
+    assert!(numeric.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
 fn dir_block_roundtrip_preserves_original_names_and_key_order() {
     let dir = sample_dir();
     let block = dir.encode(BS, 5).unwrap();
@@ -339,6 +428,7 @@ fn every_flipped_byte_is_detected() {
         sample_dir().encode(BS, 5).unwrap(),
         sample_bitmap().encode(BS, 5).unwrap(),
         sample_region_descriptor().encode(BS, 5).unwrap(),
+        sample_tree_leaf().encode(BS, 5).unwrap(),
         sample_retired().encode(BS, 5).unwrap(),
     ];
     for block in blocks {
@@ -353,6 +443,7 @@ fn every_flipped_byte_is_detected() {
                     && ObjectMap::decode(&corrupt).is_err()
                     && BitmapPage::decode(&corrupt).is_err()
                     && RegionDescriptor::decode(&corrupt).is_err()
+                    && TreeNode::decode(&corrupt).is_err()
                     && RetiredList::decode(&corrupt).is_err(),
                 "corruption at offset {offset} was not detected"
             );
@@ -373,6 +464,7 @@ fn decoders_reject_garbage_without_panicking() {
     assert!(ObjectMap::decode(&garbage).is_err());
     assert!(BitmapPage::decode(&garbage).is_err());
     assert!(RegionDescriptor::decode(&garbage).is_err());
+    assert!(TreeNode::decode(&garbage).is_err());
     assert!(RetiredList::decode(&garbage).is_err());
     // Truncated buffers.
     assert!(Identification::decode(&garbage[..16]).is_err());
