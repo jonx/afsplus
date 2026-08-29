@@ -14,6 +14,7 @@ AFS+ should be unusually strong in the combination that matters to AROS:
 - modern 64-bit semantics
 - strong crash consistency
 - excellent development-tree performance
+- cheap same-volume clones/reflinks
 - fast full-volume enumeration
 - persistent incremental change discovery
 - portable implementation
@@ -40,7 +41,7 @@ Legend:
 | Metadata checksums | NO | NO | NO | NO | limited/internal, not end-to-end | YES | YES | YES | YES | internal integrity mechanisms | YES | PLAN |
 | User-data checksums | NO | NO | NO | NO | NO | NO | NO | YES by default | YES | not exposed as general end-to-end contract | optional Integrity Streams | PROP optional |
 | Snapshots | NO | NO | NO | NO | external VSS, not NTFS-native snapshots | NO | NO native snapshots | YES | YES | YES | YES | PROP |
-| Reflink / block clone | NO | NO | NO | NO | NO general reflink | NO | YES | YES | YES clones | YES clones | YES | PROP |
+| Reflink / block clone | NO | NO | NO | NO | NO general reflink | NO | YES | YES | YES clones | YES clones | YES | PLAN epoch-1 shared extents |
 | Transparent compression | NO | NO | NO | NO | YES | fs-level compression not standard | NO general transparent compression | YES | YES | YES on modern APFS deployments/platform features | YES on current ReFS | PROP provider |
 | Encryption in filesystem | NO | NO | NO | NO | EFS | fscrypt | fscrypt integration | external/per-file mechanisms depending stack | native dataset encryption | YES | YES in current ReFS/Windows stack | PROP, likely block/file policy layer |
 | Hard links | YES | YES | YES | NO | YES | YES | YES | YES | YES | YES | YES | PLAN |
@@ -53,7 +54,7 @@ Legend:
 | Reverse physical->owner mapping | NO | NO | NO | NO | internal tooling | NO general | YES, rmap | internal trees | block birth/ownership metadata internally | private | internal | PROP rebuildable reverse-map |
 | Online scrub | NO | limited tools | limited | NO | chkdsk mostly offline/online phases | e2scrub limited | YES | YES | YES | fsck largely system-managed | YES scrubber | PROP targeted scrub |
 | Online repair | NO | tools/offline | limited | NO | limited | limited | YES, modern XFS | limited depending damage | self-heal with redundancy, tools | system-managed | self-heal with redundancy | PROP |
-| Portable reference core | handler-specific | current portable work exists, historical driver OS-coupled | multiple ports but distinct implementations | many independent implementations | proprietary | Linux-specific core | Linux-specific core | Linux-specific core | multi-OS but large integrated stack | proprietary | proprietary | PLAN `libafsplus` |
+| Portable reference core | handler-specific | current portable work exists, historical driver OS-coupled | multiple ports but distinct implementations | many independent implementations | proprietary | Linux-specific core | Linux-specific core | Linux-specific core | multi-OS but large integrated stack | proprietary | proprietary | PLAN Rust reference core + C ABI |
 | Low-memory implementation profile | YES | YES, excellent | YES | YES | moderate | moderate | moderate/high | higher | high | not a target | moderate/high | PLAN explicit profile |
 | Built-in machine-readable feature API | legacy packets | private packets | private APIs | simple | rich Windows APIs | ioctl/statx mix | rich ioctl/tooling | ioctl/tooling | properties/ioctl tooling | Foundation/API stack | Windows APIs | PLAN Filesystem API v2 |
 | Structured admin/tool API, no screen scraping | NO | NO | NO | NO | PARTIAL | fragmented | improving | fragmented | strong CLI/property model but still tool-specific | strong APIs | Windows APIs | PLAN |
@@ -78,6 +79,7 @@ AFS+ should provide all of these simultaneously:
 - modern file notifications
 - machine-readable capabilities
 - portable checking and repair tools
+- same-volume reflink cloning without copying file data
 
 PFS3 remains a major inspiration for low-memory atomic-update design. SFS remains an important benchmark for responsiveness and transparent optimization. AFS+ should preserve those strengths rather than merely add modern features.
 
@@ -113,6 +115,17 @@ AFS+ plans these interfaces before the format is frozen. See `docs/26-debug-obse
 The global catalog, change stream, directory statistics, and reverse mapping should be rebuildable or safely discardable whenever practical.
 
 This makes aggressive performance and maintenance features less dangerous to portability and recovery.
+
+### 4.5 Clone semantics as part of the developer contract
+
+AFS+ treats same-volume cloning as an explicit semantic API rather than only a hidden optimization.
+
+```text
+CloneFile()
+CloneRange()
+```
+
+allow build tools, package managers, backup tools, VM/image workflows, and editors to request cheap independent copies and fall back to physical copy on other filesystems. Shared-extent support is therefore designed into the epoch-1 extent and reclamation model rather than retrofitted later.
 
 ## 5. Important features we should not chase merely to win a table
 
