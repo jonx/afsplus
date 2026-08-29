@@ -60,10 +60,11 @@ mis-ordered commit (checkpoint before the metadata barrier) and proves the
 matrix catches it.
 
 Core Scale-1 is in progress. The shared, checksummed COW tree now has a bounded
-lookup path, exhaustive verifier, and transactional multi-upsert engine. The
+lookup path, exhaustive verifier, and transactional upsert/delete engine. The
 engine copies committed paths, reuses transaction-local staged nodes, splits
-leaves/internal nodes, grows a new root, validates every level transition, and
-reports mutation I/O/allocation statistics. The verifier checks
+leaves/internal nodes, merges or redistributes underfull siblings, grows or
+collapses a root, validates every level transition, and reports mutation
+I/O/allocation statistics. The verifier checks
 kind/owner/generation, separator ranges, exact per-child subtree counts, child
 bounds, cycles, and duplicate child ownership. ADR-034 records the
 experimental contract.
@@ -73,9 +74,8 @@ nodes in RAM. Explicit staged-node spill/reload is still required for the
 2/4/8-page tiny-cache qualification; this limitation is not hidden behind the
 bounded lookup claim.
 
-Next: COW deletion/redistribution/merge and root-height reduction, migration
-of the object/allocation roots, extent trees beyond one direct extent,
-directory B+ trees beyond one leaf, and the delta-log/spacemap
+Next: migration of the object/allocation roots, extent trees beyond one direct
+extent, directory B+ trees beyond one leaf, and the delta-log/spacemap
 allocation alternatives — to be built only if this design fails on
 correctness, write amplification, or scalability (the measurements test is
 the baseline to beat).

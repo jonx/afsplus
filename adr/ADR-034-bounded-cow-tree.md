@@ -75,10 +75,11 @@ the cache-2/4/8 proof: the tiny-cache tranche must be able to spill an
 unreachable staged node to its allocated block and reload it later while
 keeping only the active path and split peer resident.
 
-Deletion may initially defer occupancy rebalancing only if it still removes
-empty children, keeps search correct, caps depth, and documents the resulting
-space cost. The Core Scale-1 exit gate nevertheless requires tested merge and
-root-height reduction.
+Deletion rebalances an underfull child with an adjacent sibling before the
+parent is staged. If their combined image fits, they merge; otherwise their
+combined ordered contents are split again into two balanced nodes. A root
+left with one child is retired and replaced by that child. Consequently no
+empty non-root leaf or one-child non-root internal node is ever serialized.
 
 ## Typed adapters
 
@@ -112,10 +113,11 @@ not normative; the byte encoding and invariants must remain implementable by
 the portable C profile.
 
 The executable engine currently covers bounded lookup, exhaustive validation,
-transactional multi-upsert, leaf/internal splitting, and root height growth.
-A 300-key test reaches multiple leaves while reading the original committed
-tree node only once; a repeated key updates its value without changing the
-subtree count. Deletion, redistribution/merge, root-height reduction, typed
-adapters, publication through the checkpoint transaction, and the associated
-power-cut matrices remain required before Core Scale-1 is complete. So does
-staged-node spill/reload under the explicit 2/4/8-page cache matrix.
+transactional multi-upsert/delete, leaf/internal split, sibling
+merge/redistribution, and root height growth/reduction. A permuted 300-key
+test grows a three-level tree, replaces a key, then deletes 299 keys in a
+different permutation and returns to a one-item root leaf; the exhaustive
+verifier runs at both ends. Typed adapters, publication through the checkpoint
+transaction, and the associated power-cut matrices remain required before
+Core Scale-1 is complete. So does staged-node spill/reload under the explicit
+2/4/8-page cache matrix.

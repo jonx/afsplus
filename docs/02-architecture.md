@@ -94,6 +94,12 @@ must be able to spill those still-unreachable staged images to their allocated
 blocks, reload them on demand, and keep only the active path/split peer in its
 2/4/8-page cache; the on-disk tree semantics do not change.
 
+Deletion defers staging the changed node until its parent has rebalanced it
+with an adjacent sibling. The pair is merged when its combined encoding fits,
+or redistributed into two balanced nodes otherwise. This prevents transient
+empty leaves or one-child internal nodes from becoming on-disk states. Only a
+one-child root may collapse directly to its child.
+
 Allocation regions are specifically intended to make free-space operations bounded.
 
 The executable allocator prototype follows this rule: normal mount reads no

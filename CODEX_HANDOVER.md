@@ -165,10 +165,13 @@ page without reading every child. The core has bounded lookup and an
 exhaustive verifier for levels, ranges, separator minima, counts, bounds, and
 cycles. Transactional multi-upsert now copies a committed path once, keeps
 later changes in a write overlay, performs balanced leaf/internal splits, and
-grows the root. A 300-key split test plus a bad-level corruption test are
-executable. Deletion/merge/root shrink and the object-map, directory, extent,
-and allocation-root adapters are next; the legacy single-block structures
-remain authoritative until each migration has its crash matrix.
+grows the root. Deletion now merges or redistributes underfull siblings before
+staging a valid parent and collapses one-child roots. A permuted 300-key test
+grows three levels, then deletes 299 keys in another permutation and returns
+to one root leaf; a bad-level corruption test is also executable. The
+object-map, directory, extent, and allocation-root adapters are next; the
+legacy single-block structures remain authoritative until each migration has
+its crash matrix.
 
 The current multi-upsert overlay keeps every dirty tree node in RAM. It proves
 COW mutation correctness but does not yet satisfy the 2/4/8-page cache gate.

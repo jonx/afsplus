@@ -1,6 +1,6 @@
 //! Copy-on-write insertion and splitting for the shared bounded tree.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use afsplus_block::BlockDevice;
 use afsplus_format::geometry::Geometry;
@@ -21,6 +21,11 @@ pub struct TreeMutationStats {
     pub final_nodes_written: u64,
     pub splits: u64,
     pub root_splits: u64,
+    pub deletes: u64,
+    pub merges: u64,
+    pub redistributions: u64,
+    pub root_collapses: u64,
+    pub staged_nodes_discarded: u64,
     pub max_depth: u8,
 }
 
@@ -35,7 +40,9 @@ pub struct TreeMutation {
 /// allocated by this transaction update its staged image in place; committed
 /// nodes are never overwritten. This correctness prototype retains the whole
 /// dirty overlay in memory; the tiny-cache tranche must add spill/reload of
-/// unreachable staged blocks without changing the mutation semantics.
+/// unreachable staged blocks without changing the mutation semantics. After
+/// any error, the caller must abort and discard the surrounding allocator
+/// transaction rather than reuse its partially prepared state.
 #[allow(clippy::too_many_arguments)]
 pub fn upsert_many<D: BlockDevice>(
     dev: &mut D,
@@ -106,6 +113,61 @@ pub fn upsert_many<D: BlockDevice>(
     })
 }
 
+/// Deletes several keys under one COW overlay. Empty children are removed,
+/// underfull siblings are merged or redistributed, and a one-child root is
+/// collapsed. As with [`upsert_many`], dirty-node spill is a later tiny-cache
+/// layer; committed blocks are never overwritten. An error requires aborting
+/// and discarding the surrounding allocator transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn delete_many<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    tx: &mut TxAllocator,
+    root_lba: u64,
+    spec: TreeSpec,
+    new_generation: u64,
+    keys: &[Vec<u8>],
+) -> Result<TreeMutation, CoreError> {
+    if new_generation <= spec.max_generation {
+        return Err(CoreError::Corrupt(
+            "tree mutation generation is not newer than committed state".into(),
+        ));
+    }
+    check_tree_lba(geo, root_lba)?;
+    let mut context = MutationContext {
+        dev,
+        geo: *geo,
+        tx,
+        spec,
+        new_generation,
+        writes: BTreeMap::new(),
+        stats: TreeMutationStats::default(),
+    };
+    let mut root = root_lba;
+    for key in keys {
+        validate_key(key)?;
+        let pending = context.delete_node(root, None, None, None, None, true, 0, key)?;
+        if pending.node.level > 0 && pending.node.items.is_empty() {
+            let child = pending.node.leftmost_child;
+            context.discard_pending(pending)?;
+            root = child;
+            context.stats.root_collapses += 1;
+        } else {
+            let source = (pending.old_lba, pending.old_staged);
+            let output = (pending.node, pending.min_key);
+            let replacement = context.persist_sources(vec![source], vec![output])?;
+            root = replacement[0].reference.lba;
+        }
+        context.stats.deletes += 1;
+    }
+    context.stats.final_nodes_written = context.writes.len() as u64;
+    Ok(TreeMutation {
+        root_lba: root,
+        writes: context.writes.into_iter().collect(),
+        stats: context.stats,
+    })
+}
+
 struct MutationContext<'a, D: BlockDevice> {
     dev: &'a mut D,
     geo: Geometry,
@@ -127,6 +189,17 @@ struct Replacement {
     children: Vec<ChildDesc>,
     level: u8,
 }
+
+struct PendingNode {
+    old_lba: u64,
+    old_staged: bool,
+    node: TreeNode,
+    /// Exact subtree minimum. It is absent only for an empty tree or where a
+    /// root boundary does not need to expose the value to a parent.
+    min_key: Option<Vec<u8>>,
+}
+
+type NodeImage = (TreeNode, Option<Vec<u8>>);
 
 impl<D: BlockDevice> MutationContext<'_, D> {
     #[allow(clippy::too_many_arguments)]
@@ -226,6 +299,122 @@ impl<D: BlockDevice> MutationContext<'_, D> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn delete_node(
+        &mut self,
+        lba: u64,
+        expected_level: Option<u8>,
+        known_min: Option<Vec<u8>>,
+        lower: Option<Vec<u8>>,
+        upper: Option<Vec<u8>>,
+        is_root: bool,
+        depth: u8,
+        key: &[u8],
+    ) -> Result<PendingNode, CoreError> {
+        if depth > MAX_TREE_LEVEL {
+            return Err(CoreError::Corrupt(
+                "tree mutation exceeded maximum depth".into(),
+            ));
+        }
+        let (mut node, staged, _) = self.read_node(
+            lba,
+            expected_level,
+            lower.as_deref(),
+            upper.as_deref(),
+            is_root,
+            depth,
+        )?;
+        if node.is_leaf() {
+            let index = node
+                .items
+                .binary_search_by(|item| item.key.as_slice().cmp(key))
+                .map_err(|_| CoreError::NotFound)?;
+            node.items.remove(index);
+            node.subtree_items = node.items.len() as u64;
+            let min_key = node.items.first().map(|item| item.key.clone());
+            return Ok(PendingNode {
+                old_lba: lba,
+                old_staged: staged,
+                node,
+                min_key,
+            });
+        }
+
+        let child_index = node
+            .items
+            .partition_point(|item| item.key.as_slice() <= key);
+        let mut children = children_from_node(&node)?;
+        children[0].min_key = known_min.clone();
+        let (child_lower, child_upper) = child_range(&node, child_index, &lower, &upper);
+        let child = children[child_index].clone();
+        let edited = self.delete_node(
+            child.reference.lba,
+            Some(node.level - 1),
+            child.min_key,
+            child_lower,
+            child_upper,
+            false,
+            depth + 1,
+            key,
+        )?;
+
+        if needs_rebalance(&edited.node, self.geo.block_size)? {
+            let sibling_index = if child_index + 1 < children.len() {
+                child_index + 1
+            } else {
+                child_index - 1
+            };
+            let (sibling_lower, sibling_upper) = child_range(&node, sibling_index, &lower, &upper);
+            let sibling_desc = children[sibling_index].clone();
+            let (sibling_node, sibling_staged, _) = self.read_node(
+                sibling_desc.reference.lba,
+                Some(node.level - 1),
+                sibling_lower.as_deref(),
+                sibling_upper.as_deref(),
+                false,
+                depth + 1,
+            )?;
+            let sibling = PendingNode {
+                old_lba: sibling_desc.reference.lba,
+                old_staged: sibling_staged,
+                node: sibling_node,
+                min_key: sibling_desc.min_key,
+            };
+            let (left_index, left, right) = if child_index < sibling_index {
+                (child_index, edited, sibling)
+            } else {
+                (sibling_index, sibling, edited)
+            };
+            let outputs = rebalance_pair(&left, &right, self.geo.block_size)?;
+            let output_count = outputs.len();
+            let sources = vec![
+                (left.old_lba, left.old_staged),
+                (right.old_lba, right.old_staged),
+            ];
+            let replacement = self.persist_sources(sources, outputs)?;
+            if output_count == 1 {
+                self.stats.merges += 1;
+            } else {
+                self.stats.redistributions += 1;
+            }
+            children.splice(left_index..=left_index + 1, replacement);
+        } else {
+            let source = (edited.old_lba, edited.old_staged);
+            let output = (edited.node, edited.min_key);
+            let replacement = self.persist_sources(vec![source], vec![output])?;
+            children.splice(child_index..=child_index, replacement);
+        }
+
+        let min_key = children[0].min_key.clone().or(known_min);
+        node = internal_allow_one(node, &children)?;
+        Ok(PendingNode {
+            old_lba: lba,
+            old_staged: staged,
+            node,
+            min_key,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn read_node(
         &mut self,
         lba: u64,
@@ -276,7 +465,7 @@ impl<D: BlockDevice> MutationContext<'_, D> {
         &mut self,
         old_lba: u64,
         old_staged: bool,
-        nodes: Vec<(TreeNode, Option<Vec<u8>>)>,
+        nodes: Vec<NodeImage>,
     ) -> Result<Replacement, CoreError> {
         let level = nodes
             .first()
@@ -311,6 +500,72 @@ impl<D: BlockDevice> MutationContext<'_, D> {
         Ok(Replacement { children, level })
     }
 
+    fn persist_sources(
+        &mut self,
+        sources: Vec<(u64, bool)>,
+        outputs: Vec<NodeImage>,
+    ) -> Result<Vec<ChildDesc>, CoreError> {
+        if outputs.is_empty() {
+            return Err(CoreError::Corrupt("empty tree replacement".into()));
+        }
+        let level = outputs[0].0.level;
+        if outputs.iter().any(|(node, _)| node.level != level) {
+            return Err(CoreError::Corrupt(
+                "tree replacement mixes node levels".into(),
+            ));
+        }
+        let mut reusable = Vec::new();
+        for (lba, staged) in sources {
+            if staged {
+                if !self.writes.contains_key(&lba) {
+                    return Err(CoreError::Corrupt(
+                        "staged tree source has no write image".into(),
+                    ));
+                }
+                reusable.push(lba);
+            } else {
+                self.tx.retire(self.dev, lba)?;
+                self.stats.committed_nodes_retired += 1;
+            }
+        }
+        while reusable.len() < outputs.len() {
+            reusable.push(self.tx.allocate(self.dev)?);
+            self.stats.nodes_allocated += 1;
+        }
+        while reusable.len() > outputs.len() {
+            let lba = reusable.pop().expect("length checked above");
+            self.writes.remove(&lba);
+            self.tx.retire(self.dev, lba)?;
+            self.stats.staged_nodes_discarded += 1;
+        }
+        let mut replacement = Vec::with_capacity(outputs.len());
+        for ((node, min_key), lba) in outputs.into_iter().zip(reusable) {
+            let reference = ChildRef {
+                lba,
+                subtree_items: node.subtree_items,
+            };
+            self.stage_node(lba, &node)?;
+            replacement.push(ChildDesc { min_key, reference });
+        }
+        Ok(replacement)
+    }
+
+    fn discard_pending(&mut self, pending: PendingNode) -> Result<(), CoreError> {
+        if pending.old_staged {
+            if self.writes.remove(&pending.old_lba).is_none() {
+                return Err(CoreError::Corrupt(
+                    "staged tree source has no write image".into(),
+                ));
+            }
+            self.tx.retire(self.dev, pending.old_lba)?;
+            self.stats.staged_nodes_discarded += 1;
+        } else {
+            self.tx.retire(self.dev, pending.old_lba)?;
+            self.stats.committed_nodes_retired += 1;
+        }
+        Ok(())
+    }
+
     fn stage_node(&mut self, lba: u64, node: &TreeNode) -> Result<(), CoreError> {
         let encoded = node
             .encode(self.geo.block_size, self.new_generation)
@@ -335,7 +590,121 @@ fn children_from_node(node: &TreeNode) -> Result<Vec<ChildDesc>, CoreError> {
             reference: TreeNode::child_ref(item).map_err(CoreError::Format)?,
         });
     }
+    let mut seen = BTreeSet::new();
+    if children
+        .iter()
+        .any(|child| !seen.insert(child.reference.lba))
+    {
+        return Err(CoreError::Corrupt(
+            "internal tree node references a child more than once".into(),
+        ));
+    }
     Ok(children)
+}
+
+fn child_range(
+    node: &TreeNode,
+    child_index: usize,
+    lower: &Option<Vec<u8>>,
+    upper: &Option<Vec<u8>>,
+) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    let child_lower = if child_index == 0 {
+        lower.clone()
+    } else {
+        Some(node.items[child_index - 1].key.clone())
+    };
+    let child_upper = node
+        .items
+        .get(child_index)
+        .map(|item| item.key.clone())
+        .or_else(|| upper.clone());
+    (child_lower, child_upper)
+}
+
+fn needs_rebalance(node: &TreeNode, block_size: usize) -> Result<bool, CoreError> {
+    let structurally_underfull = node.items.is_empty();
+    let twice_payload = node
+        .encoded_len()?
+        .checked_mul(2)
+        .ok_or_else(|| CoreError::Corrupt("tree node size overflow".into()))?;
+    Ok(structurally_underfull || twice_payload <= block_size)
+}
+
+fn internal_allow_one(
+    mut template: TreeNode,
+    children: &[ChildDesc],
+) -> Result<TreeNode, CoreError> {
+    if children.is_empty() {
+        return Err(CoreError::Corrupt(
+            "internal tree node lost every child".into(),
+        ));
+    }
+    if children.len() >= 2 {
+        return internal_from_children(template, children);
+    }
+    template.leftmost_child = children[0].reference.lba;
+    template.leftmost_items = children[0].reference.subtree_items;
+    template.subtree_items = template.leftmost_items;
+    template.items.clear();
+    Ok(template)
+}
+
+fn rebalance_pair(
+    left: &PendingNode,
+    right: &PendingNode,
+    block_size: usize,
+) -> Result<Vec<NodeImage>, CoreError> {
+    if left.node.level != right.node.level
+        || left.node.kind != right.node.kind
+        || left.node.owner != right.node.owner
+    {
+        return Err(CoreError::Corrupt(
+            "tree rebalance siblings are incompatible".into(),
+        ));
+    }
+    if left.node.is_leaf() {
+        if left
+            .node
+            .items
+            .last()
+            .zip(right.node.items.first())
+            .is_some_and(|(left_item, right_item)| left_item.key >= right_item.key)
+        {
+            return Err(CoreError::Corrupt("tree rebalance siblings overlap".into()));
+        }
+        let mut combined = left.node.clone();
+        combined.items.extend(right.node.items.iter().cloned());
+        combined.subtree_items = combined.items.len() as u64;
+        let combined_min = combined.items.first().map(|item| item.key.clone());
+        if combined.fits(block_size) {
+            return Ok(vec![(combined, combined_min)]);
+        }
+        let (left_node, right_node) = split_leaf(combined, block_size)?;
+        let left_min = left_node.items.first().map(|item| item.key.clone());
+        let right_min = right_node.items.first().map(|item| item.key.clone());
+        return Ok(vec![(left_node, left_min), (right_node, right_min)]);
+    }
+
+    let mut children = children_from_node(&left.node)?;
+    children[0].min_key = left.min_key.clone();
+    let mut right_children = children_from_node(&right.node)?;
+    right_children[0].min_key = right.min_key.clone();
+    if right_children[0].min_key.is_none() {
+        return Err(CoreError::Corrupt(
+            "right rebalance sibling has no minimum".into(),
+        ));
+    }
+    children.extend(right_children);
+    let combined_min = children[0].min_key.clone();
+    let combined = internal_from_children(left.node.clone(), &children)?;
+    if combined.fits(block_size) {
+        return Ok(vec![(combined, combined_min)]);
+    }
+    let (left_node, right_node, right_min) = split_internal(combined, &children, block_size)?;
+    Ok(vec![
+        (left_node, combined_min),
+        (right_node, Some(right_min)),
+    ])
 }
 
 fn internal_from_children(
@@ -424,13 +793,18 @@ fn split_internal(
 }
 
 fn validate_upsert(key: &[u8], value: &[u8]) -> Result<(), CoreError> {
-    if key.is_empty() || key.len() > MAX_TREE_KEY_BYTES {
-        return Err(CoreError::Corrupt(
-            "tree upsert key length out of range".into(),
-        ));
-    }
+    validate_key(key)?;
     if value.is_empty() {
         return Err(CoreError::Corrupt("tree upsert value is empty".into()));
+    }
+    Ok(())
+}
+
+fn validate_key(key: &[u8]) -> Result<(), CoreError> {
+    if key.is_empty() || key.len() > MAX_TREE_KEY_BYTES {
+        return Err(CoreError::Corrupt(
+            "tree mutation key length out of range".into(),
+        ));
     }
     Ok(())
 }
@@ -441,7 +815,7 @@ mod tests {
     use afsplus_format::tree::{child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode};
     use afsplus_format::Timespec;
 
-    use super::upsert_many;
+    use super::{delete_many, upsert_many};
     use crate::alloc::TxAllocator;
     use crate::tree::{lookup, validate_tree, TreeSpec};
     use crate::{mkfs, mount, MkfsParams};
@@ -453,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn many_upserts_split_under_one_overlay_without_rewriting_committed_nodes() {
+    fn split_merge_and_height_changes_share_one_cow_engine() {
         let mut dev = MemoryBackend::new(4096, 2048);
         mkfs(
             &mut dev,
@@ -523,6 +897,74 @@ mod tests {
         );
         let finished = tx.finish(&checkpoint, None).unwrap();
         assert!(finished.stats.blocks_allocated >= mutation.stats.nodes_allocated);
+        for (lba, block) in &finished.bitmap_writes {
+            dev.write_block(*lba, block).unwrap();
+        }
+        for (lba, block) in &finished.descriptor_writes {
+            dev.write_block(*lba, block).unwrap();
+        }
+        let mut checkpoint2 = checkpoint.clone();
+        checkpoint2.generation = 2;
+        checkpoint2.object_map_block = mutation.root_lba;
+        checkpoint2.regions = finished.records.clone();
+        let mut tx2 = TxAllocator::begin(
+            &mut dev,
+            &geo,
+            &checkpoint2,
+            Some(&checkpoint),
+            &finished.retired,
+            3,
+        )
+        .unwrap();
+        assert!(matches!(
+            delete_many(
+                &mut dev,
+                &geo,
+                &mut tx2,
+                mutation.root_lba,
+                new_spec,
+                3,
+                &[wide_key(999)],
+            ),
+            Err(crate::CoreError::NotFound)
+        ));
+        let delete_keys: Vec<_> = (0..299u64)
+            .map(|ordinal| wide_key((ordinal * 137) % 299))
+            .collect();
+        let deletion = delete_many(
+            &mut dev,
+            &geo,
+            &mut tx2,
+            mutation.root_lba,
+            new_spec,
+            3,
+            &delete_keys,
+        )
+        .unwrap();
+        assert_eq!(deletion.stats.deletes, 299);
+        assert!(deletion.stats.merges > 0);
+        assert!(deletion.stats.root_collapses >= 2);
+        for (lba, block) in &deletion.writes {
+            dev.write_block(*lba, block).unwrap();
+        }
+        let final_spec = TreeSpec {
+            max_generation: 3,
+            ..spec
+        };
+        let summary = validate_tree(&mut dev, &geo, deletion.root_lba, final_spec).unwrap();
+        assert_eq!(summary.items, 1);
+        assert_eq!(summary.height, 1);
+        assert!(lookup(
+            &mut dev,
+            &geo,
+            deletion.root_lba,
+            final_spec,
+            &wide_key(299)
+        )
+        .unwrap()
+        .0
+        .is_some());
+        tx2.finish(&checkpoint2, Some(&checkpoint)).unwrap();
     }
 
     #[test]
@@ -554,7 +996,7 @@ mod tests {
             items: vec![TreeItem {
                 key: key_u64(100).to_vec(),
                 value: child_value(ChildRef {
-                    lba: root,
+                    lba: root + 1,
                     subtree_items: 1,
                 })
                 .unwrap(),
