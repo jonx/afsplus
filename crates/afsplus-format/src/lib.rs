@@ -22,14 +22,17 @@
 
 extern crate alloc;
 
+pub mod bitmap;
 pub mod checkpoint;
 pub mod crc32c;
 pub mod dir;
+pub mod geometry;
 pub mod header;
 pub mod ident;
 pub mod le;
 pub mod object;
 pub mod omap;
+pub mod retired;
 
 use core::fmt;
 
@@ -123,6 +126,9 @@ impl Timespec {
     }
 
     pub fn read(buf: &[u8]) -> Result<Self, FormatError> {
+        if buf.len() < Self::WIRE_SIZE {
+            return Err(FormatError::WrongBufferSize { expected: Self::WIRE_SIZE, actual: buf.len() });
+        }
         let seconds = le::get_i64(&buf[0..8]);
         let nanoseconds = le::get_u32(&buf[8..12]);
         if nanoseconds >= 1_000_000_000 {

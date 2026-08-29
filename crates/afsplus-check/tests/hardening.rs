@@ -1,0 +1,170 @@
+//! Priority-0 hardening behaviors: ambiguous same-generation checkpoints,
+//! no silent fallback over corrupt reachable state, comparison-key
+//! consistency, and counter-overflow handling.
+
+use afsplus_block::MemoryBackend;
+use afsplus_check::check_device;
+use afsplus_core::{mkfs, mount, CoreError, MkfsParams};
+use afsplus_format::checkpoint::Checkpoint;
+use afsplus_format::dir::{DirBlock, DirEntry};
+use afsplus_format::header::BlockHeader;
+use afsplus_format::ident::Identification;
+use afsplus_format::Timespec;
+
+const BS: usize = 4096;
+
+fn formatted() -> MemoryBackend {
+    let mut dev = MemoryBackend::new(BS, 64);
+    mkfs(
+        &mut dev,
+        &MkfsParams {
+            uuid: [42u8; 16],
+            label: "HardVol".into(),
+            region_size: 64,
+            timestamp: Timespec { seconds: 1_780_000_000, nanoseconds: 0 },
+        },
+    )
+    .unwrap();
+    dev
+}
+
+fn ts(seconds: i64) -> Timespec {
+    Timespec { seconds, nanoseconds: 0 }
+}
+
+fn read_ident(dev: &MemoryBackend) -> Identification {
+    Identification::decode(&dev.peek(0)).unwrap()
+}
+
+#[test]
+fn same_generation_checkpoints_are_ambiguous_for_mount_and_checker() {
+    let mut dev = formatted();
+    // Duplicate slot A into slot B: two structurally valid checkpoints with
+    // the same generation — a state no correct commit sequence can produce.
+    let slot_a = dev.peek(1);
+    dev.apply_raw(2, &slot_a);
+
+    let report = check_device(&mut dev);
+    assert!(!report.is_clean());
+    assert!(
+        report.errors.iter().any(|e| e.contains("ambiguous")),
+        "checker must flag ambiguity: {:?}",
+        report.errors
+    );
+    match mount(dev) {
+        Err(CoreError::AmbiguousCheckpoints(1)) => {}
+        Err(e) => panic!("mount must report ambiguity, got: {e}"),
+        Ok(_) => panic!("mount must refuse the ambiguous volume"),
+    }
+}
+
+#[test]
+fn corrupt_state_under_the_chosen_checkpoint_is_an_error_not_a_fallback() {
+    // The newest checkpoint is structurally valid but its object map is
+    // corrupt. The old pre-hardening behavior silently fell back to
+    // generation 1, masking the violation; mount must now report corruption
+    // and the checker must flag it as an error.
+    let mut dev = formatted();
+    let mut vol = mount(dev).unwrap();
+    vol.create_file_in_root("hello.txt", b"x", ts(1)).unwrap();
+    dev = vol.into_device();
+
+    let ident = read_ident(&dev);
+    let newest = Checkpoint::decode(&dev.peek(2), &ident.uuid).expect("generation 2 in slot B");
+    assert_eq!(newest.generation, 2);
+    let mut omap_block = dev.peek(newest.object_map_block);
+    omap_block[100] ^= 0xFF;
+    dev.apply_raw(newest.object_map_block, &omap_block);
+
+    let report = check_device(&mut dev);
+    assert!(!report.is_clean(), "checker must not accept the volume");
+    assert!(
+        report.errors.iter().any(|e| e.contains("references invalid state")),
+        "unexpected findings: {:?}",
+        report.errors
+    );
+    match mount(dev) {
+        Err(CoreError::Corrupt(message)) => {
+            assert!(message.contains("generation 2"), "unhelpful diagnostics: {message}");
+        }
+        Err(e) => panic!("mount must report corruption, got: {e}"),
+        Ok(vol) => panic!(
+            "mount must report corruption, not fall back to generation {}",
+            vol.generation()
+        ),
+    }
+}
+
+#[test]
+fn stored_comparison_key_must_match_the_name() {
+    let mut dev = formatted();
+    let mut vol = mount(dev).unwrap();
+    let id = vol.create_file_in_root("aaa.txt", b"", ts(1)).unwrap();
+    let dir_lba = vol.stat(afsplus_format::OBJECT_ROOT).unwrap().data_root;
+    dev = vol.into_device();
+
+    // Re-encode the root directory block with a key that does not derive
+    // from the name (a mis-keyed entry breaks lookup determinism).
+    let generation = BlockHeader::verify(&dev.peek(dir_lba), afsplus_format::header::block_type::DIRECTORY)
+        .unwrap()
+        .generation;
+    let mut forged = DirBlock::new(afsplus_format::OBJECT_ROOT);
+    forged
+        .insert(DirEntry {
+            key: b"zzz-not-the-name".to_vec(),
+            name: b"aaa.txt".to_vec(),
+            child_type_hint: 1,
+            child_id: id,
+        })
+        .unwrap();
+    dev.apply_raw(dir_lba, &forged.encode(BS, generation).unwrap());
+
+    match mount(dev.clone()) {
+        Err(CoreError::Corrupt(message)) => {
+            assert!(message.contains("key"), "unhelpful diagnostics: {message}");
+        }
+        Err(e) => panic!("mount must report the mis-keyed directory, got: {e}"),
+        Ok(_) => panic!("mount must reject the mis-keyed directory"),
+    }
+    let report = check_device(&mut dev);
+    assert!(!report.is_clean());
+}
+
+#[test]
+fn generation_counter_overflow_is_reported_not_wrapped() {
+    let mut dev = formatted();
+    let ident = read_ident(&dev);
+    // Rewrite checkpoint A at generation u64::MAX (bitmap records keep their
+    // real generation, which stays ≤ the checkpoint's).
+    let mut ckpt = Checkpoint::decode(&dev.peek(1), &ident.uuid).unwrap();
+    ckpt.generation = u64::MAX;
+    ckpt.committed_tx_id = u64::MAX;
+    dev.apply_raw(1, &ckpt.encode(BS).unwrap());
+
+    let mut vol = mount(dev).unwrap();
+    assert_eq!(vol.generation(), u64::MAX);
+    match vol.create_file_in_root("overflow.txt", b"", ts(1)) {
+        Err(CoreError::PrototypeLimit(message)) => {
+            assert!(message.contains("generation"), "{message}");
+        }
+        other => panic!("expected a reported overflow, got {other:?}"),
+    }
+    assert_eq!(vol.generation(), u64::MAX, "failed commit must not change state");
+}
+
+#[test]
+fn object_id_counter_overflow_is_reported_not_wrapped() {
+    let mut dev = formatted();
+    let ident = read_ident(&dev);
+    let mut ckpt = Checkpoint::decode(&dev.peek(1), &ident.uuid).unwrap();
+    ckpt.next_object_id = u64::MAX;
+    dev.apply_raw(1, &ckpt.encode(BS).unwrap());
+
+    let mut vol = mount(dev).unwrap();
+    match vol.create_file_in_root("overflow.txt", b"", ts(1)) {
+        Err(CoreError::PrototypeLimit(message)) => {
+            assert!(message.contains("object ID"), "{message}");
+        }
+        other => panic!("expected a reported overflow, got {other:?}"),
+    }
+}

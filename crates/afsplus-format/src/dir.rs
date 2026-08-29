@@ -83,6 +83,14 @@ impl DirBlock {
         }
     }
 
+    /// Removes the entry with this key; returns it, or None if absent.
+    pub fn remove(&mut self, key: &[u8]) -> Option<DirEntry> {
+        self.entries
+            .binary_search_by(|e| e.key.as_slice().cmp(key))
+            .ok()
+            .map(|pos| self.entries.remove(pos))
+    }
+
     pub fn lookup(&self, key: &[u8]) -> Option<&DirEntry> {
         self.entries
             .binary_search_by(|e| e.key.as_slice().cmp(key))

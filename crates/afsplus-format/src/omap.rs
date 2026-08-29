@@ -52,6 +52,14 @@ impl ObjectMap {
         Ok(())
     }
 
+    /// Removes a mapping; returns the record block it pointed at.
+    pub fn remove(&mut self, object_id: u64) -> Option<u64> {
+        self.entries
+            .binary_search_by_key(&object_id, |e| e.object_id)
+            .ok()
+            .map(|pos| self.entries.remove(pos).block)
+    }
+
     pub fn encode(&self, block_size: usize, transaction_generation: u64) -> Result<Vec<u8>, FormatError> {
         let payload_len = 8 + self.entries.len() * ENTRY_SIZE;
         if payload_len > block_size - HEADER_SIZE {

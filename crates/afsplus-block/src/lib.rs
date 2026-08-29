@@ -6,7 +6,8 @@
 //! Durability model: `flush` is a barrier — when it returns, every previously
 //! written block is durable. After a power cut, writes issued since the last
 //! completed flush may each be applied, lost, or torn (partially applied).
-//! The power-cut harness in [`powercut`] enumerates exactly those states.
+//! The power-cut harness in [`powercut`] enumerates all full-write subsets
+//! of that tail plus representative torn-write states.
 
 pub mod fault;
 pub mod file;

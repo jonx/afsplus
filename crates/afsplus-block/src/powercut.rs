@@ -1,15 +1,23 @@
 //! Power-cut simulation (roadmap Stage A: "power-cut capable block backend").
 //!
 //! [`RecordingBackend`] captures the exact sequence of writes and flush
-//! barriers a workload performs. [`crash_states`] then materializes every
-//! durable state the device model allows at a given crash point:
+//! barriers a workload performs. [`crash_states`] then materializes, for a
+//! given crash point, every *full-write subset* of the unflushed tail plus a
+//! set of representative torn-write states:
 //!
 //! - writes before the last completed flush are durable, in order
-//! - each write after the last flush may independently be applied or lost
-//!   (all subsets are enumerated, covering device write reordering)
-//! - additionally, in-order tear states: each unflushed write applied only
-//!   partially (a prefix of the block), with all earlier unflushed writes
-//!   applied — modeling a tear in the middle of the most recent write
+//! - each write after the last flush may independently be applied or lost;
+//!   all such subsets are enumerated, covering loss and device reordering
+//!   at whole-block granularity
+//! - in-order tear states: each unflushed write applied only partially (a
+//!   prefix of the block, at a few representative offsets), with all
+//!   earlier unflushed writes applied
+//!
+//! This is deliberately not "every physically possible state": tears are
+//! sampled at fixed offsets and at most one write is torn per state, and
+//! sub-block reordering or interleaved tears are not modeled. Checksums make
+//! finer-grained tears equivalent to the sampled ones for AFS+ metadata, but
+//! the model should be restated, not oversold.
 //!
 //! Crashing *during* a flush is equivalent to crashing just before it with an
 //! arbitrary subset of the pending writes durable, which the enumeration at
@@ -70,7 +78,7 @@ impl<D: BlockDevice> BlockDevice for RecordingBackend<D> {
     }
 }
 
-/// One possible durable image after a power cut.
+/// One durable image the crash model produces for a power cut.
 pub struct CrashState {
     pub image: MemoryBackend,
     /// Human-readable description for failure diagnostics.
@@ -85,7 +93,8 @@ const TEAR_OFFSETS: &[usize] = &[64, 2048, 4064];
 /// require. Guarded by an assertion so a silent coverage loss cannot happen.
 const MAX_ENUMERATED_TAIL: usize = 12;
 
-/// Enumerates the possible durable states when power is lost immediately
+/// Enumerates the modeled durable states (full-write subsets plus
+/// representative tears; see the module docs) when power is lost immediately
 /// after `log[..crash_point]` has been issued (`crash_point` in
 /// `0..=log.len()`), starting from the durable image `base`.
 pub fn crash_states(base: &MemoryBackend, log: &[RecordedOp], crash_point: usize) -> Vec<CrashState> {

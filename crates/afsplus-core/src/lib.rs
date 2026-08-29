@@ -16,13 +16,15 @@
 //! empty. The data-update policy is architecture blocker 1 and deliberately
 //! not decided here.)
 //!
-//! COW discipline: a transaction only ever writes to blocks at or above the
-//! committed checkpoint's `next_free_block` high-water mark, plus the
-//! alternate checkpoint slot. No block reachable from the previous committed
-//! checkpoint is touched, which is what makes every crash state recover to
-//! exactly the pre- or post-commit state. The bump allocator never reuses
-//! storage (pre-blocker-3 scaffolding; see `afsplus_format::checkpoint`).
+//! COW discipline: a transaction writes only to blocks that are FREE or
+//! promoted-from-quarantine in the committed allocation state, to bitmap
+//! slot blocks referenced by no retained checkpoint, and to the alternate
+//! checkpoint slot. No block reachable from a still-selectable checkpoint is
+//! ever touched, which is what makes every crash state recover to exactly
+//! the pre- or post-commit state. See `alloc` for the region allocator and
+//! the retired-block quarantine.
 
+pub mod alloc;
 pub mod mkfs;
 pub mod mount;
 pub mod verify;
@@ -38,7 +40,8 @@ pub use mount::mount;
 pub use volume::Volume;
 
 /// Fixed prototype placement (`spec/disk-layout.md` marks exact offsets TBD;
-/// these are prototype constants, not frozen format commitments).
+/// these are prototype constants, not frozen format commitments). Region
+/// bitmap slot placement lives in `afsplus_format::geometry`.
 pub mod layout {
     /// Identification block, immutable after mkfs.
     pub const IDENT_LBA: u64 = 0;
@@ -46,25 +49,28 @@ pub mod layout {
     pub const CKPT_SLOT_A: u64 = 1;
     /// Checkpoint slot B.
     pub const CKPT_SLOT_B: u64 = 2;
-    /// First copy-on-write metadata block.
-    pub const METADATA_START: u64 = 3;
     /// Smallest volume the prototype will format.
-    pub const MIN_TOTAL_BLOCKS: u64 = 8;
+    pub const MIN_TOTAL_BLOCKS: u64 = 16;
 }
 
 #[derive(Debug)]
 pub enum CoreError {
     Block(BlockError),
     Format(FormatError),
-    /// Neither checkpoint slot yields a valid, fully validated state.
+    /// Neither checkpoint slot is structurally valid.
     NoValidCheckpoint {
         slot_a: String,
         slot_b: String,
     },
+    /// Both slots carry a structurally valid checkpoint with the same
+    /// generation — a state no correct commit sequence can produce.
+    AmbiguousCheckpoints(u64),
     /// A structure referenced by the chosen checkpoint failed validation.
     Corrupt(String),
     /// Name already present in the directory.
     AlreadyExists,
+    /// Name not present in the directory.
+    NotFound,
     /// Component name rejected by format rules.
     InvalidName(FormatError),
     /// The volume ran out of blocks (the bootstrap allocator never reuses).
@@ -83,8 +89,12 @@ impl fmt::Display for CoreError {
             CoreError::NoValidCheckpoint { slot_a, slot_b } => {
                 write!(f, "no valid checkpoint (slot A: {slot_a}; slot B: {slot_b})")
             }
+            CoreError::AmbiguousCheckpoints(generation) => {
+                write!(f, "both checkpoint slots carry generation {generation}; volume is ambiguous")
+            }
             CoreError::Corrupt(what) => write!(f, "corrupt volume: {what}"),
             CoreError::AlreadyExists => write!(f, "name already exists"),
+            CoreError::NotFound => write!(f, "name not found"),
             CoreError::InvalidName(e) => write!(f, "invalid name: {e}"),
             CoreError::NoSpace => write!(f, "no space left on volume"),
             CoreError::PrototypeLimit(what) => write!(f, "prototype limit: {what}"),

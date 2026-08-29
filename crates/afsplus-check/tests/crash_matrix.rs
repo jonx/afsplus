@@ -1,60 +1,104 @@
-//! Step 5 of the first-contributor plan and the success criterion of the
-//! next-phase roadmap:
+//! Crash matrix over single transactions, plus the mandated negative test:
+//! a deliberately mis-ordered commit (checkpoint written before the metadata
+//! barrier) MUST make the matrix find at least one invalid state.
 //!
-//! ```text
-//! format image -> mutate -> checkpoint -> kill power at every point
-//!              -> remount -> verify exact allowed state
-//! ```
-//!
-//! Power is cut after every recorded operation of the first transaction; at
-//! each point every durable state the device model allows (unflushed writes
-//! independently lost, applied, or torn) must remount to *exactly* the
-//! pre-commit or post-commit state, pass the full checker, and honor the
-//! allocation/object invariants.
-//!
-//! The transaction's write log is also checked structurally for the COW
-//! discipline: only fresh blocks above the committed high-water mark plus
-//! the alternate checkpoint slot are ever written, and the barrier ordering
-//! metadata -> flush -> checkpoint -> flush is exact. (With the bootstrap
-//! bump allocator storage is never reused, so stale-but-valid block content
-//! cannot masquerade as current; the allocator prototype for architecture
-//! blocker 3 must re-run this matrix once reuse exists.)
+//! The model: power is cut after every recorded operation; every full-write
+//! subset of the unflushed tail plus representative torn-write states must
+//! remount to *exactly* the pre-commit or post-commit state and pass the
+//! full checker. See `afsplus_block::powercut` for what the model does and
+//! does not cover.
 
-use afsplus_block::{crash_states, MemoryBackend, RecordedOp, RecordingBackend};
+use std::collections::BTreeSet;
+
+use afsplus_block::{crash_states, BlockDevice, MemoryBackend, RecordedOp, RecordingBackend};
 use afsplus_check::check_device;
-use afsplus_core::{layout, mkfs, mount, MkfsParams};
+use afsplus_core::mount::select_checkpoint;
+use afsplus_core::verify::load_committed_state;
+use afsplus_core::{mkfs, mount, MkfsParams};
+use afsplus_format::ident::Identification;
 use afsplus_format::object::ObjectType;
 use afsplus_format::Timespec;
 
 const BS: usize = 4096;
 
+fn params(label: &str) -> MkfsParams {
+    MkfsParams {
+        uuid: [42u8; 16],
+        label: label.into(),
+        region_size: 64,
+        timestamp: Timespec { seconds: 1_780_000_000, nanoseconds: 0 },
+    }
+}
+
+fn ts(seconds: i64) -> Timespec {
+    Timespec { seconds, nanoseconds: 0 }
+}
+
+/// Blocks a correct transaction must never write: everything reachable from
+/// the committed state, its quarantined blocks, the identification block,
+/// the current checkpoint slot, and every bitmap slot referenced by a
+/// retained checkpoint.
+fn forbidden_targets(base: &MemoryBackend) -> BTreeSet<u64> {
+    let mut dev = base.clone();
+    let mut buf = vec![0u8; BS];
+    dev.read_block(0, &mut buf).unwrap();
+    let ident = Identification::decode(&buf).unwrap();
+    let geo = ident.geometry();
+    let selection = select_checkpoint(&mut dev, &ident).unwrap();
+    let state = load_committed_state(&mut dev, &ident, &selection.chosen).unwrap();
+
+    let mut forbidden: BTreeSet<u64> = BTreeSet::new();
+    forbidden.insert(0);
+    forbidden.insert(ident.checkpoint_slots[selection.chosen_slot]);
+    forbidden.extend(state.metadata_blocks.iter().copied());
+    forbidden.extend(state.data_blocks.iter().copied());
+    // Quarantined blocks may be *reused by allocation* in the next
+    // transaction — that is the whole point — so they are not forbidden.
+    for ckpt in std::iter::once(&selection.chosen).chain(selection.other.iter()) {
+        for (r, record) in ckpt.regions.iter().enumerate() {
+            forbidden.insert(geo.bitmap_slot_lba(r as u32, record.slot));
+        }
+    }
+    forbidden
+}
+
+fn run_matrix(
+    base: &MemoryBackend,
+    log: &[RecordedOp],
+    pre_generation: u64,
+    mut verify: impl FnMut(&str, afsplus_core::Volume<MemoryBackend>),
+) {
+    for crash_point in 0..=log.len() {
+        for state in crash_states(base, log, crash_point) {
+            let context = state.description.clone();
+            let mut image = state.image;
+            let report = check_device(&mut image);
+            assert!(report.is_clean(), "{context}: checker findings {:?}", report.errors);
+            let vol = mount(image).unwrap_or_else(|e| panic!("{context}: mount failed: {e}"));
+            assert!(
+                vol.generation() == pre_generation || vol.generation() == pre_generation + 1,
+                "{context}: recovered to disallowed generation {}",
+                vol.generation()
+            );
+            verify(&context, vol);
+        }
+    }
+}
+
 #[test]
-fn every_crash_state_of_the_first_transaction_recovers_to_an_allowed_state() {
+fn every_crash_state_of_a_create_transaction_recovers_to_an_allowed_state() {
     let mut base = MemoryBackend::new(BS, 64);
-    mkfs(
-        &mut base,
-        &MkfsParams {
-            uuid: [42u8; 16],
-            label: "CrashVol".into(),
-            timestamp: Timespec { seconds: 1_780_000_000, nanoseconds: 0 },
-        },
-    )
-    .unwrap();
+    mkfs(&mut base, &params("CrashVol")).unwrap();
 
-    // Pre-state facts, needed to verify "exact allowed state" below.
-    let pre_generation = 1u64;
-    let pre_next_free = mount(base.clone()).unwrap().checkpoint().next_free_block;
-    assert_eq!(pre_next_free, layout::METADATA_START + 3);
+    let forbidden = forbidden_targets(&base);
+    let pre_free = mount(base.clone()).unwrap().free_blocks();
 
-    // Record the first transaction.
     let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
-    let file_id = vol
-        .create_file_in_root("hello.txt", Timespec { seconds: 1_780_000_100, nanoseconds: 0 })
-        .unwrap();
+    let file_id = vol.create_file_in_root("hello.txt", &[0x5Au8; 4000], ts(1)).unwrap();
     let (_, log) = vol.into_device().into_parts();
 
     // --- Structural discipline of the commit sequence -------------------
-    // Expected: 4 COW metadata writes, barrier, checkpoint write, barrier.
+    // data, barrier, 5 metadata + 1 bitmap page, barrier, checkpoint, barrier.
     let shape: Vec<&'static str> = log
         .iter()
         .map(|op| match op {
@@ -62,114 +106,114 @@ fn every_crash_state_of_the_first_transaction_recovers_to_an_allowed_state() {
             RecordedOp::Flush => "F",
         })
         .collect();
-    assert_eq!(shape, ["w", "w", "w", "w", "F", "w", "F"], "commit sequence changed");
-    for (i, op) in log.iter().enumerate() {
+    assert_eq!(
+        shape,
+        ["w", "F", "w", "w", "w", "w", "w", "w", "F", "w", "F"],
+        "commit sequence changed"
+    );
+    for op in &log {
         if let RecordedOp::Write { lba, .. } = op {
-            if i < 4 {
-                assert!(
-                    *lba >= pre_next_free,
-                    "write {i} touches block {lba} inside the committed state"
-                );
-            } else {
-                assert_eq!(*lba, layout::CKPT_SLOT_B, "checkpoint must go to the alternate slot");
-            }
+            assert!(!forbidden.contains(lba), "transaction wrote committed block {lba}");
         }
     }
 
     // --- The matrix ------------------------------------------------------
-    let mut total_states = 0u64;
     let mut pre_outcomes = 0u64;
     let mut post_outcomes = 0u64;
+    run_matrix(&base, &log, 1, |context, mut vol| {
+        if vol.generation() == 1 {
+            pre_outcomes += 1;
+            assert!(vol.list_root().is_empty(), "{context}: pre state shows the new file");
+            assert_eq!(vol.free_blocks(), pre_free, "{context}");
+        } else {
+            post_outcomes += 1;
+            assert_eq!(vol.lookup_root("hello.txt"), Some(file_id), "{context}");
+            let record = *vol.stat(file_id).unwrap();
+            assert_eq!(record.object_type, ObjectType::File);
+            assert_eq!(vol.read_file(file_id).unwrap(), vec![0x5Au8; 4000], "{context}");
+        }
+    });
+    assert!(pre_outcomes > 0, "matrix never produced a pre-commit recovery");
+    assert!(post_outcomes > 0, "matrix never produced a post-commit recovery");
+}
 
-    for crash_point in 0..=log.len() {
-        for state in crash_states(&base, &log, crash_point) {
-            total_states += 1;
-            let context = &state.description;
+#[test]
+fn misordered_commit_checkpoint_before_metadata_barrier_is_caught() {
+    // Negative control for the whole harness: replay the recorded commit
+    // with the checkpoint write moved BEFORE the metadata barrier. The
+    // matrix must now find at least one durable state where the newest
+    // structurally valid checkpoint references metadata that never became
+    // durable — and mount must report it as corruption rather than silently
+    // falling back to the older checkpoint.
+    let mut base = MemoryBackend::new(BS, 64);
+    mkfs(&mut base, &params("BadOrder")).unwrap();
 
-            // The full checker must accept every crash state.
+    let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
+    vol.create_file_in_root("hello.txt", b"", ts(1)).unwrap();
+    let (_, log) = vol.into_device().into_parts();
+
+    // Good log: [w x6, F, w(ckpt), F]. Mangled: [w x6, w(ckpt), F, F].
+    let mut bad_log = log.clone();
+    let ckpt_write = bad_log.remove(7);
+    assert!(matches!(ckpt_write, RecordedOp::Write { .. }));
+    let first_flush = bad_log.iter().position(|op| matches!(op, RecordedOp::Flush)).unwrap();
+    bad_log.insert(first_flush, ckpt_write);
+
+    let mut invalid_states = 0u64;
+    let mut mount_outcomes = 0u64;
+    for crash_point in 0..=bad_log.len() {
+        for state in crash_states(&base, &bad_log, crash_point) {
             let mut image = state.image;
             let report = check_device(&mut image);
-            assert!(report.is_clean(), "{context}: checker findings {:?}", report.errors);
-
-            // Mount must succeed and land on exactly one allowed state.
-            let vol = mount(image).unwrap_or_else(|e| panic!("{context}: mount failed: {e}"));
-            match vol.generation() {
-                g if g == pre_generation => {
-                    pre_outcomes += 1;
+            match mount(image) {
+                Ok(_) => {
+                    mount_outcomes += 1;
+                    assert!(report.is_clean(), "{}: checker disagrees with mount", state.description);
+                }
+                Err(e) => {
+                    invalid_states += 1;
                     assert!(
-                        vol.list_root().is_empty(),
-                        "{context}: pre-commit state must not show the new file"
+                        !report.is_clean(),
+                        "{}: mount rejected the state but the checker passed it: {e}",
+                        state.description
                     );
-                    assert_eq!(vol.checkpoint().next_free_block, pre_next_free, "{context}");
                 }
-                g if g == pre_generation + 1 => {
-                    post_outcomes += 1;
-                    assert_eq!(
-                        vol.lookup_root("hello.txt"),
-                        Some(file_id),
-                        "{context}: post-commit state must show the new file"
-                    );
-                    let record = vol.stat(file_id).unwrap();
-                    assert_eq!(record.object_type, ObjectType::File);
-                    assert_eq!(record.link_count, 1);
-                    assert_eq!(vol.checkpoint().next_free_block, pre_next_free + 4, "{context}");
-                }
-                g => panic!("{context}: recovered to disallowed generation {g}"),
             }
         }
     }
-
-    // Sanity: the matrix must actually exercise both outcomes, and the
-    // subset/tear enumeration must produce a meaningful number of states.
-    assert!(pre_outcomes > 0, "matrix never produced a pre-commit recovery");
-    assert!(post_outcomes > 0, "matrix never produced a post-commit recovery");
-    assert!(total_states > 50, "matrix unexpectedly small: {total_states} states");
+    assert!(
+        invalid_states > 0,
+        "the matrix failed to catch the mis-ordered commit ({mount_outcomes} states all mounted)"
+    );
 }
 
 #[test]
 fn crash_matrix_across_a_second_transaction() {
     // Same property for a transaction that starts from a non-trivial state
-    // and commits back into slot A.
+    // (with quarantined blocks to promote) and commits back into slot A.
     let mut base = MemoryBackend::new(BS, 64);
-    mkfs(
-        &mut base,
-        &MkfsParams {
-            uuid: [42u8; 16],
-            label: "CrashVol2".into(),
-            timestamp: Timespec { seconds: 1_780_000_000, nanoseconds: 0 },
-        },
-    )
-    .unwrap();
+    mkfs(&mut base, &params("CrashVol2")).unwrap();
     let mut vol = mount(base).unwrap();
-    let first_id = vol
-        .create_file_in_root("first.txt", Timespec { seconds: 1, nanoseconds: 0 })
-        .unwrap();
+    let first_id = vol.create_file_in_root("first.txt", b"one", ts(1)).unwrap();
     let base = vol.into_device();
 
+    let forbidden = forbidden_targets(&base);
     let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
-    let second_id = vol
-        .create_file_in_root("second.txt", Timespec { seconds: 2, nanoseconds: 0 })
-        .unwrap();
+    let second_id = vol.create_file_in_root("second.txt", b"two", ts(2)).unwrap();
     let (_, log) = vol.into_device().into_parts();
 
-    for crash_point in 0..=log.len() {
-        for state in crash_states(&base, &log, crash_point) {
-            let context = &state.description;
-            let mut image = state.image;
-            let report = check_device(&mut image);
-            assert!(report.is_clean(), "{context}: checker findings {:?}", report.errors);
-            let vol = mount(image).unwrap_or_else(|e| panic!("{context}: mount failed: {e}"));
-            match vol.generation() {
-                2 => {
-                    assert_eq!(vol.lookup_root("first.txt"), Some(first_id), "{context}");
-                    assert_eq!(vol.lookup_root("second.txt"), None, "{context}");
-                }
-                3 => {
-                    assert_eq!(vol.lookup_root("first.txt"), Some(first_id), "{context}");
-                    assert_eq!(vol.lookup_root("second.txt"), Some(second_id), "{context}");
-                }
-                g => panic!("{context}: recovered to disallowed generation {g}"),
-            }
+    for op in &log {
+        if let RecordedOp::Write { lba, .. } = op {
+            assert!(!forbidden.contains(lba), "transaction wrote committed block {lba}");
         }
     }
+
+    run_matrix(&base, &log, 2, |context, vol| {
+        assert_eq!(vol.lookup_root("first.txt"), Some(first_id), "{context}");
+        if vol.generation() == 2 {
+            assert_eq!(vol.lookup_root("second.txt"), None, "{context}");
+        } else {
+            assert_eq!(vol.lookup_root("second.txt"), Some(second_id), "{context}");
+        }
+    });
 }

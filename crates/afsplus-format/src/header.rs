@@ -36,6 +36,10 @@ pub mod block_type {
     pub const DIRECTORY: u32 = u32::from_le_bytes(*b"AFSD");
     /// Object map block, `"AFSM"`.
     pub const OBJECT_MAP: u32 = u32::from_le_bytes(*b"AFSM");
+    /// Region bitmap page, `"AFSB"`.
+    pub const BITMAP: u32 = u32::from_le_bytes(*b"AFSB");
+    /// Retired-block list, `"AFSR"`.
+    pub const RETIRED: u32 = u32::from_le_bytes(*b"AFSR");
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -16,6 +16,7 @@ fn formatted() -> MemoryBackend {
         &MkfsParams {
             uuid: [42u8; 16],
             label: "FaultVol".into(),
+            region_size: 64,
             timestamp: Timespec { seconds: 1_780_000_000, nanoseconds: 0 },
         },
     )
@@ -29,15 +30,16 @@ fn ts() -> Timespec {
 
 #[test]
 fn failed_write_at_every_index_leaves_committed_state_untouched() {
-    // The first transaction performs 5 writes and 2 flushes.
-    for write_index in 0..5 {
+    // An empty-file transaction performs 7 writes (5 metadata + 1 bitmap
+    // page + 1 checkpoint) and 2 flushes.
+    for write_index in 0..7 {
         let plan = FaultPlan {
             fail_write_index: Some(write_index),
             fail_flush_index: None,
             fail_hard: false,
         };
         let mut vol = mount(FaultBackend::new(formatted(), plan)).unwrap();
-        let err = vol.create_file_in_root("hello.txt", ts()).unwrap_err();
+        let err = vol.create_file_in_root("hello.txt", b"", ts()).unwrap_err();
         assert!(
             err.to_string().contains("injected"),
             "write {write_index}: expected injected fault, got {err}"
@@ -62,7 +64,7 @@ fn failed_flush_at_each_barrier_leaves_committed_state_untouched() {
             fail_hard: false,
         };
         let mut vol = mount(FaultBackend::new(formatted(), plan)).unwrap();
-        assert!(vol.create_file_in_root("hello.txt", ts()).is_err());
+        assert!(vol.create_file_in_root("hello.txt", b"", ts()).is_err());
         assert_eq!(vol.generation(), 1, "flush {flush_index}: state must not advance");
     }
 }
@@ -71,10 +73,10 @@ fn failed_flush_at_each_barrier_leaves_committed_state_untouched() {
 fn transient_fault_is_retryable() {
     let plan = FaultPlan { fail_write_index: Some(2), fail_flush_index: None, fail_hard: false };
     let mut vol = mount(FaultBackend::new(formatted(), plan)).unwrap();
-    assert!(vol.create_file_in_root("hello.txt", ts()).is_err());
+    assert!(vol.create_file_in_root("hello.txt", b"payload", ts()).is_err());
 
     // Same volume, same operation: must succeed now and be fully consistent.
-    let id = vol.create_file_in_root("hello.txt", ts()).unwrap();
+    let id = vol.create_file_in_root("hello.txt", b"payload", ts()).unwrap();
     assert_eq!(vol.generation(), 2);
 
     let mut dev = vol.into_device().into_inner();

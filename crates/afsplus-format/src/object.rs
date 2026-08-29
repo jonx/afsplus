@@ -3,6 +3,13 @@
 //! One object per block in the prototype; the header's owner field carries
 //! the object ID so repair tooling can attribute the block without context.
 //!
+//! Files carry at most one direct data extent (`data_root` = start LBA,
+//! `data_blocks` = length); the inline-extents-plus-tree model comes later.
+//! Directories use `data_root` for their directory block.
+//!
+//! `link_count == 0` is invalid: the prototype has no orphan handling yet,
+//! so an unreferenced object must not exist at all.
+//!
 //! Payload layout after the common header:
 //!
 //! ```text
@@ -19,7 +26,8 @@
 //! 56     12   metadata-change timestamp
 //! 68     4    AROS protection flags
 //! 72     8    content generation
-//! 80     8    data root LBA (directory: directory block; file: 0 = no data)
+//! 80     8    data root LBA (directory: directory block; file: extent start)
+//! 88     8    data extent length in blocks (files; 0 = empty file)
 //! ```
 
 use alloc::vec;
@@ -28,7 +36,11 @@ use alloc::vec::Vec;
 use crate::header::{block_type, BlockHeader, HEADER_SIZE};
 use crate::{le, FormatError, Timespec, OBJECT_INVALID};
 
-const PAYLOAD_LEN: usize = 88;
+const PAYLOAD_LEN: usize = 96;
+
+/// Resource-exhaustion guard (`docs/21-security-and-corruption.md` §5): a
+/// corrupt record must not be able to demand absurd extent walks.
+pub const MAX_EXTENT_BLOCKS: u64 = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectType {
@@ -73,11 +85,12 @@ pub struct ObjectRecord {
     pub protection: u32,
     pub content_generation: u64,
     pub data_root: u64,
+    pub data_blocks: u64,
 }
 
 impl ObjectRecord {
     pub fn encode(&self, block_size: usize, transaction_generation: u64) -> Result<Vec<u8>, FormatError> {
-        self.validate()?;
+        self.validate(block_size)?;
         let mut block = vec![0u8; block_size];
         let p = &mut block[HEADER_SIZE..];
         le::put_u64(&mut p[0..8], self.object_id);
@@ -92,6 +105,7 @@ impl ObjectRecord {
         le::put_u32(&mut p[68..72], self.protection);
         le::put_u64(&mut p[72..80], self.content_generation);
         le::put_u64(&mut p[80..88], self.data_root);
+        le::put_u64(&mut p[88..96], self.data_blocks);
 
         BlockHeader {
             block_type: block_type::OBJECT,
@@ -123,31 +137,45 @@ impl ObjectRecord {
             protection: le::get_u32(&p[68..72]),
             content_generation: le::get_u64(&p[72..80]),
             data_root: le::get_u64(&p[80..88]),
+            data_blocks: le::get_u64(&p[88..96]),
         };
         if record.object_id != header.owner {
             return Err(FormatError::Invalid("object ID does not match block owner"));
         }
-        record.validate()?;
+        record.validate(block.len())?;
         Ok(record)
     }
 
-    fn validate(&self) -> Result<(), FormatError> {
+    fn validate(&self, block_size: usize) -> Result<(), FormatError> {
         if self.object_id == OBJECT_INVALID {
             return Err(FormatError::Invalid("object ID zero is invalid"));
+        }
+        if self.link_count == 0 {
+            return Err(FormatError::Invalid("link count zero without orphan support"));
         }
         match self.object_type {
             ObjectType::Directory => {
                 if self.data_root == 0 {
                     return Err(FormatError::Invalid("directory must reference a directory block"));
                 }
-                if self.size_bytes != 0 {
-                    return Err(FormatError::Invalid("directory logical size must be zero"));
+                if self.size_bytes != 0 || self.data_blocks != 0 {
+                    return Err(FormatError::Invalid("directory size fields must be zero"));
                 }
             }
             ObjectType::File => {
-                // Prototype: files carry no data extents yet.
-                if self.data_root != 0 || self.size_bytes != 0 {
-                    return Err(FormatError::Invalid("prototype files must be empty"));
+                if self.data_blocks > MAX_EXTENT_BLOCKS {
+                    return Err(FormatError::Invalid("file extent exceeds prototype cap"));
+                }
+                if self.data_blocks == 0 {
+                    if self.data_root != 0 || self.size_bytes != 0 {
+                        return Err(FormatError::Invalid("empty file with data references"));
+                    }
+                } else {
+                    let capacity = self.data_blocks * block_size as u64;
+                    let minimum = (self.data_blocks - 1) * block_size as u64;
+                    if self.data_root == 0 || self.size_bytes > capacity || self.size_bytes <= minimum {
+                        return Err(FormatError::Invalid("file size inconsistent with extent"));
+                    }
                 }
             }
             ObjectType::Symlink | ObjectType::Internal => {

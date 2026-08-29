@@ -16,11 +16,12 @@
 //! 16     16   filesystem UUID
 //! 32     1    logical block shift
 //! 33     1    checksum algorithm identifier
-//! 34     6    reserved (zero)
+//! 34     2    reserved (zero)
+//! 36     4    allocation region size in blocks
 //! 40     8    total logical blocks
 //! 48     8    checkpoint slot A LBA
 //! 56     8    checkpoint slot B LBA
-//! 64     8    first metadata-area LBA
+//! 64     8    first general-allocation LBA (after region 0's reserved head)
 //! 72     1    label length in bytes
 //! 73     64   label (UTF-8, zero padded)
 //! ```
@@ -30,6 +31,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::crc32c::CHECKSUM_CRC32C;
+use crate::geometry::{Geometry, REGION0_RESERVED};
 use crate::header::{block_type, BlockHeader, HEADER_SIZE};
 use crate::{le, FormatError, DEFAULT_BLOCK_SHIFT, FORMAT_EPOCH, FS_MAGIC};
 
@@ -43,6 +45,7 @@ pub struct Identification {
     pub uuid: [u8; 16],
     pub block_shift: u8,
     pub checksum_algorithm: u8,
+    pub region_size: u32,
     pub total_blocks: u64,
     pub checkpoint_slots: [u64; 2],
     pub metadata_start: u64,
@@ -52,6 +55,14 @@ pub struct Identification {
 impl Identification {
     pub fn block_size(&self) -> usize {
         1usize << self.block_shift
+    }
+
+    pub fn geometry(&self) -> Geometry {
+        Geometry {
+            block_size: self.block_size(),
+            total_blocks: self.total_blocks,
+            region_size: self.region_size,
+        }
     }
 
     pub fn encode(&self, block_size: usize) -> Result<Vec<u8>, FormatError> {
@@ -75,6 +86,7 @@ impl Identification {
         p[16..32].copy_from_slice(&self.uuid);
         p[32] = self.block_shift;
         p[33] = self.checksum_algorithm;
+        le::put_u32(&mut p[36..40], self.region_size);
         le::put_u64(&mut p[40..48], self.total_blocks);
         le::put_u64(&mut p[48..56], self.checkpoint_slots[0]);
         le::put_u64(&mut p[56..64], self.checkpoint_slots[1]);
@@ -120,6 +132,7 @@ impl Identification {
         if checksum_algorithm != CHECKSUM_CRC32C {
             return Err(FormatError::Invalid("unsupported checksum algorithm"));
         }
+        let region_size = le::get_u32(&p[36..40]);
         let label_len = p[72] as usize;
         if label_len > LABEL_MAX_BYTES {
             return Err(FormatError::Invalid("label length out of range"));
@@ -131,6 +144,7 @@ impl Identification {
             uuid,
             block_shift,
             checksum_algorithm,
+            region_size,
             total_blocks: le::get_u64(&p[40..48]),
             checkpoint_slots: [le::get_u64(&p[48..56]), le::get_u64(&p[56..64])],
             metadata_start: le::get_u64(&p[64..72]),
@@ -142,23 +156,15 @@ impl Identification {
 
     /// Bounds-first geometry validation shared by encode and decode.
     fn validate_geometry(&self) -> Result<(), FormatError> {
-        if self.total_blocks == 0 {
-            return Err(FormatError::Invalid("total_blocks is zero"));
+        self.geometry().validate()?;
+        // The prototype pins the reserved layout: ident at 0, checkpoint
+        // slots at 1 and 2, general allocation from the end of region 0's
+        // reserved head.
+        if self.checkpoint_slots != [1, 2] {
+            return Err(FormatError::Invalid("prototype requires checkpoint slots at LBA 1 and 2"));
         }
-        let [a, b] = self.checkpoint_slots;
-        if a == b {
-            return Err(FormatError::Invalid("checkpoint slots must differ"));
-        }
-        for slot in [a, b] {
-            if slot >= self.total_blocks {
-                return Err(FormatError::Invalid("checkpoint slot out of volume bounds"));
-            }
-            if slot >= self.metadata_start {
-                return Err(FormatError::Invalid("checkpoint slot overlaps metadata area"));
-            }
-        }
-        if self.metadata_start >= self.total_blocks {
-            return Err(FormatError::Invalid("metadata area start out of volume bounds"));
+        if self.metadata_start != REGION0_RESERVED {
+            return Err(FormatError::Invalid("metadata start does not match reserved layout"));
         }
         Ok(())
     }

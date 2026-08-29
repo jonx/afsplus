@@ -28,11 +28,13 @@ fn main() {
     uuid[8..].copy_from_slice(&std::process::id().to_le_bytes().repeat(2));
 
     let mut dev = FileBackend::create(&path, DEFAULT_BLOCK_SIZE, 256).unwrap();
-    mkfs(&mut dev, &MkfsParams { uuid, label: "DemoVol".into(), timestamp: now }).unwrap();
+    mkfs(&mut dev, &MkfsParams { uuid, label: "DemoVol".into(), region_size: 64, timestamp: now })
+        .unwrap();
 
     let mut vol = mount(dev).unwrap();
     for name in ["readme.txt", "notes.md", "café.rs"] {
-        let id = vol.create_file_in_root(name, now).unwrap();
+        let content = format!("demo content of {name}\n");
+        let id = vol.create_file_in_root(name, content.as_bytes(), now).unwrap();
         println!("created {name} as object {id}");
     }
     println!(

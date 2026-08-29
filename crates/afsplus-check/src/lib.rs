@@ -1,20 +1,29 @@
 //! AFS+ volume checker.
 //!
-//! Reuses the core's reachable-state validation (ADR-015: the filesystem and
-//! `afsplus-check` must not become two divergent interpretations of the
-//! format) and reports on both checkpoint slots, not only the one a mount
-//! would choose.
+//! Uses the same checkpoint selection and state loading as normal mount
+//! (ADR-015: the filesystem and `afsplus-check` must not become two
+//! divergent interpretations of the format), then runs the full invariant
+//! sweep that normal mount does not: link counts, orphaned objects, bitmap
+//! versus reachability, retired-block quarantine.
+//!
+//! Selection semantics deliberately match mount: the newest structurally
+//! valid checkpoint is the volume's state. If it references corrupt
+//! metadata, that is an error — the checker does not paper over it by
+//! falling back to the older slot. The older slot gets shadow verification:
+//! its findings are warnings, because mount never reads it while the newest
+//! is intact.
 //!
 //! The checker never writes (`spec/compatibility-rules.md`: repair tools are
 //! stricter than normal mounts; this prototype checker is verify-only).
 
 use afsplus_block::BlockDevice;
-use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::ident::Identification;
-use afsplus_core::verify::validate_checkpoint_reachable;
+use afsplus_core::mount::select_checkpoint;
+use afsplus_core::verify::{full_sweep, load_committed_state};
+use afsplus_core::CoreError;
 
 /// Versioned structured-output schema (ADR-025).
-pub const REPORT_SCHEMA_VERSION: u32 = 1;
+pub const REPORT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Default)]
 pub struct CheckReport {
@@ -30,11 +39,14 @@ pub struct VolumeSummary {
     pub uuid_hex: String,
     pub label: String,
     pub total_blocks: u64,
+    pub region_size: u32,
     pub generation: u64,
     pub chosen_slot: usize,
     pub object_count: usize,
     pub reachable_metadata_blocks: usize,
-    pub next_free_block: u64,
+    pub reachable_data_blocks: usize,
+    pub retired_blocks: usize,
+    pub free_blocks: u64,
 }
 
 impl CheckReport {
@@ -46,16 +58,19 @@ impl CheckReport {
         let mut out = String::new();
         if let Some(v) = &self.volume {
             out.push_str(&format!(
-                "volume {} label \"{}\" blocks {} generation {} (slot {})\n\
-                 objects {} reachable metadata blocks {} next free block {}\n",
+                "volume {} label \"{}\" blocks {} region size {} generation {} (slot {})\n\
+                 objects {} metadata blocks {} data blocks {} retired {} free {}\n",
                 v.uuid_hex,
                 v.label,
                 v.total_blocks,
+                v.region_size,
                 v.generation,
                 if v.chosen_slot == 0 { "A" } else { "B" },
                 v.object_count,
                 v.reachable_metadata_blocks,
-                v.next_free_block,
+                v.reachable_data_blocks,
+                v.retired_blocks,
+                v.free_blocks,
             ));
         }
         for (i, s) in self.slots.iter().enumerate() {
@@ -80,16 +95,20 @@ impl CheckReport {
         if let Some(v) = &self.volume {
             out.push_str(&format!(
                 "\"volume\":{{\"uuid\":{},\"label\":{},\"total_blocks\":{},\
-                 \"generation\":{},\"chosen_slot\":{},\"objects\":{},\
-                 \"reachable_metadata_blocks\":{},\"next_free_block\":{}}},",
+                 \"region_size\":{},\"generation\":{},\"chosen_slot\":{},\"objects\":{},\
+                 \"metadata_blocks\":{},\"data_blocks\":{},\"retired_blocks\":{},\
+                 \"free_blocks\":{}}},",
                 json_string(&v.uuid_hex),
                 json_string(&v.label),
                 v.total_blocks,
+                v.region_size,
                 v.generation,
                 v.chosen_slot,
                 v.object_count,
                 v.reachable_metadata_blocks,
-                v.next_free_block,
+                v.reachable_data_blocks,
+                v.retired_blocks,
+                v.free_blocks,
             ));
         } else {
             out.push_str("\"volume\":null,");
@@ -129,66 +148,70 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
         ));
         return report;
     }
+    let geo = ident.geometry();
 
-    // Examine both slots independently.
-    let mut candidates: Vec<(usize, Checkpoint)> = Vec::new();
-    for (slot, lba) in ident.checkpoint_slots.iter().enumerate() {
-        match dev.read_block(*lba, &mut buf) {
-            Ok(()) => match Checkpoint::decode(&buf, &ident.uuid) {
-                Ok(checkpoint) => {
-                    report.slots.push(format!("valid, generation {}", checkpoint.generation));
-                    candidates.push((slot, checkpoint));
-                }
-                Err(e) => report.slots.push(format!("invalid: {e}")),
-            },
-            Err(e) => report.slots.push(format!("unreadable: {e}")),
+    // Same selection as mount: newest structurally valid, ambiguity is fatal.
+    let selection = match select_checkpoint(dev, &ident) {
+        Ok(selection) => selection,
+        Err(CoreError::AmbiguousCheckpoints(generation)) => {
+            report.errors.push(format!(
+                "both checkpoint slots carry generation {generation}; volume is ambiguous"
+            ));
+            return report;
         }
-    }
-    if candidates.is_empty() {
-        report.errors.push("no valid checkpoint slot".into());
-        return report;
-    }
-
-    candidates.sort_by_key(|(_, c)| core::cmp::Reverse(c.generation));
-    if candidates.len() == 2 && candidates[0].1.generation == candidates[1].1.generation {
-        report.errors.push("both checkpoint slots carry the same generation".into());
-    }
-
-    let mut chosen = None;
-    for (slot, checkpoint) in &candidates {
-        match validate_checkpoint_reachable(dev, &ident, checkpoint) {
-            Ok(state) => {
-                chosen = Some((*slot, *checkpoint, state));
-                break;
-            }
-            Err(e) => {
-                // An invalid newest slot is exactly the state a torn commit
-                // leaves behind; mount falls back, so the volume is still
-                // usable — report it as a warning, not corruption.
-                report.warnings.push(format!(
-                    "slot {} (generation {}) has invalid reachable state: {e}",
-                    if *slot == 0 { "A" } else { "B" },
-                    checkpoint.generation
-                ));
-            }
+        Err(e) => {
+            report.errors.push(e.to_string());
+            return report;
         }
-    }
+    };
+    report.slots = selection.slot_status.to_vec();
 
-    match chosen {
-        Some((slot, checkpoint, state)) => {
+    // The chosen checkpoint must load and pass the full sweep — errors.
+    match load_committed_state(dev, &ident, &selection.chosen) {
+        Ok(state) => {
+            for finding in full_sweep(&state, &geo, &selection.chosen) {
+                report.errors.push(finding);
+            }
             report.volume = Some(VolumeSummary {
                 uuid_hex: hex(&ident.uuid),
                 label: ident.label.clone(),
                 total_blocks: ident.total_blocks,
-                generation: checkpoint.generation,
-                chosen_slot: slot,
+                region_size: ident.region_size,
+                generation: selection.chosen.generation,
+                chosen_slot: selection.chosen_slot,
                 object_count: state.objects.len(),
-                reachable_metadata_blocks: state.reachable_blocks.len(),
-                next_free_block: checkpoint.next_free_block,
+                reachable_metadata_blocks: state.metadata_blocks.len(),
+                reachable_data_blocks: state.data_blocks.len(),
+                retired_blocks: state.retired.entries.len(),
+                free_blocks: state.bitmaps.free_blocks_total(),
             });
         }
-        None => report.errors.push("no checkpoint slot yields a valid reachable state".into()),
+        Err(e) => {
+            report.errors.push(format!(
+                "chosen checkpoint generation {} references invalid state: {e}",
+                selection.chosen.generation
+            ));
+        }
     }
+
+    // Shadow verification of the retained older checkpoint — warnings only.
+    if let Some(other) = &selection.other {
+        match load_committed_state(dev, &ident, other) {
+            Ok(state) => {
+                for finding in full_sweep(&state, &geo, other) {
+                    report.warnings.push(format!(
+                        "retained checkpoint generation {}: {finding}",
+                        other.generation
+                    ));
+                }
+            }
+            Err(e) => report.warnings.push(format!(
+                "retained checkpoint generation {} references invalid state: {e}",
+                other.generation
+            )),
+        }
+    }
+
     report
 }
 

@@ -1,6 +1,6 @@
-//! Smallest-mountable-image and first-transaction behavior
-//! (`implementation/peer-review-prototype-plan.md`, steps 3 and 4), plus I/O
-//! accounting from the very first prototype (roadmap Stage A requirement).
+//! Smallest-mountable-image and transaction behavior over the region
+//! allocator, plus I/O accounting from the very first prototype (roadmap
+//! Stage A requirement).
 
 use afsplus_block::{FileBackend, MemoryBackend, TraceBackend};
 use afsplus_check::check_device;
@@ -10,10 +10,11 @@ use afsplus_format::Timespec;
 
 const BS: usize = 4096;
 
-fn params() -> MkfsParams {
+fn params(region_size: u32) -> MkfsParams {
     MkfsParams {
         uuid: [42u8; 16],
         label: "TestVol".into(),
+        region_size,
         timestamp: Timespec { seconds: 1_780_000_000, nanoseconds: 0 },
     }
 }
@@ -25,7 +26,7 @@ fn ts(seconds: i64) -> Timespec {
 #[test]
 fn mkfs_then_mount_yields_empty_root_at_generation_1() {
     let mut dev = MemoryBackend::new(BS, 64);
-    mkfs(&mut dev, &params()).unwrap();
+    mkfs(&mut dev, &params(64)).unwrap();
 
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "checker findings: {:?}", report.errors);
@@ -37,28 +38,34 @@ fn mkfs_then_mount_yields_empty_root_at_generation_1() {
     let root = vol.stat(afsplus_format::OBJECT_ROOT).unwrap();
     assert_eq!(root.object_type, ObjectType::Directory);
     assert_eq!(root.link_count, 1);
+    // 64 blocks minus 6 reserved minus 3 initial metadata.
+    assert_eq!(vol.free_blocks(), 55);
 }
 
 #[test]
-fn create_commit_remount_verify() {
+fn create_with_content_commit_remount_read_back() {
     let mut dev = MemoryBackend::new(BS, 64);
-    mkfs(&mut dev, &params()).unwrap();
+    mkfs(&mut dev, &params(64)).unwrap();
     let mut vol = mount(dev).unwrap();
 
-    let id = vol.create_file_in_root("hello.txt", ts(1_780_000_100)).unwrap();
+    let content = b"bonjour AFS+\n".repeat(400); // ~5 KiB -> 2 data blocks
+    let id = vol.create_file_in_root("hello.txt", &content, ts(1_780_000_100)).unwrap();
     assert_eq!(vol.generation(), 2);
     assert_eq!(vol.lookup_root("hello.txt"), Some(id));
+    assert_eq!(vol.read_file(id).unwrap(), content);
 
     // Remount from the same device: the committed state must be identical.
     let dev = vol.into_device();
-    let vol = mount(dev).unwrap();
+    let mut vol = mount(dev).unwrap();
     assert_eq!(vol.generation(), 2);
     assert_eq!(vol.lookup_root("hello.txt"), Some(id));
-    let record = vol.stat(id).unwrap();
+    let record = *vol.stat(id).unwrap();
     assert_eq!(record.object_type, ObjectType::File);
     assert_eq!(record.link_count, 1);
-    assert_eq!(record.size_bytes, 0);
+    assert_eq!(record.size_bytes, content.len() as u64);
+    assert_eq!(record.data_blocks, 2);
     assert_eq!(record.modified.seconds, 1_780_000_100);
+    assert_eq!(vol.read_file(id).unwrap(), content);
 
     let mut dev = vol.into_device();
     let report = check_device(&mut dev);
@@ -66,12 +73,42 @@ fn create_commit_remount_verify() {
 }
 
 #[test]
-fn several_transactions_alternate_checkpoint_slots() {
+fn delete_retires_storage_and_checker_stays_clean() {
+    let mut dev = MemoryBackend::new(BS, 64);
+    mkfs(&mut dev, &params(64)).unwrap();
+    let mut vol = mount(dev).unwrap();
+
+    let id = vol.create_file_in_root("victim.txt", &[0xA5u8; 4000], ts(1)).unwrap();
+    let data_lba = vol.stat(id).unwrap().data_root;
+    vol.delete_file_in_root("victim.txt", ts(2)).unwrap();
+
+    assert_eq!(vol.lookup_root("victim.txt"), None);
+    assert!(vol.stat(id).is_none());
+    assert!(vol.retired().contains(data_lba), "deleted data must be quarantined, not freed");
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+    let vol = mount(dev).unwrap();
+    assert_eq!(vol.lookup_root("victim.txt"), None);
+}
+
+#[test]
+fn deleting_a_missing_name_fails_cleanly() {
+    let mut dev = MemoryBackend::new(BS, 64);
+    mkfs(&mut dev, &params(64)).unwrap();
+    let mut vol = mount(dev).unwrap();
+    assert!(matches!(vol.delete_file_in_root("ghost", ts(0)), Err(CoreError::NotFound)));
+    assert_eq!(vol.generation(), 1);
+}
+
+#[test]
+fn several_transactions_alternate_checkpoint_slots_and_recycle_space() {
     let mut dev = MemoryBackend::new(BS, 256);
-    mkfs(&mut dev, &params()).unwrap();
+    mkfs(&mut dev, &params(256)).unwrap();
     let mut vol = mount(dev).unwrap();
     for i in 0..10 {
-        vol.create_file_in_root(&format!("file-{i}.txt"), ts(1_780_000_000 + i)).unwrap();
+        vol.create_file_in_root(&format!("file-{i}.txt"), b"data", ts(1_780_000_000 + i)).unwrap();
     }
     assert_eq!(vol.generation(), 11);
     assert_eq!(vol.list_root().len(), 10);
@@ -79,59 +116,84 @@ fn several_transactions_alternate_checkpoint_slots() {
     let vol = mount(vol.into_device()).unwrap();
     assert_eq!(vol.generation(), 11);
     assert_eq!(vol.list_root().len(), 10);
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
 }
 
 #[test]
 fn duplicate_and_invalid_names_are_rejected_without_state_change() {
     let mut dev = MemoryBackend::new(BS, 64);
-    mkfs(&mut dev, &params()).unwrap();
+    mkfs(&mut dev, &params(64)).unwrap();
     let mut vol = mount(dev).unwrap();
-    vol.create_file_in_root("hello.txt", ts(0)).unwrap();
+    vol.create_file_in_root("hello.txt", b"", ts(0)).unwrap();
 
-    assert!(matches!(vol.create_file_in_root("hello.txt", ts(1)), Err(CoreError::AlreadyExists)));
-    assert!(matches!(vol.create_file_in_root("a/b", ts(1)), Err(CoreError::InvalidName(_))));
-    assert!(matches!(vol.create_file_in_root("", ts(1)), Err(CoreError::InvalidName(_))));
+    assert!(matches!(
+        vol.create_file_in_root("hello.txt", b"", ts(1)),
+        Err(CoreError::AlreadyExists)
+    ));
+    assert!(matches!(vol.create_file_in_root("a/b", b"", ts(1)), Err(CoreError::InvalidName(_))));
+    assert!(matches!(vol.create_file_in_root("", b"", ts(1)), Err(CoreError::InvalidName(_))));
     assert_eq!(vol.generation(), 2, "failed operations must not advance the committed state");
 }
 
 #[test]
 fn out_of_space_is_reported_and_state_survives() {
-    // 10 blocks: layout overhead 6, one transaction needs 4. The second must fail.
-    let mut dev = MemoryBackend::new(BS, 10);
-    mkfs(&mut dev, &params()).unwrap();
+    // 16 blocks: 6 reserved + 3 mkfs metadata leaves 7 free. An empty-file
+    // transaction needs 5 fresh blocks; quarantine recycling keeps two
+    // transactions viable, the third must fail cleanly.
+    let mut dev = MemoryBackend::new(BS, 16);
+    mkfs(&mut dev, &params(16)).unwrap();
     let mut vol = mount(dev).unwrap();
-    vol.create_file_in_root("first.txt", ts(0)).unwrap();
-    assert!(matches!(vol.create_file_in_root("second.txt", ts(1)), Err(CoreError::NoSpace)));
+    vol.create_file_in_root("first.txt", b"", ts(0)).unwrap();
+    vol.create_file_in_root("second.txt", b"", ts(1)).unwrap();
+    assert!(matches!(
+        vol.create_file_in_root("third.txt", b"", ts(2)),
+        Err(CoreError::NoSpace)
+    ));
 
     let vol = mount(vol.into_device()).unwrap();
-    assert_eq!(vol.generation(), 2);
-    assert_eq!(vol.list_root().len(), 1);
+    assert_eq!(vol.generation(), 3);
+    assert_eq!(vol.list_root().len(), 2);
 }
 
 #[test]
-fn first_transaction_io_accounting() {
+fn transaction_io_accounting() {
     // Write amplification is tracked from the first prototype onward. The
     // exact numbers are prototype characteristics, not format guarantees, but
     // a silent regression here is exactly what the accounting must catch.
     let mut dev = MemoryBackend::new(BS, 64);
-    mkfs(&mut dev, &params()).unwrap();
+    mkfs(&mut dev, &params(64)).unwrap();
     let mut vol = mount(TraceBackend::new(dev)).unwrap();
     let mount_stats = vol.device_mut().stats();
     vol.device_mut().reset();
 
-    vol.create_file_in_root("hello.txt", ts(0)).unwrap();
+    vol.create_file_in_root("hello.txt", &[7u8; 4000], ts(0)).unwrap();
     let stats = vol.device_mut().stats();
+    let commit = vol.last_commit_stats().unwrap();
 
-    // COW transaction: file record + new dir block + new root record + new
-    // object map, then the checkpoint. Two barriers.
-    assert_eq!(stats.writes, 5, "unexpected metadata write amplification");
-    assert_eq!(stats.flushes, 2, "commit must use exactly two barriers");
-    assert!(
-        stats.reads <= 8,
-        "post-commit re-walk grew unexpectedly: {} reads",
-        stats.reads
-    );
-    // Mount reads: ident + 2 slots + walk (omap, root record, root dir).
+    // 1 data block, then file record + dir + root record + object map +
+    // retired list, 1 bitmap page, 1 checkpoint. Three barriers (data,
+    // metadata, commit).
+    assert_eq!(commit.data_blocks_written, 1);
+    assert_eq!(commit.metadata_blocks_written, 5, "unexpected metadata write amplification");
+    assert_eq!(commit.bitmap_pages_written, 1);
+    assert_eq!(commit.checkpoint_blocks_written, 1);
+    assert_eq!(commit.flushes, 3, "data commit must use exactly three barriers");
+    assert_eq!(stats.writes, 8);
+    assert_eq!(stats.flushes, 3);
+    assert!(stats.reads <= 12, "post-commit re-walk grew unexpectedly: {} reads", stats.reads);
+
+    // Empty-file transaction: no data barrier.
+    vol.device_mut().reset();
+    vol.create_file_in_root("empty.txt", b"", ts(1)).unwrap();
+    let commit = vol.last_commit_stats().unwrap();
+    assert_eq!(commit.data_blocks_written, 0);
+    assert_eq!(commit.flushes, 2, "empty commit must use exactly two barriers");
+
+    // Mount: ident + 2 checkpoint slots + omap + root record + root dir +
+    // 1 bitmap page (single region) = 7 reads, no writes.
     assert!(mount_stats.reads <= 8 && mount_stats.writes == 0);
 }
 
@@ -142,28 +204,32 @@ fn file_image_end_to_end_with_json_report() {
     let path = dir.join("volume.img");
 
     let mut dev = FileBackend::create(&path, BS, 128).unwrap();
-    mkfs(&mut dev, &params()).unwrap();
+    mkfs(&mut dev, &params(128)).unwrap();
     let mut vol = mount(dev).unwrap();
-    vol.create_file_in_root("on-disk.txt", ts(7)).unwrap();
+    vol.create_file_in_root("on-disk.txt", b"persisted", ts(7)).unwrap();
     drop(vol);
 
     let mut dev = FileBackend::open(&path, BS, 128).unwrap();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "checker findings: {:?}", report.errors);
     let json = report.render_json();
-    assert!(json.contains("\"schema_version\":1"));
+    assert!(json.contains("\"schema_version\":2"));
     assert!(json.contains("\"clean\":true"));
     assert!(json.contains("\"generation\":2"));
+    assert!(json.contains("\"region_size\":128"));
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
 fn torn_newest_checkpoint_falls_back_to_previous_generation() {
+    // A torn checkpoint is structurally invalid (CRC), so *selection* falls
+    // back to the intact slot — this is the designed A/B mechanism, distinct
+    // from the forbidden reachable-state fallback (see hardening tests).
     let mut dev = MemoryBackend::new(BS, 64);
-    mkfs(&mut dev, &params()).unwrap();
+    mkfs(&mut dev, &params(64)).unwrap();
     let mut vol = mount(dev).unwrap();
-    vol.create_file_in_root("hello.txt", ts(0)).unwrap();
+    vol.create_file_in_root("hello.txt", b"x", ts(0)).unwrap();
     let mut dev = vol.into_device();
 
     // Generation 2 lives in slot B (LBA 2). Tear it.
@@ -174,7 +240,7 @@ fn torn_newest_checkpoint_falls_back_to_previous_generation() {
     dev.apply_raw(2, &torn);
 
     let report = check_device(&mut dev);
-    assert!(report.is_clean(), "fallback is an allowed state: {:?}", report.errors);
+    assert!(report.is_clean(), "structural fallback is an allowed state: {:?}", report.errors);
     let vol = mount(dev).unwrap();
     assert_eq!(vol.generation(), 1, "mount must fall back to the intact checkpoint");
     assert!(vol.list_root().is_empty());
