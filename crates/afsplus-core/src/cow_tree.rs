@@ -1219,7 +1219,7 @@ mod tests {
             .encode(4096, 1)
             .unwrap();
         dev.write_block(old_root, &empty).unwrap();
-        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096).unwrap();
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096, 0).unwrap();
         let mut entries: Vec<_> = (0..300u64)
             .map(|ordinal| {
                 let key = (ordinal * 137) % 300;
@@ -1265,7 +1265,7 @@ mod tests {
                 .0
                 .is_none()
         );
-        let finished = tx.finish(&mut dev, &checkpoint, None).unwrap();
+        let finished = tx.finish(&mut dev).unwrap();
         assert!(finished.stats.blocks_allocated >= mutation.stats.nodes_allocated);
         for (lba, block) in &finished.bitmap_writes {
             dev.write_block(*lba, block).unwrap();
@@ -1323,7 +1323,7 @@ mod tests {
             dev.write_block(*lba, block).unwrap();
         }
         checkpoint2.reclaim_root_block = finished.reclaim_root_lba;
-        let mut tx2 = TxAllocator::begin(&mut dev, &geo, &checkpoint2, Some(&checkpoint), 3, 4096)
+        let mut tx2 = TxAllocator::begin(&mut dev, &geo, &checkpoint2, Some(&checkpoint), 3, 4096, 0)
             .unwrap();
         assert!(matches!(
             delete_many(
@@ -1382,7 +1382,7 @@ mod tests {
             .0,
             Some(surviving_value)
         );
-        tx2.finish(&mut dev, &checkpoint2, Some(&checkpoint)).unwrap();
+        tx2.finish(&mut dev).unwrap();
     }
 
     #[test]
@@ -1628,7 +1628,7 @@ mod tests {
         .encode(4096, 1)
         .unwrap();
         dev.write_block(root, &corrupt_root).unwrap();
-        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096).unwrap();
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096, 0).unwrap();
         let error = upsert_many(
             &mut dev,
             &geo,

@@ -286,6 +286,8 @@ pub struct TxAllocator {
     reclaim: Option<ReclaimTx>,
     allocated_this_tx: RunSet,
     retired_this_tx: RunSet,
+    /// Region where allocation last succeeded; searches start here.
+    rover_region: u32,
     stats: AllocStats,
 }
 
@@ -299,6 +301,7 @@ impl TxAllocator {
         other: Option<&Checkpoint>,
         new_generation: u64,
         batch_blocks: u64,
+        rover_region: u32,
     ) -> Result<TxAllocator, CoreError> {
         let reclaim = ReclaimTx::begin(
             dev,
@@ -324,6 +327,7 @@ impl TxAllocator {
             reclaim: Some(reclaim),
             allocated_this_tx: RunSet::default(),
             retired_this_tx: RunSet::default(),
+            rover_region: rover_region % geo.region_count().max(1),
             stats: AllocStats::default(),
         };
         let promoted: Vec<_> = tx
@@ -366,7 +370,19 @@ impl TxAllocator {
             return Err(CoreError::NoSpace);
         }
         let geo = self.geo;
-        for region in 0..geo.region_count() {
+        let region_count = geo.region_count();
+        for step in 0..region_count {
+            let region = (self.rover_region + step) % region_count;
+            // Skip regions whose committed free count cannot satisfy the
+            // request without loading any bitmap page. Regions this
+            // transaction already dirtied (allocations or promotions) have
+            // diverged from the committed count and are never skipped.
+            if !self.dirty_regions.contains(&region) {
+                let record = self.current_record(dev, region)?;
+                if (record.free_blocks as u64) < len {
+                    continue;
+                }
+            }
             let base = geo.region_base(region);
             let mut run_start = 0u32;
             let mut run_len = 0u64;
@@ -412,6 +428,7 @@ impl TxAllocator {
                         "allocator returned overlapping run at {lba}"
                     )));
                 }
+                self.rover_region = region;
                 self.stats.blocks_allocated += len;
                 return Ok(lba);
             }
@@ -450,6 +467,7 @@ impl TxAllocator {
                 "run {start}+{blocks} retired twice"
             )));
         }
+        let mut touched_pages = BTreeSet::new();
         for lba in start..end {
             if !self.geo.is_allocatable(lba) {
                 return Err(CoreError::Corrupt(format!(
@@ -459,6 +477,7 @@ impl TxAllocator {
             let region = self.geo.region_of(lba);
             let region_index = (lba - self.geo.region_base(region)) as u32;
             let (page_index, local_index) = self.geo.bitmap_page_for_index(region_index);
+            touched_pages.insert((region, page_index));
             if !self
                 .page_mut(dev, region, page_index)?
                 .is_allocated(local_index)
@@ -466,6 +485,13 @@ impl TxAllocator {
                 return Err(CoreError::Corrupt(format!(
                     "retiring block {lba} that is not live"
                 )));
+            }
+        }
+        // Retiring only reads bits; drop pages this check loaded so a large
+        // quarantine does not inflate resident allocator state.
+        for key in touched_pages {
+            if !self.dirty_pages.contains(&key) {
+                self.pages.remove(&key);
             }
         }
         self.reclaim
@@ -510,20 +536,29 @@ impl TxAllocator {
         self.dirty_regions.insert(region);
     }
 
+    /// The committed allocation-root record for a region, loaded on demand
+    /// and cached for the transaction.
+    fn current_record<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        region: u32,
+    ) -> Result<RegionRecord, CoreError> {
+        if let Some(record) = self.current_records.get(&region) {
+            return Ok(*record);
+        }
+        let record = checkpoint_record(dev, &self.geo, &self.current_checkpoint, region)?;
+        self.current_records.insert(region, record);
+        self.stats.allocation_records_loaded += 1;
+        Ok(record)
+    }
+
     fn ensure_descriptors<D: BlockDevice>(
         &mut self,
         dev: &mut D,
         region: u32,
     ) -> Result<(), CoreError> {
         if !self.descriptors.contains_key(&region) {
-            let record = if let Some(record) = self.current_records.get(&region) {
-                *record
-            } else {
-                let record = checkpoint_record(dev, &self.geo, &self.current_checkpoint, region)?;
-                self.current_records.insert(region, record);
-                self.stats.allocation_records_loaded += 1;
-                record
-            };
+            let record = self.current_record(dev, region)?;
             let mut buf = vec![0u8; self.geo.block_size];
             let descriptor = load_region_descriptor(dev, &self.geo, region, &record, &mut buf)?;
             self.descriptors.insert(region, descriptor);
@@ -559,12 +594,7 @@ impl TxAllocator {
         Ok(self.pages.get_mut(&key).expect("inserted above"))
     }
 
-    pub fn finish<D: BlockDevice>(
-        mut self,
-        dev: &mut D,
-        _current: &Checkpoint,
-        _other: Option<&Checkpoint>,
-    ) -> Result<FinishedAlloc, CoreError> {
+    pub fn finish<D: BlockDevice>(mut self, dev: &mut D) -> Result<FinishedAlloc, CoreError> {
         // Rebuild the reclaim queue first: sealing and the new root allocate
         // ordinary blocks, which must land in the dirty bitmap state emitted
         // below. The allocation count is known before allocating (ADR-036),
@@ -665,6 +695,7 @@ impl TxAllocator {
             reclaim_root_lba: build.root_lba,
             reclaim_writes: build.writes,
             reclaim_pending_blocks: build.pending_blocks,
+            rover_region: self.rover_region,
             stats: self.stats,
         })
     }
@@ -682,6 +713,9 @@ pub struct FinishedAlloc {
     pub reclaim_root_lba: u64,
     pub reclaim_writes: Vec<(u64, Vec<u8>)>,
     pub reclaim_pending_blocks: u64,
+    /// Region of the last successful allocation, for the next transaction's
+    /// search start.
+    pub rover_region: u32,
     pub stats: AllocStats,
 }
 
@@ -731,7 +765,7 @@ mod tests {
         let checkpoint = vol.checkpoint().clone();
         let mut dev = vol.into_device();
 
-        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096).unwrap();
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096, 0).unwrap();
         let start = tx
             .allocate_run(&mut dev, BITMAP_PAGE_BLOCKS as u64 + 1)
             .unwrap();
@@ -739,7 +773,7 @@ mod tests {
         // object map, reclaim root) plus the three-image allocation-root
         // pool precede ordinary free space.
         assert_eq!(start, geo.region0_reserved_blocks() + 7);
-        let finished = tx.finish(&mut dev, &checkpoint, None).unwrap();
+        let finished = tx.finish(&mut dev).unwrap();
         assert_eq!(finished.bitmap_writes.len(), 2);
         assert_eq!(finished.descriptor_writes.len(), 1);
         assert_eq!(finished.stats.bitmap_pages_dirty, 2);

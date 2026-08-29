@@ -117,6 +117,16 @@ post-Scale-1 work includes atomic replacement/orphan handling and the broader
 workload suite. Delta-log/spacemap alternatives are built only if the measured
 bitmap design fails on correctness, amplification, or scale.
 
+The fsync workload harness (`tests/fsync_workloads.rs`) measures blocker 2:
+per durable operation, checkpoint-per-op costs 9–27 block writes and 3–7
+barriers on Git-style workloads versus a ~1.1-write/1.05-barrier intent-log
+envelope — analysis and decision input in
+`../implementation/fsync-intent-log-baseline.md`. The allocation-root node
+set is now cached across commits (no per-transaction tree walks for the
+reserved-pool exclusion), and the allocator keeps a roving region pointer
+and skips regions whose committed free count cannot satisfy a request,
+without loading their bitmap pages.
+
 Reclaim Scale-2 replaces the single-block retired list with the ADR-036
 queue. Entries are runs, so a large truncate or unlink costs a handful of
 entries; a 600-block COW rewrite, a 400-block truncate plus 400-block bulk

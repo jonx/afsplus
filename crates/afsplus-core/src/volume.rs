@@ -67,6 +67,14 @@ pub struct Volume<D: BlockDevice> {
     state: MountState,
     /// Per-transaction reclamation budget in blocks (runtime policy).
     reclaim_batch_blocks: u64,
+    /// Allocation-root node sets for (current, other) checkpoints, cached
+    /// across commits so the reserved-pool exclusion set needs no tree walk
+    /// per transaction. Populated lazily on the first commit (mount stays
+    /// bounded) and maintained incrementally afterwards.
+    allocation_tree_cache: Option<(Vec<u64>, Vec<u64>)>,
+    /// Region where the last allocation succeeded; the next transaction
+    /// starts its search there instead of rescanning from region zero.
+    alloc_rover_region: u32,
     last_commit: Option<CommitStats>,
 }
 
@@ -85,6 +93,8 @@ impl<D: BlockDevice> Volume<D> {
             other_checkpoint: selection.other,
             state,
             reclaim_batch_blocks: crate::reclaim::DEFAULT_RECLAIM_BATCH_BLOCKS,
+            allocation_tree_cache: None,
+            alloc_rover_region: 0,
             last_commit: None,
         }
     }
@@ -141,6 +151,7 @@ impl<D: BlockDevice> Volume<D> {
             self.other_checkpoint.as_ref(),
             generation,
             self.reclaim_batch_blocks,
+            self.alloc_rover_region,
         )?;
         self.commit_transaction(
             generation,
@@ -335,6 +346,7 @@ impl<D: BlockDevice> Volume<D> {
             self.other_checkpoint.as_ref(),
             generation,
             self.reclaim_batch_blocks,
+            self.alloc_rover_region,
         )?;
         let additions = allocate_extent_runs(
             &mut tx,
@@ -430,6 +442,7 @@ impl<D: BlockDevice> Volume<D> {
             self.other_checkpoint.as_ref(),
             generation,
             self.reclaim_batch_blocks,
+            self.alloc_rover_region,
         )?;
         let mut data_writes = Vec::new();
         if let Some((logical_block, block)) = tail_rewrite {
@@ -507,6 +520,7 @@ impl<D: BlockDevice> Volume<D> {
             self.other_checkpoint.as_ref(),
             generation,
             self.reclaim_batch_blocks,
+            self.alloc_rover_region,
         )?;
         let mut additions = Vec::new();
         for (logical_start, logical_end) in holes {
@@ -593,6 +607,7 @@ impl<D: BlockDevice> Volume<D> {
             self.other_checkpoint.as_ref(),
             generation,
             self.reclaim_batch_blocks,
+            self.alloc_rover_region,
         )?;
 
         // Data first: allocate one contiguous extent and stage its blocks.
@@ -751,6 +766,7 @@ impl<D: BlockDevice> Volume<D> {
             self.other_checkpoint.as_ref(),
             generation,
             self.reclaim_batch_blocks,
+            self.alloc_rover_region,
         )?;
         let directory_root_lba = tx.allocate(&mut self.dev)?;
         let directory_record_lba = tx.allocate(&mut self.dev)?;
@@ -969,6 +985,7 @@ impl<D: BlockDevice> Volume<D> {
             self.other_checkpoint.as_ref(),
             generation,
             self.reclaim_batch_blocks,
+            self.alloc_rover_region,
         )?;
 
         let parent_record_new_lba = tx.allocate(&mut self.dev)?;
@@ -1111,6 +1128,7 @@ impl<D: BlockDevice> Volume<D> {
             self.other_checkpoint.as_ref(),
             generation,
             self.reclaim_batch_blocks,
+            self.alloc_rover_region,
         )?;
         let file_new_lba = tx.allocate(&mut self.dev)?;
         let parent_new_lba = tx.allocate(&mut self.dev)?;
@@ -1285,6 +1303,7 @@ impl<D: BlockDevice> Volume<D> {
             self.other_checkpoint.as_ref(),
             generation,
             self.reclaim_batch_blocks,
+            self.alloc_rover_region,
         )?;
         let source_parent_new_lba = tx.allocate(&mut self.dev)?;
         let target_parent_new_lba = if target_parent_id == source_parent_id {
@@ -1732,37 +1751,48 @@ impl<D: BlockDevice> Volume<D> {
         }
     }
 
+    /// Returns the mutation plus the new checkpoint's node set for the
+    /// cross-commit cache.
     fn mutate_allocation_root(
         &mut self,
         generation: u64,
         dirty_records: &[(u32, afsplus_format::checkpoint::RegionRecord)],
-    ) -> Result<TreeMutation, CoreError> {
+    ) -> Result<(TreeMutation, Vec<u64>), CoreError> {
         if self.checkpoint.allocation_root_block == 0 {
             return Err(CoreError::PrototypeLimit(
                 "inline allocation checkpoint cannot be mutated",
             ));
         }
         let geo = self.ident.geometry();
-        let current_blocks = allocation_root::load_tree_blocks(
-            &mut self.dev,
-            &geo,
-            self.checkpoint.allocation_root_block,
-            self.checkpoint.generation,
-        )?;
-        let older_blocks = if let Some(older) = self
-            .other_checkpoint
-            .as_ref()
-            .filter(|checkpoint| checkpoint.allocation_root_block != 0)
-        {
-            allocation_root::load_tree_blocks(
-                &mut self.dev,
-                &geo,
-                older.allocation_root_block,
-                older.generation,
-            )?
-        } else {
-            Vec::new()
+        let (current_blocks, older_blocks) = match self.allocation_tree_cache.take() {
+            Some(cached) => cached,
+            None => {
+                let current = allocation_root::load_tree_blocks(
+                    &mut self.dev,
+                    &geo,
+                    self.checkpoint.allocation_root_block,
+                    self.checkpoint.generation,
+                )?;
+                let older = if let Some(older) = self
+                    .other_checkpoint
+                    .as_ref()
+                    .filter(|checkpoint| checkpoint.allocation_root_block != 0)
+                {
+                    allocation_root::load_tree_blocks(
+                        &mut self.dev,
+                        &geo,
+                        older.allocation_root_block,
+                        older.generation,
+                    )?
+                } else {
+                    Vec::new()
+                };
+                (current, older)
+            }
         };
+        // The take() above cleared the cache; restore it so an aborted
+        // commit leaves the committed view intact.
+        self.allocation_tree_cache = Some((current_blocks.clone(), older_blocks.clone()));
         let pool_lbas = allocation_root::reserved_pool_lbas(&geo)?;
         let mut pool = ReservedTreePool::new(pool_lbas, &current_blocks, &older_blocks)?;
         let encoded: Vec<_> = dirty_records
@@ -1778,7 +1808,7 @@ impl<D: BlockDevice> Volume<D> {
             .iter()
             .map(|(key, value)| TreeOperation::Upsert { key, value })
             .collect();
-        mutate_many(
+        let mutation = mutate_many(
             &mut self.dev,
             &geo,
             &mut pool,
@@ -1786,7 +1816,18 @@ impl<D: BlockDevice> Volume<D> {
             allocation_root::spec(self.checkpoint.generation),
             generation,
             &operations,
-        )
+        )?;
+        // New node set = current − retired paths ∪ freshly written images.
+        let retired: std::collections::BTreeSet<u64> = pool.retired_nodes().collect();
+        let mut new_blocks: Vec<u64> = current_blocks
+            .iter()
+            .copied()
+            .filter(|lba| !retired.contains(lba))
+            .collect();
+        new_blocks.extend(mutation.writes.iter().map(|(lba, _)| *lba));
+        new_blocks.sort_unstable();
+        new_blocks.dedup();
+        Ok((mutation, new_blocks))
     }
 
     /// The common commit tail: durability ordering, checkpoint write, state
@@ -1803,8 +1844,9 @@ impl<D: BlockDevice> Volume<D> {
         new_object_map_block: u64,
     ) -> Result<(), CoreError> {
         let block_size = self.dev.block_size();
-        let finished = tx.finish(&mut self.dev, &self.checkpoint, self.other_checkpoint.as_ref())?;
-        let allocation_root = self.mutate_allocation_root(generation, &finished.dirty_records)?;
+        let finished = tx.finish(&mut self.dev)?;
+        let (allocation_root, new_allocation_tree_blocks) =
+            self.mutate_allocation_root(generation, &finished.dirty_records)?;
         let new_allocation_root_block = allocation_root.root_lba;
         meta_writes.extend(allocation_root.writes);
         meta_writes.extend(finished.reclaim_writes);
@@ -1876,6 +1918,15 @@ impl<D: BlockDevice> Volume<D> {
         // remount. The transaction already owns the exact new bitmap state,
         // so no post-commit full-volume reload is needed.
         self.state = load_mount_state(&mut self.dev, &self.ident, &new_checkpoint)?;
+        // Rotate the allocation-root cache: the previous current tree is now
+        // the retained older one.
+        let previous_current = self
+            .allocation_tree_cache
+            .take()
+            .map(|(current, _)| current)
+            .unwrap_or_default();
+        self.allocation_tree_cache = Some((new_allocation_tree_blocks, previous_current));
+        self.alloc_rover_region = finished.rover_region;
         self.other_checkpoint = Some(std::mem::replace(&mut self.checkpoint, new_checkpoint));
         self.current_slot = new_slot;
         self.last_commit = Some(stats);

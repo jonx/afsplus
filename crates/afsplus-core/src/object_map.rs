@@ -162,7 +162,7 @@ mod tests {
         let geo = vol.ident().geometry();
         let checkpoint = vol.checkpoint().clone();
         let mut dev = vol.into_device();
-        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096).unwrap();
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096, 0).unwrap();
 
         let mut encoded = Vec::new();
         for offset in 0..1000u64 {

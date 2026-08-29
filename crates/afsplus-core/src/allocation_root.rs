@@ -454,6 +454,11 @@ pub struct ReservedTreePool {
 }
 
 impl ReservedTreePool {
+    /// Committed pool nodes this mutation retired (replaced COW paths).
+    pub fn retired_nodes(&self) -> impl Iterator<Item = u64> + '_ {
+        self.retired_here.iter().copied()
+    }
+
     pub fn new(
         pool_lbas: impl IntoIterator<Item = u64>,
         current_tree: &[u64],
