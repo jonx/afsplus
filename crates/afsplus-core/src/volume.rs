@@ -21,7 +21,9 @@ use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::dir::{comparison_key, DirEntry};
 use afsplus_format::ident::Identification;
-use afsplus_format::object::{ObjectRecord, ObjectType, OBJECT_FLAG_EXTENT_TREE};
+use afsplus_format::object::{
+    ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_EXTENT_TREE,
+};
 use afsplus_format::retired::RetiredList;
 use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 
@@ -29,7 +31,7 @@ use crate::alloc::{AllocStats, TxAllocator};
 use crate::allocation_root::{self, ReservedTreePool};
 use crate::cow_tree::{mutate_many, TreeMutation, TreeOperation};
 use crate::directory;
-use crate::extent_map::{self, EXTENT_UNWRITTEN};
+use crate::extent_map::{self, Extent, EXTENT_UNWRITTEN};
 use crate::mount::Selection;
 use crate::object_map;
 use crate::verify::{load_mount_state, MountState};
@@ -125,9 +127,7 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
     ) -> Result<Option<u64>, CoreError> {
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
-        let directory_record = self
-            .read_object(directory_id)?
-            .ok_or(CoreError::NotFound)?;
+        let directory_record = self.read_object(directory_id)?.ok_or(CoreError::NotFound)?;
         if directory_record.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
@@ -149,13 +149,8 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     /// Lists a directory as `(original name, object ID)` pairs.
-    pub fn list_directory(
-        &mut self,
-        directory_id: u64,
-    ) -> Result<Vec<(String, u64)>, CoreError> {
-        let directory_record = self
-            .read_object(directory_id)?
-            .ok_or(CoreError::NotFound)?;
+    pub fn list_directory(&mut self, directory_id: u64) -> Result<Vec<(String, u64)>, CoreError> {
+        let directory_record = self.read_object(directory_id)?.ok_or(CoreError::NotFound)?;
         if directory_record.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
@@ -166,10 +161,10 @@ impl<D: BlockDevice> Volume<D> {
             directory_id,
             self.checkpoint.generation,
         )?
-            .entries
-            .iter()
-            .map(|e| (String::from_utf8_lossy(&e.name).into_owned(), e.child_id))
-            .collect())
+        .entries
+        .iter()
+        .map(|e| (String::from_utf8_lossy(&e.name).into_owned(), e.child_id))
+        .collect())
     }
 
     /// Reads and validates one object record on demand. Returning the record
@@ -226,6 +221,271 @@ impl<D: BlockDevice> Volume<D> {
         Ok(content)
     }
 
+    /// Replaces `content.len()` bytes at `offset` using fresh data blocks and
+    /// one atomic COW metadata publication. Writing beyond EOF creates a hole;
+    /// the file is converted from its cheap direct extent to an AFST extent
+    /// map only when the resulting layout is sparse or fragmented.
+    pub fn write_file_at(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        content: &[u8],
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        if content.is_empty() {
+            return Ok(());
+        }
+        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        if record.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("file {object_id} missing from object map"))
+        })?;
+        let content_len = u64::try_from(content.len())
+            .map_err(|_| CoreError::PrototypeLimit("write buffer is too large"))?;
+        let end_offset = offset
+            .checked_add(content_len)
+            .ok_or(CoreError::PrototypeLimit("file size limit reached"))?;
+        let block_size = self.dev.block_size() as u64;
+        let first_block = offset / block_size;
+        let end_block = end_offset.div_ceil(block_size);
+        let write_block_count = end_block - first_block;
+        let (old_extents, old_tree_blocks) = self.load_file_layout(&record)?;
+
+        // Partial first/last blocks inherit their committed bytes. Holes and
+        // unwritten preallocation read as zeros, so they need no special case.
+        let mut blocks = Vec::with_capacity(write_block_count as usize);
+        for logical_block in first_block..end_block {
+            let mut block = vec![0u8; block_size as usize];
+            self.read_layout_block(&old_extents, logical_block, &mut block)?;
+            let logical_byte = logical_block.saturating_mul(block_size);
+            let copy_start = offset.max(logical_byte);
+            let copy_end = end_offset.min(logical_byte.saturating_add(block_size));
+            let source_start = usize::try_from(copy_start - offset)
+                .map_err(|_| CoreError::PrototypeLimit("write offset is too large"))?;
+            let source_end = usize::try_from(copy_end - offset)
+                .map_err(|_| CoreError::PrototypeLimit("write offset is too large"))?;
+            let target_start = usize::try_from(copy_start - logical_byte)
+                .map_err(|_| CoreError::PrototypeLimit("block offset is too large"))?;
+            block[target_start..target_start + source_end - source_start]
+                .copy_from_slice(&content[source_start..source_end]);
+            blocks.push(block);
+        }
+
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            &self.state.retired,
+            generation,
+        )?;
+        let additions = allocate_extent_runs(
+            &mut tx,
+            &mut self.dev,
+            &self.ident.geometry(),
+            first_block,
+            write_block_count,
+            0,
+        )?;
+        let mut block_iter = blocks.into_iter();
+        let mut data_writes = Vec::with_capacity(write_block_count as usize);
+        for extent in &additions {
+            for offset in 0..extent.block_count {
+                let block = block_iter.next().ok_or_else(|| {
+                    CoreError::Corrupt("write extent/data block count mismatch".into())
+                })?;
+                data_writes.push((extent.physical_start + offset, block));
+            }
+        }
+        if block_iter.next().is_some() {
+            return Err(CoreError::Corrupt(
+                "write extent/data block count mismatch".into(),
+            ));
+        }
+        let (mut new_extents, removed_extents) =
+            replace_logical_range(&old_extents, first_block, end_block, None)?;
+        new_extents.extend(additions);
+        let new_extents = coalesce_extents(new_extents)?;
+
+        self.commit_file_layout(
+            record,
+            record_lba,
+            old_extents,
+            old_tree_blocks,
+            new_extents,
+            removed_extents,
+            record.size_bytes.max(end_offset),
+            true,
+            now,
+            generation,
+            tx,
+            data_writes,
+        )
+    }
+
+    /// Changes a file's logical size atomically. Growth creates zero-reading
+    /// holes. Shrinking a written partial block COW-rewrites that block with a
+    /// zeroed tail so a later extension cannot reveal bytes past the old EOF.
+    pub fn truncate_file(
+        &mut self,
+        object_id: u64,
+        new_size: u64,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        if record.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        if new_size == record.size_bytes {
+            return Ok(());
+        }
+        let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("file {object_id} missing from object map"))
+        })?;
+        let block_size = self.dev.block_size() as u64;
+        let (old_extents, old_tree_blocks) = self.load_file_layout(&record)?;
+        let mut new_extents = old_extents.clone();
+        let mut removed_extents = Vec::new();
+        let mut tail_rewrite = None;
+
+        if new_size < record.size_bytes {
+            let retained_blocks = new_size.div_ceil(block_size);
+            (new_extents, removed_extents) =
+                replace_logical_range(&old_extents, retained_blocks, u64::MAX, None)?;
+            if !new_size.is_multiple_of(block_size) {
+                let logical_block = retained_blocks - 1;
+                if extent_at(&new_extents, logical_block)
+                    .is_some_and(|extent| extent.flags & EXTENT_UNWRITTEN == 0)
+                {
+                    let mut block = vec![0u8; block_size as usize];
+                    self.read_layout_block(&new_extents, logical_block, &mut block)?;
+                    block[(new_size % block_size) as usize..].fill(0);
+                    tail_rewrite = Some((logical_block, block));
+                }
+            }
+        }
+
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            &self.state.retired,
+            generation,
+        )?;
+        let mut data_writes = Vec::new();
+        if let Some((logical_block, block)) = tail_rewrite {
+            let physical_start = tx.allocate(&mut self.dev)?;
+            let replacement = Extent {
+                logical_start: logical_block,
+                physical_start,
+                block_count: 1,
+                flags: 0,
+            };
+            let (rewritten, mut removed) = replace_logical_range(
+                &new_extents,
+                logical_block,
+                logical_block + 1,
+                Some(replacement),
+            )?;
+            new_extents = rewritten;
+            removed_extents.append(&mut removed);
+            data_writes.push((physical_start, block));
+        }
+
+        self.commit_file_layout(
+            record,
+            record_lba,
+            old_extents,
+            old_tree_blocks,
+            new_extents,
+            removed_extents,
+            new_size,
+            true,
+            now,
+            generation,
+            tx,
+            data_writes,
+        )
+    }
+
+    /// Reserves physical blocks for a byte range without changing the file's
+    /// logical size. New mappings carry the unwritten flag and therefore read
+    /// as zeros until replaced by [`Self::write_file_at`].
+    pub fn preallocate_file(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        length: u64,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        if length == 0 {
+            return Ok(());
+        }
+        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        if record.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        let end_offset = offset
+            .checked_add(length)
+            .ok_or(CoreError::PrototypeLimit("preallocation range overflows"))?;
+        let block_size = self.dev.block_size() as u64;
+        let start_block = offset / block_size;
+        let end_block = end_offset.div_ceil(block_size);
+        let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("file {object_id} missing from object map"))
+        })?;
+        let (old_extents, old_tree_blocks) = self.load_file_layout(&record)?;
+        let holes = logical_holes(&old_extents, start_block, end_block)?;
+        if holes.is_empty() {
+            return Ok(());
+        }
+
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            &self.state.retired,
+            generation,
+        )?;
+        let mut additions = Vec::new();
+        for (logical_start, logical_end) in holes {
+            additions.extend(allocate_extent_runs(
+                &mut tx,
+                &mut self.dev,
+                &self.ident.geometry(),
+                logical_start,
+                logical_end - logical_start,
+                EXTENT_UNWRITTEN,
+            )?);
+        }
+        let mut new_extents = old_extents.clone();
+        new_extents.extend(additions);
+        let new_extents = coalesce_extents(new_extents)?;
+        let logical_size = record.size_bytes;
+
+        self.commit_file_layout(
+            record,
+            record_lba,
+            old_extents,
+            old_tree_blocks,
+            new_extents,
+            Vec::new(),
+            logical_size,
+            false,
+            now,
+            generation,
+            tx,
+            Vec::new(),
+        )
+    }
+
     pub fn device_mut(&mut self) -> &mut D {
         &mut self.dev
     }
@@ -257,9 +517,9 @@ impl<D: BlockDevice> Volume<D> {
         if parent.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
-        let parent_record_lba = self
-            .object_record_lba(parent_id)?
-            .ok_or_else(|| CoreError::Corrupt(format!("directory {parent_id} missing from object map")))?;
+        let parent_record_lba = self.object_record_lba(parent_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("directory {parent_id} missing from object map"))
+        })?;
         let key = comparison_key(name.as_bytes());
         if self.lookup_in_directory(parent_id, name)?.is_some() {
             return Err(CoreError::AlreadyExists);
@@ -419,9 +679,9 @@ impl<D: BlockDevice> Volume<D> {
         if parent.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
-        let parent_record_lba = self
-            .object_record_lba(parent_id)?
-            .ok_or_else(|| CoreError::Corrupt(format!("directory {parent_id} missing from object map")))?;
+        let parent_record_lba = self.object_record_lba(parent_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("directory {parent_id} missing from object map"))
+        })?;
         if self.lookup_in_directory(parent_id, name)?.is_some() {
             return Err(CoreError::AlreadyExists);
         }
@@ -584,9 +844,9 @@ impl<D: BlockDevice> Volume<D> {
         if parent.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
-        let parent_record_lba = self
-            .object_record_lba(parent_id)?
-            .ok_or_else(|| CoreError::Corrupt(format!("directory {parent_id} missing from object map")))?;
+        let parent_record_lba = self.object_record_lba(parent_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("directory {parent_id} missing from object map"))
+        })?;
         let key = comparison_key(name.as_bytes());
         let entry = directory::lookup_entry(
             &mut self.dev,
@@ -719,9 +979,7 @@ impl<D: BlockDevice> Volume<D> {
         let parent_key = object_map::key(parent_id);
         let parent_value = object_map::value(parent_record_new_lba)?;
         let victim_key = object_map::key(entry.child_id);
-        let victim_value = victim_record_new_lba
-            .map(object_map::value)
-            .transpose()?;
+        let victim_value = victim_record_new_lba.map(object_map::value).transpose()?;
         let mut operations = vec![TreeOperation::Upsert {
             key: &parent_key,
             value: &parent_value,
@@ -877,10 +1135,7 @@ impl<D: BlockDevice> Volume<D> {
 
         let mut metadata_writes = vec![
             (file_new_lba, new_file.encode(block_size, generation)?),
-            (
-                parent_new_lba,
-                new_parent.encode(block_size, generation)?,
-            ),
+            (parent_new_lba, new_parent.encode(block_size, generation)?),
         ];
         metadata_writes.extend(directory_mutation.writes);
         metadata_writes.extend(object_map_mutation.writes);
@@ -1139,11 +1394,7 @@ impl<D: BlockDevice> Volume<D> {
     /// Returns whether `target_id` is `ancestor_id` or is reachable below it.
     /// This exhaustive guard is used only for directory moves; a future
     /// parent/reverse index may accelerate it without changing semantics.
-    fn directory_reaches(
-        &mut self,
-        ancestor_id: u64,
-        target_id: u64,
-    ) -> Result<bool, CoreError> {
+    fn directory_reaches(&mut self, ancestor_id: u64, target_id: u64) -> Result<bool, CoreError> {
         let mut pending = vec![ancestor_id];
         let mut visited = BTreeSet::new();
         while let Some(directory_id) = pending.pop() {
@@ -1155,9 +1406,9 @@ impl<D: BlockDevice> Volume<D> {
                     "directory graph contains a cycle or duplicate parent".into(),
                 ));
             }
-            let record = self
-                .read_object(directory_id)?
-                .ok_or_else(|| CoreError::Corrupt(format!("directory {directory_id} is missing")))?;
+            let record = self.read_object(directory_id)?.ok_or_else(|| {
+                CoreError::Corrupt(format!("directory {directory_id} is missing"))
+            })?;
             if record.object_type != ObjectType::Directory {
                 return Err(CoreError::Corrupt(format!(
                     "directory graph references non-directory object {directory_id}"
@@ -1191,6 +1442,195 @@ impl<D: BlockDevice> Volume<D> {
         Ok(false)
     }
 
+    fn load_file_layout(
+        &mut self,
+        record: &ObjectRecord,
+    ) -> Result<(Vec<Extent>, Vec<u64>), CoreError> {
+        if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
+            let loaded = extent_map::load_all(
+                &mut self.dev,
+                &self.ident.geometry(),
+                record.data_root,
+                record.object_id,
+                self.checkpoint.generation,
+            )?;
+            Ok((loaded.extents, loaded.tree_blocks))
+        } else if record.data_blocks == 0 {
+            Ok((Vec::new(), Vec::new()))
+        } else {
+            Ok((
+                vec![Extent {
+                    logical_start: 0,
+                    physical_start: record.data_root,
+                    block_count: record.data_blocks,
+                    flags: 0,
+                }],
+                Vec::new(),
+            ))
+        }
+    }
+
+    fn read_layout_block(
+        &mut self,
+        extents: &[Extent],
+        logical_block: u64,
+        block: &mut [u8],
+    ) -> Result<(), CoreError> {
+        let after = extents.partition_point(|extent| extent.logical_start <= logical_block);
+        let Some(extent) = after.checked_sub(1).map(|index| extents[index]) else {
+            return Ok(());
+        };
+        if logical_block >= extent.logical_end()? || extent.flags & EXTENT_UNWRITTEN != 0 {
+            return Ok(());
+        }
+        let lba = extent
+            .physical_start
+            .checked_add(logical_block - extent.logical_start)
+            .ok_or_else(|| CoreError::Corrupt("mapped physical block overflows".into()))?;
+        self.dev.read_block(lba, block)?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_file_layout(
+        &mut self,
+        record: ObjectRecord,
+        record_lba: u64,
+        old_extents: Vec<Extent>,
+        old_tree_blocks: Vec<u64>,
+        new_extents: Vec<Extent>,
+        removed_extents: Vec<Extent>,
+        new_size: u64,
+        content_changed: bool,
+        now: Timespec,
+        generation: u64,
+        mut tx: TxAllocator,
+        data_writes: Vec<(u64, Vec<u8>)>,
+    ) -> Result<(), CoreError> {
+        let block_size = self.dev.block_size();
+        let allocated_blocks = new_extents.iter().try_fold(0u64, |total, extent| {
+            total
+                .checked_add(extent.block_count)
+                .ok_or(CoreError::PrototypeLimit("allocated block count overflow"))
+        })?;
+        let direct = direct_layout(&new_extents, new_size, block_size as u64);
+        let was_tree = record.flags & OBJECT_FLAG_EXTENT_TREE != 0;
+        let mut extent_writes = Vec::new();
+        let (flags, data_root, data_blocks) = if let Some(extent) = direct {
+            if was_tree {
+                for lba in old_tree_blocks {
+                    tx.retire(&mut self.dev, lba)?;
+                }
+            }
+            (
+                0,
+                extent.map_or(0, |item| item.physical_start),
+                allocated_blocks,
+            )
+        } else if was_tree && old_extents == new_extents {
+            (OBJECT_FLAG_EXTENT_TREE, record.data_root, allocated_blocks)
+        } else if was_tree {
+            let old_encoded = old_extents
+                .iter()
+                .copied()
+                .map(extent_map::encode_extent)
+                .collect::<Result<Vec<_>, _>>()?;
+            let new_encoded = new_extents
+                .iter()
+                .copied()
+                .map(extent_map::encode_extent)
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut operations = Vec::with_capacity(old_encoded.len() + new_encoded.len());
+            for (key, _) in &old_encoded {
+                operations.push(TreeOperation::Delete { key });
+            }
+            for (key, value) in &new_encoded {
+                operations.push(TreeOperation::Upsert { key, value });
+            }
+            let mutation = mutate_many(
+                &mut self.dev,
+                &self.ident.geometry(),
+                &mut tx,
+                record.data_root,
+                extent_map::spec(record.object_id, self.checkpoint.generation),
+                generation,
+                &operations,
+            )?;
+            extent_writes = mutation.writes;
+            (OBJECT_FLAG_EXTENT_TREE, mutation.root_lba, allocated_blocks)
+        } else {
+            let node_count = extent_map::bulk_node_count(block_size, new_extents.len())?;
+            let mut lbas = Vec::with_capacity(node_count);
+            for _ in 0..node_count {
+                lbas.push(tx.allocate(&mut self.dev)?);
+            }
+            let built = extent_map::bulk_build(record.object_id, block_size, &new_extents, &lbas)?;
+            for (lba, node) in built.nodes {
+                extent_writes.push((lba, node.encode(block_size, generation)?));
+            }
+            (OBJECT_FLAG_EXTENT_TREE, built.root_lba, allocated_blocks)
+        };
+
+        let new_record_lba = tx.allocate(&mut self.dev)?;
+        let retired_list_lba = tx.allocate(&mut self.dev)?;
+        tx.retire(&mut self.dev, record_lba)?;
+        for extent in removed_extents {
+            for lba in extent.physical_start..extent.physical_end()? {
+                tx.retire(&mut self.dev, lba)?;
+            }
+        }
+        self.retire_previous_list(&mut tx)?;
+
+        let new_record = ObjectRecord {
+            flags,
+            size_bytes: new_size,
+            allocated_bytes: allocated_blocks
+                .checked_mul(block_size as u64)
+                .ok_or(CoreError::PrototypeLimit("allocated byte count overflow"))?,
+            modified: if content_changed {
+                now
+            } else {
+                record.modified
+            },
+            changed: now,
+            content_generation: if content_changed {
+                generation
+            } else {
+                record.content_generation
+            },
+            data_root,
+            data_blocks,
+            ..record
+        };
+        let object_key = object_map::key(record.object_id);
+        let object_value = object_map::value(new_record_lba)?;
+        let object_map_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &[TreeOperation::Upsert {
+                key: &object_key,
+                value: &object_value,
+            }],
+        )?;
+        let mut metadata_writes =
+            vec![(new_record_lba, new_record.encode(block_size, generation)?)];
+        metadata_writes.extend(extent_writes);
+        metadata_writes.extend(object_map_mutation.writes);
+        self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            data_writes,
+            metadata_writes,
+            retired_list_lba,
+            object_map_mutation.root_lba,
+        )
+    }
+
     fn next_generation(&self) -> Result<u64, CoreError> {
         self.checkpoint
             .generation
@@ -1220,9 +1660,7 @@ impl<D: BlockDevice> Volume<D> {
                 record.object_id
             )));
         }
-        if record.object_type == ObjectType::File
-            && record.flags & OBJECT_FLAG_EXTENT_TREE != 0
-        {
+        if record.object_type == ObjectType::File && record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
             extent_map::validate_root(
                 &mut self.dev,
                 &self.ident.geometry(),
@@ -1297,11 +1735,8 @@ impl<D: BlockDevice> Volume<D> {
             Vec::new()
         };
         let layout = allocation_root::bulk_build(&geo, records)?;
-        let mut pool = ReservedTreePool::new(
-            layout.pool_lbas,
-            &current.tree_blocks,
-            &older_blocks,
-        )?;
+        let mut pool =
+            ReservedTreePool::new(layout.pool_lbas, &current.tree_blocks, &older_blocks)?;
         let encoded: Vec<_> = records
             .iter()
             .enumerate()
@@ -1436,4 +1871,183 @@ impl<D: BlockDevice> Volume<D> {
         self.last_commit = Some(stats);
         Ok(())
     }
+}
+
+fn direct_layout(extents: &[Extent], size_bytes: u64, block_size: u64) -> Option<Option<Extent>> {
+    if extents.is_empty() {
+        return (size_bytes == 0).then_some(None);
+    }
+    let [extent] = extents else {
+        return None;
+    };
+    if extent.logical_start != 0 || extent.flags != 0 || extent.block_count > MAX_EXTENT_BLOCKS {
+        return None;
+    }
+    let capacity = extent.block_count.checked_mul(block_size)?;
+    let minimum = extent.block_count.checked_sub(1)?.checked_mul(block_size)?;
+    (size_bytes > minimum && size_bytes <= capacity).then_some(Some(*extent))
+}
+
+fn extent_at(extents: &[Extent], logical_block: u64) -> Option<Extent> {
+    let after = extents.partition_point(|extent| extent.logical_start <= logical_block);
+    let extent = after.checked_sub(1).map(|index| extents[index])?;
+    (logical_block < extent.logical_start.saturating_add(extent.block_count)).then_some(extent)
+}
+
+fn logical_holes(extents: &[Extent], start: u64, end: u64) -> Result<Vec<(u64, u64)>, CoreError> {
+    let mut holes = Vec::new();
+    let mut cursor = start;
+    for extent in extents {
+        let extent_end = extent.logical_end()?;
+        if extent_end <= cursor {
+            continue;
+        }
+        if extent.logical_start >= end {
+            break;
+        }
+        if extent.logical_start > cursor {
+            holes.push((cursor, extent.logical_start.min(end)));
+        }
+        cursor = cursor.max(extent_end.min(end));
+        if cursor == end {
+            break;
+        }
+    }
+    if cursor < end {
+        holes.push((cursor, end));
+    }
+    Ok(holes)
+}
+
+fn coalesce_extents(mut extents: Vec<Extent>) -> Result<Vec<Extent>, CoreError> {
+    extents.sort_unstable_by_key(|extent| extent.logical_start);
+    let mut coalesced: Vec<Extent> = Vec::with_capacity(extents.len());
+    for extent in extents {
+        if let Some(previous) = coalesced.last_mut() {
+            let previous_end = previous.logical_end()?;
+            if previous_end > extent.logical_start {
+                return Err(CoreError::Corrupt("logical extents overlap".into()));
+            }
+            if previous.flags == extent.flags
+                && previous_end == extent.logical_start
+                && previous.physical_end()? == extent.physical_start
+            {
+                previous.block_count = previous
+                    .block_count
+                    .checked_add(extent.block_count)
+                    .ok_or_else(|| CoreError::Corrupt("coalesced extent overflows".into()))?;
+                continue;
+            }
+        }
+        coalesced.push(extent);
+    }
+    Ok(coalesced)
+}
+
+fn allocate_extent_runs<D: BlockDevice>(
+    tx: &mut TxAllocator,
+    dev: &mut D,
+    geo: &afsplus_format::geometry::Geometry,
+    mut logical_start: u64,
+    mut block_count: u64,
+    flags: u32,
+) -> Result<Vec<Extent>, CoreError> {
+    let max_run = maximum_allocatable_run(geo)?;
+    let mut extents = Vec::new();
+    while block_count > 0 {
+        let mut candidate = block_count.min(max_run);
+        let physical_start = loop {
+            match tx.allocate_run(dev, candidate) {
+                Ok(start) => break start,
+                Err(CoreError::NoSpace) if candidate > 1 => {
+                    candidate = candidate.div_ceil(2);
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        extents.push(Extent {
+            logical_start,
+            physical_start,
+            block_count: candidate,
+            flags,
+        });
+        logical_start = logical_start
+            .checked_add(candidate)
+            .ok_or(CoreError::PrototypeLimit("logical extent range overflows"))?;
+        block_count -= candidate;
+    }
+    coalesce_extents(extents)
+}
+
+fn maximum_allocatable_run(geo: &afsplus_format::geometry::Geometry) -> Result<u64, CoreError> {
+    let last = geo.region_count() - 1;
+    let candidates = [0, 1.min(last), last];
+    let mut maximum = 0u64;
+    for region in candidates {
+        let bootstrap = if region == 0 {
+            afsplus_format::geometry::BOOTSTRAP_BLOCKS
+        } else {
+            0
+        };
+        let available =
+            geo.region_valid_blocks(region) as u64 - geo.region_reserved_blocks(region) - bootstrap;
+        maximum = maximum.max(available);
+    }
+    if maximum == 0 {
+        return Err(CoreError::Corrupt(
+            "validated geometry has no allocatable run".into(),
+        ));
+    }
+    Ok(maximum)
+}
+
+fn replace_logical_range(
+    old_extents: &[Extent],
+    start: u64,
+    end: u64,
+    replacement: Option<Extent>,
+) -> Result<(Vec<Extent>, Vec<Extent>), CoreError> {
+    if start >= end {
+        return Err(CoreError::Corrupt("empty logical replacement range".into()));
+    }
+    let mut extents = Vec::with_capacity(old_extents.len() + usize::from(replacement.is_some()));
+    let mut removed = Vec::new();
+    for old in old_extents {
+        let old_end = old.logical_end()?;
+        if old_end <= start || old.logical_start >= end {
+            extents.push(*old);
+            continue;
+        }
+        let overlap_start = old.logical_start.max(start);
+        let overlap_end = old_end.min(end);
+        if old.logical_start < overlap_start {
+            extents.push(Extent {
+                block_count: overlap_start - old.logical_start,
+                ..*old
+            });
+        }
+        removed.push(Extent {
+            logical_start: overlap_start,
+            physical_start: old.physical_start + overlap_start - old.logical_start,
+            block_count: overlap_end - overlap_start,
+            flags: old.flags,
+        });
+        if overlap_end < old_end {
+            extents.push(Extent {
+                logical_start: overlap_end,
+                physical_start: old.physical_start + overlap_end - old.logical_start,
+                block_count: old_end - overlap_end,
+                flags: old.flags,
+            });
+        }
+    }
+    if let Some(replacement) = replacement {
+        if replacement.logical_start != start || replacement.logical_end()? != end {
+            return Err(CoreError::Corrupt(
+                "replacement extent does not cover requested range".into(),
+            ));
+        }
+        extents.push(replacement);
+    }
+    Ok((coalesce_extents(extents)?, removed))
 }

@@ -27,12 +27,18 @@ fn params(label: &str) -> MkfsParams {
         uuid: [42u8; 16],
         label: label.into(),
         region_size: 64,
-        timestamp: Timespec { seconds: 1_780_000_000, nanoseconds: 0 },
+        timestamp: Timespec {
+            seconds: 1_780_000_000,
+            nanoseconds: 0,
+        },
     }
 }
 
 fn ts(seconds: i64) -> Timespec {
-    Timespec { seconds, nanoseconds: 0 }
+    Timespec {
+        seconds,
+        nanoseconds: 0,
+    }
 }
 
 /// Blocks a correct transaction must never write: everything reachable from
@@ -56,13 +62,9 @@ fn forbidden_targets(base: &MemoryBackend) -> BTreeSet<u64> {
     // Quarantined blocks may be *reused by allocation* in the next
     // transaction — that is the whole point — so they are not forbidden.
     for ckpt in std::iter::once(&selection.chosen).chain(selection.other.iter()) {
-        let allocation = allocation_root::load_all(
-            &mut dev,
-            &geo,
-            ckpt.allocation_root_block,
-            ckpt.generation,
-        )
-        .unwrap();
+        let allocation =
+            allocation_root::load_all(&mut dev, &geo, ckpt.allocation_root_block, ckpt.generation)
+                .unwrap();
         forbidden.extend(allocation.tree_blocks);
         for (r, record) in allocation.records.iter().enumerate() {
             let region = r as u32;
@@ -89,7 +91,11 @@ fn run_matrix(
             let context = state.description.clone();
             let mut image = state.image;
             let report = check_device(&mut image);
-            assert!(report.is_clean(), "{context}: checker findings {:?}", report.errors);
+            assert!(
+                report.is_clean(),
+                "{context}: checker findings {:?}",
+                report.errors
+            );
             let vol = mount(image).unwrap_or_else(|e| panic!("{context}: mount failed: {e}"));
             assert!(
                 vol.generation() == pre_generation || vol.generation() == pre_generation + 1,
@@ -110,7 +116,9 @@ fn every_crash_state_of_a_create_transaction_recovers_to_an_allowed_state() {
     let pre_free = mount(base.clone()).unwrap().free_blocks();
 
     let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
-    let file_id = vol.create_file_in_root("hello.txt", &[0x5Au8; 4000], ts(1)).unwrap();
+    let file_id = vol
+        .create_file_in_root("hello.txt", &[0x5Au8; 4000], ts(1))
+        .unwrap();
     let (_, log) = vol.into_device().into_parts();
 
     // --- Structural discipline of the commit sequence -------------------
@@ -126,14 +134,15 @@ fn every_crash_state_of_a_create_transaction_recovers_to_an_allowed_state() {
         .collect();
     assert_eq!(
         shape,
-        [
-            "w", "F", "w", "w", "w", "w", "w", "w", "w", "w", "F", "w", "F"
-        ],
+        ["w", "F", "w", "w", "w", "w", "w", "w", "w", "w", "F", "w", "F"],
         "commit sequence changed"
     );
     for op in &log {
         if let RecordedOp::Write { lba, .. } = op {
-            assert!(!forbidden.contains(lba), "transaction wrote committed block {lba}");
+            assert!(
+                !forbidden.contains(lba),
+                "transaction wrote committed block {lba}"
+            );
         }
     }
 
@@ -157,11 +166,21 @@ fn every_crash_state_of_a_create_transaction_recovers_to_an_allowed_state() {
             );
             let record = vol.stat(file_id).unwrap().unwrap();
             assert_eq!(record.object_type, ObjectType::File);
-            assert_eq!(vol.read_file(file_id).unwrap(), vec![0x5Au8; 4000], "{context}");
+            assert_eq!(
+                vol.read_file(file_id).unwrap(),
+                vec![0x5Au8; 4000],
+                "{context}"
+            );
         }
     });
-    assert!(pre_outcomes > 0, "matrix never produced a pre-commit recovery");
-    assert!(post_outcomes > 0, "matrix never produced a post-commit recovery");
+    assert!(
+        pre_outcomes > 0,
+        "matrix never produced a pre-commit recovery"
+    );
+    assert!(
+        post_outcomes > 0,
+        "matrix never produced a post-commit recovery"
+    );
 }
 
 #[test]
@@ -231,7 +250,70 @@ fn every_crash_state_of_cross_directory_rename_is_atomic() {
         assert_eq!(vol.read_file(file).unwrap(), b"rename payload", "{context}");
     });
     assert!(pre_outcomes > 0, "matrix never produced a pre-rename state");
-    assert!(post_outcomes > 0, "matrix never produced a post-rename state");
+    assert!(
+        post_outcomes > 0,
+        "matrix never produced a post-rename state"
+    );
+}
+
+#[test]
+fn every_crash_state_of_a_sparse_write_is_atomic() {
+    let mut initial = MemoryBackend::new(BS, 256);
+    mkfs(
+        &mut initial,
+        &MkfsParams {
+            uuid: [88u8; 16],
+            label: "SparseCrash".into(),
+            region_size: 256,
+            timestamp: ts(0),
+        },
+    )
+    .unwrap();
+    let mut vol = mount(initial).unwrap();
+    let before = vec![0x31; BS + 37];
+    let file = vol
+        .create_file_in_root("atomic.bin", &before, ts(1))
+        .unwrap();
+    let base = vol.into_device();
+    let pre_generation = mount(base.clone()).unwrap().generation();
+    let forbidden = forbidden_targets(&base);
+
+    let offset = BS as u64 * 3 + 11;
+    let mut after = before.clone();
+    after.resize(offset as usize, 0);
+    after.extend_from_slice(b"after");
+    let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
+    vol.write_file_at(file, offset, b"after", ts(2)).unwrap();
+    let (_, log) = vol.into_device().into_parts();
+    for operation in &log {
+        if let RecordedOp::Write { lba, .. } = operation {
+            assert!(
+                !forbidden.contains(lba),
+                "sparse write transaction overwrote committed block {lba}"
+            );
+        }
+    }
+
+    let mut pre_outcomes = 0u64;
+    let mut post_outcomes = 0u64;
+    run_matrix(&base, &log, pre_generation, |context, mut vol| {
+        let recovered = vol.read_file(file).unwrap();
+        if vol.generation() == pre_generation {
+            pre_outcomes += 1;
+            assert_eq!(recovered, before, "{context}");
+        } else {
+            post_outcomes += 1;
+            assert_eq!(recovered, after, "{context}");
+        }
+    });
+    assert!(
+        pre_outcomes > 0,
+        "matrix never produced the pre-write state"
+    );
+    assert!(
+        post_outcomes > 0,
+        "matrix never produced the post-write state"
+    );
 }
 
 #[test]
@@ -257,7 +339,10 @@ fn misordered_commit_checkpoint_before_metadata_barrier_is_caught() {
         .unwrap();
     let ckpt_write = bad_log.remove(checkpoint_index);
     assert!(matches!(ckpt_write, RecordedOp::Write { .. }));
-    let first_flush = bad_log.iter().position(|op| matches!(op, RecordedOp::Flush)).unwrap();
+    let first_flush = bad_log
+        .iter()
+        .position(|op| matches!(op, RecordedOp::Flush))
+        .unwrap();
     bad_log.insert(first_flush, ckpt_write);
 
     let mut invalid_states = 0u64;
@@ -303,7 +388,10 @@ fn misordered_commit_checkpoint_before_metadata_barrier_is_caught() {
         invalid_states > 0,
         "the matrix failed to catch the mis-ordered commit"
     );
-    assert!(root_rejections > 0, "bad ordering never damaged a bounded mount root");
+    assert!(
+        root_rejections > 0,
+        "bad ordering never damaged a bounded mount root"
+    );
     assert!(
         deferred_rejections > 0,
         "matrix never exercised corruption discovered by on-demand access"
@@ -322,12 +410,17 @@ fn crash_matrix_across_a_second_transaction() {
 
     let forbidden = forbidden_targets(&base);
     let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
-    let second_id = vol.create_file_in_root("second.txt", b"two", ts(2)).unwrap();
+    let second_id = vol
+        .create_file_in_root("second.txt", b"two", ts(2))
+        .unwrap();
     let (_, log) = vol.into_device().into_parts();
 
     for op in &log {
         if let RecordedOp::Write { lba, .. } = op {
-            assert!(!forbidden.contains(lba), "transaction wrote committed block {lba}");
+            assert!(
+                !forbidden.contains(lba),
+                "transaction wrote committed block {lba}"
+            );
         }
     }
 

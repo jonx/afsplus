@@ -3,7 +3,9 @@
 use afsplus_block::BlockDevice;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::le;
-use afsplus_format::tree::{key_u64, TreeKind, TreeNode};
+use afsplus_format::tree::{
+    child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode, MAX_TREE_LEVEL,
+};
 
 use crate::tree::{lookup_floor, visit_tree_nodes, TreeSpec, TreeSummary};
 use crate::CoreError;
@@ -45,6 +47,11 @@ pub struct LoadedExtentMap {
     pub allocated_blocks: u64,
 }
 
+pub struct BuiltExtentMap {
+    pub root_lba: u64,
+    pub nodes: Vec<(u64, TreeNode)>,
+}
+
 pub fn spec(owner: u64, max_generation: u64) -> TreeSpec {
     TreeSpec {
         kind: TreeKind::ExtentMap,
@@ -55,6 +62,243 @@ pub fn spec(owner: u64, max_generation: u64) -> TreeSpec {
 
 pub fn empty_leaf(owner: u64) -> TreeNode {
     TreeNode::leaf(TreeKind::ExtentMap, owner)
+}
+
+/// Builds the initial single-node extent tree used when a direct file first
+/// becomes sparse or fragmented. Later growth goes through the shared COW
+/// tree engine and can split this leaf normally.
+pub fn leaf_from_extents(owner: u64, extents: &[Extent]) -> Result<TreeNode, CoreError> {
+    for pair in extents.windows(2) {
+        if pair[0].logical_end()? > pair[1].logical_start {
+            return Err(CoreError::Corrupt("logical extents overlap".into()));
+        }
+    }
+    let items = extents
+        .iter()
+        .copied()
+        .map(|extent| {
+            let (key, value) = encode_extent(extent)?;
+            Ok(TreeItem {
+                key: key.to_vec(),
+                value: value.to_vec(),
+            })
+        })
+        .collect::<Result<Vec<_>, CoreError>>()?;
+    Ok(TreeNode {
+        kind: TreeKind::ExtentMap,
+        owner,
+        level: 0,
+        subtree_items: items.len() as u64,
+        leftmost_child: 0,
+        leftmost_items: 0,
+        items,
+    })
+}
+
+/// Returns the number of blocks needed for a balanced initial tree. This lets
+/// the caller reserve every LBA transactionally before constructing child
+/// references, without writing a temporary root to the device.
+pub fn bulk_node_count(block_size: usize, item_count: usize) -> Result<usize, CoreError> {
+    if item_count == 0 {
+        return Ok(1);
+    }
+    let leaf_capacity = leaf_capacity(block_size)?;
+    let fanout = internal_fanout(block_size)?;
+    let mut level_nodes = item_count.div_ceil(leaf_capacity);
+    let mut nodes = level_nodes;
+    while level_nodes > 1 {
+        level_nodes = level_nodes.div_ceil(fanout);
+        nodes = nodes
+            .checked_add(level_nodes)
+            .ok_or_else(|| CoreError::Corrupt("extent tree node count overflows".into()))?;
+    }
+    Ok(nodes)
+}
+
+/// Builds a balanced initial tree using exactly the supplied transactionally
+/// allocated LBAs. Subsequent edits use the generic shared COW engine.
+pub fn bulk_build(
+    owner: u64,
+    block_size: usize,
+    extents: &[Extent],
+    lbas: &[u64],
+) -> Result<BuiltExtentMap, CoreError> {
+    let expected = bulk_node_count(block_size, extents.len())?;
+    if lbas.len() != expected {
+        return Err(CoreError::Corrupt(
+            "extent bulk-build LBA count mismatch".into(),
+        ));
+    }
+    if extents.is_empty() {
+        return Ok(BuiltExtentMap {
+            root_lba: lbas[0],
+            nodes: vec![(lbas[0], empty_leaf(owner))],
+        });
+    }
+    for pair in extents.windows(2) {
+        if pair[0].logical_end()? > pair[1].logical_start {
+            return Err(CoreError::Corrupt("logical extents overlap".into()));
+        }
+    }
+    let leaf_capacity = leaf_capacity(block_size)?;
+    let fanout = internal_fanout(block_size)?;
+    let mut next_lba = lbas.iter().copied();
+    let mut nodes = Vec::with_capacity(expected);
+    let mut level_nodes = Vec::new();
+    let mut offset = 0usize;
+    for group_len in balanced_groups(extents.len(), leaf_capacity)? {
+        let lba = next_lba
+            .next()
+            .ok_or_else(|| CoreError::Corrupt("extent bulk-build pool exhausted".into()))?;
+        let node = leaf_from_extents(owner, &extents[offset..offset + group_len])?;
+        level_nodes.push(BulkChild {
+            lba,
+            min_key: node.items[0].key.clone(),
+            items: node.subtree_items,
+        });
+        nodes.push((lba, node));
+        offset += group_len;
+    }
+
+    let mut level = 0u8;
+    while level_nodes.len() > 1 {
+        level = level
+            .checked_add(1)
+            .filter(|level| *level <= MAX_TREE_LEVEL)
+            .ok_or(CoreError::PrototypeLimit(
+                "extent tree height limit reached",
+            ))?;
+        let mut next_level = Vec::new();
+        let mut child_offset = 0usize;
+        for group_len in balanced_groups(level_nodes.len(), fanout)? {
+            let children = &level_nodes[child_offset..child_offset + group_len];
+            let lba = next_lba
+                .next()
+                .ok_or_else(|| CoreError::Corrupt("extent bulk-build pool exhausted".into()))?;
+            let mut total = children[0].items;
+            let mut items = Vec::with_capacity(children.len() - 1);
+            for child in &children[1..] {
+                total = total
+                    .checked_add(child.items)
+                    .ok_or_else(|| CoreError::Corrupt("extent item count overflows".into()))?;
+                items.push(TreeItem {
+                    key: child.min_key.clone(),
+                    value: child_value(ChildRef {
+                        lba: child.lba,
+                        subtree_items: child.items,
+                    })
+                    .map_err(CoreError::Format)?,
+                });
+            }
+            let node = TreeNode {
+                kind: TreeKind::ExtentMap,
+                owner,
+                level,
+                subtree_items: total,
+                leftmost_child: children[0].lba,
+                leftmost_items: children[0].items,
+                items,
+            };
+            next_level.push(BulkChild {
+                lba,
+                min_key: children[0].min_key.clone(),
+                items: total,
+            });
+            nodes.push((lba, node));
+            child_offset += group_len;
+        }
+        level_nodes = next_level;
+    }
+    if next_lba.next().is_some() || nodes.len() != expected {
+        return Err(CoreError::Corrupt(
+            "extent bulk-build node count mismatch".into(),
+        ));
+    }
+    Ok(BuiltExtentMap {
+        root_lba: level_nodes[0].lba,
+        nodes,
+    })
+}
+
+#[derive(Clone)]
+struct BulkChild {
+    lba: u64,
+    min_key: Vec<u8>,
+    items: u64,
+}
+
+fn leaf_capacity(block_size: usize) -> Result<usize, CoreError> {
+    let mut node = empty_leaf(1);
+    let mut capacity = 0usize;
+    loop {
+        let (key, value) = encode_extent(Extent {
+            logical_start: capacity as u64 * 2,
+            physical_start: 1,
+            block_count: 1,
+            flags: 0,
+        })?;
+        node.items.push(TreeItem {
+            key: key.to_vec(),
+            value: value.to_vec(),
+        });
+        node.subtree_items = node.items.len() as u64;
+        if !node.fits(block_size) {
+            break;
+        }
+        capacity += 1;
+    }
+    if capacity == 0 {
+        return Err(CoreError::UnsupportedGeometry(
+            "block cannot hold one extent record",
+        ));
+    }
+    Ok(capacity)
+}
+
+fn internal_fanout(block_size: usize) -> Result<usize, CoreError> {
+    let mut node = TreeNode {
+        kind: TreeKind::ExtentMap,
+        owner: 1,
+        level: 1,
+        subtree_items: 1,
+        leftmost_child: 1,
+        leftmost_items: 1,
+        items: Vec::new(),
+    };
+    let mut children = 1usize;
+    loop {
+        node.items.push(TreeItem {
+            key: key_u64(children as u64).to_vec(),
+            value: child_value(ChildRef {
+                lba: children as u64 + 1,
+                subtree_items: 1,
+            })
+            .map_err(CoreError::Format)?,
+        });
+        node.subtree_items += 1;
+        if !node.fits(block_size) {
+            break;
+        }
+        children += 1;
+    }
+    if children < 2 {
+        return Err(CoreError::UnsupportedGeometry(
+            "block cannot hold two extent-tree children",
+        ));
+    }
+    Ok(children)
+}
+
+fn balanced_groups(count: usize, capacity: usize) -> Result<Vec<usize>, CoreError> {
+    if count == 0 || capacity == 0 {
+        return Err(CoreError::Corrupt("invalid extent bulk-build group".into()));
+    }
+    let group_count = count.div_ceil(capacity);
+    let base = count / group_count;
+    let remainder = count % group_count;
+    Ok((0..group_count)
+        .map(|index| base + usize::from(index < remainder))
+        .collect())
 }
 
 /// Validates only the extent-tree root for bounded object access. Individual
@@ -213,7 +457,10 @@ mod tests {
     use afsplus_block::{BlockDevice, MemoryBackend};
     use afsplus_format::geometry::Geometry;
 
-    use super::{empty_leaf, encode_extent, load_all, lookup_extent, spec, Extent};
+    use super::{
+        bulk_build, bulk_node_count, empty_leaf, encode_extent, load_all, lookup_extent, spec,
+        Extent,
+    };
     use crate::allocation_root::ReservedTreePool;
     use crate::cow_tree::{mutate_many, TreeOperation};
 
@@ -267,5 +514,34 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn initial_bulk_build_is_not_limited_to_one_leaf() {
+        let geo = Geometry {
+            block_size: 4096,
+            total_blocks: 8192,
+            region_size: 8192,
+        };
+        let mut dev = MemoryBackend::new(4096, 8192);
+        let extents: Vec<_> = (0..600u64)
+            .map(|index| Extent {
+                logical_start: index * 2,
+                physical_start: 2000 + index,
+                block_count: 1,
+                flags: 0,
+            })
+            .collect();
+        let count = bulk_node_count(4096, extents.len()).unwrap();
+        assert!(count > 1);
+        let lbas: Vec<_> = (100..100 + count as u64).collect();
+        let built = bulk_build(23, 4096, &extents, &lbas).unwrap();
+        for (lba, node) in built.nodes {
+            dev.write_block(lba, &node.encode(4096, 2).unwrap())
+                .unwrap();
+        }
+        let loaded = load_all(&mut dev, &geo, built.root_lba, 23, 2).unwrap();
+        assert_eq!(loaded.extents, extents);
+        assert_eq!(loaded.summary.nodes as usize, count);
     }
 }

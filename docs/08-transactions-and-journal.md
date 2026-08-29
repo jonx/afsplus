@@ -97,6 +97,17 @@ The first writable prototype must measure at least:
 
 Until this experiment is complete, any API promising an old content generation must qualify that the requested data generation must still be retained and physically stable.
 
+### Current prototype experiment
+
+Core Scale-1 currently implements Candidate B for range writes and partial-tail
+truncate: touched committed data blocks are never overwritten. Fresh data is
+flushed before COW extent metadata, then the alternate checkpoint publishes
+the result. The exhaustive sparse-write power-cut matrix accepts only the
+complete pre-write or post-write byte sequence. This is executable evidence
+for full data COW, but does not yet freeze the epoch-1 policy; write
+amplification, fragmentation, database/VM workloads, and the explicit hybrid
+alternative still require measurement.
+
 ## 5. Recovery
 
 Mount examines checkpoint candidates and chooses the newest valid generation.

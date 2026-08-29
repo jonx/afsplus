@@ -20,6 +20,19 @@ Larger or fragmented files spill into an extent B+ tree.
 
 This keeps the common case cheap without imposing a fixed maximum extent count.
 
+### Executable Core Scale-1 representation
+
+The current prototype deliberately starts with the smallest useful inline
+case: one contiguous direct extent in the object record. A file sets the
+experimental `OBJECT_FLAG_EXTENT_TREE` bit when `data_root` instead references
+an `AFST` extent-map root. This is a prototype encoding, not an epoch-1 freeze.
+
+Extent-tree leaves use the logical start block as an eight-byte big-endian
+search key. The typed value contains a little-endian physical start block,
+64-bit block count, 32-bit flags, and zeroed reserved field. Trees can be
+bulk-built across multiple nodes on their first publication; later mutations
+use the shared COW split/merge engine.
+
 ## 3. Sparse files
 
 A missing logical range represents a hole.
@@ -28,11 +41,24 @@ Reads from holes return zero.
 
 Writing into a hole allocates storage transactionally.
 
+`Volume::write_file_at` implements this rule with full data COW: every touched
+logical block is reconstructed in fresh storage, user data is made durable
+before the new extent root, and the old mapping is quarantined. A write beyond
+EOF therefore creates a real missing logical range rather than materializing
+zero-filled blocks.
+
 ## 4. Preallocation
 
 The API may request space reservation without immediately increasing visible logical file size.
 
 This is useful for databases, large downloads, and reducing fragmentation.
+
+The prototype marks reserved mappings `EXTENT_UNWRITTEN`. Such mappings count
+as allocated storage but read as zeros and do not change logical size. A later
+write replaces only the touched unwritten blocks with ordinary written COW
+extents. Because preallocation does not change visible bytes, it advances the
+metadata-change timestamp but preserves modification time and content
+generation; content scanners therefore do not rescan an unchanged file.
 
 ## 5. Truncation
 
@@ -42,6 +68,12 @@ Shrinking a file must:
 2. retire/release fully unused extents according to checkpoint/reference rules
 3. zero or define the newly exposed tail behavior when the file is re-extended
 4. send discard only after blocks are no longer reachable by any state that may legally reference them
+
+The prototype's `Volume::truncate_file` supports sparse growth and shrinking.
+A partial written tail block is copied and zeroed past the new EOF before the
+new size is published, preventing stale tail bytes from reappearing after a
+later extension. Removed tree/data blocks enter the same checkpoint quarantine
+as unlink; physical discard is still deferred.
 
 ## 6. Shared extents/reflinks
 

@@ -187,8 +187,21 @@ self/descendants. Its dedicated every-write/every-flush power-cut matrix
 accepts only the complete pre- or post-rename namespace. File link counts are
 updated transactionally; the first unlink preserves shared data and the final
 unlink retires it. Atomic replacement, symlinks, open-unlinked orphans,
-bounded iteration, and 100,000-entry qualification remain. Extent migration
-is next.
+bounded iteration, and 100,000-entry qualification remain.
+
+The next continuation introduced the authoritative typed extent-map adapter.
+Small contiguous files retain the zero-extra-tree direct representation;
+fragmented, sparse, or preallocated files set an experimental object flag and
+use an owner-bound `AFST` tree keyed by logical block. Initial maps can be
+bulk-built beyond one leaf. Bounded lookup finds the containing predecessor;
+the checker exhaustively validates non-overlap, allocation ownership, exact
+allocated-block totals, and tree nodes. `write_file_at` uses full data COW and
+supports writes beyond EOF, `truncate_file` preserves zero-tail semantics, and
+`preallocate_file` creates zero-reading unwritten mappings without changing
+logical size. Final unlink retires both extent-tree and mapped data blocks. A
+dedicated every-write/every-flush matrix proves sparse range writes recover to
+exactly the pre- or post-transaction content. Workload measurement and the
+tiny-cache mutation overlay remain the next Core Scale-1 gates.
 
 The current multi-upsert overlay keeps every dirty tree node in RAM. It proves
 COW mutation correctness but does not yet satisfy the 2/4/8-page cache gate.
