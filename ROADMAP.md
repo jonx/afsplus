@@ -33,6 +33,7 @@ Status: initial review complete, continue subsystem-by-subsystem during implemen
 - tiny-cache test matrix
 - fuzzing and property tests
 - benchmark harness with CPU/RAM/I/O/write-amplification accounting
+- implement workload-description format shared by host and AROS benchmark runners
 
 Observability, virtual block backends, deterministic replay, fault injection, and repeatable resource benchmarks are required before the writable format is considered stable enough to develop aggressively.
 
@@ -44,8 +45,11 @@ Observability, virtual block backends, deterministic replay, fault injection, an
 - object mutation
 - B+ tree directories
 - extent mapping
+- preallocation and best-effort contiguous placement API
+- advisory access-intent API
 - shared-extent/refcount prototype for reflinks
 - CloneFile and CloneRange semantics
+- prototype sealed-content semantics
 - canonical portable principal model
 - shared immutable security-descriptor prototype
 - ALLOW/DENY ACL evaluation and inheritance vectors
@@ -73,6 +77,8 @@ The epoch-1 security model must preserve rich ACL metadata on hosts that expose 
 - Filesystem API v2
 - modern 64-bit API
 - clone/reflink capability API
+- access-intent and preallocation mapping
+- mmap-friendly file backing and large-file path qualification
 - modern path semantics
 - notifications
 - health reporting
@@ -100,18 +106,23 @@ The epoch-1 security model must preserve rich ACL metadata on hosts that expose 
 - POSIX ACL/principal mapping adapter
 - Windows ACL/SID mapping adapter
 - cross-OS security round-trip and fidelity reporting
+- FUSE mmap and parallel page-fault qualification
 
 ## Stage E: modern accelerators
 
 - global catalog
 - persistent change stream
 - fast enumeration API
+- Git/FSMonitor-style adapter using persistent change sequence
+- bulk metadata APIs (`StatBatch`, `LookupBatch`, streamed tree enumeration)
+- directory namespace generations
 - production reflink/block cloning
 - benchmark tiny-file storage alternatives
 - evaluate rebuildable reverse map
 - evaluate recursive directory statistics
 - evaluate optional data checksums
 - evaluate CloneTree separately from file/range cloning
+- evaluate derived content fingerprints for sealed generations
 - prototype shared subtree security domains
 - benchmark security-domain policy updates against recursively materialized ACL changes
 - separate design review for optional encrypted security domains / key hierarchy
@@ -128,6 +139,11 @@ The epoch-1 security model must preserve rich ACL metadata on hosts that expose 
 - CPU-efficiency qualification
 - Rust-vs-C resource qualification
 - security access-check performance qualification
+- streaming/video/large-file qualification
+- Git 100k/1M/4M file qualification
+- LLM mmap/range-load/model-larger-than-cache qualification
+- checkpoint-publication workload qualification
+- page-cache pollution qualification
 - real SSD qualification
 - exhaustive crash-point qualification
 - independent format review
@@ -152,4 +168,8 @@ Do not freeze the format until:
 - unknown/unmapped principals survive round-trip without identity loss
 - a host unable to enforce active security semantics cannot silently mount read-write in strict mode
 - classic protection-bit edits do not accidentally erase richer security metadata
+- access-intent hints cannot change correctness/durability/security semantics
+- streaming a huge file does not catastrophically evict essential filesystem metadata
+- Git-scale change detection can avoid full-tree scans when the persistent change stream is available
+- large model files are qualified for mmap/range-read and parallel access paths
 - Cargo/Git/Zed-style/Ferail workloads are qualified
