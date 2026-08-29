@@ -849,6 +849,13 @@ L. measure the fsync checkpoint path before deciding whether an auxiliary
    durability/intent log is justified
 ```
 
+The multi-page prototype should not put one record per bitmap page directly
+in the checkpoint. The current design direction is a triple-buffered reserved
+region descriptor, itself selected by the checkpoint's one record per region,
+which binds the triple-buffered bitmap pages. See `docs/07-allocation.md`
+section 3.1. Its wire format remains deliberately uncommitted until the
+prototype is executable.
+
 ---
 
 ## 24. Short resume instruction

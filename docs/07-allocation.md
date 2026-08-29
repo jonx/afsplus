@@ -71,6 +71,55 @@ may layer a larger persistent bitmap cache over the same semantics. The
 checker deliberately retains the option to load all pages for an exhaustive
 whole-volume comparison.
 
+### 3.1 Next experiment: multi-page region binding
+
+The proposed 1 GiB region needs roughly eight 4 KiB bitmap pages. A naïve
+checkpoint record for every bitmap page would make the checkpoint grow with
+the number of pages and would quickly turn the checkpoint block itself into a
+volume-size limit.
+
+The next prototype should instead test one reserved, triple-buffered region
+descriptor plus triple-buffered bitmap pages:
+
+```text
+checkpoint region record
+        |
+        v
+region descriptor slot A/B/C
+        |
+        +-- bitmap page 0 slot A/B/C
+        +-- bitmap page 1 slot A/B/C
+        +-- ...
+```
+
+The region descriptor records, for each logical bitmap page, its selected
+physical slot, generation, free count, and any required integrity binding.
+The checkpoint keeps only one bounded record per region: descriptor slot,
+descriptor generation, and region free count.
+
+A transaction changing one allocation page would:
+
+1. write that page to a slot referenced by neither retained descriptor
+2. write a new region descriptor to its unused slot, reusing bindings for
+   unchanged pages
+3. include both writes in the pre-checkpoint metadata barrier
+4. publish the alternate checkpoint
+
+For a 1 GiB region with eight bitmap pages, three descriptor blocks plus
+three slots for each page reserve 27 blocks, or 108 KiB (about 0.0103% of the
+region). These blocks remain outside the allocator they describe, so the COW
+self-reference stays broken.
+
+This is an experiment, not an epoch-1 commitment. It must preserve page-level
+write amplification, on-demand loading, crash safety, and repairability. If
+the descriptor indirection performs poorly or becomes too complex, the
+delta-log/spacemap candidates remain open.
+
+The current single-block checkpoint also limits the number of region records.
+Larger-volume work must eventually replace that prototype limit with a
+bounded allocation-root structure rather than silently increasing mount I/O
+in proportion to the volume.
+
 ## 4. Allocation strategy
 
 Preferred policy, independent of exact free-space encoding:
