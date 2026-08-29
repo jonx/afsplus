@@ -165,6 +165,76 @@ fn every_crash_state_of_a_create_transaction_recovers_to_an_allowed_state() {
 }
 
 #[test]
+fn every_crash_state_of_cross_directory_rename_is_atomic() {
+    let mut initial = MemoryBackend::new(BS, 256);
+    mkfs(
+        &mut initial,
+        &MkfsParams {
+            uuid: [77u8; 16],
+            label: "RenameCrash".into(),
+            region_size: 256,
+            timestamp: ts(0),
+        },
+    )
+    .unwrap();
+    let mut vol = mount(initial).unwrap();
+    let left = vol.create_directory_in_root("left", ts(1)).unwrap();
+    let right = vol.create_directory_in_root("right", ts(2)).unwrap();
+    let file = vol
+        .create_file_in_directory(left, "before.txt", b"rename payload", ts(3))
+        .unwrap();
+    let base = vol.into_device();
+    let pre_generation = mount(base.clone()).unwrap().generation();
+    let forbidden = forbidden_targets(&base);
+
+    let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
+    vol.rename(left, "before.txt", right, "after.txt", ts(4))
+        .unwrap();
+    let (_, log) = vol.into_device().into_parts();
+    for operation in &log {
+        if let RecordedOp::Write { lba, .. } = operation {
+            assert!(
+                !forbidden.contains(lba),
+                "rename transaction wrote committed block {lba}"
+            );
+        }
+    }
+
+    let mut pre_outcomes = 0u64;
+    let mut post_outcomes = 0u64;
+    run_matrix(&base, &log, pre_generation, |context, mut vol| {
+        if vol.generation() == pre_generation {
+            pre_outcomes += 1;
+            assert_eq!(
+                vol.lookup_in_directory(left, "before.txt").unwrap(),
+                Some(file),
+                "{context}"
+            );
+            assert_eq!(
+                vol.lookup_in_directory(right, "after.txt").unwrap(),
+                None,
+                "{context}"
+            );
+        } else {
+            post_outcomes += 1;
+            assert_eq!(
+                vol.lookup_in_directory(left, "before.txt").unwrap(),
+                None,
+                "{context}"
+            );
+            assert_eq!(
+                vol.lookup_in_directory(right, "after.txt").unwrap(),
+                Some(file),
+                "{context}"
+            );
+        }
+        assert_eq!(vol.read_file(file).unwrap(), b"rename payload", "{context}");
+    });
+    assert!(pre_outcomes > 0, "matrix never produced a pre-rename state");
+    assert!(post_outcomes > 0, "matrix never produced a post-rename state");
+}
+
+#[test]
 fn misordered_commit_checkpoint_before_metadata_barrier_is_caught() {
     // Negative control for the whole harness: replay the recorded commit
     // with the checkpoint write moved BEFORE the metadata barrier. The

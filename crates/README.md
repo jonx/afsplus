@@ -85,8 +85,16 @@ end-to-end 300-entry namespace test also exceeds the old directory limit,
 checks the image, remounts it, and verifies enumeration/lookup. Existing
 power-cut, fault, and reuse matrices cover the ordinary publication path.
 
-Next: extent trees beyond one direct extent, namespace operations beyond
-root create/delete, allocation-root on-demand/dirty-path optimization, and the delta-log/spacemap
+The namespace API now addresses arbitrary directories by stable object ID and
+implements create, mkdir, unlink, empty-directory removal, file hard links,
+and same/cross-directory rename. Rename updates all affected COW roots in one
+checkpoint transaction, preserves the moved object ID, rejects moves into a
+descendant, and passes an every-write/every-flush power-cut matrix. Hard-link
+counts are checked against the complete namespace; storage survives the first
+unlink and is retired only after the final link disappears.
+
+Next: extent trees beyond one direct extent, atomic replacement and orphan
+handling, allocation-root on-demand/dirty-path optimization, and the delta-log/spacemap
 allocation alternatives — to be built only if this design fails on
 correctness, write amplification, or scalability (the measurements test is
 the baseline to beat).

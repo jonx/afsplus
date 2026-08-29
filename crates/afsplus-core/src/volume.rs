@@ -15,6 +15,8 @@
 //! ([`CommitStats`]) — metadata bytes, bitmap pages, region descriptors,
 //! flushes, retired and promoted blocks, reclaim latency, allocator RAM.
 
+use std::collections::BTreeSet;
+
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::dir::{comparison_key, DirEntry};
@@ -112,12 +114,28 @@ impl<D: BlockDevice> Volume<D> {
 
     /// Looks a name up in the root directory.
     pub fn lookup_root(&mut self, name: &str) -> Result<Option<u64>, CoreError> {
+        self.lookup_in_directory(OBJECT_ROOT, name)
+    }
+
+    /// Looks a name up in a directory identified by its stable object ID.
+    pub fn lookup_in_directory(
+        &mut self,
+        directory_id: u64,
+        name: &str,
+    ) -> Result<Option<u64>, CoreError> {
+        validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+        let directory_record = self
+            .read_object(directory_id)?
+            .ok_or(CoreError::NotFound)?;
+        if directory_record.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
         let key = comparison_key(name.as_bytes());
         Ok(directory::lookup_entry(
             &mut self.dev,
             &self.ident.geometry(),
-            self.state.root_directory_root_lba,
-            OBJECT_ROOT,
+            directory_record.data_root,
+            directory_id,
             self.checkpoint.generation,
             &key,
         )?
@@ -126,11 +144,25 @@ impl<D: BlockDevice> Volume<D> {
 
     /// Lists the root directory as (original name, object ID) pairs.
     pub fn list_root(&mut self) -> Result<Vec<(String, u64)>, CoreError> {
+        self.list_directory(OBJECT_ROOT)
+    }
+
+    /// Lists a directory as `(original name, object ID)` pairs.
+    pub fn list_directory(
+        &mut self,
+        directory_id: u64,
+    ) -> Result<Vec<(String, u64)>, CoreError> {
+        let directory_record = self
+            .read_object(directory_id)?
+            .ok_or(CoreError::NotFound)?;
+        if directory_record.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
         Ok(directory::load_all(
             &mut self.dev,
             &self.ident.geometry(),
-            self.state.root_directory_root_lba,
-            OBJECT_ROOT,
+            directory_record.data_root,
+            directory_id,
             self.checkpoint.generation,
         )?
             .entries
@@ -187,9 +219,27 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        self.create_file_in_directory(OBJECT_ROOT, name, content, now)
+    }
+
+    /// Creates a file in an arbitrary directory identified by object ID.
+    pub fn create_file_in_directory(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        content: &[u8],
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+        let parent = self.read_object(parent_id)?.ok_or(CoreError::NotFound)?;
+        if parent.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        let parent_record_lba = self
+            .object_record_lba(parent_id)?
+            .ok_or_else(|| CoreError::Corrupt(format!("directory {parent_id} missing from object map")))?;
         let key = comparison_key(name.as_bytes());
-        if self.lookup_root(name)?.is_some() {
+        if self.lookup_in_directory(parent_id, name)?.is_some() {
             return Err(CoreError::AlreadyExists);
         }
 
@@ -228,11 +278,12 @@ impl<D: BlockDevice> Volume<D> {
 
         // Fresh blocks for every COW'd structure.
         let file_record_lba = tx.allocate(&mut self.dev)?;
-        let root_record_lba = tx.allocate(&mut self.dev)?;
+        let parent_record_new_lba = tx.allocate(&mut self.dev)?;
         let retired_list_lba = tx.allocate(&mut self.dev)?;
 
         // Everything the new state no longer reaches goes into quarantine.
-        self.retire_cow_originals(&mut tx)?;
+        tx.retire(&mut self.dev, parent_record_lba)?;
+        self.retire_previous_list(&mut tx)?;
 
         let file_record = ObjectRecord {
             object_id,
@@ -261,8 +312,8 @@ impl<D: BlockDevice> Volume<D> {
             &mut self.dev,
             &self.ident.geometry(),
             &mut tx,
-            self.state.root_directory_root_lba,
-            directory::spec(OBJECT_ROOT, self.checkpoint.generation),
+            parent.data_root,
+            directory::spec(parent_id, self.checkpoint.generation),
             generation,
             &[TreeOperation::Upsert {
                 key: &directory_key,
@@ -270,23 +321,22 @@ impl<D: BlockDevice> Volume<D> {
             }],
         )?;
 
-        let old_root = self.state.root_object;
-        let new_root = ObjectRecord {
+        let new_parent = ObjectRecord {
             modified: now,
             changed: now,
             content_generation: generation,
             data_root: directory_mutation.root_lba,
-            ..old_root
+            ..parent
         };
 
-        let root_key = object_map::key(OBJECT_ROOT);
-        let root_value = object_map::value(root_record_lba)?;
+        let parent_key = object_map::key(parent_id);
+        let parent_value = object_map::value(parent_record_new_lba)?;
         let file_key = object_map::key(object_id);
         let file_value = object_map::value(file_record_lba)?;
         let operations = [
             TreeOperation::Upsert {
-                key: &root_key,
-                value: &root_value,
+                key: &parent_key,
+                value: &parent_value,
             },
             TreeOperation::Upsert {
                 key: &file_key,
@@ -306,7 +356,10 @@ impl<D: BlockDevice> Volume<D> {
 
         let mut meta_writes = vec![
             (file_record_lba, file_record.encode(block_size, generation)?),
-            (root_record_lba, new_root.encode(block_size, generation)?),
+            (
+                parent_record_new_lba,
+                new_parent.encode(block_size, generation)?,
+            ),
         ];
         meta_writes.extend(directory_mutation.writes);
         meta_writes.extend(omap_mutation.writes);
@@ -323,16 +376,201 @@ impl<D: BlockDevice> Volume<D> {
         Ok(object_id)
     }
 
+    /// Creates a directory in the root directory.
+    pub fn create_directory_in_root(
+        &mut self,
+        name: &str,
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
+        self.create_directory(OBJECT_ROOT, name, now)
+    }
+
+    /// Creates an empty directory in an arbitrary parent directory.
+    pub fn create_directory(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
+        validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+        let parent = self.read_object(parent_id)?.ok_or(CoreError::NotFound)?;
+        if parent.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        let parent_record_lba = self
+            .object_record_lba(parent_id)?
+            .ok_or_else(|| CoreError::Corrupt(format!("directory {parent_id} missing from object map")))?;
+        if self.lookup_in_directory(parent_id, name)?.is_some() {
+            return Err(CoreError::AlreadyExists);
+        }
+
+        let block_size = self.dev.block_size();
+        let generation = self.next_generation()?;
+        let object_id = self.checkpoint.next_object_id;
+        let next_object_id = object_id
+            .checked_add(1)
+            .ok_or(CoreError::PrototypeLimit("object ID space exhausted"))?;
+
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            &self.state.retired,
+            generation,
+        )?;
+        let directory_root_lba = tx.allocate(&mut self.dev)?;
+        let directory_record_lba = tx.allocate(&mut self.dev)?;
+        let parent_record_new_lba = tx.allocate(&mut self.dev)?;
+        let retired_list_lba = tx.allocate(&mut self.dev)?;
+
+        tx.retire(&mut self.dev, parent_record_lba)?;
+        self.retire_previous_list(&mut tx)?;
+
+        let new_directory = ObjectRecord {
+            object_id,
+            object_type: ObjectType::Directory,
+            flags: 0,
+            link_count: 1,
+            size_bytes: 0,
+            allocated_bytes: 0,
+            created: now,
+            modified: now,
+            changed: now,
+            protection: 0,
+            content_generation: generation,
+            data_root: directory_root_lba,
+            data_blocks: 0,
+        };
+
+        let entry = DirEntry {
+            key: comparison_key(name.as_bytes()),
+            name: name.as_bytes().to_vec(),
+            child_type_hint: 2,
+            child_id: object_id,
+        };
+        let (directory_key, directory_value) = directory::encode_entry(&entry)?;
+        let parent_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            parent.data_root,
+            directory::spec(parent_id, self.checkpoint.generation),
+            generation,
+            &[TreeOperation::Upsert {
+                key: &directory_key,
+                value: &directory_value,
+            }],
+        )?;
+        let new_parent = ObjectRecord {
+            modified: now,
+            changed: now,
+            content_generation: generation,
+            data_root: parent_mutation.root_lba,
+            ..parent
+        };
+
+        let parent_key = object_map::key(parent_id);
+        let parent_value = object_map::value(parent_record_new_lba)?;
+        let directory_object_key = object_map::key(object_id);
+        let directory_object_value = object_map::value(directory_record_lba)?;
+        let operations = [
+            TreeOperation::Upsert {
+                key: &parent_key,
+                value: &parent_value,
+            },
+            TreeOperation::Upsert {
+                key: &directory_object_key,
+                value: &directory_object_value,
+            },
+        ];
+        let object_map_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &operations,
+        )?;
+
+        let mut metadata_writes = vec![
+            (
+                directory_root_lba,
+                directory::empty_leaf(object_id).encode(block_size, generation)?,
+            ),
+            (
+                directory_record_lba,
+                new_directory.encode(block_size, generation)?,
+            ),
+            (
+                parent_record_new_lba,
+                new_parent.encode(block_size, generation)?,
+            ),
+        ];
+        metadata_writes.extend(parent_mutation.writes);
+        metadata_writes.extend(object_map_mutation.writes);
+
+        self.commit_transaction(
+            generation,
+            next_object_id,
+            tx,
+            Vec::new(),
+            metadata_writes,
+            retired_list_lba,
+            object_map_mutation.root_lba,
+        )?;
+        Ok(object_id)
+    }
+
     /// Deletes a file from the root directory. Its record and data blocks are
     /// retired, not freed: they stay quarantined until no still-selectable
     /// checkpoint can reference them.
     pub fn delete_file_in_root(&mut self, name: &str, now: Timespec) -> Result<(), CoreError> {
+        self.delete_file(OBJECT_ROOT, name, now)
+    }
+
+    /// Deletes a file link from an arbitrary directory.
+    pub fn delete_file(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.remove_entry(parent_id, name, now, ObjectType::File)
+    }
+
+    /// Removes an empty child directory from an arbitrary parent.
+    pub fn remove_directory(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.remove_entry(parent_id, name, now, ObjectType::Directory)
+    }
+
+    fn remove_entry(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+        expected_type: ObjectType,
+    ) -> Result<(), CoreError> {
+        validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+        let parent = self.read_object(parent_id)?.ok_or(CoreError::NotFound)?;
+        if parent.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        let parent_record_lba = self
+            .object_record_lba(parent_id)?
+            .ok_or_else(|| CoreError::Corrupt(format!("directory {parent_id} missing from object map")))?;
         let key = comparison_key(name.as_bytes());
         let entry = directory::lookup_entry(
             &mut self.dev,
             &self.ident.geometry(),
-            self.state.root_directory_root_lba,
-            OBJECT_ROOT,
+            parent.data_root,
+            parent_id,
             self.checkpoint.generation,
             &key,
         )?
@@ -340,11 +578,42 @@ impl<D: BlockDevice> Volume<D> {
         let victim = self
             .read_object(entry.child_id)?
             .ok_or_else(|| CoreError::Corrupt("victim missing from object map".into()))?;
-        if victim.object_type != ObjectType::File {
-            return Err(CoreError::PrototypeLimit(
-                "only file deletion is implemented",
+        if !matches!(
+            (entry.child_type_hint, victim.object_type),
+            (1, ObjectType::File) | (2, ObjectType::Directory)
+        ) {
+            return Err(CoreError::Corrupt(
+                "directory entry type hint does not match victim object".into(),
             ));
         }
+        if victim.object_type != expected_type {
+            return Err(if victim.object_type == ObjectType::Directory {
+                CoreError::IsDirectory
+            } else {
+                CoreError::NotDirectory
+            });
+        }
+        let victim_directory_blocks = if victim.object_type == ObjectType::Directory {
+            if victim.link_count != 1 {
+                return Err(CoreError::Corrupt(
+                    "directory hard links are not supported".into(),
+                ));
+            }
+            let loaded = directory::load_all(
+                &mut self.dev,
+                &self.ident.geometry(),
+                victim.data_root,
+                victim.object_id,
+                self.checkpoint.generation,
+            )?;
+            if !loaded.entries.is_empty() {
+                return Err(CoreError::DirectoryNotEmpty);
+            }
+            loaded.tree_blocks
+        } else {
+            Vec::new()
+        };
+        let keep_file_object = victim.object_type == ObjectType::File && victim.link_count > 1;
 
         let block_size = self.dev.block_size();
         let generation = self.next_generation()?;
@@ -358,48 +627,66 @@ impl<D: BlockDevice> Volume<D> {
             generation,
         )?;
 
-        let root_record_lba = tx.allocate(&mut self.dev)?;
+        let parent_record_new_lba = tx.allocate(&mut self.dev)?;
+        let victim_record_new_lba = if keep_file_object {
+            Some(tx.allocate(&mut self.dev)?)
+        } else {
+            None
+        };
         let retired_list_lba = tx.allocate(&mut self.dev)?;
 
         // Quarantine the object's storage and the COW'd originals.
         let victim_record_lba = self
-            .lookup_object_lba(entry.child_id)?
+            .object_record_lba(entry.child_id)?
             .ok_or_else(|| CoreError::Corrupt("victim missing from object map".into()))?;
         tx.retire(&mut self.dev, victim_record_lba)?;
-        for i in 0..victim.data_blocks {
-            tx.retire(&mut self.dev, victim.data_root + i)?;
+        if !keep_file_object {
+            for i in 0..victim.data_blocks {
+                tx.retire(&mut self.dev, victim.data_root + i)?;
+            }
+            for lba in victim_directory_blocks {
+                tx.retire(&mut self.dev, lba)?;
+            }
         }
-        self.retire_cow_originals(&mut tx)?;
+        tx.retire(&mut self.dev, parent_record_lba)?;
+        self.retire_previous_list(&mut tx)?;
 
         let directory_mutation = mutate_many(
             &mut self.dev,
             &self.ident.geometry(),
             &mut tx,
-            self.state.root_directory_root_lba,
-            directory::spec(OBJECT_ROOT, self.checkpoint.generation),
+            parent.data_root,
+            directory::spec(parent_id, self.checkpoint.generation),
             generation,
             &[TreeOperation::Delete { key: &key }],
         )?;
 
-        let old_root = self.state.root_object;
-        let new_root = ObjectRecord {
+        let new_parent = ObjectRecord {
             modified: now,
             changed: now,
             content_generation: generation,
             data_root: directory_mutation.root_lba,
-            ..old_root
+            ..parent
         };
 
-        let root_key = object_map::key(OBJECT_ROOT);
-        let root_value = object_map::value(root_record_lba)?;
+        let parent_key = object_map::key(parent_id);
+        let parent_value = object_map::value(parent_record_new_lba)?;
         let victim_key = object_map::key(entry.child_id);
-        let operations = [
-            TreeOperation::Upsert {
-                key: &root_key,
-                value: &root_value,
-            },
-            TreeOperation::Delete { key: &victim_key },
-        ];
+        let victim_value = victim_record_new_lba
+            .map(object_map::value)
+            .transpose()?;
+        let mut operations = vec![TreeOperation::Upsert {
+            key: &parent_key,
+            value: &parent_value,
+        }];
+        if let Some(value) = &victim_value {
+            operations.push(TreeOperation::Upsert {
+                key: &victim_key,
+                value,
+            });
+        } else {
+            operations.push(TreeOperation::Delete { key: &victim_key });
+        }
         let omap_mutation = mutate_many(
             &mut self.dev,
             &self.ident.geometry(),
@@ -411,7 +698,18 @@ impl<D: BlockDevice> Volume<D> {
         )?;
         let omap_lba = omap_mutation.root_lba;
 
-        let mut meta_writes = vec![(root_record_lba, new_root.encode(block_size, generation)?)];
+        let mut meta_writes = vec![(
+            parent_record_new_lba,
+            new_parent.encode(block_size, generation)?,
+        )];
+        if let Some(lba) = victim_record_new_lba {
+            let new_victim = ObjectRecord {
+                link_count: victim.link_count - 1,
+                changed: now,
+                ..victim
+            };
+            meta_writes.push((lba, new_victim.encode(block_size, generation)?));
+        }
         meta_writes.extend(directory_mutation.writes);
         meta_writes.extend(omap_mutation.writes);
 
@@ -424,6 +722,426 @@ impl<D: BlockDevice> Volume<D> {
             retired_list_lba,
             omap_lba,
         )
+    }
+
+    /// Adds another directory link to an existing regular file and updates
+    /// its authoritative link count in the same checkpoint transaction.
+    pub fn link_file(
+        &mut self,
+        object_id: u64,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+        let file = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        if file.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        let new_link_count = file
+            .link_count
+            .checked_add(1)
+            .ok_or(CoreError::PrototypeLimit("link count exhausted"))?;
+        let parent = self.read_object(parent_id)?.ok_or(CoreError::NotFound)?;
+        if parent.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        if self.lookup_in_directory(parent_id, name)?.is_some() {
+            return Err(CoreError::AlreadyExists);
+        }
+        let file_lba = self
+            .object_record_lba(object_id)?
+            .ok_or_else(|| CoreError::Corrupt("linked file missing from object map".into()))?;
+        let parent_lba = self
+            .object_record_lba(parent_id)?
+            .ok_or_else(|| CoreError::Corrupt("link parent missing from object map".into()))?;
+
+        let block_size = self.dev.block_size();
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            &self.state.retired,
+            generation,
+        )?;
+        let file_new_lba = tx.allocate(&mut self.dev)?;
+        let parent_new_lba = tx.allocate(&mut self.dev)?;
+        let retired_list_lba = tx.allocate(&mut self.dev)?;
+        tx.retire(&mut self.dev, file_lba)?;
+        tx.retire(&mut self.dev, parent_lba)?;
+        self.retire_previous_list(&mut tx)?;
+
+        let entry = DirEntry {
+            key: comparison_key(name.as_bytes()),
+            name: name.as_bytes().to_vec(),
+            child_type_hint: 1,
+            child_id: object_id,
+        };
+        let (entry_key, entry_value) = directory::encode_entry(&entry)?;
+        let directory_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            parent.data_root,
+            directory::spec(parent_id, self.checkpoint.generation),
+            generation,
+            &[TreeOperation::Upsert {
+                key: &entry_key,
+                value: &entry_value,
+            }],
+        )?;
+        let new_parent = ObjectRecord {
+            modified: now,
+            changed: now,
+            content_generation: generation,
+            data_root: directory_mutation.root_lba,
+            ..parent
+        };
+        let new_file = ObjectRecord {
+            link_count: new_link_count,
+            changed: now,
+            ..file
+        };
+
+        let parent_key = object_map::key(parent_id);
+        let parent_value = object_map::value(parent_new_lba)?;
+        let file_key = object_map::key(object_id);
+        let file_value = object_map::value(file_new_lba)?;
+        let object_map_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &[
+                TreeOperation::Upsert {
+                    key: &parent_key,
+                    value: &parent_value,
+                },
+                TreeOperation::Upsert {
+                    key: &file_key,
+                    value: &file_value,
+                },
+            ],
+        )?;
+
+        let mut metadata_writes = vec![
+            (file_new_lba, new_file.encode(block_size, generation)?),
+            (
+                parent_new_lba,
+                new_parent.encode(block_size, generation)?,
+            ),
+        ];
+        metadata_writes.extend(directory_mutation.writes);
+        metadata_writes.extend(object_map_mutation.writes);
+        self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            Vec::new(),
+            metadata_writes,
+            retired_list_lba,
+            object_map_mutation.root_lba,
+        )
+    }
+
+    /// Atomically renames or moves one namespace entry without changing its
+    /// stable object ID. Replacement of an existing destination is a separate
+    /// future operation with an explicit contract.
+    pub fn rename(
+        &mut self,
+        source_parent_id: u64,
+        source_name: &str,
+        target_parent_id: u64,
+        target_name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        validate_name(source_name.as_bytes()).map_err(CoreError::InvalidName)?;
+        validate_name(target_name.as_bytes()).map_err(CoreError::InvalidName)?;
+        let source_key = comparison_key(source_name.as_bytes());
+        let target_key = comparison_key(target_name.as_bytes());
+
+        let source_parent = self
+            .read_object(source_parent_id)?
+            .ok_or(CoreError::NotFound)?;
+        if source_parent.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        let target_parent = if target_parent_id == source_parent_id {
+            source_parent
+        } else {
+            self.read_object(target_parent_id)?
+                .ok_or(CoreError::NotFound)?
+        };
+        if target_parent.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+
+        let source_entry = directory::lookup_entry(
+            &mut self.dev,
+            &self.ident.geometry(),
+            source_parent.data_root,
+            source_parent_id,
+            self.checkpoint.generation,
+            &source_key,
+        )?
+        .ok_or(CoreError::NotFound)?;
+        if source_parent_id == target_parent_id && source_key == target_key {
+            return Ok(());
+        }
+        if directory::lookup_entry(
+            &mut self.dev,
+            &self.ident.geometry(),
+            target_parent.data_root,
+            target_parent_id,
+            self.checkpoint.generation,
+            &target_key,
+        )?
+        .is_some()
+        {
+            return Err(CoreError::AlreadyExists);
+        }
+        let moved = self
+            .read_object(source_entry.child_id)?
+            .ok_or_else(|| CoreError::Corrupt("moved object missing from object map".into()))?;
+        if !matches!(
+            (source_entry.child_type_hint, moved.object_type),
+            (1, ObjectType::File) | (2, ObjectType::Directory)
+        ) {
+            return Err(CoreError::Corrupt(
+                "source entry type hint does not match moved object".into(),
+            ));
+        }
+        if moved.object_type == ObjectType::Directory
+            && self.directory_reaches(moved.object_id, target_parent_id)?
+        {
+            return Err(CoreError::InvalidMove(
+                "a directory cannot be moved into itself or a descendant",
+            ));
+        }
+
+        let source_parent_lba = self
+            .object_record_lba(source_parent_id)?
+            .ok_or_else(|| CoreError::Corrupt("source parent missing from object map".into()))?;
+        let target_parent_lba = if target_parent_id == source_parent_id {
+            source_parent_lba
+        } else {
+            self.object_record_lba(target_parent_id)?
+                .ok_or_else(|| CoreError::Corrupt("target parent missing from object map".into()))?
+        };
+        let moved_lba = self
+            .object_record_lba(moved.object_id)?
+            .ok_or_else(|| CoreError::Corrupt("moved object missing from object map".into()))?;
+
+        let block_size = self.dev.block_size();
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            &self.state.retired,
+            generation,
+        )?;
+        let source_parent_new_lba = tx.allocate(&mut self.dev)?;
+        let target_parent_new_lba = if target_parent_id == source_parent_id {
+            source_parent_new_lba
+        } else {
+            tx.allocate(&mut self.dev)?
+        };
+        let moved_new_lba = tx.allocate(&mut self.dev)?;
+        let retired_list_lba = tx.allocate(&mut self.dev)?;
+
+        tx.retire(&mut self.dev, source_parent_lba)?;
+        if target_parent_id != source_parent_id {
+            tx.retire(&mut self.dev, target_parent_lba)?;
+        }
+        tx.retire(&mut self.dev, moved_lba)?;
+        self.retire_previous_list(&mut tx)?;
+
+        let target_entry = DirEntry {
+            key: target_key,
+            name: target_name.as_bytes().to_vec(),
+            child_type_hint: source_entry.child_type_hint,
+            child_id: source_entry.child_id,
+        };
+        let (target_entry_key, target_entry_value) = directory::encode_entry(&target_entry)?;
+
+        let (source_mutation, target_mutation) = if source_parent_id == target_parent_id {
+            let mutation = mutate_many(
+                &mut self.dev,
+                &self.ident.geometry(),
+                &mut tx,
+                source_parent.data_root,
+                directory::spec(source_parent_id, self.checkpoint.generation),
+                generation,
+                &[
+                    TreeOperation::Delete { key: &source_key },
+                    TreeOperation::Upsert {
+                        key: &target_entry_key,
+                        value: &target_entry_value,
+                    },
+                ],
+            )?;
+            (mutation, None)
+        } else {
+            let source_mutation = mutate_many(
+                &mut self.dev,
+                &self.ident.geometry(),
+                &mut tx,
+                source_parent.data_root,
+                directory::spec(source_parent_id, self.checkpoint.generation),
+                generation,
+                &[TreeOperation::Delete { key: &source_key }],
+            )?;
+            let target_mutation = mutate_many(
+                &mut self.dev,
+                &self.ident.geometry(),
+                &mut tx,
+                target_parent.data_root,
+                directory::spec(target_parent_id, self.checkpoint.generation),
+                generation,
+                &[TreeOperation::Upsert {
+                    key: &target_entry_key,
+                    value: &target_entry_value,
+                }],
+            )?;
+            (source_mutation, Some(target_mutation))
+        };
+
+        let new_source_parent = ObjectRecord {
+            modified: now,
+            changed: now,
+            content_generation: generation,
+            data_root: source_mutation.root_lba,
+            ..source_parent
+        };
+        let new_target_parent = target_mutation.as_ref().map(|mutation| ObjectRecord {
+            modified: now,
+            changed: now,
+            content_generation: generation,
+            data_root: mutation.root_lba,
+            ..target_parent
+        });
+        let new_moved = ObjectRecord {
+            changed: now,
+            ..moved
+        };
+
+        let source_parent_map_key = object_map::key(source_parent_id);
+        let source_parent_map_value = object_map::value(source_parent_new_lba)?;
+        let target_parent_map_key = object_map::key(target_parent_id);
+        let target_parent_map_value = object_map::value(target_parent_new_lba)?;
+        let moved_map_key = object_map::key(moved.object_id);
+        let moved_map_value = object_map::value(moved_new_lba)?;
+        let mut map_operations = vec![TreeOperation::Upsert {
+            key: &source_parent_map_key,
+            value: &source_parent_map_value,
+        }];
+        if target_parent_id != source_parent_id {
+            map_operations.push(TreeOperation::Upsert {
+                key: &target_parent_map_key,
+                value: &target_parent_map_value,
+            });
+        }
+        map_operations.push(TreeOperation::Upsert {
+            key: &moved_map_key,
+            value: &moved_map_value,
+        });
+        let object_map_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &map_operations,
+        )?;
+
+        let mut metadata_writes = vec![
+            (
+                source_parent_new_lba,
+                new_source_parent.encode(block_size, generation)?,
+            ),
+            (moved_new_lba, new_moved.encode(block_size, generation)?),
+        ];
+        metadata_writes.extend(source_mutation.writes);
+        if let (Some(record), Some(mutation)) = (new_target_parent, target_mutation) {
+            metadata_writes.push((
+                target_parent_new_lba,
+                record.encode(block_size, generation)?,
+            ));
+            metadata_writes.extend(mutation.writes);
+        }
+        metadata_writes.extend(object_map_mutation.writes);
+
+        self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            Vec::new(),
+            metadata_writes,
+            retired_list_lba,
+            object_map_mutation.root_lba,
+        )
+    }
+
+    /// Returns whether `target_id` is `ancestor_id` or is reachable below it.
+    /// This exhaustive guard is used only for directory moves; a future
+    /// parent/reverse index may accelerate it without changing semantics.
+    fn directory_reaches(
+        &mut self,
+        ancestor_id: u64,
+        target_id: u64,
+    ) -> Result<bool, CoreError> {
+        let mut pending = vec![ancestor_id];
+        let mut visited = BTreeSet::new();
+        while let Some(directory_id) = pending.pop() {
+            if directory_id == target_id {
+                return Ok(true);
+            }
+            if !visited.insert(directory_id) {
+                return Err(CoreError::Corrupt(
+                    "directory graph contains a cycle or duplicate parent".into(),
+                ));
+            }
+            let record = self
+                .read_object(directory_id)?
+                .ok_or_else(|| CoreError::Corrupt(format!("directory {directory_id} is missing")))?;
+            if record.object_type != ObjectType::Directory {
+                return Err(CoreError::Corrupt(format!(
+                    "directory graph references non-directory object {directory_id}"
+                )));
+            }
+            let loaded = directory::load_all(
+                &mut self.dev,
+                &self.ident.geometry(),
+                record.data_root,
+                directory_id,
+                self.checkpoint.generation,
+            )?;
+            for entry in loaded.entries {
+                if entry.child_type_hint == 2 {
+                    let child = self.read_object(entry.child_id)?.ok_or_else(|| {
+                        CoreError::Corrupt(format!(
+                            "directory {directory_id} references missing object {}",
+                            entry.child_id
+                        ))
+                    })?;
+                    if child.object_type != ObjectType::Directory {
+                        return Err(CoreError::Corrupt(format!(
+                            "directory {directory_id} has a bad type hint for object {}",
+                            entry.child_id
+                        )));
+                    }
+                    pending.push(entry.child_id);
+                }
+            }
+        }
+        Ok(false)
     }
 
     fn next_generation(&self) -> Result<u64, CoreError> {
@@ -479,6 +1197,14 @@ impl<D: BlockDevice> Volume<D> {
             self.checkpoint.generation,
             object_id,
         )
+    }
+
+    fn object_record_lba(&mut self, object_id: u64) -> Result<Option<u64>, CoreError> {
+        if object_id == OBJECT_ROOT {
+            Ok(Some(self.state.root_record_lba))
+        } else {
+            self.lookup_object_lba(object_id)
+        }
     }
 
     fn mutate_allocation_root(
@@ -544,11 +1270,10 @@ impl<D: BlockDevice> Volume<D> {
         )
     }
 
-    /// Retires the committed blocks every transaction replaces: the object
-    /// root object record and previous retired list. The object-map and
-    /// directory engines retire exactly the COW paths they replace.
-    fn retire_cow_originals(&mut self, tx: &mut TxAllocator) -> Result<(), CoreError> {
-        tx.retire(&mut self.dev, self.state.root_record_lba)?;
+    /// Retires the previous generation's bounded retired-list root. Callers
+    /// separately retire each object-record block they replace; tree engines
+    /// retire exactly the committed COW paths they replace.
+    fn retire_previous_list(&mut self, tx: &mut TxAllocator) -> Result<(), CoreError> {
         if self.checkpoint.retired_list_block != 0 {
             tx.retire(&mut self.dev, self.checkpoint.retired_list_block)?;
         }

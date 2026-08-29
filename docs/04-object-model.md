@@ -71,3 +71,14 @@ Object IDs should not be aggressively reused.
 A monotonically increasing allocator is preferred until wraparound is no longer a realistic concern.
 
 If reuse is ever implemented, generation information must prevent stale `(object ID)` references from being mistaken for a newly created object.
+
+## 7. Executable prototype status
+
+The current core creates files and directories under any directory object ID.
+Same-directory rename and cross-directory move preserve the child object ID;
+directory moves into self/descendants are rejected before a transaction
+starts. Regular-file hard links update the object record and destination tree
+atomically. Unlink decrements the authoritative count and retains content
+until the final link, when record and data blocks enter checkpoint quarantine.
+Directory hard links and open-but-unlinked orphans are intentionally not yet
+implemented.

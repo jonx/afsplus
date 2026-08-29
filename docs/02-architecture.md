@@ -108,10 +108,13 @@ mount looks up only the root object; the checker performs exhaustive traversal.
 Newly formatted directories use the same engine with comparison-key leaves
 whose typed values preserve the original UTF-8 name, child object ID, and type
 hint. Ordinary mount validates the directory root only, lookup descends one
-path, and enumeration/checking walks the tree. Root create/delete publishes
-the directory mutation atomically with the object-map mutation. An executable
-300-entry volume test crosses the removed legacy one-page limit, runs the
-checker, remounts, and verifies enumeration and lookup.
+path, and enumeration/checking walks the tree. Namespace operations address
+directories by stable object ID. Create, mkdir, unlink, rmdir, hard link, and
+same/cross-directory rename publish all affected directory trees and object
+records atomically with the object-map mutation. Rename preserves object ID,
+rejects directory cycles, and has an exhaustive power-cut matrix. An
+executable 300-entry volume test crosses the removed legacy one-page limit,
+runs the checker, remounts, and verifies enumeration and lookup.
 
 The authoritative allocation-region root is also AFST-backed, using a
 permanently allocated triple-version node pool to avoid allocator

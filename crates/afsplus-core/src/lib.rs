@@ -77,6 +77,14 @@ pub enum CoreError {
     AlreadyExists,
     /// Name not present in the directory.
     NotFound,
+    /// An operation expected a directory object.
+    NotDirectory,
+    /// An operation requiring a regular file was given a directory.
+    IsDirectory,
+    /// A directory can only be removed when it has no entries.
+    DirectoryNotEmpty,
+    /// A namespace move would create a cycle or otherwise violate topology.
+    InvalidMove(&'static str),
     /// Component name rejected by format rules.
     InvalidName(FormatError),
     /// The volume ran out of blocks (the bootstrap allocator never reuses).
@@ -101,6 +109,10 @@ impl fmt::Display for CoreError {
             CoreError::Corrupt(what) => write!(f, "corrupt volume: {what}"),
             CoreError::AlreadyExists => write!(f, "name already exists"),
             CoreError::NotFound => write!(f, "name not found"),
+            CoreError::NotDirectory => write!(f, "object is not a directory"),
+            CoreError::IsDirectory => write!(f, "object is a directory"),
+            CoreError::DirectoryNotEmpty => write!(f, "directory is not empty"),
+            CoreError::InvalidMove(what) => write!(f, "invalid namespace move: {what}"),
             CoreError::InvalidName(e) => write!(f, "invalid name: {e}"),
             CoreError::NoSpace => write!(f, "no space left on volume"),
             CoreError::PrototypeLimit(what) => write!(f, "prototype limit: {what}"),

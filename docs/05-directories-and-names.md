@@ -27,15 +27,19 @@ The tree must also support bounded-memory traversal. An implementation should ne
 Newly formatted prototype volumes store directories in the shared typed AFST
 COW tree. Leaves map the binary comparison key to the original name, child ID,
 and type hint. Mount validates only the root; lookup descends one path; the
-checker validates and claims the full tree. Create and delete publish the
-directory path together with the corresponding object-map change through the
-normal metadata barrier and alternate checkpoint.
+checker validates and claims the full tree. Create, mkdir, unlink, rmdir,
+rename/move, and file hard-link operations address parents by stable object ID
+and publish every affected directory path, object record, and object-map
+change through one metadata barrier and alternate checkpoint. Cross-directory
+rename preserves object identity, rejects topology cycles, and has an
+every-write/every-flush power-cut matrix accepting only the complete before or
+after namespace.
 
 The current tests bulk-build 1,000 typed entries across leaf/internal pages
 and exercise 300 root-namespace creates through real transactions, followed
 by exhaustive checking, remount, enumeration, and lookup. This removes the
 old one-block directory limit. The 100,000-entry scale gate, bounded iterator,
-non-root directory operations, rename/link, and the explicit 2/4/8-page
+atomic replacement, symlinks/orphan handling, and the explicit 2/4/8-page
 mutation-cache matrix remain Core Scale-1 work.
 
 ## 3. UTF-8

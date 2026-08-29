@@ -177,7 +177,18 @@ and exhaustive enumeration/checking use the tree, and create/delete publish
 its COW paths alongside the object map. A typed 1,000-entry test and an
 end-to-end 300-entry checked/remounted namespace test cross the old one-block
 limit. Legacy object-map and directory block codecs remain transitional tests.
-Extent migration is next.
+
+The namespace continuation removed the root-only API restriction. Directory
+lookup/enumeration, file creation/deletion, mkdir/rmdir, hard links, and
+same/cross-directory rename now address parents by stable object ID. Rename
+publishes both parent trees, parent records, the moved record, and object-map
+updates in one checkpoint, preserves object identity, and rejects moves into
+self/descendants. Its dedicated every-write/every-flush power-cut matrix
+accepts only the complete pre- or post-rename namespace. File link counts are
+updated transactionally; the first unlink preserves shared data and the final
+unlink retires it. Atomic replacement, symlinks, open-unlinked orphans,
+bounded iteration, and 100,000-entry qualification remain. Extent migration
+is next.
 
 The current multi-upsert overlay keeps every dirty tree node in RAM. It proves
 COW mutation correctness but does not yet satisfy the 2/4/8-page cache gate.

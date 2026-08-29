@@ -130,9 +130,11 @@ newly formatted volumes do not reference it.
 Directories are the second ordinary-allocator consumer. `mkfs` creates an
 empty typed AFST leaf; bounded mount validates only the directory root;
 lookup descends one path; enumeration and the checker traverse exhaustively.
-Root create/delete publish directory and object-map mutations in the same
-checkpoint transaction, and each engine retires only the committed COW paths
-it replaces. A typed 1,000-entry unit test crosses leaf/internal boundaries;
+Create/mkdir/unlink/rmdir/link and same/cross-directory rename publish every
+affected directory and object-map mutation in the same checkpoint transaction,
+and each engine retires only the committed COW paths it replaces. Rename keeps
+stable object identity, rejects directory cycles, and passes a dedicated
+power-cut matrix. A typed 1,000-entry unit test crosses leaf/internal boundaries;
 an end-to-end 300-entry volume test exceeds the legacy one-block capacity,
 then checks, remounts, enumerates, and looks up entries. Ordinary transaction,
 fault-injection, and power-cut matrices all exercise this authoritative path.

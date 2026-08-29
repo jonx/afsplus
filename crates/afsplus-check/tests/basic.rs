@@ -153,6 +153,174 @@ fn root_directory_grows_beyond_the_legacy_single_block_limit() {
 }
 
 #[test]
+fn nested_directories_are_addressed_by_stable_object_id() {
+    let mut dev = MemoryBackend::new(BS, 512);
+    mkfs(&mut dev, &params(512)).unwrap();
+    let mut vol = mount(dev).unwrap();
+
+    let projects = vol.create_directory_in_root("Projects", ts(1)).unwrap();
+    let afsplus = vol.create_directory(projects, "afsplus", ts(2)).unwrap();
+    let readme = vol
+        .create_file_in_directory(afsplus, "README.md", b"portable core\n", ts(3))
+        .unwrap();
+
+    assert_eq!(vol.lookup_root("Projects").unwrap(), Some(projects));
+    assert_eq!(
+        vol.lookup_in_directory(projects, "afsplus").unwrap(),
+        Some(afsplus)
+    );
+    assert_eq!(
+        vol.lookup_in_directory(afsplus, "README.md").unwrap(),
+        Some(readme)
+    );
+    assert_eq!(vol.read_file(readme).unwrap(), b"portable core\n");
+    assert!(matches!(
+        vol.lookup_in_directory(readme, "not-a-directory"),
+        Err(CoreError::NotDirectory)
+    ));
+    assert!(matches!(
+        vol.remove_directory(afsplus_format::OBJECT_ROOT, "Projects", ts(4)),
+        Err(CoreError::DirectoryNotEmpty)
+    ));
+    assert!(matches!(
+        vol.remove_directory(afsplus, "README.md", ts(4)),
+        Err(CoreError::NotDirectory)
+    ));
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+    let mut vol = mount(dev).unwrap();
+    assert_eq!(vol.list_directory(projects).unwrap().len(), 1);
+    assert_eq!(vol.list_directory(afsplus).unwrap().len(), 1);
+    assert_eq!(vol.read_file(readme).unwrap(), b"portable core\n");
+
+    vol.delete_file(afsplus, "README.md", ts(5)).unwrap();
+    vol.remove_directory(projects, "afsplus", ts(6)).unwrap();
+    vol.remove_directory(afsplus_format::OBJECT_ROOT, "Projects", ts(7))
+        .unwrap();
+    assert!(vol.list_root().unwrap().is_empty());
+    assert!(matches!(vol.list_directory(afsplus), Err(CoreError::NotFound)));
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+}
+
+#[test]
+fn rename_and_cross_directory_move_preserve_identity_and_reject_cycles() {
+    let mut dev = MemoryBackend::new(BS, 512);
+    mkfs(&mut dev, &params(512)).unwrap();
+    let mut vol = mount(dev).unwrap();
+
+    let left = vol.create_directory_in_root("left", ts(1)).unwrap();
+    let right = vol.create_directory_in_root("right", ts(2)).unwrap();
+    let nested = vol.create_directory(left, "nested", ts(3)).unwrap();
+    let file = vol
+        .create_file_in_directory(left, "note.txt", b"stable identity", ts(4))
+        .unwrap();
+
+    let generation = vol.generation();
+    assert!(matches!(
+        vol.rename(left, "missing", left, "missing", ts(5)),
+        Err(CoreError::NotFound)
+    ));
+    assert_eq!(vol.generation(), generation);
+
+    vol.rename(left, "note.txt", left, "renamed.txt", ts(5))
+        .unwrap();
+    assert_eq!(vol.lookup_in_directory(left, "note.txt").unwrap(), None);
+    assert_eq!(
+        vol.lookup_in_directory(left, "renamed.txt").unwrap(),
+        Some(file)
+    );
+
+    vol.rename(left, "renamed.txt", right, "moved.txt", ts(6))
+        .unwrap();
+    vol.rename(left, "nested", right, "nested", ts(7))
+        .unwrap();
+    assert_eq!(vol.lookup_in_directory(right, "moved.txt").unwrap(), Some(file));
+    assert_eq!(vol.lookup_in_directory(right, "nested").unwrap(), Some(nested));
+    assert_eq!(vol.read_file(file).unwrap(), b"stable identity");
+
+    let generation = vol.generation();
+    assert!(matches!(
+        vol.rename(
+            afsplus_format::OBJECT_ROOT,
+            "right",
+            nested,
+            "cycle",
+            ts(8)
+        ),
+        Err(CoreError::InvalidMove(_))
+    ));
+    assert_eq!(vol.generation(), generation);
+    assert!(matches!(
+        vol.rename(
+            afsplus_format::OBJECT_ROOT,
+            "left",
+            afsplus_format::OBJECT_ROOT,
+            "right",
+            ts(8)
+        ),
+        Err(CoreError::AlreadyExists)
+    ));
+    assert_eq!(vol.generation(), generation);
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+    let mut vol = mount(dev).unwrap();
+    assert_eq!(vol.lookup_root("right").unwrap(), Some(right));
+    assert_eq!(vol.lookup_in_directory(right, "moved.txt").unwrap(), Some(file));
+    assert_eq!(vol.lookup_in_directory(right, "nested").unwrap(), Some(nested));
+    assert_eq!(vol.read_file(file).unwrap(), b"stable identity");
+}
+
+#[test]
+fn hard_links_share_one_file_object_until_the_final_unlink() {
+    let mut dev = MemoryBackend::new(BS, 512);
+    mkfs(&mut dev, &params(512)).unwrap();
+    let mut vol = mount(dev).unwrap();
+
+    let first = vol.create_directory_in_root("first", ts(1)).unwrap();
+    let second = vol.create_directory_in_root("second", ts(2)).unwrap();
+    let file = vol
+        .create_file_in_directory(first, "original", b"one object", ts(3))
+        .unwrap();
+    vol.link_file(file, second, "alias", ts(4)).unwrap();
+
+    assert_eq!(vol.lookup_in_directory(first, "original").unwrap(), Some(file));
+    assert_eq!(vol.lookup_in_directory(second, "alias").unwrap(), Some(file));
+    assert_eq!(vol.stat(file).unwrap().unwrap().link_count, 2);
+    let generation = vol.generation();
+    assert!(matches!(
+        vol.link_file(first, second, "directory-link", ts(5)),
+        Err(CoreError::IsDirectory)
+    ));
+    assert_eq!(vol.generation(), generation);
+
+    vol.delete_file(first, "original", ts(5)).unwrap();
+    assert_eq!(vol.lookup_in_directory(first, "original").unwrap(), None);
+    assert_eq!(vol.lookup_in_directory(second, "alias").unwrap(), Some(file));
+    assert_eq!(vol.stat(file).unwrap().unwrap().link_count, 1);
+    assert_eq!(vol.read_file(file).unwrap(), b"one object");
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+    let mut vol = mount(dev).unwrap();
+    assert_eq!(vol.lookup_in_directory(second, "alias").unwrap(), Some(file));
+    assert_eq!(vol.read_file(file).unwrap(), b"one object");
+
+    vol.delete_file(second, "alias", ts(6)).unwrap();
+    assert!(vol.stat(file).unwrap().is_none());
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+}
+
+#[test]
 fn mount_reads_are_bounded_and_descendants_are_loaded_on_demand() {
     let mut dev = MemoryBackend::new(BS, 256);
     mkfs(&mut dev, &params(256)).unwrap();
