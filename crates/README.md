@@ -23,7 +23,8 @@ as such in the crate docs.
   experiment. Mount *selects* the newest structurally valid checkpoint
   without walking the filesystem, then reads only the object-map/root
   namespace and retired-list roots. Descendant objects are decoded on demand;
-  allocation bitmaps are loaded only for mutation. Corruption is reported
+  allocation bitmaps are loaded page-by-page only as a transaction touches
+  regions, while the exhaustive checker may load them all. Corruption is reported
   when the relevant root/descendant is read, never masked by falling back.
   The allocator keeps free-space state in per-region bitmap pages
   written to reserved generational slot blocks (3 per region), which breaks

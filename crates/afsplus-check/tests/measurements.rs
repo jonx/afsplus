@@ -80,8 +80,9 @@ fn per_transaction_resource_accounting() {
         // Reclaim latency: exactly one generation per promoted block.
         assert_eq!(s.alloc.reclaim_latency_generations, s.alloc.blocks_promoted, "{label}");
     }
-    // Allocator RAM: one 2-byte bitmap per 16-block region.
-    assert_eq!(vol.allocator_ram_bytes(), 4 * 2);
+    // Page-on-demand allocator: the last transaction touched at most two of
+    // four 2-byte region pages, rather than retaining the full 8-byte bitmap.
+    assert_eq!(vol.allocator_ram_bytes(), 2 * 2);
 
     let mut dev = vol.into_device();
     let report = check_device(&mut dev);

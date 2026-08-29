@@ -22,7 +22,7 @@ use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::retired::RetiredList;
 use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 
-use crate::alloc::{AllocStats, Bitmaps, TxAllocator};
+use crate::alloc::{AllocStats, TxAllocator};
 use crate::mount::Selection;
 use crate::verify::{load_mount_state, MountState};
 use crate::CoreError;
@@ -51,10 +51,6 @@ pub struct Volume<D: BlockDevice> {
     /// slots and quarantined blocks must stay untouched.
     other_checkpoint: Option<Checkpoint>,
     state: MountState,
-    /// Authoritative allocation pages are loaded only when a mutation needs
-    /// them. Modern ports may keep this cache hot; constrained readers never
-    /// need to instantiate it merely to mount or read files.
-    bitmaps: Option<Bitmaps>,
     last_commit: Option<CommitStats>,
 }
 
@@ -67,7 +63,6 @@ impl<D: BlockDevice> Volume<D> {
             current_slot: selection.chosen_slot,
             other_checkpoint: selection.other,
             state,
-            bitmaps: None,
             last_commit: None,
         }
     }
@@ -96,8 +91,12 @@ impl<D: BlockDevice> Volume<D> {
             .sum()
     }
 
+    /// Peak bitmap bytes resident during the most recent transaction (zero
+    /// before any mutation on this mount).
     pub fn allocator_ram_bytes(&self) -> usize {
-        self.bitmaps.as_ref().map(Bitmaps::ram_bytes).unwrap_or(0)
+        self.last_commit
+            .map(|stats| stats.alloc.allocator_ram_bytes as usize)
+            .unwrap_or(0)
     }
 
     pub fn last_commit_stats(&self) -> Option<CommitStats> {
@@ -180,9 +179,10 @@ impl<D: BlockDevice> Volume<D> {
             .checked_add(1)
             .ok_or(CoreError::PrototypeLimit("object ID space exhausted"))?;
 
-        self.ensure_bitmaps_loaded()?;
         let mut tx = TxAllocator::begin(
-            self.bitmaps.as_ref().expect("loaded above"),
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
             &self.state.retired,
             generation,
         )?;
@@ -191,7 +191,7 @@ impl<D: BlockDevice> Volume<D> {
         let data_block_count = (content.len() as u64).div_ceil(block_size as u64);
         let mut data_writes = Vec::new();
         let data_start = if data_block_count > 0 {
-            let start = tx.allocate_run(data_block_count)?;
+            let start = tx.allocate_run(&mut self.dev, data_block_count)?;
             for i in 0..data_block_count as usize {
                 let mut block = vec![0u8; block_size];
                 let from = i * block_size;
@@ -205,11 +205,11 @@ impl<D: BlockDevice> Volume<D> {
         };
 
         // Fresh blocks for every COW'd structure.
-        let file_record_lba = tx.allocate()?;
-        let dir_lba = tx.allocate()?;
-        let root_record_lba = tx.allocate()?;
-        let omap_lba = tx.allocate()?;
-        let retired_list_lba = tx.allocate()?;
+        let file_record_lba = tx.allocate(&mut self.dev)?;
+        let dir_lba = tx.allocate(&mut self.dev)?;
+        let root_record_lba = tx.allocate(&mut self.dev)?;
+        let omap_lba = tx.allocate(&mut self.dev)?;
+        let retired_list_lba = tx.allocate(&mut self.dev)?;
 
         // Everything the new state no longer reaches goes into quarantine.
         self.retire_cow_originals(&mut tx)?;
@@ -287,17 +287,18 @@ impl<D: BlockDevice> Volume<D> {
         let block_size = self.dev.block_size();
         let generation = self.next_generation()?;
 
-        self.ensure_bitmaps_loaded()?;
         let mut tx = TxAllocator::begin(
-            self.bitmaps.as_ref().expect("loaded above"),
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
             &self.state.retired,
             generation,
         )?;
 
-        let dir_lba = tx.allocate()?;
-        let root_record_lba = tx.allocate()?;
-        let omap_lba = tx.allocate()?;
-        let retired_list_lba = tx.allocate()?;
+        let dir_lba = tx.allocate(&mut self.dev)?;
+        let root_record_lba = tx.allocate(&mut self.dev)?;
+        let omap_lba = tx.allocate(&mut self.dev)?;
+        let retired_list_lba = tx.allocate(&mut self.dev)?;
 
         // Quarantine the object's storage and the COW'd originals.
         let victim_record_lba = self
@@ -305,9 +306,9 @@ impl<D: BlockDevice> Volume<D> {
             .object_map
             .lookup(entry.child_id)
             .ok_or_else(|| CoreError::Corrupt("victim missing from object map".into()))?;
-        tx.retire(victim_record_lba)?;
+        tx.retire(&mut self.dev, victim_record_lba)?;
         for i in 0..victim.data_blocks {
-            tx.retire(victim.data_root + i)?;
+            tx.retire(&mut self.dev, victim.data_root + i)?;
         }
         self.retire_cow_originals(&mut tx)?;
 
@@ -351,13 +352,6 @@ impl<D: BlockDevice> Volume<D> {
             .ok_or(CoreError::PrototypeLimit("generation counter exhausted"))
     }
 
-    fn ensure_bitmaps_loaded(&mut self) -> Result<(), CoreError> {
-        if self.bitmaps.is_none() {
-            self.bitmaps = Some(Bitmaps::load(&mut self.dev, &self.ident.geometry(), &self.checkpoint)?);
-        }
-        Ok(())
-    }
-
     fn read_object(&mut self, object_id: u64) -> Result<Option<ObjectRecord>, CoreError> {
         if object_id == OBJECT_ROOT {
             return Ok(Some(self.state.root_object));
@@ -399,17 +393,17 @@ impl<D: BlockDevice> Volume<D> {
     /// Retires the committed blocks every transaction replaces: the object
     /// map, the root object record, the root directory block, and the
     /// previous retired list.
-    fn retire_cow_originals(&self, tx: &mut TxAllocator) -> Result<(), CoreError> {
-        tx.retire(self.checkpoint.object_map_block)?;
+    fn retire_cow_originals(&mut self, tx: &mut TxAllocator) -> Result<(), CoreError> {
+        tx.retire(&mut self.dev, self.checkpoint.object_map_block)?;
         let old_root_record = self
             .state
             .object_map
             .lookup(OBJECT_ROOT)
             .ok_or_else(|| CoreError::Corrupt("root missing from object map".into()))?;
-        tx.retire(old_root_record)?;
-        tx.retire(self.state.root_object.data_root)?;
+        tx.retire(&mut self.dev, old_root_record)?;
+        tx.retire(&mut self.dev, self.state.root_object.data_root)?;
         if self.checkpoint.retired_list_block != 0 {
-            tx.retire(self.checkpoint.retired_list_block)?;
+            tx.retire(&mut self.dev, self.checkpoint.retired_list_block)?;
         }
         Ok(())
     }
@@ -486,7 +480,6 @@ impl<D: BlockDevice> Volume<D> {
         // remount. The transaction already owns the exact new bitmap state,
         // so no post-commit full-volume reload is needed.
         self.state = load_mount_state(&mut self.dev, &self.ident, &new_checkpoint)?;
-        self.bitmaps = Some(finished.bitmaps);
         self.other_checkpoint = Some(std::mem::replace(&mut self.checkpoint, new_checkpoint));
         self.current_slot = new_slot;
         self.last_commit = Some(stats);

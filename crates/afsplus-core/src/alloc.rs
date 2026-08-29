@@ -17,7 +17,7 @@
 //! transaction that freed it, and always survives a crash back to the
 //! newest committed state.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use afsplus_block::BlockDevice;
 use afsplus_format::bitmap::BitmapPage;
@@ -27,11 +27,8 @@ use afsplus_format::retired::{RetiredEntry, RetiredList};
 
 use crate::CoreError;
 
-/// Committed in-memory allocation state: one decoded page per region.
-///
-/// The prototype loads every region at mount; a bounded-memory
-/// implementation loads regions on demand (`docs/02-architecture.md` §2) —
-/// `ram_bytes` exists so that cost is measured, not guessed.
+/// Fully decoded allocation state used by the exhaustive checker. Normal
+/// mount and transactions do not instantiate this volume-sized view.
 #[derive(Debug, Clone)]
 pub struct Bitmaps {
     pub geo: Geometry,
@@ -51,26 +48,7 @@ impl Bitmaps {
         let mut pages = Vec::with_capacity(checkpoint.regions.len());
         for (r, record) in checkpoint.regions.iter().enumerate() {
             let region = r as u32;
-            let lba = geo.bitmap_slot_lba(region, record.slot);
-            dev.read_block(lba, &mut buf)?;
-            let (page, generation) = BitmapPage::decode(&buf)
-                .map_err(|e| CoreError::Corrupt(format!("region {region} bitmap: {e}")))?;
-            if page.region != region || page.valid_blocks != geo.region_valid_blocks(region) {
-                return Err(CoreError::Corrupt(format!("region {region} bitmap geometry mismatch")));
-            }
-            if generation != record.bitmap_generation {
-                return Err(CoreError::Corrupt(format!(
-                    "region {region} bitmap generation {generation} does not match checkpoint record {}",
-                    record.bitmap_generation
-                )));
-            }
-            if page.free_blocks() != record.free_blocks {
-                return Err(CoreError::Corrupt(format!(
-                    "region {region} free count mismatch: bitmap {}, checkpoint {}",
-                    page.free_blocks(),
-                    record.free_blocks
-                )));
-            }
+            let page = load_region_page(dev, geo, region, record, &mut buf)?;
             pages.push(page);
         }
         Ok(Bitmaps { geo: *geo, pages })
@@ -82,12 +60,6 @@ impl Bitmaps {
         self.pages[region as usize].is_allocated(index)
     }
 
-    fn set_allocated(&mut self, lba: u64, allocated: bool) -> bool {
-        let region = self.geo.region_of(lba);
-        let index = (lba - self.geo.region_base(region)) as u32;
-        self.pages[region as usize].set_allocated(index, allocated)
-    }
-
     pub fn free_blocks_total(&self) -> u64 {
         self.pages.iter().map(|p| p.free_blocks() as u64).sum()
     }
@@ -96,6 +68,36 @@ impl Bitmaps {
     pub fn ram_bytes(&self) -> usize {
         self.pages.iter().map(|p| p.bits.len()).sum()
     }
+}
+
+fn load_region_page<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    region: u32,
+    record: &RegionRecord,
+    buf: &mut [u8],
+) -> Result<BitmapPage, CoreError> {
+    let lba = geo.bitmap_slot_lba(region, record.slot);
+    dev.read_block(lba, buf)?;
+    let (page, generation) = BitmapPage::decode(buf)
+        .map_err(|e| CoreError::Corrupt(format!("region {region} bitmap: {e}")))?;
+    if page.region != region || page.valid_blocks != geo.region_valid_blocks(region) {
+        return Err(CoreError::Corrupt(format!("region {region} bitmap geometry mismatch")));
+    }
+    if generation != record.bitmap_generation {
+        return Err(CoreError::Corrupt(format!(
+            "region {region} bitmap generation {generation} does not match checkpoint record {}",
+            record.bitmap_generation
+        )));
+    }
+    if page.free_blocks() != record.free_blocks {
+        return Err(CoreError::Corrupt(format!(
+            "region {region} free count mismatch: bitmap {}, checkpoint {}",
+            page.free_blocks(),
+            record.free_blocks
+        )));
+    }
+    Ok(page)
 }
 
 /// Measured allocator behavior for one transaction.
@@ -114,7 +116,11 @@ pub struct AllocStats {
 /// Working allocation state of one in-flight transaction. Dropped on any
 /// error, leaving the committed state untouched; adopted on durable commit.
 pub struct TxAllocator {
-    working: Bitmaps,
+    geo: Geometry,
+    current_records: Vec<RegionRecord>,
+    /// Transaction working set. Clean pages that fail an allocation scan are
+    /// evicted immediately; dirty pages stay until commit.
+    pages: BTreeMap<u32, BitmapPage>,
     new_generation: u64,
     dirty_regions: BTreeSet<u32>,
     new_retired: RetiredList,
@@ -125,26 +131,33 @@ impl TxAllocator {
     /// Starts a transaction: clones the committed bitmaps and promotes every
     /// committed retired entry (they are unreachable from the only still
     /// selectable checkpoint, so their quarantine ends now).
-    pub fn begin(
-        committed: &Bitmaps,
+    pub fn begin<D: BlockDevice>(
+        dev: &mut D,
+        geo: &Geometry,
+        current: &Checkpoint,
         committed_retired: &RetiredList,
         new_generation: u64,
     ) -> Result<TxAllocator, CoreError> {
         let mut tx = TxAllocator {
-            working: committed.clone(),
+            geo: *geo,
+            current_records: current.regions.clone(),
+            pages: BTreeMap::new(),
             new_generation,
             dirty_regions: BTreeSet::new(),
             new_retired: RetiredList::default(),
             stats: AllocStats::default(),
         };
         for entry in &committed_retired.entries {
-            if !tx.working.set_allocated(entry.lba, false) {
+            let region = tx.geo.region_of(entry.lba);
+            let index = (entry.lba - tx.geo.region_base(region)) as u32;
+            let page = tx.page_mut(dev, region)?;
+            if !page.set_allocated(index, false) {
                 return Err(CoreError::Corrupt(format!(
                     "retired block {} was not marked allocated",
                     entry.lba
                 )));
             }
-            tx.dirty_regions.insert(tx.working.geo.region_of(entry.lba));
+            tx.dirty_regions.insert(region);
             tx.stats.blocks_promoted += 1;
             tx.stats.reclaim_latency_generations +=
                 new_generation.saturating_sub(entry.retire_generation);
@@ -153,35 +166,53 @@ impl TxAllocator {
     }
 
     /// Allocates one block, lowest-address first fit.
-    pub fn allocate(&mut self) -> Result<u64, CoreError> {
-        self.allocate_run(1)
+    pub fn allocate<D: BlockDevice>(&mut self, dev: &mut D) -> Result<u64, CoreError> {
+        self.allocate_run(dev, 1)
     }
 
     /// Allocates `len` physically contiguous blocks, lowest first fit.
-    pub fn allocate_run(&mut self, len: u64) -> Result<u64, CoreError> {
+    pub fn allocate_run<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        len: u64,
+    ) -> Result<u64, CoreError> {
         assert!(len > 0);
-        let geo = self.working.geo;
-        let mut run_start = None;
-        let mut run_len = 0u64;
-        for lba in 0..geo.total_blocks {
-            let usable = geo.is_allocatable(lba) && !self.working.is_allocated(lba);
-            if usable {
-                if run_len == 0 {
-                    run_start = Some(lba);
-                }
-                run_len += 1;
-                if run_len == len {
-                    let start = run_start.unwrap();
-                    for b in start..start + len {
-                        self.working.set_allocated(b, true);
-                        self.dirty_regions.insert(geo.region_of(b));
+        let geo = self.geo;
+        for region in 0..geo.region_count() {
+            let base = geo.region_base(region);
+            let valid = geo.region_valid_blocks(region);
+            let mut found = None;
+            {
+                let page = self.page_mut(dev, region)?;
+                let mut run_start = 0u32;
+                let mut run_len = 0u64;
+                for index in 0..valid {
+                    let lba = base + index as u64;
+                    if geo.is_allocatable(lba) && !page.is_allocated(index) {
+                        if run_len == 0 {
+                            run_start = index;
+                        }
+                        run_len += 1;
+                        if run_len == len {
+                            found = Some(run_start);
+                            break;
+                        }
+                    } else {
+                        run_len = 0;
                     }
-                    self.stats.blocks_allocated += len;
-                    return Ok(start);
                 }
-            } else {
-                run_start = None;
-                run_len = 0;
+            }
+            if let Some(start_index) = found {
+                let page = self.pages.get_mut(&region).expect("loaded above");
+                for index in start_index..start_index + len as u32 {
+                    page.set_allocated(index, true);
+                }
+                self.dirty_regions.insert(region);
+                self.stats.blocks_allocated += len;
+                return Ok(base + start_index as u64);
+            }
+            if !self.dirty_regions.contains(&region) {
+                self.pages.remove(&region);
             }
         }
         Err(CoreError::NoSpace)
@@ -189,8 +220,13 @@ impl TxAllocator {
 
     /// Retires a block that the new state no longer reaches. Its bit stays
     /// allocated; it enters quarantine via the new retired list.
-    pub fn retire(&mut self, lba: u64) -> Result<(), CoreError> {
-        if !self.working.geo.is_allocatable(lba) || !self.working.is_allocated(lba) {
+    pub fn retire<D: BlockDevice>(&mut self, dev: &mut D, lba: u64) -> Result<(), CoreError> {
+        if !self.geo.is_allocatable(lba) {
+            return Err(CoreError::Corrupt(format!("retiring block {lba} that is not live")));
+        }
+        let region = self.geo.region_of(lba);
+        let index = (lba - self.geo.region_base(region)) as u32;
+        if !self.page_mut(dev, region)?.is_allocated(index) {
             return Err(CoreError::Corrupt(format!("retiring block {lba} that is not live")));
         }
         self.new_retired
@@ -204,6 +240,29 @@ impl TxAllocator {
         &self.new_retired
     }
 
+    fn page_mut<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        region: u32,
+    ) -> Result<&mut BitmapPage, CoreError> {
+        if !self.pages.contains_key(&region) {
+            let record = self
+                .current_records
+                .get(region as usize)
+                .ok_or_else(|| CoreError::Corrupt(format!("missing bitmap record for region {region}")))?;
+            let mut buf = vec![0u8; self.geo.block_size];
+            let page = load_region_page(dev, &self.geo, region, record, &mut buf)?;
+            self.pages.insert(region, page);
+            let resident: u64 = self
+                .pages
+                .values()
+                .map(|loaded| loaded.bits.len() as u64)
+                .sum();
+            self.stats.allocator_ram_bytes = self.stats.allocator_ram_bytes.max(resident);
+        }
+        Ok(self.pages.get_mut(&region).expect("inserted above"))
+    }
+
     /// Finalizes the transaction's allocation state: encoded bitmap pages
     /// for every dirty region (each written to a slot that neither retained
     /// checkpoint references) and the region records for the new checkpoint.
@@ -212,7 +271,7 @@ impl TxAllocator {
         current: &Checkpoint,
         other: Option<&Checkpoint>,
     ) -> Result<FinishedAlloc, CoreError> {
-        let geo = self.working.geo;
+        let geo = self.geo;
         let mut page_writes = Vec::new();
         let mut records = Vec::with_capacity(current.regions.len());
         for (r, current_record) in current.regions.iter().enumerate() {
@@ -222,7 +281,9 @@ impl TxAllocator {
                     current_record.slot,
                     other.and_then(|c| c.regions.get(r)).map(|rec| rec.slot),
                 );
-                let page = &self.working.pages[r];
+                let page = self.pages.get(&region).ok_or_else(|| {
+                    CoreError::Corrupt(format!("dirty region {region} has no working bitmap"))
+                })?;
                 let encoded = page
                     .encode(geo.block_size, self.new_generation)
                     .map_err(CoreError::Format)?;
@@ -237,9 +298,13 @@ impl TxAllocator {
             }
         }
         self.stats.bitmap_pages_dirty = page_writes.len() as u64;
-        self.stats.allocator_ram_bytes = self.working.ram_bytes() as u64;
+        let resident: u64 = self
+            .pages
+            .values()
+            .map(|page| page.bits.len() as u64)
+            .sum();
+        self.stats.allocator_ram_bytes = self.stats.allocator_ram_bytes.max(resident);
         Ok(FinishedAlloc {
-            bitmaps: self.working,
             page_writes,
             records,
             retired: self.new_retired,
@@ -249,8 +314,6 @@ impl TxAllocator {
 }
 
 pub struct FinishedAlloc {
-    /// The working bitmaps, to adopt as committed state after a durable commit.
-    pub bitmaps: Bitmaps,
     /// (lba, encoded page) for every dirty region.
     pub page_writes: Vec<(u64, Vec<u8>)>,
     /// Region records for the new checkpoint, in region order.

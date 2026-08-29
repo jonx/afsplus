@@ -143,7 +143,9 @@ The continuation after `7a61c06` replaced the eager mount walk with bounded
 root loading. Ordinary mount now reads identification/checkpoints, the
 single-page prototype object map, root object/root directory, and the retired
 list root. Descendant records are decoded on access and allocation bitmaps are
-loaded only when a mutation begins. The checker retains the exhaustive walk.
+loaded page-by-page as a mutation touches regions. Clean pages that fail an
+allocation scan are evicted immediately; the checker retains the exhaustive
+whole-volume view.
 
 At that baseline, steps 1-5 of `implementation/peer-review-prototype-plan.md` are implemented and green:
 

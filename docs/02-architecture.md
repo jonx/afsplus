@@ -75,6 +75,12 @@ Iterators and indexes operate page by page.
 
 Allocation regions are specifically intended to make free-space operations bounded.
 
+The executable allocator prototype follows this rule: normal mount reads no
+bitmap pages, and a transaction loads region pages on demand. A clean page
+that does not satisfy an allocation scan is evicted immediately; dirty pages
+remain pinned through checkpoint commit. The exhaustive checker may choose to
+load every page because its operation is explicitly whole-volume.
+
 This rule defines the minimum implementation path needed for classic and
 constrained profiles. It does not forbid a modern implementation from using
 all available RAM productively. Macaros Native and workstation-class ports

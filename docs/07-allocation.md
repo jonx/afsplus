@@ -64,6 +64,13 @@ The chosen design must preserve:
 
 No epoch-1 bitmap layout should be frozen before this prototype passes power-cut tests.
 
+The current reserved-slot prototype also keeps transaction RAM independent of
+the total region count: it loads bitmap pages on demand, evicts unsuccessful
+clean scan pages, and pins only dirty/touched pages until commit. Modern ports
+may layer a larger persistent bitmap cache over the same semantics. The
+checker deliberately retains the option to load all pages for an exhaustive
+whole-volume comparison.
+
 ## 4. Allocation strategy
 
 Preferred policy, independent of exact free-space encoding:
