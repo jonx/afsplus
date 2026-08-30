@@ -33,6 +33,7 @@ fn per_transaction_resource_accounting() {
             label: "MeasureVol".into(),
             region_size: 16,
             reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: ts(0),
         },
     )
@@ -133,10 +134,11 @@ fn per_transaction_resource_accounting() {
             "{label}"
         );
     }
-    // The last transaction (a reclaim step) touched two of the four 2-byte
-    // region pages — promotion targets plus the rebuilt queue root — while
-    // still avoiding retention of the full 8-byte bitmap.
-    assert_eq!(vol.allocator_ram_bytes(), 2 * 2);
+    // The last transaction (a reclaim step) touched three of the four
+    // 2-byte region pages — promotion targets plus the rebuilt queue root,
+    // shifted by the intent-log area — while still avoiding retention of
+    // the full 8-byte bitmap.
+    assert_eq!(vol.allocator_ram_bytes(), 3 * 2);
 
     let mut dev = vol.into_device();
     let report = check_device(&mut dev);
@@ -160,6 +162,7 @@ fn one_tib_sparse_image_formats_and_mounts_without_a_block_count_scan() {
             label: "OneTiB".into(),
             region_size: afsplus_format::geometry::MAX_REGION_BLOCKS,
             reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: ts(0),
         },
     )

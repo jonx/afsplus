@@ -96,6 +96,36 @@ Two findings:
    cost ~1.2 writes and ~1 barrier. That ~3× barrier gap on fsync latency
    is the entire remaining case for the intent log — nothing else.
 
+## Phase B measured: the intent log wins its gate
+
+ADR-037's prototype logs each fsync group as one record in a reserved slot
+area and replays the valid prefix at mount. Same harness (1,000 durable ref
+updates, fsync per update, checkpoint every 64):
+
+| durable ref update path | writes/op | flushes/op | reads/op | wall (mem) |
+|-------------------------|-----------|------------|----------|------------|
+| original (3 tx)         | 27.0      | 7.0        | 50.0     | 731 ms     |
+| group-committed batch   | 10.0      | 3.0        | 21.0     | 286 ms     |
+| **intent log, fsynced** | **2.2**   | **1.03**   | **0.4**  | **39 ms**  |
+
+The gate — beat 3 barriers / 10 writes under the same crash matrices — is
+passed with a 4.7× write and 2.9× barrier margin (12× / 6.8× against the
+original sequence), and the crash matrices hold: one fsync group is one
+record, so every modeled state (including a durable record over torn data,
+rejected by the content CRC) recovers to exactly the old or the new ref,
+with the lock file never visible and stale records inert after any
+checkpoint.
+
+Two design points the prototype settled the hard way:
+
+- **Windowed transactions never promote quarantined blocks** (reclaim
+  budget zero): logged extents must be FREE in the committed bitmaps so
+  replay can claim them deterministically regardless of runtime policy.
+- **Cancelling a logged create must not recycle its blocks** — an earlier
+  record's content CRC still covers them. Unlogged cancellations scrub the
+  pair from the fsync group; logged ones sacrifice the blocks to the
+  reclaim queue at commit.
+
 ## What the data supports
 
 1. **Checkpoint-per-operation is not viable as the only durability path**
@@ -111,12 +141,12 @@ Two findings:
    writes. On storage where a barrier costs 0.1–5 ms, that is roughly a
    3× fsync-latency difference for fsync-per-operation applications (Git,
    databases), and nothing for everyone else.
-3. **The remaining decision** is therefore narrow: is ~3× on forced-fsync
-   latency worth a new on-disk structure (log area, record format, replay
-   in recovery, its own crash matrices)? That is a product call about how
-   central fsync-heavy workloads are. If yes, the log is designed against
-   the auxiliary-log extension point doc 08 reserves, and its bake-off
-   gate is: beat 3 flushes and 10 writes per durable ref update under the
-   same crash matrices. If no, group commit plus the documented 3-barrier
-   fsync floor is a defensible v1 stance, and the log stays a negotiable
-   future feature.
+3. **Bake-off verdict.** Both mechanisms are now implemented and measured
+   under identical workloads and crash matrices. Group commit carries
+   bursts (2.2 writes, 0.05 barriers per checkout file); the intent log
+   carries forced durability (2.2 writes, 1.03 barriers per fsynced ref
+   update — 6.8× fewer barriers than the original sequence). They compose:
+   the log is precisely how an fsync becomes cheap between group-committed
+   checkpoints. The measured recommendation is to keep both, with the log
+   remaining an experimental feature until its record format survives the
+   broader workload suite and the epoch-1 feature-flag decision.

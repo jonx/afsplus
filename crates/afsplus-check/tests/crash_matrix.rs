@@ -30,6 +30,7 @@ fn params(label: &str) -> MkfsParams {
         label: label.into(),
         region_size: 64,
         reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: Timespec {
             seconds: 1_780_000_000,
             nanoseconds: 0,
@@ -212,6 +213,7 @@ fn every_crash_state_of_cross_directory_rename_is_atomic() {
             label: "RenameCrash".into(),
             region_size: 256,
             reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: ts(0),
         },
     )
@@ -286,6 +288,7 @@ fn directory_root_split_and_collapse_are_crash_atomic() {
             label: "DirectoryHeightCrash".into(),
             region_size: 2_048,
             reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: ts(0),
         },
     )
@@ -421,6 +424,7 @@ fn every_crash_state_of_a_sparse_write_is_atomic() {
             label: "SparseCrash".into(),
             region_size: 256,
             reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: ts(0),
         },
     )
@@ -487,6 +491,7 @@ fn multi_node_allocation_root_commit_has_an_exhaustive_crash_matrix() {
             label: "MultiAllocCrash".into(),
             region_size: REGION_BLOCKS,
             reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: ts(0),
         },
     )

@@ -291,24 +291,41 @@ fn balanced_groups(total: usize, maximum: usize) -> Result<Vec<usize>, CoreError
 }
 
 fn derive_pool_lbas(geo: &Geometry, count: usize) -> Result<Vec<u64>, CoreError> {
-    let mut bootstrap_left = BOOTSTRAP_METADATA_BLOCKS;
-    let mut pool = Vec::with_capacity(count);
+    derive_reserved_lbas(geo, BOOTSTRAP_METADATA_BLOCKS, count)
+}
+
+/// The `count` allocatable blocks after skipping the first `skip`
+/// allocatable ones — the deterministic placement rule shared by the
+/// bootstrap metadata, the allocation-root pool, and the intent-log area.
+pub(crate) fn derive_reserved_lbas(
+    geo: &Geometry,
+    skip: usize,
+    count: usize,
+) -> Result<Vec<u64>, CoreError> {
+    let mut to_skip = skip;
+    let mut out = Vec::with_capacity(count);
     for lba in geo.region0_reserved_blocks()..geo.total_blocks {
         if !geo.is_allocatable(lba) {
             continue;
         }
-        if bootstrap_left > 0 {
-            bootstrap_left -= 1;
+        if to_skip > 0 {
+            to_skip -= 1;
             continue;
         }
-        pool.push(lba);
-        if pool.len() == count {
-            return Ok(pool);
+        out.push(lba);
+        if out.len() == count {
+            return Ok(out);
         }
     }
     Err(CoreError::UnsupportedGeometry(
-        "volume cannot hold allocation-root reserve pool",
+        "volume cannot hold its reserved metadata areas",
     ))
+}
+
+/// Allocatable blocks occupied by the bootstrap metadata plus the pool;
+/// the intent-log area starts after this span.
+pub fn reserved_span_before_log(geo: &Geometry) -> Result<usize, CoreError> {
+    Ok(BOOTSTRAP_METADATA_BLOCKS + reserved_pool_lbas(geo)?.len())
 }
 
 pub fn lookup_record<D: BlockDevice>(

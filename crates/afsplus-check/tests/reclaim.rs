@@ -32,6 +32,7 @@ fn format_volume(total: u64, region: u32, caps: ReclaimCaps) -> MemoryBackend {
             label: "ReclaimVol".into(),
             region_size: region,
             reclaim_caps: caps,
+            log_slots: 0,
             timestamp: ts(0),
         },
     )

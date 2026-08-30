@@ -109,5 +109,10 @@ pub fn mount<D: BlockDevice>(mut dev: D) -> Result<Volume<D>, CoreError> {
         ))
     })?;
 
-    Ok(Volume::new(dev, ident, selection, state))
+    let mut volume = Volume::new(dev, ident, selection, state);
+    // ADR-037: a valid intent-log tail is replayed and checkpointed before
+    // the volume is handed out; volumes with no pending records mount
+    // without writing.
+    volume.recover_intent_log()?;
+    Ok(volume)
 }

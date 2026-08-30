@@ -29,6 +29,7 @@ fn main() {
 
     let mut dev = FileBackend::create(&path, DEFAULT_BLOCK_SIZE, 256).unwrap();
     mkfs(&mut dev, &MkfsParams { uuid, label: "DemoVol".into(), region_size: 64, reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: now })
         .unwrap();
 

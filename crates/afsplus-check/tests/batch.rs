@@ -22,6 +22,7 @@ fn formatted(total: u64) -> MemoryBackend {
             label: "BatchVol".into(),
             region_size: 1024,
             reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: ts(0),
         },
     )

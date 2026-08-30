@@ -24,6 +24,8 @@ use afsplus_format::ident::Identification;
 use afsplus_format::object::{
     ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_EXTENT_TREE,
 };
+use afsplus_format::crc32c::crc32c;
+use afsplus_format::intent_log::{LogOp, LogRecord, MAX_LOG_OPS};
 use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 
 use crate::alloc::{AllocStats, TxAllocator};
@@ -31,6 +33,7 @@ use crate::allocation_root::{self, ReservedTreePool};
 use crate::cow_tree::{mutate_many, TreeMutation, TreeOperation};
 use crate::directory;
 use crate::extent_map::{self, Extent, EXTENT_UNWRITTEN};
+use crate::intent_log;
 use crate::mount::Selection;
 use crate::object_map;
 use crate::verify::{load_mount_state, MountState};
@@ -81,7 +84,26 @@ struct PendingBatch {
     /// Data runs of objects created by this batch (cancellable).
     created_data: BTreeMap<u64, (u64, u64)>,
     data_writes: Vec<(u64, Vec<u8>)>,
+    /// Windowed batches write data blocks at operation time (covered by the
+    /// fsync or metadata barrier); plain batches stage them for commit.
+    write_through: bool,
+    /// Window creates already covered by a durable log record: cancelling
+    /// one must not release its blocks (an earlier record's content CRC
+    /// still covers them); they are sacrificed to quarantine instead.
+    logged_created: BTreeSet<u64>,
+    /// Data runs of cancelled logged creates, quarantined at materialize.
+    sacrificed: Vec<(u64, u64)>,
     next_object_id: u64,
+}
+
+/// An open operation window: a live ADR-026 batch whose fsynced prefix is
+/// persisted in the intent log (ADR-037).
+struct OpenWindow {
+    tx: TxAllocator,
+    pending: PendingBatch,
+    generation: u64,
+    unlogged: Vec<LogOp>,
+    logged_records: u32,
 }
 
 pub struct Volume<D: BlockDevice> {
@@ -104,6 +126,8 @@ pub struct Volume<D: BlockDevice> {
     /// Region where the last allocation succeeded; the next transaction
     /// starts its search there instead of rescanning from region zero.
     alloc_rover_region: u32,
+    window: Option<OpenWindow>,
+    window_poisoned: bool,
     last_commit: Option<CommitStats>,
 }
 
@@ -124,6 +148,8 @@ impl<D: BlockDevice> Volume<D> {
             reclaim_batch_blocks: crate::reclaim::DEFAULT_RECLAIM_BATCH_BLOCKS,
             allocation_tree_cache: None,
             alloc_rover_region: 0,
+            window: None,
+            window_poisoned: false,
             last_commit: None,
         }
     }
@@ -168,6 +194,7 @@ impl<D: BlockDevice> Volume<D> {
     /// Returns the number of blocks reclaimed (zero means the queue could
     /// not shrink further and no commit was made).
     pub fn reclaim_step(&mut self, _now: Timespec) -> Result<u64, CoreError> {
+        self.ensure_window_closed()?;
         if self.state.reclaim_root.pending_blocks == 0 {
             return Ok(0);
         }
@@ -326,6 +353,7 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.ensure_window_closed()?;
         if content.is_empty() {
             return Ok(());
         }
@@ -430,6 +458,7 @@ impl<D: BlockDevice> Volume<D> {
         new_size: u64,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.ensure_window_closed()?;
         let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
         if record.object_type != ObjectType::File {
             return Err(CoreError::IsDirectory);
@@ -519,6 +548,7 @@ impl<D: BlockDevice> Volume<D> {
         length: u64,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.ensure_window_closed()?;
         if length == 0 {
             return Ok(());
         }
@@ -609,6 +639,7 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        self.ensure_window_closed()?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
         let parent = self.read_object(parent_id)?.ok_or(CoreError::NotFound)?;
         if parent.object_type != ObjectType::Directory {
@@ -769,6 +800,7 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        self.ensure_window_closed()?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
         let parent = self.read_object(parent_id)?.ok_or(CoreError::NotFound)?;
         if parent.object_type != ObjectType::Directory {
@@ -932,6 +964,7 @@ impl<D: BlockDevice> Volume<D> {
         now: Timespec,
         expected_type: ObjectType,
     ) -> Result<(), CoreError> {
+        self.ensure_window_closed()?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
         let parent = self.read_object(parent_id)?.ok_or(CoreError::NotFound)?;
         if parent.object_type != ObjectType::Directory {
@@ -1125,6 +1158,7 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.ensure_window_closed()?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
         let file = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
         if file.object_type != ObjectType::File {
@@ -1246,6 +1280,7 @@ impl<D: BlockDevice> Volume<D> {
         target_name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.ensure_window_closed()?;
         validate_name(source_name.as_bytes()).map_err(CoreError::InvalidName)?;
         validate_name(target_name.as_bytes()).map_err(CoreError::InvalidName)?;
         let source_key = comparison_key(source_name.as_bytes());
@@ -1729,6 +1764,7 @@ impl<D: BlockDevice> Volume<D> {
         if ops.len() > MAX_BATCH_OPS {
             return Err(CoreError::PrototypeLimit("batch exceeds bounded operation count"));
         }
+        self.ensure_window_closed()?;
         let generation = self.next_generation()?;
         let mut tx = TxAllocator::begin(
             &mut self.dev,
@@ -1745,13 +1781,16 @@ impl<D: BlockDevice> Volume<D> {
             committed_record_lbas: BTreeMap::new(),
             created_data: BTreeMap::new(),
             data_writes: Vec::new(),
+            write_through: false,
+            logged_created: BTreeSet::new(),
+            sacrificed: Vec::new(),
             next_object_id: self.checkpoint.next_object_id,
         };
         let mut results = Vec::with_capacity(ops.len());
         for op in ops {
             results.push(self.apply_batch_op(&mut tx, &mut pending, op, now, generation)?);
         }
-        self.materialize_batch(tx, pending, now, generation)?;
+        self.materialize_batch(tx, pending, now, generation, false)?;
         Ok(results)
     }
 
@@ -1878,7 +1917,11 @@ impl<D: BlockDevice> Volume<D> {
                         let from = i * block_size;
                         let to = content.len().min(from + block_size);
                         block[..to - from].copy_from_slice(&content[from..to]);
-                        pending.data_writes.push((start + i as u64, block));
+                        if pending.write_through {
+                            self.dev.write_block(start + i as u64, &block)?;
+                        } else {
+                            pending.data_writes.push((start + i as u64, block));
+                        }
                     }
                     start
                 } else {
@@ -2014,15 +2057,24 @@ impl<D: BlockDevice> Volume<D> {
             return Err(CoreError::IsDirectory);
         }
         if let Some((data_start, data_blocks)) = pending.created_data.remove(&object_id) {
-            // Same-batch creation: nothing was ever committed. Release the
-            // staged data and drop the staged writes.
+            pending.records.remove(&object_id);
+            if pending.logged_created.contains(&object_id) {
+                // A durable log record's content CRC still covers these
+                // blocks: never reuse them in this window; quarantine them
+                // when the window materializes.
+                if data_blocks > 0 {
+                    pending.sacrificed.push((data_start, data_blocks));
+                }
+                return Ok(());
+            }
+            // Same-batch creation, never logged: nothing on disk or in the
+            // log references it. Release the staged data and writes.
             for lba in data_start..data_start + data_blocks {
                 tx.release_uncommitted(&mut self.dev, lba)?;
             }
             pending
                 .data_writes
                 .retain(|(lba, _)| *lba < data_start || *lba >= data_start + data_blocks);
-            pending.records.remove(&object_id);
             return Ok(());
         }
         if victim.link_count > 1 {
@@ -2072,6 +2124,474 @@ impl<D: BlockDevice> Volume<D> {
         Ok(())
     }
 
+    fn ensure_window_closed(&self) -> Result<(), CoreError> {
+        if self.window_poisoned {
+            Err(CoreError::WindowPoisoned)
+        } else if self.window.is_some() {
+            Err(CoreError::WindowOpen)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// True for errors that reject one operation without having mutated the
+    /// window's staged state.
+    fn is_validation_error(error: &CoreError) -> bool {
+        matches!(
+            error,
+            CoreError::AlreadyExists
+                | CoreError::NotFound
+                | CoreError::InvalidName(_)
+                | CoreError::NotDirectory
+                | CoreError::IsDirectory
+                | CoreError::NoSpace
+                | CoreError::PrototypeLimit(_)
+        )
+    }
+
+    /// Pending window operations not yet made durable by an fsync.
+    pub fn window_unlogged_ops(&self) -> usize {
+        self.window.as_ref().map_or(0, |w| w.unlogged.len())
+    }
+
+    /// Applies one operation to the open window (opening it if needed). The
+    /// operation is visible to later window operations but not durable until
+    /// [`Volume::window_fsync`] and not checkpointed until
+    /// [`Volume::window_commit`].
+    pub fn window_op(
+        &mut self,
+        op: &BatchOp<'_>,
+        now: Timespec,
+    ) -> Result<Option<u64>, CoreError> {
+        if self.window_poisoned {
+            return Err(CoreError::WindowPoisoned);
+        }
+        let mut window = match self.window.take() {
+            Some(window) => window,
+            None => {
+                let generation = self.next_generation()?;
+                // Windowed transactions never promote quarantined blocks:
+                // logged extents must be FREE in the committed bitmaps so
+                // replay can claim them deterministically (ADR-037).
+                let tx = TxAllocator::begin(
+                    &mut self.dev,
+                    &self.ident.geometry(),
+                    &self.checkpoint,
+                    self.other_checkpoint.as_ref(),
+                    generation,
+                    0,
+                    self.alloc_rover_region,
+                )?;
+                OpenWindow {
+                    tx,
+                    pending: PendingBatch {
+                        dir_changes: BTreeMap::new(),
+                        records: BTreeMap::new(),
+                        committed_record_lbas: BTreeMap::new(),
+                        created_data: BTreeMap::new(),
+                        data_writes: Vec::new(),
+                        write_through: true,
+                        logged_created: BTreeSet::new(),
+                        sacrificed: Vec::new(),
+                        next_object_id: self.checkpoint.next_object_id,
+                    },
+                    generation,
+                    unlogged: Vec::new(),
+                    logged_records: 0,
+                }
+            }
+        };
+        let generation = window.generation;
+        // A delete (or replacing rename) whose victim is a window create not
+        // yet covered by a log record cancels to nothing: the create is
+        // scrubbed from the unlogged group so the record never mentions it.
+        let cancels_unlogged = self.window_cancel_target(&window.pending, op)?;
+        let result =
+            self.apply_batch_op(&mut window.tx, &mut window.pending, op, now, generation);
+        match result {
+            Ok(created) => {
+                if let Some(cancelled) = cancels_unlogged {
+                    window.unlogged.retain(|logged| {
+                        !matches!(
+                            logged,
+                            LogOp::Create { expected_object_id, .. }
+                                if *expected_object_id == cancelled
+                        )
+                    });
+                    if !matches!(op, BatchOp::DeleteFile { .. }) {
+                        window.unlogged.push(Self::log_op_for(op, created, &window.pending)?);
+                    }
+                } else {
+                    window.unlogged.push(Self::log_op_for(op, created, &window.pending)?);
+                }
+                self.window = Some(window);
+                Ok(created)
+            }
+            Err(error) if Self::is_validation_error(&error) => {
+                self.window = Some(window);
+                Err(error)
+            }
+            Err(error) => {
+                self.window_poisoned = true;
+                Err(error)
+            }
+        }
+    }
+
+    /// The window-created, not-yet-logged object a delete or replacing
+    /// rename would cancel, if any.
+    fn window_cancel_target(
+        &mut self,
+        pending: &PendingBatch,
+        op: &BatchOp<'_>,
+    ) -> Result<Option<u64>, CoreError> {
+        let (parent_id, name) = match op {
+            BatchOp::DeleteFile { parent_id, name } => (*parent_id, *name),
+            BatchOp::Rename { target_parent_id, target_name, replace: true, .. } => {
+                (*target_parent_id, *target_name)
+            }
+            _ => return Ok(None),
+        };
+        if validate_name(name.as_bytes()).is_err() {
+            return Ok(None);
+        }
+        let key = comparison_key(name.as_bytes());
+        let Some(entry) = self.batch_lookup(pending, parent_id, &key)? else {
+            return Ok(None);
+        };
+        Ok(
+            (pending.created_data.contains_key(&entry.child_id)
+                && !pending.logged_created.contains(&entry.child_id))
+            .then_some(entry.child_id),
+        )
+    }
+
+    fn log_op_for(
+        op: &BatchOp<'_>,
+        created: Option<u64>,
+        pending: &PendingBatch,
+    ) -> Result<LogOp, CoreError> {
+        Ok(match op {
+            BatchOp::CreateFile { parent_id, name, content } => {
+                let object_id = created
+                    .ok_or_else(|| CoreError::Corrupt("create produced no object ID".into()))?;
+                let (start, blocks) = pending
+                    .created_data
+                    .get(&object_id)
+                    .copied()
+                    .ok_or_else(|| CoreError::Corrupt("created data run missing".into()))?;
+                let extents = if blocks > 0 { vec![(start, blocks as u32)] } else { Vec::new() };
+                LogOp::Create {
+                    parent_id: *parent_id,
+                    name: name.as_bytes().to_vec(),
+                    expected_object_id: object_id,
+                    size_bytes: content.len() as u64,
+                    content_crc: crc32c(content),
+                    extents,
+                }
+            }
+            BatchOp::DeleteFile { parent_id, name } => LogOp::Delete {
+                parent_id: *parent_id,
+                name: name.as_bytes().to_vec(),
+            },
+            BatchOp::Rename {
+                source_parent_id,
+                source_name,
+                target_parent_id,
+                target_name,
+                replace,
+            } => LogOp::Rename {
+                source_parent_id: *source_parent_id,
+                source_name: source_name.as_bytes().to_vec(),
+                target_parent_id: *target_parent_id,
+                target_name: target_name.as_bytes().to_vec(),
+                replace: *replace,
+            },
+        })
+    }
+
+    /// Makes every window operation so far durable: appends ONE log record
+    /// covering the unlogged prefix, then one barrier (ADR-037). The group
+    /// replays all-or-nothing after a crash.
+    pub fn window_fsync(&mut self) -> Result<(), CoreError> {
+        if self.window_poisoned {
+            return Err(CoreError::WindowPoisoned);
+        }
+        let Some(window) = self.window.as_mut() else {
+            return Ok(());
+        };
+        if window.unlogged.is_empty() {
+            self.dev.flush()?;
+            return Ok(());
+        }
+        if window.unlogged.len() > MAX_LOG_OPS {
+            return Err(CoreError::PrototypeLimit(
+                "fsync group exceeds one log record; commit the window",
+            ));
+        }
+        let geo = self.ident.geometry();
+        let slots = intent_log::log_slot_lbas(&geo, self.ident.log_slots)?;
+        let sequence = window.logged_records + 1;
+        if sequence as usize > slots.len() {
+            return Err(CoreError::PrototypeLimit(
+                "intent log is full; commit the window",
+            ));
+        }
+        let record = LogRecord {
+            uuid: self.ident.uuid,
+            base_generation: self.checkpoint.generation,
+            sequence,
+            ops: std::mem::take(&mut window.unlogged),
+        };
+        let encoded = record.encode(geo.block_size).map_err(CoreError::Format)?;
+        let write = self
+            .dev
+            .write_block(slots[sequence as usize - 1], &encoded)
+            .and_then(|()| self.dev.flush());
+        match write {
+            Ok(()) => {
+                let window = self.window.as_mut().expect("window checked above");
+                window.logged_records = sequence;
+                for op in &record.ops {
+                    if let LogOp::Create { expected_object_id, .. } = op {
+                        window.pending.logged_created.insert(*expected_object_id);
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.window_poisoned = true;
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Materializes the open window as one checkpoint transaction. Always
+    /// publishes a checkpoint when any record was logged, so stale records
+    /// can never be mistaken for live ones.
+    pub fn window_commit(&mut self, now: Timespec) -> Result<(), CoreError> {
+        if self.window_poisoned {
+            return Err(CoreError::WindowPoisoned);
+        }
+        let Some(window) = self.window.take() else {
+            return Ok(());
+        };
+        let force = window.logged_records > 0;
+        let result =
+            self.materialize_batch(window.tx, window.pending, now, window.generation, force);
+        if result.is_err() {
+            self.window_poisoned = true;
+        }
+        result
+    }
+
+    /// Replays the intent log after mount (ADR-037): re-runs the valid
+    /// record prefix through the batch engine, claiming each logged create's
+    /// exact data extents, and publishes one checkpoint. Returns the number
+    /// of records replayed.
+    pub(crate) fn recover_intent_log(&mut self) -> Result<u32, CoreError> {
+        if self.ident.log_slots == 0 {
+            return Ok(0);
+        }
+        let geo = self.ident.geometry();
+        let scanned = intent_log::scan(
+            &mut self.dev,
+            &geo,
+            self.ident.log_slots,
+            &self.ident.uuid,
+            self.checkpoint.generation,
+        )?;
+        if scanned.records.is_empty() {
+            return Ok(0);
+        }
+        let generation = self.next_generation()?;
+        // Same zero-promotion rule as the live window: the recorded extents
+        // are FREE in the committed bitmaps and must claim cleanly.
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            generation,
+            0,
+            self.alloc_rover_region,
+        )?;
+        let mut pending = PendingBatch {
+            dir_changes: BTreeMap::new(),
+            records: BTreeMap::new(),
+            committed_record_lbas: BTreeMap::new(),
+            created_data: BTreeMap::new(),
+            data_writes: Vec::new(),
+            write_through: true,
+            logged_created: BTreeSet::new(),
+            sacrificed: Vec::new(),
+            next_object_id: self.checkpoint.next_object_id,
+        };
+        // Replay timestamps are zero in the prototype; a frozen record format
+        // would log the operation timestamp.
+        let now = Timespec::default();
+        let replayed = scanned.records.len() as u32;
+        for record in scanned.records {
+            for op in record.ops {
+                self.apply_log_op(&mut tx, &mut pending, &op, now, generation)?;
+            }
+        }
+        self.materialize_batch(tx, pending, now, generation, true)?;
+        Ok(replayed)
+    }
+
+    fn apply_log_op(
+        &mut self,
+        tx: &mut TxAllocator,
+        pending: &mut PendingBatch,
+        op: &LogOp,
+        now: Timespec,
+        generation: u64,
+    ) -> Result<(), CoreError> {
+        let utf8 = |bytes: &[u8]| -> Result<String, CoreError> {
+            String::from_utf8(bytes.to_vec())
+                .map_err(|_| CoreError::Corrupt("log record name is not UTF-8".into()))
+        };
+        match op {
+            LogOp::Create {
+                parent_id,
+                name,
+                expected_object_id,
+                size_bytes,
+                extents,
+                ..
+            } => self.apply_replay_create(
+                tx,
+                pending,
+                *parent_id,
+                &utf8(name)?,
+                *expected_object_id,
+                *size_bytes,
+                extents,
+                now,
+                generation,
+            ),
+            LogOp::Delete { parent_id, name } => {
+                let name = utf8(name)?;
+                self.apply_batch_op(
+                    tx,
+                    pending,
+                    &BatchOp::DeleteFile { parent_id: *parent_id, name: &name },
+                    now,
+                    generation,
+                )
+                .map(|_| ())
+            }
+            LogOp::Rename {
+                source_parent_id,
+                source_name,
+                target_parent_id,
+                target_name,
+                replace,
+            } => {
+                let source = utf8(source_name)?;
+                let target = utf8(target_name)?;
+                self.apply_batch_op(
+                    tx,
+                    pending,
+                    &BatchOp::Rename {
+                        source_parent_id: *source_parent_id,
+                        source_name: &source,
+                        target_parent_id: *target_parent_id,
+                        target_name: &target,
+                        replace: *replace,
+                    },
+                    now,
+                    generation,
+                )
+                .map(|_| ())
+            }
+        }
+    }
+
+    /// The create branch of the batch engine with pre-placed content: the
+    /// logged extents are claimed exactly, and the data — already on disk
+    /// and CRC-verified by the scan — is never rewritten.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_replay_create(
+        &mut self,
+        tx: &mut TxAllocator,
+        pending: &mut PendingBatch,
+        parent_id: u64,
+        name: &str,
+        expected_object_id: u64,
+        size_bytes: u64,
+        extents: &[(u64, u32)],
+        now: Timespec,
+        generation: u64,
+    ) -> Result<(), CoreError> {
+        validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+        let parent = self
+            .batch_record(pending, parent_id)?
+            .ok_or(CoreError::NotFound)?;
+        if parent.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        let key = comparison_key(name.as_bytes());
+        if self.batch_lookup(pending, parent_id, &key)?.is_some() {
+            return Err(CoreError::Corrupt("log replay found the name already present".into()));
+        }
+        // IDs are monotonic and never reused; scrubbed (cancelled-unlogged)
+        // creates leave legal gaps that replay skips over.
+        if expected_object_id < pending.next_object_id {
+            return Err(CoreError::Corrupt(format!(
+                "log replay expected object {expected_object_id} below allocator watermark {}",
+                pending.next_object_id
+            )));
+        }
+        let object_id = expected_object_id;
+        pending.next_object_id = object_id
+            .checked_add(1)
+            .ok_or(CoreError::PrototypeLimit("object ID space exhausted"))?;
+        let (data_start, data_blocks) = match extents {
+            [] => (0u64, 0u64),
+            [(start, blocks)] => {
+                tx.allocate_exact_run(&mut self.dev, *start, *blocks as u64)?;
+                (*start, *blocks as u64)
+            }
+            _ => {
+                return Err(CoreError::PrototypeLimit(
+                    "multi-extent logged creates are not implemented",
+                ))
+            }
+        };
+        let block_size = self.dev.block_size();
+        pending.created_data.insert(object_id, (data_start, data_blocks));
+        pending.records.insert(
+            object_id,
+            Some(ObjectRecord {
+                object_id,
+                object_type: ObjectType::File,
+                flags: 0,
+                link_count: 1,
+                size_bytes,
+                allocated_bytes: data_blocks * block_size as u64,
+                created: now,
+                modified: now,
+                changed: now,
+                protection: 0,
+                content_generation: generation,
+                data_root: data_start,
+                data_blocks,
+            }),
+        );
+        pending.dir_changes.entry(parent_id).or_default().insert(
+            key,
+            Some(DirEntry {
+                key: comparison_key(name.as_bytes()),
+                name: name.as_bytes().to_vec(),
+                child_type_hint: 1,
+                child_id: object_id,
+            }),
+        );
+        Ok(())
+    }
+
     /// Publishes the batch: one directory-tree mutation per touched
     /// directory, freshly encoded object records, one object-map mutation,
     /// one checkpoint.
@@ -2081,9 +2601,14 @@ impl<D: BlockDevice> Volume<D> {
         mut pending: PendingBatch,
         now: Timespec,
         generation: u64,
+        force_commit: bool,
     ) -> Result<(), CoreError> {
         let block_size = self.dev.block_size();
         let mut meta_writes: Vec<(u64, Vec<u8>)> = Vec::new();
+
+        for (start, blocks) in std::mem::take(&mut pending.sacrificed) {
+            tx.abandon_uncommitted_run(&mut self.dev, start, blocks)?;
+        }
 
         let dir_ids: Vec<u64> = pending.dir_changes.keys().copied().collect();
         for dir_id in dir_ids {
@@ -2171,7 +2696,7 @@ impl<D: BlockDevice> Volume<D> {
                 }
             }
         }
-        if omap_encoded.is_empty() {
+        if omap_encoded.is_empty() && !force_commit {
             // Every operation cancelled out; there is no state to publish.
             return Ok(());
         }

@@ -35,6 +35,8 @@ pub struct CommittedState {
     pub object_map: LoadedObjectMap,
     pub allocation_records: Vec<afsplus_format::checkpoint::RegionRecord>,
     pub allocation_pool_blocks: Vec<u64>,
+    /// Permanently allocated intent-log slots (ADR-037); empty when disabled.
+    pub log_area_blocks: Vec<u64>,
     pub objects: BTreeMap<u64, ObjectRecord>,
     /// Directory trees keyed by owning directory object ID.
     pub directories: BTreeMap<u64, LoadedDirectory>,
@@ -350,11 +352,13 @@ pub fn load_committed_state<D: BlockDevice>(
     }
 
     let bitmaps = Bitmaps::load(dev, &geo, checkpoint)?;
+    let log_area_blocks = crate::intent_log::log_slot_lbas(&geo, ident.log_slots)?;
 
     Ok(CommittedState {
         object_map,
         allocation_records: allocation.records,
         allocation_pool_blocks: allocation_layout.pool_lbas,
+        log_area_blocks,
         objects,
         directories,
         reclaim_runs: reclaim.runs,
@@ -409,6 +413,11 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
                     "quarantined block {lba} belongs to the permanent allocation-root pool"
                 ));
             }
+            if state.log_area_blocks.contains(&lba) {
+                findings.push(format!(
+                    "quarantined block {lba} belongs to the intent-log area"
+                ));
+            }
         }
     }
 
@@ -430,6 +439,7 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
     accounted.extend(state.metadata_blocks.iter().copied());
     accounted.extend(state.data_blocks.iter().copied());
     accounted.extend(state.allocation_pool_blocks.iter().copied());
+    accounted.extend(state.log_area_blocks.iter().copied());
     for run in &state.reclaim_runs {
         accounted.extend(run.start..run.start + run.blocks as u64);
     }

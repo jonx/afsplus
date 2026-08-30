@@ -16,6 +16,7 @@ fn params(region_size: u32) -> MkfsParams {
         label: "TestVol".into(),
         region_size,
         reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: Timespec {
             seconds: 1_780_000_000,
             nanoseconds: 0,
@@ -49,8 +50,9 @@ fn mkfs_then_mount_yields_empty_root_at_generation_1() {
     assert_eq!(root.link_count, 1);
     // 64 blocks minus 9 reserved (bootstrap + descriptor + bitmap slots),
     // 4 initial metadata blocks (root record, root directory, object map,
-    // reclaim root), and the 3-block triple-version allocation-root pool.
-    assert_eq!(vol.free_blocks(), 48);
+    // reclaim root), the 3-block triple-version allocation-root pool, and
+    // the 8-slot intent-log area.
+    assert_eq!(vol.free_blocks(), 40);
 }
 
 #[test]
@@ -540,7 +542,8 @@ fn mount_reads_are_bounded_and_descendants_are_loaded_on_demand() {
     // ident + 2 checkpoints + object-map root + root record + directory root +
     // reclaim root. Object count, queue depth, and allocation-region pages do
     // not add reads to ordinary mount.
-    assert_eq!(after_mount.reads, 7);
+    // +1: mount probes the first intent-log slot (empty here).
+    assert_eq!(after_mount.reads, 8);
     assert_eq!(vol.allocator_ram_bytes(), 0);
     assert_eq!(vol.list_root().unwrap().len(), 10);
     assert!(vol.free_blocks() > 0);
@@ -562,7 +565,7 @@ fn one_gib_region_mount_is_bounded_and_small_commit_dirties_one_page() {
     let traced = TraceBackend::new(dev);
     let mut vol = mount(traced).unwrap();
     assert_eq!(vol.ident().geometry().bitmap_page_count(0), 9);
-    assert_eq!(vol.device_mut().stats().reads, 7);
+    assert_eq!(vol.device_mut().stats().reads, 8);
     assert_eq!(vol.allocator_ram_bytes(), 0);
 
     vol.device_mut().reset();
@@ -606,7 +609,18 @@ fn out_of_space_is_reported_and_state_survives() {
     // blocks; quarantine recycling keeps two
     // transactions viable, the third must fail cleanly.
     let mut dev = MemoryBackend::new(BS, 28);
-    mkfs(&mut dev, &params(16)).unwrap();
+    mkfs(
+        &mut dev,
+        &MkfsParams {
+            uuid: [42u8; 16],
+            label: "TestVol".into(),
+            region_size: 16,
+            reclaim_caps: Default::default(),
+            log_slots: 0,
+            timestamp: ts(0),
+        },
+    )
+    .unwrap();
     let mut vol = mount(dev).unwrap();
     vol.create_file_in_root("first.txt", b"", ts(0)).unwrap();
     vol.create_file_in_root("second.txt", b"", ts(1)).unwrap();
@@ -672,7 +686,7 @@ fn transaction_io_accounting() {
     // Mount: ident + 2 checkpoint slots + omap + root record + directory
     // root + reclaim root. Allocation pages are not read until the first
     // mutation.
-    assert_eq!(mount_stats.reads, 7);
+    assert_eq!(mount_stats.reads, 8);
     assert_eq!(mount_stats.writes, 0);
 }
 

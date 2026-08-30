@@ -47,6 +47,8 @@ pub struct VolumeSummary {
     pub reachable_data_blocks: usize,
     pub reclaim_pending_blocks: u64,
     pub reclaim_runs: usize,
+    /// Valid intent-log records awaiting replay (ADR-037).
+    pub log_records_pending: usize,
     pub free_blocks: u64,
 }
 
@@ -175,6 +177,45 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
             for finding in full_sweep(&state, &geo, &selection.chosen) {
                 report.errors.push(finding);
             }
+            // Intent-log validation (ADR-037): the valid prefix must
+            // reference only blocks the committed state considers FREE; a
+            // broken tail is a normal crash artifact.
+            let mut log_records_pending = 0;
+            match afsplus_core::intent_log::scan(
+                dev,
+                &geo,
+                ident.log_slots,
+                &ident.uuid,
+                selection.chosen.generation,
+            ) {
+                Ok(scanned) => {
+                    log_records_pending = scanned.records.len();
+                    if let Some(note) = scanned.tail_note {
+                        report.warnings.push(format!("intent log tail: {note}"));
+                    }
+                    for record in &scanned.records {
+                        for op in &record.ops {
+                            let afsplus_format::intent_log::LogOp::Create {
+                                extents, ..
+                            } = op
+                            else {
+                                continue;
+                            };
+                            for (start, blocks) in extents {
+                                for lba in *start..*start + *blocks as u64 {
+                                    if state.bitmaps.is_allocated(lba) {
+                                        report.errors.push(format!(
+                                            "log record {} references allocated block {lba}",
+                                            record.sequence
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => report.warnings.push(format!("intent log unreadable: {e}")),
+            }
             report.volume = Some(VolumeSummary {
                 uuid_hex: hex(&ident.uuid),
                 label: ident.label.clone(),
@@ -187,6 +228,7 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
                 reachable_data_blocks: state.data_blocks.len(),
                 reclaim_pending_blocks: state.reclaim_pending_blocks,
                 reclaim_runs: state.reclaim_runs.len(),
+                log_records_pending,
                 free_blocks: state.bitmaps.free_blocks_total(),
             });
         }

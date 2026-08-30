@@ -129,6 +129,16 @@ per file versus 12.9 and 3 per-operation; a durable 2-op ref-update batch
 costs 10 writes and 3 barriers versus 27 and 7 for the three-transaction
 sequence.
 
+The intent log (ADR-037, experimental) closes blocker 2's forced-fsync
+path: `window_op`/`window_fsync`/`window_commit` run a live ADR-026 batch
+whose fsynced prefix is persisted as one multi-operation record per fsync
+in a reserved slot area (outside the allocator, like the bitmap slots);
+mount replays the valid record prefix — claiming each logged create's
+exact, CRC-verified data extents — and publishes one checkpoint. Crash
+matrices prove per-fsync-group all-or-nothing recovery. Measured: 2.2
+writes and 1.03 barriers per durable ref update versus 10 and 3 under
+group commit alone — the bake-off gate passed with a 2.9× barrier margin.
+
 The fsync workload harness (`tests/fsync_workloads.rs`) measures blocker 2:
 per durable operation, checkpoint-per-op costs 9–27 block writes and 3–7
 barriers on Git-style workloads versus a ~1.1-write/1.05-barrier intent-log

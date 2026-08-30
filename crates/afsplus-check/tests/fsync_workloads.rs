@@ -39,6 +39,7 @@ fn fresh_volume(total_blocks: u64) -> Volume<TraceBackend<MemoryBackend>> {
             label: "FsyncBench".into(),
             region_size: 16_384,
             reclaim_caps: Default::default(),
+            log_slots: 64,
             timestamp: ts(0),
         },
     )
@@ -173,6 +174,48 @@ fn ref_update(vol: &mut Volume<TraceBackend<MemoryBackend>>, totals: &mut Totals
 
 fn run_workloads(updates: u64, files: u64, appends: u64) -> Vec<WorkloadRow> {
     let mut rows = Vec::new();
+
+    // --- ref updates through the intent log: fsync per update, checkpoint
+    // every 64 updates (ADR-037) -----------------------------------------
+    let mut vol = fresh_volume(65_536);
+    vol.device_mut().reset();
+    let mut totals = Totals::default();
+    let start = Instant::now();
+    for i in 0..updates {
+        let content = format!("ref {i}\n");
+        vol.window_op(
+            &BatchOp::CreateFile {
+                parent_id: afsplus_format::OBJECT_ROOT,
+                name: "HEAD.lock",
+                content: content.as_bytes(),
+            },
+            ts(i as i64),
+        )
+        .unwrap();
+        vol.window_op(
+            &BatchOp::Rename {
+                source_parent_id: afsplus_format::OBJECT_ROOT,
+                source_name: "HEAD.lock",
+                target_parent_id: afsplus_format::OBJECT_ROOT,
+                target_name: "HEAD",
+                replace: true,
+            },
+            ts(i as i64),
+        )
+        .unwrap();
+        vol.window_fsync().unwrap();
+        if (i + 1) % 64 == 0 {
+            vol.window_commit(ts(i as i64)).unwrap();
+            totals.absorb(vol.last_commit_stats().unwrap());
+        }
+    }
+    vol.window_commit(ts(updates as i64)).unwrap();
+    totals.wall_micros = start.elapsed().as_micros();
+    let io = vol.device_mut().stats();
+    rows.push(WorkloadRow { name: "ref update logged(64)", logical_ops: updates, totals, io });
+    let mut dev = vol.into_device().into_inner();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
 
     // --- ref updates, group-committed: one 2-op batch per durable update --
     let mut vol = fresh_volume(65_536);

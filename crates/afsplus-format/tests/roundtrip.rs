@@ -9,6 +9,7 @@ use afsplus_format::dir::{comparison_key, DirBlock, DirEntry};
 use afsplus_format::geometry::Geometry;
 use afsplus_format::header::BlockHeader;
 use afsplus_format::ident::Identification;
+use afsplus_format::intent_log::{LogOp, LogRecord};
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::omap::ObjectMap;
 use afsplus_format::reclaim::{
@@ -33,6 +34,7 @@ fn sample_ident() -> Identification {
         block_shift: DEFAULT_BLOCK_SHIFT,
         checksum_algorithm: CHECKSUM_CRC32C,
         region_size: 256,
+        log_slots: 8,
         total_blocks: 1024,
         checkpoint_slots: [1, 2],
         metadata_start: 9,
@@ -359,6 +361,62 @@ fn reclaim_structures_reject_inconsistencies() {
     // Empty sealed blocks are invalid by construction.
     assert!(ReclaimSegment::default().encode(BS, 1).is_err());
     assert!(ReclaimTable::default().encode(BS, 1).is_err());
+}
+
+fn sample_log_record() -> LogRecord {
+    LogRecord {
+        uuid: [7u8; 16],
+        base_generation: 9,
+        sequence: 2,
+        ops: vec![
+            LogOp::Create {
+                parent_id: 1,
+                name: b"HEAD.lock".to_vec(),
+                expected_object_id: 21,
+                size_bytes: 5000,
+                content_crc: 0xDEAD_BEEF,
+                extents: vec![(300, 2)],
+            },
+            LogOp::Delete { parent_id: 1, name: b"old".to_vec() },
+            LogOp::Rename {
+                source_parent_id: 1,
+                source_name: b"HEAD.lock".to_vec(),
+                target_parent_id: 1,
+                target_name: b"HEAD".to_vec(),
+                replace: true,
+            },
+        ],
+    }
+}
+
+#[test]
+fn intent_log_record_roundtrip_and_rejections() {
+    let record = sample_log_record();
+    let block = record.encode(BS).unwrap();
+    assert_eq!(LogRecord::decode(&block).unwrap(), record);
+
+    // Zero-length runs, missing IDs, and oversized groups are rejected.
+    let mut bad = sample_log_record();
+    bad.ops[0] = LogOp::Create {
+        parent_id: 1,
+        name: b"x".to_vec(),
+        expected_object_id: 0,
+        size_bytes: 0,
+        content_crc: 0,
+        extents: Vec::new(),
+    };
+    assert!(bad.encode(BS).is_err());
+    let mut bad = sample_log_record();
+    if let LogOp::Create { extents, .. } = &mut bad.ops[0] {
+        extents[0].1 = 0;
+    }
+    assert!(bad.encode(BS).is_err());
+    let mut bad = sample_log_record();
+    bad.sequence = 0;
+    assert!(bad.encode(BS).is_err());
+    let mut bad = sample_log_record();
+    bad.ops.clear();
+    assert!(bad.encode(BS).is_err());
 }
 
 #[test]

@@ -29,6 +29,7 @@ pub mod dir;
 pub mod geometry;
 pub mod header;
 pub mod ident;
+pub mod intent_log;
 pub mod le;
 pub mod object;
 pub mod omap;

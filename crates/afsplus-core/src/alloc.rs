@@ -440,6 +440,52 @@ impl TxAllocator {
         self.retire_run(dev, lba, 1)
     }
 
+    /// Claims a specific free run (intent-log replay: the record names the
+    /// exact extents whose data survived the crash). Every block must be
+    /// FREE in the working state; the run then behaves like any allocation
+    /// of this transaction.
+    pub fn allocate_exact_run<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        start: u64,
+        blocks: u64,
+    ) -> Result<(), CoreError> {
+        if blocks == 0 {
+            return Err(CoreError::Corrupt("claiming an empty run".into()));
+        }
+        let end = start
+            .checked_add(blocks)
+            .ok_or_else(|| CoreError::Corrupt("claimed run end overflows".into()))?;
+        for lba in start..end {
+            if !self.geo.is_allocatable(lba) {
+                return Err(CoreError::Corrupt(format!(
+                    "claimed block {lba} is not allocatable"
+                )));
+            }
+            let region = self.geo.region_of(lba);
+            let region_index = (lba - self.geo.region_base(region)) as u32;
+            let (page_index, local_index) = self.geo.bitmap_page_for_index(region_index);
+            if self
+                .page_mut(dev, region, page_index)?
+                .is_allocated(local_index)
+            {
+                return Err(CoreError::Corrupt(format!(
+                    "claimed block {lba} is already allocated"
+                )));
+            }
+            self.page_mut(dev, region, page_index)?
+                .set_allocated(local_index, true);
+            self.mark_dirty(region, page_index);
+        }
+        if !self.allocated_this_tx.insert(start, end) {
+            return Err(CoreError::Corrupt(format!(
+                "claimed run {start}+{blocks} overlaps this transaction"
+            )));
+        }
+        self.stats.blocks_allocated += blocks;
+        Ok(())
+    }
+
     /// Quarantines a committed run: its bits stay allocated and it enters
     /// the reclaim queue. Blocks allocated by this same transaction must use
     /// [`TxAllocator::release_uncommitted`] instead.
@@ -493,6 +539,42 @@ impl TxAllocator {
             if !self.dirty_pages.contains(&key) {
                 self.pages.remove(&key);
             }
+        }
+        self.reclaim
+            .as_mut()
+            .expect("reclaim lives until finish")
+            .append_run(&self.geo, start, blocks as u32)?;
+        self.stats.blocks_retired += blocks;
+        Ok(())
+    }
+
+    /// Quarantines a run this transaction allocated whose content a durable
+    /// log record still covers (ADR-037 sacrifice): the bits stay set and
+    /// the run enters the reclaim queue instead of returning to FREE.
+    pub fn abandon_uncommitted_run<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        start: u64,
+        blocks: u64,
+    ) -> Result<(), CoreError> {
+        let _ = dev;
+        if blocks == 0 || blocks > u32::MAX as u64 {
+            return Err(CoreError::Corrupt("abandoning invalid run".into()));
+        }
+        let end = start
+            .checked_add(blocks)
+            .ok_or_else(|| CoreError::Corrupt("abandoned run end overflows".into()))?;
+        for lba in start..end {
+            if !self.allocated_this_tx.remove_block(lba) {
+                return Err(CoreError::Corrupt(format!(
+                    "abandoning block {lba} that this transaction did not allocate"
+                )));
+            }
+        }
+        if !self.retired_this_tx.insert(start, end) {
+            return Err(CoreError::Corrupt(format!(
+                "run {start}+{blocks} abandoned twice"
+            )));
         }
         self.reclaim
             .as_mut()
@@ -756,6 +838,7 @@ mod tests {
                 label: "MultiPage".into(),
                 region_size: 262_144,
                 reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: Timespec::default(),
             },
         )
@@ -770,9 +853,9 @@ mod tests {
             .allocate_run(&mut dev, BITMAP_PAGE_BLOCKS as u64 + 1)
             .unwrap();
         // Four bootstrap metadata blocks (root record, root directory,
-        // object map, reclaim root) plus the three-image allocation-root
-        // pool precede ordinary free space.
-        assert_eq!(start, geo.region0_reserved_blocks() + 7);
+        // object map, reclaim root), the three-image allocation-root pool,
+        // and the eight-slot intent-log area precede ordinary free space.
+        assert_eq!(start, geo.region0_reserved_blocks() + 15);
         let finished = tx.finish(&mut dev).unwrap();
         assert_eq!(finished.bitmap_writes.len(), 2);
         assert_eq!(finished.descriptor_writes.len(), 1);

@@ -16,7 +16,7 @@
 //! 16     16   filesystem UUID
 //! 32     1    logical block shift
 //! 33     1    checksum algorithm identifier
-//! 34     2    reserved (zero)
+//! 34     2    intent-log slot count (0 = no log area; ADR-037)
 //! 36     4    allocation region size in blocks
 //! 40     8    total logical blocks
 //! 48     8    checkpoint slot A LBA
@@ -46,6 +46,8 @@ pub struct Identification {
     pub block_shift: u8,
     pub checksum_algorithm: u8,
     pub region_size: u32,
+    /// Reserved intent-log slots after the allocation-root pool (ADR-037).
+    pub log_slots: u16,
     pub total_blocks: u64,
     pub checkpoint_slots: [u64; 2],
     pub metadata_start: u64,
@@ -86,6 +88,7 @@ impl Identification {
         p[16..32].copy_from_slice(&self.uuid);
         p[32] = self.block_shift;
         p[33] = self.checksum_algorithm;
+        le::put_u16(&mut p[34..36], self.log_slots);
         le::put_u32(&mut p[36..40], self.region_size);
         le::put_u64(&mut p[40..48], self.total_blocks);
         le::put_u64(&mut p[48..56], self.checkpoint_slots[0]);
@@ -132,6 +135,7 @@ impl Identification {
         if checksum_algorithm != CHECKSUM_CRC32C {
             return Err(FormatError::Invalid("unsupported checksum algorithm"));
         }
+        let log_slots = le::get_u16(&p[34..36]);
         let region_size = le::get_u32(&p[36..40]);
         let label_len = p[72] as usize;
         if label_len > LABEL_MAX_BYTES {
@@ -145,6 +149,7 @@ impl Identification {
             block_shift,
             checksum_algorithm,
             region_size,
+            log_slots,
             total_blocks: le::get_u64(&p[40..48]),
             checkpoint_slots: [le::get_u64(&p[48..56]), le::get_u64(&p[56..64])],
             metadata_start: le::get_u64(&p[64..72]),

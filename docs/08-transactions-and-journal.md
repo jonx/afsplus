@@ -162,6 +162,8 @@ A global checkpoint is conceptually simple, but a small-file `fsync()` must not 
 
 The first implementation should build the simplest checkpoint-COW path first and measure it.
 
+Both amortization mechanisms are now implemented and measured in the executable prototype (`implementation/fsync-intent-log-baseline.md`): bounded atomic batches (ADR-026) group-commit bursts under one checkpoint, and the experimental intent log (ADR-037) makes a forced fsync cost ~1 sequential record write plus one barrier between checkpoints, with per-fsync-group all-or-nothing crash recovery.
+
 Required benchmark:
 
 ```text

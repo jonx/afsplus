@@ -25,6 +25,7 @@
 //! the retired-block quarantine.
 
 pub mod alloc;
+pub mod intent_log;
 pub mod reclaim;
 pub mod allocation_root;
 pub mod cow_tree;
@@ -95,6 +96,10 @@ pub enum CoreError {
     PrototypeLimit(&'static str),
     /// Device geometry unsupported by the prototype.
     UnsupportedGeometry(&'static str),
+    /// An operation window is open; immediate-commit operations are refused.
+    WindowOpen,
+    /// The open window failed mid-mutation; remount to recover from the log.
+    WindowPoisoned,
 }
 
 impl fmt::Display for CoreError {
@@ -119,6 +124,12 @@ impl fmt::Display for CoreError {
             CoreError::NoSpace => write!(f, "no space left on volume"),
             CoreError::PrototypeLimit(what) => write!(f, "prototype limit: {what}"),
             CoreError::UnsupportedGeometry(what) => write!(f, "unsupported geometry: {what}"),
+            CoreError::WindowOpen => {
+                write!(f, "an operation window is open; fsync or commit it first")
+            }
+            CoreError::WindowPoisoned => {
+                write!(f, "the operation window failed mid-mutation; remount to recover")
+            }
         }
     }
 }

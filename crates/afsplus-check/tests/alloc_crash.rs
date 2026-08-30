@@ -40,6 +40,7 @@ fn setup_g1() -> (MemoryBackend, u64) {
             label: "AllocVol".into(),
             region_size: 64,
             reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: ts(0),
         },
     )

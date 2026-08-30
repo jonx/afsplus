@@ -27,6 +27,7 @@ use afsplus_format::{
 
 use crate::allocation_root;
 use crate::directory;
+use crate::intent_log;
 use crate::layout;
 use crate::object_map;
 use crate::CoreError;
@@ -39,6 +40,8 @@ pub struct MkfsParams {
     /// Reclaim-queue root-area capacities (ADR-036). Tests shrink these to
     /// force sealing and consumption with tiny transactions.
     pub reclaim_caps: ReclaimCaps,
+    /// Intent-log slots (ADR-037); 0 disables the log area.
+    pub log_slots: u16,
     pub timestamp: Timespec,
 }
 
@@ -112,7 +115,9 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         .iter()
         .copied()
         .collect();
+    let log_area = intent_log::log_slot_lbas(&geo, params.log_slots)?;
     let mut initially_allocated = allocation_pool.clone();
+    initially_allocated.extend(log_area.iter().copied());
     initially_allocated.insert(root_record_lba);
     initially_allocated.insert(root_dir_lba);
     initially_allocated.insert(omap_lba);
@@ -190,6 +195,7 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         block_shift: DEFAULT_BLOCK_SHIFT,
         checksum_algorithm: CHECKSUM_CRC32C,
         region_size: params.region_size,
+        log_slots: params.log_slots,
         total_blocks: geo.total_blocks,
         checkpoint_slots: [layout::CKPT_SLOT_A, layout::CKPT_SLOT_B],
         metadata_start,

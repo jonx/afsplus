@@ -1206,6 +1206,7 @@ mod tests {
                 label: "CowTree".into(),
                 region_size: 2048,
                 reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: Timespec::default(),
             },
         )
@@ -1600,6 +1601,7 @@ mod tests {
                 label: "CowTreeBadLevel".into(),
                 region_size: 2048,
                 reclaim_caps: Default::default(),
+            log_slots: 8,
             timestamp: Timespec::default(),
             },
         )
