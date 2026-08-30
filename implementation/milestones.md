@@ -12,7 +12,7 @@ through a host mount and a MacAROS adapter. Format epoch 1 remains unfrozen.
 | M03 | RW core | Prototype complete | create/read/write/rename/unlink on images |
 | M04 | Journal | Prototype complete, format experimental | exhaustive crash-point suite passes |
 | M05 | Checker | Prototype complete | corruption corpus detected safely |
-| M06 | AROS handler | Partial: complete off-tree AROS module links; in-tree package and runtime gates pending | classic apps operate without recompilation |
+| M06 | AROS handler | Partial: checked off-tree module, DOSDriver, probe and image package; in-tree build and runtime gates pending | classic apps operate without recompilation |
 | M07 | FS API v2 | Portable subset implemented | 64-bit and capability tests pass |
 | M08 | FUSE | Host mount qualified; same-image AROS gate pending | same image read/write on host and AROS |
 | M09 | Catalog | Not started | multi-million object enumeration fast path |
@@ -21,3 +21,8 @@ through a host mount and a MacAROS adapter. Format epoch 1 remains unfrozen.
 | M12 | Classic reader | Not started | constrained profile implementation demonstrated |
 | M13 | App qualification | Partial harness | Cargo/Git/Zed/Ferail/Moonstone workloads |
 | M14 | Epoch 1 | Not started | format stability and external review |
+
+M06/M08 first qualify AFS+ as a secondary same-image volume. The subsequent
+system-volume ladder and AFS/FFS comparison contract are specified in
+`testing/aros-system-volume-qualification.md`; a post-bootstrap `SYS:` pivot and
+a boot-selected AFS+ volume are separate acceptance claims.

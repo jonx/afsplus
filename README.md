@@ -175,8 +175,10 @@ switches are inert, use the diagnostic and reversible workaround in
 transport is not a raw substitute for macFUSE's message channel; see ADR-040.
 The native AROS bridge and its cross-build qualification are documented in
 [`docs/aros-native-bridge.md`](docs/aros-native-bridge.md), ADR-042 through
-ADR-045. MacAROS build/package integration and the runtime mount remain explicit
-Alpha-0 gates; a link-complete target module is not claimed as an executed
+ADR-045. `tools/package-aros-alpha0.sh` now produces a checked, off-tree
+handler, DOSDriver, target probe and sparse image without modifying MacAROS.
+In-tree build integration and the runtime same-image/crash-replay mount remain
+explicit Alpha-0 gates; a packaged target module is not claimed as an executed
 native mount.
 Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen are not
 format commitments. Incompatible format changes must update the format epoch

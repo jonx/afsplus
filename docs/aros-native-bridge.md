@@ -54,6 +54,18 @@ paired with the current MacAROS Rust target and `rust-aros` standard library.
 Override `AFSPLUS_AROS_RUST_TOOLCHAIN` only with a correspondingly rebased
 target and standard library.
 
+To materialize, without installing, everything needed for the first target
+run, use:
+
+```sh
+tools/package-aros-alpha0.sh
+```
+
+It creates `build/aros-alpha0` atomically and refuses to replace an existing
+package. The directory contains the complete handler, target operation probe,
+DOSDriver, clean 64-MiB `fdsk.device` image, host checker report, instructions
+and hashes. No MacAROS tree is modified by the packaging command.
+
 ## Trackdisk viewport
 
 Use `afsplus_aros_trackdisk_geometry` to convert the non-negative `DosEnvec`
@@ -146,9 +158,10 @@ never the command-oriented `startup.o`.
 ## Remaining native gate
 
 The next integration step is to add this source set as a MacAROS handler build
-target and package its DOSDriver. It must then mount the same image used by the
-host, execute create/read/write/truncate/rename/fsync, reboot at controlled durability
-points, replay, unmount and pass the strict host checker.
+target and install the already qualified off-tree package into a dedicated test
+tree. It must then mount the same image used by the host, execute
+create/read/write/truncate/rename/fsync, reboot at controlled durability points,
+replay, unmount and pass the strict host checker.
 
 The fixed-image Alpha-0 path does not yet install `TD_ADDCHANGEINT` handling.
 Hot-swappable media remains disabled until removal can detach the mounted Rust

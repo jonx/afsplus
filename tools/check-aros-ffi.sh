@@ -9,6 +9,7 @@ aros_build=${AROS_BUILD:-"$HOME/aros-build"}
 aros_crosstools=${AROS_CROSSTOOLS:-"$HOME/aros-crosstools"}
 aros_m68k_build=${AROS_M68K_BUILD:-"$HOME/aros-m68k-build"}
 rust_toolchain=${AFSPLUS_AROS_RUST_TOOLCHAIN:-nightly-2026-06-27}
+handler_output=${AFSPLUS_AROS_HANDLER_OUTPUT:-}
 target_json="$macaros_root/hosted/rust/aarch64-unknown-aros.json"
 aros_clang="$aros_crosstools/bin/clang"
 aros_ld="$aros_crosstools/bin/ld.lld"
@@ -227,7 +228,6 @@ for symbol in afsplus_Handler handler afsplus_aros_mount; do
         exit 65
     }
 done
-
 if [ "${AFSPLUS_AROS_SKIP_M68K_ABI:-0}" != 1 ]; then
     require_executable "$m68k_cc"
     require_file "$m68k_include/dos/dos64.h"
@@ -267,6 +267,18 @@ if [ "${AFSPLUS_AROS_SKIP_M68K_ABI:-0}" != 1 ]; then
             -I "$task_dir/module" -c "$task_dir/module/$source.c" \
             -o "$task_dir/module/$source-m68k.o"
     done
+fi
+
+if [ -n "$handler_output" ]; then
+    handler_output_dir=$(dirname -- "$handler_output")
+    mkdir -p "$handler_output_dir"
+    [ ! -e "$handler_output" ] || {
+        echo "Refusing to replace handler output: $handler_output" >&2
+        exit 73
+    }
+    cp "$task_dir/afsplus-handler" "$handler_output"
+    chmod +x "$handler_output"
+    echo "[aros-ffi] handler artifact: $handler_output"
 fi
 
 echo "[aros-ffi] PASS"

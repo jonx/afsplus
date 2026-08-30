@@ -52,6 +52,10 @@ Where platform permits, compare against representative filesystems such as:
 
 Cross-filesystem results must state platform, mount options, cache state, storage medium, OS version, and whether the filesystem is native or FUSE/user-space.
 
+Native AROS system-volume qualification and the required separation between
+MacAROS, constrained, emulated-classic and physical-machine results are defined
+in `testing/aros-system-volume-qualification.md`.
+
 ## 3. Mandatory workload classes
 
 ### Small-file development tree

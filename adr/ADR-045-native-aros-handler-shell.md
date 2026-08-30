@@ -68,9 +68,10 @@ handler module with no undefined symbols. The generated entry and shell also
 compile with the m68k SDK, while the m68k Rust library remains outside the
 supported Alpha-0 path described by ADR-042.
 
-The source is ready to become a MacAROS handler target, but the off-tree module
-link is not a runtime-mount claim. The remaining gates are build/package
-integration, a DOSDriver for an AFS+ image, target execution of the same-image
-operation matrix and crash replay, plus removable-media notification handling
-before hot-swappable devices are supported. No MacAROS source tree is modified
-by this decision.
+`tools/package-aros-alpha0.sh` turns the qualified off-tree link into a
+self-contained pre-install artifact: handler, DOSDriver, target operation
+probe, full-length sparse image, clean host-checker report and hashes. This is
+still not a runtime-mount claim. The remaining gates are in-tree build
+integration, target execution of the same-image operation matrix and crash
+replay, plus removable-media notification handling before hot-swappable
+devices are supported. No MacAROS source tree is modified by this decision.
