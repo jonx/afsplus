@@ -12,17 +12,20 @@ required-features = ["fuser-adapter"]
 
 [features]
 default = []
-fuser-adapter = ["dep:fuser", "dep:libc"]
+fuser-adapter = ["dep:fuser", "dep:libc", "dep:log"]
+macfuse-mount = ["fuser-adapter", "dep:afsplus-macfuse-sys"]
 
 [dependencies]
 afsplus-block = { path = "../afsplus-block" }
 afsplus-core = { path = "../afsplus-core" }
+afsplus-macfuse-sys = { path = "../afsplus-macfuse-sys", optional = true }
 afsplus-format = { path = "../afsplus-format" }
 afsplus-vfs = { path = "../afsplus-vfs" }
 libc = { version = "0.2", optional = true }
+log = { version = "0.4", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-fuser = { version = "0.18", optional = true, features = ["macos-no-mount"] }
+fuser = { version = "0.18", optional = true, features = ["macfuse-4-compat", "macos-no-mount"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 fuser = { version = "0.18", optional = true }

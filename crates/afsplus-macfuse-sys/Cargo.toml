@@ -1,0 +1,14 @@
+[package]
+name = "afsplus-macfuse-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libloading = "0.8"
+
+# This crate is the audited native boundary. All higher AFS+ crates retain the
+# workspace-wide unsafe-code prohibition.
+[lints.rust]
+unsafe_code = "allow"

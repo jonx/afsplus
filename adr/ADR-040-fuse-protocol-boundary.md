@@ -7,7 +7,7 @@ Status: Accepted for Mountable Alpha-0
 The portable VFS slice from ADR-039 must be exercised through real host
 filesystem operations, but tying all FUSE semantics to callback reply objects
 would make most behavior untestable on machines without a compatible kernel
-driver. The development Mac currently has Fuse-T rather than macFUSE; `fuser`
+driver. The development Mac initially had Fuse-T rather than macFUSE; `fuser`
 can compile its callback contract there, but its built-in macOS mount path
 expects the macFUSE libfuse-2 compatibility package.
 
@@ -41,14 +41,24 @@ sync contract.
 
 `afsplus-mount` opens an image, widens sparse host-file geometry from the AFS+
 identification block, applies the selected mount mode and enters the fuser
-session. Linux can use fuser's native mount path. macOS builds use fuser's
-test-only no-mount mode until either macFUSE is present or a separately
-qualified Fuse-T bridge supplies the mounted FUSE descriptor.
+session. Linux uses fuser's native mount path. macOS ordinary builds retain
+fuser's test-only no-mount mode. The `macfuse-mount` feature dynamically loads
+macFUSE's libfuse-2 compatibility entry point in a tiny audited `-sys` crate,
+then hands the resulting protocol descriptor to `fuser::Session::from_fd`.
+This keeps build and test machines independent of a system installation.
+
+A direct Fuse-T experiment reached INIT, STATFS and GETATTR, but Fuse-T then
+closed the session. This follows from its architecture: Fuse-T translates
+through an NFS transport and its descriptor lifecycle is driven by its own
+libfuse loop; it is not a drop-in raw macFUSE/kernel protocol channel for a
+separate fuser event loop. A Fuse-T backend would therefore need a dedicated
+adapter rather than a symbol-name alias and is outside this Alpha-0 path.
 
 ## Consequences
 
 The full operation slice, sparse reads, replacement, remount/checker behavior,
 directory pagination and failure modes run in CI without mounting. Kernel
-integration is a thin, independently compilable layer. A successful build on
-macOS does not yet claim a successful host mount; that qualification remains
-an explicit Alpha-0 gate.
+integration is a thin, independently compilable layer. macOS does not claim a
+successful host mount until the `macfuse-mount` workflow passes the same
+operation matrix and checker after unmount; that qualification remains an
+explicit Alpha-0 gate.

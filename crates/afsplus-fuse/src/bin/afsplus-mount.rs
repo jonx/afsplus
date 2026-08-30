@@ -1,3 +1,4 @@
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -12,12 +13,44 @@ use afsplus_vfs::Vfs;
 use fuser::{Config, MountOption};
 
 fn main() -> ExitCode {
+    init_logging();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("afsplus-mount: {error}");
             ExitCode::from(1)
         }
+    }
+}
+
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::max_level()
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            eprintln!("{} {}: {}", record.level(), record.target(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: StderrLogger = StderrLogger;
+
+fn init_logging() {
+    let level = match std::env::var("AFSPLUS_LOG").as_deref() {
+        Ok("trace") => log::LevelFilter::Trace,
+        Ok("debug") => log::LevelFilter::Debug,
+        Ok("info") => log::LevelFilter::Info,
+        Ok("warn") => log::LevelFilter::Warn,
+        _ => log::LevelFilter::Error,
+    };
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(level);
     }
 }
 
@@ -55,15 +88,52 @@ fn run() -> Result<(), String> {
         },
     ];
 
-    fuser::mount(filesystem, &mountpoint, &config).map_err(|error| {
-        if cfg!(target_os = "macos") {
-            format!(
-                "FUSE mount failed: {error}. This build validates the adapter on macOS but needs the macFUSE/Fuse-T native mount bridge"
-            )
-        } else {
-            format!("FUSE mount failed: {error}")
-        }
+    mount_session(filesystem, &mountpoint, config, &identification.label, mode).map_err(|error| {
+        #[cfg(all(target_os = "macos", not(feature = "macfuse-mount")))]
+        return format!(
+            "FUSE mount failed: {error}. Install macFUSE and rebuild with --features macfuse-mount"
+        );
+        #[cfg(not(all(target_os = "macos", not(feature = "macfuse-mount"))))]
+        format!("FUSE mount failed: {error}")
     })
+}
+
+#[cfg(all(target_os = "macos", feature = "macfuse-mount"))]
+fn mount_session(
+    filesystem: FuserFilesystem<FileBackend>,
+    mountpoint: &Path,
+    config: Config,
+    label: &str,
+    mode: MountMode,
+) -> io::Result<()> {
+    let options = vec![
+        "fsname=afsplus".to_string(),
+        format!("volname={label}"),
+        if mode == MountMode::ReadWrite {
+            "rw".to_string()
+        } else {
+            "ro".to_string()
+        },
+        "nodev".to_string(),
+        "nosuid".to_string(),
+    ];
+    let mut native_mount = afsplus_macfuse_sys::MacFuseMount::new(mountpoint, &options)?;
+    let descriptor = native_mount.take_descriptor()?;
+    let session = fuser::Session::from_fd(filesystem, descriptor, config.acl, config)?;
+    let result = session.run();
+    drop(native_mount);
+    result
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macfuse-mount")))]
+fn mount_session(
+    filesystem: FuserFilesystem<FileBackend>,
+    mountpoint: &Path,
+    config: Config,
+    _label: &str,
+    _mode: MountMode,
+) -> io::Result<()> {
+    fuser::mount(filesystem, mountpoint, &config)
 }
 
 fn arguments() -> Result<(MountMode, PathBuf, PathBuf), String> {

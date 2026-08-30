@@ -162,9 +162,10 @@ VFS API and FUSE protocol adapter. The adapter and mount CLI can be built with:
 cargo build -p afsplus-fuse --features fuser-adapter --bin afsplus-mount
 ```
 
-Linux uses fuser's native mount path. The callbacks compile and are tested on
-macOS, while a real Fuse-T/macFUSE mount is still an explicit qualification
-gate; see ADR-040. Fields marked `TBD`, Proposed, experimental, or otherwise
-unfrozen are not format commitments. Incompatible format changes must update
-the format epoch or use feature negotiation as defined in the compatibility
-specification.
+Linux uses fuser's native mount path. On macOS, install macFUSE and build with
+`--features macfuse-mount`; the library is loaded at runtime, so ordinary
+workspace builds do not require a system FUSE installation. Fuse-T's NFS
+transport is not a raw substitute for macFUSE's protocol descriptor; see
+ADR-040. Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen
+are not format commitments. Incompatible format changes must update the format
+epoch or use feature negotiation as defined in the compatibility specification.
