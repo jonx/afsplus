@@ -88,6 +88,27 @@ impl TreeNode {
         self.level == 0
     }
 
+    /// Number of fixed-size items that fit in one encoded node. Typed tree
+    /// adapters use this instead of constructing and repeatedly growing a
+    /// temporary node merely to discover its capacity.
+    pub fn fixed_item_capacity(
+        block_size: usize,
+        key_len: usize,
+        value_len: usize,
+    ) -> Result<usize, FormatError> {
+        if key_len == 0 || key_len > MAX_TREE_KEY_BYTES || value_len == 0 {
+            return Err(FormatError::Invalid("tree item length out of range"));
+        }
+        let item_len = ITEM_FIXED
+            .checked_add(key_len)
+            .and_then(|length| length.checked_add(value_len))
+            .ok_or(FormatError::Overflow("tree item length"))?;
+        let available = block_size
+            .checked_sub(HEADER_SIZE + FIXED_PAYLOAD)
+            .ok_or(FormatError::Overflow("tree node fixed payload"))?;
+        Ok(available / item_len)
+    }
+
     pub fn encoded_len(&self) -> Result<usize, FormatError> {
         let mut length = FIXED_PAYLOAD;
         for item in &self.items {

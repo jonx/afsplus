@@ -882,8 +882,8 @@ int32_t afsplus_aros_packet_process(
     {
         struct FileHandle *public_file = packet->dp_Arg1 != 0
             ? (struct FileHandle *)BADDR((BPTR)packet->dp_Arg1) : NULL;
-        const uint8_t *path;
-        uint32_t path_length;
+        const uint8_t *path = NULL;
+        uint32_t path_length = 0;
         uint64_t base;
         uint64_t id = 0;
         uint32_t mode;

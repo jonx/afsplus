@@ -13,6 +13,16 @@ pub const BOOTSTRAP_BLOCKS: u64 = 3;
 pub const MAX_REGION_BLOCKS: u32 = 262_144;
 pub const MIN_REGION_BLOCKS: u32 = 16;
 
+fn u64_is_below(left: u64, right: u64) -> bool {
+    let left_high = (left >> 32) as u32;
+    let right_high = (right >> 32) as u32;
+    if left_high != right_high {
+        left_high < right_high
+    } else {
+        (left as u32) < (right as u32)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
     pub block_size: usize,
@@ -42,15 +52,12 @@ impl Geometry {
         // regular full region. Keep identification validation O(1): mount
         // must not loop once per allocation region.
         let last_region = regions as u32 - 1;
-        for region in [0, last_region] {
-            let valid = self.region_valid_blocks(region);
-            let reserved = self.region_reserved_blocks(region)
-                + if region == 0 { BOOTSTRAP_BLOCKS } else { 0 };
-            if valid as u64 <= reserved {
-                return Err(FormatError::Invalid(
-                    "allocation region is all reserved metadata",
-                ));
-            }
+        if !self.region_has_allocatable_blocks(0)
+            || (last_region != 0 && !self.region_has_allocatable_blocks(last_region))
+        {
+            return Err(FormatError::Invalid(
+                "allocation region is all reserved metadata",
+            ));
         }
         Ok(())
     }
@@ -92,8 +99,26 @@ impl Geometry {
     }
 
     /// Descriptor plus bitmap slots reserved at the start of this region.
+    #[inline(never)]
     pub fn region_reserved_blocks(&self, region: u32) -> u64 {
-        DESCRIPTOR_SLOTS as u64 + self.bitmap_page_count(region) as u64 * BITMAP_SLOTS as u64
+        self.region_reserved_blocks_u32(region) as u64
+    }
+
+    fn region_reserved_blocks_u32(&self, region: u32) -> u32 {
+        DESCRIPTOR_SLOTS as u32 + self.bitmap_page_count(region) * BITMAP_SLOTS as u32
+    }
+
+    fn region_has_allocatable_blocks(&self, region: u32) -> bool {
+        // Both values are region-relative and bounded by MAX_REGION_BLOCKS.
+        // Keep this comparison 32-bit on 32-bit targets; widening it adds no
+        // range and needlessly depends on emulated 64-bit comparison.
+        let reserved = self.region_reserved_blocks(region) as u32
+            + if region == 0 {
+                BOOTSTRAP_BLOCKS as u32
+            } else {
+                0
+            };
+        self.region_valid_blocks(region) > reserved
     }
 
     pub fn region0_reserved_blocks(&self) -> u64 {
@@ -118,17 +143,32 @@ impl Geometry {
     }
 
     pub fn is_reserved(&self, lba: u64) -> bool {
-        if lba >= self.total_blocks {
+        if !u64_is_below(lba, self.total_blocks) {
             return false;
         }
         let region = self.region_of(lba);
-        let offset = lba - self.region_base(region);
-        let reserved =
-            self.region_reserved_blocks(region) + if region == 0 { BOOTSTRAP_BLOCKS } else { 0 };
+        let offset = (lba - self.region_base(region)) as u32;
+        let reserved = self.region_reserved_blocks(region) as u32
+            + if region == 0 {
+                BOOTSTRAP_BLOCKS as u32
+            } else {
+                0
+            };
         offset < reserved
     }
 
     pub fn is_allocatable(&self, lba: u64) -> bool {
-        lba < self.total_blocks && !self.is_reserved(lba)
+        if !u64_is_below(lba, self.total_blocks) {
+            return false;
+        }
+        let region = self.region_of(lba);
+        let offset = (lba - self.region_base(region)) as u32;
+        let reserved = self.region_reserved_blocks(region) as u32
+            + if region == 0 {
+                BOOTSTRAP_BLOCKS as u32
+            } else {
+                0
+            };
+        offset >= reserved
     }
 }

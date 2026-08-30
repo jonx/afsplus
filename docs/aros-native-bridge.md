@@ -269,13 +269,26 @@ AFSPLUS_AROS_M68K_SYSTEM_ISO=/path/to/aros-amiga-m68k.iso \
     tools/check-aros-m68k-boot-fsuae.sh
 ```
 
-This FS-UAE gate uses the ROM pair from the ISO, retains the official bootstrap
-floppy in `DF0:`, exposes the extracted system as the exactly named
+This first FS-UAE gate uses the ROM pair from the ISO, retains the official
+bootstrap floppy in `DF0:`, exposes the extracted system as the exactly named
 `AROS Live CD:` volume and captures the guest result through `HOST:`. It proves
-only the native m68k boot harness. It does not yet mount AFS+, qualify 68000
-code, claim A500 compatibility or provide hardware performance evidence.
-ADR-055 defines the emulator/hardware progression and the standalone-reproducer
-rule for any AROS patch discovered during qualification.
+only the native m68k boot harness.
+
+The complete M68020-or-newer filesystem reference gate uses the same media:
+
+```sh
+AFSPLUS_AROS_M68K_BOOT_ADF=/path/to/bootdisk-amiga-m68k.adf \
+AFSPLUS_AROS_M68K_SYSTEM_ISO=/path/to/aros-amiga-m68k.iso \
+    tools/check-aros-m68k-alpha0-fsuae.sh
+```
+
+It builds the Rust/C handler from scratch with the patched `m68k-ccr-fixed`
+toolchain, executes the Alpha-0 operation matrix and boots all six deterministic
+intent-log cuts. Every case is checked on the host, and the evidence binds the
+toolchain, handler, target, media and ROM hashes. ADR-056 records the accepted
+generation-7 Alpha-0 result and the four generation-2/two generation-3 replay
+outcomes. ADR-055 defines the remaining emulator/hardware progression and the
+standalone-reproducer rule for any AROS patch discovered during qualification.
 
 `afsram.device` writes only the retained boot image. `CMD_UPDATE` therefore
 tests the filesystem/device ordering path but cannot make data survive reset.
@@ -288,7 +301,9 @@ The fixed-image Alpha-0 path does not yet install `TD_ADDCHANGEINT` handling.
 Hot-swappable media remains disabled until removal can detach the mounted Rust
 instance and DOS volume without racing outstanding locks.
 
-The AArch64 library is cross-build qualified. The m68k header/layout is
-qualified, but the experimental m68k Rust `std` toolchain is not yet a
-production path; classic support will either repair that toolchain or move the
-core dependency graph to a bounded `no_std + alloc` profile.
+The experimental m68k Rust `std` toolchain now builds and runs the complete
+reference handler, but it is not yet the production A500 path. Its target is
+M68020 and its current LLVM CCR workaround is explicitly unsuitable as a plain
+68000 compatibility claim. Classic support still needs a 68000-safe compiler
+and PAL or a bounded `no_std + alloc`/portable-C profile, followed by the
+A500-configured emulator and physical-machine gates.

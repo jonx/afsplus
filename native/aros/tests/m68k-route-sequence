@@ -1,0 +1,15 @@
+C:FailAt 21
+Assign "FDSK:" "SYS:DiskImages"
+C:Mount DEVS:DOSDrivers/AFSPLUS19 >HOST:mount.out
+If WARN
+    C:Echo fail >HOST:mount.status
+Else
+    C:Echo pass >HOST:mount.status
+    C:AFSPlusRouteProbe >HOST:route.out
+    If WARN
+        C:Echo fail >HOST:route.status
+    Else
+        C:Echo pass >HOST:route.status
+    EndIf
+EndIf
+C:Shutdown

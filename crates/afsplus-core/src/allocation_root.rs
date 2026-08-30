@@ -48,7 +48,19 @@ pub fn key(region: u32) -> [u8; 4] {
 }
 
 pub fn value(record: RegionRecord) -> Result<[u8; VALUE_BYTES], CoreError> {
-    validate_record(record)?;
+    match validate_record(record) {
+        RecordValidation::Valid => {}
+        RecordValidation::DescriptorSlot => {
+            return Err(CoreError::Corrupt(
+                "allocation-root descriptor slot out of range".into(),
+            ));
+        }
+        RecordValidation::DescriptorGeneration => {
+            return Err(CoreError::Corrupt(
+                "allocation-root descriptor generation is zero".into(),
+            ));
+        }
+    }
     let mut encoded = [0u8; VALUE_BYTES];
     encoded[0] = record.descriptor_slot;
     encoded[4..8].copy_from_slice(&record.free_blocks.to_le_bytes());
@@ -199,24 +211,8 @@ struct BulkChild {
 }
 
 fn leaf_capacity(block_size: usize) -> Result<usize, CoreError> {
-    let record = RegionRecord {
-        descriptor_slot: 0,
-        free_blocks: 0,
-        descriptor_generation: 1,
-    };
-    let mut node = TreeNode::leaf(TreeKind::AllocationRoot, 0);
-    let mut capacity = 0usize;
-    loop {
-        node.items.push(TreeItem {
-            key: key(capacity as u32).to_vec(),
-            value: value(record)?.to_vec(),
-        });
-        node.subtree_items = node.items.len() as u64;
-        if !node.fits(block_size) {
-            break;
-        }
-        capacity += 1;
-    }
+    let capacity =
+        TreeNode::fixed_item_capacity(block_size, 4, VALUE_BYTES).map_err(CoreError::Format)?;
     if capacity == 0 {
         return Err(CoreError::UnsupportedGeometry(
             "block cannot hold one allocation-root record",
@@ -226,31 +222,7 @@ fn leaf_capacity(block_size: usize) -> Result<usize, CoreError> {
 }
 
 fn internal_fanout(block_size: usize) -> Result<usize, CoreError> {
-    let mut node = TreeNode {
-        kind: TreeKind::AllocationRoot,
-        owner: 0,
-        level: 1,
-        subtree_items: 1,
-        leftmost_child: 1,
-        leftmost_items: 1,
-        items: Vec::new(),
-    };
-    let mut separators = 0usize;
-    loop {
-        node.items.push(TreeItem {
-            key: key((separators + 1) as u32).to_vec(),
-            value: child_value(ChildRef {
-                lba: separators as u64 + 2,
-                subtree_items: 1,
-            })
-            .map_err(CoreError::Format)?,
-        });
-        node.subtree_items += 1;
-        if !node.fits(block_size) {
-            break;
-        }
-        separators += 1;
-    }
+    let separators = TreeNode::fixed_item_capacity(block_size, 4, 16).map_err(CoreError::Format)?;
     let fanout = separators + 1;
     if fanout < 2 {
         return Err(CoreError::UnsupportedGeometry(
@@ -432,7 +404,19 @@ fn decode_value(
         free_blocks: le::get_u32(&bytes[4..8]),
         descriptor_generation: le::get_u64(&bytes[8..16]),
     };
-    validate_record(record)?;
+    match validate_record(record) {
+        RecordValidation::Valid => {}
+        RecordValidation::DescriptorSlot => {
+            return Err(CoreError::Corrupt(
+                "allocation-root descriptor slot out of range".into(),
+            ));
+        }
+        RecordValidation::DescriptorGeneration => {
+            return Err(CoreError::Corrupt(
+                "allocation-root descriptor generation is zero".into(),
+            ));
+        }
+    }
     if region >= geo.region_count() || record.free_blocks > geo.region_valid_blocks(region) {
         return Err(CoreError::Corrupt(format!(
             "allocation-root record for region {region} exceeds geometry"
@@ -446,18 +430,25 @@ fn decode_value(
     Ok(record)
 }
 
-fn validate_record(record: RegionRecord) -> Result<(), CoreError> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecordValidation {
+    Valid,
+    DescriptorSlot,
+    DescriptorGeneration,
+}
+
+/// Keep the hot validation result scalar. In particular, this avoids forcing
+/// every successful record encoding through an indirect `Result<(),
+/// CoreError>` return merely to construct an owned diagnostic on the two cold
+/// error paths.
+fn validate_record(record: RegionRecord) -> RecordValidation {
     if record.descriptor_slot >= DESCRIPTOR_SLOTS {
-        return Err(CoreError::Corrupt(
-            "allocation-root descriptor slot out of range".into(),
-        ));
+        return RecordValidation::DescriptorSlot;
     }
     if record.descriptor_generation == 0 {
-        return Err(CoreError::Corrupt(
-            "allocation-root descriptor generation is zero".into(),
-        ));
+        return RecordValidation::DescriptorGeneration;
     }
-    Ok(())
+    RecordValidation::Valid
 }
 
 /// Allocator for a permanently allocated tree-node pool. Blocks reachable
@@ -546,6 +537,32 @@ mod tests {
         bulk_build, initial_leaf, key, load_all, lookup_record, spec, value, ReservedTreePool,
     };
     use crate::cow_tree::{mutate_many, TreeOperation};
+    use crate::CoreError;
+
+    #[test]
+    fn record_validation_preserves_owned_error_diagnostics() {
+        let invalid_slot = value(RegionRecord {
+            descriptor_slot: 3,
+            free_blocks: 1,
+            descriptor_generation: 1,
+        });
+        assert!(matches!(
+            invalid_slot,
+            Err(CoreError::Corrupt(message))
+                if message == "allocation-root descriptor slot out of range"
+        ));
+
+        let zero_generation = value(RegionRecord {
+            descriptor_slot: 0,
+            free_blocks: 1,
+            descriptor_generation: 0,
+        });
+        assert!(matches!(
+            zero_generation,
+            Err(CoreError::Corrupt(message))
+                if message == "allocation-root descriptor generation is zero"
+        ));
+    }
 
     #[test]
     fn reserved_pool_keeps_three_checkpoint_generations_disjoint() {

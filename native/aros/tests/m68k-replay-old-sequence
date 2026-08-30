@@ -1,0 +1,16 @@
+C:FailAt 21
+Assign "FDSK:" "SYS:DiskImages"
+C:Mount DEVS:DOSDrivers/AFSPLUS19 >HOST:mount.out
+If WARN
+    C:Echo fail >HOST:mount.status
+Else
+    C:Echo pass >HOST:mount.status
+    C:AFSPlusReplayProbe old >HOST:replay.out
+    If WARN
+        C:Echo fail >HOST:replay.status
+    Else
+        C:Echo pass >HOST:replay.status
+    EndIf
+    C:Assign AFSPLUS19: DISMOUNT >HOST:dismount.out
+EndIf
+C:Shutdown

@@ -70,3 +70,7 @@ shim.
   makes the upstream/not-upstream boundary reviewable.
 - The exact A500 memory, cache and workload budgets remain to be measured and
   accepted before stage 4.
+
+ADR-056 completes the M68020-or-newer filesystem subprofile of stage 3,
+including the Alpha-0 operation matrix and all six modeled intent-log cuts. The
+plain-68000/A500-configured emulator subprofile remains open.

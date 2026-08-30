@@ -200,7 +200,11 @@ Hosted MacAROS, native MacAROS/Apple Silicon, Amiga 500/m68k emulation, then the
 physical A500. The emulator is the pre-hardware validation stage of the A500
 target. `tools/check-aros-m68k-boot-fsuae.sh` now makes the first native m68k
 boot prerequisite machine-readable with matching official ROM, floppy and
-system-media hashes; it deliberately makes no filesystem, 68000 or A500 claim.
+system-media hashes. `tools/check-aros-m68k-alpha0-fsuae.sh` now also qualifies
+the real external handler's Alpha-0 operation matrix and all six recovery cuts
+on an M68020-or-newer native AROS emulator profile. This deliberately makes no
+plain-68000, physical-A500 or hardware-performance claim; ADR-056 records the
+boundary.
 Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen are not
 format commitments. Incompatible format changes must update the format epoch
 or use feature negotiation as defined in the compatibility specification.

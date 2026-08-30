@@ -125,7 +125,7 @@ fn decode_value(encoded: &[u8], geo: &Geometry, object_id: u64) -> Result<u64, C
             "object map value for object {object_id} is not eight bytes"
         ))
     })?;
-    let block = u64::from_le_bytes(bytes);
+    let block = afsplus_format::le::get_u64(&bytes);
     if !geo.is_allocatable(block) {
         return Err(CoreError::Corrupt(format!(
             "object {object_id} record block {block} outside allocatable bounds"

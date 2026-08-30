@@ -1,0 +1,17 @@
+C:FailAt 21
+Assign "FDSK:" "SYS:DiskImages"
+C:Mount DEVS:DOSDrivers/AFSPLUS19 >HOST:mount.out
+If WARN
+    C:Echo fail >HOST:mount.status
+Else
+    C:Echo pass >HOST:mount.status
+    C:AFSPlusAlpha0Probe >HOST:probe.out
+    If WARN
+        C:Echo fail >HOST:probe.status
+    Else
+        C:Echo pass >HOST:probe.status
+        C:Copy AFSPLUS19:alpha0.from-aros HOST:alpha0.from-aros >HOST:copy.out
+    EndIf
+    C:Assign AFSPLUS19: DISMOUNT >HOST:dismount.out
+EndIf
+C:Shutdown

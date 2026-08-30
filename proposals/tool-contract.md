@@ -1,8 +1,9 @@
 # Tool Contract v1: volume self-description for partition tools
 
 Status: proposal — for team review. Nothing is implemented; the vocabulary
-becomes a versioned commitment once published, so review comes first.
-Decisions requested from the team are marked **D1–D7**.
+becomes a versioned commitment once published, so review comes first. On
+acceptance the spec lands under `spec/` with a numbered ADR. Decisions
+requested from the team are marked **D1–D7**.
 
 ## Summary
 
@@ -54,7 +55,7 @@ spec is neutral and publishable, nothing more.
 | Deliverable | Location | Content |
 |---|---|---|
 | `spec/tool-contract.md` | new | The neutral mini-spec: the five question groups, versioned JSON schema, C ABI sketch, conformance rules, license. |
-| `adr/ADR-038-tool-contract.md` | new | Short decision record: public contract → ADR, points at the spec. |
+| tool-contract ADR (number at integration) | new | Short decision record: public contract → ADR, points at the spec. |
 | `afsplus-core::probe` | new module | `probe_device()` → `ToolInfo` (bounded reads, §5) and `in_use_map()` (iterator of allocated runs). |
 | `afsplus-info` | binary (bin target in afsplus-check — D5) | Text + versioned `--json` + `--in-use-map`. Zero writes, stable exit codes. |
 | `docs/18`, `tools/tools-spec.md` | update | Rewritten around the contract; afsplus-info section completed. |

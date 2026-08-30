@@ -681,6 +681,25 @@ fn geometry_reserved_blocks() {
 }
 
 #[test]
+fn single_region_geometry_uses_region_relative_bounds() {
+    let geo = Geometry {
+        block_size: BS,
+        total_blocks: 16_384,
+        region_size: 16_384,
+    };
+    geo.validate().unwrap();
+    assert_eq!(geo.region_count(), 1);
+    assert_eq!(geo.region_valid_blocks(0), 16_384);
+    assert_eq!(geo.region0_reserved_blocks(), 9);
+    assert!(geo.is_reserved(8));
+    assert!(!geo.is_allocatable(8));
+    assert!(!geo.is_reserved(9));
+    assert!(geo.is_allocatable(9));
+    assert!(!geo.is_reserved(16_384));
+    assert!(!geo.is_allocatable(16_384));
+}
+
+#[test]
 fn multi_page_region_descriptor_roundtrip() {
     let geo = Geometry {
         block_size: BS,
@@ -714,6 +733,7 @@ fn multi_page_region_descriptor_roundtrip() {
 
 #[test]
 fn shared_tree_leaf_and_internal_nodes_roundtrip() {
+    assert_eq!(TreeNode::fixed_item_capacity(BS, 4, 16).unwrap(), 144);
     let leaf = sample_tree_leaf();
     let encoded = leaf.encode(BS, 7).unwrap();
     let (decoded, generation) = TreeNode::decode(&encoded).unwrap();

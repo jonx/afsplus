@@ -15,7 +15,7 @@
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::ident::{Identification, INCOMPAT_INTENT_LOG};
-use afsplus_format::DEFAULT_BLOCK_SIZE;
+use afsplus_format::{FormatError, DEFAULT_BLOCK_SIZE};
 
 use crate::verify::load_mount_state;
 use crate::volume::Volume;
@@ -81,47 +81,53 @@ pub fn select_checkpoint<D: BlockDevice>(
 ) -> Result<Selection, CoreError> {
     let geo = ident.geometry();
     let mut buf = vec![0u8; geo.block_size];
-    let mut candidates: Vec<(usize, Checkpoint)> = Vec::new();
+    let mut candidates: [Option<Checkpoint>; 2] = [None, None];
     let mut slot_status = [String::new(), String::new()];
 
-    for (slot, lba) in ident.checkpoint_slots.iter().enumerate() {
-        dev.read_block(*lba, &mut buf)?;
-        match Checkpoint::decode(&buf, &ident.uuid) {
-            Ok(checkpoint) => match checkpoint.validate_structural(&geo) {
-                Ok(()) => {
-                    slot_status[slot] = format!("valid, generation {}", checkpoint.generation);
-                    candidates.push((slot, checkpoint));
-                }
-                Err(e) => slot_status[slot] = format!("structurally invalid: {e}"),
-            },
-            Err(e) => slot_status[slot] = format!("invalid: {e}"),
-        }
-    }
+    read_checkpoint_candidate(
+        dev,
+        ident,
+        &geo,
+        0,
+        &mut buf,
+        &mut candidates[0],
+        &mut slot_status,
+    )?;
+    read_checkpoint_candidate(
+        dev,
+        ident,
+        &geo,
+        1,
+        &mut buf,
+        &mut candidates[1],
+        &mut slot_status,
+    )?;
 
-    match candidates.len() {
-        0 => Err(CoreError::NoValidCheckpoint {
+    match (candidates[0].take(), candidates[1].take()) {
+        (None, None) => Err(CoreError::NoValidCheckpoint {
             slot_a: slot_status[0].clone(),
             slot_b: slot_status[1].clone(),
         }),
-        1 => {
-            let (slot, chosen) = candidates.pop().unwrap();
-            Ok(Selection {
-                chosen,
-                chosen_slot: slot,
-                other: None,
-                slot_status,
-            })
-        }
-        _ => {
-            let (slot_b, ckpt_b) = candidates.pop().unwrap();
-            let (slot_a, ckpt_a) = candidates.pop().unwrap();
+        (Some(chosen), None) => Ok(Selection {
+            chosen,
+            chosen_slot: 0,
+            other: None,
+            slot_status,
+        }),
+        (None, Some(chosen)) => Ok(Selection {
+            chosen,
+            chosen_slot: 1,
+            other: None,
+            slot_status,
+        }),
+        (Some(ckpt_a), Some(ckpt_b)) => {
             if ckpt_a.generation == ckpt_b.generation {
                 return Err(CoreError::AmbiguousCheckpoints(ckpt_a.generation));
             }
-            let ((chosen_slot, chosen), (_, other)) = if ckpt_a.generation > ckpt_b.generation {
-                ((slot_a, ckpt_a), (slot_b, ckpt_b))
+            let (chosen_slot, chosen, other) = if ckpt_a.generation > ckpt_b.generation {
+                (0, ckpt_a, ckpt_b)
             } else {
-                ((slot_b, ckpt_b), (slot_a, ckpt_a))
+                (1, ckpt_b, ckpt_a)
             };
             Ok(Selection {
                 chosen,
@@ -131,6 +137,75 @@ pub fn select_checkpoint<D: BlockDevice>(
             })
         }
     }
+}
+
+fn read_checkpoint_candidate<D: BlockDevice>(
+    dev: &mut D,
+    ident: &Identification,
+    geo: &afsplus_format::geometry::Geometry,
+    slot: usize,
+    buf: &mut [u8],
+    candidate: &mut Option<Checkpoint>,
+    slot_status: &mut [String; 2],
+) -> Result<(), CoreError> {
+    dev.read_block(ident.checkpoint_slots[slot], buf)?;
+    match Checkpoint::decode(buf, &ident.uuid) {
+        Ok(checkpoint) => match checkpoint.validate_structural(geo) {
+            Ok(()) => {
+                slot_status[slot] = valid_checkpoint_status(checkpoint.generation);
+                *candidate = Some(checkpoint);
+            }
+            Err(error) => {
+                slot_status[slot] = checkpoint_error_status("structurally invalid: ", &error)
+            }
+        },
+        Err(error) => slot_status[slot] = checkpoint_error_status("invalid: ", &error),
+    }
+    Ok(())
+}
+
+fn valid_checkpoint_status(mut generation: u64) -> String {
+    const PREFIX: &str = "valid, generation ";
+    let mut status = String::with_capacity(PREFIX.len() + 20);
+    status.push_str(PREFIX);
+    if generation == 0 {
+        status.push('0');
+        return status;
+    }
+
+    let mut reversed = [0u8; 20];
+    let mut length = 0;
+    while generation != 0 {
+        reversed[length] = (generation % 10) as u8;
+        length += 1;
+        generation /= 10;
+    }
+    while length != 0 {
+        length -= 1;
+        status.push(char::from(b'0' + reversed[length]));
+    }
+    status
+}
+
+fn checkpoint_error_status(prefix: &str, error: &FormatError) -> String {
+    let (category, detail) = match error {
+        FormatError::WrongBufferSize { .. } => ("wrong buffer size", None),
+        FormatError::WrongBlockType { .. } => ("wrong block type", None),
+        FormatError::UnsupportedHeaderVersion(_) => ("unsupported header version", None),
+        FormatError::ChecksumMismatch { .. } => ("checksum mismatch", None),
+        FormatError::PayloadTooLarge { .. } => ("payload too large", None),
+        FormatError::Invalid(detail) => ("invalid structure: ", Some(*detail)),
+        FormatError::InvalidUtf8 => ("name is not valid UTF-8", None),
+        FormatError::Overflow(detail) => ("structure does not fit: ", Some(*detail)),
+    };
+    let detail_length = detail.map_or(0, str::len);
+    let mut status = String::with_capacity(prefix.len() + category.len() + detail_length);
+    status.push_str(prefix);
+    status.push_str(category);
+    if let Some(detail) = detail {
+        status.push_str(detail);
+    }
+    status
 }
 
 pub fn mount<D: BlockDevice>(dev: D) -> Result<Volume<D>, CoreError> {
@@ -160,9 +235,12 @@ pub fn mount_with_options<D: BlockDevice>(
     }
 
     let selection = select_checkpoint(&mut dev, &ident)?;
-    let state = load_mount_state(&mut dev, &ident, &selection.chosen).map_err(|e| {
+    #[cfg(target_arch = "m68k")]
+    let state = load_mount_state(&mut dev, &ident, &selection.chosen)?;
+    #[cfg(not(target_arch = "m68k"))]
+    let state = load_mount_state(&mut dev, &ident, &selection.chosen).map_err(|error| {
         CoreError::Corrupt(format!(
-            "checkpoint generation {} (slot {}) references invalid state: {e}",
+            "checkpoint generation {} (slot {}) references invalid state: {error}",
             selection.chosen.generation,
             if selection.chosen_slot == 0 { "A" } else { "B" },
         ))
@@ -175,4 +253,42 @@ pub fn mount_with_options<D: BlockDevice>(
         volume.inspect_intent_log()?;
     }
     Ok(volume)
+}
+
+#[cfg(test)]
+mod tests {
+    use afsplus_format::FormatError;
+
+    use super::{checkpoint_error_status, valid_checkpoint_status};
+
+    #[test]
+    fn checkpoint_status_formats_full_u64_range_without_fmt() {
+        assert_eq!(valid_checkpoint_status(0), "valid, generation 0");
+        assert_eq!(valid_checkpoint_status(42), "valid, generation 42");
+        assert_eq!(
+            valid_checkpoint_status(u64::MAX),
+            "valid, generation 18446744073709551615"
+        );
+    }
+
+    #[test]
+    fn checkpoint_error_status_is_bounded_without_generic_formatting() {
+        assert_eq!(
+            checkpoint_error_status(
+                "structurally invalid: ",
+                &FormatError::Invalid("checkpoint generation is zero"),
+            ),
+            "structurally invalid: invalid structure: checkpoint generation is zero"
+        );
+        assert_eq!(
+            checkpoint_error_status(
+                "invalid: ",
+                &FormatError::WrongBlockType {
+                    expected: 1,
+                    actual: 0,
+                },
+            ),
+            "invalid: wrong block type"
+        );
+    }
 }

@@ -19,7 +19,15 @@ pub fn comparison_key(ident: &Identification, name: &[u8]) -> Result<Vec<u8>, Co
         core::str::from_utf8(name).map_err(|_| CoreError::InvalidName(FormatError::InvalidUtf8))?;
     let key = match ident.name_key_algorithm {
         NameKeyAlgorithm::LegacyIdentity => name.to_vec(),
+        NameKeyAlgorithm::UnicodeNfc if name.is_ascii() => name.to_vec(),
         NameKeyAlgorithm::UnicodeNfc => text.nfc().collect::<String>().into_bytes(),
+        NameKeyAlgorithm::UnicodeNfcCasefold if name.is_ascii() => {
+            let mut key = Vec::with_capacity(name.len());
+            for &byte in name {
+                key.push(byte.to_ascii_lowercase());
+            }
+            key
+        }
         NameKeyAlgorithm::UnicodeNfcCasefold => text
             .nfd()
             .default_case_fold()
@@ -100,6 +108,10 @@ mod tests {
 
     #[test]
     fn insensitive_keys_fold_unicode_and_preserve_no_locale_state() {
+        assert_eq!(
+            comparison_key(&ident(NameKeyAlgorithm::UnicodeNfcCasefold), b"Alpha0.TMP").unwrap(),
+            b"alpha0.tmp"
+        );
         let ident = ident(NameKeyAlgorithm::UnicodeNfcCasefold);
         assert_eq!(
             comparison_key(&ident, "Cafe\u{301}".as_bytes()).unwrap(),
