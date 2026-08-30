@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "afsplus-aros"
+version = "0.0.1"
+dependencies = [
+ "afsplus-block",
+ "afsplus-check",
+ "afsplus-core",
+ "afsplus-format",
+ "afsplus-vfs",
+]
+
+[[package]]
 name = "afsplus-block"
 version = "0.0.1"
 

@@ -1,0 +1,18 @@
+[package]
+name = "afsplus-aros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+afsplus-block = { path = "../afsplus-block" }
+afsplus-core = { path = "../afsplus-core" }
+afsplus-format = { path = "../afsplus-format" }
+afsplus-vfs = { path = "../afsplus-vfs" }
+
+[dev-dependencies]
+afsplus-check = { path = "../afsplus-check" }
+
+[lints]
+workspace = true
