@@ -7,8 +7,12 @@
 
 #include <string.h>
 
-#define HEAD_PATH "AFSPLUS19:HEAD"
-#define LOCK_PATH "AFSPLUS19:HEAD.lock"
+#ifndef AFSPLUS_REPLAY_VOLUME
+#define AFSPLUS_REPLAY_VOLUME "AFSPLUS19"
+#endif
+
+#define HEAD_PATH AFSPLUS_REPLAY_VOLUME ":HEAD"
+#define LOCK_PATH AFSPLUS_REPLAY_VOLUME ":HEAD.lock"
 
 static int fail(const char *stage, SIPTR result)
 {
@@ -17,17 +21,16 @@ static int fail(const char *stage, SIPTR result)
     return RETURN_FAIL;
 }
 
-int main(int argc, char **argv)
+static int verify_replay(const char *expected)
 {
     UBYTE content[4];
-    const char *expected;
     BPTR file;
     BPTR lock;
     LONG result;
 
-    if (argc != 2 || (strcmp(argv[1], "old") != 0 && strcmp(argv[1], "new") != 0))
-        return fail("usage: AFSPlusReplayProbe old|new", argc);
-    expected = argv[1];
+    if (expected == NULL ||
+        (strcmp(expected, "old") != 0 && strcmp(expected, "new") != 0))
+        return fail("expected state must be old|new", 0);
 
     SetIoErr(0);
     lock = Lock(LOCK_PATH, SHARED_LOCK);
@@ -61,3 +64,17 @@ int main(int argc, char **argv)
     Printf("[AFSPLUS-REPLAY] PASS expected=%s\n", expected);
     return RETURN_OK;
 }
+
+#ifdef AFSPLUS_REPLAY_FUNCTION
+int AFSPLUS_REPLAY_FUNCTION(const char *expected)
+{
+    return verify_replay(expected);
+}
+#else
+int main(int argc, char **argv)
+{
+    if (argc != 2)
+        return fail("usage: AFSPlusReplayProbe old|new", argc);
+    return verify_replay(argv[1]);
+}
+#endif

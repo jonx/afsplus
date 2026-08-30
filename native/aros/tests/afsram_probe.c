@@ -239,6 +239,11 @@ struct RetainedHandlerFile {
     ULONG position;
 };
 
+#ifndef AFSPLUS_AFSRAM_TRACE
+#define AFSPLUS_AFSRAM_TRACE 0
+#endif
+
+#if AFSPLUS_AFSRAM_TRACE
 static volatile ULONG *retained_trace;
 static ULONG retained_trace_count;
 
@@ -251,6 +256,9 @@ static void trace_retained_loader(ULONG event, ULONG first, ULONG second)
         retained_trace[3] = ++retained_trace_count;
     }
 }
+#else
+#define trace_retained_loader(event, first, second) ((void)0)
+#endif
 
 static AROS_UFH4(LONG, retained_read,
     AROS_UFHA(BPTR, file, D1),
@@ -373,8 +381,10 @@ static BPTR load_retained_handler(void)
     file.data = (const UBYTE *)(uintptr_t)image_start + payload.handler_offset;
     file.size = (ULONG)payload.handler_size;
     file.position = 0;
+#if AFSPLUS_AFSRAM_TRACE
     retained_trace = (volatile ULONG *)(file.data - AFSPLUS_AFSRAM_HEADER_SIZE + 48);
     retained_trace_count = 0;
+#endif
     trace_retained_loader(1, file.size, 0);
     {
         BPTR segment = InternalLoadSeg(MKBADDR(&file), BNULL, functions, NULL);
@@ -384,7 +394,11 @@ static BPTR load_retained_handler(void)
     }
 }
 
+#if defined(AFSPLUS_AFSRAM_REPLAY_EXPECTED)
+int afsplus_native_replay_probe(const char *expected);
+#else
 int afsplus_native_alpha_probe(void);
+#endif
 
 static int wait_handler_exit(void)
 {
@@ -424,7 +438,7 @@ static int probe_filesystem(void)
     struct DeviceNode *node;
     struct MsgPort *handler_port;
     BPTR root = BNULL;
-    LONG alpha_result = -1;
+    LONG operation_result = -1;
     int result = 0;
     int node_added = 0;
     int node_removed = 0;
@@ -485,8 +499,13 @@ static int probe_filesystem(void)
     root = BNULL;
     trace_retained_loader(9, 0, 0);
 
-    alpha_result = afsplus_native_alpha_probe();
-    if (alpha_result != RETURN_OK) {
+#if defined(AFSPLUS_AFSRAM_REPLAY_EXPECTED)
+    operation_result = afsplus_native_replay_probe(
+        AFSPLUS_AFSRAM_REPLAY_EXPECTED);
+#else
+    operation_result = afsplus_native_alpha_probe();
+#endif
+    if (operation_result != RETURN_OK) {
         result = 76;
         goto shutdown;
     }

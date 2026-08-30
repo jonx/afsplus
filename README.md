@@ -175,7 +175,7 @@ switches are inert, use the diagnostic and reversible workaround in
 transport is not a raw substitute for macFUSE's message channel; see ADR-040.
 The native AROS bridge and its cross-build qualification are documented in
 [`docs/aros-native-bridge.md`](docs/aros-native-bridge.md), ADR-042 through
-ADR-053. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
+ADR-054. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
 Hosted MacAROS → macFUSE → Hosted MacAROS round trip on one checked image.
 Hosted intent-log replay and the cumulative post-bootstrap S1 system-volume
 pivot are also qualified. The handler now supports standard AROS
@@ -189,8 +189,11 @@ spelling-preserving namespace; general-purpose images remain configurable and
 default to case-sensitive lookup.
 The native Apple-AArch64 pre-hardware QEMU gate now loads the external handler
 from a versioned retained image, executes the same operation matrix and proves
-a clean dismount/unload. Its RAM block transport deliberately makes no reset
-durability, final-checker or hardware claim; those remain explicit gates.
+a clean dismount/unload. File-backed guest RAM lets the host extract and
+strictly check the mutated payload; all six modeled intent-log cuts also replay
+to their exact old/new state with zero pending records. The RAM block transport
+still makes no reset-durability or Apple-hardware claim; those remain explicit
+gates.
 Autonomous boot selection and the classic ports also remain later gates.
 Qualification is reported as three target platforms over four ordered stages:
 Hosted MacAROS, native MacAROS/Apple Silicon, Amiga 500/m68k emulation, then the

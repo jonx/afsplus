@@ -18,6 +18,8 @@ output=${AFSPLUS_AROS_AFSRAM_OUTPUT:-"$repo_root/build/macaros-afsram/afsram.dev
 probe_output=${AFSPLUS_AROS_AFSRAM_PROBE_OUTPUT:-"$(dirname -- "$output")/AFSPlusAfsRamProbe"}
 alpha_probe_output=${AFSPLUS_AROS_NATIVE_ALPHA_PROBE_OUTPUT:-"$(dirname -- "$output")/AFSPlusNativeAlpha0Probe"}
 mount_probe_output=${AFSPLUS_AROS_NATIVE_MOUNT_PROBE_OUTPUT:-"$(dirname -- "$output")/AFSPlusNativeMountProbe"}
+replay_old_output=${AFSPLUS_AROS_NATIVE_REPLAY_OLD_OUTPUT:-"$(dirname -- "$output")/AFSPlusNativeReplayOldProbe"}
+replay_new_output=${AFSPLUS_AROS_NATIVE_REPLAY_NEW_OUTPUT:-"$(dirname -- "$output")/AFSPlusNativeReplayNewProbe"}
 cross_lib=${AFSPLUS_AROS_CROSS_LIB:-"$aros_crosstools/lib/generic"}
 clang="$aros_crosstools/bin/clang"
 nm="$aros_crosstools/bin/llvm-nm"
@@ -47,6 +49,7 @@ require_file "$source_dir/afsram.conf"
 require_file "$source_dir/afsram_device.c"
 require_file "$source_dir/afsram_format.c"
 require_file "$repo_root/native/aros/tests/afsram_probe.c"
+require_file "$repo_root/native/aros/tests/replay_probe.c"
 require_file "$developer/lib/startup.o"
 require_file "$cross_lib/libclang_rt.builtins-aarch64.a"
 
@@ -93,6 +96,16 @@ platform=$(awk '
     echo "Refusing to replace existing mount-probe ABI report: ${mount_probe_output}.abi-report.txt" >&2
     exit 73
 }
+for replay_output in "$replay_old_output" "$replay_new_output"; do
+    [ ! -e "$replay_output" ] || {
+        echo "Refusing to replace existing native replay probe: $replay_output" >&2
+        exit 73
+    }
+    [ ! -e "${replay_output}.abi-report.txt" ] || {
+        echo "Refusing to replace existing replay-probe ABI report: ${replay_output}.abi-report.txt" >&2
+        exit 73
+    }
+done
 
 echo "[afsram-device] host descriptor parser"
 clang -std=c11 -Wall -Wextra -Wconversion -Werror \
@@ -211,6 +224,47 @@ COMPILER_PATH="$build_tools:$aros_crosstools/bin" \
     --objdump "$objdump" "$task_dir/AFSPlusNativeMountProbe" \
     >"$task_dir/mount-probe-abi-report.txt"
 
+for replay_state in old new; do
+    case "$replay_state" in
+    old)
+        replay_expected='-DAFSPLUS_AFSRAM_REPLAY_EXPECTED="old"'
+        replay_target=AFSPlusNativeReplayOldProbe
+        ;;
+    new)
+        replay_expected='-DAFSPLUS_AFSRAM_REPLAY_EXPECTED="new"'
+        replay_target=AFSPlusNativeReplayNewProbe
+        ;;
+    esac
+    # The callback table intentionally erases the four InternalLoadSeg
+    # signatures; keep that warning exception local to retained-image probes.
+    # shellcheck disable=SC2086 -- profile and probe flags are separate words.
+    COMPILER_PATH="$build_tools:$aros_crosstools/bin" \
+        "$clang" --target="$target" $arch_flags -O2 -std=gnu11 \
+        $mount_probe_cflags "$replay_expected" \
+        -DAFSPLUS_REPLAY_VOLUME='"AFSPLUS0"' \
+        -DAFSPLUS_REPLAY_FUNCTION=afsplus_native_replay_probe \
+        -Wall -Wextra -Wconversion -Wsign-conversion -Werror \
+        -Wno-pointer-sign -Wno-cast-function-type-mismatch \
+        -isystem "$developer/include" -isystem "$generated" \
+        -isystem "$generated/aros/posixc" \
+        -isystem "$developer/include/aros/stdc" \
+        -I "$source_dir" \
+        -nostartfiles -nodefaultlibs \
+        -L "$developer/lib" -L "$cross_lib" \
+        "$developer/lib/startup.o" \
+        "$repo_root/native/aros/tests/afsram_probe.c" \
+        "$repo_root/native/aros/tests/replay_probe.c" \
+        "$task_dir/module/afsram_format.o" \
+        -o "$task_dir/$replay_target" \
+        -Wl,--allow-multiple-definition -Wl,--start-group \
+        -lpthread -lposixc -lstdc -lstdcio -ldos -lexec -laros \
+        -lautoinit -llibinit -lutility -lexpansion -lamiga -larossupport \
+        -Wl,--end-group -lclang_rt.builtins-aarch64
+    "$repo_root/tools/check-aros-aarch64-abi.py" \
+        --objdump "$objdump" "$task_dir/$replay_target" \
+        >"$task_dir/$replay_state-replay-probe-abi-report.txt"
+done
+
 # shellcheck disable=SC2086 -- the profile supplies separate ABI flags.
 COMPILER_PATH="$build_tools:$aros_crosstools/bin" \
     "$clang" --target="$target" $arch_flags -O2 -std=gnu11 \
@@ -238,20 +292,30 @@ mv "$task_dir/afsram.device" "$output"
 mv "$task_dir/AFSPlusAfsRamProbe" "$probe_output"
 mv "$task_dir/AFSPlusNativeAlpha0Probe" "$alpha_probe_output"
 mv "$task_dir/AFSPlusNativeMountProbe" "$mount_probe_output"
+mv "$task_dir/AFSPlusNativeReplayOldProbe" "$replay_old_output"
+mv "$task_dir/AFSPlusNativeReplayNewProbe" "$replay_new_output"
 cp "$task_dir/abi-report.txt" "${output}.abi-report.txt"
 cp "$task_dir/probe-abi-report.txt" "${probe_output}.abi-report.txt"
 cp "$task_dir/alpha-probe-abi-report.txt" \
     "${alpha_probe_output}.abi-report.txt"
 cp "$task_dir/mount-probe-abi-report.txt" \
     "${mount_probe_output}.abi-report.txt"
+cp "$task_dir/old-replay-probe-abi-report.txt" \
+    "${replay_old_output}.abi-report.txt"
+cp "$task_dir/new-replay-probe-abi-report.txt" \
+    "${replay_new_output}.abi-report.txt"
 shasum -a 256 "$output" "$probe_output" "$alpha_probe_output" \
-    "$mount_probe_output" \
+    "$mount_probe_output" "$replay_old_output" "$replay_new_output" \
     "${output}.abi-report.txt" "${probe_output}.abi-report.txt" \
     "${alpha_probe_output}.abi-report.txt" \
     "${mount_probe_output}.abi-report.txt" \
+    "${replay_old_output}.abi-report.txt" \
+    "${replay_new_output}.abi-report.txt" \
     >"${output}.SHA256SUMS"
 cat "${output}.abi-report.txt"
 cat "${probe_output}.abi-report.txt"
 cat "${alpha_probe_output}.abi-report.txt"
 cat "${mount_probe_output}.abi-report.txt"
+cat "${replay_old_output}.abi-report.txt"
+cat "${replay_new_output}.abi-report.txt"
 echo "[afsram-device] PASS: $output"

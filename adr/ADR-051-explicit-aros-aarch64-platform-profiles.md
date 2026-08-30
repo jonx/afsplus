@@ -62,6 +62,6 @@ the same AROS architecture.
 
 The profile mechanism alone is not runtime evidence. ADR-053 adds a writable
 retained-RAM transport and proves the operation and unload matrix under native
-MacAROS QEMU. Durable media, native crash replay, extraction plus strict
-checking of the mutated image, and Apple-hardware execution remain separate
-gates.
+MacAROS QEMU; ADR-054 adds extraction, strict checking and modeled crash replay.
+Durable native media, controlled in-guest power cuts and Apple-hardware
+execution remain separate gates.

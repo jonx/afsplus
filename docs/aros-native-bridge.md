@@ -224,12 +224,12 @@ system pivot is also qualified: S1a moves the six core assigns, while S1b runs
 Wanderer, IPrefs, Locale and Clock from a manifested AFS+ desktop image and
 durably writes `ENVARC:`. ADR-048 defines the split and ADR-049 records the S1b
 evidence; ADR-052 removes its former case-policy workaround with a versioned,
-case-insensitive and spelling-preserving AROS namespace. ADR-050 records repeated standard
-`Assign DISMOUNT` termination and reload, including the required ordering of
-device-node removal and the deferred `ACTION_DIE` reply. No AROS kernel, DOS or
-source-tree inclusion of the AFS+ handler is part of that contract. A genuine
-bug in a generic AROS interface should still be fixed and proposed upstream
-rather than hidden in the handler.
+case-insensitive and spelling-preserving AROS namespace. ADR-050 records
+repeated standard `Assign DISMOUNT` termination and reload, including the
+required ordering of device-node removal and the deferred `ACTION_DIE` reply.
+No AROS kernel, DOS or source-tree inclusion of the AFS+ handler is part of that
+contract. A genuine bug in a generic AROS interface should still be fixed and
+proposed upstream rather than hidden in the handler.
 
 The native pre-hardware gate is reproduced with:
 
@@ -243,16 +243,29 @@ Under QEMU, the target mounts the 64-MiB AFS+ payload and executes create,
 read, write, sparse write, truncate, two flushes, rename, case-folded lookup,
 case-only rename and reopen/readback. It then inhibits and stops the handler,
 waits for its task to disappear and unloads both modules before the boot gate
-returns PASS. The report hashes every executable input and the command refuses
-to mutate either the MacAROS or AROS worktree. ADR-053 defines the transport and
-records the evidence.
+returns PASS. QEMU uses file-backed RAM, after which the gate extracts the exact
+payload and requires a clean schema-5 checker report with zero pending records.
+The report hashes every executable input and the command refuses to mutate
+either the MacAROS or AROS worktree. ADR-053 defines the transport.
+
+The six native replay cases are reproduced with:
+
+```sh
+tools/check-macaros-native-replay-qemu.sh
+```
+
+The command generates the same deterministic cuts used by Hosted MacAROS,
+requires the exact manifest `old`/`new` state on target, cleanly unloads, then
+extracts and checks each resulting payload. ADR-054 records the four old-state
+generation-2 and two new-state generation-3 results; every final image has zero
+pending records.
 
 `afsram.device` writes only the retained boot image. `CMD_UPDATE` therefore
 tests the filesystem/device ordering path but cannot make data survive reset.
-Native crash replay, extraction plus strict checking of the mutated payload,
-and Apple-hardware execution remain unproven. The package contract moves next
-to those native durability gates, then m68k emulation and the physical Amiga
-500: three target platforms, four ordered validation stages.
+The extracted replay proof is not reset durability: a persistent native device,
+controlled in-guest power cuts and Apple-hardware execution remain unproven.
+The package contract moves next to m68k emulation and the physical Amiga 500:
+three target platforms, four ordered validation stages.
 
 The fixed-image Alpha-0 path does not yet install `TD_ADDCHANGEINT` handling.
 Hot-swappable media remains disabled until removal can detach the mounted Rust

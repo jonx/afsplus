@@ -62,7 +62,6 @@ Native MacAROS execution is now proven at the pre-hardware QEMU stage without
 adding AFS+ to the AROS source tree. The transport and raw loader remain bounded
 test infrastructure and are not a production storage driver.
 
-This gate does not yet prove reset durability, extraction and strict checking
-of the mutated RAM image, native crash replay, Apple-hardware execution or m68k
-performance. Those claims require separate evidence rather than
-reinterpretation of this PASS.
+This gate does not prove reset durability, Apple-hardware execution or m68k
+performance. ADR-054 subsequently adds extraction, strict checking and modeled
+native crash replay without reinterpreting retained RAM as durable media.

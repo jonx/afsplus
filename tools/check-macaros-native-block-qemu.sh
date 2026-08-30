@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 # Qualify the external writable retained-image transport under QEMU. Alpha-0
-# mode also mounts the off-tree handler and runs its complete operation matrix.
+# and replay modes mount the off-tree handler, then optionally extract and
+# check the exact mutated payload from file-backed guest RAM.
 
 set -eu
 
@@ -15,6 +16,9 @@ build_tools=${AFSPLUS_AROS_BUILD_TOOLS_ROOT:-"$core_build/bin/darwin-aarch64/too
 output=${AFSPLUS_MACAROS_QEMU_OUTPUT:-"$repo_root/build/macaros-native-block-qemu"}
 mode=${AFSPLUS_MACAROS_QEMU_MODE:-block}
 handler_cflags=${AFSPLUS_AROS_HANDLER_CFLAGS:-}
+payload_image=${AFSPLUS_MACAROS_QEMU_AFSPLUS_IMAGE:-}
+extract_after=${AFSPLUS_MACAROS_QEMU_EXTRACT:-0}
+qemu_real=${AFSPLUS_QEMU_REAL_BIN:-${QEMU:-qemu-system-aarch64}}
 efi="$native_repo/boot/arosboot/build/AROSBOOTAA64.EFI"
 stage2="$core_build/bin/apple-aarch64/gen/arch/aarch64-apple/bootstrap/aros-apple-stage2-test.bin"
 
@@ -31,15 +35,30 @@ require_executable() {
     exit 73
 }
 case "$mode" in
-block|image|alpha0) ;;
-*) echo "AFSPLUS_MACAROS_QEMU_MODE must be block, image or alpha0" >&2; exit 64 ;;
+block|image|alpha0|replay-old|replay-new) ;;
+*) echo "AFSPLUS_MACAROS_QEMU_MODE must be block, image, alpha0, replay-old or replay-new" >&2; exit 64 ;;
 esac
-if [ "$mode" = alpha0 ] && [ -z "$handler_cflags" ]; then
-    handler_cflags=-DAFSPLUS_AROS_TRACE_STARTUP=1
+case "$extract_after" in
+0|1) ;;
+*) echo "AFSPLUS_MACAROS_QEMU_EXTRACT must be 0 or 1" >&2; exit 64 ;;
+esac
+case "$mode" in
+replay-old|replay-new)
+    [ -n "$payload_image" ] || {
+        echo "Replay mode requires AFSPLUS_MACAROS_QEMU_AFSPLUS_IMAGE" >&2
+        exit 64
+    }
+    extract_after=1
+    ;;
+esac
+if [ -z "$payload_image" ]; then
+    payload_image="$output/alpha0/Unit19"
 fi
 require_executable "$native_repo/tools/arosbundle"
 require_executable "$native_repo/tools/make-fat12-image.py"
 require_executable "$native_repo/boot/arosboot/test-qemu.sh"
+require_executable "$repo_root/tools/qemu-file-backed-memory.sh"
+require_executable "$repo_root/tools/extract-macaros-afsram.py"
 require_file "$efi"
 require_file "$stage2"
 
@@ -63,15 +82,25 @@ AFSPLUS_AROS_AFSRAM_OUTPUT="$output/transport/afsram.device" \
     "$repo_root/tools/build-macaros-afsram-device.sh"
 
 system_probe="$output/transport/AFSPlusAfsRamProbe"
-if [ "$mode" = alpha0 ] || [ "$mode" = image ]; then
-    if [ "$mode" = alpha0 ]; then
+case "$mode" in
+image|alpha0|replay-old|replay-new)
+    case "$mode" in
+    alpha0)
         system_probe="$output/transport/AFSPlusNativeMountProbe"
-    fi
+        ;;
+    replay-old)
+        system_probe="$output/transport/AFSPlusNativeReplayOldProbe"
+        ;;
+    replay-new)
+        system_probe="$output/transport/AFSPlusNativeReplayNewProbe"
+        ;;
+    esac
     "$repo_root/tools/make-macaros-afsplus-system.py" \
         --abi-probe "$system_probe" \
         --device "$output/transport/afsram.device" \
         "$output/sys-probe-device.fixture"
-else
+    ;;
+block)
     python3 -B "$native_repo/tools/make-fat12-image.py" \
         --abi-probe "$output/transport/AFSPlusAfsRamProbe" \
         "$output/sys-probe.fixture"
@@ -79,11 +108,13 @@ else
         --file "$output/transport/afsram.device" \
         --path DEVS/afsram.device \
         "$output/sys-probe.fixture" "$output/sys-probe-device.fixture"
-fi
+    ;;
+esac
+require_file "$payload_image"
 "$repo_root/tools/make-macaros-afsram-image.py" \
     --system-image "$output/sys-probe-device.fixture" \
     --aros-handler "$output/alpha0/afsplus-handler" \
-    --afsplus-image "$output/alpha0/Unit19" \
+    --afsplus-image "$payload_image" \
     "$output/sys-composite.img"
 
 set -- "$native_repo/tools/arosbundle" create \
@@ -114,19 +145,44 @@ set -- "$native_repo/tools/arosbundle" create \
 "$@"
 "$native_repo/tools/arosbundle" verify "$output/AFSRAM-QEMU.BND"
 
-RUNDIR="$output/run" \
-EXPECTED_MODULES=22 \
-EXPECTED_ENTRY_MARKER='[B2Q] AROS startup contract PASS' \
-EXPECTED_ENTRY_FAILURE_MARKER='[B2Q] FAIL:' \
-BUNDLE_IMAGE="$output/AFSRAM-QEMU.BND" \
-EFI_IMAGE="$efi" \
-    "$native_repo/boot/arosboot/test-qemu.sh"
+if [ "$extract_after" = 1 ]; then
+    QEMU="$repo_root/tools/qemu-file-backed-memory.sh" \
+    AFSPLUS_QEMU_REAL_BIN="$qemu_real" \
+    AFSPLUS_QEMU_MEMORY_FILE="$output/guest-memory.bin" \
+    QEMU_MACHINE='virt,acpi=off,memory-backend=afsplus-memory' \
+    RUNDIR="$output/run" \
+    EXPECTED_MODULES=22 \
+    EXPECTED_ENTRY_MARKER='[B2Q] AROS startup contract PASS' \
+    EXPECTED_ENTRY_FAILURE_MARKER='[B2Q] FAIL:' \
+    BUNDLE_IMAGE="$output/AFSRAM-QEMU.BND" \
+    EFI_IMAGE="$efi" \
+        "$native_repo/boot/arosboot/test-qemu.sh"
+else
+    RUNDIR="$output/run" \
+    EXPECTED_MODULES=22 \
+    EXPECTED_ENTRY_MARKER='[B2Q] AROS startup contract PASS' \
+    EXPECTED_ENTRY_FAILURE_MARKER='[B2Q] FAIL:' \
+    BUNDLE_IMAGE="$output/AFSRAM-QEMU.BND" \
+    EFI_IMAGE="$efi" \
+        "$native_repo/boot/arosboot/test-qemu.sh"
+fi
 
 grep -q '^\[B2A\] portable ABI + emulated TLS + streams + W^X/unload PASS$' \
     "$output/run/semihost.log" || {
     echo "Native AFSRAM probe did not satisfy the ABI/unload gate" >&2
     exit 1
 }
+checker_clean=not-run
+if [ "$extract_after" = 1 ]; then
+    "$repo_root/tools/extract-macaros-afsram.py" \
+        "$output/guest-memory.bin" "$output/payload-after.img"
+    unlink "$output/guest-memory.bin"
+    cargo run --quiet --release -p afsplus-check --bin afsplus-check -- \
+        "$output/payload-after.img" --json >"$output/check-after.json"
+    grep -q '"clean":true' "$output/check-after.json"
+    grep -q '"log_records_pending":0' "$output/check-after.json"
+    checker_clean=true
+fi
 native_status_after=$(git -C "$native_repo" status --porcelain=v1)
 core_status_after=$(git -C "$core_source" status --porcelain=v1)
 [ "$native_status_before" = "$native_status_after" ] || {
@@ -145,9 +201,14 @@ core_status_after=$(git -C "$core_source" status --porcelain=v1)
     echo "hardware_claim=none"
     echo "transport=retained-ram-image"
     echo "descriptor_version=2"
+    echo "checker_clean=$checker_clean"
     if [ "$mode" = alpha0 ]; then
         echo "filesystem=afsplus-handler"
         echo "operations=create,read,write,sparse-write,truncate,rename,fsync,casefold,case-only-rename,dismount,unload"
+    elif [ "$mode" = replay-old ] || [ "$mode" = replay-new ]; then
+        echo "filesystem=afsplus-handler"
+        echo "replay_expected=${mode#replay-}"
+        echo "operations=mount-replay,read-expected-state,dismount,unload,extract,strict-check"
     elif [ "$mode" = image ]; then
         echo "filesystem=present-not-mounted"
         echo "operations=open,read,write-identical,update,reread,geometry"
@@ -165,6 +226,12 @@ core_status_after=$(git -C "$core_source" status --porcelain=v1)
     shasum -a 256 "$system_probe" | awk '{print $1}'
     printf 'handler_sha256='
     shasum -a 256 "$output/alpha0/afsplus-handler" | awk '{print $1}'
+    if [ "$extract_after" = 1 ]; then
+        printf 'payload_after_sha256='
+        shasum -a 256 "$output/payload-after.img" | awk '{print $1}'
+        printf 'check_after_sha256='
+        shasum -a 256 "$output/check-after.json" | awk '{print $1}'
+    fi
     printf 'kernel_resource_sha256='
     shasum -a 256 "$core_build/bin/apple-aarch64/AROS/boot/apple/Devs/kernel.resource" | awk '{print $1}'
     printf 'stage2_sha256='

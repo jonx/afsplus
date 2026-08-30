@@ -1,6 +1,6 @@
 # ADR-047: Replay modeled power-cut images through the native AROS handler
 
-Status: Accepted for Mountable Alpha-0 Hosted qualification
+Status: Accepted for Hosted and native-QEMU qualification
 
 ## Context
 
@@ -47,12 +47,17 @@ The gate was requalified with identification-v3 case-insensitive AROS images
 after ADR-052. The same four old/two new classification held and all six final
 schema-5 checker reports remained clean with zero pending records.
 
+ADR-054 carried the identical fixtures through native Apple-AArch64 QEMU. The
+four incomplete records again exposed `old` at generation 2, both valid records
+exposed `new` at generation 3, and file-backed RAM extraction proved all six
+final payloads checker-clean with zero pending records.
+
 This is native-handler replay of authoritative crash artifacts, not a claim
 that Hosted process termination emulates physical power loss. The exhaustive
 state space remains in the portable tests; the native gate deliberately mounts
 a bounded representative set. Lifecycle kills and later device failpoints are
-separate tests. The same fixture contract moves through native MacAROS, m68k
-emulation, and the physical Amiga 500 in that order.
+separate tests. The same fixture contract moves next through m68k emulation and
+the physical Amiga 500 in that order.
 
 ## Consequences
 
