@@ -178,7 +178,10 @@ The native AROS bridge and its cross-build qualification are documented in
 ADR-046. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
 Hosted MacAROS → macFUSE → Hosted MacAROS round trip on one checked image.
 In-tree build integration, Hosted crash replay, an AFS+ system volume and the
-native/classic ports remain explicit later gates.
+native/classic ports remain explicit later gates. Qualification is reported as
+three target platforms over four ordered stages: Hosted MacAROS, native
+MacAROS/Apple Silicon, Amiga 500/m68k emulation, then the physical A500. The
+emulator is the pre-hardware validation stage of the A500 target.
 Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen are not
 format commitments. Incompatible format changes must update the format epoch
 or use feature negotiation as defined in the compatibility specification.

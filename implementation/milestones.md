@@ -12,7 +12,7 @@ through a host mount and a MacAROS adapter. Format epoch 1 remains unfrozen.
 | M03 | RW core | Prototype complete | create/read/write/rename/unlink on images |
 | M04 | Journal | Prototype complete, format experimental | exhaustive crash-point suite passes |
 | M05 | Checker | Prototype complete | corruption corpus detected safely |
-| M06 | AROS handler | Partial: Hosted S0, crash replay and S1a core SYS pivot qualified; S1b session, in-tree build and later platforms pending | classic apps operate without recompilation |
+| M06 | AROS handler | Partial: Hosted S0, crash replay and S1a core SYS pivot qualified; S1b session, in-tree build, native Apple Silicon, m68k emulation and physical A500 pending | classic apps operate without recompilation |
 | M07 | FS API v2 | Portable subset implemented | 64-bit and capability tests pass |
 | M08 | FUSE | Host mount and Hosted bidirectional same-image S0 qualified | same image read/write on host and AROS |
 | M09 | Catalog | Not started | multi-million object enumeration fast path |
@@ -26,3 +26,8 @@ M06/M08 first qualify AFS+ as a secondary same-image volume. The subsequent
 system-volume ladder and AFS/FFS comparison contract are specified in
 `testing/aros-system-volume-qualification.md`; a post-bootstrap `SYS:` pivot and
 a boot-selected AFS+ volume are separate acceptance claims.
+
+Platform reporting uses three targets and four ordered validation stages:
+Hosted MacAROS on macOS, native MacAROS on Apple Silicon, Amiga 500/m68k under
+emulation, then the same classic target on a physical A500. The emulator is the
+repeatable pre-hardware gate for the third platform, not a fourth platform.
