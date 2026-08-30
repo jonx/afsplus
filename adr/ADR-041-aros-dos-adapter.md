@@ -63,5 +63,6 @@ truncate, rename, hard-link, fsync, flush, enumeration, remount and the strict
 checker, plus Latin-1 conversion, lock conflicts and read-only errors.
 
 This does not by itself prove a native MacAROS mount. Alpha-0 still requires
-the small packet/ABI layer to be built in the MacAROS toolchain and the same
-image workflow to pass inside MacAROS before that gate can be closed.
+the small packet layer to be linked in the MacAROS toolchain and the same image
+workflow to pass inside MacAROS before that gate can be closed. ADR-042 now
+defines and cross-builds the C/staticlib boundary used by that packet layer.

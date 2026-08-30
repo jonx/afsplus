@@ -48,15 +48,16 @@ crates/
   afsplus-host/          # std host adapters
   afsplus-fuse/          # host filesystem mount adapter
   afsplus-cli/           # mkfs/info/check/trace/explain tools
-  afsplus-aros-sys/      # raw AROS FFI bindings
-  afsplus-aros/          # safe AROS wrappers and handler adapter
+  afsplus-aros/          # safe, packet-neutral DOS handler semantics
+  afsplus-aros-ffi/      # versioned staticlib/C callback boundary
 ```
 
 The exact crate split can change as implementation begins. The important boundary is that core disk semantics do not depend on POSIX, macOS, AROS DOS packets, FUSE, or a host filesystem namespace.
 
 The `afsplus-vfs` boundary is now executable. Both `afsplus-fuse` and
 `afsplus-aros` consume it; neither adapter may reach into COW trees or disk
-records directly.
+records directly. `afsplus-aros-ffi` confines all raw pointers and native
+block-device callbacks around that safe adapter; see ADR-042.
 
 ## 4. Block-device trait
 

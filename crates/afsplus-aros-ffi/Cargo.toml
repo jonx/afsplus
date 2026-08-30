@@ -1,0 +1,25 @@
+[package]
+name = "afsplus-aros-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+afsplus-aros = { path = "../afsplus-aros" }
+afsplus-block = { path = "../afsplus-block" }
+afsplus-core = { path = "../afsplus-core" }
+afsplus-format = { path = "../afsplus-format" }
+afsplus-vfs = { path = "../afsplus-vfs" }
+
+[dev-dependencies]
+afsplus-check = { path = "../afsplus-check" }
+
+[lints.rust]
+# Raw pointers and C callbacks are confined to this boundary crate. The safe
+# filesystem crates retain the workspace-wide `unsafe_code = "forbid"` rule.
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"

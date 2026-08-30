@@ -1,12 +1,17 @@
 #!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
 
 set -eu
 
 settings_dir="$HOME/Library/Group Containers/group.com.apple.fskit.settings"
 enabled_plist="$settings_dir/enabledModules.plist"
 plist_buddy=/usr/libexec/PlistBuddy
+pluginkit=/usr/bin/pluginkit
+pkgutil=/usr/sbin/pkgutil
+sw_vers=/usr/bin/sw_vers
 module_local=io.macfuse.app.fsmodule.macfuse-local
 module_generic=io.macfuse.app.fsmodule.macfuse
+macfuse_receipt=io.macfuse.installer.components.core
 
 usage() {
     echo "usage: $0 check | enable | restore <backup.plist>" >&2
@@ -22,6 +27,20 @@ require_macos_tools() {
         echo "Missing $plist_buddy." >&2
         exit 69
     }
+    [ -x "$pluginkit" ] || {
+        echo "Missing $pluginkit." >&2
+        exit 69
+    }
+}
+
+show_versions() {
+    product_version=$($sw_vers -productVersion)
+    build_version=$($sw_vers -buildVersion)
+    macfuse_version=$($pkgutil --pkg-info "$macfuse_receipt" 2>/dev/null |
+        sed -n 's/^version: //p')
+    [ -n "$macfuse_version" ] || macfuse_version="not installed"
+    echo "macOS: $product_version ($build_version)"
+    echo "macFUSE: $macfuse_version"
 }
 
 validate_plist() {
@@ -45,6 +64,24 @@ has_module() {
     $plist_buddy -c Print "$candidate" | grep -Fqx "    $module"
 }
 
+has_registered_module() {
+    module=$1
+    $pluginkit -m -A -D -i "$module" 2>/dev/null | grep -Fq "$module"
+}
+
+check_registered_modules() {
+    missing=0
+    for module in "$module_local" "$module_generic"; do
+        if has_registered_module "$module"; then
+            echo "installed: $module"
+        else
+            echo "not installed: $module"
+            missing=1
+        fi
+    done
+    return "$missing"
+}
+
 check_modules() {
     candidate=$1
     missing=0
@@ -60,10 +97,13 @@ check_modules() {
 }
 
 restart_fskit() {
+    echo "Restarting fskitd requires one administrator authorization."
+    if ! sudo /usr/bin/killall fskitd; then
+        echo "fskitd was not restarted; no activation change is being kept." >&2
+        return 1
+    fi
     killall fskit_agent 2>/dev/null || true
     killall extensionkitservice 2>/dev/null || true
-    echo "Restarting fskitd requires one administrator authorization."
-    sudo /usr/bin/killall fskitd
 }
 
 timestamped_backup() {
@@ -72,6 +112,10 @@ timestamped_backup() {
 }
 
 enable_modules() {
+    check_registered_modules || {
+        echo "Install macFUSE and open File System Extensions once before retrying." >&2
+        exit 69
+    }
     if check_modules "$enabled_plist"; then
         echo "macFUSE FSKit modules are already enabled; nothing changed."
         return
@@ -93,7 +137,12 @@ enable_modules() {
     cp -p "$enabled_plist" "$backup"
     cp -p "$staged_plist" "$enabled_plist"
     echo "Backup: $backup"
-    restart_fskit
+    if ! restart_fskit; then
+        cp -p "$backup" "$enabled_plist"
+        validate_plist "$enabled_plist"
+        echo "Restored the original module list: $backup" >&2
+        exit 77
+    fi
     check_modules "$enabled_plist"
 }
 
@@ -105,7 +154,12 @@ restore_modules() {
     cp -p "$enabled_plist" "$backup"
     cp -p "$source_plist" "$enabled_plist"
     echo "Previous current file saved as: $backup"
-    restart_fskit
+    if ! restart_fskit; then
+        cp -p "$backup" "$enabled_plist"
+        validate_plist "$enabled_plist"
+        echo "Restored the module list that was current before this command." >&2
+        exit 77
+    fi
     check_modules "$enabled_plist" || true
 }
 
@@ -118,13 +172,20 @@ validate_plist "$enabled_plist"
 case "$action" in
     check)
         [ "$#" -eq 0 ] || usage
-        check_modules "$enabled_plist"
+        show_versions
+        registration_status=0
+        check_registered_modules || registration_status=$?
+        enabled_status=0
+        check_modules "$enabled_plist" || enabled_status=$?
+        [ "$registration_status" -eq 0 ] && [ "$enabled_status" -eq 0 ]
         ;;
     enable)
         [ "$#" -eq 0 ] || usage
+        show_versions
         enable_modules
         ;;
     restore)
+        show_versions
         restore_modules "$@"
         ;;
     *)

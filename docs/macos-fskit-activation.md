@@ -23,7 +23,9 @@ From the repository root:
 tools/macos-fskit-modules.sh check
 ```
 
-The command verifies the two installed module identifiers in:
+The command reports the macOS build and macFUSE package version, verifies that
+PluginKit sees both installed module identifiers, then checks their activation
+in:
 
 ```text
 ~/Library/Group Containers/group.com.apple.fskit.settings/enabledModules.plist
@@ -43,11 +45,15 @@ tools/macos-fskit-modules.sh enable
 The script:
 
 1. validates the existing FSKit plist rather than creating a replacement;
-2. makes a timestamped backup next to it;
-3. adds only missing macFUSE module identifiers to a temporary copy;
-4. validates and installs that copy;
-5. restarts the per-user FSKit services;
-6. requests one administrator authorization to restart `fskitd`.
+2. refuses to proceed unless PluginKit sees both installed macFUSE modules;
+3. makes a timestamped backup next to it;
+4. adds only missing macFUSE module identifiers to a temporary copy;
+5. validates and installs that copy;
+6. requests one administrator authorization to restart `fskitd`; and
+7. restarts the per-user FSKit services.
+
+If authorization is cancelled or `fskitd` cannot be restarted, the script
+automatically restores the module list that was current before the command.
 
 If both identifiers are already enabled, `enable` exits without changing
 anything, restarting services, or requesting administrator authorization.
@@ -85,3 +91,7 @@ Apple administration interface. Keep the OS build and macFUSE version in bug
 reports, retain the generated backup, and retry the normal Settings path after
 system updates. Do not copy another machine's entire plist: module lists may
 differ between macOS versions.
+
+The script is BSD-2-Clause and may be shared independently. When posting it,
+describe it as an unofficial, reversible workaround verified on macOS 26.6.2
+(25G83) with macFUSE 5.3.3, not as a supported macFUSE or Apple procedure.

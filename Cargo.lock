@@ -14,6 +14,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "afsplus-aros-ffi"
+version = "0.0.1"
+dependencies = [
+ "afsplus-aros",
+ "afsplus-block",
+ "afsplus-check",
+ "afsplus-core",
+ "afsplus-format",
+ "afsplus-vfs",
+]
+
+[[package]]
 name = "afsplus-block"
 version = "0.0.1"
 
