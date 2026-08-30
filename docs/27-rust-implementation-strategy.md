@@ -57,7 +57,9 @@ The exact crate split can change as implementation begins. The important boundar
 The `afsplus-vfs` boundary is now executable. Both `afsplus-fuse` and
 `afsplus-aros` consume it; neither adapter may reach into COW trees or disk
 records directly. `afsplus-aros-ffi` confines all raw pointers and native
-block-device callbacks around that safe adapter; see ADR-042.
+block-device callbacks around that safe adapter. The C translator in
+`native/aros` owns only AROS packet structures, native wrappers and DOS path
+walking; see ADR-042 and ADR-043.
 
 ## 4. Block-device trait
 

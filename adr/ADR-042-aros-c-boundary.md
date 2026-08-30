@@ -47,7 +47,7 @@ all adapter handles. C callback errors become block I/O errors; filesystem
 failures return their AROS `ERROR_*` number. Rust unwinding is caught on host
 builds, while native AROS uses `panic=abort`; no unwind may cross the C ABI.
 
-The native packet layer remains responsible for:
+The native packet layer, implemented by ADR-043, remains responsible for:
 
 - message-port receive/reply and handler startup/shutdown;
 - BPTR, BSTR, buffer and `FileInfoBlock` validation;
@@ -66,8 +66,9 @@ with the real `aarch64-unknown-aros` Rust target. The public header compiles
 together with MacAROS `dos/dos64.h` under both the AROS AArch64 Clang and m68k
 GCC; its 64-bit and 32-bit layouts are compile-time pinned.
 
-This is not yet a native mount. M06 remains partial until the small C packet
-layer links into a handler and runs the same-image matrix on MacAROS. The m68k
-C ABI is qualified, but the Rust static library is not yet a supported classic
-artifact: the current experimental m68k `std` port has unrelated build/runtime
-defects that must be resolved or avoided with a future `no_std + alloc` profile.
+This is not yet a native mount. M06 remains partial until the C translator and
+static library link into a handler and run the same-image matrix on MacAROS.
+The m68k C ABI and translator are qualified, but the Rust static library is not
+yet a supported classic artifact: the current experimental m68k `std` port has
+unrelated build/runtime defects that must be resolved or avoided with a future
+`no_std + alloc` profile.

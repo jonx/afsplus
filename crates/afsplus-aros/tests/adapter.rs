@@ -57,6 +57,9 @@ fn dos_semantics_cover_the_mountable_alpha_operation_slice() {
     let parent = adapter.parent_of_file(draft).unwrap();
     assert!(adapter.same_lock(Some(work), Some(parent)).unwrap());
     adapter.free_lock(parent).unwrap();
+    let draft_lock = adapter.lock_from_file(draft).unwrap();
+    assert_eq!(adapter.examine_lock(draft_lock).unwrap().name, b"draft");
+    adapter.free_lock(draft_lock).unwrap();
     adapter.close(draft).unwrap();
 
     adapter
@@ -142,6 +145,24 @@ fn latin1_names_round_trip_and_lock_conflicts_are_explicit() {
     let root = adapter.locate(None, b"", LockAccess::Shared).unwrap();
     assert_eq!(adapter.examine_next(root).unwrap().name, b"caf\xe9");
     adapter.free_lock(root).unwrap();
+
+    let directory = adapter
+        .create_directory(None, b"directory", timestamp(2))
+        .unwrap();
+    let child = adapter
+        .create_directory(Some(directory), b"child", timestamp(3))
+        .unwrap();
+    adapter.free_lock(directory).unwrap();
+    let exclusive_parent = adapter
+        .parent_lock_with_access(child, LockAccess::Exclusive)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        adapter.locate(None, b"directory", LockAccess::Shared),
+        Err(ArosError::ObjectInUse)
+    );
+    adapter.free_lock(exclusive_parent).unwrap();
+    adapter.free_lock(child).unwrap();
 }
 
 #[test]

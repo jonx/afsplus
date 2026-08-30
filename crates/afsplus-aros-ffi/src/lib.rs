@@ -506,6 +506,22 @@ pub extern "C" fn afsplus_aros_parent_lock(
 }
 
 #[no_mangle]
+pub extern "C" fn afsplus_aros_parent_lock_with_access(
+    filesystem: *mut AfsplusAros,
+    lock: u64,
+    access: u32,
+    output_lock: *mut u64,
+) -> i32 {
+    ffi_status(|| {
+        require_output(output_lock)?;
+        let parent = bridge_mut(filesystem)?
+            .adapter
+            .parent_lock_with_access(lock, lock_access(access)?)?;
+        write_output(output_lock, parent.unwrap_or(0))
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn afsplus_aros_same_lock(
     filesystem: *mut AfsplusAros,
     first_lock: u64,
@@ -559,6 +575,19 @@ pub extern "C" fn afsplus_aros_parent_of_file(
     ffi_status(|| {
         require_output(output_lock)?;
         let lock = bridge_mut(filesystem)?.adapter.parent_of_file(file)?;
+        write_output(output_lock, lock)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_lock_from_file(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    output_lock: *mut u64,
+) -> i32 {
+    ffi_status(|| {
+        require_output(output_lock)?;
+        let lock = bridge_mut(filesystem)?.adapter.lock_from_file(file)?;
         write_output(output_lock, lock)
     })
 }

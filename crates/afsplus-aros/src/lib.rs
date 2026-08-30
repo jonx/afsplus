@@ -233,6 +233,14 @@ impl<D: BlockDevice> ArosAdapter<D> {
     }
 
     pub fn parent_lock(&mut self, lock: LockId) -> Result<Option<LockId>, ArosError> {
+        self.parent_lock_with_access(lock, LockAccess::Shared)
+    }
+
+    pub fn parent_lock_with_access(
+        &mut self,
+        lock: LockId,
+        access: LockAccess,
+    ) -> Result<Option<LockId>, ArosError> {
         let parent = self.lock_state(lock)?.parent;
         let Some(parent) = parent else {
             return Ok(None);
@@ -243,7 +251,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
             .get(&parent)
             .cloned()
             .ok_or(ArosError::InvalidLock)?;
-        self.insert_lock(parent, grandparent, name, LockAccess::Shared)
+        self.insert_lock(parent, grandparent, name, access)
             .map(Some)
     }
 
@@ -323,6 +331,17 @@ impl<D: BlockDevice> ArosAdapter<D> {
             .cloned()
             .ok_or(ArosError::InvalidLock)?;
         self.insert_lock(parent, grandparent, name, LockAccess::Shared)
+    }
+
+    pub fn lock_from_file(&mut self, handle: FileHandleId) -> Result<LockId, ArosError> {
+        self.ensure_lock_capacity()?;
+        let state = self.file_state(handle)?.clone();
+        self.insert_lock(
+            state.object_id,
+            Some(state.parent),
+            state.name,
+            LockAccess::Shared,
+        )
     }
 
     pub fn close(&mut self, handle: FileHandleId) -> Result<(), ArosError> {

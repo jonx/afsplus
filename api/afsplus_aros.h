@@ -126,6 +126,8 @@ int32_t afsplus_aros_duplicate_lock(struct AfsplusAros *filesystem,
     uint64_t lock, uint64_t *output_lock);
 int32_t afsplus_aros_parent_lock(struct AfsplusAros *filesystem,
     uint64_t lock, uint64_t *output_lock);
+int32_t afsplus_aros_parent_lock_with_access(struct AfsplusAros *filesystem,
+    uint64_t lock, uint32_t access, uint64_t *output_lock);
 int32_t afsplus_aros_same_lock(struct AfsplusAros *filesystem,
     uint64_t first_lock, uint64_t second_lock, uint32_t *output_same);
 int32_t afsplus_aros_free_lock(struct AfsplusAros *filesystem, uint64_t lock);
@@ -135,6 +137,8 @@ int32_t afsplus_aros_open(struct AfsplusAros *filesystem,
     uint32_t mode, int64_t now_seconds, uint32_t now_nanoseconds,
     uint64_t *output_file);
 int32_t afsplus_aros_parent_of_file(struct AfsplusAros *filesystem,
+    uint64_t file, uint64_t *output_lock);
+int32_t afsplus_aros_lock_from_file(struct AfsplusAros *filesystem,
     uint64_t file, uint64_t *output_lock);
 int32_t afsplus_aros_close(struct AfsplusAros *filesystem, uint64_t file);
 

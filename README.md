@@ -156,8 +156,9 @@ Tiny files dominate source trees, Cargo metadata, package caches, editor state, 
 ## Status
 
 This repository now includes an executable Rust prototype, checker, portable
-VFS API, FUSE protocol adapter, packet-neutral AROS DOS adapter and a versioned
-AROS C/staticlib boundary. The host adapter and mount CLI can be built with:
+VFS API, FUSE protocol adapter, packet-neutral AROS DOS adapter, a versioned
+AROS C/staticlib boundary and a cross-qualified native `DosPacket` translator.
+The host adapter and mount CLI can be built with:
 
 ```sh
 cargo build -p afsplus-fuse --features fuser-adapter --bin afsplus-mount
@@ -172,9 +173,10 @@ switches are inert, use the diagnostic and reversible workaround in
 [`docs/macos-fskit-activation.md`](docs/macos-fskit-activation.md). Fuse-T's NFS
 transport is not a raw substitute for macFUSE's message channel; see ADR-040.
 The native AROS bridge and its cross-build qualification are documented in
-[`docs/aros-native-bridge.md`](docs/aros-native-bridge.md) and ADR-042. A real
-MacAROS packet-loop mount remains an explicit Alpha-0 gate; the C boundary by
-itself is not claimed as a native mount.
+[`docs/aros-native-bridge.md`](docs/aros-native-bridge.md), ADR-042 and ADR-043.
+A real MacAROS handler shell, block-device attachment and runtime mount remain
+explicit Alpha-0 gates; cross-compiling the packet translator is not claimed
+as a native mount.
 Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen are not
 format commitments. Incompatible format changes must update the format epoch
 or use feature negotiation as defined in the compatibility specification.

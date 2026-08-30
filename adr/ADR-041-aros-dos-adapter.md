@@ -62,7 +62,7 @@ raw image semantics as FUSE. Tests cover create/read/write/sparse seek,
 truncate, rename, hard-link, fsync, flush, enumeration, remount and the strict
 checker, plus Latin-1 conversion, lock conflicts and read-only errors.
 
-This does not by itself prove a native MacAROS mount. Alpha-0 still requires
-the small packet layer to be linked in the MacAROS toolchain and the same image
-workflow to pass inside MacAROS before that gate can be closed. ADR-042 now
-defines and cross-builds the C/staticlib boundary used by that packet layer.
+This does not by itself prove a native MacAROS mount. ADR-042 defines the
+C/staticlib boundary and ADR-043 now supplies the cross-qualified packet
+translator. Alpha-0 still requires them to be linked into a MacAROS handler and
+the same-image workflow to pass there before that gate can be closed.

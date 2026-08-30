@@ -5,7 +5,7 @@ The native integration is deliberately split at a stable C ABI:
 ```text
 DosPacket / BPTR / BSTR / DateStamp       AROS trackdisk or image device
                  |                                      |
-          native packet.c                       C block callbacks
+     native/aros/afsplus_packet.c                 C block callbacks
                  |                                      |
                  +---------- api/afsplus_aros.h --------+
                                       |
@@ -14,9 +14,10 @@ DosPacket / BPTR / BSTR / DateStamp       AROS trackdisk or image device
                          adapter -> VFS -> AFS+ core
 ```
 
-Only `packet.c` is target-specific. It owns AROS structures and message-port
-lifetime; the static library owns filesystem, lock, file-handle and durability
-semantics.
+The shared C translator owns AROS structure conversion and native wrapper
+lifetime without calling Exec or DOS. A small target handler still owns the
+message port, startup/shutdown and block device. The static library owns
+filesystem, numeric lock/file-handle and durability semantics.
 
 ## Reproduce the bridge qualification
 
@@ -26,14 +27,16 @@ On the MacAROS development machine:
 tools/check-aros-ffi.sh
 ```
 
-The script performs four independent gates:
+The script performs these independent gates:
 
 1. the host operation matrix through the exported Rust functions;
-2. the standalone C11 header check;
-3. a release staticlib build with MacAROS's `aarch64-unknown-aros.json`, plus
+2. a runnable host `DosPacket` matrix compiled with genuine AROS AArch64
+   headers;
+3. the standalone C11 header check;
+4. a release staticlib build with MacAROS's `aarch64-unknown-aros.json`, plus
    exported-symbol checks; and
-4. compilation of `api/afsplus_aros.h` together with the genuine AROS
-   `dos/dos64.h` under AArch64 Clang and m68k GCC.
+5. compilation of the public headers and packet translator under AArch64
+   Clang, both with the default DOS aliases and `__DOS64=1`, plus m68k GCC.
 
 Defaults assume sibling `Macaros`, `~/aros-build`, `~/aros-crosstools` and
 `~/aros-m68k-build` trees. Override `MACAROS_ROOT`, `AROS_BUILD`,
@@ -58,9 +61,18 @@ Lock value zero represents the DOS null lock/root at the C boundary. A native
 not be squeezed into the 32-bit `fl_Key`/`fh_Arg1` scalar itself. Those fields
 point to native wrappers instead.
 
+Create the packet context from `native/aros/afsplus_packet.h` after mounting
+the Rust bridge. Its allocation callback must return suitably aligned public
+memory; the translator clears each allocation itself. Its clock callback
+returns UTC Unix seconds and nanoseconds. Process one packet at a time with
+`afsplus_aros_packet_process`, then reply to the original message from the
+handler loop. Destroy the packet context before calling
+`afsplus_aros_unmount`.
+
 Names are raw byte spans with an explicit encoding selected at mount. Examine
 functions write name bytes separately from `AfsplusArosFileInfo`; the packet
 layer adds the BCPL length byte and terminator required by `FileInfoBlock`.
+Use `max_file_info_name_bytes <= 107` for a packet mount.
 
 The usual packet mapping is direct:
 
@@ -80,11 +92,17 @@ The usual packet mapping is direct:
 are decoded and encoded in the C packet layer. The Rust ABI always receives the
 already reconstructed `int64_t`/`uint64_t` value.
 
+`__WORDSIZE` and `__DOS64` are intentionally handled separately. Standard
+examine/info actions use the structure selected by the native DOS headers;
+explicit `ACTION_EXAMINE_*64` and `ACTION_INFO64` always use the wide form.
+Legacy 32-bit counters saturate at `INT32_MAX` rather than wrapping.
+
 ## Remaining native gate
 
 The next integration step is a small MacAROS handler target that links the
-static library, implements trackdisk callbacks and translates the packets
-above. It must then mount the same image used by the host, execute
+static library and the existing translator, implements trackdisk/image
+callbacks and owns the message receive/reply loop. It must then mount the same
+image used by the host, execute
 create/read/write/truncate/rename/fsync, reboot at controlled durability
 points, replay, unmount and pass the strict host checker.
 
