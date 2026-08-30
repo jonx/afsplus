@@ -25,11 +25,23 @@ Filesystem API v2 changes require:
 ## Performance work
 
 Performance patches must include:
+
 - workload
 - before/after measurement
 - peak memory
 - read/write amplification
 - invariant test results
+
+## Rust quality gate
+
+The repository has one root `rustfmt.toml`; format the entire workspace rather
+than individual crates. Before committing Rust changes, run:
+
+```sh
+cargo fmt --all -- --check
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
 
 ## No private fast paths
 

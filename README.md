@@ -155,4 +155,16 @@ Tiny files dominate source trees, Cargo metadata, package caches, editor state, 
 
 ## Status
 
-This is a development specification. Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen are not format commitments. Once implementation begins, incompatible format changes must update the format epoch or be represented through feature negotiation as defined in the compatibility specification.
+This repository now includes an executable Rust prototype, checker, portable
+VFS API and FUSE protocol adapter. The adapter and mount CLI can be built with:
+
+```sh
+cargo build -p afsplus-fuse --features fuser-adapter --bin afsplus-mount
+```
+
+Linux uses fuser's native mount path. The callbacks compile and are tested on
+macOS, while a real Fuse-T/macFUSE mount is still an explicit qualification
+gate; see ADR-040. Fields marked `TBD`, Proposed, experimental, or otherwise
+unfrozen are not format commitments. Incompatible format changes must update
+the format epoch or use feature negotiation as defined in the compatibility
+specification.
