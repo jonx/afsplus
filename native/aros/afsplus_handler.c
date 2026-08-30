@@ -11,6 +11,7 @@
 #define USE_INLINE_STDARG
 
 #include <aros/asmcall.h>
+#include <aros/debug.h>
 #include <aros/stdc/string.h>
 #include <exec/types.h>
 #include <devices/newstyle.h>
@@ -77,6 +78,7 @@ struct AfsplusArosHandler {
     uint16_t read_command;
     uint16_t write_command;
     uint32_t supports_64bit_offsets;
+    const char *startup_stage;
 };
 
 static void reply_packet(struct MsgPort *handler_port,
@@ -363,21 +365,26 @@ static int32_t open_device(struct AfsplusArosHandler *handler)
     struct ExecBase *SysBase = handler->SysBase;
     struct FileSysStartupMsg *startup = handler->startup;
 
+    handler->startup_stage = "device-unit";
     if (startup->fssm_Unit > UINT32_MAX)
         return ERROR_BAD_NUMBER;
+    handler->startup_stage = "device-port";
     handler->device_port = CreateMsgPort();
     if (handler->device_port == NULL)
         return ERROR_NO_FREE_STORE;
+    handler->startup_stage = "device-request";
     handler->device_request = (struct IOExtTD *)CreateIORequest(
         handler->device_port, sizeof(struct IOExtTD));
     if (handler->device_request == NULL)
         return ERROR_NO_FREE_STORE;
+    handler->startup_stage = "open-device";
     if (OpenDevice(AROS_BSTR_ADDR(startup->fssm_Device),
             (ULONG)startup->fssm_Unit,
             (struct IORequest *)handler->device_request,
             startup->fssm_Flags) != 0)
         return ERROR_DEVICE_NOT_MOUNTED;
     handler->device_open = 1;
+    handler->startup_stage = "media-state";
     return require_media(handler);
 }
 
@@ -396,6 +403,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     uint64_t physical_block_size;
     int32_t error;
 
+    handler->startup_stage = "geometry-fields";
     if ((SIPTR)environment->de_TableSize < DE_HIGHCYL
         || (SIPTR)environment->de_SizeBlock <= 0
         || (SIPTR)environment->de_Surfaces <= 0
@@ -403,6 +411,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
         || (SIPTR)environment->de_LowCyl < 0
         || (SIPTR)environment->de_HighCyl < 0)
         return ERROR_BAD_NUMBER;
+    handler->startup_stage = "geometry-bounds";
     error = afsplus_aros_trackdisk_geometry(
         (uint64_t)environment->de_LowCyl,
         (uint64_t)environment->de_HighCyl,
@@ -416,6 +425,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     if (physical_block_size > UINT32_MAX)
         return ERROR_OBJECT_TOO_LARGE;
 
+    handler->startup_stage = "dma-bounce";
     error = setup_dma_bounce(handler);
     if (error != 0)
         return error;
@@ -437,6 +447,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     trackdisk_config.supports_64bit_offsets =
         handler->supports_64bit_offsets;
     trackdisk_config.read_only = handler->read_only;
+    handler->startup_stage = "trackdisk-adapter";
     error = afsplus_aros_trackdisk_init(&trackdisk_config,
         &handler->trackdisk, &handler->device);
     if (error != 0)
@@ -453,14 +464,17 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     mount_config.max_file_handles = 1024;
     mount_config.max_locks = 1024;
     mount_config.max_file_info_name_bytes = 107;
+    handler->startup_stage = "rust-mount";
     error = afsplus_aros_mount(&handler->device, &mount_config,
         &handler->filesystem);
     if (error != 0)
         return error;
 
+    handler->startup_stage = "disk-info";
     error = afsplus_aros_disk_info(handler->filesystem, &disk_info);
     if (error != 0)
         return error;
+    handler->startup_stage = "volume-entry";
     handler->volume_node = MakeDosEntry((STRPTR)"AFS+", DLT_VOLUME);
     if (handler->volume_node == NULL)
         return ERROR_NO_FREE_STORE;
@@ -469,6 +483,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
         (ULONG)disk_info.disk_type;
     DateStamp(&now);
     handler->volume_node->dol_misc.dol_volume.dol_VolumeDate = now;
+    handler->startup_stage = "volume-register";
     if (!AddDosEntry(handler->volume_node))
         return IoErr() != 0 ? (int32_t)IoErr() : ERROR_OBJECT_EXISTS;
     handler->volume_registered = 1;
@@ -483,6 +498,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     packet_config.allocate = packet_allocate;
     packet_config.free = packet_free;
     packet_config.now = packet_now;
+    handler->startup_stage = "packet-context";
     return afsplus_aros_packet_create(&packet_config, &handler->packets);
 }
 
@@ -557,6 +573,7 @@ static struct AfsplusArosHandler *initialize_handler(struct ExecBase *SysBase,
         return NULL;
     }
     handler->SysBase = SysBase;
+    handler->startup_stage = "startup-message";
     handler->process = process;
     handler->handler_port = &process->pr_MsgPort;
     handler->device_node = (struct DosList *)BADDR(startup_packet->dp_Arg3);
@@ -575,6 +592,7 @@ static struct AfsplusArosHandler *initialize_handler(struct ExecBase *SysBase,
         return handler;
     }
 
+    handler->startup_stage = "dos-library";
     handler->DOSBase = (struct DosLibrary *)TaggedOpenLibrary(TAGGEDOPEN_DOS);
     if (handler->DOSBase == NULL)
     {
@@ -616,6 +634,9 @@ LONG handler(struct ExecBase *SysBase)
     state = initialize_handler(SysBase, process, packet, &error);
     if (state == NULL || error != 0)
     {
+        bug("[AFSPLUS] mount failed at %s: error %d\n",
+            state != NULL ? state->startup_stage : "handler-allocation",
+            (int)error);
         packet->dp_Res1 = DOSFALSE;
         packet->dp_Res2 = error;
         reply_packet(port, SysBase, packet);

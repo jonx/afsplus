@@ -155,13 +155,18 @@ That final off-tree link deliberately consumes the glue sources from
 `posixc/stdc/pthread` link set. A handler uses its generated start/end objects,
 never the command-oriented `startup.o`.
 
-## Remaining native gate
+## Hosted S0 and remaining native gates
 
-The next integration step is to add this source set as a MacAROS handler build
-target and install the already qualified off-tree package into a dedicated test
-tree. It must then mount the same image used by the host, execute
-create/read/write/truncate/rename/fsync, reboot at controlled durability points,
-replay, unmount and pass the strict host checker.
+`tools/check-hosted-aros-alpha0.sh` now installs the off-tree package into a
+dedicated Hosted test tree, executes create/read/write/truncate/rename/fsync on
+AROS and macFUSE, returns to AROS for cross-created-file readback, and requires
+a clean strict checker at every boundary. ADR-046 records the runtime startup
+fixes and S0 evidence.
+
+The next integration steps are controlled Hosted power cuts and replay, a
+post-bootstrap AFS+ `SYS:` pivot, and an in-tree MacAROS handler build target.
+Only after those Hosted gates does the same contract move to native MacAROS,
+then m68k emulation and the physical Amiga 500.
 
 The fixed-image Alpha-0 path does not yet install `TD_ADDCHANGEINT` handling.
 Hot-swappable media remains disabled until removal can detach the mounted Rust

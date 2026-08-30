@@ -161,6 +161,10 @@ mkdir -p "$task_dir/module/include"
     writelibdefs afsplus handler
 "$aros_genmodule" -c native/aros/afsplus.conf -d "$task_dir/module" \
     writefiles afsplus handler
+patch -s "$task_dir/module/afsplus_start.c" \
+    native/aros/afsplus-handler-autolibs.patch
+grep -q 'if (set_open_libraries())' "$task_dir/module/afsplus_start.c"
+grep -q 'set_close_libraries();' "$task_dir/module/afsplus_start.c"
 for source in afsplus_start afsplus_end; do
     "$aros_clang" --target=aarch64-unknown-none-elf \
         -mcmodel=large -ffixed-x18 -D__arm64__ -D__AROS__ \

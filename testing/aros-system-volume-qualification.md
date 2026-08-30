@@ -21,6 +21,10 @@ the strict checker must report a clean volume.
 This proves the native DOS packet, handler, block-device and on-disk paths. It
 does not prove that AROS can use AFS+ as `SYS:`.
 
+Hosted MacAROS S0 is qualified by `tools/check-hosted-aros-alpha0.sh`; ADR-046
+records the runtime evidence and boundary fixes. Each later platform repeats S0
+before advancing to its system-volume or performance gates.
+
 ### S1: post-bootstrap system-volume pivot
 
 Start MacAROS through its existing boot path, mount an AFS+ image containing a
@@ -67,15 +71,34 @@ large RAM, host file caching and an APFS-backed `fdsk.device` image do not model
 a 680x0 CPU, a few MiB of memory, an IDE/CompactFlash controller or a real
 rotating disk.
 
-Results are therefore published in separate classes and never averaged:
+The project has three target platforms and four ordered validation stages.
+Results from the four stages are published separately and never averaged:
 
-1. MacAROS native AArch64: modern AROS software cost and primary development
-   regression gate;
-2. constrained AROS: fixed CPU share and explicit small handler/cache budgets,
-   useful for sensitivity analysis but still not a hardware claim;
-3. classic/emulated target: cycle-stable m68k configuration with recorded RAM
-   and controller model; and
-4. physical target: named machine, CPU, RAM, controller and medium.
+1. Hosted MacAROS on macOS: modern AROS software cost and the primary rapid
+   development regression gate;
+2. native MacAROS on Apple Silicon: bare-metal integration without the Hosted
+   transport or host filesystem in the execution path;
+3. Amiga 500/m68k emulation: deterministic CPU, RAM and controller model for
+   instrumentation, repeatability and crash testing before physical media; and
+4. physical Amiga 500: named CPU, RAM, controller and storage medium.
+
+Explicit cache budgets or CPU constraints may be applied inside a stage for
+sensitivity analysis, but a constrained Hosted result is not promoted to an
+emulated or physical-machine claim.
+
+The project's first physical classic target is an Amiga 500. Its result bundle
+must record the exact 680x0 CPU, Chip/Fast RAM, accelerator or expansion, ROM/OS
+build, storage controller, medium and filesystem-handler versions. A stock and
+an expanded A500 are distinct platforms even when they use the same case.
+
+The A500 qualification starts in the emulator with the bounded
+reader/`NO_CHANGES` path, then a minimal read-write profile, deterministic
+power cuts and timed workloads. Only the resulting qualified build moves to
+disposable media on the physical machine. Unsupported optional features are
+negotiated through the normal AFS+ profile/feature mechanism; the A500 does not
+get a divergent disk format. Workload sizes are scaled to fit the recorded
+machine, while operation mixes and durability points remain comparable to the
+MacAROS runs.
 
 ## 3. Comparison contract
 
