@@ -5,12 +5,18 @@ If WARN
     C:Echo fail >HOST:mount.status
 Else
     C:Echo pass >HOST:mount.status
-    C:AFSPlusAlpha0Probe >HOST:probe.out
+    C:AFSPlusRouteProbe >HOST:route.out
     If WARN
-        C:Echo fail >HOST:probe.status
+        C:Echo fail >HOST:route.status
     Else
-        C:Echo pass >HOST:probe.status
-        C:Copy AFSPLUS19:alpha0.from-aros HOST:alpha0.from-aros >HOST:copy.out
+        C:Echo pass >HOST:route.status
+        C:AFSPlusAlpha0Probe >HOST:probe.out
+        If WARN
+            C:Echo fail >HOST:probe.status
+        Else
+            C:Echo pass >HOST:probe.status
+            C:Copy AFSPLUS19:alpha0.from-aros HOST:alpha0.from-aros >HOST:copy.out
+        EndIf
     EndIf
     C:Assign AFSPLUS19: DISMOUNT >HOST:dismount.out
 EndIf

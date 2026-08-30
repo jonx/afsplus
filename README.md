@@ -175,7 +175,7 @@ switches are inert, use the diagnostic and reversible workaround in
 transport is not a raw substitute for macFUSE's message channel; see ADR-040.
 The native AROS bridge and its cross-build qualification are documented in
 [`docs/aros-native-bridge.md`](docs/aros-native-bridge.md), ADR-042 through
-ADR-055. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
+ADR-056. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
 Hosted MacAROS → macFUSE → Hosted MacAROS round trip on one checked image.
 Hosted intent-log replay and the cumulative post-bootstrap S1 system-volume
 pivot are also qualified. The handler now supports standard AROS

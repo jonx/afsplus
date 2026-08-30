@@ -23,7 +23,8 @@ filesystem gate. Given a matching official boot ADF and system ISO, it:
 2. generates the handler entry, compiles the C packet/trackdisk shell and links
    the final module directly with `collect-aros`;
 3. rejects undefined symbols and diagnostic trace strings in that module;
-4. boots a fresh case-insensitive image under native AROS in FS-UAE and runs
+4. boots a fresh case-insensitive image under native AROS in FS-UAE, verifies
+   that the DOS device and volume route to the same handler port, then runs
    create/read/write/sparse-write/truncate/rename/two flushes/case-folded
    lookup/case-only rename/reopen/readback;
 5. returns the image and requires a clean schema-5 host checker with no pending
@@ -68,6 +69,11 @@ The standard-library PAL was rebased outside this repository for the current
 nightly allocation, I/O-error and unsupported m68k subsystem APIs. That PAL and
 patched compiler remain an experimental build prerequisite, not part of the
 AFS+ disk format or VFS contract.
+
+Formatting reductions are confined to the m68k build: modern targets retain
+the complete contextual mount and `FormatError` diagnostics. The classic path
+uses bounded checkpoint-status formatting and may return the underlying state
+error without the additional formatted checkpoint wrapper.
 
 ## Consequences
 

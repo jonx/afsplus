@@ -164,6 +164,7 @@ fn read_checkpoint_candidate<D: BlockDevice>(
     Ok(())
 }
 
+#[cfg(target_arch = "m68k")]
 fn valid_checkpoint_status(mut generation: u64) -> String {
     const PREFIX: &str = "valid, generation ";
     let mut status = String::with_capacity(PREFIX.len() + 20);
@@ -187,6 +188,12 @@ fn valid_checkpoint_status(mut generation: u64) -> String {
     status
 }
 
+#[cfg(not(target_arch = "m68k"))]
+fn valid_checkpoint_status(generation: u64) -> String {
+    format!("valid, generation {generation}")
+}
+
+#[cfg(target_arch = "m68k")]
 fn checkpoint_error_status(prefix: &str, error: &FormatError) -> String {
     let (category, detail) = match error {
         FormatError::WrongBufferSize { .. } => ("wrong buffer size", None),
@@ -206,6 +213,11 @@ fn checkpoint_error_status(prefix: &str, error: &FormatError) -> String {
         status.push_str(detail);
     }
     status
+}
+
+#[cfg(not(target_arch = "m68k"))]
+fn checkpoint_error_status(prefix: &str, error: &FormatError) -> String {
+    format!("{prefix}{error}")
 }
 
 pub fn mount<D: BlockDevice>(dev: D) -> Result<Volume<D>, CoreError> {
@@ -262,7 +274,7 @@ mod tests {
     use super::{checkpoint_error_status, valid_checkpoint_status};
 
     #[test]
-    fn checkpoint_status_formats_full_u64_range_without_fmt() {
+    fn checkpoint_status_formats_full_u64_range() {
         assert_eq!(valid_checkpoint_status(0), "valid, generation 0");
         assert_eq!(valid_checkpoint_status(42), "valid, generation 42");
         assert_eq!(
@@ -272,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_error_status_is_bounded_without_generic_formatting() {
+    fn checkpoint_error_status_preserves_format_diagnostics() {
         assert_eq!(
             checkpoint_error_status(
                 "structurally invalid: ",
@@ -288,7 +300,7 @@ mod tests {
                     actual: 0,
                 },
             ),
-            "invalid: wrong block type"
+            "invalid: wrong block type: expected 0x00000001, got 0x00000000"
         );
     }
 }

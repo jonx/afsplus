@@ -13,6 +13,7 @@ pub const BOOTSTRAP_BLOCKS: u64 = 3;
 pub const MAX_REGION_BLOCKS: u32 = 262_144;
 pub const MIN_REGION_BLOCKS: u32 = 16;
 
+#[cfg(target_arch = "m68k")]
 fn u64_is_below(left: u64, right: u64) -> bool {
     let left_high = (left >> 32) as u32;
     let right_high = (right >> 32) as u32;
@@ -21,6 +22,11 @@ fn u64_is_below(left: u64, right: u64) -> bool {
     } else {
         (left as u32) < (right as u32)
     }
+}
+
+#[cfg(not(target_arch = "m68k"))]
+fn u64_is_below(left: u64, right: u64) -> bool {
+    left < right
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +105,7 @@ impl Geometry {
     }
 
     /// Descriptor plus bitmap slots reserved at the start of this region.
-    #[inline(never)]
+    #[cfg_attr(target_arch = "m68k", inline(never))]
     pub fn region_reserved_blocks(&self, region: u32) -> u64 {
         self.region_reserved_blocks_u32(region) as u64
     }

@@ -196,13 +196,18 @@ echo "[m68k-alpha0] build target operation and replay probes"
     -Wno-volatile-register-var -Wno-pointer-sign \
     "$repo_root/native/aros/tests/replay_probe.c" \
     -o "$build/AFSPlusReplayProbe"
+"$cc" -O2 -std=gnu11 -Wall -Wextra -Werror \
+    -Wno-volatile-register-var -Wno-pointer-sign \
+    "$repo_root/native/aros/tests/m68k_route_probe.c" \
+    -o "$build/AFSPlusRouteProbe"
 cp "$handler" "$system/L/afsplus-handler"
 cp "$build/AFSPlusAlpha0Probe" "$system/C/AFSPlusAlpha0Probe"
 cp "$build/AFSPlusReplayProbe" "$system/C/AFSPlusReplayProbe"
+cp "$build/AFSPlusRouteProbe" "$system/C/AFSPlusRouteProbe"
 cp "$repo_root/native/aros/AFSPLUS19-m68k.mountlist" \
     "$system/Devs/DOSDrivers/AFSPLUS19"
 chmod 755 "$system/L/afsplus-handler" "$system/C/AFSPlusAlpha0Probe" \
-    "$system/C/AFSPlusReplayProbe"
+    "$system/C/AFSPlusReplayProbe" "$system/C/AFSPlusRouteProbe"
 
 run_guest() {
     case_name=$1
@@ -252,6 +257,8 @@ cargo run --quiet --release -p afsplus-core --bin afsplus-mkfs -- \
 run_guest alpha0 "$repo_root/native/aros/tests/m68k-alpha0-sequence" \
     "$alpha_image" "$serial_port_base"
 alpha_case="$result/cases/alpha0"
+grep -qx pass "$alpha_case/host/route.status"
+grep -qxF '[AFSPLUS-ROUTE] PASS' "$alpha_case/host/route.out"
 grep -qx pass "$alpha_case/host/probe.status"
 grep -qxF \
     '[AFSPLUS-ALPHA0] PASS create/read/write/truncate/rename/fsync/casefold' \

@@ -72,3 +72,8 @@ The m68k C ABI and translator are qualified, but the Rust static library is not
 yet a supported classic artifact: the current experimental m68k `std` port has
 unrelated build/runtime defects that must be resolved or avoided with a future
 `no_std + alloc` profile.
+
+ADR-056 subsequently qualifies a patched experimental `std` static library and
+the full native handler on an M68020-or-newer emulator profile. That later
+evidence supersedes only the classic-artifact status above; the plain-68000 and
+production-toolchain limitations remain.

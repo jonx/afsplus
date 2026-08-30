@@ -68,6 +68,10 @@ handler module with no undefined symbols. The generated entry and shell also
 compile with the m68k SDK, while the m68k Rust library remains outside the
 supported Alpha-0 path described by ADR-042.
 
+ADR-056 subsequently supplies that m68k Rust library and qualifies the complete
+shell under native AROS for the M68020-or-newer emulator profile. It does not
+turn the original cross-build evidence into a plain-68000 or hardware claim.
+
 `tools/package-aros-alpha0.sh` turns the qualified off-tree link into a
 self-contained pre-install artifact: handler, DOSDriver, target operation
 probe, full-length sparse image, clean host-checker report and hashes. This is
