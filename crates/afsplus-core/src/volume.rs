@@ -15,7 +15,7 @@
 //! ([`CommitStats`]) — metadata bytes, bitmap pages, region descriptors,
 //! flushes, retired and promoted blocks, reclaim latency, allocator RAM.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
@@ -53,6 +53,35 @@ pub struct CommitStats {
     /// Total bytes issued to the device by this transaction.
     pub bytes_written: u64,
     pub alloc: AllocStats,
+}
+
+/// One operation inside a [`Volume::run_batch`] group commit (ADR-026).
+#[derive(Debug, Clone)]
+pub enum BatchOp<'a> {
+    CreateFile { parent_id: u64, name: &'a str, content: &'a [u8] },
+    DeleteFile { parent_id: u64, name: &'a str },
+    Rename {
+        source_parent_id: u64,
+        source_name: &'a str,
+        target_parent_id: u64,
+        target_name: &'a str,
+        /// Atomically replace an existing file target in the same batch.
+        replace: bool,
+    },
+}
+
+/// Logical read-your-writes overlay of one in-flight batch.
+struct PendingBatch {
+    /// Per-directory entry changes: Some = upsert, None = delete.
+    dir_changes: BTreeMap<u64, BTreeMap<Vec<u8>, Option<DirEntry>>>,
+    /// Object-record changes: Some = rewrite, None = delete from the map.
+    records: BTreeMap<u64, Option<ObjectRecord>>,
+    /// Committed record blocks to retire when their object is rewritten.
+    committed_record_lbas: BTreeMap<u64, u64>,
+    /// Data runs of objects created by this batch (cancellable).
+    created_data: BTreeMap<u64, (u64, u64)>,
+    data_writes: Vec<(u64, Vec<u8>)>,
+    next_object_id: u64,
 }
 
 pub struct Volume<D: BlockDevice> {
@@ -1677,6 +1706,501 @@ impl<D: BlockDevice> Volume<D> {
             data_writes,
             metadata_writes,
             object_map_mutation.root_lba,
+        )
+    }
+
+    /// Executes several namespace operations as ONE transaction with ONE
+    /// checkpoint publication: the group-commit / bounded atomic-batch
+    /// primitive (ADR-026). Either every operation commits or none does.
+    ///
+    /// Prototype scope: file operations only (create with content, delete,
+    /// rename with optional atomic replace). Operations see the effects of
+    /// earlier operations in the same batch. Returns one entry per
+    /// operation: the created object ID for `CreateFile`, `None` otherwise.
+    pub fn run_batch(
+        &mut self,
+        ops: &[BatchOp<'_>],
+        now: Timespec,
+    ) -> Result<Vec<Option<u64>>, CoreError> {
+        const MAX_BATCH_OPS: usize = 1024;
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        if ops.len() > MAX_BATCH_OPS {
+            return Err(CoreError::PrototypeLimit("batch exceeds bounded operation count"));
+        }
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            generation,
+            self.reclaim_batch_blocks,
+            self.alloc_rover_region,
+        )?;
+        let mut pending = PendingBatch {
+            dir_changes: BTreeMap::new(),
+            records: BTreeMap::new(),
+            committed_record_lbas: BTreeMap::new(),
+            created_data: BTreeMap::new(),
+            data_writes: Vec::new(),
+            next_object_id: self.checkpoint.next_object_id,
+        };
+        let mut results = Vec::with_capacity(ops.len());
+        for op in ops {
+            results.push(self.apply_batch_op(&mut tx, &mut pending, op, now, generation)?);
+        }
+        self.materialize_batch(tx, pending, now, generation)?;
+        Ok(results)
+    }
+
+    /// Atomic-replace rename for files: the target, if present, is replaced
+    /// in the same transaction (its storage is quarantined or its link count
+    /// decremented). One-operation batch.
+    pub fn rename_replace(
+        &mut self,
+        source_parent_id: u64,
+        source_name: &str,
+        target_parent_id: u64,
+        target_name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.run_batch(
+            &[BatchOp::Rename {
+                source_parent_id,
+                source_name,
+                target_parent_id,
+                target_name,
+                replace: true,
+            }],
+            now,
+        )?;
+        Ok(())
+    }
+
+    /// Directory-entry view through the batch overlay, then committed state.
+    fn batch_lookup(
+        &mut self,
+        pending: &PendingBatch,
+        directory_id: u64,
+        key: &[u8],
+    ) -> Result<Option<DirEntry>, CoreError> {
+        if let Some(changes) = pending.dir_changes.get(&directory_id) {
+            if let Some(change) = changes.get(key) {
+                return Ok(change.clone());
+            }
+        }
+        let directory = self
+            .batch_record(pending, directory_id)?
+            .ok_or(CoreError::NotFound)?;
+        if directory.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        // Entries are overlaid separately, so the committed tree root is the
+        // right base even when the directory record has pending changes.
+        let committed = self
+            .read_object(directory_id)?
+            .ok_or(CoreError::NotFound)?;
+        directory::lookup_entry(
+            &mut self.dev,
+            &self.ident.geometry(),
+            committed.data_root,
+            directory_id,
+            self.checkpoint.generation,
+            key,
+        )
+    }
+
+    /// Object-record view through the batch overlay, then committed state.
+    fn batch_record(
+        &mut self,
+        pending: &PendingBatch,
+        object_id: u64,
+    ) -> Result<Option<ObjectRecord>, CoreError> {
+        if let Some(record) = pending.records.get(&object_id) {
+            return Ok(*record);
+        }
+        self.read_object(object_id)
+    }
+
+    /// Remembers the committed record block of an object the batch rewrites
+    /// or deletes, so materialization retires exactly one old block per
+    /// object.
+    fn note_committed_record(
+        &mut self,
+        pending: &mut PendingBatch,
+        object_id: u64,
+    ) -> Result<(), CoreError> {
+        if pending.committed_record_lbas.contains_key(&object_id)
+            || pending.created_data.contains_key(&object_id)
+        {
+            return Ok(());
+        }
+        let lba = self.object_record_lba(object_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("object {object_id} missing from object map"))
+        })?;
+        pending.committed_record_lbas.insert(object_id, lba);
+        Ok(())
+    }
+
+    fn apply_batch_op(
+        &mut self,
+        tx: &mut TxAllocator,
+        pending: &mut PendingBatch,
+        op: &BatchOp<'_>,
+        now: Timespec,
+        generation: u64,
+    ) -> Result<Option<u64>, CoreError> {
+        let block_size = self.dev.block_size();
+        match op {
+            BatchOp::CreateFile { parent_id, name, content } => {
+                validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+                let parent = self
+                    .batch_record(pending, *parent_id)?
+                    .ok_or(CoreError::NotFound)?;
+                if parent.object_type != ObjectType::Directory {
+                    return Err(CoreError::NotDirectory);
+                }
+                let key = comparison_key(name.as_bytes());
+                if self.batch_lookup(pending, *parent_id, &key)?.is_some() {
+                    return Err(CoreError::AlreadyExists);
+                }
+                let object_id = pending.next_object_id;
+                pending.next_object_id = object_id
+                    .checked_add(1)
+                    .ok_or(CoreError::PrototypeLimit("object ID space exhausted"))?;
+                let data_block_count = (content.len() as u64).div_ceil(block_size as u64);
+                let data_start = if data_block_count > 0 {
+                    let start = tx.allocate_run(&mut self.dev, data_block_count)?;
+                    for i in 0..data_block_count as usize {
+                        let mut block = vec![0u8; block_size];
+                        let from = i * block_size;
+                        let to = content.len().min(from + block_size);
+                        block[..to - from].copy_from_slice(&content[from..to]);
+                        pending.data_writes.push((start + i as u64, block));
+                    }
+                    start
+                } else {
+                    0
+                };
+                pending.created_data.insert(object_id, (data_start, data_block_count));
+                pending.records.insert(
+                    object_id,
+                    Some(ObjectRecord {
+                        object_id,
+                        object_type: ObjectType::File,
+                        flags: 0,
+                        link_count: 1,
+                        size_bytes: content.len() as u64,
+                        allocated_bytes: data_block_count * block_size as u64,
+                        created: now,
+                        modified: now,
+                        changed: now,
+                        protection: 0,
+                        content_generation: generation,
+                        data_root: data_start,
+                        data_blocks: data_block_count,
+                    }),
+                );
+                pending.dir_changes.entry(*parent_id).or_default().insert(
+                    key,
+                    Some(DirEntry {
+                        key: comparison_key(name.as_bytes()),
+                        name: name.as_bytes().to_vec(),
+                        child_type_hint: 1,
+                        child_id: object_id,
+                    }),
+                );
+                Ok(Some(object_id))
+            }
+            BatchOp::DeleteFile { parent_id, name } => {
+                validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+                let key = comparison_key(name.as_bytes());
+                let entry = self
+                    .batch_lookup(pending, *parent_id, &key)?
+                    .ok_or(CoreError::NotFound)?;
+                self.unlink_in_batch(tx, pending, entry.child_id, now)?;
+                pending
+                    .dir_changes
+                    .entry(*parent_id)
+                    .or_default()
+                    .insert(key, None);
+                Ok(None)
+            }
+            BatchOp::Rename {
+                source_parent_id,
+                source_name,
+                target_parent_id,
+                target_name,
+                replace,
+            } => {
+                validate_name(source_name.as_bytes()).map_err(CoreError::InvalidName)?;
+                validate_name(target_name.as_bytes()).map_err(CoreError::InvalidName)?;
+                let source_key = comparison_key(source_name.as_bytes());
+                let target_key = comparison_key(target_name.as_bytes());
+                if source_parent_id == target_parent_id && source_key == target_key {
+                    return Ok(None);
+                }
+                let entry = self
+                    .batch_lookup(pending, *source_parent_id, &source_key)?
+                    .ok_or(CoreError::NotFound)?;
+                let moved = self
+                    .batch_record(pending, entry.child_id)?
+                    .ok_or_else(|| CoreError::Corrupt("moved object missing".into()))?;
+                if moved.object_type != ObjectType::File {
+                    return Err(CoreError::PrototypeLimit(
+                        "batched rename supports files only",
+                    ));
+                }
+                if let Some(existing) = self.batch_lookup(pending, *target_parent_id, &target_key)? {
+                    if !replace {
+                        return Err(CoreError::AlreadyExists);
+                    }
+                    let target = self
+                        .batch_record(pending, existing.child_id)?
+                        .ok_or_else(|| CoreError::Corrupt("replace target missing".into()))?;
+                    if target.object_type != ObjectType::File {
+                        return Err(CoreError::IsDirectory);
+                    }
+                    self.unlink_in_batch(tx, pending, existing.child_id, now)?;
+                }
+                let target_parent = self
+                    .batch_record(pending, *target_parent_id)?
+                    .ok_or(CoreError::NotFound)?;
+                if target_parent.object_type != ObjectType::Directory {
+                    return Err(CoreError::NotDirectory);
+                }
+                pending
+                    .dir_changes
+                    .entry(*source_parent_id)
+                    .or_default()
+                    .insert(source_key, None);
+                pending.dir_changes.entry(*target_parent_id).or_default().insert(
+                    target_key,
+                    Some(DirEntry {
+                        key: comparison_key(target_name.as_bytes()),
+                        name: target_name.as_bytes().to_vec(),
+                        child_type_hint: 1,
+                        child_id: entry.child_id,
+                    }),
+                );
+                if !pending.created_data.contains_key(&entry.child_id) {
+                    self.note_committed_record(pending, entry.child_id)?;
+                }
+                pending
+                    .records
+                    .insert(entry.child_id, Some(ObjectRecord { changed: now, ..moved }));
+                Ok(None)
+            }
+        }
+    }
+
+    /// Drops one link from a file inside a batch: cancels a same-batch
+    /// creation entirely (its storage is released, never quarantined),
+    /// decrements a multiply-linked committed file, or retires a committed
+    /// file's record and storage.
+    fn unlink_in_batch(
+        &mut self,
+        tx: &mut TxAllocator,
+        pending: &mut PendingBatch,
+        object_id: u64,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        let victim = self
+            .batch_record(pending, object_id)?
+            .ok_or_else(|| CoreError::Corrupt("unlink victim missing".into()))?;
+        if victim.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        if let Some((data_start, data_blocks)) = pending.created_data.remove(&object_id) {
+            // Same-batch creation: nothing was ever committed. Release the
+            // staged data and drop the staged writes.
+            for lba in data_start..data_start + data_blocks {
+                tx.release_uncommitted(&mut self.dev, lba)?;
+            }
+            pending
+                .data_writes
+                .retain(|(lba, _)| *lba < data_start || *lba >= data_start + data_blocks);
+            pending.records.remove(&object_id);
+            return Ok(());
+        }
+        if victim.link_count > 1 {
+            self.note_committed_record(pending, object_id)?;
+            pending.records.insert(
+                object_id,
+                Some(ObjectRecord {
+                    link_count: victim.link_count - 1,
+                    changed: now,
+                    ..victim
+                }),
+            );
+            return Ok(());
+        }
+        self.note_committed_record(pending, object_id)?;
+        let committed_lba = pending.committed_record_lbas[&object_id];
+        tx.retire(&mut self.dev, committed_lba)?;
+        pending.committed_record_lbas.remove(&object_id);
+        self.retire_file_storage(tx, &victim)?;
+        pending.records.insert(object_id, None);
+        Ok(())
+    }
+
+    /// Quarantines a committed file's data extents and extent-tree nodes.
+    fn retire_file_storage(
+        &mut self,
+        tx: &mut TxAllocator,
+        victim: &ObjectRecord,
+    ) -> Result<(), CoreError> {
+        if victim.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
+            let map = extent_map::load_all(
+                &mut self.dev,
+                &self.ident.geometry(),
+                victim.data_root,
+                victim.object_id,
+                self.checkpoint.generation,
+            )?;
+            for lba in map.tree_blocks {
+                tx.retire(&mut self.dev, lba)?;
+            }
+            for extent in map.extents {
+                tx.retire_run(&mut self.dev, extent.physical_start, extent.block_count)?;
+            }
+        } else if victim.data_blocks > 0 {
+            tx.retire_run(&mut self.dev, victim.data_root, victim.data_blocks)?;
+        }
+        Ok(())
+    }
+
+    /// Publishes the batch: one directory-tree mutation per touched
+    /// directory, freshly encoded object records, one object-map mutation,
+    /// one checkpoint.
+    fn materialize_batch(
+        &mut self,
+        mut tx: TxAllocator,
+        mut pending: PendingBatch,
+        now: Timespec,
+        generation: u64,
+    ) -> Result<(), CoreError> {
+        let block_size = self.dev.block_size();
+        let mut meta_writes: Vec<(u64, Vec<u8>)> = Vec::new();
+
+        let dir_ids: Vec<u64> = pending.dir_changes.keys().copied().collect();
+        for dir_id in dir_ids {
+            let changes = pending.dir_changes.remove(&dir_id).expect("key listed above");
+            let committed = self
+                .read_object(dir_id)?
+                .ok_or_else(|| CoreError::Corrupt(format!("directory {dir_id} disappeared")))?;
+            let mut encoded: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+            for (key, change) in changes {
+                match change {
+                    Some(entry) => {
+                        let (entry_key, entry_value) = directory::encode_entry(&entry)?;
+                        debug_assert_eq!(entry_key, key);
+                        encoded.push((entry_key, Some(entry_value)));
+                    }
+                    None => {
+                        // A delete of a key with no committed entry is a
+                        // same-batch create that was cancelled: skip it.
+                        let existed = directory::lookup_entry(
+                            &mut self.dev,
+                            &self.ident.geometry(),
+                            committed.data_root,
+                            dir_id,
+                            self.checkpoint.generation,
+                            &key,
+                        )?
+                        .is_some();
+                        if existed {
+                            encoded.push((key, None));
+                        }
+                    }
+                }
+            }
+            if encoded.is_empty() {
+                continue;
+            }
+            let operations: Vec<TreeOperation<'_>> = encoded
+                .iter()
+                .map(|(key, value)| match value {
+                    Some(value) => TreeOperation::Upsert { key, value },
+                    None => TreeOperation::Delete { key },
+                })
+                .collect();
+            let mutation = mutate_many(
+                &mut self.dev,
+                &self.ident.geometry(),
+                &mut tx,
+                committed.data_root,
+                directory::spec(dir_id, self.checkpoint.generation),
+                generation,
+                &operations,
+            )?;
+            meta_writes.extend(mutation.writes);
+            self.note_committed_record(&mut pending, dir_id)?;
+            let base = self
+                .batch_record(&pending, dir_id)?
+                .ok_or_else(|| CoreError::Corrupt(format!("directory {dir_id} disappeared")))?;
+            pending.records.insert(
+                dir_id,
+                Some(ObjectRecord {
+                    modified: now,
+                    changed: now,
+                    content_generation: generation,
+                    data_root: mutation.root_lba,
+                    ..base
+                }),
+            );
+        }
+
+        // Encode every surviving pending record into a fresh block and build
+        // the object-map operation set.
+        let mut omap_encoded: Vec<([u8; 8], Option<[u8; 8]>)> = Vec::new();
+        for (object_id, record) in &pending.records {
+            match record {
+                Some(record) => {
+                    let lba = tx.allocate(&mut self.dev)?;
+                    meta_writes.push((lba, record.encode(block_size, generation)?));
+                    if let Some(old) = pending.committed_record_lbas.remove(object_id) {
+                        tx.retire(&mut self.dev, old)?;
+                    }
+                    omap_encoded.push((object_map::key(*object_id), Some(object_map::value(lba)?)));
+                }
+                None => {
+                    omap_encoded.push((object_map::key(*object_id), None));
+                }
+            }
+        }
+        if omap_encoded.is_empty() {
+            // Every operation cancelled out; there is no state to publish.
+            return Ok(());
+        }
+        let omap_operations: Vec<TreeOperation<'_>> = omap_encoded
+            .iter()
+            .map(|(key, value)| match value {
+                Some(value) => TreeOperation::Upsert { key, value },
+                None => TreeOperation::Delete { key },
+            })
+            .collect();
+        let omap_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &omap_operations,
+        )?;
+        let omap_root = omap_mutation.root_lba;
+        meta_writes.extend(omap_mutation.writes);
+
+        self.commit_transaction(
+            generation,
+            pending.next_object_id,
+            tx,
+            std::mem::take(&mut pending.data_writes),
+            meta_writes,
+            omap_root,
         )
     }
 

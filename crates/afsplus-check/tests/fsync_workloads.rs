@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use afsplus_block::{IoStats, MemoryBackend, TraceBackend};
 use afsplus_check::check_device;
-use afsplus_core::volume::CommitStats;
+use afsplus_core::volume::{BatchOp, CommitStats};
 use afsplus_core::{mkfs, mount, MkfsParams, Volume};
 use afsplus_format::Timespec;
 
@@ -174,6 +174,68 @@ fn ref_update(vol: &mut Volume<TraceBackend<MemoryBackend>>, totals: &mut Totals
 fn run_workloads(updates: u64, files: u64, appends: u64) -> Vec<WorkloadRow> {
     let mut rows = Vec::new();
 
+    // --- ref updates, group-committed: one 2-op batch per durable update --
+    let mut vol = fresh_volume(65_536);
+    vol.device_mut().reset();
+    let mut totals = Totals::default();
+    let start = Instant::now();
+    for i in 0..updates {
+        let content = format!("ref {i}\n");
+        vol.run_batch(
+            &[
+                BatchOp::CreateFile {
+                    parent_id: afsplus_format::OBJECT_ROOT,
+                    name: "HEAD.lock",
+                    content: content.as_bytes(),
+                },
+                BatchOp::Rename {
+                    source_parent_id: afsplus_format::OBJECT_ROOT,
+                    source_name: "HEAD.lock",
+                    target_parent_id: afsplus_format::OBJECT_ROOT,
+                    target_name: "HEAD",
+                    replace: true,
+                },
+            ],
+            ts(i as i64),
+        )
+        .unwrap();
+        totals.absorb(vol.last_commit_stats().unwrap());
+    }
+    totals.wall_micros = start.elapsed().as_micros();
+    let io = vol.device_mut().stats();
+    rows.push(WorkloadRow { name: "ref update batched(2)", logical_ops: updates, totals, io });
+    let mut dev = vol.into_device().into_inner();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+
+    // --- checkout, group-committed in 64-file windows ---------------------
+    let mut vol = fresh_volume(65_536);
+    vol.device_mut().reset();
+    let mut totals = Totals::default();
+    let start = Instant::now();
+    let names: Vec<String> = (0..files).map(|i| format!("obj-{i:06}")).collect();
+    let contents: Vec<Vec<u8>> = (0..files).map(|i| vec![i as u8; 900]).collect();
+    for window in names.chunks(64).zip(contents.chunks(64)) {
+        let ops: Vec<BatchOp<'_>> = window
+            .0
+            .iter()
+            .zip(window.1)
+            .map(|(name, content)| BatchOp::CreateFile {
+                parent_id: afsplus_format::OBJECT_ROOT,
+                name,
+                content,
+            })
+            .collect();
+        vol.run_batch(&ops, ts(0)).unwrap();
+        totals.absorb(vol.last_commit_stats().unwrap());
+    }
+    totals.wall_micros = start.elapsed().as_micros();
+    let io = vol.device_mut().stats();
+    rows.push(WorkloadRow { name: "checkout batched(64)", logical_ops: files, totals, io });
+    let mut dev = vol.into_device().into_inner();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+
     // --- ref updates ------------------------------------------------------
     let mut vol = fresh_volume(65_536);
     vol.device_mut().reset();
@@ -228,11 +290,12 @@ fn fsync_workload_smoke() {
     let rows = run_workloads(40, 120, 120);
     print_table(&rows);
     for row in &rows {
+        let ops = row.logical_ops.max(1) as f64;
         let txs = row.totals.transactions.max(1) as f64;
         // Guard rails, not targets: silent cost regressions must fail here.
-        assert!(row.io.writes as f64 / txs < 20.0, "{}: writes per tx exploded", row.name);
+        assert!(row.io.writes as f64 / ops < 30.0, "{}: writes per op exploded", row.name);
         assert!(row.totals.commits.flushes as f64 / txs <= 3.0, "{}", row.name);
-        assert!(row.io.reads as f64 / txs < 40.0, "{}: reads per tx exploded", row.name);
+        assert!(row.io.reads as f64 / ops < 60.0, "{}: reads per op exploded", row.name);
     }
 }
 

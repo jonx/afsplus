@@ -117,6 +117,18 @@ post-Scale-1 work includes atomic replacement/orphan handling and the broader
 workload suite. Delta-log/spacemap alternatives are built only if the measured
 bitmap design fails on correctness, amplification, or scale.
 
+`Volume::run_batch` implements group commit and the ADR-026 bounded atomic
+batch in one primitive: up to 1,024 file operations (create with content,
+delete, rename with atomic replace) execute as one transaction with one
+checkpoint, read their own writes, cancel same-batch create+delete without
+quarantine, and recover all-or-nothing under the crash matrix (the Git
+lock-file pattern's intermediate states are never visible).
+`rename_replace` exposes atomic replacement as a one-operation batch.
+Measured: a 64-file batched checkout costs 2.2 writes and 0.05 barriers
+per file versus 12.9 and 3 per-operation; a durable 2-op ref-update batch
+costs 10 writes and 3 barriers versus 27 and 7 for the three-transaction
+sequence.
+
 The fsync workload harness (`tests/fsync_workloads.rs`) measures blocker 2:
 per durable operation, checkpoint-per-op costs 9–27 block writes and 3–7
 barriers on Git-style workloads versus a ~1.1-write/1.05-barrier intent-log

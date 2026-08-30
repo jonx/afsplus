@@ -71,6 +71,31 @@ one barrier per durable operation, with the full checkpoint amortized over a
 rename exists; with it, one update ≈ 2 records ≈ 2.3 writes and 2.1 flushes
 versus 27 and 7 today.)
 
+## Phase A measured: group commit
+
+`Volume::run_batch` now executes a bounded set of namespace operations
+(create with content, delete, rename with atomic replace) as ONE
+transaction with ONE checkpoint — the ADR-026 bounded atomic batch and the
+group-commit mechanism in one primitive. Crash matrices prove the batch is
+all-or-nothing (the Git pattern's lock file is never visible in any modeled
+crash state). Same harness, same volumes:
+
+| workload               | writes/op | flushes/op | reads/op | vs per-op commit    |
+|------------------------|-----------|------------|----------|---------------------|
+| checkout batched(64)   | 2.2       | 0.05       | 2.3      | 5.9× wr, 63× fl     |
+| ref update batched(2)  | 10.0      | 3.0        | 21.0     | 2.7× wr, 2.3× fl    |
+
+Two findings:
+
+1. **For non-durable bursts, group commit fully closes the gap** — batched
+   checkout (2.2 wr/op, 0.05 fl/op) actually beats the intent-log envelope
+   (3.2 wr/op est.), because shared tree paths amortize across the batch.
+   No intent log is needed for throughput.
+2. **The forced-durability floor is now isolated.** A durable ref update as
+   one atomic batch costs 10 writes and 3 barriers; an intent log would
+   cost ~1.2 writes and ~1 barrier. That ~3× barrier gap on fsync latency
+   is the entire remaining case for the intent log — nothing else.
+
 ## What the data supports
 
 1. **Checkpoint-per-operation is not viable as the only durability path**
@@ -78,21 +103,20 @@ versus 27 and 7 today.)
    per logical operation is a 8–24× write amplification and a ~3× barrier
    multiplier over a log-based design, on the workloads AFS+ names as
    primary targets.
-2. **Two separable mechanisms, two problems.** *Group commit* — batching
-   many namespace operations into one checkpoint — needs no new on-disk
-   structure and fixes throughput for non-fsync bursts (checkout would drop
-   to ~0.2 writes and ~0.05 flushes per file at a 64-op window). It does
-   nothing for an application that demands durability *now*. The *intent
-   log* is specifically the mechanism that makes a forced fsync cost ~1
-   write + 1 barrier between checkpoints.
-3. **Recommended order:** implement group commit first (pure engine work:
-   an operation queue and a checkpoint cadence policy), re-measure, then
-   design the intent log for the forced-durability path against these
-   numbers, using the auxiliary-log extension point doc 08 already
-   reserves. Atomic-replace rename is worth doing alongside: it removes a
-   third of the ref-update pattern's cost independently of either mechanism.
-
-The decision itself is a format/architecture call and stays open until the
-group-commit measurement exists; this report's role is to establish that
-the status quo loses by roughly an order of magnitude on writes and 3× on
-barriers, so *some* amortization mechanism is not optional.
+2. **Two separable mechanisms, two problems — now both measured.** Group
+   commit (implemented, measured above) solves burst throughput without
+   format change and doubles as the ADR-026 atomic-batch primitive. The
+   intent log's remaining value is exclusively the forced-fsync path:
+   3 barriers + 10 writes per durable update versus ~1 barrier + ~1.2
+   writes. On storage where a barrier costs 0.1–5 ms, that is roughly a
+   3× fsync-latency difference for fsync-per-operation applications (Git,
+   databases), and nothing for everyone else.
+3. **The remaining decision** is therefore narrow: is ~3× on forced-fsync
+   latency worth a new on-disk structure (log area, record format, replay
+   in recovery, its own crash matrices)? That is a product call about how
+   central fsync-heavy workloads are. If yes, the log is designed against
+   the auxiliary-log extension point doc 08 reserves, and its bake-off
+   gate is: beat 3 flushes and 10 writes per durable ref update under the
+   same crash matrices. If no, group commit plus the documented 3-barrier
+   fsync floor is a defensible v1 stance, and the log stays a negotiable
+   future feature.

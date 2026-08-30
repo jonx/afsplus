@@ -46,3 +46,17 @@ Applications must be able to use the traditional sequence on filesystems that do
 ## Why only Proposed
 
 Before acceptance we need real application cases and must prove that exposing the transaction boundary does not complicate crash recovery, locking, or compatibility disproportionately.
+
+## Current executable evidence
+
+The prototype implements this contract as `Volume::run_batch` (bounded at
+1,024 operations; files only: create with content, delete, rename with
+atomic replace), which is simultaneously the group-commit mechanism for
+blocker 2. One transaction, one checkpoint; operations see earlier
+operations in the same batch; a same-batch create+delete cancels without
+ever quarantining storage. Crash matrices show all-or-nothing recovery —
+the lock-file pattern's intermediate states are never visible. Measured
+effect: a 64-file batched checkout costs 2.2 block writes and 0.05
+barriers per file versus 12.9 and 3 committed per-operation
+(`implementation/fsync-intent-log-baseline.md`). The API shape and
+compatibility classification remain unfrozen.
