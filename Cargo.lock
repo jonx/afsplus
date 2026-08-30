@@ -57,7 +57,10 @@ dependencies = [
 name = "afsplus-macfuse-sys"
 version = "0.0.1"
 dependencies = [
+ "fuser",
+ "libc",
  "libloading",
+ "log",
 ]
 
 [[package]]
@@ -103,8 +106,6 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 [[package]]
 name = "fuser"
 version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b82b6597d216503555ead6b358f341ef748869bf5c6fbae6a0cb9dd231baecfd"
 dependencies = [
  "bitflags",
  "libc",

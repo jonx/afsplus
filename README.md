@@ -163,9 +163,13 @@ cargo build -p afsplus-fuse --features fuser-adapter --bin afsplus-mount
 ```
 
 Linux uses fuser's native mount path. On macOS, install macFUSE and build with
-`--features macfuse-mount`; the library is loaded at runtime, so ordinary
-workspace builds do not require a system FUSE installation. Fuse-T's NFS
-transport is not a raw substitute for macFUSE's protocol descriptor; see
-ADR-040. Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen
-are not format commitments. Incompatible format changes must update the format
-epoch or use feature negotiation as defined in the compatibility specification.
+`--features macfuse-mount`; the mount CLI selects macFUSE's user-space FSKit
+backend and the mountpoint must be an existing directory or a new direct child
+of `/Volumes`. The library is loaded at runtime, so ordinary workspace builds
+do not require a system FUSE installation. If macOS's File System Extensions
+switches are inert, use the diagnostic and reversible workaround in
+[`docs/macos-fskit-activation.md`](docs/macos-fskit-activation.md). Fuse-T's NFS
+transport is not a raw substitute for macFUSE's message channel; see ADR-040.
+Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen are not
+format commitments. Incompatible format changes must update the format epoch
+or use feature negotiation as defined in the compatibility specification.

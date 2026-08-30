@@ -43,9 +43,28 @@ sync contract.
 identification block, applies the selected mount mode and enters the fuser
 session. Linux uses fuser's native mount path. macOS ordinary builds retain
 fuser's test-only no-mount mode. The `macfuse-mount` feature dynamically loads
-macFUSE's libfuse-2 compatibility entry point in a tiny audited `-sys` crate,
-then hands the resulting protocol descriptor to `fuser::Session::from_fd`.
-This keeps build and test machines independent of a system installation.
+macFUSE's `MFMount.framework` in a tiny audited `-sys` crate. A narrow vendored
+fuser patch supplies `SessionTransport` and `Session::from_transport`, allowing
+complete FUSE messages to cross the FSKit channel without pretending it is a
+`/dev/fuse` byte-stream descriptor. The ordinary device-backed fuser paths are
+unchanged. Dynamic loading keeps build and test machines independent of a
+system installation.
+On macOS 15.4 and newer, the CLI selects macFUSE's user-space FSKit backend
+explicitly. FSKit requires mountpoints below `/Volumes`; macFUSE can create a
+missing direct child there, so the CLI permits exactly that missing-path case
+and derives presentation ownership from the image file. Existing mountpoints
+retain their own ownership. This avoids the Apple Silicon kernel-extension and
+reduced-security path while keeping the native boundary unchanged. FSKit sends
+mount-time control requests as root, so the session admits root and the mounting
+user while `default_permissions` enforces the attributes exposed by AFS+.
+macOS also repeats mode, owner and empty BSD flags immediately after create and
+mkdir; exact no-op repetitions are acknowledged, while real unsupported POSIX
+metadata changes still fail explicitly.
+
+Some macOS builds display inert File System Extensions switches. The reversible
+workaround and its version-specific caveat are documented in
+`docs/macos-fskit-activation.md`; it edits only FSKit's per-user enabled-module
+list, retains a backup, and never enables the legacy kernel extension.
 
 A direct Fuse-T experiment reached INIT, STATFS and GETATTR, but Fuse-T then
 closed the session. This follows from its architecture: Fuse-T translates
@@ -58,7 +77,8 @@ adapter rather than a symbol-name alias and is outside this Alpha-0 path.
 
 The full operation slice, sparse reads, replacement, remount/checker behavior,
 directory pagination and failure modes run in CI without mounting. Kernel
-integration is a thin, independently compilable layer. macOS does not claim a
-successful host mount until the `macfuse-mount` workflow passes the same
-operation matrix and checker after unmount; that qualification remains an
-explicit Alpha-0 gate.
+integration is a thin, independently compilable layer. The ignored
+`host_mount` qualification has passed on macOS through macFUSE 5.3.3's FSKit
+backend: it exercises create/read/write with a sparse gap/truncate/rename with
+replacement/hard-link/fsync, unmounts, and requires a clean checker result.
+It remains an explicit, opt-in Alpha-0 gate on machines with macFUSE installed.

@@ -102,17 +102,25 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
         flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        if mode.is_some() || uid.is_some() || gid.is_some() || flags.is_some() {
-            reply.error(Errno::EOPNOTSUPP);
-            return;
-        }
         let result = self.lock().and_then(|mut adapter| {
+            let attributes = adapter.attributes(inode.0).map_err(errno)?;
+            // macOS follows create/mkdir with a SETATTR that repeats the mode,
+            // owner and empty BSD flags it just requested. AFS+ does not yet
+            // persist those fields, but acknowledging an exact no-op is safe.
+            let metadata_is_unchanged = mode
+                .is_none_or(|value| value & 0o7777 == u32::from(attributes.mode))
+                && uid.is_none_or(|value| value == attributes.uid)
+                && gid.is_none_or(|value| value == attributes.gid)
+                && flags.is_none_or(|value| value.is_empty());
+            if !metadata_is_unchanged {
+                return Err(Errno::EOPNOTSUPP);
+            }
             if let Some(size) = size {
                 adapter
                     .truncate(inode.0, handle.map(|value| value.0), size, now())
                     .map_err(errno)
             } else {
-                adapter.attributes(inode.0).map_err(errno)
+                Ok(attributes)
             }
         });
         match result {

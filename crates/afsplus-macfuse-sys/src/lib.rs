@@ -1,56 +1,263 @@
-//! Minimal dynamic bridge to macFUSE's libfuse-2 mount compatibility ABI.
+//! Dynamic bridge to macFUSE's message-oriented `MFMount.framework` API.
 //!
-//! Dynamic loading keeps normal builds and protocol tests independent of a
-//! machine-wide macFUSE installation. The mounted descriptor speaks the FUSE
-//! kernel protocol and is handed to `fuser::Session::from_fd` by the safe host
-//! adapter.
+//! FSKit deliberately does not expose a `/dev/fuse` descriptor. The channel
+//! API instead preserves complete FUSE request and reply boundaries. Dynamic
+//! loading keeps ordinary builds independent of a machine-wide macFUSE
+//! installation.
 
-use std::ffi::{c_char, c_int, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::fmt;
-use std::io;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::io::{self, IoSlice};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 
+use fuser::SessionTransport;
 use libloading::Library;
 
-const LIBRARY_ENV: &str = "AFSPLUS_MACFUSE_LIBRARY";
+const LIBRARY_ENV: &str = "AFSPLUS_MFMOUNT_LIBRARY";
 const DEFAULT_LIBRARIES: &[&str] = &[
-    "/usr/local/lib/libfuse.dylib",
-    "/usr/local/lib/libfuse.2.dylib",
-    "/Library/Filesystems/macfuse.fs/Contents/Frameworks/libfuse.dylib",
+    "/Library/Filesystems/macfuse.fs/Contents/Frameworks/MFMount.framework/Versions/A/MFMount",
+    "/Library/Filesystems/macfuse.fs/Contents/Frameworks/MFMount.framework/MFMount",
 ];
 
+type Reference = *mut c_void;
+
 #[repr(C)]
-struct FuseArgs {
-    argc: c_int,
-    argv: *const *const c_char,
-    allocated: c_int,
+#[derive(Clone, Copy)]
+struct Iovec {
+    base: *mut c_void,
+    length: usize,
 }
 
-type FuseMountCompat25 = unsafe extern "C" fn(*const c_char, *const FuseArgs) -> c_int;
-type FuseUnmountCompat22 = unsafe extern "C" fn(*const c_char);
+type ChannelCreate = unsafe extern "C" fn() -> Reference;
+type ChannelCopyNextMessage = unsafe extern "C" fn(Reference) -> Reference;
+type MessageGetBodyBuffers = unsafe extern "C" fn(Reference, *mut *const Iovec) -> isize;
+type ChannelSendMessage = unsafe extern "C" fn(Reference, *const Iovec, usize) -> isize;
+type ChannelClose = unsafe extern "C" fn(Reference) -> bool;
+type Release = unsafe extern "C" fn(Reference);
+type Mount = unsafe extern "C" fn(Reference, *const c_char, *const c_char, bool) -> i32;
 
-/// Keeps the dynamically loaded implementation and mountpoint alive until
-/// after the fuser session has closed its descriptor.
+#[derive(Clone, Copy)]
+struct Symbols {
+    channel_copy_next_message: ChannelCopyNextMessage,
+    message_get_body_buffers: MessageGetBodyBuffers,
+    channel_send_message: ChannelSendMessage,
+    channel_close: ChannelClose,
+    release: Release,
+    mount: Mount,
+}
+
+struct ChannelInner {
+    channel: NonNull<c_void>,
+    symbols: Symbols,
+    closed: AtomicBool,
+    _library: Library,
+}
+
+// SAFETY: MFMount documents channel receive interruption and message sending
+// as channel operations. The channel is retained for this object's lifetime,
+// closure is serialized by `closed`, and all borrowed message buffers are
+// consumed before their message reference is released.
+unsafe impl Send for ChannelInner {}
+// SAFETY: concurrent reply sends are supported by the channel abstraction;
+// AFS+ currently runs one receive loop, so receives are not concurrent.
+unsafe impl Sync for ChannelInner {}
+
+impl fmt::Debug for ChannelInner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MFChannel")
+            .field("closed", &self.closed.load(Ordering::Acquire))
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChannelInner {
+    fn close(&self) {
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            // SAFETY: channel is a live retained MFChannel reference and this
+            // transition is performed at most once.
+            unsafe {
+                (self.symbols.channel_close)(self.channel.as_ptr());
+            }
+        }
+    }
+
+    fn receive_message(&self, destination: &mut [u8]) -> io::Result<usize> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(io::Error::from_raw_os_error(libc::ENODEV));
+        }
+
+        // SAFETY: channel remains retained by self for the complete call.
+        let message = unsafe { (self.symbols.channel_copy_next_message)(self.channel.as_ptr()) };
+        let message = NonNull::new(message).ok_or_else(last_os_error)?;
+        let guard = MessageGuard {
+            message,
+            release: self.symbols.release,
+        };
+
+        let mut buffers = std::ptr::null();
+        // SAFETY: message is live and buffers points to writable pointer storage.
+        let count = unsafe {
+            (self.symbols.message_get_body_buffers)(guard.message.as_ptr(), &mut buffers)
+        };
+        if count <= 0 || buffers.is_null() {
+            return Err(last_os_error());
+        }
+        let count = usize::try_from(count).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid MFMessage iovec count")
+        })?;
+        // SAFETY: MFMessage owns an array of `count` iovecs for the lifetime of guard.
+        let buffers = unsafe { std::slice::from_raw_parts(buffers, count) };
+        let total = buffers.iter().try_fold(0usize, |total, buffer| {
+            total.checked_add(buffer.length).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "MFMessage body size overflow")
+            })
+        })?;
+        if total > destination.len() {
+            return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
+        }
+
+        let mut offset = 0;
+        for buffer in buffers {
+            if buffer.length != 0 && buffer.base.is_null() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "MFMessage contains a null body buffer",
+                ));
+            }
+            // SAFETY: the borrowed body range is valid while guard is live and
+            // destination has been checked to contain the concatenated body.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    buffer.base.cast::<u8>(),
+                    destination.as_mut_ptr().add(offset),
+                    buffer.length,
+                );
+            }
+            offset += buffer.length;
+        }
+        if total >= 16 {
+            let opcode = u32::from_ne_bytes(destination[4..8].try_into().expect("fixed slice"));
+            let unique = u64::from_ne_bytes(destination[8..16].try_into().expect("fixed slice"));
+            log::trace!("MFChannel receive: {total} bytes, opcode {opcode}, unique {unique}");
+        } else {
+            log::trace!("MFChannel receive: {total} bytes");
+        }
+        Ok(total)
+    }
+
+    fn send_message(&self, buffers: &[IoSlice<'_>]) -> io::Result<()> {
+        if buffers.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a FUSE reply must contain at least one buffer",
+            ));
+        }
+        let total = buffers.iter().try_fold(0usize, |total, buffer| {
+            total.checked_add(buffer.len()).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "FUSE reply size overflow")
+            })
+        })?;
+        let native: Vec<_> = buffers
+            .iter()
+            .map(|buffer| Iovec {
+                base: buffer.as_ptr().cast_mut().cast::<c_void>(),
+                length: buffer.len(),
+            })
+            .collect();
+        if let Some(header) = reply_header(buffers) {
+            let length = u32::from_ne_bytes(header[0..4].try_into().expect("fixed slice"));
+            let error = i32::from_ne_bytes(header[4..8].try_into().expect("fixed slice"));
+            let unique = u64::from_ne_bytes(header[8..16].try_into().expect("fixed slice"));
+            log::trace!(
+                "MFChannel send: {total} bytes, header length {length}, error {error}, unique {unique}"
+            );
+        } else {
+            log::trace!("MFChannel send: {total} bytes");
+        }
+        // SAFETY: channel is retained and every iovec borrows a caller buffer
+        // that remains live for the duration of this synchronous call.
+        let sent = unsafe {
+            (self.symbols.channel_send_message)(
+                self.channel.as_ptr(),
+                native.as_ptr(),
+                native.len(),
+            )
+        };
+        if sent < 0 {
+            return Err(last_os_error());
+        }
+        if usize::try_from(sent).ok() != Some(total) {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                format!("MFChannel sent {sent} of {total} reply bytes"),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SessionTransport for ChannelInner {
+    fn receive(&self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.receive_message(buffer)
+    }
+
+    fn send(&self, buffers: &[IoSlice<'_>]) -> io::Result<()> {
+        self.send_message(buffers)
+    }
+}
+
+impl Drop for ChannelInner {
+    fn drop(&mut self) {
+        self.close();
+        // SAFETY: the Create-owned reference is released exactly once, after
+        // the channel has closed and before the library field is dropped.
+        unsafe {
+            (self.symbols.release)(self.channel.as_ptr());
+        }
+    }
+}
+
+struct MessageGuard {
+    message: NonNull<c_void>,
+    release: Release,
+}
+
+impl Drop for MessageGuard {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns the Copy-created message reference.
+        unsafe {
+            (self.release)(self.message.as_ptr());
+        }
+    }
+}
+
+/// Owns one MFMount channel and the asynchronous mount operation.
 pub struct MacFuseMount {
-    library: Library,
-    mountpoint: CString,
-    descriptor: Option<OwnedFd>,
+    inner: Arc<ChannelInner>,
+    mount_thread: Option<JoinHandle<io::Result<()>>>,
+    mount_complete: bool,
 }
 
 impl fmt::Debug for MacFuseMount {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MacFuseMount")
-            .field("mountpoint", &self.mountpoint)
-            .field("has_descriptor", &self.descriptor.is_some())
+            .field("channel", &self.inner)
+            .field("mount_complete", &self.mount_complete)
             .finish_non_exhaustive()
     }
 }
 
 impl MacFuseMount {
-    /// Mounts `mountpoint` through macFUSE and owns the protocol descriptor.
+    /// Begins an FSKit mount while leaving the channel available for the FUSE
+    /// INIT handshake. Call [`Self::wait_until_mounted`] after constructing the
+    /// fuser session.
     pub fn new(mountpoint: &Path, options: &[String]) -> io::Result<Self> {
         if !cfg!(target_os = "macos") {
             return Err(io::Error::new(
@@ -59,81 +266,117 @@ impl MacFuseMount {
             ));
         }
 
-        let mountpoint = mountpoint.canonicalize()?;
+        let mountpoint = resolve_mountpoint(mountpoint)?;
         let mountpoint = CString::new(mountpoint.as_os_str().as_bytes()).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "mountpoint contains a NUL byte",
             )
         })?;
+        let options = CString::new(options.join(",")).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "mount options contain a NUL byte",
+            )
+        })?;
+
         let library = load_library()?;
+        // SAFETY: every symbol is resolved from the retained MFMount framework
+        // using the signature published by its installed C header.
+        let (create, symbols) = unsafe { load_symbols(&library)? };
+        // SAFETY: no arguments are required and the framework is retained.
+        let channel = NonNull::new(unsafe { create() })
+            .ok_or_else(|| io::Error::other("MFChannelCreate failed"))?;
+        let inner = Arc::new(ChannelInner {
+            channel,
+            symbols,
+            closed: AtomicBool::new(false),
+            _library: library,
+        });
+        let mount_inner = inner.clone();
+        let mount_thread = thread::Builder::new()
+            .name("afsplus-mfmount".into())
+            .spawn(move || {
+                // SAFETY: the channel and C strings remain valid for the call.
+                let result = unsafe {
+                    (mount_inner.symbols.mount)(
+                        mount_inner.channel.as_ptr(),
+                        mountpoint.as_ptr(),
+                        options.as_ptr(),
+                        false,
+                    )
+                };
+                let outcome = mount_result(result);
+                if outcome.is_err() {
+                    mount_inner.close();
+                }
+                outcome
+            })?;
 
-        let mut arguments = vec![CString::new("afsplus-mount").expect("static string")];
-        for option in options {
-            arguments.push(CString::new("-o").expect("static string"));
-            arguments.push(CString::new(option.as_str()).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "mount option contains a NUL byte",
-                )
-            })?);
-        }
-        let argument_pointers: Vec<_> = arguments.iter().map(|value| value.as_ptr()).collect();
-        let fuse_arguments = FuseArgs {
-            argc: c_int::try_from(argument_pointers.len()).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "too many mount options")
-            })?,
-            argv: argument_pointers.as_ptr(),
-            allocated: 0,
-        };
-
-        // SAFETY: macFUSE exports the libfuse-2.6 compatibility signature used
-        // here. Every pointer is NUL-terminated and remains valid for the call.
-        let descriptor = unsafe {
-            let mount = library
-                .get::<FuseMountCompat25>(b"fuse_mount_compat25\0")
-                .map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error))?;
-            mount(mountpoint.as_ptr(), &fuse_arguments)
-        };
-        if descriptor < 0 {
-            return Err(last_os_error("macFUSE rejected the mount"));
-        }
-
-        // SAFETY: a successful fuse_mount_compat25 call transfers ownership of
-        // one newly opened descriptor to its caller.
-        let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
         Ok(MacFuseMount {
-            library,
-            mountpoint,
-            descriptor: Some(descriptor),
+            inner,
+            mount_thread: Some(mount_thread),
+            mount_complete: false,
         })
     }
 
-    /// Transfers the mounted FUSE descriptor to the request-processing loop.
-    pub fn take_descriptor(&mut self) -> io::Result<OwnedFd> {
-        self.descriptor.take().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "macFUSE descriptor was already taken",
-            )
-        })
+    /// Returns the transport used to construct `fuser::Session`.
+    pub fn transport(&self) -> Arc<dyn SessionTransport> {
+        self.inner.clone()
+    }
+
+    /// Waits for macFUSE to finish the mount operation after the FUSE INIT
+    /// handshake has completed.
+    pub fn wait_until_mounted(&mut self) -> io::Result<()> {
+        if self.mount_complete {
+            return Ok(());
+        }
+        let thread = self
+            .mount_thread
+            .take()
+            .ok_or_else(|| io::Error::other("MFMount thread is missing"))?;
+        let result = thread
+            .join()
+            .map_err(|_| io::Error::other("MFMount thread panicked"))?;
+        result?;
+        self.mount_complete = true;
+        Ok(())
     }
 }
 
 impl Drop for MacFuseMount {
     fn drop(&mut self) {
-        drop(self.descriptor.take());
-
-        // SAFETY: the library is still loaded, the symbol signature is the
-        // exported libfuse compatibility ABI, and mountpoint remains valid.
-        unsafe {
-            if let Ok(unmount) = self
-                .library
-                .get::<FuseUnmountCompat22>(b"fuse_unmount_compat22\0")
-            {
-                unmount(self.mountpoint.as_ptr());
-            }
+        self.inner.close();
+        if let Some(thread) = self.mount_thread.take() {
+            let _ = thread.join();
         }
+    }
+}
+
+unsafe fn load_symbols(library: &Library) -> io::Result<(ChannelCreate, Symbols)> {
+    // SAFETY: callers retain library for every copied function pointer.
+    unsafe {
+        Ok((
+            load_symbol(library, b"MFChannelCreate\0")?,
+            Symbols {
+                channel_copy_next_message: load_symbol(library, b"MFChannelCopyNextMessage\0")?,
+                message_get_body_buffers: load_symbol(library, b"MFMessageGetBodyBuffers\0")?,
+                channel_send_message: load_symbol(library, b"MFChannelSendMessage\0")?,
+                channel_close: load_symbol(library, b"MFChannelClose\0")?,
+                release: load_symbol(library, b"MFRelease\0")?,
+                mount: load_symbol(library, b"MFMount\0")?,
+            },
+        ))
+    }
+}
+
+unsafe fn load_symbol<T: Copy>(library: &Library, name: &[u8]) -> io::Result<T> {
+    // SAFETY: the caller supplies the exact ABI type for a named framework symbol.
+    unsafe {
+        library
+            .get::<T>(name)
+            .map(|symbol| *symbol)
+            .map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error))
     }
 }
 
@@ -144,8 +387,8 @@ fn load_library() -> io::Result<Library> {
     };
     let mut failures = Vec::new();
     for path in candidates {
-        // SAFETY: loading macFUSE is the sole purpose of this native boundary;
-        // the successful library is retained for the complete mount lifetime.
+        // SAFETY: loading MFMount is the purpose of this audited boundary and
+        // a successful library remains retained by ChannelInner.
         match unsafe { Library::new(&path) } {
             Ok(library) => return Ok(library),
             Err(error) => failures.push(format!("{}: {error}", path.display())),
@@ -154,17 +397,75 @@ fn load_library() -> io::Result<Library> {
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "cannot load macFUSE (install it or set {LIBRARY_ENV}): {}",
+            "cannot load MFMount.framework (install macFUSE or set {LIBRARY_ENV}): {}",
             failures.join("; ")
         ),
     ))
 }
 
-fn last_os_error(context: &str) -> io::Error {
+fn resolve_mountpoint(mountpoint: &Path) -> io::Result<PathBuf> {
+    match mountpoint.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = mountpoint.parent().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "mountpoint has no parent")
+            })?;
+            let name = mountpoint.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "mountpoint has no final component",
+                )
+            })?;
+            Ok(parent.canonicalize()?.join(name))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn mount_result(result: i32) -> io::Result<()> {
+    match result {
+        0 => Ok(()),
+        1 => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "MFMount does not support this macOS version",
+        )),
+        2 => Err(io::Error::other(
+            "macFUSE helper tools could not be installed",
+        )),
+        3 => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "macFUSE file-system extension was not found",
+        )),
+        4 => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "macFUSE file-system extension is not enabled",
+        )),
+        -1 => Err(last_os_error()),
+        value => Err(io::Error::other(format!(
+            "MFMount returned unknown result {value}"
+        ))),
+    }
+}
+
+fn last_os_error() -> io::Error {
     let error = io::Error::last_os_error();
     if error.raw_os_error().is_some_and(|code| code != 0) {
-        io::Error::new(error.kind(), format!("{context}: {error}"))
+        error
     } else {
-        io::Error::other(context)
+        io::Error::other("MFMount operation failed without errno")
     }
+}
+
+fn reply_header(buffers: &[IoSlice<'_>]) -> Option<[u8; 16]> {
+    let mut header = [0; 16];
+    let mut copied = 0;
+    for buffer in buffers {
+        let count = (header.len() - copied).min(buffer.len());
+        header[copied..copied + count].copy_from_slice(&buffer[..count]);
+        copied += count;
+        if copied == header.len() {
+            return Some(header);
+        }
+    }
+    None
 }

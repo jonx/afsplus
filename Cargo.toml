@@ -19,3 +19,9 @@ repository = "https://github.com/jonx/afsplus"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[patch.crates-io]
+# A narrowly patched fuser 0.18.0 adds a message-oriented SessionTransport.
+# This is required by macFUSE's FSKit backend, which deliberately has no
+# /dev/fuse file descriptor. Regular device-backed paths remain unchanged.
+fuser = { path = "vendor/fuser" }

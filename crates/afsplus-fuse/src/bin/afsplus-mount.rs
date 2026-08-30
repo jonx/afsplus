@@ -10,7 +10,7 @@ use afsplus_format::DEFAULT_BLOCK_SIZE;
 use afsplus_fuse::fuser_adapter::FuserFilesystem;
 use afsplus_fuse::FuseConfig;
 use afsplus_vfs::Vfs;
-use fuser::{Config, MountOption};
+use fuser::{Config, MountOption, SessionACL};
 
 fn main() -> ExitCode {
     init_logging();
@@ -56,11 +56,7 @@ fn init_logging() {
 
 fn run() -> Result<(), String> {
     let (mode, image, mountpoint) = arguments()?;
-    let metadata = std::fs::metadata(&mountpoint)
-        .map_err(|error| format!("cannot inspect {}: {error}", mountpoint.display()))?;
-    if !metadata.is_dir() {
-        return Err(format!("{} is not a directory", mountpoint.display()));
-    }
+    let (uid, gid) = mount_ownership(&image, &mountpoint)?;
 
     let (device, identification) = open_image(&image)?;
     let vfs = Vfs::mount(device, MountOptions { mode })
@@ -68,12 +64,16 @@ fn run() -> Result<(), String> {
     let filesystem = FuserFilesystem::new(
         vfs,
         FuseConfig {
-            uid: metadata.uid(),
-            gid: metadata.gid(),
+            uid,
+            gid,
             ..FuseConfig::default()
         },
     );
     let mut config = Config::default();
+    // FSKit performs mount-time control requests as root. Keep ordinary
+    // requests limited to root and the mounting user; DefaultPermissions then
+    // enforces the mode bits exported by AFS+.
+    config.acl = SessionACL::RootAndOwner;
     config.mount_options = vec![
         MountOption::FSName(format!("afsplus: {}", identification.label)),
         MountOption::Subtype("afsplus".into()),
@@ -107,6 +107,7 @@ fn mount_session(
     mode: MountMode,
 ) -> io::Result<()> {
     let options = vec![
+        "backend=fskit".to_string(),
         "fsname=afsplus".to_string(),
         format!("volname={label}"),
         if mode == MountMode::ReadWrite {
@@ -116,13 +117,55 @@ fn mount_session(
         },
         "nodev".to_string(),
         "nosuid".to_string(),
+        "default_permissions".to_string(),
     ];
     let mut native_mount = afsplus_macfuse_sys::MacFuseMount::new(mountpoint, &options)?;
-    let descriptor = native_mount.take_descriptor()?;
-    let session = fuser::Session::from_fd(filesystem, descriptor, config.acl, config)?;
-    let result = session.run();
+    let transport = native_mount.transport();
+    let session = match fuser::Session::from_transport(filesystem, transport, config.acl, config) {
+        Ok(session) => session,
+        Err(error) => {
+            drop(native_mount);
+            return Err(error);
+        }
+    };
+    // MFMount completes only after FSKit has queried the freshly initialized
+    // filesystem (notably with STATFS). Start the request loop before waiting
+    // for the mount operation, otherwise both sides wait for each other.
+    let background = session.spawn()?;
+    if let Err(error) = native_mount.wait_until_mounted() {
+        drop(native_mount);
+        let _ = background.join();
+        return Err(error);
+    }
+    let result = background.join();
     drop(native_mount);
     result
+}
+
+fn mount_ownership(image: &Path, mountpoint: &Path) -> Result<(u32, u32), String> {
+    match std::fs::metadata(mountpoint) {
+        Ok(metadata) if metadata.is_dir() => Ok((metadata.uid(), metadata.gid())),
+        Ok(_) => Err(format!("{} is not a directory", mountpoint.display())),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                && missing_mountpoint_is_supported(mountpoint) =>
+        {
+            let metadata = std::fs::metadata(image)
+                .map_err(|error| format!("cannot inspect {}: {error}", image.display()))?;
+            Ok((metadata.uid(), metadata.gid()))
+        }
+        Err(error) => Err(format!("cannot inspect {}: {error}", mountpoint.display())),
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "macfuse-mount"))]
+fn missing_mountpoint_is_supported(mountpoint: &Path) -> bool {
+    mountpoint.parent() == Some(Path::new("/Volumes")) && mountpoint.file_name().is_some()
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macfuse-mount")))]
+fn missing_mountpoint_is_supported(_mountpoint: &Path) -> bool {
+    false
 }
 
 #[cfg(not(all(target_os = "macos", feature = "macfuse-mount")))]

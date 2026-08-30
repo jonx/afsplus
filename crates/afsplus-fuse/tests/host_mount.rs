@@ -25,8 +25,11 @@ fn real_mount_runs_the_alpha_operation_matrix_and_leaves_a_clean_image() {
 
     let base = unique_test_directory();
     let image = base.join("volume.afsp");
-    let mountpoint = base.join("mount");
-    fs::create_dir_all(&mountpoint).unwrap();
+    let mountpoint = unique_mountpoint(&base);
+    fs::create_dir_all(&base).unwrap();
+    if !cfg!(target_os = "macos") || std::env::var_os("AFSPLUS_FUSE_MOUNT_ROOT").is_some() {
+        fs::create_dir_all(&mountpoint).unwrap();
+    }
     create_image(&image);
 
     let child = Command::new(env!("CARGO_BIN_EXE_afsplus-mount"))
@@ -115,17 +118,38 @@ fn unique_test_directory() -> PathBuf {
     std::env::temp_dir().join(format!("afsplus-fuse-{}-{nonce}", std::process::id()))
 }
 
+fn unique_mountpoint(base: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::var_os("AFSPLUS_FUSE_MOUNT_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/Volumes"));
+        root.join(format!(
+            "AFSPlusQualification-{}-{nonce}",
+            std::process::id()
+        ))
+    } else {
+        base.join("mount")
+    }
+}
+
 fn wait_until_mounted(mounted: &mut MountedChild, mountpoint: &Path) {
+    let mut last_error = None;
     for _ in 0..200 {
-        if matches!(fs::read(mountpoint.join("seed")), Ok(data) if data == b"mounted") {
-            return;
+        match fs::read(mountpoint.join("seed")) {
+            Ok(data) if data == b"mounted" => return,
+            Ok(data) => last_error = Some(format!("unexpected seed contents: {data:?}")),
+            Err(error) => last_error = Some(error.to_string()),
         }
         if let Some(status) = mounted.child.try_wait().unwrap() {
             panic!("afsplus-mount exited before mounting: {status}");
         }
         thread::sleep(Duration::from_millis(50));
     }
-    panic!("timed out waiting for the FUSE mount");
+    panic!("timed out waiting for the FUSE mount: {last_error:?}");
 }
 
 struct MountedChild {

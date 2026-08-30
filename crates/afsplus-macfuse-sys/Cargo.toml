@@ -6,7 +6,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+fuser = { version = "0.18", features = ["macfuse-4-compat", "macos-no-mount"] }
+libc = "0.2"
 libloading = "0.8"
+log = "0.4"
 
 # This crate is the audited native boundary. All higher AFS+ crates retain the
 # workspace-wide unsafe-code prohibition.
