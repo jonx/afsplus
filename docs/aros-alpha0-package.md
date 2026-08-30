@@ -10,6 +10,7 @@ The files map to a runnable MacAROS tree as follows:
 |---|---|
 | `afsplus-handler` | `AROS/L/afsplus-handler` |
 | `AFSPlusAlpha0Probe` | `AROS/C/AFSPlusAlpha0Probe` |
+| `AFSPlusReplayProbe` | `AROS/C/AFSPlusReplayProbe` |
 | `AFSPLUS19` | `AROS/Devs/DOSDrivers/AFSPLUS19` |
 | `Unit19` | `AROS/DiskImages/Unit19` |
 
@@ -39,7 +40,7 @@ prints:
 Stop MacAROS cleanly before copying `Unit19` back to the host. Then require both:
 
 ```sh
-cargo run --release -p afsplus-check -- /path/to/Unit19 --json
+cargo run --release -p afsplus-check --bin afsplus-check -- /path/to/Unit19 --json
 ```
 
 Mount the returned image through the host adapter, read
@@ -54,8 +55,19 @@ The complete Hosted round trip is automated by:
 tools/check-hosted-aros-alpha0.sh
 ```
 
-It builds a fresh package, installs only the four reserved test artifacts,
+It builds a fresh package, installs only the reserved test artifacts,
 runs AROS → host macFUSE → AROS against one image, checks both cross-created
 files and the filesystem at every boundary, and removes the installed artifacts
 afterward. It refuses to disturb a running Hosted instance or replace an
 existing target/result.
+
+Deterministic native-handler recovery is automated separately by:
+
+```sh
+tools/check-hosted-aros-crash-replay.sh
+```
+
+That gate generates modeled power-cut images, boots Hosted MacAROS once per
+fixture, runs `AFSPlusReplayProbe old|new`, and requires a clean checker with no
+pending intent-log record after every mount. See ADR-047 for the exact coverage
+and its limits.

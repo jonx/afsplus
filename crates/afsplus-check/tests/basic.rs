@@ -707,10 +707,11 @@ fn file_image_end_to_end_with_json_report() {
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "checker findings: {:?}", report.errors);
     let json = report.render_json();
-    assert!(json.contains("\"schema_version\":3"));
+    assert!(json.contains("\"schema_version\":4"));
     assert!(json.contains("\"clean\":true"));
     assert!(json.contains("\"generation\":2"));
     assert!(json.contains("\"region_size\":128"));
+    assert!(json.contains("\"log_records_pending\":0"));
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -25,6 +25,11 @@ Hosted MacAROS S0 is qualified by `tools/check-hosted-aros-alpha0.sh`; ADR-046
 records the runtime evidence and boundary fixes. Each later platform repeats S0
 before advancing to its system-volume or performance gates.
 
+The secondary-volume recovery extension is qualified by
+`tools/check-hosted-aros-crash-replay.sh`. It replays deterministic power-cut
+images through the real Hosted handler; ADR-047 defines the modeled state space
+and prevents this result from being confused with a physical power-cut claim.
+
 ### S1: post-bootstrap system-volume pivot
 
 Start MacAROS through its existing boot path, mount an AFS+ image containing a
@@ -72,7 +77,10 @@ a 680x0 CPU, a few MiB of memory, an IDE/CompactFlash controller or a real
 rotating disk.
 
 The project has three target platforms and four ordered validation stages.
-Results from the four stages are published separately and never averaged:
+Hosted MacAROS/macOS and native MacAROS/Apple Silicon are the first two target
+platforms. The Amiga 500/m68k is the third; it is deliberately qualified in two
+stages, emulator first and physical machine second. Results from the four
+stages are published separately and never averaged:
 
 1. Hosted MacAROS on macOS: modern AROS software cost and the primary rapid
    development regression gate;
@@ -89,7 +97,8 @@ emulated or physical-machine claim.
 The project's first physical classic target is an Amiga 500. Its result bundle
 must record the exact 680x0 CPU, Chip/Fast RAM, accelerator or expansion, ROM/OS
 build, storage controller, medium and filesystem-handler versions. A stock and
-an expanded A500 are distinct platforms even when they use the same case.
+an expanded A500 are distinct result configurations of the same target
+platform.
 
 The A500 qualification starts in the emulator with the bounded
 reader/`NO_CHANGES` path, then a minimal read-write profile, deterministic

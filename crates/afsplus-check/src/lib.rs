@@ -23,7 +23,7 @@ use afsplus_core::CoreError;
 use afsplus_format::ident::Identification;
 
 /// Versioned structured-output schema (ADR-025).
-pub const REPORT_SCHEMA_VERSION: u32 = 3;
+pub const REPORT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Default)]
 pub struct CheckReport {
@@ -62,7 +62,8 @@ impl CheckReport {
         if let Some(v) = &self.volume {
             out.push_str(&format!(
                 "volume {} label \"{}\" blocks {} region size {} generation {} (slot {})\n\
-                 objects {} metadata blocks {} data blocks {} pending reclaim {} ({} runs) free {}\n",
+                 objects {} metadata blocks {} data blocks {} pending reclaim {} ({} runs) \
+                 pending log records {} free {}\n",
                 v.uuid_hex,
                 v.label,
                 v.total_blocks,
@@ -74,6 +75,7 @@ impl CheckReport {
                 v.reachable_data_blocks,
                 v.reclaim_pending_blocks,
                 v.reclaim_runs,
+                v.log_records_pending,
                 v.free_blocks,
             ));
         }
@@ -105,7 +107,7 @@ impl CheckReport {
                 "\"volume\":{{\"uuid\":{},\"label\":{},\"total_blocks\":{},\
                  \"region_size\":{},\"generation\":{},\"chosen_slot\":{},\"objects\":{},\
                  \"metadata_blocks\":{},\"data_blocks\":{},\"reclaim_pending_blocks\":{},\
-                 \"reclaim_runs\":{},\"free_blocks\":{}}},",
+                 \"reclaim_runs\":{},\"log_records_pending\":{},\"free_blocks\":{}}},",
                 json_string(&v.uuid_hex),
                 json_string(&v.label),
                 v.total_blocks,
@@ -117,6 +119,7 @@ impl CheckReport {
                 v.reachable_data_blocks,
                 v.reclaim_pending_blocks,
                 v.reclaim_runs,
+                v.log_records_pending,
                 v.free_blocks,
             ));
         } else {

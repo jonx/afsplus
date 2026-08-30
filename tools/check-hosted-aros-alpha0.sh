@@ -154,7 +154,7 @@ C:Copy AFSPLUS19:alpha0.from-aros MacRW:alpha0.from-aros >MacRW:copy.out'
 stop_aros "$result/target"
 grep -q '^\[AFSPLUS-ALPHA0\] PASS ' "$result/target/probe.out"
 [ "$(cat "$result/target/alpha0.from-aros")" = hello ]
-cargo run --quiet --release -p afsplus-check -- "$image" --json \
+cargo run --quiet --release -p afsplus-check --bin afsplus-check -- "$image" --json \
     >"$result/check-after-target.json"
 grep -q '"clean":true' "$result/check-after-target.json"
 
@@ -171,7 +171,7 @@ grep -q '^\[AFSPLUS-HOST-ALPHA0\] PASS ' "$result/host-probe.out"
 diskutil unmount "$host_mount" >"$result/host-unmount.out"
 wait "$host_mount_pid"
 host_mount_pid=
-cargo run --quiet --release -p afsplus-check -- "$image" --json \
+cargo run --quiet --release -p afsplus-check --bin afsplus-check -- "$image" --json \
     >"$result/check-after-host.json"
 grep -q '"clean":true' "$result/check-after-host.json"
 
@@ -189,7 +189,7 @@ if grep -Eq '^\._alpha0\.' "$result/return/list.out"; then
     echo "AppleDouble sidecars leaked into the final fixture" >&2
     exit 1
 fi
-cargo run --quiet --release -p afsplus-check -- "$image" --json \
+cargo run --quiet --release -p afsplus-check --bin afsplus-check -- "$image" --json \
     >"$result/check-final.json"
 grep -q '"clean":true' "$result/check-final.json"
 

@@ -65,17 +65,37 @@ COMPILER_PATH="$sdk/tools:$aros_crosstools/bin" \
     -Wl,--end-group -lclang_rt.builtins-aarch64
 chmod 755 "$staging/AFSPlusAlpha0Probe"
 
+echo "[aros-package] build the target-side crash-replay probe"
+COMPILER_PATH="$sdk/tools:$aros_crosstools/bin" \
+    "$aros_clang" --target=aarch64-unknown-aros \
+    -mcmodel=large -ffixed-x18 -O2 -std=gnu11 \
+    -Wall -Wextra -Wconversion -Wsign-conversion -Werror \
+    -Wno-pointer-sign \
+    -isystem "$developer/include" \
+    -isystem "$sdk/gen/include" \
+    -isystem "$sdk/gen/include/aros/posixc" \
+    -isystem "$developer/include/aros/stdc" \
+    -nostartfiles -nodefaultlibs \
+    -L "$developer/lib" -L "$aros_crosstools/lib/generic" \
+    "$developer/lib/startup.o" native/aros/tests/replay_probe.c \
+    -o "$staging/AFSPlusReplayProbe" \
+    -Wl,--allow-multiple-definition -Wl,--start-group \
+    -lpthread -lposixc -lstdc -lstdcio -ldos -lexec -laros \
+    -lautoinit -llibinit -lutility -lamiga -larossupport \
+    -Wl,--end-group -lclang_rt.builtins-aarch64
+chmod 755 "$staging/AFSPlusReplayProbe"
+
 echo "[aros-package] create and verify the 64 MiB image"
 cargo run --quiet --release -p afsplus-core --bin afsplus-mkfs -- \
     --size-mib 64 --label AFSPlusAlpha0 "$staging/Unit19"
-cargo run --quiet --release -p afsplus-check -- \
+cargo run --quiet --release -p afsplus-check --bin afsplus-check -- \
     "$staging/Unit19" --json >"$staging/check-before.json"
 
 cp native/aros/AFSPLUS19.mountlist "$staging/AFSPLUS19"
 cp docs/aros-alpha0-package.md "$staging/README.md"
 (
     cd "$staging"
-    shasum -a 256 afsplus-handler AFSPlusAlpha0Probe \
+    shasum -a 256 afsplus-handler AFSPlusAlpha0Probe AFSPlusReplayProbe \
         AFSPLUS19 Unit19 check-before.json README.md >SHA256SUMS
 )
 
