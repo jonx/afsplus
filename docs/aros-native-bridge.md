@@ -54,6 +54,35 @@ paired with the current MacAROS Rust target and `rust-aros` standard library.
 Override `AFSPLUS_AROS_RUST_TOOLCHAIN` only with a correspondingly rebased
 target and standard library.
 
+## AArch64 platform profiles
+
+The default profile remains the qualified Hosted MacAROS build. Its target JSON
+reserves `x18`, and every C object uses `-ffixed-x18`, because Darwin may alter
+that platform register across host signal delivery. Those are Hosted runtime
+requirements, not properties of the AFS+ format or handler ABI.
+
+`tools/check-aros-ffi.sh` and `tools/package-aros-alpha0.sh` accept the same
+profile variables:
+
+| Variable | Hosted default | Contract |
+|---|---|---|
+| `AFSPLUS_AROS_SDK_ROOT` | `$AROS_BUILD/bin/darwin-aarch64` | SDK root containing `tools`, `gen` and `AROS/Developer` |
+| `AFSPLUS_AROS_RUST_TARGET_JSON` | MacAROS `aarch64-unknown-aros.json` | Rust target used with `-Zbuild-std` |
+| `AFSPLUS_AROS_RUST_ARCHIVE` | derived from the JSON filename | Optional explicit `libafsplus_aros_ffi.a` output |
+| `AFSPLUS_AROS_PLATFORM_GLUE_DIR` | MacAROS `hosted/rust` | Seven AROS `std` C glue sources |
+| `AFSPLUS_AROS_TARGET` | `aarch64-unknown-aros` | Clang driver/link target |
+| `AFSPLUS_AROS_CODEGEN_TARGET` | `aarch64-unknown-none-elf` | Clang target for generated entry/glue objects |
+| `AFSPLUS_AROS_ARCH_FLAGS` | `-mcmodel=large -ffixed-x18` | Whitespace-separated target ABI/codegen flags |
+| `AFSPLUS_AROS_CROSS_LIB` | `$AROS_CROSSTOOLS/lib/generic` | Compiler runtime library directory |
+
+A bare-metal MacAROS SDK must provide these as one coherent profile. In
+particular it must not inherit `+reserve-x18` or `-ffixed-x18` unless that
+platform ABI independently reserves the register. The build still requires the
+same public AROS headers/libraries and seven `std` glue symbols; no filesystem
+source fork is permitted. Every package records the profile values, target-JSON
+hash and per-glue hashes in `build-profile.txt`. ADR-051 records this boundary;
+it deliberately does not claim that the future native profile is qualified.
+
 To materialize, without installing, everything needed for the first target
 run, use:
 

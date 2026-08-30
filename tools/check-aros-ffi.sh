@@ -10,23 +10,29 @@ aros_crosstools=${AROS_CROSSTOOLS:-"$HOME/aros-crosstools"}
 aros_m68k_build=${AROS_M68K_BUILD:-"$HOME/aros-m68k-build"}
 rust_toolchain=${AFSPLUS_AROS_RUST_TOOLCHAIN:-nightly-2026-06-27}
 handler_output=${AFSPLUS_AROS_HANDLER_OUTPUT:-}
-target_json="$macaros_root/hosted/rust/aarch64-unknown-aros.json"
+target_json=${AFSPLUS_AROS_RUST_TARGET_JSON:-"$macaros_root/hosted/rust/aarch64-unknown-aros.json"}
+target_name=$(basename -- "$target_json" .json)
+platform_glue_dir=${AFSPLUS_AROS_PLATFORM_GLUE_DIR:-"$macaros_root/hosted/rust"}
+aros_target=${AFSPLUS_AROS_TARGET:-aarch64-unknown-aros}
+aros_codegen_target=${AFSPLUS_AROS_CODEGEN_TARGET:-aarch64-unknown-none-elf}
+aros_arch_flags=${AFSPLUS_AROS_ARCH_FLAGS:--mcmodel=large -ffixed-x18}
+aros_sdk=${AFSPLUS_AROS_SDK_ROOT:-"$aros_build/bin/darwin-aarch64"}
 aros_clang="$aros_crosstools/bin/clang"
 aros_ld="$aros_crosstools/bin/ld.lld"
 aros_nm="$aros_crosstools/bin/llvm-nm"
-aros_tools="$aros_build/bin/darwin-aarch64/tools"
+aros_tools="$aros_sdk/tools"
 aros_genmodule="$aros_tools/genmodule"
-aros_include="$aros_build/bin/darwin-aarch64/AROS/Developer/include"
-aros_gen_include="$aros_build/bin/darwin-aarch64/gen/include"
+aros_include="$aros_sdk/AROS/Developer/include"
+aros_gen_include="$aros_sdk/gen/include"
 aros_stdc_include="$aros_include/aros/stdc"
 aros_posixc_include="$aros_gen_include/aros/posixc"
-aros_lib="$aros_build/bin/darwin-aarch64/AROS/Developer/lib"
-aros_cross_lib="$aros_crosstools/lib/generic"
+aros_lib="$aros_sdk/AROS/Developer/lib"
+aros_cross_lib=${AFSPLUS_AROS_CROSS_LIB:-"$aros_crosstools/lib/generic"}
 m68k_cc="$aros_m68k_build/bin/darwin-aarch64/tools/crosstools/m68k-aros-gcc"
 m68k_include="$aros_m68k_build/bin/amiga-m68k/AROS/Developer/include"
 m68k_gen_include="$aros_m68k_build/bin/amiga-m68k/gen/include"
 m68k_stdc_include="$m68k_include/aros/stdc"
-archive="$repo_root/target/aarch64-unknown-aros/release/libafsplus_aros_ffi.a"
+archive=${AFSPLUS_AROS_RUST_ARCHIVE:-"$repo_root/target/$target_name/release/libafsplus_aros_ffi.a"}
 task_dir=$(mktemp -d "${TMPDIR:-/tmp}/afsplus-aros-ffi.XXXXXX")
 trap 'rm -r "$task_dir"' EXIT HUP INT TERM
 
@@ -57,7 +63,7 @@ for glue in \
     aros_net_glue.c aros_fs_glue.c aros_process_glue.c \
     aros_proc_glue.c aros_thread_glue.c aros_sync_glue.c aros_env_glue.c
 do
-    require_file "$macaros_root/hosted/rust/$glue"
+    require_file "$platform_glue_dir/$glue"
 done
 
 cd "$repo_root"
@@ -87,6 +93,7 @@ clang -std=c11 -Wall -Wextra -Werror \
     -o "$task_dir/trackdisk-stub"
 "$task_dir/trackdisk-stub"
 
+echo "[aros-ffi] AROS AArch64 profile: target=$aros_target codegen=$aros_codegen_target"
 echo "[aros-ffi] AROS AArch64 Rust static library"
 PATH="$aros_crosstools/bin:$PATH" cargo "+$rust_toolchain" build \
     -p afsplus-aros-ffi --release --target "$target_json" \
@@ -106,7 +113,8 @@ do
 done
 
 echo "[aros-ffi] AROS AArch64 C/DOS64 header ABI"
-"$aros_clang" --target=aarch64-unknown-aros -mcmodel=large -ffixed-x18 \
+# shellcheck disable=SC2086 -- the profile intentionally supplies separate flags.
+"$aros_clang" --target="$aros_target" $aros_arch_flags \
     -std=c11 -Wall -Wextra -Werror \
     -I "$aros_include" -I "$aros_gen_include" -I api \
     -include dos/dos64.h -include afsplus_aros.h \
@@ -114,8 +122,8 @@ echo "[aros-ffi] AROS AArch64 C/DOS64 header ABI"
 
 echo "[aros-ffi] AROS AArch64 DosPacket translator"
 for dos64_flag in "" "-D__DOS64=1"; do
-    # shellcheck disable=SC2086 -- the empty/non-empty compile flag is intentional.
-    "$aros_clang" --target=aarch64-unknown-aros -mcmodel=large -ffixed-x18 \
+    # shellcheck disable=SC2086 -- profile and DOS64 flags are intentional words.
+    "$aros_clang" --target="$aros_target" $aros_arch_flags \
         -std=c11 -Wall -Wextra -Werror $dos64_flag \
         -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
         -I api -I native/aros -c native/aros/afsplus_packet.c \
@@ -123,14 +131,16 @@ for dos64_flag in "" "-D__DOS64=1"; do
 done
 
 echo "[aros-ffi] AROS AArch64 bounded trackdisk viewport"
-"$aros_clang" --target=aarch64-unknown-aros -mcmodel=large -ffixed-x18 \
+# shellcheck disable=SC2086 -- the profile intentionally supplies separate flags.
+"$aros_clang" --target="$aros_target" $aros_arch_flags \
     -std=c11 -Wall -Wextra -Werror \
     -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
     -I api -I native/aros -c native/aros/afsplus_trackdisk.c \
     -o "$task_dir/trackdisk-aarch64.o"
 
 echo "[aros-ffi] AROS AArch64 native handler shell"
-"$aros_clang" --target=aarch64-unknown-aros -mcmodel=large -ffixed-x18 \
+# shellcheck disable=SC2086 -- the profile intentionally supplies separate flags.
+"$aros_clang" --target="$aros_target" $aros_arch_flags \
     -std=gnu11 -Wall -Wextra -Werror -D__NOLIBBASE__ \
     -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
     -I api -I native/aros -c native/aros/afsplus_handler.c \
@@ -166,8 +176,9 @@ patch -s "$task_dir/module/afsplus_start.c" \
 grep -q 'if (set_open_libraries())' "$task_dir/module/afsplus_start.c"
 grep -q 'set_close_libraries();' "$task_dir/module/afsplus_start.c"
 for source in afsplus_start afsplus_end; do
-    "$aros_clang" --target=aarch64-unknown-none-elf \
-        -mcmodel=large -ffixed-x18 -D__arm64__ -D__AROS__ \
+    # shellcheck disable=SC2086 -- the profile intentionally supplies separate flags.
+    "$aros_clang" --target="$aros_codegen_target" $aros_arch_flags \
+        -D__arm64__ -D__AROS__ \
         -D__NOLIBBASE__ -O2 -Wall -Wextra -Werror \
         -Wno-missing-field-initializers -Wno-unused-parameter \
         -Wno-pointer-sign \
@@ -179,29 +190,31 @@ for glue in \
     aros_net_glue aros_process_glue aros_proc_glue \
     aros_env_glue aros_thread_glue
 do
-    "$aros_clang" --target=aarch64-unknown-none-elf \
-        -mcmodel=large -ffixed-x18 -D__arm64__ -O2 \
+    # shellcheck disable=SC2086 -- the profile intentionally supplies separate flags.
+    "$aros_clang" --target="$aros_codegen_target" $aros_arch_flags \
+        -D__arm64__ -O2 \
         -Wno-pointer-sign -Wno-int-conversion \
         -Wno-implicit-function-declaration \
         -Wno-incompatible-pointer-types \
         -I "$aros_gen_include" -I "$aros_include" \
-        -c "$macaros_root/hosted/rust/$glue.c" \
+        -c "$platform_glue_dir/$glue.c" \
         -o "$task_dir/module/$glue.o"
 done
 for glue in aros_fs_glue aros_sync_glue; do
-    "$aros_clang" --target=aarch64-unknown-none-elf \
-        -mcmodel=large -ffixed-x18 -D__arm64__ -O2 \
+    # shellcheck disable=SC2086 -- the profile intentionally supplies separate flags.
+    "$aros_clang" --target="$aros_codegen_target" $aros_arch_flags \
+        -D__arm64__ -O2 \
         -Wno-pointer-sign -Wno-int-conversion \
         -Wno-implicit-function-declaration \
         -Wno-incompatible-library-redeclaration \
         -I "$aros_gen_include" -I "$aros_include" \
         -I "$aros_posixc_include" \
-        -c "$macaros_root/hosted/rust/$glue.c" \
+        -c "$platform_glue_dir/$glue.c" \
         -o "$task_dir/module/$glue.o"
 done
 PATH="$aros_tools:$PATH" COMPILER_PATH="$aros_crosstools/bin" \
-    "$aros_clang" --target=aarch64-unknown-aros \
-    -mcmodel=large -ffixed-x18 -nostartfiles \
+    "$aros_clang" --target="$aros_target" \
+    $aros_arch_flags -nostartfiles \
     -Wl,--allow-multiple-definition \
     -L "$aros_lib" -L "$aros_cross_lib" \
     -o "$task_dir/afsplus-handler" \

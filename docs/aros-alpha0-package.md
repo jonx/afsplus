@@ -16,6 +16,7 @@ The files map to a runnable MacAROS tree as follows:
 | `AFSPlusS1Pivot` | `AROS/C/AFSPlusS1Pivot` for S1 bootstrap only |
 | `AFSPLUS19` | `AROS/Devs/DOSDrivers/AFSPLUS19` |
 | `Unit19` | `AROS/DiskImages/Unit19` |
+| `build-profile.txt` | Target, architecture flags and hashes of the Rust target and platform glues |
 
 The DOSDriver describes one 64 MiB device with 16,384 logical 4-KiB blocks and
 uses `fdsk.device` unit 19. The 256-KiB handler stack is an Alpha-0 safety value,
@@ -71,6 +72,11 @@ Removing that pair after `Assign <device>: DISMOUNT` uninstalls the driver; disk
 images and physical volumes are user data and must not be deleted as part of
 driver removal. The Alpha-0 `Unit19` file is only a disposable qualification
 fixture.
+
+`build-profile.txt` is part of `SHA256SUMS`. It prevents a package built with
+the Darwin-hosted `x18` reservation from being confused with a future
+bare-metal profile merely because both binaries use the AArch64 AROS ABI. See
+ADR-051.
 
 Deterministic native-handler recovery is automated separately by:
 
