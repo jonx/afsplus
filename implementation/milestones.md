@@ -12,7 +12,7 @@ through a host mount and a MacAROS adapter. Format epoch 1 remains unfrozen.
 | M03 | RW core | Prototype complete | create/read/write/rename/unlink on images |
 | M04 | Journal | Prototype complete, format experimental | exhaustive crash-point suite passes |
 | M05 | Checker | Prototype complete | corruption corpus detected safely |
-| M06 | AROS handler | Partial: DOS semantics + C ABI + packet translator + bounded trackdisk viewport; native handler shell pending | classic apps operate without recompilation |
+| M06 | AROS handler | Partial: complete off-tree AROS module links; in-tree package and runtime gates pending | classic apps operate without recompilation |
 | M07 | FS API v2 | Portable subset implemented | 64-bit and capability tests pass |
 | M08 | FUSE | Host mount qualified; same-image AROS gate pending | same image read/write on host and AROS |
 | M09 | Catalog | Not started | multi-million object enumeration fast path |

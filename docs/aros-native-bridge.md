@@ -36,9 +36,13 @@ The script performs these independent gates:
    with genuine AROS AArch64 headers;
 3. the standalone C11 header check;
 4. a release staticlib build with MacAROS's `aarch64-unknown-aros.json`, plus
-   exported-symbol checks; and
-5. compilation of the public headers, packet translator and trackdisk adapter
-   under AArch64 Clang, both packet DOS alias modes, plus m68k GCC.
+   exported-symbol checks;
+5. compilation of the public headers, packet translator, trackdisk adapter and
+   native handler shell under AArch64 Clang, both packet DOS alias modes, plus
+   m68k GCC, including the generated handler entry; and
+6. an intermediate AArch64 link which rejects unresolved AFS+ symbols, followed
+   by `genmodule`, compilation of the MacAROS Rust platform glues and a complete
+   AROS handler-module link which must have no undefined symbols.
 
 Defaults assume sibling `Macaros`, `~/aros-build`, `~/aros-crosstools` and
 `~/aros-m68k-build` trees. Override `MACAROS_ROOT`, `AROS_BUILD`,
@@ -64,6 +68,12 @@ bits to `io_Actual`, calls `DoIO`, and accepts success only when `io_Actual`
 then equals the requested byte count. The sync callback issues `CMD_UPDATE`.
 The adapter rejects an inaccessible viewport at initialization rather than
 allowing a later 32-bit offset wrap. See ADR-044.
+
+An optional `afsp_io_activity_sink` in the trackdisk configuration exposes the
+virtual drive LED contract. The adapter selects direct callbacks for every
+masked-out operation, so leaving the sink empty has no per-operation activity
+test. Select `AFSP_IO_ACTIVITY_MASK_WRITE | AFSP_IO_ACTIVITY_MASK_FLUSH` for an
+Amiga-style write LED; timing and coalescing remain UI policy.
 
 ## Native lifecycle
 
@@ -114,15 +124,35 @@ examine/info actions use the structure selected by the native DOS headers;
 explicit `ACTION_EXAMINE_*64` and `ACTION_INFO64` always use the wide form.
 Legacy 32-bit counters saturate at `INT32_MAX` rather than wrapping.
 
+## Native handler shell
+
+`native/aros/afsplus_handler.c` now performs the target-specific assembly: it
+validates startup geometry, opens the device, probes NSD/TD64 and write
+protection, handles optional DMA masks through a bounded bounce buffer,
+registers the volume, provides UTC/public-memory callbacks, processes messages
+serially and unwinds partial startup in reverse order. It is cross-compiled on
+AArch64 and m68k. `native/aros/afsplus.conf` provides the AFS+ DOS type and
+Resident definition. Qualification generates the AROS entry, supplies the
+MacAROS `std` platform glues and fully links the AArch64 module with no undefined
+symbols. See ADR-045.
+
+That final off-tree link deliberately consumes the glue sources from
+`$MACAROS_ROOT/hosted/rust` instead of copying them. The eventual in-tree
+`mmakefile.src` must list the same seven glues (`net`, `fs`, `process`, `proc`,
+`thread`, `sync`, `env`), the AFS+ static library and the standard MacAROS
+`posixc/stdc/pthread` link set. A handler uses its generated start/end objects,
+never the command-oriented `startup.o`.
+
 ## Remaining native gate
 
-The next integration step is a small MacAROS handler target that links the
-static library, packet translator and trackdisk viewport, implements the
-actual `IOExtTD` transfer/barrier callbacks and owns device/media lifecycle plus
-the message receive/reply loop. It must then mount the same
-image used by the host, execute
-create/read/write/truncate/rename/fsync, reboot at controlled durability
+The next integration step is to add this source set as a MacAROS handler build
+target and package its DOSDriver. It must then mount the same image used by the
+host, execute create/read/write/truncate/rename/fsync, reboot at controlled durability
 points, replay, unmount and pass the strict host checker.
+
+The fixed-image Alpha-0 path does not yet install `TD_ADDCHANGEINT` handling.
+Hot-swappable media remains disabled until removal can detach the mounted Rust
+instance and DOS volume without racing outstanding locks.
 
 The AArch64 library is cross-build qualified. The m68k header/layout is
 qualified, but the experimental m68k Rust `std` toolchain is not yet a

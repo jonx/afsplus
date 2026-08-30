@@ -77,6 +77,8 @@ enum afsp_io_activity_mask {
     AFSP_IO_ACTIVITY_MASK_FLUSH = UINT32_C(1) << 2
 };
 
+#define AFSP_IO_ACTIVITY_EVENT_VERSION UINT16_C(1)
+
 struct afsp_io_activity_event {
     uint32_t size;
     uint16_t version;
@@ -96,6 +98,11 @@ struct afsp_io_activity_sink {
     void *ctx;
     uint32_t operation_mask;
 };
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(struct afsp_io_activity_event) == 32,
+               "afsp_io_activity_event ABI drift");
+#endif
 
 enum afsp_check_level {
     AFSP_CHECK_ALWAYS = 0,

@@ -149,6 +149,11 @@ The contract is portable: an AROS handler, a host-image tool, another OS, or a
 physical driver can expose the same event model. It changes no on-disk data and
 is neither a persistent log nor part of the filesystem change stream.
 
+The native AROS trackdisk adapter accepts the same C sink. It chooses direct or
+instrumented block function pointers once at initialization, per operation, so
+an absent sink and masked-out reads add no conditional to their I/O callbacks.
+This lets a MacAROS front-end request only `WRITE | FLUSH` for its virtual LED.
+
 ## 5. Explain API
 
 Tracing tells us what happened. Explain APIs tell us what the current filesystem believes.

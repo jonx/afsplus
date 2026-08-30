@@ -53,15 +53,23 @@ transfer. Its sync implementation issues `CMD_UPDATE`; a successful filesystem
 flush therefore includes the physical device barrier rather than only draining
 an AFS+ cache. Read-only mounts omit write and flush callbacks entirely.
 
+Version 2 of the configuration can also carry the portable fixed-size
+block-activity sink
+from `api/debug_observability.h`. Callback selection happens once during
+initialization: disabled or masked-out operations use the direct function
+pointer and pay no per-I/O activity branch. Enabled operations emit `BEGIN` and
+`END`, including unsuccessful completion, without allocation, clocks, payload
+copies or delays. A virtual Amiga write LED selects `WRITE | FLUSH`.
+
 ## Consequences
 
 The geometry and viewport logic has a runnable host matrix and the exact same C
 source compiles with warnings as errors for AROS AArch64 and AROS m68k. Tests
 cover overflow, alignment, the last legacy-addressable block, rejection beyond
-4 GiB without TD64/NSD, callback-error propagation and read-only setup.
+4 GiB without TD64/NSD, callback-error propagation, read-only setup and filtered
+success/failure activity events.
 
-This does not yet prove a native mount. The remaining shell must own
-`OpenDevice`, capability probing, short-I/O checks, media-change lifecycle,
-startup/reply plumbing and the message loop. It can now do so without owning
-partition arithmetic or a second block-bounds policy. No MacAROS source tree is
-modified by this decision.
+This does not by itself prove a native mount. ADR-045 supplies the shell which
+owns `OpenDevice`, capability probing, short-I/O checks, startup/reply plumbing
+and the message loop without taking over partition arithmetic or a second
+block-bounds policy.

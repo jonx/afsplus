@@ -8,12 +8,14 @@
 #include <stdint.h>
 
 #include "afsplus_aros.h"
+#include "debug_observability.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define AFSPLUS_AROS_TRACKDISK_ABI_VERSION UINT32_C(1)
+/* Version 2 adds the optional fixed-size activity sink. */
+#define AFSPLUS_AROS_TRACKDISK_ABI_VERSION UINT32_C(2)
 #define AFSPLUS_AROS_ALPHA0_BLOCK_SIZE UINT32_C(4096)
 
 typedef int32_t (*AfsplusArosTrackdiskTransfer)(void *context,
@@ -37,6 +39,8 @@ struct AfsplusArosTrackdiskConfig {
     uint32_t write_command;
     uint32_t supports_64bit_offsets;
     uint32_t read_only;
+    /* Optional fixed-size activity events for a virtual drive LED. */
+    struct afsp_io_activity_sink activity;
 };
 
 struct AfsplusArosTrackdisk {
@@ -51,18 +55,19 @@ struct AfsplusArosTrackdisk {
     uint32_t write_command;
     uint32_t supports_64bit_offsets;
     uint32_t read_only;
+    struct afsp_io_activity_sink activity;
 };
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(struct AfsplusArosTrackdiskConfig) == 72,
+_Static_assert(sizeof(struct AfsplusArosTrackdiskConfig) == 96,
     "AfsplusArosTrackdiskConfig 64-bit ABI drift");
-_Static_assert(sizeof(struct AfsplusArosTrackdisk) == 72,
+_Static_assert(sizeof(struct AfsplusArosTrackdisk) == 96,
     "AfsplusArosTrackdisk 64-bit ABI drift");
 #elif UINTPTR_MAX == UINT32_MAX
-_Static_assert(sizeof(struct AfsplusArosTrackdiskConfig) == 60,
+_Static_assert(sizeof(struct AfsplusArosTrackdiskConfig) == 72,
     "AfsplusArosTrackdiskConfig 32-bit ABI drift");
-_Static_assert(sizeof(struct AfsplusArosTrackdisk) == 56,
+_Static_assert(sizeof(struct AfsplusArosTrackdisk) == 68,
     "AfsplusArosTrackdisk 32-bit ABI drift");
 #endif
 #endif

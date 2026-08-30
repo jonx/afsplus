@@ -74,7 +74,7 @@ static int32_t validate_access(const struct AfsplusArosTrackdisk *trackdisk,
     return 0;
 }
 
-static int32_t read_block(void *context, uint64_t lba,
+static int32_t read_block_direct(void *context, uint64_t lba,
     uint8_t *destination, uint32_t length)
 {
     struct AfsplusArosTrackdisk *trackdisk = context;
@@ -90,7 +90,7 @@ static int32_t read_block(void *context, uint64_t lba,
         offset, destination, length, 0);
 }
 
-static int32_t write_block(void *context, uint64_t lba,
+static int32_t write_block_direct(void *context, uint64_t lba,
     const uint8_t *source, uint32_t length)
 {
     struct AfsplusArosTrackdisk *trackdisk = context;
@@ -108,7 +108,7 @@ static int32_t write_block(void *context, uint64_t lba,
         offset, (void *)source, length, 1);
 }
 
-static int32_t flush_device(void *context)
+static int32_t flush_device_direct(void *context)
 {
     struct AfsplusArosTrackdisk *trackdisk = context;
 
@@ -117,6 +117,66 @@ static int32_t flush_device(void *context)
     if (trackdisk->read_only)
         return ERROR_DISK_WRITE_PROTECTED;
     return trackdisk->sync(trackdisk->context);
+}
+
+static void emit_activity(struct AfsplusArosTrackdisk *trackdisk,
+    uint8_t operation, uint8_t phase, uint64_t lba, uint32_t lba_valid,
+    uint32_t success)
+{
+    struct afsp_io_activity_event event;
+
+    memset(&event, 0, sizeof(event));
+    event.size = sizeof(event);
+    event.version = AFSP_IO_ACTIVITY_EVENT_VERSION;
+    event.operation = operation;
+    event.phase = phase;
+    event.flags = lba_valid ? AFSP_IO_ACTIVITY_LBA_VALID : 0;
+    if (phase == AFSP_IO_ACTIVITY_END && success)
+        event.flags |= AFSP_IO_ACTIVITY_SUCCESS;
+    event.lba = lba;
+    event.block_count = lba_valid ? 1 : 0;
+    trackdisk->activity.emit(trackdisk->activity.ctx, &event);
+}
+
+static int32_t read_block_with_activity(void *context, uint64_t lba,
+    uint8_t *destination, uint32_t length)
+{
+    struct AfsplusArosTrackdisk *trackdisk = context;
+    int32_t result;
+
+    emit_activity(trackdisk, AFSP_IO_ACTIVITY_READ,
+        AFSP_IO_ACTIVITY_BEGIN, lba, 1, 0);
+    result = read_block_direct(context, lba, destination, length);
+    emit_activity(trackdisk, AFSP_IO_ACTIVITY_READ,
+        AFSP_IO_ACTIVITY_END, lba, 1, result == 0);
+    return result;
+}
+
+static int32_t write_block_with_activity(void *context, uint64_t lba,
+    const uint8_t *source, uint32_t length)
+{
+    struct AfsplusArosTrackdisk *trackdisk = context;
+    int32_t result;
+
+    emit_activity(trackdisk, AFSP_IO_ACTIVITY_WRITE,
+        AFSP_IO_ACTIVITY_BEGIN, lba, 1, 0);
+    result = write_block_direct(context, lba, source, length);
+    emit_activity(trackdisk, AFSP_IO_ACTIVITY_WRITE,
+        AFSP_IO_ACTIVITY_END, lba, 1, result == 0);
+    return result;
+}
+
+static int32_t flush_device_with_activity(void *context)
+{
+    struct AfsplusArosTrackdisk *trackdisk = context;
+    int32_t result;
+
+    emit_activity(trackdisk, AFSP_IO_ACTIVITY_FLUSH,
+        AFSP_IO_ACTIVITY_BEGIN, 0, 0, 0);
+    result = flush_device_direct(context);
+    emit_activity(trackdisk, AFSP_IO_ACTIVITY_FLUSH,
+        AFSP_IO_ACTIVITY_END, 0, 0, result == 0);
+    return result;
 }
 
 int32_t afsplus_aros_trackdisk_init(
@@ -138,7 +198,12 @@ int32_t afsplus_aros_trackdisk_init(
         || config->partition_length_bytes % config->logical_block_size != 0
         || config->read_command == 0
         || (!config->read_only
-            && (config->write_command == 0 || config->sync == NULL)))
+            && (config->write_command == 0 || config->sync == NULL))
+        || (config->activity.operation_mask
+            & ~(AFSP_IO_ACTIVITY_MASK_READ | AFSP_IO_ACTIVITY_MASK_WRITE
+                | AFSP_IO_ACTIVITY_MASK_FLUSH)) != 0
+        || (config->activity.emit == NULL
+            && config->activity.operation_mask != 0))
         return ERROR_BAD_NUMBER;
     if (config->partition_start_bytes
         > UINT64_MAX - config->partition_length_bytes)
@@ -162,6 +227,7 @@ int32_t afsplus_aros_trackdisk_init(
     trackdisk->write_command = config->write_command;
     trackdisk->supports_64bit_offsets = !!config->supports_64bit_offsets;
     trackdisk->read_only = !!config->read_only;
+    trackdisk->activity = config->activity;
 
     memset(device, 0, sizeof(*device));
     device->abi_version = AFSPLUS_AROS_ABI_VERSION;
@@ -169,11 +235,20 @@ int32_t afsplus_aros_trackdisk_init(
     device->context = trackdisk;
     device->block_size = trackdisk->logical_block_size;
     device->total_blocks = trackdisk->total_blocks;
-    device->read_block = read_block;
+    device->read_block = trackdisk->activity.emit != NULL
+            && (trackdisk->activity.operation_mask
+                & AFSP_IO_ACTIVITY_MASK_READ) != 0
+        ? read_block_with_activity : read_block_direct;
     if (!trackdisk->read_only)
     {
-        device->write_block = write_block;
-        device->flush = flush_device;
+        device->write_block = trackdisk->activity.emit != NULL
+                && (trackdisk->activity.operation_mask
+                    & AFSP_IO_ACTIVITY_MASK_WRITE) != 0
+            ? write_block_with_activity : write_block_direct;
+        device->flush = trackdisk->activity.emit != NULL
+                && (trackdisk->activity.operation_mask
+                    & AFSP_IO_ACTIVITY_MASK_FLUSH) != 0
+            ? flush_device_with_activity : flush_device_direct;
     }
     return 0;
 }
