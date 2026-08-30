@@ -61,6 +61,15 @@ clang -std=c11 -Wall -Wextra -Werror \
     -o "$task_dir/packet-stub"
 "$task_dir/packet-stub"
 
+echo "[aros-ffi] host bounded trackdisk viewport matrix"
+clang -std=c11 -Wall -Wextra -Werror \
+    -D__WORDSIZE=64 -DAROS_FAST_BPTR=1 -DAROS_FAST_BSTR=1 \
+    -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
+    -I api -I native/aros \
+    native/aros/afsplus_trackdisk.c native/aros/tests/trackdisk_stub.c \
+    -o "$task_dir/trackdisk-stub"
+"$task_dir/trackdisk-stub"
+
 echo "[aros-ffi] AROS AArch64 Rust static library"
 PATH="$aros_crosstools/bin:$PATH" cargo "+$rust_toolchain" build \
     -p afsplus-aros-ffi --release --target "$target_json" \
@@ -96,6 +105,13 @@ for dos64_flag in "" "-D__DOS64=1"; do
         -o "$task_dir/packet-aarch64${dos64_flag:+-dos64}.o"
 done
 
+echo "[aros-ffi] AROS AArch64 bounded trackdisk viewport"
+"$aros_clang" --target=aarch64-unknown-aros -mcmodel=large -ffixed-x18 \
+    -std=c11 -Wall -Wextra -Werror \
+    -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
+    -I api -I native/aros -c native/aros/afsplus_trackdisk.c \
+    -o "$task_dir/trackdisk-aarch64.o"
+
 if [ "${AFSPLUS_AROS_SKIP_M68K_ABI:-0}" != 1 ]; then
     require_executable "$m68k_cc"
     require_file "$m68k_include/dos/dos64.h"
@@ -110,6 +126,12 @@ if [ "${AFSPLUS_AROS_SKIP_M68K_ABI:-0}" != 1 ]; then
         -I "$m68k_stdc_include" -I "$m68k_include" \
         -I "$m68k_gen_include" -I api -I native/aros \
         -c native/aros/afsplus_packet.c -o "$task_dir/packet-m68k.o"
+    echo "[aros-ffi] AROS m68k bounded trackdisk viewport"
+    "$m68k_cc" -std=c11 -Wall -Wextra -Werror \
+        -I "$m68k_stdc_include" -I "$m68k_include" \
+        -I "$m68k_gen_include" -I api -I native/aros \
+        -c native/aros/afsplus_trackdisk.c \
+        -o "$task_dir/trackdisk-m68k.o"
 fi
 
 echo "[aros-ffi] PASS"

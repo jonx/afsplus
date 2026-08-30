@@ -5,7 +5,7 @@ The native integration is deliberately split at a stable C ABI:
 ```text
 DosPacket / BPTR / BSTR / DateStamp       AROS trackdisk or image device
                  |                                      |
-     native/aros/afsplus_packet.c                 C block callbacks
+     native/aros/afsplus_packet.c       native/aros/afsplus_trackdisk.c
                  |                                      |
                  +---------- api/afsplus_aros.h --------+
                                       |
@@ -15,9 +15,11 @@ DosPacket / BPTR / BSTR / DateStamp       AROS trackdisk or image device
 ```
 
 The shared C translator owns AROS structure conversion and native wrapper
-lifetime without calling Exec or DOS. A small target handler still owns the
-message port, startup/shutdown and block device. The static library owns
-filesystem, numeric lock/file-handle and durability semantics.
+lifetime without calling Exec or DOS. The bounded trackdisk adapter owns
+checked partition arithmetic and logical-block bounds, also without calling
+Exec or DOS. A small target handler still owns the message port,
+startup/shutdown and device requests. The static library owns filesystem,
+numeric lock/file-handle and durability semantics.
 
 ## Reproduce the bridge qualification
 
@@ -30,13 +32,13 @@ tools/check-aros-ffi.sh
 The script performs these independent gates:
 
 1. the host operation matrix through the exported Rust functions;
-2. a runnable host `DosPacket` matrix compiled with genuine AROS AArch64
-   headers;
+2. runnable host `DosPacket` and bounded trackdisk viewport matrices compiled
+   with genuine AROS AArch64 headers;
 3. the standalone C11 header check;
 4. a release staticlib build with MacAROS's `aarch64-unknown-aros.json`, plus
    exported-symbol checks; and
-5. compilation of the public headers and packet translator under AArch64
-   Clang, both with the default DOS aliases and `__DOS64=1`, plus m68k GCC.
+5. compilation of the public headers, packet translator and trackdisk adapter
+   under AArch64 Clang, both packet DOS alias modes, plus m68k GCC.
 
 Defaults assume sibling `Macaros`, `~/aros-build`, `~/aros-crosstools` and
 `~/aros-m68k-build` trees. Override `MACAROS_ROOT`, `AROS_BUILD`,
@@ -47,6 +49,21 @@ The Rust build uses `nightly-2026-06-27` by default because that is the version
 paired with the current MacAROS Rust target and `rust-aros` standard library.
 Override `AFSPLUS_AROS_RUST_TOOLCHAIN` only with a correspondingly rebased
 target and standard library.
+
+## Trackdisk viewport
+
+Use `afsplus_aros_trackdisk_geometry` to convert the non-negative `DosEnvec`
+cylinder geometry into an exact byte start and length. Initialize
+`AfsplusArosTrackdiskConfig` with that viewport, the physical block size
+`de_SizeBlock << 2`, the Alpha-0 logical size of 4096, the command pair selected
+by the handler's TD64/NSD probe, and whether the mount is read-only.
+
+The supplied transfer callback receives an absolute device byte offset. For
+TD64 and NSD commands it writes the low 32 bits to `io_Offset` and the high 32
+bits to `io_Actual`, calls `DoIO`, and accepts success only when `io_Actual`
+then equals the requested byte count. The sync callback issues `CMD_UPDATE`.
+The adapter rejects an inaccessible viewport at initialization rather than
+allowing a later 32-bit offset wrap. See ADR-044.
 
 ## Native lifecycle
 
@@ -100,8 +117,9 @@ Legacy 32-bit counters saturate at `INT32_MAX` rather than wrapping.
 ## Remaining native gate
 
 The next integration step is a small MacAROS handler target that links the
-static library and the existing translator, implements trackdisk/image
-callbacks and owns the message receive/reply loop. It must then mount the same
+static library, packet translator and trackdisk viewport, implements the
+actual `IOExtTD` transfer/barrier callbacks and owns device/media lifecycle plus
+the message receive/reply loop. It must then mount the same
 image used by the host, execute
 create/read/write/truncate/rename/fsync, reboot at controlled durability
 points, replay, unmount and pass the strict host checker.
