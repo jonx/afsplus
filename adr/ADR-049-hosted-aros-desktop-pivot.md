@@ -77,6 +77,7 @@ system tree.
 
 ## Consequences
 
-Hosted S1 is complete. The next integration work is handler lifecycle and an
-in-tree MacAROS build, followed by the same-image contract on native MacAROS,
+Hosted S1 is complete. ADR-050 subsequently qualifies handler lifecycle and
+selects an autonomous external package rather than making an in-tree AROS build
+a release dependency. The same-image contract moves next to native MacAROS,
 then m68k emulation and the physical A500.

@@ -60,9 +60,17 @@ tools/check-hosted-aros-alpha0.sh
 
 It builds a fresh package, installs only the reserved test artifacts,
 runs AROS → host macFUSE → AROS against one image, checks both cross-created
-files and the filesystem at every boundary, and removes the installed artifacts
-afterward. It refuses to disturb a running Hosted instance or replace an
-existing target/result.
+files and the filesystem at every boundary, performs two standard
+`Assign AFSPLUS19: DISMOUNT` plus `Mount` reload cycles, and removes the
+installed artifacts afterward. It refuses to disturb a running Hosted instance
+or replace an existing target/result.
+
+The handler does not need to be built into AROS. A normal distribution installs
+the handler in `L:` and a machine-specific DOSDriver in `DEVS:DOSDrivers`.
+Removing that pair after `Assign <device>: DISMOUNT` uninstalls the driver; disk
+images and physical volumes are user data and must not be deleted as part of
+driver removal. The Alpha-0 `Unit19` file is only a disposable qualification
+fixture.
 
 Deterministic native-handler recovery is automated separately by:
 

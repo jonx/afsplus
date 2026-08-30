@@ -643,6 +643,12 @@ int main(void)
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_OBJECT_IN_USE);
 
+    initialize_packet(&packet, ACTION_INHIBIT);
+    packet.dp_Arg1 = DOSTRUE;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_OBJECT_IN_USE);
+    assert(flush_count == 0);
+
     initialize_packet(&packet, ACTION_FREE_LOCK);
     packet.dp_Arg1 = (SIPTR)located;
     assert(afsplus_aros_packet_process(context, &packet) == 0);
@@ -656,11 +662,34 @@ int main(void)
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
 
+    initialize_packet(&packet, ACTION_INHIBIT);
+    packet.dp_Arg1 = DOSTRUE;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert(flush_count == 1);
+
+    initialize_packet(&packet, ACTION_INHIBIT);
+    packet.dp_Arg1 = DOSTRUE;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert(flush_count == 1);
+
+    initialize_packet(&packet, ACTION_INHIBIT);
+    packet.dp_Arg1 = DOSFALSE;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+
+    initialize_packet(&packet, ACTION_INHIBIT);
+    packet.dp_Arg1 = DOSTRUE;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert(flush_count == 2);
+
     initialize_packet(&packet, ACTION_DIE);
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
     assert(afsplus_aros_packet_should_quit(context) == 1);
-    assert(flush_count == 1);
+    assert(flush_count == 3);
 
     assert(afsplus_aros_packet_destroy(context) == 0);
     puts("afsplus packet stub: PASS");

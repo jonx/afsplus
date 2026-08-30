@@ -39,6 +39,7 @@ struct AfsplusArosPacketContext {
     AfsplusArosPacketNow now;
     struct AfsplusArosNativeLock *locks;
     struct AfsplusArosNativeFile *files;
+    uint32_t inhibited;
     uint32_t quit;
 };
 
@@ -1375,6 +1376,23 @@ int32_t afsplus_aros_packet_process(
     }
     case ACTION_FLUSH:
         error = afsplus_aros_flush(context->filesystem);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    case ACTION_INHIBIT:
+        if (packet->dp_Arg1 == DOSTRUE)
+        {
+            if (context->locks != NULL || context->files != NULL)
+                error = ERROR_OBJECT_IN_USE;
+            else if (!context->inhibited)
+            {
+                error = afsplus_aros_flush(context->filesystem);
+                if (error == 0)
+                    context->inhibited = 1;
+            }
+        }
+        else
+            context->inhibited = 0;
         if (error == 0)
             result = DOSTRUE;
         break;

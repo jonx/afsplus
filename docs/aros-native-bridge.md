@@ -149,11 +149,14 @@ MacAROS `std` platform glues and fully links the AArch64 module with no undefine
 symbols. See ADR-045.
 
 That final off-tree link deliberately consumes the glue sources from
-`$MACAROS_ROOT/hosted/rust` instead of copying them. The eventual in-tree
-`mmakefile.src` must list the same seven glues (`net`, `fs`, `process`, `proc`,
-`thread`, `sync`, `env`), the AFS+ static library and the standard MacAROS
-`posixc/stdc/pthread` link set. A handler uses its generated start/end objects,
-never the command-oriented `startup.o`.
+`$MACAROS_ROOT/hosted/rust` instead of copying them. This external build is the
+release architecture, not a temporary dependency on AROS accepting AFS+ into
+its source tree. The resulting module is installed in `L:` and selected by a
+normal file in `DEVS:DOSDrivers`; it uses only public Exec, DOS and device APIs.
+An optional upstream or distribution `mmakefile.src` would list the same seven
+glues (`net`, `fs`, `process`, `proc`, `thread`, `sync`, `env`), the AFS+ static
+library and the standard MacAROS `posixc/stdc/pthread` link set. A handler uses
+its generated start/end objects, never the command-oriented `startup.o`.
 
 ## Hosted S0 and remaining native gates
 
@@ -169,10 +172,12 @@ post-replay checker; ADR-047 records its model and limits. The cumulative S1
 system pivot is also qualified: S1a moves the six core assigns, while S1b runs
 Wanderer, IPrefs, Locale and Clock from a manifested AFS+ desktop image and
 durably writes `ENVARC:`. ADR-048 defines the split and ADR-049 records the S1b
-evidence and prototype case-policy boundary. Lifecycle termination and an
-in-tree MacAROS handler build remain before the same contract moves to native
-MacAROS, then m68k emulation and the physical Amiga 500: three target
-platforms, four ordered validation stages.
+evidence and prototype case-policy boundary. ADR-050 records repeated standard
+`Assign DISMOUNT` termination and reload, including the required ordering of
+device-node removal and the deferred `ACTION_DIE` reply. No AROS kernel, DOS or
+source-tree change is part of that contract. The same package contract moves
+next to native MacAROS, then m68k emulation and the physical Amiga 500: three
+target platforms, four ordered validation stages.
 
 The fixed-image Alpha-0 path does not yet install `TD_ADDCHANGEINT` handling.
 Hot-swappable media remains disabled until removal can detach the mounted Rust

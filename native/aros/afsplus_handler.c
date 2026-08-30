@@ -3,9 +3,10 @@
 /*
  * Native AROS handler shell for the Mountable Alpha-0 bridge.
  *
- * This file deliberately lives in the AFS+ repository until the integration
- * target is authorized in MacAROS. It owns Exec/DOS resources; packet and
- * partition semantics remain in their independently tested modules.
+ * This file deliberately lives in the AFS+ repository so the driver can ship
+ * independently of any AROS source-tree integration. It owns Exec/DOS
+ * resources; packet and partition semantics remain in their independently
+ * tested modules.
  */
 
 #define USE_INLINE_STDARG
@@ -74,6 +75,7 @@ struct AfsplusArosHandler {
     uint32_t use_dma_mask;
     uint32_t device_open;
     uint32_t volume_registered;
+    uint32_t remove_device_node;
     uint32_t read_only;
     uint16_t read_command;
     uint16_t write_command;
@@ -545,15 +547,22 @@ static void cleanup_handler(struct AfsplusArosHandler *handler)
         DeleteMsgPort(handler->device_port);
     if (handler->bounce != NULL)
         FreeMem(handler->bounce, handler->bounce_size);
+    if (handler->device_node != NULL)
+    {
+        if (handler->remove_device_node)
+        {
+            if (!RemDosEntry(handler->device_node))
+                bug("[AFSPLUS] clean shutdown could not remove device node\n");
+        }
+        else if (handler->device_node->dol_Task == handler->handler_port)
+            handler->device_node->dol_Task = NULL;
+    }
     if (handler->locale != NULL)
         CloseLocale(handler->locale);
     if (handler->LocaleBase != NULL)
         CloseLibrary((struct Library *)handler->LocaleBase);
     if (handler->DOSBase != NULL)
         CloseLibrary((struct Library *)handler->DOSBase);
-    if (handler->device_node != NULL
-        && handler->device_node->dol_Task == handler->handler_port)
-        handler->device_node->dol_Task = NULL;
     FreeMem(handler, sizeof(*handler));
 
     (void)DOSBase;
@@ -620,6 +629,7 @@ LONG handler(struct ExecBase *SysBase)
     struct MsgPort *port;
     struct Message *message;
     struct DosPacket *packet;
+    struct DosPacket *death_packet = NULL;
     int32_t error = ERROR_NO_FREE_STORE;
     uint32_t quit = 0;
 
@@ -666,11 +676,21 @@ LONG handler(struct ExecBase *SysBase)
             }
             quit = afsplus_aros_packet_should_quit(state->packets);
             if (quit)
+            {
                 state->device_node->dol_Task = NULL;
-            reply_packet(port, SysBase, packet);
+                state->remove_device_node = 1;
+                death_packet = packet;
+            }
+            else
+                reply_packet(port, SysBase, packet);
         }
     }
 
+    /* Keep the ACTION_DIE sender blocked until every reference to the device
+     * node and backing device is gone. Assign DISMOUNT may remove/free that
+     * node and immediately start a replacement handler after our reply. */
     cleanup_handler(state);
+    if (death_packet != NULL)
+        reply_packet(port, SysBase, death_packet);
     return RETURN_OK;
 }

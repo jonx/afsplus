@@ -177,14 +177,47 @@ grep -q '"clean":true' "$result/check-after-host.json"
 
 echo "[hosted-alpha0] target return-read phase"
 start_aros "$result/return" \
-    'Assign "FDSK:" "SYS:DiskImages"
+    'C:FailAt 21
+Assign "FDSK:" "SYS:DiskImages"
 C:Mount DEVS:DOSDrivers/AFSPLUS19 >MacRW:mount.out
 C:List AFSPLUS19: ALL >MacRW:list.out
 C:Copy AFSPLUS19:alpha0.from-host MacRW:alpha0.from-host >MacRW:copy-host.out
-C:Copy AFSPLUS19:alpha0.from-aros MacRW:alpha0.from-aros >MacRW:copy-aros.out'
+C:Copy AFSPLUS19:alpha0.from-aros MacRW:alpha0.from-aros >MacRW:copy-aros.out
+C:Assign AFSPLUS19: DISMOUNT >MacRW:dismount-1.out
+If WARN
+    C:Echo fail >MacRW:dismount-1.status
+Else
+    C:Echo pass >MacRW:dismount-1.status
+EndIf
+C:Mount DEVS:DOSDrivers/AFSPLUS19 >MacRW:remount-1.out
+If WARN
+    C:Echo fail >MacRW:remount-1.status
+Else
+    C:Echo pass >MacRW:remount-1.status
+EndIf
+C:Copy AFSPLUS19:alpha0.from-host MacRW:alpha0.after-remount-1 >MacRW:copy-remount-1.out
+C:Assign AFSPLUS19: DISMOUNT >MacRW:dismount-2.out
+If WARN
+    C:Echo fail >MacRW:dismount-2.status
+Else
+    C:Echo pass >MacRW:dismount-2.status
+EndIf
+C:Mount DEVS:DOSDrivers/AFSPLUS19 >MacRW:remount-2.out
+If WARN
+    C:Echo fail >MacRW:remount-2.status
+Else
+    C:Echo pass >MacRW:remount-2.status
+EndIf
+C:Copy AFSPLUS19:alpha0.from-aros MacRW:alpha0.after-remount-2 >MacRW:copy-remount-2.out'
 stop_aros "$result/return"
 [ "$(cat "$result/return/alpha0.from-host")" = host ]
 [ "$(cat "$result/return/alpha0.from-aros")" = hello ]
+[ "$(cat "$result/return/dismount-1.status")" = pass ]
+[ "$(cat "$result/return/remount-1.status")" = pass ]
+[ "$(cat "$result/return/alpha0.after-remount-1")" = host ]
+[ "$(cat "$result/return/dismount-2.status")" = pass ]
+[ "$(cat "$result/return/remount-2.status")" = pass ]
+[ "$(cat "$result/return/alpha0.after-remount-2")" = hello ]
 if grep -Eq '^\._alpha0\.' "$result/return/list.out"; then
     echo "AppleDouble sidecars leaked into the final fixture" >&2
     exit 1

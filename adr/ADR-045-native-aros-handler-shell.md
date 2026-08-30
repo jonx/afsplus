@@ -71,7 +71,8 @@ supported Alpha-0 path described by ADR-042.
 `tools/package-aros-alpha0.sh` turns the qualified off-tree link into a
 self-contained pre-install artifact: handler, DOSDriver, target operation
 probe, full-length sparse image, clean host-checker report and hashes. This is
-still not a runtime-mount claim. The remaining gates are in-tree build
-integration, target execution of the same-image operation matrix and crash
-replay, plus removable-media notification handling before hot-swappable
-devices are supported. No MacAROS source tree is modified by this decision.
+still not a runtime-mount claim. ADR-046 through ADR-050 subsequently qualify
+Hosted execution, recovery, the system pivot and unload/reload lifecycle. An
+in-tree AROS build is now optional rather than a release gate; removable-media
+notification handling remains required before hot-swappable devices are
+supported. No MacAROS source tree is modified by this decision.
