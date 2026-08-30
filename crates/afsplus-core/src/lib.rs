@@ -32,6 +32,7 @@ pub mod extent_map;
 pub mod intent_log;
 pub mod mkfs;
 pub mod mount;
+pub mod name_key;
 pub mod object_map;
 pub mod reclaim;
 pub mod tree;
@@ -43,7 +44,7 @@ use std::fmt;
 use afsplus_block::BlockError;
 use afsplus_format::FormatError;
 
-pub use mkfs::{mkfs, MkfsParams};
+pub use mkfs::{mkfs, MkfsParams, NamePolicy};
 pub use mount::{mount, mount_with_options, MountMode, MountOptions};
 pub use volume::Volume;
 

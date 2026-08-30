@@ -38,4 +38,4 @@ Rules:
 5. redundant recovery/checkpoint descriptor locations are deterministic from immutable format parameters or discoverable through an independently validated format descriptor
 6. a future small durability/intent log may use a reserved/discoverable auxiliary area, but no journal record format or mandatory size is frozen yet
 7. allocation regions are required for bounded resource use, but their authoritative free-space encoding remains an epoch-1 prototype decision (reserved allocator, bitmap+delta, spacemap-like log, or proven hybrid)
-8. the format descriptor must record the Unicode normalization/casefold table version used for directory comparison-key generation
+8. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0

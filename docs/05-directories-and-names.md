@@ -35,6 +35,13 @@ rename preserves object identity, rejects topology cycles, and has an
 every-write/every-flush power-cut matrix accepting only the complete before or
 after namespace.
 
+Identification version 3 now selects a volume-default comparison encoder. The
+general formatter defaults to case-sensitive Unicode 16 NFC. AROS images use
+Unicode 16 canonical decomposition, full default case folding and NFC
+recomposition. Lookups never consult the host locale. Version-1/2 prototype
+images retain their historical byte-identity encoder. Per-directory overrides
+remain pending.
+
 The tests bulk-build 1,000 typed entries across leaf/internal pages and
 exercise 300 root-namespace creates through real transactions, followed by
 exhaustive checking, remount, enumeration, and lookup. This removes the old
@@ -72,7 +79,8 @@ This is an AFS+ rule, not a requirement placed on every filesystem supported by 
 
 ## 4. Normalization-preserving lookup
 
-The proposed canonical comparison normalization is NFC.
+The executable canonical comparison normalization is NFC using the
+volume-pinned Unicode 16.0.0 tables.
 
 The key distinction is:
 
@@ -83,7 +91,10 @@ comparison key      = canonical key derived from those bytes
 
 For a case-sensitive directory, canonically equivalent Unicode spellings compare as the same name according to the frozen normalization algorithm, but the original spelling is preserved.
 
-For a case-insensitive directory, the comparison key additionally applies the specified case-folding algorithm.
+For a case-insensitive directory, the comparison key performs canonical
+decomposition, full default non-Turkic case folding, then NFC recomposition.
+For example, `Straße` and `STRASSE`, and composed/decomposed spellings of
+`Café`, share one key while enumeration returns the creator's spelling.
 
 AFS+ must not force the stored display name itself into NFC or NFD.
 
@@ -95,7 +106,8 @@ Every formatted volume therefore records the exact Unicode normalization/casefol
 
 Changing the Unicode table version is a filesystem conversion operation, not an invisible implementation upgrade.
 
-The exact superblock/format-descriptor field is TBD before epoch 1, but the semantic requirement is frozen now.
+Identification version 3 carries the prototype fields. Their epoch-1 wire
+placement remains subject to the normal format-freeze review.
 
 ## 6. B+ tree ordering is binary, never locale collation
 

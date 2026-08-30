@@ -26,6 +26,7 @@ fn formatted(total: u64) -> MemoryBackend {
             region_size: 1024,
             reclaim_caps: Default::default(),
             log_slots: 8,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: ts(0),
         },
     )

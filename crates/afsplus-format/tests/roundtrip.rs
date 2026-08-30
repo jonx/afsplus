@@ -9,7 +9,8 @@ use afsplus_format::dir::{comparison_key, DirBlock, DirEntry};
 use afsplus_format::geometry::Geometry;
 use afsplus_format::header::{block_type, BlockHeader, HEADER_SIZE};
 use afsplus_format::ident::{
-    FeatureFlags, Identification, IDENT_VERSION_LEGACY, INCOMPAT_INTENT_LOG,
+    FeatureFlags, Identification, NameKeyAlgorithm, IDENT_VERSION_FEATURES, IDENT_VERSION_LEGACY,
+    INCOMPAT_INTENT_LOG, UNICODE_VERSION_16_0_0,
 };
 use afsplus_format::intent_log::{LogOp, LogRecord};
 use afsplus_format::object::{ObjectRecord, ObjectType};
@@ -46,6 +47,8 @@ fn sample_ident() -> Identification {
             incompat: INCOMPAT_INTENT_LOG,
             ..FeatureFlags::default()
         },
+        name_key_algorithm: NameKeyAlgorithm::UnicodeNfc,
+        unicode_version: UNICODE_VERSION_16_0_0,
         total_blocks: 1024,
         checkpoint_slots: [1, 2],
         metadata_start: 9,
@@ -199,6 +202,71 @@ fn legacy_identification_derives_the_intent_log_feature() {
     let decoded = Identification::decode(&block).unwrap();
     assert_eq!(decoded.log_slots, ident.log_slots);
     assert_eq!(decoded.features.incompat, INCOMPAT_INTENT_LOG);
+    assert_eq!(decoded.name_key_algorithm, NameKeyAlgorithm::LegacyIdentity);
+    assert_eq!(decoded.unicode_version, [0, 0, 0]);
+}
+
+#[test]
+fn version_two_identification_preserves_features_and_uses_identity_keys() {
+    const FEATURE_PAYLOAD_LEN: usize = 161;
+    let ident = sample_ident();
+    let mut block = ident.encode(BS).unwrap();
+    le::put_u32(
+        &mut block[HEADER_SIZE + 12..HEADER_SIZE + 16],
+        IDENT_VERSION_FEATURES,
+    );
+    block[HEADER_SIZE + FEATURE_PAYLOAD_LEN..].fill(0);
+    BlockHeader {
+        block_type: block_type::IDENTIFICATION,
+        flags: 0,
+        owner: 0,
+        generation: 0,
+        payload_len: FEATURE_PAYLOAD_LEN as u32,
+    }
+    .seal(&mut block);
+
+    let decoded = Identification::decode(&block).unwrap();
+    assert_eq!(decoded.features, ident.features);
+    assert_eq!(decoded.name_key_algorithm, NameKeyAlgorithm::LegacyIdentity);
+    assert_eq!(decoded.unicode_version, [0, 0, 0]);
+}
+
+#[test]
+fn identification_rejects_unknown_name_key_algorithm_and_unicode_version() {
+    let ident = sample_ident();
+    let mut unknown_algorithm = ident.encode(BS).unwrap();
+    unknown_algorithm[HEADER_SIZE + 161] = 0xff;
+    BlockHeader {
+        block_type: block_type::IDENTIFICATION,
+        flags: 0,
+        owner: 0,
+        generation: 0,
+        payload_len: 165,
+    }
+    .seal(&mut unknown_algorithm);
+    assert!(matches!(
+        Identification::decode(&unknown_algorithm),
+        Err(FormatError::Invalid(
+            "unsupported directory comparison-key algorithm"
+        ))
+    ));
+
+    let mut unknown_unicode = ident.encode(BS).unwrap();
+    unknown_unicode[HEADER_SIZE + 162..HEADER_SIZE + 165].copy_from_slice(&[15, 1, 0]);
+    BlockHeader {
+        block_type: block_type::IDENTIFICATION,
+        flags: 0,
+        owner: 0,
+        generation: 0,
+        payload_len: 165,
+    }
+    .seal(&mut unknown_unicode);
+    assert!(matches!(
+        Identification::decode(&unknown_unicode),
+        Err(FormatError::Invalid(
+            "unsupported directory Unicode table version"
+        ))
+    ));
 }
 
 #[test]

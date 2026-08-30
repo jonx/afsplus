@@ -242,6 +242,7 @@ pub fn load_committed_state<D: BlockDevice>(
                     record.data_root,
                     record.object_id,
                     checkpoint.generation,
+                    ident,
                 )?;
                 for lba in &dir.tree_blocks {
                     claim(*lba, &mut claimed)?;

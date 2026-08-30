@@ -12,7 +12,7 @@ an executable compatibility decision at mount.
 
 ## Decision
 
-Identification version 2 carries three 64-bit feature summaries:
+Identification version 2 introduced three 64-bit feature summaries:
 `COMPAT`, `RO_COMPAT`, and `INCOMPAT`. Bit zero in `INCOMPAT` is permanently
 assigned to `org.aros.afsplus:intent-log`. Version-1 prototype identification
 blocks remain readable; `log_slots > 0` is upgraded in memory to the same
@@ -49,6 +49,8 @@ zero timestamp because that information was never recorded.
 Mount behavior is now explicit enough for a FUSE or MacAROS adapter to select
 policy without duplicating recovery logic. Identification version 2 makes
 older prototypes refuse new images instead of silently ignoring the journal.
+Identification version 3 retains those summaries and adds the versioned
+directory-key policy defined by ADR-052.
 The compact masks are a mount-time summary, not the final rich feature
 registry; dependencies, lifecycle metadata, and per-feature parameters may
 still require feature records before epoch 1.

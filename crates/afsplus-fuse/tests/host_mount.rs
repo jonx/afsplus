@@ -92,6 +92,7 @@ fn create_image(path: &Path) {
             region_size: 4096,
             reclaim_caps: Default::default(),
             log_slots: 8,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp,
         },
     )

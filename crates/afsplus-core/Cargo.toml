@@ -9,6 +9,9 @@ repository.workspace = true
 [dependencies]
 afsplus-format = { path = "../afsplus-format" }
 afsplus-block = { path = "../afsplus-block" }
+caseless = "0.2.2"
+# Keep normalization and case-fold tables on the same frozen Unicode release.
+unicode-normalization = "=0.1.24"
 
 [lints]
 workspace = true

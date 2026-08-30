@@ -33,14 +33,19 @@ through `fdsk.device`, and requires exactly the manifest's `old` or `new`
 content. `HEAD.lock` must never survive. The host checker runs before and after
 each target mount; after recovery the pending-record count must be zero.
 
-Checker JSON schema 4 exposes `log_records_pending`, so the gate tests replay
-rather than merely accepting a structurally clean volume.
+Checker JSON schema 4 introduced `log_records_pending` (retained by schema 5),
+so the gate tests replay rather than merely accepting a structurally clean
+volume.
 
 ## Evidence and limits
 
 The gate passed on 2026-08-30. The four old-state fixtures remained at
 generation 2. Both valid-record fixtures replayed to generation 3. All six
 post-mount images were checker-clean with zero pending records.
+
+The gate was requalified with identification-v3 case-insensitive AROS images
+after ADR-052. The same four old/two new classification held and all six final
+schema-5 checker reports remained clean with zero pending records.
 
 This is native-handler replay of authoritative crash artifacts, not a claim
 that Hosted process termination emulates physical power loss. The exhaustive

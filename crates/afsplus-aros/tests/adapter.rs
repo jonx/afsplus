@@ -26,6 +26,7 @@ fn formatted() -> MemoryBackend {
             region_size: 4096,
             reclaim_caps: Default::default(),
             log_slots: 8,
+            name_policy: afsplus_core::NamePolicy::Insensitive,
             timestamp: timestamp(0),
         },
     )
@@ -129,6 +130,16 @@ fn latin1_names_round_trip_and_lock_conflicts_are_explicit() {
         .open(None, b"caf\xe9", OpenMode::NewFile, timestamp(1))
         .unwrap();
     adapter.close(file).unwrap();
+    let folded = adapter
+        .locate(None, b"CAF\xc9", LockAccess::Shared)
+        .unwrap();
+    adapter.free_lock(folded).unwrap();
+    // MODE_NEWFILE follows DOS semantics and truncates an existing folded
+    // match; it must not create a second directory entry.
+    let reopened = adapter
+        .open(None, b"CAF\xc9", OpenMode::NewFile, timestamp(1))
+        .unwrap();
+    adapter.close(reopened).unwrap();
     let shared = adapter
         .locate(None, b"caf\xe9", LockAccess::Shared)
         .unwrap();

@@ -1,6 +1,6 @@
 # ADR-008: Case behavior is configurable
 
-Status: Accepted; comparison-key implementation pending
+Status: Accepted; volume-default implementation complete, per-directory override pending
 
 ## Decision
 AFS+ supports case-sensitive and case-insensitive directories, with a volume
@@ -17,7 +17,13 @@ development trees may require sensitive names.
 
 ## Implementation status
 
-The executable prototype currently uses the original UTF-8 bytes as an identity
-comparison key and is therefore case-sensitive. S1b uses exact source-tree
-spelling and records that boundary in ADR-049. This temporary behavior must not
-become the AROS profile or be frozen as epoch 1.
+Identification version 3 records the comparison-key algorithm and Unicode
+table version. New case-sensitive volumes use Unicode 16 NFC; insensitive
+volumes use canonical decomposition, Unicode 16 full default case folding and
+NFC recomposition. Original UTF-8 spelling remains in the leaf value. New AROS
+qualification images select the insensitive policy, while the general mkfs
+default remains sensitive unless explicitly requested.
+
+Version-1/2 prototype images retain their byte-identity behavior through an
+explicit legacy algorithm. The optional per-directory override and the final
+epoch-1 table choice remain pending.

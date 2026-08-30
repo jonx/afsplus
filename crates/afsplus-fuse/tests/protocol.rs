@@ -15,6 +15,10 @@ fn timestamp(seconds: i64) -> Timespec {
 }
 
 fn adapter() -> FuseAdapter<MemoryBackend> {
+    adapter_with_policy(afsplus_core::NamePolicy::Sensitive)
+}
+
+fn adapter_with_policy(policy: afsplus_core::NamePolicy) -> FuseAdapter<MemoryBackend> {
     let mut device = MemoryBackend::new(BLOCK_SIZE, 8192);
     mkfs(
         &mut device,
@@ -24,6 +28,7 @@ fn adapter() -> FuseAdapter<MemoryBackend> {
             region_size: 4096,
             reclaim_caps: Default::default(),
             log_slots: 8,
+            name_policy: policy,
             timestamp: timestamp(0),
         },
     )
@@ -37,6 +42,47 @@ fn adapter() -> FuseAdapter<MemoryBackend> {
             ..FuseConfig::default()
         },
     )
+}
+
+#[test]
+fn insensitive_protocol_lookup_rejects_folded_duplicates_and_preserves_spelling() {
+    let mut fuse = adapter_with_policy(afsplus_core::NamePolicy::Insensitive);
+    let (file, handle) = fuse
+        .create_file(
+            OBJECT_ROOT,
+            "Straße".as_bytes(),
+            AccessMode::ReadWrite,
+            timestamp(1),
+        )
+        .unwrap();
+    fuse.close(handle).unwrap();
+    assert_eq!(
+        fuse.lookup(OBJECT_ROOT, b"STRASSE").unwrap().object_id,
+        file.object_id
+    );
+    assert!(matches!(
+        fuse.create_file(OBJECT_ROOT, b"strasse", AccessMode::ReadWrite, timestamp(2)),
+        Err(VfsError::AlreadyExists)
+    ));
+    fuse.rename(
+        OBJECT_ROOT,
+        b"strasse",
+        OBJECT_ROOT,
+        b"STRASSE",
+        false,
+        timestamp(3),
+    )
+    .unwrap();
+    let directory = fuse.open_directory(OBJECT_ROOT).unwrap();
+    let names: Vec<_> = fuse
+        .read_directory(OBJECT_ROOT, directory, 0, 16)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    assert!(names.contains(&b"STRASSE".to_vec()));
+    assert!(!names.contains(&"Straße".as_bytes().to_vec()));
+    fuse.close(directory).unwrap();
 }
 
 #[test]

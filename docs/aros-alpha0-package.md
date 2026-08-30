@@ -32,13 +32,16 @@ Mount DEVS:DOSDrivers/AFSPLUS19
 AFSPlusAlpha0Probe
 ```
 
-The probe refuses a dirty/reused fixture, then exercises create, sparse write,
-two `ACTION_FLUSH` durability barriers, truncate, rename, reopen and readback.
+The fixture is formatted with identification-v3 Unicode 16
+`unicode-nfc-casefold`: AROS lookup is case-insensitive while enumeration keeps
+the creator's spelling. The probe refuses a dirty/reused fixture, then
+exercises create, sparse write, two `ACTION_FLUSH` durability barriers,
+truncate, rename, a case-only rename, folded reopen and readback.
 On success it leaves `AFSPLUS19:alpha0.from-aros` containing exactly `hello` and
 prints:
 
 ```text
-[AFSPLUS-ALPHA0] PASS create/read/write/truncate/rename/fsync
+[AFSPLUS-ALPHA0] PASS create/read/write/truncate/rename/fsync/casefold
 ```
 
 Stop MacAROS cleanly before copying `Unit19` back to the host. Then require both:

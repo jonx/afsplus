@@ -58,6 +58,13 @@ The gate imports every payload through the portable transactional core. The
 3,408 pre-boot generation therefore also exercises repeated COW publication and
 reclamation over a realistic many-file system tree.
 
+The gate was requalified after ADR-052 with the stock desktop spelling
+`THEME:Images` against a manifested `THEME:images` directory. The
+identification-v3 image reported `unicode-nfc-casefold`, Unicode 16.0.0 and
+`case_sensitive: false`; all target probes passed and the final schema-5
+checker was clean at generation 3,418 with 3,411 objects and no pending intent
+record.
+
 ## Boundaries
 
 This accepts the statement "a normal Hosted MacAROS session runs on AFS+ after
@@ -65,11 +72,11 @@ bootstrap." It does not claim autonomous AFS+ boot selection, native Apple
 Silicon execution or classic m68k qualification. The S1a bootstrap dependencies
 and retained `BOOTSYS:` emergency assign remain explicit.
 
-The prototype comparison key is still identity and therefore case-sensitive.
-The stock desktop sequence spells the theme directory `Images`, while the
-manifested tree contains `images`; S1b uses the exact stored spelling. ADR-008
-still requires case-insensitive, spelling-preserving lookup for traditional
-AROS/Amiga namespaces before epoch 1. This gate does not waive that contract.
+Per-directory policy overrides and the final epoch-1 Unicode/table freeze are
+still pending. ADR-052 now satisfies the volume-wide traditional AROS contract:
+the stock desktop sequence spells the theme directory `Images`, the manifested
+tree contains `images`, and the same native path resolves both while retaining
+the original stored spelling.
 
 AmigaDOS `If` and `EndIf` are files in `C:`, not shell built-ins. They are part
 of the desktop payload so post-pivot control flow never falls back to the old

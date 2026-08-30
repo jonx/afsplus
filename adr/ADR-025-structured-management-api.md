@@ -27,8 +27,12 @@ afsplus-trace --json
 
 Structured schemas must include their own schema/API version.
 
-`afsplus-check` JSON schema 4 adds the pending intent-log record count required
+`afsplus-check` JSON schema 4 added the pending intent-log record count required
 to distinguish a clean pre-replay image from a clean completed recovery.
+
+Schema 5 adds the on-disk name-key algorithm, case behavior and Unicode version
+introduced by ADR-052. Consumers must continue to reject unknown schema
+versions instead of silently assuming a namespace policy.
 
 ## Rules
 

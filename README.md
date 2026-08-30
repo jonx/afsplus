@@ -175,13 +175,16 @@ switches are inert, use the diagnostic and reversible workaround in
 transport is not a raw substitute for macFUSE's message channel; see ADR-040.
 The native AROS bridge and its cross-build qualification are documented in
 [`docs/aros-native-bridge.md`](docs/aros-native-bridge.md), ADR-042 through
-ADR-051. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
+ADR-052. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
 Hosted MacAROS → macFUSE → Hosted MacAROS round trip on one checked image.
 Hosted intent-log replay and the cumulative post-bootstrap S1 system-volume
 pivot are also qualified. The handler now supports standard AROS
 `Assign DISMOUNT` termination and repeated unload/reload. AFS+ is distributed
 as an external `L:` handler plus DOSDriver and does not require acceptance into
 the upstream AROS source tree; an upstream build recipe remains optional.
+AROS qualification images use the versioned Unicode 16 case-insensitive,
+spelling-preserving namespace; general-purpose images remain configurable and
+default to case-sensitive lookup.
 Autonomous boot selection and the native/classic ports remain explicit later
 gates.
 Qualification is reported as three target platforms over four ordered stages:

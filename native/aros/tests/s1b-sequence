@@ -33,8 +33,8 @@ C:Assign "IMAGES:" "SYS:System/Images" DEFER
 C:Assign "WANDERER:" "SYS:System/Wanderer" DEFER
 C:Assign "THEMES:" "SYS:Prefs/Presets/Themes"
 C:Assign "THEME:" "THEMES:AROSDefault"
-If EXISTS "THEME:images"
-    C:Assign "IMAGES:" "THEME:images" PREPEND
+If EXISTS "THEME:Images"
+    C:Assign "IMAGES:" "THEME:Images" PREPEND
 EndIf
 C:Path "C:" "SYS:System" "S:" "SYS:Prefs" QUIET
 C:Assign "FONTS:" "SYS:Fonts"

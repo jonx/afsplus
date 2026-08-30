@@ -20,10 +20,10 @@ use afsplus_block::BlockDevice;
 use afsplus_core::mount::select_checkpoint;
 use afsplus_core::verify::{full_sweep, load_committed_state};
 use afsplus_core::CoreError;
-use afsplus_format::ident::Identification;
+use afsplus_format::ident::{Identification, NameKeyAlgorithm};
 
 /// Versioned structured-output schema (ADR-025).
-pub const REPORT_SCHEMA_VERSION: u32 = 4;
+pub const REPORT_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Default)]
 pub struct CheckReport {
@@ -40,6 +40,9 @@ pub struct VolumeSummary {
     pub label: String,
     pub total_blocks: u64,
     pub region_size: u32,
+    pub name_key_algorithm: &'static str,
+    pub case_sensitive: bool,
+    pub unicode_version: String,
     pub generation: u64,
     pub chosen_slot: usize,
     pub object_count: usize,
@@ -61,13 +64,15 @@ impl CheckReport {
         let mut out = String::new();
         if let Some(v) = &self.volume {
             out.push_str(&format!(
-                "volume {} label \"{}\" blocks {} region size {} generation {} (slot {})\n\
+                "volume {} label \"{}\" blocks {} region size {} names {} Unicode {} generation {} (slot {})\n\
                  objects {} metadata blocks {} data blocks {} pending reclaim {} ({} runs) \
                  pending log records {} free {}\n",
                 v.uuid_hex,
                 v.label,
                 v.total_blocks,
                 v.region_size,
+                v.name_key_algorithm,
+                v.unicode_version,
                 v.generation,
                 if v.chosen_slot == 0 { "A" } else { "B" },
                 v.object_count,
@@ -105,13 +110,17 @@ impl CheckReport {
         if let Some(v) = &self.volume {
             out.push_str(&format!(
                 "\"volume\":{{\"uuid\":{},\"label\":{},\"total_blocks\":{},\
-                 \"region_size\":{},\"generation\":{},\"chosen_slot\":{},\"objects\":{},\
+                 \"region_size\":{},\"name_key_algorithm\":{},\"case_sensitive\":{},\
+                 \"unicode_version\":{},\"generation\":{},\"chosen_slot\":{},\"objects\":{},\
                  \"metadata_blocks\":{},\"data_blocks\":{},\"reclaim_pending_blocks\":{},\
                  \"reclaim_runs\":{},\"log_records_pending\":{},\"free_blocks\":{}}},",
                 json_string(&v.uuid_hex),
                 json_string(&v.label),
                 v.total_blocks,
                 v.region_size,
+                json_string(v.name_key_algorithm),
+                v.case_sensitive,
+                json_string(&v.unicode_version),
                 v.generation,
                 v.chosen_slot,
                 v.object_count,
@@ -245,6 +254,16 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
                 label: ident.label.clone(),
                 total_blocks: ident.total_blocks,
                 region_size: ident.region_size,
+                name_key_algorithm: match ident.name_key_algorithm {
+                    NameKeyAlgorithm::LegacyIdentity => "legacy-identity",
+                    NameKeyAlgorithm::UnicodeNfc => "unicode-nfc",
+                    NameKeyAlgorithm::UnicodeNfcCasefold => "unicode-nfc-casefold",
+                },
+                case_sensitive: ident.name_key_algorithm != NameKeyAlgorithm::UnicodeNfcCasefold,
+                unicode_version: format!(
+                    "{}.{}.{}",
+                    ident.unicode_version[0], ident.unicode_version[1], ident.unicode_version[2]
+                ),
                 generation: selection.chosen.generation,
                 chosen_slot: selection.chosen_slot,
                 object_count: state.objects.len(),

@@ -34,6 +34,7 @@ fn per_transaction_resource_accounting() {
             region_size: 16,
             reclaim_caps: Default::default(),
             log_slots: 8,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: ts(0),
         },
     )
@@ -163,6 +164,7 @@ fn one_tib_sparse_image_formats_and_mounts_without_a_block_count_scan() {
             region_size: afsplus_format::geometry::MAX_REGION_BLOCKS,
             reclaim_caps: Default::default(),
             log_slots: 8,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: ts(0),
         },
     )

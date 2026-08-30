@@ -42,6 +42,7 @@ fn main() {
             region_size: 64,
             reclaim_caps: Default::default(),
             log_slots: 8,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: now,
         },
     )

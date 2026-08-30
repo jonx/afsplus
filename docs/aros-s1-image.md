@@ -20,10 +20,12 @@ the commands used by the normal MacAROS desktop sequence, a deterministic
 backdrop, and the `AFSPlusS1bProbe`. It starts Wanderer, IPrefs, Locale and Clock
 only after their assigns and paths point to AFS+.
 
-The current prototype comparison key is case-sensitive, so the S1b sequence
-uses the exact source-tree spelling `THEME:images`. This is a recorded prototype
-boundary, not the final Amiga namespace contract; the pinned epoch-1 comparison
-key must provide the selected case-insensitive policy before format freeze.
+AROS qualification images use the identification-v3 `unicode-nfc-casefold`
+comparison key: lookup is Unicode 16 case-insensitive and spelling-preserving.
+The S1b sequence deliberately keeps the stock `THEME:Images` spelling while
+the manifested tree contains `THEME:images`; successful desktop startup proves
+that the native handler resolves the mismatch through the on-disk policy rather
+than through an adapter-only workaround.
 
 `content-SHA256SUMS` manifests every payload file by its image-relative path.
 The source MacAROS commit/build identity belongs in the gate result alongside

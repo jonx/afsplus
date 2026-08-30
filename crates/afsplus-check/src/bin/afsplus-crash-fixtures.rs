@@ -148,6 +148,7 @@ fn run(output: &Path) -> Result<(), String> {
             region_size: TOTAL_BLOCKS as u32,
             reclaim_caps: Default::default(),
             log_slots: 8,
+            name_policy: afsplus_core::NamePolicy::Insensitive,
             timestamp: timestamp(0),
         },
     )

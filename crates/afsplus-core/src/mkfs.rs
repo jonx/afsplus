@@ -17,7 +17,9 @@ use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::{Checkpoint, RegionRecord};
 use afsplus_format::crc32c::CHECKSUM_CRC32C;
 use afsplus_format::geometry::Geometry;
-use afsplus_format::ident::{FeatureFlags, Identification, INCOMPAT_INTENT_LOG};
+use afsplus_format::ident::{
+    FeatureFlags, Identification, NameKeyAlgorithm, INCOMPAT_INTENT_LOG, UNICODE_VERSION_16_0_0,
+};
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::reclaim::{ReclaimCaps, ReclaimRoot};
 use afsplus_format::region::{BitmapBinding, RegionDescriptor};
@@ -32,6 +34,13 @@ use crate::layout;
 use crate::object_map;
 use crate::CoreError;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NamePolicy {
+    #[default]
+    Sensitive,
+    Insensitive,
+}
+
 pub struct MkfsParams {
     pub uuid: [u8; 16],
     pub label: String,
@@ -42,6 +51,8 @@ pub struct MkfsParams {
     pub reclaim_caps: ReclaimCaps,
     /// Intent-log slots (ADR-037); 0 disables the log area.
     pub log_slots: u16,
+    /// Volume-default directory lookup policy (ADR-008).
+    pub name_policy: NamePolicy,
     pub timestamp: Timespec,
 }
 
@@ -204,6 +215,11 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
             },
             ..FeatureFlags::default()
         },
+        name_key_algorithm: match params.name_policy {
+            NamePolicy::Sensitive => NameKeyAlgorithm::UnicodeNfc,
+            NamePolicy::Insensitive => NameKeyAlgorithm::UnicodeNfcCasefold,
+        },
+        unicode_version: UNICODE_VERSION_16_0_0,
         total_blocks: geo.total_blocks,
         checkpoint_slots: [layout::CKPT_SLOT_A, layout::CKPT_SLOT_B],
         metadata_start,

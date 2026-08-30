@@ -6,7 +6,7 @@
 use afsplus_block::{crash_states, MemoryBackend, RecordingBackend, TraceBackend};
 use afsplus_check::check_device;
 use afsplus_core::volume::BatchOp;
-use afsplus_core::{mkfs, mount, CoreError, MkfsParams};
+use afsplus_core::{mkfs, mount, CoreError, MkfsParams, NamePolicy};
 use afsplus_format::{Timespec, OBJECT_ROOT};
 
 const BS: usize = 4096;
@@ -19,6 +19,10 @@ fn ts(seconds: i64) -> Timespec {
 }
 
 fn formatted(total: u64, log_slots: u16) -> MemoryBackend {
+    formatted_with_policy(total, log_slots, NamePolicy::Sensitive)
+}
+
+fn formatted_with_policy(total: u64, log_slots: u16, name_policy: NamePolicy) -> MemoryBackend {
     let mut dev = MemoryBackend::new(BS, total);
     mkfs(
         &mut dev,
@@ -28,11 +32,59 @@ fn formatted(total: u64, log_slots: u16) -> MemoryBackend {
             region_size: 4096,
             reclaim_caps: Default::default(),
             log_slots,
+            name_policy,
             timestamp: ts(0),
         },
     )
     .unwrap();
     dev
+}
+
+#[test]
+fn case_only_rename_replays_as_one_spelling_preserving_operation() {
+    let base = {
+        let mut vol = mount(formatted_with_policy(4096, 8, NamePolicy::Insensitive)).unwrap();
+        vol.create_file_in_root("ReadMe", b"content", ts(1))
+            .unwrap();
+        vol.into_device()
+    };
+    let pre_generation = mount(base.clone()).unwrap().generation();
+
+    let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
+    vol.window_op(&publish("readme", "README"), ts(2)).unwrap();
+    vol.window_fsync().unwrap();
+    let (_, log) = vol.into_device().into_parts();
+
+    let mut old_spelling = 0;
+    let mut new_spelling = 0;
+    for crash_point in 0..=log.len() {
+        for state in crash_states(&base, &log, crash_point) {
+            let context = state.description.clone();
+            let mut vol = mount(state.image).unwrap_or_else(|error| panic!("{context}: {error}"));
+            let object = vol
+                .lookup_root("rEaDmE")
+                .unwrap()
+                .unwrap_or_else(|| panic!("{context}: folded lookup must succeed"));
+            assert_eq!(vol.read_file(object).unwrap(), b"content", "{context}");
+            let entries = vol.list_root().unwrap();
+            assert_eq!(entries.len(), 1, "{context}");
+            match entries[0].0.as_bytes() {
+                b"ReadMe" => {
+                    old_spelling += 1;
+                    assert_eq!(vol.generation(), pre_generation, "{context}");
+                }
+                b"README" => {
+                    new_spelling += 1;
+                    assert_eq!(vol.generation(), pre_generation + 1, "{context}");
+                }
+                spelling => panic!("{context}: unexpected spelling {spelling:?}"),
+            }
+            let mut dev = vol.into_device();
+            let report = check_device(&mut dev);
+            assert!(report.is_clean(), "{context}: {:?}", report.errors);
+        }
+    }
+    assert!(old_spelling > 0 && new_spelling > 0);
 }
 
 fn create<'a>(name: &'a str, content: &'a [u8]) -> BatchOp<'a> {

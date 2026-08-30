@@ -57,6 +57,11 @@ Hosted S0 is now demonstrated bidirectionally: the target-created file contains
 clean. The checked run advanced from generation 6 after the first target phase
 to generation 21 after the host phase; the return-read phase made no changes.
 
+ADR-052 requalification additionally performs a case-only target rename and a
+folded reopen. The returned identification-v3 image reports Unicode 16.0.0
+`unicode-nfc-casefold`; it is checker-clean at generation 22 with three objects
+and no pending intent record.
+
 This proves native handler execution and same-image interoperability on Hosted
 MacAROS. It does not prove target power-cut replay, an AFS+ `SYS:` pivot,
 boot-volume selection, native Apple Silicon execution, m68k runtime behavior or

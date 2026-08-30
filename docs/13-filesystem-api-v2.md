@@ -41,6 +41,10 @@ stat/statfs, create/mkdir/unlink/rmdir/rename/atomic replace/hard links, and
 explicit sync. Unsupported categories below are not advertised in the
 capability mask.
 
+`statfs` reports whether the mounted namespace is case-sensitive plus the
+three-part Unicode table version. Adapters must expose the volume policy rather
+than infer it from the host OS or filesystem name.
+
 Required categories:
 
 ### handles and I/O

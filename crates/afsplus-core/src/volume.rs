@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::crc32c::crc32c;
-use afsplus_format::dir::{comparison_key, DirEntry};
+use afsplus_format::dir::DirEntry;
 use afsplus_format::ident::Identification;
 use afsplus_format::intent_log::{LogOp, LogRecord, MAX_LOG_OPS};
 use afsplus_format::object::{
@@ -35,6 +35,7 @@ use crate::directory;
 use crate::extent_map::{self, Extent, EXTENT_UNWRITTEN};
 use crate::intent_log;
 use crate::mount::{MountMode, Selection};
+use crate::name_key;
 use crate::object_map;
 use crate::verify::{load_mount_state, MountState};
 use crate::CoreError;
@@ -191,6 +192,10 @@ impl<D: BlockDevice> Volume<D> {
         &self.ident
     }
 
+    fn comparison_key(&self, name: &[u8]) -> Result<Vec<u8>, CoreError> {
+        name_key::comparison_key(&self.ident, name)
+    }
+
     pub fn checkpoint(&self) -> &Checkpoint {
         &self.checkpoint
     }
@@ -301,13 +306,14 @@ impl<D: BlockDevice> Volume<D> {
         if directory_record.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
-        let key = comparison_key(name.as_bytes());
+        let key = self.comparison_key(name.as_bytes())?;
         Ok(directory::lookup_entry(
             &mut self.dev,
             &self.ident.geometry(),
             directory_record.data_root,
             directory_id,
             self.checkpoint.generation,
+            &self.ident,
             &key,
         )?
         .map(|entry| entry.child_id))
@@ -330,6 +336,7 @@ impl<D: BlockDevice> Volume<D> {
             directory_record.data_root,
             directory_id,
             self.checkpoint.generation,
+            &self.ident,
         )?
         .entries
         .iter()
@@ -365,8 +372,8 @@ impl<D: BlockDevice> Volume<D> {
             &mut self.dev,
             &self.ident.geometry(),
             record.data_root,
-            directory_id,
-            self.checkpoint.generation,
+            directory::spec(directory_id, self.checkpoint.generation),
+            &self.ident,
             cursor.ordinal,
             max_entries,
         )?;
@@ -796,7 +803,7 @@ impl<D: BlockDevice> Volume<D> {
         let parent_record_lba = self.object_record_lba(parent_id)?.ok_or_else(|| {
             CoreError::Corrupt(format!("directory {parent_id} missing from object map"))
         })?;
-        let key = comparison_key(name.as_bytes());
+        let key = self.comparison_key(name.as_bytes())?;
         if self.lookup_in_directory(parent_id, name)?.is_some() {
             return Err(CoreError::AlreadyExists);
         }
@@ -864,7 +871,8 @@ impl<D: BlockDevice> Volume<D> {
             child_type_hint: 1,
             child_id: object_id,
         };
-        let (directory_key, directory_value) = directory::encode_entry(&directory_entry)?;
+        let (directory_key, directory_value) =
+            directory::encode_entry(&self.ident, &directory_entry)?;
         let directory_mutation = mutate_many(
             &mut self.dev,
             &self.ident.geometry(),
@@ -1000,12 +1008,12 @@ impl<D: BlockDevice> Volume<D> {
         };
 
         let entry = DirEntry {
-            key: comparison_key(name.as_bytes()),
+            key: self.comparison_key(name.as_bytes())?,
             name: name.as_bytes().to_vec(),
             child_type_hint: 2,
             child_id: object_id,
         };
-        let (directory_key, directory_value) = directory::encode_entry(&entry)?;
+        let (directory_key, directory_value) = directory::encode_entry(&self.ident, &entry)?;
         let parent_mutation = mutate_many(
             &mut self.dev,
             &self.ident.geometry(),
@@ -1121,13 +1129,14 @@ impl<D: BlockDevice> Volume<D> {
         let parent_record_lba = self.object_record_lba(parent_id)?.ok_or_else(|| {
             CoreError::Corrupt(format!("directory {parent_id} missing from object map"))
         })?;
-        let key = comparison_key(name.as_bytes());
+        let key = self.comparison_key(name.as_bytes())?;
         let entry = directory::lookup_entry(
             &mut self.dev,
             &self.ident.geometry(),
             parent.data_root,
             parent_id,
             self.checkpoint.generation,
+            &self.ident,
             &key,
         )?
         .ok_or(CoreError::NotFound)?;
@@ -1161,6 +1170,7 @@ impl<D: BlockDevice> Volume<D> {
                 victim.data_root,
                 victim.object_id,
                 self.checkpoint.generation,
+                &self.ident,
             )?;
             if !loaded.entries.is_empty() {
                 return Err(CoreError::DirectoryNotEmpty);
@@ -1347,12 +1357,12 @@ impl<D: BlockDevice> Volume<D> {
         tx.retire(&mut self.dev, parent_lba)?;
 
         let entry = DirEntry {
-            key: comparison_key(name.as_bytes()),
+            key: self.comparison_key(name.as_bytes())?,
             name: name.as_bytes().to_vec(),
             child_type_hint: 1,
             child_id: object_id,
         };
-        let (entry_key, entry_value) = directory::encode_entry(&entry)?;
+        let (entry_key, entry_value) = directory::encode_entry(&self.ident, &entry)?;
         let directory_mutation = mutate_many(
             &mut self.dev,
             &self.ident.geometry(),
@@ -1431,8 +1441,8 @@ impl<D: BlockDevice> Volume<D> {
         self.ensure_window_closed()?;
         validate_name(source_name.as_bytes()).map_err(CoreError::InvalidName)?;
         validate_name(target_name.as_bytes()).map_err(CoreError::InvalidName)?;
-        let source_key = comparison_key(source_name.as_bytes());
-        let target_key = comparison_key(target_name.as_bytes());
+        let source_key = self.comparison_key(source_name.as_bytes())?;
+        let target_key = self.comparison_key(target_name.as_bytes())?;
 
         let source_parent = self
             .read_object(source_parent_id)?
@@ -1456,21 +1466,25 @@ impl<D: BlockDevice> Volume<D> {
             source_parent.data_root,
             source_parent_id,
             self.checkpoint.generation,
+            &self.ident,
             &source_key,
         )?
         .ok_or(CoreError::NotFound)?;
-        if source_parent_id == target_parent_id && source_key == target_key {
+        let same_key = source_parent_id == target_parent_id && source_key == target_key;
+        if same_key && source_entry.name == target_name.as_bytes() {
             return Ok(());
         }
-        if directory::lookup_entry(
-            &mut self.dev,
-            &self.ident.geometry(),
-            target_parent.data_root,
-            target_parent_id,
-            self.checkpoint.generation,
-            &target_key,
-        )?
-        .is_some()
+        if !same_key
+            && directory::lookup_entry(
+                &mut self.dev,
+                &self.ident.geometry(),
+                target_parent.data_root,
+                target_parent_id,
+                self.checkpoint.generation,
+                &self.ident,
+                &target_key,
+            )?
+            .is_some()
         {
             return Err(CoreError::AlreadyExists);
         }
@@ -1537,7 +1551,8 @@ impl<D: BlockDevice> Volume<D> {
             child_type_hint: source_entry.child_type_hint,
             child_id: source_entry.child_id,
         };
-        let (target_entry_key, target_entry_value) = directory::encode_entry(&target_entry)?;
+        let (target_entry_key, target_entry_value) =
+            directory::encode_entry(&self.ident, &target_entry)?;
 
         let (source_mutation, target_mutation) = if source_parent_id == target_parent_id {
             let mutation = mutate_many(
@@ -1686,6 +1701,7 @@ impl<D: BlockDevice> Volume<D> {
                 record.data_root,
                 directory_id,
                 self.checkpoint.generation,
+                &self.ident,
             )?;
             for entry in loaded.entries {
                 if entry.child_type_hint == 2 {
@@ -1996,6 +2012,7 @@ impl<D: BlockDevice> Volume<D> {
             committed.data_root,
             directory_id,
             self.checkpoint.generation,
+            &self.ident,
             key,
         )
     }
@@ -2054,7 +2071,7 @@ impl<D: BlockDevice> Volume<D> {
                 if parent.object_type != ObjectType::Directory {
                     return Err(CoreError::NotDirectory);
                 }
-                let key = comparison_key(name.as_bytes());
+                let key = self.comparison_key(name.as_bytes())?;
                 if self.batch_lookup(pending, *parent_id, &key)?.is_some() {
                     return Err(CoreError::AlreadyExists);
                 }
@@ -2104,7 +2121,7 @@ impl<D: BlockDevice> Volume<D> {
                 pending.dir_changes.entry(*parent_id).or_default().insert(
                     key,
                     Some(DirEntry {
-                        key: comparison_key(name.as_bytes()),
+                        key: self.comparison_key(name.as_bytes())?,
                         name: name.as_bytes().to_vec(),
                         child_type_hint: 1,
                         child_id: object_id,
@@ -2115,7 +2132,7 @@ impl<D: BlockDevice> Volume<D> {
             }
             BatchOp::DeleteFile { parent_id, name } => {
                 validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
-                let key = comparison_key(name.as_bytes());
+                let key = self.comparison_key(name.as_bytes())?;
                 let entry = self
                     .batch_lookup(pending, *parent_id, &key)?
                     .ok_or(CoreError::NotFound)?;
@@ -2137,14 +2154,15 @@ impl<D: BlockDevice> Volume<D> {
             } => {
                 validate_name(source_name.as_bytes()).map_err(CoreError::InvalidName)?;
                 validate_name(target_name.as_bytes()).map_err(CoreError::InvalidName)?;
-                let source_key = comparison_key(source_name.as_bytes());
-                let target_key = comparison_key(target_name.as_bytes());
-                if source_parent_id == target_parent_id && source_key == target_key {
-                    return Ok(None);
-                }
+                let source_key = self.comparison_key(source_name.as_bytes())?;
+                let target_key = self.comparison_key(target_name.as_bytes())?;
+                let same_key = source_parent_id == target_parent_id && source_key == target_key;
                 let entry = self
                     .batch_lookup(pending, *source_parent_id, &source_key)?
                     .ok_or(CoreError::NotFound)?;
+                if same_key && entry.name == target_name.as_bytes() {
+                    return Ok(None);
+                }
                 let moved = self
                     .batch_record(pending, entry.child_id)?
                     .ok_or_else(|| CoreError::Corrupt("moved object missing".into()))?;
@@ -2153,19 +2171,21 @@ impl<D: BlockDevice> Volume<D> {
                         "batched rename supports files only",
                     ));
                 }
-                if let Some(existing) =
-                    self.batch_lookup(pending, *target_parent_id, &target_key)?
-                {
-                    if !replace {
-                        return Err(CoreError::AlreadyExists);
+                if !same_key {
+                    if let Some(existing) =
+                        self.batch_lookup(pending, *target_parent_id, &target_key)?
+                    {
+                        if !replace {
+                            return Err(CoreError::AlreadyExists);
+                        }
+                        let target = self
+                            .batch_record(pending, existing.child_id)?
+                            .ok_or_else(|| CoreError::Corrupt("replace target missing".into()))?;
+                        if target.object_type != ObjectType::File {
+                            return Err(CoreError::IsDirectory);
+                        }
+                        self.unlink_in_batch(tx, pending, existing.child_id, now)?;
                     }
-                    let target = self
-                        .batch_record(pending, existing.child_id)?
-                        .ok_or_else(|| CoreError::Corrupt("replace target missing".into()))?;
-                    if target.object_type != ObjectType::File {
-                        return Err(CoreError::IsDirectory);
-                    }
-                    self.unlink_in_batch(tx, pending, existing.child_id, now)?;
                 }
                 let target_parent = self
                     .batch_record(pending, *target_parent_id)?
@@ -2185,7 +2205,7 @@ impl<D: BlockDevice> Volume<D> {
                     .insert(
                         target_key,
                         Some(DirEntry {
-                            key: comparison_key(target_name.as_bytes()),
+                            key: self.comparison_key(target_name.as_bytes())?,
                             name: target_name.as_bytes().to_vec(),
                             child_type_hint: 1,
                             child_id: entry.child_id,
@@ -2422,17 +2442,27 @@ impl<D: BlockDevice> Volume<D> {
         let (parent_id, name) = match op {
             BatchOp::DeleteFile { parent_id, name } => (*parent_id, *name),
             BatchOp::Rename {
+                source_parent_id,
+                source_name,
                 target_parent_id,
                 target_name,
                 replace: true,
                 ..
-            } => (*target_parent_id, *target_name),
+            } => {
+                if source_parent_id == target_parent_id
+                    && self.comparison_key(source_name.as_bytes())?
+                        == self.comparison_key(target_name.as_bytes())?
+                {
+                    return Ok(None);
+                }
+                (*target_parent_id, *target_name)
+            }
             _ => return Ok(None),
         };
         if validate_name(name.as_bytes()).is_err() {
             return Ok(None);
         }
-        let key = comparison_key(name.as_bytes());
+        let key = self.comparison_key(name.as_bytes())?;
         let Some(entry) = self.batch_lookup(pending, parent_id, &key)? else {
             return Ok(None);
         };
@@ -2754,7 +2784,7 @@ impl<D: BlockDevice> Volume<D> {
         if parent.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
-        let key = comparison_key(name.as_bytes());
+        let key = self.comparison_key(name.as_bytes())?;
         if self.batch_lookup(pending, parent_id, &key)?.is_some() {
             return Err(CoreError::Corrupt(
                 "log replay found the name already present".into(),
@@ -2809,7 +2839,7 @@ impl<D: BlockDevice> Volume<D> {
         pending.dir_changes.entry(parent_id).or_default().insert(
             key,
             Some(DirEntry {
-                key: comparison_key(name.as_bytes()),
+                key: self.comparison_key(name.as_bytes())?,
                 name: name.as_bytes().to_vec(),
                 child_type_hint: 1,
                 child_id: object_id,
@@ -2850,7 +2880,8 @@ impl<D: BlockDevice> Volume<D> {
             for (key, change) in changes {
                 match change {
                     Some(entry) => {
-                        let (entry_key, entry_value) = directory::encode_entry(&entry)?;
+                        let (entry_key, entry_value) =
+                            directory::encode_entry(&self.ident, &entry)?;
                         debug_assert_eq!(entry_key, key);
                         encoded.push((entry_key, Some(entry_value)));
                     }
@@ -2863,6 +2894,7 @@ impl<D: BlockDevice> Volume<D> {
                             committed.data_root,
                             dir_id,
                             self.checkpoint.generation,
+                            &self.ident,
                             &key,
                         )?
                         .is_some();

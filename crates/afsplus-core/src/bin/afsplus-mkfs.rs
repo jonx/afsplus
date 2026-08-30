@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use afsplus_block::FileBackend;
-use afsplus_core::{mkfs, MkfsParams};
+use afsplus_core::{mkfs, MkfsParams, NamePolicy};
 use afsplus_format::{geometry::MAX_REGION_BLOCKS, Timespec, DEFAULT_BLOCK_SIZE};
 
 const DEFAULT_SIZE_MIB: u64 = 64;
@@ -17,10 +17,14 @@ struct Options {
     label: String,
     size_mib: u64,
     force: bool,
+    name_policy: NamePolicy,
 }
 
 fn usage() -> ! {
-    eprintln!("usage: afsplus-mkfs [--size-mib N] [--label NAME] [--force] <image>");
+    eprintln!(
+        "usage: afsplus-mkfs [--size-mib N] [--label NAME] \
+         [--case-sensitive|--case-insensitive] [--force] <image>"
+    );
     std::process::exit(2);
 }
 
@@ -30,6 +34,8 @@ fn parse_options() -> Options {
     let mut label = "AFSPlus".to_owned();
     let mut size_mib = DEFAULT_SIZE_MIB;
     let mut force = false;
+    let mut name_policy = NamePolicy::Sensitive;
+    let mut case_option_seen = false;
 
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -42,6 +48,17 @@ fn parse_options() -> Options {
             }
             "--label" => label = args.next().unwrap_or_else(|| usage()),
             "--force" => force = true,
+            "--case-sensitive" | "--case-insensitive" => {
+                if case_option_seen {
+                    usage();
+                }
+                case_option_seen = true;
+                name_policy = if argument == "--case-insensitive" {
+                    NamePolicy::Insensitive
+                } else {
+                    NamePolicy::Sensitive
+                };
+            }
             "-h" | "--help" => usage(),
             _ if argument.starts_with('-') || path.is_some() => usage(),
             _ => path = Some(PathBuf::from(argument)),
@@ -52,6 +69,7 @@ fn parse_options() -> Options {
         label,
         size_mib,
         force,
+        name_policy,
     }
 }
 
@@ -109,6 +127,7 @@ fn run(options: Options) -> Result<(), String> {
                 .min(MAX_REGION_BLOCKS),
             reclaim_caps: Default::default(),
             log_slots: 8,
+            name_policy: options.name_policy,
             timestamp: now,
         },
     )
@@ -132,12 +151,13 @@ fn run(options: Options) -> Result<(), String> {
             )
         })?;
     println!(
-        "formatted {} as {:?}: {} MiB, {} blocks of {} bytes",
+        "formatted {} as {:?}: {} MiB, {} blocks of {} bytes, {:?} names",
         options.path.display(),
         options.label,
         options.size_mib,
         total_blocks,
-        DEFAULT_BLOCK_SIZE
+        DEFAULT_BLOCK_SIZE,
+        options.name_policy
     );
     Ok(())
 }

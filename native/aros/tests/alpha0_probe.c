@@ -9,6 +9,7 @@
 
 #define TEMP_PATH "AFSPLUS19:alpha0.tmp"
 #define FINAL_PATH "AFSPLUS19:alpha0.from-aros"
+#define FOLDED_FINAL_PATH "AFSPLUS19:ALPHA0.FROM-AROS"
 #define SPARSE_OFFSET 8192
 
 static const UBYTE prefix[] = "hello";
@@ -88,6 +89,12 @@ int main(void)
 
     if (!Rename(TEMP_PATH, FINAL_PATH))
         return fail("rename", DOSFALSE);
+    lock = Lock(FOLDED_FINAL_PATH, SHARED_LOCK);
+    if (lock == BNULL)
+        return fail("case-folded lookup", DOSFALSE);
+    UnLock(lock);
+    if (!Rename(FINAL_PATH, FOLDED_FINAL_PATH))
+        return fail("case-only rename", DOSFALSE);
     file = Open(FINAL_PATH, MODE_OLDFILE);
     if (file == BNULL)
         return fail("reopen", DOSFALSE);
@@ -108,6 +115,6 @@ int main(void)
     if (!Close(file))
         return fail("read close", DOSFALSE);
 
-    Printf("[AFSPLUS-ALPHA0] PASS create/read/write/truncate/rename/fsync\n");
+    Printf("[AFSPLUS-ALPHA0] PASS create/read/write/truncate/rename/fsync/casefold\n");
     return RETURN_OK;
 }

@@ -10,6 +10,7 @@ use std::fmt;
 use afsplus_block::BlockDevice;
 use afsplus_core::volume::{DirectoryCursor, Volume};
 use afsplus_core::{mount_with_options, CoreError, MountMode, MountOptions};
+use afsplus_format::ident::NameKeyAlgorithm;
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::{Timespec, NAME_MAX_UTF8_BYTES, OBJECT_ROOT};
 
@@ -90,6 +91,8 @@ pub struct StatFs {
     pub free_blocks: u64,
     pub available_blocks: u64,
     pub max_name_bytes: u32,
+    pub case_sensitive: bool,
+    pub unicode_version: [u8; 3],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +266,8 @@ impl<D: BlockDevice> Vfs<D> {
             free_blocks: free,
             available_blocks: free,
             max_name_bytes: NAME_MAX_UTF8_BYTES as u32,
+            case_sensitive: ident.name_key_algorithm != NameKeyAlgorithm::UnicodeNfcCasefold,
+            unicode_version: ident.unicode_version,
         }
     }
 

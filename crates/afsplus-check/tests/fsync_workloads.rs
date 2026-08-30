@@ -43,6 +43,7 @@ fn fresh_volume(total_blocks: u64) -> Volume<TraceBackend<MemoryBackend>> {
             region_size: 16_384,
             reclaim_caps: Default::default(),
             log_slots: 64,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: ts(0),
         },
     )

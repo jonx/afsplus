@@ -8,9 +8,9 @@
 //! Each entry carries both the normalized comparison key and the original
 //! UTF-8 name, per the accepted normalization-preserving correction: original
 //! bytes are what readers get back; the key is only for lookup and ordering.
-//! The prototype key encoding is the identity (case-sensitive volume,
-//! Unicode table version pinning comes with the real key encoder), but the
-//! dual-field wire shape is already the final one.
+//! This retired codec's key encoding remains identity and is used only by
+//! legacy transition tests. Current typed directory trees derive their key
+//! from the versioned policy in the identification block.
 //!
 //! Entries are ordered by byte-wise comparison of their keys — never host
 //! locale collation.
@@ -55,9 +55,10 @@ pub struct DirEntry {
 
 /// Computes the normalized comparison key for a name.
 ///
-/// Prototype: identity mapping (byte-wise case-sensitive). The real encoder
-/// applies the volume's pinned Unicode normalization/casefold tables and is a
-/// separate frozen artifact (ADR-007, accepted corrections).
+/// Legacy identity mapping used only by the retired one-block codec.
+///
+/// Current typed directory trees use the volume's pinned Unicode
+/// normalization/casefold algorithm instead (ADR-052).
 pub fn comparison_key(name: &[u8]) -> Vec<u8> {
     name.to_vec()
 }

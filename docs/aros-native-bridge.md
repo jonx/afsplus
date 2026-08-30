@@ -201,7 +201,8 @@ post-replay checker; ADR-047 records its model and limits. The cumulative S1
 system pivot is also qualified: S1a moves the six core assigns, while S1b runs
 Wanderer, IPrefs, Locale and Clock from a manifested AFS+ desktop image and
 durably writes `ENVARC:`. ADR-048 defines the split and ADR-049 records the S1b
-evidence and prototype case-policy boundary. ADR-050 records repeated standard
+evidence; ADR-052 removes its former case-policy workaround with a versioned,
+case-insensitive and spelling-preserving AROS namespace. ADR-050 records repeated standard
 `Assign DISMOUNT` termination and reload, including the required ordering of
 device-node removal and the deferred `ACTION_DIE` reply. No AROS kernel, DOS or
 source-tree change is part of that contract. The same package contract moves

@@ -27,6 +27,8 @@
 //! 137    8    COMPAT feature bits
 //! 145    8    RO_COMPAT feature bits
 //! 153    8    INCOMPAT feature bits
+//! 161    1    directory comparison-key algorithm
+//! 162    3    Unicode table version (major, minor, patch)
 //! ```
 
 use alloc::string::String;
@@ -38,7 +40,8 @@ use crate::geometry::Geometry;
 use crate::header::{block_type, BlockHeader, HEADER_SIZE};
 use crate::{le, FormatError, DEFAULT_BLOCK_SHIFT, FORMAT_EPOCH, FS_MAGIC};
 
-pub const IDENT_VERSION: u32 = 2;
+pub const IDENT_VERSION: u32 = 3;
+pub const IDENT_VERSION_FEATURES: u32 = 2;
 pub const IDENT_VERSION_LEGACY: u32 = 1;
 pub const LABEL_MAX_BYTES: usize = 64;
 /// The intent-log area and its replay semantics must be understood by every
@@ -46,7 +49,36 @@ pub const LABEL_MAX_BYTES: usize = 64;
 pub const INCOMPAT_INTENT_LOG: u64 = 1 << 0;
 
 const LEGACY_PAYLOAD_LEN: usize = 73 + LABEL_MAX_BYTES;
-const PAYLOAD_LEN: usize = LEGACY_PAYLOAD_LEN + 3 * 8;
+const FEATURE_PAYLOAD_LEN: usize = LEGACY_PAYLOAD_LEN + 3 * 8;
+const PAYLOAD_LEN: usize = FEATURE_PAYLOAD_LEN + 4;
+
+/// Unicode data frozen by the first executable comparison-key algorithm.
+pub const UNICODE_VERSION_16_0_0: [u8; 3] = [16, 0, 0];
+
+/// Byte-level directory-key derivation recorded in the immutable identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NameKeyAlgorithm {
+    /// Prototype v1/v2 byte identity. Compatibility mode; never emitted by new mkfs.
+    LegacyIdentity = 0,
+    /// Unicode 16 NFC; comparisons remain case-sensitive.
+    UnicodeNfc = 1,
+    /// Unicode 16 canonical normalization plus full default case folding.
+    UnicodeNfcCasefold = 2,
+}
+
+impl NameKeyAlgorithm {
+    fn decode(value: u8) -> Result<Self, FormatError> {
+        match value {
+            0 => Ok(Self::LegacyIdentity),
+            1 => Ok(Self::UnicodeNfc),
+            2 => Ok(Self::UnicodeNfcCasefold),
+            _ => Err(FormatError::Invalid(
+                "unsupported directory comparison-key algorithm",
+            )),
+        }
+    }
+}
 
 /// Compact feature summary carried by the immutable identification block.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -65,6 +97,8 @@ pub struct Identification {
     /// Reserved intent-log slots after the allocation-root pool (ADR-037).
     pub log_slots: u16,
     pub features: FeatureFlags,
+    pub name_key_algorithm: NameKeyAlgorithm,
+    pub unicode_version: [u8; 3],
     pub total_blocks: u64,
     pub checkpoint_slots: [u64; 2],
     pub metadata_start: u64,
@@ -119,6 +153,8 @@ impl Identification {
         le::put_u64(&mut p[137..145], self.features.compat);
         le::put_u64(&mut p[145..153], self.features.ro_compat);
         le::put_u64(&mut p[153..161], self.features.incompat);
+        p[161] = self.name_key_algorithm as u8;
+        p[162..165].copy_from_slice(&self.unicode_version);
 
         BlockHeader {
             block_type: block_type::IDENTIFICATION,
@@ -145,12 +181,20 @@ impl Identification {
             return Err(FormatError::Invalid("unsupported format epoch"));
         }
         let version = le::get_u32(&p[12..16]);
-        if version != IDENT_VERSION && version != IDENT_VERSION_LEGACY {
+        if !matches!(
+            version,
+            IDENT_VERSION | IDENT_VERSION_FEATURES | IDENT_VERSION_LEGACY
+        ) {
             return Err(FormatError::Invalid("unsupported identification version"));
         }
-        if version == IDENT_VERSION && p.len() < PAYLOAD_LEN {
+        let minimum_payload = match version {
+            IDENT_VERSION => PAYLOAD_LEN,
+            IDENT_VERSION_FEATURES => FEATURE_PAYLOAD_LEN,
+            _ => LEGACY_PAYLOAD_LEN,
+        };
+        if p.len() < minimum_payload {
             return Err(FormatError::Invalid(
-                "identification feature summary is truncated",
+                "identification payload is truncated for its version",
             ));
         }
         let mut uuid = [0u8; 16];
@@ -164,7 +208,7 @@ impl Identification {
             return Err(FormatError::Invalid("unsupported checksum algorithm"));
         }
         let log_slots = le::get_u16(&p[34..36]);
-        let features = if version == IDENT_VERSION {
+        let features = if version >= IDENT_VERSION_FEATURES {
             FeatureFlags {
                 compat: le::get_u64(&p[137..145]),
                 ro_compat: le::get_u64(&p[145..153]),
@@ -179,6 +223,11 @@ impl Identification {
                 },
                 ..FeatureFlags::default()
             }
+        };
+        let (name_key_algorithm, unicode_version) = if version == IDENT_VERSION {
+            (NameKeyAlgorithm::decode(p[161])?, [p[162], p[163], p[164]])
+        } else {
+            (NameKeyAlgorithm::LegacyIdentity, [0, 0, 0])
         };
         let region_size = le::get_u32(&p[36..40]);
         let label_len = p[72] as usize;
@@ -195,6 +244,8 @@ impl Identification {
             region_size,
             log_slots,
             features,
+            name_key_algorithm,
+            unicode_version,
             total_blocks: le::get_u64(&p[40..48]),
             checkpoint_slots: [le::get_u64(&p[48..56]), le::get_u64(&p[56..64])],
             metadata_start: le::get_u64(&p[64..72]),
@@ -219,6 +270,21 @@ impl Identification {
             return Err(FormatError::Invalid(
                 "intent-log slots and incompatible feature bit disagree",
             ));
+        }
+        match self.name_key_algorithm {
+            NameKeyAlgorithm::LegacyIdentity if self.unicode_version == [0, 0, 0] => {}
+            NameKeyAlgorithm::UnicodeNfc | NameKeyAlgorithm::UnicodeNfcCasefold
+                if self.unicode_version == UNICODE_VERSION_16_0_0 => {}
+            NameKeyAlgorithm::LegacyIdentity => {
+                return Err(FormatError::Invalid(
+                    "legacy identity key must not declare Unicode tables",
+                ))
+            }
+            NameKeyAlgorithm::UnicodeNfc | NameKeyAlgorithm::UnicodeNfcCasefold => {
+                return Err(FormatError::Invalid(
+                    "unsupported directory Unicode table version",
+                ))
+            }
         }
         // The prototype pins the reserved layout: ident at 0, checkpoint
         // slots at 1 and 2, general allocation from the end of region 0's

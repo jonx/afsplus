@@ -47,6 +47,10 @@ the second read `alpha0.from-aros` as `hello`. The final strict checker reported
 generation 21, three objects, no warnings or errors, and zero pending intent-log
 records.
 
+ADR-052 requalification repeated both standard dismount/remount cycles after a
+case-only target rename. The final case-insensitive image was checker-clean at
+generation 22 with three objects and zero pending intent records.
+
 The same change remains cross-qualified against genuine AROS headers and the
 complete AArch64 handler link, plus the m68k packet, trackdisk, handler and
 generated-entry ABI compilation gates.

@@ -40,6 +40,7 @@ fn format_volume(total: u64, region: u32, caps: ReclaimCaps) -> MemoryBackend {
             region_size: region,
             reclaim_caps: caps,
             log_slots: 0,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: ts(0),
         },
     )

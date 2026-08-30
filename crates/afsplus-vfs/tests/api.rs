@@ -23,6 +23,7 @@ fn formatted() -> MemoryBackend {
             region_size: 4096,
             reclaim_caps: Default::default(),
             log_slots: 8,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: ts(0),
         },
     )
@@ -38,6 +39,8 @@ fn handle_api_covers_the_mountable_alpha_operation_slice() {
     let stats = vfs.statfs();
     assert_eq!(stats.block_size, BS as u32);
     assert_eq!(stats.total_blocks, 8192);
+    assert!(stats.case_sensitive);
+    assert_eq!(stats.unicode_version, [16, 0, 0]);
 
     let directory = vfs.create_directory(OBJECT_ROOT, "work", ts(1)).unwrap();
     let object = vfs.create_file(directory, "draft", ts(2)).unwrap();

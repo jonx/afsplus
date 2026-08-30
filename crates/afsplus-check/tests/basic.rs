@@ -17,6 +17,7 @@ fn params(region_size: u32) -> MkfsParams {
         region_size,
         reclaim_caps: Default::default(),
         log_slots: 8,
+        name_policy: afsplus_core::NamePolicy::Sensitive,
         timestamp: Timespec {
             seconds: 1_780_000_000,
             nanoseconds: 0,
@@ -603,6 +604,56 @@ fn duplicate_and_invalid_names_are_rejected_without_state_change() {
 }
 
 #[test]
+fn insensitive_names_fold_unicode_preserve_spelling_and_survive_remount() {
+    let mut dev = MemoryBackend::new(BS, 512);
+    let mut options = params(512);
+    options.name_policy = afsplus_core::NamePolicy::Insensitive;
+    mkfs(&mut dev, &options).unwrap();
+    let mut vol = mount(dev).unwrap();
+
+    let id = vol
+        .create_file_in_root("Straße", b"content", ts(1))
+        .unwrap();
+    assert_eq!(vol.lookup_root("STRASSE").unwrap(), Some(id));
+    assert_eq!(vol.lookup_root("straße").unwrap(), Some(id));
+    let generation = vol.generation();
+    assert!(matches!(
+        vol.create_file_in_root("strasse", b"duplicate", ts(2)),
+        Err(CoreError::AlreadyExists)
+    ));
+    assert_eq!(vol.generation(), generation);
+    assert_eq!(vol.list_root().unwrap(), vec![("Straße".into(), id)]);
+
+    // A rename to the same comparison key updates only the preserved display
+    // spelling; it must not be mistaken for an existing destination.
+    vol.rename(
+        afsplus_format::OBJECT_ROOT,
+        "STRASSE",
+        afsplus_format::OBJECT_ROOT,
+        "STRASSE",
+        ts(3),
+    )
+    .unwrap();
+    assert_eq!(vol.list_root().unwrap(), vec![("STRASSE".into(), id)]);
+    assert_eq!(vol.lookup_root("Straße").unwrap(), Some(id));
+
+    let composed = vol.create_file_in_root("Café", b"accent", ts(4)).unwrap();
+    assert_eq!(vol.lookup_root("CAFE\u{301}").unwrap(), Some(composed));
+    assert!(matches!(
+        vol.create_file_in_root("Cafe\u{301}", b"duplicate", ts(5)),
+        Err(CoreError::AlreadyExists)
+    ));
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+    let mut vol = mount(dev).unwrap();
+    assert_eq!(vol.lookup_root("strasse").unwrap(), Some(id));
+    assert_eq!(vol.lookup_root("CAFÉ").unwrap(), Some(composed));
+    assert_eq!(vol.read_file(id).unwrap(), b"content");
+}
+
+#[test]
 fn out_of_space_is_reported_and_state_survives() {
     // 28 blocks in two tiny regions: the allocation-root pool consumes three
     // permanently reserved blocks. An empty-file transaction needs 5 fresh
@@ -617,6 +668,7 @@ fn out_of_space_is_reported_and_state_survives() {
             region_size: 16,
             reclaim_caps: Default::default(),
             log_slots: 0,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: ts(0),
         },
     )
@@ -707,10 +759,13 @@ fn file_image_end_to_end_with_json_report() {
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "checker findings: {:?}", report.errors);
     let json = report.render_json();
-    assert!(json.contains("\"schema_version\":4"));
+    assert!(json.contains("\"schema_version\":5"));
     assert!(json.contains("\"clean\":true"));
     assert!(json.contains("\"generation\":2"));
     assert!(json.contains("\"region_size\":128"));
+    assert!(json.contains("\"name_key_algorithm\":\"unicode-nfc\""));
+    assert!(json.contains("\"case_sensitive\":true"));
+    assert!(json.contains("\"unicode_version\":\"16.0.0\""));
     assert!(json.contains("\"log_records_pending\":0"));
 
     std::fs::remove_dir_all(&dir).unwrap();

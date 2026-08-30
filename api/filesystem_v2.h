@@ -60,6 +60,11 @@ struct FSV2_StatFs {
     uint64_t total_blocks;
     uint64_t free_blocks;
     uint64_t available_blocks;
+    uint32_t case_sensitive;
+    uint8_t unicode_version_major;
+    uint8_t unicode_version_minor;
+    uint8_t unicode_version_patch;
+    uint8_t reserved0;
 };
 
 struct FSV2_DirEntry {
