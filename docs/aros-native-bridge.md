@@ -42,7 +42,9 @@ The script performs these independent gates:
    m68k GCC, including the generated handler entry; and
 6. an intermediate AArch64 link which rejects unresolved AFS+ symbols, followed
    by `genmodule`, compilation of the MacAROS Rust platform glues and a complete
-   AROS handler-module link which must have no undefined symbols.
+   AROS handler-module link which must have no undefined symbols; and
+7. a machine-code audit requiring AROS AArch64 `ET_REL` identity and rejecting
+   every `x18` or architectural TLS-register instruction.
 
 Defaults assume sibling `Macaros`, `~/aros-build`, `~/aros-crosstools` and
 `~/aros-m68k-build` trees. Override `MACAROS_ROOT`, `AROS_BUILD`,
@@ -66,7 +68,11 @@ profile variables:
 
 | Variable | Hosted default | Contract |
 |---|---|---|
-| `AFSPLUS_AROS_SDK_ROOT` | `$AROS_BUILD/bin/darwin-aarch64` | SDK root containing `tools`, `gen` and `AROS/Developer` |
+| `AFSPLUS_AROS_SDK_ROOT` | `$AROS_BUILD/bin/darwin-aarch64` | Target SDK root containing `gen` and `AROS/Developer` |
+| `AFSPLUS_AROS_BUILD_TOOLS_ROOT` | `$AFSPLUS_AROS_SDK_ROOT/tools` | Host-executable `collect-aros` and `genmodule` directory |
+| `AFSPLUS_AROS_EXPECTED_PLATFORM` | unset | Required `AROS_TARGET_PLATFORM` value for a release profile |
+| `AFSPLUS_AROS_PROFILE_ID` | SDK platform | Human-readable package profile identity |
+| `AFSPLUS_AROS_OBJDUMP` | `$AROS_CROSSTOOLS/bin/llvm-objdump` | Disassembler used by the final machine-code ABI gate |
 | `AFSPLUS_AROS_RUST_TARGET_JSON` | MacAROS `aarch64-unknown-aros.json` | Rust target used with `-Zbuild-std` |
 | `AFSPLUS_AROS_RUST_ARCHIVE` | derived from the JSON filename | Optional explicit `libafsplus_aros_ffi.a` output |
 | `AFSPLUS_AROS_PLATFORM_GLUE_DIR` | MacAROS `hosted/rust` | Seven AROS `std` C glue sources |
@@ -75,13 +81,29 @@ profile variables:
 | `AFSPLUS_AROS_ARCH_FLAGS` | `-mcmodel=large -ffixed-x18` | Whitespace-separated target ABI/codegen flags |
 | `AFSPLUS_AROS_CROSS_LIB` | `$AROS_CROSSTOOLS/lib/generic` | Compiler runtime library directory |
 
-A bare-metal MacAROS SDK must provide these as one coherent profile. In
-particular it must not inherit `+reserve-x18` or `-ffixed-x18` unless that
-platform ABI independently reserves the register. The build still requires the
-same public AROS headers/libraries and seven `std` glue symbols; no filesystem
-source fork is permitted. Every package records the profile values, target-JSON
-hash and per-glue hashes in `build-profile.txt`. ADR-051 records this boundary;
-it deliberately does not claim that the future native profile is qualified.
+A bare-metal MacAROS SDK plus its host build tools must provide these as one
+coherent profile. In particular it must not inherit `+reserve-x18` or
+`-ffixed-x18` unless that platform ABI independently reserves the register. The
+build still requires the same public AROS headers/libraries and seven `std`
+glue symbols; no filesystem source fork is permitted. Every package records
+the profile values, target-JSON hash and per-glue hashes in
+`build-profile.txt`. ADR-051 records this boundary.
+
+The first native-linked pre-hardware package is reproduced with:
+
+```sh
+AFSPLUS_AROS_PACKAGE_OUTPUT="$PWD/build/aros-alpha0-apple-aarch64" \
+AFSPLUS_AROS_SDK_ROOT="$HOME/Build/aros-apple-core/apple/bin/apple-aarch64" \
+AFSPLUS_AROS_BUILD_TOOLS_ROOT="$HOME/Build/aros-apple-core/apple/bin/darwin-aarch64/tools" \
+AFSPLUS_AROS_EXPECTED_PLATFORM=apple-aarch64 \
+AFSPLUS_AROS_PROFILE_ID=macaros-native-apple-aarch64-prehardware \
+tools/package-aros-alpha0.sh
+```
+
+It reuses the currently qualified MacAROS AROS-AArch64 Rust target and seven
+glues, but links against the `apple-aarch64` SDK. Their hashes, the SDK target
+configuration, host tools and ABI auditor are recorded in profile format v2.
+The resulting machine-code report is a build gate, not a native runtime claim.
 
 To materialize, without installing, everything needed for the first target
 run, use:
@@ -187,7 +209,7 @@ glues (`net`, `fs`, `process`, `proc`, `thread`, `sync`, `env`), the AFS+ static
 library and the standard MacAROS `posixc/stdc/pthread` link set. A handler uses
 its generated start/end objects, never the command-oriented `startup.o`.
 
-## Hosted S0 and remaining native gates
+## Runtime qualification stages
 
 `tools/check-hosted-aros-alpha0.sh` now installs the off-tree package into a
 dedicated Hosted test tree, executes create/read/write/truncate/rename/fsync on
@@ -205,9 +227,32 @@ evidence; ADR-052 removes its former case-policy workaround with a versioned,
 case-insensitive and spelling-preserving AROS namespace. ADR-050 records repeated standard
 `Assign DISMOUNT` termination and reload, including the required ordering of
 device-node removal and the deferred `ACTION_DIE` reply. No AROS kernel, DOS or
-source-tree change is part of that contract. The same package contract moves
-next to native MacAROS, then m68k emulation and the physical Amiga 500: three
-target platforms, four ordered validation stages.
+source-tree inclusion of the AFS+ handler is part of that contract. A genuine
+bug in a generic AROS interface should still be fixed and proposed upstream
+rather than hidden in the handler.
+
+The native pre-hardware gate is reproduced with:
+
+```sh
+tools/check-macaros-native-alpha0-qemu.sh
+```
+
+It builds an external `afsram.device`, a strict version-2 retained-image
+descriptor and the complete off-tree handler against the `apple-aarch64` SDK.
+Under QEMU, the target mounts the 64-MiB AFS+ payload and executes create,
+read, write, sparse write, truncate, two flushes, rename, case-folded lookup,
+case-only rename and reopen/readback. It then inhibits and stops the handler,
+waits for its task to disappear and unloads both modules before the boot gate
+returns PASS. The report hashes every executable input and the command refuses
+to mutate either the MacAROS or AROS worktree. ADR-053 defines the transport and
+records the evidence.
+
+`afsram.device` writes only the retained boot image. `CMD_UPDATE` therefore
+tests the filesystem/device ordering path but cannot make data survive reset.
+Native crash replay, extraction plus strict checking of the mutated payload,
+and Apple-hardware execution remain unproven. The package contract moves next
+to those native durability gates, then m68k emulation and the physical Amiga
+500: three target platforms, four ordered validation stages.
 
 The fixed-image Alpha-0 path does not yet install `TD_ADDCHANGEINT` handling.
 Hot-swappable media remains disabled until removal can detach the mounted Rust

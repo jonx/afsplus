@@ -2,11 +2,18 @@
 +++ afsplus_start.c
 @@ -72,0 +73 @@
 +DECLARESET(LIBS)
-@@ -92,2 +93,3 @@
+@@ -94,3 +95,8 @@
 -    if (set_call_funcs(SETNAME(INIT), 1, 1)) {
 -        ret = handler(SysBase);
+-        set_call_funcs(SETNAME(EXIT), -1, 0);
++#if defined(AFSPLUS_AROS_DIAGNOSTIC_DIRECT_ENTRY)
++    ret = handler(SysBase);
++#else
 +    if (set_open_libraries()) {
-+        if (set_call_funcs(SETNAME(INIT), 1, 1))
++        if (set_call_funcs(SETNAME(INIT), 1, 1)) {
 +            ret = handler(SysBase);
-@@ -95,0 +98 @@
++            set_call_funcs(SETNAME(EXIT), -1, 0);
++        }
+@@ -97,0 +104,2 @@
 +    set_close_libraries();
++#endif

@@ -1,6 +1,6 @@
 # ADR-050: Keep the AROS handler external and qualify its unload/reload lifecycle
 
-Status: Accepted for Hosted lifecycle
+Status: Accepted for Hosted and native-QEMU lifecycle
 
 ## Context
 
@@ -17,9 +17,16 @@ still referenced it.
 ## Decision
 
 The AROS integration remains an independently built and distributed module.
-No change to the AROS kernel, `dos.library` or source tree is required. An AROS
-or distribution build recipe may be contributed later, but acceptance of that
+Adding AFS+ itself to the AROS source tree is not required. An AROS or
+distribution build recipe may be contributed later, but acceptance of that
 recipe is not a release condition for AFS+.
+
+This is not a rule against fixing AROS. If conformance testing exposes a defect
+in a generic Exec, DOS, device or filesystem interface, the preferred result is
+a minimal regression-tested fix proposed upstream. Until it is accepted, a
+MacAROS build may carry that fix locally and the package must state the exact
+dependency. A private compatibility shim is appropriate only when it implements
+a genuinely platform-specific boundary; it must not hide a general AROS bug.
 
 The packet translator now implements `ACTION_INHIBIT`:
 
@@ -50,6 +57,11 @@ records.
 ADR-052 requalification repeated both standard dismount/remount cycles after a
 case-only target rename. The final case-insensitive image was checker-clean at
 generation 22 with three objects and zero pending intent records.
+
+ADR-053 then exercised the same shutdown ordering through the native
+Apple-AArch64 handler under QEMU. The handler completed cleanup before its
+deferred death reply, its process disappeared, and both handler and block
+device unloaded before QEMU exited cleanly.
 
 The same change remains cross-qualified against genuine AROS headers and the
 complete AArch64 handler link, plus the m68k packet, trackdisk, handler and

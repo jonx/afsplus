@@ -1,6 +1,6 @@
 # ADR-051: Make AROS AArch64 platform profiles explicit
 
-Status: Accepted for the build boundary; native profile not yet qualified
+Status: Accepted; apple-aarch64 pre-hardware runtime profile qualified
 
 ## Context
 
@@ -18,9 +18,11 @@ external module, not files owned by the filesystem repository.
 ## Decision
 
 The AROS AArch64 qualification and package scripts consume one explicit,
-coherent platform profile. It specifies:
+coherent platform profile. Target SDK contents and host-executed build tools
+are separate roots: a cross SDK must never be mistaken for the machine on
+which `genmodule` and `collect-aros` execute. The profile specifies:
 
-- the AROS SDK and compiler-runtime library roots;
+- the target AROS SDK, host build-tools and compiler-runtime library roots;
 - the Rust target JSON and toolchain;
 - the Clang link and generated-object targets;
 - the architecture/code-generation flags; and
@@ -31,10 +33,25 @@ target plus `-ffixed-x18` for every C object. A future native profile must be
 provided by the native SDK and must not inherit those settings unless its own
 ABI reserves the register.
 
-Every Alpha-0 package includes `build-profile.txt` in its checksum manifest.
-The file records the selected targets and flags plus hashes of the Rust target
-JSON and each platform glue. The handler, packet translator, trackdisk adapter
-and AFS+ static library remain the same sources for all profiles.
+Every Alpha-0 package includes `build-profile.txt`, `abi-report.txt` and both in
+its checksum manifest. The profile records a human-selected profile ID, the SDK
+platform, selected targets and flags, and hashes of `target.cfg`, the two host
+tools, the ABI auditor, Rust target JSON and each platform glue. The ABI report
+requires an AROS OSABI/ABI-version-1 AArch64 `ET_REL` module and rejects every
+`x18` or architectural `TPIDR` instruction. The handler, packet translator,
+trackdisk adapter and AFS+ static library remain the same sources for all
+profiles.
+
+On 2026-08-30 the `apple-aarch64` SDK produced a complete off-tree handler with
+profile ID `macaros-native-apple-aarch64-prehardware`. Its target configuration
+independently reserves `x18`; the emitted handler nevertheless contains zero
+`x18` and zero `TPIDR` instructions. All package checksums and the strict clean
+image check passed. The current Rust target JSON and seven `std` glues are the
+already-qualified MacAROS AROS-AArch64 inputs, hashed explicitly rather than
+silently copied. This proves native-SDK linkage, not by itself native execution
+and not an independently maintained native Rust `std` profile. ADR-053
+separately records the first execution of that artifact under the native
+Apple-AArch64 QEMU runtime.
 
 ## Consequences
 
@@ -43,6 +60,8 @@ and install the external `L:` handler with its own profile. Hosted and native
 AArch64 artifacts are distinguishable even when their executable headers name
 the same AROS architecture.
 
-The profile mechanism is not evidence that native MacAROS already runs AFS+.
-That claim requires a native SDK profile, a bootable runtime and the same
-on-target operation, durability and checker gates used for Hosted MacAROS.
+The profile mechanism alone is not runtime evidence. ADR-053 adds a writable
+retained-RAM transport and proves the operation and unload matrix under native
+MacAROS QEMU. Durable media, native crash replay, extraction plus strict
+checking of the mutated image, and Apple-hardware execution remain separate
+gates.

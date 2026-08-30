@@ -7,9 +7,17 @@
 
 #include <string.h>
 
-#define TEMP_PATH "AFSPLUS19:alpha0.tmp"
-#define FINAL_PATH "AFSPLUS19:alpha0.from-aros"
-#define FOLDED_FINAL_PATH "AFSPLUS19:ALPHA0.FROM-AROS"
+#ifndef AFSPLUS_PROBE_VOLUME
+#define AFSPLUS_PROBE_VOLUME "AFSPLUS19"
+#endif
+
+#ifndef AFSPLUS_PROBE_FUNCTION
+#define AFSPLUS_PROBE_FUNCTION main
+#endif
+
+#define TEMP_PATH AFSPLUS_PROBE_VOLUME ":alpha0.tmp"
+#define FINAL_PATH AFSPLUS_PROBE_VOLUME ":alpha0.from-aros"
+#define FOLDED_FINAL_PATH AFSPLUS_PROBE_VOLUME ":ALPHA0.FROM-AROS"
 #define SPARSE_OFFSET 8192
 
 static const UBYTE prefix[] = "hello";
@@ -22,7 +30,7 @@ static int fail(const char *stage, SIPTR result)
     return RETURN_FAIL;
 }
 
-int main(void)
+int AFSPLUS_PROBE_FUNCTION(void)
 {
     UBYTE readback[sizeof(prefix)];
     BPTR file;
