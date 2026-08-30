@@ -1,0 +1,4 @@
+C:Echo "AFSPLUS M68K BOOT PASS" >HOST:boot.pass
+C:Avail FLUSH >HOST:avail.txt
+C:Version full >HOST:version.txt
+C:Shutdown

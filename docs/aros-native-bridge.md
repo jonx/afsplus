@@ -260,6 +260,23 @@ extracts and checks each resulting payload. ADR-054 records the four old-state
 generation-2 and two new-state generation-3 results; every final image has zero
 pending records.
 
+The next-platform boot prerequisite is reproduced with matching official AROS
+m68k media:
+
+```sh
+AFSPLUS_AROS_M68K_BOOT_ADF=/path/to/bootdisk-amiga-m68k.adf \
+AFSPLUS_AROS_M68K_SYSTEM_ISO=/path/to/aros-amiga-m68k.iso \
+    tools/check-aros-m68k-boot-fsuae.sh
+```
+
+This FS-UAE gate uses the ROM pair from the ISO, retains the official bootstrap
+floppy in `DF0:`, exposes the extracted system as the exactly named
+`AROS Live CD:` volume and captures the guest result through `HOST:`. It proves
+only the native m68k boot harness. It does not yet mount AFS+, qualify 68000
+code, claim A500 compatibility or provide hardware performance evidence.
+ADR-055 defines the emulator/hardware progression and the standalone-reproducer
+rule for any AROS patch discovered during qualification.
+
 `afsram.device` writes only the retained boot image. `CMD_UPDATE` therefore
 tests the filesystem/device ordering path but cannot make data survive reset.
 The extracted replay proof is not reset durability: a persistent native device,
