@@ -12,7 +12,10 @@ use afsplus_format::{Timespec, OBJECT_ROOT};
 const BS: usize = 4096;
 
 fn ts(seconds: i64) -> Timespec {
-    Timespec { seconds, nanoseconds: 0 }
+    Timespec {
+        seconds,
+        nanoseconds: 0,
+    }
 }
 
 fn formatted(total: u64, log_slots: u16) -> MemoryBackend {
@@ -33,7 +36,11 @@ fn formatted(total: u64, log_slots: u16) -> MemoryBackend {
 }
 
 fn create<'a>(name: &'a str, content: &'a [u8]) -> BatchOp<'a> {
-    BatchOp::CreateFile { parent_id: OBJECT_ROOT, name, content }
+    BatchOp::CreateFile {
+        parent_id: OBJECT_ROOT,
+        name,
+        content,
+    }
 }
 
 fn publish<'a>(source: &'a str, target: &'a str) -> BatchOp<'a> {
@@ -56,10 +63,12 @@ fn crash_recovers_exactly_the_fsynced_prefix() {
     vol.window_op(&publish("HEAD.lock", "HEAD"), ts(1)).unwrap();
     vol.window_fsync().unwrap();
     // Group 2 (fsynced): durable side file.
-    vol.window_op(&create("durable.txt", b"kept"), ts(2)).unwrap();
+    vol.window_op(&create("durable.txt", b"kept"), ts(2))
+        .unwrap();
     vol.window_fsync().unwrap();
     // Unlogged tail: must vanish in the crash.
-    vol.window_op(&create("volatile.txt", b"lost"), ts(3)).unwrap();
+    vol.window_op(&create("volatile.txt", b"lost"), ts(3))
+        .unwrap();
     assert_eq!(vol.window_unlogged_ops(), 1);
 
     // Crash: drop the in-memory window; the device keeps data + records.
@@ -72,10 +81,17 @@ fn crash_recovers_exactly_the_fsynced_prefix() {
     assert_eq!(vol.generation(), 2, "replay publishes one checkpoint");
     let head = vol.lookup_root("HEAD").unwrap().expect("fsynced group 1");
     assert_eq!(vol.read_file(head).unwrap(), b"v1");
-    let durable = vol.lookup_root("durable.txt").unwrap().expect("fsynced group 2");
+    let durable = vol
+        .lookup_root("durable.txt")
+        .unwrap()
+        .expect("fsynced group 2");
     assert_eq!(vol.read_file(durable).unwrap(), b"kept");
     assert_eq!(vol.lookup_root("HEAD.lock").unwrap(), None);
-    assert_eq!(vol.lookup_root("volatile.txt").unwrap(), None, "unlogged op must vanish");
+    assert_eq!(
+        vol.lookup_root("volatile.txt").unwrap(),
+        None,
+        "unlogged op must vanish"
+    );
 
     // The replay checkpoint made the log stale: remounting is idempotent.
     let mut dev = vol.into_device();
@@ -94,13 +110,15 @@ fn every_crash_state_of_a_logged_ref_update_is_all_or_nothing() {
     // which the content CRC rejects) recovers to the old or the new ref.
     let base = {
         let mut vol = mount(formatted(4096, 8)).unwrap();
-        vol.create_file_in_root("HEAD", &[0x01u8; 2000], ts(1)).unwrap();
+        vol.create_file_in_root("HEAD", &[0x01u8; 2000], ts(1))
+            .unwrap();
         vol.into_device()
     };
     let pre_generation = mount(base.clone()).unwrap().generation();
 
     let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
-    vol.window_op(&create("HEAD.lock", &[0x02u8; 2000]), ts(2)).unwrap();
+    vol.window_op(&create("HEAD.lock", &[0x02u8; 2000]), ts(2))
+        .unwrap();
     vol.window_op(&publish("HEAD.lock", "HEAD"), ts(2)).unwrap();
     vol.window_fsync().unwrap();
     let (_, log) = vol.into_device().into_parts();
@@ -134,7 +152,11 @@ fn every_crash_state_of_a_logged_ref_update_is_all_or_nothing() {
             // Post-replay volumes must pass the checker again.
             let mut dev = vol.into_device();
             let after = check_device(&mut dev);
-            assert!(after.is_clean(), "{context}: after replay {:?}", after.errors);
+            assert!(
+                after.is_clean(),
+                "{context}: after replay {:?}",
+                after.errors
+            );
         }
     }
     assert!(pre > 0 && post > 0, "matrix must produce both outcomes");
@@ -151,8 +173,10 @@ fn successive_fsync_groups_recover_as_monotone_prefixes() {
 
     let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
     for (i, version) in [b"v1", b"v2", b"v3"].iter().enumerate() {
-        vol.window_op(&create("HEAD.lock", *version), ts(i as i64 + 1)).unwrap();
-        vol.window_op(&publish("HEAD.lock", "HEAD"), ts(i as i64 + 1)).unwrap();
+        vol.window_op(&create("HEAD.lock", *version), ts(i as i64 + 1))
+            .unwrap();
+        vol.window_op(&publish("HEAD.lock", "HEAD"), ts(i as i64 + 1))
+            .unwrap();
         vol.window_fsync().unwrap();
     }
     let (_, log) = vol.into_device().into_parts();
@@ -179,15 +203,26 @@ fn successive_fsync_groups_recover_as_monotone_prefixes() {
             seen.insert(content);
         }
     }
-    assert!(seen.len() >= 3, "matrix should surface several prefixes, saw {seen:?}");
+    assert!(
+        seen.len() >= 3,
+        "matrix should surface several prefixes, saw {seen:?}"
+    );
 }
 
 #[test]
 fn cancelled_window_ops_replay_cleanly() {
     let dev = formatted(4096, 8);
     let mut vol = mount(dev).unwrap();
-    vol.window_op(&create("tmp", &[9u8; 2 * BS]), ts(1)).unwrap();
-    vol.window_op(&BatchOp::DeleteFile { parent_id: OBJECT_ROOT, name: "tmp" }, ts(1)).unwrap();
+    vol.window_op(&create("tmp", &[9u8; 2 * BS]), ts(1))
+        .unwrap();
+    vol.window_op(
+        &BatchOp::DeleteFile {
+            parent_id: OBJECT_ROOT,
+            name: "tmp",
+        },
+        ts(1),
+    )
+    .unwrap();
     vol.window_op(&create("kept", b"stay"), ts(1)).unwrap();
     vol.window_fsync().unwrap();
 
@@ -214,10 +249,16 @@ fn window_rules_are_enforced() {
         vol.create_file_in_root("direct", b"x", ts(1)),
         Err(CoreError::WindowOpen)
     ));
-    assert!(matches!(vol.reclaim_step(ts(1)), Err(CoreError::WindowOpen)));
+    assert!(matches!(
+        vol.reclaim_step(ts(1)),
+        Err(CoreError::WindowOpen)
+    ));
 
     // A validation error leaves the window usable.
-    assert!(matches!(vol.window_op(&create("a", b"dup"), ts(1)), Err(CoreError::AlreadyExists)));
+    assert!(matches!(
+        vol.window_op(&create("a", b"dup"), ts(1)),
+        Err(CoreError::AlreadyExists)
+    ));
     vol.window_op(&create("b", b"2"), ts(1)).unwrap();
     vol.window_fsync().unwrap();
 
@@ -225,7 +266,10 @@ fn window_rules_are_enforced() {
     vol.window_op(&create("c", b"3"), ts(2)).unwrap();
     vol.window_fsync().unwrap();
     vol.window_op(&create("d", b"4"), ts(3)).unwrap();
-    assert!(matches!(vol.window_fsync(), Err(CoreError::PrototypeLimit(_))));
+    assert!(matches!(
+        vol.window_fsync(),
+        Err(CoreError::PrototypeLimit(_))
+    ));
     vol.window_commit(ts(4)).unwrap();
     assert_eq!(vol.generation(), 2);
     for name in ["a", "b", "c", "d"] {
@@ -235,7 +279,11 @@ fn window_rules_are_enforced() {
     let mut dev = vol.into_device();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "{:?}", report.errors);
-    assert_eq!(report.volume.unwrap().log_records_pending, 0, "commit staled the log");
+    assert_eq!(
+        report.volume.unwrap().log_records_pending,
+        0,
+        "commit staled the log"
+    );
 }
 
 /// The blocker-2 bake-off gate (ADR-037): a durable ref update through the
@@ -250,8 +298,10 @@ fn gate_logged_ref_updates_beat_the_checkpoint_floor() {
     let window = 64u64;
     for i in 0..updates {
         let content = format!("ref {i}\n");
-        vol.window_op(&create("HEAD.lock", content.as_bytes()), ts(i as i64)).unwrap();
-        vol.window_op(&publish("HEAD.lock", "HEAD"), ts(i as i64)).unwrap();
+        vol.window_op(&create("HEAD.lock", content.as_bytes()), ts(i as i64))
+            .unwrap();
+        vol.window_op(&publish("HEAD.lock", "HEAD"), ts(i as i64))
+            .unwrap();
         vol.window_fsync().unwrap();
         if (i + 1) % window == 0 {
             vol.window_commit(ts(i as i64)).unwrap();
@@ -279,5 +329,8 @@ fn gate_logged_ref_updates_beat_the_checkpoint_floor() {
     assert!(report.is_clean(), "{:?}", report.errors);
     let mut vol = mount(dev).unwrap();
     let head = vol.lookup_root("HEAD").unwrap().expect("last ref");
-    assert_eq!(vol.read_file(head).unwrap(), format!("ref {}\n", updates - 1).as_bytes());
+    assert_eq!(
+        vol.read_file(head).unwrap(),
+        format!("ref {}\n", updates - 1).as_bytes()
+    );
 }

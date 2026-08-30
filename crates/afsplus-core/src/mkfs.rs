@@ -17,7 +17,7 @@ use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::{Checkpoint, RegionRecord};
 use afsplus_format::crc32c::CHECKSUM_CRC32C;
 use afsplus_format::geometry::Geometry;
-use afsplus_format::ident::Identification;
+use afsplus_format::ident::{FeatureFlags, Identification, INCOMPAT_INTENT_LOG};
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::reclaim::{ReclaimCaps, ReclaimRoot};
 use afsplus_format::region::{BitmapBinding, RegionDescriptor};
@@ -196,6 +196,14 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         checksum_algorithm: CHECKSUM_CRC32C,
         region_size: params.region_size,
         log_slots: params.log_slots,
+        features: FeatureFlags {
+            incompat: if params.log_slots > 0 {
+                INCOMPAT_INTENT_LOG
+            } else {
+                0
+            },
+            ..FeatureFlags::default()
+        },
         total_blocks: geo.total_blocks,
         checkpoint_slots: [layout::CKPT_SLOT_A, layout::CKPT_SLOT_B],
         metadata_start,

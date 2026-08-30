@@ -77,6 +77,11 @@ The identification region must contain enough data for:
 - feature summary
 - clean/dirty state
 
+Prototype identification version 2 stores three 64-bit mount-time feature
+summaries (`COMPAT`, `RO_COMPAT`, `INCOMPAT`). Unknown bits are handled before
+any checkpoint replay or other write. Version-1 prototype images remain
+readable through an unambiguous in-memory upgrade of their intent-log state.
+
 ## 6. Checksums
 
 All core metadata blocks are checksummed.

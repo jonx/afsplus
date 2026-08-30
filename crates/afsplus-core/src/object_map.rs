@@ -154,8 +154,8 @@ mod tests {
                 label: "ObjectMapTree".into(),
                 region_size: 4096,
                 reclaim_caps: Default::default(),
-            log_slots: 8,
-            timestamp: Timespec::default(),
+                log_slots: 8,
+                timestamp: Timespec::default(),
             },
         )
         .unwrap();

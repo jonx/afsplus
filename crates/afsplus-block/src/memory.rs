@@ -14,7 +14,11 @@ pub struct MemoryBackend {
 impl MemoryBackend {
     pub fn new(block_size: usize, total_blocks: u64) -> Self {
         assert!(block_size.is_power_of_two() && block_size >= 512);
-        MemoryBackend { block_size, total_blocks, blocks: BTreeMap::new() }
+        MemoryBackend {
+            block_size,
+            total_blocks,
+            blocks: BTreeMap::new(),
+        }
     }
 
     /// Applies raw bytes to a block without going through the device

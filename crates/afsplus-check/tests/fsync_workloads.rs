@@ -27,7 +27,10 @@ use afsplus_format::Timespec;
 const BS: usize = 4096;
 
 fn ts(seconds: i64) -> Timespec {
-    Timespec { seconds, nanoseconds: 0 }
+    Timespec {
+        seconds,
+        nanoseconds: 0,
+    }
 }
 
 fn fresh_volume(total_blocks: u64) -> Volume<TraceBackend<MemoryBackend>> {
@@ -154,7 +157,8 @@ fn print_table(rows: &[WorkloadRow]) {
 /// transactions; the delete is skipped on the first iteration.
 fn ref_update(vol: &mut Volume<TraceBackend<MemoryBackend>>, totals: &mut Totals, i: i64) {
     let start = Instant::now();
-    vol.create_file_in_root("HEAD.lock", format!("ref {i}\n").as_bytes(), ts(i)).unwrap();
+    vol.create_file_in_root("HEAD.lock", format!("ref {i}\n").as_bytes(), ts(i))
+        .unwrap();
     totals.absorb(vol.last_commit_stats().unwrap());
     if vol.lookup_root("HEAD").unwrap().is_some() {
         vol.delete_file_in_root("HEAD", ts(i)).unwrap();
@@ -212,7 +216,12 @@ fn run_workloads(updates: u64, files: u64, appends: u64) -> Vec<WorkloadRow> {
     vol.window_commit(ts(updates as i64)).unwrap();
     totals.wall_micros = start.elapsed().as_micros();
     let io = vol.device_mut().stats();
-    rows.push(WorkloadRow { name: "ref update logged(64)", logical_ops: updates, totals, io });
+    rows.push(WorkloadRow {
+        name: "ref update logged(64)",
+        logical_ops: updates,
+        totals,
+        io,
+    });
     let mut dev = vol.into_device().into_inner();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "{:?}", report.errors);
@@ -246,7 +255,12 @@ fn run_workloads(updates: u64, files: u64, appends: u64) -> Vec<WorkloadRow> {
     }
     totals.wall_micros = start.elapsed().as_micros();
     let io = vol.device_mut().stats();
-    rows.push(WorkloadRow { name: "ref update batched(2)", logical_ops: updates, totals, io });
+    rows.push(WorkloadRow {
+        name: "ref update batched(2)",
+        logical_ops: updates,
+        totals,
+        io,
+    });
     let mut dev = vol.into_device().into_inner();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "{:?}", report.errors);
@@ -274,7 +288,12 @@ fn run_workloads(updates: u64, files: u64, appends: u64) -> Vec<WorkloadRow> {
     }
     totals.wall_micros = start.elapsed().as_micros();
     let io = vol.device_mut().stats();
-    rows.push(WorkloadRow { name: "checkout batched(64)", logical_ops: files, totals, io });
+    rows.push(WorkloadRow {
+        name: "checkout batched(64)",
+        logical_ops: files,
+        totals,
+        io,
+    });
     let mut dev = vol.into_device().into_inner();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "{:?}", report.errors);
@@ -287,7 +306,12 @@ fn run_workloads(updates: u64, files: u64, appends: u64) -> Vec<WorkloadRow> {
         ref_update(&mut vol, &mut totals, i as i64);
     }
     let io = vol.device_mut().stats();
-    rows.push(WorkloadRow { name: "git ref update", logical_ops: updates, totals, io });
+    rows.push(WorkloadRow {
+        name: "git ref update",
+        logical_ops: updates,
+        totals,
+        io,
+    });
     let mut dev = vol.into_device().into_inner();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "{:?}", report.errors);
@@ -298,12 +322,18 @@ fn run_workloads(updates: u64, files: u64, appends: u64) -> Vec<WorkloadRow> {
     let mut totals = Totals::default();
     let start = Instant::now();
     for i in 0..files {
-        vol.create_file_in_root(&format!("obj-{i:06}"), &[i as u8; 900], ts(i as i64)).unwrap();
+        vol.create_file_in_root(&format!("obj-{i:06}"), &[i as u8; 900], ts(i as i64))
+            .unwrap();
         totals.absorb(vol.last_commit_stats().unwrap());
     }
     totals.wall_micros = start.elapsed().as_micros();
     let io = vol.device_mut().stats();
-    rows.push(WorkloadRow { name: "checkout small files", logical_ops: files, totals, io });
+    rows.push(WorkloadRow {
+        name: "checkout small files",
+        logical_ops: files,
+        totals,
+        io,
+    });
     let mut dev = vol.into_device().into_inner();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "{:?}", report.errors);
@@ -315,12 +345,18 @@ fn run_workloads(updates: u64, files: u64, appends: u64) -> Vec<WorkloadRow> {
     let mut totals = Totals::default();
     let start = Instant::now();
     for i in 0..appends {
-        vol.write_file_at(id, i * 200, &[i as u8; 200], ts(i as i64)).unwrap();
+        vol.write_file_at(id, i * 200, &[i as u8; 200], ts(i as i64))
+            .unwrap();
         totals.absorb(vol.last_commit_stats().unwrap());
     }
     totals.wall_micros = start.elapsed().as_micros();
     let io = vol.device_mut().stats();
-    rows.push(WorkloadRow { name: "durable log append", logical_ops: appends, totals, io });
+    rows.push(WorkloadRow {
+        name: "durable log append",
+        logical_ops: appends,
+        totals,
+        io,
+    });
     let mut dev = vol.into_device().into_inner();
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "{:?}", report.errors);
@@ -336,9 +372,21 @@ fn fsync_workload_smoke() {
         let ops = row.logical_ops.max(1) as f64;
         let txs = row.totals.transactions.max(1) as f64;
         // Guard rails, not targets: silent cost regressions must fail here.
-        assert!(row.io.writes as f64 / ops < 30.0, "{}: writes per op exploded", row.name);
-        assert!(row.totals.commits.flushes as f64 / txs <= 3.0, "{}", row.name);
-        assert!(row.io.reads as f64 / ops < 60.0, "{}: reads per op exploded", row.name);
+        assert!(
+            row.io.writes as f64 / ops < 30.0,
+            "{}: writes per op exploded",
+            row.name
+        );
+        assert!(
+            row.totals.commits.flushes as f64 / txs <= 3.0,
+            "{}",
+            row.name
+        );
+        assert!(
+            row.io.reads as f64 / ops < 60.0,
+            "{}: reads per op exploded",
+            row.name
+        );
     }
 }
 

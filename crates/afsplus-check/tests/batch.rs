@@ -10,7 +10,10 @@ use afsplus_format::{Timespec, OBJECT_ROOT};
 const BS: usize = 4096;
 
 fn ts(seconds: i64) -> Timespec {
-    Timespec { seconds, nanoseconds: 0 }
+    Timespec {
+        seconds,
+        nanoseconds: 0,
+    }
 }
 
 fn formatted(total: u64) -> MemoryBackend {
@@ -44,8 +47,16 @@ fn batch_matches_the_equivalent_sequential_operations() {
     // Same operations, batched on one volume and sequential on its twin:
     // identical namespace and contents, but exactly one generation advance.
     let ops = [
-        BatchOp::CreateFile { parent_id: OBJECT_ROOT, name: "a", content: b"alpha" },
-        BatchOp::CreateFile { parent_id: OBJECT_ROOT, name: "b", content: b"beta" },
+        BatchOp::CreateFile {
+            parent_id: OBJECT_ROOT,
+            name: "a",
+            content: b"alpha",
+        },
+        BatchOp::CreateFile {
+            parent_id: OBJECT_ROOT,
+            name: "b",
+            content: b"beta",
+        },
         BatchOp::Rename {
             source_parent_id: OBJECT_ROOT,
             source_name: "a",
@@ -53,21 +64,38 @@ fn batch_matches_the_equivalent_sequential_operations() {
             target_name: "c",
             replace: false,
         },
-        BatchOp::DeleteFile { parent_id: OBJECT_ROOT, name: "b" },
-        BatchOp::CreateFile { parent_id: OBJECT_ROOT, name: "d", content: b"delta" },
+        BatchOp::DeleteFile {
+            parent_id: OBJECT_ROOT,
+            name: "b",
+        },
+        BatchOp::CreateFile {
+            parent_id: OBJECT_ROOT,
+            name: "d",
+            content: b"delta",
+        },
     ];
 
     let mut batched = mount(formatted(1024)).unwrap();
     let results = batched.run_batch(&ops, ts(1)).unwrap();
-    assert_eq!(batched.generation(), 2, "one checkpoint for the whole batch");
+    assert_eq!(
+        batched.generation(),
+        2,
+        "one checkpoint for the whole batch"
+    );
     assert_eq!(results.iter().filter(|r| r.is_some()).count(), 3);
 
     let mut sequential = mount(formatted(1024)).unwrap();
-    sequential.create_file_in_root("a", b"alpha", ts(1)).unwrap();
+    sequential
+        .create_file_in_root("a", b"alpha", ts(1))
+        .unwrap();
     sequential.create_file_in_root("b", b"beta", ts(1)).unwrap();
-    sequential.rename(OBJECT_ROOT, "a", OBJECT_ROOT, "c", ts(1)).unwrap();
+    sequential
+        .rename(OBJECT_ROOT, "a", OBJECT_ROOT, "c", ts(1))
+        .unwrap();
     sequential.delete_file_in_root("b", ts(1)).unwrap();
-    sequential.create_file_in_root("d", b"delta", ts(1)).unwrap();
+    sequential
+        .create_file_in_root("d", b"delta", ts(1))
+        .unwrap();
 
     assert_eq!(listing(&mut batched), listing(&mut sequential));
 
@@ -95,8 +123,15 @@ fn same_batch_create_and_delete_cancel_without_quarantine() {
                     name: "ephemeral",
                     content: &[7u8; 3 * BS],
                 },
-                BatchOp::CreateFile { parent_id: OBJECT_ROOT, name: "kept", content: b"stay" },
-                BatchOp::DeleteFile { parent_id: OBJECT_ROOT, name: "ephemeral" },
+                BatchOp::CreateFile {
+                    parent_id: OBJECT_ROOT,
+                    name: "kept",
+                    content: b"stay",
+                },
+                BatchOp::DeleteFile {
+                    parent_id: OBJECT_ROOT,
+                    name: "ephemeral",
+                },
             ],
             ts(1),
         )
@@ -120,22 +155,30 @@ fn same_batch_create_and_delete_cancel_without_quarantine() {
 #[test]
 fn rename_replace_swaps_content_atomically_and_quarantines_the_old_target() {
     let mut vol = mount(formatted(1024)).unwrap();
-    let old = vol.create_file_in_root("HEAD", &[0xAAu8; 2 * BS], ts(1)).unwrap();
+    let old = vol
+        .create_file_in_root("HEAD", &[0xAAu8; 2 * BS], ts(1))
+        .unwrap();
     let old_data = vol.stat(old).unwrap().unwrap().data_root;
-    vol.create_file_in_root("HEAD.lock", b"new ref", ts(2)).unwrap();
+    vol.create_file_in_root("HEAD.lock", b"new ref", ts(2))
+        .unwrap();
 
-    vol.rename_replace(OBJECT_ROOT, "HEAD.lock", OBJECT_ROOT, "HEAD", ts(3)).unwrap();
+    vol.rename_replace(OBJECT_ROOT, "HEAD.lock", OBJECT_ROOT, "HEAD", ts(3))
+        .unwrap();
     assert_eq!(vol.lookup_root("HEAD.lock").unwrap(), None);
     let head = vol.lookup_root("HEAD").unwrap().unwrap();
     assert_eq!(vol.read_file(head).unwrap(), b"new ref");
-    assert!(vol.quarantine_contains(old_data).unwrap(), "old content quarantined");
+    assert!(
+        vol.quarantine_contains(old_data).unwrap(),
+        "old content quarantined"
+    );
     assert!(vol.stat(old).unwrap().is_none(), "old object gone");
 
     // Replace of a multiply-linked file only drops one link.
     let kept = vol.create_file_in_root("shared", b"shared", ts(4)).unwrap();
     vol.link_file(kept, OBJECT_ROOT, "shared2", ts(5)).unwrap();
     vol.create_file_in_root("tmp", b"x", ts(6)).unwrap();
-    vol.rename_replace(OBJECT_ROOT, "tmp", OBJECT_ROOT, "shared", ts(7)).unwrap();
+    vol.rename_replace(OBJECT_ROOT, "tmp", OBJECT_ROOT, "shared", ts(7))
+        .unwrap();
     assert_eq!(vol.stat(kept).unwrap().unwrap().link_count, 1);
     assert_eq!(vol.read_file(kept).unwrap(), b"shared");
 
@@ -151,23 +194,47 @@ fn failing_operation_aborts_the_whole_batch() {
     let error = vol
         .run_batch(
             &[
-                BatchOp::CreateFile { parent_id: OBJECT_ROOT, name: "fresh", content: b"y" },
-                BatchOp::CreateFile { parent_id: OBJECT_ROOT, name: "existing", content: b"z" },
+                BatchOp::CreateFile {
+                    parent_id: OBJECT_ROOT,
+                    name: "fresh",
+                    content: b"y",
+                },
+                BatchOp::CreateFile {
+                    parent_id: OBJECT_ROOT,
+                    name: "existing",
+                    content: b"z",
+                },
             ],
             ts(2),
         )
         .unwrap_err();
     assert!(matches!(error, CoreError::AlreadyExists));
     assert_eq!(vol.generation(), 2, "failed batch must not advance state");
-    assert_eq!(vol.lookup_root("fresh").unwrap(), None, "no partial visibility");
+    assert_eq!(
+        vol.lookup_root("fresh").unwrap(),
+        None,
+        "no partial visibility"
+    );
 
     // Transient device fault mid-batch: nothing commits, retry succeeds.
     let dev = vol.into_device();
-    let plan = FaultPlan { fail_write_index: Some(4), fail_flush_index: None, fail_hard: false };
+    let plan = FaultPlan {
+        fail_write_index: Some(4),
+        fail_flush_index: None,
+        fail_hard: false,
+    };
     let mut vol = mount(FaultBackend::new(dev, plan)).unwrap();
     let ops = [
-        BatchOp::CreateFile { parent_id: OBJECT_ROOT, name: "one", content: b"1" },
-        BatchOp::CreateFile { parent_id: OBJECT_ROOT, name: "two", content: b"2" },
+        BatchOp::CreateFile {
+            parent_id: OBJECT_ROOT,
+            name: "one",
+            content: b"1",
+        },
+        BatchOp::CreateFile {
+            parent_id: OBJECT_ROOT,
+            name: "two",
+            content: b"2",
+        },
     ];
     assert!(vol.run_batch(&ops, ts(3)).is_err());
     assert_eq!(vol.lookup_root("one").unwrap(), None);
@@ -187,7 +254,8 @@ fn every_crash_state_of_a_ref_update_batch_is_all_or_nothing() {
     // a torn mixture of old and new content.
     let base = {
         let mut vol = mount(formatted(1024)).unwrap();
-        vol.create_file_in_root("HEAD", &[0x01u8; 2000], ts(1)).unwrap();
+        vol.create_file_in_root("HEAD", &[0x01u8; 2000], ts(1))
+            .unwrap();
         vol.into_device()
     };
     let pre_generation = mount(base.clone()).unwrap().generation();
@@ -254,7 +322,11 @@ fn a_large_batch_is_one_generation_and_bounded() {
     let names: Vec<String> = (0..256).map(|i| format!("pkg-{i:04}")).collect();
     let ops: Vec<BatchOp<'_>> = names
         .iter()
-        .map(|name| BatchOp::CreateFile { parent_id: OBJECT_ROOT, name, content: b"payload" })
+        .map(|name| BatchOp::CreateFile {
+            parent_id: OBJECT_ROOT,
+            name,
+            content: b"payload",
+        })
         .collect();
     vol.run_batch(&ops, ts(1)).unwrap();
     assert_eq!(vol.generation(), 2);
@@ -269,7 +341,10 @@ fn a_large_batch_is_one_generation_and_bounded() {
 
     // Bound enforcement.
     let too_many: Vec<BatchOp<'_>> = (0..1025)
-        .map(|_| BatchOp::DeleteFile { parent_id: OBJECT_ROOT, name: "pkg-0000" })
+        .map(|_| BatchOp::DeleteFile {
+            parent_id: OBJECT_ROOT,
+            name: "pkg-0000",
+        })
         .collect();
     assert!(matches!(
         vol.run_batch(&too_many, ts(2)),

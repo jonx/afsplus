@@ -18,7 +18,11 @@ const fn build_table() -> [u32; 256] {
         let mut crc = i as u32;
         let mut bit = 0;
         while bit < 8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ POLY_REFLECTED } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ POLY_REFLECTED
+            } else {
+                crc >> 1
+            };
             bit += 1;
         }
         table[i] = crc;

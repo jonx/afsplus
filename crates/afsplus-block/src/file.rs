@@ -20,8 +20,17 @@ pub struct FileBackend {
 impl FileBackend {
     /// Creates or truncates an image file with the given geometry.
     pub fn create(path: &Path, block_size: usize, total_blocks: u64) -> Result<Self, BlockError> {
-        let file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path)?;
-        Ok(FileBackend { file, block_size, total_blocks })
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        Ok(FileBackend {
+            file,
+            block_size,
+            total_blocks,
+        })
     }
 
     /// Opens an existing image read/write with an explicit geometry.
@@ -30,7 +39,11 @@ impl FileBackend {
     /// tail of a sparse image reads as zeros.
     pub fn open(path: &Path, block_size: usize, total_blocks: u64) -> Result<Self, BlockError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
-        Ok(FileBackend { file, block_size, total_blocks })
+        Ok(FileBackend {
+            file,
+            block_size,
+            total_blocks,
+        })
     }
 
     /// Opens an existing image, deriving a provisional geometry from the file
@@ -40,7 +53,11 @@ impl FileBackend {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let len = file.metadata()?.len();
         let total_blocks = len.div_ceil(block_size as u64).max(1);
-        Ok(FileBackend { file, block_size, total_blocks })
+        Ok(FileBackend {
+            file,
+            block_size,
+            total_blocks,
+        })
     }
 
     pub fn set_total_blocks(&mut self, total_blocks: u64) {
@@ -59,7 +76,8 @@ impl BlockDevice for FileBackend {
 
     fn read_block(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         check_access(lba, self.total_blocks, buf.len(), self.block_size)?;
-        self.file.seek(SeekFrom::Start(lba * self.block_size as u64))?;
+        self.file
+            .seek(SeekFrom::Start(lba * self.block_size as u64))?;
         // Short reads at EOF are zero-filled: sparse tail semantics.
         let mut filled = 0;
         while filled < buf.len() {
@@ -75,7 +93,8 @@ impl BlockDevice for FileBackend {
 
     fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
         check_access(lba, self.total_blocks, data.len(), self.block_size)?;
-        self.file.seek(SeekFrom::Start(lba * self.block_size as u64))?;
+        self.file
+            .seek(SeekFrom::Start(lba * self.block_size as u64))?;
         self.file.write_all(data)?;
         Ok(())
     }

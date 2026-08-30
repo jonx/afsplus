@@ -22,8 +22,14 @@ fn memory_backend_zero_fill_and_bounds() {
     dev.write_block(3, &block(0x55)).unwrap();
     dev.read_block(3, &mut buf).unwrap();
     assert_eq!(buf, block(0x55));
-    assert!(matches!(dev.read_block(8, &mut buf), Err(BlockError::OutOfBounds { .. })));
-    assert!(matches!(dev.write_block(2, &[0u8; 100]), Err(BlockError::WrongBufferSize { .. })));
+    assert!(matches!(
+        dev.read_block(8, &mut buf),
+        Err(BlockError::OutOfBounds { .. })
+    ));
+    assert!(matches!(
+        dev.write_block(2, &[0u8; 100]),
+        Err(BlockError::WrongBufferSize { .. })
+    ));
 }
 
 #[test]
@@ -176,10 +182,17 @@ fn write_led_sink_can_filter_reads_before_emission() {
 
 #[test]
 fn fault_backend_fails_exactly_the_planned_write() {
-    let plan = FaultPlan { fail_write_index: Some(1), fail_flush_index: None, fail_hard: true };
+    let plan = FaultPlan {
+        fail_write_index: Some(1),
+        fail_flush_index: None,
+        fail_hard: true,
+    };
     let mut dev = FaultBackend::new(MemoryBackend::new(BS, 8), plan);
     dev.write_block(1, &block(1)).unwrap();
-    assert!(matches!(dev.write_block(2, &block(2)), Err(BlockError::Injected(_))));
+    assert!(matches!(
+        dev.write_block(2, &block(2)),
+        Err(BlockError::Injected(_))
+    ));
     assert!(dev.tripped());
     // fail_hard: the device is gone afterwards.
     assert!(matches!(dev.flush(), Err(BlockError::Injected(_))));
@@ -214,7 +227,10 @@ fn crash_states_respect_flush_barrier() {
             saw_3_without_2 = true;
         }
     }
-    assert!(saw_2_without_3, "subset enumeration must cover in-order loss");
+    assert!(
+        saw_2_without_3,
+        "subset enumeration must cover in-order loss"
+    );
     assert!(saw_3_without_2, "subset enumeration must cover reordering");
 
     // Crash before anything: exactly the base image.
@@ -224,7 +240,10 @@ fn crash_states_respect_flush_barrier() {
 
     // A torn state must mix new and old bytes in one block.
     let states = crash_states(&base, &log, 4);
-    let torn = states.iter().find(|s| s.description.contains("torn")).unwrap();
+    let torn = states
+        .iter()
+        .find(|s| s.description.contains("torn"))
+        .unwrap();
     let torn_block = [torn.image.peek(2), torn.image.peek(3)]
         .into_iter()
         .find(|b| *b != block(0) && *b != block(2) && *b != block(3));

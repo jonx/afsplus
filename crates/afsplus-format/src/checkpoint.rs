@@ -80,7 +80,9 @@ pub struct Checkpoint {
 impl Checkpoint {
     pub fn encode(&self, block_size: usize) -> Result<Vec<u8>, FormatError> {
         if self.generation == 0 {
-            return Err(FormatError::Invalid("checkpoint generation must be nonzero"));
+            return Err(FormatError::Invalid(
+                "checkpoint generation must be nonzero",
+            ));
         }
         if self.root_object_id != OBJECT_ROOT {
             return Err(FormatError::Invalid("root object ID is invalid"));
@@ -92,7 +94,9 @@ impl Checkpoint {
         }
         let payload_len = FIXED_PAYLOAD + self.regions.len() * REGION_RECORD_SIZE;
         if payload_len > block_size - HEADER_SIZE {
-            return Err(FormatError::Overflow("too many regions for one checkpoint block"));
+            return Err(FormatError::Overflow(
+                "too many regions for one checkpoint block",
+            ));
         }
 
         let mut block = vec![0u8; block_size];
@@ -112,7 +116,10 @@ impl Checkpoint {
             let offset = FIXED_PAYLOAD + i * REGION_RECORD_SIZE;
             p[offset] = record.descriptor_slot;
             le::put_u32(&mut p[offset + 4..offset + 8], record.free_blocks);
-            le::put_u64(&mut p[offset + 8..offset + 16], record.descriptor_generation);
+            le::put_u64(
+                &mut p[offset + 8..offset + 16],
+                record.descriptor_generation,
+            );
         }
 
         BlockHeader {
@@ -140,15 +147,21 @@ impl Checkpoint {
         let mut uuid = [0u8; 16];
         uuid.copy_from_slice(&p[0..16]);
         if &uuid != expected_uuid {
-            return Err(FormatError::Invalid("checkpoint UUID does not match volume"));
+            return Err(FormatError::Invalid(
+                "checkpoint UUID does not match volume",
+            ));
         }
         let generation = le::get_u64(&p[16..24]);
         if generation == 0 || generation != header.generation {
-            return Err(FormatError::Invalid("checkpoint generation invalid or inconsistent"));
+            return Err(FormatError::Invalid(
+                "checkpoint generation invalid or inconsistent",
+            ));
         }
         let region_count = le::get_u32(&p[88..92]) as usize;
         if region_count > (p.len() - FIXED_PAYLOAD) / REGION_RECORD_SIZE {
-            return Err(FormatError::Invalid("checkpoint region count exceeds payload"));
+            return Err(FormatError::Invalid(
+                "checkpoint region count exceeds payload",
+            ));
         }
         if header.payload_len as usize != FIXED_PAYLOAD + region_count * REGION_RECORD_SIZE {
             return Err(FormatError::Invalid("checkpoint payload length mismatch"));
@@ -203,7 +216,9 @@ impl Checkpoint {
                     ));
                 }
                 if record.free_blocks > geo.region_valid_blocks(i as u32) {
-                    return Err(FormatError::Invalid("region free count exceeds region size"));
+                    return Err(FormatError::Invalid(
+                        "region free count exceeds region size",
+                    ));
                 }
                 free_total = free_total
                     .checked_add(record.free_blocks as u64)
@@ -232,10 +247,14 @@ impl Checkpoint {
             }
         }
         if !geo.is_allocatable(self.object_map_block) {
-            return Err(FormatError::Invalid("object map block out of allocatable bounds"));
+            return Err(FormatError::Invalid(
+                "object map block out of allocatable bounds",
+            ));
         }
         if !geo.is_allocatable(self.reclaim_root_block) {
-            return Err(FormatError::Invalid("reclaim root block out of allocatable bounds"));
+            return Err(FormatError::Invalid(
+                "reclaim root block out of allocatable bounds",
+            ));
         }
         if self.next_object_id < OBJECT_FIRST_DYNAMIC {
             return Err(FormatError::Invalid("next object ID below dynamic range"));

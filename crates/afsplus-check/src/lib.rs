@@ -17,10 +17,10 @@
 //! stricter than normal mounts; this prototype checker is verify-only).
 
 use afsplus_block::BlockDevice;
-use afsplus_format::ident::Identification;
 use afsplus_core::mount::select_checkpoint;
 use afsplus_core::verify::{full_sweep, load_committed_state};
 use afsplus_core::CoreError;
+use afsplus_format::ident::Identification;
 
 /// Versioned structured-output schema (ADR-025).
 pub const REPORT_SCHEMA_VERSION: u32 = 3;
@@ -86,7 +86,11 @@ impl CheckReport {
         for e in &self.errors {
             out.push_str(&format!("error: {e}\n"));
         }
-        out.push_str(if self.is_clean() { "clean\n" } else { "NOT CLEAN\n" });
+        out.push_str(if self.is_clean() {
+            "clean\n"
+        } else {
+            "NOT CLEAN\n"
+        });
         out
     }
 
@@ -135,16 +139,35 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
     let mut buf = vec![0u8; block_size];
 
     if let Err(e) = dev.read_block(0, &mut buf) {
-        report.errors.push(format!("cannot read identification block: {e}"));
+        report
+            .errors
+            .push(format!("cannot read identification block: {e}"));
         return report;
     }
     let ident = match Identification::decode(&buf) {
         Ok(ident) => ident,
         Err(e) => {
-            report.errors.push(format!("identification block invalid: {e}"));
+            report
+                .errors
+                .push(format!("identification block invalid: {e}"));
             return report;
         }
     };
+    let unknown_incompat =
+        ident.features.incompat & !afsplus_core::mount::SUPPORTED_INCOMPAT_FEATURES;
+    if unknown_incompat != 0 {
+        report.errors.push(format!(
+            "unsupported incompatible filesystem features: {unknown_incompat:#018x}"
+        ));
+        return report;
+    }
+    let unknown_ro_compat =
+        ident.features.ro_compat & !afsplus_core::mount::SUPPORTED_RO_COMPAT_FEATURES;
+    if unknown_ro_compat != 0 {
+        report.warnings.push(format!(
+            "unknown read-only-compatible filesystem features: {unknown_ro_compat:#018x}"
+        ));
+    }
     if ident.total_blocks > dev.total_blocks() {
         report.errors.push(format!(
             "identification declares {} blocks but device has {}",
@@ -195,9 +218,7 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
                     }
                     for record in &scanned.records {
                         for op in &record.ops {
-                            let afsplus_format::intent_log::LogOp::Create {
-                                extents, ..
-                            } = op
+                            let afsplus_format::intent_log::LogOp::Create { extents, .. } = op
                             else {
                                 continue;
                             };

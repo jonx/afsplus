@@ -23,7 +23,10 @@ fn formatted() -> MemoryBackend {
             region_size: 64,
             reclaim_caps: Default::default(),
             log_slots: 8,
-            timestamp: Timespec { seconds: 1_780_000_000, nanoseconds: 0 },
+            timestamp: Timespec {
+                seconds: 1_780_000_000,
+                nanoseconds: 0,
+            },
         },
     )
     .unwrap();
@@ -31,7 +34,10 @@ fn formatted() -> MemoryBackend {
 }
 
 fn ts(seconds: i64) -> Timespec {
-    Timespec { seconds, nanoseconds: 0 }
+    Timespec {
+        seconds,
+        nanoseconds: 0,
+    }
 }
 
 fn read_ident(dev: &MemoryBackend) -> Identification {
@@ -72,7 +78,11 @@ fn allocator_descriptor_and_page_corruption_are_deferred_but_never_accepted() {
             vol.create_file_in_root("probe", b"", ts(1)),
             Err(CoreError::Corrupt(_))
         ));
-        assert_eq!(vol.generation(), 1, "failed mutation changed committed state");
+        assert_eq!(
+            vol.generation(),
+            1,
+            "failed mutation changed committed state"
+        );
     }
 }
 
@@ -119,13 +129,19 @@ fn corrupt_state_under_the_chosen_checkpoint_is_an_error_not_a_fallback() {
     let report = check_device(&mut dev);
     assert!(!report.is_clean(), "checker must not accept the volume");
     assert!(
-        report.errors.iter().any(|e| e.contains("references invalid state")),
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("references invalid state")),
         "unexpected findings: {:?}",
         report.errors
     );
     match mount(dev) {
         Err(CoreError::Corrupt(message)) => {
-            assert!(message.contains("generation 2"), "unhelpful diagnostics: {message}");
+            assert!(
+                message.contains("generation 2"),
+                "unhelpful diagnostics: {message}"
+            );
         }
         Err(e) => panic!("mount must report corruption, got: {e}"),
         Ok(vol) => panic!(
@@ -164,7 +180,10 @@ fn corrupt_descendant_is_reported_on_access_without_a_mount_scan() {
     assert!(matches!(vol.stat(id), Err(CoreError::Corrupt(_))));
 
     let report = check_device(&mut dev);
-    assert!(!report.is_clean(), "full checker must find the damaged descendant");
+    assert!(
+        !report.is_clean(),
+        "full checker must find the damaged descendant"
+    );
 }
 
 #[test]
@@ -216,7 +235,11 @@ fn generation_counter_overflow_is_reported_not_wrapped() {
         }
         other => panic!("expected a reported overflow, got {other:?}"),
     }
-    assert_eq!(vol.generation(), u64::MAX, "failed commit must not change state");
+    assert_eq!(
+        vol.generation(),
+        u64::MAX,
+        "failed commit must not change state"
+    );
 }
 
 #[test]

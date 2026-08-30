@@ -16,7 +16,7 @@
 //! 16     8    base checkpoint generation (mirror)
 //! 24     4    sequence (slot index + 1)
 //! 28     2    operation count
-//! 30     2    reserved
+//! 30     2    record version (2; zero denotes the legacy prototype)
 //! 32     ...  operations
 //! ```
 //!
@@ -35,7 +35,9 @@
 //! 32     8    content size in bytes (create)
 //! 40     4    content CRC32C (create)
 //! 44     4    reserved
-//! 48     ...  extents: (start u64, blocks u32) × count, then source name,
+//! 48     12   operation timestamp (seconds i64, nanoseconds u32)
+//! 60     4    reserved
+//! 64     ...  extents: (start u64, blocks u32) × count, then source name,
 //!             then target name
 //! ```
 
@@ -43,11 +45,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::header::{block_type, BlockHeader, HEADER_SIZE};
-use crate::{le, validate_name, FormatError};
+use crate::{le, validate_name, FormatError, Timespec};
 
 const FIXED_PAYLOAD: usize = 32;
-const OP_FIXED: usize = 48;
+const LEGACY_OP_FIXED: usize = 48;
+const OP_FIXED: usize = 64;
 const EXTENT_WIRE: usize = 12;
+const LOG_RECORD_VERSION: u16 = 2;
 
 /// Extents per logged create; larger fsynced creates are a reported limit.
 pub const MAX_LOG_EXTENTS: usize = 16;
@@ -62,12 +66,14 @@ pub enum LogOp {
         expected_object_id: u64,
         size_bytes: u64,
         content_crc: u32,
+        timestamp: Timespec,
         /// (physical start, blocks); the data was written before the record.
         extents: Vec<(u64, u32)>,
     },
     Delete {
         parent_id: u64,
         name: Vec<u8>,
+        timestamp: Timespec,
     },
     Rename {
         source_parent_id: u64,
@@ -75,23 +81,44 @@ pub enum LogOp {
         target_parent_id: u64,
         target_name: Vec<u8>,
         replace: bool,
+        timestamp: Timespec,
     },
 }
 
 impl LogOp {
-    fn wire_len(&self) -> usize {
+    fn wire_len_with_fixed(&self, fixed: usize) -> usize {
         match self {
-            LogOp::Create { name, extents, .. } => OP_FIXED + extents.len() * EXTENT_WIRE + name.len(),
-            LogOp::Delete { name, .. } => OP_FIXED + name.len(),
-            LogOp::Rename { source_name, target_name, .. } => {
-                OP_FIXED + source_name.len() + target_name.len()
-            }
+            LogOp::Create { name, extents, .. } => fixed + extents.len() * EXTENT_WIRE + name.len(),
+            LogOp::Delete { name, .. } => fixed + name.len(),
+            LogOp::Rename {
+                source_name,
+                target_name,
+                ..
+            } => fixed + source_name.len() + target_name.len(),
+        }
+    }
+
+    fn wire_len(&self) -> usize {
+        self.wire_len_with_fixed(OP_FIXED)
+    }
+
+    pub fn timestamp(&self) -> Timespec {
+        match self {
+            LogOp::Create { timestamp, .. }
+            | LogOp::Delete { timestamp, .. }
+            | LogOp::Rename { timestamp, .. } => *timestamp,
         }
     }
 
     fn validate(&self) -> Result<(), FormatError> {
         match self {
-            LogOp::Create { name, extents, expected_object_id, size_bytes, .. } => {
+            LogOp::Create {
+                name,
+                extents,
+                expected_object_id,
+                size_bytes,
+                ..
+            } => {
                 validate_name(name)?;
                 if *expected_object_id == 0 {
                     return Err(FormatError::Invalid("logged create without object ID"));
@@ -115,12 +142,18 @@ impl LogOp {
                     || (!extents.is_empty()
                         && (*size_bytes == 0 || size_bytes.div_ceil(4096) > total))
                 {
-                    return Err(FormatError::Invalid("logged size inconsistent with extents"));
+                    return Err(FormatError::Invalid(
+                        "logged size inconsistent with extents",
+                    ));
                 }
                 Ok(())
             }
             LogOp::Delete { name, .. } => validate_name(name),
-            LogOp::Rename { source_name, target_name, .. } => {
+            LogOp::Rename {
+                source_name,
+                target_name,
+                ..
+            } => {
                 validate_name(source_name)?;
                 validate_name(target_name)
             }
@@ -139,13 +172,14 @@ pub struct LogRecord {
 impl LogRecord {
     pub fn encode(&self, block_size: usize) -> Result<Vec<u8>, FormatError> {
         if self.ops.is_empty() || self.ops.len() > MAX_LOG_OPS {
-            return Err(FormatError::Invalid("log record operation count out of range"));
+            return Err(FormatError::Invalid(
+                "log record operation count out of range",
+            ));
         }
         if self.sequence == 0 || self.base_generation == 0 {
             return Err(FormatError::Invalid("log record binding out of range"));
         }
-        let payload_len =
-            FIXED_PAYLOAD + self.ops.iter().map(LogOp::wire_len).sum::<usize>();
+        let payload_len = FIXED_PAYLOAD + self.ops.iter().map(LogOp::wire_len).sum::<usize>();
         if payload_len > block_size - HEADER_SIZE {
             return Err(FormatError::Overflow("fsync group exceeds one log record"));
         }
@@ -155,6 +189,7 @@ impl LogRecord {
         le::put_u64(&mut p[16..24], self.base_generation);
         le::put_u32(&mut p[24..28], self.sequence);
         le::put_u16(&mut p[28..30], self.ops.len() as u16);
+        le::put_u16(&mut p[30..32], LOG_RECORD_VERSION);
         let mut offset = FIXED_PAYLOAD;
         for op in &self.ops {
             op.validate()?;
@@ -167,6 +202,7 @@ impl LogRecord {
                     size_bytes,
                     content_crc,
                     extents,
+                    timestamp,
                 } => {
                     entry[0] = 1;
                     le::put_u16(&mut entry[2..4], name.len() as u16);
@@ -175,6 +211,7 @@ impl LogRecord {
                     le::put_u64(&mut entry[24..32], *expected_object_id);
                     le::put_u64(&mut entry[32..40], *size_bytes);
                     le::put_u32(&mut entry[40..44], *content_crc);
+                    timestamp.write(&mut entry[48..60]);
                     let mut at = OP_FIXED;
                     for (start, blocks) in extents {
                         le::put_u64(&mut entry[at..at + 8], *start);
@@ -183,10 +220,15 @@ impl LogRecord {
                     }
                     entry[at..at + name.len()].copy_from_slice(name);
                 }
-                LogOp::Delete { parent_id, name } => {
+                LogOp::Delete {
+                    parent_id,
+                    name,
+                    timestamp,
+                } => {
                     entry[0] = 2;
                     le::put_u16(&mut entry[2..4], name.len() as u16);
                     le::put_u64(&mut entry[8..16], *parent_id);
+                    timestamp.write(&mut entry[48..60]);
                     entry[OP_FIXED..OP_FIXED + name.len()].copy_from_slice(name);
                 }
                 LogOp::Rename {
@@ -195,6 +237,7 @@ impl LogRecord {
                     target_parent_id,
                     target_name,
                     replace,
+                    timestamp,
                 } => {
                     entry[0] = 3;
                     entry[1] = u8::from(*replace);
@@ -202,6 +245,7 @@ impl LogRecord {
                     le::put_u16(&mut entry[4..6], target_name.len() as u16);
                     le::put_u64(&mut entry[8..16], *source_parent_id);
                     le::put_u64(&mut entry[16..24], *target_parent_id);
+                    timestamp.write(&mut entry[48..60]);
                     let mut at = OP_FIXED;
                     entry[at..at + source_name.len()].copy_from_slice(source_name);
                     at += source_name.len();
@@ -240,12 +284,24 @@ impl LogRecord {
         }
         let op_count = le::get_u16(&p[28..30]) as usize;
         if op_count == 0 || op_count > MAX_LOG_OPS {
-            return Err(FormatError::Invalid("log record operation count out of range"));
+            return Err(FormatError::Invalid(
+                "log record operation count out of range",
+            ));
         }
+        let record_version = le::get_u16(&p[30..32]);
+        let op_fixed = match record_version {
+            0 => LEGACY_OP_FIXED,
+            LOG_RECORD_VERSION => OP_FIXED,
+            _ => {
+                return Err(FormatError::Invalid(
+                    "unsupported intent-log record version",
+                ))
+            }
+        };
         let mut ops = Vec::with_capacity(op_count);
         let mut offset = FIXED_PAYLOAD;
         for _ in 0..op_count {
-            if p.len() - offset < OP_FIXED {
+            if p.len() - offset < op_fixed {
                 return Err(FormatError::Invalid("truncated log operation"));
             }
             let entry = &p[offset..];
@@ -262,13 +318,18 @@ impl LogRecord {
                 3 => source_len + target_len,
                 _ => return Err(FormatError::Invalid("unknown log operation type")),
             };
-            if p.len() - offset - OP_FIXED < variable {
+            if p.len() - offset - op_fixed < variable {
                 return Err(FormatError::Invalid("log operation exceeds payload"));
             }
+            let timestamp = if record_version == LOG_RECORD_VERSION {
+                Timespec::read(&entry[48..60])?
+            } else {
+                Timespec::default()
+            };
             let op = match op_type {
                 1 => {
                     let mut extents = Vec::with_capacity(extent_count);
-                    let mut at = OP_FIXED;
+                    let mut at = op_fixed;
                     for _ in 0..extent_count {
                         extents.push((
                             le::get_u64(&entry[at..at + 8]),
@@ -283,31 +344,39 @@ impl LogRecord {
                         size_bytes: le::get_u64(&entry[32..40]),
                         content_crc: le::get_u32(&entry[40..44]),
                         extents,
+                        timestamp,
                     }
                 }
                 2 => LogOp::Delete {
                     parent_id: le::get_u64(&entry[8..16]),
-                    name: entry[OP_FIXED..OP_FIXED + source_len].to_vec(),
+                    name: entry[op_fixed..op_fixed + source_len].to_vec(),
+                    timestamp,
                 },
                 3 => {
-                    let at = OP_FIXED;
+                    let at = op_fixed;
                     LogOp::Rename {
                         source_parent_id: le::get_u64(&entry[8..16]),
                         source_name: entry[at..at + source_len].to_vec(),
                         target_parent_id: le::get_u64(&entry[16..24]),
                         target_name: entry[at + source_len..at + source_len + target_len].to_vec(),
                         replace: entry[1] != 0,
+                        timestamp,
                     }
                 }
                 _ => unreachable!("validated above"),
             };
             op.validate()?;
-            offset += op.wire_len();
+            offset += op.wire_len_with_fixed(op_fixed);
             ops.push(op);
         }
         if offset != header.payload_len as usize {
             return Err(FormatError::Invalid("log record payload length mismatch"));
         }
-        Ok(LogRecord { uuid, base_generation, sequence, ops })
+        Ok(LogRecord {
+            uuid,
+            base_generation,
+            sequence,
+            ops,
+        })
     }
 }

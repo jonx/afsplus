@@ -24,6 +24,9 @@
 //! 64     8    first general-allocation LBA (after region 0's reserved head)
 //! 72     1    label length in bytes
 //! 73     64   label (UTF-8, zero padded)
+//! 137    8    COMPAT feature bits
+//! 145    8    RO_COMPAT feature bits
+//! 153    8    INCOMPAT feature bits
 //! ```
 
 use alloc::string::String;
@@ -35,10 +38,23 @@ use crate::geometry::Geometry;
 use crate::header::{block_type, BlockHeader, HEADER_SIZE};
 use crate::{le, FormatError, DEFAULT_BLOCK_SHIFT, FORMAT_EPOCH, FS_MAGIC};
 
-pub const IDENT_VERSION: u32 = 1;
+pub const IDENT_VERSION: u32 = 2;
+pub const IDENT_VERSION_LEGACY: u32 = 1;
 pub const LABEL_MAX_BYTES: usize = 64;
+/// The intent-log area and its replay semantics must be understood by every
+/// implementation that opens the volume (ADR-037).
+pub const INCOMPAT_INTENT_LOG: u64 = 1 << 0;
 
-const PAYLOAD_LEN: usize = 73 + LABEL_MAX_BYTES;
+const LEGACY_PAYLOAD_LEN: usize = 73 + LABEL_MAX_BYTES;
+const PAYLOAD_LEN: usize = LEGACY_PAYLOAD_LEN + 3 * 8;
+
+/// Compact feature summary carried by the immutable identification block.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FeatureFlags {
+    pub compat: u64,
+    pub ro_compat: u64,
+    pub incompat: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identification {
@@ -48,6 +64,7 @@ pub struct Identification {
     pub region_size: u32,
     /// Reserved intent-log slots after the allocation-root pool (ADR-037).
     pub log_slots: u16,
+    pub features: FeatureFlags,
     pub total_blocks: u64,
     pub checkpoint_slots: [u64; 2],
     pub metadata_start: u64,
@@ -72,7 +89,10 @@ impl Identification {
             return Err(FormatError::Invalid("prototype supports only 4 KiB blocks"));
         }
         if block_size != self.block_size() {
-            return Err(FormatError::WrongBufferSize { expected: self.block_size(), actual: block_size });
+            return Err(FormatError::WrongBufferSize {
+                expected: self.block_size(),
+                actual: block_size,
+            });
         }
         let label = self.label.as_bytes();
         if label.len() > LABEL_MAX_BYTES {
@@ -96,6 +116,9 @@ impl Identification {
         le::put_u64(&mut p[64..72], self.metadata_start);
         p[72] = label.len() as u8;
         p[73..73 + label.len()].copy_from_slice(label);
+        le::put_u64(&mut p[137..145], self.features.compat);
+        le::put_u64(&mut p[145..153], self.features.ro_compat);
+        le::put_u64(&mut p[153..161], self.features.incompat);
 
         BlockHeader {
             block_type: block_type::IDENTIFICATION,
@@ -111,7 +134,7 @@ impl Identification {
     pub fn decode(block: &[u8]) -> Result<Identification, FormatError> {
         let header = BlockHeader::verify(block, block_type::IDENTIFICATION)?;
         let p = header.payload(block);
-        if p.len() < PAYLOAD_LEN {
+        if p.len() < LEGACY_PAYLOAD_LEN {
             return Err(FormatError::Invalid("identification payload too short"));
         }
         if le::get_u64(&p[0..8]) != FS_MAGIC {
@@ -122,8 +145,13 @@ impl Identification {
             return Err(FormatError::Invalid("unsupported format epoch"));
         }
         let version = le::get_u32(&p[12..16]);
-        if version != IDENT_VERSION {
+        if version != IDENT_VERSION && version != IDENT_VERSION_LEGACY {
             return Err(FormatError::Invalid("unsupported identification version"));
+        }
+        if version == IDENT_VERSION && p.len() < PAYLOAD_LEN {
+            return Err(FormatError::Invalid(
+                "identification feature summary is truncated",
+            ));
         }
         let mut uuid = [0u8; 16];
         uuid.copy_from_slice(&p[16..32]);
@@ -136,13 +164,29 @@ impl Identification {
             return Err(FormatError::Invalid("unsupported checksum algorithm"));
         }
         let log_slots = le::get_u16(&p[34..36]);
+        let features = if version == IDENT_VERSION {
+            FeatureFlags {
+                compat: le::get_u64(&p[137..145]),
+                ro_compat: le::get_u64(&p[145..153]),
+                incompat: le::get_u64(&p[153..161]),
+            }
+        } else {
+            FeatureFlags {
+                incompat: if log_slots > 0 {
+                    INCOMPAT_INTENT_LOG
+                } else {
+                    0
+                },
+                ..FeatureFlags::default()
+            }
+        };
         let region_size = le::get_u32(&p[36..40]);
         let label_len = p[72] as usize;
         if label_len > LABEL_MAX_BYTES {
             return Err(FormatError::Invalid("label length out of range"));
         }
-        let label = core::str::from_utf8(&p[73..73 + label_len])
-            .map_err(|_| FormatError::InvalidUtf8)?;
+        let label =
+            core::str::from_utf8(&p[73..73 + label_len]).map_err(|_| FormatError::InvalidUtf8)?;
 
         let ident = Identification {
             uuid,
@@ -150,6 +194,7 @@ impl Identification {
             checksum_algorithm,
             region_size,
             log_slots,
+            features,
             total_blocks: le::get_u64(&p[40..48]),
             checkpoint_slots: [le::get_u64(&p[48..56]), le::get_u64(&p[56..64])],
             metadata_start: le::get_u64(&p[64..72]),
@@ -162,14 +207,31 @@ impl Identification {
     /// Bounds-first geometry validation shared by encode and decode.
     fn validate_geometry(&self) -> Result<(), FormatError> {
         self.geometry().validate()?;
+        if self.features.compat & self.features.ro_compat != 0
+            || self.features.compat & self.features.incompat != 0
+            || self.features.ro_compat & self.features.incompat != 0
+        {
+            return Err(FormatError::Invalid(
+                "feature bit appears in multiple classes",
+            ));
+        }
+        if (self.log_slots > 0) != (self.features.incompat & INCOMPAT_INTENT_LOG != 0) {
+            return Err(FormatError::Invalid(
+                "intent-log slots and incompatible feature bit disagree",
+            ));
+        }
         // The prototype pins the reserved layout: ident at 0, checkpoint
         // slots at 1 and 2, general allocation from the end of region 0's
         // reserved head.
         if self.checkpoint_slots != [1, 2] {
-            return Err(FormatError::Invalid("prototype requires checkpoint slots at LBA 1 and 2"));
+            return Err(FormatError::Invalid(
+                "prototype requires checkpoint slots at LBA 1 and 2",
+            ));
         }
         if self.metadata_start != self.geometry().region0_reserved_blocks() {
-            return Err(FormatError::Invalid("metadata start does not match reserved layout"));
+            return Err(FormatError::Invalid(
+                "metadata start does not match reserved layout",
+            ));
         }
         Ok(())
     }

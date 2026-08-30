@@ -22,7 +22,9 @@ struct afsp_block_ops {
 enum afsp_open_mode {
     AFSP_OPEN_RW,
     AFSP_OPEN_READ_ONLY,
+    /* Strict forensic open: no replay, repair, flush, or media write. */
     AFSP_OPEN_NO_CHANGES,
+    /* Replay mandatory recovery during open, then expose a read-only view. */
     AFSP_OPEN_RECOVERY
 };
 

@@ -86,7 +86,10 @@ impl BlockHeader {
     /// the block must not be interpreted further.
     pub fn verify(block: &[u8], expected_type: u32) -> Result<BlockHeader, FormatError> {
         if block.len() < HEADER_SIZE {
-            return Err(FormatError::WrongBufferSize { expected: HEADER_SIZE, actual: block.len() });
+            return Err(FormatError::WrongBufferSize {
+                expected: HEADER_SIZE,
+                actual: block.len(),
+            });
         }
         // Checksum first: no field of a corrupted block is trustworthy.
         let stored = le::get_u32(&block[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4]);
@@ -101,7 +104,10 @@ impl BlockHeader {
 
         let block_type = le::get_u32(&block[0..4]);
         if block_type != expected_type {
-            return Err(FormatError::WrongBlockType { expected: expected_type, actual: block_type });
+            return Err(FormatError::WrongBlockType {
+                expected: expected_type,
+                actual: block_type,
+            });
         }
         let version = le::get_u16(&block[4..6]);
         if version != HEADER_VERSION {

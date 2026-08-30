@@ -49,7 +49,13 @@ impl RetiredList {
         match self.entries.binary_search_by_key(&lba, |e| e.lba) {
             Ok(_) => Err(FormatError::Invalid("block retired twice")),
             Err(pos) => {
-                self.entries.insert(pos, RetiredEntry { lba, retire_generation });
+                self.entries.insert(
+                    pos,
+                    RetiredEntry {
+                        lba,
+                        retire_generation,
+                    },
+                );
                 Ok(())
             }
         }
@@ -62,7 +68,9 @@ impl RetiredList {
     pub fn encode(&self, block_size: usize, generation: u64) -> Result<Vec<u8>, FormatError> {
         let payload_len = 8 + self.entries.len() * ENTRY_SIZE;
         if payload_len > block_size - HEADER_SIZE {
-            return Err(FormatError::Overflow("retired list exceeds one block (prototype limit)"));
+            return Err(FormatError::Overflow(
+                "retired list exceeds one block (prototype limit)",
+            ));
         }
         validate_entries(&self.entries)?;
 

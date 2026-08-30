@@ -34,8 +34,8 @@ pub mod le;
 pub mod object;
 pub mod omap;
 pub mod reclaim;
-pub mod retired;
 pub mod region;
+pub mod retired;
 pub mod tree;
 
 use core::fmt;
@@ -91,16 +91,25 @@ impl fmt::Display for FormatError {
                 write!(f, "wrong buffer size: expected {expected}, got {actual}")
             }
             FormatError::WrongBlockType { expected, actual } => {
-                write!(f, "wrong block type: expected {expected:#010x}, got {actual:#010x}")
+                write!(
+                    f,
+                    "wrong block type: expected {expected:#010x}, got {actual:#010x}"
+                )
             }
             FormatError::UnsupportedHeaderVersion(v) => {
                 write!(f, "unsupported header version {v}")
             }
             FormatError::ChecksumMismatch { stored, computed } => {
-                write!(f, "checksum mismatch: stored {stored:#010x}, computed {computed:#010x}")
+                write!(
+                    f,
+                    "checksum mismatch: stored {stored:#010x}, computed {computed:#010x}"
+                )
             }
             FormatError::PayloadTooLarge { payload_len, max } => {
-                write!(f, "payload length {payload_len} exceeds block capacity {max}")
+                write!(
+                    f,
+                    "payload length {payload_len} exceeds block capacity {max}"
+                )
             }
             FormatError::Invalid(what) => write!(f, "invalid structure: {what}"),
             FormatError::InvalidUtf8 => write!(f, "name is not valid UTF-8"),
@@ -131,14 +140,20 @@ impl Timespec {
 
     pub fn read(buf: &[u8]) -> Result<Self, FormatError> {
         if buf.len() < Self::WIRE_SIZE {
-            return Err(FormatError::WrongBufferSize { expected: Self::WIRE_SIZE, actual: buf.len() });
+            return Err(FormatError::WrongBufferSize {
+                expected: Self::WIRE_SIZE,
+                actual: buf.len(),
+            });
         }
         let seconds = le::get_i64(&buf[0..8]);
         let nanoseconds = le::get_u32(&buf[8..12]);
         if nanoseconds >= 1_000_000_000 {
             return Err(FormatError::Invalid("timestamp nanoseconds out of range"));
         }
-        Ok(Timespec { seconds, nanoseconds })
+        Ok(Timespec {
+            seconds,
+            nanoseconds,
+        })
     }
 }
 

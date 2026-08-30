@@ -56,7 +56,8 @@ One block per record (`AFSJ`), one record per fsync, containing:
 - a sequence number that must equal its slot position;
 - the fsync group: every window operation not covered by an earlier
   record (create with name/size/extents/content CRC32C plus the expected
-  object ID, delete, rename with replace), bounded by one block —
+  object ID, delete, rename with replace), including each operation's
+  timestamp, bounded by one block —
   a group too large for one record is a reported prototype limit.
 
 Because one fsync is one record, an fsync group is all-or-nothing under
@@ -95,10 +96,9 @@ record referencing allocated blocks is corruption (error).
 
 ## Consequences and status
 
-Mount may write (replay plus its checkpoint) when a valid log tail exists
-— standard journaling-filesystem behavior that the future `NO_CHANGES`
-mode must refuse by mounting the pre-replay state read-only. The feature
-is experimental wire format: measurements and crash matrices decide
-whether it becomes an epoch-1 feature (with a real feature flag), stays
-optional, or is removed; its identifier is permanent either way
-(feature-lifecycle rules).
+ADR-038 makes replay policy explicit. `ReadWrite` replays automatically;
+`ReadOnly` and `NO_CHANGES` expose the pre-replay checkpoint and the pending
+record count without writes; `Recovery` replays and then remains read-only.
+The feature is advertised by INCOMPAT bit 0 under the permanent identity
+`org.aros.afsplus:intent-log`. Its record format remains experimental until
+the broader workload suite and external interoperability qualification pass.

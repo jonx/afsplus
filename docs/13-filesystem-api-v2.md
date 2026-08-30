@@ -25,6 +25,14 @@ modern API call  -> direct modern operation
 - explicit encoding
 - structured errors
 
+## 2.1 Mount policy
+
+The portable core distinguishes `ReadWrite`, `ReadOnly`, `NoChanges`, and
+`Recovery`. `ReadOnly` and `NoChanges` expose the last checkpoint without
+replaying a pending intent log; callers can query the pending-record count.
+`NoChanges` has a strict zero-write contract. `Recovery` may write only while
+performing mandatory replay and returns a read-only recovered view.
+
 ## 3. Core operations
 
 Required categories:

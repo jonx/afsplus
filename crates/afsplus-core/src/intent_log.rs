@@ -86,7 +86,13 @@ fn verify_record_contents<D: BlockDevice>(
 ) -> Result<(), String> {
     let mut buf = vec![0u8; geo.block_size];
     for op in &record.ops {
-        let LogOp::Create { extents, size_bytes, content_crc, .. } = op else {
+        let LogOp::Create {
+            extents,
+            size_bytes,
+            content_crc,
+            ..
+        } = op
+        else {
             continue;
         };
         let mut remaining = *size_bytes as usize;

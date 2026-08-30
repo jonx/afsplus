@@ -31,7 +31,11 @@ pub struct TraceBackend<D: BlockDevice> {
 
 impl<D: BlockDevice> TraceBackend<D> {
     pub fn new(inner: D) -> Self {
-        TraceBackend { inner, events: Vec::new(), stats: IoStats::default() }
+        TraceBackend {
+            inner,
+            events: Vec::new(),
+            stats: IoStats::default(),
+        }
     }
 
     pub fn events(&self) -> &[TraceEvent] {

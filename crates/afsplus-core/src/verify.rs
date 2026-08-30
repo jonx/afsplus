@@ -118,8 +118,8 @@ pub fn load_mount_state<D: BlockDevice>(
     // sealed segments/tables behind it are batch and checker territory.
     claim_root(checkpoint.reclaim_root_block, &mut roots)?;
     dev.read_block(checkpoint.reclaim_root_block, &mut buf)?;
-    let (reclaim_root, reclaim_generation) = ReclaimRoot::decode(&buf)
-        .map_err(|e| CoreError::Corrupt(format!("reclaim root: {e}")))?;
+    let (reclaim_root, reclaim_generation) =
+        ReclaimRoot::decode(&buf).map_err(|e| CoreError::Corrupt(format!("reclaim root: {e}")))?;
     if reclaim_generation > checkpoint.generation {
         return Err(CoreError::Corrupt(
             "reclaim root generation is from the future".into(),

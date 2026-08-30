@@ -70,12 +70,18 @@ pub struct DirBlock {
 
 impl DirBlock {
     pub fn new(owner: u64) -> Self {
-        DirBlock { owner, entries: Vec::new() }
+        DirBlock {
+            owner,
+            entries: Vec::new(),
+        }
     }
 
     /// Inserts an entry keeping key order. Fails on duplicate keys.
     pub fn insert(&mut self, entry: DirEntry) -> Result<(), FormatError> {
-        match self.entries.binary_search_by(|e| e.key.as_slice().cmp(&entry.key)) {
+        match self
+            .entries
+            .binary_search_by(|e| e.key.as_slice().cmp(&entry.key))
+        {
             Ok(_) => Err(FormatError::Invalid("duplicate directory key")),
             Err(pos) => {
                 self.entries.insert(pos, entry);
@@ -99,14 +105,20 @@ impl DirBlock {
             .map(|pos| &self.entries[pos])
     }
 
-    pub fn encode(&self, block_size: usize, transaction_generation: u64) -> Result<Vec<u8>, FormatError> {
+    pub fn encode(
+        &self,
+        block_size: usize,
+        transaction_generation: u64,
+    ) -> Result<Vec<u8>, FormatError> {
         let mut payload_len = 8usize;
         for entry in &self.entries {
             validate_entry(entry)?;
             payload_len += ENTRY_FIXED + entry.key.len() + entry.name.len();
         }
         if payload_len > block_size - HEADER_SIZE {
-            return Err(FormatError::Overflow("directory exceeds one block (prototype limit)"));
+            return Err(FormatError::Overflow(
+                "directory exceeds one block (prototype limit)",
+            ));
         }
         validate_ordering(&self.entries)?;
 
@@ -146,7 +158,9 @@ impl DirBlock {
         let count = le::get_u32(&p[0..4]) as usize;
         // Bounds-first: each entry needs at least its fixed part.
         if count > (p.len() - 8) / ENTRY_FIXED {
-            return Err(FormatError::Invalid("directory entry count exceeds payload"));
+            return Err(FormatError::Invalid(
+                "directory entry count exceeds payload",
+            ));
         }
         let mut entries = Vec::with_capacity(count);
         let mut offset = 8usize;
@@ -160,13 +174,20 @@ impl DirBlock {
             let child_id = le::get_u64(&p[offset + 8..offset + 16]);
             offset += ENTRY_FIXED;
             if key_len > p.len() - offset || name_len > p.len() - offset - key_len {
-                return Err(FormatError::Invalid("directory entry lengths exceed payload"));
+                return Err(FormatError::Invalid(
+                    "directory entry lengths exceed payload",
+                ));
             }
             let key = p[offset..offset + key_len].to_vec();
             offset += key_len;
             let name = p[offset..offset + name_len].to_vec();
             offset += name_len;
-            let entry = DirEntry { key, name, child_type_hint, child_id };
+            let entry = DirEntry {
+                key,
+                name,
+                child_type_hint,
+                child_id,
+            };
             validate_entry(&entry)?;
             entries.push(entry);
         }
@@ -175,7 +196,10 @@ impl DirBlock {
             return Err(FormatError::Invalid("directory payload length mismatch"));
         }
         validate_ordering(&entries)?;
-        Ok(DirBlock { owner: header.owner, entries })
+        Ok(DirBlock {
+            owner: header.owner,
+            entries,
+        })
     }
 }
 
@@ -185,7 +209,9 @@ fn validate_entry(entry: &DirEntry) -> Result<(), FormatError> {
         return Err(FormatError::Invalid("directory key length out of range"));
     }
     if entry.child_id == OBJECT_INVALID {
-        return Err(FormatError::Invalid("directory entry references invalid object"));
+        return Err(FormatError::Invalid(
+            "directory entry references invalid object",
+        ));
     }
     Ok(())
 }

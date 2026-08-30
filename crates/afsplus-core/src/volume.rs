@@ -19,13 +19,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
+use afsplus_format::crc32c::crc32c;
 use afsplus_format::dir::{comparison_key, DirEntry};
 use afsplus_format::ident::Identification;
+use afsplus_format::intent_log::{LogOp, LogRecord, MAX_LOG_OPS};
 use afsplus_format::object::{
     ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_EXTENT_TREE,
 };
-use afsplus_format::crc32c::crc32c;
-use afsplus_format::intent_log::{LogOp, LogRecord, MAX_LOG_OPS};
 use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 
 use crate::alloc::{AllocStats, TxAllocator};
@@ -34,7 +34,7 @@ use crate::cow_tree::{mutate_many, TreeMutation, TreeOperation};
 use crate::directory;
 use crate::extent_map::{self, Extent, EXTENT_UNWRITTEN};
 use crate::intent_log;
-use crate::mount::Selection;
+use crate::mount::{MountMode, Selection};
 use crate::object_map;
 use crate::verify::{load_mount_state, MountState};
 use crate::CoreError;
@@ -61,8 +61,15 @@ pub struct CommitStats {
 /// One operation inside a [`Volume::run_batch`] group commit (ADR-026).
 #[derive(Debug, Clone)]
 pub enum BatchOp<'a> {
-    CreateFile { parent_id: u64, name: &'a str, content: &'a [u8] },
-    DeleteFile { parent_id: u64, name: &'a str },
+    CreateFile {
+        parent_id: u64,
+        name: &'a str,
+        content: &'a [u8],
+    },
+    DeleteFile {
+        parent_id: u64,
+        name: &'a str,
+    },
     Rename {
         source_parent_id: u64,
         source_name: &'a str,
@@ -77,6 +84,8 @@ pub enum BatchOp<'a> {
 struct PendingBatch {
     /// Per-directory entry changes: Some = upsert, None = delete.
     dir_changes: BTreeMap<u64, BTreeMap<Vec<u8>, Option<DirEntry>>>,
+    /// Timestamp of the last namespace operation touching each directory.
+    dir_timestamps: BTreeMap<u64, Timespec>,
     /// Object-record changes: Some = rewrite, None = delete from the map.
     records: BTreeMap<u64, Option<ObjectRecord>>,
     /// Committed record blocks to retire when their object is rewritten.
@@ -116,6 +125,8 @@ pub struct Volume<D: BlockDevice> {
     /// slots and quarantined blocks must stay untouched.
     other_checkpoint: Option<Checkpoint>,
     state: MountState,
+    mount_mode: MountMode,
+    pending_intent_records: u32,
     /// Per-transaction reclamation budget in blocks (runtime policy).
     reclaim_batch_blocks: u64,
     /// Allocation-root node sets for (current, other) checkpoints, cached
@@ -137,6 +148,7 @@ impl<D: BlockDevice> Volume<D> {
         ident: Identification,
         selection: Selection,
         state: MountState,
+        mount_mode: MountMode,
     ) -> Self {
         Volume {
             dev,
@@ -145,6 +157,8 @@ impl<D: BlockDevice> Volume<D> {
             current_slot: selection.chosen_slot,
             other_checkpoint: selection.other,
             state,
+            mount_mode,
+            pending_intent_records: 0,
             reclaim_batch_blocks: crate::reclaim::DEFAULT_RECLAIM_BATCH_BLOCKS,
             allocation_tree_cache: None,
             alloc_rover_region: 0,
@@ -164,6 +178,14 @@ impl<D: BlockDevice> Volume<D> {
 
     pub fn checkpoint(&self) -> &Checkpoint {
         &self.checkpoint
+    }
+
+    pub fn mount_mode(&self) -> MountMode {
+        self.mount_mode
+    }
+
+    pub fn pending_intent_records(&self) -> u32 {
+        self.pending_intent_records
     }
 
     /// Blocks currently quarantined in the reclaim queue.
@@ -1762,7 +1784,9 @@ impl<D: BlockDevice> Volume<D> {
             return Ok(Vec::new());
         }
         if ops.len() > MAX_BATCH_OPS {
-            return Err(CoreError::PrototypeLimit("batch exceeds bounded operation count"));
+            return Err(CoreError::PrototypeLimit(
+                "batch exceeds bounded operation count",
+            ));
         }
         self.ensure_window_closed()?;
         let generation = self.next_generation()?;
@@ -1777,6 +1801,7 @@ impl<D: BlockDevice> Volume<D> {
         )?;
         let mut pending = PendingBatch {
             dir_changes: BTreeMap::new(),
+            dir_timestamps: BTreeMap::new(),
             records: BTreeMap::new(),
             committed_record_lbas: BTreeMap::new(),
             created_data: BTreeMap::new(),
@@ -1838,9 +1863,7 @@ impl<D: BlockDevice> Volume<D> {
         }
         // Entries are overlaid separately, so the committed tree root is the
         // right base even when the directory record has pending changes.
-        let committed = self
-            .read_object(directory_id)?
-            .ok_or(CoreError::NotFound)?;
+        let committed = self.read_object(directory_id)?.ok_or(CoreError::NotFound)?;
         directory::lookup_entry(
             &mut self.dev,
             &self.ident.geometry(),
@@ -1893,7 +1916,11 @@ impl<D: BlockDevice> Volume<D> {
     ) -> Result<Option<u64>, CoreError> {
         let block_size = self.dev.block_size();
         match op {
-            BatchOp::CreateFile { parent_id, name, content } => {
+            BatchOp::CreateFile {
+                parent_id,
+                name,
+                content,
+            } => {
                 validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
                 let parent = self
                     .batch_record(pending, *parent_id)?
@@ -1927,7 +1954,9 @@ impl<D: BlockDevice> Volume<D> {
                 } else {
                     0
                 };
-                pending.created_data.insert(object_id, (data_start, data_block_count));
+                pending
+                    .created_data
+                    .insert(object_id, (data_start, data_block_count));
                 pending.records.insert(
                     object_id,
                     Some(ObjectRecord {
@@ -1955,6 +1984,7 @@ impl<D: BlockDevice> Volume<D> {
                         child_id: object_id,
                     }),
                 );
+                pending.dir_timestamps.insert(*parent_id, now);
                 Ok(Some(object_id))
             }
             BatchOp::DeleteFile { parent_id, name } => {
@@ -1969,6 +1999,7 @@ impl<D: BlockDevice> Volume<D> {
                     .entry(*parent_id)
                     .or_default()
                     .insert(key, None);
+                pending.dir_timestamps.insert(*parent_id, now);
                 Ok(None)
             }
             BatchOp::Rename {
@@ -1996,7 +2027,9 @@ impl<D: BlockDevice> Volume<D> {
                         "batched rename supports files only",
                     ));
                 }
-                if let Some(existing) = self.batch_lookup(pending, *target_parent_id, &target_key)? {
+                if let Some(existing) =
+                    self.batch_lookup(pending, *target_parent_id, &target_key)?
+                {
                     if !replace {
                         return Err(CoreError::AlreadyExists);
                     }
@@ -2019,21 +2052,31 @@ impl<D: BlockDevice> Volume<D> {
                     .entry(*source_parent_id)
                     .or_default()
                     .insert(source_key, None);
-                pending.dir_changes.entry(*target_parent_id).or_default().insert(
-                    target_key,
-                    Some(DirEntry {
-                        key: comparison_key(target_name.as_bytes()),
-                        name: target_name.as_bytes().to_vec(),
-                        child_type_hint: 1,
-                        child_id: entry.child_id,
-                    }),
-                );
+                pending
+                    .dir_changes
+                    .entry(*target_parent_id)
+                    .or_default()
+                    .insert(
+                        target_key,
+                        Some(DirEntry {
+                            key: comparison_key(target_name.as_bytes()),
+                            name: target_name.as_bytes().to_vec(),
+                            child_type_hint: 1,
+                            child_id: entry.child_id,
+                        }),
+                    );
+                pending.dir_timestamps.insert(*source_parent_id, now);
+                pending.dir_timestamps.insert(*target_parent_id, now);
                 if !pending.created_data.contains_key(&entry.child_id) {
                     self.note_committed_record(pending, entry.child_id)?;
                 }
-                pending
-                    .records
-                    .insert(entry.child_id, Some(ObjectRecord { changed: now, ..moved }));
+                pending.records.insert(
+                    entry.child_id,
+                    Some(ObjectRecord {
+                        changed: now,
+                        ..moved
+                    }),
+                );
                 Ok(None)
             }
         }
@@ -2125,7 +2168,9 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     fn ensure_window_closed(&self) -> Result<(), CoreError> {
-        if self.window_poisoned {
+        if !self.mount_mode.allows_user_writes() {
+            Err(CoreError::ReadOnly)
+        } else if self.window_poisoned {
             Err(CoreError::WindowPoisoned)
         } else if self.window.is_some() {
             Err(CoreError::WindowOpen)
@@ -2158,11 +2203,10 @@ impl<D: BlockDevice> Volume<D> {
     /// operation is visible to later window operations but not durable until
     /// [`Volume::window_fsync`] and not checkpointed until
     /// [`Volume::window_commit`].
-    pub fn window_op(
-        &mut self,
-        op: &BatchOp<'_>,
-        now: Timespec,
-    ) -> Result<Option<u64>, CoreError> {
+    pub fn window_op(&mut self, op: &BatchOp<'_>, now: Timespec) -> Result<Option<u64>, CoreError> {
+        if !self.mount_mode.allows_user_writes() {
+            return Err(CoreError::ReadOnly);
+        }
         if self.window_poisoned {
             return Err(CoreError::WindowPoisoned);
         }
@@ -2186,6 +2230,7 @@ impl<D: BlockDevice> Volume<D> {
                     tx,
                     pending: PendingBatch {
                         dir_changes: BTreeMap::new(),
+                        dir_timestamps: BTreeMap::new(),
                         records: BTreeMap::new(),
                         committed_record_lbas: BTreeMap::new(),
                         created_data: BTreeMap::new(),
@@ -2206,8 +2251,7 @@ impl<D: BlockDevice> Volume<D> {
         // yet covered by a log record cancels to nothing: the create is
         // scrubbed from the unlogged group so the record never mentions it.
         let cancels_unlogged = self.window_cancel_target(&window.pending, op)?;
-        let result =
-            self.apply_batch_op(&mut window.tx, &mut window.pending, op, now, generation);
+        let result = self.apply_batch_op(&mut window.tx, &mut window.pending, op, now, generation);
         match result {
             Ok(created) => {
                 if let Some(cancelled) = cancels_unlogged {
@@ -2219,10 +2263,14 @@ impl<D: BlockDevice> Volume<D> {
                         )
                     });
                     if !matches!(op, BatchOp::DeleteFile { .. }) {
-                        window.unlogged.push(Self::log_op_for(op, created, &window.pending)?);
+                        window
+                            .unlogged
+                            .push(Self::log_op_for(op, created, &window.pending, now)?);
                     }
                 } else {
-                    window.unlogged.push(Self::log_op_for(op, created, &window.pending)?);
+                    window
+                        .unlogged
+                        .push(Self::log_op_for(op, created, &window.pending, now)?);
                 }
                 self.window = Some(window);
                 Ok(created)
@@ -2247,9 +2295,12 @@ impl<D: BlockDevice> Volume<D> {
     ) -> Result<Option<u64>, CoreError> {
         let (parent_id, name) = match op {
             BatchOp::DeleteFile { parent_id, name } => (*parent_id, *name),
-            BatchOp::Rename { target_parent_id, target_name, replace: true, .. } => {
-                (*target_parent_id, *target_name)
-            }
+            BatchOp::Rename {
+                target_parent_id,
+                target_name,
+                replace: true,
+                ..
+            } => (*target_parent_id, *target_name),
             _ => return Ok(None),
         };
         if validate_name(name.as_bytes()).is_err() {
@@ -2259,20 +2310,23 @@ impl<D: BlockDevice> Volume<D> {
         let Some(entry) = self.batch_lookup(pending, parent_id, &key)? else {
             return Ok(None);
         };
-        Ok(
-            (pending.created_data.contains_key(&entry.child_id)
-                && !pending.logged_created.contains(&entry.child_id))
-            .then_some(entry.child_id),
-        )
+        Ok((pending.created_data.contains_key(&entry.child_id)
+            && !pending.logged_created.contains(&entry.child_id))
+        .then_some(entry.child_id))
     }
 
     fn log_op_for(
         op: &BatchOp<'_>,
         created: Option<u64>,
         pending: &PendingBatch,
+        now: Timespec,
     ) -> Result<LogOp, CoreError> {
         Ok(match op {
-            BatchOp::CreateFile { parent_id, name, content } => {
+            BatchOp::CreateFile {
+                parent_id,
+                name,
+                content,
+            } => {
                 let object_id = created
                     .ok_or_else(|| CoreError::Corrupt("create produced no object ID".into()))?;
                 let (start, blocks) = pending
@@ -2280,7 +2334,11 @@ impl<D: BlockDevice> Volume<D> {
                     .get(&object_id)
                     .copied()
                     .ok_or_else(|| CoreError::Corrupt("created data run missing".into()))?;
-                let extents = if blocks > 0 { vec![(start, blocks as u32)] } else { Vec::new() };
+                let extents = if blocks > 0 {
+                    vec![(start, blocks as u32)]
+                } else {
+                    Vec::new()
+                };
                 LogOp::Create {
                     parent_id: *parent_id,
                     name: name.as_bytes().to_vec(),
@@ -2288,11 +2346,13 @@ impl<D: BlockDevice> Volume<D> {
                     size_bytes: content.len() as u64,
                     content_crc: crc32c(content),
                     extents,
+                    timestamp: now,
                 }
             }
             BatchOp::DeleteFile { parent_id, name } => LogOp::Delete {
                 parent_id: *parent_id,
                 name: name.as_bytes().to_vec(),
+                timestamp: now,
             },
             BatchOp::Rename {
                 source_parent_id,
@@ -2306,6 +2366,7 @@ impl<D: BlockDevice> Volume<D> {
                 target_parent_id: *target_parent_id,
                 target_name: target_name.as_bytes().to_vec(),
                 replace: *replace,
+                timestamp: now,
             },
         })
     }
@@ -2314,6 +2375,9 @@ impl<D: BlockDevice> Volume<D> {
     /// covering the unlogged prefix, then one barrier (ADR-037). The group
     /// replays all-or-nothing after a crash.
     pub fn window_fsync(&mut self) -> Result<(), CoreError> {
+        if !self.mount_mode.allows_user_writes() {
+            return Err(CoreError::ReadOnly);
+        }
         if self.window_poisoned {
             return Err(CoreError::WindowPoisoned);
         }
@@ -2353,7 +2417,10 @@ impl<D: BlockDevice> Volume<D> {
                 let window = self.window.as_mut().expect("window checked above");
                 window.logged_records = sequence;
                 for op in &record.ops {
-                    if let LogOp::Create { expected_object_id, .. } = op {
+                    if let LogOp::Create {
+                        expected_object_id, ..
+                    } = op
+                    {
                         window.pending.logged_created.insert(*expected_object_id);
                     }
                 }
@@ -2370,6 +2437,9 @@ impl<D: BlockDevice> Volume<D> {
     /// publishes a checkpoint when any record was logged, so stale records
     /// can never be mistaken for live ones.
     pub fn window_commit(&mut self, now: Timespec) -> Result<(), CoreError> {
+        if !self.mount_mode.allows_user_writes() {
+            return Err(CoreError::ReadOnly);
+        }
         if self.window_poisoned {
             return Err(CoreError::WindowPoisoned);
         }
@@ -2402,6 +2472,7 @@ impl<D: BlockDevice> Volume<D> {
             self.checkpoint.generation,
         )?;
         if scanned.records.is_empty() {
+            self.pending_intent_records = 0;
             return Ok(0);
         }
         let generation = self.next_generation()?;
@@ -2418,6 +2489,7 @@ impl<D: BlockDevice> Volume<D> {
         )?;
         let mut pending = PendingBatch {
             dir_changes: BTreeMap::new(),
+            dir_timestamps: BTreeMap::new(),
             records: BTreeMap::new(),
             committed_record_lbas: BTreeMap::new(),
             created_data: BTreeMap::new(),
@@ -2427,17 +2499,33 @@ impl<D: BlockDevice> Volume<D> {
             sacrificed: Vec::new(),
             next_object_id: self.checkpoint.next_object_id,
         };
-        // Replay timestamps are zero in the prototype; a frozen record format
-        // would log the operation timestamp.
-        let now = Timespec::default();
+        let mut last_timestamp = Timespec::default();
         let replayed = scanned.records.len() as u32;
         for record in scanned.records {
             for op in record.ops {
-                self.apply_log_op(&mut tx, &mut pending, &op, now, generation)?;
+                last_timestamp = op.timestamp();
+                self.apply_log_op(&mut tx, &mut pending, &op, generation)?;
             }
         }
-        self.materialize_batch(tx, pending, now, generation, true)?;
+        self.materialize_batch(tx, pending, last_timestamp, generation, true)?;
+        self.pending_intent_records = 0;
         Ok(replayed)
+    }
+
+    pub(crate) fn inspect_intent_log(&mut self) -> Result<u32, CoreError> {
+        if self.ident.log_slots == 0 {
+            self.pending_intent_records = 0;
+            return Ok(0);
+        }
+        let scanned = intent_log::scan(
+            &mut self.dev,
+            &self.ident.geometry(),
+            self.ident.log_slots,
+            &self.ident.uuid,
+            self.checkpoint.generation,
+        )?;
+        self.pending_intent_records = scanned.records.len() as u32;
+        Ok(self.pending_intent_records)
     }
 
     fn apply_log_op(
@@ -2445,7 +2533,6 @@ impl<D: BlockDevice> Volume<D> {
         tx: &mut TxAllocator,
         pending: &mut PendingBatch,
         op: &LogOp,
-        now: Timespec,
         generation: u64,
     ) -> Result<(), CoreError> {
         let utf8 = |bytes: &[u8]| -> Result<String, CoreError> {
@@ -2459,6 +2546,7 @@ impl<D: BlockDevice> Volume<D> {
                 expected_object_id,
                 size_bytes,
                 extents,
+                timestamp,
                 ..
             } => self.apply_replay_create(
                 tx,
@@ -2468,16 +2556,23 @@ impl<D: BlockDevice> Volume<D> {
                 *expected_object_id,
                 *size_bytes,
                 extents,
-                now,
+                *timestamp,
                 generation,
             ),
-            LogOp::Delete { parent_id, name } => {
+            LogOp::Delete {
+                parent_id,
+                name,
+                timestamp,
+            } => {
                 let name = utf8(name)?;
                 self.apply_batch_op(
                     tx,
                     pending,
-                    &BatchOp::DeleteFile { parent_id: *parent_id, name: &name },
-                    now,
+                    &BatchOp::DeleteFile {
+                        parent_id: *parent_id,
+                        name: &name,
+                    },
+                    *timestamp,
                     generation,
                 )
                 .map(|_| ())
@@ -2488,6 +2583,7 @@ impl<D: BlockDevice> Volume<D> {
                 target_parent_id,
                 target_name,
                 replace,
+                timestamp,
             } => {
                 let source = utf8(source_name)?;
                 let target = utf8(target_name)?;
@@ -2501,7 +2597,7 @@ impl<D: BlockDevice> Volume<D> {
                         target_name: &target,
                         replace: *replace,
                     },
-                    now,
+                    *timestamp,
                     generation,
                 )
                 .map(|_| ())
@@ -2534,7 +2630,9 @@ impl<D: BlockDevice> Volume<D> {
         }
         let key = comparison_key(name.as_bytes());
         if self.batch_lookup(pending, parent_id, &key)?.is_some() {
-            return Err(CoreError::Corrupt("log replay found the name already present".into()));
+            return Err(CoreError::Corrupt(
+                "log replay found the name already present".into(),
+            ));
         }
         // IDs are monotonic and never reused; scrubbed (cancelled-unlogged)
         // creates leave legal gaps that replay skips over.
@@ -2561,7 +2659,9 @@ impl<D: BlockDevice> Volume<D> {
             }
         };
         let block_size = self.dev.block_size();
-        pending.created_data.insert(object_id, (data_start, data_blocks));
+        pending
+            .created_data
+            .insert(object_id, (data_start, data_blocks));
         pending.records.insert(
             object_id,
             Some(ObjectRecord {
@@ -2589,6 +2689,7 @@ impl<D: BlockDevice> Volume<D> {
                 child_id: object_id,
             }),
         );
+        pending.dir_timestamps.insert(parent_id, now);
         Ok(())
     }
 
@@ -2612,7 +2713,10 @@ impl<D: BlockDevice> Volume<D> {
 
         let dir_ids: Vec<u64> = pending.dir_changes.keys().copied().collect();
         for dir_id in dir_ids {
-            let changes = pending.dir_changes.remove(&dir_id).expect("key listed above");
+            let changes = pending
+                .dir_changes
+                .remove(&dir_id)
+                .expect("key listed above");
             let committed = self
                 .read_object(dir_id)?
                 .ok_or_else(|| CoreError::Corrupt(format!("directory {dir_id} disappeared")))?;
@@ -2666,11 +2770,12 @@ impl<D: BlockDevice> Volume<D> {
             let base = self
                 .batch_record(&pending, dir_id)?
                 .ok_or_else(|| CoreError::Corrupt(format!("directory {dir_id} disappeared")))?;
+            let directory_timestamp = pending.dir_timestamps.remove(&dir_id).unwrap_or(now);
             pending.records.insert(
                 dir_id,
                 Some(ObjectRecord {
-                    modified: now,
-                    changed: now,
+                    modified: directory_timestamp,
+                    changed: directory_timestamp,
                     content_generation: generation,
                     data_root: mutation.root_lba,
                     ..base

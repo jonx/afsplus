@@ -55,12 +55,7 @@ impl RunSet {
 
     /// Removes one block, splitting its run if needed.
     fn remove_block(&mut self, lba: u64) -> bool {
-        let Some((start, end)) = self
-            .runs
-            .range(..=lba)
-            .next_back()
-            .map(|(s, e)| (*s, *e))
-        else {
+        let Some((start, end)) = self.runs.range(..=lba).next_back().map(|(s, e)| (*s, *e)) else {
             return false;
         };
         if lba >= end {
@@ -807,7 +802,6 @@ fn choose_slot(slot_count: u8, current: u8, other: Option<u8>) -> u8 {
         .expect("three slots minus at most two references")
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::choose_slot;
@@ -838,8 +832,8 @@ mod tests {
                 label: "MultiPage".into(),
                 region_size: 262_144,
                 reclaim_caps: Default::default(),
-            log_slots: 8,
-            timestamp: Timespec::default(),
+                log_slots: 8,
+                timestamp: Timespec::default(),
             },
         )
         .unwrap();

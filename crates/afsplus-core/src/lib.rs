@@ -25,15 +25,15 @@
 //! the retired-block quarantine.
 
 pub mod alloc;
-pub mod intent_log;
-pub mod reclaim;
 pub mod allocation_root;
 pub mod cow_tree;
 pub mod directory;
 pub mod extent_map;
+pub mod intent_log;
 pub mod mkfs;
 pub mod mount;
 pub mod object_map;
+pub mod reclaim;
 pub mod tree;
 pub mod verify;
 pub mod volume;
@@ -44,7 +44,7 @@ use afsplus_block::BlockError;
 use afsplus_format::FormatError;
 
 pub use mkfs::{mkfs, MkfsParams};
-pub use mount::mount;
+pub use mount::{mount, mount_with_options, MountMode, MountOptions};
 pub use volume::Volume;
 
 /// Fixed prototype placement (`spec/disk-layout.md` marks exact offsets TBD;
@@ -100,6 +100,12 @@ pub enum CoreError {
     WindowOpen,
     /// The open window failed mid-mutation; remount to recover from the log.
     WindowPoisoned,
+    /// The selected mount mode does not permit filesystem mutations.
+    ReadOnly,
+    /// Unknown INCOMPAT bits prevent every kind of mount.
+    UnsupportedIncompatFeatures(u64),
+    /// Unknown RO_COMPAT bits require a read-only or NO_CHANGES mount.
+    ReadOnlyRequiredFeatures(u64),
 }
 
 impl fmt::Display for CoreError {
@@ -108,10 +114,16 @@ impl fmt::Display for CoreError {
             CoreError::Block(e) => write!(f, "block device error: {e}"),
             CoreError::Format(e) => write!(f, "format error: {e}"),
             CoreError::NoValidCheckpoint { slot_a, slot_b } => {
-                write!(f, "no valid checkpoint (slot A: {slot_a}; slot B: {slot_b})")
+                write!(
+                    f,
+                    "no valid checkpoint (slot A: {slot_a}; slot B: {slot_b})"
+                )
             }
             CoreError::AmbiguousCheckpoints(generation) => {
-                write!(f, "both checkpoint slots carry generation {generation}; volume is ambiguous")
+                write!(
+                    f,
+                    "both checkpoint slots carry generation {generation}; volume is ambiguous"
+                )
             }
             CoreError::Corrupt(what) => write!(f, "corrupt volume: {what}"),
             CoreError::AlreadyExists => write!(f, "name already exists"),
@@ -128,8 +140,22 @@ impl fmt::Display for CoreError {
                 write!(f, "an operation window is open; fsync or commit it first")
             }
             CoreError::WindowPoisoned => {
-                write!(f, "the operation window failed mid-mutation; remount to recover")
+                write!(
+                    f,
+                    "the operation window failed mid-mutation; remount to recover"
+                )
             }
+            CoreError::ReadOnly => write!(f, "volume is mounted read-only"),
+            CoreError::UnsupportedIncompatFeatures(bits) => {
+                write!(
+                    f,
+                    "unsupported incompatible filesystem features: {bits:#018x}"
+                )
+            }
+            CoreError::ReadOnlyRequiredFeatures(bits) => write!(
+                f,
+                "filesystem features {bits:#018x} are unsupported for a writable mount"
+            ),
         }
     }
 }

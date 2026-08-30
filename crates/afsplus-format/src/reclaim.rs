@@ -107,7 +107,11 @@ impl Default for ReclaimCaps {
     fn default() -> Self {
         // 64 + 64×12 + 64×12 + 96×20 = 3520 payload bytes; capacity with
         // full sealed blocks ≈ 64 × 338 × 202 ≈ 4.4M entries (runs).
-        ReclaimCaps { inline_entries: 96, segment_refs: 64, table_refs: 64 }
+        ReclaimCaps {
+            inline_entries: 96,
+            segment_refs: 64,
+            table_refs: 64,
+        }
     }
 }
 
@@ -126,7 +130,11 @@ impl ReclaimCaps {
 fn root_payload_len(caps: ReclaimCaps) -> Result<usize, FormatError> {
     (caps.table_refs as usize)
         .checked_mul(REF_WIRE_SIZE)
-        .and_then(|t| (caps.segment_refs as usize).checked_mul(REF_WIRE_SIZE).map(|s| (t, s)))
+        .and_then(|t| {
+            (caps.segment_refs as usize)
+                .checked_mul(REF_WIRE_SIZE)
+                .map(|s| (t, s))
+        })
         .and_then(|(t, s)| {
             (caps.inline_entries as usize)
                 .checked_mul(ENTRY_WIRE_SIZE)
@@ -211,12 +219,20 @@ impl ReclaimRoot {
         le::put_u32(&mut p[60..64], self.inline_entries.len() as u32);
         let mut offset = ROOT_FIXED;
         for table in &self.table_refs {
-            write_ref(&mut p[offset..offset + REF_WIRE_SIZE], table.lba, table.ref_count);
+            write_ref(
+                &mut p[offset..offset + REF_WIRE_SIZE],
+                table.lba,
+                table.ref_count,
+            );
             offset += REF_WIRE_SIZE;
         }
         offset = ROOT_FIXED + self.caps.table_refs as usize * REF_WIRE_SIZE;
         for segment in &self.segment_refs {
-            write_ref(&mut p[offset..offset + REF_WIRE_SIZE], segment.lba, segment.entry_count);
+            write_ref(
+                &mut p[offset..offset + REF_WIRE_SIZE],
+                segment.lba,
+                segment.entry_count,
+            );
             offset += REF_WIRE_SIZE;
         }
         offset = ROOT_FIXED
@@ -254,7 +270,9 @@ impl ReclaimRoot {
         // Bounds-first: capacities bound every later area read.
         caps.validate(block.len())?;
         if p.len() < root_payload_len(caps)? {
-            return Err(FormatError::Invalid("reclaim root payload shorter than its areas"));
+            return Err(FormatError::Invalid(
+                "reclaim root payload shorter than its areas",
+            ));
         }
         let table_count = le::get_u32(&p[52..56]) as usize;
         let segment_count = le::get_u32(&p[56..60]) as usize;
@@ -263,7 +281,9 @@ impl ReclaimRoot {
             || segment_count > caps.segment_refs as usize
             || inline_count > caps.inline_entries as usize
         {
-            return Err(FormatError::Invalid("reclaim root area count exceeds capacity"));
+            return Err(FormatError::Invalid(
+                "reclaim root area count exceeds capacity",
+            ));
         }
         let mut table_refs = Vec::with_capacity(table_count);
         let mut offset = ROOT_FIXED;
@@ -284,7 +304,8 @@ impl ReclaimRoot {
             offset += REF_WIRE_SIZE;
         }
         let mut inline_entries = Vec::with_capacity(inline_count);
-        offset = ROOT_FIXED + (caps.table_refs as usize + caps.segment_refs as usize) * REF_WIRE_SIZE;
+        offset =
+            ROOT_FIXED + (caps.table_refs as usize + caps.segment_refs as usize) * REF_WIRE_SIZE;
         for _ in 0..inline_count {
             inline_entries.push(ReclaimEntry::read(&p[offset..offset + ENTRY_WIRE_SIZE])?);
             offset += ENTRY_WIRE_SIZE;
@@ -311,7 +332,9 @@ impl ReclaimRoot {
             || self.segment_refs.len() > self.caps.segment_refs as usize
             || self.inline_entries.len() > self.caps.inline_entries as usize
         {
-            return Err(FormatError::Invalid("reclaim root area count exceeds capacity"));
+            return Err(FormatError::Invalid(
+                "reclaim root area count exceeds capacity",
+            ));
         }
         for table in &self.table_refs {
             if table.ref_count == 0 || table.ref_count as usize > TABLE_REF_CAP {
@@ -320,7 +343,9 @@ impl ReclaimRoot {
         }
         for segment in &self.segment_refs {
             if segment.entry_count == 0 || segment.entry_count as usize > SEGMENT_ENTRY_CAP {
-                return Err(FormatError::Invalid("reclaim segment ref count out of range"));
+                return Err(FormatError::Invalid(
+                    "reclaim segment ref count out of range",
+                ));
             }
         }
         // The cursor refers exclusively to sealed blocks, in FIFO order.
@@ -329,23 +354,31 @@ impl ReclaimRoot {
                 return Err(FormatError::Invalid("reclaim cursor names a missing table"));
             }
         } else if self.head_segment_offset >= self.table_refs[0].ref_count {
-            return Err(FormatError::Invalid("reclaim cursor beyond the first table"));
+            return Err(FormatError::Invalid(
+                "reclaim cursor beyond the first table",
+            ));
         }
         if self.table_refs.is_empty() && self.segment_refs.is_empty() {
             if self.head_entry_offset != 0 || self.head_block_offset != 0 {
-                return Err(FormatError::Invalid("reclaim cursor names a missing segment"));
+                return Err(FormatError::Invalid(
+                    "reclaim cursor names a missing segment",
+                ));
             }
         } else if self.table_refs.is_empty()
             && self.head_entry_offset >= self.segment_refs[0].entry_count
         {
-            return Err(FormatError::Invalid("reclaim cursor beyond the head segment"));
+            return Err(FormatError::Invalid(
+                "reclaim cursor beyond the head segment",
+            ));
         }
         let pending = self
             .appended_blocks_total
             .checked_sub(self.reclaimed_blocks_total)
             .ok_or(FormatError::Invalid("reclaimed more blocks than appended"))?;
         if pending != self.pending_blocks {
-            return Err(FormatError::Invalid("reclaim totals do not match pending count"));
+            return Err(FormatError::Invalid(
+                "reclaim totals do not match pending count",
+            ));
         }
         Ok(())
     }
@@ -362,7 +395,9 @@ pub struct ReclaimSegment {
 impl ReclaimSegment {
     pub fn encode(&self, block_size: usize, generation: u64) -> Result<Vec<u8>, FormatError> {
         if self.entries.is_empty() || self.entries.len() > SEGMENT_ENTRY_CAP {
-            return Err(FormatError::Invalid("reclaim segment entry count out of range"));
+            return Err(FormatError::Invalid(
+                "reclaim segment entry count out of range",
+            ));
         }
         let payload_len = 8 + self.entries.len() * ENTRY_WIRE_SIZE;
         let mut block = vec![0u8; block_size];
@@ -391,10 +426,14 @@ impl ReclaimSegment {
         }
         let count = le::get_u32(&p[0..4]) as usize;
         if count == 0 || count > SEGMENT_ENTRY_CAP || count > (p.len() - 8) / ENTRY_WIRE_SIZE {
-            return Err(FormatError::Invalid("reclaim segment entry count out of range"));
+            return Err(FormatError::Invalid(
+                "reclaim segment entry count out of range",
+            ));
         }
         if header.payload_len as usize != 8 + count * ENTRY_WIRE_SIZE {
-            return Err(FormatError::Invalid("reclaim segment payload length mismatch"));
+            return Err(FormatError::Invalid(
+                "reclaim segment payload length mismatch",
+            ));
         }
         let mut entries = Vec::with_capacity(count);
         for i in 0..count {
@@ -425,7 +464,9 @@ impl ReclaimTable {
         le::put_u32(&mut p[0..4], self.refs.len() as u32);
         for (i, segment) in self.refs.iter().enumerate() {
             if segment.entry_count == 0 || segment.entry_count as usize > SEGMENT_ENTRY_CAP {
-                return Err(FormatError::Invalid("reclaim table segment count out of range"));
+                return Err(FormatError::Invalid(
+                    "reclaim table segment count out of range",
+                ));
             }
             write_ref(
                 &mut p[8 + i * REF_WIRE_SIZE..8 + (i + 1) * REF_WIRE_SIZE],
@@ -455,7 +496,9 @@ impl ReclaimTable {
             return Err(FormatError::Invalid("reclaim table ref count out of range"));
         }
         if header.payload_len as usize != 8 + count * REF_WIRE_SIZE {
-            return Err(FormatError::Invalid("reclaim table payload length mismatch"));
+            return Err(FormatError::Invalid(
+                "reclaim table payload length mismatch",
+            ));
         }
         let mut refs = Vec::with_capacity(count);
         for i in 0..count {
@@ -465,7 +508,9 @@ impl ReclaimTable {
                 entry_count: le::get_u32(&p[offset + 8..offset + 12]),
             };
             if segment.entry_count == 0 || segment.entry_count as usize > SEGMENT_ENTRY_CAP {
-                return Err(FormatError::Invalid("reclaim table segment count out of range"));
+                return Err(FormatError::Invalid(
+                    "reclaim table segment count out of range",
+                ));
             }
             refs.push(segment);
         }

@@ -27,7 +27,10 @@ const PA: [u8; 4000] = [0xAAu8; 4000];
 const PB: [u8; 4000] = [0xBBu8; 4000];
 
 fn ts(seconds: i64) -> Timespec {
-    Timespec { seconds, nanoseconds: 0 }
+    Timespec {
+        seconds,
+        nanoseconds: 0,
+    }
 }
 
 /// Formats a volume and runs G1 (create A). Returns (image, A's data block).
@@ -64,7 +67,11 @@ fn record_tx(
 fn checked_mount(context: &str, image: MemoryBackend) -> Volume<MemoryBackend> {
     let mut copy = image.clone();
     let report = check_device(&mut copy);
-    assert!(report.is_clean(), "{context}: checker findings {:?}", report.errors);
+    assert!(
+        report.is_clean(),
+        "{context}: checker findings {:?}",
+        report.errors
+    );
     mount(image).unwrap_or_else(|e| panic!("{context}: mount failed: {e}"))
 }
 
@@ -82,7 +89,10 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
     let g2_image = {
         let mut vol = mount(g1_image.clone()).unwrap();
         vol.delete_file_in_root("A", ts(2)).unwrap();
-        assert!(vol.quarantine_contains(x).unwrap(), "X must be quarantined after the delete");
+        assert!(
+            vol.quarantine_contains(x).unwrap(),
+            "X must be quarantined after the delete"
+        );
         assert_eq!(vol.lookup_root("A").unwrap(), None);
         vol.into_device()
     };
@@ -111,11 +121,22 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
                         .unwrap()
                         .unwrap_or_else(|| panic!("{context}: A missing"));
                     assert_eq!(vol.stat(a).unwrap().unwrap().data_root, x, "{context}");
-                    assert_eq!(vol.read_file(a).unwrap(), PA.to_vec(), "{context}: A content damaged");
+                    assert_eq!(
+                        vol.read_file(a).unwrap(),
+                        PA.to_vec(),
+                        "{context}: A content damaged"
+                    );
                 }
                 g if g == g1_generation + 1 => {
-                    assert_eq!(vol.lookup_root("A").unwrap(), None, "{context}: A must be gone");
-                    assert!(vol.quarantine_contains(x).unwrap(), "{context}: X must be retired, not reused");
+                    assert_eq!(
+                        vol.lookup_root("A").unwrap(),
+                        None,
+                        "{context}: A must be gone"
+                    );
+                    assert!(
+                        vol.quarantine_contains(x).unwrap(),
+                        "{context}: X must be retired, not reused"
+                    );
                 }
                 g => panic!("{context}: recovered to disallowed generation {g}"),
             }
@@ -134,7 +155,10 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
                     // half-written bytes inside X, they are unreachable.
                     assert_eq!(vol.lookup_root("A").unwrap(), None, "{context}");
                     assert_eq!(vol.lookup_root("B").unwrap(), None, "{context}");
-                    assert!(vol.quarantine_contains(x).unwrap(), "{context}: X left quarantine early");
+                    assert!(
+                        vol.quarantine_contains(x).unwrap(),
+                        "{context}: X left quarantine early"
+                    );
                 }
                 g if g == g1_generation + 2 => {
                     assert_eq!(vol.lookup_root("A").unwrap(), None, "{context}");
@@ -144,8 +168,15 @@ fn quarantine_workload_g1_g2_g3_with_full_crash_matrix() {
                         .unwrap_or_else(|| panic!("{context}: B missing"));
                     let record = vol.stat(b).unwrap().unwrap();
                     assert_eq!(record.data_root, x, "{context}: B must own X");
-                    assert_eq!(vol.read_file(b).unwrap(), PB.to_vec(), "{context}: B content damaged");
-                    assert!(!vol.quarantine_contains(x).unwrap(), "{context}: X still retired after reuse");
+                    assert_eq!(
+                        vol.read_file(b).unwrap(),
+                        PB.to_vec(),
+                        "{context}: B content damaged"
+                    );
+                    assert!(
+                        !vol.quarantine_contains(x).unwrap(),
+                        "{context}: X still retired after reuse"
+                    );
                 }
                 g => panic!("{context}: recovered to disallowed generation {g}"),
             }

@@ -233,13 +233,8 @@ impl ReclaimTx {
             if let Some(table_ref) = self.root.table_refs.first().copied() {
                 let table = read_table(dev, geo, table_ref, committed_generation)?;
                 let segment_ref = table.refs[self.root.head_segment_offset as usize];
-                let finished_segment = self.consume_segment(
-                    dev,
-                    geo,
-                    segment_ref,
-                    committed_generation,
-                    &mut budget,
-                )?;
+                let finished_segment =
+                    self.consume_segment(dev, geo, segment_ref, committed_generation, &mut budget)?;
                 if finished_segment {
                     self.consumed_structure.push(segment_ref.lba);
                     self.root.head_segment_offset += 1;
@@ -252,13 +247,8 @@ impl ReclaimTx {
                     }
                 }
             } else if let Some(segment_ref) = self.root.segment_refs.first().copied() {
-                let finished_segment = self.consume_segment(
-                    dev,
-                    geo,
-                    segment_ref,
-                    committed_generation,
-                    &mut budget,
-                )?;
+                let finished_segment =
+                    self.consume_segment(dev, geo, segment_ref, committed_generation, &mut budget)?;
                 if finished_segment {
                     self.consumed_structure.push(segment_ref.lba);
                     self.root.segment_refs.remove(0);
@@ -305,7 +295,9 @@ impl ReclaimTx {
         while *budget > 0 && (self.root.head_entry_offset as usize) < segment.entries.len() {
             let entry = segment.entries[self.root.head_entry_offset as usize];
             if self.root.head_block_offset >= entry.blocks {
-                return Err(CoreError::Corrupt("reclaim cursor beyond the head run".into()));
+                return Err(CoreError::Corrupt(
+                    "reclaim cursor beyond the head run".into(),
+                ));
             }
             let remaining = entry.blocks - self.root.head_block_offset;
             let take = (remaining as u64).min(*budget) as u32;
@@ -326,13 +318,12 @@ impl ReclaimTx {
     }
 
     /// Appends a run retired by this transaction.
-    pub fn append_run(
-        &mut self,
-        geo: &Geometry,
-        start: u64,
-        blocks: u32,
-    ) -> Result<(), CoreError> {
-        let entry = ReclaimEntry { start, blocks, retire_generation: self.new_generation };
+    pub fn append_run(&mut self, geo: &Geometry, start: u64, blocks: u32) -> Result<(), CoreError> {
+        let entry = ReclaimEntry {
+            start,
+            blocks,
+            retire_generation: self.new_generation,
+        };
         validate_run(geo, &entry)?;
         self.appends.push(entry);
         Ok(())
@@ -480,24 +471,33 @@ pub fn load_all<D: BlockDevice>(
     let mut structure_blocks = vec![root_lba];
 
     let push_segment = |dev: &mut D,
-                            structure_blocks: &mut Vec<u64>,
-                            runs: &mut Vec<ReclaimEntry>,
-                            reference: SegmentRef,
-                            entry_offset: u32,
-                            block_offset: u32|
+                        structure_blocks: &mut Vec<u64>,
+                        runs: &mut Vec<ReclaimEntry>,
+                        reference: SegmentRef,
+                        entry_offset: u32,
+                        block_offset: u32|
      -> Result<(), CoreError> {
         structure_blocks.push(reference.lba);
         let segment = read_segment(dev, geo, reference, committed_generation)?;
         if entry_offset as usize > segment.entries.len()
             || (entry_offset as usize == segment.entries.len() && block_offset != 0)
         {
-            return Err(CoreError::Corrupt("reclaim cursor beyond the head segment".into()));
+            return Err(CoreError::Corrupt(
+                "reclaim cursor beyond the head segment".into(),
+            ));
         }
-        for (index, entry) in segment.entries.iter().enumerate().skip(entry_offset as usize) {
+        for (index, entry) in segment
+            .entries
+            .iter()
+            .enumerate()
+            .skip(entry_offset as usize)
+        {
             let mut entry = *entry;
             if index == entry_offset as usize && block_offset != 0 {
                 if block_offset >= entry.blocks {
-                    return Err(CoreError::Corrupt("reclaim cursor beyond the head run".into()));
+                    return Err(CoreError::Corrupt(
+                        "reclaim cursor beyond the head run".into(),
+                    ));
                 }
                 entry.start += block_offset as u64;
                 entry.blocks -= block_offset;
@@ -510,7 +510,11 @@ pub fn load_all<D: BlockDevice>(
     for (table_index, table_ref) in root.table_refs.iter().enumerate() {
         structure_blocks.push(table_ref.lba);
         let table = read_table(dev, geo, *table_ref, committed_generation)?;
-        let start_ref = if table_index == 0 { root.head_segment_offset as usize } else { 0 };
+        let start_ref = if table_index == 0 {
+            root.head_segment_offset as usize
+        } else {
+            0
+        };
         for (ref_index, segment_ref) in table.refs.iter().enumerate().skip(start_ref) {
             let (entry_offset, block_offset) = if table_index == 0 && ref_index == start_ref {
                 (root.head_entry_offset, root.head_block_offset)
@@ -554,7 +558,11 @@ pub fn load_all<D: BlockDevice>(
             root.pending_blocks
         )));
     }
-    Ok(LoadedReclaim { runs, structure_blocks, pending_blocks: root.pending_blocks })
+    Ok(LoadedReclaim {
+        runs,
+        structure_blocks,
+        pending_blocks: root.pending_blocks,
+    })
 }
 
 /// Diagnostic: whether `lba` is currently quarantined. Walks the queue.

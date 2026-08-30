@@ -48,6 +48,8 @@ as such in the crate docs.
 
 ```text
 cargo test
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test -p afsplus-check --test measurements -- --nocapture   # cost table
 cargo run -p afsplus-core --example mkimage -- demo.img
 cargo run -p afsplus-check -- demo.img --json
@@ -64,7 +66,7 @@ recovery states accepted. A negative-control test replays a deliberately
 mis-ordered commit (checkpoint before the metadata barrier) and proves the
 matrix catches it.
 
-Core Scale-1 is in progress. The shared, checksummed COW tree now has a bounded
+Core Scale-1 is complete. The shared, checksummed COW tree has a bounded
 lookup path, exhaustive verifier, and transactional upsert/delete engine. The
 engine copies committed paths, reuses transaction-local staged nodes, splits
 leaves/internal nodes, merges or redistributes underfull siblings, grows or
@@ -138,6 +140,10 @@ exact, CRC-verified data extents — and publishes one checkpoint. Crash
 matrices prove per-fsync-group all-or-nothing recovery. Measured: 2.2
 writes and 1.03 barriers per durable ref update versus 10 and 3 under
 group commit alone — the bake-off gate passed with a 2.9× barrier margin.
+Identification v2 now advertises the log as an INCOMPAT feature. Explicit
+`ReadOnly` and `NoChanges` mounts expose the pre-replay checkpoint and pending
+record count without writes; `Recovery` replays and returns a read-only view.
+Versioned log records preserve operation and directory timestamps on replay.
 
 The fsync workload harness (`tests/fsync_workloads.rs`) measures blocker 2:
 per durable operation, checkpoint-per-op costs 9–27 block writes and 3–7

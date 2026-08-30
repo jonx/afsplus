@@ -27,7 +27,13 @@ pub struct FaultBackend<D: BlockDevice> {
 
 impl<D: BlockDevice> FaultBackend<D> {
     pub fn new(inner: D, plan: FaultPlan) -> Self {
-        FaultBackend { inner, plan, writes_seen: 0, flushes_seen: 0, tripped: false }
+        FaultBackend {
+            inner,
+            plan,
+            writes_seen: 0,
+            flushes_seen: 0,
+            tripped: false,
+        }
     }
 
     /// Whether any fault has been injected so far.

@@ -16,8 +16,8 @@ fn params(region_size: u32) -> MkfsParams {
         label: "TestVol".into(),
         region_size,
         reclaim_caps: Default::default(),
-            log_slots: 8,
-            timestamp: Timespec {
+        log_slots: 8,
+        timestamp: Timespec {
             seconds: 1_780_000_000,
             nanoseconds: 0,
         },

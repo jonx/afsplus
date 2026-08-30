@@ -14,12 +14,51 @@
 
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
-use afsplus_format::ident::Identification;
+use afsplus_format::ident::{Identification, INCOMPAT_INTENT_LOG};
 use afsplus_format::DEFAULT_BLOCK_SIZE;
 
 use crate::verify::load_mount_state;
 use crate::volume::Volume;
 use crate::{layout, CoreError};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MountMode {
+    #[default]
+    ReadWrite,
+    ReadOnly,
+    NoChanges,
+    Recovery,
+}
+
+impl MountMode {
+    pub(crate) fn allows_user_writes(self) -> bool {
+        self == MountMode::ReadWrite
+    }
+
+    fn writes_during_mount(self) -> bool {
+        matches!(self, MountMode::ReadWrite | MountMode::Recovery)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MountOptions {
+    pub mode: MountMode,
+}
+
+pub const SUPPORTED_INCOMPAT_FEATURES: u64 = INCOMPAT_INTENT_LOG;
+pub const SUPPORTED_RO_COMPAT_FEATURES: u64 = 0;
+
+fn negotiate_features(ident: &Identification, mode: MountMode) -> Result<(), CoreError> {
+    let unknown_incompat = ident.features.incompat & !SUPPORTED_INCOMPAT_FEATURES;
+    if unknown_incompat != 0 {
+        return Err(CoreError::UnsupportedIncompatFeatures(unknown_incompat));
+    }
+    let unknown_ro_compat = ident.features.ro_compat & !SUPPORTED_RO_COMPAT_FEATURES;
+    if unknown_ro_compat != 0 && mode.writes_during_mount() {
+        return Err(CoreError::ReadOnlyRequiredFeatures(unknown_ro_compat));
+    }
+    Ok(())
+}
 
 /// Result of structural checkpoint selection.
 pub struct Selection {
@@ -66,7 +105,12 @@ pub fn select_checkpoint<D: BlockDevice>(
         }),
         1 => {
             let (slot, chosen) = candidates.pop().unwrap();
-            Ok(Selection { chosen, chosen_slot: slot, other: None, slot_status })
+            Ok(Selection {
+                chosen,
+                chosen_slot: slot,
+                other: None,
+                slot_status,
+            })
         }
         _ => {
             let (slot_b, ckpt_b) = candidates.pop().unwrap();
@@ -79,19 +123,34 @@ pub fn select_checkpoint<D: BlockDevice>(
             } else {
                 ((slot_b, ckpt_b), (slot_a, ckpt_a))
             };
-            Ok(Selection { chosen, chosen_slot, other: Some(other), slot_status })
+            Ok(Selection {
+                chosen,
+                chosen_slot,
+                other: Some(other),
+                slot_status,
+            })
         }
     }
 }
 
-pub fn mount<D: BlockDevice>(mut dev: D) -> Result<Volume<D>, CoreError> {
+pub fn mount<D: BlockDevice>(dev: D) -> Result<Volume<D>, CoreError> {
+    mount_with_options(dev, MountOptions::default())
+}
+
+pub fn mount_with_options<D: BlockDevice>(
+    mut dev: D,
+    options: MountOptions,
+) -> Result<Volume<D>, CoreError> {
     if dev.block_size() != DEFAULT_BLOCK_SIZE {
-        return Err(CoreError::UnsupportedGeometry("prototype supports only 4 KiB blocks"));
+        return Err(CoreError::UnsupportedGeometry(
+            "prototype supports only 4 KiB blocks",
+        ));
     }
 
     let mut buf = vec![0u8; dev.block_size()];
     dev.read_block(layout::IDENT_LBA, &mut buf)?;
     let ident = Identification::decode(&buf)?;
+    negotiate_features(&ident, options.mode)?;
     if ident.total_blocks > dev.total_blocks() {
         return Err(CoreError::Corrupt(format!(
             "identification declares {} blocks but device has {}",
@@ -109,10 +168,11 @@ pub fn mount<D: BlockDevice>(mut dev: D) -> Result<Volume<D>, CoreError> {
         ))
     })?;
 
-    let mut volume = Volume::new(dev, ident, selection, state);
-    // ADR-037: a valid intent-log tail is replayed and checkpointed before
-    // the volume is handed out; volumes with no pending records mount
-    // without writing.
-    volume.recover_intent_log()?;
+    let mut volume = Volume::new(dev, ident, selection, state, options.mode);
+    if options.mode.writes_during_mount() {
+        volume.recover_intent_log()?;
+    } else {
+        volume.inspect_intent_log()?;
+    }
     Ok(volume)
 }

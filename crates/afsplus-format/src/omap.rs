@@ -45,7 +45,10 @@ impl ObjectMap {
         if object_id == OBJECT_INVALID {
             return Err(FormatError::Invalid("object ID zero is invalid"));
         }
-        match self.entries.binary_search_by_key(&object_id, |e| e.object_id) {
+        match self
+            .entries
+            .binary_search_by_key(&object_id, |e| e.object_id)
+        {
             Ok(pos) => self.entries[pos].block = block,
             Err(pos) => self.entries.insert(pos, OmapEntry { object_id, block }),
         }
@@ -60,10 +63,16 @@ impl ObjectMap {
             .map(|pos| self.entries.remove(pos).block)
     }
 
-    pub fn encode(&self, block_size: usize, transaction_generation: u64) -> Result<Vec<u8>, FormatError> {
+    pub fn encode(
+        &self,
+        block_size: usize,
+        transaction_generation: u64,
+    ) -> Result<Vec<u8>, FormatError> {
         let payload_len = 8 + self.entries.len() * ENTRY_SIZE;
         if payload_len > block_size - HEADER_SIZE {
-            return Err(FormatError::Overflow("object map exceeds one block (prototype limit)"));
+            return Err(FormatError::Overflow(
+                "object map exceeds one block (prototype limit)",
+            ));
         }
         validate_entries(&self.entries)?;
 
@@ -95,7 +104,9 @@ impl ObjectMap {
         }
         let count = le::get_u32(&p[0..4]) as usize;
         if count > (p.len() - 8) / ENTRY_SIZE {
-            return Err(FormatError::Invalid("object map entry count exceeds payload"));
+            return Err(FormatError::Invalid(
+                "object map entry count exceeds payload",
+            ));
         }
         if header.payload_len as usize != 8 + count * ENTRY_SIZE {
             return Err(FormatError::Invalid("object map payload length mismatch"));
@@ -116,7 +127,9 @@ impl ObjectMap {
 fn validate_entries(entries: &[OmapEntry]) -> Result<(), FormatError> {
     for entry in entries {
         if entry.object_id == OBJECT_INVALID {
-            return Err(FormatError::Invalid("object map contains invalid object ID"));
+            return Err(FormatError::Invalid(
+                "object map contains invalid object ID",
+            ));
         }
     }
     for pair in entries.windows(2) {

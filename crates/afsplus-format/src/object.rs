@@ -94,7 +94,11 @@ pub struct ObjectRecord {
 }
 
 impl ObjectRecord {
-    pub fn encode(&self, block_size: usize, transaction_generation: u64) -> Result<Vec<u8>, FormatError> {
+    pub fn encode(
+        &self,
+        block_size: usize,
+        transaction_generation: u64,
+    ) -> Result<Vec<u8>, FormatError> {
         self.validate(block_size)?;
         let mut block = vec![0u8; block_size];
         let p = &mut block[HEADER_SIZE..];
@@ -156,7 +160,9 @@ impl ObjectRecord {
             return Err(FormatError::Invalid("object ID zero is invalid"));
         }
         if self.link_count == 0 {
-            return Err(FormatError::Invalid("link count zero without orphan support"));
+            return Err(FormatError::Invalid(
+                "link count zero without orphan support",
+            ));
         }
         if self.flags & !OBJECT_FLAG_EXTENT_TREE != 0 {
             return Err(FormatError::Invalid("object has unsupported flags"));
@@ -167,7 +173,9 @@ impl ObjectRecord {
                     return Err(FormatError::Invalid("directory has file extent flags"));
                 }
                 if self.data_root == 0 {
-                    return Err(FormatError::Invalid("directory must reference a directory block"));
+                    return Err(FormatError::Invalid(
+                        "directory must reference a directory block",
+                    ));
                 }
                 if self.size_bytes != 0 || self.data_blocks != 0 {
                     return Err(FormatError::Invalid("directory size fields must be zero"));
@@ -185,9 +193,7 @@ impl ObjectRecord {
                 }
                 if self.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
                     if self.data_root == 0 {
-                        return Err(FormatError::Invalid(
-                            "extent-tree file has no tree root",
-                        ));
+                        return Err(FormatError::Invalid("extent-tree file has no tree root"));
                     }
                 } else if self.data_blocks > MAX_EXTENT_BLOCKS {
                     return Err(FormatError::Invalid("file extent exceeds prototype cap"));
@@ -198,16 +204,23 @@ impl ObjectRecord {
                 } else {
                     self.data_root
                         .checked_add(self.data_blocks)
-                        .ok_or(FormatError::Overflow("file extent end overflows block address"))?;
+                        .ok_or(FormatError::Overflow(
+                            "file extent end overflows block address",
+                        ))?;
                     let capacity = self.data_blocks * block_size as u64;
                     let minimum = (self.data_blocks - 1) * block_size as u64;
-                    if self.data_root == 0 || self.size_bytes > capacity || self.size_bytes <= minimum {
+                    if self.data_root == 0
+                        || self.size_bytes > capacity
+                        || self.size_bytes <= minimum
+                    {
                         return Err(FormatError::Invalid("file size inconsistent with extent"));
                     }
                 }
             }
             ObjectType::Symlink | ObjectType::Internal => {
-                return Err(FormatError::Invalid("object type not implemented in prototype"));
+                return Err(FormatError::Invalid(
+                    "object type not implemented in prototype",
+                ));
             }
         }
         Ok(())

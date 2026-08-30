@@ -30,8 +30,8 @@ fn params(label: &str) -> MkfsParams {
         label: label.into(),
         region_size: 64,
         reclaim_caps: Default::default(),
-            log_slots: 8,
-            timestamp: Timespec {
+        log_slots: 8,
+        timestamp: Timespec {
             seconds: 1_780_000_000,
             nanoseconds: 0,
         },

@@ -7,25 +7,32 @@ use afsplus_format::checkpoint::{Checkpoint, RegionRecord};
 use afsplus_format::crc32c::CHECKSUM_CRC32C;
 use afsplus_format::dir::{comparison_key, DirBlock, DirEntry};
 use afsplus_format::geometry::Geometry;
-use afsplus_format::header::BlockHeader;
-use afsplus_format::ident::Identification;
+use afsplus_format::header::{block_type, BlockHeader, HEADER_SIZE};
+use afsplus_format::ident::{
+    FeatureFlags, Identification, IDENT_VERSION_LEGACY, INCOMPAT_INTENT_LOG,
+};
 use afsplus_format::intent_log::{LogOp, LogRecord};
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::omap::ObjectMap;
 use afsplus_format::reclaim::{
     ReclaimCaps, ReclaimEntry, ReclaimRoot, ReclaimSegment, ReclaimTable, SegmentRef, TableRef,
 };
-use afsplus_format::retired::RetiredList;
 use afsplus_format::region::{BitmapBinding, RegionDescriptor};
+use afsplus_format::retired::RetiredList;
 use afsplus_format::tree::{
     child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode, MAX_TREE_LEVEL,
 };
-use afsplus_format::{FormatError, Timespec, DEFAULT_BLOCK_SHIFT, DEFAULT_BLOCK_SIZE, OBJECT_ROOT};
+use afsplus_format::{
+    le, FormatError, Timespec, DEFAULT_BLOCK_SHIFT, DEFAULT_BLOCK_SIZE, OBJECT_ROOT,
+};
 
 const BS: usize = DEFAULT_BLOCK_SIZE;
 
 fn ts() -> Timespec {
-    Timespec { seconds: 1_780_000_000, nanoseconds: 123_456_789 }
+    Timespec {
+        seconds: 1_780_000_000,
+        nanoseconds: 123_456_789,
+    }
 }
 
 fn sample_ident() -> Identification {
@@ -35,6 +42,10 @@ fn sample_ident() -> Identification {
         checksum_algorithm: CHECKSUM_CRC32C,
         region_size: 256,
         log_slots: 8,
+        features: FeatureFlags {
+            incompat: INCOMPAT_INTENT_LOG,
+            ..FeatureFlags::default()
+        },
         total_blocks: 1024,
         checkpoint_slots: [1, 2],
         metadata_start: 9,
@@ -55,10 +66,26 @@ fn sample_checkpoint() -> Checkpoint {
         free_blocks_total: 800,
         flags: 0,
         regions: vec![
-            RegionRecord { descriptor_slot: 0, free_blocks: 100, descriptor_generation: 5 },
-            RegionRecord { descriptor_slot: 2, free_blocks: 200, descriptor_generation: 3 },
-            RegionRecord { descriptor_slot: 1, free_blocks: 250, descriptor_generation: 1 },
-            RegionRecord { descriptor_slot: 0, free_blocks: 250, descriptor_generation: 1 },
+            RegionRecord {
+                descriptor_slot: 0,
+                free_blocks: 100,
+                descriptor_generation: 5,
+            },
+            RegionRecord {
+                descriptor_slot: 2,
+                free_blocks: 200,
+                descriptor_generation: 3,
+            },
+            RegionRecord {
+                descriptor_slot: 1,
+                free_blocks: 250,
+                descriptor_generation: 1,
+            },
+            RegionRecord {
+                descriptor_slot: 0,
+                free_blocks: 250,
+                descriptor_generation: 1,
+            },
         ],
     }
 }
@@ -108,7 +135,11 @@ fn sample_region_descriptor() -> RegionDescriptor {
         region: 3,
         valid_blocks: 100,
         free_blocks: 95,
-        pages: vec![BitmapBinding { slot: 1, free_blocks: 95, generation: 5 }],
+        pages: vec![BitmapBinding {
+            slot: 1,
+            free_blocks: 95,
+            generation: 5,
+        }],
     }
 }
 
@@ -147,6 +178,30 @@ fn identification_roundtrip() {
 }
 
 #[test]
+fn legacy_identification_derives_the_intent_log_feature() {
+    const LEGACY_PAYLOAD_LEN: usize = 137;
+    let ident = sample_ident();
+    let mut block = ident.encode(BS).unwrap();
+    le::put_u32(
+        &mut block[HEADER_SIZE + 12..HEADER_SIZE + 16],
+        IDENT_VERSION_LEGACY,
+    );
+    block[HEADER_SIZE + LEGACY_PAYLOAD_LEN..].fill(0);
+    BlockHeader {
+        block_type: block_type::IDENTIFICATION,
+        flags: 0,
+        owner: 0,
+        generation: 0,
+        payload_len: LEGACY_PAYLOAD_LEN as u32,
+    }
+    .seal(&mut block);
+
+    let decoded = Identification::decode(&block).unwrap();
+    assert_eq!(decoded.log_slots, ident.log_slots);
+    assert_eq!(decoded.features.incompat, INCOMPAT_INTENT_LOG);
+}
+
+#[test]
 fn checkpoint_roundtrip_and_uuid_binding() {
     let checkpoint = sample_checkpoint();
     let block = checkpoint.encode(BS).unwrap();
@@ -157,7 +212,11 @@ fn checkpoint_roundtrip_and_uuid_binding() {
 
 #[test]
 fn checkpoint_structural_validation() {
-    let geo = Geometry { block_size: BS, total_blocks: 1024, region_size: 256 };
+    let geo = Geometry {
+        block_size: BS,
+        total_blocks: 1024,
+        region_size: 256,
+    };
     sample_checkpoint().validate_structural(&geo).unwrap();
 
     // Wrong region count.
@@ -250,7 +309,10 @@ fn object_record_rejects_zero_link_count_and_bad_extents() {
     record.data_blocks = 1;
     record.size_bytes = BS as u64;
     record.allocated_bytes = BS as u64;
-    assert!(matches!(record.encode(BS, 5), Err(FormatError::Overflow(_))));
+    assert!(matches!(
+        record.encode(BS, 5),
+        Err(FormatError::Overflow(_))
+    ));
 }
 
 #[test]
@@ -279,14 +341,31 @@ fn retired_list_roundtrip_and_double_retire() {
     assert!(list.contains(42));
     assert!(!list.contains(43));
     let mut list = sample_retired();
-    assert!(list.insert(42, 5).is_err(), "double retire must be rejected");
+    assert!(
+        list.insert(42, 5).is_err(),
+        "double retire must be rejected"
+    );
 }
 
 fn sample_reclaim_root() -> ReclaimRoot {
-    let mut root = ReclaimRoot::empty(ReclaimCaps { inline_entries: 8, segment_refs: 4, table_refs: 4 });
-    root.table_refs.push(TableRef { lba: 40, ref_count: 2 });
-    root.segment_refs.push(SegmentRef { lba: 41, entry_count: 3 });
-    root.inline_entries.push(ReclaimEntry { start: 100, blocks: 5, retire_generation: 7 });
+    let mut root = ReclaimRoot::empty(ReclaimCaps {
+        inline_entries: 8,
+        segment_refs: 4,
+        table_refs: 4,
+    });
+    root.table_refs.push(TableRef {
+        lba: 40,
+        ref_count: 2,
+    });
+    root.segment_refs.push(SegmentRef {
+        lba: 41,
+        entry_count: 3,
+    });
+    root.inline_entries.push(ReclaimEntry {
+        start: 100,
+        blocks: 5,
+        retire_generation: 7,
+    });
     root.head_segment_offset = 1;
     root.head_entry_offset = 2;
     root.head_block_offset = 1;
@@ -299,8 +378,16 @@ fn sample_reclaim_root() -> ReclaimRoot {
 fn sample_reclaim_segment() -> ReclaimSegment {
     ReclaimSegment {
         entries: vec![
-            ReclaimEntry { start: 100, blocks: 5, retire_generation: 3 },
-            ReclaimEntry { start: 200, blocks: 1, retire_generation: 4 },
+            ReclaimEntry {
+                start: 100,
+                blocks: 5,
+                retire_generation: 3,
+            },
+            ReclaimEntry {
+                start: 200,
+                blocks: 1,
+                retire_generation: 4,
+            },
         ],
     }
 }
@@ -308,8 +395,14 @@ fn sample_reclaim_segment() -> ReclaimSegment {
 fn sample_reclaim_table() -> ReclaimTable {
     ReclaimTable {
         refs: vec![
-            SegmentRef { lba: 300, entry_count: 10 },
-            SegmentRef { lba: 301, entry_count: 202 },
+            SegmentRef {
+                lba: 300,
+                entry_count: 10,
+            },
+            SegmentRef {
+                lba: 301,
+                entry_count: 202,
+            },
         ],
     }
 }
@@ -344,17 +437,29 @@ fn reclaim_structures_reject_inconsistencies() {
     // Areas exceeding their recorded capacities.
     let mut root = sample_reclaim_root();
     for i in 0..9 {
-        root.inline_entries.push(ReclaimEntry { start: 500 + i, blocks: 1, retire_generation: 1 });
+        root.inline_entries.push(ReclaimEntry {
+            start: 500 + i,
+            blocks: 1,
+            retire_generation: 1,
+        });
     }
     assert!(root.encode(BS, 9).is_err());
     // Zero-length runs and zero generations.
     assert!(ReclaimSegment {
-        entries: vec![ReclaimEntry { start: 1, blocks: 0, retire_generation: 1 }],
+        entries: vec![ReclaimEntry {
+            start: 1,
+            blocks: 0,
+            retire_generation: 1
+        }],
     }
     .encode(BS, 1)
     .is_err());
     assert!(ReclaimSegment {
-        entries: vec![ReclaimEntry { start: 1, blocks: 1, retire_generation: 0 }],
+        entries: vec![ReclaimEntry {
+            start: 1,
+            blocks: 1,
+            retire_generation: 0
+        }],
     }
     .encode(BS, 1)
     .is_err());
@@ -376,14 +481,20 @@ fn sample_log_record() -> LogRecord {
                 size_bytes: 5000,
                 content_crc: 0xDEAD_BEEF,
                 extents: vec![(300, 2)],
+                timestamp: ts(),
             },
-            LogOp::Delete { parent_id: 1, name: b"old".to_vec() },
+            LogOp::Delete {
+                parent_id: 1,
+                name: b"old".to_vec(),
+                timestamp: ts(),
+            },
             LogOp::Rename {
                 source_parent_id: 1,
                 source_name: b"HEAD.lock".to_vec(),
                 target_parent_id: 1,
                 target_name: b"HEAD".to_vec(),
                 replace: true,
+                timestamp: ts(),
             },
         ],
     }
@@ -404,6 +515,7 @@ fn intent_log_record_roundtrip_and_rejections() {
         size_bytes: 0,
         content_crc: 0,
         extents: Vec::new(),
+        timestamp: ts(),
     };
     assert!(bad.encode(BS).is_err());
     let mut bad = sample_log_record();
@@ -420,6 +532,49 @@ fn intent_log_record_roundtrip_and_rejections() {
 }
 
 #[test]
+fn legacy_intent_record_decodes_with_its_historical_zero_timestamp() {
+    const FIXED_PAYLOAD: usize = 32;
+    const LEGACY_OP_FIXED: usize = 48;
+    const CURRENT_OP_FIXED: usize = 64;
+    let name = b"old";
+    let record = LogRecord {
+        uuid: [7u8; 16],
+        base_generation: 9,
+        sequence: 1,
+        ops: vec![LogOp::Delete {
+            parent_id: 1,
+            name: name.to_vec(),
+            timestamp: Timespec::default(),
+        }],
+    };
+    let current = record.encode(BS).unwrap();
+    let mut legacy = vec![0u8; BS];
+    let payload = HEADER_SIZE;
+    legacy[payload..payload + FIXED_PAYLOAD]
+        .copy_from_slice(&current[payload..payload + FIXED_PAYLOAD]);
+    le::put_u16(&mut legacy[payload + 30..payload + 32], 0);
+    legacy[payload + FIXED_PAYLOAD..payload + FIXED_PAYLOAD + LEGACY_OP_FIXED].copy_from_slice(
+        &current[payload + FIXED_PAYLOAD..payload + FIXED_PAYLOAD + LEGACY_OP_FIXED],
+    );
+    legacy[payload + FIXED_PAYLOAD + LEGACY_OP_FIXED
+        ..payload + FIXED_PAYLOAD + LEGACY_OP_FIXED + name.len()]
+        .copy_from_slice(
+            &current[payload + FIXED_PAYLOAD + CURRENT_OP_FIXED
+                ..payload + FIXED_PAYLOAD + CURRENT_OP_FIXED + name.len()],
+        );
+    BlockHeader {
+        block_type: block_type::INTENT_LOG,
+        flags: 0,
+        owner: 0,
+        generation: record.base_generation,
+        payload_len: (FIXED_PAYLOAD + LEGACY_OP_FIXED + name.len()) as u32,
+    }
+    .seal(&mut legacy);
+
+    assert_eq!(LogRecord::decode(&legacy).unwrap(), record);
+}
+
+#[test]
 fn timespec_short_buffer_is_an_error_not_a_panic() {
     assert!(Timespec::read(&[]).is_err());
     assert!(Timespec::read(&[0u8; 11]).is_err());
@@ -430,7 +585,11 @@ fn timespec_short_buffer_is_an_error_not_a_panic() {
 
 #[test]
 fn geometry_reserved_blocks() {
-    let geo = Geometry { block_size: BS, total_blocks: 300, region_size: 128 };
+    let geo = Geometry {
+        block_size: BS,
+        total_blocks: 300,
+        region_size: 128,
+    };
     geo.validate().unwrap();
     assert_eq!(geo.region_count(), 3);
     assert_eq!(geo.region_valid_blocks(2), 44);
@@ -455,7 +614,11 @@ fn geometry_reserved_blocks() {
 
 #[test]
 fn multi_page_region_descriptor_roundtrip() {
-    let geo = Geometry { block_size: BS, total_blocks: 262_144, region_size: 262_144 };
+    let geo = Geometry {
+        block_size: BS,
+        total_blocks: 262_144,
+        region_size: 262_144,
+    };
     geo.validate().unwrap();
     assert_eq!(geo.bitmap_page_count(0), 9);
     // 30 allocation-metadata blocks plus ident and two checkpoints.
@@ -500,11 +663,19 @@ fn shared_tree_leaf_and_internal_nodes_roundtrip() {
         items: vec![
             TreeItem {
                 key: key_u64(100).to_vec(),
-                value: child_value(ChildRef { lba: 41, subtree_items: 100 }).unwrap(),
+                value: child_value(ChildRef {
+                    lba: 41,
+                    subtree_items: 100,
+                })
+                .unwrap(),
             },
             TreeItem {
                 key: key_u64(200).to_vec(),
-                value: child_value(ChildRef { lba: 42, subtree_items: 100 }).unwrap(),
+                value: child_value(ChildRef {
+                    lba: 42,
+                    subtree_items: 100,
+                })
+                .unwrap(),
             },
         ],
     };
@@ -529,14 +700,18 @@ fn shared_tree_rejects_bad_order_depth_children_and_hostile_counts() {
         subtree_items: 2,
         leftmost_child: 10,
         leftmost_items: 1,
-        items: vec![TreeItem { key: b"x".to_vec(), value: vec![1, 2, 3] }],
+        items: vec![TreeItem {
+            key: b"x".to_vec(),
+            value: vec![1, 2, 3],
+        }],
     };
     assert!(bad_internal.encode(BS, 1).is_err());
 
     // A checksummed but hostile count must fail bounds-first, without trying
     // to reserve attacker-controlled memory.
     let mut encoded = sample_tree_leaf().encode(BS, 1).unwrap();
-    let header = BlockHeader::verify(&encoded, afsplus_format::header::block_type::TREE_NODE).unwrap();
+    let header =
+        BlockHeader::verify(&encoded, afsplus_format::header::block_type::TREE_NODE).unwrap();
     afsplus_format::le::put_u32(&mut encoded[32 + 4..32 + 8], u32::MAX);
     header.seal(&mut encoded);
     assert!(TreeNode::decode(&encoded).is_err());
@@ -557,7 +732,10 @@ fn dir_block_roundtrip_preserves_original_names_and_key_order() {
     let mut sorted = keys.clone();
     sorted.sort();
     assert_eq!(keys, sorted);
-    assert!(decoded.entries.iter().any(|e| e.name == "Émoji-☂.rs".as_bytes()));
+    assert!(decoded
+        .entries
+        .iter()
+        .any(|e| e.name == "Émoji-☂.rs".as_bytes()));
 }
 
 #[test]

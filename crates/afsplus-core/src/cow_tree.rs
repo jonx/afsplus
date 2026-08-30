@@ -1206,8 +1206,8 @@ mod tests {
                 label: "CowTree".into(),
                 region_size: 2048,
                 reclaim_caps: Default::default(),
-            log_slots: 8,
-            timestamp: Timespec::default(),
+                log_slots: 8,
+                timestamp: Timespec::default(),
             },
         )
         .unwrap();
@@ -1324,8 +1324,9 @@ mod tests {
             dev.write_block(*lba, block).unwrap();
         }
         checkpoint2.reclaim_root_block = finished.reclaim_root_lba;
-        let mut tx2 = TxAllocator::begin(&mut dev, &geo, &checkpoint2, Some(&checkpoint), 3, 4096, 0)
-            .unwrap();
+        let mut tx2 =
+            TxAllocator::begin(&mut dev, &geo, &checkpoint2, Some(&checkpoint), 3, 4096, 0)
+                .unwrap();
         assert!(matches!(
             delete_many(
                 &mut dev,
@@ -1601,8 +1602,8 @@ mod tests {
                 label: "CowTreeBadLevel".into(),
                 region_size: 2048,
                 reclaim_caps: Default::default(),
-            log_slots: 8,
-            timestamp: Timespec::default(),
+                log_slots: 8,
+                timestamp: Timespec::default(),
             },
         )
         .unwrap();

@@ -27,6 +27,16 @@ org.aros.afsplus:inline-data
 
 The on-disk representation may use compact numeric IDs for standardized core features, but tools must retain a stable globally unique textual identity.
 
+The current prototype identification block carries compact `COMPAT`,
+`RO_COMPAT`, and `INCOMPAT` summaries. The first assigned identity is:
+
+```text
+INCOMPAT bit 0 = org.aros.afsplus:intent-log
+```
+
+This summary is executable at mount; it does not replace future registry
+records for dependencies, lifecycle state, or feature parameters.
+
 Once allocated, a feature identity is never reused for a different semantic feature, even if the original feature is later deprecated or retired.
 
 ## 3. Feature classes
