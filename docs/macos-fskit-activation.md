@@ -15,6 +15,11 @@ This was reproduced on macOS 26.6.2 (25G83) with macFUSE 5.3.3. Registration
 with PluginKit is not sufficient in that state: FSKit keeps its own per-user
 enabled-module list.
 
+The inert-toggle behavior and the reversible workaround below are reported
+upstream in [macfuse/macfuse#1194](https://github.com/macfuse/macfuse/issues/1194).
+Check that issue before using the workaround: a supported fix or activation
+procedure may supersede it.
+
 ## Diagnose without changing the system
 
 From the repository root:
