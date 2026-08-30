@@ -57,6 +57,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test -p afsplus-check --test measurements -- --nocapture   # cost table
 cargo run -p afsplus-core --example mkimage -- demo.img
+cargo run -p afsplus-core --bin afsplus-populate -- demo.img ./payload
 cargo run -p afsplus-check --bin afsplus-check -- demo.img --json
 ```
 

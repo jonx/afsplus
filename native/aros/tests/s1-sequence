@@ -1,0 +1,5 @@
+; Runs after SYS:, C:, L:, LIBS:, DEVS: and S: point into AFSPLUS19:.
+C:AFSPlusS1Probe >MacRW:s1-probe.out
+C:Version >MacRW:s1-version.out
+C:List SYS: ALL >MacRW:s1-list.out
+C:Copy SYS:s1-runtime MacRW:s1-runtime >MacRW:s1-copy.out

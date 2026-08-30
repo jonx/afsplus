@@ -85,6 +85,46 @@ COMPILER_PATH="$sdk/tools:$aros_crosstools/bin" \
     -Wl,--end-group -lclang_rt.builtins-aarch64
 chmod 755 "$staging/AFSPlusReplayProbe"
 
+echo "[aros-package] build the target-side S1 system-pivot probe"
+COMPILER_PATH="$sdk/tools:$aros_crosstools/bin" \
+    "$aros_clang" --target=aarch64-unknown-aros \
+    -mcmodel=large -ffixed-x18 -O2 -std=gnu11 \
+    -Wall -Wextra -Wconversion -Wsign-conversion -Werror \
+    -Wno-pointer-sign \
+    -isystem "$developer/include" \
+    -isystem "$sdk/gen/include" \
+    -isystem "$sdk/gen/include/aros/posixc" \
+    -isystem "$developer/include/aros/stdc" \
+    -nostartfiles -nodefaultlibs \
+    -L "$developer/lib" -L "$aros_crosstools/lib/generic" \
+    "$developer/lib/startup.o" native/aros/tests/s1_probe.c \
+    -o "$staging/AFSPlusS1Probe" \
+    -Wl,--allow-multiple-definition -Wl,--start-group \
+    -lpthread -lposixc -lstdc -lstdcio -ldos -lexec -laros \
+    -lautoinit -llibinit -lutility -lamiga -larossupport \
+    -Wl,--end-group -lclang_rt.builtins-aarch64
+chmod 755 "$staging/AFSPlusS1Probe"
+
+echo "[aros-package] build the target-side S1 bootstrap pivot"
+COMPILER_PATH="$sdk/tools:$aros_crosstools/bin" \
+    "$aros_clang" --target=aarch64-unknown-aros \
+    -mcmodel=large -ffixed-x18 -O2 -std=gnu11 \
+    -Wall -Wextra -Wconversion -Wsign-conversion -Werror \
+    -Wno-pointer-sign \
+    -isystem "$developer/include" \
+    -isystem "$sdk/gen/include" \
+    -isystem "$sdk/gen/include/aros/posixc" \
+    -isystem "$developer/include/aros/stdc" \
+    -nostartfiles -nodefaultlibs \
+    -L "$developer/lib" -L "$aros_crosstools/lib/generic" \
+    "$developer/lib/startup.o" native/aros/tests/s1_pivot.c \
+    -o "$staging/AFSPlusS1Pivot" \
+    -Wl,--allow-multiple-definition -Wl,--start-group \
+    -lpthread -lposixc -lstdc -lstdcio -ldos -lexec -laros \
+    -lautoinit -llibinit -lutility -lamiga -larossupport \
+    -Wl,--end-group -lclang_rt.builtins-aarch64
+chmod 755 "$staging/AFSPlusS1Pivot"
+
 echo "[aros-package] create and verify the 64 MiB image"
 cargo run --quiet --release -p afsplus-core --bin afsplus-mkfs -- \
     --size-mib 64 --label AFSPlusAlpha0 "$staging/Unit19"
@@ -96,7 +136,8 @@ cp docs/aros-alpha0-package.md "$staging/README.md"
 (
     cd "$staging"
     shasum -a 256 afsplus-handler AFSPlusAlpha0Probe AFSPlusReplayProbe \
-        AFSPLUS19 Unit19 check-before.json README.md >SHA256SUMS
+        AFSPlusS1Probe AFSPlusS1Pivot AFSPLUS19 Unit19 check-before.json \
+        README.md >SHA256SUMS
 )
 
 mkdir -p "$(dirname -- "$output")"

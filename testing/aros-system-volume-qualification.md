@@ -41,6 +41,12 @@ from the old system tree except for explicitly recorded bootstrap components.
 This is the first gate that supports the statement "AROS runs on AFS+" during a
 normal session. It is still not an autonomous cold boot from AFS+.
 
+S1 is implemented cumulatively. S1a proves the core assign pivot and execution
+of a manifested command/library subset; `tools/check-hosted-aros-s1.sh` passed
+that gate and ADR-048 records its explicit bootstrap boundary. S1b adds the
+desktop, preferences and representative applications. Only S1a is currently
+qualified, so the broader "normal session" statement remains withheld.
+
 ### S2: boot-selected AFS+ system volume
 
 Make the handler available before DOS chooses the boot volume, mark the AFS+
