@@ -58,6 +58,21 @@ pub struct CommitStats {
     pub alloc: AllocStats,
 }
 
+pub const MAX_DIRECTORY_PAGE_ENTRIES: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryCursor {
+    pub generation: u64,
+    pub ordinal: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryPage {
+    pub entries: Vec<DirEntry>,
+    pub next: DirectoryCursor,
+    pub eof: bool,
+}
+
 /// One operation inside a [`Volume::run_batch`] group commit (ADR-026).
 #[derive(Debug, Clone)]
 pub enum BatchOp<'a> {
@@ -258,6 +273,18 @@ impl<D: BlockDevice> Volume<D> {
         self.last_commit
     }
 
+    /// Filesystem-wide durability barrier. Successful immediate mutations
+    /// are already durable; this also gives adapters an explicit sync hook.
+    /// Read-only modes return success without touching the device.
+    pub fn sync(&mut self) -> Result<(), CoreError> {
+        if !self.mount_mode.allows_user_writes() {
+            return Ok(());
+        }
+        self.ensure_window_closed()?;
+        self.dev.flush()?;
+        Ok(())
+    }
+
     /// Looks a name up in the root directory.
     pub fn lookup_root(&mut self, name: &str) -> Result<Option<u64>, CoreError> {
         self.lookup_in_directory(OBJECT_ROOT, name)
@@ -308,6 +335,53 @@ impl<D: BlockDevice> Volume<D> {
         .iter()
         .map(|e| (String::from_utf8_lossy(&e.name).into_owned(), e.child_id))
         .collect())
+    }
+
+    /// Reads a bounded directory page. Cursors bind to the mounted checkpoint
+    /// generation; callers must restart after any commit that makes one stale.
+    pub fn read_directory_page(
+        &mut self,
+        directory_id: u64,
+        cursor: Option<DirectoryCursor>,
+        max_entries: usize,
+    ) -> Result<DirectoryPage, CoreError> {
+        if max_entries > MAX_DIRECTORY_PAGE_ENTRIES {
+            return Err(CoreError::PrototypeLimit(
+                "directory page exceeds entry cap",
+            ));
+        }
+        let cursor = cursor.unwrap_or(DirectoryCursor {
+            generation: self.checkpoint.generation,
+            ordinal: 0,
+        });
+        if cursor.generation != self.checkpoint.generation {
+            return Err(CoreError::Stale);
+        }
+        let record = self.read_object(directory_id)?.ok_or(CoreError::NotFound)?;
+        if record.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        let (entries, total) = directory::read_page(
+            &mut self.dev,
+            &self.ident.geometry(),
+            record.data_root,
+            directory_id,
+            self.checkpoint.generation,
+            cursor.ordinal,
+            max_entries,
+        )?;
+        let next_ordinal = cursor
+            .ordinal
+            .checked_add(entries.len() as u64)
+            .ok_or_else(|| CoreError::Corrupt("directory cursor overflow".into()))?;
+        Ok(DirectoryPage {
+            entries,
+            next: DirectoryCursor {
+                generation: cursor.generation,
+                ordinal: next_ordinal,
+            },
+            eof: next_ordinal >= total,
+        })
     }
 
     /// Reads and validates one object record on demand. Returning the record
@@ -362,6 +436,58 @@ impl<D: BlockDevice> Volume<D> {
             content[offset..offset + length].copy_from_slice(&block[..length]);
         }
         Ok(content)
+    }
+
+    /// Reads committed file bytes at `offset` into a caller-owned buffer.
+    /// Sparse holes and unwritten extents are returned as zeros.
+    pub fn read_file_at(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> Result<usize, CoreError> {
+        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        if record.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        if destination.is_empty() || offset >= record.size_bytes {
+            return Ok(0);
+        }
+        let count = (record.size_bytes - offset).min(destination.len() as u64);
+        let end = offset + count;
+        let block_size = self.dev.block_size() as u64;
+        let mut block = vec![0u8; block_size as usize];
+        for logical_block in offset / block_size..end.div_ceil(block_size) {
+            block.fill(0);
+            let mapped = if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
+                extent_map::lookup_extent(
+                    &mut self.dev,
+                    &self.ident.geometry(),
+                    record.data_root,
+                    object_id,
+                    self.checkpoint.generation,
+                    logical_block,
+                )?
+                .filter(|extent| extent.flags & EXTENT_UNWRITTEN == 0)
+                .map(|extent| extent.physical_start + logical_block - extent.logical_start)
+            } else if logical_block < record.data_blocks {
+                Some(record.data_root.checked_add(logical_block).ok_or_else(|| {
+                    CoreError::Corrupt(format!("object {object_id} extent overflow"))
+                })?)
+            } else {
+                None
+            };
+            if let Some(lba) = mapped {
+                self.dev.read_block(lba, &mut block)?;
+            }
+            let block_start = logical_block * block_size;
+            let copy_start = offset.max(block_start);
+            let copy_end = end.min(block_start + block_size);
+            let source = (copy_start - block_start) as usize..(copy_end - block_start) as usize;
+            let target = (copy_start - offset) as usize..(copy_end - offset) as usize;
+            destination[target].copy_from_slice(&block[source]);
+        }
+        Ok(count as usize)
     }
 
     /// Replaces `content.len()` bytes at `offset` using fresh data blocks and

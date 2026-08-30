@@ -43,6 +43,11 @@ as such in the crate docs.
   does not run: link counts, orphaned objects, bitmap ⟺ reachability
   equality, quarantine invariants, and shadow verification of the retained
   older checkpoint (warnings). Human and versioned JSON output (ADR-025).
+- `afsplus-vfs` — filesystem-neutral API-v2 subset with stable object IDs,
+  handles, caller-buffer 64-bit I/O, bounded generation-checked directory
+  pages, stat/statfs, namespace operations, explicit durability, capability
+  discovery, and portable error categories. FUSE and MacAROS adapters share
+  this layer rather than calling disk structures directly (ADR-039).
 
 ## Try it
 

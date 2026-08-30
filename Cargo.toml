@@ -5,6 +5,7 @@ members = [
     "crates/afsplus-block",
     "crates/afsplus-core",
     "crates/afsplus-check",
+    "crates/afsplus-vfs",
 ]
 
 [workspace.package]

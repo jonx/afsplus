@@ -6,7 +6,9 @@ use afsplus_format::geometry::Geometry;
 use afsplus_format::tree::{TreeKind, TreeNode};
 use afsplus_format::{le, validate_name, OBJECT_INVALID};
 
-use crate::tree::{lookup, visit_tree_nodes, visit_tree_nodes_bounded, TreeSpec, TreeSummary};
+use crate::tree::{
+    lookup, read_range, visit_tree_nodes, visit_tree_nodes_bounded, TreeSpec, TreeSummary,
+};
 use crate::CoreError;
 
 const VALUE_FIXED: usize = 16;
@@ -116,6 +118,32 @@ pub fn load_all<D: BlockDevice>(
         tree_blocks,
         summary,
     })
+}
+
+/// Reads a bounded ordinal page without materializing the whole directory.
+pub fn read_page<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    owner: u64,
+    max_generation: u64,
+    start: u64,
+    limit: usize,
+) -> Result<(Vec<DirEntry>, u64), CoreError> {
+    let page = read_range(
+        dev,
+        geo,
+        root_lba,
+        spec(owner, max_generation),
+        start,
+        limit,
+    )?;
+    let entries = page
+        .items
+        .into_iter()
+        .map(|(key, value)| decode_entry(&key, &value))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((entries, page.total_items))
 }
 
 /// Exhaustively validates the directory tree and yields each typed entry in

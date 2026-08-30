@@ -44,6 +44,7 @@ crates/
   afsplus-format/        # exact encoding, constants, checksums
   afsplus-check/         # invariant/check engine
   afsplus-block/         # block-device traits and wrappers
+  afsplus-vfs/           # portable handles, errors, capabilities, I/O API
   afsplus-host/          # std host adapters
   afsplus-fuse/          # host filesystem mount adapter
   afsplus-cli/           # mkfs/info/check/trace/explain tools
@@ -52,6 +53,10 @@ crates/
 ```
 
 The exact crate split can change as implementation begins. The important boundary is that core disk semantics do not depend on POSIX, macOS, AROS DOS packets, FUSE, or a host filesystem namespace.
+
+The `afsplus-vfs` boundary is now executable. Both `afsplus-fuse` and
+`afsplus-aros` consume it; neither adapter may reach into COW trees or disk
+records directly.
 
 ## 4. Block-device trait
 

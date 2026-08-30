@@ -35,6 +35,12 @@ performing mandatory replay and returns a read-only recovered view.
 
 ## 3. Core operations
 
+The executable Rust subset lives in `afsplus-vfs` (ADR-039). It currently
+covers handles, caller-buffer 64-bit I/O, truncate, paged directories,
+stat/statfs, create/mkdir/unlink/rmdir/rename/atomic replace/hard links, and
+explicit sync. Unsupported categories below are not advertised in the
+capability mask.
+
 Required categories:
 
 ### handles and I/O
@@ -73,6 +79,10 @@ Required categories:
 - directory iterator
 - full-volume object iterator
 - change-stream iterator
+
+Directory cookies are opaque to OS adapters. The current AFS+ implementation
+binds an ordinal to the checkpoint generation and returns `STALE` after any
+commit, requiring enumeration to restart rather than mixing namespace views.
 
 ### synchronization
 

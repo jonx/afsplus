@@ -8,6 +8,8 @@ typedef uint64_t FSV2_ObjectId;
 typedef int64_t  FSV2_Offset;
 typedef uint64_t FSV2_Size;
 typedef uint64_t FSV2_Sequence;
+typedef uint64_t FSV2_Handle;
+typedef uint64_t FSV2_DirCookie;
 
 enum FSV2_Result {
     FSV2_OK = 0,
@@ -50,6 +52,21 @@ struct FSV2_Stat {
     uint64_t protection;
     int64_t mtime_seconds;
     uint32_t mtime_nanoseconds;
+};
+
+struct FSV2_StatFs {
+    uint32_t block_size;
+    uint32_t max_name_bytes;
+    uint64_t total_blocks;
+    uint64_t free_blocks;
+    uint64_t available_blocks;
+};
+
+struct FSV2_DirEntry {
+    struct FSV2_String name;
+    FSV2_ObjectId object_id;
+    FSV2_DirCookie next_cookie;
+    uint32_t type;
 };
 
 struct FSV2_Change {

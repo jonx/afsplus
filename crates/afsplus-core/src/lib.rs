@@ -102,6 +102,8 @@ pub enum CoreError {
     WindowPoisoned,
     /// The selected mount mode does not permit filesystem mutations.
     ReadOnly,
+    /// A generation-bound iterator or handle no longer names its view.
+    Stale,
     /// Unknown INCOMPAT bits prevent every kind of mount.
     UnsupportedIncompatFeatures(u64),
     /// Unknown RO_COMPAT bits require a read-only or NO_CHANGES mount.
@@ -146,6 +148,7 @@ impl fmt::Display for CoreError {
                 )
             }
             CoreError::ReadOnly => write!(f, "volume is mounted read-only"),
+            CoreError::Stale => write!(f, "filesystem cursor or handle is stale"),
             CoreError::UnsupportedIncompatFeatures(bits) => {
                 write!(
                     f,

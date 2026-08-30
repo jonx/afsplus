@@ -26,3 +26,13 @@ dependencies = [
 [[package]]
 name = "afsplus-format"
 version = "0.0.1"
+
+[[package]]
+name = "afsplus-vfs"
+version = "0.0.1"
+dependencies = [
+ "afsplus-block",
+ "afsplus-check",
+ "afsplus-core",
+ "afsplus-format",
+]

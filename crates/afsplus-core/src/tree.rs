@@ -24,6 +24,12 @@ pub struct TreeLookupStats {
 
 pub type TreeFloorItem = (Vec<u8>, Vec<u8>);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRangePage {
+    pub items: Vec<(Vec<u8>, Vec<u8>)>,
+    pub total_items: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TreeSummary {
     pub items: u64,
@@ -175,6 +181,124 @@ pub fn lookup_floor<D: BlockDevice>(
     Err(CoreError::Corrupt(
         "tree traversal exceeded maximum depth".into(),
     ))
+}
+
+/// Reads a bounded ordinal range of leaf items. Subtree counters let the
+/// traversal skip whole branches, so work is proportional to tree height
+/// plus the pages containing returned items rather than directory size.
+pub fn read_range<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    spec: TreeSpec,
+    start: u64,
+    limit: usize,
+) -> Result<TreeRangePage, CoreError> {
+    check_tree_lba(geo, root_lba)?;
+    let mut items = Vec::with_capacity(limit);
+    let mut path = BTreeSet::new();
+    let total_items = read_range_node(
+        dev, geo, root_lba, spec, None, None, None, true, start, limit, &mut path, &mut items,
+    )?;
+    Ok(TreeRangePage { items, total_items })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_range_node<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    lba: u64,
+    spec: TreeSpec,
+    expected_level: Option<u8>,
+    lower: Option<&[u8]>,
+    upper: Option<&[u8]>,
+    is_root: bool,
+    mut start: u64,
+    limit: usize,
+    path: &mut BTreeSet<u64>,
+    out: &mut Vec<(Vec<u8>, Vec<u8>)>,
+) -> Result<u64, CoreError> {
+    if !path.insert(lba) {
+        return Err(CoreError::Corrupt(format!("tree cycle at block {lba}")));
+    }
+    let result = (|| {
+        let mut buf = vec![0u8; geo.block_size];
+        dev.read_block(lba, &mut buf)?;
+        let (node, generation) = TreeNode::decode(&buf)
+            .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        validate_node_identity(&node, generation, spec, expected_level, lba)?;
+        validate_node_range(&node, lower, upper, is_root)?;
+        let total = node.subtree_items;
+        if start >= total || out.len() >= limit {
+            return Ok(total);
+        }
+
+        if node.is_leaf() {
+            let first = usize::try_from(start)
+                .map_err(|_| CoreError::Corrupt("leaf ordinal does not fit memory".into()))?;
+            let take = limit.saturating_sub(out.len());
+            out.extend(
+                node.items[first..]
+                    .iter()
+                    .take(take)
+                    .map(|item| (item.key.clone(), item.value.clone())),
+            );
+            return Ok(total);
+        }
+
+        for child_index in 0..=node.items.len() {
+            if out.len() >= limit {
+                break;
+            }
+            let child = if child_index == 0 {
+                afsplus_format::tree::ChildRef {
+                    lba: node.leftmost_child,
+                    subtree_items: node.leftmost_items,
+                }
+            } else {
+                TreeNode::child_ref(&node.items[child_index - 1]).map_err(CoreError::Format)?
+            };
+            if start >= child.subtree_items {
+                start -= child.subtree_items;
+                continue;
+            }
+            check_tree_lba(geo, child.lba)?;
+            let child_lower = if child_index == 0 {
+                lower
+            } else {
+                Some(node.items[child_index - 1].key.as_slice())
+            };
+            let child_upper = node
+                .items
+                .get(child_index)
+                .map(|item| item.key.as_slice())
+                .or(upper);
+            let actual = read_range_node(
+                dev,
+                geo,
+                child.lba,
+                spec,
+                Some(node.level - 1),
+                child_lower,
+                child_upper,
+                false,
+                start,
+                limit,
+                path,
+                out,
+            )?;
+            if actual != child.subtree_items {
+                return Err(CoreError::Corrupt(format!(
+                    "tree child {} count {actual}, parent records {}",
+                    child.lba, child.subtree_items
+                )));
+            }
+            start = 0;
+        }
+        Ok(total)
+    })();
+    path.remove(&lba);
+    result
 }
 
 /// Exhaustively checks level, range, separator, count, ownership, and cycle
