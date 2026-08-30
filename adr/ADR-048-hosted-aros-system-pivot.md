@@ -1,6 +1,6 @@
 # ADR-048: Split Hosted system-volume qualification into S1a and S1b
 
-Status: Accepted for S1a; full S1 remains open
+Status: Accepted; S1a and Hosted S1b qualified
 
 ## Context
 
@@ -68,5 +68,6 @@ using that diagnostic as evidence, but the compatibility bug remains open.
 ## Consequences
 
 S1a supports the narrow statement "AROS commands execute with their system
-assigns on AFS+ after bootstrap." It does not yet satisfy the full statement
-"a normal AROS session runs on AFS+"; that requires S1b.
+assigns on AFS+ after bootstrap." S1b now satisfies the broader Hosted statement
+"a normal AROS session runs on AFS+ after bootstrap" under the boundaries in
+ADR-049. Autonomous boot selection remains S2.

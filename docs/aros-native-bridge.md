@@ -165,13 +165,14 @@ fixes and S0 evidence.
 
 The deterministic Hosted replay gate now mounts six modeled power-cut images
 through the native handler and validates their exact old/new state plus a clean
-post-replay checker; ADR-047 records its model and limits. The next integration
-step, the S1a core `SYS:` pivot, is also qualified: six system assigns, target
-commands and durable writes run from a manifested AFS+ subset. ADR-048 keeps
-the full S1 claim open until the desktop/preferences/application S1b gate.
-Lifecycle termination, S1b and an in-tree MacAROS handler build remain before
-the same contract moves to native MacAROS, then m68k emulation and the physical
-Amiga 500: three target platforms, four ordered validation stages.
+post-replay checker; ADR-047 records its model and limits. The cumulative S1
+system pivot is also qualified: S1a moves the six core assigns, while S1b runs
+Wanderer, IPrefs, Locale and Clock from a manifested AFS+ desktop image and
+durably writes `ENVARC:`. ADR-048 defines the split and ADR-049 records the S1b
+evidence and prototype case-policy boundary. Lifecycle termination and an
+in-tree MacAROS handler build remain before the same contract moves to native
+MacAROS, then m68k emulation and the physical Amiga 500: three target
+platforms, four ordered validation stages.
 
 The fixed-image Alpha-0 path does not yet install `TD_ADDCHANGEINT` handling.
 Hot-swappable media remains disabled until removal can detach the mounted Rust

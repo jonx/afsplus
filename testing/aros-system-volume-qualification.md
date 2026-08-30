@@ -44,8 +44,9 @@ normal session. It is still not an autonomous cold boot from AFS+.
 S1 is implemented cumulatively. S1a proves the core assign pivot and execution
 of a manifested command/library subset; `tools/check-hosted-aros-s1.sh` passed
 that gate and ADR-048 records its explicit bootstrap boundary. S1b adds the
-desktop, preferences and representative applications. Only S1a is currently
-qualified, so the broader "normal session" statement remains withheld.
+desktop, preferences and representative applications.
+`tools/check-hosted-aros-s1b.sh` has qualified S1b on Hosted MacAROS; ADR-049
+records the payload, runtime evidence, case-policy boundary and exact claim.
 
 ### S2: boot-selected AFS+ system volume
 

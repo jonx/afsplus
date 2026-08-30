@@ -175,13 +175,15 @@ switches are inert, use the diagnostic and reversible workaround in
 transport is not a raw substitute for macFUSE's message channel; see ADR-040.
 The native AROS bridge and its cross-build qualification are documented in
 [`docs/aros-native-bridge.md`](docs/aros-native-bridge.md), ADR-042 through
-ADR-046. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
+ADR-049. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
 Hosted MacAROS → macFUSE → Hosted MacAROS round trip on one checked image.
-In-tree build integration, Hosted crash replay, an AFS+ system volume and the
-native/classic ports remain explicit later gates. Qualification is reported as
-three target platforms over four ordered stages: Hosted MacAROS, native
-MacAROS/Apple Silicon, Amiga 500/m68k emulation, then the physical A500. The
-emulator is the pre-hardware validation stage of the A500 target.
+Hosted intent-log replay and the cumulative post-bootstrap S1 system-volume
+pivot are also qualified. In-tree build/lifecycle integration, autonomous boot
+selection and the native/classic ports remain explicit later gates.
+Qualification is reported as three target platforms over four ordered stages:
+Hosted MacAROS, native MacAROS/Apple Silicon, Amiga 500/m68k emulation, then the
+physical A500. The emulator is the pre-hardware validation stage of the A500
+target.
 Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen are not
 format commitments. Incompatible format changes must update the format epoch
 or use feature negotiation as defined in the compatibility specification.

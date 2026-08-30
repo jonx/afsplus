@@ -1,0 +1,65 @@
+; Runs after the S1 pivot. Every persistent system path below resolves to AFS+.
+C:AFSPlusS1Probe >MacRW:s1-probe.out
+If NOT EXISTS "RAM:Clipboards"
+    C:MakeDir "RAM:Clipboards"
+EndIf
+If NOT EXISTS "RAM:T"
+    C:MakeDir "RAM:T"
+EndIf
+If NOT EXISTS "RAM:ENV"
+    C:MakeDir "RAM:ENV"
+EndIf
+C:Assign "ENV:" "RAM:ENV"
+C:Assign "T:" "RAM:T"
+C:Assign "CLIPS:" "RAM:Clipboards"
+C:Assign "ENVARC:" "SYS:Prefs/Env-Archive"
+If EXISTS "C:SetClock"
+    C:SetClock LOAD
+EndIf
+If EXISTS "L:pipe-handler"
+    C:Mount DEVS:DOSDrivers/PIPE
+EndIf
+If EXISTS "DEVS:Keymaps"
+    C:Assign "KEYMAPS:" "DEVS:Keymaps"
+EndIf
+If EXISTS "C:LoadKeymap"
+    C:LoadKeymap RESTORE
+EndIf
+C:SetEnv AROS_FSW_ROOTS "SYS:"
+C:Assign "LOCALE:" "SYS:Locale"
+C:Assign "LIBS:" "SYS:Classes" ADD
+C:Assign "HELP:" "LOCALE:Help" DEFER
+C:Assign "IMAGES:" "SYS:System/Images" DEFER
+C:Assign "WANDERER:" "SYS:System/Wanderer" DEFER
+C:Assign "THEMES:" "SYS:Prefs/Presets/Themes"
+C:Assign "THEME:" "THEMES:AROSDefault"
+If EXISTS "THEME:images"
+    C:Assign "IMAGES:" "THEME:images" PREPEND
+EndIf
+C:Path "C:" "SYS:System" "S:" "SYS:Prefs" QUIET
+C:Assign "FONTS:" "SYS:Fonts"
+C:Path "SYS:Tools" QUIET ADD
+C:Path "SYS:Utilities" QUIET ADD
+If EXISTS "C:AddDataTypes"
+    C:AddDataTypes REFRESH QUIET
+EndIf
+If EXISTS "C:AddAudioModes"
+    If EXISTS "DEVS:AudioModes/COREAUDIO"
+        C:Run <NIL: >NIL: QUIET C:AddAudioModes DEVS:AudioModes/COREAUDIO QUIET
+    EndIf
+EndIf
+If EXISTS "C:IPrefs"
+    C:IPrefs
+EndIf
+C:Run <NIL: >NIL: QUIET C:ConClip
+C:AFSPlusS1bProbe >MacRW:s1b-probe.out
+C:Copy ENVARC:AFSPlus/S1b-probe MacRW:s1b-preference >MacRW:s1b-preference-copy.out
+C:SetEnv SAVE AFSPLUS_S1B afsplus-s1b
+C:GetEnv AFSPLUS_S1B >MacRW:s1b-env.out
+C:Copy ENVARC:AFSPLUS_S1B MacRW:s1b-saved-env >MacRW:s1b-saved-env-copy.out
+C:Run <NIL: >NIL: QUIET WANDERER:Wanderer
+C:Wait 3
+C:Run <NIL: >NIL: QUIET SYS:Prefs/Locale
+C:Run <NIL: >NIL: QUIET SYS:Utilities/Clock
+C:Wait 2
+C:Copy SYS:s1b-origin MacRW:s1b-runtime >MacRW:s1b-copy.out
