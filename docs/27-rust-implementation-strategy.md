@@ -1,6 +1,24 @@
 # 27. Rust Implementation Strategy
 
+> **ADRs:** [ADR-042](../adr/ADR-042-aros-c-boundary.md),
+> [ADR-043](../adr/ADR-043-native-aros-dospacket-translator.md) · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 Status: implementation direction
+
+<!-- toc -->
+
+- [1. Why Rust is attractive for AFS+](#1-why-rust-is-attractive-for-afs)
+- [2. Rust does not mean waiting for native Rust on AROS](#2-rust-does-not-mean-waiting-for-native-rust-on-aros)
+- [3. Proposed crate layout](#3-proposed-crate-layout)
+- [4. Block-device trait](#4-block-device-trait)
+- [5. Composable test backends](#5-composable-test-backends)
+- [6. Rust on Macaros Native](#6-rust-on-macaros-native)
+- [7. What should remain C-accessible](#7-what-should-remain-c-accessible)
+- [8. Testing advantage](#8-testing-advantage)
+- [9. Development principle](#9-development-principle)
+
+<!-- /toc -->
 
 ## 1. Why Rust is attractive for AFS+
 

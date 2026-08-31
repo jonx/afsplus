@@ -1,6 +1,30 @@
 # 29. First-Class Content Inspection and Anti-Malware Support
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 Status: developer/security API design
+
+<!-- toc -->
+
+- [1. Goal](#1-goal)
+- [2. Lessons from existing systems](#2-lessons-from-existing-systems)
+- [3. Core principle: scan once per content generation](#3-core-principle-scan-once-per-content-generation)
+- [4. Durable whole-filesystem security feed](#4-durable-whole-filesystem-security-feed)
+- [5. Coalesce writes, do not notify every write syscall by default](#5-coalesce-writes-do-not-notify-every-write-syscall-by-default)
+- [6. Race-free scanning by object and generation](#6-race-free-scanning-by-object-and-generation)
+- [7. Fast execution/open authorization](#7-fast-executionopen-authorization)
+- [8. Clone/reflink awareness](#8-clonereflink-awareness)
+- [9. Optional content fingerprint cache](#9-optional-content-fingerprint-cache)
+- [10. Security verdicts should not be ordinary file metadata](#10-security-verdicts-should-not-be-ordinary-file-metadata)
+- [11. Whole-volume initial scan without pathname overhead](#11-whole-volume-initial-scan-without-pathname-overhead)
+- [12. Priority, filtering, and backpressure](#12-priority-filtering-and-backpressure)
+- [13. Changed-range hints](#13-changed-range-hints)
+- [14. Security origin metadata](#14-security-origin-metadata)
+- [15. Resource target](#15-resource-target)
+- [16. Broader value](#16-broader-value)
+
+<!-- /toc -->
 
 ## 1. Goal
 

@@ -1,6 +1,26 @@
 # 28. Virtual Images, Overlays, and Filesystem Viewports
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 Status: developer-platform design
+
+<!-- toc -->
+
+- [1. Core rule: an image is a real volume](#1-core-rule-an-image-is-a-real-volume)
+- [2. Sparse files are ideal for development](#2-sparse-files-are-ideal-for-development)
+- [3. Block-backend composition](#3-block-backend-composition)
+- [4. SliceBackend: a true viewport into a larger disk image](#4-slicebackend-a-true-viewport-into-a-larger-disk-image)
+- [5. OverlayBackend: disposable writable views](#5-overlaybackend-disposable-writable-views)
+- [6. Forking a test state](#6-forking-a-test-state)
+- [7. CheckpointView: logical historical viewport](#7-checkpointview-logical-historical-viewport)
+- [8. Image files as first-class virtual disks on AROS](#8-image-files-as-first-class-virtual-disks-on-aros)
+- [9. Nested images and reflinks](#9-nested-images-and-reflinks)
+- [10. Directory projections are different](#10-directory-projections-are-different)
+- [11. Debugging commands worth providing](#11-debugging-commands-worth-providing)
+- [12. Guiding principle](#12-guiding-principle)
+
+<!-- /toc -->
 
 ## 1. Core rule: an image is a real volume
 

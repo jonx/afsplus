@@ -1,5 +1,22 @@
 # 07. Allocation
 
+> **ADRs:** [ADR-035](../adr/ADR-035-allocation-root-reserved-pool.md) · **Spec:** none ·
+> **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
+
+<!-- toc -->
+
+- [1. Allocation regions](#1-allocation-regions)
+- [2. Proposed region size](#2-proposed-region-size)
+- [3. Epoch-1 blocker: allocation metadata under COW](#3-epoch-1-blocker-allocation-metadata-under-cow)
+  - [3.1 Multi-page region binding experiment](#31-multi-page-region-binding-experiment)
+- [4. Allocation strategy](#4-allocation-strategy)
+- [5. Free-space summaries](#5-free-space-summaries)
+- [6. Metadata reservation](#6-metadata-reservation)
+- [7. Discard](#7-discard)
+- [8. Allocation integrity](#8-allocation-integrity)
+
+<!-- /toc -->
+
 ## 1. Allocation regions
 
 The volume is divided into fixed-size allocation regions.

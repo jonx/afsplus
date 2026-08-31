@@ -1,6 +1,34 @@
 # 31. Extreme Workloads: Streaming, Git-Scale Trees, and AI/LLM
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [application-qualification](../testing/application-qualification.md),
+> [benchmark-contract](../testing/benchmark-contract.md),
+> [extreme-workload-benchmarks](../testing/extreme-workload-benchmarks.md) · **Milestones:** M13
+
 Status: workload architecture and qualification plan
+
+<!-- toc -->
+
+- [1. Goal](#1-goal)
+- [2. Large streaming files](#2-large-streaming-files)
+- [3. Access-intent hints](#3-access-intent-hints)
+- [4. Preallocation](#4-preallocation)
+- [5. Git and millions of small files](#5-git-and-millions-of-small-files)
+- [6. Native FSMonitor-style acceleration](#6-native-fsmonitor-style-acceleration)
+- [7. Bulk metadata APIs](#7-bulk-metadata-apis)
+- [8. Directory-change generation](#8-directory-change-generation)
+- [9. AI/LLM model-loading workload](#9-aillm-model-loading-workload)
+- [10. Sealed immutable content](#10-sealed-immutable-content)
+- [11. Model cloning and local model experimentation](#11-model-cloning-and-local-model-experimentation)
+- [12. Training/checkpoint workloads](#12-trainingcheckpoint-workloads)
+- [13. Dataset workloads](#13-dataset-workloads)
+- [14. Page-cache pollution](#14-page-cache-pollution)
+- [15. Large alignment and extent hints](#15-large-alignment-and-extent-hints)
+- [16. Direct I/O and zero-copy boundaries](#16-direct-io-and-zero-copy-boundaries)
+- [17. What AFS+ should not pretend to solve](#17-what-afs-should-not-pretend-to-solve)
+- [18. Workload qualification principle](#18-workload-qualification-principle)
+
+<!-- /toc -->
 
 ## 1. Goal
 

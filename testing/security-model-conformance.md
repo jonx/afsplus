@@ -1,6 +1,29 @@
 # Security Model Conformance and Performance Tests
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** M14
+
 Status: required test plan before security-format freeze
+
+<!-- toc -->
+
+- [1. Identity round-trip](#1-identity-round-trip)
+- [2. ACL evaluation vectors](#2-acl-evaluation-vectors)
+- [3. Inheritance vectors](#3-inheritance-vectors)
+- [4. Cross-platform projection](#4-cross-platform-projection)
+  - [POSIX adapter](#posix-adapter)
+  - [Windows adapter](#windows-adapter)
+  - [Classic Amiga/AROS adapter](#classic-amigaaros-adapter)
+- [5. Strict mount behavior](#5-strict-mount-behavior)
+- [6. Security descriptor sharing](#6-security-descriptor-sharing)
+- [7. Security-domain prototype](#7-security-domain-prototype)
+- [8. Access-check performance](#8-access-check-performance)
+- [9. Namespace operation security semantics](#9-namespace-operation-security-semantics)
+- [10. Raw-media threat test](#10-raw-media-threat-test)
+- [11. Failure injection](#11-failure-injection)
+- [12. Benchmark reporting](#12-benchmark-reporting)
+
+<!-- /toc -->
 
 ## 1. Identity round-trip
 

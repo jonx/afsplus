@@ -1,5 +1,8 @@
 # 01. Goals and Non-goals
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 ## Goals
 
 ### G1. Native AROS semantics

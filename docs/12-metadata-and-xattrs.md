@@ -1,5 +1,8 @@
 # 12. Metadata and Extended Attributes
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 ## 1. Core versus extensible metadata
 
 Frequently required fields stay in the core object record.

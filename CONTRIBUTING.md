@@ -43,6 +43,18 @@ cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
+## Documentation
+
+Before committing a documentation change, run:
+
+```sh
+make check-docs
+```
+
+It verifies links and anchors, tables of contents, the ADR index, ADR and
+milestone references, navigation blocks and index rows.
+`make toc` regenerates the tables of contents and the ADR index.
+
 ## No private fast paths
 
 Applications must not be taught AFS+ block layouts. Add semantic filesystem APIs instead.

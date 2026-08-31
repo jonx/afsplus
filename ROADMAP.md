@@ -1,5 +1,23 @@
 # Roadmap
 
+<!-- toc -->
+
+- [Stage 0: Amiga-native design review](#stage-0-amiga-native-design-review)
+- [Stage A: make the core executable](#stage-a-make-the-core-executable)
+- [Stage B: resolve the epoch-1 architecture blockers](#stage-b-resolve-the-epoch-1-architecture-blockers)
+  - [B1. Allocation state](#b1-allocation-state)
+  - [B2. User-data update policy](#b2-user-data-update-policy)
+  - [B3. Checkpoint and fsync](#b3-checkpoint-and-fsync)
+  - [B4. Core filesystem structures](#b4-core-filesystem-structures)
+  - [B5. Security preservation container](#b5-security-preservation-container)
+- [Stage C: integrate AROS and begin independent C portability](#stage-c-integrate-aros-and-begin-independent-c-portability)
+- [Stage D: portability and host tooling](#stage-d-portability-and-host-tooling)
+- [Stage E: developer-contract accelerators and optional features](#stage-e-developer-contract-accelerators-and-optional-features)
+- [Stage F: production qualification](#stage-f-production-qualification)
+- [Epoch 1 freeze gates](#epoch-1-freeze-gates)
+
+<!-- /toc -->
+
 ## Stage 0: Amiga-native design review
 
 Status: initial review complete. Continue subsystem-by-subsystem only when implementation reaches that subsystem.

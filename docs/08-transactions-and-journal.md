@@ -1,5 +1,32 @@
 # 08. Transactions, Checkpoints, and Recovery
 
+> **ADRs:** [ADR-009](../adr/ADR-009-journal.md), [ADR-020](../adr/ADR-020-checkpoint-commit.md),
+> [ADR-026](../adr/ADR-026-bounded-atomic-batches.md), [ADR-036](../adr/ADR-036-reclaim-queue.md),
+> [ADR-037](../adr/ADR-037-intent-log.md) · **Spec:** none ·
+> **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M04
+
+<!-- toc -->
+
+- [1. Requirement, not mechanism](#1-requirement-not-mechanism)
+- [2. Transaction boundary](#2-transaction-boundary)
+- [3. Proposed COW checkpoint commit](#3-proposed-cow-checkpoint-commit)
+- [4. Epoch-1 blocker A: data overwrite versus data COW](#4-epoch-1-blocker-a-data-overwrite-versus-data-cow)
+  - [Candidate A: in-place data overwrite](#candidate-a-in-place-data-overwrite)
+  - [Candidate B: full data COW](#candidate-b-full-data-cow)
+  - [Candidate C: explicit hybrid policy](#candidate-c-explicit-hybrid-policy)
+  - [Decision rule](#decision-rule)
+  - [Current prototype experiment](#current-prototype-experiment)
+- [5. Recovery](#5-recovery)
+- [6. Retired blocks and quarantine](#6-retired-blocks-and-quarantine)
+- [7. Deferred reclamation](#7-deferred-reclamation)
+- [8. Epoch-1 blocker B: fsync and small durability commits](#8-epoch-1-blocker-b-fsync-and-small-durability-commits)
+- [9. NO_CHANGES mode](#9-nochanges-mode)
+- [10. Durability contract](#10-durability-contract)
+- [11. Concurrency and readers](#11-concurrency-and-readers)
+- [12. Testing gate](#12-testing-gate)
+
+<!-- /toc -->
+
 ## 1. Requirement, not mechanism
 
 AFS+ requires atomic metadata transactions, bounded recovery, and explicit durability semantics.

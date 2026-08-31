@@ -1,5 +1,8 @@
 # 03. On-Disk Format
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [conformance](../testing/conformance.md) · **Milestones:** M00, M02
+
 ## 1. Encoding
 
 All multi-byte integer fields are little-endian.

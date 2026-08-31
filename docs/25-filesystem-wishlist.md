@@ -1,5 +1,8 @@
 # 25. What People Actually Want From a Filesystem
 
+> **ADRs:** [ADR-027](../adr/ADR-027-reflink-clones.md) · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 Status: product/design exploration. Nothing in this document is automatically a 1.0 requirement unless promoted by an ADR.
 
 A new filesystem is rare. That makes it worth asking a different question from "which features do existing filesystems have?":
@@ -7,6 +10,43 @@ A new filesystem is rare. That makes it worth asking a different question from "
 > Which recurring annoyances could we remove because we are designing the filesystem, API, tools, and debugging model together from the beginning?
 
 The rule is simple: a feature belongs in AFS+ only when it solves a real user, application, maintenance, or development problem at acceptable complexity.
+
+<!-- toc -->
+
+- [1. Instant answers about the namespace](#1-instant-answers-about-the-namespace)
+  - [Problem](#problem)
+  - [AFS+ direction](#afs-direction)
+- [2. Instant directory size without crawling](#2-instant-directory-size-without-crawling)
+  - [Problem](#problem-1)
+  - [Proposal: derived directory aggregate index](#proposal-derived-directory-aggregate-index)
+- [3. A real persistent change API](#3-a-real-persistent-change-api)
+  - [Problem](#problem-2)
+  - [AFS+ direction](#afs-direction-1)
+- [4. Explainable storage](#4-explainable-storage)
+  - [Problem](#problem-3)
+  - [AFS+ direction](#afs-direction-2)
+- [5. Structured tools instead of screen scraping](#5-structured-tools-instead-of-screen-scraping)
+  - [Problem](#problem-4)
+  - [AFS+ rule](#afs-rule)
+- [6. Targeted online repair instead of "fsck the universe"](#6-targeted-online-repair-instead-of-fsck-the-universe)
+  - [Problem](#problem-5)
+  - [AFS+ direction](#afs-direction-3)
+- [7. Safe rollback for humans, not only administrators](#7-safe-rollback-for-humans-not-only-administrators)
+- [8. Atomic publication of more than one filename](#8-atomic-publication-of-more-than-one-filename)
+  - [Problem](#problem-6)
+  - [Proposal: bounded atomic namespace batches](#proposal-bounded-atomic-namespace-batches)
+- [9. Cheap independent copies as a baseline capability](#9-cheap-independent-copies-as-a-baseline-capability)
+  - [Problem](#problem-7)
+  - [AFS+ direction](#afs-direction-4)
+- [10. Integrity policy that can vary by workload](#10-integrity-policy-that-can-vary-by-workload)
+- [11. Content identity without requiring applications to hash everything repeatedly](#11-content-identity-without-requiring-applications-to-hash-everything-repeatedly)
+- [12. Per-directory policy instead of one volume-wide compromise](#12-per-directory-policy-instead-of-one-volume-wide-compromise)
+- [13. First-class health information](#13-first-class-health-information)
+- [14. Virtual disk images that are easy to branch and inspect](#14-virtual-disk-images-that-are-easy-to-branch-and-inspect)
+- [15. Things we deliberately do not promise](#15-things-we-deliberately-do-not-promise)
+- [16. Product differentiation target](#16-product-differentiation-target)
+
+<!-- /toc -->
 
 ## 1. Instant answers about the namespace
 

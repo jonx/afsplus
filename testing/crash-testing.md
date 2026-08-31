@@ -1,5 +1,8 @@
 # Crash and Power-Failure Testing
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** M03, M04
+
 ## Goal
 
 Prove that every acknowledged transaction recovers to a valid state and every unacknowledged transaction resolves to one of the explicitly allowed states.

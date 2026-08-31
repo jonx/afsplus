@@ -1,6 +1,28 @@
 # Security and Antivirus Benchmark Plan
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** M10
+
 Status: qualification requirement
+
+<!-- toc -->
+
+- [1. Purpose](#1-purpose)
+- [2. Baseline scenarios](#2-baseline-scenarios)
+- [3. Workloads](#3-workloads)
+  - [Idle/read-heavy clean workstation](#idleread-heavy-clean-workstation)
+  - [Save/build workload](#savebuild-workload)
+  - [Massive tree update](#massive-tree-update)
+  - [Clone workload](#clone-workload)
+  - [Execution gate](#execution-gate)
+  - [Event-overflow/backpressure](#event-overflowbackpressure)
+- [4. Metrics](#4-metrics)
+- [5. Key ratios](#5-key-ratios)
+- [6. Scale matrix](#6-scale-matrix)
+- [7. Correctness tests](#7-correctness-tests)
+- [8. Acceptance direction](#8-acceptance-direction)
+
+<!-- /toc -->
 
 ## 1. Purpose
 

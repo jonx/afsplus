@@ -1,8 +1,33 @@
 # AFS+ Benchmark Contract
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [aros-system-volume-qualification](aros-system-volume-qualification.md) · **Milestones:** M13, M14
+
 Status: required benchmark policy
 
 AFS+ must measure performance and resource use continuously. A new filesystem has no credibility if its design claims are not tied to repeatable workloads and published metrics.
+
+<!-- toc -->
+
+- [1. Benchmark dimensions](#1-benchmark-dimensions)
+- [2. Implementation comparison](#2-implementation-comparison)
+- [3. Mandatory workload classes](#3-mandatory-workload-classes)
+  - [Small-file development tree](#small-file-development-tree)
+  - [Large sequential files](#large-sequential-files)
+  - [Directory scale](#directory-scale)
+  - [Metadata-heavy package/build workload](#metadata-heavy-packagebuild-workload)
+  - [Clone/reflink](#clonereflink)
+  - [Change stream/catalog](#change-streamcatalog)
+  - [Crash/recovery](#crashrecovery)
+  - [Low-memory mode](#low-memory-mode)
+- [4. CPU measurement](#4-cpu-measurement)
+- [5. Memory measurement](#5-memory-measurement)
+- [6. I/O and write amplification](#6-io-and-write-amplification)
+- [7. Benchmark reproducibility](#7-benchmark-reproducibility)
+- [8. Regression gates](#8-regression-gates)
+- [9. Benchmark philosophy](#9-benchmark-philosophy)
+
+<!-- /toc -->
 
 ## 1. Benchmark dimensions
 

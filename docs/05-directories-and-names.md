@@ -1,5 +1,24 @@
 # 05. Directories and Names
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
+
+<!-- toc -->
+
+- [1. Directory representation](#1-directory-representation)
+- [2. Why B+ trees](#2-why-b-trees)
+  - [Executable prototype status](#executable-prototype-status)
+- [3. UTF-8](#3-utf-8)
+- [4. Normalization-preserving lookup](#4-normalization-preserving-lookup)
+- [5. Unicode version is a format parameter](#5-unicode-version-is-a-format-parameter)
+- [6. B+ tree ordering is binary, never locale collation](#6-b-tree-ordering-is-binary-never-locale-collation)
+- [7. Case policy](#7-case-policy)
+- [8. Maximum name size](#8-maximum-name-size)
+- [9. Reserved syntax](#9-reserved-syntax)
+- [10. Directory cookies](#10-directory-cookies)
+
+<!-- /toc -->
+
 ## 1. Directory representation
 
 Directories use a page-based B+ tree keyed by a canonical **comparison key**.

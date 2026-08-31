@@ -1,5 +1,8 @@
 # AFS+ Hosted MacAROS S1 image
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 This directory is produced by `tools/build-aros-s1-image.sh`. Its `profile.txt`
 identifies either the 64 MiB `core` S1a image or the 256 MiB `desktop` S1b
 image. Neither is an autonomous boot volume: both are entered through the

@@ -1,5 +1,11 @@
 # AFS+ MacAROS Alpha-0 package
 
+> **ADRs:** [ADR-047](../adr/ADR-047-hosted-aros-crash-replay.md),
+> [ADR-048](../adr/ADR-048-hosted-aros-system-pivot.md),
+> [ADR-049](../adr/ADR-049-hosted-aros-desktop-pivot.md),
+> [ADR-051](../adr/ADR-051-explicit-aros-aarch64-platform-profiles.md) · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 This directory is produced by `tools/package-aros-alpha0.sh`. Its hashes prove
 the exact pre-install set; `check-before.json` proves the image was clean before
 target execution.

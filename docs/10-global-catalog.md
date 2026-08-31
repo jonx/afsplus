@@ -1,5 +1,8 @@
 # 10. Global Catalog
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [performance-benchmarks](../testing/performance-benchmarks.md) · **Milestones:** M09
+
 ## 1. Purpose
 
 The global catalog is an optional non-authoritative, rebuildable index optimized for reading metadata about very large numbers of namespace entries with mostly sequential I/O.

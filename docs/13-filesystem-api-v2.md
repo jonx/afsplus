@@ -1,5 +1,8 @@
 # 13. Filesystem API v2
 
+> **ADRs:** [ADR-039](../adr/ADR-039-portable-vfs-slice.md) · **Spec:** none ·
+> **Tests:** [test-strategy](../testing/test-strategy.md) · **Milestones:** M07
+
 ## 1. Purpose
 
 Filesystem API v2 provides modern operations without breaking the classic AROS DOS ABI.

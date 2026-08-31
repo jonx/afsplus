@@ -2,6 +2,28 @@
 
 Status: implementation guidance after external review
 
+<!-- toc -->
+
+- [Why this document exists](#why-this-document-exists)
+- [Corrections already accepted](#corrections-already-accepted)
+- [Architecture blocker 1: committed data update policy](#architecture-blocker-1-committed-data-update-policy)
+- [Architecture blocker 2: fsync under global checkpoints](#architecture-blocker-2-fsync-under-global-checkpoints)
+- [Architecture blocker 3: free-space state under metadata COW](#architecture-blocker-3-free-space-state-under-metadata-cow)
+- [Architecture blocker 4: retained content generations](#architecture-blocker-4-retained-content-generations)
+- [Architecture blocker 5: ACL scope](#architecture-blocker-5-acl-scope)
+- [First contributor implementation scope](#first-contributor-implementation-scope)
+  - [1. Rust workspace](#1-rust-workspace)
+  - [2. Block backends](#2-block-backends)
+  - [3. Smallest mountable image](#3-smallest-mountable-image)
+  - [4. First writable transaction](#4-first-writable-transaction)
+  - [5. Crash matrix](#5-crash-matrix)
+  - [6. Allocation experiment](#6-allocation-experiment)
+- [Explicitly not first implementation work](#explicitly-not-first-implementation-work)
+- [Decision discipline](#decision-discipline)
+- [Success criterion for the next phase](#success-criterion-for-the-next-phase)
+
+<!-- /toc -->
+
 ## Why this document exists
 
 The project has reached the point where additional speculative specification has diminishing returns.

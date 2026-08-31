@@ -1,5 +1,9 @@
 # 19. Recovery and Maintenance
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [conformance](../testing/conformance.md),
+> [developer-harness](../testing/developer-harness.md) · **Milestones:** M05, M11
+
 ## 1. Recovery is an architecture feature
 
 Repair must not depend on undocumented implementation behavior.

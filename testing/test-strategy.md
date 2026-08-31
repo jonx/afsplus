@@ -1,5 +1,8 @@
 # Test Strategy
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [crash-testing](crash-testing.md) · **Milestones:** M07
+
 ## Test pyramid
 
 ### Unit

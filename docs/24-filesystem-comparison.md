@@ -1,6 +1,25 @@
 # 24. Filesystem Comparison Matrix
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 Status: design benchmark. This table compares architectural capabilities, not marketing claims. AFS+ entries marked Planned or Proposed are not implemented yet.
+
+<!-- toc -->
+
+- [1. Why compare](#1-why-compare)
+- [2. High-level comparison](#2-high-level-comparison)
+- [3. Where AFS+ should clearly outperform classic Amiga filesystems](#3-where-afs-should-clearly-outperform-classic-amiga-filesystems)
+- [4. Where AFS+ can offer something uncommon even among modern filesystems](#4-where-afs-can-offer-something-uncommon-even-among-modern-filesystems)
+  - [4.1 Global object stream plus persistent change stream](#41-global-object-stream-plus-persistent-change-stream)
+  - [4.2 Low-memory and workstation profiles in the same format](#42-low-memory-and-workstation-profiles-in-the-same-format)
+  - [4.3 Observability as a filesystem feature for developers](#43-observability-as-a-filesystem-feature-for-developers)
+  - [4.4 Derived accelerators that never become correctness dependencies](#44-derived-accelerators-that-never-become-correctness-dependencies)
+  - [4.5 Clone semantics as part of the developer contract](#45-clone-semantics-as-part-of-the-developer-contract)
+- [5. Important features we should not chase merely to win a table](#5-important-features-we-should-not-chase-merely-to-win-a-table)
+- [6. Reference facts](#6-reference-facts)
+
+<!-- /toc -->
 
 ## 1. Why compare
 

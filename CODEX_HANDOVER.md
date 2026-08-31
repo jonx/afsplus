@@ -8,6 +8,52 @@ This document exists to tell you where the project stands now, which earlier ide
 
 ---
 
+<!-- toc -->
+
+- [1. Role you are inheriting](#1-role-you-are-inheriting)
+- [2. Context precedence](#2-context-precedence)
+- [3. What AFS+ is](#3-what-afs-is)
+- [4. Implementation language strategy](#4-implementation-language-strategy)
+- [5. Current executable implementation](#5-current-executable-implementation)
+  - [`crates/afsplus-format`](#cratesafsplus-format)
+  - [`crates/afsplus-block`](#cratesafsplus-block)
+  - [`crates/afsplus-core`](#cratesafsplus-core)
+  - [`crates/afsplus-check`](#cratesafsplus-check)
+- [6. Important lesson already discovered by implementation](#6-important-lesson-already-discovered-by-implementation)
+- [7. Immediate hardening before allocator work](#7-immediate-hardening-before-allocator-work)
+- [8. The architecture blockers](#8-the-architecture-blockers)
+  - [Blocker 1: user-data COW policy](#blocker-1-user-data-cow-policy)
+  - [Blocker 2: fsync durability path](#blocker-2-fsync-durability-path)
+  - [Blocker 3: allocation-state representation](#blocker-3-allocation-state-representation)
+  - [Blocker 4: retained content generations](#blocker-4-retained-content-generations)
+  - [Blocker 5: rich security semantics](#blocker-5-rich-security-semantics)
+- [9. Stage 6: allocator experiment](#9-stage-6-allocator-experiment)
+  - [First candidate](#first-candidate)
+  - [Retired/quarantined storage is mandatory](#retiredquarantined-storage-is-mandatory)
+  - [Mandatory reuse crash workload](#mandatory-reuse-crash-workload)
+  - [Metrics from the start](#metrics-from-the-start)
+- [10. Crash-consistency rules that must remain visible](#10-crash-consistency-rules-that-must-remain-visible)
+- [11. Feature evolution and removal](#11-feature-evolution-and-removal)
+- [12. Important derived vs authoritative distinction](#12-important-derived-vs-authoritative-distinction)
+- [13. Developer-facing ideas and their maturity](#13-developer-facing-ideas-and-their-maturity)
+- [14. Workload philosophy](#14-workload-philosophy)
+  - [Streaming / very large files](#streaming--very-large-files)
+  - [Git / source trees / millions of small files](#git--source-trees--millions-of-small-files)
+  - [AI/LLM](#aillm)
+  - [Security scanner / antivirus](#security-scanner--antivirus)
+- [15. Benchmark contract](#15-benchmark-contract)
+- [16. Debuggability is an implementation requirement](#16-debuggability-is-an-implementation-requirement)
+- [17. Portability rules](#17-portability-rules)
+- [18. Security philosophy](#18-security-philosophy)
+- [19. Things not to do right now](#19-things-not-to-do-right-now)
+- [20. Recommended files to read first](#20-recommended-files-to-read-first)
+- [21. How to use the full conversation](#21-how-to-use-the-full-conversation)
+- [22. Expected interaction with the user](#22-expected-interaction-with-the-user)
+- [23. Current next action](#23-current-next-action)
+- [24. Short resume instruction](#24-short-resume-instruction)
+
+<!-- /toc -->
+
 ## 1. Role you are inheriting
 
 The user develops AFS+ with a coding agent. Your primary role is **tech lead, filesystem architecture reviewer, and development supervisor**.

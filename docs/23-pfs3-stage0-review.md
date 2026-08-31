@@ -1,6 +1,36 @@
 # 23. Stage 0 PFS3/PFS4 Design Review
 
+> **ADRs:** [ADR-009](../adr/ADR-009-journal.md) · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 Status: architecture review v1, completed before the first implementation milestone. Source-level study should continue when the corresponding AFS+ subsystem is implemented.
+
+<!-- toc -->
+
+- [1. Why PFS3 is a primary reference](#1-why-pfs3-is-a-primary-reference)
+- [2. Executive decision matrix](#2-executive-decision-matrix)
+- [3. Atomic commit: the most important PFS3 lesson](#3-atomic-commit-the-most-important-pfs3-lesson)
+  - [3.1 Why AFS+ should not copy the exact PFS3 mechanism](#31-why-afs-should-not-copy-the-exact-pfs3-mechanism)
+- [4. Retired-block quarantine](#4-retired-block-quarantine)
+- [5. Deferred reclamation replaces special postponed operations](#5-deferred-reclamation-replaces-special-postponed-operations)
+- [6. Allocation and fragmentation](#6-allocation-and-fragmentation)
+- [7. Extents: learn from anodes, do not inherit them](#7-extents-learn-from-anodes-do-not-inherit-them)
+- [8. Directory structure](#8-directory-structure)
+- [9. Cache design and the dangers of raw pointers](#9-cache-design-and-the-dangers-of-raw-pointers)
+- [10. Safe failure direction](#10-safe-failure-direction)
+- [11. Small files](#11-small-files)
+  - [A. Inline data](#a-inline-data)
+  - [B. Packed small-file slabs](#b-packed-small-file-slabs)
+  - [C. Ordinary extents with locality](#c-ordinary-extents-with-locality)
+- [12. Online optimization instead of format-level defragmentation dependency](#12-online-optimization-instead-of-format-level-defragmentation-dependency)
+- [13. Deldir and rollover files](#13-deldir-and-rollover-files)
+  - [Deldir](#deldir)
+  - [Rollover files](#rollover-files)
+- [14. Testing lessons from current pfs3aio](#14-testing-lessons-from-current-pfs3aio)
+- [15. Portable implementation lesson](#15-portable-implementation-lesson)
+- [16. Consequences for the current AFS+ specification](#16-consequences-for-the-current-afs-specification)
+
+<!-- /toc -->
 
 ## 1. Why PFS3 is a primary reference
 

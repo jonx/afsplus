@@ -1,10 +1,31 @@
 # AROS system-volume qualification and AFS/AFS+ comparison
 
+> **ADRs:** [ADR-046](../adr/ADR-046-hosted-aros-same-image.md),
+> [ADR-047](../adr/ADR-047-hosted-aros-crash-replay.md),
+> [ADR-048](../adr/ADR-048-hosted-aros-system-pivot.md),
+> [ADR-049](../adr/ADR-049-hosted-aros-desktop-pivot.md) · **Spec:** none ·
+> **Tests:** [benchmark-contract](benchmark-contract.md) · **Milestones:** M06, M08
+
 Status: required after Mountable Alpha-0 secondary-volume qualification
 
 The end state is not merely that AROS can access an AFS+ data volume. AROS must
 be able to run its normal system tree from AFS+, and the resulting behavior must
 be measured against the classic AFS/FFS family on equivalent paths.
+
+<!-- toc -->
+
+- [1. Qualification ladder](#1-qualification-ladder)
+  - [S0: secondary same-image mount](#s0-secondary-same-image-mount)
+  - [S1: post-bootstrap system-volume pivot](#s1-post-bootstrap-system-volume-pivot)
+  - [S2: boot-selected AFS+ system volume](#s2-boot-selected-afs-system-volume)
+  - [S3: recovery and repeated boot](#s3-recovery-and-repeated-boot)
+- [2. What MacAROS performance proves](#2-what-macaros-performance-proves)
+- [3. Comparison contract](#3-comparison-contract)
+- [4. Mandatory system workloads](#4-mandatory-system-workloads)
+- [5. Required measurements](#5-required-measurements)
+- [6. Acceptance](#6-acceptance)
+
+<!-- /toc -->
 
 ## 1. Qualification ladder
 

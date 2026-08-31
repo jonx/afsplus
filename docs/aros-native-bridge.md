@@ -1,5 +1,24 @@
 # Native AROS bridge
 
+> **ADRs:** [ADR-044](../adr/ADR-044-aros-trackdisk-viewport.md),
+> [ADR-045](../adr/ADR-045-native-aros-handler-shell.md),
+> [ADR-046](../adr/ADR-046-hosted-aros-same-image.md),
+> [ADR-047](../adr/ADR-047-hosted-aros-crash-replay.md),
+> [ADR-048](../adr/ADR-048-hosted-aros-system-pivot.md),
+> [ADR-049](../adr/ADR-049-hosted-aros-desktop-pivot.md),
+> [ADR-050](../adr/ADR-050-external-aros-handler-lifecycle.md),
+> [ADR-051](../adr/ADR-051-explicit-aros-aarch64-platform-profiles.md),
+> [ADR-052](../adr/ADR-052-versioned-directory-comparison-keys.md),
+> [ADR-053](../adr/ADR-053-native-macaros-retained-image-transport.md),
+> [ADR-054](../adr/ADR-054-native-macaros-crash-replay-extraction.md),
+> [ADR-055](../adr/ADR-055-aros-m68k-emulator-gate.md),
+> [ADR-056](../adr/ADR-056-native-aros-m68k-alpha0-and-replay.md),
+> [ADR-057](../adr/ADR-057-plain-m68000-emulator-gate.md),
+> [ADR-058](../adr/ADR-058-m68000-memory-and-restart-lifecycle.md),
+> [ADR-059](../adr/ADR-059-guest-failure-diagnostics-are-gate-verdicts.md),
+> [ADR-060](../adr/ADR-060-mountable-alpha0-completion-gate.md) · **Spec:** none ·
+> **Tests:** [aros-system-volume-qualification](../testing/aros-system-volume-qualification.md) · **Milestones:** M06
+
 The native integration is deliberately split at a stable C ABI:
 
 ```text
@@ -20,6 +39,18 @@ checked partition arithmetic and logical-block bounds, also without calling
 Exec or DOS. A small target handler still owns the message port,
 startup/shutdown and device requests. The static library owns filesystem,
 numeric lock/file-handle and durability semantics.
+
+<!-- toc -->
+
+- [Reproduce the bridge qualification](#reproduce-the-bridge-qualification)
+- [AArch64 platform profiles](#aarch64-platform-profiles)
+- [Trackdisk viewport](#trackdisk-viewport)
+- [Qualification diagnostics](#qualification-diagnostics)
+- [Native lifecycle](#native-lifecycle)
+- [Native handler shell](#native-handler-shell)
+- [Runtime qualification stages](#runtime-qualification-stages)
+
+<!-- /toc -->
 
 ## Reproduce the bridge qualification
 

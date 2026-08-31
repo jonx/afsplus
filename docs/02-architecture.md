@@ -1,5 +1,22 @@
 # 02. Architecture
 
+> **ADRs:** [ADR-035](../adr/ADR-035-allocation-root-reserved-pool.md) · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
+<!-- toc -->
+
+- [1. Layering](#1-layering)
+  - [Layer A: namespace and compatibility](#layer-a-namespace-and-compatibility)
+  - [Layer B: filesystem front-end](#layer-b-filesystem-front-end)
+  - [Layer C: portable filesystem core](#layer-c-portable-filesystem-core)
+  - [Layer D: block provider](#layer-d-block-provider)
+- [2. Bounded-memory rule](#2-bounded-memory-rule)
+- [3. Authoritative versus derived structures](#3-authoritative-versus-derived-structures)
+- [4. Failure containment](#4-failure-containment)
+- [5. No hidden writes](#5-no-hidden-writes)
+
+<!-- /toc -->
+
 ## 1. Layering
 
 AFS+ is split into four logical layers.

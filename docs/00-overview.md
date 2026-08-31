@@ -1,5 +1,8 @@
 # 00. Overview
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 ## 1. Scope
 
 AFS+ is a new on-disk filesystem designed primarily for modern AROS systems while remaining practical to implement on other Amiga-family operating systems and general-purpose operating systems.

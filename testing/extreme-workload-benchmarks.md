@@ -1,6 +1,24 @@
 # Extreme Workload Benchmarks
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** M13
+
 Status: required qualification design
+
+<!-- toc -->
+
+- [1. General metrics](#1-general-metrics)
+- [2. Streaming video / huge sequential file](#2-streaming-video--huge-sequential-file)
+- [3. Git-scale working trees](#3-git-scale-working-trees)
+- [4. LLM model loading](#4-llm-model-loading)
+- [5. Model copy/variant experiments](#5-model-copyvariant-experiments)
+- [6. Sealed content](#6-sealed-content)
+- [7. Training/checkpoint publication](#7-trainingcheckpoint-publication)
+- [8. Dataset workloads](#8-dataset-workloads)
+- [9. Cache-pressure matrix](#9-cache-pressure-matrix)
+- [10. Cross-filesystem comparison](#10-cross-filesystem-comparison)
+
+<!-- /toc -->
 
 ## 1. General metrics
 

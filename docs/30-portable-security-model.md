@@ -1,6 +1,38 @@
 # 30. Portable Multi-User Security Model
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 Status: security architecture proposal
+
+<!-- toc -->
+
+- [1. Goal](#1-goal)
+- [2. Why UID/GID or Windows SID cannot be the format foundation](#2-why-uidgid-or-windows-sid-cannot-be-the-format-foundation)
+- [3. Canonical principal identity](#3-canonical-principal-identity)
+- [4. Well-known principals](#4-well-known-principals)
+- [5. Canonical ACL model](#5-canonical-acl-model)
+- [6. Rights](#6-rights)
+  - [File/directory data rights](#filedirectory-data-rights)
+  - [Metadata rights](#metadata-rights)
+  - [Namespace/security rights](#namespacesecurity-rights)
+- [7. Inheritance](#7-inheritance)
+- [8. Security descriptors as shared objects](#8-security-descriptors-as-shared-objects)
+- [9. Classic Amiga compatibility profile](#9-classic-amiga-compatibility-profile)
+- [10. POSIX mapping](#10-posix-mapping)
+- [11. Windows mapping](#11-windows-mapping)
+- [12. Administrator and superuser semantics](#12-administrator-and-superuser-semantics)
+- [13. Move, copy, and clone security semantics](#13-move-copy-and-clone-security-semantics)
+  - [Rename/move within the same filesystem](#renamemove-within-the-same-filesystem)
+  - [Copy](#copy)
+  - [Reflink CloneFile](#reflink-clonefile)
+- [14. Security domains for subtrees](#14-security-domains-for-subtrees)
+- [15. Encryption is a separate protection layer](#15-encryption-is-a-separate-protection-layer)
+- [16. Auditing](#16-auditing)
+- [17. Security fidelity must be queryable](#17-security-fidelity-must-be-queryable)
+- [18. Threat-model principle](#18-threat-model-principle)
+
+<!-- /toc -->
 
 ## 1. Goal
 

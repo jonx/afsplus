@@ -8,6 +8,18 @@ Status: measurement report for architecture blocker 2
 cargo test -p afsplus-check --test fsync_workloads --release -- --ignored --nocapture
 ```
 
+<!-- toc -->
+
+- [Methodology](#methodology)
+- [Measured cost per durable operation](#measured-cost-per-durable-operation)
+- [The structural floor](#the-structural-floor)
+- [Intent-log envelope](#intent-log-envelope)
+- [Phase A measured: group commit](#phase-a-measured-group-commit)
+- [Phase B measured: the intent log wins its gate](#phase-b-measured-the-intent-log-wins-its-gate)
+- [What the data supports](#what-the-data-supports)
+
+<!-- /toc -->
+
 ## Methodology
 
 Every prototype transaction is a full checkpoint commit with its own

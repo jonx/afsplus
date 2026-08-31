@@ -1,5 +1,8 @@
 # 06. Files and Extents
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
+
 ## 1. Extent model
 
 Regular-file data is represented as mappings:

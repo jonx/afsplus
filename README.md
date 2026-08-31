@@ -6,6 +6,25 @@ AFS+ is a proposed modern native filesystem for AROS and the wider Amiga-family 
 
 This repository is a design specification, implementation plan, compatibility contract, and conformance plan. It is intentionally written so that a developer who has not participated in the design discussions can implement individual components without needing undocumented context.
 
+<!-- toc -->
+
+- [Founding developer contract](#founding-developer-contract)
+- [Why AFS+](#why-afs)
+- [Important architectural rule](#important-architectural-rule)
+- [Core design summary](#core-design-summary)
+- [Amiga-native design ancestry](#amiga-native-design-ancestry)
+- [Design choices intended to reduce future maintenance cost](#design-choices-intended-to-reduce-future-maintenance-cost)
+  - [Allocation regions](#allocation-regions)
+  - [Compatibility profiles](#compatibility-profiles)
+  - [Forensic no-write mount](#forensic-no-write-mount)
+  - [Shared repair and invariant definitions](#shared-repair-and-invariant-definitions)
+  - [Optional accelerators have explicit failure semantics](#optional-accelerators-have-explicit-failure-semantics)
+  - [Tiny-file optimization is measured, not assumed](#tiny-file-optimization-is-measured-not-assumed)
+- [Repository map](#repository-map)
+- [Status](#status)
+
+<!-- /toc -->
+
 ## Founding developer contract
 
 AFS+ treats the filesystem as an active platform service, not merely a byte store with paths.

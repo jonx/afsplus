@@ -1,5 +1,8 @@
 # 04. Object Model
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
+
 ## 1. Stable objects
 
 Files and directories are objects with stable numeric IDs.

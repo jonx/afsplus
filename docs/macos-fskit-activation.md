@@ -1,5 +1,8 @@
 # macFUSE FSKit activation on macOS
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [aros-system-volume-qualification](../testing/aros-system-volume-qualification.md) · **Milestones:** M08
+
 AFS+ uses macFUSE's user-space FSKit backend on current macOS releases. It
 does not require the legacy macFUSE kernel extension, reduced security, or a
 restart into Recovery.

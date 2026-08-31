@@ -1,5 +1,9 @@
 # 21. Security and Corruption Handling
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [conformance](../testing/conformance.md),
+> [developer-harness](../testing/developer-harness.md) · **Milestones:** M05
+
 ## 1. Treat disk data as untrusted
 
 Every parser must validate:

@@ -1,5 +1,8 @@
 # 14. Paths and Namespaces
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [aros-system-volume-qualification](../testing/aros-system-volume-qualification.md) · **Milestones:** M06
+
 ## 1. Fundamental separation
 
 AFS+ stores hierarchy and component names.

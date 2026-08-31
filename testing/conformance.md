@@ -1,5 +1,8 @@
 # Conformance Suite
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** M00, M01, M02, M05, M12, M14
+
 A conforming implementation is tested against versioned images.
 
 Required image families:

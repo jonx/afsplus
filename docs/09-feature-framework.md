@@ -1,5 +1,30 @@
 # 09. Feature Framework
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
+<!-- toc -->
+
+- [1. Objective](#1-objective)
+- [2. Feature identity](#2-feature-identity)
+- [3. Feature classes](#3-feature-classes)
+  - [COMPAT](#compat)
+  - [RO_COMPAT](#rocompat)
+  - [INCOMPAT](#incompat)
+- [4. On-disk feature states](#4-on-disk-feature-states)
+- [5. Implementation lifecycle](#5-implementation-lifecycle)
+- [6. Authoritative, rebuildable, and discardable are different properties](#6-authoritative-rebuildable-and-discardable-are-different-properties)
+- [7. Dependencies](#7-dependencies)
+- [8. Compatibility profiles](#8-compatibility-profiles)
+  - [reader-minimal](#reader-minimal)
+  - [classic-rw](#classic-rw)
+  - [boot-safe](#boot-safe)
+  - [workstation](#workstation)
+  - [full](#full)
+- [9. Loadable providers](#9-loadable-providers)
+
+<!-- /toc -->
+
 ## 1. Objective
 
 AFS+ must evolve without requiring every implementation to support every future feature forever.

@@ -1,5 +1,8 @@
 # 20. Performance Architecture
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 ## 1. Performance principles
 
 Optimize measured workloads, not hypothetical ones.

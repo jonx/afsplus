@@ -1,5 +1,8 @@
 # 11. Change Stream
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [security-scanning-benchmarks](../testing/security-scanning-benchmarks.md) · **Milestones:** M10
+
 ## 1. Purpose
 
 The optional change stream provides a persistent ordered record of namespace and metadata changes.

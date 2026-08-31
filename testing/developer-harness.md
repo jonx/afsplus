@@ -1,5 +1,24 @@
 # Developer Harness
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** M05
+
+<!-- toc -->
+
+- [Goal](#goal)
+- [Host-native inner loop](#host-native-inner-loop)
+- [Scenario format](#scenario-format)
+- [Failure minimization](#failure-minimization)
+- [Differential tests](#differential-tests)
+- [Tiny-cache matrix](#tiny-cache-matrix)
+- [Crash-point exploration](#crash-point-exploration)
+- [Shadow reader](#shadow-reader)
+- [Block ownership assertions](#block-ownership-assertions)
+- [Remote AROS target mode](#remote-aros-target-mode)
+- [Rule](#rule)
+
+<!-- /toc -->
+
 ## Goal
 
 A filesystem bug should be reproducible from a small artifact set rather than from a verbal description of what happened on a machine.

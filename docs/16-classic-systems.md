@@ -1,5 +1,8 @@
 # 16. Classic and Constrained Systems
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [conformance](../testing/conformance.md), [fuzzing](../testing/fuzzing.md) · **Milestones:** M01, M12
+
 ## 1. Policy
 
 Full feature parity on vintage systems is not a requirement.

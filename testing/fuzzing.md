@@ -1,5 +1,8 @@
 # Fuzzing
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** M01
+
 Required fuzz targets:
 
 - identification block

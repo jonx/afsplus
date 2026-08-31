@@ -1,10 +1,42 @@
 # 26. Debugging, Observability, and Fault Injection
 
+> **ADRs:** [ADR-024](../adr/ADR-024-rebuildable-reverse-map.md) · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 Status: required development architecture. Most facilities are runtime-optional and must have near-zero cost when disabled.
 
 Filesystem development is unusually painful because a bug may corrupt the state needed to diagnose the bug. A pointer lifetime mistake, ordering mistake, allocator error, or failed flush can produce damage minutes later and far from the original cause.
 
 AFS+ should treat diagnosability as a design requirement rather than add logging after corruption starts happening.
+
+<!-- toc -->
+
+- [1. Goals](#1-goals)
+- [2. Every mutating operation gets identities](#2-every-mutating-operation-gets-identities)
+- [3. Binary flight recorder](#3-binary-flight-recorder)
+- [4. Live attachment](#4-live-attachment)
+  - [4.1 Virtual drive activity LED](#41-virtual-drive-activity-led)
+- [5. Explain API](#5-explain-api)
+- [6. Optional reverse-map index](#6-optional-reverse-map-index)
+- [7. Metadata self-description](#7-metadata-self-description)
+- [8. Deterministic test mode](#8-deterministic-test-mode)
+- [9. Fault-injection API](#9-fault-injection-api)
+- [10. Power-cut simulator](#10-power-cut-simulator)
+- [11. Operation record/replay](#11-operation-recordreplay)
+- [12. Semantic block trace](#12-semantic-block-trace)
+- [13. Invariant levels](#13-invariant-levels)
+  - [ALWAYS](#always)
+  - [DEBUG](#debug)
+  - [PARANOID](#paranoid)
+  - [FULL](#full)
+- [14. Tiny-cache mode](#14-tiny-cache-mode)
+- [15. Shadow verification](#15-shadow-verification)
+- [16. Previous checkpoint access](#16-previous-checkpoint-access)
+- [17. Structured health/event stream](#17-structured-healthevent-stream)
+- [18. Debug features must not become disk-format dependencies](#18-debug-features-must-not-become-disk-format-dependencies)
+- [19. Release gate](#19-release-gate)
+
+<!-- /toc -->
 
 ## 1. Goals
 

@@ -2,6 +2,18 @@
 
 Status: Accepted for the prototype; four authoritative adapters published
 
+<!-- toc -->
+
+- [Context](#context)
+- [Decision](#decision)
+- [Bounded-resource contract](#bounded-resource-contract)
+- [COW mutation contract](#cow-mutation-contract)
+- [Typed adapters](#typed-adapters)
+- [Validation](#validation)
+- [Status and compatibility](#status-and-compatibility)
+
+<!-- /toc -->
+
 ## Context
 
 The executable core began with four independent one-block limits:

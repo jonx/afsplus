@@ -1,9 +1,31 @@
 # Storage Media Profiles
 
+> **ADRs:** [ADR-036](../adr/ADR-036-reclaim-queue.md),
+> [ADR-057](../adr/ADR-057-plain-m68000-emulator-gate.md) · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 Status: proposal — for team review before epoch 1. On acceptance this
 becomes a numbered document under `docs/`. Decisions requested are marked
 **M1–M5**; M1 is a format question and is expanded in
 `proposals/checkpoint-slot-rings.md`.
+
+<!-- toc -->
+
+- [1. Why this document exists](#1-why-this-document-exists)
+- [2. What the existing design already provides](#2-what-the-existing-design-already-provides)
+- [3. Per-medium analysis](#3-per-medium-analysis)
+  - [NVMe / SATA SSD](#nvme--sata-ssd)
+  - [Spinning disks (HDD)](#spinning-disks-hdd)
+  - [SD, eMMC, CompactFlash, USB sticks](#sd-emmc-compactflash-usb-sticks)
+  - [Classic Amiga storage (SCSI, IDE, trackdisk-class devices)](#classic-amiga-storage-scsi-ide-trackdisk-class-devices)
+  - [SMR and zoned devices (ZNS)](#smr-and-zoned-devices-zns)
+  - [Host files, loop devices, VM images](#host-files-loop-devices-vm-images)
+- [4. The hot-slot problem](#4-the-hot-slot-problem)
+- [5. Discard wiring (runtime, no format impact)](#5-discard-wiring-runtime-no-format-impact)
+- [6. The media profile](#6-the-media-profile)
+- [7. Decisions requested](#7-decisions-requested)
+
+<!-- /toc -->
 
 ## 1. Why this document exists
 

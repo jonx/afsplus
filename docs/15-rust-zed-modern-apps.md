@@ -1,5 +1,10 @@
 # 15. Rust, Zed, Git, and Modern Applications
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [application-qualification](../testing/application-qualification.md),
+> [benchmark-contract](../testing/benchmark-contract.md),
+> [extreme-workload-benchmarks](../testing/extreme-workload-benchmarks.md) · **Milestones:** M13
+
 ## 1. Why this matters
 
 AFS+ is intended to support a modern self-hosted AROS development environment.

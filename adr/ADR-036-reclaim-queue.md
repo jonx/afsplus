@@ -2,6 +2,22 @@
 
 Status: Accepted for the prototype (Reclaim Scale-2); wire format experimental
 
+<!-- toc -->
+
+- [Context](#context)
+- [Quarantine invariant (normative for this prototype)](#quarantine-invariant-normative-for-this-prototype)
+- [Decision](#decision)
+  - [Entries are runs](#entries-are-runs)
+  - [Three tiers, append-only sealing](#three-tiers-append-only-sealing)
+  - [Why there is no self-recursion](#why-there-is-no-self-recursion)
+  - [Bounded, resumable reclamation](#bounded-resumable-reclamation)
+  - [Bounded mount](#bounded-mount)
+  - [Checker obligations](#checker-obligations)
+- [Format impact](#format-impact)
+- [Rejected alternative](#rejected-alternative)
+
+<!-- /toc -->
+
 ## Context
 
 The first prototype recorded quarantined storage in a single retired-list

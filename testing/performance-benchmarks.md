@@ -1,5 +1,8 @@
 # Performance Benchmarks
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** M09
+
 Performance results must always include correctness verification.
 
 ## Metadata

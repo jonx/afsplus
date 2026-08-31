@@ -1,5 +1,9 @@
 # 17. Portability
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** [aros-system-volume-qualification](../testing/aros-system-volume-qualification.md),
+> [conformance](../testing/conformance.md), [fuzzing](../testing/fuzzing.md) · **Milestones:** M01, M08
+
 ## 1. Portable core requirement
 
 `libafsplus` must build outside AROS.

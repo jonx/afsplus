@@ -1,5 +1,8 @@
 # Application Qualification
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** M13
+
 ## Rust/Cargo
 
 Pass when:

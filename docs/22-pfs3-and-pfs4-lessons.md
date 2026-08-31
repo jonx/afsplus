@@ -1,8 +1,24 @@
 # 22. Lessons from PFS3 and the Proposed PFS4
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 PFS3 is a mandatory design reference for AFS+.
 
 AFS+ should not be designed as if classic Amiga filesystem history consisted only of FFS. Professional File System 3 solved several practical Amiga filesystem problems extremely well, especially reliability, performance on modest hardware, fragmentation behavior, and useful native filesystem semantics.
+
+<!-- toc -->
+
+- [1. Why PFS3 matters](#1-why-pfs3-matters)
+- [2. Atomic commit is more relevant than copying a Unix journal model](#2-atomic-commit-is-more-relevant-than-copying-a-unix-journal-model)
+- [3. PFS4 is particularly relevant](#3-pfs4-is-particularly-relevant)
+- [4. Tiny-file optimization should be elevated](#4-tiny-file-optimization-should-be-elevated)
+- [5. Fragmentation prevention is preferable to mandatory defragmentation](#5-fragmentation-prevention-is-preferable-to-mandatory-defragmentation)
+- [6. Deleted-file recovery](#6-deleted-file-recovery)
+- [7. Low-resource implementation is a core quality metric](#7-low-resource-implementation-is-a-core-quality-metric)
+- [8. Study the source before freezing epoch 1](#8-study-the-source-before-freezing-epoch-1)
+
+<!-- /toc -->
 
 ## 1. Why PFS3 matters
 

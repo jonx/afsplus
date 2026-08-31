@@ -1,9 +1,30 @@
 # Tool Contract v1: volume self-description for partition tools
 
+> **ADRs:** [ADR-025](../adr/ADR-025-structured-management-api.md),
+> [ADR-037](../adr/ADR-037-intent-log.md),
+> [ADR-038](../adr/ADR-038-mount-policy-and-feature-summary.md) · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 Status: proposal — for team review. Nothing is implemented; the vocabulary
 becomes a versioned commitment once published, so review comes first. On
 acceptance the spec lands under `spec/` with a numbered ADR. Decisions
 requested from the team are marked **D1–D7**.
+
+<!-- toc -->
+
+- [Summary](#summary)
+- [1. Goal and positioning](#1-goal-and-positioning)
+- [2. Deliverables](#2-deliverables)
+- [3. The v1 vocabulary — `ToolInfo`](#3-the-v1-vocabulary--toolinfo)
+- [4. v1 capabilities — values and rationale](#4-v1-capabilities--values-and-rationale)
+- [5. Design constraints](#5-design-constraints)
+- [6. Implementation plan](#6-implementation-plan)
+- [7. Decisions requested from the team](#7-decisions-requested-from-the-team)
+- [8. Out of scope for v1](#8-out-of-scope-for-v1)
+- [9. Accepted risks and limits](#9-accepted-risks-and-limits)
+- [10. Estimate](#10-estimate)
+
+<!-- /toc -->
 
 ## Summary
 

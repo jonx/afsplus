@@ -1,5 +1,8 @@
 # 18. Third-Party Integration
 
+> **ADRs:** none · **Spec:** none ·
+> **Tests:** none · **Milestones:** none
+
 ## 1. Partition identification
 
 AFS+ should request and publish an official GPT partition type GUID before format freeze.
