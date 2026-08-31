@@ -10,6 +10,7 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- toc -->
 
 - [2026-08-31 — Team board adopted](#2026-08-31--team-board-adopted)
+- [2026-08-31 — Shared extents chosen as the next epoch-1 lot](#2026-08-31--shared-extents-chosen-as-the-next-epoch-1-lot)
 - [2026-08-31 — Documentation restructured around one home per fact](#2026-08-31--documentation-restructured-around-one-home-per-fact)
 - [2026-08-31 — Mountable Alpha-0 closed](#2026-08-31--mountable-alpha-0-closed)
 - [2026-08-29 — Region allocator, bounded mount and shared COW trees](#2026-08-29--region-allocator-bounded-mount-and-shared-cow-trees)
@@ -26,6 +27,36 @@ Coordination between agents and the owner moves to the shared
 hooks under `.claude/` and the protocol block in [CLAUDE.md](CLAUDE.md);
 [AGENTS.md § Team board](AGENTS.md#team-board) points to it. The board is the
 live conversation; this file stays the repository's record.
+
+## 2026-08-31 — Shared extents chosen as the next epoch-1 lot
+
+With Mountable Alpha-0 closed, the next objective is the largest unimplemented
+epoch-1 *requirement* rather than an open question: [ADR-027](adr/ADR-027-reflink-clones.md)
+has been "Accepted as an epoch-1 format requirement" since the design phase, a
+freeze gate depends on it, and nothing implemented it — the extent record
+carried one flag and no reference state existed. ADR-027 itself records why
+that cannot be deferred: sharing changes the allocator, checker, reclamation
+and reverse-map invariants at once. It is also coupled to open question Q1,
+because reflink-shared ranges always copy on write, so the write path must fork
+on shared versus private — exactly where the data-policy decision lives.
+
+[ADR-061](adr/ADR-061-shared-extent-references.md) selects the mechanism: a
+volume-wide typed reference tree on the ADR-034 engine, keyed by physical run.
+A first draft was revised after review found six contract gaps, two of them
+genuine correctness holes: an operation on a flagged extent must partition by
+overlap rather than look up its start, because peers split the underlying runs
+independently; and although clone is not journalled, the existing journalled
+delete and rename-replacement can remove a file holding shared extents, so
+their replay has to maintain the counts. The review also refused the
+checkpoint offset until the transitional inline region records — dead since
+[ADR-035](adr/ADR-035-allocation-root-reserved-pool.md) but still decoded when
+the allocation root is zero — were removed outright rather than left to
+collide with a new field.
+
+That review exposed a defect in these very rules: they declared ADRs immutable
+from the moment they were written, which leaves no way to correct a draft that
+review has rejected. The rule now says what it should have said — immutable
+from acceptance, revisable while `Proposed`.
 
 ## 2026-08-31 — Documentation restructured around one home per fact
 

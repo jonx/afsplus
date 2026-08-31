@@ -478,14 +478,14 @@ def main() -> int:
         state, stale = process_toc(path, write_toc)
         relative = path.relative_to(root)
         if state == "absent":
-            if len(read_lines(path)) > TOC_MIN_LINES and first_h2_index(
-                    read_lines(path)) != -1:
+            if not write_toc and len(read_lines(path)) > TOC_MIN_LINES and (
+                    first_h2_index(read_lines(path)) != -1):
                 problems.append(
                     f"{relative} (longer than {TOC_MIN_LINES} lines without a "
                     "<!-- toc --> block; run tools/check-docs.py --write-toc)")
             continue
         toc_files += 1
-        if stale:
+        if stale and not write_toc:
             toc_stale += 1
             problems.append(
                 f"{relative} (stale toc; run tools/check-docs.py --write-toc)")

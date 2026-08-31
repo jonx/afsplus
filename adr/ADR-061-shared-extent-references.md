@@ -1,7 +1,24 @@
 # ADR-061: Shared-extent references in a typed reference tree
 
-Status: Accepted for the prototype; wire format experimental
-Amends: ADR-027
+Status: Proposed; under review (thread #17), wire format experimental
+Amends: ADR-027, ADR-035
+
+<!-- toc -->
+
+- [Context](#context)
+- [Decision](#decision)
+  - [Reference authority](#reference-authority)
+  - [The flag is a conservative marker, not a symmetric hint](#the-flag-is-a-conservative-marker-not-a-symmetric-hint)
+  - [Canonical form](#canonical-form)
+  - [Checkpoint binding](#checkpoint-binding)
+  - [Reference counts are per checkpoint](#reference-counts-are-per-checkpoint)
+  - [Operations](#operations)
+  - [Intent log](#intent-log)
+  - [Compatibility](#compatibility)
+- [Validation](#validation)
+- [Consequences](#consequences)
+
+<!-- /toc -->
 
 ## Context
 
@@ -28,19 +45,22 @@ which is exactly where the unresolved user-data update policy
 
 ### Reference authority
 
-A volume-wide typed `AFST` tree, `TreeKind::SharedExtents`, owner 0, holds one
-record per shared physical run, keyed by its first physical block:
+A volume-wide typed `AFST` tree, `TreeKind::SharedExtents` (wire value 5),
+owner 0, holds one record per shared physical run, keyed by its first physical
+block:
 
 ```text
 key    physical_start (u64)
 value  block_count (u64), reference_count (u32), flags (u32, zero reserved)
 ```
 
-Records are non-overlapping and ordered by `physical_start`. The tree uses the
-bounded copy-on-write engine of [ADR-034](ADR-034-bounded-cow-tree.md)
-unchanged: same node format, same split/merge, same exhaustive verifier, same
-bounded lookup, and it is published in the same transaction as the extent maps
-it describes.
+The tree uses the bounded copy-on-write engine of
+[ADR-034](ADR-034-bounded-cow-tree.md) unchanged, and is published in the same
+transaction as the extent maps it describes. Every record is validated on
+load: `block_count > 0`, `physical_start + block_count` without overflow and
+within volume bounds, `reference_count >= 2`, reserved flags zero, and node
+kind, owner and generation checked like every other typed adapter. A clone that
+would take a reference count past `u32::MAX` fails cleanly instead of wrapping.
 
 Rejected alternatives: a reference count inside each extent record duplicates
 the value in every sharer and leaves no single authority; physical-to-owner
@@ -49,73 +69,151 @@ back-reference objects are more general and would also serve
 with its own rebuild and staleness rules and are not required to satisfy
 ADR-027.
 
-### The extent flag is a hint, the tree is authoritative
+### The flag is a conservative marker, not a symmetric hint
 
-`EXTENT_SHARED` marks an extent whose physical run may be shared. Set, it
-obliges the reader to consult the reference tree before any in-place action.
-Clear, the run is private with no lookup. A record is absent from the tree
-exactly when its run has a single reference, so an extent may keep the flag
-after its peers are gone: a stale flag costs one bounded lookup and never
-costs correctness. The tree stays empty on volumes that never clone, and
-`shared_extent_root_block` is zero there.
+`EXTENT_SHARED` on an extent asserts nothing except *this run may overlap
+shared records*; the tree is the authority. The two directions are not
+symmetric:
+
+- **flag set, no overlapping record** — the run is private. Legal, and the
+  expected steady state after peers disappear. It costs one bounded lookup.
+- **flag clear, an overlapping record exists** — corruption. A false negative
+  would let a caller overwrite or free storage another object still
+  references, so the checker rejects it.
+
+An extent's flag therefore covers an interval that may be partly shared and
+partly private, because peers split the underlying runs independently. After
+`A` and `B` share `[0, 100)` and `B` rewrites `[40, 60)`:
+
+```text
+tree      [0,40) rc=2        [60,100) rc=2      ([40,60) has one reference: no record)
+A extent  [0,100) EXTENT_SHARED  — one extent, two shared sub-runs and one private gap
+```
+
+Every operation on a flagged extent therefore performs an **overlap search**
+— floor record plus successors until past the extent's physical end — and
+partitions the extent at record boundaries, treating only the gaps as private.
+An exact lookup on `physical_start` is wrong: here it finds `[0,40)` and misses
+`[60,100)`.
+
+### Canonical form
+
+Records are non-overlapping, ordered by `physical_start`, and **maximal**: two
+adjacent records with equal `reference_count` must be merged, so a given
+sharing state has exactly one representation and the checker compares without
+guessing. Fragmentation is bounded by merging on every decrement rather than
+left to accumulate.
+
+A split partitions the original interval exactly — the resulting `block_count`s
+sum to the original `block_count`, covering it without gap or overlap. Each
+segment keeps the original `reference_count`; only the segment whose reference
+is being dropped changes, and it disappears entirely when its count reaches 1.
 
 ### Checkpoint binding
 
-The checkpoint payload gains `shared_extent_root_block` (u64) at offset 96,
-where the transitional inline region records used to begin; they have been
-empty since [ADR-035](ADR-035-allocation-root-reserved-pool.md). Zero means no
-shared-extent tree exists on this volume. The root is allocated by the first
-clone, inside that clone's transaction.
+The transitional inline region records are removed rather than made to coexist
+with a new field. They have been empty in every written checkpoint since
+[ADR-035](ADR-035-allocation-root-reserved-pool.md), but the codec still
+decodes them when `allocation_root_block == 0`, and that layout puts the first
+record at offset 96 — the same bytes a naively appended root would occupy.
+
+Therefore: `allocation_root_block == 0` becomes structurally invalid, the
+record count, its reserved word and the trailing records leave the payload, and
+the fixed payload is 96 bytes:
+
+```text
+80     8    flags (zero; reserved)
+88     8    shared-extent reference-tree root LBA
+```
+
+Zero means no shared-extent tree exists on this volume, the normal state of a
+volume that has never cloned; the root is allocated by the first clone, inside
+that clone's transaction. Structural validation accepts zero or an allocatable
+LBA and nothing else; kind, owner and generation are checked when the node is
+loaded.
+
+### Reference counts are per checkpoint
+
+A checkpoint's tree counts the live mappings **of that checkpoint**. References
+held only by the other selectable checkpoint are not added to the current
+count: they are protected by retirement and quarantine
+([ADR-036](ADR-036-reclaim-queue.md)), which is the same mechanism that already
+protects unshared blocks a stale checkpoint can still reach. Mixing the two
+would make the count ambiguous and unverifiable.
 
 ### Operations
 
 - **Clone.** `CloneFile`/`CloneRange` copy the source extent records into the
   destination map, set `EXTENT_SHARED` on both sides, and insert or increment
-  the reference records for the covered runs. One transaction, one checkpoint.
+  the reference records for the covered runs. Clone is a checkpoint
+  transaction, never an intent-log operation; if a log window is open it is
+  committed first, so the clone is never split across the two mechanisms.
 - **Write into a shared range.** Replacement blocks are allocated for the
-  modified logical range, the reference count of the overwritten sub-range is
-  decremented, and the private extent replaces it in that object's map only.
-  This is unconditional and independent of the Q1 outcome, which governs
-  writes to *private* committed data.
-- **Split and merge.** Cloning or overwriting part of a run splits its record
-  into up to three records whose counts sum to the original accounting. Two
-  adjacent records merge only when their reference counts are equal.
-- **Free.** Unlink and truncate consult the tree for every `EXTENT_SHARED`
-  extent: a count above one is decremented and the blocks are *not* retired; a
-  count of one, or an absent record, retires the run into the reclaim queue
-  ([ADR-036](ADR-036-reclaim-queue.md)) exactly as an unshared run is retired
-  today. The decrement and the extent-map change are in the same transaction.
-- **Uncertainty.** A reference state that cannot be read is never resolved in
-  favour of freeing: the run is quarantined and reported, never returned to
-  free space.
+  modified logical range, the reference of the overwritten sub-range is
+  dropped, and the private extent replaces it in that object's map only. This
+  is unconditional and independent of Q1, which governs writes to *private*
+  committed data.
+- **Free.** Unlink and truncate partition every flagged extent as above: a
+  sub-run with a record above one reference is decremented and its blocks are
+  *not* retired; a gap, or a record falling to a single reference, retires the
+  run into the reclaim queue exactly as an unshared run is retired today. The
+  decrement and the extent-map change are in the same transaction.
+- **Uncertainty is fail-closed.** If the root or a lookup cannot be read, the
+  mutation aborts and returns the error; the storage stays marked allocated and
+  nothing is freed, published or invented. Moving such storage to quarantine is
+  a later repair decision made by the checker, not something the core does
+  behind an unreadable tree.
+
+### Intent log
+
+Clone is not journalled, but that alone is not enough: an existing
+`LogOp::Delete`, or a `Rename` with replacement, can remove a file holding
+shared extents. Their logical replay must therefore maintain reference counts
+in the same transaction that applies the operation
+([ADR-037](ADR-037-intent-log.md)). No new log operation is required, and the
+crash matrix must cover at least one shared unlink and one shared
+rename-replacement that are fsynced and then replayed.
 
 ### Compatibility
 
-The feature registry gains `org.aros.afsplus:shared-extents`, read-compatible
-and write-incompatible: an implementation that does not honour reference counts
-may mount read-only but must refuse read-write, because freeing a shared run
-would destroy another object's data. Minimal readers need only accept that
-several objects may map the same physical run.
+The feature registry gains `org.aros.afsplus:shared-extents`, class
+`ro_compat`, lifecycle experimental, `authoritative = true`,
+`rebuildable = true` (by exhaustive scan of every extent map),
+`discardable = false`.
+
+Identification is immutable, so the first clone cannot activate a bit. The
+feature is therefore activated by `mkfs` according to the requested
+compatibility profile — `workstation` and `full` enable it, `reader-minimal`,
+`classic-rw` and `boot-safe` do not — with the root left at zero until the
+first clone. A volume without the feature rejects clone operations as
+unsupported rather than silently copying. Making sharing mandatory epoch
+semantics was rejected: it would deny read-write access to exactly the
+constrained implementations the classic profile exists to serve.
 
 ## Validation
 
-The checker rebuilds the expected reference table by scanning the extent map of
-every live object — a forward scan, no reverse map — and requires:
+The checker rebuilds the expected reference state by scanning the extent map of
+every live object — a forward scan, no reverse map — accumulating a count per
+physical block, then partitioning at every boundary. Equality is required in
+**both** directions, so that a missing record is as detectable as a wrong one:
 
-- every record's `reference_count` equals the number of live references found;
-- no record's run intersects authoritative free space, quarantine, or another
-  record;
-- records are ordered, non-overlapping, and within volume bounds;
-- an extent flagged `EXTENT_SHARED` whose run is absent from the tree is
-  accounted as private, which is allowed;
-- an extent *not* flagged shared whose run appears in a record is a corruption.
+- every maximal sub-run whose expected count is at least two has exactly one
+  record, with that count and those bounds;
+- every record corresponds to such a sub-run: no orphan, no stale count, no
+  record whose expected count is one;
+- records are ordered, non-overlapping, maximal, and within volume bounds;
+- no record's run intersects authoritative free space or quarantine;
+- an extent flagged `EXTENT_SHARED` with no overlapping record is accounted
+  private, which is legal; an extent not flagged whose run overlaps a record is
+  reported as corruption.
 
 Because the tree is published in the checkpoint that publishes the extent maps,
 every modelled crash state selects either the complete pre-operation or the
 complete post-operation state. The mandatory matrix injects a power cut after
 every write and every flush of: clone creation, a write that splits a shared
-run, unlink of one clone while another lives, and reclamation of the last
-reference.
+run, unlink of one clone while another lives, reclamation of the last
+reference, and the fsynced-then-replayed shared unlink and rename-replacement
+above.
 
 ## Consequences
 
@@ -123,13 +221,17 @@ ADR-027's required invariants become executable and checkable, and the epoch-1
 gate "shared extents cannot be freed while referenced by any live object or
 retained recovery state" acquires a mechanism and a test.
 
-`spec/invariants.md` gains the shared-block exception its own text anticipates.
-The write path acquires the shared/private fork that open question Q1 needs in
-order to be decided by measurement rather than by default.
+[`spec/invariants.md`](../spec/invariants.md) gains the shared-block exception
+its own text anticipates. The write path acquires the shared/private fork that
+open question Q1 needs in order to be decided by measurement rather than by
+default.
+
+Removing the transitional inline region records completes ADR-035 and closes
+the checkpoint layout to one interpretation, at the cost of rebuilding
+prototype images rather than migrating them.
 
 The wire format is experimental. The record shape, the tree kind, the flag bit
-and the checkpoint offset are not epoch-1 commitments until M14, and prototype
-images are rebuilt rather than migrated.
+and the checkpoint offset are not epoch-1 commitments until M14.
 
 `CloneTree`, the reverse map of ADR-024 and user-data checksums stay out of
 scope, as ADR-027 and the open-questions register already record.

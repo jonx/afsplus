@@ -51,9 +51,12 @@ drafts awaiting team review have theirs, [proposals/](../proposals/README.md).
   test plan or design document the row links.
 - **ROADMAP.md** carries the plan only: stages, order, exit criteria, and the
   milestones each stage feeds. It carries no `Status:` line.
-- **ADRs** are immutable except for their `Status:` line and the relation
-  lines `Supersedes:`, `Superseded by:`, `Amends:`, `Amended by:` that follow
-  it. Numbers are never reused; [`adr/README.md`](../adr/README.md) is generated from these
+- **ADRs** become immutable when they are accepted, not when they are written.
+  A record whose `Status:` is `Proposed` is a draft under review and may be
+  revised in place while its review thread is open; once its status records
+  acceptance, only that `Status:` line and the relation lines `Supersedes:`,
+  `Superseded by:`, `Amends:`, `Amended by:` may change, and a changed decision
+  needs a new record. Numbers are never reused; [`adr/README.md`](../adr/README.md) is generated from these
   headers. Ideas no ADR supersedes formally are listed in
   [adr/README.md § Superseded directions](../adr/README.md#superseded-directions).
 - **Design documents** (`docs/NN-*.md`, `spec/`, `api/`) carry no status, no
