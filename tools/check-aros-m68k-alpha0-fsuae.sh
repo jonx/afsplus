@@ -72,6 +72,7 @@ for file in \
     "$repo_root/native/aros/tests/m68k-alpha0-sequence" \
     "$repo_root/native/aros/tests/m68k-replay-old-sequence" \
     "$repo_root/native/aros/tests/m68k-replay-new-sequence" \
+    "$repo_root/tools/check-aros-serial-log.sh" \
     "$macaros_root/hosted/rust/aros_fs_glue.c" \
     "$macaros_root/hosted/rust/aros_env_glue.c"
 do
@@ -290,6 +291,7 @@ run_guest() {
     emulator_status=$?
     wait "$serial_pid"
     set -e
+    "$repo_root/tools/check-aros-serial-log.sh" "$case_result/serial.log"
     [ "$emulator_status" -eq 0 ] || {
         echo "FS-UAE case $case_name failed with status $emulator_status" >&2
         exit 1
@@ -305,6 +307,15 @@ cargo run --quiet --release -p afsplus-core --bin afsplus-mkfs -- \
 run_guest alpha0 "$repo_root/native/aros/tests/m68k-alpha0-sequence" \
     "$alpha_image" "$serial_port_base"
 alpha_case="$result/cases/alpha0"
+for sample in before-mount mounted after-shutdown restarted \
+    after-second-shutdown after-dismount
+do
+    require_file "$alpha_case/host/avail.$sample.txt"
+done
+for status in shutdown restart second-shutdown dismount
+do
+    grep -qx pass "$alpha_case/host/$status.status"
+done
 grep -qx pass "$alpha_case/host/route.status"
 grep -qxF '[AFSPLUS-ROUTE] PASS' "$alpha_case/host/route.out"
 grep -qx pass "$alpha_case/host/probe.status"
@@ -339,6 +350,8 @@ while IFS="$tab" read -r fixture expected pending_before description; do
         "$fixtures/$fixture" "$((serial_port_base + index + 1))"
     mv "$work/check-before.json" "$case_result/check-before.json"
     grep -qx pass "$case_result/host/replay.status"
+    grep -qx pass "$case_result/host/shutdown.status"
+    grep -qx pass "$case_result/host/dismount.status"
     grep -qx "\[AFSPLUS-REPLAY\] PASS expected=$expected" \
         "$case_result/host/replay.out"
     cargo run --quiet --release -p afsplus-check --bin afsplus-check -- \
@@ -386,6 +399,26 @@ cp "$handler" "$result/afsplus-handler"
     echo "physical_a500_claim=none"
     echo "plain_68000_claim=$plain_68000_claim"
     echo "performance_claim=none"
+    echo "memory_measurement=guest-avail-flush"
+    for sample in before-mount mounted after-shutdown restarted \
+        after-second-shutdown after-dismount
+    do
+        case "$sample" in
+        before-mount) sample_key=before_mount ;;
+        mounted) sample_key=mounted ;;
+        after-shutdown) sample_key=after_shutdown ;;
+        restarted) sample_key=restarted ;;
+        after-second-shutdown) sample_key=after_second_shutdown ;;
+        after-dismount) sample_key=after_dismount ;;
+        esac
+        fast_available=$(awk '$1 == "fast" {print $2; found = 1} END {if (!found) exit 1}' \
+            "$alpha_case/host/avail.$sample.txt")
+        total_available=$(awk '$1 == "total" {print $2; found = 1} END {if (!found) exit 1}' \
+            "$alpha_case/host/avail.$sample.txt")
+        echo "guest_fast_available_${sample_key}=$fast_available"
+        echo "guest_total_available_${sample_key}=$total_available"
+    done
+    echo "guest_failure_requester=none"
     echo "trace_startup=$trace_startup"
     echo "rust_toolchain=$rust_toolchain"
     if [ -n "$llvm_lib" ]; then

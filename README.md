@@ -175,15 +175,16 @@ switches are inert, use the diagnostic and reversible workaround in
 transport is not a raw substitute for macFUSE's message channel; see ADR-040.
 The native AROS bridge and its cross-build qualification are documented in
 [`docs/aros-native-bridge.md`](docs/aros-native-bridge.md), ADR-042 through
-ADR-057. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
+ADR-058. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
 Hosted MacAROS → macFUSE → Hosted MacAROS round trip on one checked image.
 Hosted intent-log replay and the cumulative post-bootstrap S1 system-volume
 pivot are also qualified. The handler now supports standard AROS
-`Assign DISMOUNT` termination and repeated unload/reload. AFS+ is distributed
-as an external `L:` handler plus DOSDriver and does not require acceptance of
-AFS+ into the upstream AROS source tree; an upstream build recipe remains
-optional. Genuine defects found in generic AROS interfaces are still fixed
-with focused regression-tested patches and proposed upstream.
+`Mount SHUTDOWN` termination, restart through the retained device node and a
+final `Assign DISMOUNT`. AFS+ is distributed as an external `L:` handler plus
+DOSDriver and does not require acceptance of AFS+ into the upstream AROS source
+tree; an upstream build recipe remains optional. Genuine defects found in
+generic AROS interfaces are still fixed with focused regression-tested patches
+and proposed upstream.
 AROS qualification images use the versioned Unicode 16 case-insensitive,
 spelling-preserving namespace; general-purpose images remain configurable and
 default to case-sensitive lookup.
@@ -205,8 +206,11 @@ the real external handler's Alpha-0 operation matrix and all six recovery cuts
 on both the M68020-or-newer reference profile and an A500-configured plain
 M68000 profile. The latter rejects M68020 long-multiply instructions before
 boot and binds the patched LLVM library in its evidence. This deliberately
-makes no physical-A500, constrained-memory-budget or hardware-performance
-claim; ADR-057 records the boundary.
+makes no physical-A500, final constrained-memory-budget or
+hardware-performance claim; ADR-057 records the boundary.
+ADR-058 adds a measured 8-MiB emulator profile and proves that sequential
+shutdown/restart cycles reuse one DOS-loaded segment without material memory
+growth; 4 MiB does not boot the control AROS profile far enough to test AFS+.
 Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen are not
 format commitments. Incompatible format changes must update the format epoch
 or use feature negotiation as defined in the compatibility specification.

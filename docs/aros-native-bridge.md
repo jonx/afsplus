@@ -225,8 +225,9 @@ Wanderer, IPrefs, Locale and Clock from a manifested AFS+ desktop image and
 durably writes `ENVARC:`. ADR-048 defines the split and ADR-049 records the S1b
 evidence; ADR-052 removes its former case-policy workaround with a versioned,
 case-insensitive and spelling-preserving AROS namespace. ADR-050 records
-repeated standard `Assign DISMOUNT` termination and reload, including the
-required ordering of device-node removal and the deferred `ACTION_DIE` reply.
+repeated standard `Mount SHUTDOWN`/restart cycles followed by final `Assign
+DISMOUNT`, including retention of the device node until handler cleanup and the
+deferred `ACTION_DIE` reply.
 No AROS kernel, DOS or source-tree inclusion of the AFS+ handler is part of that
 contract. A genuine bug in a generic AROS interface should still be fixed and
 proposed upstream rather than hidden in the handler.
@@ -311,6 +312,12 @@ The gate compiles every native object with `-m68000`, rejects M68020 long
 multiply opcodes in the linked handler, and records the selected CPU and LLVM
 dylib hash. ADR-057 records the accepted Alpha-0 and six-replay result. No
 standard-library `Vec` workaround is required.
+
+ADR-058 adds guest `Avail FLUSH` samples around two sequential handler
+instances. On the accepted 8-MiB profile, the DOS-loaded external segment costs
+about 1.95 MiB, an active instance adds about 1.08 MiB, and two shutdowns differ
+by only 64 bytes. A 4-MiB boot-only control does not reach its first guest
+verdict, so that lower result cannot be attributed to AFS+.
 
 `afsram.device` writes only the retained boot image. `CMD_UPDATE` therefore
 tests the filesystem/device ordering path but cannot make data survive reset.

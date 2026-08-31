@@ -16,6 +16,7 @@ model=${AFSPLUS_AROS_M68K_MODEL:-A4000/040}
 cpu_speed=${AFSPLUS_AROS_M68K_CPU_SPEED:-real}
 fast_memory=${AFSPLUS_AROS_M68K_FAST_MEMORY:-8M}
 zorro_iii_memory=${AFSPLUS_AROS_M68K_ZORRO_III_MEMORY:-64M}
+timeout_seconds=${TIMEOUT:-90}
 output=${AFSPLUS_AROS_M68K_OUTPUT:-"$repo_root/build/aros-m68k-boot-fsuae"}
 
 require_file() {
@@ -45,6 +46,7 @@ require_executable() {
 require_file "$boot_adf"
 require_file "$system_iso"
 require_file "$repo_root/native/aros/tests/m68k-boot-sequence"
+require_file "$repo_root/tools/check-aros-serial-log.sh"
 require_executable "$fs_uae"
 require_executable bsdtar
 if command -v gtimeout >/dev/null 2>&1; then
@@ -66,7 +68,7 @@ cp "$repo_root/native/aros/tests/m68k-boot-sequence" \
     "$output/system/S/Startup-Sequence"
 
 set +e
-"$timeout_command" 90 "$fs_uae" \
+"$timeout_command" "$timeout_seconds" "$fs_uae" \
     --amiga-model="$model" \
     --kickstart-file="$output/system/boot/amiga/aros-rom.bin" \
     --uae-kickstart-ext-rom-file="$output/system/boot/amiga/aros-ext.bin" \
@@ -82,6 +84,7 @@ set +e
 emulator_status=$?
 set -e
 
+"$repo_root/tools/check-aros-serial-log.sh" "$output/fs-uae.log"
 [ "$emulator_status" -eq 0 ] || {
     echo "FS-UAE did not reach guest shutdown (status $emulator_status)" >&2
     exit 1
@@ -104,6 +107,8 @@ grep -qx 'AFSPLUS M68K BOOT PASS' "$output/host/boot.pass" || {
     echo "cpu_speed=$cpu_speed"
     echo "fast_memory=$fast_memory"
     echo "zorro_iii_memory=$zorro_iii_memory"
+    echo "timeout_seconds=$timeout_seconds"
+    echo "guest_failure_requester=none"
     echo "boot_protocol=official-rom-plus-boot-floppy-plus-live-cd-volume"
     printf 'boot_adf_sha256='
     shasum -a 256 "$boot_adf" | awk '{print $1}'

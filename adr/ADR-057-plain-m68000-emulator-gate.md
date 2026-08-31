@@ -56,8 +56,10 @@ The accepted A500-configured FS-UAE run uses:
 - all six deterministic intent-log cuts, with four old and two new outcomes.
 
 Every final image passed the strict host checker with no pending intent-log
-record. Internal FS-UAE screenshots were inspected during the accepted run so
-an AROS software-failure requester could not be mistaken for a serial timeout.
+record. Internal FS-UAE screenshots were inspected during the accepted run.
+The gate now also scans every serial log and rejects `Software Failure!` or
+`Guru Meditation` before accepting process status, so a modal requester cannot
+be mistaken for a serial timeout or successful guest run.
 
 No `alloc`/`Vec` change is part of the accepted toolchain. No AROS or MacAROS
 source change is required by this result.
@@ -68,9 +70,12 @@ source change is required by this result.
   M68020-or-newer reference profile and an A500-configured M68000 emulator.
 - This does not establish the final classic memory budget, acceptable
   performance, physical-media behavior, or physical Amiga 500 compatibility.
+- ADR-058 subsequently measures the 8-MiB profile, separates retained segment
+  and per-instance memory, and qualifies stable sequential restarts. It does
+  not turn that emulator measurement into a physical-machine requirement.
 - The Rust compiler/PAL remains experimental. The portable-C profile remains
   the long-term fallback for machines where that toolchain or its cost is not
   acceptable.
-- Emulator timeouts must be checked visually as well as through serial and
-  host verdict files; a modal AROS failure requester does not terminate
-  FS-UAE.
+- Every emulator case must pass the automatic requester scan and its guest/host
+  verdict files. Visual inspection remains part of diagnosing unexplained
+  timeouts because a modal AROS failure requester does not terminate FS-UAE.

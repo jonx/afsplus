@@ -108,6 +108,16 @@ wait_for_host_mount() {
 
 require_executable "$control"
 require_file "$aros_tree/Devs/fdsk.device"
+require_file "$aros_tree/C/Mount"
+require_file "$aros_tree/C/Assign"
+command -v strings >/dev/null 2>&1 || {
+    echo "Missing required host command: strings" >&2
+    exit 69
+}
+if ! strings "$aros_tree/C/Mount" | grep -q 'SHUTDOWN/S'; then
+    echo "Hosted AROS C:Mount is too old: SHUTDOWN support is required" >&2
+    exit 69
+fi
 [ -d "$aros_tree/DiskImages" ] || {
     echo "Missing Hosted MacAROS DiskImages directory: $aros_tree" >&2
     exit 69
@@ -183,41 +193,55 @@ C:Mount DEVS:DOSDrivers/AFSPLUS19 >MacRW:mount.out
 C:List AFSPLUS19: ALL >MacRW:list.out
 C:Copy AFSPLUS19:alpha0.from-host MacRW:alpha0.from-host >MacRW:copy-host.out
 C:Copy AFSPLUS19:alpha0.from-aros MacRW:alpha0.from-aros >MacRW:copy-aros.out
-C:Assign AFSPLUS19: DISMOUNT >MacRW:dismount-1.out
+C:Mount AFSPLUS19: SHUTDOWN >MacRW:shutdown-1.out
 If WARN
-    C:Echo fail >MacRW:dismount-1.status
+    C:Echo fail >MacRW:shutdown-1.status
 Else
-    C:Echo pass >MacRW:dismount-1.status
+    C:Echo pass >MacRW:shutdown-1.status
 EndIf
-C:Mount DEVS:DOSDrivers/AFSPLUS19 >MacRW:remount-1.out
+C:List AFSPLUS19: >MacRW:restart-1.out
 If WARN
-    C:Echo fail >MacRW:remount-1.status
+    C:Echo fail >MacRW:restart-1.status
 Else
-    C:Echo pass >MacRW:remount-1.status
+    C:Echo pass >MacRW:restart-1.status
 EndIf
-C:Copy AFSPLUS19:alpha0.from-host MacRW:alpha0.after-remount-1 >MacRW:copy-remount-1.out
-C:Assign AFSPLUS19: DISMOUNT >MacRW:dismount-2.out
+C:Copy AFSPLUS19:alpha0.from-host MacRW:alpha0.after-restart-1 >MacRW:copy-restart-1.out
+C:Mount AFSPLUS19: SHUTDOWN >MacRW:shutdown-2.out
 If WARN
-    C:Echo fail >MacRW:dismount-2.status
+    C:Echo fail >MacRW:shutdown-2.status
 Else
-    C:Echo pass >MacRW:dismount-2.status
+    C:Echo pass >MacRW:shutdown-2.status
 EndIf
-C:Mount DEVS:DOSDrivers/AFSPLUS19 >MacRW:remount-2.out
+C:List AFSPLUS19: >MacRW:restart-2.out
 If WARN
-    C:Echo fail >MacRW:remount-2.status
+    C:Echo fail >MacRW:restart-2.status
 Else
-    C:Echo pass >MacRW:remount-2.status
+    C:Echo pass >MacRW:restart-2.status
 EndIf
-C:Copy AFSPLUS19:alpha0.from-aros MacRW:alpha0.after-remount-2 >MacRW:copy-remount-2.out'
+C:Copy AFSPLUS19:alpha0.from-aros MacRW:alpha0.after-restart-2 >MacRW:copy-restart-2.out
+C:Mount AFSPLUS19: SHUTDOWN >MacRW:shutdown-final.out
+If WARN
+    C:Echo fail >MacRW:shutdown-final.status
+Else
+    C:Echo pass >MacRW:shutdown-final.status
+EndIf
+C:Assign AFSPLUS19: DISMOUNT >MacRW:dismount-final.out
+If WARN
+    C:Echo fail >MacRW:dismount-final.status
+Else
+    C:Echo pass >MacRW:dismount-final.status
+EndIf'
 stop_aros "$result/return"
 [ "$(cat "$result/return/alpha0.from-host")" = host ]
 [ "$(cat "$result/return/alpha0.from-aros")" = hello ]
-[ "$(cat "$result/return/dismount-1.status")" = pass ]
-[ "$(cat "$result/return/remount-1.status")" = pass ]
-[ "$(cat "$result/return/alpha0.after-remount-1")" = host ]
-[ "$(cat "$result/return/dismount-2.status")" = pass ]
-[ "$(cat "$result/return/remount-2.status")" = pass ]
-[ "$(cat "$result/return/alpha0.after-remount-2")" = hello ]
+[ "$(cat "$result/return/shutdown-1.status")" = pass ]
+[ "$(cat "$result/return/restart-1.status")" = pass ]
+[ "$(cat "$result/return/alpha0.after-restart-1")" = host ]
+[ "$(cat "$result/return/shutdown-2.status")" = pass ]
+[ "$(cat "$result/return/restart-2.status")" = pass ]
+[ "$(cat "$result/return/alpha0.after-restart-2")" = hello ]
+[ "$(cat "$result/return/shutdown-final.status")" = pass ]
+[ "$(cat "$result/return/dismount-final.status")" = pass ]
 if grep -Eq '^\._alpha0\.' "$result/return/list.out"; then
     echo "AppleDouble sidecars leaked into the final fixture" >&2
     exit 1

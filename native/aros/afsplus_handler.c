@@ -84,7 +84,6 @@ struct AfsplusArosHandler {
     uint32_t use_dma_mask;
     uint32_t device_open;
     uint32_t volume_registered;
-    uint32_t remove_device_node;
     uint32_t read_only;
     uint16_t read_command;
     uint16_t write_command;
@@ -644,12 +643,7 @@ static void cleanup_handler(struct AfsplusArosHandler *handler)
     afsplus_aros_startup_trace(SysBase, UINT32_C(0x60000006));
     if (handler->device_node != NULL)
     {
-        if (handler->remove_device_node)
-        {
-            if (!RemDosEntry(handler->device_node))
-                bug("[AFSPLUS] clean shutdown could not remove device node\n");
-        }
-        else if (handler->device_node->dol_Task == handler->handler_port)
+        if (handler->device_node->dol_Task == handler->handler_port)
             handler->device_node->dol_Task = NULL;
     }
     if (handler->locale != NULL)
@@ -792,7 +786,6 @@ LONG handler(struct ExecBase *SysBase)
             if (quit)
             {
                 state->device_node->dol_Task = NULL;
-                state->remove_device_node = 1;
                 death_packet = packet;
             }
             else
@@ -800,9 +793,10 @@ LONG handler(struct ExecBase *SysBase)
         }
     }
 
-    /* Keep the ACTION_DIE sender blocked until every reference to the device
-     * node and backing device is gone. Assign DISMOUNT may remove/free that
-     * node and immediately start a replacement handler after our reply. */
+    /* Keep the ACTION_DIE sender blocked until every handler-owned reference
+     * to the device node and backing device is gone. The caller retains the
+     * DeviceNode: Mount SHUTDOWN must leave it available for a subsequent
+     * Assign DISMOUNT, and a later access may restart this handler from it. */
     afsplus_aros_startup_trace(SysBase, UINT32_C(0x60000000));
     cleanup_handler(state);
     afsplus_aros_startup_trace(SysBase, UINT32_C(0x60000008));

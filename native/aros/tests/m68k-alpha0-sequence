@@ -1,10 +1,12 @@
 C:FailAt 21
 Assign "FDSK:" "SYS:DiskImages"
+C:Avail FLUSH >HOST:avail.before-mount.txt
 C:Mount DEVS:DOSDrivers/AFSPLUS19 >HOST:mount.out
 If WARN
     C:Echo fail >HOST:mount.status
 Else
     C:Echo pass >HOST:mount.status
+    C:Avail FLUSH >HOST:avail.mounted.txt
     C:AFSPlusRouteProbe >HOST:route.out
     If WARN
         C:Echo fail >HOST:route.status
@@ -18,6 +20,33 @@ Else
             C:Copy AFSPLUS19:alpha0.from-aros HOST:alpha0.from-aros >HOST:copy.out
         EndIf
     EndIf
-    C:Assign AFSPLUS19: DISMOUNT >HOST:dismount.out
+    C:Mount AFSPLUS19: SHUTDOWN >HOST:shutdown.out
+    If WARN
+        C:Echo fail >HOST:shutdown.status
+    Else
+        C:Echo pass >HOST:shutdown.status
+        C:Avail FLUSH >HOST:avail.after-shutdown.txt
+        C:List AFSPLUS19: >HOST:restart.out
+        If WARN
+            C:Echo fail >HOST:restart.status
+        Else
+            C:Echo pass >HOST:restart.status
+            C:Avail FLUSH >HOST:avail.restarted.txt
+            C:Mount AFSPLUS19: SHUTDOWN >HOST:second-shutdown.out
+            If WARN
+                C:Echo fail >HOST:second-shutdown.status
+            Else
+                C:Echo pass >HOST:second-shutdown.status
+                C:Avail FLUSH >HOST:avail.after-second-shutdown.txt
+                C:Assign AFSPLUS19: DISMOUNT >HOST:dismount.out
+                If WARN
+                    C:Echo fail >HOST:dismount.status
+                Else
+                    C:Echo pass >HOST:dismount.status
+                    C:Avail FLUSH >HOST:avail.after-dismount.txt
+                EndIf
+            EndIf
+        EndIf
+    EndIf
 EndIf
 C:Shutdown

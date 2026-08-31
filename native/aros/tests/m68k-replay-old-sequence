@@ -11,6 +11,17 @@ Else
     Else
         C:Echo pass >HOST:replay.status
     EndIf
-    C:Assign AFSPLUS19: DISMOUNT >HOST:dismount.out
+    C:Mount AFSPLUS19: SHUTDOWN >HOST:shutdown.out
+    If WARN
+        C:Echo fail >HOST:shutdown.status
+    Else
+        C:Echo pass >HOST:shutdown.status
+        C:Assign AFSPLUS19: DISMOUNT >HOST:dismount.out
+        If WARN
+            C:Echo fail >HOST:dismount.status
+        Else
+            C:Echo pass >HOST:dismount.status
+        EndIf
+    EndIf
 EndIf
 C:Shutdown

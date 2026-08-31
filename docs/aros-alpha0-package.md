@@ -65,17 +65,20 @@ tools/check-hosted-aros-alpha0.sh
 
 It builds a fresh package, installs only the reserved test artifacts,
 runs AROS → host macFUSE → AROS against one image, checks both cross-created
-files and the filesystem at every boundary, performs two standard
-`Assign AFSPLUS19: DISMOUNT` plus `Mount` reload cycles, and removes the
-installed artifacts afterward. It refuses to disturb a running Hosted instance
-or replace an existing target/result.
+files and the filesystem at every boundary, performs two standard `Mount
+AFSPLUS19: SHUTDOWN` plus access-triggered restart cycles through the retained
+device node, then performs a final clean shutdown/dismount and removes the
+installed artifacts. It refuses to disturb a running Hosted instance or
+replace an existing target/result. It also fails up front if the Hosted AROS
+`C:Mount` predates the generic `SHUTDOWN` command support required by this
+lifecycle.
 
 The handler does not need to be built into AROS. A normal distribution installs
 the handler in `L:` and a machine-specific DOSDriver in `DEVS:DOSDrivers`.
-Removing that pair after `Assign <device>: DISMOUNT` uninstalls the driver; disk
-images and physical volumes are user data and must not be deleted as part of
-driver removal. The Alpha-0 `Unit19` file is only a disposable qualification
-fixture.
+Removing that pair after `Mount <device>: SHUTDOWN` followed by `Assign
+<device>: DISMOUNT` uninstalls the driver; disk images and physical volumes are
+user data and must not be deleted as part of driver removal. The Alpha-0
+`Unit19` file is only a disposable qualification fixture.
 
 `build-profile.txt` and `abi-report.txt` are part of `SHA256SUMS`. Profile
 format v2 also identifies and hashes the target SDK configuration, host-side
