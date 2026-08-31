@@ -113,3 +113,37 @@ Delete/truncate very large synthetic objects, crash after every reclamation batc
 7. verify quarantined blocks are never in allocatable free space
 
 A result that requires ordinary fsck repair after every injected crash does not satisfy the normal transaction guarantee.
+
+## Block reuse across generations
+
+Reuse makes stale-but-valid block contents dangerous, so the reuse workload is
+mandatory once the allocator recycles storage. Construct:
+
+```text
+G1: create A -> physical block X
+G2: delete A -> X becomes retired, not free
+G3: after safe checkpoint retirement, X may become reusable; create B reuses X
+```
+
+Inject power loss after every relevant write and flush during G2 and G3.
+
+Allowed mounted states:
+
+```text
+G1: A exists and its bytes are correct
+G2: A absent and X not unsafely reused
+G3: B exists and its bytes are correct
+```
+
+Forbidden:
+
+```text
+A visible but X contains B's bytes
+FREE block reachable from any selectable checkpoint
+same non-shared physical block owned by two live objects
+reuse before every checkpoint that can reach old contents is retired
+```
+
+The executable form is the G1/G2/G3 quarantine matrix in
+`crates/afsplus-check/tests/alloc_crash.rs`; the allocator design it exercises
+is [docs/07](../docs/07-allocation.md).

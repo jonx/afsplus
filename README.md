@@ -270,7 +270,7 @@ Every fact has one home; everything else links to it.
 | Design | how is it built and why? | [docs/](docs/README.md), [spec/](docs/README.md#spec), [api/](docs/README.md#api), [adr/](adr/README.md) |
 | Procedure | what do I run, what does it prove? | [testing/](testing/README.md), [tools/README.md](tools/README.md), [tools/tools-spec.md](tools/tools-spec.md), [CONTRIBUTING.md](CONTRIBUTING.md) |
 | History | what was decided, tried, delivered? | [adr/](adr/README.md) (decisions), [NOTES.md](NOTES.md) (journal) |
-| Agent rules | how do agents work here? | `AGENTS.md` |
+| Agent rules | how do agents work here? | [AGENTS.md](AGENTS.md) (with [CLAUDE.md](CLAUDE.md) pointing to it) |
 
 ## Status
 

@@ -7,6 +7,16 @@ rules.
 
 Entry format: `## YYYY-MM-DD — title`.
 
+<!-- toc -->
+
+- [2026-08-31 — Documentation restructured around one home per fact](#2026-08-31--documentation-restructured-around-one-home-per-fact)
+- [2026-08-31 — Mountable Alpha-0 closed](#2026-08-31--mountable-alpha-0-closed)
+- [2026-08-29 — Region allocator, bounded mount and shared COW trees](#2026-08-29--region-allocator-bounded-mount-and-shared-cow-trees)
+- [2026-08-29 — Lesson from the first crash matrix, and the hardening list](#2026-08-29--lesson-from-the-first-crash-matrix-and-the-hardening-list)
+- [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
+
+<!-- /toc -->
+
 ## 2026-08-31 — Documentation restructured around one home per fact
 
 The repository's documentation is reorganised so that state, design,
@@ -61,6 +71,36 @@ What moved where:
 - `FILE_INDEX.md` and `SHA256SUMS.json` are deleted: no generator, no
   consumer, stale since the first commit; Git and the per-directory indexes
   replace them.
+- `CODEX_HANDOVER.md` (955 lines, written 2026-08-29 at commit `c2c2ed3`) is
+  split and deleted. Where each section went: §1 role, §2 context precedence,
+  §19 things not to do, §20 files to read first, §21 use of the conversation,
+  §22 expected interaction and §24 resume sentence → `AGENTS.md`; §3 what
+  AFS+ is and §4 language strategy → the review lens in `AGENTS.md`, the
+  facts themselves being [README.md](README.md), [ADR-028](adr/ADR-028-rust-reference-core.md)
+  and [ADR-029](adr/ADR-029-dual-reference-implementations.md); §5 current
+  implementation, §6 lesson from the first crash matrix, §7 hardening list and
+  §23 next action → the dated entries below; §8 architecture blockers and §13
+  developer-idea maturity → [implementation/open-questions.md](implementation/open-questions.md);
+  §9 allocator experiment → the design is [docs/07](docs/07-allocation.md) and
+  [ADR-035](adr/ADR-035-allocation-root-reserved-pool.md), the G1/G2/G3 reuse
+  workload with its allowed and forbidden states is
+  [testing/crash-testing.md](testing/crash-testing.md#block-reuse-across-generations),
+  its metrics are in [testing/benchmark-contract.md § 1](testing/benchmark-contract.md#1-benchmark-dimensions);
+  §10 crash-consistency rules → the reviewer checklist in `AGENTS.md`, the
+  design being [docs/08](docs/08-transactions-and-journal.md) and
+  [ADR-021](adr/ADR-021-deferred-reclamation.md); §11 feature evolution →
+  [docs/09](docs/09-feature-framework.md); §12 derived versus authoritative →
+  [ADR-012](adr/ADR-012-catalog-derived.md), [ADR-013](adr/ADR-013-change-stream-bounded.md);
+  §14 workload philosophy and §15 benchmark contract →
+  [docs/31](docs/31-extreme-workloads.md), [testing/benchmark-contract.md](testing/benchmark-contract.md);
+  §16 debuggability → [docs/26](docs/26-debug-observability.md) and the
+  regression-scenario rule in `AGENTS.md`; §17 portability rules →
+  [docs/14](docs/14-paths-and-namespaces.md), [ADR-017](adr/ADR-017-namespace-outside-format.md);
+  §18 security philosophy → [docs/30](docs/30-portable-security-model.md),
+  [ADR-031](adr/ADR-031-portable-security-acls.md); the superseded ideas →
+  [adr/README.md § Superseded directions](adr/README.md#superseded-directions).
+  Two ADRs gained relation lines the text already implied: ADR-009 is amended
+  by ADR-020, ADR-042 by ADR-056 and ADR-057.
 
 The `README.md` status section read as follows before it was reduced to the
 five-row table (moved here verbatim from `README.md § Status`, commit
@@ -132,7 +172,7 @@ external-handler distribution model is stated in
 [README.md § What AFS+ is and is not](README.md#what-afs-is-and-is-not) with
 [ADR-050](adr/ADR-050-external-aros-handler-lifecycle.md). The rule that
 genuine defects in generic AROS interfaces are fixed with focused
-regression-tested patches and proposed upstream is retained in `AGENTS.md`.
+regression-tested patches and proposed upstream is retained in [AGENTS.md](AGENTS.md).
 
 ## 2026-08-31 — Mountable Alpha-0 closed
 
@@ -145,3 +185,158 @@ old states, two exact new states), no guest failure requester, and a
 re-verified independently the same day in the gate's reuse mode. ADR-060
 records the decision; M08 is complete; M06 stays partial because no physical
 hardware was involved.
+
+## 2026-08-29 — Region allocator, bounded mount and shared COW trees
+
+(Moved from `CODEX_HANDOVER.md` § 5 and § 23; the commits are `7a61c06`
+through `35ec483`.)
+
+Commit `7a61c06` completed the immediate hardening and the first Stage 6
+allocator experiment: checkpoint selection is structural and never falls back
+over corrupt state; same-generation slots are ambiguous; the negative
+bad-ordering crash test is present; triple-buffered region descriptors and
+three reserved generational slots per logical bitmap page break allocator
+self-reference; retired blocks spend one generation in quarantine before
+reuse; create-with-content, delete, the G1/G2/G3 reuse crash workload and
+resource measurements are implemented. The first major proof after the
+bootstrap prototype was not "allocation works" but "AFS+ can reuse storage
+after deletes without any selectable checkpoint ever observing stale metadata
+that points at newly reused content" — that invariant passed the modeled crash
+matrix.
+
+The continuation replaced the eager mount walk with bounded root loading.
+Ordinary mount reads identification/checkpoints, the object-map root, root
+object/directory-tree root and the retired-list root; descendant records are
+decoded on access and allocation bitmaps are split across independently
+checksummed pages, loaded as a mutation touches them through the selected
+region descriptor. Clean pages that fail an allocation scan are evicted
+immediately; the checker retains the exhaustive whole-volume view.
+
+The Stage B1 continuation supports the proposed 262,144-block (1 GiB at 4 KiB)
+region. The verifiable wire representation needs nine bitmap pages, not the
+earlier rough estimate of eight. Three region-descriptor slots plus three slots
+per bitmap page reserve 30 blocks (120 KiB, about 0.0114 %) per full region;
+region 0 additionally contains ident and the two checkpoints. A small
+transaction writes one dirty bitmap page and one descriptor before the
+checkpoint. Cross-page allocation, corruption deferral/detection, quarantine
+and power-cut behaviour are covered by executable tests. The multi-page design
+deliberately does not put one record per bitmap page in the checkpoint: a
+triple-buffered reserved region descriptor, itself selected by the
+checkpoint's one record per region, binds the bitmap pages
+([docs/07 § 3.1](docs/07-allocation.md)).
+
+Core Scale-1 began with ADR-034 and the shared `AFST` node format: tree kind,
+owner, level, strict binary keys, exact subtree item count and a counted
+reference for every internal child, so an internal split can be planned from
+the current page without reading every child. Transactional multi-upsert
+copies a committed path once, keeps later changes in a write overlay, performs
+balanced leaf/internal splits and grows the root; deletion merges or
+redistributes underfull siblings and collapses one-child roots. A permuted
+300-key test grows three levels, then deletes 299 keys in another permutation
+and returns to one root leaf; a bad-level corruption test is executable. The
+object-map adapter became authoritative (mkfs/checkpoints, bounded mount/stat,
+mixed create/delete, checker ownership, crash matrices, a typed 1,001-entry
+multi-page test), then the directory adapter (typed leaf at mkfs, bounded
+lookup, exhaustive enumeration, 1,000-entry and end-to-end 300-entry
+checked/remounted tests). Legacy object-map and directory codecs stayed as
+transitional tests.
+
+The namespace continuation removed the root-only API restriction: directory
+lookup/enumeration, file creation/deletion, mkdir/rmdir, hard links and
+same/cross-directory rename address parents by stable object ID. Rename
+publishes both parent trees, parent records, the moved record and object-map
+updates in one checkpoint, preserves object identity and rejects moves into
+self or descendants; its every-write/every-flush matrix accepts only the
+complete pre- or post-rename namespace. Link counts are transactional; the
+first unlink preserves shared data and the final unlink retires it.
+
+The typed extent-map adapter followed: small contiguous files keep the
+zero-extra-tree direct representation; fragmented, sparse or preallocated
+files set an experimental object flag and use an owner-bound `AFST` tree keyed
+by logical block. `write_file_at` uses full data COW and supports writes beyond
+EOF, `truncate_file` preserves zero-tail semantics, `preallocate_file` creates
+zero-reading unwritten mappings, and final unlink retires both extent-tree and
+mapped data blocks. A dedicated matrix proves sparse range writes recover to
+exactly the pre- or post-transaction content.
+
+The multi-upsert overlay retains every dirty node in RAM by default but has a
+constrained mode with a 2/4/8-page final-image LRU that spills to
+allocated-but-unreachable blocks; all three budgets pass a multi-level mutation
+test, and a 100,000-key eight-page structural qualification passes (about 8.1 s
+optimised, 53 s debug, so it is an explicit ignored scale test). This did not
+close the classic-memory gate: decoded recursive ancestors and the split peer
+stayed outside the measured staged-image budget.
+
+ADR-035 fixed the allocation-root self-reference direction: `AFST` nodes in a
+permanently allocated `3N` pool for an `N`-node fixed-topology region tree,
+leaving a complete writable generation while two checkpoints stay selectable.
+`TreeAllocator` decoupled the COW engine from ordinary free-space allocation;
+inline checkpoint records became empty. A 1 TiB geometry bulk-build creates
+1,024 typed records; a sparse 1 TiB image formats, bounded-mounts, performs two
+small commits and runs the exhaustive checker in about 3.51 s on the
+Apple-Silicon/APFS development host (commits about 18.6/12.0 ms, checker about
+2.34 s), with host physical allocation between about 112 MiB and 2.13 GiB, so
+the test uses a relative < 1 % sparse bound. Allocation-root publication
+upserts only dirty region records (at most three tree nodes per measured
+commit); the 145-region boundary forces a two-level allocation root and has an
+exhaustive crash matrix; checker bitmap equality compares a sparse accounted
+set against set bits byte-wise.
+
+The next actions recorded at that point were: prototype multi-page region
+bitmaps and larger regions against the one-page baseline, and measure the
+fsync checkpoint path before deciding whether an auxiliary durability log is
+justified — both done later the same week
+([fsync-intent-log-baseline.md](implementation/fsync-intent-log-baseline.md),
+[ADR-036](adr/ADR-036-reclaim-queue.md), [ADR-037](adr/ADR-037-intent-log.md)).
+
+## 2026-08-29 — Lesson from the first crash matrix, and the hardening list
+
+(Moved from `CODEX_HANDOVER.md` § 6 and § 7.)
+
+Because the bootstrap allocator never reused blocks, an incorrectly ordered
+commit could sometimes be hidden by doing a full reachable-state validation at
+mount and falling back to the old checkpoint. That is dangerous: the crash
+harness appears to prove ordering correctness while mount is repairing around
+an invalid commit protocol. `validate_checkpoint_reachable()` also walked
+every object reachable from the checkpoint; used as the ordinary selection
+path it would turn mounting a volume with millions of files into a full-volume
+scan. The design direction that followed — bounded structural checkpoint
+selection at mount, full reachable validation only in `afsplus-check`, shadow
+verification, the test harness and explicit recovery modes; torn or
+CRC-failing checkpoints as the only legitimate fallback — is the rule the
+reviewer checklist in `AGENTS.md` carries.
+
+The hardening list executed before the allocator work: separate bounded
+checkpoint selection from full reachable validation and add the negative
+mis-ordered-commit crash test; make `Timespec::read()` and every public decode
+helper reject short buffers instead of panicking; checked arithmetic for
+generation, next free block, next object ID and range arithmetic; two distinct
+checkpoint slots claiming the same generation are ambiguous, not tie-broken;
+the power-cut model is described exactly as what it enumerates (all
+full-write subsets plus representative torn writes of the modeled tail);
+directory entries enforce `entry.key == comparison_key(entry.name)`; an object
+in the authoritative object map with zero namespace references fails
+validation until an explicit orphan model exists.
+
+## 2026-08-29 — First executable prototype
+
+(Moved from `CODEX_HANDOVER.md` § 5; commit `74b1410`.)
+
+Steps 1–5 of
+[implementation/peer-review-prototype-plan.md](implementation/peer-review-prototype-plan.md)
+became executable and green: 29 tests, zero clippy warnings, about 3,592
+lines, `afsplus-format` building as `no_std + alloc` on
+`aarch64-unknown-none`. `afsplus-format` held the prototype wire codecs
+(explicit little-endian, no native-struct serialisation, CRC32C, a 32-byte
+common metadata header with type, version, owner, generation, payload length
+and checksum, bounds-first decoding, a normalisation-preserving directory
+entry shape with an identity comparison-key encoder). `afsplus-block` held
+the block provider plus memory, sparse file, trace/accounting, deterministic
+fault and power-cut recording backends. `afsplus-core` held mkfs, the
+identification record, alternating checkpoints A/B, bootstrap bump allocation
+from a checkpoint high-water mark (scaffolding that never reused blocks), the
+root object, root directory and object map, the first COW metadata
+transaction (create empty file: four fresh metadata blocks, flush, alternate
+checkpoint, flush) and the shared reachable-state validator. `afsplus-check`
+was a verify-only checker reporting both checkpoint slots as text and
+versioned JSON.

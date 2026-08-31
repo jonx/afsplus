@@ -1,6 +1,7 @@
 # ADR-009: Metadata transaction mechanism
 
 Status: Reopened after PFS3/PFS4 Stage 0 review
+Amended by: ADR-020
 
 ## Context
 

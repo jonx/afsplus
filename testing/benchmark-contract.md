@@ -52,6 +52,12 @@ Every important benchmark should collect as many of these as applicable:
 - fragmentation/extents per file
 - transaction/checkpoint count
 - reclaim backlog
+- bitmap pages written
+- blocks allocated
+- blocks retired/quarantined
+- blocks reclaimed
+- reclaim latency
+- metadata bytes written per allocation/free
 
 The benchmark harness must separate filesystem-cache effects from cold-storage behavior where practical.
 

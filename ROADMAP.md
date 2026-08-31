@@ -91,7 +91,7 @@ Do not block this stage on:
 
 ## Stage B: resolve the epoch-1 architecture blockers
 
-Milestones: M03, M04 ([status](implementation/milestones.md)).
+Milestones: M03, M04 ([status](implementation/milestones.md)); the blockers are tracked as questions in [implementation/open-questions.md](implementation/open-questions.md).
 
 ### B1. Allocation state
 
