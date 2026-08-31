@@ -165,25 +165,25 @@ fn read_checkpoint_candidate<D: BlockDevice>(
 }
 
 #[cfg(target_arch = "m68k")]
-fn valid_checkpoint_status(mut generation: u64) -> String {
-    const PREFIX: &str = "valid, generation ";
-    let mut status = String::with_capacity(PREFIX.len() + 20);
+fn valid_checkpoint_status(generation: u64) -> String {
+    // Keep this diagnostic path free of 64-bit division. Plain 68000 has no
+    // native long division and the experimental backend's helper path is not
+    // yet qualified; hexadecimal needs only byte extraction and shifts.
+    const PREFIX: &str = "valid, generation 0x";
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut status = String::with_capacity(PREFIX.len() + 16);
     status.push_str(PREFIX);
-    if generation == 0 {
+    let mut significant = false;
+    for byte in generation.to_be_bytes() {
+        for nibble in [byte >> 4, byte & 0x0f] {
+            if nibble != 0 || significant {
+                significant = true;
+                status.push(char::from(HEX[nibble as usize]));
+            }
+        }
+    }
+    if !significant {
         status.push('0');
-        return status;
-    }
-
-    let mut reversed = [0u8; 20];
-    let mut length = 0;
-    while generation != 0 {
-        reversed[length] = (generation % 10) as u8;
-        length += 1;
-        generation /= 10;
-    }
-    while length != 0 {
-        length -= 1;
-        status.push(char::from(b'0' + reversed[length]));
     }
     status
 }

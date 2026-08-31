@@ -71,6 +71,7 @@ shim.
 - The exact A500 memory, cache and workload budgets remain to be measured and
   accepted before stage 4.
 
-ADR-056 completes the M68020-or-newer filesystem subprofile of stage 3,
-including the Alpha-0 operation matrix and all six modeled intent-log cuts. The
-plain-68000/A500-configured emulator subprofile remains open.
+ADR-056 completes the M68020-or-newer filesystem subprofile of stage 3.
+ADR-057 completes the same functional and crash-recovery matrix on an
+A500-configured plain-M68000 emulator. The constrained-memory/performance
+budget and physical Amiga 500 stage remain open.

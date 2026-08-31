@@ -1,0 +1,180 @@
+diff --git a/src/llvm-project/llvm/lib/Target/M68k/M68kISelLowering.cpp b/src/llvm-project/llvm/lib/Target/M68k/M68kISelLowering.cpp
+--- a/src/llvm-project/llvm/lib/Target/M68k/M68kISelLowering.cpp
++++ b/src/llvm-project/llvm/lib/Target/M68k/M68kISelLowering.cpp
+@@ -98,7 +98,11 @@ M68kTargetLowering::M68kTargetLowering(const M68kTargetMachine &TM,
+   for (auto OP : {ISD::SMULO, ISD::UMULO}) {
+     setOperationAction(OP, MVT::i8,  Custom);
+     setOperationAction(OP, MVT::i16, Custom);
+-    setOperationAction(OP, MVT::i32, Custom);
++    // The custom i32 lowering selects MULS.L/MULU.L, which were introduced
++    // with M68020.  M68000/M68010 must use the generic expansion so the
++    // ordinary i32 MUL action can lower through the compiler runtime.
++    setOperationAction(OP, MVT::i32,
++                       Subtarget.atLeastM68020() ? Custom : Expand);
+   }
+
+   for (auto OP : {ISD::SHL_PARTS, ISD::SRA_PARTS, ISD::SRL_PARTS})
+@@ -548,9 +552,19 @@ SDValue M68kTargetLowering::LowerCall(CallLoweringInfo &CLI,
+   if (Attr.getValueAsBool())
+     IsTailCall = false;
+
+-  if (CLI.CB && CLI.CB->isMustTailCall()) {
++  bool IsMustTail = CLI.CB && CLI.CB->isMustTailCall();
++  // Direct tail calls are lowered to TAILJMPq, which M68kMCInstLower expands
++  // to BRA8.  The M68000 has no 32-bit branch displacement, so an unresolved
++  // or out-of-range callee cannot be represented by that instruction.  Until
++  // the backend can relax such a call to an absolute jump, keep the regular
++  // call/return sequence on M68000 instead of emitting a truncated branch.
++  if (Subtarget.isM68000()) {
++    if (IsMustTail)
++      report_fatal_error("M68000 does not support guaranteed tail calls");
++    IsTailCall = false;
++  } else if (IsMustTail) {
+     // Force this to be a tail call.  The verifier rules are enough to ensure
+     // that we can lower this successfully without moving the return address
+     // around.
+     IsTailCall = true;
+   } else if (IsTailCall) {
+@@ -1536,6 +1550,14 @@ static bool isOverflowArithmetic(unsigned Opcode) {
+   }
+ }
+
++static bool canFuseOverflowArithmetic(SDValue Op,
++                                      const M68kSubtarget &Subtarget) {
++  if ((Op.getOpcode() == ISD::UMULO || Op.getOpcode() == ISD::SMULO) &&
++      Op.getNode()->getValueType(0) == MVT::i32)
++    return Subtarget.atLeastM68020();
++  return true;
++}
++
+ static void lowerOverflowArithmetic(SDValue Op, SelectionDAG &DAG,
+                                     SDValue &Result, SDValue &CCR,
+                                     unsigned &CC) {
+@@ -2343,7 +2365,8 @@ SDValue M68kTargetLowering::LowerSELECT(SDValue Op,
+       Cond = Cmp;
+       addTest = false;
+     }
+-  } else if (isOverflowArithmetic(CondOpcode)) {
++  } else if (isOverflowArithmetic(CondOpcode) &&
++             canFuseOverflowArithmetic(Cond, Subtarget)) {
+     // Result is unused here.
+     SDValue Result;
+     unsigned CCode;
+@@ -2519,7 +2546,8 @@ SDValue M68kTargetLowering::LowerBRCOND(SDValue Op,
+     }
+   }
+   CondOpcode = Cond.getOpcode();
+-  if (isOverflowArithmetic(CondOpcode)) {
++  if (isOverflowArithmetic(CondOpcode) &&
++      canFuseOverflowArithmetic(Cond, Subtarget)) {
+     SDValue Result;
+     unsigned CCode;
+     lowerOverflowArithmetic(Cond, DAG, Result, Cond, CCode);
+diff --git a/src/llvm-project/llvm/lib/Target/M68k/M68kInstrArithmetic.td b/src/llvm-project/llvm/lib/Target/M68k/M68kInstrArithmetic.td
+--- a/src/llvm-project/llvm/lib/Target/M68k/M68kInstrArithmetic.td
++++ b/src/llvm-project/llvm/lib/Target/M68k/M68kInstrArithmetic.td
+@@ -729,8 +729,10 @@ def : Pat<(urem i16:$dst, Mxi16immSExt16:$opd),
+
+ defm MUL : MxDiMuOp<"mul", 0xC>;
+
++let Predicates = [AtLeastM68020] in {
+ def SMULd32d32 : MxDiMuOp_DD_Long<"muls.l", MxSMul, 0x130, /*SIGNED*/true>;
+ def UMULd32d32 : MxDiMuOp_DD_Long<"mulu.l", MxUMul, 0x130, /*SIGNED*/false>;
++}
+
+ // RR
+ def : Pat<(mul i16:$dst, i16:$opd),
+@@ -748,7 +750,8 @@ def : Pat<(mulhu i16:$dst, i16:$opd),
+             (LSR32di (LSR32di (UMULd32d16 (MOVXd32d16 $dst), $opd), 8), 8),
+              MxSubRegIndex16Lo)>;
+
+-def : Pat<(mul i32:$dst, i32:$opd), (SMULd32d32 $dst, $opd)>;
++let Predicates = [AtLeastM68020] in
++def : Pat<(mul i32:$dst, i32:$opd), (SMULd32d32 $dst, $opd)>;
+
+
+ // RI
+diff --git a/src/llvm-project/llvm/test/CodeGen/M68k/tail-call-m68000.ll b/src/llvm-project/llvm/test/CodeGen/M68k/tail-call-m68000.ll
+new file mode 100644
+--- /dev/null
++++ b/src/llvm-project/llvm/test/CodeGen/M68k/tail-call-m68000.ll
+@@ -0,0 +1,18 @@
++; RUN: llc -mtriple=m68k -mcpu=M68000 -O2 < %s | FileCheck %s --check-prefix=M68000
++; RUN: llc -mtriple=m68k -mcpu=M68020 -O2 < %s | FileCheck %s --check-prefix=M68020
++
++declare i32 @callee(i32)
++
++define i32 @tail_callee(i32 %value) {
++; M68000-LABEL: tail_callee:
++; M68000-NOT:   bra callee
++; M68000:       jsr callee
++; M68000:       rts
++;
++; M68020-LABEL: tail_callee:
++; M68020:       bra callee
++; M68020-NOT:   rts
++entry:
++  %result = tail call i32 @callee(i32 %value)
++  ret i32 %result
++}
+diff --git a/src/llvm-project/llvm/test/CodeGen/M68k/mul-overflow-m68000.ll b/src/llvm-project/llvm/test/CodeGen/M68k/mul-overflow-m68000.ll
+new file mode 100644
+--- /dev/null
++++ b/src/llvm-project/llvm/test/CodeGen/M68k/mul-overflow-m68000.ll
+@@ -0,0 +1,56 @@
++; RUN: llc -mtriple=m68k -mcpu=M68000 -O2 < %s | FileCheck %s --check-prefix=M68000
++; RUN: llc -mtriple=m68k -mcpu=M68020 -O2 < %s | FileCheck %s --check-prefix=M68020
++
++declare { i32, i1 } @llvm.umul.with.overflow.i32(i32, i32)
++declare { i32, i1 } @llvm.smul.with.overflow.i32(i32, i32)
++
++define i1 @unsigned_overflow(i32 %left, i32 %right, ptr %product) {
++; M68000-LABEL: unsigned_overflow:
++; M68000-NOT:   mulu.l
++; M68000:       jsr __muldi3
++; M68000-NOT:   mulu.l
++; M68000:       rts
++;
++; M68020-LABEL: unsigned_overflow:
++; M68020:       mulu.l
++entry:
++  %pair = call { i32, i1 } @llvm.umul.with.overflow.i32(i32 %left, i32 %right)
++  %value = extractvalue { i32, i1 } %pair, 0
++  %overflow = extractvalue { i32, i1 } %pair, 1
++  store i32 %value, ptr %product
++  ret i1 %overflow
++}
++
++define i1 @signed_overflow(i32 %left, i32 %right, ptr %product) {
++; M68000-LABEL: signed_overflow:
++; M68000-NOT:   muls.l
++; M68000:       jsr __muldi3
++; M68000-NOT:   muls.l
++; M68000:       rts
++;
++; M68020-LABEL: signed_overflow:
++; M68020:       muls.l
++entry:
++  %pair = call { i32, i1 } @llvm.smul.with.overflow.i32(i32 %left, i32 %right)
++  %value = extractvalue { i32, i1 } %pair, 0
++  %overflow = extractvalue { i32, i1 } %pair, 1
++  store i32 %value, ptr %product
++  ret i1 %overflow
++}
++
++define i32 @unsigned_constant_overflow(i32 %left) {
++; M68000-LABEL: unsigned_constant_overflow:
++; M68000-NOT:   mulu.l
++; M68000:       jsr __muldi3
++; M68000-NOT:   mulu.l
++; M68000:       rts
++;
++; M68020-LABEL: unsigned_constant_overflow:
++; M68020:       mulu.l
++entry:
++  %pair = call { i32, i1 } @llvm.umul.with.overflow.i32(i32 %left, i32 32384)
++  %value = extractvalue { i32, i1 } %pair, 0
++  %overflow = extractvalue { i32, i1 } %pair, 1
++  %selected = select i1 %overflow, i32 -1, i32 %value
++  ret i32 %selected
++}

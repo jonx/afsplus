@@ -126,9 +126,25 @@ static void afsplus_aros_startup_trace(
     trace[0] = (uint32_t)event;
     trace[1] += 1U;
 }
+#elif AFSPLUS_AROS_TRACE_STARTUP
+static void afsplus_aros_startup_trace(
+    struct ExecBase *SysBase, ULONG event)
+{
+    (void)SysBase;
+    bug("[AFSPLUS-EVENT] 0x%08lx\n", (unsigned long)event);
+}
 #else
 #define afsplus_aros_startup_trace(SysBase, event) ((void)0)
 #endif
+
+void afsplus_aros_trace_stage(const char *stage)
+{
+#if AFSPLUS_AROS_TRACE_STARTUP && !defined(__aarch64__)
+    bug("[AFSPLUS-STARTUP] %s\n", stage);
+#else
+    (void)stage;
+#endif
+}
 
 static void set_startup_stage(struct AfsplusArosHandler *handler,
     const char *stage)
@@ -139,6 +155,7 @@ static void set_startup_stage(struct AfsplusArosHandler *handler,
 #endif
 
     handler->startup_stage = stage;
+    afsplus_aros_trace_stage(stage);
 #if AFSPLUS_AROS_TRACE_STARTUP && defined(__aarch64__)
     while (*cursor != 0) {
         hash ^= *cursor++;

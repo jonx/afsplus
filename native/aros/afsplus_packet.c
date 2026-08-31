@@ -2,6 +2,17 @@
 
 #include "afsplus_packet.h"
 
+#ifndef AFSPLUS_AROS_TRACE_STARTUP
+#define AFSPLUS_AROS_TRACE_STARTUP 0
+#endif
+
+#if AFSPLUS_AROS_TRACE_STARTUP
+extern void afsplus_aros_trace_stage(const char *stage);
+#define AFSPLUS_PACKET_TRACE(stage) afsplus_aros_trace_stage(stage)
+#else
+#define AFSPLUS_PACKET_TRACE(stage) ((void)0)
+#endif
+
 #include <dos/dos.h>
 #include <dos/dosextens.h>
 #include <aros/stdc/string.h>
@@ -880,6 +891,7 @@ int32_t afsplus_aros_packet_process(
     case ACTION_FINDUPDATE:
     case ACTION_FINDOUTPUT:
     {
+        AFSPLUS_PACKET_TRACE("find-output-enter");
         struct FileHandle *public_file = packet->dp_Arg1 != 0
             ? (struct FileHandle *)BADDR((BPTR)packet->dp_Arg1) : NULL;
         const uint8_t *path = NULL;
@@ -917,19 +929,36 @@ int32_t afsplus_aros_packet_process(
         }
         if (error == 0)
         {
+            AFSPLUS_PACKET_TRACE("find-output-parent-before");
             error = resolve_parent(context, base, path, path_length, &parent);
+            AFSPLUS_PACKET_TRACE("find-output-parent-after");
             parent_ready = error == 0;
         }
         if (error == 0 && writable)
+        {
+            AFSPLUS_PACKET_TRACE("find-output-now-before");
             error = packet_now(context, &seconds, &nanoseconds);
+            AFSPLUS_PACKET_TRACE("find-output-now-after");
+        }
         if (error == 0)
+        {
+            AFSPLUS_PACKET_TRACE("find-output-reserve-before");
             file = reserve_file(context, writable, &error);
+            AFSPLUS_PACKET_TRACE("find-output-reserve-after");
+        }
         if (error == 0)
+        {
+            AFSPLUS_PACKET_TRACE("find-output-rust-before");
             error = afsplus_aros_open(context->filesystem, parent.id,
                 parent.leaf, parent.leaf_length, mode, seconds, nanoseconds,
                 &id);
+            AFSPLUS_PACKET_TRACE("find-output-rust-after");
+        }
         if (error == 0)
+        {
+            AFSPLUS_PACKET_TRACE("find-output-publish");
             publish_file(context, file, id);
+        }
         if (error != 0 && id != 0)
             (void)afsplus_aros_close(context->filesystem, id);
         if (error != 0 && file != NULL)

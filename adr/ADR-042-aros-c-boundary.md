@@ -74,6 +74,7 @@ unrelated build/runtime defects that must be resolved or avoided with a future
 `no_std + alloc` profile.
 
 ADR-056 subsequently qualifies a patched experimental `std` static library and
-the full native handler on an M68020-or-newer emulator profile. That later
-evidence supersedes only the classic-artifact status above; the plain-68000 and
+the full native handler on an M68020-or-newer emulator profile. ADR-057 adds an
+A500-configured plain-M68000 emulator qualification. That later evidence
+supersedes only the classic-artifact status above; the physical-machine and
 production-toolchain limitations remain.

@@ -1,0 +1,11 @@
+diff --git a/src/tools/cargo/src/compiler/standard_lib.rs b/src/tools/cargo/src/compiler/standard_lib.rs
+--- a/src/tools/cargo/src/compiler/standard_lib.rs
++++ b/src/tools/cargo/src/compiler/standard_lib.rs
+@@ -26,7 +26,6 @@ fn std_crates<'a>(crates: &'a [String], default: &'static str, units: &[Unit]) -
+     if crates.contains("std") {
+         crates.insert("core");
+         crates.insert("alloc");
+-        crates.insert("proc_macro");
+         crates.insert("panic_unwind");
+         crates.insert("compiler_builtins");
+         // Only build libtest if it looks like it is needed (libtest depends on libstd)

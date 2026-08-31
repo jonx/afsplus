@@ -175,7 +175,7 @@ switches are inert, use the diagnostic and reversible workaround in
 transport is not a raw substitute for macFUSE's message channel; see ADR-040.
 The native AROS bridge and its cross-build qualification are documented in
 [`docs/aros-native-bridge.md`](docs/aros-native-bridge.md), ADR-042 through
-ADR-056. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
+ADR-057. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
 Hosted MacAROS → macFUSE → Hosted MacAROS round trip on one checked image.
 Hosted intent-log replay and the cumulative post-bootstrap S1 system-volume
 pivot are also qualified. The handler now supports standard AROS
@@ -202,9 +202,11 @@ target. `tools/check-aros-m68k-boot-fsuae.sh` now makes the first native m68k
 boot prerequisite machine-readable with matching official ROM, floppy and
 system-media hashes. `tools/check-aros-m68k-alpha0-fsuae.sh` now also qualifies
 the real external handler's Alpha-0 operation matrix and all six recovery cuts
-on an M68020-or-newer native AROS emulator profile. This deliberately makes no
-plain-68000, physical-A500 or hardware-performance claim; ADR-056 records the
-boundary.
+on both the M68020-or-newer reference profile and an A500-configured plain
+M68000 profile. The latter rejects M68020 long-multiply instructions before
+boot and binds the patched LLVM library in its evidence. This deliberately
+makes no physical-A500, constrained-memory-budget or hardware-performance
+claim; ADR-057 records the boundary.
 Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen are not
 format commitments. Incompatible format changes must update the format epoch
 or use feature negotiation as defined in the compatibility specification.

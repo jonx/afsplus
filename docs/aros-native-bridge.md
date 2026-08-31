@@ -290,20 +290,42 @@ generation-7 Alpha-0 result and the four generation-2/two generation-3 replay
 outcomes. ADR-055 defines the remaining emulator/hardware progression and the
 standalone-reproducer rule for any AROS patch discovered during qualification.
 
+The A500-configured plain-M68000 profile uses the same gate with the target and
+resource overrides below. The patched backend and temporary dedicated Cargo
+are documented in `native/aros/toolchain/`:
+
+```sh
+AFSPLUS_AROS_M68K_LLVM_LIB=/path/to/llvm/install/lib \
+AFSPLUS_AROS_M68K_CARGO=/path/to/dedicated-cargo \
+AFSPLUS_AROS_M68K_RUST_TARGET_JSON=native/aros/m68k-unknown-aros-m68000.json \
+AFSPLUS_AROS_M68K_MODEL=A500 \
+AFSPLUS_AROS_M68K_CPU_SPEED=max \
+AFSPLUS_AROS_M68K_FAST_MEMORY=8192 \
+AFSPLUS_AROS_M68K_ZORRO_III_MEMORY=0 \
+AFSPLUS_AROS_M68K_BOOT_ADF=/path/to/bootdisk-amiga-m68k.adf \
+AFSPLUS_AROS_M68K_SYSTEM_ISO=/path/to/aros-amiga-m68k.iso \
+    tools/check-aros-m68k-alpha0-fsuae.sh
+```
+
+The gate compiles every native object with `-m68000`, rejects M68020 long
+multiply opcodes in the linked handler, and records the selected CPU and LLVM
+dylib hash. ADR-057 records the accepted Alpha-0 and six-replay result. No
+standard-library `Vec` workaround is required.
+
 `afsram.device` writes only the retained boot image. `CMD_UPDATE` therefore
 tests the filesystem/device ordering path but cannot make data survive reset.
 The extracted replay proof is not reset durability: a persistent native device,
 controlled in-guest power cuts and Apple-hardware execution remain unproven.
-The package contract moves next to m68k emulation and the physical Amiga 500:
-three target platforms, four ordered validation stages.
+The package contract next requires native Apple hardware and the physical
+Amiga 500: three target platforms, four ordered validation stages.
 
 The fixed-image Alpha-0 path does not yet install `TD_ADDCHANGEINT` handling.
 Hot-swappable media remains disabled until removal can detach the mounted Rust
 instance and DOS volume without racing outstanding locks.
 
 The experimental m68k Rust `std` toolchain now builds and runs the complete
-reference handler, but it is not yet the production A500 path. Its target is
-M68020 and its current LLVM CCR workaround is explicitly unsuitable as a plain
-68000 compatibility claim. Classic support still needs a 68000-safe compiler
-and PAL or a bounded `no_std + alloc`/portable-C profile, followed by the
-A500-configured emulator and physical-machine gates.
+reference handler for both M68020+ and plain M68000. This is a functional and
+recovery result, not yet the production A500 path: the compiler/PAL remains
+experimental, classic memory and performance budgets remain unset, and the
+physical-machine gate is still open. A bounded `no_std + alloc` or portable-C
+profile remains the fallback for machines where the Rust profile is too costly.

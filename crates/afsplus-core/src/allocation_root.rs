@@ -197,8 +197,11 @@ pub fn reserved_pool_lbas(geo: &Geometry) -> Result<Vec<u64>, CoreError> {
     let internal_fanout = internal_fanout(geo.block_size)?;
     let leaf_nodes = (geo.region_count() as usize).div_ceil(leaf_capacity);
     let logical_nodes = logical_node_count(leaf_nodes, internal_fanout)?;
+    // The pool always carries exactly three physical generations. Checked
+    // additions retain the overflow proof without requiring multiplication.
     let pool_blocks = logical_nodes
-        .checked_mul(3)
+        .checked_add(logical_nodes)
+        .and_then(|twice| twice.checked_add(logical_nodes))
         .ok_or_else(|| CoreError::Corrupt("allocation-root pool size overflow".into()))?;
     derive_pool_lbas(geo, pool_blocks)
 }

@@ -10,8 +10,9 @@ model, and return the mutated image to the strict host checker. It also had to
 revisit the experimental Rust/m68k toolchain rather than assuming that defects
 observed on an older nightly still existed.
 
-The target JSON currently selects `M68020`. This is suitable for the first
-native semantic gate, but it is not compatible with a plain 68000 Amiga 500.
+The first target JSON selected `M68020`. This was suitable for the first native
+semantic gate, but not compatible with a plain 68000 Amiga 500. ADR-057 records
+the subsequent plain-M68000 emulator qualification.
 
 ## Decision
 
@@ -79,10 +80,9 @@ error without the additional formatted checkpoint wrapper.
 
 - Native AROS/m68k handler semantics and modeled recovery are now qualified on
   an M68020-or-newer emulator profile.
-- This closes the first filesystem part of validation stage 3, but not the
-  A500/68000 compatibility, memory-budget, performance or physical-media gates.
-- The final 68000 path must remove or replace the current CCR workaround,
-  generate 68000-compatible code, audit the instruction set and pass an
-  A500-configured emulator before the physical machine.
+- This closes the M68020-or-newer filesystem part of validation stage 3.
+- ADR-057 adds plain-M68000 code generation, instruction auditing and the same
+  operation/replay matrix on an A500-configured emulator. Memory-budget,
+  performance and physical-machine claims remain open.
 - Compiler workarounds must stay small, architecture-neutral where practical,
   and backed by native runtime evidence; they must not change on-disk semantics.

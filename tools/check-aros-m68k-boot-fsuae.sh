@@ -13,6 +13,9 @@ boot_adf=${AFSPLUS_AROS_M68K_BOOT_ADF:-}
 system_iso=${AFSPLUS_AROS_M68K_SYSTEM_ISO:-}
 fs_uae=${AFSPLUS_FS_UAE:-fs-uae}
 model=${AFSPLUS_AROS_M68K_MODEL:-A4000/040}
+cpu_speed=${AFSPLUS_AROS_M68K_CPU_SPEED:-real}
+fast_memory=${AFSPLUS_AROS_M68K_FAST_MEMORY:-8M}
+zorro_iii_memory=${AFSPLUS_AROS_M68K_ZORRO_III_MEMORY:-64M}
 output=${AFSPLUS_AROS_M68K_OUTPUT:-"$repo_root/build/aros-m68k-boot-fsuae"}
 
 require_file() {
@@ -72,8 +75,9 @@ set +e
     --hard-drive-0-label='AROS Live CD' \
     --hard-drive-1="$output/host" \
     --hard-drive-1-label=HOST \
-    --fast-memory=8M \
-    --zorro-iii-memory=64M \
+    --cpu-speed="$cpu_speed" \
+    --fast-memory="$fast_memory" \
+    --zorro-iii-memory="$zorro_iii_memory" \
     --stdout >"$output/fs-uae.log" 2>&1
 emulator_status=$?
 set -e
@@ -97,6 +101,9 @@ grep -qx 'AFSPLUS M68K BOOT PASS' "$output/host/boot.pass" || {
     echo "hardware_claim=none"
     echo "a500_68000_claim=none"
     echo "model=$model"
+    echo "cpu_speed=$cpu_speed"
+    echo "fast_memory=$fast_memory"
+    echo "zorro_iii_memory=$zorro_iii_memory"
     echo "boot_protocol=official-rom-plus-boot-floppy-plus-live-cd-volume"
     printf 'boot_adf_sha256='
     shasum -a 256 "$boot_adf" | awk '{print $1}'
