@@ -3,7 +3,7 @@
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-Status: design benchmark. This table compares architectural capabilities, not marketing claims. AFS+ entries marked Planned or Proposed are not implemented yet.
+This table compares architectural capabilities, not marketing claims. AFS+ entries marked Planned or Proposed are not implemented yet.
 
 <!-- toc -->
 

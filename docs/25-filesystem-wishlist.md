@@ -3,7 +3,7 @@
 > **ADRs:** [ADR-027](../adr/ADR-027-reflink-clones.md) · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-Status: product/design exploration. Nothing in this document is automatically a 1.0 requirement unless promoted by an ADR.
+Nothing in this document is automatically a 1.0 requirement unless promoted by an ADR.
 
 A new filesystem is rare. That makes it worth asking a different question from "which features do existing filesystems have?":
 

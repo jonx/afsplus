@@ -3,8 +3,6 @@
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-Status: epoch-1 design requirement for shared data extents
-
 ## 1. Move, hard link, symlink, clone, and copy are different
 
 AFS+ must expose these semantics clearly.

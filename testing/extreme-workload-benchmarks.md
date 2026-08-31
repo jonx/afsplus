@@ -3,8 +3,6 @@
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** none · **Milestones:** M13
 
-Status: required qualification design
-
 <!-- toc -->
 
 - [1. General metrics](#1-general-metrics)

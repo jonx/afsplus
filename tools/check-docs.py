@@ -24,8 +24,8 @@ in ``docs/DOCUMENTATION.md``; this script enforces the mechanical part:
    ``docs/README.md`` and every implementation document a row in
    ``implementation/README.md``;
 8. ``Status:`` lines appear only in ADRs, the ``## Status`` table of
-   ``README.md`` has at most five rows, and every cell of the milestone table
-   fits on one line.
+   ``README.md`` has at most five rows, and every status cell of the
+   milestone table fits on one line.
 
 ``--journey`` additionally reports, without failing, how many journey words
 ("now", "currently", "still", ...) each file carries; they belong in
@@ -412,13 +412,12 @@ def check_status_rules(root: Path, files: list[Path],
         for number, line in enumerate(read_lines(milestones), start=1):
             if not MILESTONE_ROW.match(line):
                 continue
-            for cell in line.strip().strip("|").split("|"):
-                if len(cell.strip()) > MILESTONE_CELL_MAX_CHARS:
-                    problems.append(
-                        f"implementation/milestones.md:{number} (cell longer "
-                        f"than {MILESTONE_CELL_MAX_CHARS} characters; keep "
-                        "one line: 'state — what passes; what is open')")
-                    break
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) > 2 and len(cells[2]) > MILESTONE_CELL_MAX_CHARS:
+                problems.append(
+                    f"implementation/milestones.md:{number} (status cell "
+                    f"longer than {MILESTONE_CELL_MAX_CHARS} characters; keep "
+                    "one line: 'state — what passes; what is open')")
 
 
 def journey_report(root: Path, files: list[Path]) -> int:
@@ -554,6 +553,9 @@ def main() -> int:
         check_index_rows(root, directory / "README.md", sorted(
             path for path in directory.glob("*.md")
             if path.name != "README.md"), problems)
+
+    # 8. Status rules.
+    check_status_rules(root, files, problems)
 
     journey = journey_report(root, files) if arguments.journey else None
 

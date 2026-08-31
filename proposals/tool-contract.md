@@ -5,10 +5,10 @@
 > [ADR-038](../adr/ADR-038-mount-policy-and-feature-summary.md) · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-Status: proposal — for team review. Nothing is implemented; the vocabulary
-becomes a versioned commitment once published, so review comes first. On
-acceptance the spec lands under `spec/` with a numbered ADR. Decisions
-requested from the team are marked **D1–D7**.
+Target on acceptance: the specification lands under `spec/` with a numbered
+ADR. Nothing is implemented; the vocabulary becomes a versioned commitment
+once published, so review comes first. Decisions requested from the team are
+marked **D1–D7**.
 
 <!-- toc -->
 

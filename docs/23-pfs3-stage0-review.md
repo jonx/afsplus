@@ -3,7 +3,7 @@
 > **ADRs:** [ADR-009](../adr/ADR-009-journal.md) · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-Status: architecture review v1, completed before the first implementation milestone. Source-level study should continue when the corresponding AFS+ subsystem is implemented.
+Source-level study should continue when the corresponding AFS+ subsystem is implemented.
 
 <!-- toc -->
 

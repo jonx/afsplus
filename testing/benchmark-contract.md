@@ -3,8 +3,6 @@
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** [aros-system-volume-qualification](aros-system-volume-qualification.md) · **Milestones:** M13, M14
 
-Status: required benchmark policy
-
 AFS+ must measure performance and resource use continuously. A new filesystem has no credibility if its design claims are not tied to repeatable workloads and published metrics.
 
 <!-- toc -->

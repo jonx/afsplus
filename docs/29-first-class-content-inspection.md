@@ -3,8 +3,6 @@
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-Status: developer/security API design
-
 <!-- toc -->
 
 - [1. Goal](#1-goal)

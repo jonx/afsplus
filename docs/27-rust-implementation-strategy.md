@@ -4,8 +4,6 @@
 > [ADR-043](../adr/ADR-043-native-aros-dospacket-translator.md) · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-Status: implementation direction
-
 <!-- toc -->
 
 - [1. Why Rust is attractive for AFS+](#1-why-rust-is-attractive-for-afs)

@@ -3,8 +3,6 @@
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** none · **Milestones:** M10
 
-Status: qualification requirement
-
 <!-- toc -->
 
 - [1. Purpose](#1-purpose)

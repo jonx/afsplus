@@ -3,8 +3,6 @@
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-Status: developer-platform design
-
 <!-- toc -->
 
 - [1. Core rule: an image is a real volume](#1-core-rule-an-image-is-a-real-volume)

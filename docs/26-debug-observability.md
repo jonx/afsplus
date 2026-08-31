@@ -3,7 +3,7 @@
 > **ADRs:** [ADR-024](../adr/ADR-024-rebuildable-reverse-map.md) · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-Status: required development architecture. Most facilities are runtime-optional and must have near-zero cost when disabled.
+Most facilities are runtime-optional and must have near-zero cost when disabled.
 
 Filesystem development is unusually painful because a bug may corrupt the state needed to diagnose the bug. A pointer lifetime mistake, ordering mistake, allocator error, or failed flush can produce damage minutes later and far from the original cause.
 

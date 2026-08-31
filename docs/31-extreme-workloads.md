@@ -5,8 +5,6 @@
 > [benchmark-contract](../testing/benchmark-contract.md),
 > [extreme-workload-benchmarks](../testing/extreme-workload-benchmarks.md) · **Milestones:** M13
 
-Status: workload architecture and qualification plan
-
 <!-- toc -->
 
 - [1. Goal](#1-goal)

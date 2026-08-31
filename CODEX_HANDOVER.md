@@ -1,7 +1,5 @@
 # AFS+ Codex Handover
 
-Status: active handover document for continuing architecture supervision and implementation review.
-
 This file is intentionally not a replacement for the design conversation that produced AFS+. The full conversation contains useful rationale, discarded alternatives, workload examples, and the reasoning behind many constraints. When available, read the full conversation as historical context **in addition to this file**.
 
 This document exists to tell you where the project stands now, which earlier ideas have been superseded, which decisions remain deliberately unresolved, and how to continue the role previously played by the architecture/review assistant.

@@ -20,7 +20,7 @@
 
 ## Stage 0: Amiga-native design review
 
-Status: initial review complete. Continue subsystem-by-subsystem only when implementation reaches that subsystem.
+Milestones: none — the outcome is [docs/23](docs/23-pfs3-stage0-review.md). Subsystem-by-subsystem source review continues only when implementation reaches that subsystem.
 
 - review PFS3 source subsystem by subsystem
 - document PFS3 atomic commit
@@ -28,11 +28,13 @@ Status: initial review complete. Continue subsystem-by-subsystem only when imple
 - produce adopt/adapt/reject matrix
 - revise AFS+ transaction and small-file ADRs before format freeze
 
-**Specification expansion is now secondary to implementation. Proposed features remain unfrozen until they have real consumers, code, measurements, and crash semantics.**
+**Specification expansion is secondary to implementation. A proposed feature is unfrozen until it has real consumers, code, measurements, and crash semantics.**
 
 See [`implementation/peer-review-prototype-plan.md`](implementation/peer-review-prototype-plan.md).
 
 ## Stage A: make the core executable
+
+Milestones: M02, M03, M04, M05 ([status](implementation/milestones.md)).
 
 Primary goal:
 
@@ -88,6 +90,8 @@ Do not block this stage on:
 - LLM-specific tuning
 
 ## Stage B: resolve the epoch-1 architecture blockers
+
+Milestones: M03, M04 ([status](implementation/milestones.md)).
 
 ### B1. Allocation state
 
@@ -151,6 +155,8 @@ Do **not** require full canonical NFSv4/Windows ACL evaluation semantics in the 
 
 ## Stage C: integrate AROS and begin independent C portability
 
+Milestones: M06, M07 ([status](implementation/milestones.md)).
+
 - AROS handler
 - DOS compatibility
 - Filesystem API v2
@@ -176,6 +182,8 @@ Portable C work begins from the stable executable spec/conformance corpus:
 
 ## Stage D: portability and host tooling
 
+Milestones: M01, M08, M12 ([status](implementation/milestones.md)).
+
 - FUSE host mount
 - third-party probe kit
 - compatibility profiles
@@ -190,6 +198,8 @@ Portable C work begins from the stable executable spec/conformance corpus:
 If rich multi-user ACL semantics remain a project goal, this is the earliest sensible point to build real POSIX and Windows mapping adapters and use them to validate or revise the canonical ACL proposal.
 
 ## Stage E: developer-contract accelerators and optional features
+
+Milestones: M09, M10 ([status](implementation/milestones.md)).
 
 A proposed feature enters this stage only after the core is proven and at least one real consumer exists.
 
@@ -217,6 +227,8 @@ Features that fail to earn real use may be deprecated/retired. Their IDs remain 
 
 ## Stage F: production qualification
 
+Milestones: M11, M13, M14 ([status](implementation/milestones.md)).
+
 - grow resize
 - minimum-size query
 - shrink/relocation after safe mover exists
@@ -238,7 +250,7 @@ Features that fail to earn real use may be deprecated/retired. Their IDs remain 
 
 ## Epoch 1 freeze gates
 
-Do not freeze the format until:
+Milestone: M14 ([status](implementation/milestones.md)). Do not freeze the format until:
 
 - normal metadata crash recovery never requires a full-volume scan
 - deterministic crash injection covers every transaction boundary

@@ -3,8 +3,6 @@
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-Status: security architecture proposal
-
 <!-- toc -->
 
 - [1. Goal](#1-goal)

@@ -6,8 +6,6 @@
 > [ADR-049](../adr/ADR-049-hosted-aros-desktop-pivot.md) · **Spec:** none ·
 > **Tests:** [benchmark-contract](benchmark-contract.md) · **Milestones:** M06, M08
 
-Status: required after Mountable Alpha-0 secondary-volume qualification
-
 The end state is not merely that AROS can access an AFS+ data volume. AROS must
 be able to run its normal system tree from AFS+, and the resulting behavior must
 be measured against the classic AFS/FFS family on equivalent paths.
@@ -24,6 +22,7 @@ be measured against the classic AFS/FFS family on equivalent paths.
 - [4. Mandatory system workloads](#4-mandatory-system-workloads)
 - [5. Required measurements](#5-required-measurements)
 - [6. Acceptance](#6-acceptance)
+- [7. Qualified configurations](#7-qualified-configurations)
 
 <!-- /toc -->
 
@@ -202,3 +201,23 @@ post-bootstrap pivot until S2 passes. "AROS boots from AFS+" requires S2.
 "AFS+ is faster than AFS/FFS" is never a global statement: it must name the
 workload, platform class, durability policy and resource budget from the result
 bundle.
+
+## 7. Qualified configurations
+
+This section records which configuration each gate proves; the one-line
+milestone state is in [implementation/milestones.md](../implementation/milestones.md)
+(M06, M08).
+
+| Platform | Proven by | Claim |
+|---|---|---|
+| Hosted MacAROS on macOS | [`check-hosted-aros-alpha0.sh`](../tools/check-hosted-aros-alpha0.sh), [`check-hosted-aros-crash-replay.sh`](../tools/check-hosted-aros-crash-replay.sh), [`check-hosted-aros-s1.sh`](../tools/check-hosted-aros-s1.sh), [`check-hosted-aros-s1b.sh`](../tools/check-hosted-aros-s1b.sh) | S0 same-image round trip through real macFUSE, six intent-log replay cases, S1a core pivot and S1b desktop session ([ADR-046](../adr/ADR-046-hosted-aros-same-image.md)–[ADR-049](../adr/ADR-049-hosted-aros-desktop-pivot.md)) |
+| Native MacAROS, Apple-AArch64 under QEMU | [`check-macaros-native-alpha0-qemu.sh`](../tools/check-macaros-native-alpha0-qemu.sh), [`check-macaros-native-replay-qemu.sh`](../tools/check-macaros-native-replay-qemu.sh) | S0 operation matrix and six replay cases through the retained-image RAM transport; pre-hardware only, no reset-durability claim ([ADR-053](../adr/ADR-053-native-macaros-retained-image-transport.md), [ADR-054](../adr/ADR-054-native-macaros-crash-replay-extraction.md)) |
+| Native AROS/m68k, M68020-or-newer emulator profile | [`check-aros-m68k-alpha0-fsuae.sh`](../tools/check-aros-m68k-alpha0-fsuae.sh) | S0 operation matrix and six replay cases with the experimental Rust/m68k `std` static library ([ADR-055](../adr/ADR-055-aros-m68k-emulator-gate.md), [ADR-056](../adr/ADR-056-native-aros-m68k-alpha0-and-replay.md)) |
+| Native AROS/m68k, A500-configured plain M68000 emulator profile | [`check-aros-m68k-alpha0-fsuae.sh`](../tools/check-aros-m68k-alpha0-fsuae.sh) | S0 and replay with M68020 long-multiply instructions rejected before boot; measured 8-MiB emulator profile with stable shutdown/restart cycles; 4 MiB does not boot the control profile ([ADR-057](../adr/ADR-057-plain-m68000-emulator-gate.md), [ADR-058](../adr/ADR-058-m68000-memory-and-restart-lifecycle.md)) |
+| All of the above, as one result | [`check-mountable-alpha0.sh`](../tools/check-mountable-alpha0.sh) | Mountable Alpha-0 composite completion; no physical-hardware or format-freeze claim ([ADR-060](../adr/ADR-060-mountable-alpha0-completion-gate.md)) |
+
+Open gates, in ladder order: S2 boot-selected volume and S3 repeated
+boot/recovery on every platform; native MacAROS on Apple hardware with a
+persistent reset-durable transport; the performance budget of section 2; the
+physical Amiga 500. Every gate treats a guest failure requester as a verdict
+([ADR-059](../adr/ADR-059-guest-failure-diagnostics-are-gate-verdicts.md)).

@@ -1,7 +1,5 @@
 # Peer Review Follow-up and First Prototype Plan
 
-Status: implementation guidance after external review
-
 <!-- toc -->
 
 - [Why this document exists](#why-this-document-exists)

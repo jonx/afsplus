@@ -4,10 +4,9 @@
 > [ADR-057](../adr/ADR-057-plain-m68000-emulator-gate.md) · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-Status: proposal — for team review before epoch 1. On acceptance this
-becomes a numbered document under `docs/`. Decisions requested are marked
-**M1–M5**; M1 is a format question and is expanded in
-[`proposals/checkpoint-slot-rings.md`](checkpoint-slot-rings.md).
+Target on acceptance: a numbered document under `docs/`, before epoch 1.
+Decisions requested are marked **M1–M5**; M1 is a format question and is
+expanded in [`proposals/checkpoint-slot-rings.md`](checkpoint-slot-rings.md).
 
 <!-- toc -->
 

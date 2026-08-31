@@ -3,8 +3,6 @@
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** none · **Milestones:** M14
 
-Status: required test plan before security-format freeze
-
 <!-- toc -->
 
 - [1. Identity round-trip](#1-identity-round-trip)
