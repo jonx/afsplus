@@ -121,7 +121,10 @@ row of the milestone table.
 - Something worth telling → an entry in [`NOTES.md`](../NOTES.md).
 - Text removed from a document without a home → [`NOTES.md`](../NOTES.md), with the original
   location.
-- `make check-docs` passes.
+- `make check-docs` passes, and what it regenerated is staged: because
+  files are staged explicitly rather than with `git add -A`, a generated
+  index or table of contents is easily left dirty, so `git status` must be
+  clean once the commit is made.
 
 ## 8. The checker
 

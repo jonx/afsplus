@@ -54,6 +54,11 @@ key    physical_start (u64)
 value  block_count (u64), reference_count (u32), flags (u32, zero reserved)
 ```
 
+`EXTENT_SHARED` is bit 1 of the extent flag word (bit 0 being
+`EXTENT_UNWRITTEN`), and the feature occupies bit 0 of the still-empty
+`RO_COMPAT` namespace. These three identities — tree kind 5, extent flag bit 1,
+feature bit 0 — are what a codec needs and are fixed here.
+
 The tree uses the bounded copy-on-write engine of
 [ADR-034](ADR-034-bounded-cow-tree.md) unchanged, and is published in the same
 transaction as the extent maps it describes. Every record is validated on
@@ -148,16 +153,32 @@ would make the count ambiguous and unverifiable.
   the reference records for the covered runs. Clone is a checkpoint
   transaction, never an intent-log operation; if a log window is open it is
   committed first, so the clone is never split across the two mechanisms.
+- **Direct layout cannot be shared.** The direct representation stores a run in
+  the object record itself and carries no extent flag word, so a file entering
+  a clone as source or destination is promoted to an extent-tree map in the
+  same transaction, before publication. A direct-layout file is by construction
+  private, and a file whose map carries `EXTENT_SHARED` — even a stale one —
+  never collapses back to direct.
 - **Write into a shared range.** Replacement blocks are allocated for the
-  modified logical range, the reference of the overwritten sub-range is
-  dropped, and the private extent replaces it in that object's map only. This
-  is unconditional and independent of Q1, which governs writes to *private*
-  committed data.
-- **Free.** Unlink and truncate partition every flagged extent as above: a
-  sub-run with a record above one reference is decremented and its blocks are
-  *not* retired; a gap, or a record falling to a single reference, retires the
-  run into the reclaim queue exactly as an unshared run is retired today. The
-  decrement and the extent-map change are in the same transaction.
+  modified logical range, the reference to the overwritten sub-range is
+  dropped under the rule below, and the private extent replaces it in that
+  object's map only. This is unconditional and independent of Q1, which governs
+  writes to *private* committed data.
+- **Dropping a reference never frees the run.** Unlink, truncate and
+  write-into-shared partition every flagged extent as above, and each sub-run
+  is resolved by what the tree says *before* the operation:
+
+  | Before | Action | Blocks |
+  |---|---|---|
+  | record, count > 2 | decrement, record kept | not retired |
+  | record, count = 2 | record removed, since only counts of two or more are stored | **not retired** — one live mapping remains |
+  | no record | sole owner | retired into the reclaim queue as today |
+
+  The middle row is the one that destroys data if it is got wrong: a count
+  falling to one means a peer still maps those blocks. The run leaves the tree
+  and becomes an ordinary private run of that surviving object, and it is
+  retired only later, when that last owner drops it as a gap. The reference
+  change and the extent-map change are in the same transaction.
 - **Uncertainty is fail-closed.** If the root or a lookup cannot be read, the
   mutation aborts and returns the error; the storage stays marked allocated and
   nothing is freed, published or invented. Moving such storage to quarantine is
@@ -186,16 +207,27 @@ feature is therefore activated by `mkfs` according to the requested
 compatibility profile — `workstation` and `full` enable it, `reader-minimal`,
 `classic-rw` and `boot-safe` do not — with the root left at zero until the
 first clone. A volume without the feature rejects clone operations as
-unsupported rather than silently copying. Making sharing mandatory epoch
+unsupported rather than silently copying.
+
+Feature, root and flag must agree, which makes both the mount contract and the
+stale flag unambiguous: a non-zero root, or an extent carrying `EXTENT_SHARED`,
+on a volume where the feature is not enabled is corruption; the feature enabled
+with a zero root is the legal enabled-but-unused state. Once the first clone
+allocates the root it stays allocated and non-zero even after the last sharing
+disappears, so the tree is simply empty rather than oscillating between
+existing and not. Making sharing mandatory epoch
 semantics was rejected: it would deny read-write access to exactly the
 constrained implementations the classic profile exists to serve.
 
 ## Validation
 
 The checker rebuilds the expected reference state by scanning the extent map of
-every live object — a forward scan, no reverse map — accumulating a count per
-physical block, then partitioning at every boundary. Equality is required in
-**both** directions, so that a missing record is as detectable as a wrong one:
+every live object — a forward scan, no reverse map — and comparing it with the
+tree. The expected state is defined per physical block, but that is its
+semantics and not a prescribed representation: an implementation sweeps
+interval endpoints rather than materialising an array proportional to the
+volume. Equality is required in **both** directions, so that a missing record
+is as detectable as a wrong one:
 
 - every maximal sub-run whose expected count is at least two has exactly one
   record, with that count and those bounds;
@@ -205,15 +237,21 @@ physical block, then partitioning at every boundary. Equality is required in
 - no record's run intersects authoritative free space or quarantine;
 - an extent flagged `EXTENT_SHARED` with no overlapping record is accounted
   private, which is legal; an extent not flagged whose run overlaps a record is
-  reported as corruption.
+  reported as corruption;
+- no run that left the tree in the transaction under test appears in the
+  reclaim queue while a live mapping still covers it — the direct check for the
+  premature-release bug;
+- no object in direct layout is reachable from a map carrying `EXTENT_SHARED`,
+  and no shared run is covered by a direct-layout object.
 
 Because the tree is published in the checkpoint that publishes the extent maps,
 every modelled crash state selects either the complete pre-operation or the
 complete post-operation state. The mandatory matrix injects a power cut after
 every write and every flush of: clone creation, a write that splits a shared
-run, unlink of one clone while another lives, reclamation of the last
-reference, and the fsynced-then-replayed shared unlink and rename-replacement
-above.
+run, unlink of one clone while another lives — the count-two case, whose
+recovered states must still show the survivor's bytes intact — reclamation of
+the last reference once it is an ordinary private run, and the
+fsynced-then-replayed shared unlink and rename-replacement above.
 
 ## Consequences
 
