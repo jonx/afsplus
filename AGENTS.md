@@ -15,8 +15,10 @@ story is in [NOTES.md](NOTES.md).
 - [Review checklist](#review-checklist)
 - [Do not](#do-not)
 - [Process rules](#process-rules)
+- [Team board](#team-board)
 - [Read first](#read-first)
 - [One-sentence resume](#one-sentence-resume)
+- [Team board (MCP server "board")](#team-board-mcp-server-board)
 
 <!-- /toc -->
 
@@ -214,6 +216,18 @@ Invariants the reviewer checks on every change that touches the core:
   failure requester is a verdict, not noise
   ([ADR-059](adr/ADR-059-guest-failure-diagnostics-are-gate-verdicts.md)).
 
+## Team board
+
+Agents and the owner coordinate on the shared team board (project `afsplus`
+on the local [agent-board](https://github.com/jonx/agent-board) server;
+everything posted there is public to the whole team). The protocol — join,
+status, inbox, claim the paths you edit, journal at each milestone, ask with
+`critical:true` before irreversible choices, request review when a step is
+done, release and hand off before stopping — is the block that `board init`
+maintains in [CLAUDE.md](CLAUDE.md) (and in this file or `GEMINI.md` for other
+providers). Board journal entries do not replace [NOTES.md](NOTES.md): the
+board is the live conversation, NOTES.md is the repository's record.
+
 ## Read first
 
 Before an architecture-sensitive change:
@@ -243,3 +257,36 @@ document has gone stale, and a stale document is fixed, not worked around.
 > Continue as AFS+'s filesystem tech lead and architecture reviewer: inspect
 > `HEAD`, keep the open questions explicit, keep normal mount bounded, and let
 > measurements decide the remaining format questions before epoch 1.
+
+<!-- agent-board:start -->
+## Team board (MCP server "board")
+
+You are working on project **afsplus** alongside other coding agents (possibly from other providers, possibly other sessions of your own provider) and a human supervisor. You coordinate through the `board` MCP tools. The human reads everything on the board and may reply, pause you, or veto. There are no private messages: everything you post is visible to every agent and to the human.
+
+**Session start (always):**
+1. `board_join` — choose your agent name for this session. Your provider (**codex**) is fixed by the connection; the name is yours to pick: reuse your previous name if you are resuming earlier work (you get your journal, claims and inbox back), otherwise take a free one (`board_status` suggests one, e.g. `codex-2`, or something descriptive like `codex-auth`). A name held by a live session is refused — do not fight over it, pick another.
+2. `board_status` — read the project brief ("Project context"), who is here (and who is live), recent journal entries, active claims, tasks, threads needing attention.
+3. `board_inbox` — read what was said since your last visit. Answer anything addressed to you (`@your-name`) or coming from the human before doing anything else.
+4. If "Project context" is EMPTY or clearly stale, write it with `board_context` (goal, stack, repo layout, how to run and test, conventions, current state, pitfalls). Even if you are alone: the next agent, or the human, must be able to pick up from it.
+
+**While working:**
+- Take a task (`board_task` with `owner:"me"`, or create one) so nobody duplicates your work.
+- `board_claim` the files/directories you are about to edit. If a claim conflicts, coordinate with that agent in a thread (`board_ask`, `to:[name]`) instead of forcing. Prefer separate git worktrees/branches per agent.
+- `board_journal` at every milestone — at least: when you start, after each completed step, when you get stuck, and before you stop. Say what you did, what is next, what is uncertain. Short and factual.
+- Check `board_inbox` between steps (every 10–15 minutes of work or after each task). `board_wait` blocks until something new arrives — use it while waiting for an answer.
+
+**Asking for opinions and decisions:**
+- Unsure, or a design choice with trade-offs? `board_ask` (optionally `to:[agents]`) — give context, options, your recommendation. Continue with non-blocking work while you wait.
+- Irreversible or high-stakes (deleting data, schema/migration, auth/security, external side effects, spending money, architecture change, changing the board itself)? `board_ask` with `critical:true`. This opens a decision that **only the human can approve**. Do **not** proceed until `board_read` shows status `approved`; if `rejected`, follow the human's instructions. Other agents' verdicts on such threads are advice, not approval.
+
+**Reviews:**
+- When a meaningful step is finished (feature, refactor, migration), `board_request_review` with a `ref` (commit/branch/PR/files), what changed, why, and how to verify. Keep working on something else while waiting; act on `request_changes`.
+- When someone asks you to review (`review` thread mentioning you or `@all`): actually read the code, run tests if you can, then `board_post` with `verdict` = `approve` or `request_changes` and concrete comments.
+
+**Human messages:** anything from `human` takes priority over other agents. If a tool returns `paused`, stop posting and wait (`board_wait`) until resumed; do not try to work around it.
+
+**Before you finish:** `board_journal` a handoff note (state, what remains, how to continue), `board_release` your claims, mark your tasks, and refresh `board_context` if the picture changed.
+
+**Changing the board itself** (its tools, UI, rules — local repo `agent-board`, https://github.com/jonx/agent-board): make the change on a branch of that repo, keep `npm test` green and `INVARIANTS.md` true, then `board_propose_board_change` with the branch as `ref`. Another agent reviews; the human approves and deploys. Never propose anything that reduces what the human can see or do.
+
+<!-- agent-board:end -->

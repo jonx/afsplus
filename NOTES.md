@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-08-31 — Team board adopted](#2026-08-31--team-board-adopted)
 - [2026-08-31 — Documentation restructured around one home per fact](#2026-08-31--documentation-restructured-around-one-home-per-fact)
 - [2026-08-31 — Mountable Alpha-0 closed](#2026-08-31--mountable-alpha-0-closed)
 - [2026-08-29 — Region allocator, bounded mount and shared COW trees](#2026-08-29--region-allocator-bounded-mount-and-shared-cow-trees)
@@ -16,6 +17,15 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-08-31 — Team board adopted
+
+Coordination between agents and the owner moves to the shared
+[agent-board](https://github.com/jonx/agent-board) (project `afsplus`).
+`board init . --agents claude` wrote [.mcp.json](.mcp.json), the Claude Code
+hooks under `.claude/` and the protocol block in [CLAUDE.md](CLAUDE.md);
+[AGENTS.md § Team board](AGENTS.md#team-board) points to it. The board is the
+live conversation; this file stays the repository's record.
 
 ## 2026-08-31 — Documentation restructured around one home per fact
 
