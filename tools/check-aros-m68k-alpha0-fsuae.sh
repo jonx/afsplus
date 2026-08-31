@@ -72,15 +72,14 @@ for file in \
     "$repo_root/native/aros/tests/m68k-alpha0-sequence" \
     "$repo_root/native/aros/tests/m68k-replay-old-sequence" \
     "$repo_root/native/aros/tests/m68k-replay-new-sequence" \
-    "$repo_root/tools/check-aros-serial-log.sh" \
     "$macaros_root/hosted/rust/aros_fs_glue.c" \
     "$macaros_root/hosted/rust/aros_env_glue.c"
 do
     require_file "$file"
 done
 for executable in "$fs_uae" "$cc" "$collect_aros" "$genmodule" \
-    "$nm_tool" "$objdump_tool" "$target_cargo" cargo rustup bsdtar nc patch \
-    shasum
+    "$nm_tool" "$objdump_tool" "$target_cargo" \
+    "$repo_root/tools/check-aros-serial-log.sh" cargo rustup bsdtar nc patch shasum
 do
     require_executable "$executable"
 done

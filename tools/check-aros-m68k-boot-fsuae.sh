@@ -46,7 +46,7 @@ require_executable() {
 require_file "$boot_adf"
 require_file "$system_iso"
 require_file "$repo_root/native/aros/tests/m68k-boot-sequence"
-require_file "$repo_root/tools/check-aros-serial-log.sh"
+require_executable "$repo_root/tools/check-aros-serial-log.sh"
 require_executable "$fs_uae"
 require_executable bsdtar
 if command -v gtimeout >/dev/null 2>&1; then

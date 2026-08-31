@@ -75,16 +75,12 @@ stop_aros() {
     "$control" stop >/dev/null 2>&1 || true
     aros_started=0
     cp /tmp/aros-window.log "$phase_result/aros-window.log"
-    if grep -Eq 'AFSPLUS.*failed|Trap signal|ALERT' \
-        "$phase_result/aros-window.log"; then
-        echo "Hosted AROS reported an AFS+ failure or crash" >&2
-        grep -En 'AFSPLUS.*failed|Trap signal|ALERT' \
-            "$phase_result/aros-window.log" >&2
-        exit 1
-    fi
+    "$repo_root/tools/check-aros-serial-log.sh" \
+        "$phase_result/aros-window.log"
 }
 
 require_executable "$control"
+require_executable "$repo_root/tools/check-aros-serial-log.sh"
 require_file "$aros_tree/Devs/fdsk.device"
 [ -d "$aros_tree/DiskImages" ] || {
     echo "Missing Hosted MacAROS DiskImages directory: $aros_tree" >&2
@@ -146,12 +142,14 @@ while IFS="$tab" read -r fixture expected pending_before description; do
     grep -q '"log_records_pending":0' "$phase/check-after.json"
 done <"$fixtures/manifest.tsv"
 
+printf '%s\n' none >"$result/guest-failure-requester.txt"
 cp "$package/SHA256SUMS" "$result/package-SHA256SUMS"
 (
     cd "$result"
     {
         find cases -type f -print
-        printf '%s\n' README.txt manifest.tsv package-SHA256SUMS
+        printf '%s\n' README.txt guest-failure-requester.txt manifest.tsv \
+            package-SHA256SUMS
     } | LC_ALL=C sort | xargs shasum -a 256 >SHA256SUMS
 )
 

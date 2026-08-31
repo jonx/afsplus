@@ -79,13 +79,8 @@ stop_aros() {
     "$control" stop >/dev/null 2>&1 || true
     aros_started=0
     cp /tmp/aros-window.log "$phase_result/aros-window.log"
-    if grep -Eq 'AFSPLUS.*failed|Trap signal|ALERT' \
-        "$phase_result/aros-window.log"; then
-        echo "Hosted AROS reported an AFS+ failure or crash" >&2
-        grep -En 'AFSPLUS.*failed|Trap signal|ALERT' \
-            "$phase_result/aros-window.log" >&2
-        exit 1
-    fi
+    "$repo_root/tools/check-aros-serial-log.sh" \
+        "$phase_result/aros-window.log"
 }
 
 wait_for_host_mount() {
@@ -107,6 +102,7 @@ wait_for_host_mount() {
 }
 
 require_executable "$control"
+require_executable "$repo_root/tools/check-aros-serial-log.sh"
 require_file "$aros_tree/Devs/fdsk.device"
 require_file "$aros_tree/C/Mount"
 require_file "$aros_tree/C/Assign"
@@ -232,6 +228,7 @@ Else
     C:Echo pass >MacRW:dismount-final.status
 EndIf'
 stop_aros "$result/return"
+printf '%s\n' none >"$result/guest-failure-requester.txt"
 [ "$(cat "$result/return/alpha0.from-host")" = host ]
 [ "$(cat "$result/return/alpha0.from-aros")" = hello ]
 [ "$(cat "$result/return/shutdown-1.status")" = pass ]
@@ -255,7 +252,8 @@ cp "$package/SHA256SUMS" "$result/package-SHA256SUMS"
 (
     cd "$result"
     shasum -a 256 Unit19.final check-after-target.json \
-        check-after-host.json check-final.json >SHA256SUMS
+        check-after-host.json check-final.json guest-failure-requester.txt \
+        >SHA256SUMS
 )
 
 mkdir -p "$(dirname -- "$output")"

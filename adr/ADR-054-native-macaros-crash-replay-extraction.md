@@ -52,6 +52,10 @@ Every final checker report was clean with no warning or error. The ordinary
 Alpha-0 operation image was also extracted after native create/write/truncate/
 rename/fsync and was clean at generation 7 with zero pending records.
 
+ADR-059 requalified the current handler and all six cases on 2026-08-31 with a
+shared fatal-diagnostic scan over native-QEMU serial and semihost output. Every
+case additionally recorded `guest_failure_requester=none`.
+
 ## Consequences
 
 The modeled intent-log replay and strict final checker are now native-runtime

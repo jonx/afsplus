@@ -61,14 +61,11 @@ stop_aros() {
     "$control" stop >/dev/null 2>&1 || true
     aros_started=0
     cp /tmp/aros-window.log "$result/aros-window.log"
-    if grep -Eq 'AFSPLUS.*failed|Trap signal|ALERT' "$result/aros-window.log"; then
-        echo "Hosted AROS reported an AFS+ failure or crash" >&2
-        grep -En 'AFSPLUS.*failed|Trap signal|ALERT' "$result/aros-window.log" >&2
-        exit 1
-    fi
+    "$repo_root/tools/check-aros-serial-log.sh" "$result/aros-window.log"
 }
 
 require_executable "$control"
+require_executable "$repo_root/tools/check-aros-serial-log.sh"
 require_file "$aros_tree/Devs/fdsk.device"
 [ -d "$aros_tree/DiskImages" ] || {
     echo "Missing Hosted MacAROS DiskImages directory: $aros_tree" >&2
@@ -114,6 +111,7 @@ C:AFSPlusS1Pivot >MacRW:s1-pivot.out' \
 aros_started=1
 "$control" wait 12 >/dev/null
 stop_aros
+printf '%s\n' none >"$result/guest-failure-requester.txt"
 
 grep -q '^\[AFSPLUS-S1\] PASS ' "$result/s1-probe.out"
 grep -q '^\[AFSPLUS-S1-PIVOT\] PASS' "$result/s1-pivot.out"
@@ -137,7 +135,7 @@ git -C "$macaros_root" status --short >"$result/macaros-status.txt"
     shasum -a 256 Unit19.s1.final check-before.json check-after.json \
         content-SHA256SUMS package-SHA256SUMS s1-probe.out s1-runtime \
         s1-version.out s1-list.out s1-pivot.out macaros-commit.txt \
-        macaros-status.txt >SHA256SUMS
+        macaros-status.txt guest-failure-requester.txt >SHA256SUMS
 )
 
 mkdir -p "$(dirname -- "$output")"

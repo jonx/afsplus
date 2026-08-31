@@ -69,13 +69,7 @@ stop_aros() {
     "$control" stop >/dev/null 2>&1 || true
     aros_started=0
     cp /tmp/aros-window.log "$result/aros-window.log"
-    if grep -Eq 'AFSPLUS.*failed|Trap signal|ALERT|unrecoverable|halting host' \
-        "$result/aros-window.log"; then
-        echo "Hosted AROS reported an AFS+ failure or crash" >&2
-        grep -En 'AFSPLUS.*failed|Trap signal|ALERT|unrecoverable|halting host' \
-            "$result/aros-window.log" >&2
-        exit 1
-    fi
+    "$repo_root/tools/check-aros-serial-log.sh" "$result/aros-window.log"
 }
 
 desktop_non_background_pixels() {
@@ -104,6 +98,7 @@ desktop_non_background_pixels() {
 }
 
 require_executable "$control"
+require_executable "$repo_root/tools/check-aros-serial-log.sh"
 require_file "$aros_tree/Devs/fdsk.device"
 [ -d "$aros_tree/DiskImages" ] || {
     echo "Missing Hosted MacAROS DiskImages directory: $aros_tree" >&2
@@ -153,6 +148,7 @@ aros_started=1
 "$control" tasks >"$result/s1b-tasks.out"
 "$control" shot "$result/s1b-desktop.png" >/dev/null
 stop_aros
+printf '%s\n' none >"$result/guest-failure-requester.txt"
 
 grep -q '^\[AFSPLUS-S1\] PASS ' "$result/s1-probe.out"
 grep -q '^\[AFSPLUS-S1B\] PASS ' "$result/s1b-probe.out"
@@ -192,7 +188,8 @@ git -C "$macaros_root" status --short >"$result/macaros-status.txt"
         s1b-runtime s1b-preference s1b-env.out s1b-saved-env s1b-pivot.out \
         s1b-tasks.out \
         s1b-desktop.png s1b-desktop.ppm s1b-desktop-foreground-pixels.txt \
-        macaros-commit.txt macaros-status.txt >SHA256SUMS
+        macaros-commit.txt macaros-status.txt guest-failure-requester.txt \
+        >SHA256SUMS
 )
 
 mkdir -p "$(dirname -- "$output")"

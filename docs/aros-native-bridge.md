@@ -138,6 +138,16 @@ masked-out operation, so leaving the sink empty has no per-operation activity
 test. Select `AFSP_IO_ACTIVITY_MASK_WRITE | AFSP_IO_ACTIVITY_MASK_FLUSH` for an
 Amiga-style write LED; timing and coalescing remain UI policy.
 
+## Qualification diagnostics
+
+Every AROS runtime gate treats guest failure output as a verdict rather than
+assuming that emulator or host-process status represents the filesystem task.
+`tools/check-aros-serial-log.sh` scans FS-UAE serial output, Hosted AROS window
+logs, and both native-QEMU serial and semihost logs. A software-failure
+requester, Guru Meditation, trap, AFS+ failure, alert or unrecoverable halt
+fails the gate before its normal operation/checker verdict can be accepted.
+Successful evidence records the absence of a requester. See ADR-059.
+
 ## Native lifecycle
 
 The handler keeps its device state alive, fills `AfsplusArosDevice` and

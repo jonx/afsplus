@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 # Fail when an AROS diagnostic stream contains a modal software-failure
-# requester.  Such a requester can leave the emulator alive until its timeout,
-# so process status alone is not a sufficient guest verdict.
+# requester or another fatal runtime marker used by the Hosted gates. Such a
+# failure can leave the emulator alive until its timeout, so process status
+# alone is not a sufficient guest verdict.
 
 set -eu
 
@@ -15,10 +16,14 @@ check_log() {
     }
 
     failure_pattern='Software Failure!|Guru Meditation'
+    failure_pattern="$failure_pattern|AFSPLUS.*failed|Trap signal|ALERT"
+    failure_pattern="$failure_pattern|unrecoverable|halting host"
     if LC_ALL=C grep -Eq "$failure_pattern" "$log"; then
-        echo "AROS software-failure requester detected in $log:" >&2
+        echo "Fatal AROS diagnostic detected in $log:" >&2
+        diagnostic_pattern="$failure_pattern|Task[[:space:]]*:|Error:"
+        diagnostic_pattern="$diagnostic_pattern|PC[[:space:]]*:|Module |Function "
         LC_ALL=C grep -En \
-            'Software Failure!|Guru Meditation|Task[[:space:]]*:|Error:|PC[[:space:]]*:|Module |Function ' \
+            "$diagnostic_pattern" \
             "$log" | tail -30 >&2 || true
         return 1
     fi
@@ -36,9 +41,15 @@ if [ "$#" -eq 1 ] && [ "$1" = --self-test ]; then
         'Task : 0x002E0A18 - AFSPLUS19' \
         'Error: 0x80000004 - Illegal instruction' \
         'PC : 0x003CE210' >"$test_work/failure.log"
+    printf '%s\n' 'Trap signal 11 in AFSPLUS19' \
+        >"$test_work/hosted-failure.log"
     check_log "$test_work/clean.log"
     if check_log "$test_work/failure.log" >/dev/null 2>&1; then
         echo "AROS serial failure scanner accepted its failure fixture" >&2
+        exit 1
+    fi
+    if check_log "$test_work/hosted-failure.log" >/dev/null 2>&1; then
+        echo "AROS serial failure scanner accepted its Hosted failure fixture" >&2
         exit 1
     fi
     echo "aros-serial-log self-test=PASS"

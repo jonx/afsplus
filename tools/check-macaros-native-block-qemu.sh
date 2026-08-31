@@ -57,6 +57,7 @@ fi
 require_executable "$native_repo/tools/arosbundle"
 require_executable "$native_repo/tools/make-fat12-image.py"
 require_executable "$native_repo/boot/arosboot/test-qemu.sh"
+require_executable "$repo_root/tools/check-aros-serial-log.sh"
 require_executable "$repo_root/tools/qemu-file-backed-memory.sh"
 require_executable "$repo_root/tools/extract-macaros-afsram.py"
 require_file "$efi"
@@ -167,6 +168,9 @@ else
         "$native_repo/boot/arosboot/test-qemu.sh"
 fi
 
+"$repo_root/tools/check-aros-serial-log.sh" "$output/run/serial.log"
+"$repo_root/tools/check-aros-serial-log.sh" "$output/run/semihost.log"
+
 grep -q '^\[B2A\] portable ABI + emulated TLS + streams + W^X/unload PASS$' \
     "$output/run/semihost.log" || {
     echo "Native AFSRAM probe did not satisfy the ABI/unload gate" >&2
@@ -202,6 +206,7 @@ core_status_after=$(git -C "$core_source" status --porcelain=v1)
     echo "transport=retained-ram-image"
     echo "descriptor_version=2"
     echo "checker_clean=$checker_clean"
+    echo "guest_failure_requester=none"
     if [ "$mode" = alpha0 ]; then
         echo "filesystem=afsplus-handler"
         echo "operations=create,read,write,sparse-write,truncate,rename,fsync,casefold,case-only-rename,dismount,unload"
