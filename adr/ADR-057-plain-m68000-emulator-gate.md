@@ -24,7 +24,7 @@ tail-call lowering was repaired.
 ## Decision
 
 The plain-68000 reference profile uses
-`native/aros/m68k-unknown-aros-m68000.json` and the toolchain deltas recorded in
+[`native/aros/m68k-unknown-aros-m68000.json`](../native/aros/m68k-unknown-aros-m68000.json) and the toolchain deltas recorded in
 `native/aros/toolchain/`:
 
 1. M68000 external calls are not tail-call lowered until the backend can relax

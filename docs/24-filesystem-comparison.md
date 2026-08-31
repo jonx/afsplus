@@ -127,7 +127,7 @@ A reader can stream B+ tree pages and allocation-region bitmaps with bounded mem
 
 Most mature filesystems gained tracing, fsck tooling, fault injectors, and health reporting after years of painful debugging.
 
-AFS+ plans these interfaces before the format is frozen. See `docs/26-debug-observability.md`.
+AFS+ plans these interfaces before the format is frozen. See [`docs/26-debug-observability.md`](26-debug-observability.md).
 
 ### 4.4 Derived accelerators that never become correctness dependencies
 

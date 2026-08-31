@@ -94,7 +94,7 @@ reserves `x18`, and every C object uses `-ffixed-x18`, because Darwin may alter
 that platform register across host signal delivery. Those are Hosted runtime
 requirements, not properties of the AFS+ format or handler ABI.
 
-`tools/check-aros-ffi.sh` and `tools/package-aros-alpha0.sh` accept the same
+[`tools/check-aros-ffi.sh`](../tools/check-aros-ffi.sh) and [`tools/package-aros-alpha0.sh`](../tools/package-aros-alpha0.sh) accept the same
 profile variables:
 
 | Variable | Hosted default | Contract |
@@ -173,7 +173,7 @@ Amiga-style write LED; timing and coalescing remain UI policy.
 
 Every AROS runtime gate treats guest failure output as a verdict rather than
 assuming that emulator or host-process status represents the filesystem task.
-`tools/check-aros-serial-log.sh` scans FS-UAE serial output, Hosted AROS window
+[`tools/check-aros-serial-log.sh`](../tools/check-aros-serial-log.sh) scans FS-UAE serial output, Hosted AROS window
 logs, and both native-QEMU serial and semihost logs. A software-failure
 requester, Guru Meditation, trap, AFS+ failure, alert or unrecoverable halt
 fails the gate before its normal operation/checker verdict can be accepted.
@@ -192,7 +192,7 @@ Lock value zero represents the DOS null lock/root at the C boundary. A native
 not be squeezed into the 32-bit `fl_Key`/`fh_Arg1` scalar itself. Those fields
 point to native wrappers instead.
 
-Create the packet context from `native/aros/afsplus_packet.h` after mounting
+Create the packet context from [`native/aros/afsplus_packet.h`](../native/aros/afsplus_packet.h) after mounting
 the Rust bridge. Its allocation callback must return suitably aligned public
 memory; the translator clears each allocation itself. Its clock callback
 returns UTC Unix seconds and nanoseconds. Process one packet at a time with
@@ -230,7 +230,7 @@ Legacy 32-bit counters saturate at `INT32_MAX` rather than wrapping.
 
 ## Native handler shell
 
-`native/aros/afsplus_handler.c` now performs the target-specific assembly: it
+[`native/aros/afsplus_handler.c`](../native/aros/afsplus_handler.c) now performs the target-specific assembly: it
 validates startup geometry, opens the device, probes NSD/TD64 and write
 protection, handles optional DMA masks through a bounded bounce buffer,
 registers the volume, provides UTC/public-memory callbacks, processes messages
@@ -263,7 +263,7 @@ macFUSE same-image round trip, Hosted crash replay, native MacAROS Alpha-0 and
 native crash replay into one checksummed requirement matrix. ADR-060 defines
 the completion boundary and its explicit lack of a hardware claim.
 
-`tools/check-hosted-aros-alpha0.sh` now installs the off-tree package into a
+[`tools/check-hosted-aros-alpha0.sh`](../tools/check-hosted-aros-alpha0.sh) now installs the off-tree package into a
 dedicated Hosted test tree, executes create/read/write/truncate/rename/fsync on
 AROS and macFUSE, returns to AROS for cross-created-file readback, and requires
 a clean strict checker at every boundary. ADR-046 records the runtime startup

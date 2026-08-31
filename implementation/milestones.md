@@ -24,7 +24,7 @@ through a host mount and a MacAROS adapter. Format epoch 1 remains unfrozen.
 
 M06/M08 first qualify AFS+ as a secondary same-image volume. The subsequent
 system-volume ladder and AFS/FFS comparison contract are specified in
-`testing/aros-system-volume-qualification.md`; a post-bootstrap `SYS:` pivot and
+[`testing/aros-system-volume-qualification.md`](../testing/aros-system-volume-qualification.md); a post-bootstrap `SYS:` pivot and
 a boot-selected AFS+ volume are separate acceptance claims.
 
 Platform reporting uses three targets and four ordered validation stages:

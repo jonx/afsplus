@@ -17,7 +17,7 @@ into Rust or into host tests.
 
 ## Decision
 
-`native/aros/afsplus_trackdisk.c` converts a checked partition byte viewport
+[`native/aros/afsplus_trackdisk.c`](../native/aros/afsplus_trackdisk.c) converts a checked partition byte viewport
 into the one-block callbacks required by `AfsplusArosDevice`. The handler
 supplies two synchronous functions: one transfer function which receives the
 already checked absolute byte offset and selected command, and one durability
@@ -55,7 +55,7 @@ an AFS+ cache. Read-only mounts omit write and flush callbacks entirely.
 
 Version 2 of the configuration can also carry the portable fixed-size
 block-activity sink
-from `api/debug_observability.h`. Callback selection happens once during
+from [`api/debug_observability.h`](../api/debug_observability.h). Callback selection happens once during
 initialization: disabled or masked-out operations use the direct function
 pointer and pay no per-I/O activity branch. Enabled operations emit `BEGIN` and
 `END`, including unsuccessful completion, without allocation, clocks, payload

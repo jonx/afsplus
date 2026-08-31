@@ -1,8 +1,8 @@
 # fsync under checkpoint COW: measured baseline and intent-log decision input
 
 Status: measurement report for architecture blocker 2
-(`docs/08-transactions-and-journal.md` §8). The harness is
-`crates/afsplus-check/tests/fsync_workloads.rs`; reproduce with:
+([`docs/08-transactions-and-journal.md`](../docs/08-transactions-and-journal.md) §8). The harness is
+[`crates/afsplus-check/tests/fsync_workloads.rs`](../crates/afsplus-check/tests/fsync_workloads.rs); reproduce with:
 
 ```text
 cargo test -p afsplus-check --test fsync_workloads --release -- --ignored --nocapture

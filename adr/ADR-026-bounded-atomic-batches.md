@@ -58,5 +58,5 @@ ever quarantining storage. Crash matrices show all-or-nothing recovery —
 the lock-file pattern's intermediate states are never visible. Measured
 effect: a 64-file batched checkout costs 2.2 block writes and 0.05
 barriers per file versus 12.9 and 3 committed per-operation
-(`implementation/fsync-intent-log-baseline.md`). The API shape and
+([`implementation/fsync-intent-log-baseline.md`](../implementation/fsync-intent-log-baseline.md)). The API shape and
 compatibility classification remain unfrozen.

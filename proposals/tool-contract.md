@@ -79,8 +79,8 @@ spec is neutral and publishable, nothing more.
 | tool-contract ADR (number at integration) | new | Short decision record: public contract → ADR, points at the spec. |
 | `afsplus-core::probe` | new module | `probe_device()` → `ToolInfo` (bounded reads, §5) and `in_use_map()` (iterator of allocated runs). |
 | `afsplus-info` | binary (bin target in afsplus-check — D5) | Text + versioned `--json` + `--in-use-map`. Zero writes, stable exit codes. |
-| `docs/18`, `tools/tools-spec.md` | update | Rewritten around the contract; afsplus-info section completed. |
-| `tools/third-party-probe-example.c` | update | Aligned with the real identification-block layout (offsets marked experimental). |
+| `docs/18`, [`tools/tools-spec.md`](../tools/tools-spec.md) | update | Rewritten around the contract; afsplus-info section completed. |
+| [`tools/third-party-probe-example.c`](../tools/third-party-probe-example.c) | update | Aligned with the real identification-block layout (offsets marked experimental). |
 
 ## 3. The v1 vocabulary — `ToolInfo`
 

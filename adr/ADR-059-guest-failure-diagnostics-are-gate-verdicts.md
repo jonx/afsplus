@@ -16,7 +16,7 @@ accepted on one platform and rejected on another.
 
 ## Decision
 
-`tools/check-aros-serial-log.sh` is the shared fatal-diagnostic boundary. It
+[`tools/check-aros-serial-log.sh`](../tools/check-aros-serial-log.sh) is the shared fatal-diagnostic boundary. It
 rejects modal `Software Failure!` and `Guru Meditation` requesters plus the
 Hosted fatal markers already used by the project: an AFS+ failure line, trap,
 alert, unrecoverable state or host halt.

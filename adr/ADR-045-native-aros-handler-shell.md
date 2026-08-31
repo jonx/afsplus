@@ -22,7 +22,7 @@ core itself does not use networking or child processes.
 
 ## Decision
 
-`native/aros/afsplus_handler.c` is the native shell source. It receives the
+[`native/aros/afsplus_handler.c`](../native/aros/afsplus_handler.c) is the native shell source. It receives the
 startup `DosPacket`, validates its `FileSysStartupMsg` and bounded `DosEnvec`,
 opens the requested device and refuses a definitely absent medium. It probes
 write protection before selecting read-only or read-write mount mode.
@@ -73,7 +73,7 @@ shell under native AROS for the M68020-or-newer emulator profile. ADR-057 adds
 the corresponding A500-configured plain-M68000 emulator result; neither result
 is a physical-hardware claim.
 
-`tools/package-aros-alpha0.sh` turns the qualified off-tree link into a
+[`tools/package-aros-alpha0.sh`](../tools/package-aros-alpha0.sh) turns the qualified off-tree link into a
 self-contained pre-install artifact: handler, DOSDriver, target operation
 probe, full-length sparse image, clean host-checker report and hashes. This is
 still not a runtime-mount claim. ADR-046 through ADR-050 subsequently qualify

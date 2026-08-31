@@ -117,7 +117,7 @@ AFS+ 1.0 is built around:
 
 AFS+ explicitly studies PFS3 and the proposed PFS4 design before freezing epoch 1. PFS3 demonstrated unusually strong crash resilience, speed, fragmentation behavior, and low-resource operation on classic Amiga hardware. PFS4's published design ideas, including B+ tree directories, redesigned atomic commit, small-file grouping, and improved fragmentation prevention, overlap with several AFS+ goals and must be evaluated rather than rediscovered.
 
-See `docs/22-pfs3-and-pfs4-lessons.md`, `docs/23-pfs3-stage0-review.md`, and `adr/ADR-019-pfs3-design-reference.md`.
+See [`docs/22-pfs3-and-pfs4-lessons.md`](docs/22-pfs3-and-pfs4-lessons.md), [`docs/23-pfs3-stage0-review.md`](docs/23-pfs3-stage0-review.md), and [`adr/ADR-019-pfs3-design-reference.md`](adr/ADR-019-pfs3-design-reference.md).
 
 ## Design choices intended to reduce future maintenance cost
 
@@ -194,7 +194,7 @@ switches are inert, use the diagnostic and reversible workaround in
 transport is not a raw substitute for macFUSE's message channel; see ADR-040.
 The native AROS bridge and its cross-build qualification are documented in
 [`docs/aros-native-bridge.md`](docs/aros-native-bridge.md), ADR-042 through
-ADR-060. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
+ADR-060. [`tools/check-hosted-aros-alpha0.sh`](tools/check-hosted-aros-alpha0.sh) now qualifies a bidirectional
 Hosted MacAROS → macFUSE → Hosted MacAROS round trip on one checked image.
 Hosted intent-log replay and the cumulative post-bootstrap S1 system-volume
 pivot are also qualified. The handler now supports standard AROS
@@ -218,9 +218,9 @@ Autonomous boot selection and the classic ports also remain later gates.
 Qualification is reported as three target platforms over four ordered stages:
 Hosted MacAROS, native MacAROS/Apple Silicon, Amiga 500/m68k emulation, then the
 physical A500. The emulator is the pre-hardware validation stage of the A500
-target. `tools/check-aros-m68k-boot-fsuae.sh` now makes the first native m68k
+target. [`tools/check-aros-m68k-boot-fsuae.sh`](tools/check-aros-m68k-boot-fsuae.sh) now makes the first native m68k
 boot prerequisite machine-readable with matching official ROM, floppy and
-system-media hashes. `tools/check-aros-m68k-alpha0-fsuae.sh` now also qualifies
+system-media hashes. [`tools/check-aros-m68k-alpha0-fsuae.sh`](tools/check-aros-m68k-alpha0-fsuae.sh) now also qualifies
 the real external handler's Alpha-0 operation matrix and all six recovery cuts
 on both the M68020-or-newer reference profile and an A500-configured plain
 M68000 profile. The latter rejects M68020 long-multiply instructions before
@@ -234,7 +234,7 @@ ADR-059 makes AROS fatal diagnostics an explicit verdict across Hosted,
 native-QEMU and FS-UAE gates, so a modal requester cannot be mistaken for a
 hang or a successful outer process.
 ADR-060 closes the Mountable Alpha-0 objective with
-`tools/check-mountable-alpha0.sh`: one checksummed composite result binds the
+[`tools/check-mountable-alpha0.sh`](tools/check-mountable-alpha0.sh): one checksummed composite result binds the
 portable APIs, real macFUSE round trip, Hosted/native operation matrices and
 twelve recovery cases. This completion makes no physical-hardware or format
 freeze claim.

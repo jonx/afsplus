@@ -32,7 +32,7 @@ Known byte-for-byte images with expected output.
 
 ### Crash/fault injection
 
-Interrupt and corrupt I/O at deterministic points, including cache eviction and OOM. See `crash-testing.md`.
+Interrupt and corrupt I/O at deterministic points, including cache eviction and OOM. See [`crash-testing.md`](crash-testing.md).
 
 ### Fuzz
 

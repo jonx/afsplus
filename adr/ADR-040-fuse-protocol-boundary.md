@@ -63,7 +63,7 @@ metadata changes still fail explicitly.
 
 Some macOS builds display inert File System Extensions switches. The reversible
 workaround and its version-specific caveat are documented in
-`docs/macos-fskit-activation.md`; it edits only FSKit's per-user enabled-module
+[`docs/macos-fskit-activation.md`](../docs/macos-fskit-activation.md); it edits only FSKit's per-user enabled-module
 list, retains a backup, and never enables the legacy kernel extension.
 
 A direct Fuse-T experiment reached INIT, STATFS and GETATTR, but Fuse-T then

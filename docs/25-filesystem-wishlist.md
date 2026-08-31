@@ -403,7 +403,7 @@ A writable overlay should make a new test branch essentially instant while prese
 
 Read-only checkpoint viewports should permit inspection of retained previous generations without pretending AFS+ already has a full user snapshot product.
 
-See `docs/28-virtual-images-and-viewports.md`.
+See [`docs/28-virtual-images-and-viewports.md`](28-virtual-images-and-viewports.md).
 
 ## 15. Things we deliberately do not promise
 

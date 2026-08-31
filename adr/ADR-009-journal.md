@@ -23,12 +23,12 @@ AFS+ requires a transaction engine with:
 
 The exact implementation is not yet frozen.
 
-The leading design candidate is copy-on-write metadata plus alternating checksummed checkpoint records, described in `ADR-020-checkpoint-commit.md`.
+The leading design candidate is copy-on-write metadata plus alternating checksummed checkpoint records, described in [`ADR-020-checkpoint-commit.md`](ADR-020-checkpoint-commit.md).
 
 A conventional redo journal remains a comparison candidate until the checkpoint design passes crash testing and write-amplification benchmarks.
 
 ## Consequences
 
-`docs/08-transactions-and-journal.md` is no longer interpreted as requiring a conventional journal.
+[`docs/08-transactions-and-journal.md`](../docs/08-transactions-and-journal.md) is no longer interpreted as requiring a conventional journal.
 
 No epoch-1 on-disk journal format may be frozen until the checkpoint approach and at least one journal alternative have been tested under identical fault injection workloads.

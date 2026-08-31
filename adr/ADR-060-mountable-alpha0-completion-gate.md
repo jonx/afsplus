@@ -17,7 +17,7 @@ clean with no pending intent record.
 
 ## Decision
 
-`tools/check-mountable-alpha0.sh` is the composite completion gate. It runs:
+[`tools/check-mountable-alpha0.sh`](../tools/check-mountable-alpha0.sh) is the composite completion gate. It runs:
 
 1. the portable VFS API, FUSE protocol, intent-log and AROS adapter tests;
 2. Hosted AROS → real macFUSE → Hosted AROS on one image;

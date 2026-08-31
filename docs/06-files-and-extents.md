@@ -84,7 +84,7 @@ The epoch-1 extent architecture must be able to represent shared physical data r
 
 A shared range is never modified in place while another live object still references the same bytes. A write first creates private replacement storage for the modified logical range.
 
-The general policy for writes to **unshared** committed data remains an explicit transaction-prototype question. See `docs/08-transactions-and-journal.md`.
+The general policy for writes to **unshared** committed data remains an explicit transaction-prototype question. See [`docs/08-transactions-and-journal.md`](08-transactions-and-journal.md).
 
 ## 7. Reserved optional user-data checksum association
 

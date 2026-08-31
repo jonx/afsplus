@@ -34,7 +34,7 @@ The reserved Hosted `fdsk.device` DOSDriver explicitly uses `Mask = 0`.
 Hardware DOSDrivers continue to provide their real mask, which the native
 trackdisk adapter honors with its bounded bounce buffer.
 
-`tools/check-hosted-aros-alpha0.sh` is the S0 acceptance gate. It refuses a
+[`tools/check-hosted-aros-alpha0.sh`](../tools/check-hosted-aros-alpha0.sh) is the S0 acceptance gate. It refuses a
 running Hosted instance or existing reserved artifacts and performs:
 
 1. a fresh cross-qualified handler/package build;
@@ -66,4 +66,4 @@ This proves native handler execution and same-image interoperability on Hosted
 MacAROS. It does not prove target power-cut replay, an AFS+ `SYS:` pivot,
 boot-volume selection, native Apple Silicon execution, m68k runtime behavior or
 physical Amiga performance. Those claims retain separate gates in
-`testing/aros-system-volume-qualification.md`.
+[`testing/aros-system-volume-qualification.md`](../testing/aros-system-volume-qualification.md).

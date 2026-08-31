@@ -27,7 +27,7 @@ six deterministic 64 MiB representative images:
 5. complete data and record immediately before the barrier; and
 6. the same record after the completed barrier.
 
-`tools/check-hosted-aros-crash-replay.sh` installs a freshly qualified handler
+[`tools/check-hosted-aros-crash-replay.sh`](../tools/check-hosted-aros-crash-replay.sh) installs a freshly qualified handler
 and target probe, boots Hosted MacAROS separately for every image, mounts it
 through `fdsk.device`, and requires exactly the manifest's `old` or `new`
 content. `HEAD.lock` must never survive. The host checker runs before and after

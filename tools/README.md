@@ -10,7 +10,7 @@ Two kinds of file live here and must not be confused:
   helpers** for the development machines. They produce evidence sets under
   `build/` and are referenced from the test plans and ADRs that own them.
 
-Every file in this directory has one row here; `tools/check-docs.py`
+Every file in this directory has one row here; [`tools/check-docs.py`](check-docs.py)
 enforces that.
 
 | File | What it does | Owned by |

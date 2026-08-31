@@ -6,7 +6,7 @@ epoch-1 commitment
 ## Context
 
 The measured blocker-2 baseline
-(`implementation/fsync-intent-log-baseline.md`) established that group
+([`implementation/fsync-intent-log-baseline.md`](../implementation/fsync-intent-log-baseline.md)) established that group
 commit (ADR-026 batches) fully solves burst throughput, and isolated the one
 remaining problem: a *forced* durable operation still costs a full
 checkpoint publication — 10 block writes and 3 barriers for a Git-style ref

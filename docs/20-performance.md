@@ -90,5 +90,5 @@ default.
 
 The separate 1 TiB sparse-image qualification records format/mount/checker
 wall time and per-commit bitmap pages, allocation records, metadata nodes, and
-flushes. `afsplus-check/tests/measurements.rs` remains the executable source
+flushes. [`crates/afsplus-check/tests/measurements.rs`](../crates/afsplus-check/tests/measurements.rs) remains the executable source
 of those numbers so regressions cannot be papered over by documentation.

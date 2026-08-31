@@ -20,7 +20,7 @@ call an ordinary C ABI and keep native `FileLock`/file-handle wrappers around
 
 `afsplus-aros-ffi` is the only raw-pointer boundary between a native handler
 and the safe AFS+ crates. It builds as an `rlib` and a `staticlib` and exports
-the hand-written, versioned interface in `api/afsplus_aros.h`.
+the hand-written, versioned interface in [`api/afsplus_aros.h`](../api/afsplus_aros.h).
 
 The native handler provides:
 

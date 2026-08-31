@@ -34,7 +34,7 @@ Performance patches must include:
 
 ## Rust quality gate
 
-The repository has one root `rustfmt.toml`; format the entire workspace rather
+The repository has one root [`rustfmt.toml`](rustfmt.toml); format the entire workspace rather
 than individual crates. Before committing Rust changes, run:
 
 ```sh

@@ -12,9 +12,9 @@ the commit message.
 
 Current proposals:
 
-- `tool-contract.md` — volume self-description for partition tools
+- [`tool-contract.md`](tool-contract.md) — volume self-description for partition tools
   (decisions D1–D7).
-- `storage-media-profiles.md` — per-medium analysis and mkfs media
+- [`storage-media-profiles.md`](storage-media-profiles.md) — per-medium analysis and mkfs media
   profiles (decisions M1–M5).
-- `checkpoint-slot-rings.md` — wear-leveling slot rings for the checkpoint
+- [`checkpoint-slot-rings.md`](checkpoint-slot-rings.md) — wear-leveling slot rings for the checkpoint
   and intent-log areas; the format-affecting half of M1.

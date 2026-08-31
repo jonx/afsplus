@@ -81,7 +81,7 @@ Native AROS system-volume qualification follows three target platforms in four
 ordered stages: Hosted MacAROS, native MacAROS, Amiga 500/m68k emulation, then
 the physical Amiga 500. Constrained resource profiles are measurements within
 a stage, not an additional platform. The detailed separation rules are defined
-in `testing/aros-system-volume-qualification.md`.
+in [`testing/aros-system-volume-qualification.md`](aros-system-volume-qualification.md).
 
 ## 3. Mandatory workload classes
 

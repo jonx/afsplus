@@ -7,7 +7,7 @@
 Status: proposal — for team review before epoch 1. On acceptance this
 becomes a numbered document under `docs/`. Decisions requested are marked
 **M1–M5**; M1 is a format question and is expanded in
-`proposals/checkpoint-slot-rings.md`.
+[`proposals/checkpoint-slot-rings.md`](checkpoint-slot-rings.md).
 
 <!-- toc -->
 

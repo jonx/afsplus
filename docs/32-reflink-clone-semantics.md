@@ -53,7 +53,7 @@ If object 101 modifies bytes inside extent Y:
 
 Only the modified logical range should require newly allocated storage when a safe extent split can represent it.
 
-This shared-range COW requirement is mandatory for reflink correctness even if the general policy for writes to **unshared** file data is later chosen to permit in-place overwrite. See `docs/08-transactions-and-journal.md`.
+This shared-range COW requirement is mandatory for reflink correctness even if the general policy for writes to **unshared** file data is later chosen to permit in-place overwrite. See [`docs/08-transactions-and-journal.md`](08-transactions-and-journal.md).
 
 ## 5. CloneRange
 

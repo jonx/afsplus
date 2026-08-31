@@ -30,7 +30,7 @@ Status: initial review complete. Continue subsystem-by-subsystem only when imple
 
 **Specification expansion is now secondary to implementation. Proposed features remain unfrozen until they have real consumers, code, measurements, and crash semantics.**
 
-See `implementation/peer-review-prototype-plan.md`.
+See [`implementation/peer-review-prototype-plan.md`](implementation/peer-review-prototype-plan.md).
 
 ## Stage A: make the core executable
 

@@ -4,7 +4,7 @@
 > **Tests:** none · **Milestones:** none
 
 Status: proposal — for team review (decision M1 of
-`storage-media-profiles.md`). Format-affecting: on acceptance this becomes
+[`storage-media-profiles.md`](storage-media-profiles.md)). Format-affecting: on acceptance this becomes
 a numbered ADR and the change lands before epoch 1.
 
 ## Context

@@ -42,12 +42,12 @@ the strict checker must report a clean volume.
 This proves the native DOS packet, handler, block-device and on-disk paths. It
 does not prove that AROS can use AFS+ as `SYS:`.
 
-Hosted MacAROS S0 is qualified by `tools/check-hosted-aros-alpha0.sh`; ADR-046
+Hosted MacAROS S0 is qualified by [`tools/check-hosted-aros-alpha0.sh`](../tools/check-hosted-aros-alpha0.sh); ADR-046
 records the runtime evidence and boundary fixes. Each later platform repeats S0
 before advancing to its system-volume or performance gates.
 
 The secondary-volume recovery extension is qualified by
-`tools/check-hosted-aros-crash-replay.sh`. It replays deterministic power-cut
+[`tools/check-hosted-aros-crash-replay.sh`](../tools/check-hosted-aros-crash-replay.sh). It replays deterministic power-cut
 images through the real Hosted handler; ADR-047 defines the modeled state space
 and prevents this result from being confused with a physical power-cut claim.
 
@@ -63,10 +63,10 @@ This is the first gate that supports the statement "AROS runs on AFS+" during a
 normal session. It is still not an autonomous cold boot from AFS+.
 
 S1 is implemented cumulatively. S1a proves the core assign pivot and execution
-of a manifested command/library subset; `tools/check-hosted-aros-s1.sh` passed
+of a manifested command/library subset; [`tools/check-hosted-aros-s1.sh`](../tools/check-hosted-aros-s1.sh) passed
 that gate and ADR-048 records its explicit bootstrap boundary. S1b adds the
 desktop, preferences and representative applications.
-`tools/check-hosted-aros-s1b.sh` has qualified S1b on Hosted MacAROS; ADR-049
+[`tools/check-hosted-aros-s1b.sh`](../tools/check-hosted-aros-s1b.sh) has qualified S1b on Hosted MacAROS; ADR-049
 records the payload, runtime evidence, case-policy boundary and exact claim.
 
 ### S2: boot-selected AFS+ system volume
@@ -180,7 +180,7 @@ correctness gate fails are invalid, not slow results.
 
 ## 5. Required measurements
 
-In addition to `testing/benchmark-contract.md`, native runs record:
+In addition to [`testing/benchmark-contract.md`](benchmark-contract.md), native runs record:
 
 - time to handler mount, log replay, shell-ready and desktop-ready;
 - DOS packets by action and failures by error code;

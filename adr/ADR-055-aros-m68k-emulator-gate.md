@@ -29,7 +29,7 @@ The port is qualified in four ordered stages:
 4. a physical Amiga 500.
 
 Stage 3 begins with the machine-readable boot gate in
-`tools/check-aros-m68k-boot-fsuae.sh`. It requires a matching official boot ADF
+[`tools/check-aros-m68k-boot-fsuae.sh`](../tools/check-aros-m68k-boot-fsuae.sh). It requires a matching official boot ADF
 and system ISO, loads the ISO's ROM pair, leaves the boot ADF in `DF0:`, exposes
 an extracted ISO as `AROS Live CD:`, and captures the guest verdict through a
 separate `HOST:` volume. The gate records hashes and explicitly makes no A500,

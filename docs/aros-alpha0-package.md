@@ -6,7 +6,7 @@
 > [ADR-051](../adr/ADR-051-explicit-aros-aarch64-platform-profiles.md) · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-This directory is produced by `tools/package-aros-alpha0.sh`. Its hashes prove
+This directory is produced by [`tools/package-aros-alpha0.sh`](../tools/package-aros-alpha0.sh). Its hashes prove
 the exact pre-install set; `check-before.json` proves the image was clean before
 target execution.
 

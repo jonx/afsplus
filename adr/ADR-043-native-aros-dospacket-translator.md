@@ -19,9 +19,9 @@ the wide structures.
 
 ## Decision
 
-`native/aros/afsplus_packet.c` is the shared native packet translator. It is
+[`native/aros/afsplus_packet.c`](../native/aros/afsplus_packet.c) is the shared native packet translator. It is
 compiled as ordinary C against genuine AROS headers and calls only
-`api/afsplus_aros.h`. It performs no Exec or DOS library calls. A small handler
+[`api/afsplus_aros.h`](../api/afsplus_aros.h). It performs no Exec or DOS library calls. A small handler
 shell remains responsible for startup, block-device callbacks, receiving and
 replying to messages, and public-memory allocation.
 

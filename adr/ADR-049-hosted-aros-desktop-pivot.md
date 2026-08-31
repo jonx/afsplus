@@ -15,7 +15,7 @@ content or wrote persistent state.
 
 ## Decision
 
-`tools/build-aros-s1-image.sh` provides a separate `desktop` profile. It creates
+[`tools/build-aros-s1-image.sh`](../tools/build-aros-s1-image.sh) provides a separate `desktop` profile. It creates
 a 256 MiB image containing the core S1 payload plus the named MacAROS build's
 `Classes`, `Devs`, `Fonts`, `Locale`, `Prefs`, `System`, `Tools`, `Utilities`
 and `L` trees. It adds the exact desktop-sequence commands, a deterministic

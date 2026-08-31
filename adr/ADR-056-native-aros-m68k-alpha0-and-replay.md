@@ -16,7 +16,7 @@ the subsequent plain-M68000 emulator qualification.
 
 ## Decision
 
-`tools/check-aros-m68k-alpha0-fsuae.sh` is the reproducible native m68k
+[`tools/check-aros-m68k-alpha0-fsuae.sh`](../tools/check-aros-m68k-alpha0-fsuae.sh) is the reproducible native m68k
 filesystem gate. Given a matching official boot ADF and system ISO, it:
 
 1. builds `afsplus-aros-ffi` and its AROS `std` with the qualified patched
