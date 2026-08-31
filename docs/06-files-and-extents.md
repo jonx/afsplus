@@ -1,6 +1,6 @@
 # 06. Files and Extents
 
-> **ADRs:** none · **Spec:** none ·
+> **ADRs:** [ADR-027](../adr/ADR-027-reflink-clones.md), [ADR-061](../adr/ADR-061-shared-extent-references.md) · **Spec:** none ·
 > **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
 
 ## 1. Extent model
@@ -83,6 +83,8 @@ as unlink; physical discard is still deferred.
 The epoch-1 extent architecture must be able to represent shared physical data ranges for reflinks.
 
 A shared range is never modified in place while another live object still references the same bytes. A write first creates private replacement storage for the modified logical range.
+
+The reference mechanism that carries this is a volume-wide typed reference tree keyed by physical run, with the extent's shared flag acting as a hint and the tree as the authority ([ADR-061](../adr/ADR-061-shared-extent-references.md)); the requirement it satisfies is [ADR-027](../adr/ADR-027-reflink-clones.md).
 
 The general policy for writes to **unshared** committed data remains an explicit transaction-prototype question. See [`docs/08-transactions-and-journal.md`](08-transactions-and-journal.md).
 

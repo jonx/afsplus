@@ -1,7 +1,7 @@
 # 32. Reflink and Clone Semantics
 
-> **ADRs:** none · **Spec:** none ·
-> **Tests:** none · **Milestones:** none
+> **ADRs:** [ADR-027](../adr/ADR-027-reflink-clones.md), [ADR-061](../adr/ADR-061-shared-extent-references.md) · **Spec:** none ·
+> **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
 
 ## 1. Move, hard link, symlink, clone, and copy are different
 
@@ -100,6 +100,8 @@ The checker must verify independently that:
 - reverse-map data, when present, agrees or is marked stale/rebuildable
 
 Fault tests must inject crashes at every step of clone creation, COW split, unlink, and last-reference reclamation.
+
+The structure these checks run against, and the shape of the mandatory matrix, are in [ADR-061](../adr/ADR-061-shared-extent-references.md).
 
 ## 10. CloneTree is separate
 
