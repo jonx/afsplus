@@ -8,7 +8,8 @@ a document keeps its number for life and retired numbers are never reused.
 [implementation/milestones.md](../implementation/milestones.md).
 
 Every document in this directory opens with a navigation block linking the
-ADRs, specification files, test plans and milestones it relates to.
+ADRs, specification files, test plans and milestones it relates to; the block
+format and the writing rules are in [DOCUMENTATION.md](DOCUMENTATION.md).
 
 ## Design series
 
@@ -56,6 +57,12 @@ ADRs, specification files, test plans and milestones it relates to.
 | [AFS+ MacAROS Alpha-0 package](aros-alpha0-package.md) | Layout of the self-contained MacAROS Alpha-0 qualification package |
 | [AFS+ Hosted MacAROS S1 image](aros-s1-image.md) | The manifested system image used by the post-bootstrap `SYS:` pivot |
 | [macFUSE FSKit activation on macOS](macos-fskit-activation.md) | Enabling the macFUSE FSKit backend, including the diagnostic workaround |
+
+## Rules for this directory
+
+| Document | Summary |
+|---|---|
+| [DOCUMENTATION.md](DOCUMENTATION.md) | How documentation is written, where each kind of fact lives, and what the checker enforces |
 
 ## Spec
 

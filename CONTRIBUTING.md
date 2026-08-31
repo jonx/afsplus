@@ -52,8 +52,14 @@ make check-docs
 ```
 
 It verifies links and anchors, tables of contents, the ADR index, ADR and
-milestone references, navigation blocks and index rows.
+milestone references, navigation blocks, index rows and the status rules.
 `make toc` regenerates the tables of contents and the ADR index.
+
+The writing rules — finished-state text, one home per fact, the navigation
+block, the per-document rules and the checklist before committing — are in
+[docs/DOCUMENTATION.md](docs/DOCUMENTATION.md). Where the project stands is
+written only in [implementation/milestones.md](implementation/milestones.md);
+the story goes to [NOTES.md](NOTES.md).
 
 ## No private fast paths
 

@@ -1,7 +1,7 @@
 # Working in the AFS+ repository
 
 This file tells a coding or reviewing agent how work is done here. The
-documentation rules are in `docs/DOCUMENTATION.md`; the project state is in
+documentation rules are in [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md); the project state is in
 [implementation/milestones.md](implementation/milestones.md); the questions
 nobody may settle implicitly are in
 [implementation/open-questions.md](implementation/open-questions.md); the

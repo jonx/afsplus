@@ -145,5 +145,5 @@ reuse before every checkpoint that can reach old contents is retired
 ```
 
 The executable form is the G1/G2/G3 quarantine matrix in
-`crates/afsplus-check/tests/alloc_crash.rs`; the allocator design it exercises
+[`crates/afsplus-check/tests/alloc_crash.rs`](../crates/afsplus-check/tests/alloc_crash.rs); the allocator design it exercises
 is [docs/07](../docs/07-allocation.md).

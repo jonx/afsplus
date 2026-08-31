@@ -16,7 +16,7 @@ enforces that.
 | File | What it does | Owned by |
 |---|---|---|
 | [tools-spec.md](tools-spec.md) | Specification of the official CLI tools | [docs/README.md](../docs/README.md) |
-| [check-docs.py](check-docs.py) | Documentation contract checker: links, anchors, TOCs, ADR index, navigation blocks, index rows | [CONTRIBUTING.md](../CONTRIBUTING.md) |
+| [check-docs.py](check-docs.py) | Documentation contract checker: links, anchors, TOCs, ADR index, navigation blocks, index rows, status rules | [docs/DOCUMENTATION.md](../docs/DOCUMENTATION.md) |
 | [check-mountable-alpha0.sh](check-mountable-alpha0.sh) | Composite Mountable Alpha-0 completion gate: portable API tests, real macFUSE round trip, Hosted and native AROS matrices, twelve replay cases, one checksummed result set | [ADR-060](../adr/ADR-060-mountable-alpha0-completion-gate.md), M08 |
 | [check-hosted-aros-alpha0.sh](check-hosted-aros-alpha0.sh) | S0 bidirectional same-image gate: Hosted MacAROS → host mount → Hosted MacAROS | [testing/aros-system-volume-qualification.md](../testing/aros-system-volume-qualification.md), [ADR-046](../adr/ADR-046-hosted-aros-same-image.md) |
 | [check-hosted-aros-crash-replay.sh](check-hosted-aros-crash-replay.sh) | Replays the deterministic intent-log power-cut images through the Hosted MacAROS handler | [testing/aros-system-volume-qualification.md](../testing/aros-system-volume-qualification.md), [ADR-047](../adr/ADR-047-hosted-aros-crash-replay.md) |
