@@ -175,7 +175,7 @@ switches are inert, use the diagnostic and reversible workaround in
 transport is not a raw substitute for macFUSE's message channel; see ADR-040.
 The native AROS bridge and its cross-build qualification are documented in
 [`docs/aros-native-bridge.md`](docs/aros-native-bridge.md), ADR-042 through
-ADR-059. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
+ADR-060. `tools/check-hosted-aros-alpha0.sh` now qualifies a bidirectional
 Hosted MacAROS → macFUSE → Hosted MacAROS round trip on one checked image.
 Hosted intent-log replay and the cumulative post-bootstrap S1 system-volume
 pivot are also qualified. The handler now supports standard AROS
@@ -214,6 +214,11 @@ growth; 4 MiB does not boot the control AROS profile far enough to test AFS+.
 ADR-059 makes AROS fatal diagnostics an explicit verdict across Hosted,
 native-QEMU and FS-UAE gates, so a modal requester cannot be mistaken for a
 hang or a successful outer process.
+ADR-060 closes the Mountable Alpha-0 objective with
+`tools/check-mountable-alpha0.sh`: one checksummed composite result binds the
+portable APIs, real macFUSE round trip, Hosted/native operation matrices and
+twelve recovery cases. This completion makes no physical-hardware or format
+freeze claim.
 Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen are not
 format commitments. Incompatible format changes must update the format epoch
 or use feature negotiation as defined in the compatibility specification.

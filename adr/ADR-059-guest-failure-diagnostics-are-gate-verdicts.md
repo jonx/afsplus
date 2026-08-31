@@ -30,8 +30,9 @@ that environment:
 
 Successful evidence records `guest_failure_requester=none` in native/m68k
 reports or a checksummed `guest-failure-requester.txt` marker in Hosted result
-sets. Existing operation, checker, boot-marker and worktree-integrity verdicts
-remain mandatory; the diagnostic scan supplements rather than replaces them.
+sets. Existing operation, checker, boot-marker and consumed-input-integrity
+verdicts remain mandatory; the diagnostic scan supplements rather than
+replaces them.
 
 ## Evidence
 

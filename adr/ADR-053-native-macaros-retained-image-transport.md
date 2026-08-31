@@ -37,9 +37,12 @@ harness loads the raw handler from the retained image through the public
 `InternalLoadSeg` callback API. This raw loading path is test-bootstrap policy;
 normal installations continue to use an `L:` handler and DOSDriver.
 
-The gate snapshots the MacAROS and AROS worktree status before building and
-requires it to be unchanged afterward. Its evidence report hashes the bundle,
-composite, selected probe, device, raw handler, kernel resource and stage 2.
+The gate fingerprints the native tools, QEMU harness, EFI image, stage 2,
+module generator and SDK target configuration that it actually consumes, and
+requires those inputs to remain byte-identical throughout the run. Its evidence
+report hashes that manifest plus the bundle, composite, selected probe, device,
+raw handler and kernel resource. Unrelated edits in a parallel MacAROS or AROS
+worktree do not invalidate an already frozen runtime input set.
 
 ## Evidence
 

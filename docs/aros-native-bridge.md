@@ -221,6 +221,17 @@ its generated start/end objects, never the command-oriented `startup.o`.
 
 ## Runtime qualification stages
 
+The complete Mountable Alpha-0 contract is reproduced with:
+
+```sh
+tools/check-mountable-alpha0.sh
+```
+
+This composite gate binds the portable VFS/FUSE/intent-log tests, a real
+macFUSE same-image round trip, Hosted crash replay, native MacAROS Alpha-0 and
+native crash replay into one checksummed requirement matrix. ADR-060 defines
+the completion boundary and its explicit lack of a hardware claim.
+
 `tools/check-hosted-aros-alpha0.sh` now installs the off-tree package into a
 dedicated Hosted test tree, executes create/read/write/truncate/rename/fsync on
 AROS and macFUSE, returns to AROS for cross-created-file readback, and requires
@@ -256,8 +267,9 @@ case-only rename and reopen/readback. It then inhibits and stops the handler,
 waits for its task to disappear and unloads both modules before the boot gate
 returns PASS. QEMU uses file-backed RAM, after which the gate extracts the exact
 payload and requires a clean schema-5 checker report with zero pending records.
-The report hashes every executable input and the command refuses to mutate
-either the MacAROS or AROS worktree. ADR-053 defines the transport.
+The report hashes every consumed runtime/build input and requires those bytes
+to remain stable during the gate. This permits unrelated parallel worktree
+edits without weakening evidence integrity. ADR-053 defines the transport.
 
 The six native replay cases are reproduced with:
 

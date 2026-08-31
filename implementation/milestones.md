@@ -14,7 +14,7 @@ through a host mount and a MacAROS adapter. Format epoch 1 remains unfrozen.
 | M05 | Checker | Prototype complete | corruption corpus detected safely |
 | M06 | AROS handler | Partial: Hosted, native Apple-AArch64, M68020+ emulator and A500-configured M68000 emulator S0/replay qualified; 8-MiB emulator memory/restart profile measured; Apple hardware, performance budget and physical A500 pending | classic apps operate without recompilation |
 | M07 | FS API v2 | Portable subset implemented | 64-bit and capability tests pass |
-| M08 | FUSE | Host mount and Hosted bidirectional same-image S0 qualified | same image read/write on host and AROS |
+| M08 | FUSE | Mountable Alpha-0 complete: composite VFS, real macFUSE, Hosted/native AROS and 12-case replay gate accepted | same image read/write on host and AROS |
 | M09 | Catalog | Not started | multi-million object enumeration fast path |
 | M10 | Change stream | Not started | incremental index + rescan fallback |
 | M11 | Grow resize | Not started | online/offline policy documented and tested |

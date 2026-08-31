@@ -10,7 +10,6 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 native_repo=${MACAROS_NATIVE_ROOT:-"$repo_root/../aros-apple-silicon"}
 core_build=${MACAROS_NATIVE_BUILD:-"$HOME/Build/aros-apple-core/apple"}
-core_source=${AROS_CORE_SOURCE:-"$repo_root/../aros-apple-core"}
 sdk=${AFSPLUS_AROS_SDK_ROOT:-"$core_build/bin/apple-aarch64"}
 build_tools=${AFSPLUS_AROS_BUILD_TOOLS_ROOT:-"$core_build/bin/darwin-aarch64/tools"}
 output=${AFSPLUS_MACAROS_QEMU_OUTPUT:-"$repo_root/build/macaros-native-block-qemu"}
@@ -28,6 +27,18 @@ require_file() {
 
 require_executable() {
     [ -x "$1" ] || { echo "Missing required executable: $1" >&2; exit 69; }
+}
+
+critical_input_fingerprint() {
+    shasum -a 256 \
+        "$native_repo/tools/arosbundle" \
+        "$native_repo/tools/make-fat12-image.py" \
+        "$native_repo/boot/arosboot/test-qemu.sh" \
+        "$native_repo/tools/boot_generation.py" \
+        "$native_repo/harness/qmp.py" \
+        "$efi" "$stage2" \
+        "$build_tools/genmodule" \
+        "$sdk/gen/config/target.cfg"
 }
 
 [ ! -e "$output" ] || {
@@ -57,15 +68,19 @@ fi
 require_executable "$native_repo/tools/arosbundle"
 require_executable "$native_repo/tools/make-fat12-image.py"
 require_executable "$native_repo/boot/arosboot/test-qemu.sh"
+require_file "$native_repo/tools/boot_generation.py"
+require_file "$native_repo/harness/qmp.py"
 require_executable "$repo_root/tools/check-aros-serial-log.sh"
 require_executable "$repo_root/tools/qemu-file-backed-memory.sh"
 require_executable "$repo_root/tools/extract-macaros-afsram.py"
+require_executable "$build_tools/genmodule"
 require_file "$efi"
 require_file "$stage2"
+require_file "$sdk/gen/config/target.cfg"
 
-native_status_before=$(git -C "$native_repo" status --porcelain=v1)
-core_status_before=$(git -C "$core_source" status --porcelain=v1)
 mkdir -p "$output"
+critical_inputs_before=$(critical_input_fingerprint)
+printf '%s\n' "$critical_inputs_before" >"$output/critical-inputs.txt"
 
 AFSPLUS_AROS_PACKAGE_OUTPUT="$output/alpha0" \
 AFSPLUS_AROS_SDK_ROOT="$sdk" \
@@ -187,16 +202,13 @@ if [ "$extract_after" = 1 ]; then
     grep -q '"log_records_pending":0' "$output/check-after.json"
     checker_clean=true
 fi
-native_status_after=$(git -C "$native_repo" status --porcelain=v1)
-core_status_after=$(git -C "$core_source" status --porcelain=v1)
-[ "$native_status_before" = "$native_status_after" ] || {
-    echo "Native integration worktree changed during the QEMU gate" >&2
+critical_inputs_after=$(critical_input_fingerprint)
+[ "$critical_inputs_before" = "$critical_inputs_after" ] || {
+    echo "A consumed native-QEMU input changed during the gate" >&2
     exit 1
 }
-[ "$core_status_before" = "$core_status_after" ] || {
-    echo "AROS core worktree changed during the QEMU gate" >&2
-    exit 1
-}
+critical_inputs_sha256=$(printf '%s\n' "$critical_inputs_before" | \
+    shasum -a 256 | awk '{print $1}')
 
 {
     echo "format=afsplus-macaros-native-qemu-v2"
@@ -207,6 +219,7 @@ core_status_after=$(git -C "$core_source" status --porcelain=v1)
     echo "descriptor_version=2"
     echo "checker_clean=$checker_clean"
     echo "guest_failure_requester=none"
+    echo "critical_inputs_sha256=$critical_inputs_sha256"
     if [ "$mode" = alpha0 ]; then
         echo "filesystem=afsplus-handler"
         echo "operations=create,read,write,sparse-write,truncate,rename,fsync,casefold,case-only-rename,dismount,unload"
