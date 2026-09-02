@@ -15,7 +15,7 @@ use afsplus_check::check_device;
 use afsplus_core::shared_extents::{self, LoadedSharedExtents, SharedRun};
 use afsplus_core::{mkfs, mount, MkfsParams, Volume};
 use afsplus_format::geometry::Geometry;
-use afsplus_format::tree::{key_u64, TreeItem, TreeKind, TreeNode};
+use afsplus_format::tree::{child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode};
 use afsplus_format::{le, Timespec};
 
 const BS: usize = 4096;
@@ -231,6 +231,38 @@ fn naive_shared_runs(
     Ok(runs)
 }
 
+fn naive_overlap_partition(
+    start: u64,
+    blocks: u64,
+    records: &[SharedRun],
+) -> Vec<shared_extents::SubRun> {
+    let end = start + blocks;
+    let count_at = |block: u64| {
+        records
+            .iter()
+            .find(|record| {
+                record.physical_start <= block && block < record.physical_start + record.block_count
+            })
+            .map(|record| record.reference_count)
+    };
+    let mut segments = Vec::new();
+    let mut cursor = start;
+    while cursor < end {
+        let reference_count = count_at(cursor);
+        let segment_start = cursor;
+        cursor += 1;
+        while cursor < end && count_at(cursor) == reference_count {
+            cursor += 1;
+        }
+        segments.push(shared_extents::SubRun {
+            physical_start: segment_start,
+            block_count: cursor - segment_start,
+            reference_count,
+        });
+    }
+    segments
+}
+
 /// Runs the common ADR-061 recovery oracle over every state in the power-cut
 /// model. Operation-specific checks receive whether the old or new checkpoint
 /// won; the helper independently requires a clean full checker result.
@@ -322,17 +354,21 @@ fn raw_shared_item(start: u64, blocks: u64, references: u32, flags: u32) -> Tree
 /// containing-block checksum first.
 fn load_raw_shared(items: Vec<TreeItem>) -> Result<LoadedSharedExtents, afsplus_core::CoreError> {
     const ROOT_LBA: u64 = 20;
-    let geometry = Geometry {
-        block_size: BS,
-        total_blocks: 128,
-        region_size: 128,
-    };
+    let geometry = test_geometry();
     let mut node = TreeNode::leaf(TreeKind::SharedExtents, 0);
     node.subtree_items = items.len() as u64;
     node.items = items;
     let mut device = MemoryBackend::new(BS, geometry.total_blocks);
     device.write_block(ROOT_LBA, &node.encode(BS, 1).unwrap())?;
     shared_extents::load_all(&mut device, &geometry, ROOT_LBA, 1)
+}
+
+fn test_geometry() -> Geometry {
+    Geometry {
+        block_size: BS,
+        total_blocks: 128,
+        region_size: 128,
+    }
 }
 
 #[test]
@@ -591,6 +627,114 @@ fn checksummed_shared_tree_rejects_overlap_and_nonmaximal_runs() {
     ])
     .unwrap();
     assert_eq!(distinct.records.len(), 2);
+}
+
+#[test]
+fn shared_loader_rejects_wrong_identity_generation_and_unreadable_nodes() {
+    const ROOT_LBA: u64 = 20;
+    let geometry = test_geometry();
+
+    for (label, kind, owner, generation) in [
+        ("tree kind", TreeKind::ExtentMap, 0, 1),
+        ("owner", TreeKind::SharedExtents, 99, 1),
+        ("future generation", TreeKind::SharedExtents, 0, 2),
+    ] {
+        let mut node = TreeNode::leaf(kind, owner);
+        node.items.push(raw_shared_item(40, 4, 2, 0));
+        node.subtree_items = 1;
+        let mut device = MemoryBackend::new(BS, geometry.total_blocks);
+        device
+            .write_block(ROOT_LBA, &node.encode(BS, generation).unwrap())
+            .unwrap();
+        assert!(
+            shared_extents::load_all(&mut device, &geometry, ROOT_LBA, 1).is_err(),
+            "wrong {label} was accepted"
+        );
+    }
+
+    let mut blank_root = MemoryBackend::new(BS, geometry.total_blocks);
+    assert!(
+        shared_extents::load_all(&mut blank_root, &geometry, ROOT_LBA, 1).is_err(),
+        "unreadable root was accepted"
+    );
+
+    // The root itself is sound and points to structurally plausible children;
+    // the first child is deliberately blank. This distinguishes an unreadable
+    // descendant from a bad root checksum.
+    let internal = TreeNode {
+        kind: TreeKind::SharedExtents,
+        owner: 0,
+        level: 1,
+        subtree_items: 2,
+        leftmost_child: 21,
+        leftmost_items: 1,
+        items: vec![TreeItem {
+            key: key_u64(60).to_vec(),
+            value: child_value(ChildRef {
+                lba: 22,
+                subtree_items: 1,
+            })
+            .unwrap(),
+        }],
+    };
+    let mut right = TreeNode::leaf(TreeKind::SharedExtents, 0);
+    right.items.push(raw_shared_item(60, 4, 2, 0));
+    right.subtree_items = 1;
+    let mut unreadable_child = MemoryBackend::new(BS, geometry.total_blocks);
+    unreadable_child
+        .write_block(ROOT_LBA, &internal.encode(BS, 1).unwrap())
+        .unwrap();
+    unreadable_child
+        .write_block(22, &right.encode(BS, 1).unwrap())
+        .unwrap();
+    assert!(
+        shared_extents::load_all(&mut unreadable_child, &geometry, ROOT_LBA, 1).is_err(),
+        "unreadable descendant was accepted"
+    );
+}
+
+#[test]
+fn overlap_resolver_matches_an_independent_per_block_model() {
+    const BLOCKS: u64 = 32;
+    let mut state = 0x0610_a11a_u64;
+    for case in 0..4_096 {
+        let mapping_count = (state as usize % 8) + 1;
+        let mut mappings = Vec::with_capacity(mapping_count);
+        for _ in 0..mapping_count {
+            state = state
+                .wrapping_mul(2_862_933_555_777_941_757)
+                .wrapping_add(3_037_000_493);
+            let start = state % BLOCKS;
+            state = state
+                .wrapping_mul(2_862_933_555_777_941_757)
+                .wrapping_add(3_037_000_493);
+            mappings.push(CountedMapping::one(start, 1 + state % (BLOCKS - start)));
+        }
+        let records: Vec<_> = expected_shared_runs(&mappings)
+            .unwrap()
+            .into_iter()
+            .map(|record| SharedRun {
+                physical_start: record.start,
+                block_count: record.blocks,
+                reference_count: record.references,
+                flags: 0,
+            })
+            .collect();
+
+        state = state
+            .wrapping_mul(2_862_933_555_777_941_757)
+            .wrapping_add(3_037_000_493);
+        let query_start = state % BLOCKS;
+        state = state
+            .wrapping_mul(2_862_933_555_777_941_757)
+            .wrapping_add(3_037_000_493);
+        let query_blocks = 1 + state % (BLOCKS - query_start);
+        assert_eq!(
+            shared_extents::resolve_overlaps(query_start, query_blocks, &records).unwrap(),
+            naive_overlap_partition(query_start, query_blocks, &records),
+            "overlap disagreement in generated case {case}: query {query_start}+{query_blocks}, records {records:?}"
+        );
+    }
 }
 
 #[test]
