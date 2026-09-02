@@ -2609,12 +2609,21 @@ impl<D: BlockDevice> Volume<D> {
             return Ok(());
         }
         let low_key = {
+            // Query immediately before `start`, not at `start`: when a
+            // record begins exactly on the edited boundary, lookup_floor at
+            // `start` returns that record and hides its immediate left
+            // neighbour.  The neighbour is needed because the edit may make
+            // the two records merge on the left (for example rc=3 -> rc=2 next
+            // to an existing rc=2 record).  For start zero there cannot be a
+            // predecessor, and the saturating key still includes a record at
+            // zero in the range walk below.
+            let predecessor_key = afsplus_format::tree::key_u64(start.saturating_sub(1));
             let (floor, _) = crate::tree::lookup_floor(
                 &mut self.dev,
                 &geo,
                 root,
                 shared_extents::spec(committed),
-                &afsplus_format::tree::key_u64(start),
+                &predecessor_key,
             )?;
             floor
                 .map(|(key, _)| key)

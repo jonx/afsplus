@@ -185,6 +185,54 @@ fn clone_of_clone_counts_three_references() {
 }
 
 #[test]
+fn decrement_at_a_record_start_merges_with_its_left_neighbour() {
+    let dev = formatted(true);
+    let mut vol = mount(dev).unwrap();
+    let content = vec![0x62u8; 2 * BS];
+    let source = vol.create_file_in_root("origin", &content, ts(2)).unwrap();
+    let first = vol.clone_file(source, OBJECT_ROOT, "copy1", ts(3)).unwrap();
+
+    // Make copy1 private in the first block.  The second physical block
+    // remains shared by source and copy1.
+    vol.write_file_at(first, 0, &vec![0x91u8; BS], ts(4))
+        .unwrap();
+
+    // A second full clone of source creates adjacent records with different
+    // counts: the first block is shared by source/copy2 (rc=2), the second by
+    // source/copy1/copy2 (rc=3).
+    let second = vol.clone_file(source, OBJECT_ROOT, "copy2", ts(5)).unwrap();
+    let before = shared_records(&mut vol);
+    assert_eq!(
+        before.len(),
+        2,
+        "expected the rc=2/rc=3 boundary: {before:?}"
+    );
+    assert_eq!(before[0].reference_count, 2);
+    assert_eq!(before[1].reference_count, 3);
+    assert_eq!(before[0].physical_end().unwrap(), before[1].physical_start);
+
+    // Dropping copy1 decrements exactly the second record at its own start.
+    // The result must merge with the left rc=2 neighbour.  A prefetch based
+    // on lookup_floor(start) misses that neighbour and leaves a non-canonical
+    // pair of adjacent rc=2 records behind.
+    vol.delete_file(OBJECT_ROOT, "copy1", ts(6)).unwrap();
+    let after = shared_records(&mut vol);
+    assert_eq!(
+        after.len(),
+        1,
+        "adjacent equal counts must merge: {after:?}"
+    );
+    assert_eq!(after[0].block_count, 2);
+    assert_eq!(after[0].reference_count, 2);
+    assert_eq!(vol.read_file(source).unwrap(), content);
+    assert_eq!(vol.read_file(second).unwrap(), content);
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+}
+
+#[test]
 fn clone_without_the_feature_is_rejected() {
     let dev = formatted(false);
     let mut vol = mount(dev).unwrap();
