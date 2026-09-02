@@ -12,4 +12,5 @@ measurement reports; the sequence of stages is [ROADMAP.md](../ROADMAP.md).
 | [peer-review-prototype-plan.md](peer-review-prototype-plan.md) | Corrections accepted after external review and the first executable prototype scope |
 | [team-workstreams.md](team-workstreams.md) | Parallel workstreams and the merge rule for on-disk semantics |
 | [fsync-intent-log-baseline.md](fsync-intent-log-baseline.md) | Measured fsync cost under checkpoint COW and the intent-log decision input (architecture blocker 2) |
+| [data-policy-bakeoff.md](data-policy-bakeoff.md) | Measured full-COW versus private-in-place decision input (architecture blocker 1) |
 | [shared-extents-completion.md](shared-extents-completion.md) | Retained host-side completion evidence for ADR-061 shared extents and reflinks |

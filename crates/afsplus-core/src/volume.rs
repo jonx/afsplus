@@ -45,6 +45,10 @@ use crate::CoreError;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CommitStats {
     pub data_blocks_written: u64,
+    /// Data blocks overwritten at their committed physical address. This is
+    /// a subset of `data_blocks_written` and is zero under the default full
+    /// COW policy.
+    pub data_blocks_overwritten_in_place: u64,
     /// COW metadata blocks (records, directories, object map, retired list).
     pub metadata_blocks_written: u64,
     pub bitmap_pages_written: u64,
@@ -64,6 +68,19 @@ pub struct CommitStats {
     /// Total bytes issued to the device by this transaction.
     pub bytes_written: u64,
     pub alloc: AllocStats,
+}
+
+/// Runtime data-update policy used by the Q1 architecture qualification.
+///
+/// This does not alter the on-disk format. `InPlacePrivate` is deliberately
+/// conservative: only already-written, unshared blocks of a non-extending
+/// write are eligible. A hole, unwritten extent, shared marker, or any other
+/// uncertainty makes the complete operation fall back to full data COW.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DataUpdatePolicy {
+    #[default]
+    FullCow,
+    InPlacePrivate,
 }
 
 pub const MAX_DIRECTORY_PAGE_ENTRIES: usize = 4096;
@@ -175,6 +192,9 @@ pub struct Volume<D: BlockDevice> {
     shared_refs: Option<(u64, RefEdit)>,
     /// Direct-layout promotions performed by the transaction being built.
     pending_layout_promotions: u64,
+    data_update_policy: DataUpdatePolicy,
+    /// Transaction-scoped count consumed by `commit_transaction`.
+    pending_in_place_data_blocks: u64,
 }
 
 impl<D: BlockDevice> Volume<D> {
@@ -202,6 +222,8 @@ impl<D: BlockDevice> Volume<D> {
             last_commit: None,
             shared_refs: None,
             pending_layout_promotions: 0,
+            data_update_policy: DataUpdatePolicy::FullCow,
+            pending_in_place_data_blocks: 0,
         }
     }
 
@@ -297,6 +319,16 @@ impl<D: BlockDevice> Volume<D> {
 
     pub fn last_commit_stats(&self) -> Option<CommitStats> {
         self.last_commit
+    }
+
+    pub fn data_update_policy(&self) -> DataUpdatePolicy {
+        self.data_update_policy
+    }
+
+    /// Selects the runtime-only data update policy. Newly mounted volumes
+    /// always start in [`DataUpdatePolicy::FullCow`].
+    pub fn set_data_update_policy(&mut self, policy: DataUpdatePolicy) {
+        self.data_update_policy = policy;
     }
 
     /// Filesystem-wide durability barrier. Successful immediate mutations
@@ -518,10 +550,13 @@ impl<D: BlockDevice> Volume<D> {
         Ok(count as usize)
     }
 
-    /// Replaces `content.len()` bytes at `offset` using fresh data blocks and
-    /// one atomic COW metadata publication. Writing beyond EOF creates a hole;
-    /// the file is converted from its cheap direct extent to an AFST extent
-    /// map only when the resulting layout is sparse or fragmented.
+    /// Replaces `content.len()` bytes at `offset` and publishes the metadata
+    /// atomically. The default policy uses fresh data blocks. The experimental
+    /// private-in-place policy may reuse proven-private physical blocks for a
+    /// non-extending write; see [`DataUpdatePolicy`]. Writing beyond EOF
+    /// creates a hole; the file is converted from its cheap direct extent to
+    /// an AFST extent map only when the resulting layout is sparse or
+    /// fragmented.
     pub fn write_file_at(
         &mut self,
         object_id: u64,
@@ -550,6 +585,11 @@ impl<D: BlockDevice> Volume<D> {
         let end_block = end_offset.div_ceil(block_size);
         let write_block_count = end_block - first_block;
         let (old_extents, old_tree_blocks) = self.load_file_layout(&record)?;
+        let overwrite_in_place = self.data_update_policy == DataUpdatePolicy::InPlacePrivate
+            && end_offset <= record.size_bytes
+            && (first_block..end_block).all(|logical_block| {
+                extent_at(&old_extents, logical_block).is_some_and(|extent| extent.flags == 0)
+            });
 
         // Partial first/last blocks inherit their committed bytes. Holes and
         // unwritten preallocation read as zeros, so they need no special case.
@@ -581,6 +621,36 @@ impl<D: BlockDevice> Volume<D> {
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
         )?;
+        if overwrite_in_place {
+            let mut data_writes = Vec::with_capacity(write_block_count as usize);
+            for (logical_block, block) in (first_block..end_block).zip(blocks) {
+                let extent = extent_at(&old_extents, logical_block).ok_or_else(|| {
+                    CoreError::Corrupt("in-place write lost its validated extent".into())
+                })?;
+                let physical = extent
+                    .physical_start
+                    .checked_add(logical_block - extent.logical_start)
+                    .ok_or_else(|| {
+                        CoreError::Corrupt("in-place physical block overflows".into())
+                    })?;
+                data_writes.push((physical, block));
+            }
+            self.pending_in_place_data_blocks = write_block_count;
+            return self.commit_file_layout(
+                record,
+                record_lba,
+                old_extents.clone(),
+                old_tree_blocks,
+                old_extents,
+                Vec::new(),
+                record.size_bytes,
+                true,
+                now,
+                generation,
+                tx,
+                data_writes,
+            );
+        }
         let additions = allocate_extent_runs(
             &mut tx,
             &mut self.dev,
@@ -3725,6 +3795,7 @@ impl<D: BlockDevice> Volume<D> {
         // distinguish them, because an aborted commit does not consume it.
         self.shared_refs = None;
         self.pending_layout_promotions = 0;
+        self.pending_in_place_data_blocks = 0;
         self.checkpoint
             .generation
             .checked_add(1)
@@ -3949,6 +4020,7 @@ impl<D: BlockDevice> Volume<D> {
             }
         }
         let layout_promotions = std::mem::take(&mut self.pending_layout_promotions);
+        let in_place_data_blocks = std::mem::take(&mut self.pending_in_place_data_blocks);
 
         let finished = tx.finish(&mut self.dev)?;
         let (allocation_root, new_allocation_tree_blocks) =
@@ -3959,6 +4031,7 @@ impl<D: BlockDevice> Volume<D> {
 
         let mut stats = CommitStats {
             data_blocks_written: data_writes.len() as u64,
+            data_blocks_overwritten_in_place: in_place_data_blocks,
             metadata_blocks_written: meta_writes.len() as u64,
             bitmap_pages_written: finished.bitmap_writes.len() as u64,
             region_descriptors_written: finished.descriptor_writes.len() as u64,
