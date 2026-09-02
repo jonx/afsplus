@@ -1,7 +1,7 @@
 # ADR-009: Metadata transaction mechanism
 
-Status: Reopened after PFS3/PFS4 Stage 0 review
-Amended by: ADR-020
+Status: Architecture resolved by ADR-063; final epoch-1 wire freeze remains M14
+Amended by: ADR-020, ADR-063
 
 ## Context
 

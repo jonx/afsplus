@@ -1,7 +1,7 @@
 # ADR-037: Intent log for forced durability between checkpoints
 
-Status: Experimental prototype feature (blocker-2 bake-off, phase B); not an
-epoch-1 commitment
+Status: Mechanism accepted by ADR-063; record wire version 2 remains experimental
+Amended by: ADR-063
 
 ## Context
 

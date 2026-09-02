@@ -2,6 +2,7 @@
 
 Status: Accepted; wire format experimental until M14
 Amends: ADR-027, ADR-035
+Amended by: ADR-062
 
 <!-- toc -->
 

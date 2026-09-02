@@ -2,24 +2,24 @@
 
 > **ADRs:** [ADR-009](../adr/ADR-009-journal.md), [ADR-020](../adr/ADR-020-checkpoint-commit.md),
 > [ADR-026](../adr/ADR-026-bounded-atomic-batches.md), [ADR-036](../adr/ADR-036-reclaim-queue.md),
-> [ADR-037](../adr/ADR-037-intent-log.md) · **Spec:** none ·
-> **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M04
+> [ADR-037](../adr/ADR-037-intent-log.md), [ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md),
+> [ADR-063](../adr/ADR-063-intent-log-epoch1.md) · **Spec:** [invariants](../spec/invariants.md) ·
+> **Tests:** [crash-testing](../testing/crash-testing.md), [data-policy qualification](../testing/data-policy-qualification.md) · **Milestones:** M04
 
 <!-- toc -->
 
-- [1. Requirement, not mechanism](#1-requirement-not-mechanism)
+- [1. Requirements and selected mechanism](#1-requirements-and-selected-mechanism)
 - [2. Transaction boundary](#2-transaction-boundary)
-- [3. Proposed COW checkpoint commit](#3-proposed-cow-checkpoint-commit)
-- [4. Epoch-1 blocker A: data overwrite versus data COW](#4-epoch-1-blocker-a-data-overwrite-versus-data-cow)
-  - [Candidate A: in-place data overwrite](#candidate-a-in-place-data-overwrite)
-  - [Candidate B: full data COW](#candidate-b-full-data-cow)
-  - [Candidate C: explicit hybrid policy](#candidate-c-explicit-hybrid-policy)
-  - [Decision rule](#decision-rule)
-  - [Current prototype experiment](#current-prototype-experiment)
+- [3. COW checkpoint commit](#3-cow-checkpoint-commit)
+- [4. Epoch-1 user-data update policy](#4-epoch-1-user-data-update-policy)
+  - [Default full data COW](#default-full-data-cow)
+  - [Explicit private in-place opt-in](#explicit-private-in-place-opt-in)
+  - [Crash and generation contract](#crash-and-generation-contract)
+  - [Executable qualification](#executable-qualification)
 - [5. Recovery](#5-recovery)
 - [6. Retired blocks and quarantine](#6-retired-blocks-and-quarantine)
 - [7. Deferred reclamation](#7-deferred-reclamation)
-- [8. Epoch-1 blocker B: fsync and small durability commits](#8-epoch-1-blocker-b-fsync-and-small-durability-commits)
+- [8. Epoch-1 fsync and small durability commits](#8-epoch-1-fsync-and-small-durability-commits)
 - [9. NO_CHANGES mode](#9-nochanges-mode)
 - [10. Durability contract](#10-durability-contract)
 - [11. Concurrency and readers](#11-concurrency-and-readers)
@@ -27,15 +27,16 @@
 
 <!-- /toc -->
 
-## 1. Requirement, not mechanism
+## 1. Requirements and selected mechanism
 
 AFS+ requires atomic metadata transactions, bounded recovery, and explicit durability semantics.
 
 A conventional metadata redo journal was the original proposal. After the PFS3/PFS4 Stage 0 review it is no longer a predetermined requirement.
 
-The leading candidate is copy-on-write metadata with alternating checksummed checkpoint records. See ADR-009 and ADR-020.
-
-The implementation phase must now answer several questions that cannot be settled honestly by prose alone. They are explicit epoch-1 blockers below.
+AFS+ uses copy-on-write metadata with alternating checksummed checkpoint
+records, bounded group commit, and a small intent log for forced durability
+between checkpoints. ADR-063 records why these are complementary layers of
+one transaction engine rather than competing engines.
 
 ## 2. Transaction boundary
 
@@ -51,11 +52,11 @@ Operations that must expose an atomic logical result include:
 
 Large physical cleanup need not be part of the same transaction if the user-visible change can commit and cleanup can safely continue through deferred reclamation.
 
-## 3. Proposed COW checkpoint commit
+## 3. COW checkpoint commit
 
 Changed authoritative metadata is written to new blocks rather than overwriting blocks reachable from the current checkpoint.
 
-Proposed ordering:
+Commit ordering:
 
 1. write required user-data blocks according to the selected data-versioning policy
 2. durability barrier/flush as required by that policy
@@ -66,74 +67,61 @@ Proposed ordering:
 
 The previous checkpoint's **metadata graph** remains untouched until the new checkpoint is independently valid.
 
-This statement deliberately does not yet claim that every byte of user data referenced by the previous checkpoint remains unchanged. That stronger guarantee depends on the data-update policy described next.
+This ordering alone does not claim that every byte of user data referenced by
+the previous checkpoint remains unchanged. That stronger guarantee depends on
+the data-update policy described next.
 
-## 4. Epoch-1 blocker A: data overwrite versus data COW
+## 4. Epoch-1 user-data update policy
 
-Rewriting a logical range that already has allocated storage creates a fundamental choice.
+[ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md) selects an explicit
+per-file hybrid. The policy controls user-data versioning only; metadata uses
+COW in every mode, and reflink-shared ranges always use data COW.
 
-### Candidate A: in-place data overwrite
+### Default full data COW
 
-Metadata is COW/checkpointed, but unshared user-data blocks may be overwritten in place.
+Every modification to committed data allocates replacement blocks until
+commit. Fresh data is flushed before the COW extent metadata, then the
+alternate checkpoint publishes the result. While an older checkpoint and its
+blocks remain retained, its file bytes are stable and crash recovery selects
+the complete old or complete new content.
 
-Advantages:
+Full COW is the creation default and the mandatory fallback whenever privacy
+or representability is uncertain.
 
-- low fragmentation for database/VM-like workloads
-- lower allocation/write-amplification cost
+### Explicit private in-place opt-in
 
-Consequences:
+A filesystem-neutral policy API may opt a file into private in-place updates.
+The choice is persistent per file; AFS+ does not infer it from a workload.
 
-- after a crash, an older valid metadata checkpoint may reference partially newer user data
-- the recovery contract resembles metadata-journaling filesystems: structurally consistent metadata does not imply old file bytes are preserved
-- an exact previous committed content-generation handle cannot be guaranteed once its data blocks are overwritten
+An operation may overwrite its mapped physical blocks only when the complete
+write is non-extending and every touched block is materialized and proven
+private. A hole, unwritten extent, shared marker, unresolved reference state,
+or extension sends the complete operation through COW. Metadata is still
+published by the ordinary checkpoint transaction.
 
-### Candidate B: full data COW
+### Crash and generation contract
 
-Every modification to committed data allocates replacement blocks until commit.
+After an interrupted in-place operation, the older metadata checkpoint remains
+structurally valid but the requested byte range may contain old, new or torn
+data. If data reached the device and a later metadata operation failed, a
+returned error also does not promise byte rollback.
 
-Advantages:
+An API therefore never labels such bytes as an exact historical content
+generation. It returns `GENERATION_NOT_AVAILABLE` when physical stability
+cannot be proved. This is independent of Q4's future retention-duration
+policy.
 
-- previous retained checkpoints/content generations remain byte-stable
-- reflink and generation-stable reads share one model
+### Executable qualification
 
-Consequences:
-
-- potential fragmentation and write amplification, especially for databases, VM images, and random rewrites
-- more reclamation/reference tracking
-
-### Candidate C: explicit hybrid policy
-
-Some files/ranges use data COW while others permit in-place overwrite under a clearly weaker historical-generation contract.
-
-This may provide useful tradeoffs but creates policy and interoperability complexity.
-
-### Decision rule
-
-Do not freeze this choice on paper.
-
-The first writable prototype must measure at least:
-
-- random 4 KiB rewrites of large files
-- database/VM-image style workloads
-- reflink COW writes
-- crash states before/after metadata commit
-- fragmentation
-- bytes written
-- CPU and RAM
-- ability/cost to serve an exact committed generation
-
-Until this experiment is complete, any API promising an old content generation must qualify that the requested data generation must still be retained and physically stable.
-
-### Current prototype experiment
-
-Core Scale-1 currently implements Candidate B for range writes and partial-tail
-truncate: touched committed data blocks are never overwritten. Fresh data is
-flushed before COW extent metadata, then the alternate checkpoint publishes
-the result. The exhaustive sparse-write power-cut matrix accepts only the
-complete pre-write or post-write byte sequence. This is executable evidence
-for full data COW, but does not yet freeze the epoch-1 policy; write
-amplification, fragmentation, database/VM workloads, and the explicit hybrid
-alternative still require measurement.
+The runtime-only `DataUpdatePolicy` switch keeps full COW as the mount default
+and implements the conservative eligibility rule for comparison. Random 4 KiB,
+database hot-set, append and reflink workloads, plus power-cut and injected-I/O
+matrices, are specified in
+[`testing/data-policy-qualification.md`](../testing/data-policy-qualification.md).
+The measurements are retained in the
+[Q1 bake-off](../implementation/data-policy-bakeoff.md). The shipping per-file
+encoding and API remain an M14 gate rather than an implicit property of this
+runtime switch.
 
 ## 5. Recovery
 
@@ -183,15 +171,21 @@ This avoids enormous temporary free lists and long uninterruptible commits.
 
 The executable prototype implements this as a segmented reclaim queue (ADR-036): retired runs are appended to a FIFO of immutable sealed blocks, each transaction reclaims at most a bounded block budget from the head, and a persistent cursor makes the work resumable across crashes and reboots. Multiple retire generations coexist in the queue; normal mount reads only its root block.
 
-## 8. Epoch-1 blocker B: fsync and small durability commits
+## 8. Epoch-1 fsync and small durability commits
 
 A global checkpoint is conceptually simple, but a small-file `fsync()` must not accidentally require an expensive whole-filesystem commit path that makes Git/package/database workloads unusable.
 
-The first implementation should build the simplest checkpoint-COW path first and measure it.
+ADR-063 selects checkpoint COW, bounded group commit and a small intent log as
+the epoch-1 durability architecture. Group commit amortizes bursts under one
+checkpoint. The intent log records fsynced prefixes of the same open batch and
+recovery materializes them through the same checkpoint engine.
 
-Both amortization mechanisms are now implemented and measured in the executable prototype ([`implementation/fsync-intent-log-baseline.md`](../implementation/fsync-intent-log-baseline.md)): bounded atomic batches (ADR-026) group-commit bursts under one checkpoint, and the experimental intent log (ADR-037) makes a forced fsync cost ~1 sequential record write plus one barrier between checkpoints, with per-fsync-group all-or-nothing crash recovery.
+Both mechanisms are implemented and measured for the namespace window
+([`implementation/fsync-intent-log-baseline.md`](../implementation/fsync-intent-log-baseline.md)).
+The log makes a forced ref update cost about one sequential record write plus
+one barrier between checkpoints, with per-fsync-group all-or-nothing recovery.
 
-Required benchmark:
+Qualification workloads include:
 
 ```text
 create/write small file
@@ -201,11 +195,14 @@ repeat
 
 plus rename/replace-heavy Git/package workloads.
 
-If global checkpoint latency/write amplification is unacceptable, the expected next design candidate is **checkpoint COW plus a small durability/intent log**, rather than replacing the entire checkpoint engine with a second full transaction architecture.
+Record wire version 2 covers create/delete/rename and created-file content. It
+does not cover write or truncate of an existing file. Such fsyncs use a full
+checkpoint until the log encoding, replay, checker and crash matrices support
+them. Consequently the intent-log mechanism is accepted while its record wire,
+mandatory size and universal cheap-file-fsync capability remain unfrozen.
 
-AFS+ therefore reserves a discoverable extension point for an auxiliary durability log before epoch 1, but does not freeze its record format, mandatory size, or activation semantics until measurement proves it is needed.
-
-The project no longer requires building two complete transaction engines merely for a bake-off. A redo/durability log prototype is built when the checkpoint prototype or its benchmarks demonstrate a concrete need.
+AFS+ does not build a second redo-journal transaction engine: the log is a
+bounded durability layer over checkpoint COW.
 
 ## 9. NO_CHANGES mode
 

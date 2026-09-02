@@ -39,6 +39,26 @@ the selected checkpoint ([ADR-061](../adr/ADR-061-shared-extent-references.md)).
   bit is corruption; the feature bit with a zero root is the legal
   enabled-but-unused state
 
+## User-data updates
+
+[ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md) defines two explicit
+per-file contracts:
+
+- full data COW is the default and publishes replacement mappings only after
+  their data satisfies the durability barrier
+- private in-place update is an opt-in policy and may apply only to a
+  non-extending write whose complete touched range is materialized and proven
+  private
+- a hole, unwritten mapping, shared marker, unresolved shared-reference state,
+  or extension makes the complete operation COW
+- no physical block with two or more live mappings is overwritten in place
+- metadata remains COW regardless of the user-data policy
+- a generation exposed after in-place overwrite may not be advertised as an
+  exact historical byte version; exact-generation access fails explicitly
+  when physical stability cannot be proved
+- ignoring the in-place optimization and performing full COW is always a
+  conforming, stronger fallback
+
 ## Objects
 
 - object ID zero is invalid
@@ -58,6 +78,14 @@ the selected checkpoint ([ADR-061](../adr/ADR-061-shared-extent-references.md)).
 - transaction sequence is monotonic
 - only committed transactions affect recovered authoritative state
 - replay is idempotent or otherwise safely detectable
+- checkpoint COW is the authoritative metadata transaction engine; group
+  commit and the intent log feed that same engine rather than defining
+  independent allocation or mutation semantics
+- a completed logged fsync group is replayed completely or not at all
+- an active intent-log version may advertise only operations its recovery path
+  can validate and replay
+- existing-file write/truncate records reference only replacement data made
+  durable before the record and reject torn or missing content
 
 ## Catalog
 

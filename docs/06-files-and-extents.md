@@ -1,7 +1,8 @@
 # 06. Files and Extents
 
-> **ADRs:** [ADR-027](../adr/ADR-027-reflink-clones.md), [ADR-061](../adr/ADR-061-shared-extent-references.md) · **Spec:** none ·
-> **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
+> **ADRs:** [ADR-027](../adr/ADR-027-reflink-clones.md), [ADR-061](../adr/ADR-061-shared-extent-references.md),
+> [ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md) · **Spec:** [invariants](../spec/invariants.md) ·
+> **Tests:** [crash-testing](../testing/crash-testing.md), [data-policy qualification](../testing/data-policy-qualification.md) · **Milestones:** M03
 
 ## 1. Extent model
 
@@ -44,11 +45,17 @@ Reads from holes return zero.
 
 Writing into a hole allocates storage transactionally.
 
-`Volume::write_file_at` implements this rule with full data COW: every touched
-logical block is reconstructed in fresh storage, user data is made durable
-before the new extent root, and the old mapping is quarantined. A write beyond
-EOF therefore creates a real missing logical range rather than materializing
-zero-filled blocks.
+Writing into a hole uses data COW: every touched logical block is reconstructed
+in fresh storage, user data is made durable before the new extent root, and
+the old mapping, if any, is quarantined. A write beyond EOF therefore creates
+a real missing logical range rather than materializing zero-filled blocks.
+
+For already materialized private data, [ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md)
+selects an explicit per-file hybrid. Full COW is the default. An opted-in file
+may overwrite a non-extending range in place only when every touched block is
+proven private; otherwise the complete operation falls back to COW. The
+shipping policy is persistent per file, although the executable qualification
+switch remains runtime-only until its format/API gate is complete.
 
 ## 4. Preallocation
 
@@ -86,7 +93,10 @@ A shared range is never modified in place while another live object still refere
 
 The reference mechanism that carries this is a volume-wide typed reference tree keyed by physical run, with the extent's shared flag acting as a hint and the tree as the authority ([ADR-061](../adr/ADR-061-shared-extent-references.md)); the requirement it satisfies is [ADR-027](../adr/ADR-027-reflink-clones.md).
 
-The general policy for writes to **unshared** committed data remains an explicit transaction-prototype question. See [`docs/08-transactions-and-journal.md`](08-transactions-and-journal.md).
+Writes to **unshared** committed data follow ADR-062's explicit per-file
+policy. The presence of the in-place option never weakens this section's
+shared-range COW requirement. See
+[`docs/08-transactions-and-journal.md`](08-transactions-and-journal.md).
 
 ## 7. Reserved optional user-data checksum association
 

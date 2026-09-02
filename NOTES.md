@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-02 — Q1 and Q2 architecture blockers closed](#2026-09-02--q1-and-q2-architecture-blockers-closed)
 - [2026-09-02 — Shared extents and reflinks qualified](#2026-09-02--shared-extents-and-reflinks-qualified)
 - [2026-08-31 — Team board adopted](#2026-08-31--team-board-adopted)
 - [2026-08-31 — Shared extents chosen as the next epoch-1 lot](#2026-08-31--shared-extents-chosen-as-the-next-epoch-1-lot)
@@ -19,6 +20,33 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-02 — Q1 and Q2 architecture blockers closed
+
+The shared-extent implementation made the private/shared write fork executable,
+so Q1 was settled by measurement rather than preference. A runtime-only
+private-in-place prototype was compared against full data COW on random 4 KiB,
+database-hotset, append and reflink-first-write workloads. The large random
+case fell from 26,972 to 8,000 device writes, 24,870 to 3,000 allocations,
+21,936 to 2,000 retirements and 1,767 to one final extent. The database hot
+set retained a smaller but material advantage; append and shared first-write
+rows were identical because they correctly remained COW. Power-cut and
+injected-error tests demonstrated the price directly: an old metadata
+generation may expose old, new or torn overwritten bytes, and a returned error
+does not imply byte rollback. ADR-062 therefore selected full COW by default
+plus a persistent, explicit per-file private-in-place opt-in, never automatic
+detection.
+
+Q2's optimized re-run held the earlier result: a logged Git-style ref update
+cost 2.152 writes and 1.032 flushes per operation, versus 10/3 for one
+group-commit checkpoint and 26.992/6.998 for the original sequence. Review of
+the executable record format caught an overclaim in the old report: version 2
+can replay create/delete/rename and created-file content, but not writes or
+truncates of existing files. ADR-063 accepted checkpoint COW, bounded group
+commit and the intent log as the layered epoch-1 architecture while refusing
+to freeze that namespace-only wire. Existing-file replay, the persistent Q1
+policy representation, portable-C parity and real-device qualification remain
+M14 gates rather than unresolved architecture choices.
 
 ## 2026-09-02 — Shared extents and reflinks qualified
 

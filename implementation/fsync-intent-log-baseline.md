@@ -190,5 +190,5 @@ freeze.
    the log is precisely how an fsync becomes cheap between group-committed
    checkpoints. The measured recommendation is to keep both, with the log
    remaining an experimental feature until existing-file write/truncate
-   replay survives the same workload and crash suite and the epoch-1
-   feature-flag decision is made.
+   replay survives the same workload and crash suite. [ADR-063](../adr/ADR-063-intent-log-epoch1.md)
+   accepts this layered architecture while retaining that wire gate.

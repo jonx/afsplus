@@ -1,11 +1,11 @@
 # Data-update policy qualification
 
-> **ADRs:** none while Q1 remains open · **Spec:** none ·
+> **ADRs:** [ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md) · **Spec:** [invariants](../spec/invariants.md) ·
 > **Tests:** `crates/afsplus-check/tests/data_policy.rs` · **Milestones:** M03, M14
 
 This plan compares full data copy-on-write with the conservative private
 in-place prototype without changing the disk format. It is the executable
-decision input for open question Q1.
+qualification evidence for the policy accepted by ADR-062.
 
 ## Reproduction
 

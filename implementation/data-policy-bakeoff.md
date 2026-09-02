@@ -14,8 +14,8 @@ materialized extent whose flags are clear. Any hole, unwritten extent, shared
 marker, extension, or uncertainty sends the complete operation through the
 existing COW path. Remounting resets the runtime choice to full COW.
 
-This intentionally isolates the architecture tradeoff. It does not yet add a
-per-file on-disk policy bit or stabilize a public policy API.
+This intentionally isolates the architecture tradeoff. It contains no
+per-file on-disk policy bit and does not stabilize a public policy API.
 
 ## Optimized qualification result
 
@@ -45,7 +45,8 @@ Append and first writes to shared blocks are deliberately identical across
 policies. That negative result confirms the eligibility boundary rather than
 claiming a universal speedup. Both modes retain the same three flushes per
 data transaction, so in-place overwrite does not solve forced-durability
-latency; Q2 remains a separate decision.
+latency. [ADR-063](../adr/ADR-063-intent-log-epoch1.md) addresses that separate
+mechanism.
 
 ## Crash and historical-generation cost
 
@@ -66,13 +67,10 @@ an error and does not advance the generation, yet the old checkpoint reads the
 new bytes. The injected-error regression pins this behavior so callers cannot
 mistake a failed in-place transaction for byte rollback.
 
-## Evidence-supported recommendation
+## Decision supported by the evidence
 
-The measured benefit is large enough to keep an explicit hybrid design in the
-epoch-1 architecture: full COW by default, with per-file opt-in to private
-in-place updates and an explicit loss of historical byte stability. Automatic
-selection is not supported by the evidence. Shared or uncertain ranges remain
-mandatory COW.
-
-This recommendation does not become an accepted architecture decision until
-the owner approves decision thread 38 and its ADR is reviewed.
+The measured benefit supports the explicit hybrid accepted by
+[ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md): full COW by default,
+with per-file opt-in to private in-place updates and an explicit loss of
+historical byte stability. Automatic selection is not supported by the
+evidence. Shared or uncertain ranges remain mandatory COW.
