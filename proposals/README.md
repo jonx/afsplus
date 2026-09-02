@@ -18,3 +18,5 @@ Proposals:
   profiles (decisions M1–M5).
 - [`checkpoint-slot-rings.md`](checkpoint-slot-rings.md) — wear-leveling slot rings for the checkpoint
   and intent-log areas; the format-affecting half of M1.
+- [`filesystem-api-v2-abi-freeze.md`](filesystem-api-v2-abi-freeze.md) — additive, portable
+  filesystem API v2 ABI and AROS handler transport (decisions D1–D8).
