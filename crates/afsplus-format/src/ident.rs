@@ -48,6 +48,12 @@ pub const LABEL_MAX_BYTES: usize = 64;
 /// implementation that opens the volume (ADR-037).
 pub const INCOMPAT_INTENT_LOG: u64 = 1 << 0;
 
+/// Shared data extents (ADR-061): reference counts must be honoured on every
+/// write and free, so an implementation without support mounts read-only.
+/// Set by mkfs according to the compatibility profile; identification is
+/// immutable, so the first clone cannot set it.
+pub const RO_COMPAT_SHARED_EXTENTS: u64 = 1 << 0;
+
 const LEGACY_PAYLOAD_LEN: usize = 73 + LABEL_MAX_BYTES;
 const FEATURE_PAYLOAD_LEN: usize = LEGACY_PAYLOAD_LEN + 3 * 8;
 const PAYLOAD_LEN: usize = FEATURE_PAYLOAD_LEN + 4;

@@ -3,7 +3,7 @@
 //! never panic on arbitrary input (`docs/21-security-and-corruption.md`).
 
 use afsplus_format::bitmap::BitmapPage;
-use afsplus_format::checkpoint::{Checkpoint, RegionRecord};
+use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::crc32c::CHECKSUM_CRC32C;
 use afsplus_format::dir::{comparison_key, DirBlock, DirEntry};
 use afsplus_format::geometry::Geometry;
@@ -62,34 +62,13 @@ fn sample_checkpoint() -> Checkpoint {
         generation: 5,
         root_object_id: OBJECT_ROOT,
         object_map_block: 10,
-        allocation_root_block: 0,
+        allocation_root_block: 12,
         reclaim_root_block: 11,
         next_object_id: 20,
         committed_tx_id: 5,
         free_blocks_total: 800,
         flags: 0,
-        regions: vec![
-            RegionRecord {
-                descriptor_slot: 0,
-                free_blocks: 100,
-                descriptor_generation: 5,
-            },
-            RegionRecord {
-                descriptor_slot: 2,
-                free_blocks: 200,
-                descriptor_generation: 3,
-            },
-            RegionRecord {
-                descriptor_slot: 1,
-                free_blocks: 250,
-                descriptor_generation: 1,
-            },
-            RegionRecord {
-                descriptor_slot: 0,
-                free_blocks: 250,
-                descriptor_generation: 1,
-            },
-        ],
+        shared_extent_root_block: 0,
     }
 }
 
@@ -287,19 +266,11 @@ fn checkpoint_structural_validation() {
     };
     sample_checkpoint().validate_structural(&geo).unwrap();
 
-    // Wrong region count.
+    // The allocation root is mandatory (ADR-061); zero is unencodable and
+    // structurally invalid (LBA 0 is the identification block).
     let mut ckpt = sample_checkpoint();
-    ckpt.regions.pop();
-    assert!(ckpt.validate_structural(&geo).is_err());
-
-    // Slot out of range.
-    let mut ckpt = sample_checkpoint();
-    ckpt.regions[0].descriptor_slot = 3;
-    assert!(ckpt.validate_structural(&geo).is_err());
-
-    // Bitmap generation from the future.
-    let mut ckpt = sample_checkpoint();
-    ckpt.regions[1].descriptor_generation = 6;
+    ckpt.allocation_root_block = 0;
+    assert!(ckpt.encode(BS).is_err());
     assert!(ckpt.validate_structural(&geo).is_err());
 
     // Object map inside the reserved area.
@@ -307,38 +278,44 @@ fn checkpoint_structural_validation() {
     ckpt.object_map_block = 4;
     assert!(ckpt.validate_structural(&geo).is_err());
 
-    // Free count exceeding the region.
+    // Allocation root out of bounds.
     let mut ckpt = sample_checkpoint();
-    ckpt.regions[0].free_blocks = 257;
+    ckpt.allocation_root_block = geo.total_blocks;
+    assert!(ckpt.validate_structural(&geo).is_err());
+
+    // Free total exceeding the volume.
+    let mut ckpt = sample_checkpoint();
+    ckpt.free_blocks_total = geo.total_blocks + 1;
     assert!(ckpt.validate_structural(&geo).is_err());
 }
 
 #[test]
-fn checkpoint_allocation_root_replaces_inline_region_records() {
+fn checkpoint_shared_extent_root_roundtrip() {
     let geo = Geometry {
         block_size: BS,
         total_blocks: 1024,
         region_size: 256,
     };
-    let mut checkpoint = sample_checkpoint();
-    checkpoint.allocation_root_block = 12;
-    checkpoint.regions.clear();
-    checkpoint.validate_structural(&geo).unwrap();
-    let encoded = checkpoint.encode(BS).unwrap();
-    let decoded = Checkpoint::decode(&encoded, &checkpoint.uuid).unwrap();
+    // Zero root: no shared-extent tree on this volume (ADR-061).
+    let checkpoint = sample_checkpoint();
+    let decoded = Checkpoint::decode(&checkpoint.encode(BS).unwrap(), &checkpoint.uuid).unwrap();
     assert_eq!(decoded, checkpoint);
+    assert_eq!(decoded.shared_extent_root_block, 0);
 
-    let mut mixed = checkpoint.clone();
-    mixed.regions.push(RegionRecord {
-        descriptor_slot: 0,
-        free_blocks: 1,
-        descriptor_generation: 1,
-    });
-    assert!(mixed.encode(BS).is_err());
+    // Nonzero root survives the roundtrip and validates when allocatable.
+    let mut shared = sample_checkpoint();
+    shared.shared_extent_root_block = 13;
+    shared.validate_structural(&geo).unwrap();
+    let decoded = Checkpoint::decode(&shared.encode(BS).unwrap(), &shared.uuid).unwrap();
+    assert_eq!(decoded, shared);
 
-    let mut out_of_bounds = checkpoint;
-    out_of_bounds.allocation_root_block = geo.total_blocks;
+    // A root outside allocatable bounds is structurally invalid.
+    let mut out_of_bounds = sample_checkpoint();
+    out_of_bounds.shared_extent_root_block = geo.total_blocks;
     assert!(out_of_bounds.validate_structural(&geo).is_err());
+    let mut reserved = sample_checkpoint();
+    reserved.shared_extent_root_block = 1;
+    assert!(reserved.validate_structural(&geo).is_err());
 }
 
 #[test]

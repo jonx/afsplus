@@ -21,6 +21,8 @@ pub enum TreeKind {
     Directory,
     ExtentMap,
     AllocationRoot,
+    /// Volume-wide shared-extent reference tree (ADR-061); owner 0.
+    SharedExtents,
 }
 
 impl TreeKind {
@@ -30,6 +32,7 @@ impl TreeKind {
             TreeKind::Directory => 2,
             TreeKind::ExtentMap => 3,
             TreeKind::AllocationRoot => 4,
+            TreeKind::SharedExtents => 5,
         }
     }
 
@@ -39,6 +42,7 @@ impl TreeKind {
             2 => Ok(TreeKind::Directory),
             3 => Ok(TreeKind::ExtentMap),
             4 => Ok(TreeKind::AllocationRoot),
+            5 => Ok(TreeKind::SharedExtents),
             _ => Err(FormatError::Invalid("unknown tree kind")),
         }
     }

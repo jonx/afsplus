@@ -76,3 +76,14 @@ authoritative = false
 rebuildable = "tbd"
 discardable = "tbd"
 description = "Reserved feature identity for optional user-data checksum metadata. Exact compatibility class and storage are intentionally not frozen."
+
+[[feature]]
+id = "org.aros.afsplus:shared-extents"
+short = "shared-extents"
+class = "ro_compat"
+state_model = "disabled-enabled-active"
+lifecycle = "experimental"
+authoritative = true
+rebuildable = true
+discardable = false
+description = "Shared data extents (reflinks, ADR-061): a volume-wide reference tree counts multi-owner physical runs. Reference counts must be honoured on every write and free, so unsupporting implementations mount read-only. Rebuildable by exhaustive scan of every extent map; never discardable while shared runs exist."

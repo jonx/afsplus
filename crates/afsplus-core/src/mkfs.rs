@@ -242,7 +242,7 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         committed_tx_id: generation,
         free_blocks_total: regions.iter().map(|record| record.free_blocks as u64).sum(),
         flags: 0,
-        regions: Vec::new(),
+        shared_extent_root_block: 0,
     };
     dev.write_block(layout::CKPT_SLOT_A, &checkpoint.encode(block_size)?)?;
     dev.flush()?;

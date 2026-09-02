@@ -1320,7 +1320,6 @@ mod tests {
         }
         checkpoint2.allocation_root_block = allocation_mutation.root_lba;
         checkpoint2.free_blocks_total = finished.free_blocks_total;
-        checkpoint2.regions.clear();
         for (lba, block) in &finished.reclaim_writes {
             dev.write_block(*lba, block).unwrap();
         }

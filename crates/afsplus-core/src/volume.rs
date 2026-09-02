@@ -3210,7 +3210,7 @@ impl<D: BlockDevice> Volume<D> {
             committed_tx_id: generation,
             free_blocks_total,
             flags: 0,
-            regions: Vec::new(),
+            shared_extent_root_block: self.checkpoint.shared_extent_root_block,
         };
         self.dev.write_block(
             self.ident.checkpoint_slots[new_slot],

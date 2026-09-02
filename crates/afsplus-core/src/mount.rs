@@ -14,7 +14,7 @@
 
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
-use afsplus_format::ident::{Identification, INCOMPAT_INTENT_LOG};
+use afsplus_format::ident::{Identification, INCOMPAT_INTENT_LOG, RO_COMPAT_SHARED_EXTENTS};
 use afsplus_format::{FormatError, DEFAULT_BLOCK_SIZE};
 
 use crate::verify::load_mount_state;
@@ -247,6 +247,15 @@ pub fn mount_with_options<D: BlockDevice>(
     }
 
     let selection = select_checkpoint(&mut dev, &ident)?;
+    // Feature/root congruence (ADR-061): the enabled-but-unused state (bit
+    // set, root zero) is legal; a root without the feature is not.
+    if selection.chosen.shared_extent_root_block != 0
+        && ident.features.ro_compat & RO_COMPAT_SHARED_EXTENTS == 0
+    {
+        return Err(CoreError::Corrupt(
+            "shared-extent root present without the shared-extents feature".into(),
+        ));
+    }
     #[cfg(target_arch = "m68k")]
     let state = load_mount_state(&mut dev, &ident, &selection.chosen)?;
     #[cfg(not(target_arch = "m68k"))]

@@ -15,7 +15,13 @@ const VALUE_SIZE: usize = 24;
 /// Allocated blocks whose contents are not yet part of the logical file read
 /// as zeros until a later write replaces the extent or clears this flag.
 pub const EXTENT_UNWRITTEN: u32 = 1 << 0;
-const KNOWN_FLAGS: u32 = EXTENT_UNWRITTEN;
+
+/// Conservative marker: this extent's physical run *may* overlap shared
+/// records, and every operation on it must resolve by overlap against the
+/// reference tree (ADR-061). Set with no overlapping record is legal (the
+/// run is private); clear over an existing record is corruption.
+pub const EXTENT_SHARED: u32 = 1 << 1;
+const KNOWN_FLAGS: u32 = EXTENT_UNWRITTEN | EXTENT_SHARED;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Extent {

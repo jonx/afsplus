@@ -43,7 +43,7 @@ fn mkfs_then_mount_yields_empty_root_at_generation_1() {
     let mut vol = mount(dev).unwrap();
     assert_eq!(vol.generation(), 1);
     assert_ne!(vol.checkpoint().allocation_root_block, 0);
-    assert!(vol.checkpoint().regions.is_empty());
+    assert_eq!(vol.checkpoint().shared_extent_root_block, 0);
     assert!(vol.list_root().unwrap().is_empty());
     assert_eq!(vol.ident().label, "TestVol");
     let root = vol.stat(afsplus_format::OBJECT_ROOT).unwrap().unwrap();
@@ -68,7 +68,7 @@ fn create_with_content_commit_remount_read_back() {
         .unwrap();
     assert_eq!(vol.generation(), 2);
     assert_ne!(vol.checkpoint().allocation_root_block, 0);
-    assert!(vol.checkpoint().regions.is_empty());
+    assert_eq!(vol.checkpoint().shared_extent_root_block, 0);
     assert_eq!(vol.lookup_root("hello.txt").unwrap(), Some(id));
     assert_eq!(vol.read_file(id).unwrap(), content);
 

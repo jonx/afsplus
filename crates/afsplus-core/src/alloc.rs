@@ -77,17 +77,13 @@ fn checkpoint_records<D: BlockDevice>(
     geo: &Geometry,
     checkpoint: &Checkpoint,
 ) -> Result<Vec<RegionRecord>, CoreError> {
-    if checkpoint.allocation_root_block == 0 {
-        Ok(checkpoint.regions.clone())
-    } else {
-        Ok(allocation_root::load_all(
-            dev,
-            geo,
-            checkpoint.allocation_root_block,
-            checkpoint.generation,
-        )?
-        .records)
-    }
+    Ok(allocation_root::load_all(
+        dev,
+        geo,
+        checkpoint.allocation_root_block,
+        checkpoint.generation,
+    )?
+    .records)
 }
 
 fn checkpoint_record<D: BlockDevice>(
@@ -96,22 +92,14 @@ fn checkpoint_record<D: BlockDevice>(
     checkpoint: &Checkpoint,
     region: u32,
 ) -> Result<RegionRecord, CoreError> {
-    if checkpoint.allocation_root_block == 0 {
-        checkpoint
-            .regions
-            .get(region as usize)
-            .copied()
-            .ok_or_else(|| CoreError::Corrupt(format!("checkpoint missing region {region}")))
-    } else {
-        allocation_root::lookup_record(
-            dev,
-            geo,
-            checkpoint.allocation_root_block,
-            checkpoint.generation,
-            region,
-        )?
-        .ok_or_else(|| CoreError::Corrupt(format!("allocation root missing region {region}")))
-    }
+    allocation_root::lookup_record(
+        dev,
+        geo,
+        checkpoint.allocation_root_block,
+        checkpoint.generation,
+        region,
+    )?
+    .ok_or_else(|| CoreError::Corrupt(format!("allocation root missing region {region}")))
 }
 
 #[derive(Debug, Clone)]

@@ -62,14 +62,23 @@ struct afsp_timespec_wire {
 /*
  * Extent flags are a versioned namespace. Unknown semantic flags must be
  * handled according to the owning feature's compatibility class.
- * Reserve a bit now for optional data-checksum association so adding that
- * feature later does not require redefining the base extent record.
+ * Bit assignments follow the executable prototype and ADR-061: bit 0 marks
+ * an allocated-but-unwritten (preallocated) mapping that reads as zeros;
+ * bit 1 is the conservative shared marker whose authority is the volume-wide
+ * reference tree. A data-checksum association bit stays reserved so adding
+ * that feature later does not require redefining the base extent record.
  */
 enum afsp_extent_flag {
     AFSP_EXTENT_FLAG_NONE = 0,
-    AFSP_EXTENT_FLAG_SHARED = 1u << 0,
-    AFSP_EXTENT_FLAG_PREALLOC = 1u << 1,
+    AFSP_EXTENT_FLAG_UNWRITTEN = 1u << 0,
+    AFSP_EXTENT_FLAG_SHARED = 1u << 1, /* ADR-061 */
     AFSP_EXTENT_FLAG_DATA_CHECKSUM_PRESENT = 1u << 2 /* reserved feature */
 };
+
+/*
+ * RO_COMPAT feature bits (ADR-061). An implementation that does not honour
+ * shared-extent reference counts must not mount read-write.
+ */
+#define AFSP_RO_COMPAT_SHARED_EXTENTS (UINT64_C(1) << 0)
 
 #endif

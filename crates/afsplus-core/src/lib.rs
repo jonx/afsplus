@@ -35,6 +35,7 @@ pub mod mount;
 pub mod name_key;
 pub mod object_map;
 pub mod reclaim;
+pub mod shared_extents;
 pub mod tree;
 pub mod verify;
 pub mod volume;
