@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Logged data fsync reaches the portable Rust adapters](#2026-09-03--logged-data-fsync-reaches-the-portable-rust-adapters)
 - [2026-09-03 — Intent-log writes and truncates survive nested recovery crashes](#2026-09-03--intent-log-writes-and-truncates-survive-nested-recovery-crashes)
 - [2026-09-02 — Q1 and Q2 architecture blockers closed](#2026-09-02--q1-and-q2-architecture-blockers-closed)
 - [2026-09-02 — Shared extents and reflinks qualified](#2026-09-02--shared-extents-and-reflinks-qualified)
@@ -21,6 +22,23 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Logged data fsync reaches the portable Rust adapters
+
+The portable VFS now routes existing-file writes and truncates through the
+version-3 data-update window when the volume advertises that incompatible
+feature. Reads and stats see the pending logical layout before publication;
+`fsync` writes the bounded data/record barriers without advancing a checkpoint,
+while oversized/full groups, namespace operations, reflinks and filesystem
+sync publish the window through the ordinary checkpoint engine. Log-free and
+older volumes retain their immediate checkpoint behavior.
+
+The FUSE protocol, packet-neutral AROS Rust adapter and current C ABI bridge
+inherit this path from the VFS. A trace test proves a successful VFS fsync
+writes no checkpoint slot and that remount recovers its bytes; adapter tests
+cover pre-fsync visibility, remount and checker cleanliness. The next
+portability boundary is the independent portable-C filesystem implementation,
+followed by real-device barrier measurements.
 
 ## 2026-09-03 — Intent-log writes and truncates survive nested recovery crashes
 

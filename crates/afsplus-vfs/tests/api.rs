@@ -1,4 +1,4 @@
-use afsplus_block::{MemoryBackend, TraceBackend};
+use afsplus_block::{MemoryBackend, TraceBackend, TraceEvent};
 use afsplus_check::check_device;
 use afsplus_core::{mkfs, mount, MkfsParams, MountMode, MountOptions};
 use afsplus_format::{Timespec, OBJECT_ROOT};
@@ -18,6 +18,10 @@ fn formatted() -> MemoryBackend {
 }
 
 fn formatted_with_shared_extents(shared_extents: bool) -> MemoryBackend {
+    formatted_with_options(shared_extents, 8)
+}
+
+fn formatted_with_options(shared_extents: bool, log_slots: u16) -> MemoryBackend {
     let mut dev = MemoryBackend::new(BS, 8192);
     mkfs(
         &mut dev,
@@ -26,7 +30,7 @@ fn formatted_with_shared_extents(shared_extents: bool) -> MemoryBackend {
             label: "VfsApi".into(),
             region_size: 4096,
             reclaim_caps: Default::default(),
-            log_slots: 8,
+            log_slots,
             shared_extents,
             name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: ts(0),
@@ -34,6 +38,101 @@ fn formatted_with_shared_extents(shared_extents: bool) -> MemoryBackend {
     )
     .unwrap();
     dev
+}
+
+#[test]
+fn logged_data_fsync_is_visible_before_checkpoint_and_recovers_on_remount() {
+    let base = {
+        let mut volume = mount(formatted()).unwrap();
+        volume
+            .create_file_in_root("database", b"old", ts(1))
+            .unwrap();
+        volume.into_device()
+    };
+    let mut vfs = Vfs::mount(TraceBackend::new(base), MountOptions::default()).unwrap();
+    assert!(vfs.capabilities().contains(Capabilities::LOGGED_DATA_FSYNC));
+    let object = vfs.lookup(OBJECT_ROOT, "database").unwrap();
+    let handle = vfs.open_file(object, AccessMode::ReadWrite).unwrap();
+
+    vfs.write(handle, 0, b"new durable bytes", ts(2)).unwrap();
+    assert_eq!(vfs.stat(object).unwrap().size, 17);
+    let mut visible = [0u8; 17];
+    assert_eq!(vfs.read(handle, 0, &mut visible).unwrap(), visible.len());
+    assert_eq!(&visible, b"new durable bytes");
+    vfs.fsync(handle).unwrap();
+
+    let traced = vfs.into_volume().into_device();
+    assert_eq!(traced.stats().flushes, 2, "data and record barriers");
+    assert!(
+        traced
+            .events()
+            .iter()
+            .all(|event| !matches!(event, TraceEvent::Write { lba: 1 | 2 })),
+        "fsync must not publish a checkpoint"
+    );
+
+    let mut recovered = Vfs::mount(traced.into_inner(), MountOptions::default()).unwrap();
+    let object = recovered.lookup(OBJECT_ROOT, "database").unwrap();
+    let handle = recovered.open_file(object, AccessMode::ReadOnly).unwrap();
+    let mut durable = [0u8; 17];
+    assert_eq!(recovered.read(handle, 0, &mut durable).unwrap(), 17);
+    assert_eq!(&durable, b"new durable bytes");
+    let mut device = recovered.into_volume().into_device();
+    let report = check_device(&mut device);
+    assert!(report.is_clean(), "{:?}", report.errors);
+}
+
+#[test]
+fn volumes_without_the_data_log_capability_keep_checkpoint_fsync_semantics() {
+    let base = {
+        let mut volume = mount(formatted_with_options(true, 0)).unwrap();
+        volume.create_file_in_root("legacy", b"old", ts(1)).unwrap();
+        volume.into_device()
+    };
+    let mut vfs = Vfs::mount(TraceBackend::new(base), MountOptions::default()).unwrap();
+    assert!(!vfs.capabilities().contains(Capabilities::LOGGED_DATA_FSYNC));
+    let object = vfs.lookup(OBJECT_ROOT, "legacy").unwrap();
+    let handle = vfs.open_file(object, AccessMode::ReadWrite).unwrap();
+    vfs.write(handle, 0, b"checkpoint", ts(2)).unwrap();
+    vfs.fsync(handle).unwrap();
+    assert_eq!(vfs.stat(object).unwrap().size, 10);
+    let traced = vfs.into_volume().into_device();
+    assert!(traced
+        .events()
+        .iter()
+        .any(|event| matches!(event, TraceEvent::Write { lba: 1 | 2 })));
+}
+
+#[test]
+fn full_intent_log_falls_back_to_a_checkpoint_without_exposing_a_limit() {
+    let base = {
+        let mut volume = mount(formatted()).unwrap();
+        volume.create_file_in_root("counter", &[0], ts(1)).unwrap();
+        volume.into_device()
+    };
+    let mut vfs = Vfs::mount(TraceBackend::new(base), MountOptions::default()).unwrap();
+    let object = vfs.lookup(OBJECT_ROOT, "counter").unwrap();
+    let handle = vfs.open_file(object, AccessMode::ReadWrite).unwrap();
+
+    for value in 1u8..=9 {
+        vfs.write(handle, 0, &[value], ts(i64::from(value) + 1))
+            .unwrap();
+        vfs.fsync(handle).unwrap();
+    }
+    let mut current = [0u8; 1];
+    assert_eq!(vfs.read(handle, 0, &mut current).unwrap(), 1);
+    assert_eq!(current, [9]);
+
+    let traced = vfs.into_volume().into_device();
+    assert!(traced
+        .events()
+        .iter()
+        .any(|event| matches!(event, TraceEvent::Write { lba: 1 | 2 })));
+    let mut recovered = Vfs::mount(traced.into_inner(), MountOptions::default()).unwrap();
+    let object = recovered.lookup(OBJECT_ROOT, "counter").unwrap();
+    let handle = recovered.open_file(object, AccessMode::ReadOnly).unwrap();
+    assert_eq!(recovered.read(handle, 0, &mut current).unwrap(), 1);
+    assert_eq!(current, [9]);
 }
 
 #[test]

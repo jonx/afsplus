@@ -5,11 +5,15 @@
 > **Spec:** [invariants](../spec/invariants.md) ·
 > **Tests:** `crates/afsplus-check/tests/intent_log.rs`,
 > `crates/afsplus-check/tests/shared_crash.rs`,
-> `crates/afsplus-check/tests/fsync_workloads.rs` · **Milestones:** M04, M14
+> `crates/afsplus-check/tests/fsync_workloads.rs`,
+> `crates/afsplus-vfs/tests/api.rs`, `crates/afsplus-fuse/tests/protocol.rs`,
+> `crates/afsplus-aros/tests/adapter.rs`,
+> `crates/afsplus-aros-ffi/tests/ffi.rs` · **Milestones:** M04, M07, M14
 
 This gate qualifies experimental intent-log version 3 for writes and
-truncates of already committed files. It does not freeze the wire format or
-claim that the portable VFS and C implementations expose the path yet.
+truncates of already committed files through the Rust core, portable VFS,
+host FUSE protocol and packet-neutral AROS adapter. It does not freeze the wire
+format or claim portable-C parity yet.
 
 ## Durability oracle
 
@@ -54,6 +58,10 @@ Run codec, intent-log and shared-reference correctness gates:
 cargo test -p afsplus-format --test roundtrip
 cargo test -p afsplus-check --test intent_log
 cargo test -p afsplus-check --test shared_crash
+cargo test -p afsplus-vfs --test api
+cargo test -p afsplus-fuse --test protocol
+cargo test -p afsplus-aros --test adapter
+cargo test -p afsplus-aros-ffi --test ffi
 ```
 
 Run the optimized 4,000-operation measurement:
@@ -63,17 +71,12 @@ cargo test -p afsplus-check --test fsync_workloads --release \
   fsync_workload_qualification -- --ignored --nocapture
 ```
 
-The 2026-09-03 run passed 29 codec tests, 16 intent-log tests and 11
-shared-crash tests. Its relevant rows were:
-
-| workload | operations | writes/op | flushes/op | reads/op |
-|---|---:|---:|---:|---:|
-| logged 200-byte append, checkpoint/64 | 4,000 | 2.200 | 2.032 | 1.396 |
-| logged 4 KiB DB hotset, checkpoint/64 | 4,000 | 2.134 | 2.032 | 1.346 |
-| checkpointed 200-byte append | 4,000 | 9.037 | 3.000 | 18.962 |
-
-These are deterministic memory-backend structural counts. Hardware latency,
-cache persistence and throughput remain separate real-device gates.
+The release gate reports reads, writes and flushes per operation for logged
+append, logged database-hotset rewrite and checkpointed append. It requires
+the logged paths to beat the checkpoint flush floor. Retained measurements
+and their interpretation live in the
+[fsync baseline](../implementation/fsync-intent-log-baseline.md); these
+memory-backend structural counts make no hardware-latency claim.
 
 ## Crash matrix
 
@@ -94,12 +97,16 @@ The executable cases prove:
   recovery;
 - bit-0-only volumes retain namespace replay but reject data updates, and a
   version-3 record with no bit 1 fails closed in both mount and checker.
+- VFS reads and stats observe staged bytes before checkpoint, a successful
+  VFS `fsync` writes no checkpoint slot, and remount replays its durable record;
+- log-free volumes do not advertise `LOGGED_DATA_FSYNC` and retain the
+  checkpoint path; FUSE, AROS and its current C ABI bridge exercise the same
+  read-your-writes path.
 
 ## Remaining boundary
 
-The Rust core APIs and recovery path are qualified. The current log record is
-bounded to one block and at most 16 physical extents per data operation.
-Deleting or replacing a file already modified inside the same open window is
-an explicit `PrototypeLimit` until a compaction rule is specified. Public VFS
-fsync wiring, portable-C parity, real-storage flush testing and final numeric
-wire allocation remain M14 work.
+The gate covers the Rust core APIs and recovery path. A log record is bounded
+to one block and at most 16 physical extents per data operation.
+The VFS avoids the core's same-window delete/replace boundary by publishing the
+data window before any namespace or reflink transaction. Portable-C parity,
+real-storage flush testing and final numeric wire allocation remain M14 work.

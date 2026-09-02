@@ -8,10 +8,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use afsplus_block::BlockDevice;
-use afsplus_core::volume::{DirectoryCursor, Volume};
+use afsplus_core::volume::{DirectoryCursor, ObjectMetadata, Volume};
 use afsplus_core::{mount_with_options, CoreError, MountMode, MountOptions};
-use afsplus_format::ident::{NameKeyAlgorithm, RO_COMPAT_SHARED_EXTENTS};
-use afsplus_format::object::{ObjectRecord, ObjectType};
+use afsplus_format::ident::{
+    NameKeyAlgorithm, INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_SHARED_EXTENTS,
+};
+use afsplus_format::object::ObjectType;
 use afsplus_format::{Timespec, NAME_MAX_UTF8_BYTES, OBJECT_ROOT};
 
 pub type ObjectId = u64;
@@ -67,8 +69,8 @@ pub struct Stat {
     pub content_generation: u64,
 }
 
-impl From<ObjectRecord> for Stat {
-    fn from(record: ObjectRecord) -> Self {
+impl From<ObjectMetadata> for Stat {
+    fn from(record: ObjectMetadata) -> Self {
         Stat {
             object_id: record.object_id,
             kind: record.object_type.into(),
@@ -123,6 +125,9 @@ impl Capabilities {
     pub const FSYNC: u64 = 1 << 7;
     pub const CLONE_FILE: u64 = 1 << 8;
     pub const CLONE_RANGE: u64 = 1 << 9;
+    /// Existing-file writes/truncates can be made durable through the bounded
+    /// intent log without publishing a checkpoint per fsync.
+    pub const LOGGED_DATA_FSYNC: u64 = 1 << 10;
 
     pub const BASELINE: Capabilities = Capabilities(
         Self::IO_64BIT
@@ -257,7 +262,24 @@ impl<D: BlockDevice> Vfs<D> {
         if self.volume.ident().features.ro_compat & RO_COMPAT_SHARED_EXTENTS != 0 {
             bits |= Capabilities::CLONE_FILE | Capabilities::CLONE_RANGE;
         }
+        if self.logged_data_fsync_enabled() {
+            bits |= Capabilities::LOGGED_DATA_FSYNC;
+        }
         Capabilities(bits)
+    }
+
+    fn logged_data_fsync_enabled(&self) -> bool {
+        self.volume.ident().features.incompat & INCOMPAT_INTENT_LOG_DATA_UPDATES != 0
+    }
+
+    /// Immediate namespace and reflink transactions cannot run beside the
+    /// global data-update window. Publish that window first; this is also the
+    /// bounded fallback used when an fsync group cannot fit in the log.
+    fn checkpoint_data_window(&mut self, now: Timespec) -> Result<(), VfsError> {
+        if self.volume.mount_mode() == MountMode::ReadWrite && self.logged_data_fsync_enabled() {
+            self.volume.window_commit(now)?;
+        }
+        Ok(())
     }
 
     pub fn pending_intent_records(&self) -> u32 {
@@ -286,7 +308,7 @@ impl<D: BlockDevice> Vfs<D> {
 
     pub fn stat(&mut self, object_id: ObjectId) -> Result<Stat, VfsError> {
         self.volume
-            .stat(object_id)?
+            .visible_metadata(object_id)?
             .map(Stat::from)
             .ok_or(VfsError::NotFound)
     }
@@ -366,7 +388,12 @@ impl<D: BlockDevice> Vfs<D> {
         if !access.can_write() {
             return Err(VfsError::ReadOnly);
         }
-        self.volume.write_file_at(object_id, offset, source, now)?;
+        if self.logged_data_fsync_enabled() {
+            self.volume
+                .window_write_file_at(object_id, offset, source, now)?;
+        } else {
+            self.volume.write_file_at(object_id, offset, source, now)?;
+        }
         Ok(source.len())
     }
 
@@ -379,7 +406,11 @@ impl<D: BlockDevice> Vfs<D> {
         if !access.can_write() {
             return Err(VfsError::ReadOnly);
         }
-        Ok(self.volume.truncate_file(object_id, size, now)?)
+        if self.logged_data_fsync_enabled() {
+            Ok(self.volume.window_truncate_file(object_id, size, now)?)
+        } else {
+            Ok(self.volume.truncate_file(object_id, size, now)?)
+        }
     }
 
     pub fn read_directory(
@@ -429,6 +460,7 @@ impl<D: BlockDevice> Vfs<D> {
         name: &str,
         now: Timespec,
     ) -> Result<ObjectId, VfsError> {
+        self.checkpoint_data_window(now)?;
         Ok(self
             .volume
             .create_file_in_directory(parent, name, b"", now)?)
@@ -440,6 +472,7 @@ impl<D: BlockDevice> Vfs<D> {
         name: &str,
         now: Timespec,
     ) -> Result<ObjectId, VfsError> {
+        self.checkpoint_data_window(now)?;
         Ok(self.volume.create_directory(parent, name, now)?)
     }
 
@@ -449,6 +482,7 @@ impl<D: BlockDevice> Vfs<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), VfsError> {
+        self.checkpoint_data_window(now)?;
         Ok(self.volume.delete_file(parent, name, now)?)
     }
 
@@ -458,6 +492,7 @@ impl<D: BlockDevice> Vfs<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), VfsError> {
+        self.checkpoint_data_window(now)?;
         Ok(self.volume.remove_directory(parent, name, now)?)
     }
 
@@ -471,6 +506,7 @@ impl<D: BlockDevice> Vfs<D> {
         replace: bool,
         now: Timespec,
     ) -> Result<(), VfsError> {
+        self.checkpoint_data_window(now)?;
         if replace {
             Ok(self.volume.rename_replace(
                 source_parent,
@@ -493,6 +529,7 @@ impl<D: BlockDevice> Vfs<D> {
         target_name: &str,
         now: Timespec,
     ) -> Result<(), VfsError> {
+        self.checkpoint_data_window(now)?;
         Ok(self
             .volume
             .link_file(object_id, target_parent, target_name, now)?)
@@ -507,6 +544,7 @@ impl<D: BlockDevice> Vfs<D> {
         target_name: &str,
         now: Timespec,
     ) -> Result<ObjectId, VfsError> {
+        self.checkpoint_data_window(now)?;
         Ok(self
             .volume
             .clone_file(source, target_parent, target_name, now)?)
@@ -542,6 +580,7 @@ impl<D: BlockDevice> Vfs<D> {
         if !destination_access.can_write() {
             return Err(VfsError::ReadOnly);
         }
+        self.checkpoint_data_window(now)?;
         Ok(self.volume.clone_range(
             source_object,
             source_offset,
@@ -556,11 +595,25 @@ impl<D: BlockDevice> Vfs<D> {
         if !self.handles.contains_key(&handle) {
             return Err(VfsError::Stale);
         }
-        Ok(self.volume.sync()?)
+        if self.volume.mount_mode() != MountMode::ReadWrite || !self.logged_data_fsync_enabled() {
+            return Ok(self.volume.sync()?);
+        }
+        match self.volume.window_fsync() {
+            Ok(()) => Ok(()),
+            Err(CoreError::PrototypeLimit(_)) => {
+                Ok(self.volume.window_commit(Timespec::default())?)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub fn sync_filesystem(&mut self) -> Result<(), VfsError> {
-        Ok(self.volume.sync()?)
+        if self.volume.mount_mode() == MountMode::ReadWrite && self.logged_data_fsync_enabled() {
+            self.volume.window_commit(Timespec::default())?;
+            Ok(())
+        } else {
+            Ok(self.volume.sync()?)
+        }
     }
 
     pub fn into_volume(self) -> Volume<D> {

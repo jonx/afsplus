@@ -63,8 +63,11 @@ covers handles, caller-buffer 64-bit I/O, truncate, paged directories,
 stat/statfs, create/mkdir/unlink/rmdir/rename/atomic replace/hard links, and
 explicit sync. On a volume carrying the shared-extents feature it also exposes
 filesystem-neutral `CloneFile` and `CloneRange` operations and advertises each
-capability separately. Unsupported categories below are not advertised in the
-capability mask.
+capability separately. A volume carrying the intent-log data-update feature
+advertises `LOGGED_DATA_FSYNC`; this means existing-file writes and truncates
+can satisfy `fsync` through the bounded log instead of publishing a checkpoint
+per call. Unsupported categories below are not advertised in the capability
+mask.
 
 `statfs` reports whether the mounted namespace is case-sensitive plus the
 three-part Unicode table version. Adapters must expose the volume policy rather
@@ -109,7 +112,7 @@ Required categories:
 - full-volume object iterator
 - change-stream iterator
 
-Directory cookies are opaque to OS adapters. The current AFS+ implementation
+Directory cookies are opaque to OS adapters. The AFS+ implementation
 binds an ordinal to the checkpoint generation and returns `STALE` after any
 commit, requiring enumeration to restart rather than mixing namespace views.
 
@@ -118,6 +121,30 @@ commit, requiring enumeration to restart rather than mixing namespace views.
 - fsync file
 - fsync directory
 - sync filesystem
+
+The Rust VFS owns one filesystem-wide data-update window. Writes and
+truncates are visible immediately through `read` and `stat`, including sparse
+ranges and the visible allocated size, but do not advance the checkpoint.
+`fsync` on any valid handle makes every operation held in that window
+durable. This is deliberately stronger than per-file durability; adapters must
+not promise isolation between concurrent writers until the concurrency model
+is frozen.
+
+If a group is too large for one log record or the bounded log is full, `fsync`
+falls back to an ordinary checkpoint commit. Namespace and reflink mutations
+also publish an open data window before starting their own atomic transaction,
+and `sync filesystem` publishes it explicitly. Closing a handle alone is not a
+durability request. Volumes without `LOGGED_DATA_FSYNC` keep the immediate
+checkpoint mutation path, so the API remains usable with older or log-free
+images.
+
+`LOGGED_DATA_FSYNC` is additive bit 10 in the Rust capability mask; it changes
+no existing operation signature or on-disk identity. FUSE and the AROS Rust
+adapter inherit it through the shared VFS. The version-1 AROS C bridge has no
+capability-query structure to extend and keeps its ABI unchanged: its existing
+write/truncate/fsync entry points receive the same semantics transparently.
+An independent portable-C filesystem implementation must negotiate the on-disk
+feature and cross-read the conformance corpus before claiming parity.
 
 ### cloning
 

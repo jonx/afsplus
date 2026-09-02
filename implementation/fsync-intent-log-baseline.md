@@ -225,8 +225,9 @@ the numeric v3 wire remains experimental until M14.
    update — 6.8× fewer barriers than the original sequence). They compose:
    the log is precisely how an fsync becomes cheap between group-committed
    checkpoints. The measured recommendation is to keep both, with the log
-   remaining experimental until portable-C parity, the public VFS fsync path,
-   real-device qualification and the M14 wire review are complete.
+   remaining experimental until portable-C parity, real-device qualification
+   and the M14 wire review are complete. The public Rust VFS path is now
+   qualified by the existing-file log gate.
    [ADR-063](../adr/ADR-063-intent-log-epoch1.md) accepts this layered
    architecture; [ADR-064](../adr/ADR-064-intent-log-data-update-compatibility.md)
    makes the new replay capability fail closed across implementations.

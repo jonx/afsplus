@@ -28,7 +28,7 @@ use afsplus_format::intent_log::{LogOp, LogRecord, MAX_LOG_OPS};
 use afsplus_format::object::{
     ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_EXTENT_TREE,
 };
-use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
+use afsplus_format::{validate_name, FormatError, Timespec, OBJECT_ROOT};
 
 use crate::alloc::{AllocStats, TxAllocator};
 use crate::allocation_root::{self, ReservedTreePool};
@@ -98,6 +98,40 @@ pub struct DirectoryPage {
     pub entries: Vec<DirEntry>,
     pub next: DirectoryCursor,
     pub eof: bool,
+}
+
+/// Filesystem-facing object metadata. Unlike [`ObjectRecord`], this is a
+/// logical view and never exposes an in-flight extent root as if it were an
+/// encoded on-disk record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectMetadata {
+    pub object_id: u64,
+    pub object_type: ObjectType,
+    pub size_bytes: u64,
+    pub allocated_bytes: u64,
+    pub link_count: u32,
+    pub protection: u32,
+    pub created: Timespec,
+    pub modified: Timespec,
+    pub changed: Timespec,
+    pub content_generation: u64,
+}
+
+impl From<ObjectRecord> for ObjectMetadata {
+    fn from(record: ObjectRecord) -> Self {
+        ObjectMetadata {
+            object_id: record.object_id,
+            object_type: record.object_type,
+            size_bytes: record.size_bytes,
+            allocated_bytes: record.allocated_bytes,
+            link_count: record.link_count,
+            protection: record.protection,
+            created: record.created,
+            modified: record.modified,
+            changed: record.changed,
+            content_generation: record.content_generation,
+        }
+    }
 }
 
 struct StagedFileLayout {
@@ -476,69 +510,79 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
-    /// Reads and validates one object record on demand. Returning the record
-    /// by value keeps the low-memory path independent of a mandatory object
-    /// cache; modern implementations may add a bounded or aggressive cache
-    /// above this API.
+    /// Reads and validates one committed object record on demand. Returning
+    /// the record by value keeps the low-memory path independent of a
+    /// mandatory object cache; modern implementations may add a bounded or
+    /// aggressive cache above this API.
     pub fn stat(&mut self, object_id: u64) -> Result<Option<ObjectRecord>, CoreError> {
         self.read_object(object_id)
     }
 
-    /// Reads a file's committed content.
+    /// Returns filesystem-facing metadata through the open intent-log
+    /// overlay. This keeps adapters away from physical roots that do not exist
+    /// until the final checkpoint materializes the pending logical layout.
+    pub fn visible_metadata(
+        &mut self,
+        object_id: u64,
+    ) -> Result<Option<ObjectMetadata>, CoreError> {
+        if let Some(window) = self.window.as_ref() {
+            if let Some(record) = window.pending.records.get(&object_id) {
+                let Some(record) = *record else {
+                    return Ok(None);
+                };
+                let mut metadata = ObjectMetadata::from(record);
+                if let Some(layout) = window.pending.file_layouts.get(&object_id) {
+                    let allocated_blocks =
+                        layout.extents.iter().try_fold(0u64, |total, extent| {
+                            total
+                                .checked_add(extent.block_count)
+                                .ok_or(CoreError::PrototypeLimit(
+                                    "visible allocated block count overflow",
+                                ))
+                        })?;
+                    metadata.size_bytes = layout.size_bytes;
+                    metadata.allocated_bytes = allocated_blocks
+                        .checked_mul(self.dev.block_size() as u64)
+                        .ok_or(CoreError::PrototypeLimit(
+                            "visible allocated byte count overflow",
+                        ))?;
+                }
+                return Ok(Some(metadata));
+            }
+        }
+        Ok(self.read_object(object_id)?.map(ObjectMetadata::from))
+    }
+
+    /// Reads a file's visible content, including existing-file edits in the
+    /// open intent-log window.
     pub fn read_file(&mut self, object_id: u64) -> Result<Vec<u8>, CoreError> {
         let record = self
-            .read_object(object_id)?
+            .visible_metadata(object_id)?
             .ok_or_else(|| CoreError::Corrupt(format!("no object {object_id}")))?;
         if record.object_type != ObjectType::File {
             return Err(CoreError::Corrupt(format!(
                 "object {object_id} is not a file"
             )));
         }
-        let block_size = self.dev.block_size();
         let content_len = usize::try_from(record.size_bytes)
             .map_err(|_| CoreError::PrototypeLimit("file is too large to read into one buffer"))?;
         let mut content = vec![0u8; content_len];
-        let logical_blocks = record.size_bytes.div_ceil(block_size as u64);
-        let mut block = vec![0u8; block_size];
-        for logical_block in 0..logical_blocks {
-            let lba = if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
-                let Some(extent) = extent_map::lookup_extent(
-                    &mut self.dev,
-                    &self.ident.geometry(),
-                    record.data_root,
-                    object_id,
-                    self.checkpoint.generation,
-                    logical_block,
-                )?
-                else {
-                    continue;
-                };
-                if extent.flags & EXTENT_UNWRITTEN != 0 {
-                    continue;
-                }
-                extent.physical_start + logical_block - extent.logical_start
-            } else {
-                record.data_root.checked_add(logical_block).ok_or_else(|| {
-                    CoreError::Corrupt(format!("object {object_id} extent overflow"))
-                })?
-            };
-            self.dev.read_block(lba, &mut block)?;
-            let offset = logical_block as usize * block_size;
-            let length = block_size.min(content.len() - offset);
-            content[offset..offset + length].copy_from_slice(&block[..length]);
-        }
+        self.read_file_at(object_id, 0, &mut content)?;
         Ok(content)
     }
 
-    /// Reads committed file bytes at `offset` into a caller-owned buffer.
-    /// Sparse holes and unwritten extents are returned as zeros.
+    /// Reads visible file bytes at `offset` into a caller-owned buffer. Sparse
+    /// holes and unwritten extents are returned as zeros. Existing-file edits
+    /// in the open intent-log window take precedence over the committed map.
     pub fn read_file_at(
         &mut self,
         object_id: u64,
         offset: u64,
         destination: &mut [u8],
     ) -> Result<usize, CoreError> {
-        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        let record = self
+            .visible_metadata(object_id)?
+            .ok_or(CoreError::NotFound)?;
         if record.object_type != ObjectType::File {
             return Err(CoreError::IsDirectory);
         }
@@ -549,25 +593,46 @@ impl<D: BlockDevice> Volume<D> {
         let end = offset + count;
         let block_size = self.dev.block_size() as u64;
         let mut block = vec![0u8; block_size as usize];
+        let pending_layout = self.window.as_ref().and_then(|window| {
+            window
+                .pending
+                .file_layouts
+                .get(&object_id)
+                .map(|layout| layout.extents.clone())
+        });
+        let committed_record = if pending_layout.is_none() {
+            Some(self.read_object(object_id)?.ok_or(CoreError::NotFound)?)
+        } else {
+            None
+        };
         for logical_block in offset / block_size..end.div_ceil(block_size) {
             block.fill(0);
-            let mapped = if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
-                extent_map::lookup_extent(
-                    &mut self.dev,
-                    &self.ident.geometry(),
-                    record.data_root,
-                    object_id,
-                    self.checkpoint.generation,
-                    logical_block,
-                )?
-                .filter(|extent| extent.flags & EXTENT_UNWRITTEN == 0)
-                .map(|extent| extent.physical_start + logical_block - extent.logical_start)
-            } else if logical_block < record.data_blocks {
-                Some(record.data_root.checked_add(logical_block).ok_or_else(|| {
-                    CoreError::Corrupt(format!("object {object_id} extent overflow"))
-                })?)
+            let mapped = if let Some(extents) = pending_layout.as_deref() {
+                extent_at(extents, logical_block)
+                    .filter(|extent| extent.flags & EXTENT_UNWRITTEN == 0)
+                    .map(|extent| extent.physical_start + logical_block - extent.logical_start)
             } else {
-                None
+                let record = committed_record
+                    .as_ref()
+                    .expect("committed record loaded without a pending layout");
+                if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
+                    extent_map::lookup_extent(
+                        &mut self.dev,
+                        &self.ident.geometry(),
+                        record.data_root,
+                        object_id,
+                        self.checkpoint.generation,
+                        logical_block,
+                    )?
+                    .filter(|extent| extent.flags & EXTENT_UNWRITTEN == 0)
+                    .map(|extent| extent.physical_start + logical_block - extent.logical_start)
+                } else if logical_block < record.data_blocks {
+                    Some(record.data_root.checked_add(logical_block).ok_or_else(|| {
+                        CoreError::Corrupt(format!("object {object_id} extent overflow"))
+                    })?)
+                } else {
+                    None
+                }
             };
             if let Some(lba) = mapped {
                 self.dev.read_block(lba, &mut block)?;
@@ -3733,6 +3798,25 @@ impl<D: BlockDevice> Volume<D> {
                 "intent-log existing-file data updates",
             ));
         }
+        let pending_size = self.window.as_ref().and_then(|window| {
+            window
+                .pending
+                .file_layouts
+                .get(&object_id)
+                .map(|layout| layout.size_bytes)
+        });
+        if pending_size == Some(new_size) {
+            return Ok(());
+        }
+        if pending_size.is_none() {
+            let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+            if record.object_type != ObjectType::File {
+                return Err(CoreError::IsDirectory);
+            }
+            if record.size_bytes == new_size {
+                return Ok(());
+            }
+        }
         let mut window = self.take_or_open_window()?;
         if let Err(error) = self.ensure_pending_file_layout(&mut window.pending, object_id) {
             self.window = Some(window);
@@ -3945,7 +4029,15 @@ impl<D: BlockDevice> Volume<D> {
             sequence,
             ops: window.unlogged.clone(),
         };
-        let encoded = record.encode(geo.block_size).map_err(CoreError::Format)?;
+        let encoded = match record.encode(geo.block_size) {
+            Ok(encoded) => encoded,
+            Err(FormatError::Overflow(_)) => {
+                return Err(CoreError::PrototypeLimit(
+                    "fsync group exceeds one log record; commit the window",
+                ));
+            }
+            Err(error) => return Err(CoreError::Format(error)),
+        };
         let write = self
             .dev
             .write_block(slots[sequence as usize - 1], &encoded)

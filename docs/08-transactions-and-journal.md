@@ -215,8 +215,15 @@ The codec, old/new crash cuts, replay-during-replay cuts, monotone prefixes,
 sparse/aligned truncates and shared-range split are qualified in the
 [existing-file log gate](../testing/intent-log-write-truncate-qualification.md).
 
-The record wire, mandatory log size, portable-C parity and public VFS fsync
-wiring remain unfrozen M14 work; the Rust core result is not yet a universal
+The Rust VFS exposes the path: writes and truncates remain visible through
+its read/stat overlay, `fsync` records the complete global window, log-bound
+groups fall back to a checkpoint, and namespace or reflink mutations publish
+the window first. The host FUSE protocol, packet-neutral AROS Rust adapter and
+its current C ABI bridge inherit these semantics without an OS-specific
+transaction fork.
+
+The record wire, mandatory log size, portable-C parity and real-device barrier
+validation remain unfrozen M14 work; the Rust result is not yet a universal
 cross-implementation cheap-file-`fsync` claim.
 
 AFS+ does not build a second redo-journal transaction engine: the log is a
@@ -260,7 +267,10 @@ Before epoch 1, the implementation/spec must define and test:
 - object/content-generation handle lifetime
 - cache/page pinning and stale-handle behavior
 
-The baseline target is a clearly documented read-committed model, not accidental behavior inherited from lock implementation details.
+The current single-process Rust baseline provides read-your-writes for the
+global existing-file update window and generation-bound directory enumeration.
+The multi-writer isolation and cache-coherency model still requires an explicit
+epoch-1 decision rather than behavior inherited accidentally from adapter locks.
 
 ## 12. Testing gate
 

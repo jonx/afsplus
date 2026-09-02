@@ -49,6 +49,10 @@ fn dos_semantics_cover_the_mountable_alpha_operation_slice() {
     assert_eq!(adapter.write(draft, b"hello", timestamp(3)).unwrap(), 5);
     assert_eq!(adapter.seek(draft, 8192, SeekMode::Beginning).unwrap(), 5);
     assert_eq!(adapter.write(draft, b"tail", timestamp(4)).unwrap(), 4);
+    assert_eq!(adapter.seek(draft, 0, SeekMode::Beginning).unwrap(), 8196);
+    let mut visible_before_fsync = [0u8; 5];
+    assert_eq!(adapter.read(draft, &mut visible_before_fsync).unwrap(), 5);
+    assert_eq!(&visible_before_fsync, b"hello");
     adapter.fsync(draft).unwrap();
     assert_eq!(
         adapter

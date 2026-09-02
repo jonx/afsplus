@@ -148,6 +148,30 @@ fn c_boundary_runs_the_alpha_matrix_and_remounts_cleanly() {
         afsplus_aros_write(filesystem, draft, b"tail".as_ptr(), 4, 4, 0, &mut count,),
         0
     );
+    assert_eq!(
+        afsplus_aros_seek(
+            filesystem,
+            draft,
+            0,
+            AFSPLUS_AROS_SEEK_BEGINNING,
+            &mut old_position,
+        ),
+        0
+    );
+    assert_eq!(old_position, 8196);
+    let mut visible_before_fsync = [0u8; 5];
+    assert_eq!(
+        afsplus_aros_read(
+            filesystem,
+            draft,
+            visible_before_fsync.as_mut_ptr(),
+            visible_before_fsync.len() as u32,
+            &mut count,
+        ),
+        0
+    );
+    assert_eq!(count, 5);
+    assert_eq!(&visible_before_fsync, b"hello");
     assert_eq!(afsplus_aros_fsync(filesystem, draft), 0);
 
     let mut size = 0;
