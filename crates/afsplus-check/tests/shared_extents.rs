@@ -8,6 +8,13 @@
 
 use std::collections::BTreeMap;
 
+use afsplus_block::{for_each_crash_state, MemoryBackend, RecordedOp, RecordingBackend};
+use afsplus_check::check_device;
+use afsplus_core::{mkfs, mount, MkfsParams, Volume};
+use afsplus_format::Timespec;
+
+const BS: usize = 4096;
+
 #[derive(Debug, Clone, Copy)]
 struct CountedMapping {
     start: u64,
@@ -115,6 +122,81 @@ fn expected_shared_runs(
         return Err("unbalanced interval starts");
     }
     Ok(expected)
+}
+
+/// Runs the common ADR-061 recovery oracle over every state in the power-cut
+/// model. Operation-specific checks receive whether the old or new checkpoint
+/// won; the helper independently requires a clean full checker result.
+fn run_powercut_matrix(
+    base: &MemoryBackend,
+    operations: &[RecordedOp],
+    pre_generation: u64,
+    mut verify: impl FnMut(&str, bool, &mut Volume<MemoryBackend>),
+) {
+    let mut pre_outcomes = 0u64;
+    let mut post_outcomes = 0u64;
+    for crash_point in 0..=operations.len() {
+        for_each_crash_state(base, operations, crash_point, |state| {
+            let context = state.description.clone();
+            let mut image = state.image;
+            let report = check_device(&mut image);
+            assert!(
+                report.is_clean(),
+                "{context}: checker findings {:?}",
+                report.errors
+            );
+            let mut volume =
+                mount(image).unwrap_or_else(|error| panic!("{context}: mount failed: {error}"));
+            let post = match volume.generation() {
+                generation if generation == pre_generation => {
+                    pre_outcomes += 1;
+                    false
+                }
+                generation if generation == pre_generation + 1 => {
+                    post_outcomes += 1;
+                    true
+                }
+                generation => panic!(
+                    "{context}: generation {generation} is neither pre {pre_generation} nor post {}",
+                    pre_generation + 1
+                ),
+            };
+            verify(&context, post, &mut volume);
+        });
+    }
+    assert!(
+        pre_outcomes > 0,
+        "power-cut matrix produced no pre-transaction state"
+    );
+    assert!(
+        post_outcomes > 0,
+        "power-cut matrix produced no post-transaction state"
+    );
+}
+
+fn timestamp(seconds: i64) -> Timespec {
+    Timespec {
+        seconds,
+        nanoseconds: 0,
+    }
+}
+
+fn formatted(label: &str) -> MemoryBackend {
+    let mut device = MemoryBackend::new(BS, 128);
+    mkfs(
+        &mut device,
+        &MkfsParams {
+            uuid: [0x61; 16],
+            label: label.into(),
+            region_size: 128,
+            reclaim_caps: Default::default(),
+            log_slots: 0,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
+            timestamp: timestamp(1),
+        },
+    )
+    .unwrap();
+    device
 }
 
 #[test]
@@ -225,4 +307,39 @@ fn oracle_is_sparse_in_address_space_and_rejects_hostile_ranges() {
         copies: u32::MAX as u64 + 1,
     }])
     .is_err());
+}
+
+#[test]
+fn powercut_harness_proves_both_states_and_checks_contents() {
+    // This non-sharing transaction is a witness for the harness itself. The
+    // ADR-061 cases use exactly the same path once CloneFile/CloneRange land.
+    let base = formatted("MatrixWitness");
+    let pre_generation = mount(base.clone()).unwrap().generation();
+    let mut volume = mount(RecordingBackend::new(base.clone())).unwrap();
+    let file_id = volume
+        .create_file_in_root("witness", b"shared-matrix", timestamp(2))
+        .unwrap();
+    let (_, operations) = volume.into_device().into_parts();
+
+    run_powercut_matrix(
+        &base,
+        &operations,
+        pre_generation,
+        |context, post, volume| {
+            if post {
+                assert_eq!(
+                    volume.lookup_root("witness").unwrap(),
+                    Some(file_id),
+                    "{context}"
+                );
+                assert_eq!(
+                    volume.read_file(file_id).unwrap(),
+                    b"shared-matrix",
+                    "{context}"
+                );
+            } else {
+                assert_eq!(volume.lookup_root("witness").unwrap(), None, "{context}");
+            }
+        },
+    );
 }
