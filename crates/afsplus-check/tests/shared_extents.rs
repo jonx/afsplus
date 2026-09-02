@@ -12,13 +12,14 @@ use afsplus_block::{
     for_each_crash_state, BlockDevice, MemoryBackend, RecordedOp, RecordingBackend,
 };
 use afsplus_check::check_device;
+use afsplus_core::extent_map::EXTENT_SHARED;
 use afsplus_core::shared_extents::{self, LoadedSharedExtents, SharedRun};
 use afsplus_core::{mkfs, mount, MkfsParams, Volume};
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::ident::{Identification, RO_COMPAT_SHARED_EXTENTS};
 use afsplus_format::tree::{child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode};
-use afsplus_format::{le, Timespec};
+use afsplus_format::{le, Timespec, OBJECT_ROOT};
 
 const BS: usize = 4096;
 
@@ -341,6 +342,95 @@ fn formatted(label: &str) -> MemoryBackend {
     )
     .unwrap();
     device
+}
+
+fn formatted_shared(label: &str) -> MemoryBackend {
+    let mut device = MemoryBackend::new(BS, 256);
+    mkfs(
+        &mut device,
+        &MkfsParams {
+            uuid: [0x62; 16],
+            label: label.into(),
+            region_size: 256,
+            reclaim_caps: Default::default(),
+            log_slots: 0,
+            shared_extents: true,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
+            timestamp: timestamp(1),
+        },
+    )
+    .unwrap();
+    device
+}
+
+fn cloned_pair(label: &str) -> (Volume<MemoryBackend>, u64, u64) {
+    let mut volume = mount(formatted_shared(label)).unwrap();
+    let source = volume
+        .create_file_in_root("source", &vec![0x5au8; BS], timestamp(2))
+        .unwrap();
+    let clone = volume
+        .clone_file(source, OBJECT_ROOT, "clone", timestamp(3))
+        .unwrap();
+    (volume, source, clone)
+}
+
+fn rewrite_shared_leaf(
+    volume: &mut Volume<MemoryBackend>,
+    rewrite: impl FnOnce(&mut Vec<TreeItem>),
+) {
+    let root = volume.checkpoint().shared_extent_root_block;
+    assert_ne!(root, 0);
+    let generation = volume.generation();
+    let mut block = vec![0u8; BS];
+    volume.device_mut().read_block(root, &mut block).unwrap();
+    let (mut node, _) = TreeNode::decode(&block).unwrap();
+    assert!(
+        node.is_leaf(),
+        "small corruption fixtures require a leaf root"
+    );
+    rewrite(&mut node.items);
+    node.subtree_items = node.items.len() as u64;
+    volume
+        .device_mut()
+        .write_block(root, &node.encode(BS, generation).unwrap())
+        .unwrap();
+}
+
+fn rewrite_first_extent_flags(
+    volume: &mut Volume<MemoryBackend>,
+    object_id: u64,
+    rewrite: impl FnOnce(u32) -> u32,
+) {
+    let record = volume.stat(object_id).unwrap().unwrap();
+    assert_ne!(
+        record.flags & afsplus_format::object::OBJECT_FLAG_EXTENT_TREE,
+        0
+    );
+    let generation = volume.generation();
+    let mut block = vec![0u8; BS];
+    volume
+        .device_mut()
+        .read_block(record.data_root, &mut block)
+        .unwrap();
+    let (mut node, _) = TreeNode::decode(&block).unwrap();
+    let item = node.items.first_mut().expect("file has one mapped extent");
+    let flags = le::get_u32(&item.value[16..20]);
+    le::put_u32(&mut item.value[16..20], rewrite(flags));
+    volume
+        .device_mut()
+        .write_block(record.data_root, &node.encode(BS, generation).unwrap())
+        .unwrap();
+}
+
+fn require_checker_error(volume: Volume<MemoryBackend>, expected: &str) {
+    let mut device = volume.into_device();
+    let report = check_device(&mut device);
+    assert!(!report.is_clean(), "forged image was accepted");
+    assert!(
+        report.errors.iter().any(|error| error.contains(expected)),
+        "expected an error containing {expected:?}, got {:?}",
+        report.errors
+    );
 }
 
 fn raw_shared_item(start: u64, blocks: u64, references: u32, flags: u32) -> TreeItem {
@@ -720,6 +810,102 @@ fn checker_enforces_shared_feature_root_congruence() {
         "enabled-but-unused volume rejected: {:?}",
         report.errors
     );
+}
+
+#[test]
+fn checker_rejects_missing_extra_and_wrong_reference_records() {
+    // C4: two flagged mappings remain live but their authoritative record is
+    // removed from an otherwise checksummed tree.
+    let (mut missing, _, _) = cloned_pair("MissingSharedRecord");
+    rewrite_shared_leaf(&mut missing, Vec::clear);
+    require_checker_error(missing, "reconstruct");
+
+    // C6: the run and mappings agree, but the stored count is forged from two
+    // references to three.
+    let (mut wrong, _, _) = cloned_pair("WrongSharedCount");
+    rewrite_shared_leaf(&mut wrong, |items| {
+        assert_eq!(items.len(), 1);
+        le::put_u32(&mut items[0].value[8..12], 3);
+    });
+    require_checker_error(wrong, "reconstruct");
+
+    // C5: after rc=2 -> rc=1 the surviving mapping deliberately keeps its
+    // conservative flag, but the reference tree must be empty. Reinsert an
+    // orphan count-two record over that sole owner.
+    let (mut extra, _, clone) = cloned_pair("ExtraSharedRecord");
+    let root = extra.checkpoint().shared_extent_root_block;
+    let generation = extra.generation();
+    let geometry = extra.ident().geometry();
+    let committed = shared_extents::load_all(extra.device_mut(), &geometry, root, generation)
+        .unwrap()
+        .records[0];
+    extra
+        .delete_file(OBJECT_ROOT, "source", timestamp(4))
+        .unwrap();
+    assert_eq!(extra.read_file(clone).unwrap(), vec![0x5au8; BS]);
+    rewrite_shared_leaf(&mut extra, |items| {
+        assert!(items.is_empty());
+        items.push(raw_shared_item(
+            committed.physical_start,
+            committed.block_count,
+            2,
+            0,
+        ));
+    });
+    require_checker_error(extra, "referenced twice");
+}
+
+#[test]
+fn checker_rejects_unflagged_and_direct_shared_mappings() {
+    // C7: clear the conservative marker on one of two live mappings while
+    // leaving the reference record and all containing CRCs valid.
+    let (mut unflagged, _, clone) = cloned_pair("UnflaggedSharedMapping");
+    rewrite_first_extent_flags(&mut unflagged, clone, |flags| flags & !EXTENT_SHARED);
+    require_checker_error(unflagged, "referenced twice");
+
+    // C10: a direct-layout object cannot participate because its object
+    // record has no extent flag word. Allocate the empty reference root with
+    // an empty clone, then forge a record over a direct file's data.
+    let mut direct = mount(formatted_shared("DirectSharedMapping")).unwrap();
+    let data = direct
+        .create_file_in_root("direct", &vec![0x6bu8; BS], timestamp(2))
+        .unwrap();
+    let direct_record = direct.stat(data).unwrap().unwrap();
+    assert_eq!(
+        direct_record.flags & afsplus_format::object::OBJECT_FLAG_EXTENT_TREE,
+        0
+    );
+    let empty = direct
+        .create_file_in_root("empty", b"", timestamp(3))
+        .unwrap();
+    direct
+        .clone_file(empty, OBJECT_ROOT, "empty-clone", timestamp(4))
+        .unwrap();
+    rewrite_shared_leaf(&mut direct, |items| {
+        assert!(items.is_empty());
+        items.push(raw_shared_item(direct_record.data_root, 1, 2, 0));
+    });
+    require_checker_error(direct, "referenced twice");
+}
+
+#[test]
+fn checker_rejects_a_shared_tree_block_claimed_as_data() {
+    // C11: make the reference root describe its own block as shared data.
+    // The block remains checksummed and allocatable, so the semantic ownership
+    // collision — not a codec failure — must reject the image.
+    let mut volume = mount(formatted_shared("SharedTreeDataCollision")).unwrap();
+    let empty = volume
+        .create_file_in_root("empty", b"", timestamp(2))
+        .unwrap();
+    volume
+        .clone_file(empty, OBJECT_ROOT, "empty-clone", timestamp(3))
+        .unwrap();
+    let root = volume.checkpoint().shared_extent_root_block;
+    rewrite_shared_leaf(&mut volume, |items| {
+        assert!(items.is_empty());
+        items.push(raw_shared_item(root, 1, 2, 0));
+    });
+    require_checker_error(volume, "referenced twice");
 }
 
 #[test]
