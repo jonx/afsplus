@@ -14,6 +14,10 @@ fn ts(seconds: i64) -> Timespec {
 }
 
 fn formatted() -> MemoryBackend {
+    formatted_with_shared_extents(true)
+}
+
+fn formatted_with_shared_extents(shared_extents: bool) -> MemoryBackend {
     let mut dev = MemoryBackend::new(BS, 8192);
     mkfs(
         &mut dev,
@@ -23,13 +27,82 @@ fn formatted() -> MemoryBackend {
             region_size: 4096,
             reclaim_caps: Default::default(),
             log_slots: 8,
-            shared_extents: true,
+            shared_extents,
             name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: ts(0),
         },
     )
     .unwrap();
     dev
+}
+
+#[test]
+fn clone_capabilities_are_volume_gated_and_filesystem_neutral() {
+    let mut vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let capabilities = vfs.capabilities();
+    assert!(capabilities.contains(Capabilities::CLONE_FILE));
+    assert!(capabilities.contains(Capabilities::CLONE_RANGE));
+
+    let source = vfs.create_file(OBJECT_ROOT, "source", ts(1)).unwrap();
+    let source_handle = vfs.open_file(source, AccessMode::ReadWrite).unwrap();
+    let source_bytes = vec![0x37u8; 2 * BS];
+    vfs.write(source_handle, 0, &source_bytes, ts(2)).unwrap();
+    let clone = vfs.clone_file(source, OBJECT_ROOT, "clone", ts(3)).unwrap();
+    let clone_handle = vfs.open_file(clone, AccessMode::ReadWrite).unwrap();
+    let replacement = vec![0x81u8; BS];
+    let replacement_file = vfs.create_file(OBJECT_ROOT, "replacement", ts(4)).unwrap();
+    let replacement_handle = vfs
+        .open_file(replacement_file, AccessMode::ReadWrite)
+        .unwrap();
+    vfs.write(replacement_handle, 0, &replacement, ts(5))
+        .unwrap();
+    vfs.clone_range(
+        replacement_handle,
+        0,
+        clone_handle,
+        BS as u64,
+        BS as u64,
+        ts(6),
+    )
+    .unwrap();
+
+    let mut clone_bytes = vec![0u8; 2 * BS];
+    assert_eq!(
+        vfs.read(clone_handle, 0, &mut clone_bytes).unwrap(),
+        clone_bytes.len()
+    );
+    let mut expected = source_bytes.clone();
+    expected[BS..].copy_from_slice(&replacement);
+    assert_eq!(clone_bytes, expected);
+    let mut original = vec![0u8; 2 * BS];
+    vfs.read(source_handle, 0, &mut original).unwrap();
+    assert_eq!(
+        original, source_bytes,
+        "range clone must not modify its source"
+    );
+
+    let mut dev = vfs.into_volume().into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+
+    let mut unsupported = Vfs::mount(
+        formatted_with_shared_extents(false),
+        MountOptions::default(),
+    )
+    .unwrap();
+    assert!(!unsupported
+        .capabilities()
+        .contains(Capabilities::CLONE_FILE));
+    assert!(!unsupported
+        .capabilities()
+        .contains(Capabilities::CLONE_RANGE));
+    let plain = unsupported
+        .create_file(OBJECT_ROOT, "plain", ts(1))
+        .unwrap();
+    assert!(matches!(
+        unsupported.clone_file(plain, OBJECT_ROOT, "copy", ts(2)),
+        Err(VfsError::NotSupported)
+    ));
 }
 
 #[test]

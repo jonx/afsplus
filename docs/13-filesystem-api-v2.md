@@ -3,6 +3,26 @@
 > **ADRs:** [ADR-039](../adr/ADR-039-portable-vfs-slice.md) · **Spec:** none ·
 > **Tests:** [test-strategy](../testing/test-strategy.md) · **Milestones:** M07
 
+<!-- toc -->
+
+- [1. Purpose](#1-purpose)
+- [2. Design principles](#2-design-principles)
+- [2.1 Mount policy](#21-mount-policy)
+- [3. Core operations](#3-core-operations)
+  - [handles and I/O](#handles-and-io)
+  - [namespace](#namespace)
+  - [metadata](#metadata)
+  - [enumeration](#enumeration)
+  - [synchronization](#synchronization)
+  - [cloning](#cloning)
+  - [observation](#observation)
+- [4. Compatibility adapters](#4-compatibility-adapters)
+- [5. Large files](#5-large-files)
+- [6. Rust](#6-rust)
+- [7. Zed](#7-zed)
+
+<!-- /toc -->
+
 ## 1. Purpose
 
 Filesystem API v2 provides modern operations without breaking the classic AROS DOS ABI.
@@ -41,7 +61,9 @@ performing mandatory replay and returns a read-only recovered view.
 The executable Rust subset lives in `afsplus-vfs` (ADR-039). It currently
 covers handles, caller-buffer 64-bit I/O, truncate, paged directories,
 stat/statfs, create/mkdir/unlink/rmdir/rename/atomic replace/hard links, and
-explicit sync. Unsupported categories below are not advertised in the
+explicit sync. On a volume carrying the shared-extents feature it also exposes
+filesystem-neutral `CloneFile` and `CloneRange` operations and advertises each
+capability separately. Unsupported categories below are not advertised in the
 capability mask.
 
 `statfs` reports whether the mounted namespace is case-sensitive plus the
@@ -96,6 +118,26 @@ commit, requiring enumeration to restart rather than mixing namespace views.
 - fsync file
 - fsync directory
 - sync filesystem
+
+### cloning
+
+- `CloneFile(source, parent, name)` creates a distinct object and initially
+  shares its mapped storage with the source;
+- `CloneRange(source_handle, source_offset, destination_handle,
+  destination_offset, length)` replaces a destination byte range while
+  keeping later writes independent.
+
+The executable prototype accepts range offsets with matching intra-block
+alignment. Complete interior blocks are shared, complete source holes remain
+holes, and at most two partial boundary blocks are copied privately to retain
+the destination bytes outside the requested range. Other alignments and
+same-file range cloning return an explicit implementation-limit error.
+
+These are additive, capability-gated operations: they do not change existing
+structure layouts or the classic DOS ABI. A profile without shared extents
+does not advertise either capability and returns `NOT_SUPPORTED`, allowing a
+caller to fall back to an ordinary copy. Read-only mounts may report that the
+format supports cloning but still reject mutation as `READ_ONLY`.
 
 ### observation
 

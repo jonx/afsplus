@@ -10,7 +10,7 @@ use std::fmt;
 use afsplus_block::BlockDevice;
 use afsplus_core::volume::{DirectoryCursor, Volume};
 use afsplus_core::{mount_with_options, CoreError, MountMode, MountOptions};
-use afsplus_format::ident::NameKeyAlgorithm;
+use afsplus_format::ident::{NameKeyAlgorithm, RO_COMPAT_SHARED_EXTENTS};
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::{Timespec, NAME_MAX_UTF8_BYTES, OBJECT_ROOT};
 
@@ -121,6 +121,8 @@ impl Capabilities {
     pub const PAGED_DIRECTORIES: u64 = 1 << 5;
     pub const SPARSE_FILES: u64 = 1 << 6;
     pub const FSYNC: u64 = 1 << 7;
+    pub const CLONE_FILE: u64 = 1 << 8;
+    pub const CLONE_RANGE: u64 = 1 << 9;
 
     pub const BASELINE: Capabilities = Capabilities(
         Self::IO_64BIT
@@ -251,7 +253,11 @@ impl<D: BlockDevice> Vfs<D> {
     }
 
     pub fn capabilities(&self) -> Capabilities {
-        Capabilities::BASELINE
+        let mut bits = Capabilities::BASELINE.bits();
+        if self.volume.ident().features.ro_compat & RO_COMPAT_SHARED_EXTENTS != 0 {
+            bits |= Capabilities::CLONE_FILE | Capabilities::CLONE_RANGE;
+        }
+        Capabilities(bits)
     }
 
     pub fn pending_intent_records(&self) -> u32 {
@@ -490,6 +496,60 @@ impl<D: BlockDevice> Vfs<D> {
         Ok(self
             .volume
             .link_file(object_id, target_parent, target_name, now)?)
+    }
+
+    /// Creates a distinct file object whose initial data mapping is shared
+    /// with `source`.  Capability-gated by [`Capabilities::CLONE_FILE`].
+    pub fn clone_file(
+        &mut self,
+        source: ObjectId,
+        target_parent: ObjectId,
+        target_name: &str,
+        now: Timespec,
+    ) -> Result<ObjectId, VfsError> {
+        Ok(self
+            .volume
+            .clone_file(source, target_parent, target_name, now)?)
+    }
+
+    /// Reflinks a byte range between two open file handles.  Read access is
+    /// required on the source and write access on the destination; the core
+    /// reports alignment or implementation limits explicitly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn clone_range(
+        &mut self,
+        source: Handle,
+        source_offset: u64,
+        destination: Handle,
+        destination_offset: u64,
+        length: u64,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        let (source_object, source_access) = match self.handles.get(&source).copied() {
+            Some(OpenHandle::File { object_id, access }) => (object_id, access),
+            Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
+            None => return Err(VfsError::Stale),
+        };
+        if !source_access.can_read() {
+            return Err(VfsError::Invalid);
+        }
+        let (destination_object, destination_access) = match self.handles.get(&destination).copied()
+        {
+            Some(OpenHandle::File { object_id, access }) => (object_id, access),
+            Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
+            None => return Err(VfsError::Stale),
+        };
+        if !destination_access.can_write() {
+            return Err(VfsError::ReadOnly);
+        }
+        Ok(self.volume.clone_range(
+            source_object,
+            source_offset,
+            destination_object,
+            destination_offset,
+            length,
+            now,
+        )?)
     }
 
     pub fn fsync(&mut self, handle: Handle) -> Result<(), VfsError> {
