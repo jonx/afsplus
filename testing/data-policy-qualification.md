@@ -57,6 +57,12 @@ requested range remain unchanged, but bytes inside it may be old, new, or a
 representative torn mixture. The model enumerates all full-write subsets of
 the unflushed tail plus its documented representative block tears.
 
+A deterministic injected-error case also fails the first metadata write after
+the in-place data barrier. The operation returns an error and the generation
+does not advance, but the old generation observes the new data bytes. This is
+part of the policy contract, not a retry guarantee. A three-block unaligned
+write separately proves that every touched private mapping is reused.
+
 Shared, unwritten, sparse, or extending writes are ineligible for in-place
 overwrite and must continue to satisfy the full-COW exact-state oracle.
 

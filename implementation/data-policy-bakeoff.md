@@ -60,6 +60,12 @@ The checker remains clean in every modeled state because allocation and
 metadata ownership do not change when a private physical block is overwritten.
 That is structural consistency, not proof of old-data atomicity.
 
+The same boundary holds for reported device errors: when the data write and
+its barrier succeed but a later metadata write fails, `write_file_at` returns
+an error and does not advance the generation, yet the old checkpoint reads the
+new bytes. The injected-error regression pins this behavior so callers cannot
+mistake a failed in-place transaction for byte rollback.
+
 ## Evidence-supported recommendation
 
 The measured benefit is large enough to keep an explicit hybrid design in the

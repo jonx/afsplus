@@ -10,7 +10,8 @@
 use std::time::Instant;
 
 use afsplus_block::{
-    for_each_crash_state, IoStats, MemoryBackend, RecordedOp, RecordingBackend, TraceBackend,
+    for_each_crash_state, FaultBackend, FaultPlan, IoStats, MemoryBackend, RecordedOp,
+    RecordingBackend, TraceBackend,
 };
 use afsplus_check::check_device;
 use afsplus_core::volume::{CommitStats, DataUpdatePolicy};
@@ -87,6 +88,69 @@ fn private_non_extending_write_reuses_the_physical_block() {
         DataUpdatePolicy::FullCow,
         "the experimental policy is runtime-only"
     );
+}
+
+#[test]
+fn private_multi_block_write_reuses_every_touched_block() {
+    let mut vol = mount(formatted()).unwrap();
+    let before = vec![0x19; 4 * BS];
+    let file = vol
+        .create_file_in_root("private-large.bin", &before, ts(1))
+        .unwrap();
+    let physical = vol.stat(file).unwrap().unwrap().data_root;
+    vol.set_data_update_policy(DataUpdatePolicy::InPlacePrivate);
+
+    let offset = BS - 100;
+    let replacement = vec![0x73; BS + 200];
+    vol.write_file_at(file, offset as u64, &replacement, ts(2))
+        .unwrap();
+    let stats = vol.last_commit_stats().unwrap();
+    assert_eq!(stats.data_blocks_written, 3);
+    assert_eq!(stats.data_blocks_overwritten_in_place, 3);
+    assert_eq!(vol.stat(file).unwrap().unwrap().data_root, physical);
+
+    let mut expected = before;
+    expected[offset..offset + replacement.len()].copy_from_slice(&replacement);
+    assert_eq!(vol.read_file(file).unwrap(), expected);
+}
+
+#[test]
+fn metadata_io_error_after_in_place_data_write_keeps_old_generation_but_not_old_bytes() {
+    let mut initial = mount(formatted()).unwrap();
+    let before = vec![0x21; BS];
+    let file = initial
+        .create_file_in_root("error.page", &before, ts(1))
+        .unwrap();
+    let pre_generation = initial.generation();
+    let base = initial.into_device();
+
+    // Write zero is the in-place data block. Write one is the first COW
+    // metadata block, so this injects an error after data reached the device
+    // but before a new checkpoint can be published.
+    let plan = FaultPlan {
+        fail_write_index: Some(1),
+        fail_flush_index: None,
+        fail_hard: false,
+    };
+    let mut vol = mount(FaultBackend::new(base, plan)).unwrap();
+    vol.set_data_update_policy(DataUpdatePolicy::InPlacePrivate);
+    let error = vol.write_file_at(file, 100, &vec![0x92; 500], ts(2));
+    assert!(error.is_err());
+    assert_eq!(vol.generation(), pre_generation);
+
+    let mut expected = before;
+    expected[100..600].fill(0x92);
+    assert_eq!(
+        vol.read_file(file).unwrap(),
+        expected,
+        "a failed in-place transaction cannot promise restoration of old bytes"
+    );
+    let mut dev = vol.into_device().into_inner();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+    let mut remounted = mount(dev).unwrap();
+    assert_eq!(remounted.generation(), pre_generation);
+    assert_eq!(remounted.read_file(file).unwrap(), expected);
 }
 
 #[test]
