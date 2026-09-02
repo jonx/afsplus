@@ -1,6 +1,6 @@
 # ADR-061: Shared-extent references in a typed reference tree
 
-Status: Proposed; under review (thread #17), wire format experimental
+Status: Accepted; wire format experimental until M14
 Amends: ADR-027, ADR-035
 
 <!-- toc -->

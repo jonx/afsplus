@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-02 — Shared extents and reflinks qualified](#2026-09-02--shared-extents-and-reflinks-qualified)
 - [2026-08-31 — Team board adopted](#2026-08-31--team-board-adopted)
 - [2026-08-31 — Shared extents chosen as the next epoch-1 lot](#2026-08-31--shared-extents-chosen-as-the-next-epoch-1-lot)
 - [2026-08-31 — Documentation restructured around one home per fact](#2026-08-31--documentation-restructured-around-one-home-per-fact)
@@ -18,6 +19,25 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-02 — Shared extents and reflinks qualified
+
+The ADR-061 implementation completed the volume-wide reference tree, shared
+copy-on-write writes, `CloneFile`, byte-range `CloneRange`, checker
+reconstruction and corruption cases, and every-write/every-flush crash
+matrices. Review caught and fixed the dangerous rc=2→1 case before closure:
+removing one of two mappings deletes the reference record but never retires
+the surviving file's blocks. A second review found a left-boundary prefetch
+case that could leave adjacent equal-count records non-canonical; its
+regression now exercises rc=2/rc=3→rc=2 merging.
+
+When the original implementation session reached its limit, the remaining
+range-clone lot was taken over in the shared checkout. The completed operation
+shares every representable full block, privately copies partial boundaries,
+keeps holes sparse and publishes both file maps with the reference tree in one
+checkpoint. The same semantics are exposed through the portable VFS with
+per-volume capabilities. The retained commands, revisions and limitations are
+in [the completion report](implementation/shared-extents-completion.md).
 
 ## 2026-08-31 — Team board adopted
 

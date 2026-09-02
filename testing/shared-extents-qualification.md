@@ -25,15 +25,13 @@ allowing a write, truncate, unlink, replacement or crash to expose one
 object's changes through another object or to return still-referenced storage
 to the allocator.
 
-The executable target is:
+The executable targets are:
 
 ```sh
 cargo test -p afsplus-check --test shared_extents
+cargo test -p afsplus-check --test shared_clone
+cargo test -p afsplus-check --test shared_crash
 ```
-
-The target is added only with the implementation. Until then this document is
-the acceptance contract for the format/core work and the checker work owned by
-separate agents.
 
 ## Required observability
 
@@ -80,8 +78,10 @@ For every row the test also asserts:
   bitmap equality check;
 - shared-reference tree blocks are reachable metadata and cannot intersect
   data, free space, reclaim or another metadata owner;
-- the operation never writes a block protected by either selectable
-  checkpoint.
+- the operation never writes data or metadata reachable from the checkpoint
+  that remains selected if the transaction aborts. Blocks reachable only from
+  the older checkpoint may be recycled while its slot is the publication
+  target; a crash before publication still selects the intact newer state.
 
 ## Canonical reference oracle
 
