@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — The independent portable C reader starts executing](#2026-09-03--the-independent-portable-c-reader-starts-executing)
 - [2026-09-03 — FSKit durability moves to write replies](#2026-09-03--fskit-durability-moves-to-write-replies)
 - [2026-09-03 — Qualification order follows executable targets](#2026-09-03--qualification-order-follows-executable-targets)
 - [2026-09-03 — macFUSE FSKit reopens the host fsync gate](#2026-09-03--macfuse-fskit-reopens-the-host-fsync-gate)
@@ -25,6 +26,29 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — The independent portable C reader starts executing
+
+The first ADR-029 implementation slice added a C99 reader that does not link or
+generate code from the Rust codecs. Caller-owned block I/O and one 4-KiB
+scratch block are sufficient to validate the identification record, negotiate
+the implemented feature summary, validate bounded geometry and structurally
+select between both retained checkpoints. The public reader surface is
+versioned before expansion so future profiles do not depend on native C struct
+serialization.
+
+Its cross-implementation gate formats and advances an image with Rust, compiles
+the reader under strict C99 warnings, and asks C to select it. The same binary
+injects a bad newest checkpoint, valid-checksum structural corruption, two bad
+checkpoints, an impossible duplicate generation, a selected-state feature/root
+mismatch, a bad identification checksum and a short scratch buffer, with
+structured stage/LBA/per-slot diagnostics. The feature/root case proves that
+selection does not hide corruption beneath a newer structurally valid
+checkpoint by falling back. Sanitizer, CMake-example and available AROS-m68k
+compiler gates catch host-language and integration faults; Rust's checker
+validates the untouched source image. Object-tree traversal and file reads form
+the next reader slice rather than being simulated through the Rust
+implementation.
 
 ## 2026-09-03 — FSKit durability moves to write replies
 

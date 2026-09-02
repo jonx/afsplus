@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: BSD-2-Clause
+
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/AFSPlusReaderTargets.cmake")

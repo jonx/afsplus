@@ -218,7 +218,8 @@ commands build, test and check the repository:
 ```sh
 cargo build --workspace
 cargo test --workspace --all-features
-make check            # fmt, clippy, tests and the documentation checker
+make check            # Rust/C gates, clippy and the documentation checker
+make portable-c-gate  # independent C99 reader cross-reads a Rust image
 ```
 
 The host mount CLI is built with:
@@ -258,6 +259,7 @@ its purpose in [tools/README.md](tools/README.md).
 | `testing/` | Test plans: what each gate checks and what runs it | [testing/README.md](testing/README.md) |
 | `tools/` | Official CLI tool specification and qualification gates | [tools/README.md](tools/README.md) |
 | `crates/` | Rust workspace: format, block, core, check, vfs, fuse, aros | [crates/README.md](crates/README.md) |
+| `portable/` | Independent non-Rust implementations and embedding guides | [portable/README.md](portable/README.md) |
 | `native/` | Native AROS C handler shell and translator | [docs/aros-native-bridge.md](docs/aros-native-bridge.md) |
 
 ## Documentation map

@@ -58,3 +58,19 @@ Porting should require:
 - encoding/path integration
 
 It should not require reverse engineering the format from AROS source.
+
+## 6. Independent portable C reader
+
+The `reader-minimal` C99 implementation lives under
+[`portable/`](../portable/README.md). Its core has no POSIX dependency, owns no
+memory, and receives logical-block I/O plus a scratch block from its caller.
+The bootstrap surface validates identification, compatibility summaries and
+geometry, then selects the newest structurally valid retained checkpoint. It
+does not share codecs with Rust; interoperability is established by consuming
+Rust-produced images and matching the corruption/fallback oracle in the
+[conformance gate](../testing/conformance.md#portable-c-bootstrap-gate).
+
+Integrators get a versioned public ABI, symbolic and printable errors,
+structured stage/LBA/per-checkpoint diagnostics, a source-vendoring contract,
+a CMake target and a complete host-file example. Native targets replace only
+the logical-block callback.
