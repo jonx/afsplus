@@ -124,6 +124,59 @@ fn expected_shared_runs(
     Ok(expected)
 }
 
+/// Validates an independently observed reference-tree sequence before it is
+/// compared with the records derived from live file maps.
+fn validate_observed_runs(records: &[ExpectedSharedRun]) -> Result<(), String> {
+    for record in records {
+        if record.blocks == 0 {
+            return Err(format!("zero-length record at {}", record.start));
+        }
+        if record.references < 2 {
+            return Err(format!(
+                "record at {} has only {} reference(s)",
+                record.start, record.references
+            ));
+        }
+        record
+            .start
+            .checked_add(record.blocks)
+            .ok_or_else(|| format!("record at {} overflows", record.start))?;
+    }
+    for pair in records.windows(2) {
+        let left_end = pair[0]
+            .start
+            .checked_add(pair[0].blocks)
+            .ok_or_else(|| format!("record at {} overflows", pair[0].start))?;
+        if left_end > pair[1].start {
+            return Err(format!(
+                "records at {} and {} overlap or are out of order",
+                pair[0].start, pair[1].start
+            ));
+        }
+        if left_end == pair[1].start && pair[0].references == pair[1].references {
+            return Err(format!(
+                "adjacent count-{} records at {} and {} are not maximal",
+                pair[0].references, pair[0].start, pair[1].start
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn compare_reference_state(
+    mappings: &[CountedMapping],
+    observed: &[ExpectedSharedRun],
+) -> Result<(), String> {
+    validate_observed_runs(observed)?;
+    let expected = expected_shared_runs(mappings).map_err(str::to_owned)?;
+    if observed != expected {
+        return Err(format!(
+            "reference tree mismatch: expected {expected:?}, observed {observed:?}"
+        ));
+    }
+    Ok(())
+}
+
 /// Runs the common ADR-061 recovery oracle over every state in the power-cut
 /// model. Operation-specific checks receive whether the old or new checkpoint
 /// won; the helper independently requires a clean full checker result.
@@ -305,6 +358,64 @@ fn oracle_is_sparse_in_address_space_and_rejects_hostile_ranges() {
         start: 7,
         blocks: 1,
         copies: u32::MAX as u64 + 1,
+    }])
+    .is_err());
+}
+
+#[test]
+fn oracle_rejects_missing_extra_wrong_and_noncanonical_records() {
+    let mappings = [CountedMapping {
+        start: 100,
+        blocks: 20,
+        copies: 2,
+    }];
+    let valid = [ExpectedSharedRun {
+        start: 100,
+        blocks: 20,
+        references: 2,
+    }];
+    compare_reference_state(&mappings, &valid).unwrap();
+
+    assert!(compare_reference_state(&mappings, &[]).is_err());
+    assert!(compare_reference_state(&[CountedMapping::one(100, 20)], &valid).is_err());
+    assert!(compare_reference_state(
+        &mappings,
+        &[ExpectedSharedRun {
+            references: 3,
+            ..valid[0]
+        }]
+    )
+    .is_err());
+    assert!(validate_observed_runs(&[
+        ExpectedSharedRun {
+            start: 100,
+            blocks: 15,
+            references: 2,
+        },
+        ExpectedSharedRun {
+            start: 110,
+            blocks: 10,
+            references: 3,
+        },
+    ])
+    .is_err());
+    assert!(validate_observed_runs(&[
+        ExpectedSharedRun {
+            start: 100,
+            blocks: 10,
+            references: 2,
+        },
+        ExpectedSharedRun {
+            start: 110,
+            blocks: 10,
+            references: 2,
+        },
+    ])
+    .is_err());
+    assert!(validate_observed_runs(&[ExpectedSharedRun {
+        start: u64::MAX,
+        blocks: 2,
+        references: 2,
     }])
     .is_err());
 }
