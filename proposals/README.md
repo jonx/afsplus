@@ -20,3 +20,7 @@ Proposals:
   and intent-log areas; the format-affecting half of M1.
 - [`filesystem-api-v2-abi-freeze.md`](filesystem-api-v2-abi-freeze.md) — additive, portable
   filesystem API v2 ABI and AROS handler transport (decisions D1–D8).
+- [`data-update-policy.md`](data-update-policy.md) — explicit per-file hybrid data policy
+  based on the Q1 bake-off (decisions Q1-D1–Q1-D4).
+- [`intent-log-epoch1.md`](intent-log-epoch1.md) — adopt the intent-log mechanism while
+  keeping its wire experimental until existing-file writes replay (decisions Q2-D1–Q2-D3).
