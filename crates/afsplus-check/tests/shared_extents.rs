@@ -177,6 +177,55 @@ fn compare_reference_state(
     Ok(())
 }
 
+/// Deliberately simple block-by-block model used only to validate the sparse
+/// interval sweep on a tiny address space. Keeping the two algorithms unlike
+/// one another makes a shared boundary bug much less likely.
+fn naive_shared_runs(
+    mappings: &[CountedMapping],
+    block_limit: usize,
+) -> Result<Vec<ExpectedSharedRun>, &'static str> {
+    let mut counts = vec![0u64; block_limit];
+    for mapping in mappings {
+        if mapping.blocks == 0 || mapping.copies == 0 {
+            return Err("mapping length and copy count must be non-zero");
+        }
+        let end = mapping
+            .start
+            .checked_add(mapping.blocks)
+            .ok_or("mapping end overflows")?;
+        if end > block_limit as u64 {
+            return Err("mapping exceeds naive model");
+        }
+        for count in &mut counts[mapping.start as usize..end as usize] {
+            *count = count
+                .checked_add(mapping.copies)
+                .ok_or("reference count overflows")?;
+        }
+    }
+
+    let mut runs = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < counts.len() {
+        let count = counts[cursor];
+        if count < 2 {
+            cursor += 1;
+            continue;
+        }
+        let references = u32::try_from(count).map_err(|_| "reference count exceeds wire limit")?;
+        let start = cursor;
+        cursor += 1;
+        while cursor < counts.len() && counts[cursor] == count {
+            cursor += 1;
+        }
+        runs.push(ExpectedSharedRun {
+            start: start as u64,
+            blocks: (cursor - start) as u64,
+            references,
+        });
+    }
+    Ok(runs)
+}
+
 /// Runs the common ADR-061 recovery oracle over every state in the power-cut
 /// model. Operation-specific checks receive whether the old or new checkpoint
 /// won; the helper independently requires a clean full checker result.
@@ -418,6 +467,42 @@ fn oracle_rejects_missing_extra_wrong_and_noncanonical_records() {
         references: 2,
     }])
     .is_err());
+}
+
+#[test]
+fn sparse_oracle_matches_an_independent_naive_model() {
+    const BLOCKS: u64 = 32;
+    let mut state = 0x0615_5eed_u64;
+    for case in 0..4_096 {
+        let mapping_count = (state as usize % 8) + 1;
+        let mut mappings = Vec::with_capacity(mapping_count);
+        for _ in 0..mapping_count {
+            // Fixed LCG: deterministic, dependency-free, and adequate for
+            // exercising coincident starts/ends, gaps and nested overlaps.
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let start = state % BLOCKS;
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let blocks = 1 + state % (BLOCKS - start);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            mappings.push(CountedMapping {
+                start,
+                blocks,
+                copies: 1 + state % 3,
+            });
+        }
+
+        assert_eq!(
+            expected_shared_runs(&mappings),
+            naive_shared_runs(&mappings, BLOCKS as usize),
+            "oracle disagreement in generated case {case}: {mappings:?}"
+        );
+    }
 }
 
 #[test]
