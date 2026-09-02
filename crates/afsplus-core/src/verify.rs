@@ -18,7 +18,7 @@ use afsplus_block::BlockDevice;
 use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::geometry::{Geometry, DESCRIPTOR_SLOTS};
-use afsplus_format::ident::Identification;
+use afsplus_format::ident::{Identification, RO_COMPAT_SHARED_EXTENTS};
 use afsplus_format::object::{ObjectRecord, ObjectType, OBJECT_FLAG_EXTENT_TREE};
 use afsplus_format::reclaim::{ReclaimEntry, ReclaimRoot};
 use afsplus_format::{OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
@@ -244,13 +244,13 @@ pub fn load_committed_state<D: BlockDevice>(
     } else {
         (Vec::new(), Vec::new())
     };
-    // Per-block live-mapping counts over the record-covered runs.
-    let mut shared_claims: BTreeMap<u64, u32> = BTreeMap::new();
-    let record_cover = |lba: u64| -> Option<&SharedRun> {
-        let index = shared_records.partition_point(|run| run.physical_start <= lba);
-        let run = &shared_records[..index].last()?;
-        (lba < run.physical_start + run.block_count).then_some(*run)
-    };
+    // Physical intervals of live mappings, split by whether they carry the
+    // conservative marker. The shared cross-check below is an endpoint sweep
+    // over these intervals: memory and work stay proportional to the number
+    // of mapping boundaries, never to the numeric size of the runs.
+    let mut flagged_intervals: Vec<(u64, u64)> = Vec::new();
+    let mut unflagged_intervals: Vec<(u64, u64)> = Vec::new();
+    let shared_enabled = ident.features.ro_compat & RO_COMPAT_SHARED_EXTENTS != 0;
 
     let object_map = object_map::load_all(
         dev,
@@ -314,23 +314,26 @@ pub fn load_committed_state<D: BlockDevice>(
                         metadata_blocks.push(lba);
                     }
                     for extent in map.extents {
-                        let flagged = extent.flags & crate::extent_map::EXTENT_SHARED != 0;
-                        for lba in extent.physical_start..extent.physical_end()? {
-                            if record_cover(lba).is_some() {
-                                // A mapping over a shared record must carry
-                                // the conservative marker: a clear flag over
-                                // a record is the dangerous false negative
-                                // (ADR-061).
-                                if !flagged {
-                                    return Err(CoreError::Corrupt(format!(
-                                        "object {} maps shared block {lba} without EXTENT_SHARED",
-                                        record.object_id
-                                    )));
-                                }
-                                *shared_claims.entry(lba).or_insert(0) += 1;
-                            } else {
-                                // A stale flag over a private gap is legal;
-                                // the claim stays exclusive either way.
+                        if extent.flags & crate::extent_map::EXTENT_SHARED != 0 {
+                            // Fail closed (ADR-061): a flagged extent has no
+                            // legal history on a volume without the feature
+                            // or without a reference tree.
+                            if !shared_enabled || checkpoint.shared_extent_root_block == 0 {
+                                return Err(CoreError::Corrupt(format!(
+                                    "object {} carries EXTENT_SHARED {}",
+                                    record.object_id,
+                                    if shared_enabled {
+                                        "but the volume has no reference tree"
+                                    } else {
+                                        "without the shared-extents feature"
+                                    }
+                                )));
+                            }
+                            flagged_intervals.push((extent.physical_start, extent.physical_end()?));
+                        } else {
+                            unflagged_intervals
+                                .push((extent.physical_start, extent.physical_end()?));
+                            for lba in extent.physical_start..extent.physical_end()? {
                                 claim(lba, &mut claimed)?;
                                 data_blocks.push(lba);
                             }
@@ -357,17 +360,87 @@ pub fn load_committed_state<D: BlockDevice>(
         objects.insert(record.object_id, record);
     }
 
-    // Bidirectional (ADR-061): every record's count equals the live
-    // mappings found over its run — a missing record is as detectable as a
-    // wrong one, because uncovered multi-references die as double claims.
-    for run in &shared_records {
-        for lba in run.physical_start..run.physical_end()? {
-            let found = shared_claims.get(&lba).copied().unwrap_or(0);
-            if found != run.reference_count {
-                return Err(CoreError::Corrupt(format!(
-                    "shared block {lba} has {found} live references, record says {}",
-                    run.reference_count
-                )));
+    // Bidirectional (ADR-061), by endpoint sweep: the canonical runs
+    // reconstructed from the flagged mappings must equal the stored records
+    // exactly, so a missing record is as detectable as a wrong count, and
+    // work is proportional to the number of boundaries.
+    {
+        let mut events: BTreeMap<u64, i64> = BTreeMap::new();
+        for (start, end) in &flagged_intervals {
+            *events.entry(*start).or_insert(0) += 1;
+            *events.entry(*end).or_insert(0) -= 1;
+        }
+        let mut expected: Vec<SharedRun> = Vec::new();
+        let mut count: i64 = 0;
+        let mut previous: Option<u64> = None;
+        for (position, delta) in &events {
+            if *delta == 0 {
+                continue;
+            }
+            if let Some(start) = previous {
+                if count >= 2 {
+                    expected.push(SharedRun {
+                        physical_start: start,
+                        block_count: position - start,
+                        reference_count: u32::try_from(count).map_err(|_| {
+                            CoreError::Corrupt(format!(
+                                "shared run at {start} has more references than fit a count"
+                            ))
+                        })?,
+                        flags: 0,
+                    });
+                } else if count == 1 {
+                    // The private part of a flagged mapping: exactly one
+                    // owner, claimed exclusively like any other data.
+                    for lba in start..*position {
+                        claim(lba, &mut claimed)?;
+                        data_blocks.push(lba);
+                    }
+                }
+            }
+            count += delta;
+            previous = Some(*position);
+        }
+        if count != 0 {
+            return Err(CoreError::Corrupt(
+                "shared mapping sweep does not balance".into(),
+            ));
+        }
+        if expected != shared_records {
+            return Err(CoreError::Corrupt(format!(
+                "live shared mappings reconstruct {} canonical runs {:?}, tree stores {} {:?}",
+                expected.len(),
+                expected
+                    .iter()
+                    .map(|run| (run.physical_start, run.block_count, run.reference_count))
+                    .collect::<Vec<_>>(),
+                shared_records.len(),
+                shared_records
+                    .iter()
+                    .map(|run| (run.physical_start, run.block_count, run.reference_count))
+                    .collect::<Vec<_>>(),
+            )));
+        }
+
+        // A mapping over a record without the marker is the dangerous false
+        // negative. Both lists are sorted intervals: one linear pass.
+        let mut unflagged = unflagged_intervals;
+        unflagged.sort_unstable();
+        let mut record_index = 0usize;
+        for (start, end) in unflagged {
+            while record_index < shared_records.len()
+                && shared_records[record_index].physical_end()? <= start
+            {
+                record_index += 1;
+            }
+            if let Some(run) = shared_records.get(record_index) {
+                if run.physical_start < end {
+                    return Err(CoreError::Corrupt(format!(
+                        "blocks {}..{} map a shared run without EXTENT_SHARED",
+                        start.max(run.physical_start),
+                        end.min(run.physical_end()?)
+                    )));
+                }
             }
         }
     }

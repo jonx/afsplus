@@ -2,7 +2,7 @@
 //! sharing, the write-splits-a-run partition, and the release table whose
 //! middle row (two references falling to one) must privatise, never free.
 
-use afsplus_block::MemoryBackend;
+use afsplus_block::{BlockDevice, MemoryBackend};
 use afsplus_check::check_device;
 use afsplus_core::shared_extents;
 use afsplus_core::{mkfs, mount, CoreError, MkfsParams};
@@ -194,4 +194,198 @@ fn clone_without_the_feature_is_rejected() {
         .unwrap_err();
     assert!(matches!(error, CoreError::FeatureDisabled(_)), "{error:?}");
     assert_eq!(vol.checkpoint().shared_extent_root_block, 0);
+}
+
+#[test]
+fn refusing_a_clone_leaves_an_open_window_untouched() {
+    // F12: on a volume without the feature, a refused clone must have no
+    // side effect at all — in particular it must not have committed the
+    // open intent-log window first.
+    let mut dev = MemoryBackend::new(BS, 256);
+    mkfs(
+        &mut dev,
+        &MkfsParams {
+            uuid: [7u8; 16],
+            label: "NoCloneVol".into(),
+            region_size: 256,
+            reclaim_caps: Default::default(),
+            log_slots: 8,
+            shared_extents: false,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
+            timestamp: ts(1),
+        },
+    )
+    .unwrap();
+    let mut vol = mount(dev).unwrap();
+    let source = vol.create_file_in_root("origin", b"data", ts(2)).unwrap();
+    let generation_before = vol.generation();
+    let free_before = vol.free_blocks();
+    vol.window_op(
+        &afsplus_core::volume::BatchOp::CreateFile {
+            parent_id: OBJECT_ROOT,
+            name: "staged",
+            content: b"staged",
+        },
+        ts(3),
+    )
+    .unwrap();
+
+    let error = vol
+        .clone_file(source, OBJECT_ROOT, "copy", ts(4))
+        .unwrap_err();
+    assert!(matches!(error, CoreError::FeatureDisabled(_)), "{error:?}");
+    // The window is still open (an immediate-commit op is refused), and the
+    // committed state did not move.
+    assert!(matches!(
+        vol.create_file_in_root("other", b"x", ts(5)),
+        Err(CoreError::WindowOpen)
+    ));
+    assert_eq!(vol.generation(), generation_before);
+    assert_eq!(vol.free_blocks(), free_before);
+}
+
+/// Plants `EXTENT_SHARED` on a committed extent-tree leaf, byte-for-byte on
+/// the device, bypassing every write path.
+fn plant_shared_flag(vol: &mut afsplus_core::Volume<MemoryBackend>, object_id: u64) {
+    let record = vol.stat(object_id).unwrap().unwrap();
+    assert_ne!(record.flags & OBJECT_FLAG_EXTENT_TREE, 0);
+    let root = record.data_root;
+    let dev = vol.device_mut();
+    let mut block = vec![0u8; BS];
+    dev.read_block(root, &mut block).unwrap();
+    let (mut node, generation) = afsplus_format::tree::TreeNode::decode(&block).unwrap();
+    for item in &mut node.items {
+        let flags_offset = 16; // physical (8) + block_count (8), flags u32
+        let mut flags = u32::from_le_bytes(
+            item.value[flags_offset..flags_offset + 4]
+                .try_into()
+                .unwrap(),
+        );
+        flags |= afsplus_core::extent_map::EXTENT_SHARED;
+        item.value[flags_offset..flags_offset + 4].copy_from_slice(&flags.to_le_bytes());
+    }
+    let encoded = node.encode(BS, generation).unwrap();
+    dev.write_block(root, &encoded).unwrap();
+}
+
+#[test]
+fn planted_flag_without_feature_fails_closed() {
+    let dev = formatted(false);
+    let mut vol = mount(dev).unwrap();
+    let source = vol
+        .create_file_in_root("origin", &vec![0x33u8; BS], ts(2))
+        .unwrap();
+    // Preallocation forces the extent-tree layout so there is a flag word.
+    vol.preallocate_file(source, 4 * BS as u64, 2 * BS as u64, ts(3))
+        .unwrap();
+    let free_before = vol.free_blocks();
+    plant_shared_flag(&mut vol, source);
+
+    // Mutation: fail closed, nothing freed, nothing published.
+    let error = vol.delete_file(OBJECT_ROOT, "origin", ts(4)).unwrap_err();
+    assert!(
+        matches!(&error, CoreError::Corrupt(text)
+            if text.contains("without the shared-extents feature")),
+        "{error:?}"
+    );
+    assert_eq!(vol.free_blocks(), free_before);
+    assert!(vol.stat(source).unwrap().is_some());
+
+    // Checker: the same congruence, reported.
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(!report.is_clean());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("EXTENT_SHARED")),
+        "checker findings: {:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn planted_flag_without_a_tree_fails_closed() {
+    let dev = formatted(true);
+    let mut vol = mount(dev).unwrap();
+    let source = vol
+        .create_file_in_root("origin", &vec![0x44u8; BS], ts(2))
+        .unwrap();
+    vol.preallocate_file(source, 4 * BS as u64, 2 * BS as u64, ts(3))
+        .unwrap();
+    assert_eq!(vol.checkpoint().shared_extent_root_block, 0);
+    let free_before = vol.free_blocks();
+    plant_shared_flag(&mut vol, source);
+
+    let error = vol.delete_file(OBJECT_ROOT, "origin", ts(4)).unwrap_err();
+    assert!(
+        matches!(&error, CoreError::Corrupt(text)
+            if text.contains("no reference tree")),
+        "{error:?}"
+    );
+    assert_eq!(vol.free_blocks(), free_before);
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(!report.is_clean());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("EXTENT_SHARED")),
+        "checker findings: {:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn cloning_an_empty_file_still_allocates_the_root() {
+    let dev = formatted(true);
+    let mut vol = mount(dev).unwrap();
+    let source = vol.create_file_in_root("origin", b"", ts(2)).unwrap();
+    let clone = vol.clone_file(source, OBJECT_ROOT, "copy", ts(3)).unwrap();
+
+    // ADR-061: the first CloneFile allocates the root even when it shares
+    // nothing, so root zero keeps meaning "this volume has never cloned".
+    assert_ne!(vol.checkpoint().shared_extent_root_block, 0);
+    assert!(shared_records(&mut vol).is_empty());
+    assert_eq!(vol.read_file(clone).unwrap(), b"");
+    assert_eq!(
+        vol.last_commit_stats().unwrap().shared_tree_nodes_written,
+        1
+    );
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+}
+
+#[test]
+fn cloning_a_sparse_file_shares_its_unwritten_runs() {
+    let dev = formatted(true);
+    let mut vol = mount(dev).unwrap();
+    let source = vol
+        .create_file_in_root("origin", &vec![0x55u8; BS], ts(2))
+        .unwrap();
+    vol.preallocate_file(source, 4 * BS as u64, 3 * BS as u64, ts(3))
+        .unwrap();
+    let clone = vol.clone_file(source, OBJECT_ROOT, "copy", ts(4)).unwrap();
+
+    assert_ne!(vol.checkpoint().shared_extent_root_block, 0);
+    let records = shared_records(&mut vol);
+    let shared_blocks: u64 = records.iter().map(|run| run.block_count).sum();
+    assert_eq!(
+        shared_blocks, 4,
+        "written + unwritten runs share: {records:?}"
+    );
+    assert!(records.iter().all(|run| run.reference_count == 2));
+    assert_eq!(
+        vol.read_file(clone).unwrap(),
+        vol.read_file(source).unwrap()
+    );
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
 }

@@ -295,7 +295,7 @@ fn internal_fanout(block_size: usize) -> Result<usize, CoreError> {
     Ok(children)
 }
 
-fn balanced_groups(count: usize, capacity: usize) -> Result<Vec<usize>, CoreError> {
+pub(crate) fn balanced_groups(count: usize, capacity: usize) -> Result<Vec<usize>, CoreError> {
     if count == 0 || capacity == 0 {
         return Err(CoreError::Corrupt("invalid extent bulk-build group".into()));
     }

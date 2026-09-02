@@ -798,15 +798,17 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<u64, CoreError> {
-        if self.window.is_some() {
-            self.window_commit(now)?;
-        }
-        self.ensure_window_closed()?;
+        // The feature gate comes before every side effect: refusing a clone
+        // must not have committed an open window first (F12).
         if !self.shared_extents_enabled() {
             return Err(CoreError::FeatureDisabled(
                 "shared-extents feature is not enabled on this volume",
             ));
         }
+        if self.window.is_some() {
+            self.window_commit(now)?;
+        }
+        self.ensure_window_closed()?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
         let parent = self.read_object(parent_id)?.ok_or(CoreError::NotFound)?;
         if parent.object_type != ObjectType::Directory {
@@ -849,6 +851,10 @@ impl<D: BlockDevice> Volume<D> {
         // One more reference per source run. A run shared for the first time
         // gains a record at two references (source + clone); an already
         // shared run is incremented, refusing overflow.
+        self.shared_refs_edit(generation)?.require_root();
+        for extent in &source_extents {
+            self.shared_prefetch(generation, extent.physical_start, extent.block_count)?;
+        }
         {
             let edit = self.shared_refs_edit(generation)?;
             for extent in &source_extents {
@@ -2560,33 +2566,76 @@ impl<D: BlockDevice> Volume<D> {
         self.ident.features.ro_compat & RO_COMPAT_SHARED_EXTENTS != 0
     }
 
-    /// The transaction-scoped reference edit, loading the committed records
-    /// on first use. Keyed by generation; `next_generation` cleared any
-    /// leftover from an aborted transaction.
+    /// The transaction-scoped reference edit. Created empty; committed
+    /// records enter the overlay only through [`Self::shared_prefetch`]'s
+    /// bounded range reads. Keyed by generation; `next_generation` cleared
+    /// any leftover from an aborted transaction.
     fn shared_refs_edit(&mut self, generation: u64) -> Result<&mut RefEdit, CoreError> {
         let stale = self
             .shared_refs
             .as_ref()
             .is_none_or(|(opened_for, _)| *opened_for != generation);
         if stale {
-            let records = if self.checkpoint.shared_extent_root_block != 0 {
-                shared_extents::load_all(
-                    &mut self.dev,
-                    &self.ident.geometry(),
-                    self.checkpoint.shared_extent_root_block,
-                    self.checkpoint.generation,
-                )?
-                .records
-            } else {
-                Vec::new()
-            };
-            self.shared_refs = Some((generation, RefEdit::new(records)));
+            let mut edit = RefEdit::new();
+            if self.checkpoint.shared_extent_root_block == 0 {
+                edit.mark_all_fetched();
+            }
+            self.shared_refs = Some((generation, edit));
         }
         Ok(&mut self
             .shared_refs
             .as_mut()
             .expect("shared_refs initialized above")
             .1)
+    }
+
+    /// Loads into the overlay, through the bounded tree walk, exactly the
+    /// committed records overlapping `[start, start+blocks)` plus the floor
+    /// neighbour, so canonical merging stays local. Never materialises the
+    /// volume-wide tree.
+    fn shared_prefetch(
+        &mut self,
+        generation: u64,
+        start: u64,
+        blocks: u64,
+    ) -> Result<(), CoreError> {
+        let end = start
+            .checked_add(blocks)
+            .ok_or_else(|| CoreError::Corrupt("shared prefetch range overflows".into()))?;
+        let root = self.checkpoint.shared_extent_root_block;
+        let committed = self.checkpoint.generation;
+        let geo = self.ident.geometry();
+        if self.shared_refs_edit(generation)?.covers(start, end) {
+            return Ok(());
+        }
+        let low_key = {
+            let (floor, _) = crate::tree::lookup_floor(
+                &mut self.dev,
+                &geo,
+                root,
+                shared_extents::spec(committed),
+                &afsplus_format::tree::key_u64(start),
+            )?;
+            floor
+                .map(|(key, _)| key)
+                .unwrap_or_else(|| afsplus_format::tree::key_u64(start).to_vec())
+        };
+        let mut records = Vec::new();
+        crate::tree::visit_key_range(
+            &mut self.dev,
+            &geo,
+            root,
+            shared_extents::spec(committed),
+            &low_key,
+            &afsplus_format::tree::key_u64(end),
+            |key, value| {
+                records.push(shared_extents::decode_run(key, value, &geo)?);
+                Ok(())
+            },
+        )?;
+        self.shared_refs_edit(generation)?
+            .note_fetched(start, end, records);
+        Ok(())
     }
 
     /// Drops this mapping's reference to a data run and retires exactly what
@@ -2604,6 +2653,21 @@ impl<D: BlockDevice> Volume<D> {
             tx.retire_run(&mut self.dev, extent.physical_start, extent.block_count)?;
             return Ok(());
         }
+        // Fail closed (ADR-061): a flagged extent on a volume where the
+        // feature is off, or where no reference tree exists, has no legal
+        // history. Freeing it as if the gaps were private would release
+        // storage through the unknown state.
+        if !self.shared_extents_enabled() {
+            return Err(CoreError::Corrupt(
+                "extent carries EXTENT_SHARED without the shared-extents feature".into(),
+            ));
+        }
+        if self.checkpoint.shared_extent_root_block == 0 {
+            return Err(CoreError::Corrupt(
+                "extent carries EXTENT_SHARED but the volume has no reference tree".into(),
+            ));
+        }
+        self.shared_prefetch(generation, extent.physical_start, extent.block_count)?;
         let gaps = self
             .shared_refs_edit(generation)?
             .release(extent.physical_start, extent.block_count)?;
@@ -3501,14 +3565,27 @@ impl<D: BlockDevice> Volume<D> {
             if opened_for == generation {
                 let publication = edit.finish()?;
                 shared_stats = publication.stats;
-                if publication.changed() {
-                    if shared_root == 0 {
-                        let node = shared_extents::initial_leaf(&publication.records)?;
-                        let lba = tx.allocate(&mut self.dev)?;
+                if shared_root == 0 && (publication.changed() || publication.root_required()) {
+                    // The volume's first clone: build the initial tree from
+                    // the overlay's canonical records (complete here, since
+                    // no committed tree existed), on transactionally
+                    // reserved blocks — even empty, so root zero keeps
+                    // meaning "never cloned" (ADR-061).
+                    let node_count =
+                        shared_extents::bulk_node_count(block_size, publication.records.len())?;
+                    let mut lbas = Vec::with_capacity(node_count);
+                    for _ in 0..node_count {
+                        lbas.push(tx.allocate(&mut self.dev)?);
+                    }
+                    let built =
+                        shared_extents::bulk_build(block_size, &publication.records, &lbas)?;
+                    shared_nodes_written = built.nodes.len() as u64;
+                    for (lba, node) in built.nodes {
                         meta_writes.push((lba, node.encode(block_size, generation)?));
-                        shared_root = lba;
-                        shared_nodes_written = 1;
-                    } else {
+                    }
+                    shared_root = built.root_lba;
+                } else if publication.changed() {
+                    {
                         let operations: Vec<TreeOperation<'_>> = publication
                             .deletes
                             .iter()

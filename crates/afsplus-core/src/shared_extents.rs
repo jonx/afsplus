@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use afsplus_block::BlockDevice;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::le;
-use afsplus_format::tree::{key_u64, TreeItem, TreeKind, TreeNode};
+use afsplus_format::tree::{child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode};
 
 use crate::tree::{visit_tree_nodes, TreeSpec, TreeSummary};
 use crate::CoreError;
@@ -280,35 +280,110 @@ impl RefEditStats {
 pub struct RefPublication {
     pub deletes: Vec<[u8; 8]>,
     pub upserts: Vec<([u8; 8], [u8; VALUE_SIZE])>,
+    /// The canonical records of the overlay's fetched window. Complete for
+    /// the whole volume only when the tree did not exist yet (first clone),
+    /// which is exactly when the initial bulk build consumes it.
     pub records: Vec<SharedRun>,
     pub stats: RefEditStats,
+    root_required: bool,
 }
 
 impl RefPublication {
     pub fn changed(&self) -> bool {
         !self.deletes.is_empty() || !self.upserts.is_empty()
     }
+
+    /// True when a root must exist after this transaction even without a
+    /// record change (the empty first clone).
+    pub fn root_required(&self) -> bool {
+        self.root_required
+    }
 }
 
-/// In-memory transactional edit over the committed canonical records.
-/// `acquire` and `release` implement the ADR-061 tables; `finish`
-/// re-canonicalises (maximal runs) and diffs against the committed form.
+/// Transactional edit over a bounded window of the committed canonical
+/// records. The caller prefetches, through the bounded tree range walk, only
+/// the records overlapping the runs an operation touches (plus their
+/// immediate neighbours, so canonical merging stays local); the overlay
+/// never materialises the volume-wide tree. `acquire` and `release`
+/// implement the ADR-061 tables; `finish` re-canonicalises and diffs.
 pub struct RefEdit {
     original: BTreeMap<u64, SharedRun>,
     current: BTreeMap<u64, SharedRun>,
+    /// Physical intervals whose committed records are loaded (merged,
+    /// sorted). An edit outside them is refused fail-closed: it would
+    /// silently treat unknown shared state as private.
+    fetched: Vec<(u64, u64)>,
     stats: RefEditStats,
+    root_required: bool,
+}
+
+impl Default for RefEdit {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RefEdit {
-    pub fn new(records: Vec<SharedRun>) -> Self {
-        let map: BTreeMap<u64, SharedRun> = records
-            .into_iter()
-            .map(|run| (run.physical_start, run))
-            .collect();
+    pub fn new() -> Self {
         RefEdit {
-            original: map.clone(),
-            current: map,
+            original: BTreeMap::new(),
+            current: BTreeMap::new(),
+            fetched: Vec::new(),
             stats: RefEditStats::default(),
+            root_required: false,
+        }
+    }
+
+    /// The volume has no reference tree: every range is known empty.
+    pub fn mark_all_fetched(&mut self) {
+        self.fetched = vec![(0, u64::MAX)];
+    }
+
+    /// ADR-061: the first `CloneFile` allocates the root even when it shares
+    /// nothing (an empty or fully sparse source), so root zero keeps meaning
+    /// "this volume has never cloned".
+    pub fn require_root(&mut self) {
+        self.root_required = true;
+    }
+
+    pub fn covers(&self, start: u64, end: u64) -> bool {
+        self.fetched
+            .iter()
+            .any(|(low, high)| *low <= start && end <= *high)
+    }
+
+    /// Registers the committed records fetched for `[start, end)`. A record
+    /// already present in the overlay keeps its edited state.
+    pub fn note_fetched(&mut self, start: u64, end: u64, records: Vec<SharedRun>) {
+        for run in records {
+            if let std::collections::btree_map::Entry::Vacant(slot) =
+                self.original.entry(run.physical_start)
+            {
+                slot.insert(run);
+                self.current.insert(run.physical_start, run);
+            }
+        }
+        self.fetched.push((start, end));
+        self.fetched.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(self.fetched.len());
+        for (low, high) in self.fetched.drain(..) {
+            match merged.last_mut() {
+                Some((_, previous_high)) if low <= *previous_high => {
+                    *previous_high = (*previous_high).max(high);
+                }
+                _ => merged.push((low, high)),
+            }
+        }
+        self.fetched = merged;
+    }
+
+    fn ensure_covered(&self, start: u64, end: u64) -> Result<(), CoreError> {
+        if self.covers(start, end) {
+            Ok(())
+        } else {
+            Err(CoreError::Corrupt(format!(
+                "shared-reference edit touches {start}..{end} without prefetching it"
+            )))
         }
     }
 
@@ -318,6 +393,10 @@ impl RefEdit {
 
     /// Partitions `[start, start+count)` against the current records.
     pub fn resolve(&self, start: u64, count: u64) -> Result<Vec<SubRun>, CoreError> {
+        let end = start
+            .checked_add(count)
+            .ok_or_else(|| CoreError::Corrupt("overlap query end overflows".into()))?;
+        self.ensure_covered(start, end)?;
         resolve_overlaps(start, count, &self.sorted_current())
     }
 
@@ -473,28 +552,205 @@ impl RefEdit {
             upserts,
             records: merged,
             stats: self.stats,
+            root_required: self.root_required,
         })
     }
 }
 
-/// Builds the first tree of a volume's clone history: one leaf holding the
-/// initial records. A first clone whose records exceed one leaf hits the
-/// documented prototype limit; later growth goes through the COW engine.
-pub fn initial_leaf(records: &[SharedRun]) -> Result<TreeNode, CoreError> {
-    validate_canonical(records)?;
-    let items = records
-        .iter()
-        .map(|run| item(*run))
-        .collect::<Result<Vec<_>, CoreError>>()?;
-    Ok(TreeNode {
+pub struct BuiltSharedTree {
+    pub root_lba: u64,
+    pub nodes: Vec<(u64, TreeNode)>,
+}
+
+fn leaf_capacity(block_size: usize) -> Result<usize, CoreError> {
+    let mut node = empty_leaf();
+    let mut capacity = 0usize;
+    loop {
+        node.items.push(item(SharedRun {
+            physical_start: capacity as u64 * 2 + 8,
+            block_count: 1,
+            reference_count: MIN_REFERENCE_COUNT,
+            flags: 0,
+        })?);
+        node.subtree_items = node.items.len() as u64;
+        if !node.fits(block_size) {
+            break;
+        }
+        capacity += 1;
+    }
+    if capacity == 0 {
+        return Err(CoreError::UnsupportedGeometry(
+            "block cannot hold one shared-run record",
+        ));
+    }
+    Ok(capacity)
+}
+
+fn internal_fanout(block_size: usize) -> Result<usize, CoreError> {
+    let mut node = TreeNode {
         kind: TreeKind::SharedExtents,
         owner: 0,
-        level: 0,
-        subtree_items: items.len() as u64,
-        leftmost_child: 0,
-        leftmost_items: 0,
-        items,
+        level: 1,
+        subtree_items: 1,
+        leftmost_child: 1,
+        leftmost_items: 1,
+        items: Vec::new(),
+    };
+    let mut children = 1usize;
+    loop {
+        node.items.push(TreeItem {
+            key: key_u64(children as u64).to_vec(),
+            value: child_value(ChildRef {
+                lba: children as u64 + 1,
+                subtree_items: 1,
+            })
+            .map_err(CoreError::Format)?
+            .to_vec(),
+        });
+        node.subtree_items = children as u64 + 1;
+        if !node.fits(block_size) {
+            break;
+        }
+        children += 1;
+    }
+    if children < 2 {
+        return Err(CoreError::UnsupportedGeometry(
+            "block cannot hold two shared-tree children",
+        ));
+    }
+    Ok(children)
+}
+
+/// Blocks needed for a balanced initial tree, so the first clone can reserve
+/// every LBA transactionally before building (like the extent maps).
+pub fn bulk_node_count(block_size: usize, record_count: usize) -> Result<usize, CoreError> {
+    if record_count == 0 {
+        return Ok(1);
+    }
+    let leaf_capacity = leaf_capacity(block_size)?;
+    let fanout = internal_fanout(block_size)?;
+    let mut level_nodes = record_count.div_ceil(leaf_capacity);
+    let mut nodes = level_nodes;
+    while level_nodes > 1 {
+        level_nodes = level_nodes.div_ceil(fanout);
+        nodes = nodes
+            .checked_add(level_nodes)
+            .ok_or_else(|| CoreError::Corrupt("shared tree node count overflows".into()))?;
+    }
+    Ok(nodes)
+}
+
+/// Builds the volume's first reference tree from the canonical records,
+/// balanced across exactly the supplied transactionally allocated LBAs.
+/// Later growth goes through the generic COW engine.
+pub fn bulk_build(
+    block_size: usize,
+    records: &[SharedRun],
+    lbas: &[u64],
+) -> Result<BuiltSharedTree, CoreError> {
+    validate_canonical(records)?;
+    let expected = bulk_node_count(block_size, records.len())?;
+    if lbas.len() != expected {
+        return Err(CoreError::Corrupt(
+            "shared tree bulk-build LBA count mismatch".into(),
+        ));
+    }
+    if records.is_empty() {
+        return Ok(BuiltSharedTree {
+            root_lba: lbas[0],
+            nodes: vec![(lbas[0], empty_leaf())],
+        });
+    }
+    let leaf_capacity = leaf_capacity(block_size)?;
+    let fanout = internal_fanout(block_size)?;
+    let mut next_lba = lbas.iter().copied();
+    let mut nodes = Vec::with_capacity(expected);
+    let mut level_nodes = Vec::new();
+    let mut offset = 0usize;
+    for group_len in crate::extent_map::balanced_groups(records.len(), leaf_capacity)? {
+        let lba = next_lba
+            .next()
+            .ok_or_else(|| CoreError::Corrupt("shared bulk-build pool exhausted".into()))?;
+        let mut node = empty_leaf();
+        for run in &records[offset..offset + group_len] {
+            node.items.push(item(*run)?);
+        }
+        node.subtree_items = node.items.len() as u64;
+        level_nodes.push(BulkChild {
+            lba,
+            min_key: node.items[0].key.clone(),
+            items: node.subtree_items,
+        });
+        nodes.push((lba, node));
+        offset += group_len;
+    }
+
+    let mut level = 0u8;
+    while level_nodes.len() > 1 {
+        level = level
+            .checked_add(1)
+            .filter(|level| *level <= afsplus_format::tree::MAX_TREE_LEVEL)
+            .ok_or(CoreError::PrototypeLimit(
+                "shared tree height limit reached",
+            ))?;
+        let mut next_level = Vec::new();
+        let mut child_offset = 0usize;
+        for group_len in crate::extent_map::balanced_groups(level_nodes.len(), fanout)? {
+            let children = &level_nodes[child_offset..child_offset + group_len];
+            let lba = next_lba
+                .next()
+                .ok_or_else(|| CoreError::Corrupt("shared bulk-build pool exhausted".into()))?;
+            let mut total = children[0].items;
+            let mut items = Vec::with_capacity(children.len() - 1);
+            for child in &children[1..] {
+                total = total
+                    .checked_add(child.items)
+                    .ok_or_else(|| CoreError::Corrupt("shared record count overflows".into()))?;
+                items.push(TreeItem {
+                    key: child.min_key.clone(),
+                    value: child_value(ChildRef {
+                        lba: child.lba,
+                        subtree_items: child.items,
+                    })
+                    .map_err(CoreError::Format)?
+                    .to_vec(),
+                });
+            }
+            let node = TreeNode {
+                kind: TreeKind::SharedExtents,
+                owner: 0,
+                level,
+                subtree_items: total,
+                leftmost_child: children[0].lba,
+                leftmost_items: children[0].items,
+                items,
+            };
+            next_level.push(BulkChild {
+                lba,
+                min_key: children[0].min_key.clone(),
+                items: total,
+            });
+            nodes.push((lba, node));
+            child_offset += group_len;
+        }
+        level_nodes = next_level;
+    }
+    if next_lba.next().is_some() || nodes.len() != expected {
+        return Err(CoreError::Corrupt(
+            "shared bulk-build node count mismatch".into(),
+        ));
+    }
+    Ok(BuiltSharedTree {
+        root_lba: level_nodes[0].lba,
+        nodes,
     })
+}
+
+#[derive(Clone)]
+struct BulkChild {
+    lba: u64,
+    min_key: Vec<u8>,
+    items: u64,
 }
 
 #[cfg(test)]
@@ -561,6 +817,41 @@ mod tests {
                 reference_count: None,
             }]
         );
+    }
+
+    #[test]
+    fn bulk_build_balances_past_one_leaf_and_reloads() {
+        use afsplus_block::{BlockDevice, MemoryBackend};
+        use afsplus_format::geometry::Geometry;
+
+        // Enough canonical records to force several leaves and one internal
+        // level; alternating counts keep the sequence maximal.
+        let geo = Geometry {
+            block_size: 4096,
+            total_blocks: 1 << 20,
+            region_size: 1 << 20,
+        };
+        let records: Vec<_> = (0..500u64)
+            .map(|index| run(8192 + index * 4, 2, 2 + (index % 2) as u32))
+            .collect();
+        let node_count = super::bulk_node_count(4096, records.len()).unwrap();
+        assert!(
+            node_count > 1,
+            "expected a multi-node tree, got {node_count}"
+        );
+        let lbas: Vec<u64> = (0..node_count as u64).map(|index| 512 + index).collect();
+        let built = super::bulk_build(4096, &records, &lbas).unwrap();
+        assert_eq!(built.nodes.len(), node_count);
+
+        // Only the tree nodes are written; the loader never reads the runs.
+        let mut dev = MemoryBackend::new(4096, 1024);
+        for (lba, node) in &built.nodes {
+            dev.write_block(*lba, &node.encode(4096, 1).unwrap())
+                .unwrap();
+        }
+        let loaded = super::load_all(&mut dev, &geo, built.root_lba, 1).unwrap();
+        assert_eq!(loaded.records, records);
+        assert_eq!(loaded.tree_blocks.len(), node_count);
     }
 
     #[test]

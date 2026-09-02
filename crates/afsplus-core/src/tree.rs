@@ -301,6 +301,137 @@ fn read_range_node<D: BlockDevice>(
     result
 }
 
+/// Visits every leaf item whose key lies in `[low, high]` (inclusive),
+/// pruning whole subtrees by their separator windows: work is proportional
+/// to tree height plus the leaves actually overlapping the range, with a
+/// recursion stack bounded by tree height. Callers that need the record
+/// *straddling* `low` pass the floor key from [`lookup_floor`] as `low`.
+pub fn visit_key_range<D, F>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    spec: TreeSpec,
+    low: &[u8],
+    high: &[u8],
+    mut visitor: F,
+) -> Result<(), CoreError>
+where
+    D: BlockDevice,
+    F: FnMut(&[u8], &[u8]) -> Result<(), CoreError>,
+{
+    if low.is_empty() || low.len() > MAX_TREE_KEY_BYTES || high.len() > MAX_TREE_KEY_BYTES {
+        return Err(CoreError::Corrupt(
+            "tree range key length out of range".into(),
+        ));
+    }
+    check_tree_lba(geo, root_lba)?;
+    let mut path = BTreeSet::new();
+    visit_key_range_node(
+        dev,
+        geo,
+        root_lba,
+        spec,
+        None,
+        None,
+        None,
+        true,
+        low,
+        high,
+        &mut path,
+        &mut visitor,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_key_range_node<D, F>(
+    dev: &mut D,
+    geo: &Geometry,
+    lba: u64,
+    spec: TreeSpec,
+    expected_level: Option<u8>,
+    lower: Option<&[u8]>,
+    upper: Option<&[u8]>,
+    is_root: bool,
+    low: &[u8],
+    high: &[u8],
+    path: &mut BTreeSet<u64>,
+    visitor: &mut F,
+) -> Result<(), CoreError>
+where
+    D: BlockDevice,
+    F: FnMut(&[u8], &[u8]) -> Result<(), CoreError>,
+{
+    if !path.insert(lba) {
+        return Err(CoreError::Corrupt(format!("tree cycle at block {lba}")));
+    }
+    let result = (|| {
+        let mut buf = vec![0u8; geo.block_size];
+        dev.read_block(lba, &mut buf)?;
+        let (node, generation) = TreeNode::decode(&buf)
+            .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        validate_node_identity(&node, generation, spec, expected_level, lba)?;
+        validate_node_range(&node, lower, upper, is_root)?;
+
+        if node.is_leaf() {
+            for item in &node.items {
+                if item.key.as_slice() > high {
+                    break;
+                }
+                if item.key.as_slice() >= low {
+                    visitor(&item.key, &item.value)?;
+                }
+            }
+            return Ok(());
+        }
+
+        for child_index in 0..=node.items.len() {
+            // Child i holds keys in [separator(i-1), separator(i)); skip
+            // subtrees entirely outside the requested window.
+            let child_lower = if child_index == 0 {
+                lower
+            } else {
+                Some(node.items[child_index - 1].key.as_slice())
+            };
+            let child_upper = node
+                .items
+                .get(child_index)
+                .map(|item| item.key.as_slice())
+                .or(upper);
+            if child_upper.is_some_and(|bound| bound <= low)
+                || child_lower.is_some_and(|bound| bound > high)
+            {
+                continue;
+            }
+            let child = if child_index == 0 {
+                afsplus_format::tree::ChildRef {
+                    lba: node.leftmost_child,
+                    subtree_items: node.leftmost_items,
+                }
+            } else {
+                TreeNode::child_ref(&node.items[child_index - 1]).map_err(CoreError::Format)?
+            };
+            check_tree_lba(geo, child.lba)?;
+            visit_key_range_node(
+                dev,
+                geo,
+                child.lba,
+                spec,
+                Some(node.level - 1),
+                child_lower,
+                child_upper,
+                false,
+                low,
+                high,
+                path,
+                visitor,
+            )?;
+        }
+        Ok(())
+    })();
+    path.remove(&lba);
+    result
+}
+
 /// Exhaustively checks level, range, separator, count, ownership, and cycle
 /// invariants. This belongs to the checker/shadow-verification path.
 pub fn validate_tree<D: BlockDevice>(
