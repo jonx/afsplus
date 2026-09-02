@@ -28,6 +28,7 @@ fn adapter_with_policy(policy: afsplus_core::NamePolicy) -> FuseAdapter<MemoryBa
             region_size: 4096,
             reclaim_caps: Default::default(),
             log_slots: 8,
+            shared_extents: true,
             name_policy: policy,
             timestamp: timestamp(0),
         },

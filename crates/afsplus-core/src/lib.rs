@@ -106,6 +106,9 @@ pub enum CoreError {
     ReadOnly,
     /// A generation-bound iterator or handle no longer names its view.
     Stale,
+    /// An operation needs a feature the volume does not enable (ADR-061:
+    /// identification is immutable, so the operation cannot enable it).
+    FeatureDisabled(&'static str),
     /// Unknown INCOMPAT bits prevent every kind of mount.
     UnsupportedIncompatFeatures(u64),
     /// Unknown RO_COMPAT bits require a read-only or NO_CHANGES mount.
@@ -157,6 +160,7 @@ impl fmt::Display for CoreError {
                     "unsupported incompatible filesystem features: {bits:#018x}"
                 )
             }
+            CoreError::FeatureDisabled(detail) => write!(f, "feature disabled: {detail}"),
             CoreError::ReadOnlyRequiredFeatures(bits) => write!(
                 f,
                 "filesystem features {bits:#018x} are unsupported for a writable mount"

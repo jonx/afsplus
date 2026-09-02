@@ -46,7 +46,7 @@ pub struct MountOptions {
 }
 
 pub const SUPPORTED_INCOMPAT_FEATURES: u64 = INCOMPAT_INTENT_LOG;
-pub const SUPPORTED_RO_COMPAT_FEATURES: u64 = 0;
+pub const SUPPORTED_RO_COMPAT_FEATURES: u64 = RO_COMPAT_SHARED_EXTENTS;
 
 fn negotiate_features(ident: &Identification, mode: MountMode) -> Result<(), CoreError> {
     let unknown_incompat = ident.features.incompat & !SUPPORTED_INCOMPAT_FEATURES;

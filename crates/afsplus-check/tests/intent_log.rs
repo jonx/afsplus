@@ -32,6 +32,7 @@ fn formatted_with_policy(total: u64, log_slots: u16, name_policy: NamePolicy) ->
             region_size: 4096,
             reclaim_caps: Default::default(),
             log_slots,
+            shared_extents: true,
             name_policy,
             timestamp: ts(0),
         },

@@ -155,6 +155,7 @@ mod tests {
                 region_size: 4096,
                 reclaim_caps: Default::default(),
                 log_slots: 8,
+                shared_extents: true,
                 name_policy: crate::NamePolicy::Sensitive,
                 timestamp: Timespec::default(),
             },

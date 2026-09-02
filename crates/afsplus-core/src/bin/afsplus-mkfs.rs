@@ -127,6 +127,7 @@ fn run(options: Options) -> Result<(), String> {
                 .min(MAX_REGION_BLOCKS),
             reclaim_caps: Default::default(),
             log_slots: 8,
+            shared_extents: true,
             name_policy: options.name_policy,
             timestamp: now,
         },

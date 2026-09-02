@@ -12,6 +12,8 @@
 //! validates sharing through these functions without depending on the write
 //! path's own readers.
 
+use std::collections::BTreeMap;
+
 use afsplus_block::BlockDevice;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::le;
@@ -248,6 +250,251 @@ pub fn resolve_overlaps(
         });
     }
     Ok(segments)
+}
+
+/// Per-block accounting of one transaction's reference edits, for
+/// `CommitStats` (ADR-061 review request: promotion, new sharing, decrements
+/// and privatisation transitions are separately observable).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RefEditStats {
+    /// Blocks that went from one implicit reference to a first record (1→2).
+    pub blocks_newly_shared: u64,
+    /// Blocks whose existing record count was incremented (≥2 → +1).
+    pub blocks_reference_incremented: u64,
+    /// Blocks whose record count was decremented and kept a record (>2 → −1).
+    pub blocks_reference_decremented: u64,
+    /// Blocks whose record was removed because the count reached one (2→1).
+    /// Their storage is NOT retired: one live mapping remains.
+    pub blocks_privatized: u64,
+}
+
+impl RefEditStats {
+    pub fn changed(&self) -> bool {
+        *self != RefEditStats::default()
+    }
+}
+
+/// The publication of one transaction's reference edits: the tree operations
+/// that turn the committed canonical form into the new one, plus the new
+/// canonical record list itself.
+pub struct RefPublication {
+    pub deletes: Vec<[u8; 8]>,
+    pub upserts: Vec<([u8; 8], [u8; VALUE_SIZE])>,
+    pub records: Vec<SharedRun>,
+    pub stats: RefEditStats,
+}
+
+impl RefPublication {
+    pub fn changed(&self) -> bool {
+        !self.deletes.is_empty() || !self.upserts.is_empty()
+    }
+}
+
+/// In-memory transactional edit over the committed canonical records.
+/// `acquire` and `release` implement the ADR-061 tables; `finish`
+/// re-canonicalises (maximal runs) and diffs against the committed form.
+pub struct RefEdit {
+    original: BTreeMap<u64, SharedRun>,
+    current: BTreeMap<u64, SharedRun>,
+    stats: RefEditStats,
+}
+
+impl RefEdit {
+    pub fn new(records: Vec<SharedRun>) -> Self {
+        let map: BTreeMap<u64, SharedRun> = records
+            .into_iter()
+            .map(|run| (run.physical_start, run))
+            .collect();
+        RefEdit {
+            original: map.clone(),
+            current: map,
+            stats: RefEditStats::default(),
+        }
+    }
+
+    fn sorted_current(&self) -> Vec<SharedRun> {
+        self.current.values().copied().collect()
+    }
+
+    /// Partitions `[start, start+count)` against the current records.
+    pub fn resolve(&self, start: u64, count: u64) -> Result<Vec<SubRun>, CoreError> {
+        resolve_overlaps(start, count, &self.sorted_current())
+    }
+
+    /// Replaces the covered segment of the record containing it. The segment
+    /// lies within exactly one record by construction of `resolve_overlaps`.
+    fn rewrite_segment(
+        &mut self,
+        segment_start: u64,
+        segment_end: u64,
+        new_count: Option<u32>,
+    ) -> Result<(), CoreError> {
+        let (&record_start, &record) = self
+            .current
+            .range(..=segment_start)
+            .next_back()
+            .ok_or_else(|| CoreError::Corrupt("shared segment without a record".into()))?;
+        let record_end = record.physical_end()?;
+        if segment_start < record_start || segment_end > record_end {
+            return Err(CoreError::Corrupt(
+                "shared segment escapes its record".into(),
+            ));
+        }
+        self.current.remove(&record_start);
+        if record_start < segment_start {
+            self.current.insert(
+                record_start,
+                SharedRun {
+                    physical_start: record_start,
+                    block_count: segment_start - record_start,
+                    ..record
+                },
+            );
+        }
+        if let Some(count) = new_count {
+            self.current.insert(
+                segment_start,
+                SharedRun {
+                    physical_start: segment_start,
+                    block_count: segment_end - segment_start,
+                    reference_count: count,
+                    flags: 0,
+                },
+            );
+        }
+        if segment_end < record_end {
+            self.current.insert(
+                segment_end,
+                SharedRun {
+                    physical_start: segment_end,
+                    block_count: record_end - segment_end,
+                    ..record
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Adds one reference over the run (clone side). A previously private
+    /// segment gains a record at two references; an existing record is
+    /// incremented, refusing overflow rather than wrapping.
+    pub fn acquire(&mut self, start: u64, count: u64) -> Result<(), CoreError> {
+        for segment in self.resolve(start, count)? {
+            let end = segment.physical_start + segment.block_count;
+            match segment.reference_count {
+                Some(references) => {
+                    let raised = references.checked_add(1).ok_or(CoreError::PrototypeLimit(
+                        "shared-extent reference count limit reached",
+                    ))?;
+                    self.rewrite_segment(segment.physical_start, end, Some(raised))?;
+                    self.stats.blocks_reference_incremented += segment.block_count;
+                }
+                None => {
+                    self.current.insert(
+                        segment.physical_start,
+                        SharedRun {
+                            physical_start: segment.physical_start,
+                            block_count: segment.block_count,
+                            reference_count: MIN_REFERENCE_COUNT,
+                            flags: 0,
+                        },
+                    );
+                    self.stats.blocks_newly_shared += segment.block_count;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Drops one reference over the run and returns the sub-runs that were
+    /// sole-owned (private gaps): only those may be retired. A record at two
+    /// references is removed WITHOUT returning its blocks — one live mapping
+    /// remains, and retiring here is the data-destroying bug the ADR-061
+    /// review caught (rc 2→1 privatises, never frees).
+    pub fn release(&mut self, start: u64, count: u64) -> Result<Vec<(u64, u64)>, CoreError> {
+        let mut retire = Vec::new();
+        for segment in self.resolve(start, count)? {
+            let end = segment.physical_start + segment.block_count;
+            match segment.reference_count {
+                Some(references) if references > MIN_REFERENCE_COUNT => {
+                    self.rewrite_segment(segment.physical_start, end, Some(references - 1))?;
+                    self.stats.blocks_reference_decremented += segment.block_count;
+                }
+                Some(_) => {
+                    self.rewrite_segment(segment.physical_start, end, None)?;
+                    self.stats.blocks_privatized += segment.block_count;
+                }
+                None => retire.push((segment.physical_start, segment.block_count)),
+            }
+        }
+        Ok(retire)
+    }
+
+    /// Canonicalises (merges adjacent contiguous records with equal counts)
+    /// and diffs against the committed form. Keys are physical starts, so a
+    /// split or merge shows up as delete-plus-upsert pairs.
+    pub fn finish(mut self) -> Result<RefPublication, CoreError> {
+        let mut merged: Vec<SharedRun> = Vec::with_capacity(self.current.len());
+        for run in self.current.values().copied() {
+            if let Some(previous) = merged.last_mut() {
+                if previous.physical_end()? == run.physical_start
+                    && previous.reference_count == run.reference_count
+                {
+                    previous.block_count = previous
+                        .block_count
+                        .checked_add(run.block_count)
+                        .ok_or_else(|| CoreError::Corrupt("merged shared run overflows".into()))?;
+                    continue;
+                }
+            }
+            merged.push(run);
+        }
+        self.current = merged
+            .iter()
+            .map(|run| (run.physical_start, *run))
+            .collect();
+        validate_canonical(&merged)?;
+
+        let mut deletes = Vec::new();
+        let mut upserts = Vec::new();
+        for start in self.original.keys() {
+            if !self.current.contains_key(start) {
+                deletes.push(key_u64(*start));
+            }
+        }
+        for (start, run) in &self.current {
+            if self.original.get(start) != Some(run) {
+                let (key, value) = encode_run(*run)?;
+                upserts.push((key, value));
+            }
+        }
+        Ok(RefPublication {
+            deletes,
+            upserts,
+            records: merged,
+            stats: self.stats,
+        })
+    }
+}
+
+/// Builds the first tree of a volume's clone history: one leaf holding the
+/// initial records. A first clone whose records exceed one leaf hits the
+/// documented prototype limit; later growth goes through the COW engine.
+pub fn initial_leaf(records: &[SharedRun]) -> Result<TreeNode, CoreError> {
+    validate_canonical(records)?;
+    let items = records
+        .iter()
+        .map(|run| item(*run))
+        .collect::<Result<Vec<_>, CoreError>>()?;
+    Ok(TreeNode {
+        kind: TreeKind::SharedExtents,
+        owner: 0,
+        level: 0,
+        subtree_items: items.len() as u64,
+        leftmost_child: 0,
+        leftmost_items: 0,
+        items,
+    })
 }
 
 #[cfg(test)]

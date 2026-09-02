@@ -332,6 +332,9 @@ fn formatted(label: &str) -> MemoryBackend {
             region_size: 128,
             reclaim_caps: Default::default(),
             log_slots: 0,
+            // Deliberately without the feature: the congruence tests plant
+            // roots and flags on top and arm the bit themselves.
+            shared_extents: false,
             name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: timestamp(1),
         },

@@ -264,14 +264,9 @@ impl Identification {
     /// Bounds-first geometry validation shared by encode and decode.
     fn validate_geometry(&self) -> Result<(), FormatError> {
         self.geometry().validate()?;
-        if self.features.compat & self.features.ro_compat != 0
-            || self.features.compat & self.features.incompat != 0
-            || self.features.ro_compat & self.features.incompat != 0
-        {
-            return Err(FormatError::Invalid(
-                "feature bit appears in multiple classes",
-            ));
-        }
+        // Each compatibility class is its own bit namespace (ADR-061 assigns
+        // RO_COMPAT bit 0 while INCOMPAT bit 0 is the intent log): a bit's
+        // meaning is the pair (class, position), never the position alone.
         if (self.log_slots > 0) != (self.features.incompat & INCOMPAT_INTENT_LOG != 0) {
             return Err(FormatError::Invalid(
                 "intent-log slots and incompatible feature bit disagree",

@@ -18,7 +18,8 @@ use afsplus_format::checkpoint::{Checkpoint, RegionRecord};
 use afsplus_format::crc32c::CHECKSUM_CRC32C;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::ident::{
-    FeatureFlags, Identification, NameKeyAlgorithm, INCOMPAT_INTENT_LOG, UNICODE_VERSION_16_0_0,
+    FeatureFlags, Identification, NameKeyAlgorithm, INCOMPAT_INTENT_LOG, RO_COMPAT_SHARED_EXTENTS,
+    UNICODE_VERSION_16_0_0,
 };
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::reclaim::{ReclaimCaps, ReclaimRoot};
@@ -51,6 +52,11 @@ pub struct MkfsParams {
     pub reclaim_caps: ReclaimCaps,
     /// Intent-log slots (ADR-037); 0 disables the log area.
     pub log_slots: u16,
+    /// Enables shared data extents (ADR-061, `RO_COMPAT`). Identification is
+    /// immutable, so the choice is made here, per compatibility profile:
+    /// `workstation` and `full` enable it, the classic and reader profiles do
+    /// not. A volume without it rejects clone operations.
+    pub shared_extents: bool,
     /// Volume-default directory lookup policy (ADR-008).
     pub name_policy: NamePolicy,
     pub timestamp: Timespec,
@@ -210,6 +216,11 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         features: FeatureFlags {
             incompat: if params.log_slots > 0 {
                 INCOMPAT_INTENT_LOG
+            } else {
+                0
+            },
+            ro_compat: if params.shared_extents {
+                RO_COMPAT_SHARED_EXTENTS
             } else {
                 0
             },

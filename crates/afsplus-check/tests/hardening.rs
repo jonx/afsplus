@@ -23,6 +23,7 @@ fn formatted() -> MemoryBackend {
             region_size: 64,
             reclaim_caps: Default::default(),
             log_slots: 8,
+            shared_extents: true,
             name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: Timespec {
                 seconds: 1_780_000_000,

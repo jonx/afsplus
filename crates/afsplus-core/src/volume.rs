@@ -21,7 +21,7 @@ use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::crc32c::crc32c;
 use afsplus_format::dir::DirEntry;
-use afsplus_format::ident::Identification;
+use afsplus_format::ident::{Identification, RO_COMPAT_SHARED_EXTENTS};
 use afsplus_format::intent_log::{LogOp, LogRecord, MAX_LOG_OPS};
 use afsplus_format::object::{
     ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_EXTENT_TREE,
@@ -32,11 +32,12 @@ use crate::alloc::{AllocStats, TxAllocator};
 use crate::allocation_root::{self, ReservedTreePool};
 use crate::cow_tree::{mutate_many, TreeMutation, TreeOperation};
 use crate::directory;
-use crate::extent_map::{self, Extent, EXTENT_UNWRITTEN};
+use crate::extent_map::{self, Extent, EXTENT_SHARED, EXTENT_UNWRITTEN};
 use crate::intent_log;
 use crate::mount::{MountMode, Selection};
 use crate::name_key;
 use crate::object_map;
+use crate::shared_extents::{self, RefEdit, RefEditStats};
 use crate::verify::{load_mount_state, MountState};
 use crate::CoreError;
 
@@ -53,6 +54,12 @@ pub struct CommitStats {
     /// COW allocation-root nodes written for those record changes.
     pub allocation_tree_nodes_written: u64,
     pub checkpoint_blocks_written: u64,
+    /// Reference-tree nodes written for this transaction (ADR-061).
+    pub shared_tree_nodes_written: u64,
+    /// Direct-layout files promoted to an extent tree by a clone (ADR-061).
+    pub layout_promotions: u64,
+    /// Per-block shared-reference accounting (ADR-061).
+    pub shared_refs: RefEditStats,
     pub flushes: u64,
     /// Total bytes issued to the device by this transaction.
     pub bytes_written: u64,
@@ -156,6 +163,13 @@ pub struct Volume<D: BlockDevice> {
     window: Option<OpenWindow>,
     window_poisoned: bool,
     last_commit: Option<CommitStats>,
+    /// The transaction-scoped shared-reference edit (ADR-061), keyed by the
+    /// generation it was opened for. `next_generation` clears it so an
+    /// aborted transaction can never leak half-applied edits into the next
+    /// one, and `commit_transaction` publishes and consumes it.
+    shared_refs: Option<(u64, RefEdit)>,
+    /// Direct-layout promotions performed by the transaction being built.
+    pending_layout_promotions: u64,
 }
 
 impl<D: BlockDevice> Volume<D> {
@@ -181,6 +195,8 @@ impl<D: BlockDevice> Volume<D> {
             window: None,
             window_poisoned: false,
             last_commit: None,
+            shared_refs: None,
+            pending_layout_promotions: 0,
         }
     }
 
@@ -768,6 +784,257 @@ impl<D: BlockDevice> Volume<D> {
         )
     }
 
+    /// Clones a committed file into a new directory entry that shares every
+    /// data run with the source (ADR-027 `CloneFile`, mechanism ADR-061).
+    /// Clone is a checkpoint transaction, never an intent-log operation: an
+    /// open window is committed first so the clone cannot straddle the two
+    /// durability mechanisms. Both sides' maps carry `EXTENT_SHARED`
+    /// afterwards, and a direct-layout source is promoted to an extent tree
+    /// because the direct representation has no flag word.
+    pub fn clone_file(
+        &mut self,
+        source_id: u64,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
+        if self.window.is_some() {
+            self.window_commit(now)?;
+        }
+        self.ensure_window_closed()?;
+        if !self.shared_extents_enabled() {
+            return Err(CoreError::FeatureDisabled(
+                "shared-extents feature is not enabled on this volume",
+            ));
+        }
+        validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+        let parent = self.read_object(parent_id)?.ok_or(CoreError::NotFound)?;
+        if parent.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        let parent_record_lba = self.object_record_lba(parent_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("directory {parent_id} missing from object map"))
+        })?;
+        let key = self.comparison_key(name.as_bytes())?;
+        if self.lookup_in_directory(parent_id, name)?.is_some() {
+            return Err(CoreError::AlreadyExists);
+        }
+        let source = self.read_object(source_id)?.ok_or(CoreError::NotFound)?;
+        if source.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        let source_record_lba = self.object_record_lba(source_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("file {source_id} missing from object map"))
+        })?;
+        let (source_extents, source_tree_blocks) = self.load_file_layout(&source)?;
+        let source_was_tree = source.flags & OBJECT_FLAG_EXTENT_TREE != 0;
+
+        let block_size = self.dev.block_size();
+        let generation = self.next_generation()?;
+        let object_id = self.checkpoint.next_object_id;
+        let next_object_id = object_id
+            .checked_add(1)
+            .ok_or(CoreError::PrototypeLimit("object ID space exhausted"))?;
+
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            generation,
+            self.reclaim_batch_blocks,
+            self.alloc_rover_region,
+        )?;
+
+        // One more reference per source run. A run shared for the first time
+        // gains a record at two references (source + clone); an already
+        // shared run is incremented, refusing overflow.
+        {
+            let edit = self.shared_refs_edit(generation)?;
+            for extent in &source_extents {
+                edit.acquire(extent.physical_start, extent.block_count)?;
+            }
+        }
+        let shared: Vec<Extent> = source_extents
+            .iter()
+            .map(|extent| Extent {
+                flags: extent.flags | EXTENT_SHARED,
+                ..*extent
+            })
+            .collect();
+
+        let mut meta_writes = Vec::new();
+
+        // Source side: same mapping, now flagged. The direct layout carries
+        // no flag word, so a direct source is promoted to an extent tree in
+        // this same transaction (and never collapses back, because
+        // direct_layout refuses flagged extents).
+        let source_new_record_lba = tx.allocate(&mut self.dev)?;
+        tx.retire(&mut self.dev, source_record_lba)?;
+        let (source_flags, source_data_root) = if shared.is_empty() {
+            (source.flags, source.data_root)
+        } else if source_was_tree {
+            let encoded = shared
+                .iter()
+                .copied()
+                .map(extent_map::encode_extent)
+                .collect::<Result<Vec<_>, _>>()?;
+            let operations: Vec<TreeOperation<'_>> = encoded
+                .iter()
+                .map(|(key, value)| TreeOperation::Upsert { key, value })
+                .collect();
+            let mutation = mutate_many(
+                &mut self.dev,
+                &self.ident.geometry(),
+                &mut tx,
+                source.data_root,
+                extent_map::spec(source_id, self.checkpoint.generation),
+                generation,
+                &operations,
+            )?;
+            meta_writes.extend(mutation.writes);
+            (source.flags, mutation.root_lba)
+        } else {
+            self.pending_layout_promotions += 1;
+            let node_count = extent_map::bulk_node_count(block_size, shared.len())?;
+            let mut lbas = Vec::with_capacity(node_count);
+            for _ in 0..node_count {
+                lbas.push(tx.allocate(&mut self.dev)?);
+            }
+            let built = extent_map::bulk_build(source_id, block_size, &shared, &lbas)?;
+            for (lba, node) in built.nodes {
+                meta_writes.push((lba, node.encode(block_size, generation)?));
+            }
+            (source.flags | OBJECT_FLAG_EXTENT_TREE, built.root_lba)
+        };
+        let _ = source_tree_blocks; // COW originals are retired by mutate_many
+        let source_new_record = ObjectRecord {
+            flags: source_flags,
+            data_root: source_data_root,
+            changed: now,
+            ..source
+        };
+
+        // Destination: a distinct object with an independent map over the
+        // same physical runs. An empty source clones to an empty file; any
+        // mapped or tree source clones to a tree destination.
+        let dest_record_lba = tx.allocate(&mut self.dev)?;
+        let (dest_flags, dest_data_root, dest_data_blocks) =
+            if shared.is_empty() && !source_was_tree {
+                (0u16, 0u64, 0u64)
+            } else {
+                let node_count = extent_map::bulk_node_count(block_size, shared.len())?;
+                let mut lbas = Vec::with_capacity(node_count);
+                for _ in 0..node_count {
+                    lbas.push(tx.allocate(&mut self.dev)?);
+                }
+                let built = extent_map::bulk_build(object_id, block_size, &shared, &lbas)?;
+                for (lba, node) in built.nodes {
+                    meta_writes.push((lba, node.encode(block_size, generation)?));
+                }
+                (OBJECT_FLAG_EXTENT_TREE, built.root_lba, source.data_blocks)
+            };
+        let dest_record = ObjectRecord {
+            object_id,
+            object_type: ObjectType::File,
+            flags: dest_flags,
+            link_count: 1,
+            size_bytes: source.size_bytes,
+            allocated_bytes: source.allocated_bytes,
+            created: now,
+            modified: source.modified,
+            changed: now,
+            protection: source.protection,
+            content_generation: generation,
+            data_root: dest_data_root,
+            data_blocks: dest_data_blocks,
+        };
+
+        // Namespace: one new directory entry, parent record COW'd.
+        let parent_record_new_lba = tx.allocate(&mut self.dev)?;
+        tx.retire(&mut self.dev, parent_record_lba)?;
+        let directory_entry = DirEntry {
+            key,
+            name: name.as_bytes().to_vec(),
+            child_type_hint: 1,
+            child_id: object_id,
+        };
+        let (directory_key, directory_value) =
+            directory::encode_entry(&self.ident, &directory_entry)?;
+        let directory_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            parent.data_root,
+            directory::spec(parent_id, self.checkpoint.generation),
+            generation,
+            &[TreeOperation::Upsert {
+                key: &directory_key,
+                value: &directory_value,
+            }],
+        )?;
+        let new_parent = ObjectRecord {
+            modified: now,
+            changed: now,
+            content_generation: generation,
+            data_root: directory_mutation.root_lba,
+            ..parent
+        };
+
+        let source_key = object_map::key(source_id);
+        let source_value = object_map::value(source_new_record_lba)?;
+        let dest_key = object_map::key(object_id);
+        let dest_value = object_map::value(dest_record_lba)?;
+        let parent_key = object_map::key(parent_id);
+        let parent_value = object_map::value(parent_record_new_lba)?;
+        let operations = [
+            TreeOperation::Upsert {
+                key: &source_key,
+                value: &source_value,
+            },
+            TreeOperation::Upsert {
+                key: &dest_key,
+                value: &dest_value,
+            },
+            TreeOperation::Upsert {
+                key: &parent_key,
+                value: &parent_value,
+            },
+        ];
+        let omap_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &operations,
+        )?;
+        let omap_lba = omap_mutation.root_lba;
+
+        meta_writes.push((
+            source_new_record_lba,
+            source_new_record.encode(block_size, generation)?,
+        ));
+        meta_writes.push((dest_record_lba, dest_record.encode(block_size, generation)?));
+        meta_writes.push((
+            parent_record_new_lba,
+            new_parent.encode(block_size, generation)?,
+        ));
+        meta_writes.extend(directory_mutation.writes);
+        meta_writes.extend(omap_mutation.writes);
+
+        self.commit_transaction(
+            generation,
+            next_object_id,
+            tx,
+            Vec::new(),
+            meta_writes,
+            omap_lba,
+        )?;
+        Ok(object_id)
+    }
+
     pub fn device_mut(&mut self) -> &mut D {
         &mut self.dev
     }
@@ -1226,7 +1493,7 @@ impl<D: BlockDevice> Volume<D> {
                     tx.retire(&mut self.dev, lba)?;
                 }
                 for extent in map.extents {
-                    tx.retire_run(&mut self.dev, extent.physical_start, extent.block_count)?;
+                    self.release_data_run(&mut tx, generation, &extent)?;
                 }
             } else if victim.data_blocks > 0 {
                 tx.retire_run(&mut self.dev, victim.data_root, victim.data_blocks)?;
@@ -1856,7 +2123,7 @@ impl<D: BlockDevice> Volume<D> {
         let new_record_lba = tx.allocate(&mut self.dev)?;
         tx.retire(&mut self.dev, record_lba)?;
         for extent in removed_extents {
-            tx.retire_run(&mut self.dev, extent.physical_start, extent.block_count)?;
+            self.release_data_run(&mut tx, generation, &extent)?;
         }
 
         let new_record = ObjectRecord {
@@ -2136,7 +2403,7 @@ impl<D: BlockDevice> Volume<D> {
                 let entry = self
                     .batch_lookup(pending, *parent_id, &key)?
                     .ok_or(CoreError::NotFound)?;
-                self.unlink_in_batch(tx, pending, entry.child_id, now)?;
+                self.unlink_in_batch(tx, pending, generation, entry.child_id, now)?;
                 pending
                     .dir_changes
                     .entry(*parent_id)
@@ -2184,7 +2451,7 @@ impl<D: BlockDevice> Volume<D> {
                         if target.object_type != ObjectType::File {
                             return Err(CoreError::IsDirectory);
                         }
-                        self.unlink_in_batch(tx, pending, existing.child_id, now)?;
+                        self.unlink_in_batch(tx, pending, generation, existing.child_id, now)?;
                     }
                 }
                 let target_parent = self
@@ -2236,6 +2503,7 @@ impl<D: BlockDevice> Volume<D> {
         &mut self,
         tx: &mut TxAllocator,
         pending: &mut PendingBatch,
+        generation: u64,
         object_id: u64,
         now: Timespec,
     ) -> Result<(), CoreError> {
@@ -2282,15 +2550,75 @@ impl<D: BlockDevice> Volume<D> {
         let committed_lba = pending.committed_record_lbas[&object_id];
         tx.retire(&mut self.dev, committed_lba)?;
         pending.committed_record_lbas.remove(&object_id);
-        self.retire_file_storage(tx, &victim)?;
+        self.retire_file_storage(tx, generation, &victim)?;
         pending.records.insert(object_id, None);
         Ok(())
     }
 
-    /// Quarantines a committed file's data extents and extent-tree nodes.
+    /// True when this volume may hold shared extents (ADR-061).
+    fn shared_extents_enabled(&self) -> bool {
+        self.ident.features.ro_compat & RO_COMPAT_SHARED_EXTENTS != 0
+    }
+
+    /// The transaction-scoped reference edit, loading the committed records
+    /// on first use. Keyed by generation; `next_generation` cleared any
+    /// leftover from an aborted transaction.
+    fn shared_refs_edit(&mut self, generation: u64) -> Result<&mut RefEdit, CoreError> {
+        let stale = self
+            .shared_refs
+            .as_ref()
+            .is_none_or(|(opened_for, _)| *opened_for != generation);
+        if stale {
+            let records = if self.checkpoint.shared_extent_root_block != 0 {
+                shared_extents::load_all(
+                    &mut self.dev,
+                    &self.ident.geometry(),
+                    self.checkpoint.shared_extent_root_block,
+                    self.checkpoint.generation,
+                )?
+                .records
+            } else {
+                Vec::new()
+            };
+            self.shared_refs = Some((generation, RefEdit::new(records)));
+        }
+        Ok(&mut self
+            .shared_refs
+            .as_mut()
+            .expect("shared_refs initialized above")
+            .1)
+    }
+
+    /// Drops this mapping's reference to a data run and retires exactly what
+    /// no live mapping still covers (the ADR-061 release table). A private
+    /// extent retires whole; a flagged extent is partitioned by overlap, and
+    /// a record falling from two references to one is removed WITHOUT
+    /// retiring its blocks — the surviving peer still maps them.
+    fn release_data_run(
+        &mut self,
+        tx: &mut TxAllocator,
+        generation: u64,
+        extent: &Extent,
+    ) -> Result<(), CoreError> {
+        if extent.flags & EXTENT_SHARED == 0 {
+            tx.retire_run(&mut self.dev, extent.physical_start, extent.block_count)?;
+            return Ok(());
+        }
+        let gaps = self
+            .shared_refs_edit(generation)?
+            .release(extent.physical_start, extent.block_count)?;
+        for (start, blocks) in gaps {
+            tx.retire_run(&mut self.dev, start, blocks)?;
+        }
+        Ok(())
+    }
+
+    /// Quarantines a committed file's data extents and extent-tree nodes,
+    /// honouring shared references (ADR-061).
     fn retire_file_storage(
         &mut self,
         tx: &mut TxAllocator,
+        generation: u64,
         victim: &ObjectRecord,
     ) -> Result<(), CoreError> {
         if victim.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
@@ -2305,7 +2633,7 @@ impl<D: BlockDevice> Volume<D> {
                 tx.retire(&mut self.dev, lba)?;
             }
             for extent in map.extents {
-                tx.retire_run(&mut self.dev, extent.physical_start, extent.block_count)?;
+                self.release_data_run(tx, generation, &extent)?;
             }
         } else if victim.data_blocks > 0 {
             tx.retire_run(&mut self.dev, victim.data_root, victim.data_blocks)?;
@@ -2992,7 +3320,12 @@ impl<D: BlockDevice> Volume<D> {
         )
     }
 
-    fn next_generation(&self) -> Result<u64, CoreError> {
+    fn next_generation(&mut self) -> Result<u64, CoreError> {
+        // A fresh transaction must never see an aborted one's half-applied
+        // reference edits (ADR-061): the generation number alone cannot
+        // distinguish them, because an aborted commit does not consume it.
+        self.shared_refs = None;
+        self.pending_layout_promotions = 0;
         self.checkpoint
             .generation
             .checked_add(1)
@@ -3150,12 +3483,61 @@ impl<D: BlockDevice> Volume<D> {
         &mut self,
         generation: u64,
         next_object_id: u64,
-        tx: TxAllocator,
+        mut tx: TxAllocator,
         data_writes: Vec<(u64, Vec<u8>)>,
         mut meta_writes: Vec<(u64, Vec<u8>)>,
         new_object_map_block: u64,
     ) -> Result<(), CoreError> {
         let block_size = self.dev.block_size();
+
+        // ADR-061: publish the shared-extent reference edit, if this
+        // transaction made one, in the same checkpoint that publishes the
+        // extent maps it describes. The first clone allocates the root and
+        // it stays allocated afterwards, even once the tree is empty again.
+        let mut shared_root = self.checkpoint.shared_extent_root_block;
+        let mut shared_stats = RefEditStats::default();
+        let mut shared_nodes_written = 0u64;
+        if let Some((opened_for, edit)) = self.shared_refs.take() {
+            if opened_for == generation {
+                let publication = edit.finish()?;
+                shared_stats = publication.stats;
+                if publication.changed() {
+                    if shared_root == 0 {
+                        let node = shared_extents::initial_leaf(&publication.records)?;
+                        let lba = tx.allocate(&mut self.dev)?;
+                        meta_writes.push((lba, node.encode(block_size, generation)?));
+                        shared_root = lba;
+                        shared_nodes_written = 1;
+                    } else {
+                        let operations: Vec<TreeOperation<'_>> = publication
+                            .deletes
+                            .iter()
+                            .map(|key| TreeOperation::Delete { key: &key[..] })
+                            .chain(publication.upserts.iter().map(|(key, value)| {
+                                TreeOperation::Upsert {
+                                    key: &key[..],
+                                    value: &value[..],
+                                }
+                            }))
+                            .collect();
+                        let mutation = mutate_many(
+                            &mut self.dev,
+                            &self.ident.geometry(),
+                            &mut tx,
+                            shared_root,
+                            shared_extents::spec(self.checkpoint.generation),
+                            generation,
+                            &operations,
+                        )?;
+                        shared_nodes_written = mutation.writes.len() as u64;
+                        meta_writes.extend(mutation.writes);
+                        shared_root = mutation.root_lba;
+                    }
+                }
+            }
+        }
+        let layout_promotions = std::mem::take(&mut self.pending_layout_promotions);
+
         let finished = tx.finish(&mut self.dev)?;
         let (allocation_root, new_allocation_tree_blocks) =
             self.mutate_allocation_root(generation, &finished.dirty_records)?;
@@ -3171,6 +3553,9 @@ impl<D: BlockDevice> Volume<D> {
             allocation_records_updated: finished.dirty_records.len() as u64,
             allocation_tree_nodes_written: allocation_root.stats.final_nodes_written,
             checkpoint_blocks_written: 1,
+            shared_tree_nodes_written: shared_nodes_written,
+            layout_promotions,
+            shared_refs: shared_stats,
             alloc: finished.stats,
             ..CommitStats::default()
         };
@@ -3210,7 +3595,7 @@ impl<D: BlockDevice> Volume<D> {
             committed_tx_id: generation,
             free_blocks_total,
             flags: 0,
-            shared_extent_root_block: self.checkpoint.shared_extent_root_block,
+            shared_extent_root_block: shared_root,
         };
         self.dev.write_block(
             self.ident.checkpoint_slots[new_slot],

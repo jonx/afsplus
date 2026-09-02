@@ -28,6 +28,7 @@ use crate::allocation_root;
 use crate::directory::{self, LoadedDirectory};
 use crate::extent_map;
 use crate::object_map::{self, LoadedObjectMap};
+use crate::shared_extents::{self, SharedRun};
 use crate::CoreError;
 
 /// Everything reachable from one committed checkpoint, fully decoded.
@@ -49,6 +50,12 @@ pub struct CommittedState {
     pub metadata_blocks: Vec<u64>,
     /// Every reachable file-data block.
     pub data_blocks: Vec<u64>,
+    /// The canonical shared-run records (ADR-061), already cross-checked:
+    /// every record's reference count equals the live mappings found over
+    /// its run during this load.
+    pub shared_records: Vec<SharedRun>,
+    /// The reference tree's own node blocks.
+    pub shared_tree_blocks: Vec<u64>,
 }
 
 /// Bounded state needed to expose a mounted root namespace. The object map and
@@ -88,6 +95,11 @@ pub fn load_mount_state<D: BlockDevice>(
     };
 
     claim_root(checkpoint.object_map_block, &mut roots)?;
+    if checkpoint.shared_extent_root_block != 0 {
+        // ADR-061: bounded mount claims the root; kind, owner and generation
+        // are checked whenever the tree is actually loaded.
+        claim_root(checkpoint.shared_extent_root_block, &mut roots)?;
+    }
     let root_record_lba = object_map::lookup_lba(
         dev,
         &geo,
@@ -208,6 +220,38 @@ pub fn load_committed_state<D: BlockDevice>(
     }
     let allocation_layout = allocation_root::bulk_build(&geo, &allocation.records)?;
 
+    // ADR-061: the reference tree is the authority for multi-owner runs.
+    // Its nodes are ordinary reachable metadata; each record's run is
+    // claimed once here, then counted per live mapping below.
+    let (shared_records, shared_tree_blocks) = if checkpoint.shared_extent_root_block != 0 {
+        let loaded = shared_extents::load_all(
+            dev,
+            &geo,
+            checkpoint.shared_extent_root_block,
+            checkpoint.generation,
+        )?;
+        for lba in &loaded.tree_blocks {
+            claim(*lba, &mut claimed)?;
+            metadata_blocks.push(*lba);
+        }
+        for run in &loaded.records {
+            for lba in run.physical_start..run.physical_end()? {
+                claim(lba, &mut claimed)?;
+                data_blocks.push(lba);
+            }
+        }
+        (loaded.records, loaded.tree_blocks)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    // Per-block live-mapping counts over the record-covered runs.
+    let mut shared_claims: BTreeMap<u64, u32> = BTreeMap::new();
+    let record_cover = |lba: u64| -> Option<&SharedRun> {
+        let index = shared_records.partition_point(|run| run.physical_start <= lba);
+        let run = &shared_records[..index].last()?;
+        (lba < run.physical_start + run.block_count).then_some(*run)
+    };
+
     let object_map = object_map::load_all(
         dev,
         &geo,
@@ -270,9 +314,26 @@ pub fn load_committed_state<D: BlockDevice>(
                         metadata_blocks.push(lba);
                     }
                     for extent in map.extents {
+                        let flagged = extent.flags & crate::extent_map::EXTENT_SHARED != 0;
                         for lba in extent.physical_start..extent.physical_end()? {
-                            claim(lba, &mut claimed)?;
-                            data_blocks.push(lba);
+                            if record_cover(lba).is_some() {
+                                // A mapping over a shared record must carry
+                                // the conservative marker: a clear flag over
+                                // a record is the dangerous false negative
+                                // (ADR-061).
+                                if !flagged {
+                                    return Err(CoreError::Corrupt(format!(
+                                        "object {} maps shared block {lba} without EXTENT_SHARED",
+                                        record.object_id
+                                    )));
+                                }
+                                *shared_claims.entry(lba).or_insert(0) += 1;
+                            } else {
+                                // A stale flag over a private gap is legal;
+                                // the claim stays exclusive either way.
+                                claim(lba, &mut claimed)?;
+                                data_blocks.push(lba);
+                            }
                         }
                     }
                 } else {
@@ -294,6 +355,21 @@ pub fn load_committed_state<D: BlockDevice>(
             _ => unreachable!("rejected by ObjectRecord::decode"),
         }
         objects.insert(record.object_id, record);
+    }
+
+    // Bidirectional (ADR-061): every record's count equals the live
+    // mappings found over its run — a missing record is as detectable as a
+    // wrong one, because uncovered multi-references die as double claims.
+    for run in &shared_records {
+        for lba in run.physical_start..run.physical_end()? {
+            let found = shared_claims.get(&lba).copied().unwrap_or(0);
+            if found != run.reference_count {
+                return Err(CoreError::Corrupt(format!(
+                    "shared block {lba} has {found} live references, record says {}",
+                    run.reference_count
+                )));
+            }
+        }
     }
 
     let root = objects
@@ -367,6 +443,8 @@ pub fn load_committed_state<D: BlockDevice>(
         bitmaps,
         metadata_blocks,
         data_blocks,
+        shared_records,
+        shared_tree_blocks,
     })
 }
 
