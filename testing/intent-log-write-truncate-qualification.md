@@ -7,6 +7,7 @@
 > `crates/afsplus-check/tests/shared_crash.rs`,
 > `crates/afsplus-check/tests/fsync_workloads.rs`,
 > `crates/afsplus-vfs/tests/api.rs`, `crates/afsplus-fuse/tests/protocol.rs`,
+> `crates/afsplus-fuse/tests/host_mount.rs`,
 > `crates/afsplus-aros/tests/adapter.rs`,
 > `crates/afsplus-aros-ffi/tests/ffi.rs` · **Milestones:** M04, M07, M14
 
@@ -63,6 +64,19 @@ cargo test -p afsplus-fuse --test protocol
 cargo test -p afsplus-aros --test adapter
 cargo test -p afsplus-aros-ffi --test ffi
 ```
+
+With macFUSE's FSKit modules enabled, run the real host boundary:
+
+```text
+AFSPLUS_FUSE_MOUNT_TEST=1 \
+  cargo test -p afsplus-fuse --all-features --test host_mount \
+  -- --ignored --nocapture
+```
+
+Before any close, rename or unmount can mask the result, this gate opens the
+backing image through a second descriptor after host `fsync` and requires a
+checker-clean replayable record or newer checkpoint. A host stack that returns
+from the syscall without delivering FUSE `FSYNC` therefore fails the gate.
 
 Run the optimized 4,000-operation measurement:
 

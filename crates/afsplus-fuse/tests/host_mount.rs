@@ -51,10 +51,25 @@ fn real_mount_runs_the_alpha_operation_matrix_and_leaves_a_clean_image() {
         .write(true)
         .open(&draft)
         .unwrap();
+    let before_fsync_generation = {
+        let mut device = FileBackend::open(&image, DEFAULT_BLOCK_SIZE, TOTAL_BLOCKS).unwrap();
+        let report = check_device(&mut device);
+        assert!(report.is_clean(), "{:?}", report.errors);
+        report.volume.unwrap().generation
+    };
     file.write_all(b"hello").unwrap();
     file.seek(SeekFrom::Start(8192)).unwrap();
     file.write_all(b"tail").unwrap();
     file.sync_all().unwrap();
+    let mut after_fsync_device =
+        FileBackend::open(&image, DEFAULT_BLOCK_SIZE, TOTAL_BLOCKS).unwrap();
+    let after_fsync = check_device(&mut after_fsync_device);
+    assert!(after_fsync.is_clean(), "{:?}", after_fsync.errors);
+    let after_fsync = after_fsync.volume.unwrap();
+    assert!(
+        after_fsync.log_records_pending > 0 || after_fsync.generation > before_fsync_generation,
+        "host fsync returned without a durable intent record or checkpoint"
+    );
     file.set_len(5).unwrap();
     drop(file);
 

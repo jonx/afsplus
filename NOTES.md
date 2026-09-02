@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — macFUSE FSKit reopens the host fsync gate](#2026-09-03--macfuse-fskit-reopens-the-host-fsync-gate)
 - [2026-09-03 — Logged data fsync reaches the portable Rust adapters](#2026-09-03--logged-data-fsync-reaches-the-portable-rust-adapters)
 - [2026-09-03 — Intent-log writes and truncates survive nested recovery crashes](#2026-09-03--intent-log-writes-and-truncates-survive-nested-recovery-crashes)
 - [2026-09-02 — Q1 and Q2 architecture blockers closed](#2026-09-02--q1-and-q2-architecture-blockers-closed)
@@ -22,6 +23,27 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — macFUSE FSKit reopens the host fsync gate
+
+Re-running the real mount after wiring the VFS log exposed a false-positive in
+the Mountable Alpha-0 host gate. On macOS 26.6.2 (25G83) with macFUSE 5.3.3's
+FSKit backend, both Rust `File::sync_all` (`F_FULLFSYNC`) and a direct
+`fsync(2)` returned after dirty data reached the FUSE `WRITE` callback but no
+FUSE `FSYNC` callback was delivered. Instrumentation distinguished `WRITE`,
+`RELEASE` and `FSYNC`; only `RELEASE` arrived when the descriptor closed. For
+two seconds after the syscall, a second descriptor on the image saw the same
+checkpoint generation and zero pending intent records. The later rename or
+unmount checkpoint had allowed the old round-trip test to pass.
+
+The ignored real-mount test now inspects the live backing image immediately
+after host fsync and requires either a replayable record or a newer checkpoint.
+It intentionally fails on that FSKit combination, while the direct FUSE
+protocol, VFS, AROS and C-bridge fsync tests pass. M08 is therefore partial
+again. A safe FSKit-specific write-through workaround would add barriers to
+every delivered write, so it requires measurement and an explicit policy
+choice rather than being enabled silently; the preferable fix is for the host
+stack to deliver FUSE `FSYNC` before returning from the syscall.
 
 ## 2026-09-03 — Logged data fsync reaches the portable Rust adapters
 

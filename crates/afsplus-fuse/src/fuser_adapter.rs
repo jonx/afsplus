@@ -320,7 +320,8 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
         _lock_owner: LockOwner,
         reply: ReplyEmpty,
     ) {
-        // AFS+ commits writes synchronously. POSIX flush is not an fsync.
+        // POSIX flush is not a durability request. Pending writes remain in
+        // the VFS window until FSYNC, a later committing operation or unmount.
         reply.ok();
     }
 
