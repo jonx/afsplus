@@ -14,7 +14,9 @@ use afsplus_block::{
 use afsplus_check::check_device;
 use afsplus_core::shared_extents::{self, LoadedSharedExtents, SharedRun};
 use afsplus_core::{mkfs, mount, MkfsParams, Volume};
+use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::geometry::Geometry;
+use afsplus_format::ident::{Identification, RO_COMPAT_SHARED_EXTENTS};
 use afsplus_format::tree::{child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode};
 use afsplus_format::{le, Timespec};
 
@@ -690,6 +692,30 @@ fn shared_loader_rejects_wrong_identity_generation_and_unreadable_nodes() {
     assert!(
         shared_extents::load_all(&mut unreadable_child, &geometry, ROOT_LBA, 1).is_err(),
         "unreadable descendant was accepted"
+    );
+}
+
+#[test]
+fn checker_enforces_shared_feature_root_congruence() {
+    let mut root_without_feature = formatted("RootWithoutFeature");
+    let mut checkpoint = Checkpoint::decode(&root_without_feature.peek(1), &[0x61; 16]).unwrap();
+    checkpoint.shared_extent_root_block = 20;
+    root_without_feature.apply_raw(1, &checkpoint.encode(BS).unwrap());
+    let report = check_device(&mut root_without_feature);
+    assert!(!report.is_clean());
+    assert!(report.errors.iter().any(|error| {
+        error.contains("shared-extent root present without the shared-extents feature")
+    }));
+
+    let mut enabled_but_unused = formatted("EnabledUnused");
+    let mut identification = Identification::decode(&enabled_but_unused.peek(0)).unwrap();
+    identification.features.ro_compat |= RO_COMPAT_SHARED_EXTENTS;
+    enabled_but_unused.apply_raw(0, &identification.encode(BS).unwrap());
+    let report = check_device(&mut enabled_but_unused);
+    assert!(
+        report.is_clean(),
+        "enabled-but-unused volume rejected: {:?}",
+        report.errors
     );
 }
 

@@ -20,7 +20,7 @@ use afsplus_block::BlockDevice;
 use afsplus_core::mount::select_checkpoint;
 use afsplus_core::verify::{full_sweep, load_committed_state};
 use afsplus_core::CoreError;
-use afsplus_format::ident::{Identification, NameKeyAlgorithm};
+use afsplus_format::ident::{Identification, NameKeyAlgorithm, RO_COMPAT_SHARED_EXTENTS};
 
 /// Versioned structured-output schema (ADR-025).
 pub const REPORT_SCHEMA_VERSION: u32 = 5;
@@ -205,6 +205,18 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
         }
     };
     report.slots = selection.slot_status.to_vec();
+
+    // The enabled-but-unused state is legal, but a root without its feature
+    // would make shared ownership invisible to a writer. Match mount's
+    // structural fail-closed contract before attempting an exhaustive walk.
+    if selection.chosen.shared_extent_root_block != 0
+        && ident.features.ro_compat & RO_COMPAT_SHARED_EXTENTS == 0
+    {
+        report
+            .errors
+            .push("shared-extent root present without the shared-extents feature".into());
+        return report;
+    }
 
     // The chosen checkpoint must load and pass the full sweep — errors.
     match load_committed_state(dev, &ident, &selection.chosen) {
