@@ -76,7 +76,11 @@ AFSPLUS_FUSE_MOUNT_TEST=1 \
 Before any close, rename or unmount can mask the result, this gate opens the
 backing image through a second descriptor after host `fsync` and requires a
 checker-clean replayable record or newer checkpoint. A host stack that returns
-from the syscall without delivering FUSE `FSYNC` therefore fails the gate.
+from the syscall without delivering FUSE `FSYNC` uses the macOS FSKit
+write-through fallback: every delivered `WRITE` or size-changing `SETATTR` is
+made durable before its reply. The backing-image oracle verifies the fallback
+at the syscall boundary; the protocol test separately crashes immediately
+after write and truncate replies without issuing `FSYNC`.
 
 Run the optimized 4,000-operation measurement:
 
@@ -115,7 +119,10 @@ The executable cases prove:
   VFS `fsync` writes no checkpoint slot, and remount replays its durable record;
 - log-free volumes do not advertise `LOGGED_DATA_FSYNC` and retain the
   checkpoint path; FUSE, AROS and its current C ABI bridge exercise the same
-  read-your-writes path.
+  read-your-writes path;
+- the macFUSE FSKit mount strengthens each data-mutation reply into a durability
+  point, while host-neutral FUSE and the AROS adapters retain ordinary deferred
+  writeback plus explicit `fsync`.
 
 ## Remaining boundary
 

@@ -21,6 +21,12 @@ pub struct FuseConfig {
     pub gid: u32,
     pub file_mode: u16,
     pub directory_mode: u16,
+    /// Make every successful data mutation durable before replying.
+    ///
+    /// This is a transport workaround for hosts that flush dirty pages through
+    /// `WRITE`/`SETATTR` but return from `fsync(2)` without sending FUSE
+    /// `FSYNC`. It deliberately strengthens normal FUSE writeback semantics.
+    pub durable_data_replies: bool,
 }
 
 impl Default for FuseConfig {
@@ -30,6 +36,7 @@ impl Default for FuseConfig {
             gid: 0,
             file_mode: 0o644,
             directory_mode: 0o755,
+            durable_data_replies: false,
         }
     }
 }
@@ -118,7 +125,11 @@ impl<D: BlockDevice> FuseAdapter<D> {
     ) -> Result<Handle, VfsError> {
         let handle = self.vfs.open_file(object_id, access)?;
         if truncate {
-            if let Err(error) = self.vfs.truncate(handle, 0, now) {
+            let result = self
+                .vfs
+                .truncate(handle, 0, now)
+                .and_then(|()| self.finish_data_mutation(handle));
+            if let Err(error) = result {
                 let _ = self.vfs.close(handle);
                 return Err(error);
             }
@@ -148,7 +159,9 @@ impl<D: BlockDevice> FuseAdapter<D> {
         data: &[u8],
         now: Timespec,
     ) -> Result<usize, VfsError> {
-        self.vfs.write(handle, offset, data, now)
+        let written = self.vfs.write(handle, offset, data, now)?;
+        self.finish_data_mutation(handle)?;
+        Ok(written)
     }
 
     pub fn truncate(
@@ -160,9 +173,13 @@ impl<D: BlockDevice> FuseAdapter<D> {
     ) -> Result<FuseAttributes, VfsError> {
         if let Some(handle) = handle {
             self.vfs.truncate(handle, size, now)?;
+            self.finish_data_mutation(handle)?;
         } else {
             let temporary = self.vfs.open_file(object_id, AccessMode::WriteOnly)?;
-            let result = self.vfs.truncate(temporary, size, now);
+            let result = self
+                .vfs
+                .truncate(temporary, size, now)
+                .and_then(|()| self.finish_data_mutation(temporary));
             let close_result = self.vfs.close(temporary);
             result?;
             close_result?;
@@ -314,6 +331,14 @@ impl<D: BlockDevice> FuseAdapter<D> {
 
     pub fn into_vfs(self) -> Vfs<D> {
         self.vfs
+    }
+
+    fn finish_data_mutation(&mut self, handle: Handle) -> Result<(), VfsError> {
+        if self.config.durable_data_replies {
+            self.vfs.fsync(handle)
+        } else {
+            Ok(())
+        }
     }
 
     fn parent_of(&self, object_id: ObjectId) -> ObjectId {

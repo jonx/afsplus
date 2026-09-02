@@ -66,6 +66,11 @@ fn run() -> Result<(), String> {
         FuseConfig {
             uid,
             gid,
+            // macFUSE's FSKit backend can return from host fsync without
+            // forwarding FUSE_FSYNC. Complete every data mutation durably so
+            // that the missing transport notification cannot lose an
+            // acknowledged host durability point.
+            durable_data_replies: cfg!(all(target_os = "macos", feature = "macfuse-mount")),
             ..FuseConfig::default()
         },
     );

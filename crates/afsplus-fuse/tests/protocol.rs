@@ -45,6 +45,97 @@ fn adapter_with_policy(policy: afsplus_core::NamePolicy) -> FuseAdapter<MemoryBa
     )
 }
 
+fn write_through_adapter() -> FuseAdapter<MemoryBackend> {
+    let mut device = MemoryBackend::new(BLOCK_SIZE, 8192);
+    mkfs(
+        &mut device,
+        &MkfsParams {
+            uuid: [0xF5; 16],
+            label: "FuseWriteThrough".into(),
+            region_size: 4096,
+            reclaim_caps: Default::default(),
+            log_slots: 8,
+            shared_extents: true,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
+            timestamp: timestamp(0),
+        },
+    )
+    .unwrap();
+    FuseAdapter::new(
+        Vfs::mount(device, MountOptions::default()).unwrap(),
+        FuseConfig {
+            durable_data_replies: true,
+            ..FuseConfig::default()
+        },
+    )
+}
+
+#[test]
+fn durable_data_replies_survive_without_a_fuse_fsync_request() {
+    let mut fuse = write_through_adapter();
+    let (file, handle) = fuse
+        .create_file(
+            OBJECT_ROOT,
+            b"host-file",
+            AccessMode::ReadWrite,
+            timestamp(1),
+        )
+        .unwrap();
+    fuse.write(handle, 0, b"host durable bytes", timestamp(2))
+        .unwrap();
+
+    let device = fuse.into_vfs().into_volume().into_device();
+    let mut recovered = FuseAdapter::new(
+        Vfs::mount(device, MountOptions::default()).unwrap(),
+        FuseConfig {
+            durable_data_replies: true,
+            ..FuseConfig::default()
+        },
+    );
+    let recovered_file = recovered.lookup(OBJECT_ROOT, b"host-file").unwrap();
+    assert_eq!(recovered_file.object_id, file.object_id);
+    let recovered_handle = recovered
+        .open_file(
+            recovered_file.object_id,
+            AccessMode::ReadWrite,
+            false,
+            timestamp(3),
+        )
+        .unwrap();
+    assert_eq!(
+        recovered.read(recovered_handle, 0, 32).unwrap(),
+        b"host durable bytes"
+    );
+
+    recovered
+        .truncate(
+            recovered_file.object_id,
+            Some(recovered_handle),
+            4,
+            timestamp(4),
+        )
+        .unwrap();
+    let device = recovered.into_vfs().into_volume().into_device();
+    let mut recovered = FuseAdapter::new(
+        Vfs::mount(device, MountOptions::default()).unwrap(),
+        FuseConfig::default(),
+    );
+    let recovered_file = recovered.lookup(OBJECT_ROOT, b"host-file").unwrap();
+    let recovered_handle = recovered
+        .open_file(
+            recovered_file.object_id,
+            AccessMode::ReadOnly,
+            false,
+            timestamp(5),
+        )
+        .unwrap();
+    assert_eq!(recovered.read(recovered_handle, 0, 32).unwrap(), b"host");
+
+    let mut device = recovered.into_vfs().into_volume().into_device();
+    let report = check_device(&mut device);
+    assert!(report.is_clean(), "{:?}", report.errors);
+}
+
 #[test]
 fn insensitive_protocol_lookup_rejects_folded_duplicates_and_preserves_spelling() {
     let mut fuse = adapter_with_policy(afsplus_core::NamePolicy::Insensitive);

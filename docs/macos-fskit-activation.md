@@ -80,6 +80,22 @@ The test mounts a fresh image below `/Volumes`, runs the Alpha-0 operation
 matrix, unmounts it, and requires a clean AFS+ checker result. Once activation
 has succeeded, this mount workflow does not request administrator privileges.
 
+## Host fsync fallback
+
+The macFUSE FSKit transport can flush dirty pages with FUSE `WRITE` and return
+success from host `fsync(2)` without delivering a FUSE `FSYNC` request. The
+AFS+ macOS mount therefore uses durable data replies: each `WRITE` and
+size-changing `SETATTR` completes the bounded AFS+ durability operation before
+the transport receives success. This is scoped to the FSKit mount; the
+host-neutral FUSE protocol and AROS adapters retain deferred writeback and an
+explicit `fsync` durability point.
+
+The fallback requires neither the legacy kernel extension nor administrator
+authorization. It trades batching for correctness and can add up to the normal
+data-and-record barriers to each delivered write. Host benchmark reports must
+identify this mode rather than comparing it silently with an ordinary
+writeback filesystem.
+
 ## Restore the previous FSKit list
 
 The activation command prints its exact backup path. Restore it with:

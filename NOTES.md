@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — FSKit durability moves to write replies](#2026-09-03--fskit-durability-moves-to-write-replies)
 - [2026-09-03 — Qualification order follows executable targets](#2026-09-03--qualification-order-follows-executable-targets)
 - [2026-09-03 — macFUSE FSKit reopens the host fsync gate](#2026-09-03--macfuse-fskit-reopens-the-host-fsync-gate)
 - [2026-09-03 — Logged data fsync reaches the portable Rust adapters](#2026-09-03--logged-data-fsync-reaches-the-portable-rust-adapters)
@@ -24,6 +25,24 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — FSKit durability moves to write replies
+
+The owner chose a scoped workaround instead of debugging the macFUSE/Apple
+FSKit boundary. The macOS FSKit mount treats each delivered data write or
+truncate as an implicit durability point and replies only after the AFS+ log or
+checkpoint is durable. This preserves host `fsync` correctness even when the
+transport omits `FUSE_FSYNC`, without changing the core, on-disk format,
+host-neutral FUSE behavior or AROS adapters and without requiring the legacy
+kernel extension.
+
+The tradeoff is intentionally visible: small host writes lose cross-request
+batching and can each pay the data-and-record barriers. A protocol regression
+crashes immediately after successful write and truncate replies without an
+`fsync` request. The real macFUSE mount then passed its syscall-boundary oracle:
+host `fsync`, immediate second-descriptor inspection, clean unmount and checker
+all succeeded without administrator authorization. The host benchmark contract
+must label the fallback.
 
 ## 2026-09-03 — Qualification order follows executable targets
 
