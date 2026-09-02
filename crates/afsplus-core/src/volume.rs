@@ -81,6 +81,11 @@ pub struct DirectoryPage {
     pub eof: bool,
 }
 
+struct StagedFileLayout {
+    record_lba: u64,
+    metadata_writes: Vec<(u64, Vec<u8>)>,
+}
+
 /// One operation inside a [`Volume::run_batch`] group commit (ADR-026).
 #[derive(Debug, Clone)]
 pub enum BatchOp<'a> {
@@ -1039,6 +1044,290 @@ impl<D: BlockDevice> Volume<D> {
             omap_lba,
         )?;
         Ok(object_id)
+    }
+
+    /// Replaces a byte range in an existing destination file with a reflink
+    /// to the corresponding source range (ADR-027/ADR-061).
+    ///
+    /// Offsets must have the same position within a filesystem block.  This
+    /// makes every complete interior block physically shareable; at most the
+    /// first and last partial blocks are copied privately so bytes outside the
+    /// requested range retain their old destination values.  Source holes
+    /// remain destination holes for complete blocks.  Self-cloning is kept as
+    /// an explicit prototype limit because overlapping edits need a separate
+    /// reference-delta plan, not operation ordering by accident.
+    #[allow(clippy::too_many_arguments)]
+    pub fn clone_range(
+        &mut self,
+        source_id: u64,
+        source_offset: u64,
+        destination_id: u64,
+        destination_offset: u64,
+        length: u64,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        if !self.shared_extents_enabled() {
+            return Err(CoreError::FeatureDisabled(
+                "shared-extents feature is not enabled on this volume",
+            ));
+        }
+        if self.window.is_some() {
+            self.window_commit(now)?;
+        }
+        self.ensure_window_closed()?;
+
+        let source = self.read_object(source_id)?.ok_or(CoreError::NotFound)?;
+        let destination = self
+            .read_object(destination_id)?
+            .ok_or(CoreError::NotFound)?;
+        if source.object_type != ObjectType::File || destination.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        if source_id == destination_id {
+            return Err(CoreError::PrototypeLimit(
+                "same-file range cloning is not implemented",
+            ));
+        }
+        let source_end = source_offset
+            .checked_add(length)
+            .ok_or(CoreError::PrototypeLimit("clone source range overflows"))?;
+        let destination_end =
+            destination_offset
+                .checked_add(length)
+                .ok_or(CoreError::PrototypeLimit(
+                    "clone destination range overflows",
+                ))?;
+        if source_end > source.size_bytes {
+            return Err(CoreError::PrototypeLimit(
+                "clone source range exceeds the file size",
+            ));
+        }
+        if length == 0 {
+            return Ok(());
+        }
+
+        let block_size = self.dev.block_size() as u64;
+        if source_offset % block_size != destination_offset % block_size {
+            return Err(CoreError::PrototypeLimit(
+                "clone range offsets must have matching block alignment",
+            ));
+        }
+        let source_record_lba = self.object_record_lba(source_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("file {source_id} missing from object map"))
+        })?;
+        let destination_record_lba = self.object_record_lba(destination_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("file {destination_id} missing from object map"))
+        })?;
+        let (source_extents, source_tree_blocks) = self.load_file_layout(&source)?;
+        let (destination_extents, destination_tree_blocks) = self.load_file_layout(&destination)?;
+
+        let destination_first_block = destination_offset / block_size;
+        let destination_end_block = destination_end.div_ceil(block_size);
+        let leading = if destination_offset.is_multiple_of(block_size) {
+            0
+        } else {
+            block_size - destination_offset % block_size
+        };
+        let full_destination_start = destination_offset
+            .checked_add(leading)
+            .ok_or(CoreError::PrototypeLimit(
+                "clone destination range overflows",
+            ))?
+            .min(destination_end);
+        let full_destination_end = destination_end - destination_end % block_size;
+        let has_full_blocks = full_destination_start < full_destination_end;
+        let (source_full_start_block, source_full_end_block) = if has_full_blocks {
+            let source_full_start = source_offset
+                .checked_add(full_destination_start - destination_offset)
+                .ok_or(CoreError::PrototypeLimit("clone source range overflows"))?;
+            let source_full_end = source_full_start
+                .checked_add(full_destination_end - full_destination_start)
+                .ok_or(CoreError::PrototypeLimit("clone source range overflows"))?;
+            (source_full_start / block_size, source_full_end / block_size)
+        } else {
+            (0, 0)
+        };
+        let full_destination_start_block = full_destination_start / block_size;
+
+        let source_new_extents = mark_logical_range_shared(
+            &source_extents,
+            source_full_start_block,
+            source_full_end_block,
+        )?;
+        let shared_destination_extents = remap_extent_range(
+            &source_extents,
+            source_full_start_block,
+            source_full_end_block,
+            full_destination_start_block,
+        )?;
+        let (mut destination_new_extents, removed_destination_extents) = replace_logical_range(
+            &destination_extents,
+            destination_first_block,
+            destination_end_block,
+            None,
+        )?;
+
+        // Snapshot the at-most-two boundary blocks before starting the
+        // transaction.  This also gives memmove-like source semantics even
+        // though same-file cloning is currently rejected explicitly.
+        let mut private_blocks = Vec::new();
+        for logical_block in destination_first_block..destination_end_block {
+            if has_full_blocks
+                && logical_block >= full_destination_start_block
+                && logical_block < full_destination_end / block_size
+            {
+                continue;
+            }
+            let logical_byte = logical_block
+                .checked_mul(block_size)
+                .ok_or(CoreError::PrototypeLimit("clone block offset overflows"))?;
+            let mut block = vec![0u8; block_size as usize];
+            self.read_layout_block(&destination_extents, logical_block, &mut block)?;
+            let copy_start = destination_offset.max(logical_byte);
+            let copy_end = destination_end.min(
+                logical_byte
+                    .checked_add(block_size)
+                    .ok_or(CoreError::PrototypeLimit("clone block offset overflows"))?,
+            );
+            let mut cursor = copy_start;
+            while cursor < copy_end {
+                let source_byte = source_offset
+                    .checked_add(cursor - destination_offset)
+                    .ok_or(CoreError::PrototypeLimit("clone source range overflows"))?;
+                let source_block = source_byte / block_size;
+                let source_in_block = source_byte % block_size;
+                let count = (copy_end - cursor).min(block_size - source_in_block);
+                let mut source_bytes = vec![0u8; block_size as usize];
+                self.read_layout_block(&source_extents, source_block, &mut source_bytes)?;
+                let target_start = usize::try_from(cursor - logical_byte)
+                    .map_err(|_| CoreError::PrototypeLimit("clone offset is too large"))?;
+                let source_start = usize::try_from(source_in_block)
+                    .map_err(|_| CoreError::PrototypeLimit("clone offset is too large"))?;
+                let count = usize::try_from(count)
+                    .map_err(|_| CoreError::PrototypeLimit("clone length is too large"))?;
+                block[target_start..target_start + count]
+                    .copy_from_slice(&source_bytes[source_start..source_start + count]);
+                cursor += count as u64;
+            }
+            private_blocks.push((logical_block, block));
+        }
+
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            generation,
+            self.reclaim_batch_blocks,
+            self.alloc_rover_region,
+        )?;
+        self.shared_refs_edit(generation)?.require_root();
+        for extent in &shared_destination_extents {
+            self.shared_prefetch(generation, extent.physical_start, extent.block_count)?;
+        }
+        for extent in &removed_destination_extents {
+            if extent.flags & EXTENT_SHARED != 0 {
+                self.shared_prefetch(generation, extent.physical_start, extent.block_count)?;
+            }
+        }
+        {
+            let edit = self.shared_refs_edit(generation)?;
+            for extent in &shared_destination_extents {
+                edit.acquire(extent.physical_start, extent.block_count)?;
+            }
+        }
+
+        let mut data_writes = Vec::with_capacity(private_blocks.len());
+        for (logical_block, block) in private_blocks {
+            let physical_start = tx.allocate(&mut self.dev)?;
+            destination_new_extents.push(Extent {
+                logical_start: logical_block,
+                physical_start,
+                block_count: 1,
+                flags: 0,
+            });
+            data_writes.push((physical_start, block));
+        }
+        destination_new_extents.extend(shared_destination_extents);
+        let destination_new_extents = coalesce_extents(destination_new_extents)?;
+        for extent in &removed_destination_extents {
+            self.release_data_run(&mut tx, generation, extent)?;
+        }
+
+        let mut metadata_writes = Vec::new();
+        let mut object_updates = Vec::new();
+        if source_new_extents != source_extents {
+            if source.flags & OBJECT_FLAG_EXTENT_TREE == 0 {
+                self.pending_layout_promotions += 1;
+            }
+            let staged = self.stage_file_layout(
+                &mut tx,
+                source,
+                source_record_lba,
+                &source_extents,
+                &source_tree_blocks,
+                &source_new_extents,
+                source.size_bytes,
+                false,
+                now,
+                generation,
+            )?;
+            metadata_writes.extend(staged.metadata_writes);
+            object_updates.push((
+                object_map::key(source_id),
+                object_map::value(staged.record_lba)?,
+            ));
+        }
+        if destination.flags & OBJECT_FLAG_EXTENT_TREE == 0
+            && direct_layout(
+                &destination_new_extents,
+                destination.size_bytes.max(destination_end),
+                block_size,
+            )
+            .is_none()
+        {
+            self.pending_layout_promotions += 1;
+        }
+        let staged_destination = self.stage_file_layout(
+            &mut tx,
+            destination,
+            destination_record_lba,
+            &destination_extents,
+            &destination_tree_blocks,
+            &destination_new_extents,
+            destination.size_bytes.max(destination_end),
+            true,
+            now,
+            generation,
+        )?;
+        metadata_writes.extend(staged_destination.metadata_writes);
+        object_updates.push((
+            object_map::key(destination_id),
+            object_map::value(staged_destination.record_lba)?,
+        ));
+        let object_operations: Vec<TreeOperation<'_>> = object_updates
+            .iter()
+            .map(|(key, value)| TreeOperation::Upsert { key, value })
+            .collect();
+        let object_map_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &object_operations,
+        )?;
+        metadata_writes.extend(object_map_mutation.writes);
+        self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            data_writes,
+            metadata_writes,
+            object_map_mutation.root_lba,
+        )
     }
 
     pub fn device_mut(&mut self) -> &mut D {
@@ -2046,34 +2335,38 @@ impl<D: BlockDevice> Volume<D> {
         Ok(())
     }
 
+    /// Stages one file record and its extent-map update inside an existing
+    /// transaction.  The caller remains responsible for shared-reference
+    /// edits, retiring removed data mappings, updating the object map and
+    /// publishing the transaction.  Keeping those steps outside is what lets
+    /// CloneRange publish the source map, destination map and reference tree
+    /// atomically rather than nesting two one-file commits.
     #[allow(clippy::too_many_arguments)]
-    fn commit_file_layout(
+    fn stage_file_layout(
         &mut self,
+        tx: &mut TxAllocator,
         record: ObjectRecord,
         record_lba: u64,
-        old_extents: Vec<Extent>,
-        old_tree_blocks: Vec<u64>,
-        new_extents: Vec<Extent>,
-        removed_extents: Vec<Extent>,
+        old_extents: &[Extent],
+        old_tree_blocks: &[u64],
+        new_extents: &[Extent],
         new_size: u64,
         content_changed: bool,
         now: Timespec,
         generation: u64,
-        mut tx: TxAllocator,
-        data_writes: Vec<(u64, Vec<u8>)>,
-    ) -> Result<(), CoreError> {
+    ) -> Result<StagedFileLayout, CoreError> {
         let block_size = self.dev.block_size();
         let allocated_blocks = new_extents.iter().try_fold(0u64, |total, extent| {
             total
                 .checked_add(extent.block_count)
                 .ok_or(CoreError::PrototypeLimit("allocated block count overflow"))
         })?;
-        let direct = direct_layout(&new_extents, new_size, block_size as u64);
+        let direct = direct_layout(new_extents, new_size, block_size as u64);
         let was_tree = record.flags & OBJECT_FLAG_EXTENT_TREE != 0;
-        let mut extent_writes = Vec::new();
+        let mut metadata_writes = Vec::new();
         let (flags, data_root, data_blocks) = if let Some(extent) = direct {
             if was_tree {
-                for lba in old_tree_blocks {
+                for &lba in old_tree_blocks {
                     tx.retire(&mut self.dev, lba)?;
                 }
             }
@@ -2105,13 +2398,13 @@ impl<D: BlockDevice> Volume<D> {
             let mutation = mutate_many(
                 &mut self.dev,
                 &self.ident.geometry(),
-                &mut tx,
+                tx,
                 record.data_root,
                 extent_map::spec(record.object_id, self.checkpoint.generation),
                 generation,
                 &operations,
             )?;
-            extent_writes = mutation.writes;
+            metadata_writes = mutation.writes;
             (OBJECT_FLAG_EXTENT_TREE, mutation.root_lba, allocated_blocks)
         } else {
             let node_count = extent_map::bulk_node_count(block_size, new_extents.len())?;
@@ -2119,19 +2412,15 @@ impl<D: BlockDevice> Volume<D> {
             for _ in 0..node_count {
                 lbas.push(tx.allocate(&mut self.dev)?);
             }
-            let built = extent_map::bulk_build(record.object_id, block_size, &new_extents, &lbas)?;
+            let built = extent_map::bulk_build(record.object_id, block_size, new_extents, &lbas)?;
             for (lba, node) in built.nodes {
-                extent_writes.push((lba, node.encode(block_size, generation)?));
+                metadata_writes.push((lba, node.encode(block_size, generation)?));
             }
             (OBJECT_FLAG_EXTENT_TREE, built.root_lba, allocated_blocks)
         };
 
         let new_record_lba = tx.allocate(&mut self.dev)?;
         tx.retire(&mut self.dev, record_lba)?;
-        for extent in removed_extents {
-            self.release_data_run(&mut tx, generation, &extent)?;
-        }
-
         let new_record = ObjectRecord {
             flags,
             size_bytes: new_size,
@@ -2153,6 +2442,46 @@ impl<D: BlockDevice> Volume<D> {
             data_blocks,
             ..record
         };
+        metadata_writes.push((new_record_lba, new_record.encode(block_size, generation)?));
+        Ok(StagedFileLayout {
+            record_lba: new_record_lba,
+            metadata_writes,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_file_layout(
+        &mut self,
+        record: ObjectRecord,
+        record_lba: u64,
+        old_extents: Vec<Extent>,
+        old_tree_blocks: Vec<u64>,
+        new_extents: Vec<Extent>,
+        removed_extents: Vec<Extent>,
+        new_size: u64,
+        content_changed: bool,
+        now: Timespec,
+        generation: u64,
+        mut tx: TxAllocator,
+        data_writes: Vec<(u64, Vec<u8>)>,
+    ) -> Result<(), CoreError> {
+        let staged = self.stage_file_layout(
+            &mut tx,
+            record,
+            record_lba,
+            &old_extents,
+            &old_tree_blocks,
+            &new_extents,
+            new_size,
+            content_changed,
+            now,
+            generation,
+        )?;
+        let new_record_lba = staged.record_lba;
+        let mut metadata_writes = staged.metadata_writes;
+        for extent in removed_extents {
+            self.release_data_run(&mut tx, generation, &extent)?;
+        }
         let object_key = object_map::key(record.object_id);
         let object_value = object_map::value(new_record_lba)?;
         let object_map_mutation = mutate_many(
@@ -2167,9 +2496,6 @@ impl<D: BlockDevice> Volume<D> {
                 value: &object_value,
             }],
         )?;
-        let mut metadata_writes =
-            vec![(new_record_lba, new_record.encode(block_size, generation)?)];
-        metadata_writes.extend(extent_writes);
         metadata_writes.extend(object_map_mutation.writes);
         self.commit_transaction(
             generation,
@@ -3761,6 +4087,94 @@ fn logical_holes(extents: &[Extent], start: u64, end: u64) -> Result<Vec<(u64, u
         holes.push((cursor, end));
     }
     Ok(holes)
+}
+
+fn mark_logical_range_shared(
+    extents: &[Extent],
+    start: u64,
+    end: u64,
+) -> Result<Vec<Extent>, CoreError> {
+    if start >= end {
+        return Ok(extents.to_vec());
+    }
+    let mut marked = Vec::with_capacity(extents.len() + 2);
+    for extent in extents {
+        let extent_end = extent.logical_end()?;
+        if extent_end <= start || extent.logical_start >= end {
+            marked.push(*extent);
+            continue;
+        }
+        let overlap_start = extent.logical_start.max(start);
+        let overlap_end = extent_end.min(end);
+        if extent.logical_start < overlap_start {
+            marked.push(Extent {
+                block_count: overlap_start - extent.logical_start,
+                ..*extent
+            });
+        }
+        marked.push(Extent {
+            logical_start: overlap_start,
+            physical_start: extent
+                .physical_start
+                .checked_add(overlap_start - extent.logical_start)
+                .ok_or_else(|| CoreError::Corrupt("extent physical start overflows".into()))?,
+            block_count: overlap_end - overlap_start,
+            flags: extent.flags | EXTENT_SHARED,
+        });
+        if overlap_end < extent_end {
+            marked.push(Extent {
+                logical_start: overlap_end,
+                physical_start: extent
+                    .physical_start
+                    .checked_add(overlap_end - extent.logical_start)
+                    .ok_or_else(|| CoreError::Corrupt("extent physical start overflows".into()))?,
+                block_count: extent_end - overlap_end,
+                flags: extent.flags,
+            });
+        }
+    }
+    coalesce_extents(marked)
+}
+
+/// Copies the mapped portions of a source logical range into a destination
+/// logical range without allocating holes.  All returned mappings carry the
+/// conservative shared flag; their physical positions and source flags are
+/// otherwise unchanged.
+fn remap_extent_range(
+    extents: &[Extent],
+    source_start: u64,
+    source_end: u64,
+    destination_start: u64,
+) -> Result<Vec<Extent>, CoreError> {
+    if source_start >= source_end {
+        return Ok(Vec::new());
+    }
+    let mut remapped = Vec::new();
+    for extent in extents {
+        let extent_end = extent.logical_end()?;
+        if extent_end <= source_start {
+            continue;
+        }
+        if extent.logical_start >= source_end {
+            break;
+        }
+        let overlap_start = extent.logical_start.max(source_start);
+        let overlap_end = extent_end.min(source_end);
+        remapped.push(Extent {
+            logical_start: destination_start
+                .checked_add(overlap_start - source_start)
+                .ok_or(CoreError::PrototypeLimit(
+                    "clone destination block range overflows",
+                ))?,
+            physical_start: extent
+                .physical_start
+                .checked_add(overlap_start - extent.logical_start)
+                .ok_or_else(|| CoreError::Corrupt("extent physical start overflows".into()))?,
+            block_count: overlap_end - overlap_start,
+            flags: extent.flags | EXTENT_SHARED,
+        });
+    }
+    coalesce_extents(remapped)
 }
 
 fn coalesce_extents(mut extents: Vec<Extent>) -> Result<Vec<Extent>, CoreError> {

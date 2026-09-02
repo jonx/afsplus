@@ -437,3 +437,219 @@ fn cloning_a_sparse_file_shares_its_unwritten_runs() {
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "checker findings: {:?}", report.errors);
 }
+
+#[test]
+fn clone_range_replaces_only_the_requested_aligned_blocks() {
+    let dev = formatted(true);
+    let mut vol = mount(dev).unwrap();
+    let source_bytes: Vec<u8> = (0..5 * BS).map(|index| (index / BS) as u8 + 1).collect();
+    let destination_bytes = vec![0x80u8; 6 * BS];
+    let source = vol
+        .create_file_in_root("source", &source_bytes, ts(2))
+        .unwrap();
+    let source_start = vol.stat(source).unwrap().unwrap().data_root;
+    let destination = vol
+        .create_file_in_root("destination", &destination_bytes, ts(3))
+        .unwrap();
+
+    vol.clone_range(
+        source,
+        BS as u64,
+        destination,
+        (2 * BS) as u64,
+        (3 * BS) as u64,
+        ts(4),
+    )
+    .unwrap();
+
+    let mut expected = destination_bytes;
+    expected[2 * BS..5 * BS].copy_from_slice(&source_bytes[BS..4 * BS]);
+    assert_eq!(vol.read_file(destination).unwrap(), expected);
+    assert_eq!(vol.read_file(source).unwrap(), source_bytes);
+    assert_eq!(vol.last_commit_stats().unwrap().data_blocks_written, 0);
+    let records = shared_records(&mut vol);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].physical_start, source_start + 1);
+    assert_eq!(records[0].block_count, 3);
+    assert_eq!(records[0].reference_count, 2);
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+}
+
+#[test]
+fn overlapping_clone_ranges_form_canonical_two_three_two_counts() {
+    let dev = formatted(true);
+    let mut vol = mount(dev).unwrap();
+    let content: Vec<u8> = (0..4 * BS).map(|index| (index / BS) as u8 + 1).collect();
+    let source = vol.create_file_in_root("source", &content, ts(2)).unwrap();
+    let first = vol.create_file_in_root("first", b"", ts(3)).unwrap();
+    let second = vol.create_file_in_root("second", b"", ts(4)).unwrap();
+
+    vol.clone_range(source, 0, first, 0, (3 * BS) as u64, ts(5))
+        .unwrap();
+    vol.clone_range(source, BS as u64, second, 0, (3 * BS) as u64, ts(6))
+        .unwrap();
+
+    assert_eq!(vol.read_file(first).unwrap(), content[..3 * BS]);
+    assert_eq!(vol.read_file(second).unwrap(), content[BS..4 * BS]);
+    let records = shared_records(&mut vol);
+    assert_eq!(records.len(), 3, "{records:?}");
+    assert_eq!(records[0].reference_count, 2);
+    assert_eq!(records[0].block_count, 1);
+    assert_eq!(records[1].reference_count, 3);
+    assert_eq!(records[1].block_count, 2);
+    assert_eq!(records[2].reference_count, 2);
+    assert_eq!(records[2].block_count, 1);
+    assert_eq!(
+        records[0].physical_end().unwrap(),
+        records[1].physical_start
+    );
+    assert_eq!(
+        records[1].physical_end().unwrap(),
+        records[2].physical_start
+    );
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+}
+
+#[test]
+fn clone_range_copies_partial_boundaries_and_shares_the_interior() {
+    let dev = formatted(true);
+    let mut vol = mount(dev).unwrap();
+    let source_bytes: Vec<u8> = (0..3 * BS).map(|index| (index % 251) as u8).collect();
+    let destination_bytes = vec![0x5au8; 3 * BS];
+    let source = vol
+        .create_file_in_root("source", &source_bytes, ts(2))
+        .unwrap();
+    let destination = vol
+        .create_file_in_root("destination", &destination_bytes, ts(3))
+        .unwrap();
+    let offset = 100usize;
+    let length = 2 * BS + 200;
+
+    vol.clone_range(
+        source,
+        offset as u64,
+        destination,
+        offset as u64,
+        length as u64,
+        ts(4),
+    )
+    .unwrap();
+
+    let mut expected = destination_bytes;
+    expected[offset..offset + length].copy_from_slice(&source_bytes[offset..offset + length]);
+    assert_eq!(vol.read_file(destination).unwrap(), expected);
+    assert_eq!(vol.read_file(source).unwrap(), source_bytes);
+    assert_eq!(
+        vol.last_commit_stats().unwrap().data_blocks_written,
+        2,
+        "only the two partial boundary blocks are copied"
+    );
+    let records = shared_records(&mut vol);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].block_count, 1);
+    assert_eq!(records[0].reference_count, 2);
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+}
+
+#[test]
+fn clone_range_keeps_complete_source_holes_sparse() {
+    let dev = formatted(true);
+    let mut vol = mount(dev).unwrap();
+    let source = vol.create_file_in_root("source", b"", ts(2)).unwrap();
+    let payload = vec![0x73u8; BS];
+    vol.write_file_at(source, (2 * BS) as u64, &payload, ts(3))
+        .unwrap();
+    let destination = vol.create_file_in_root("destination", b"", ts(4)).unwrap();
+
+    vol.clone_range(source, 0, destination, 0, (3 * BS) as u64, ts(5))
+        .unwrap();
+
+    let mut expected = vec![0u8; 3 * BS];
+    expected[2 * BS..].copy_from_slice(&payload);
+    assert_eq!(vol.read_file(destination).unwrap(), expected);
+    let destination_record = vol.stat(destination).unwrap().unwrap();
+    assert_eq!(destination_record.data_blocks, 1, "holes must not allocate");
+    let records = shared_records(&mut vol);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].block_count, 1);
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+}
+
+#[test]
+fn clone_range_replaces_a_shared_destination_without_reclaiming_its_peer() {
+    let dev = formatted(true);
+    let mut vol = mount(dev).unwrap();
+    let source_bytes = vec![0x19u8; 2 * BS];
+    let old_bytes = vec![0x2au8; 2 * BS];
+    let source = vol
+        .create_file_in_root("source", &source_bytes, ts(2))
+        .unwrap();
+    let source_peer = vol
+        .clone_file(source, OBJECT_ROOT, "source-peer", ts(3))
+        .unwrap();
+    let destination = vol
+        .create_file_in_root("destination", &old_bytes, ts(4))
+        .unwrap();
+    let old_peer = vol
+        .clone_file(destination, OBJECT_ROOT, "old-peer", ts(5))
+        .unwrap();
+
+    vol.clone_range(source, 0, destination, 0, (2 * BS) as u64, ts(6))
+        .unwrap();
+
+    assert_eq!(vol.read_file(source).unwrap(), source_bytes);
+    assert_eq!(vol.read_file(source_peer).unwrap(), source_bytes);
+    assert_eq!(vol.read_file(destination).unwrap(), source_bytes);
+    assert_eq!(vol.read_file(old_peer).unwrap(), old_bytes);
+    let stats = vol.last_commit_stats().unwrap();
+    assert_eq!(stats.shared_refs.blocks_reference_incremented, 2);
+    assert_eq!(stats.shared_refs.blocks_privatized, 2);
+    let records = shared_records(&mut vol);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].block_count, 2);
+    assert_eq!(records[0].reference_count, 3);
+
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+}
+
+#[test]
+fn unrepresentable_or_same_file_clone_range_is_rejected_without_a_commit() {
+    let dev = formatted(true);
+    let mut vol = mount(dev).unwrap();
+    let source = vol
+        .create_file_in_root("source", &vec![0x31u8; 2 * BS], ts(2))
+        .unwrap();
+    let destination = vol
+        .create_file_in_root("destination", &vec![0x42u8; 2 * BS], ts(3))
+        .unwrap();
+    let generation = vol.generation();
+    let free_blocks = vol.free_blocks();
+    let before = vol.read_file(destination).unwrap();
+
+    assert!(matches!(
+        vol.clone_range(source, 1, destination, 0, BS as u64, ts(4)),
+        Err(CoreError::PrototypeLimit(_))
+    ));
+    assert!(matches!(
+        vol.clone_range(source, 0, source, BS as u64, BS as u64, ts(4)),
+        Err(CoreError::PrototypeLimit(_))
+    ));
+    assert_eq!(vol.generation(), generation);
+    assert_eq!(vol.free_blocks(), free_blocks);
+    assert_eq!(vol.read_file(destination).unwrap(), before);
+    assert_eq!(vol.checkpoint().shared_extent_root_block, 0);
+}

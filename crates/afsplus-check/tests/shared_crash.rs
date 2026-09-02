@@ -245,6 +245,64 @@ fn first_clone_is_crash_atomic() {
 }
 
 #[test]
+fn clone_range_with_multiple_reference_boundaries_is_crash_atomic() {
+    let mut setup = mount(formatted("CrashCloneRange", 0)).unwrap();
+    let source_bytes: Vec<u8> = (0..4 * BS).map(|index| (index / BS) as u8 + 1).collect();
+    let old_destination = vec![0x92u8; 4 * BS];
+    let source = setup
+        .create_file_in_root("source", &source_bytes, ts(2))
+        .unwrap();
+    let peer = setup.create_file_in_root("peer", b"", ts(3)).unwrap();
+    setup
+        .clone_range(source, BS as u64, peer, 0, (2 * BS) as u64, ts(4))
+        .unwrap();
+    let destination = setup
+        .create_file_in_root("destination", &old_destination, ts(5))
+        .unwrap();
+    let pre_records = shared_records(&mut setup);
+    assert_eq!(pre_records.len(), 1);
+    assert_eq!(pre_records[0].block_count, 2);
+    assert_eq!(pre_records[0].reference_count, 2);
+    let base = setup.into_device();
+    let pre_generation = mount(base.clone()).unwrap().generation();
+    let operations = record_transaction(&base, |volume| {
+        volume
+            .clone_range(source, 0, destination, 0, (4 * BS) as u64, ts(6))
+            .unwrap();
+    });
+
+    run_checkpoint_matrix(
+        &base,
+        &operations,
+        pre_generation,
+        |context, post, volume| {
+            assert_eq!(volume.read_file(source).unwrap(), source_bytes, "{context}");
+            assert_eq!(
+                volume.read_file(destination).unwrap().as_slice(),
+                if post {
+                    source_bytes.as_slice()
+                } else {
+                    old_destination.as_slice()
+                },
+                "{context}"
+            );
+            let records = shared_records(volume);
+            if post {
+                assert_eq!(records.len(), 3, "{context}: {records:?}");
+                assert_eq!(records[0].reference_count, 2, "{context}");
+                assert_eq!(records[0].block_count, 1, "{context}");
+                assert_eq!(records[1].reference_count, 3, "{context}");
+                assert_eq!(records[1].block_count, 2, "{context}");
+                assert_eq!(records[2].reference_count, 2, "{context}");
+                assert_eq!(records[2].block_count, 1, "{context}");
+            } else {
+                assert_eq!(records, pre_records, "{context}");
+            }
+        },
+    );
+}
+
+#[test]
 fn shared_write_split_is_crash_atomic() {
     let mut setup = mount(formatted("CrashSharedWrite", 0)).unwrap();
     let original = vec![0x22u8; 4 * BS];
