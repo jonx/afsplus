@@ -3,10 +3,14 @@
 //! and the blocker-2 bake-off gate: beat 3 barriers / 10 writes per durable
 //! ref update.
 
-use afsplus_block::{crash_states, MemoryBackend, RecordingBackend, TraceBackend};
+use afsplus_block::{
+    crash_states, for_each_crash_state, MemoryBackend, RecordedOp, RecordingBackend, TraceBackend,
+};
 use afsplus_check::check_device;
 use afsplus_core::volume::BatchOp;
-use afsplus_core::{mkfs, mount, CoreError, MkfsParams, NamePolicy};
+use afsplus_core::{
+    mkfs, mount, mount_with_options, CoreError, MkfsParams, MountMode, MountOptions, NamePolicy,
+};
 use afsplus_format::{Timespec, OBJECT_ROOT};
 
 const BS: usize = 4096;
@@ -386,4 +390,325 @@ fn gate_logged_ref_updates_beat_the_checkpoint_floor() {
         vol.read_file(head).unwrap(),
         format!("ref {}\n", updates - 1).as_bytes()
     );
+}
+
+#[test]
+fn existing_file_write_and_truncate_replay_in_order() {
+    let mut original = vec![0x11u8; 3 * BS];
+    let base = {
+        let mut vol = mount(formatted(8192, 8)).unwrap();
+        vol.create_file_in_root("database", &original, ts(1))
+            .unwrap();
+        vol.into_device()
+    };
+
+    let mut vol = mount(base).unwrap();
+    let object = vol.lookup_root("database").unwrap().unwrap();
+    let patch = vec![0xA5u8; BS + 37];
+    let offset = BS as u64 - 19;
+    vol.window_write_file_at(object, offset, &patch, ts(2))
+        .unwrap();
+    original[offset as usize..offset as usize + patch.len()].copy_from_slice(&patch);
+    vol.window_fsync().unwrap();
+
+    let truncated = BS as u64 + 113;
+    vol.window_truncate_file(object, truncated, ts(3)).unwrap();
+    original.truncate(truncated as usize);
+    vol.window_fsync().unwrap();
+
+    // Drop the live window: mount must rebuild the final layout solely from
+    // the two durable records and their prewritten COW data.
+    let mut dev = vol.into_device();
+    let before = check_device(&mut dev);
+    assert!(before.is_clean(), "{:?}", before.errors);
+    assert_eq!(before.volume.unwrap().log_records_pending, 2);
+    let mut vol = mount(dev).unwrap();
+    assert_eq!(vol.read_file(object).unwrap(), original);
+
+    // The partial truncate tail was zeroed before logging. Growing the file
+    // later must not reveal bytes from the old second block.
+    vol.truncate_file(object, 2 * BS as u64, ts(4)).unwrap();
+    let grown = vol.read_file(object).unwrap();
+    assert!(grown[truncated as usize..].iter().all(|byte| *byte == 0));
+    let mut dev = vol.into_device();
+    let after = check_device(&mut dev);
+    assert!(after.is_clean(), "{:?}", after.errors);
+}
+
+#[test]
+fn every_crash_state_of_an_existing_file_write_is_old_or_new() {
+    let old = vec![0x31u8; 2 * BS];
+    let patch = vec![0x72u8; BS + 23];
+    let offset = 101usize;
+    let mut new = old.clone();
+    new[offset..offset + patch.len()].copy_from_slice(&patch);
+    let base = {
+        let mut vol = mount(formatted(8192, 8)).unwrap();
+        vol.create_file_in_root("vm", &old, ts(1)).unwrap();
+        vol.into_device()
+    };
+    let pre_generation = mount(base.clone()).unwrap().generation();
+
+    let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
+    let object = vol.lookup_root("vm").unwrap().unwrap();
+    vol.window_write_file_at(object, offset as u64, &patch, ts(2))
+        .unwrap();
+    vol.window_fsync().unwrap();
+    let (_, log) = vol.into_device().into_parts();
+
+    let mut saw_old = false;
+    let mut saw_new = false;
+    for crash_point in 0..=log.len() {
+        for state in crash_states(&base, &log, crash_point) {
+            let context = state.description.clone();
+            let mut image = state.image;
+            let report = check_device(&mut image);
+            assert!(report.is_clean(), "{context}: {:?}", report.errors);
+            let mut recovered = mount(image).unwrap_or_else(|error| panic!("{context}: {error}"));
+            let content = recovered.read_file(object).unwrap();
+            match recovered.generation() {
+                generation if generation == pre_generation => {
+                    saw_old = true;
+                    assert_eq!(content, old, "{context}");
+                }
+                generation if generation == pre_generation + 1 => {
+                    saw_new = true;
+                    assert_eq!(content, new, "{context}");
+                }
+                generation => panic!("{context}: disallowed generation {generation}"),
+            }
+            let mut image = recovered.into_device();
+            assert!(check_device(&mut image).is_clean(), "{context}");
+        }
+    }
+    assert!(saw_old && saw_new);
+}
+
+#[test]
+fn existing_file_write_then_rename_replays_as_one_group() {
+    let base = {
+        let mut vol = mount(formatted(8192, 8)).unwrap();
+        vol.create_file_in_root("draft", b"old bytes", ts(1))
+            .unwrap();
+        vol.into_device()
+    };
+    let mut vol = mount(base).unwrap();
+    let object = vol.lookup_root("draft").unwrap().unwrap();
+    vol.window_write_file_at(object, 0, b"published", ts(2))
+        .unwrap();
+    vol.window_op(&publish("draft", "final"), ts(3)).unwrap();
+    vol.window_fsync().unwrap();
+
+    let mut vol = mount(vol.into_device()).unwrap();
+    assert_eq!(vol.lookup_root("draft").unwrap(), None);
+    assert_eq!(vol.lookup_root("final").unwrap(), Some(object));
+    assert_eq!(vol.read_file(object).unwrap(), b"published");
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+}
+
+#[test]
+fn write_and_truncate_replay_is_restartable_after_every_cut() {
+    let old = vec![0x18u8; 3 * BS];
+    let patch = vec![0xC7u8; BS + 41];
+    let offset = 73usize;
+    let final_size = BS + 211;
+    let mut expected = old.clone();
+    expected[offset..offset + patch.len()].copy_from_slice(&patch);
+    expected.truncate(final_size);
+    let base = {
+        let mut vol = mount(formatted(8192, 8)).unwrap();
+        vol.create_file_in_root("image", &old, ts(1)).unwrap();
+        vol.into_device()
+    };
+    let pre_generation = mount(base.clone()).unwrap().generation();
+
+    let mut logger = mount(base).unwrap();
+    let object = logger.lookup_root("image").unwrap().unwrap();
+    logger
+        .window_write_file_at(object, offset as u64, &patch, ts(2))
+        .unwrap();
+    logger
+        .window_truncate_file(object, final_size as u64, ts(3))
+        .unwrap();
+    logger.window_fsync().unwrap();
+    let logged = logger.into_device();
+
+    // Record the automatic recovery transaction, then crash that recovery at
+    // every device write and barrier. A second mount must either retry the
+    // still-live record or observe its published checkpoint.
+    let replaying = mount(RecordingBackend::new(logged.clone())).unwrap();
+    let (_, replay) = replaying.into_device().into_parts();
+    let mut saw_pre = false;
+    let mut saw_post = false;
+    for crash_point in 0..=replay.len() {
+        for_each_crash_state(&logged, &replay, crash_point, |state| {
+            let context = state.description;
+            let mut raw_image = state.image.clone();
+            let report = check_device(&mut raw_image);
+            assert!(report.is_clean(), "{context}: {:?}", report.errors);
+            let raw = mount_with_options(
+                raw_image,
+                MountOptions {
+                    mode: MountMode::NoChanges,
+                },
+            )
+            .unwrap_or_else(|error| panic!("{context}: {error}"));
+            match raw.generation() {
+                generation if generation == pre_generation => {
+                    saw_pre = true;
+                    assert!(raw.pending_intent_records() > 0, "{context}");
+                }
+                generation if generation == pre_generation + 1 => {
+                    saw_post = true;
+                    assert_eq!(raw.pending_intent_records(), 0, "{context}");
+                }
+                generation => panic!("{context}: disallowed generation {generation}"),
+            }
+
+            let mut recovered =
+                mount(state.image).unwrap_or_else(|error| panic!("{context}: {error}"));
+            assert_eq!(recovered.generation(), pre_generation + 1, "{context}");
+            assert_eq!(recovered.read_file(object).unwrap(), expected, "{context}");
+            let mut image = recovered.into_device();
+            assert!(check_device(&mut image).is_clean(), "{context}");
+        });
+    }
+    assert!(saw_pre && saw_post);
+}
+
+#[test]
+fn existing_file_data_is_barriered_before_its_log_record() {
+    let base = {
+        let mut vol = mount(formatted(8192, 8)).unwrap();
+        vol.create_file_in_root("ordered", &[0x22; BS], ts(1))
+            .unwrap();
+        vol.into_device()
+    };
+    let mut vol = mount(RecordingBackend::new(base)).unwrap();
+    let object = vol.lookup_root("ordered").unwrap().unwrap();
+    let log_lba =
+        afsplus_core::intent_log::log_slot_lbas(&vol.ident().geometry(), vol.ident().log_slots)
+            .unwrap()[0];
+    vol.window_write_file_at(object, 7, b"replacement", ts(2))
+        .unwrap();
+    vol.window_fsync().unwrap();
+    let (_, operations) = vol.into_device().into_parts();
+    let record_index = operations
+        .iter()
+        .position(|operation| matches!(operation, RecordedOp::Write { lba, .. } if *lba == log_lba))
+        .expect("intent record write");
+    assert!(record_index >= 2);
+    assert!(matches!(operations[record_index - 1], RecordedOp::Flush));
+    assert!(matches!(operations[record_index + 1], RecordedOp::Flush));
+    assert!(operations[..record_index - 1]
+        .iter()
+        .any(|operation| matches!(operation, RecordedOp::Write { .. })));
+}
+
+#[test]
+fn version_two_log_feature_rejects_data_updates_but_keeps_namespace_replay() {
+    let mut dev = formatted(8192, 8);
+    let mut ident = afsplus_format::ident::Identification::decode(&dev.peek(0)).unwrap();
+    ident.features.incompat &= !afsplus_format::ident::INCOMPAT_INTENT_LOG_DATA_UPDATES;
+    dev.apply_raw(0, &ident.encode(BS).unwrap());
+
+    let mut vol = mount(dev).unwrap();
+    let object = vol
+        .create_file_in_root("old-format", b"old", ts(1))
+        .unwrap();
+    assert!(matches!(
+        vol.window_write_file_at(object, 0, b"new", ts(2)),
+        Err(CoreError::FeatureDisabled(_))
+    ));
+    vol.window_op(&create("namespace", b"still works"), ts(3))
+        .unwrap();
+    vol.window_fsync().unwrap();
+    let mut vol = mount(vol.into_device()).unwrap();
+    let created = vol.lookup_root("namespace").unwrap().unwrap();
+    assert_eq!(vol.read_file(created).unwrap(), b"still works");
+}
+
+#[test]
+fn version_three_record_without_its_feature_fails_closed() {
+    let mut dev = {
+        let mut vol = mount(formatted(8192, 8)).unwrap();
+        let object = vol.create_file_in_root("guarded", b"old", ts(1)).unwrap();
+        vol.window_write_file_at(object, 0, b"new", ts(2)).unwrap();
+        vol.window_fsync().unwrap();
+        vol.into_device()
+    };
+    let mut ident = afsplus_format::ident::Identification::decode(&dev.peek(0)).unwrap();
+    ident.features.incompat &= !afsplus_format::ident::INCOMPAT_INTENT_LOG_DATA_UPDATES;
+    dev.apply_raw(0, &ident.encode(BS).unwrap());
+
+    let report = check_device(&mut dev);
+    assert!(!report.is_clean());
+    assert!(report
+        .errors
+        .iter()
+        .any(|error| error.contains("without their INCOMPAT feature")));
+    assert!(matches!(mount(dev), Err(CoreError::Corrupt(_))));
+}
+
+#[test]
+fn data_free_truncates_replay_sparse_growth_and_aligned_shrink() {
+    let base = {
+        let mut vol = mount(formatted(8192, 8)).unwrap();
+        vol.create_file_in_root("grow", b"seed", ts(1)).unwrap();
+        vol.create_file_in_root("shrink", &[0x99; 2 * BS], ts(1))
+            .unwrap();
+        vol.into_device()
+    };
+    let mut vol = mount(base).unwrap();
+    let grow = vol.lookup_root("grow").unwrap().unwrap();
+    let shrink = vol.lookup_root("shrink").unwrap().unwrap();
+    vol.window_truncate_file(grow, 3 * BS as u64 + 17, ts(2))
+        .unwrap();
+    vol.window_truncate_file(shrink, BS as u64, ts(2)).unwrap();
+    vol.window_fsync().unwrap();
+
+    let mut vol = mount(vol.into_device()).unwrap();
+    let grown = vol.read_file(grow).unwrap();
+    assert_eq!(&grown[..4], b"seed");
+    assert!(grown[4..].iter().all(|byte| *byte == 0));
+    assert_eq!(vol.read_file(shrink).unwrap(), vec![0x99; BS]);
+    let mut dev = vol.into_device();
+    assert!(check_device(&mut dev).is_clean());
+}
+
+#[test]
+fn successive_existing_writes_recover_only_monotone_prefixes() {
+    let base = {
+        let mut vol = mount(formatted(8192, 8)).unwrap();
+        vol.create_file_in_root("page", &[0u8; BS], ts(0)).unwrap();
+        vol.into_device()
+    };
+    let mut logger = mount(RecordingBackend::new(base.clone())).unwrap();
+    let object = logger.lookup_root("page").unwrap().unwrap();
+    for value in 1..=3u8 {
+        logger
+            .window_write_file_at(object, 0, &vec![value; BS], ts(i64::from(value)))
+            .unwrap();
+        logger.window_fsync().unwrap();
+    }
+    let (_, operations) = logger.into_device().into_parts();
+
+    let mut seen = std::collections::BTreeSet::new();
+    for crash_point in 0..=operations.len() {
+        for state in crash_states(&base, &operations, crash_point) {
+            let context = state.description.clone();
+            let mut image = state.image;
+            let report = check_device(&mut image);
+            assert!(report.is_clean(), "{context}: {:?}", report.errors);
+            let mut recovered = mount(image).unwrap_or_else(|error| panic!("{context}: {error}"));
+            let bytes = recovered.read_file(object).unwrap();
+            let value = bytes[0];
+            assert!([0, 1, 2, 3].contains(&value), "{context}: {value}");
+            assert!(bytes.iter().all(|byte| *byte == value), "{context}");
+            seen.insert(value);
+        }
+    }
+    assert_eq!(seen, std::collections::BTreeSet::from([0, 1, 2, 3]));
 }

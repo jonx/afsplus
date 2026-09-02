@@ -86,6 +86,13 @@ per-file contracts:
   can validate and replay
 - existing-file write/truncate records reference only replacement data made
   durable before the record and reject torn or missing content
+- logged replacement extents are FREE in the base checkpoint, pairwise
+  disjoint across the valid prefix and contained by the resulting logical file
+  size; partial shrinking truncate records carry either the one required
+  zero-tailed block or no data when the retained tail is sparse
+- any active record version that can update existing file data requires the
+  dedicated `org.aros.afsplus:intent-log-data-updates` incompatible feature;
+  encountering such a record without the feature fails closed
 
 ## Catalog
 

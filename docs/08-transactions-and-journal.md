@@ -3,8 +3,11 @@
 > **ADRs:** [ADR-009](../adr/ADR-009-journal.md), [ADR-020](../adr/ADR-020-checkpoint-commit.md),
 > [ADR-026](../adr/ADR-026-bounded-atomic-batches.md), [ADR-036](../adr/ADR-036-reclaim-queue.md),
 > [ADR-037](../adr/ADR-037-intent-log.md), [ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md),
-> [ADR-063](../adr/ADR-063-intent-log-epoch1.md) · **Spec:** [invariants](../spec/invariants.md) ·
-> **Tests:** [crash-testing](../testing/crash-testing.md), [data-policy qualification](../testing/data-policy-qualification.md) · **Milestones:** M04
+> [ADR-063](../adr/ADR-063-intent-log-epoch1.md),
+> [ADR-064](../adr/ADR-064-intent-log-data-update-compatibility.md) · **Spec:** [invariants](../spec/invariants.md) ·
+> **Tests:** [crash-testing](../testing/crash-testing.md),
+> [intent-log qualification](../testing/intent-log-write-truncate-qualification.md),
+> [data-policy qualification](../testing/data-policy-qualification.md) · **Milestones:** M04
 
 <!-- toc -->
 
@@ -180,10 +183,12 @@ the epoch-1 durability architecture. Group commit amortizes bursts under one
 checkpoint. The intent log records fsynced prefixes of the same open batch and
 recovery materializes them through the same checkpoint engine.
 
-Both mechanisms are implemented and measured for the namespace window
+Both mechanisms are implemented and measured
 ([`implementation/fsync-intent-log-baseline.md`](../implementation/fsync-intent-log-baseline.md)).
-The log makes a forced ref update cost about one sequential record write plus
-one barrier between checkpoints, with per-fsync-group all-or-nothing recovery.
+The log makes a forced namespace update cost about one sequential record write
+plus one barrier between checkpoints. An existing-file write uses fresh COW
+data, one data barrier, then the record and its completion barrier. Both paths
+provide per-fsync-group all-or-nothing recovery.
 
 Qualification workloads include:
 
@@ -195,11 +200,24 @@ repeat
 
 plus rename/replace-heavy Git/package workloads.
 
-Record wire version 2 covers create/delete/rename and created-file content. It
-does not cover write or truncate of an existing file. Such fsyncs use a full
-checkpoint until the log encoding, replay, checker and crash matrices support
-them. Consequently the intent-log mechanism is accepted while its record wire,
-mandatory size and universal cheap-file-fsync capability remain unfrozen.
+Record wire version 2 covers create/delete/rename and created-file content.
+Experimental version 3 adds writes and truncates of existing files. Every
+complete replacement block is checksummed; replay claims the exact logged
+physical extents and applies the final layout through the same COW transaction
+engine. Replaying a write against shared extents updates the volume-wide
+reference tree rather than overwriting shared storage.
+
+Version 3 requires the separate incompatible feature identity
+`org.aros.afsplus:intent-log-data-updates`. An older namespace-only
+implementation therefore rejects the volume before it can mistake an unknown
+record for a torn tail. Namespace-only groups remain encoded as version 2.
+The codec, old/new crash cuts, replay-during-replay cuts, monotone prefixes,
+sparse/aligned truncates and shared-range split are qualified in the
+[existing-file log gate](../testing/intent-log-write-truncate-qualification.md).
+
+The record wire, mandatory log size, portable-C parity and public VFS fsync
+wiring remain unfrozen M14 work; the Rust core result is not yet a universal
+cross-implementation cheap-file-`fsync` claim.
 
 AFS+ does not build a second redo-journal transaction engine: the log is a
 bounded durability layer over checkpoint COW.

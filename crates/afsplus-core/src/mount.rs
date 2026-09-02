@@ -14,7 +14,9 @@
 
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
-use afsplus_format::ident::{Identification, INCOMPAT_INTENT_LOG, RO_COMPAT_SHARED_EXTENTS};
+use afsplus_format::ident::{
+    Identification, INCOMPAT_INTENT_LOG, INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_SHARED_EXTENTS,
+};
 use afsplus_format::{FormatError, DEFAULT_BLOCK_SIZE};
 
 use crate::verify::load_mount_state;
@@ -45,7 +47,7 @@ pub struct MountOptions {
     pub mode: MountMode,
 }
 
-pub const SUPPORTED_INCOMPAT_FEATURES: u64 = INCOMPAT_INTENT_LOG;
+pub const SUPPORTED_INCOMPAT_FEATURES: u64 = INCOMPAT_INTENT_LOG | INCOMPAT_INTENT_LOG_DATA_UPDATES;
 pub const SUPPORTED_RO_COMPAT_FEATURES: u64 = RO_COMPAT_SHARED_EXTENTS;
 
 fn negotiate_features(ident: &Identification, mode: MountMode) -> Result<(), CoreError> {

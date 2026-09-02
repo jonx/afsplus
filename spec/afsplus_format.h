@@ -29,6 +29,15 @@ enum afsp_feature_class {
     AFSP_FEATURE_INCOMPAT = 3
 };
 
+/*
+ * INCOMPAT feature bits. Version-3 intent records can name durable COW data
+ * for writes/truncates of existing files; older namespace-only log readers
+ * must reject such volumes rather than mistake an unknown record for a torn
+ * tail (ADR-064).
+ */
+#define AFSP_INCOMPAT_INTENT_LOG              (UINT64_C(1) << 0)
+#define AFSP_INCOMPAT_INTENT_LOG_DATA_UPDATES (UINT64_C(1) << 1)
+
 enum afsp_object_type {
     AFSP_OBJECT_FILE = 1,
     AFSP_OBJECT_DIRECTORY = 2,

@@ -714,3 +714,41 @@ fn shared_storage_is_reused_only_after_the_last_owner_disappears() {
         },
     );
 }
+
+#[test]
+fn logged_write_replay_splits_shared_data_and_survives_replay_crashes() {
+    let old = vec![0x41u8; 3 * BS];
+    let patch = vec![0xD2u8; BS];
+    let mut setup = mount(formatted("LoggedSharedWrite", 8)).unwrap();
+    let source = setup.create_file_in_root("source", &old, ts(2)).unwrap();
+    let clone = setup
+        .clone_file(source, OBJECT_ROOT, "clone", ts(3))
+        .unwrap();
+    let base = setup.into_device();
+    let pre_generation = mount(base.clone()).unwrap().generation();
+
+    let mut logger = mount(base).unwrap();
+    logger
+        .window_write_file_at(source, BS as u64, &patch, ts(4))
+        .unwrap();
+    logger.window_fsync().unwrap();
+    let logged = logger.into_device();
+    let replay = record_replay(&logged);
+
+    let mut expected_source = old.clone();
+    expected_source[BS..2 * BS].copy_from_slice(&patch);
+    run_replay_matrix(&logged, &replay, pre_generation, |context, volume| {
+        assert_eq!(
+            volume.read_file(source).unwrap(),
+            expected_source,
+            "{context}"
+        );
+        assert_eq!(volume.read_file(clone).unwrap(), old, "{context}");
+        let records = shared_records(volume);
+        assert_eq!(records.len(), 2, "{context}: {records:?}");
+        assert!(
+            records.iter().all(|record| record.reference_count == 2),
+            "{context}"
+        );
+    });
+}

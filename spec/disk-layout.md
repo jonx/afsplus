@@ -41,7 +41,7 @@ Rules:
 4. placement hints are not semantic invariants
 5. redundant recovery/checkpoint descriptor locations are deterministic from immutable format parameters or discoverable through an independently validated format descriptor
 6. a small durability intent log uses a reserved/discoverable auxiliary area;
-   no record format or mandatory size is frozen until existing-file
-   write/truncate replay and cross-implementation tests pass
+   no record format or mandatory size is frozen until cross-implementation,
+   real-device and independent format-review gates pass
 7. allocation regions are required for bounded resource use, but their authoritative free-space encoding remains an epoch-1 prototype decision (reserved allocator, bitmap+delta, spacemap-like log, or proven hybrid)
 8. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0

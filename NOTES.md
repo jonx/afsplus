@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Intent-log writes and truncates survive nested recovery crashes](#2026-09-03--intent-log-writes-and-truncates-survive-nested-recovery-crashes)
 - [2026-09-02 — Q1 and Q2 architecture blockers closed](#2026-09-02--q1-and-q2-architecture-blockers-closed)
 - [2026-09-02 — Shared extents and reflinks qualified](#2026-09-02--shared-extents-and-reflinks-qualified)
 - [2026-08-31 — Team board adopted](#2026-08-31--team-board-adopted)
@@ -20,6 +21,32 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Intent-log writes and truncates survive nested recovery crashes
+
+The accepted ADR-063 architecture now covers committed-file data changes in
+the Rust core. Experimental record version 3 names freshly allocated COW
+replacement blocks for writes and, when needed, one zero-tailed block for a
+partial shrinking truncate. Data is flushed before the record; replay checks
+the complete-block CRC, claims those exact blocks while they are FREE in the
+base checkpoint and publishes the final layout through the ordinary COW
+transaction engine. Multiple fsync groups on one file collapse into one final
+metadata mutation without weakening their monotone-prefix recovery contract.
+
+The new matrix covers old-or-new cuts around the live write, every write and
+flush of recovery itself followed by another remount, write-plus-rename,
+sparse growth, aligned and partial shrink, successive writes, and a reflink
+split whose other owner retains the old bytes. Release workloads measured
+2.200 writes/2.032 flushes per 200-byte logged append and 2.134/2.032 per 4 KiB
+DB hot-set rewrite, versus 9.037/3.000 for checkpointed append. These are
+memory-backend structural counts, not Apple or Amiga hardware results.
+
+Review exposed a compatibility trap: an older version-2 scanner treats an
+unknown record version as a torn tail. ADR-064 therefore assigns
+`org.aros.afsplus:intent-log-data-updates` as a dependent INCOMPAT identity so
+such readers reject the volume before silently losing an acknowledged fsync.
+The numeric wire remains experimental; VFS/C parity, real-device flush testing
+and the M14 format review remain open.
 
 ## 2026-09-02 — Q1 and Q2 architecture blockers closed
 

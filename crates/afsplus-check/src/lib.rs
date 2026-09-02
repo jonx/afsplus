@@ -234,6 +234,8 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
                 ident.log_slots,
                 &ident.uuid,
                 selection.chosen.generation,
+                ident.features.incompat & afsplus_format::ident::INCOMPAT_INTENT_LOG_DATA_UPDATES
+                    != 0,
             ) {
                 Ok(scanned) => {
                     log_records_pending = scanned.records.len();
@@ -242,11 +244,7 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
                     }
                     for record in &scanned.records {
                         for op in &record.ops {
-                            let afsplus_format::intent_log::LogOp::Create { extents, .. } = op
-                            else {
-                                continue;
-                            };
-                            for (start, blocks) in extents {
+                            for (start, blocks) in op.data_extents() {
                                 for lba in *start..*start + *blocks as u64 {
                                     if state.bitmaps.is_allocated(lba) {
                                         report.errors.push(format!(
@@ -259,7 +257,7 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
                         }
                     }
                 }
-                Err(e) => report.warnings.push(format!("intent log unreadable: {e}")),
+                Err(e) => report.errors.push(format!("intent log unreadable: {e}")),
             }
             report.volume = Some(VolumeSummary {
                 uuid_hex: hex(&ident.uuid),

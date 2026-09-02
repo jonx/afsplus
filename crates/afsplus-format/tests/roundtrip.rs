@@ -10,7 +10,7 @@ use afsplus_format::geometry::Geometry;
 use afsplus_format::header::{block_type, BlockHeader, HEADER_SIZE};
 use afsplus_format::ident::{
     FeatureFlags, Identification, NameKeyAlgorithm, IDENT_VERSION_FEATURES, IDENT_VERSION_LEGACY,
-    INCOMPAT_INTENT_LOG, UNICODE_VERSION_16_0_0,
+    INCOMPAT_INTENT_LOG, INCOMPAT_INTENT_LOG_DATA_UPDATES, UNICODE_VERSION_16_0_0,
 };
 use afsplus_format::intent_log::{LogOp, LogRecord};
 use afsplus_format::object::{ObjectRecord, ObjectType};
@@ -157,6 +157,18 @@ fn identification_roundtrip() {
     let ident = sample_ident();
     let block = ident.encode(BS).unwrap();
     assert_eq!(Identification::decode(&block).unwrap(), ident);
+}
+
+#[test]
+fn intent_log_data_update_feature_requires_the_base_log() {
+    let mut ident = sample_ident();
+    ident.features.incompat = INCOMPAT_INTENT_LOG_DATA_UPDATES;
+    assert!(ident.encode(BS).is_err());
+    ident.features.incompat = INCOMPAT_INTENT_LOG | INCOMPAT_INTENT_LOG_DATA_UPDATES;
+    assert_eq!(
+        Identification::decode(&ident.encode(BS).unwrap()).unwrap(),
+        ident
+    );
 }
 
 #[test]
@@ -541,6 +553,24 @@ fn sample_log_record() -> LogRecord {
                 replace: true,
                 timestamp: ts(),
             },
+            LogOp::Write {
+                object_id: 7,
+                logical_start: 3,
+                expected_size_bytes: 16_384,
+                new_size_bytes: 20_000,
+                content_crc: 0x1234_5678,
+                extents: vec![(500, 1), (700, 1)],
+                timestamp: ts(),
+            },
+            LogOp::Truncate {
+                object_id: 7,
+                logical_start: 1,
+                expected_size_bytes: 20_000,
+                new_size_bytes: 5000,
+                content_crc: 0x8765_4321,
+                extents: vec![(900, 1)],
+                timestamp: ts(),
+            },
         ],
     }
 }
@@ -549,7 +579,16 @@ fn sample_log_record() -> LogRecord {
 fn intent_log_record_roundtrip_and_rejections() {
     let record = sample_log_record();
     let block = record.encode(BS).unwrap();
+    assert_eq!(le::get_u16(&block[HEADER_SIZE + 30..HEADER_SIZE + 32]), 3);
     assert_eq!(LogRecord::decode(&block).unwrap(), record);
+
+    let mut namespace_only = record.clone();
+    namespace_only.ops.truncate(3);
+    let namespace_block = namespace_only.encode(BS).unwrap();
+    assert_eq!(
+        le::get_u16(&namespace_block[HEADER_SIZE + 30..HEADER_SIZE + 32]),
+        2
+    );
 
     // Zero-length runs, missing IDs, and oversized groups are rejected.
     let mut bad = sample_log_record();
@@ -566,6 +605,49 @@ fn intent_log_record_roundtrip_and_rejections() {
     let mut bad = sample_log_record();
     if let LogOp::Create { extents, .. } = &mut bad.ops[0] {
         extents[0].1 = 0;
+    }
+    assert!(bad.encode(BS).is_err());
+    let mut bad = sample_log_record();
+    bad.ops[3] = LogOp::Write {
+        object_id: 0,
+        logical_start: 0,
+        expected_size_bytes: 1,
+        new_size_bytes: 1,
+        content_crc: 0,
+        extents: vec![(1, 1)],
+        timestamp: ts(),
+    };
+    assert!(bad.encode(BS).is_err());
+    let mut bad = sample_log_record();
+    bad.ops[4] = LogOp::Truncate {
+        object_id: 7,
+        logical_start: 1,
+        expected_size_bytes: 5000,
+        new_size_bytes: 5000,
+        content_crc: 0,
+        extents: Vec::new(),
+        timestamp: ts(),
+    };
+    assert!(bad.encode(BS).is_err());
+    let mut bad = sample_log_record();
+    if let LogOp::Write { extents, .. } = &mut bad.ops[3] {
+        *extents = vec![(1000, 2), (1001, 1)];
+    }
+    assert!(bad.encode(BS).is_err());
+    let mut bad = sample_log_record();
+    if let LogOp::Write { extents, .. } = &mut bad.ops[3] {
+        *extents = vec![(1000, 3)];
+    }
+    assert!(bad.encode(BS).is_err());
+    let mut bad = sample_log_record();
+    if let LogOp::Truncate {
+        logical_start,
+        extents,
+        ..
+    } = &mut bad.ops[4]
+    {
+        *logical_start = 0;
+        extents.clear();
     }
     assert!(bad.encode(BS).is_err());
     let mut bad = sample_log_record();
@@ -617,6 +699,23 @@ fn legacy_intent_record_decodes_with_its_historical_zero_timestamp() {
     .seal(&mut legacy);
 
     assert_eq!(LogRecord::decode(&legacy).unwrap(), record);
+}
+
+#[test]
+fn version_two_intent_record_remains_readable() {
+    let mut record = sample_log_record();
+    record.ops.truncate(3);
+    let mut block = record.encode(BS).unwrap();
+    le::put_u16(&mut block[HEADER_SIZE + 30..HEADER_SIZE + 32], 2);
+    BlockHeader {
+        block_type: block_type::INTENT_LOG,
+        flags: 0,
+        owner: 0,
+        generation: record.base_generation,
+        payload_len: le::get_u32(&block[24..28]),
+    }
+    .seal(&mut block);
+    assert_eq!(LogRecord::decode(&block).unwrap(), record);
 }
 
 #[test]

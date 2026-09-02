@@ -1,6 +1,6 @@
 # 03. On-Disk Format
 
-> **ADRs:** none · **Spec:** none ·
+> **ADRs:** [ADR-064](../adr/ADR-064-intent-log-data-update-compatibility.md) · **Spec:** [disk layout](../spec/disk-layout.md) ·
 > **Tests:** [conformance](../testing/conformance.md) · **Milestones:** M00, M02
 
 ## 1. Encoding
@@ -86,6 +86,13 @@ algorithm and its three-byte Unicode table version. Unknown values are rejected
 before checkpoint replay or any other write. Version-1/2 prototype images
 remain readable and writable with their explicit legacy byte-identity key
 behavior; version 1 additionally derives its intent-log feature bit.
+
+The experimental incompatible assignments currently include bit 0 for the
+base intent log and bit 1 for version-3 existing-file data-update records.
+Bit 1 requires bit 0. The split prevents an older namespace-only replay
+implementation from interpreting an unknown but valid data-update record as a
+torn tail; see [ADR-064](../adr/ADR-064-intent-log-data-update-compatibility.md).
+The numeric values and record layout remain unfrozen until M14.
 
 ## 6. Checksums
 

@@ -19,9 +19,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
-use afsplus_format::crc32c::crc32c;
+use afsplus_format::crc32c::{crc32c, Hasher};
 use afsplus_format::dir::DirEntry;
-use afsplus_format::ident::{Identification, RO_COMPAT_SHARED_EXTENTS};
+use afsplus_format::ident::{
+    Identification, INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_SHARED_EXTENTS,
+};
 use afsplus_format::intent_log::{LogOp, LogRecord, MAX_LOG_OPS};
 use afsplus_format::object::{
     ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_EXTENT_TREE,
@@ -103,6 +105,24 @@ struct StagedFileLayout {
     metadata_writes: Vec<(u64, Vec<u8>)>,
 }
 
+/// One committed file whose logical layout is being edited inside an open
+/// intent-log window. The original layout is retained so materialization can
+/// publish one COW extent-map mutation no matter how many fsync groups edited
+/// the file first.
+struct PendingFileLayout {
+    record_lba: u64,
+    old_extents: Vec<Extent>,
+    old_tree_blocks: Vec<u64>,
+    extents: Vec<Extent>,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowAllocation {
+    start: u64,
+    blocks: u64,
+}
+
 /// One operation inside a [`Volume::run_batch`] group commit (ADR-026).
 #[derive(Debug, Clone)]
 pub enum BatchOp<'a> {
@@ -137,7 +157,17 @@ struct PendingBatch {
     committed_record_lbas: BTreeMap<u64, u64>,
     /// Data runs of objects created by this batch (cancellable).
     created_data: BTreeMap<u64, (u64, u64)>,
+    /// Final logical layouts for committed files edited in this window.
+    file_layouts: BTreeMap<u64, PendingFileLayout>,
+    /// Still-live data runs allocated by existing-file log operations. A run
+    /// removed by a later operation is quarantined because an earlier
+    /// record in the window may continue to reference its bytes.
+    window_allocations: Vec<WindowAllocation>,
     data_writes: Vec<(u64, Vec<u8>)>,
+    /// User-data blocks already issued by this write-through window. They
+    /// are included in the eventual checkpoint's accounting even though the
+    /// commit tail must not write them a second time.
+    prewritten_data_blocks: u64,
     /// Windowed batches write data blocks at operation time (covered by the
     /// fsync or metadata barrier); plain batches stage them for commit.
     write_through: bool,
@@ -195,6 +225,7 @@ pub struct Volume<D: BlockDevice> {
     data_update_policy: DataUpdatePolicy,
     /// Transaction-scoped count consumed by `commit_transaction`.
     pending_in_place_data_blocks: u64,
+    pending_prewritten_data_blocks: u64,
 }
 
 impl<D: BlockDevice> Volume<D> {
@@ -224,6 +255,7 @@ impl<D: BlockDevice> Volume<D> {
             pending_layout_promotions: 0,
             data_update_policy: DataUpdatePolicy::FullCow,
             pending_in_place_data_blocks: 0,
+            pending_prewritten_data_blocks: 0,
         }
     }
 
@@ -1341,6 +1373,7 @@ impl<D: BlockDevice> Volume<D> {
                 source.size_bytes,
                 false,
                 now,
+                now,
                 generation,
             )?;
             metadata_writes.extend(staged.metadata_writes);
@@ -1368,6 +1401,7 @@ impl<D: BlockDevice> Volume<D> {
             &destination_new_extents,
             destination.size_bytes.max(destination_end),
             true,
+            now,
             now,
             generation,
         )?;
@@ -2422,7 +2456,8 @@ impl<D: BlockDevice> Volume<D> {
         new_extents: &[Extent],
         new_size: u64,
         content_changed: bool,
-        now: Timespec,
+        modified: Timespec,
+        changed: Timespec,
         generation: u64,
     ) -> Result<StagedFileLayout, CoreError> {
         let block_size = self.dev.block_size();
@@ -2498,11 +2533,11 @@ impl<D: BlockDevice> Volume<D> {
                 .checked_mul(block_size as u64)
                 .ok_or(CoreError::PrototypeLimit("allocated byte count overflow"))?,
             modified: if content_changed {
-                now
+                modified
             } else {
                 record.modified
             },
-            changed: now,
+            changed,
             content_generation: if content_changed {
                 generation
             } else {
@@ -2544,6 +2579,7 @@ impl<D: BlockDevice> Volume<D> {
             &new_extents,
             new_size,
             content_changed,
+            now,
             now,
             generation,
         )?;
@@ -2616,7 +2652,10 @@ impl<D: BlockDevice> Volume<D> {
             records: BTreeMap::new(),
             committed_record_lbas: BTreeMap::new(),
             created_data: BTreeMap::new(),
+            file_layouts: BTreeMap::new(),
+            window_allocations: Vec::new(),
             data_writes: Vec::new(),
+            prewritten_data_blocks: 0,
             write_through: false,
             logged_created: BTreeSet::new(),
             sacrificed: Vec::new(),
@@ -2698,6 +2737,312 @@ impl<D: BlockDevice> Volume<D> {
         self.read_object(object_id)
     }
 
+    fn ensure_pending_file_layout(
+        &mut self,
+        pending: &mut PendingBatch,
+        object_id: u64,
+    ) -> Result<(), CoreError> {
+        if pending.file_layouts.contains_key(&object_id) {
+            return Ok(());
+        }
+        if pending.created_data.contains_key(&object_id) {
+            return Err(CoreError::PrototypeLimit(
+                "created-file writes stay represented by the create record",
+            ));
+        }
+        let record = self
+            .batch_record(pending, object_id)?
+            .ok_or(CoreError::NotFound)?;
+        if record.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        let (old_extents, old_tree_blocks) = self.load_file_layout(&record)?;
+        self.note_committed_record(pending, object_id)?;
+        let record_lba = pending.committed_record_lbas[&object_id];
+        pending.file_layouts.insert(
+            object_id,
+            PendingFileLayout {
+                record_lba,
+                old_extents: old_extents.clone(),
+                old_tree_blocks,
+                extents: old_extents,
+                size_bytes: record.size_bytes,
+            },
+        );
+        Ok(())
+    }
+
+    /// Removes one mapped extent from a pending file. Portions allocated by
+    /// earlier operations in this same window are quarantined (their bytes
+    /// may still be named by an earlier durable record); committed portions
+    /// follow the normal private/shared release rules.
+    fn release_window_extent(
+        &mut self,
+        tx: &mut TxAllocator,
+        pending: &mut PendingBatch,
+        generation: u64,
+        extent: Extent,
+    ) -> Result<(), CoreError> {
+        let start = extent.physical_start;
+        let end = extent.physical_end()?;
+        let mut protected = Vec::new();
+        let mut remaining_allocations = Vec::new();
+        for allocation in std::mem::take(&mut pending.window_allocations) {
+            let allocation_end = allocation
+                .start
+                .checked_add(allocation.blocks)
+                .ok_or_else(|| CoreError::Corrupt("window allocation overflows".into()))?;
+            let overlap_start = start.max(allocation.start);
+            let overlap_end = end.min(allocation_end);
+            if overlap_start >= overlap_end {
+                remaining_allocations.push(allocation);
+                continue;
+            }
+            protected.push((overlap_start, overlap_end));
+            if allocation.start < overlap_start {
+                remaining_allocations.push(WindowAllocation {
+                    start: allocation.start,
+                    blocks: overlap_start - allocation.start,
+                });
+            }
+            if overlap_end < allocation_end {
+                remaining_allocations.push(WindowAllocation {
+                    start: overlap_end,
+                    blocks: allocation_end - overlap_end,
+                });
+            }
+        }
+        pending.window_allocations = remaining_allocations;
+        protected.sort_unstable();
+
+        let mut cursor = start;
+        for (protected_start, protected_end) in protected {
+            if cursor < protected_start {
+                self.release_data_run(
+                    tx,
+                    generation,
+                    &Extent {
+                        logical_start: extent.logical_start + cursor - start,
+                        physical_start: cursor,
+                        block_count: protected_start - cursor,
+                        flags: extent.flags,
+                    },
+                )?;
+            }
+            tx.abandon_uncommitted_run(
+                &mut self.dev,
+                protected_start,
+                protected_end - protected_start,
+            )?;
+            cursor = protected_end;
+        }
+        if cursor < end {
+            self.release_data_run(
+                tx,
+                generation,
+                &Extent {
+                    logical_start: extent.logical_start + cursor - start,
+                    physical_start: cursor,
+                    block_count: end - cursor,
+                    flags: extent.flags,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn logged_data_layout(
+        logical_start: u64,
+        extents: &[(u64, u32)],
+    ) -> Result<Vec<Extent>, CoreError> {
+        let mut logical = logical_start;
+        let mut layout = Vec::with_capacity(extents.len());
+        for (physical_start, blocks) in extents {
+            let block_count = u64::from(*blocks);
+            if block_count == 0 {
+                return Err(CoreError::Corrupt("logged data extent is empty".into()));
+            }
+            layout.push(Extent {
+                logical_start: logical,
+                physical_start: *physical_start,
+                block_count,
+                flags: 0,
+            });
+            logical = logical
+                .checked_add(block_count)
+                .ok_or_else(|| CoreError::Corrupt("logged logical range overflows".into()))?;
+        }
+        Ok(layout)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn install_logged_file_range(
+        &mut self,
+        tx: &mut TxAllocator,
+        pending: &mut PendingBatch,
+        object_id: u64,
+        logical_start: u64,
+        expected_size: u64,
+        new_size: u64,
+        extents: &[(u64, u32)],
+        now: Timespec,
+        generation: u64,
+    ) -> Result<(), CoreError> {
+        self.ensure_pending_file_layout(pending, object_id)?;
+        let replacement = Self::logged_data_layout(logical_start, extents)?;
+        let block_count = replacement.iter().try_fold(0u64, |total, extent| {
+            total
+                .checked_add(extent.block_count)
+                .ok_or_else(|| CoreError::Corrupt("logged block count overflows".into()))
+        })?;
+        if block_count == 0 {
+            return Err(CoreError::Corrupt("logged write has no data".into()));
+        }
+        let current_size = pending.file_layouts[&object_id].size_bytes;
+        if current_size != expected_size {
+            return Err(CoreError::Corrupt(format!(
+                "logged write expected size {expected_size}, found {current_size}"
+            )));
+        }
+        let end = logical_start
+            .checked_add(block_count)
+            .ok_or_else(|| CoreError::Corrupt("logged write range overflows".into()))?;
+        let current_extents = pending.file_layouts[&object_id].extents.clone();
+        let (mut updated, removed) =
+            replace_logical_range(&current_extents, logical_start, end, None)?;
+        for extent in removed {
+            self.release_window_extent(tx, pending, generation, extent)?;
+        }
+        updated.extend(replacement.iter().copied());
+        let updated = coalesce_extents(updated)?;
+        pending
+            .window_allocations
+            .extend(replacement.iter().map(|extent| WindowAllocation {
+                start: extent.physical_start,
+                blocks: extent.block_count,
+            }));
+        let layout = pending
+            .file_layouts
+            .get_mut(&object_id)
+            .expect("layout prepared above");
+        layout.extents = updated;
+        layout.size_bytes = new_size;
+        let record = self
+            .batch_record(pending, object_id)?
+            .ok_or(CoreError::NotFound)?;
+        pending.records.insert(
+            object_id,
+            Some(ObjectRecord {
+                size_bytes: new_size,
+                modified: now,
+                changed: now,
+                content_generation: generation,
+                ..record
+            }),
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn install_logged_truncate(
+        &mut self,
+        tx: &mut TxAllocator,
+        pending: &mut PendingBatch,
+        object_id: u64,
+        logical_start: u64,
+        expected_size: u64,
+        new_size: u64,
+        extents: &[(u64, u32)],
+        now: Timespec,
+        generation: u64,
+    ) -> Result<(), CoreError> {
+        self.ensure_pending_file_layout(pending, object_id)?;
+        let current_size = pending.file_layouts[&object_id].size_bytes;
+        if current_size != expected_size || current_size == new_size {
+            return Err(CoreError::Corrupt(format!(
+                "logged truncate expected size {expected_size}, found {current_size}, new {new_size}"
+            )));
+        }
+        let block_size = self.dev.block_size() as u64;
+        let current_extents = pending.file_layouts[&object_id].extents.clone();
+        let mut updated = current_extents.clone();
+        let mut removed = Vec::new();
+        let mut tail_rewrite_required = false;
+        let retained_blocks = new_size.div_ceil(block_size);
+        if new_size < current_size {
+            (updated, removed) =
+                replace_logical_range(&current_extents, retained_blocks, u64::MAX, None)?;
+            if !new_size.is_multiple_of(block_size) {
+                let tail = retained_blocks - 1;
+                tail_rewrite_required = extent_at(&updated, tail)
+                    .is_some_and(|extent| extent.flags & EXTENT_UNWRITTEN == 0);
+            }
+        }
+        for extent in removed {
+            self.release_window_extent(tx, pending, generation, extent)?;
+        }
+
+        let replacement = Self::logged_data_layout(logical_start, extents)?;
+        match replacement.as_slice() {
+            [] if tail_rewrite_required => {
+                return Err(CoreError::Corrupt(
+                    "logged truncate is missing its partial tail block".into(),
+                ));
+            }
+            [] => {
+                if logical_start != 0 {
+                    return Err(CoreError::Corrupt(
+                        "data-free logged truncate has a logical block".into(),
+                    ));
+                }
+            }
+            [tail] if tail_rewrite_required && tail.logical_start == retained_blocks - 1 => {
+                let (rewritten, replaced) = replace_logical_range(
+                    &updated,
+                    tail.logical_start,
+                    tail.logical_start + 1,
+                    None,
+                )?;
+                updated = rewritten;
+                for extent in replaced {
+                    self.release_window_extent(tx, pending, generation, extent)?;
+                }
+                updated.push(*tail);
+                updated = coalesce_extents(updated)?;
+                pending.window_allocations.push(WindowAllocation {
+                    start: tail.physical_start,
+                    blocks: tail.block_count,
+                });
+            }
+            _ => {
+                return Err(CoreError::Corrupt(
+                    "logged truncate carries an invalid tail replacement".into(),
+                ));
+            }
+        }
+
+        let layout = pending
+            .file_layouts
+            .get_mut(&object_id)
+            .expect("layout prepared above");
+        layout.extents = updated;
+        layout.size_bytes = new_size;
+        let record = self
+            .batch_record(pending, object_id)?
+            .ok_or(CoreError::NotFound)?;
+        pending.records.insert(
+            object_id,
+            Some(ObjectRecord {
+                size_bytes: new_size,
+                modified: now,
+                changed: now,
+                content_generation: generation,
+                ..record
+            }),
+        );
+        Ok(())
+    }
+
     /// Remembers the committed record block of an object the batch rewrites
     /// or deletes, so materialization retires exactly one old block per
     /// object.
@@ -2761,6 +3106,12 @@ impl<D: BlockDevice> Volume<D> {
                         } else {
                             pending.data_writes.push((start + i as u64, block));
                         }
+                    }
+                    if pending.write_through {
+                        pending.prewritten_data_blocks = pending
+                            .prewritten_data_blocks
+                            .checked_add(data_block_count)
+                            .ok_or(CoreError::PrototypeLimit("window data accounting overflow"))?;
                     }
                     start
                 } else {
@@ -2909,6 +3260,11 @@ impl<D: BlockDevice> Volume<D> {
         object_id: u64,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        if pending.file_layouts.contains_key(&object_id) {
+            return Err(CoreError::PrototypeLimit(
+                "deleting a window-modified file requires a later log compaction rule",
+            ));
+        }
         let victim = self
             .batch_record(pending, object_id)?
             .ok_or_else(|| CoreError::Corrupt("unlink victim missing".into()))?;
@@ -3142,53 +3498,58 @@ impl<D: BlockDevice> Volume<D> {
         self.window.as_ref().map_or(0, |w| w.unlogged.len())
     }
 
-    /// Applies one operation to the open window (opening it if needed). The
-    /// operation is visible to later window operations but not durable until
-    /// [`Volume::window_fsync`] and not checkpointed until
-    /// [`Volume::window_commit`].
-    pub fn window_op(&mut self, op: &BatchOp<'_>, now: Timespec) -> Result<Option<u64>, CoreError> {
+    fn take_or_open_window(&mut self) -> Result<OpenWindow, CoreError> {
         if !self.mount_mode.allows_user_writes() {
             return Err(CoreError::ReadOnly);
         }
         if self.window_poisoned {
             return Err(CoreError::WindowPoisoned);
         }
-        let mut window = match self.window.take() {
-            Some(window) => window,
-            None => {
-                let generation = self.next_generation()?;
-                // Windowed transactions never promote quarantined blocks:
-                // logged extents must be FREE in the committed bitmaps so
-                // replay can claim them deterministically (ADR-037).
-                let tx = TxAllocator::begin(
-                    &mut self.dev,
-                    &self.ident.geometry(),
-                    &self.checkpoint,
-                    self.other_checkpoint.as_ref(),
-                    generation,
-                    0,
-                    self.alloc_rover_region,
-                )?;
-                OpenWindow {
-                    tx,
-                    pending: PendingBatch {
-                        dir_changes: BTreeMap::new(),
-                        dir_timestamps: BTreeMap::new(),
-                        records: BTreeMap::new(),
-                        committed_record_lbas: BTreeMap::new(),
-                        created_data: BTreeMap::new(),
-                        data_writes: Vec::new(),
-                        write_through: true,
-                        logged_created: BTreeSet::new(),
-                        sacrificed: Vec::new(),
-                        next_object_id: self.checkpoint.next_object_id,
-                    },
-                    generation,
-                    unlogged: Vec::new(),
-                    logged_records: 0,
-                }
-            }
-        };
+        if let Some(window) = self.window.take() {
+            return Ok(window);
+        }
+        let generation = self.next_generation()?;
+        // Windowed transactions never promote quarantined blocks: logged
+        // data extents must be FREE in the committed bitmaps so replay can
+        // claim them deterministically (ADR-037/063).
+        let tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            generation,
+            0,
+            self.alloc_rover_region,
+        )?;
+        Ok(OpenWindow {
+            tx,
+            pending: PendingBatch {
+                dir_changes: BTreeMap::new(),
+                dir_timestamps: BTreeMap::new(),
+                records: BTreeMap::new(),
+                committed_record_lbas: BTreeMap::new(),
+                created_data: BTreeMap::new(),
+                file_layouts: BTreeMap::new(),
+                window_allocations: Vec::new(),
+                data_writes: Vec::new(),
+                prewritten_data_blocks: 0,
+                write_through: true,
+                logged_created: BTreeSet::new(),
+                sacrificed: Vec::new(),
+                next_object_id: self.checkpoint.next_object_id,
+            },
+            generation,
+            unlogged: Vec::new(),
+            logged_records: 0,
+        })
+    }
+
+    /// Applies one operation to the open window (opening it if needed). The
+    /// operation is visible to later window operations but not durable until
+    /// [`Volume::window_fsync`] and not checkpointed until
+    /// [`Volume::window_commit`].
+    pub fn window_op(&mut self, op: &BatchOp<'_>, now: Timespec) -> Result<Option<u64>, CoreError> {
+        let mut window = self.take_or_open_window()?;
         let generation = window.generation;
         // A delete (or replacing rename) whose victim is a window create not
         // yet covered by a log record cancels to nothing: the create is
@@ -3221,6 +3582,219 @@ impl<D: BlockDevice> Volume<D> {
             Err(error) if Self::is_validation_error(&error) => {
                 self.window = Some(window);
                 Err(error)
+            }
+            Err(error) => {
+                self.window_poisoned = true;
+                Err(error)
+            }
+        }
+    }
+
+    /// Stages an existing-file write in the open intent-log window. The
+    /// replacement blocks are always newly allocated COW data, independent
+    /// of the file's ordinary ADR-062 policy.
+    pub fn window_write_file_at(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        content: &[u8],
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        if content.is_empty() {
+            return Ok(());
+        }
+        if self.ident.features.incompat & INCOMPAT_INTENT_LOG_DATA_UPDATES == 0 {
+            return Err(CoreError::FeatureDisabled(
+                "intent-log existing-file data updates",
+            ));
+        }
+        let content_len = u64::try_from(content.len())
+            .map_err(|_| CoreError::PrototypeLimit("write buffer is too large"))?;
+        let end_offset = offset
+            .checked_add(content_len)
+            .ok_or(CoreError::PrototypeLimit("file size limit reached"))?;
+        let mut window = self.take_or_open_window()?;
+        if let Err(error) = self.ensure_pending_file_layout(&mut window.pending, object_id) {
+            self.window = Some(window);
+            return Err(error);
+        }
+        let expected_size = window.pending.file_layouts[&object_id].size_bytes;
+        let current_extents = window.pending.file_layouts[&object_id].extents.clone();
+        let block_size = self.dev.block_size() as u64;
+        let first_block = offset / block_size;
+        let end_block = end_offset.div_ceil(block_size);
+        let block_count = end_block - first_block;
+
+        let result = (|| {
+            let mut blocks = Vec::with_capacity(block_count as usize);
+            for logical_block in first_block..end_block {
+                let mut block = vec![0u8; block_size as usize];
+                self.read_layout_block(&current_extents, logical_block, &mut block)?;
+                let logical_byte = logical_block.saturating_mul(block_size);
+                let copy_start = offset.max(logical_byte);
+                let copy_end = end_offset.min(logical_byte.saturating_add(block_size));
+                let source_start = usize::try_from(copy_start - offset)
+                    .map_err(|_| CoreError::PrototypeLimit("write offset is too large"))?;
+                let source_end = usize::try_from(copy_end - offset)
+                    .map_err(|_| CoreError::PrototypeLimit("write offset is too large"))?;
+                let target_start = usize::try_from(copy_start - logical_byte)
+                    .map_err(|_| CoreError::PrototypeLimit("block offset is too large"))?;
+                block[target_start..target_start + source_end - source_start]
+                    .copy_from_slice(&content[source_start..source_end]);
+                blocks.push(block);
+            }
+
+            let additions = allocate_extent_runs(
+                &mut window.tx,
+                &mut self.dev,
+                &self.ident.geometry(),
+                first_block,
+                block_count,
+                0,
+            )?;
+            let mut block_iter = blocks.iter();
+            for extent in &additions {
+                for physical_offset in 0..extent.block_count {
+                    let block = block_iter.next().ok_or_else(|| {
+                        CoreError::Corrupt("logged write block count mismatch".into())
+                    })?;
+                    self.dev
+                        .write_block(extent.physical_start + physical_offset, block)?;
+                }
+            }
+            if block_iter.next().is_some() {
+                return Err(CoreError::Corrupt(
+                    "logged write block count mismatch".into(),
+                ));
+            }
+            window.pending.prewritten_data_blocks = window
+                .pending
+                .prewritten_data_blocks
+                .checked_add(block_count)
+                .ok_or(CoreError::PrototypeLimit("window data accounting overflow"))?;
+            let mut hasher = Hasher::new();
+            for block in &blocks {
+                hasher.update(block);
+            }
+            let extents = additions
+                .iter()
+                .map(|extent| {
+                    let blocks = u32::try_from(extent.block_count).map_err(|_| {
+                        CoreError::PrototypeLimit("logged extent exceeds u32 blocks")
+                    })?;
+                    Ok((extent.physical_start, blocks))
+                })
+                .collect::<Result<Vec<_>, CoreError>>()?;
+            let new_size = expected_size.max(end_offset);
+            self.install_logged_file_range(
+                &mut window.tx,
+                &mut window.pending,
+                object_id,
+                first_block,
+                expected_size,
+                new_size,
+                &extents,
+                now,
+                window.generation,
+            )?;
+            window.unlogged.push(LogOp::Write {
+                object_id,
+                logical_start: first_block,
+                expected_size_bytes: expected_size,
+                new_size_bytes: new_size,
+                content_crc: hasher.finalize(),
+                timestamp: now,
+                extents,
+            });
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.window = Some(window);
+                Ok(())
+            }
+            Err(error) => {
+                self.window_poisoned = true;
+                Err(error)
+            }
+        }
+    }
+
+    /// Stages an existing-file truncate in the intent-log window. Shrinking
+    /// a materialized partial tail uses one fresh, zero-tailed COW block.
+    pub fn window_truncate_file(
+        &mut self,
+        object_id: u64,
+        new_size: u64,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        if self.ident.features.incompat & INCOMPAT_INTENT_LOG_DATA_UPDATES == 0 {
+            return Err(CoreError::FeatureDisabled(
+                "intent-log existing-file data updates",
+            ));
+        }
+        let mut window = self.take_or_open_window()?;
+        if let Err(error) = self.ensure_pending_file_layout(&mut window.pending, object_id) {
+            self.window = Some(window);
+            return Err(error);
+        }
+        let expected_size = window.pending.file_layouts[&object_id].size_bytes;
+        if expected_size == new_size {
+            self.window = Some(window);
+            return Ok(());
+        }
+        let current_extents = window.pending.file_layouts[&object_id].extents.clone();
+        let block_size = self.dev.block_size() as u64;
+        let result = (|| {
+            let mut logical_start = 0;
+            let mut extents = Vec::new();
+            let mut content_crc = 0;
+            if new_size < expected_size && !new_size.is_multiple_of(block_size) {
+                let logical_block = new_size / block_size;
+                if extent_at(&current_extents, logical_block)
+                    .is_some_and(|extent| extent.flags & EXTENT_UNWRITTEN == 0)
+                {
+                    let mut block = vec![0u8; block_size as usize];
+                    self.read_layout_block(&current_extents, logical_block, &mut block)?;
+                    block[(new_size % block_size) as usize..].fill(0);
+                    let physical_start = window.tx.allocate(&mut self.dev)?;
+                    self.dev.write_block(physical_start, &block)?;
+                    window.pending.prewritten_data_blocks = window
+                        .pending
+                        .prewritten_data_blocks
+                        .checked_add(1)
+                        .ok_or(CoreError::PrototypeLimit("window data accounting overflow"))?;
+                    logical_start = logical_block;
+                    extents.push((physical_start, 1));
+                    content_crc = crc32c(&block);
+                }
+            }
+            self.install_logged_truncate(
+                &mut window.tx,
+                &mut window.pending,
+                object_id,
+                logical_start,
+                expected_size,
+                new_size,
+                &extents,
+                now,
+                window.generation,
+            )?;
+            window.unlogged.push(LogOp::Truncate {
+                object_id,
+                logical_start,
+                expected_size_bytes: expected_size,
+                new_size_bytes: new_size,
+                content_crc,
+                timestamp: now,
+                extents,
+            });
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.window = Some(window);
+                Ok(())
             }
             Err(error) => {
                 self.window_poisoned = true;
@@ -3324,9 +3898,10 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
-    /// Makes every window operation so far durable: appends ONE log record
-    /// covering the unlogged prefix, then one barrier (ADR-037). The group
-    /// replays all-or-nothing after a crash.
+    /// Makes every window operation so far durable. Existing-file update
+    /// data receives its own barrier before the record that references it;
+    /// the record then receives the completion barrier. Namespace-only
+    /// groups keep the original one-barrier path (ADR-037/063).
     pub fn window_fsync(&mut self) -> Result<(), CoreError> {
         if !self.mount_mode.allows_user_writes() {
             return Err(CoreError::ReadOnly);
@@ -3346,6 +3921,16 @@ impl<D: BlockDevice> Volume<D> {
                 "fsync group exceeds one log record; commit the window",
             ));
         }
+        let needs_data_barrier = window
+            .unlogged
+            .iter()
+            .any(|op| op.is_existing_file_update() && !op.data_extents().is_empty());
+        if needs_data_barrier {
+            if let Err(error) = self.dev.flush() {
+                self.window_poisoned = true;
+                return Err(error.into());
+            }
+        }
         let geo = self.ident.geometry();
         let slots = intent_log::log_slot_lbas(&geo, self.ident.log_slots)?;
         let sequence = window.logged_records + 1;
@@ -3358,7 +3943,7 @@ impl<D: BlockDevice> Volume<D> {
             uuid: self.ident.uuid,
             base_generation: self.checkpoint.generation,
             sequence,
-            ops: std::mem::take(&mut window.unlogged),
+            ops: window.unlogged.clone(),
         };
         let encoded = record.encode(geo.block_size).map_err(CoreError::Format)?;
         let write = self
@@ -3369,6 +3954,7 @@ impl<D: BlockDevice> Volume<D> {
             Ok(()) => {
                 let window = self.window.as_mut().expect("window checked above");
                 window.logged_records = sequence;
+                window.unlogged.clear();
                 for op in &record.ops {
                     if let LogOp::Create {
                         expected_object_id, ..
@@ -3423,6 +4009,7 @@ impl<D: BlockDevice> Volume<D> {
             self.ident.log_slots,
             &self.ident.uuid,
             self.checkpoint.generation,
+            self.ident.features.incompat & INCOMPAT_INTENT_LOG_DATA_UPDATES != 0,
         )?;
         if scanned.records.is_empty() {
             self.pending_intent_records = 0;
@@ -3446,7 +4033,10 @@ impl<D: BlockDevice> Volume<D> {
             records: BTreeMap::new(),
             committed_record_lbas: BTreeMap::new(),
             created_data: BTreeMap::new(),
+            file_layouts: BTreeMap::new(),
+            window_allocations: Vec::new(),
             data_writes: Vec::new(),
+            prewritten_data_blocks: 0,
             write_through: true,
             logged_created: BTreeSet::new(),
             sacrificed: Vec::new(),
@@ -3476,6 +4066,7 @@ impl<D: BlockDevice> Volume<D> {
             self.ident.log_slots,
             &self.ident.uuid,
             self.checkpoint.generation,
+            self.ident.features.incompat & INCOMPAT_INTENT_LOG_DATA_UPDATES != 0,
         )?;
         self.pending_intent_records = scanned.records.len() as u32;
         Ok(self.pending_intent_records)
@@ -3554,6 +4145,54 @@ impl<D: BlockDevice> Volume<D> {
                     generation,
                 )
                 .map(|_| ())
+            }
+            LogOp::Write {
+                object_id,
+                logical_start,
+                expected_size_bytes,
+                new_size_bytes,
+                extents,
+                timestamp,
+                ..
+            } => {
+                for (start, blocks) in extents {
+                    tx.allocate_exact_run(&mut self.dev, *start, u64::from(*blocks))?;
+                }
+                self.install_logged_file_range(
+                    tx,
+                    pending,
+                    *object_id,
+                    *logical_start,
+                    *expected_size_bytes,
+                    *new_size_bytes,
+                    extents,
+                    *timestamp,
+                    generation,
+                )
+            }
+            LogOp::Truncate {
+                object_id,
+                logical_start,
+                expected_size_bytes,
+                new_size_bytes,
+                extents,
+                timestamp,
+                ..
+            } => {
+                for (start, blocks) in extents {
+                    tx.allocate_exact_run(&mut self.dev, *start, u64::from(*blocks))?;
+                }
+                self.install_logged_truncate(
+                    tx,
+                    pending,
+                    *object_id,
+                    *logical_start,
+                    *expected_size_bytes,
+                    *new_size_bytes,
+                    extents,
+                    *timestamp,
+                    generation,
+                )
             }
         }
     }
@@ -3738,9 +4377,53 @@ impl<D: BlockDevice> Volume<D> {
             );
         }
 
-        // Encode every surviving pending record into a fresh block and build
-        // the object-map operation set.
+        // Materialize each existing-file window layout once, no matter how
+        // many logged write/truncate operations produced its final state.
         let mut omap_encoded: Vec<([u8; 8], Option<[u8; 8]>)> = Vec::new();
+        for (object_id, layout) in std::mem::take(&mut pending.file_layouts) {
+            let record = pending
+                .records
+                .remove(&object_id)
+                .flatten()
+                .ok_or_else(|| CoreError::Corrupt("pending file record disappeared".into()))?;
+            let remembered_lba = pending
+                .committed_record_lbas
+                .remove(&object_id)
+                .ok_or_else(|| CoreError::Corrupt("pending file record LBA disappeared".into()))?;
+            if remembered_lba != layout.record_lba {
+                return Err(CoreError::Corrupt(
+                    "pending file record LBA changed inside window".into(),
+                ));
+            }
+            if record.flags & OBJECT_FLAG_EXTENT_TREE == 0
+                && direct_layout(&layout.extents, layout.size_bytes, block_size as u64).is_none()
+            {
+                self.pending_layout_promotions += 1;
+            }
+            let modified = record.modified;
+            let changed = record.changed;
+            let staged = self.stage_file_layout(
+                &mut tx,
+                record,
+                layout.record_lba,
+                &layout.old_extents,
+                &layout.old_tree_blocks,
+                &layout.extents,
+                layout.size_bytes,
+                true,
+                modified,
+                changed,
+                generation,
+            )?;
+            meta_writes.extend(staged.metadata_writes);
+            omap_encoded.push((
+                object_map::key(object_id),
+                Some(object_map::value(staged.record_lba)?),
+            ));
+        }
+
+        // Encode every other surviving pending record into a fresh block and
+        // build the remaining object-map operation set.
         for (object_id, record) in &pending.records {
             match record {
                 Some(record) => {
@@ -3779,6 +4462,7 @@ impl<D: BlockDevice> Volume<D> {
         let omap_root = omap_mutation.root_lba;
         meta_writes.extend(omap_mutation.writes);
 
+        self.pending_prewritten_data_blocks = pending.prewritten_data_blocks;
         self.commit_transaction(
             generation,
             pending.next_object_id,
@@ -3796,6 +4480,7 @@ impl<D: BlockDevice> Volume<D> {
         self.shared_refs = None;
         self.pending_layout_promotions = 0;
         self.pending_in_place_data_blocks = 0;
+        self.pending_prewritten_data_blocks = 0;
         self.checkpoint
             .generation
             .checked_add(1)
@@ -4021,6 +4706,7 @@ impl<D: BlockDevice> Volume<D> {
         }
         let layout_promotions = std::mem::take(&mut self.pending_layout_promotions);
         let in_place_data_blocks = std::mem::take(&mut self.pending_in_place_data_blocks);
+        let prewritten_data_blocks = std::mem::take(&mut self.pending_prewritten_data_blocks);
 
         let finished = tx.finish(&mut self.dev)?;
         let (allocation_root, new_allocation_tree_blocks) =
@@ -4030,7 +4716,7 @@ impl<D: BlockDevice> Volume<D> {
         meta_writes.extend(finished.reclaim_writes);
 
         let mut stats = CommitStats {
-            data_blocks_written: data_writes.len() as u64,
+            data_blocks_written: data_writes.len() as u64 + prewritten_data_blocks,
             data_blocks_overwritten_in_place: in_place_data_blocks,
             metadata_blocks_written: meta_writes.len() as u64,
             bitmap_pages_written: finished.bitmap_writes.len() as u64,

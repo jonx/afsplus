@@ -17,6 +17,7 @@ cargo test -p afsplus-check --test fsync_workloads --release -- --ignored --noca
 - [Phase A measured: group commit](#phase-a-measured-group-commit)
 - [Phase B measured: the intent log wins its gate](#phase-b-measured-the-intent-log-wins-its-gate)
 - [Requalification and coverage boundary](#requalification-and-coverage-boundary)
+- [Phase C measured: existing-file durability](#phase-c-measured-existing-file-durability)
 - [What the data supports](#what-the-data-supports)
 
 <!-- /toc -->
@@ -70,19 +71,21 @@ predicted would need measurement.
 
 ## Intent-log envelope
 
-For contrast, a minimal intent log — one sequential log-record write plus
-one barrier per durable operation, with the full checkpoint amortized over a
-64-operation window at today's per-transaction cost:
+For contrast, the initial namespace-only intent-log projection used one
+sequential log-record write plus one barrier per durable operation, with the
+full checkpoint amortized over a 64-operation window at today's
+per-transaction cost:
 
 | workload             | writes/op est. | flushes/op est. | reduction        |
 |----------------------|----------------|-----------------|------------------|
 | git ref update       | ~1.1 (×3 ops)  | ~1.05 (×3 ops)  | 8× wr, 2.2× fl   |
 | checkout small files | 1.20           | 1.05            | 11× wr, 2.9× fl  |
-| durable log append   | 1.14           | 1.05            | 8× wr, 2.9× fl   |
+| durable log append   | 1.14           | 2.05            | 8× wr, 1.5× fl   |
 
-(The ref-update line stays a three-record sequence until atomic-replace
-rename exists; with it, one update ≈ 2 records ≈ 2.3 writes and 2.1 flushes
-versus 27 and 7 today.)
+(The append projection includes a data barrier before the record barrier.
+The ref-update line stays a three-record sequence until atomic-replace rename
+exists; with it, one update ≈ 2 records ≈ 2.3 writes and 2.1 flushes versus
+27 and 7 today.)
 
 ## Phase A measured: group commit
 
@@ -155,33 +158,66 @@ The seven intent-log tests and ten shared-extent crash tests also passed in
 the optimized build, including every recorded write/flush cut, torn created
 content, shared unlink and rename-replacement replay.
 
-There is one material scope boundary: the executable log record contains
-create/delete/rename operations. It can durably publish the bytes of a newly
-created file by referencing and checksumming its fresh extents, but it cannot
-yet represent a write or truncate of an existing file. Consequently the
-append row is a measured checkpoint baseline and an estimated motivation for
-future log coverage, not a measured logged-append result. The current evidence
-supports the log architecture for its implemented namespace window; a
-universal cheap-file-`fsync` claim requires write/truncate log records, replay,
-checker validation, and their own crash matrix before the record format can
-freeze.
+That run established the namespace boundary that Phase C subsequently closes.
+It remains useful as the before-state: version 2 could publish created-file
+content, but not a write or truncate of an already committed file.
+
+## Phase C measured: existing-file durability
+
+Experimental record version 3 adds complete-block COW replacements for writes
+and the optional one-block zeroed tail needed by a partial truncate. The
+replacement data is written and flushed before its record; the record is then
+flushed as the fsync completion point. Replay verifies every content CRC,
+claims the exact extents while they are still FREE in the base checkpoint,
+and feeds the final layouts through the ordinary COW checkpoint engine.
+
+Optimized qualification on 2026-09-03, with one fsync per operation and a
+checkpoint every 64 operations:
+
+| path | operations | writes/op | flushes/op | reads/op | memory-backend wall |
+|---|---:|---:|---:|---:|---:|
+| logged 200-byte append | 4,000 | 2.200 | 2.032 | 1.396 | 388 ms |
+| logged 4 KiB DB hotset | 4,000 | 2.134 | 2.032 | 1.346 | 156 ms |
+| checkpointed 200-byte append | 4,000 | 9.037 | 3.000 | 18.962 | 2,590 ms |
+
+The logged append reduces device writes by 4.1× and reads by 13.6× while
+removing one of the three barriers per fsync. The database row demonstrates
+that repeated overwrites of the same committed file remain bounded rather
+than accumulating one checkpoint transaction per fsync. These are
+memory-backend structural measurements, not hardware latency claims.
+
+The associated suite now has 16 intent-log tests and 11 shared-extent crash
+tests. It includes every modeled write/flush cut around an existing-file
+write, monotone recovery across successive write records, write followed by
+rename in one group, sparse growth, aligned and partial shrink, a crash at
+every write/flush of recovery itself followed by another recovery, and a
+logged write that splits a shared extent without changing the clone.
+
+Version 3 is guarded by
+`org.aros.afsplus:intent-log-data-updates` (`INCOMPAT` bit 1). Without that
+identity, an older version-2 reader could mistake an unknown valid record for
+an ignorable torn tail. Namespace-only groups continue to encode version 2;
+the numeric v3 wire remains experimental until M14.
 
 ## What the data supports
 
 1. **Checkpoint-per-operation is not viable as the only durability path**
    for Git/package workloads: 9–27 block writes and 3–7 barriers per logical
    operation is a 8–24× write amplification and a ~3× barrier multiplier over
-   the implemented log path. Database-style rewrite cost is established by
-   the separate [Q1 bake-off](data-policy-bakeoff.md), but its intent-log path
-   is not implemented yet.
+   the namespace log path. The Phase C database and append rows now establish
+   the corresponding existing-file log cost directly; the separate
+   [Q1 bake-off](data-policy-bakeoff.md) compares COW with private in-place
+   checkpoint updates.
 2. **Two separable mechanisms, two problems — now both measured.** Group
    commit (implemented, measured above) solves burst throughput without
    format change and doubles as the ADR-026 atomic-batch primitive. The
-   intent log's remaining value is exclusively the forced-fsync path:
-   3 barriers + 10 writes per durable update versus ~1 barrier + ~1.2
-   writes. On storage where a barrier costs 0.1–5 ms, that is roughly a
-   3× fsync-latency difference for fsync-per-operation applications (Git,
-   databases), and nothing for everyone else.
+   intent log's remaining value is exclusively the forced-fsync path.
+   Namespace updates use about one barrier and 2.2 measured writes per
+   operation instead of 3 barriers and 10 writes; existing-file data updates
+   use two barriers (data, then record) and about 2.1–2.2 writes instead of the
+   three-barrier, 9-write checkpoint path. On storage where a barrier costs
+   0.1–5 ms, the difference matters to fsync-per-operation applications and
+   nothing for workloads that already batch freely.
 3. **Bake-off verdict.** Both mechanisms are now implemented and measured
    under identical workloads and crash matrices. Group commit carries
    bursts (2.2 writes, 0.05 barriers per checkout file); the intent log
@@ -189,6 +225,8 @@ freeze.
    update — 6.8× fewer barriers than the original sequence). They compose:
    the log is precisely how an fsync becomes cheap between group-committed
    checkpoints. The measured recommendation is to keep both, with the log
-   remaining an experimental feature until existing-file write/truncate
-   replay survives the same workload and crash suite. [ADR-063](../adr/ADR-063-intent-log-epoch1.md)
-   accepts this layered architecture while retaining that wire gate.
+   remaining experimental until portable-C parity, the public VFS fsync path,
+   real-device qualification and the M14 wire review are complete.
+   [ADR-063](../adr/ADR-063-intent-log-epoch1.md) accepts this layered
+   architecture; [ADR-064](../adr/ADR-064-intent-log-data-update-compatibility.md)
+   makes the new replay capability fail closed across implementations.

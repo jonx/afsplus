@@ -1,4 +1,26 @@
-registry_version = 2
+registry_version = 3
+
+[[feature]]
+id = "org.aros.afsplus:intent-log"
+short = "intent-log"
+class = "incompat"
+state_model = "disabled-enabled-active"
+lifecycle = "experimental"
+authoritative = true
+rebuildable = false
+discardable = false
+description = "Bounded logical durability log layered over checkpoint COW (ADR-037/063). Unknown active records cannot be ignored by a read-write mount."
+
+[[feature]]
+id = "org.aros.afsplus:intent-log-data-updates"
+short = "intent-log-data-updates"
+class = "incompat"
+state_model = "disabled-enabled-active"
+lifecycle = "experimental"
+authoritative = true
+rebuildable = false
+discardable = false
+description = "Intent-log version-3 write/truncate records may reference already durable replacement COW data. Requires org.aros.afsplus:intent-log; older namespace-only replay implementations must reject the volume (ADR-064)."
 
 [[feature]]
 id = "org.aros.afsplus:catalog"

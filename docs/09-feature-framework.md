@@ -1,7 +1,8 @@
 # 09. Feature Framework
 
-> **ADRs:** none · **Spec:** none ·
-> **Tests:** none · **Milestones:** none
+> **ADRs:** [ADR-064](../adr/ADR-064-intent-log-data-update-compatibility.md) ·
+> **Spec:** [feature registry](../spec/feature-registry.toml) ·
+> **Tests:** `crates/afsplus-format/tests/roundtrip.rs` · **Milestones:** M00, M14
 
 <!-- toc -->
 
@@ -53,11 +54,17 @@ org.aros.afsplus:inline-data
 The on-disk representation may use compact numeric IDs for standardized core features, but tools must retain a stable globally unique textual identity.
 
 The current prototype identification block carries compact `COMPAT`,
-`RO_COMPAT`, and `INCOMPAT` summaries. The first assigned identity is:
+`RO_COMPAT`, and `INCOMPAT` summaries. Assigned incompatible identities are:
 
 ```text
 INCOMPAT bit 0 = org.aros.afsplus:intent-log
+INCOMPAT bit 1 = org.aros.afsplus:intent-log-data-updates
 ```
+
+Bit 1 depends on bit 0. It distinguishes version-3 records that may reference
+replacement COW data for an existing file from the namespace-only version-2
+record set. This prevents an older log-aware writer from treating a valid but
+unknown record as an ignorable torn tail ([ADR-064](../adr/ADR-064-intent-log-data-update-compatibility.md)).
 
 This summary is executable at mount; it does not replace future registry
 records for dependencies, lifecycle state, or feature parameters.

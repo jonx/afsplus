@@ -47,6 +47,11 @@ pub const LABEL_MAX_BYTES: usize = 64;
 /// The intent-log area and its replay semantics must be understood by every
 /// implementation that opens the volume (ADR-037).
 pub const INCOMPAT_INTENT_LOG: u64 = 1 << 0;
+/// Intent-log record version 3 may reference replacement data for an
+/// existing file. A separate INCOMPAT identity keeps older version-2
+/// implementations from treating an unknown valid record as an empty/torn
+/// tail and silently losing a completed fsync (ADR-064).
+pub const INCOMPAT_INTENT_LOG_DATA_UPDATES: u64 = 1 << 1;
 
 /// Shared data extents (ADR-061): reference counts must be honoured on every
 /// write and free, so an implementation without support mounts read-only.
@@ -270,6 +275,13 @@ impl Identification {
         if (self.log_slots > 0) != (self.features.incompat & INCOMPAT_INTENT_LOG != 0) {
             return Err(FormatError::Invalid(
                 "intent-log slots and incompatible feature bit disagree",
+            ));
+        }
+        if self.features.incompat & INCOMPAT_INTENT_LOG_DATA_UPDATES != 0
+            && self.features.incompat & INCOMPAT_INTENT_LOG == 0
+        {
+            return Err(FormatError::Invalid(
+                "intent-log data updates require the base intent-log feature",
             ));
         }
         match self.name_key_algorithm {

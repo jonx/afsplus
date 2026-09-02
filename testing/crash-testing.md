@@ -1,7 +1,28 @@
 # Crash and Power-Failure Testing
 
-> **ADRs:** none · **Spec:** none ·
-> **Tests:** none · **Milestones:** M03, M04
+> **ADRs:** [ADR-020](../adr/ADR-020-checkpoint-commit.md),
+> [ADR-063](../adr/ADR-063-intent-log-epoch1.md) ·
+> **Spec:** [invariants](../spec/invariants.md) ·
+> **Tests:** [intent-log qualification](intent-log-write-truncate-qualification.md) ·
+> **Milestones:** M03, M04
+
+<!-- toc -->
+
+- [Goal](#goal)
+- [Fault model](#fault-model)
+- [Core transaction workloads](#core-transaction-workloads)
+- [Checkpoint-specific failure matrix](#checkpoint-specific-failure-matrix)
+- [Allocation safety regressions](#allocation-safety-regressions)
+  - [Unknown allocator metadata](#unknown-allocator-metadata)
+  - [Deferred-free resource exhaustion](#deferred-free-resource-exhaustion)
+  - [Tiny cache eviction pressure](#tiny-cache-eviction-pressure)
+  - [Rename ENOSPC/failure at every step](#rename-enospcfailure-at-every-step)
+  - [Geometry and arithmetic](#geometry-and-arithmetic)
+- [Deferred-reclamation tests](#deferred-reclamation-tests)
+- [Validation after every crash](#validation-after-every-crash)
+- [Block reuse across generations](#block-reuse-across-generations)
+
+<!-- /toc -->
 
 ## Goal
 
@@ -113,6 +134,14 @@ Delete/truncate very large synthetic objects, crash after every reclamation batc
 7. verify quarantined blocks are never in allocatable free space
 
 A result that requires ordinary fsck repair after every injected crash does not satisfy the normal transaction guarantee.
+
+For an acknowledged intent-log update, repeat the same cut matrix during the
+recovery transaction itself and remount the resulting image again. Recovery
+must either finish the new checkpoint or leave the original checkpoint plus
+log replayable; it may not consume the only durable copy of the intent before
+publication. Existing-file write/truncate cases, monotone fsync prefixes and
+shared-range splits are enumerated in the
+[intent-log gate](intent-log-write-truncate-qualification.md).
 
 ## Block reuse across generations
 

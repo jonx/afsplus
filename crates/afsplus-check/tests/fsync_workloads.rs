@@ -1,9 +1,8 @@
 //! Git-style fsync workload measurements (architecture blocker 2).
 //!
-//! Every prototype transaction is a full checkpoint commit with its own
-//! barriers, so these workloads measure exactly what a small durable
-//! operation costs under checkpoint COW — the number an intent log would
-//! have to beat. Three patterns dominate Git and package-manager behavior:
+//! The workloads compare full checkpoint commits, group commit and the
+//! experimental intent log under the same traced block backend. Three
+//! patterns dominate Git, package-manager and database behavior:
 //!
 //! - `ref update`: create a lock file, remove the old target, rename the
 //!   lock over it (three transactions today; an atomic-replace rename would
@@ -134,22 +133,44 @@ fn print_table(rows: &[WorkloadRow]) {
             c.checkpoint_blocks_written as f64 / txs,
         );
     }
-    // The comparison an intent log has to justify itself against: one log
-    // record write plus one barrier per durable op, with the full checkpoint
-    // amortized over a configurable window.
-    println!("\nintent-log envelope for contrast (1 log write + 1 flush per op,");
-    println!("checkpoint amortized every 64 ops at current per-tx cost):");
-    for row in rows {
-        let ops = row.logical_ops as f64;
-        let txs = row.totals.transactions.max(1) as f64;
-        let ckpt_writes_per_tx = row.io.writes as f64 / txs;
-        let est_writes = 1.0 + ckpt_writes_per_tx / 64.0;
-        let est_flushes = 1.0 + 3.0 / 64.0;
-        println!(
-            "{:<22} est {est_writes:>5.2} wr/op {est_flushes:>5.2} flush/op vs measured {:>5.1} / {:>4.1}",
-            row.name,
-            row.io.writes as f64 / ops,
-            row.io.flushes as f64 / ops,
+}
+
+fn assert_existing_file_log_gate(rows: &[WorkloadRow]) {
+    let row = |name| {
+        rows.iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("missing workload row {name}"))
+    };
+    let logged_append = row("logged append(64)");
+    let logged_db = row("logged db hotset(64)");
+    let checkpoint_append = row("durable log append");
+    let per_op = |value: u64, row: &WorkloadRow| value as f64 / row.logical_ops.max(1) as f64;
+
+    assert!(
+        per_op(logged_append.io.writes, logged_append)
+            < per_op(checkpoint_append.io.writes, checkpoint_append),
+        "logged append must beat checkpoint-per-fsync write amplification"
+    );
+    assert!(
+        per_op(logged_append.io.reads, logged_append)
+            < per_op(checkpoint_append.io.reads, checkpoint_append),
+        "logged append must beat checkpoint-per-fsync read amplification"
+    );
+    for logged in [logged_append, logged_db] {
+        assert!(
+            per_op(logged.io.writes, logged) < 3.0,
+            "{} exceeds the three-write data-log envelope",
+            logged.name
+        );
+        assert!(
+            per_op(logged.io.flushes, logged) < 2.1,
+            "{} exceeds data + record barriers with bounded checkpoint amortization",
+            logged.name
+        );
+        assert!(
+            per_op(logged.io.reads, logged) < 3.0,
+            "{} replay-window read amplification regressed",
+            logged.name
         );
     }
 }
@@ -215,7 +236,10 @@ fn run_workloads(updates: u64, files: u64, appends: u64) -> Vec<WorkloadRow> {
             totals.absorb(vol.last_commit_stats().unwrap());
         }
     }
-    vol.window_commit(ts(updates as i64)).unwrap();
+    if !updates.is_multiple_of(64) {
+        vol.window_commit(ts(updates as i64)).unwrap();
+        totals.absorb(vol.last_commit_stats().unwrap());
+    }
     totals.wall_micros = start.elapsed().as_micros();
     let io = vol.device_mut().stats();
     rows.push(WorkloadRow {
@@ -340,7 +364,74 @@ fn run_workloads(updates: u64, files: u64, appends: u64) -> Vec<WorkloadRow> {
     let report = check_device(&mut dev);
     assert!(report.is_clean(), "{:?}", report.errors);
 
-    // --- durable log appends ---------------------------------------------
+    // --- durable appends through existing-file intent records ------------
+    let mut vol = fresh_volume(65_536);
+    let id = vol
+        .create_file_in_root("logged-append", b"", ts(0))
+        .unwrap();
+    vol.device_mut().reset();
+    let mut totals = Totals::default();
+    let start = Instant::now();
+    for i in 0..appends {
+        vol.window_write_file_at(id, i * 200, &[i as u8; 200], ts(i as i64))
+            .unwrap();
+        vol.window_fsync().unwrap();
+        if (i + 1).is_multiple_of(64) {
+            vol.window_commit(ts(i as i64)).unwrap();
+            totals.absorb(vol.last_commit_stats().unwrap());
+        }
+    }
+    if !appends.is_multiple_of(64) {
+        vol.window_commit(ts(appends as i64)).unwrap();
+        totals.absorb(vol.last_commit_stats().unwrap());
+    }
+    totals.wall_micros = start.elapsed().as_micros();
+    let io = vol.device_mut().stats();
+    rows.push(WorkloadRow {
+        name: "logged append(64)",
+        logical_ops: appends,
+        totals,
+        io,
+    });
+    let mut dev = vol.into_device().into_inner();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+
+    // --- durable database hot-set writes through the intent log ----------
+    let mut vol = fresh_volume(65_536);
+    let id = vol
+        .create_file_in_root("database", &vec![0u8; 32 * BS], ts(0))
+        .unwrap();
+    vol.device_mut().reset();
+    let mut totals = Totals::default();
+    let start = Instant::now();
+    for i in 0..appends {
+        let page = (i * 17) % 32;
+        vol.window_write_file_at(id, page * BS as u64, &vec![i as u8; BS], ts(i as i64))
+            .unwrap();
+        vol.window_fsync().unwrap();
+        if (i + 1).is_multiple_of(64) {
+            vol.window_commit(ts(i as i64)).unwrap();
+            totals.absorb(vol.last_commit_stats().unwrap());
+        }
+    }
+    if !appends.is_multiple_of(64) {
+        vol.window_commit(ts(appends as i64)).unwrap();
+        totals.absorb(vol.last_commit_stats().unwrap());
+    }
+    totals.wall_micros = start.elapsed().as_micros();
+    let io = vol.device_mut().stats();
+    rows.push(WorkloadRow {
+        name: "logged db hotset(64)",
+        logical_ops: appends,
+        totals,
+        io,
+    });
+    let mut dev = vol.into_device().into_inner();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+
+    // --- durable checkpointed log appends --------------------------------
     let mut vol = fresh_volume(65_536);
     let id = vol.create_file_in_root("log", b"", ts(0)).unwrap();
     vol.device_mut().reset();
@@ -370,6 +461,7 @@ fn run_workloads(updates: u64, files: u64, appends: u64) -> Vec<WorkloadRow> {
 fn fsync_workload_smoke() {
     let rows = run_workloads(40, 120, 120);
     print_table(&rows);
+    assert_existing_file_log_gate(&rows);
     for row in &rows {
         let ops = row.logical_ops.max(1) as f64;
         let txs = row.totals.transactions.max(1) as f64;
@@ -397,4 +489,5 @@ fn fsync_workload_smoke() {
 fn fsync_workload_qualification() {
     let rows = run_workloads(1_000, 4_000, 4_000);
     print_table(&rows);
+    assert_existing_file_log_gate(&rows);
 }

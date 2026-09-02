@@ -7,7 +7,7 @@
 //! [`scan`] returns the valid record prefix for one base checkpoint
 //! generation: records must decode, bind to the volume UUID and that exact
 //! generation, carry contiguous sequences from 1, reference in-bounds
-//! extents, and (for creates) match their content CRC. The first failure
+//! extents, and match every referenced content CRC. The first failure
 //! ends the prefix — with barriers ordered as written, a durable record can
 //! never follow a lost one, so everything past the first invalid slot
 //! belongs to an fsync that never completed.
@@ -43,11 +43,13 @@ pub fn scan<D: BlockDevice>(
     log_slots: u16,
     uuid: &[u8; 16],
     base_generation: u64,
+    allow_data_updates: bool,
 ) -> Result<ScannedLog, CoreError> {
     let slots = log_slot_lbas(geo, log_slots)?;
     let mut buf = vec![0u8; geo.block_size];
     let mut records = Vec::new();
     let mut tail_note = None;
+    let mut referenced_data = Vec::new();
     for (index, lba) in slots.iter().enumerate() {
         dev.read_block(*lba, &mut buf)?;
         let record = match LogRecord::decode(&buf) {
@@ -65,7 +67,13 @@ pub fn scan<D: BlockDevice>(
             ));
             break;
         }
-        match verify_record_contents(dev, geo, &record) {
+        if !allow_data_updates && record.ops.iter().any(LogOp::is_existing_file_update) {
+            return Err(CoreError::Corrupt(format!(
+                "intent-log record {} uses existing-file data operations without their INCOMPAT feature",
+                record.sequence
+            )));
+        }
+        match verify_record_contents(dev, geo, &record, &mut referenced_data) {
             Ok(()) => records.push(record),
             Err(reason) => {
                 // A durable record over torn data: that fsync never
@@ -83,19 +91,46 @@ fn verify_record_contents<D: BlockDevice>(
     dev: &mut D,
     geo: &Geometry,
     record: &LogRecord,
+    referenced_data: &mut Vec<(u64, u64)>,
 ) -> Result<(), String> {
     let mut buf = vec![0u8; geo.block_size];
     for op in &record.ops {
-        let LogOp::Create {
-            extents,
-            size_bytes,
-            content_crc,
-            ..
-        } = op
-        else {
-            continue;
+        let (extents, mut remaining, content_crc) = match op {
+            LogOp::Create {
+                extents,
+                size_bytes,
+                content_crc,
+                ..
+            } => (extents.as_slice(), *size_bytes, *content_crc),
+            LogOp::Write {
+                extents,
+                content_crc,
+                ..
+            }
+            | LogOp::Truncate {
+                extents,
+                content_crc,
+                ..
+            } => {
+                let blocks = extents.iter().try_fold(0u64, |total, (_, blocks)| {
+                    total.checked_add(u64::from(*blocks))
+                });
+                let Some(blocks) = blocks else {
+                    return Err(format!(
+                        "log record {} data block count overflows",
+                        record.sequence
+                    ));
+                };
+                let Some(bytes) = blocks.checked_mul(geo.block_size as u64) else {
+                    return Err(format!(
+                        "log record {} data byte count overflows",
+                        record.sequence
+                    ));
+                };
+                (extents.as_slice(), bytes, *content_crc)
+            }
+            LogOp::Delete { .. } | LogOp::Rename { .. } => continue,
         };
-        let mut remaining = *size_bytes as usize;
         let mut hasher = Hasher::new();
         for (start, blocks) in extents {
             let end = start + *blocks as u64;
@@ -108,14 +143,24 @@ fn verify_record_contents<D: BlockDevice>(
                     record.sequence
                 ));
             }
+            if referenced_data
+                .iter()
+                .any(|(other_start, other_end)| *other_start < end && *start < *other_end)
+            {
+                return Err(format!(
+                    "log record {} reuses data extent {start}+{blocks}",
+                    record.sequence
+                ));
+            }
+            referenced_data.push((*start, end));
             for lba in *start..end {
                 if remaining == 0 {
                     break;
                 }
                 dev.read_block(lba, &mut buf).map_err(|e| e.to_string())?;
-                let take = remaining.min(geo.block_size);
+                let take = remaining.min(geo.block_size as u64) as usize;
                 hasher.update(&buf[..take]);
-                remaining -= take;
+                remaining -= take as u64;
             }
         }
         if remaining != 0 {
@@ -124,7 +169,7 @@ fn verify_record_contents<D: BlockDevice>(
                 record.sequence
             ));
         }
-        if hasher.finalize() != *content_crc {
+        if hasher.finalize() != content_crc {
             return Err(format!(
                 "log record {} content CRC mismatch (torn data)",
                 record.sequence

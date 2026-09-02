@@ -18,8 +18,8 @@ use afsplus_format::checkpoint::{Checkpoint, RegionRecord};
 use afsplus_format::crc32c::CHECKSUM_CRC32C;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::ident::{
-    FeatureFlags, Identification, NameKeyAlgorithm, INCOMPAT_INTENT_LOG, RO_COMPAT_SHARED_EXTENTS,
-    UNICODE_VERSION_16_0_0,
+    FeatureFlags, Identification, NameKeyAlgorithm, INCOMPAT_INTENT_LOG,
+    INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_SHARED_EXTENTS, UNICODE_VERSION_16_0_0,
 };
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::reclaim::{ReclaimCaps, ReclaimRoot};
@@ -215,7 +215,7 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         log_slots: params.log_slots,
         features: FeatureFlags {
             incompat: if params.log_slots > 0 {
-                INCOMPAT_INTENT_LOG
+                INCOMPAT_INTENT_LOG | INCOMPAT_INTENT_LOG_DATA_UPDATES
             } else {
                 0
             },
