@@ -16,6 +16,7 @@ cargo test -p afsplus-check --test fsync_workloads --release -- --ignored --noca
 - [Intent-log envelope](#intent-log-envelope)
 - [Phase A measured: group commit](#phase-a-measured-group-commit)
 - [Phase B measured: the intent log wins its gate](#phase-b-measured-the-intent-log-wins-its-gate)
+- [Requalification and coverage boundary](#requalification-and-coverage-boundary)
 - [What the data supports](#what-the-data-supports)
 
 <!-- /toc -->
@@ -138,13 +139,41 @@ Two design points the prototype settled the hard way:
   pair from the fsync group; logged ones sacrifice the blocks to the
   reclaim queue at commit.
 
+## Requalification and coverage boundary
+
+The same optimized harness was rerun on 2026-09-02 after shared extents and
+the Q1 private-in-place experiment landed. The ratios were stable:
+
+| path | writes/op | flushes/op | reads/op | memory-backend wall |
+|---|---:|---:|---:|---:|
+| intent-log ref update | 2.152 | 1.032 | 0.336 | 25 ms |
+| group-committed ref update | 10.0 | 3.0 | 21.0 | 262 ms |
+| original ref update | 26.992 | 6.998 | 49.983 | 626 ms |
+| checkpointed 200-byte append | 9.037 | 3.0 | 18.962 | 2,575 ms |
+
+The seven intent-log tests and ten shared-extent crash tests also passed in
+the optimized build, including every recorded write/flush cut, torn created
+content, shared unlink and rename-replacement replay.
+
+There is one material scope boundary: the executable log record contains
+create/delete/rename operations. It can durably publish the bytes of a newly
+created file by referencing and checksumming its fresh extents, but it cannot
+yet represent a write or truncate of an existing file. Consequently the
+append row is a measured checkpoint baseline and an estimated motivation for
+future log coverage, not a measured logged-append result. The current evidence
+supports the log architecture for its implemented namespace window; a
+universal cheap-file-`fsync` claim requires write/truncate log records, replay,
+checker validation, and their own crash matrix before the record format can
+freeze.
+
 ## What the data supports
 
 1. **Checkpoint-per-operation is not viable as the only durability path**
-   for Git/package/database workloads: 9–27 block writes and 3–7 barriers
-   per logical operation is a 8–24× write amplification and a ~3× barrier
-   multiplier over a log-based design, on the workloads AFS+ names as
-   primary targets.
+   for Git/package workloads: 9–27 block writes and 3–7 barriers per logical
+   operation is a 8–24× write amplification and a ~3× barrier multiplier over
+   the implemented log path. Database-style rewrite cost is established by
+   the separate [Q1 bake-off](data-policy-bakeoff.md), but its intent-log path
+   is not implemented yet.
 2. **Two separable mechanisms, two problems — now both measured.** Group
    commit (implemented, measured above) solves burst throughput without
    format change and doubles as the ADR-026 atomic-batch primitive. The
@@ -160,5 +189,6 @@ Two design points the prototype settled the hard way:
    update — 6.8× fewer barriers than the original sequence). They compose:
    the log is precisely how an fsync becomes cheap between group-committed
    checkpoints. The measured recommendation is to keep both, with the log
-   remaining an experimental feature until its record format survives the
-   broader workload suite and the epoch-1 feature-flag decision.
+   remaining an experimental feature until existing-file write/truncate
+   replay survives the same workload and crash suite and the epoch-1
+   feature-flag decision is made.
