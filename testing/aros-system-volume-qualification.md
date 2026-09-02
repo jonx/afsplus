@@ -104,18 +104,19 @@ a 680x0 CPU, a few MiB of memory, an IDE/CompactFlash controller or a real
 rotating disk.
 
 The project has three target platforms and four ordered validation stages.
-Hosted MacAROS/macOS and native MacAROS/Apple Silicon are the first two target
-platforms. The Amiga 500/m68k is the third; it is deliberately qualified in two
-stages, emulator first and physical machine second. Results from the four
-stages are published separately and never averaged:
+Hosted MacAROS/macOS is the first target. The Amiga 500/m68k is the second and
+is deliberately qualified in two stages, emulator first and physical machine
+second. Native MacAROS/Apple Silicon is the third target and runs last, after a
+bare-metal target exists. Results from the four stages are published separately
+and never averaged:
 
 1. Hosted MacAROS on macOS: modern AROS software cost and the primary rapid
    development regression gate;
-2. native MacAROS on Apple Silicon: bare-metal integration without the Hosted
-   transport or host filesystem in the execution path;
-3. Amiga 500/m68k emulation: deterministic CPU, RAM and controller model for
+2. Amiga 500/m68k emulation: deterministic CPU, RAM and controller model for
    instrumentation, repeatability and crash testing before physical media; and
-4. physical Amiga 500: named CPU, RAM, controller and storage medium.
+3. physical Amiga 500: named CPU, RAM, controller and storage medium; and
+4. native MacAROS on Apple Silicon: bare-metal integration without the Hosted
+   transport or host filesystem in the execution path, once that target exists.
 
 Explicit cache budgets or CPU constraints may be applied inside a stage for
 sensitivity analysis, but a constrained Hosted result is not promoted to an

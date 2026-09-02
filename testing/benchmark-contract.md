@@ -82,10 +82,12 @@ Where platform permits, compare against representative filesystems such as:
 Cross-filesystem results must state platform, mount options, cache state, storage medium, OS version, and whether the filesystem is native or FUSE/user-space.
 
 Native AROS system-volume qualification follows three target platforms in four
-ordered stages: Hosted MacAROS, native MacAROS, Amiga 500/m68k emulation, then
-the physical Amiga 500. Constrained resource profiles are measurements within
-a stage, not an additional platform. The detailed separation rules are defined
-in [`testing/aros-system-volume-qualification.md`](aros-system-volume-qualification.md).
+ordered stages: Hosted MacAROS, Amiga 500/m68k emulation, the physical Amiga
+500, then native MacAROS on Apple Silicon. The native MacAROS gate applies
+after its bare-metal target exists. Constrained resource profiles are
+measurements within a stage, not an additional platform. The detailed
+separation rules are defined in
+[`testing/aros-system-volume-qualification.md`](aros-system-volume-qualification.md).
 
 ## 3. Mandatory workload classes
 

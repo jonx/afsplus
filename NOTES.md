@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Qualification order follows executable targets](#2026-09-03--qualification-order-follows-executable-targets)
 - [2026-09-03 — macFUSE FSKit reopens the host fsync gate](#2026-09-03--macfuse-fskit-reopens-the-host-fsync-gate)
 - [2026-09-03 — Logged data fsync reaches the portable Rust adapters](#2026-09-03--logged-data-fsync-reaches-the-portable-rust-adapters)
 - [2026-09-03 — Intent-log writes and truncates survive nested recovery crashes](#2026-09-03--intent-log-writes-and-truncates-survive-nested-recovery-crashes)
@@ -23,6 +24,23 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Qualification order follows executable targets
+
+The owner reordered the four platform-validation stages so an unavailable
+bare-metal target cannot block executable qualification. The sequence is
+Hosted MacAROS, Amiga 500/m68k emulation, the physical A500, then native
+MacAROS on Apple Silicon after that system exists. These are three target
+platforms: the emulator and physical A500 are two stages for the same classic
+target.
+
+This ordering change does not weaken the reopened host `fsync` verdict. The
+real FSKit mount proves that the syscall returns without delivering a FUSE
+`FSYNC` request to AFS+, while direct VFS and FUSE-protocol tests exercise the
+expected durability path. The defect is therefore below the AFS+ engine, in
+the macFUSE-FSKit/Apple-FSKit path. The trace does not by itself assign the bug
+between macFUSE's shim and Apple's FSKit plumbing; a stock macFUSE loopback
+reproducer is the attribution gate.
 
 ## 2026-09-03 — macFUSE FSKit reopens the host fsync gate
 

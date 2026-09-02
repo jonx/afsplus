@@ -374,18 +374,20 @@ verdict, so that lower result cannot be attributed to AFS+.
 
 `afsram.device` writes only the retained boot image. `CMD_UPDATE` therefore
 tests the filesystem/device ordering path but cannot make data survive reset.
-The extracted replay proof is not reset durability: a persistent native device,
-controlled in-guest power cuts and Apple-hardware execution remain unproven.
-The package contract next requires native Apple hardware and the physical
-Amiga 500: three target platforms, four ordered validation stages.
+The extracted replay proof is not reset durability: persistent native-device,
+controlled in-guest power-cut and Apple-hardware execution are separate gates.
+The package contract orders its four validation stages as Hosted MacAROS,
+Amiga 500/m68k emulation, the physical Amiga 500, then native MacAROS on Apple
+Silicon. The last gate applies after a bare-metal MacAROS target exists.
 
-The fixed-image Alpha-0 path does not yet install `TD_ADDCHANGEINT` handling.
-Hot-swappable media remains disabled until removal can detach the mounted Rust
-instance and DOS volume without racing outstanding locks.
+The fixed-image Alpha-0 path excludes `TD_ADDCHANGEINT` handling. Hot-swappable
+media is disabled unless removal can detach the mounted Rust instance and DOS
+volume without racing outstanding locks.
 
-The experimental m68k Rust `std` toolchain now builds and runs the complete
-reference handler for both M68020+ and plain M68000. This is a functional and
-recovery result, not yet the production A500 path: the compiler/PAL remains
-experimental, classic memory and performance budgets remain unset, and the
-physical-machine gate is still open. A bounded `no_std + alloc` or portable-C
-profile remains the fallback for machines where the Rust profile is too costly.
+The experimental m68k Rust `std` toolchain builds and runs the complete
+reference handler for both M68020+ and plain M68000. It is a functional and
+recovery path rather than the production A500 profile: the compiler/PAL is
+experimental, and classic memory and performance budgets plus the
+physical-machine gate are separate qualifications. A bounded `no_std + alloc`
+or portable-C profile is the fallback for machines where the Rust profile is
+too costly.

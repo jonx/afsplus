@@ -38,6 +38,8 @@ a post-bootstrap `SYS:` pivot and a boot-selected AFS+ volume are separate
 acceptance claims.
 
 Platform reporting uses three targets and four ordered validation stages:
-Hosted MacAROS on macOS, native MacAROS on Apple Silicon, Amiga 500/m68k under
-emulation, then the same classic target on a physical A500. The emulator is the
-repeatable pre-hardware gate for the third platform, not a fourth platform.
+Hosted MacAROS on macOS, Amiga 500/m68k under emulation, the same classic
+target on a physical A500, then native MacAROS on Apple Silicon. The emulator
+is the repeatable pre-hardware gate for the second platform, not a fourth
+platform; native MacAROS is ordered last because its bare-metal target must
+exist before that gate can run.
