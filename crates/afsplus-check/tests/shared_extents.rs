@@ -8,10 +8,15 @@
 
 use std::collections::BTreeMap;
 
-use afsplus_block::{for_each_crash_state, MemoryBackend, RecordedOp, RecordingBackend};
+use afsplus_block::{
+    for_each_crash_state, BlockDevice, MemoryBackend, RecordedOp, RecordingBackend,
+};
 use afsplus_check::check_device;
+use afsplus_core::shared_extents::{self, LoadedSharedExtents, SharedRun};
 use afsplus_core::{mkfs, mount, MkfsParams, Volume};
-use afsplus_format::Timespec;
+use afsplus_format::geometry::Geometry;
+use afsplus_format::tree::{key_u64, TreeItem, TreeKind, TreeNode};
+use afsplus_format::{le, Timespec};
 
 const BS: usize = 4096;
 
@@ -301,6 +306,35 @@ fn formatted(label: &str) -> MemoryBackend {
     device
 }
 
+fn raw_shared_item(start: u64, blocks: u64, references: u32, flags: u32) -> TreeItem {
+    let mut value = vec![0u8; shared_extents::VALUE_SIZE];
+    le::put_u64(&mut value[0..8], blocks);
+    le::put_u32(&mut value[8..12], references);
+    le::put_u32(&mut value[12..16], flags);
+    TreeItem {
+        key: key_u64(start).to_vec(),
+        value,
+    }
+}
+
+/// Builds a real checksummed AFST leaf. Invalid cases therefore exercise the
+/// shared adapter's semantic validation rather than being rejected by a bad
+/// containing-block checksum first.
+fn load_raw_shared(items: Vec<TreeItem>) -> Result<LoadedSharedExtents, afsplus_core::CoreError> {
+    const ROOT_LBA: u64 = 20;
+    let geometry = Geometry {
+        block_size: BS,
+        total_blocks: 128,
+        region_size: 128,
+    };
+    let mut node = TreeNode::leaf(TreeKind::SharedExtents, 0);
+    node.subtree_items = items.len() as u64;
+    node.items = items;
+    let mut device = MemoryBackend::new(BS, geometry.total_blocks);
+    device.write_block(ROOT_LBA, &node.encode(BS, 1).unwrap())?;
+    shared_extents::load_all(&mut device, &geometry, ROOT_LBA, 1)
+}
+
 #[test]
 fn oracle_omits_private_maps_and_counts_identical_maps() {
     assert_eq!(expected_shared_runs(&[]).unwrap(), []);
@@ -503,6 +537,60 @@ fn sparse_oracle_matches_an_independent_naive_model() {
             "oracle disagreement in generated case {case}: {mappings:?}"
         );
     }
+}
+
+#[test]
+fn checksummed_shared_tree_rejects_bad_counts_bounds_and_flags() {
+    let valid = load_raw_shared(vec![raw_shared_item(40, 8, 2, 0)]).unwrap();
+    assert_eq!(
+        valid.records,
+        [SharedRun {
+            physical_start: 40,
+            block_count: 8,
+            reference_count: 2,
+            flags: 0,
+        }]
+    );
+
+    for (label, item) in [
+        ("zero length", raw_shared_item(40, 0, 2, 0)),
+        ("count below two", raw_shared_item(40, 8, 1, 0)),
+        ("reserved flags", raw_shared_item(40, 8, 2, 1)),
+        ("reserved address", raw_shared_item(1, 2, 2, 0)),
+        ("outside volume", raw_shared_item(127, 2, 2, 0)),
+    ] {
+        assert!(
+            load_raw_shared(vec![item]).is_err(),
+            "checksummed {label} record was accepted"
+        );
+    }
+}
+
+#[test]
+fn checksummed_shared_tree_rejects_overlap_and_nonmaximal_runs() {
+    assert!(
+        load_raw_shared(vec![
+            raw_shared_item(40, 8, 2, 0),
+            raw_shared_item(44, 8, 3, 0),
+        ])
+        .is_err(),
+        "overlapping records were accepted"
+    );
+    assert!(
+        load_raw_shared(vec![
+            raw_shared_item(40, 4, 2, 0),
+            raw_shared_item(44, 4, 2, 0),
+        ])
+        .is_err(),
+        "adjacent equal-count records were accepted"
+    );
+
+    let distinct = load_raw_shared(vec![
+        raw_shared_item(40, 4, 2, 0),
+        raw_shared_item(44, 4, 3, 0),
+    ])
+    .unwrap();
+    assert_eq!(distinct.records.len(), 2);
 }
 
 #[test]
