@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Portable C emits its first version-3 data mutation](#2026-09-03--portable-c-emits-its-first-version-3-data-mutation)
 - [2026-09-03 — Portable C creates empty files without an allocator](#2026-09-03--portable-c-creates-empty-files-without-an-allocator)
 - [2026-09-03 — Portable C trades caller RAM for 7x fewer writer reads](#2026-09-03--portable-c-trades-caller-ram-for-7x-fewer-writer-reads)
 - [2026-09-03 — Intent replay makes final namespace removal bounded](#2026-09-03--intent-replay-makes-final-namespace-removal-bounded)
@@ -42,6 +43,25 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Portable C emits its first version-3 data mutation
+
+The ABI-1 C writer now appends data-free truncates of existing regular files.
+It supports sparse growth, zeroing and block-aligned shrink without allocating
+media or publishing a checkpoint. A same-size request succeeds with an
+explicit zero-I/O result. Unaligned shrink instead returns
+`AFSPW_ERR_TAIL_REWRITE_REQUIRED`: exposing stale bytes from a materialized
+partial tail would be worse than delaying that case until the COW data
+allocator exists.
+
+The C reader observes the new size immediately, and Rust replay verifies both
+zero shrink and growth to 12,295 bytes with an exact zero-filled suffix before
+running the checker. Version-3 feature absence and unsupported tail rewrite
+both write nothing. Torn-record retry and flush uncertainty retain the same
+diagnostic contract as namespace records. At a seven-record prefix the cached
+path uses 21 reads, the 8 KiB path uses 178, and a cached retry uses 42; the
+shared writer setup refactor lowers the largest measured m68k writer-function
+frame to 740 bytes.
 
 ## 2026-09-03 — Portable C creates empty files without an allocator
 

@@ -15,6 +15,14 @@ int afspr_internal_validate_object_watermark(
     const struct afspr_probe_result *volume, uint64_t next_object_id,
     struct afspr_diagnostic *diagnostic, size_t diagnostic_size);
 
+/* `view` must come from a successful immediately preceding log scan. */
+int afspr_internal_intent_file_size(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_probe_result *volume,
+    const struct afspr_intent_view *view, uint64_t object_id,
+    uint64_t *size_bytes, struct afspr_diagnostic *diagnostic,
+    size_t diagnostic_size);
+
 int afspr_internal_preflight_file_namespace(
     const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
     const struct afspr_probe_result *volume, uint64_t source_parent_id,

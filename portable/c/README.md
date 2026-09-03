@@ -9,7 +9,7 @@ integrations. It shares no executable code with the Rust implementation.
 - [ABI and capability policy](#abi-and-capability-policy)
 - [Runtime contract](#runtime-contract)
 - [Durable intent-log view](#durable-intent-log-view)
-- [Bounded classic-rw namespace operations](#bounded-classic-rw-namespace-operations)
+- [Bounded classic-rw mutations](#bounded-classic-rw-mutations)
 - [Validation](#validation)
 - [Fuzzing and exact reproduction](#fuzzing-and-exact-reproduction)
 
@@ -162,16 +162,17 @@ the base reader's structural behavior, whose stored non-ASCII comparison keys
 cannot receive a semantic name/key cross-check until frozen Unicode 16 tables
 are present.
 
-## Bounded classic-rw namespace operations
+## Bounded classic-rw mutations
 
 `afspw_create_empty_file`, `afspw_rename_file_no_replace`,
-`afspw_delete_file` and `afspw_rename_file_replace` are the independent
-media-mutating C namespace slice. Each freshly probes the volume, rescans and
-semantically validates the durable namespace, proves the relevant directory
-and regular-file operands and writes one version-2 record into the next
-preallocated intent slot, then invokes exactly one flush. Empty create derives
-its returned object ID from the complete validated prefix, including gaps left
-by prior logged creates.
+`afspw_delete_file`, `afspw_rename_file_replace` and
+`afspw_truncate_file` are the independent media-mutating C slice. Each freshly
+probes the volume, rescans and semantically validates the durable view, proves
+the relevant operands and writes one record into the next preallocated intent
+slot, then invokes exactly one flush. Namespace calls use version 2. Data-free
+truncate uses version 3 and requires its incompatible feature. Empty create
+derives its returned object ID from the complete validated prefix, including
+gaps left by prior logged creates.
 They allocate no disk block and publish no checkpoint. The caller supplies
 read/write/flush callbacks, exclusive writer serialization and immutable name
 buffers. The hard minimum remains 8 KiB. Extra complete 4 KiB blocks in the
@@ -187,14 +188,21 @@ whether to retry. A full log returns `AFSPW_ERR_LOG_FULL` without write or
 flush and requires a checkpoint-capable implementation to materialize the
 prefix.
 
+`afspw_truncate_file` supports sparse growth and block-aligned shrink. A
+same-size request is a successful zero-I/O no-op reported explicitly in its
+result. An unaligned shrink fails with
+`AFSPW_ERR_TAIL_REWRITE_REQUIRED` before media I/O: conservatively rewriting
+the retained partial block needs the later COW data-allocation slice, even
+when a particular layout might prove that the tail is already sparse.
+
 Delete and replacement require the ADR-066 orphan-directory feature. Rust
 replay preclaims logged data, then moves each final victim into persistent
 orphan state in the same checkpoint, lazily creating object 2 there if needed;
 it never retires the victim layout in proportion to fragmentation. Directory
-Directory rename, nonempty create, data write, truncate, allocation, orphan
-maintenance and checkpoint publication remain later `classic-rw` slices. Modern Unicode
-profiles currently accept ASCII lookup names in this C path; legacy identity
-volumes retain exact UTF-8 lookup.
+rename, nonempty create, data write, unaligned shrinking truncate, allocation,
+orphan maintenance and checkpoint publication remain later `classic-rw`
+slices. Modern Unicode profiles currently accept ASCII lookup names in this C
+path; legacy identity volumes retain exact UTF-8 lookup.
 
 ## Validation
 
@@ -224,28 +232,32 @@ flag on a data-policy volume, while the primary fixture injects the same flag
 without its feature and requires object-decode failure.
 
 The C writer copies that seven-record image and independently appends an eighth
-empty create, non-replacing rename, delete and replacing rename. Each uses one
-write and one flush; the C overlay verifies the namespace and zero-length
-create, then Rust replay checks the monotone object ID, visible content,
-retained orphan bytes and all filesystem invariants. Case-insensitive create
-collision, a missing parent and exhausted object IDs all produce exact
-diagnostics and zero writes. A syntactically valid checkpoint whose object-ID
-watermark regresses below the highest object is also rejected on a bounded
-right-edge tree lookup rather than being amplified by the writer. The 8 KiB
-create path is independently replayed and capped at 144 reads; the cached path
-remains capped at 21. A 64-byte torn
-write is retried into the same slot; a flush failure reports durability
-uncertainty; an existing destination and a full log produce zero media writes.
+empty create, data-free truncate, non-replacing rename, delete and replacing
+rename. Each mutation uses one write and one flush; the C overlay verifies the
+result, then Rust replay checks the monotone create ID, zero shrink, sparse
+growth, visible content, retained orphan bytes and all filesystem invariants.
+Case-insensitive create collision, a missing parent and exhausted object IDs
+all produce exact diagnostics and zero writes. A syntactically valid
+checkpoint whose object-ID watermark regresses below the highest object is
+also rejected on a bounded right-edge tree lookup rather than being amplified
+by the writer. Same-size truncate performs no I/O; missing data-log support and
+an unaligned shrinking tail fail explicitly before I/O, as do missing or
+non-file object IDs with file-state diagnostics. A 64-byte torn
+namespace or truncate record is retried into the same slot; flush failure
+reports durability uncertainty; an existing destination and a full log
+produce zero media writes.
 Strict warnings, ASan/UBSan, Clang static analysis, CMake export consumption
 and the configured m68k compiler include both reader and writer. At the
-seven-record prefix, the 8 KiB fallback makes at most 152 logical-block reads.
-The recommended twelve-entry cache makes at most 21 for rename, replace and
-delete, while the torn-write retry makes at most 42 across both complete
-preflights. The test fixes these as non-regression ceilings and cross-replays
-both memory profiles in Rust. The configured m68k compiler must also keep the
-writer's main frame at or below 1 KiB (760 bytes currently). The read counts
-are structural, not device-latency claims; a single-pass prefix validator
-remains a possible later optimization.
+seven-record prefix, the 8 KiB namespace fallback makes at most 152
+logical-block reads; truncate currently needs at most 178. The recommended
+twelve-entry cache makes at most 21 for every mutation, while a torn-write
+retry makes at most 42 across both complete preflights. Empty create's 8 KiB
+path is independently capped at 144 reads. The test fixes these as
+non-regression ceilings and cross-replays both memory profiles in Rust. The
+configured m68k compiler must also keep every writer function frame at or
+below 1 KiB (the largest is 740 bytes currently). The read counts are
+structural, not device-latency claims; merging the file-state and namespace
+passes remains a possible later low-memory optimization.
 The matrix also injects an I/O failure on the first log read, requires the
 exact writer stage and LBA with zero writes, then retries successfully in 25
 total reads. For a block-by-block preflight trace while diagnosing an adapter,

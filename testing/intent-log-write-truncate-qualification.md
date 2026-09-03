@@ -133,6 +133,8 @@ to one block and at most 16 physical extents per data operation.
 The VFS may still publish a data window before immediate namespace/reflink
 transactions, but recovery now also handles a logged write followed by final
 delete/replacement: the final victim and its resulting layout enter ADR-066
-orphan state in the replay checkpoint. The independent C writer therefore
-exposes delete and both rename modes. Portable-C allocation/data emission,
-real-storage flush testing and final numeric wire allocation remain M14 work.
+orphan state in the replay checkpoint. The independent C writer exposes
+data-free truncate, delete and both rename modes. Its truncate covers sparse
+growth and aligned shrink without allocation; unaligned shrink still requires
+a replacement tail block. Portable-C allocation/data emission, real-storage
+flush testing and final numeric wire allocation remain M14 work.

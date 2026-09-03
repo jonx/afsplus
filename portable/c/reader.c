@@ -4278,6 +4278,35 @@ static int afspr_load_intent_file_state(
         ops, scratch, volume, view, end, object_id, state, diagnostic);
 }
 
+int afspr_internal_intent_file_size(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_probe_result *volume,
+    const struct afspr_intent_view *view, uint64_t object_id,
+    uint64_t *size_bytes, struct afspr_diagnostic *diagnostic,
+    size_t diagnostic_size)
+{
+    struct afspr_intent_file_state state;
+    int status;
+
+    if (diagnostic != NULL && diagnostic_size < sizeof(*diagnostic)) {
+        return AFSPR_ERR_ABI;
+    }
+    if (ops == NULL || scratch == NULL || volume == NULL || view == NULL ||
+        size_bytes == NULL || object_id == 0u) {
+        return afspr_report(diagnostic, AFSPR_ERR_INVALID_ARGUMENT,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    status = afspr_load_intent_file_state(ops, scratch, volume, view,
+                                          object_id, &state, diagnostic);
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    *size_bytes = state.size_bytes;
+    return afspr_report(diagnostic, AFSPR_OK, AFSPR_STAGE_COMPLETE,
+                        AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+}
+
 int afspr_intent_file_size(const struct afspr_block_ops *ops,
                            const struct afspr_scratch *scratch,
                            const struct afspr_probe_result *volume,

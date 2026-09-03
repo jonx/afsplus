@@ -18,6 +18,16 @@ writer_create_exists_image="$work/portable-c-writer-create-exists.afsp"
 writer_create_exhausted_image="$work/portable-c-writer-create-exhausted.afsp"
 writer_create_bad_watermark_image="$work/portable-c-writer-create-bad-watermark.afsp"
 writer_create_missing_parent_image="$work/portable-c-writer-create-missing-parent.afsp"
+writer_truncate_zero_image="$work/portable-c-writer-truncate-zero.afsp"
+writer_truncate_grow_image="$work/portable-c-writer-truncate-grow.afsp"
+writer_truncate_low_memory_image="$work/portable-c-writer-truncate-low-memory.afsp"
+writer_truncate_noop_image="$work/portable-c-writer-truncate-noop.afsp"
+writer_truncate_tail_image="$work/portable-c-writer-truncate-tail.afsp"
+writer_truncate_no_feature_image="$work/portable-c-writer-truncate-no-feature.afsp"
+writer_truncate_missing_image="$work/portable-c-writer-truncate-missing.afsp"
+writer_truncate_directory_image="$work/portable-c-writer-truncate-directory.afsp"
+writer_truncate_torn_image="$work/portable-c-writer-truncate-torn.afsp"
+writer_truncate_flush_image="$work/portable-c-writer-truncate-flush.afsp"
 writer_torn_image="$work/portable-c-writer-torn.afsp"
 writer_torn_only_image="$work/portable-c-writer-torn-only.afsp"
 writer_flush_image="$work/portable-c-writer-flush.afsp"
@@ -64,6 +74,16 @@ cp "$intent_image" "$writer_create_exists_image"
 cp "$image" "$writer_create_exhausted_image"
 cp "$image" "$writer_create_bad_watermark_image"
 cp "$intent_image" "$writer_create_missing_parent_image"
+cp "$intent_image" "$writer_truncate_zero_image"
+cp "$intent_image" "$writer_truncate_grow_image"
+cp "$intent_image" "$writer_truncate_low_memory_image"
+cp "$intent_image" "$writer_truncate_noop_image"
+cp "$intent_image" "$writer_truncate_tail_image"
+cp "$image" "$writer_truncate_no_feature_image"
+cp "$intent_image" "$writer_truncate_missing_image"
+cp "$intent_image" "$writer_truncate_directory_image"
+cp "$intent_image" "$writer_truncate_torn_image"
+cp "$intent_image" "$writer_truncate_flush_image"
 cp "$intent_image" "$writer_torn_image"
 cp "$intent_image" "$writer_torn_only_image"
 cp "$intent_image" "$writer_flush_image"
@@ -77,6 +97,9 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
     --regress-object-watermark "$writer_create_bad_watermark_image"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --clear-data-update-feature "$writer_truncate_no_feature_image"
 
 "$compiler" -std=c99 -pedantic -Wall -Wextra -Werror -Wconversion \
     -Wshadow -Wstrict-prototypes \
@@ -107,6 +130,16 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 "$writer_probe" "$writer_create_exhausted_image" create-exhausted
 "$writer_probe" "$writer_create_bad_watermark_image" create-bad-watermark
 "$writer_probe" "$writer_create_missing_parent_image" create-missing-parent
+"$writer_probe" "$writer_truncate_zero_image" truncate-zero
+"$writer_probe" "$writer_truncate_grow_image" truncate-grow
+"$writer_probe" "$writer_truncate_low_memory_image" truncate-zero-low-memory
+"$writer_probe" "$writer_truncate_noop_image" truncate-noop
+"$writer_probe" "$writer_truncate_tail_image" truncate-tail-required
+"$writer_probe" "$writer_truncate_no_feature_image" truncate-no-feature
+"$writer_probe" "$writer_truncate_missing_image" truncate-missing
+"$writer_probe" "$writer_truncate_directory_image" truncate-directory
+"$writer_probe" "$writer_truncate_torn_image" truncate-torn-retry
+"$writer_probe" "$writer_truncate_flush_image" truncate-flush-fail
 "$writer_probe" "$writer_torn_image" torn-retry
 "$writer_probe" "$writer_torn_only_image" torn-only
 "$writer_probe" "$writer_flush_image" flush-fail
@@ -133,6 +166,22 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
     --verify-c-create "$writer_create_low_memory_image" "$intent_expected" \
     "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-truncate-zero "$writer_truncate_zero_image" \
+    "$intent_expected" "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-truncate-grow "$writer_truncate_grow_image" \
+    "$intent_expected" "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-truncate-zero "$writer_truncate_low_memory_image" \
+    "$intent_expected" "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-truncate-zero "$writer_truncate_torn_image" \
+    "$intent_expected" "$intent_created_expected"
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
     --verify-c-rename "$writer_torn_image" "$intent_expected" \
@@ -229,10 +278,10 @@ if [ -x "$m68k_compiler" ]; then
         -I"$repo/api" -I"$repo/spec" \
         -c "$repo/portable/c/writer.c" -o "$work/writer-m68k.o"
     writer_stack=$(awk -F '\t' \
-        '$1 ~ /afspw_append_namespace$/ { print $2; found = 1 } \
-         END { if (!found) exit 1 }' "$work/writer-m68k.su")
+        '$2 ~ /^[0-9]+$/ { if (!found || $2 > maximum) maximum = $2; found = 1 } \
+         END { if (!found) exit 1; print maximum }' "$work/writer-m68k.su")
     test "$writer_stack" -le 1024
-    echo "portable-c-reader m68k-compile=PASS writer-frame=$writer_stack ceiling=1024"
+    echo "portable-c-reader m68k-compile=PASS writer-max-frame=$writer_stack ceiling=1024"
 else
     echo "portable-c-reader m68k-compile=SKIP compiler-not-found"
 fi
@@ -277,6 +326,26 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_create_missing_parent_image" >/dev/null
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_truncate_zero_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_truncate_grow_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_truncate_low_memory_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_truncate_noop_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_truncate_tail_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_truncate_no_feature_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_truncate_missing_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_truncate_directory_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_truncate_torn_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_truncate_flush_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_torn_image" >/dev/null
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_torn_only_image" >/dev/null
@@ -289,4 +358,4 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_replace_image" >/dev/null
 
-echo "portable-c-gate result=PASS reader=PASS intent-view=PASS writer-create=PASS writer-rename=PASS writer-delete=PASS writer-replace=PASS"
+echo "portable-c-gate result=PASS reader=PASS intent-view=PASS writer-create=PASS writer-truncate=PASS writer-rename=PASS writer-delete=PASS writer-replace=PASS"

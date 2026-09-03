@@ -107,13 +107,16 @@ See the [embedding and fuzzing guide](../portable/c/README.md#fuzzing-and-exact-
 
 The independent write path uses a separate ABI-1 writer surface. It validates
 the current checkpoint-plus-log view, then appends one empty-file create,
-regular-file delete or rename record (with optional replacement) to the next
-preallocated log slot and flushes it. Create returns the monotone object ID
-chosen after all prior logged creates. Rust replays and checks every variant. These calls need no
-allocator or checkpoint writer and remain bounded by log and tree paths;
+data-free truncate, regular-file delete or rename record (with optional
+replacement) to the next preallocated log slot and flushes it. Create returns
+the monotone object ID chosen after all prior logged creates. Truncate covers
+sparse growth and block-aligned shrink; unaligned shrink explicitly waits for
+the COW tail-block slice. Rust replays and checks every variant. These calls
+need no allocator or checkpoint writer and remain bounded by log and tree paths;
 write and flush failures are explicitly uncertain. Delete/replacement require
 the orphan-directory feature, and final victims enter bounded cleanup during
 replay rather than being retired in proportion to their fragmentation. The
 same ABI keeps an 8 KiB minimum workspace and opportunistically uses extra
 caller scratch as a bounded call-local read cache; the recommended 56 KiB
-profile cuts the seven-record writer preflight ceiling from 152 reads to 21.
+profile cuts every seven-record mutation preflight to 21 reads (from 152 for
+namespace operations and 178 for truncate).

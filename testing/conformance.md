@@ -125,12 +125,13 @@ exhaustive repair walking are separate expansion gates.
 
 The same gate compiles a separate ABI-1 writer and gives it copies of the
 seven-record Rust fixture. `afspw_create_empty_file`,
-`afspw_rename_file_no_replace`, `afspw_delete_file` and
-`afspw_rename_file_replace` must each append sequence 8 using exactly one
-block write and one flush. The C reader observes each resulting durable
-namespace; Rust then replays the C-produced record, verifies the empty create's
-monotone ID and zero bytes, verifies visible contents, confirms final victims
-retain byte-exact orphan contents and runs the exhaustive checker.
+`afspw_truncate_file`, `afspw_rename_file_no_replace`, `afspw_delete_file`
+and `afspw_rename_file_replace` must each append sequence 8 using exactly one
+block write and one flush. The C reader observes each resulting durable view;
+Rust then replays the C-produced record, verifies the empty create's monotone
+ID and zero bytes, verifies zero shrink and sparse growth, verifies visible
+contents, confirms final victims retain byte-exact orphan contents and runs
+the exhaustive checker.
 
 A 64-byte torn record returns write-uncertain and is safely overwritten after
 a fresh scan. A failed flush returns durability-uncertain without claiming
@@ -141,16 +142,23 @@ exhausted object-ID space before media I/O, with a create-specific diagnostic
 stage. A valid-checksum checkpoint with a regressed allocator watermark is
 rejected against the greatest committed object by a bounded tree lookup. Both
 the 144-read 8 KiB create and 21-read cached create are replayed in Rust.
+Data-free truncate requires the version-3 incompatible feature. Same-size is a
+zero-I/O success; unaligned shrink reports tail-rewrite-required with zero I/O.
+Missing objects and directory IDs return exact file-state diagnostics.
+Zero shrink and sparse growth replay in Rust, including a 178-read 8 KiB path,
+a 21-read cached path and a 42-read torn-record retry.
 The writer is included in strict C99, ASan/UBSan, static-analysis, CMake
 install/consumer and configured m68k compile gates. The 8 KiB minimum-memory
 path and the recommended 56 KiB call-local-cache path are both replayed by
-Rust. On the fixed seven-record fixture their preflight ceilings are 152 and
-21 reads respectively; a torn-write retry is at most 42 cached reads across
-both attempts. The configured m68k compiler must keep the main writer frame at
-or below 1 KiB. A failed first log read must identify the intent-scan stage
-and exact LBA, perform no write or flush, and succeed on a fresh 25-read
-retry. This qualifies four bounded namespace operations, not allocation or a
-complete classic-rw profile.
+Rust. On the fixed seven-record fixture the 8 KiB preflight ceilings are 152
+reads for namespace operations, 144 for create and 178 for truncate; every
+recommended-cache path is at most 21 reads. A torn-write retry is at most 42
+cached reads across both attempts. The configured m68k compiler must keep
+every writer function frame at or below 1 KiB. A failed first log read must
+identify the intent-scan stage and exact LBA, perform no write or flush, and
+succeed on a fresh 25-read retry. This qualifies four bounded namespace
+operations plus data-free truncate, not allocation, data writes or a complete
+classic-rw profile.
 
 ## Portable C fuzz mutation gate
 

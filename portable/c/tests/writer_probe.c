@@ -12,6 +12,8 @@
 #include <unistd.h>
 
 #define BLOCK_SIZE 4096u
+#define TRUNCATE_CURRENT_SIZE (BLOCK_SIZE + 123u)
+#define TRUNCATE_GROW_SIZE (3u * BLOCK_SIZE + 7u)
 
 struct file_device {
     FILE *file;
@@ -144,6 +146,7 @@ int main(int argc, char **argv)
     struct afspr_diagnostic reader_diagnostic;
     struct afspw_rename_result result;
     struct afspw_create_result create_result;
+    struct afspw_truncate_result truncate_result;
     struct afspw_diagnostic writer_diagnostic;
     struct afspr_timespec timestamp;
     uint8_t workspace[AFSPW_RECOMMENDED_SCRATCH_SIZE];
@@ -159,8 +162,13 @@ int main(int argc, char **argv)
             "usage: writer_probe IMAGE "
             "[success|low-memory|read-fail-retry|create|create-low-memory|"
             "create-exists|create-exhausted|create-bad-watermark|"
-            "create-missing-parent|delete|replace|torn-only|torn-retry|"
-            "flush-fail|destination-exists]");
+            "create-missing-parent|truncate-zero|truncate-grow|"
+            "truncate-zero-low-memory|truncate-noop|"
+            "truncate-tail-required|truncate-no-feature|"
+            "truncate-missing|truncate-directory|"
+            "truncate-torn-retry|truncate-flush-fail|delete|replace|"
+            "torn-only|torn-retry|flush-fail|"
+            "destination-exists]");
     mode = argc == 3 ? argv[2] : "success";
     if (strcmp(mode, "destination-exists") == 0) {
         target = "Replace.TXT";
@@ -175,6 +183,16 @@ int main(int argc, char **argv)
                     strcmp(mode, "create-exhausted") == 0 ||
                     strcmp(mode, "create-bad-watermark") == 0 ||
                     strcmp(mode, "create-missing-parent") == 0 ||
+                    strcmp(mode, "truncate-zero") == 0 ||
+                    strcmp(mode, "truncate-grow") == 0 ||
+                    strcmp(mode, "truncate-zero-low-memory") == 0 ||
+                    strcmp(mode, "truncate-noop") == 0 ||
+                    strcmp(mode, "truncate-tail-required") == 0 ||
+                    strcmp(mode, "truncate-no-feature") == 0 ||
+                    strcmp(mode, "truncate-missing") == 0 ||
+                    strcmp(mode, "truncate-directory") == 0 ||
+                    strcmp(mode, "truncate-torn-retry") == 0 ||
+                    strcmp(mode, "truncate-flush-fail") == 0 ||
                     strcmp(mode, "delete") == 0 ||
                     strcmp(mode, "replace") == 0 ||
                     strcmp(mode, "torn-only") == 0 ||
@@ -203,11 +221,13 @@ int main(int argc, char **argv)
     writer_ops.block_size = BLOCK_SIZE;
     scratch.buffer = workspace;
     scratch.size = strcmp(mode, "low-memory") == 0 ||
-                           strcmp(mode, "create-low-memory") == 0
+                           strcmp(mode, "create-low-memory") == 0 ||
+                           strcmp(mode, "truncate-zero-low-memory") == 0
                        ? AFSPW_SCRATCH_SIZE
                        : sizeof(workspace);
     memset(&result, 0, sizeof(result));
     memset(&create_result, 0, sizeof(create_result));
+    memset(&truncate_result, 0, sizeof(truncate_result));
     memset(&timestamp, 0, sizeof(timestamp));
     timestamp.seconds = 10;
 
@@ -219,14 +239,25 @@ int main(int argc, char **argv)
             "replace capability");
     require((afspw_capabilities() & AFSPW_CAP_CREATE_EMPTY_FILE) != 0u,
             "empty create capability");
+    require((afspw_capabilities() &
+             AFSPW_CAP_TRUNCATE_FILE_DATA_FREE) != 0u,
+            "data-free truncate capability");
     require(strcmp(afspw_status_string(AFSPW_ERR_OBJECT_ID_EXHAUSTED),
                    "object ID space exhausted") == 0 &&
                 strcmp(afspw_stage_string(AFSPW_STAGE_CREATE_LOOKUP),
                        "create-lookup") == 0,
             "create status and stage strings");
+    require(strcmp(
+                afspw_status_string(AFSPW_ERR_TAIL_REWRITE_REQUIRED),
+                "truncate tail rewrite required") == 0 &&
+                strcmp(afspw_stage_string(AFSPW_STAGE_FILE_STATE),
+                       "file-state") == 0,
+            "truncate status and stage strings");
     device.torn_write = strcmp(mode, "torn-only") == 0 ||
-                        strcmp(mode, "torn-retry") == 0;
-    device.fail_flush = strcmp(mode, "flush-fail") == 0;
+                        strcmp(mode, "torn-retry") == 0 ||
+                        strcmp(mode, "truncate-torn-retry") == 0;
+    device.fail_flush = strcmp(mode, "flush-fail") == 0 ||
+                        strcmp(mode, "truncate-flush-fail") == 0;
     device.fail_read_number =
         strcmp(mode, "read-fail-retry") == 0 ? 4u : 0u;
     if (strcmp(mode, "create") == 0 ||
@@ -249,6 +280,38 @@ int main(int argc, char **argv)
             &writer_ops, &scratch, create_parent, create_name,
             strlen(create_name), &timestamp, &create_result,
             sizeof(create_result), &writer_diagnostic,
+            sizeof(writer_diagnostic));
+    } else if (strcmp(mode, "truncate-zero") == 0 ||
+               strcmp(mode, "truncate-grow") == 0 ||
+               strcmp(mode, "truncate-zero-low-memory") == 0 ||
+               strcmp(mode, "truncate-noop") == 0 ||
+               strcmp(mode, "truncate-tail-required") == 0 ||
+               strcmp(mode, "truncate-no-feature") == 0 ||
+               strcmp(mode, "truncate-missing") == 0 ||
+               strcmp(mode, "truncate-directory") == 0 ||
+               strcmp(mode, "truncate-torn-retry") == 0 ||
+               strcmp(mode, "truncate-flush-fail") == 0) {
+        uint64_t truncate_size =
+            strcmp(mode, "truncate-zero") == 0 ||
+                    strcmp(mode, "truncate-zero-low-memory") == 0 ||
+                    strcmp(mode, "truncate-torn-retry") == 0 ||
+                    strcmp(mode, "truncate-flush-fail") == 0 ||
+                    strcmp(mode, "truncate-no-feature") == 0
+                ? UINT64_C(0)
+                : (strcmp(mode, "truncate-grow") == 0
+                       ? (uint64_t)TRUNCATE_GROW_SIZE
+                       : (strcmp(mode, "truncate-noop") == 0
+                              ? (uint64_t)TRUNCATE_CURRENT_SIZE
+                              : (uint64_t)BLOCK_SIZE + UINT64_C(1)));
+        uint64_t truncate_object =
+            strcmp(mode, "truncate-missing") == 0
+                ? UINT64_C(999999)
+                : (strcmp(mode, "truncate-directory") == 0 ? UINT64_C(1)
+                                                            : UINT64_C(16));
+
+        status = afspw_truncate_file(
+            &writer_ops, &scratch, truncate_object, truncate_size, &timestamp,
+            &truncate_result, sizeof(truncate_result), &writer_diagnostic,
             sizeof(writer_diagnostic));
     } else if (strcmp(mode, "delete") == 0) {
         status = afspw_delete_file(
@@ -323,6 +386,69 @@ int main(int argc, char **argv)
                device.reads);
         return 0;
     }
+    if (strcmp(mode, "truncate-no-feature") == 0) {
+        require(status == AFSPW_ERR_WRITE_FEATURE &&
+                    writer_diagnostic.stage == AFSPW_STAGE_PROBE &&
+                    writer_diagnostic.reader_status == AFSPR_ERR_UNSUPPORTED &&
+                    device.writes == 0u && device.flushes == 0u,
+                "data-update feature required before truncate I/O");
+        require(fclose(device.file) == 0, "close no-feature image");
+        printf("portable-c-writer truncate-no-feature=PASS reads=%u writes=0 flushes=0\n",
+               device.reads);
+        return 0;
+    }
+    if (strcmp(mode, "truncate-noop") == 0) {
+        require(status == AFSPR_OK &&
+                    truncate_result.abi_version == AFSPW_ABI_VERSION &&
+                    truncate_result.prior_records == 7u &&
+                    truncate_result.sequence == 0u &&
+                    truncate_result.log_slot == AFSPR_NO_LOG_SLOT &&
+                    truncate_result.base_generation != 0u &&
+                    truncate_result.log_block == AFSPR_NO_BLOCK &&
+                    truncate_result.previous_size ==
+                        (uint64_t)TRUNCATE_CURRENT_SIZE &&
+                    truncate_result.new_size ==
+                        (uint64_t)TRUNCATE_CURRENT_SIZE &&
+                    truncate_result.record_written == 0u &&
+                    writer_diagnostic.stage == AFSPW_STAGE_COMPLETE &&
+                    device.reads <= 21u && device.writes == 0u &&
+                    device.flushes == 0u,
+                "same-size truncate is a bounded no-op");
+        require(fclose(device.file) == 0, "close truncate no-op image");
+        printf("portable-c-writer truncate-noop=PASS reads=%u writes=0 flushes=0\n",
+               device.reads);
+        return 0;
+    }
+    if (strcmp(mode, "truncate-tail-required") == 0) {
+        require(status == AFSPW_ERR_TAIL_REWRITE_REQUIRED &&
+                    writer_diagnostic.stage == AFSPW_STAGE_FILE_STATE &&
+                    writer_diagnostic.reader_status == AFSPR_OK &&
+                    device.reads <= 21u && device.writes == 0u &&
+                    device.flushes == 0u,
+                "unaligned shrink requires safe tail rewrite");
+        require(fclose(device.file) == 0,
+                "close tail-rewrite-required image");
+        printf("portable-c-writer truncate-tail-required=PASS reads=%u writes=0 flushes=0\n",
+               device.reads);
+        return 0;
+    }
+    if (strcmp(mode, "truncate-missing") == 0 ||
+        strcmp(mode, "truncate-directory") == 0) {
+        int expected_status = strcmp(mode, "truncate-missing") == 0
+                                  ? AFSPR_ERR_NOT_FOUND
+                                  : AFSPR_ERR_NOT_FILE;
+
+        require(status == expected_status &&
+                    writer_diagnostic.stage == AFSPW_STAGE_FILE_STATE &&
+                    writer_diagnostic.reader_status == expected_status &&
+                    device.reads <= 21u && device.writes == 0u &&
+                    device.flushes == 0u,
+                "truncate object type/existence diagnostics");
+        require(fclose(device.file) == 0, "close invalid truncate image");
+        printf("portable-c-writer mode=%s result=PASS reads=%u writes=0 flushes=0\n",
+               mode, device.reads);
+        return 0;
+    }
     if (strcmp(mode, "read-fail-retry") == 0) {
         require(status == AFSPR_ERR_IO &&
                     writer_diagnostic.stage == AFSPW_STAGE_INTENT_SCAN &&
@@ -335,6 +461,24 @@ int main(int argc, char **argv)
             &writer_ops, &scratch, UINT64_C(1), "Final.BIN", 9u,
             UINT64_C(1), target, target_len, &timestamp, &result,
             sizeof(result), &writer_diagnostic, sizeof(writer_diagnostic));
+    }
+    if (strcmp(mode, "truncate-torn-retry") == 0) {
+        require(status == AFSPW_ERR_WRITE_UNCERTAIN &&
+                    writer_diagnostic.stage == AFSPW_STAGE_RECORD_WRITE &&
+                    device.writes == 1u && device.flushes == 0u,
+                "torn truncate record reported uncertain");
+        device.torn_write = 0;
+        clearerr(device.file);
+        status = afspw_truncate_file(
+            &writer_ops, &scratch, UINT64_C(16), UINT64_C(0), &timestamp,
+            &truncate_result, sizeof(truncate_result), &writer_diagnostic,
+            sizeof(writer_diagnostic));
+    } else if (strcmp(mode, "truncate-flush-fail") == 0) {
+        require(status == AFSPW_ERR_DURABILITY_UNCERTAIN &&
+                    writer_diagnostic.stage == AFSPW_STAGE_FLUSH &&
+                    device.writes == 1u && device.flushes == 1u,
+                "failed truncate flush reported uncertain");
+        device.fail_flush = 0;
     }
     if (strcmp(mode, "torn-only") == 0 ||
         strcmp(mode, "torn-retry") == 0) {
@@ -363,8 +507,12 @@ int main(int argc, char **argv)
                 "failed flush reported uncertain");
         device.fail_flush = 0;
     }
-    expected_writes = strcmp(mode, "torn-retry") == 0 ? 2u : 1u;
-    if (strcmp(mode, "flush-fail") != 0) {
+    expected_writes = strcmp(mode, "torn-retry") == 0 ||
+                              strcmp(mode, "truncate-torn-retry") == 0
+                          ? 2u
+                          : 1u;
+    if (strcmp(mode, "flush-fail") != 0 &&
+        strcmp(mode, "truncate-flush-fail") != 0) {
         require(status == AFSPR_OK, afspw_status_string(status));
         if (strcmp(mode, "create") == 0 ||
             strcmp(mode, "create-low-memory") == 0) {
@@ -379,6 +527,29 @@ int main(int argc, char **argv)
             require(writer_diagnostic.stage == AFSPW_STAGE_COMPLETE &&
                         writer_diagnostic.block == create_result.log_block,
                     "successful create diagnostic");
+        } else if (strcmp(mode, "truncate-zero") == 0 ||
+                   strcmp(mode, "truncate-grow") == 0 ||
+                   strcmp(mode, "truncate-zero-low-memory") == 0 ||
+                   strcmp(mode, "truncate-torn-retry") == 0) {
+            uint64_t expected_size = strcmp(mode, "truncate-grow") == 0
+                                         ? (uint64_t)TRUNCATE_GROW_SIZE
+                                         : UINT64_C(0);
+
+            require(truncate_result.abi_version == AFSPW_ABI_VERSION &&
+                        truncate_result.prior_records == 7u &&
+                        truncate_result.sequence == 8u &&
+                        truncate_result.log_slot == 7u &&
+                        truncate_result.base_generation != 0u &&
+                        truncate_result.log_block != AFSPR_NO_BLOCK &&
+                        truncate_result.previous_size ==
+                            (uint64_t)TRUNCATE_CURRENT_SIZE &&
+                        truncate_result.new_size == expected_size &&
+                        truncate_result.record_written == 1u &&
+                        truncate_result.reserved == 0u,
+                    "truncate result coordinates and sizes");
+            require(writer_diagnostic.stage == AFSPW_STAGE_COMPLETE &&
+                        writer_diagnostic.block == truncate_result.log_block,
+                    "successful truncate diagnostic");
         } else {
             require(result.abi_version == AFSPW_ABI_VERSION &&
                         result.prior_records == 7u &&
@@ -397,10 +568,14 @@ int main(int argc, char **argv)
     if (strcmp(mode, "create-low-memory") == 0) {
         require(mutation_reads <= 144u,
                 "8 KiB create preflight read ceiling");
+    } else if (strcmp(mode, "truncate-zero-low-memory") == 0) {
+        require(mutation_reads <= 178u,
+                "8 KiB truncate preflight read ceiling");
     } else if (strcmp(mode, "low-memory") == 0) {
         require(mutation_reads <= 152u,
                 "8 KiB fallback preflight read ceiling");
-    } else if (strcmp(mode, "torn-retry") == 0) {
+    } else if (strcmp(mode, "torn-retry") == 0 ||
+               strcmp(mode, "truncate-torn-retry") == 0) {
         require(mutation_reads <= 42u,
                 "two cached preflights read ceiling");
     } else if (strcmp(mode, "read-fail-retry") == 0) {
@@ -444,6 +619,22 @@ int main(int argc, char **argv)
                     sizeof(reader_diagnostic)) == AFSPR_OK &&
                     empty_size == 0u,
                 "created file has zero durable length");
+    } else if (strcmp(mode, "truncate-zero") == 0 ||
+               strcmp(mode, "truncate-grow") == 0 ||
+               strcmp(mode, "truncate-zero-low-memory") == 0 ||
+               strcmp(mode, "truncate-torn-retry") == 0 ||
+               strcmp(mode, "truncate-flush-fail") == 0) {
+        uint64_t expected_size = strcmp(mode, "truncate-grow") == 0
+                                     ? (uint64_t)TRUNCATE_GROW_SIZE
+                                     : UINT64_C(0);
+        uint64_t actual_size;
+
+        require(afspr_intent_file_size(
+                    &reader_ops, &scratch, &volume, &view, UINT64_C(16),
+                    &actual_size, &reader_diagnostic,
+                    sizeof(reader_diagnostic)) == AFSPR_OK &&
+                    actual_size == expected_size,
+                "truncated size visible in durable view");
     } else if (strcmp(mode, "delete") == 0) {
         require(lookup(&reader_ops, &scratch, &volume, &view, "Final.BIN",
                        &entry) == AFSPR_ERR_NOT_FOUND,
@@ -469,11 +660,24 @@ int main(int argc, char **argv)
                 "new name visible in durable view");
     }
 
-    status = afspw_rename_file_no_replace(
-        &writer_ops, &scratch, UINT64_C(1), "C-Written.BIN", 13u,
-        UINT64_C(1), "No-Room.BIN", 11u, &timestamp, &result,
-        sizeof(result), &writer_diagnostic, sizeof(writer_diagnostic));
+    if (strcmp(mode, "truncate-zero") == 0 ||
+        strcmp(mode, "truncate-grow") == 0 ||
+        strcmp(mode, "truncate-zero-low-memory") == 0 ||
+        strcmp(mode, "truncate-torn-retry") == 0 ||
+        strcmp(mode, "truncate-flush-fail") == 0) {
+        status = afspw_truncate_file(
+            &writer_ops, &scratch, UINT64_C(16), (uint64_t)BLOCK_SIZE,
+            &timestamp, &truncate_result, sizeof(truncate_result),
+            &writer_diagnostic, sizeof(writer_diagnostic));
+    } else {
+        status = afspw_rename_file_no_replace(
+            &writer_ops, &scratch, UINT64_C(1), "C-Written.BIN", 13u,
+            UINT64_C(1), "No-Room.BIN", 11u, &timestamp, &result,
+            sizeof(result), &writer_diagnostic,
+            sizeof(writer_diagnostic));
+    }
     require(status == AFSPW_ERR_LOG_FULL &&
+                writer_diagnostic.stage == AFSPW_STAGE_INTENT_SCAN &&
                 device.writes == expected_writes &&
                 device.flushes == 1u,
             "full log refuses without I/O");
