@@ -59,7 +59,7 @@ Porting should require:
 
 It should not require reverse engineering the format from AROS source.
 
-## 6. Independent portable C reader
+## 6. Independent portable C implementation
 
 The `reader-minimal` C99 implementation lives under
 [`portable/`](../portable/README.md). Its core has no POSIX dependency, owns no
@@ -104,3 +104,11 @@ tool make sanitizer failures reproducible without retaining or sharing a full
 disk image. The same callback is directly consumable by libFuzzer-compatible
 engines; the repository gate does not depend on such a runtime being installed.
 See the [embedding and fuzzing guide](../portable/c/README.md#fuzzing-and-exact-reproduction).
+
+The first independent write operation uses a separate ABI-1 writer surface.
+It validates the current checkpoint-plus-log view, appends one regular-file
+rename-without-replacement record to the next preallocated log slot and
+flushes it. Rust then replays and checks the result. The operation needs no
+allocator or checkpoint writer and remains bounded by the log and tree paths;
+write and flush failures are reported as durability-uncertain. Delete and
+replacement stay unavailable until their replay uses bounded orphan cleanup.

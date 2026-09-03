@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Portable C performs its first durable mutation](#2026-09-03--portable-c-performs-its-first-durable-mutation)
 - [2026-09-03 — Q3 allocation architecture accepted](#2026-09-03--q3-allocation-architecture-accepted)
 - [2026-09-03 — Emergency headroom makes ENOSPC recoverable](#2026-09-03--emergency-headroom-makes-enospc-recoverable)
 - [2026-09-03 — Open-unlinked files gain a bounded crash-restartable lifetime](#2026-09-03--open-unlinked-files-gain-a-bounded-crash-restartable-lifetime)
@@ -38,6 +39,27 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Portable C performs its first durable mutation
+
+The independent C99 path now appends a non-replacing regular-file rename to
+the preallocated intent log. It freshly probes and validates the complete
+checkpoint-plus-log namespace, proves the source type and absent destination,
+writes one record and issues one flush. Rust replays the C-produced sequence-8
+record and the exhaustive checker validates the materialized image. A torn
+record leaves the prior seven-record namespace, can be overwritten in the
+same slot after a fresh scan, and never publishes a hybrid rename. Write and
+flush callback failures have separate explicitly uncertain results; full-log
+and existing-target cases perform zero media writes.
+
+The deliberately narrow surface avoids a correctness trap found during the
+audit: current intent replay can retire a delete or replacement victim
+directly, bypassing ADR-066's fragmentation-independent orphan transition.
+Those operations stay unavailable from C until replay is routed through the
+bounded lifecycle. The maximum-prefix test currently performs 152 uncached
+logical-block reads, one write and one flush with 8 KiB caller scratch. The
+read count is bounded but is now an explicit cache/algorithm optimization
+target before physical A500 performance qualification.
 
 ## 2026-09-03 — Q3 allocation architecture accepted
 

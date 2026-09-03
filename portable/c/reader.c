@@ -2,6 +2,7 @@
 
 #include "libafsplus_reader.h"
 #include "afsplus_format.h"
+#include "reader_internal.h"
 
 #include <limits.h>
 #include <string.h>
@@ -3552,6 +3553,111 @@ int afspr_intent_directory_cursor_init(
     }
     memset(cursor, 0, sizeof(*cursor));
     cursor->abi_version = AFSPR_ABI_VERSION;
+    return AFSPR_OK;
+}
+
+int afspr_internal_preflight_rename_no_replace(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_probe_result *volume, uint64_t source_parent_id,
+    const void *source_name, size_t source_name_len,
+    uint64_t target_parent_id, const void *target_name,
+    size_t target_name_len, struct afspr_intent_view *view,
+    int *destination_conflict, uint32_t *phase,
+    struct afspr_diagnostic *diagnostic, size_t diagnostic_size)
+{
+    struct afspr_ident ident;
+    struct afspr_log_position end;
+    struct afspr_directory_entry source;
+    struct afspr_directory_entry target;
+    uint8_t source_result_name[AFSP_NAME_MAX_UTF8_BYTES];
+    uint8_t target_result_name[AFSP_NAME_MAX_UTF8_BYTES];
+    uint8_t *key;
+    size_t key_len;
+    int status = afspr_prepare_operation(
+        ops, scratch, volume, AFSPR_INTENT_SCRATCH_SIZE, &ident, diagnostic,
+        diagnostic_size);
+
+    if (phase != NULL) {
+        *phase = AFSPR_INTERNAL_RENAME_SCAN;
+    }
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (source_parent_id == 0u || target_parent_id == 0u ||
+        source_name == NULL || target_name == NULL ||
+        source_name_len == 0u ||
+        source_name_len > AFSP_NAME_MAX_UTF8_BYTES ||
+        target_name_len == 0u ||
+        target_name_len > AFSP_NAME_MAX_UTF8_BYTES || view == NULL ||
+        destination_conflict == NULL || phase == NULL) {
+        return afspr_report(diagnostic, AFSPR_ERR_INVALID_ARGUMENT,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    *destination_conflict = 0;
+    status = afspr_scan_intent_log(ops, scratch, volume, view, sizeof(*view),
+                                   diagnostic, diagnostic_size);
+    if (status != AFSPR_OK || view->tail_state == AFSPR_INTENT_TAIL_FULL) {
+        return status;
+    }
+    if ((view->flags & AFSPR_INTENT_VIEW_NAMESPACE) == 0u) {
+        return afspr_report(diagnostic, AFSPR_ERR_UNSUPPORTED,
+                            AFSPR_STAGE_INTENT_NAMESPACE,
+                            AFSPR_NO_CHECKPOINT_SLOT, view->tail_block);
+    }
+    status = afspr_validate_namespace_prefix(ops, scratch, volume, view,
+                                             diagnostic);
+    if (status != AFSPR_OK) {
+        return status;
+    }
+
+    *phase = AFSPR_INTERNAL_RENAME_SOURCE;
+    key = (uint8_t *)scratch->buffer + AFSPR_NAMESPACE_KEY_OFFSET;
+    status = afspr_name_key(&ident, (const uint8_t *)source_name,
+                            source_name_len, key, &key_len);
+    if (status != AFSPR_OK) {
+        return afspr_report(diagnostic, status,
+                            AFSPR_STAGE_INTENT_NAMESPACE,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    end.slot = view->valid_records;
+    end.operation = 0u;
+    status = afspr_namespace_resolve_before(
+        ops, scratch, volume, view, end, source_parent_id, key, key_len,
+        source_result_name, sizeof(source_result_name), &source, NULL,
+        diagnostic);
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (source.type_hint != AFSPR_OBJECT_FILE) {
+        return afspr_report(diagnostic, AFSPR_ERR_NOT_FILE,
+                            AFSPR_STAGE_INTENT_NAMESPACE,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+
+    *phase = AFSPR_INTERNAL_RENAME_TARGET;
+    status = afspr_name_key(&ident, (const uint8_t *)target_name,
+                            target_name_len, key, &key_len);
+    if (status != AFSPR_OK) {
+        return afspr_report(diagnostic, status,
+                            AFSPR_STAGE_INTENT_NAMESPACE,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    status = afspr_namespace_resolve_before(
+        ops, scratch, volume, view, end, target_parent_id, key, key_len,
+        target_result_name, sizeof(target_result_name), &target, NULL,
+        diagnostic);
+    if (status == AFSPR_ERR_NOT_FOUND) {
+        return AFSPR_OK;
+    }
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    *destination_conflict =
+        source.object_id != target.object_id ||
+        source.parent_id != target.parent_id ||
+        source.name_len != target.name_len ||
+        memcmp(source.name, target.name, source.name_len) != 0;
     return AFSPR_OK;
 }
 

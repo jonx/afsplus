@@ -88,6 +88,7 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md).
 | [filesystem_v2.h](../api/filesystem_v2.h) | Filesystem API v2 (design document [13](13-filesystem-api-v2.md)) |
 | [libafsplus.h](../api/libafsplus.h) | Portable core library API |
 | [libafsplus_reader.h](../api/libafsplus_reader.h) | Constrained reader profile API |
+| [libafsplus_writer.h](../api/libafsplus_writer.h) | First bounded portable-C classic-rw mutation API |
 | [afsplus_aros.h](../api/afsplus_aros.h) | Versioned C boundary for native AROS handlers ([ADR-042](../adr/ADR-042-aros-c-boundary.md)) |
 | [debug_observability.h](../api/debug_observability.h) | Flight recorder, fault injection and explain APIs (design document [26](26-debug-observability.md)) |
 | [performance_hints.h](../api/performance_hints.h) | Access-intent hints and sealed content ([ADR-032](../adr/ADR-032-access-intent-hints.md), [ADR-033](../adr/ADR-033-sealed-content.md)) |

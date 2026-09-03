@@ -38,6 +38,15 @@ Adds:
 
 Optional workstation features may be absent.
 
+The independent C path now has its first bounded writable slice: a
+non-replacing regular-file rename appended to the preallocated intent log with
+one block write and one flush. It owns no memory and uses an 8 KiB caller
+workspace. This does not yet make the C implementation a complete
+`classic-rw` filesystem: checkpoint materialization, allocation, file data
+mutation and bounded delete/replacement remain open. In particular, delete is
+not exposed until intent replay routes final victims through ADR-066 rather
+than doing fragmentation-proportional retirement.
+
 ## 3. 64-bit arithmetic
 
 64-bit on-disk values are not considered too heavy for 32-bit CPUs.

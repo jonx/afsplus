@@ -1,7 +1,8 @@
 //! Build one deterministic pending intent-log image for the portable C gate.
 
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use afsplus_block::FileBackend;
@@ -171,25 +172,118 @@ fn run(image: &PathBuf, expected: &PathBuf, created_expected: &PathBuf) -> Resul
     Ok(())
 }
 
+fn verify_c_rename(
+    image: &Path,
+    expected: &Path,
+    created_expected: &Path,
+    rename_committed: bool,
+) -> Result<(), String> {
+    let expected = fs::read(expected)
+        .map_err(|error| format!("cannot read expected existing-file bytes: {error}"))?;
+    let created_expected = fs::read(created_expected)
+        .map_err(|error| format!("cannot read expected created-file bytes: {error}"))?;
+    let device = FileBackend::open(image, DEFAULT_BLOCK_SIZE, TOTAL_BLOCKS)
+        .map_err(|error| format!("cannot open C-written fixture: {error}"))?;
+    let mut volume = mount(device).map_err(|error| format!("C-written replay failed: {error}"))?;
+
+    let absent_name = if rename_committed {
+        "Final.BIN"
+    } else {
+        "C-Written.BIN"
+    };
+    let expected_name = if rename_committed {
+        "c-written.bin"
+    } else {
+        "Final.BIN"
+    };
+    if volume
+        .lookup_root(absent_name)
+        .map_err(|error| format!("absent-name lookup failed: {error}"))?
+        .is_some()
+    {
+        return Err(format!("replay unexpectedly retained {absent_name}"));
+    }
+    let existing_id = volume
+        .lookup_root(expected_name)
+        .map_err(|error| format!("expected-name lookup failed: {error}"))?
+        .ok_or_else(|| format!("replay did not publish {expected_name}"))?;
+    let existing = volume
+        .read_file(existing_id)
+        .map_err(|error| format!("cannot read C-renamed file: {error}"))?;
+    if existing != expected {
+        return Err("existing-file content differs after Rust replay".into());
+    }
+
+    let created_id = volume
+        .lookup_root("Replace.TXT")
+        .map_err(|error| format!("created-file lookup failed: {error}"))?
+        .ok_or_else(|| "prior logged replacement disappeared".to_owned())?;
+    let created = volume
+        .read_file(created_id)
+        .map_err(|error| format!("cannot read prior logged replacement: {error}"))?;
+    if created != created_expected {
+        return Err("prior logged replacement content differs after C append".into());
+    }
+    drop(volume.into_device());
+    println!(
+        "image={} {}=PASS existing_object={} created_object={}",
+        image.display(),
+        if rename_committed {
+            "c_rename_replay"
+        } else {
+            "c_torn_replay"
+        },
+        existing_id,
+        created_id
+    );
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1).map(PathBuf::from);
-    let Some(image) = arguments.next() else {
-        eprintln!("usage: afsplus-portable-c-log-fixture IMAGE EXPECTED CREATED_EXPECTED");
+    let Some(first) = arguments.next() else {
+        eprintln!(
+            "usage: afsplus-portable-c-log-fixture [--verify-c-rename|--verify-c-torn] IMAGE EXPECTED CREATED_EXPECTED"
+        );
         return ExitCode::from(2);
     };
+    let verify_rename = first.as_os_str() == OsStr::new("--verify-c-rename");
+    let verify_torn = first.as_os_str() == OsStr::new("--verify-c-torn");
+    let image = if verify_rename || verify_torn {
+        let Some(image) = arguments.next() else {
+            eprintln!(
+                "usage: afsplus-portable-c-log-fixture [--verify-c-rename|--verify-c-torn] IMAGE EXPECTED CREATED_EXPECTED"
+            );
+            return ExitCode::from(2);
+        };
+        image
+    } else {
+        first
+    };
     let Some(expected) = arguments.next() else {
-        eprintln!("usage: afsplus-portable-c-log-fixture IMAGE EXPECTED CREATED_EXPECTED");
+        eprintln!(
+            "usage: afsplus-portable-c-log-fixture [--verify-c-rename|--verify-c-torn] IMAGE EXPECTED CREATED_EXPECTED"
+        );
         return ExitCode::from(2);
     };
     let Some(created_expected) = arguments.next() else {
-        eprintln!("usage: afsplus-portable-c-log-fixture IMAGE EXPECTED CREATED_EXPECTED");
+        eprintln!(
+            "usage: afsplus-portable-c-log-fixture [--verify-c-rename|--verify-c-torn] IMAGE EXPECTED CREATED_EXPECTED"
+        );
         return ExitCode::from(2);
     };
     if arguments.next().is_some() {
-        eprintln!("usage: afsplus-portable-c-log-fixture IMAGE EXPECTED CREATED_EXPECTED");
+        eprintln!(
+            "usage: afsplus-portable-c-log-fixture [--verify-c-rename|--verify-c-torn] IMAGE EXPECTED CREATED_EXPECTED"
+        );
         return ExitCode::from(2);
     }
-    match run(&image, &expected, &created_expected) {
+    let result = if verify_rename || verify_torn {
+        verify_c_rename(&image, &expected, &created_expected, verify_rename)
+    } else {
+        run(&image, &expected, &created_expected)
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("afsplus-portable-c-log-fixture: {error}");

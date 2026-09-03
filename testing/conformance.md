@@ -111,7 +111,23 @@ their exact tail coordinates; a v3 record without its required feature bit is
 a hard format error. Non-ASCII Unicode comparison-key conformance and
 exhaustive repair walking are separate expansion gates.
 
-## Portable C mutation gate
+## Portable C writer gate
+
+The same gate compiles a separate ABI-1 writer and gives it a copy of the
+seven-record Rust fixture. `afspw_rename_file_no_replace` must append sequence
+8 using exactly one block write and one flush. The C reader observes the old
+name absent and new name present through the durable overlay; Rust then
+replays the C-produced record, verifies both surviving contents and runs the
+exhaustive checker.
+
+A 64-byte torn record returns write-uncertain and is safely overwritten after
+a fresh scan. A failed flush returns durability-uncertain without claiming
+success. An existing target and a full log return before media I/O. The writer
+is included in strict C99, ASan/UBSan, static-analysis, CMake install/consumer
+and configured m68k compile gates. This qualifies one bounded namespace
+operation, not allocation or a complete classic-rw profile.
+
+## Portable C fuzz mutation gate
 
 The [fuzzing contract](fuzzing.md#portable-c-corpus-contract) extends the
 handwritten corruption matrix with compact recordings of successful Rust-to-C

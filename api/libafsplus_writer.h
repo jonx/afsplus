@@ -1,0 +1,115 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+#ifndef LIBAFSPLUS_WRITER_H
+#define LIBAFSPLUS_WRITER_H
+
+/*
+ * First bounded media-mutating slice of the independent portable C path.
+ *
+ * This API appends one non-replacing regular-file rename to the preallocated
+ * intent log and flushes it. It deliberately does not expose delete or
+ * replacement until their replay uses ADR-066 bounded orphan cleanup.
+ */
+
+#include "libafsplus_reader.h"
+
+#include <stddef.h>
+#include <stdint.h>
+
+#define AFSPW_ABI_VERSION 1u
+#define AFSPW_SCRATCH_SIZE AFSPR_INTENT_SCRATCH_SIZE
+#define AFSPW_CAP_RENAME_FILE_NO_REPLACE (UINT64_C(1) << 0)
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+enum afspw_status {
+    AFSPW_ERR_LOG_FULL = -100,
+    AFSPW_ERR_DESTINATION_EXISTS = -101,
+    AFSPW_ERR_WRITE_UNCERTAIN = -102,
+    AFSPW_ERR_DURABILITY_UNCERTAIN = -103,
+    AFSPW_ERR_WRITE_FEATURE = -104
+};
+
+enum afspw_stage {
+    AFSPW_STAGE_NONE = 0,
+    AFSPW_STAGE_ARGUMENTS = 1,
+    AFSPW_STAGE_PROBE = 2,
+    AFSPW_STAGE_INTENT_SCAN = 3,
+    AFSPW_STAGE_SOURCE_LOOKUP = 4,
+    AFSPW_STAGE_TARGET_LOOKUP = 5,
+    AFSPW_STAGE_ENCODE = 6,
+    AFSPW_STAGE_RECORD_WRITE = 7,
+    AFSPW_STAGE_FLUSH = 8,
+    AFSPW_STAGE_COMPLETE = 9
+};
+
+/*
+ * The caller owns serialization and supplies complete logical-block I/O.
+ * write_blocks and flush return zero only when their operation succeeded.
+ * After either callback reports failure, media state is uncertain and the
+ * caller must discard cached state and probe again before another mutation.
+ */
+struct afspw_block_ops {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    void *ctx;
+    int (*read_blocks)(void *ctx, uint64_t first_block, uint32_t count,
+                       void *dst);
+    int (*write_blocks)(void *ctx, uint64_t first_block, uint32_t count,
+                        const void *src);
+    int (*flush)(void *ctx);
+    uint64_t block_count;
+    uint32_t block_size;
+};
+
+struct afspw_rename_result {
+    uint32_t abi_version;
+    uint32_t prior_records;
+    uint32_t sequence;
+    uint32_t log_slot;
+    uint64_t base_generation;
+    uint64_t log_block;
+};
+
+struct afspw_diagnostic {
+    uint32_t abi_version;
+    int32_t status;
+    uint32_t stage;
+    int32_t reader_status;
+    uint64_t block;
+    uint32_t sequence;
+    uint32_t reserved;
+};
+
+uint64_t afspw_capabilities(void);
+
+/*
+ * Durably rename one regular-file directory entry without replacement.
+ *
+ * The function freshly probes and semantically scans the durable intent view,
+ * verifies the source and absent destination, writes exactly one log block,
+ * then invokes one flush. source_name and target_name must remain immutable
+ * and must not overlap scratch for the duration of the call. The function
+ * owns no memory, retains no pointer and performs no checkpoint mutation.
+ *
+ * Common argument/read/format failures use AFSPR_ERR_* values. Writer-only
+ * failures use AFSPW_ERR_* above. A successful return is AFSPR_OK.
+ */
+int afspw_rename_file_no_replace(
+    const struct afspw_block_ops *ops, const struct afspr_scratch *scratch,
+    uint64_t source_parent_id, const void *source_name,
+    size_t source_name_len, uint64_t target_parent_id,
+    const void *target_name, size_t target_name_len,
+    const struct afspr_timespec *timestamp,
+    struct afspw_rename_result *result, size_t result_size,
+    struct afspw_diagnostic *diagnostic, size_t diagnostic_size);
+
+const char *afspw_status_string(int status);
+const char *afspw_stage_string(uint32_t stage);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

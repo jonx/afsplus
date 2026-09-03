@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 
 #include <libafsplus_reader.h>
+#include <libafsplus_writer.h>
 
 #include <string.h>
 
@@ -10,6 +11,8 @@ int main(void)
                        0 &&
                    (afspr_capabilities() & AFSPR_CAP_FILE_READ) != 0u
                    && (afspr_capabilities() & AFSPR_CAP_INTENT_FILE_READ) != 0u
+                   && (afspw_capabilities() &
+                       AFSPW_CAP_RENAME_FILE_NO_REPLACE) != 0u
                ? 0
                : 1;
 }

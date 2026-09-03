@@ -7,8 +7,11 @@ format without linking the Rust crates.
 no memory, uses caller-supplied logical-block I/O and scratch space, validates
 the identification record, selects the newest structural checkpoint, descends
 typed object/directory/extent trees, decodes object records and performs
-bounded regular-file reads. It does not yet replay the intent log or carry the
-Unicode tables needed to validate arbitrary non-ASCII comparison keys. The
+bounded regular-file reads and a validated checkpoint-plus-intent view. It
+does not yet carry the Unicode tables needed to validate arbitrary non-ASCII
+comparison keys. [`c/writer.c`](c/writer.c) adds the first `classic-rw` slice:
+one durable non-replacing file rename in a preallocated intent slot, with
+caller-owned I/O and memory. The
 [embedding guide](c/README.md) documents the ABI, capabilities, memory
 contract, diagnostics and host example.
 

@@ -1,4 +1,4 @@
-# Embedding the portable C reader
+# Embedding the portable C reader and bounded writer
 
 The reader is a small C99 library for boot, recovery, classic and third-party
 integrations. It shares no executable code with the Rust implementation.
@@ -9,6 +9,7 @@ integrations. It shares no executable code with the Rust implementation.
 - [ABI and capability policy](#abi-and-capability-policy)
 - [Runtime contract](#runtime-contract)
 - [Durable intent-log view](#durable-intent-log-view)
+- [First classic-rw operation](#first-classic-rw-operation)
 - [Validation](#validation)
 - [Fuzzing and exact reproduction](#fuzzing-and-exact-reproduction)
 
@@ -16,10 +17,12 @@ integrations. It shares no executable code with the Rust implementation.
 
 ## Integration choices
 
-For source vendoring, compile [`reader.c`](reader.c) and add
+For source vendoring, compile [`reader.c`](reader.c), plus
+[`writer.c`](writer.c) when mutation is needed, and add
 [`../../api`](../../api) plus [`../../spec`](../../spec) to the private include
 path. Consumers include only
-[`libafsplus_reader.h`](../../api/libafsplus_reader.h); the wire-format header
+[`libafsplus_reader.h`](../../api/libafsplus_reader.h) and optionally
+[`libafsplus_writer.h`](../../api/libafsplus_writer.h); the wire-format header
 is an implementation dependency.
 
 For CMake:
@@ -31,17 +34,20 @@ cmake --install build/portable-c --prefix /chosen/prefix
 ```
 
 An enclosing CMake project may use `add_subdirectory(portable/c)` and link
-`AFSPlus::reader`. Set `AFSPLUS_READER_BUILD_EXAMPLE=OFF` when embedding only
-the library. An installed package supports:
+`AFSPlus::reader` or `AFSPlus::writer` (which carries the reader dependency).
+Set `AFSPLUS_READER_BUILD_EXAMPLE=OFF` when embedding only the libraries. An
+installed package supports:
 
 ```cmake
 find_package(AFSPlusReader 0.1 CONFIG REQUIRED)
 target_link_libraries(your_target PRIVATE AFSPlus::reader)
+# or: target_link_libraries(your_target PRIVATE AFSPlus::writer)
 ```
 
 ## ABI and capability policy
 
-This additive slice remains reader ABI 1 and packages as version 0.1. Existing
+This additive slice keeps separate reader ABI 1 and writer ABI 1 surfaces and
+packages as version 0.1. Existing
 probe calls and the original placeholder `struct afspr_entry` keep their
 layout; the operational iterator uses the separate
 `struct afspr_directory_entry`. Every output struct carries the ABI version,
@@ -49,6 +55,10 @@ and calls that write structs also receive the caller's size. New code checks
 `afspr_capabilities()` instead of inferring support from a package version.
 None of these reader calls changes Filesystem API v2 or an application-facing
 filesystem-neutral capability.
+
+The writer header has its own capability mask, result and diagnostic structs.
+Its writer-only status values do not renumber the reader ABI. Adding a future
+operation does not make an integration infer support from the package version.
 
 ## Runtime contract
 
@@ -83,11 +93,11 @@ read semantics. A flagged directory, an unknown object flag, or a flagged file
 on a volume without `AFSPR_COMPAT_DATA_POLICY` is corruption rather than an
 ignored policy.
 
-Every operation is read-only, allocation-free and bounded by the tree-height
-or configured log-slot cap. The data destination and scratch buffer must not
-overlap. `AFSPR_CAP_FILE_READ` names the selected checkpoint view only;
-callers explicitly select the durable overlay through the separate intent
-capabilities.
+Every reader operation is read-only, allocation-free and bounded by the
+tree-height or configured log-slot cap. The data destination and scratch
+buffer must not overlap. `AFSPR_CAP_FILE_READ` names the selected checkpoint
+view only; callers explicitly select the durable overlay through the separate
+intent capabilities.
 
 `afspr_probe` is the compact call. `afspr_probe_detailed` additionally reports
 the failed stage, LBA, checkpoint slot and independent status of both slots.
@@ -152,6 +162,31 @@ the base reader's structural behavior, whose stored non-ASCII comparison keys
 cannot receive a semantic name/key cross-check until frozen Unicode 16 tables
 are present.
 
+## First classic-rw operation
+
+`afspw_rename_file_no_replace` is the first independent media-mutating C
+operation. It freshly probes the volume, rescans and semantically validates the
+durable namespace, proves that the source is a regular file and the target is
+absent, writes one version-2 rename record into the next preallocated intent
+slot, then invokes exactly one flush. It allocates no disk block and publishes
+no checkpoint. The caller supplies read/write/flush callbacks, 8 KiB scratch,
+exclusive writer serialization and immutable name buffers.
+
+A torn record is the invalid tail and the same slot can be retried after a
+fresh probe. Write or flush callback failure returns an explicitly uncertain
+status; the caller must discard cached state and recover/probe before deciding
+whether to retry. A full log returns `AFSPW_ERR_LOG_FULL` without write or
+flush and requires a checkpoint-capable implementation to materialize the
+prefix.
+
+The operation deliberately excludes replacement and unlink. Current Rust log
+replay can retire a replacement victim directly; exposing that through the C
+writer before it uses ADR-066's bounded orphan transition could make replay
+work proportional to file fragmentation. Directory rename, create, data write,
+truncate, allocation and checkpoint publication remain later `classic-rw`
+slices. Modern Unicode profiles currently accept ASCII lookup names in this C
+path; legacy identity volumes retain exact UTF-8 lookup.
+
 ## Validation
 
 From the repository root:
@@ -178,6 +213,18 @@ a sequence gap and a missing v3 feature bit stop or fail at the exact record or
 data LBA. The replacement victim carries Rust's persistent private-in-place
 flag on a data-policy volume, while the primary fixture injects the same flag
 without its feature and requires object-decode failure.
+
+The C writer copies that seven-record image, appends the eighth non-replacing
+rename with one write and one flush, reads the resulting namespace through the
+independent C overlay, then lets Rust replay and exhaustively check it. A
+64-byte torn write is retried into the same slot; a flush failure reports
+durability uncertainty; an existing destination and a full log produce zero
+media writes. Strict warnings, ASan/UBSan, Clang static analysis, CMake export
+consumption and the configured m68k compiler include both reader and writer.
+The maximum-prefix preflight currently makes 152 uncached logical-block read
+callbacks with 8 KiB scratch. This is a bounded structural count, not a device
+latency claim; adapter caching of the fixed log area and a single-pass prefix
+validator are explicit optimization work before physical A500 qualification.
 
 The same gate tests retained-checkpoint fallback and corrupt/ambiguous states.
 It independently sets the checkpoint header flags, header owner and payload

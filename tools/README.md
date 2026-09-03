@@ -17,7 +17,7 @@ enforces that.
 |---|---|---|
 | [tools-spec.md](tools-spec.md) | Specification of the official CLI tools | [docs/README.md](../docs/README.md) |
 | [check-docs.py](check-docs.py) | Documentation contract checker: links, anchors, TOCs, ADR index, navigation blocks, index rows, status rules | [docs/DOCUMENTATION.md](../docs/DOCUMENTATION.md) |
-| [check-portable-c-reader.sh](check-portable-c-reader.sh) | Strict-C99 Rust-to-C checkpoint/object/directory/file and durable intent-view cross-read, corruption diagnostics, sanitizer, CMake and optional AROS-m68k compile gate | [testing/conformance.md](../testing/conformance.md) |
+| [check-portable-c-reader.sh](check-portable-c-reader.sh) | Strict-C99 Rust↔C checkpoint/object/directory/file and durable intent-view cross-read, one-write/one-flush C rename with Rust replay, fault diagnostics, sanitizer, CMake and optional AROS-m68k compile gate | [testing/conformance.md](../testing/conformance.md) |
 | [check-portable-c-fuzz.sh](check-portable-c-fuzz.sh) | Records compact Rust-to-C reader and intent-scan paths, runs deterministic ASan/UBSan mutations, exports exact replay artifacts and opportunistically runs libFuzzer | [testing/fuzzing.md](../testing/fuzzing.md) |
 | [check-rust-codec-fuzz.sh](check-rust-codec-fuzz.sh) | Runs deterministic raw/resealed/truncated Rust codec mutations, canonical round trips and exact `.afrf` artifact replay | [testing/fuzzing.md](../testing/fuzzing.md) |
 | [check-mountable-alpha0.sh](check-mountable-alpha0.sh) | Composite Mountable Alpha-0 completion gate: portable API tests, real macFUSE round trip, Hosted and native AROS matrices, twelve replay cases, one checksummed result set | [ADR-060](../adr/ADR-060-mountable-alpha0-completion-gate.md), M08 |

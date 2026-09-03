@@ -22,6 +22,23 @@ target_include_directories(afsplus_reader
         "${CMAKE_CURRENT_SOURCE_DIR}/../../spec"
 )
 
+add_library(afsplus_writer STATIC writer.c)
+add_library(AFSPlus::writer ALIAS afsplus_writer)
+target_compile_features(afsplus_writer PUBLIC c_std_99)
+target_link_libraries(afsplus_writer PUBLIC AFSPlus::reader)
+set_target_properties(afsplus_writer PROPERTIES
+    C_EXTENSIONS OFF
+    EXPORT_NAME writer
+    PUBLIC_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/../../api/libafsplus_writer.h"
+)
+target_include_directories(afsplus_writer
+    PUBLIC
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../api>"
+        "$<INSTALL_INTERFACE:include>"
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../spec"
+)
+
 if(AFSPLUS_READER_BUILD_EXAMPLE)
     add_executable(afsplus-reader-probe examples/probe_file.c)
     target_link_libraries(afsplus-reader-probe PRIVATE AFSPlus::reader)
@@ -64,7 +81,7 @@ write_basic_package_version_file(
     VERSION "${PROJECT_VERSION}"
     COMPATIBILITY SameMajorVersion
 )
-install(TARGETS afsplus_reader
+install(TARGETS afsplus_reader afsplus_writer
     EXPORT AFSPlusReaderTargets
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     PUBLIC_HEADER DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"

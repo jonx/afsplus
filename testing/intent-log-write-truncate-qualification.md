@@ -14,7 +14,9 @@
 This gate qualifies experimental intent-log version 3 for writes and
 truncates of already committed files through the Rust core, portable VFS,
 host FUSE protocol and packet-neutral AROS adapter. It does not freeze the wire
-format or claim portable-C parity yet.
+format. Portable C now validates the complete data/namespace view and can
+append a namespace-only no-replace rename; it does not yet allocate or emit
+version-3 data updates.
 
 ## Durability oracle
 
@@ -129,5 +131,8 @@ The executable cases prove:
 The gate covers the Rust core APIs and recovery path. A log record is bounded
 to one block and at most 16 physical extents per data operation.
 The VFS avoids the core's same-window delete/replace boundary by publishing the
-data window before any namespace or reflink transaction. Portable-C parity,
-real-storage flush testing and final numeric wire allocation remain M14 work.
+data window before any namespace or reflink transaction. The independent C
+writer therefore exposes only no-replace rename: delete/replacement wait until
+replay uses ADR-066's bounded orphan transition. Portable-C allocation/data
+emission, real-storage flush testing and final numeric wire allocation remain
+M14 work.
