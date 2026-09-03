@@ -66,14 +66,17 @@ valid-checksum identity corruption in a selected tree node, plus a
 valid-checksum invalid extent flag, and a parent/child subtree-count mismatch
 must identify the exact failing LBA and decode phase.
 
-A second Rust fixture leaves a three-record fsynced prefix containing an
-existing-file write, truncate and logged create. C must scan and
-content-verify the prefix, expose the final size and reproduce both files byte
-for byte without changing the image. A damaged replacement block and sequence
-gap terminate at their exact tail coordinates; a v3 record without its
-required feature bit is a hard format error. Namespace overlay for
-rename/delete, non-ASCII comparison-key conformance and exhaustive repair
-walking are separate expansion gates.
+A second Rust fixture leaves a seven-record fsynced prefix containing
+hard-link deletion, an existing-file write and truncate, logged create, rename
+chains and replacement. C must scan and content-verify the prefix, resolve and
+enumerate its final case-insensitive namespace, preserve surviving object
+identity, reject the replaced object, and reproduce both final files byte for
+byte without changing the image. Valid-checksum semantic corruptions cover a
+missing rename source, replacement-flag mismatch, create-ID regression and
+write-size mismatch. A damaged replacement block and sequence gap terminate at
+their exact tail coordinates; a v3 record without its required feature bit is
+a hard format error. Non-ASCII Unicode comparison-key conformance and
+exhaustive repair walking are separate expansion gates.
 
 ## Portable C mutation gate
 
@@ -85,9 +88,9 @@ paths:
 make portable-c-fuzz-gate
 ```
 
-Six sparse-device packets cover probe, object lookup, both sides of the
-multi-leaf directory, a complete directory-to-file read and an intent-log
-prefix scan with referenced data. Each receives
+Seven sparse-device packets cover probe, object lookup, both sides of the
+multi-leaf directory, a complete directory-to-file read, an intent-log prefix
+scan with referenced data and a final durable namespace lookup. Each receives
 4,096 reproducible mutations under ASan/UBSan by default. A failure reports
 the seed and stable case number; the included artifact/replay tools reconstruct
 its exact bytes and print the terminal stage and LBA. Native libFuzzer consumes

@@ -27,10 +27,19 @@
 #define AFSPR_CAP_FILE_READ (UINT64_C(1) << 3)
 #define AFSPR_CAP_INTENT_LOG_SCAN (UINT64_C(1) << 4)
 #define AFSPR_CAP_INTENT_FILE_READ (UINT64_C(1) << 5)
+#define AFSPR_CAP_INTENT_NAMESPACE (UINT64_C(1) << 6)
 
 #define AFSPR_INTENT_VIEW_FILE_DATA (UINT32_C(1) << 0)
+#define AFSPR_INTENT_VIEW_NAMESPACE (UINT32_C(1) << 1)
+
+#define AFSPR_COMPARISON_KEY_CAPACITY 1020u
+#define AFSPR_INTENT_CURSOR_STARTED (UINT32_C(1) << 0)
+#define AFSPR_INTENT_CURSOR_PENDING (UINT32_C(1) << 1)
 
 #define AFSPR_OBJECT_FLAG_EXTENT_TREE (UINT16_C(1) << 0)
+#define AFSPR_OBJECT_FLAG_DATA_IN_PLACE (UINT16_C(1) << 1)
+/* Required on the volume when an object carries DATA_IN_PLACE. */
+#define AFSPR_COMPAT_DATA_POLICY (UINT64_C(1) << 0)
 
 #ifdef __cplusplus
 extern "C" {
@@ -72,7 +81,8 @@ enum afspr_probe_stage {
     AFSPR_STAGE_DATA_READ = 15,
     AFSPR_STAGE_INTENT_READ = 16,
     AFSPR_STAGE_INTENT_DECODE = 17,
-    AFSPR_STAGE_INTENT_DATA = 18
+    AFSPR_STAGE_INTENT_DATA = 18,
+    AFSPR_STAGE_INTENT_NAMESPACE = 19
 };
 
 enum afspr_intent_tail {
@@ -213,7 +223,9 @@ struct afspr_directory_entry {
  * AFSPR_NO_LOG_SLOT when the log is disabled or every configured slot is
  * valid. An invalid, stale or torn tail is a normal crash boundary and is
  * excluded from the result; valid_records and valid_operations describe the
- * complete durable prefix before it.
+ * complete durable prefix before it. flags advertises which exact semantic
+ * views are available for that prefix; callers test the relevant bit before
+ * retaining the view.
  */
 struct afspr_intent_view {
     uint32_t abi_version;
@@ -225,6 +237,25 @@ struct afspr_intent_view {
     uint64_t base_generation;
     uint64_t last_sequence;
     uint64_t tail_block;
+};
+
+/*
+ * Caller-owned ordered-directory cursor. Initialize it with
+ * afspr_intent_directory_cursor_init and retain it between calls to
+ * afspr_intent_directory_next. Its key is opaque to integrations.
+ */
+struct afspr_intent_directory_cursor {
+    uint32_t abi_version;
+    uint32_t flags;
+    uint64_t directory_id;
+    uint64_t base_generation;
+    uint64_t last_sequence;
+    uint32_t valid_records;
+    uint32_t valid_operations;
+    uint64_t base_ordinal;
+    uint16_t key_len;
+    uint8_t reserved[6];
+    uint8_t key[AFSPR_COMPARISON_KEY_CAPACITY];
 };
 
 int afspr_probe(const struct afspr_block_ops *ops,
@@ -294,11 +325,44 @@ int afspr_scan_intent_log(const struct afspr_block_ops *ops,
                           struct afspr_diagnostic *diagnostic,
                           size_t diagnostic_size);
 
+/* Initializes a caller-owned cursor without performing device I/O. */
+int afspr_intent_directory_cursor_init(
+    struct afspr_intent_directory_cursor *cursor, size_t cursor_size);
+
+/*
+ * Resolves one name through the durable checkpoint-plus-intent namespace.
+ * Non-ASCII lookup names require the future portable Unicode tables unless
+ * the volume uses the legacy identity-key profile.
+ */
+int afspr_lookup_intent_directory_entry(
+    const struct afspr_block_ops *ops,
+    const struct afspr_scratch *scratch,
+    const struct afspr_probe_result *volume,
+    const struct afspr_intent_view *view, uint64_t directory_id,
+    const void *name, size_t name_len, void *name_buffer,
+    size_t name_capacity, struct afspr_directory_entry *entry,
+    size_t entry_size, struct afspr_diagnostic *diagnostic,
+    size_t diagnostic_size);
+
+/*
+ * Returns the next final entry in comparison-key order. NOT_FOUND is EOF.
+ * A BUFFER_TOO_SMALL result leaves the selected entry pending so retrying
+ * the same cursor with a larger name buffer returns that entry, not the next.
+ */
+int afspr_intent_directory_next(
+    const struct afspr_block_ops *ops,
+    const struct afspr_scratch *scratch,
+    const struct afspr_probe_result *volume,
+    const struct afspr_intent_view *view, uint64_t directory_id,
+    struct afspr_intent_directory_cursor *cursor, size_t cursor_size,
+    void *name_buffer, size_t name_capacity,
+    struct afspr_directory_entry *entry, size_t entry_size,
+    struct afspr_diagnostic *diagnostic, size_t diagnostic_size);
+
 /*
  * Resolves a regular file's final logical size through a validated view.
- * This first slice is exact for create/write/truncate-only prefixes. A prefix
- * containing delete or rename does not advertise FILE_DATA and returns
- * UNSUPPORTED until the namespace overlay is implemented.
+ * Namespace operations are reflected as well: a last-link delete returns
+ * NOT_FOUND while renames and deletes of another hard link retain identity.
  */
 int afspr_intent_file_size(const struct afspr_block_ops *ops,
                            const struct afspr_scratch *scratch,

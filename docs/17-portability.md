@@ -74,17 +74,22 @@ the corruption/fallback oracle in the
 [conformance gate](../testing/conformance.md#portable-c-bootstrap-gate).
 
 The reader also scans the fsynced intent-log prefix and exposes a read-only
-checkpoint-plus-log file view for create, write and truncate records. It
-content-verifies replacement blocks and reports the first excluded tail slot
-and LBA. Rename/delete prefixes remain scan-visible but require the future
-namespace overlay before file-data lookup is advertised.
+checkpoint-plus-log namespace and file view. Its bounded lookup and
+caller-owned ordered cursor merge logged create, delete and rename operations
+with the committed directory trees, including replacement and hard-link
+identity. File reads apply logged create, write and truncate data to that final
+identity. The reader content-verifies replacement blocks, validates replay
+preconditions and reports the first excluded tail slot and LBA.
 
 Integrators get a versioned public ABI, symbolic and printable errors,
 structured stage/LBA/per-checkpoint diagnostics, a source-vendoring contract,
 a CMake target and a complete host-file example. Native targets replace only
-the logical-block callback. Full namespace overlay, complete non-ASCII
-comparison-key validation and an independent repair walk remain later C
-capabilities, never implicit behavior of the bounded reader.
+the logical-block callback. Complete non-ASCII comparison-key validation and
+an independent repair walk are separate C capabilities, never implicit
+behavior of the bounded reader. Unicode-profile names outside ASCII fail
+closed for logged-name overlays and direct lookup until the frozen Unicode 16
+tables are present; committed ordinal enumeration has only structural key
+validation. Legacy identity keys retain byte-exact UTF-8 behavior.
 
 The companion C fuzz harness records successful reads as compact sparse-device
 packets. Deterministic case numbers, artifact export and the standalone replay

@@ -18,7 +18,8 @@ enum afspr_fuzz_operation {
     AFSPR_FUZZ_DIRECTORY_ENTRY = 2,
     AFSPR_FUZZ_READ_OBJECT = 3,
     AFSPR_FUZZ_DIRECTORY_FILE = 4,
-    AFSPR_FUZZ_INTENT_SCAN = 5
+    AFSPR_FUZZ_INTENT_SCAN = 5,
+    AFSPR_FUZZ_INTENT_NAMESPACE = 6
 };
 
 struct afspr_fuzz_request {

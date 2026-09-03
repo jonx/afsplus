@@ -150,6 +150,10 @@ static int operation_succeeded(const struct afspr_fuzz_request *request,
     if (request->operation == AFSPR_FUZZ_INTENT_SCAN) {
         return outcome->intent_status == AFSPR_OK;
     }
+    if (request->operation == AFSPR_FUZZ_INTENT_NAMESPACE) {
+        return outcome->intent_status == AFSPR_OK &&
+               outcome->directory_status == AFSPR_OK;
+    }
     if (outcome->object_status != AFSPR_OK) {
         return 0;
     }

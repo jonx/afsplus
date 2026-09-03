@@ -129,6 +129,7 @@ int afspr_fuzz_exercise(const struct afspr_block_ops *ops,
     struct afspr_probe_result volume;
     struct afspr_object object;
     struct afspr_directory_entry entry;
+    struct afspr_intent_directory_cursor cursor;
     struct afspr_intent_view intent;
     uint64_t total_entries = 0u;
     size_t output_size;
@@ -156,6 +157,24 @@ int afspr_fuzz_exercise(const struct afspr_block_ops *ops,
     if (request->operation == AFSPR_FUZZ_INTENT_SCAN) {
         outcome->intent_status = afspr_scan_intent_log(
             ops, &scratch, &volume, &intent, sizeof(intent),
+            &outcome->diagnostic, sizeof(outcome->diagnostic));
+        return AFSPR_OK;
+    }
+    if (request->operation == AFSPR_FUZZ_INTENT_NAMESPACE) {
+        outcome->intent_status = afspr_scan_intent_log(
+            ops, &scratch, &volume, &intent, sizeof(intent),
+            &outcome->diagnostic, sizeof(outcome->diagnostic));
+        if (outcome->intent_status != AFSPR_OK) {
+            return AFSPR_OK;
+        }
+        outcome->directory_status =
+            afspr_intent_directory_cursor_init(&cursor, sizeof(cursor));
+        if (outcome->directory_status != AFSPR_OK) {
+            return AFSPR_OK;
+        }
+        outcome->directory_status = afspr_intent_directory_next(
+            ops, &scratch, &volume, &intent, request->argument, &cursor,
+            sizeof(cursor), name, sizeof(name), &entry, sizeof(entry),
             &outcome->diagnostic, sizeof(outcome->diagnostic));
         return AFSPR_OK;
     }

@@ -13,6 +13,7 @@
 #define TEST_IDENT_RO_COMPAT_OFFSET (32u + 145u)
 #define TEST_CHECKPOINT_OBJECT_MAP_OFFSET (32u + 32u)
 #define TEST_CHECKPOINT_SHARED_ROOT_OFFSET (32u + 88u)
+#define TEST_OBJECT_FLAGS_OFFSET (32u + 10u)
 
 struct file_device {
     FILE *file;
@@ -30,6 +31,7 @@ struct memory_device {
 };
 
 static void reseal(uint8_t *block);
+static void put_le16(uint8_t *p, uint16_t value);
 static void put_le64(uint8_t *p, uint64_t value);
 
 static int file_read_blocks(void *ctx, uint64_t first_block, uint32_t count,
@@ -71,6 +73,10 @@ static int file_read_blocks(void *ctx, uint64_t first_block, uint32_t count,
                 (uint8_t)(((uint8_t *)dst)[40] + 1u);
             ((uint8_t *)dst)[56] =
                 (uint8_t)(((uint8_t *)dst)[56] + 1u);
+            reseal((uint8_t *)dst);
+        } else if (device->corrupt_mode == 6) {
+            put_le16((uint8_t *)dst + TEST_OBJECT_FLAGS_OFFSET,
+                     AFSPR_OBJECT_FLAG_DATA_IN_PLACE);
             reseal((uint8_t *)dst);
         }
     }
@@ -207,9 +213,11 @@ int main(int argc, char **argv)
     struct afspr_block_ops memory_ops;
     struct afspr_probe_result first;
     struct afspr_probe_result fallback;
+    struct afspr_probe_result policy_volume;
     struct afspr_object root;
     struct afspr_object file;
     struct afspr_object tree_file;
+    struct afspr_object policy_file;
     struct afspr_directory_entry entry;
     struct afspr_diagnostic diagnostic;
     uint8_t scratch[AFSPR_TREE_SCRATCH_SIZE];
@@ -277,10 +285,12 @@ int main(int argc, char **argv)
     require((afspr_capabilities() &
              (AFSPR_CAP_PROBE | AFSPR_CAP_OBJECT_LOOKUP |
               AFSPR_CAP_DIRECTORY_ORDINAL | AFSPR_CAP_FILE_READ |
-              AFSPR_CAP_INTENT_LOG_SCAN | AFSPR_CAP_INTENT_FILE_READ)) ==
+              AFSPR_CAP_INTENT_LOG_SCAN | AFSPR_CAP_INTENT_FILE_READ |
+              AFSPR_CAP_INTENT_NAMESPACE)) ==
                 (AFSPR_CAP_PROBE | AFSPR_CAP_OBJECT_LOOKUP |
                  AFSPR_CAP_DIRECTORY_ORDINAL | AFSPR_CAP_FILE_READ |
-                 AFSPR_CAP_INTENT_LOG_SCAN | AFSPR_CAP_INTENT_FILE_READ),
+                 AFSPR_CAP_INTENT_LOG_SCAN | AFSPR_CAP_INTENT_FILE_READ |
+                 AFSPR_CAP_INTENT_NAMESPACE),
             "reader capability summary is incomplete");
 
     file_device.trace_count = 0u;
@@ -415,6 +425,17 @@ int main(int argc, char **argv)
                 diagnostic.stage == AFSPR_STAGE_OBJECT_DECODE &&
                 diagnostic.block == object_lba,
             "future-generation object record was not rejected at its LBA");
+
+    file_device.corrupt_mode = 6;
+    status = afspr_lookup_object(&file_ops,
+                                 &(struct afspr_scratch){scratch,
+                                                         sizeof(scratch)},
+                                 &first, file_id, &file, sizeof(file),
+                                 &diagnostic, sizeof(diagnostic));
+    require(status == AFSPR_ERR_CORRUPT &&
+                diagnostic.stage == AFSPR_STAGE_OBJECT_DECODE &&
+                diagnostic.block == object_lba,
+            "data-policy flag without its feature was accepted");
     file_device.corrupt_lba = UINT64_MAX;
     file_device.corrupt_mode = 0;
 
@@ -465,6 +486,23 @@ int main(int argc, char **argv)
         &diagnostic, sizeof(diagnostic));
     require(status == AFSPR_OK && bytes_read == 0u,
             "file read did not report EOF cleanly");
+
+    policy_file = file;
+    policy_file.flags |= AFSPR_OBJECT_FLAG_DATA_IN_PLACE;
+    status = afspr_read_file(
+        &file_ops, &(struct afspr_scratch){scratch, sizeof(scratch)}, &first,
+        &policy_file, policy_file.size_bytes, actual, sizeof(actual),
+        &bytes_read, &diagnostic, sizeof(diagnostic));
+    require(status == AFSPR_ERR_CORRUPT,
+            "caller-supplied data-policy flag bypassed feature congruence");
+    policy_volume = first;
+    policy_volume.compat_features |= AFSPR_COMPAT_DATA_POLICY;
+    status = afspr_read_file(
+        &file_ops, &(struct afspr_scratch){scratch, sizeof(scratch)},
+        &policy_volume, &policy_file, policy_file.size_bytes, actual,
+        sizeof(actual), &bytes_read, &diagnostic, sizeof(diagnostic));
+    require(status == AFSPR_OK && bytes_read == 0u,
+            "data-policy flag was rejected when its feature was present");
 
     tree_file = file;
     tree_file.flags = AFSPR_OBJECT_FLAG_EXTENT_TREE;

@@ -77,6 +77,12 @@ names live in the caller's name buffer. Passing zero name capacity is a sizing
 query: `AFSPR_ERR_BUFFER_TOO_SMALL` leaves the required length in
 `entry.name_len`.
 
+The object decoder recognizes the per-file private-in-place policy flag from
+[ADR-065](../../adr/ADR-065-persistent-data-update-policy.md) without changing
+read semantics. A flagged directory, an unknown object flag, or a flagged file
+on a volume without `AFSPR_COMPAT_DATA_POLICY` is corruption rather than an
+ignored policy.
+
 Every operation is read-only, allocation-free and bounded by the tree-height
 or configured log-slot cap. The data destination and scratch buffer must not
 overlap. `AFSPR_CAP_FILE_READ` names the selected checkpoint view only;
@@ -114,18 +120,37 @@ out-of-sequence or content-damaged tail is reported in `tail_state`; it does
 not erase earlier complete records. Device I/O and feature-contract failures
 remain hard errors with a structured stage and LBA.
 
-For create, write and truncate records, `afspr_intent_file_size` and
-`afspr_read_intent_file` expose the durable checkpoint-plus-log bytes without
-writing the device or allocating memory. They handle files created only in the
-log, sparse growth, partial-block replacement and shrink. The caller retains
-the `afspr_intent_view` and passes it back on each read; the library rescans
-before use so a stale or forged view is not trusted.
+`afspr_lookup_intent_directory_entry` resolves a name against the selected
+checkpoint plus the durable prefix. `afspr_intent_directory_next` merges the
+committed tree and logged create/rename targets in comparison-key order through
+a caller-owned cursor. Deletes, rename chains, case-only renames, hard-link
+identity and replacement are reflected. A too-small name buffer leaves the
+selected entry pending, so retrying the same cursor cannot skip it.
 
-A prefix containing rename or delete intentionally clears
-`AFSPR_INTENT_VIEW_FILE_DATA`: object identity then depends on the namespace
-overlay, which is the next independent-reader slice. Integrators must test the
-flag instead of assuming that a successful scan provides that later
-capability.
+`afspr_intent_file_size` and `afspr_read_intent_file` expose the corresponding
+durable file bytes without writing the device or allocating memory. They
+handle files created only in the log, sparse growth, partial-block replacement,
+shrink, last-link deletion and identity retained through rename or another hard
+link. Each operation validates namespace replay preconditions, including
+source and target existence, replacement intent, monotone create IDs and
+write/truncate expected sizes.
+
+The caller retains the `afspr_intent_view` and passes it back on each lookup,
+cursor step or file read. Every call rescans the bounded log and revalidates
+the semantic prefix before using the view; no mutable validation cache or
+borrowed media pointer crosses calls. This favors a simple anti-TOCTOU contract
+over throughput: work is bounded by the configured log slots and operations,
+but an integration performing large directory scans should cache results above
+the reader only while it can guarantee an immutable device view.
+
+Legacy identity-key volumes support every valid UTF-8 spelling byte-for-byte.
+The versioned Unicode profiles support exact ASCII normalization and ASCII
+case folding. A non-ASCII logged name on those profiles clears the advertised
+intent views, and a direct non-ASCII lookup returns `AFSPR_ERR_UNSUPPORTED`;
+neither is approximated with locale rules. Committed ordinal enumeration keeps
+the base reader's structural behavior, whose stored non-ASCII comparison keys
+cannot receive a semantic name/key cross-check until frozen Unicode 16 tables
+are present.
 
 ## Validation
 
@@ -142,11 +167,17 @@ synthetic but wire-valid extent root reuses those Rust-produced data blocks to
 exercise a sparse hole and typed extent lookup. Valid-checksum tree identity
 and extent-value corruptions must report the exact failing LBA.
 
-A second Rust fixture leaves three fsynced records beyond its checkpoint: an
-existing-file write, a truncate and a newly created file. C scans that prefix,
-reconstructs both final files in 777-byte reads and matches Rust-written oracle
-bytes. Content damage, a sequence gap and a missing v3 feature bit must stop or
-fail at the exact record or data LBA.
+A second Rust fixture leaves seven fsynced records beyond its checkpoint:
+hard-link deletion, existing-file write and truncate, create, a two-step rename
+chain, another rename and replacement. C scans that prefix, resolves the final
+case-insensitive names, enumerates them in key order and reconstructs both
+surviving files in 777-byte reads against Rust-written oracle bytes. It also
+requires exact record coordinates for missing rename sources, replacement
+flag mismatch, non-monotone create IDs and write-size mismatch. Content damage,
+a sequence gap and a missing v3 feature bit stop or fail at the exact record or
+data LBA. The replacement victim carries Rust's persistent private-in-place
+flag on a data-policy volume, while the primary fixture injects the same flag
+without its feature and requires object-decode failure.
 
 The same gate tests retained-checkpoint fallback and corrupt/ambiguous states,
 compiles the public example, and runs AddressSanitizer/UndefinedBehaviorSanitizer
@@ -167,9 +198,9 @@ AFSPLUS_FUZZ_RUNS=250000 make portable-c-fuzz-long
 The seed packer records only blocks actually read during a successful
 operation. Its `.afzf` packet carries the virtual device size, operation and
 arguments followed by `(LBA, 4096-byte block)` records. This keeps a complete
-probe, lookup, directory descent or file read between 12 and 48 KiB instead of
-copying a 16-MiB image. The packet reader treats absent blocks as I/O failures
-and never writes the source packet.
+probe, lookup, directory descent, file read or durable namespace lookup between
+12 and 48 KiB instead of copying a 16-MiB image. The packet reader treats
+absent blocks as I/O failures and never writes the source packet.
 
 The mandatory smoke engine makes every mutation a pure function of a seed and
 case number. It mutates every packet-header byte and the first 128 bytes of

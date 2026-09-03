@@ -74,6 +74,7 @@ includes="-I$repo/api -I$repo/spec -I$repo/portable/c/fuzz"
 "$packer" "$image" "$corpus/03-directory-last.afzf" 2 302 0 0
 "$packer" "$image" "$corpus/04-directory-file.afzf" 4 302 0 777
 "$packer" "$intent_image" "$corpus/05-intent-scan.afzf" 5 0 0 0
+"$packer" "$intent_image" "$corpus/06-intent-namespace.afzf" 6 1 0 0
 
 for seed in "$corpus"/*.afzf; do
     "$replay" -s "$seed"
@@ -138,4 +139,4 @@ fi
 
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$image" >/dev/null
-echo "portable-c-fuzz result=PASS runs-per-seed=$runs seeds=6"
+echo "portable-c-fuzz result=PASS runs-per-seed=$runs seeds=7"

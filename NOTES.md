@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Portable C overlays the durable namespace](#2026-09-03--portable-c-overlays-the-durable-namespace)
 - [2026-09-03 — The per-file data policy becomes persistent](#2026-09-03--the-per-file-data-policy-becomes-persistent)
 - [2026-09-03 — Portable C reads the durable log view](#2026-09-03--portable-c-reads-the-durable-log-view)
 - [2026-09-03 — Portable C failures become replayable artifacts](#2026-09-03--portable-c-failures-become-replayable-artifacts)
@@ -29,6 +30,28 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Portable C overlays the durable namespace
+
+The independent C99 reader gained the namespace half of the intent-log view.
+It now resolves and enumerates the final checkpoint-plus-log directory state,
+chases rename chains without recursion, honors replacement, and keeps object
+identity correct across hard-link deletion and rename. The same semantic pass
+checks source/target preconditions, monotone create IDs and write/truncate
+expected sizes before file bytes are exposed. Calls retain the 8-KiB
+caller-owned scratch contract; an explicit cursor makes ordered iteration and
+small-buffer retries possible without hidden allocation or global state.
+
+The Rust-produced fixture grew from three to seven durable records and now
+combines delete, write, truncate, create, rename chains and replacement.
+Portable C matches both surviving oracle files and the final
+case-insensitive namespace, while four valid-checksum mutations demonstrate
+that semantic inconsistencies fail at the responsible record. A seventh AFZF
+seed carries a successful namespace lookup through the deterministic
+ASan/UBSan mutation and replay gate. The reader also learned
+[ADR-065](adr/ADR-065-persistent-data-update-policy.md)'s per-file policy flag
+and rejects the flag without its volume feature, keeping the Rust and C format
+boundaries congruent.
 
 ## 2026-09-03 — The per-file data policy becomes persistent
 

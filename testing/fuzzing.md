@@ -27,17 +27,18 @@ replayable without the original workstation.
 | Directory node | First/last ordinal in a 303-entry tree | Add complete Unicode comparison-key tables |
 | Extent node and file data | Directory-to-file read seed; direct/sparse synthetic coverage remains in conformance | Add committed tree-backed file seed |
 | Allocation-region metadata | None | Add with portable repair walker |
-| Intent-log record and referenced data | Rust-built v3 write/truncate/create prefix scan | Add namespace-overlay read seed |
+| Intent-log record and referenced data | Rust-built v3 write/truncate/create prefix scan plus final namespace lookup | Add multi-operation record seeds |
 | Xattr record | None | Add when the portable reader exposes xattrs |
 | Catalog record | None | Add with catalog implementation |
 | Change-stream record | None | Add with change-stream implementation |
 
 ## Portable C corpus contract
 
-`make portable-c-fuzz-gate` builds a Rust image with 303 root entries and
-records six successful operations: probe, root-object lookup, both extremes
-of a multi-leaf directory, directory-to-file lookup/read and an intent-log
-scan that content-verifies replacement extents. The recorder
+`make portable-c-fuzz-gate` builds Rust images and records seven successful
+operations: probe, root-object lookup, both extremes of a multi-leaf
+directory, directory-to-file lookup/read, an intent-log scan that
+content-verifies replacement extents and a final durable namespace lookup. The
+recorder
 stores only the observed blocks in `.afzf` sparse-device packets. Each packet
 contains an operation header and fixed `(LBA, block)` records, so a complete
 path is 12–48 KiB and missing data deterministically becomes an I/O error.

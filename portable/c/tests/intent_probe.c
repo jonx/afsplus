@@ -14,6 +14,7 @@
 
 struct file_device {
     FILE *file;
+    uint64_t fail_lba;
 };
 
 static uint32_t load_u32(const uint8_t *bytes)
@@ -34,6 +35,12 @@ static void store_u32(uint8_t *bytes, uint32_t value)
     bytes[1] = (uint8_t)(value >> 8);
     bytes[2] = (uint8_t)(value >> 16);
     bytes[3] = (uint8_t)(value >> 24);
+}
+
+static void store_u64(uint8_t *bytes, uint64_t value)
+{
+    store_u32(bytes, (uint32_t)value);
+    store_u32(bytes + 4u, (uint32_t)(value >> 32));
 }
 
 static uint32_t crc32c_update(uint32_t crc, const uint8_t *bytes, size_t size)
@@ -72,10 +79,11 @@ static int read_blocks(void *opaque, uint64_t first, uint32_t count,
     uint32_t index;
 
     for (index = 0u; index < count; ++index) {
-        uint64_t offset = (first + index) * BLOCK_SIZE;
+        uint64_t lba = first + index;
+        uint64_t offset = lba * BLOCK_SIZE;
         size_t got;
 
-        if (offset > (uint64_t)LONG_MAX ||
+        if (lba == device->fail_lba || offset > (uint64_t)LONG_MAX ||
             fseek(device->file, (long)offset, SEEK_SET) != 0) {
             return -1;
         }
@@ -221,6 +229,132 @@ static void compare_intent_file(const struct afspr_block_ops *ops,
     free(expected);
 }
 
+static void require_entry(const struct afspr_directory_entry *entry,
+                          uint64_t object_id, const char *name,
+                          const char *label)
+{
+    size_t name_len = strlen(name);
+
+    if (entry->object_id != object_id ||
+        entry->type_hint != AFSPR_OBJECT_FILE ||
+        entry->parent_id != 1u || entry->name_len != name_len ||
+        memcmp(entry->name, name, name_len) != 0) {
+        fprintf(stderr, "%s: unexpected directory entry\n", label);
+        exit(EXIT_FAILURE);
+    }
+}
+
+static void check_namespace(const struct afspr_block_ops *ops,
+                            const struct afspr_scratch *scratch,
+                            const struct afspr_probe_result *volume,
+                            const struct afspr_intent_view *view)
+{
+    struct afspr_intent_directory_cursor cursor;
+    struct afspr_directory_entry entry;
+    struct afspr_diagnostic diagnostic;
+    uint8_t name[255];
+    int status;
+
+    status = afspr_lookup_intent_directory_entry(
+        ops, scratch, volume, view, 1u, "replace.txt", 11u, name,
+        sizeof(name), &entry, sizeof(entry), &diagnostic,
+        sizeof(diagnostic));
+    require_status(status, AFSPR_OK, "rename replacement lookup",
+                   &diagnostic);
+    require_entry(&entry, 18u, "Replace.TXT",
+                  "rename replacement lookup");
+    status = afspr_lookup_intent_directory_entry(
+        ops, scratch, volume, view, 1u, "final.bin", 9u, name,
+        sizeof(name), &entry, sizeof(entry), &diagnostic,
+        sizeof(diagnostic));
+    require_status(status, AFSPR_OK, "hard-link survivor lookup",
+                   &diagnostic);
+    require_entry(&entry, 16u, "Final.BIN", "hard-link survivor lookup");
+    status = afspr_lookup_intent_directory_entry(
+        ops, scratch, volume, view, 1u, "pending.txt", 11u, name,
+        sizeof(name), &entry, sizeof(entry), &diagnostic,
+        sizeof(diagnostic));
+    require_status(status, AFSPR_ERR_NOT_FOUND, "renamed source lookup",
+                   &diagnostic);
+    status = afspr_lookup_intent_directory_entry(
+        ops, scratch, volume, view, 1u, "alias.bin", 9u, name,
+        sizeof(name), &entry, sizeof(entry), &diagnostic,
+        sizeof(diagnostic));
+    require_status(status, AFSPR_ERR_NOT_FOUND, "deleted alias lookup",
+                   &diagnostic);
+    status = afspr_lookup_intent_directory_entry(
+        ops, scratch, volume, view, 1u, "missing", 7u, name, sizeof(name),
+        &entry, sizeof(entry), &diagnostic, sizeof(diagnostic));
+    require_status(status, AFSPR_ERR_NOT_FOUND, "missing intent lookup",
+                   &diagnostic);
+    status = afspr_lookup_intent_directory_entry(
+        ops, scratch, volume, view, 1u, "\xc3\xa9", 2u, name,
+        sizeof(name), &entry, sizeof(entry), &diagnostic,
+        sizeof(diagnostic));
+    require_status(status, AFSPR_ERR_UNSUPPORTED,
+                   "unsupported Unicode-profile lookup", &diagnostic);
+    if (diagnostic.stage != AFSPR_STAGE_INTENT_NAMESPACE) {
+        fprintf(stderr, "Unicode lookup lost its namespace diagnostic\n");
+        exit(EXIT_FAILURE);
+    }
+
+    status = afspr_intent_directory_cursor_init(&cursor, sizeof(cursor));
+    require_status(status, AFSPR_OK, "cursor init", &diagnostic);
+    status = afspr_intent_directory_next(
+        ops, scratch, volume, view, 1u, &cursor, sizeof(cursor), name, 1u,
+        &entry, sizeof(entry), &diagnostic, sizeof(diagnostic));
+    require_status(status, AFSPR_ERR_BUFFER_TOO_SMALL,
+                   "cursor sizing query", &diagnostic);
+    if (entry.name_len != strlen("Final.BIN")) {
+        fprintf(stderr, "cursor sizing query lost required name length\n");
+        exit(EXIT_FAILURE);
+    }
+    status = afspr_intent_directory_next(
+        ops, scratch, volume, view, 1u, &cursor, sizeof(cursor), name,
+        sizeof(name), &entry, sizeof(entry), &diagnostic,
+        sizeof(diagnostic));
+    require_status(status, AFSPR_OK, "cursor retry", &diagnostic);
+    require_entry(&entry, 16u, "Final.BIN", "cursor retry");
+    status = afspr_intent_directory_next(
+        ops, scratch, volume, view, 1u, &cursor, sizeof(cursor), name,
+        sizeof(name), &entry, sizeof(entry), &diagnostic,
+        sizeof(diagnostic));
+    require_status(status, AFSPR_OK, "cursor logged entry", &diagnostic);
+    require_entry(&entry, 18u, "Replace.TXT", "cursor logged entry");
+    status = afspr_intent_directory_next(
+        ops, scratch, volume, view, 1u, &cursor, sizeof(cursor), name,
+        sizeof(name), &entry, sizeof(entry), &diagnostic,
+        sizeof(diagnostic));
+    require_status(status, AFSPR_ERR_NOT_FOUND, "cursor EOF", &diagnostic);
+}
+
+static void require_namespace_corrupt(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_probe_result *volume,
+    const struct afspr_intent_view *view, uint64_t expected_lba,
+    const char *label)
+{
+    struct afspr_directory_entry entry;
+    struct afspr_diagnostic diagnostic;
+    uint8_t name[255];
+    int status = afspr_lookup_intent_directory_entry(
+        ops, scratch, volume, view, 1u, "replace.txt", 11u, name,
+        sizeof(name), &entry, sizeof(entry), &diagnostic,
+        sizeof(diagnostic));
+
+    require_status(status, AFSPR_ERR_CORRUPT, label, &diagnostic);
+    if (diagnostic.stage != AFSPR_STAGE_INTENT_NAMESPACE ||
+        diagnostic.block != expected_lba) {
+        fprintf(stderr,
+                "%s lost record coordinate: stage=%u block=%llu "
+                "expected=%llu\n",
+                label, diagnostic.stage,
+                (unsigned long long)diagnostic.block,
+                (unsigned long long)expected_lba);
+        exit(EXIT_FAILURE);
+    }
+}
+
 int main(int argc, char **argv)
 {
     struct file_device device;
@@ -228,6 +362,7 @@ int main(int argc, char **argv)
     struct afspr_scratch scratch;
     struct afspr_probe_result volume;
     struct afspr_intent_view view;
+    struct afspr_object policy_object;
     struct afspr_diagnostic diagnostic;
     uint8_t scratch_bytes[AFSPR_INTENT_SCRATCH_SIZE];
     uint8_t log_original[BLOCK_SIZE];
@@ -249,6 +384,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "cannot open %s\n", argv[1]);
         return EXIT_FAILURE;
     }
+    device.fail_lba = UINT64_MAX;
     memset(&ops, 0, sizeof(ops));
     ops.abi_version = AFSPR_ABI_VERSION;
     ops.struct_size = (uint32_t)sizeof(ops);
@@ -266,10 +402,10 @@ int main(int argc, char **argv)
                                    sizeof(view), &diagnostic,
                                    sizeof(diagnostic));
     require_status(status, AFSPR_OK, "valid scan", &diagnostic);
-    if (view.valid_records != 3u || view.valid_operations != 3u ||
-        view.last_sequence != 3u ||
+    if (view.valid_records != 7u || view.valid_operations != 7u ||
+        view.last_sequence != 7u ||
         view.tail_state != AFSPR_INTENT_TAIL_INVALID ||
-        view.tail_slot != 3u || view.tail_block == AFSPR_NO_BLOCK) {
+        view.tail_slot != 7u || view.tail_block == AFSPR_NO_BLOCK) {
         fprintf(stderr,
                 "unexpected view records=%u operations=%u sequence=%llu "
                 "tail=%s slot=%u block=%llu\n",
@@ -283,8 +419,55 @@ int main(int argc, char **argv)
         fprintf(stderr, "create/write/truncate prefix lacks file-data view\n");
         return EXIT_FAILURE;
     }
+    if ((view.flags & AFSPR_INTENT_VIEW_NAMESPACE) == 0u ||
+        (afspr_capabilities() & AFSPR_CAP_INTENT_NAMESPACE) == 0u) {
+        fprintf(stderr, "intent namespace capability is unavailable\n");
+        return EXIT_FAILURE;
+    }
+    if (strcmp(afspr_probe_stage_string(AFSPR_STAGE_INTENT_NAMESPACE),
+               "intent-log namespace") != 0) {
+        fprintf(stderr, "intent namespace stage is not printable\n");
+        return EXIT_FAILURE;
+    }
+    status = afspr_lookup_object(
+        &ops, &scratch, &volume, 17u, &policy_object,
+        sizeof(policy_object), &diagnostic, sizeof(diagnostic));
+    require_status(status, AFSPR_OK, "data-policy object", &diagnostic);
+    if ((volume.compat_features & AFSPR_COMPAT_DATA_POLICY) == 0u ||
+        (policy_object.flags & AFSPR_OBJECT_FLAG_DATA_IN_PLACE) == 0u) {
+        fprintf(stderr, "Rust fixture lacks the persistent data-policy pair\n");
+        return EXIT_FAILURE;
+    }
+    check_namespace(&ops, &scratch, &volume, &view);
+    device.fail_lba = volume.object_map_block;
+    {
+        struct afspr_directory_entry ignored_entry;
+        uint8_t ignored_name[255];
+
+        status = afspr_lookup_intent_directory_entry(
+            &ops, &scratch, &volume, &view, 1u, "final.bin", 9u,
+            ignored_name, sizeof(ignored_name), &ignored_entry,
+            sizeof(ignored_entry), &diagnostic, sizeof(diagnostic));
+        require_status(status, AFSPR_ERR_IO, "namespace metadata I/O",
+                       &diagnostic);
+        if (diagnostic.stage != AFSPR_STAGE_TREE_READ ||
+            diagnostic.block != volume.object_map_block) {
+            fprintf(stderr, "namespace I/O lost its tree coordinate\n");
+            return EXIT_FAILURE;
+        }
+    }
+    device.fail_lba = UINT64_MAX;
     compare_intent_file(&ops, &scratch, &volume, &view, 16u, argv[2]);
-    compare_intent_file(&ops, &scratch, &volume, &view, 17u, argv[3]);
+    compare_intent_file(&ops, &scratch, &volume, &view, 18u, argv[3]);
+    {
+        uint64_t ignored_size;
+
+        status = afspr_intent_file_size(
+            &ops, &scratch, &volume, &view, 17u, &ignored_size,
+            &diagnostic, sizeof(diagnostic));
+        require_status(status, AFSPR_ERR_NOT_FOUND,
+                       "replaced object identity", &diagnostic);
+    }
     {
         struct afspr_intent_view forged = view;
         uint64_t ignored_size;
@@ -296,8 +479,69 @@ int main(int argc, char **argv)
         require_status(status, AFSPR_ERR_CORRUPT, "forged view",
                        &diagnostic);
     }
-    first_log = view.tail_block - 3u;
-    if (read_block(&device, first_log, log_original) != 0) {
+    first_log = view.tail_block - 7u;
+    if (read_block(&device, first_log + 4u, log_original) != 0) {
+        return EXIT_FAILURE;
+    }
+    memcpy(log_mutated, log_original, sizeof(log_mutated));
+    log_mutated[128] = (uint8_t)'q';
+    reseal(log_mutated);
+    if (write_block(&device, first_log + 4u, log_mutated) != 0) {
+        return EXIT_FAILURE;
+    }
+    require_namespace_corrupt(&ops, &scratch, &volume, &view,
+                              first_log + 4u,
+                              "missing rename source");
+    if (write_block(&device, first_log + 4u, log_original) != 0) {
+        return EXIT_FAILURE;
+    }
+
+    if (read_block(&device, first_log + 6u, log_original) != 0) {
+        return EXIT_FAILURE;
+    }
+    memcpy(log_mutated, log_original, sizeof(log_mutated));
+    log_mutated[65] = 0u;
+    reseal(log_mutated);
+    if (write_block(&device, first_log + 6u, log_mutated) != 0) {
+        return EXIT_FAILURE;
+    }
+    require_namespace_corrupt(&ops, &scratch, &volume, &view,
+                              first_log + 6u,
+                              "replace flag mismatch");
+    if (write_block(&device, first_log + 6u, log_original) != 0) {
+        return EXIT_FAILURE;
+    }
+
+    if (read_block(&device, first_log + 3u, log_original) != 0) {
+        return EXIT_FAILURE;
+    }
+    memcpy(log_mutated, log_original, sizeof(log_mutated));
+    store_u64(log_mutated + 88u, 17u);
+    reseal(log_mutated);
+    if (write_block(&device, first_log + 3u, log_mutated) != 0) {
+        return EXIT_FAILURE;
+    }
+    require_namespace_corrupt(&ops, &scratch, &volume, &view,
+                              first_log + 3u,
+                              "create object watermark");
+    if (write_block(&device, first_log + 3u, log_original) != 0) {
+        return EXIT_FAILURE;
+    }
+
+    if (read_block(&device, first_log + 1u, log_original) != 0) {
+        return EXIT_FAILURE;
+    }
+    memcpy(log_mutated, log_original, sizeof(log_mutated));
+    store_u64(log_mutated + 88u, load_u64(log_original + 88u) + 1u);
+    store_u64(log_mutated + 96u, load_u64(log_original + 96u) + 1u);
+    reseal(log_mutated);
+    if (write_block(&device, first_log + 1u, log_mutated) != 0) {
+        return EXIT_FAILURE;
+    }
+    require_namespace_corrupt(&ops, &scratch, &volume, &view,
+                              first_log + 1u,
+                              "write expected-size mismatch");
+    if (write_block(&device, first_log + 1u, log_original) != 0) {
         return EXIT_FAILURE;
     }
     data_lba = load_u64(log_original + LOG_FIRST_EXTENT_OFFSET);
@@ -314,9 +558,9 @@ int main(int argc, char **argv)
                                    sizeof(view), &diagnostic,
                                    sizeof(diagnostic));
     require_status(status, AFSPR_OK, "torn data scan", &diagnostic);
-    if (view.valid_records != 0u ||
+    if (view.valid_records != 1u ||
         view.tail_state != AFSPR_INTENT_TAIL_CONTENT ||
-        view.tail_slot != 0u || view.tail_block != data_lba) {
+        view.tail_slot != 1u || view.tail_block != data_lba) {
         fprintf(stderr, "torn data did not terminate the prefix exactly\n");
         return EXIT_FAILURE;
     }
@@ -324,6 +568,9 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    if (read_block(&device, first_log, log_original) != 0) {
+        return EXIT_FAILURE;
+    }
     memcpy(log_mutated, log_original, sizeof(log_mutated));
     log_mutated[32] ^= UINT8_C(0x01);
     reseal(log_mutated);
@@ -375,7 +622,7 @@ int main(int argc, char **argv)
     require_status(status, AFSPR_ERR_CORRUPT, "missing data feature",
                    &diagnostic);
     if (diagnostic.stage != AFSPR_STAGE_INTENT_DECODE ||
-        diagnostic.block != first_log) {
+        diagnostic.block != first_log + 1u) {
         fprintf(stderr, "feature error lost its intent-log LBA\n");
         return EXIT_FAILURE;
     }
@@ -396,7 +643,7 @@ int main(int argc, char **argv)
     if (fclose(device.file) != 0) {
         return EXIT_FAILURE;
     }
-    printf("portable-c-intent PASS records=3 operations=3 first-log=%llu\n",
+    printf("portable-c-intent PASS records=7 operations=7 first-log=%llu\n",
            (unsigned long long)first_log);
     return EXIT_SUCCESS;
 }
