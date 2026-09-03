@@ -279,6 +279,9 @@ int main(int argc, char **argv)
             "Rust image must provide two retained checkpoints");
     require(first.generation >= 3u,
             "Rust image did not advance through multiple generations");
+    require((first.ro_compat_features &
+             AFSPR_RO_COMPAT_ORPHAN_DIRECTORY) != 0u,
+            "Rust writable profile omitted orphan-directory negotiation");
 
     require(fseek(file_device.file, 0, SEEK_SET) == 0,
             "cannot rewind Rust image");
@@ -296,6 +299,13 @@ int main(int argc, char **argv)
                  AFSPR_CAP_INTENT_LOG_SCAN | AFSPR_CAP_INTENT_FILE_READ |
                  AFSPR_CAP_INTENT_NAMESPACE),
             "reader capability summary is incomplete");
+
+    status = afspr_lookup_object(
+        &file_ops, &(struct afspr_scratch){scratch, sizeof(scratch)}, &first,
+        AFSPR_OBJECT_ORPHAN_DIRECTORY, &root, sizeof(root), &diagnostic,
+        sizeof(diagnostic));
+    require(status == AFSPR_ERR_NOT_FOUND,
+            "portable reader exposed the reserved orphan directory");
 
     file_device.trace_count = 0u;
     status = afspr_lookup_object(&file_ops, &(struct afspr_scratch){

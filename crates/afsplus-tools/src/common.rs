@@ -7,7 +7,7 @@ use afsplus_core::mount::{select_checkpoint, Selection};
 use afsplus_core::CoreError;
 use afsplus_format::ident::{
     Identification, NameKeyAlgorithm, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG,
-    INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_SHARED_EXTENTS,
+    INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::DEFAULT_BLOCK_SIZE;
 
@@ -229,6 +229,9 @@ pub fn feature_names(ident: &Identification) -> Vec<&'static str> {
     }
     if ident.features.ro_compat & RO_COMPAT_SHARED_EXTENTS != 0 {
         names.push("org.aros.afsplus:shared-extents");
+    }
+    if ident.features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0 {
+        names.push("org.aros.afsplus:orphan-directory");
     }
     if ident.features.incompat & INCOMPAT_INTENT_LOG != 0 {
         names.push("org.aros.afsplus:intent-log");

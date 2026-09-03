@@ -66,6 +66,18 @@ replacement COW data for an existing file from the namespace-only version-2
 record set. This prevents an older log-aware writer from treating a valid but
 unknown record as an ignorable torn tail ([ADR-064](../adr/ADR-064-intent-log-data-update-compatibility.md)).
 
+Assigned read-only-compatible identities are:
+
+```text
+RO_COMPAT bit 0 = org.aros.afsplus:shared-extents
+RO_COMPAT bit 1 = org.aros.afsplus:orphan-directory
+```
+
+Bit 1 reserves object ID 2 as an internal directory and requires aware
+writers to resume bounded cleanup. An unaware reader may ignore that hidden
+state; an unaware writer must not mount read/write
+([ADR-066](../adr/ADR-066-bounded-orphan-directory.md)).
+
 This summary is executable at mount; it does not replace future registry
 records for dependencies, lifecycle state, or feature parameters.
 

@@ -65,6 +65,15 @@ per-file contracts:
 - root object exists and is a directory
 - live hard-link count matches reachable directory references, subject to orphan semantics
 - object IDs do not change on rename
+- when `org.aros.afsplus:orphan-directory` is active, object 2 is an unlinked
+  directory root with link count one; each entry has a lowercase 16-digit
+  hexadecimal name equal to its regular-file child ID, and supplies that
+  child's sole directory reference
+- no directory other than object 2 references object 2, and no ordinary
+  namespace operation exposes object 2 or one of its entries
+- an orphan cleanup checkpoint removes a bounded logical tail while retaining
+  the entry, or removes the empty file entry and record; it never advances an
+  external cursor independently of the selected checkpoint
 
 ## Directories
 

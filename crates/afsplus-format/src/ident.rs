@@ -58,6 +58,10 @@ pub const INCOMPAT_INTENT_LOG_DATA_UPDATES: u64 = 1 << 1;
 /// Set by mkfs according to the compatibility profile; identification is
 /// immutable, so the first clone cannot set it.
 pub const RO_COMPAT_SHARED_EXTENTS: u64 = 1 << 0;
+/// A reserved object-map entry at object ID 2 may contain the internal
+/// orphan directory (ADR-066). Unaware writers must mount read-only so they
+/// cannot lose or expose its lifecycle state.
+pub const RO_COMPAT_ORPHAN_DIRECTORY: u64 = 1 << 1;
 
 /// Per-file persistent data-update policy (ADR-065): object records on this
 /// volume may carry `OBJECT_FLAG_DATA_IN_PLACE`. An implementation that

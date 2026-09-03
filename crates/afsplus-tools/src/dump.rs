@@ -9,7 +9,7 @@ use afsplus_core::verify::{full_sweep, load_committed_state, CommittedState};
 use afsplus_format::ident::INCOMPAT_INTENT_LOG_DATA_UPDATES;
 use afsplus_format::intent_log::{LogOp, LogRecord};
 use afsplus_format::object::{ObjectType, OBJECT_FLAG_EXTENT_TREE};
-use afsplus_format::Timespec;
+use afsplus_format::{Timespec, OBJECT_ORPHAN_DIRECTORY};
 
 use crate::common::{
     core_failure, header_json, hex, json_string, read_header, report_failure, Failure, HeaderView,
@@ -221,7 +221,7 @@ fn render_json(
     findings: &[String],
 ) -> String {
     let mut output = format!(
-        "{{\"schema_version\":1,\"tool\":\"afsplus-dump\",{},\"consistent\":{},\"counts\":{{\"objects\":{},\"directories\":{},\"directory_entries\":{},\"allocation_regions\":{},\"metadata_blocks\":{},\"data_blocks\":{},\"reclaim_runs\":{},\"reclaim_pending_blocks\":{},\"shared_runs\":{},\"intent_records\":{}}},",
+        "{{\"schema_version\":1,\"tool\":\"afsplus-dump\",{},\"consistent\":{},\"counts\":{{\"objects\":{},\"directories\":{},\"directory_entries\":{},\"orphan_entries\":{},\"allocation_regions\":{},\"metadata_blocks\":{},\"data_blocks\":{},\"reclaim_runs\":{},\"reclaim_pending_blocks\":{},\"shared_runs\":{},\"intent_records\":{}}},",
         header_json(view),
         findings.is_empty(),
         state.objects.len(),
@@ -231,6 +231,10 @@ fn render_json(
             .values()
             .map(|directory| directory.entries.len())
             .sum::<usize>(),
+        state
+            .directories
+            .get(&OBJECT_ORPHAN_DIRECTORY)
+            .map_or(0, |directory| directory.entries.len()),
         state.allocation_records.len(),
         state.metadata_blocks.len(),
         state.data_blocks.len(),
@@ -286,12 +290,18 @@ fn render_json(
             output.push(',');
         }
         let record_lba = state.object_map.lookup(object_id).unwrap_or(0);
+        let internal_role = if object_id == OBJECT_ORPHAN_DIRECTORY {
+            json_string("orphan-directory")
+        } else {
+            "null".into()
+        };
         write!(
             output,
-            "{{\"object_id\":{},\"record_lba\":{},\"type\":{},\"flags\":\"{:#06x}\",\"link_count\":{},\"size_bytes\":{},\"allocated_bytes\":{},\"protection\":\"{:#010x}\",\"content_generation\":{},\"data_root\":{},\"data_blocks\":{},\"created\":{},\"modified\":{},\"changed\":{},\"extents\":{}}}",
+            "{{\"object_id\":{},\"record_lba\":{},\"type\":{},\"internal_role\":{},\"flags\":\"{:#06x}\",\"link_count\":{},\"size_bytes\":{},\"allocated_bytes\":{},\"protection\":\"{:#010x}\",\"content_generation\":{},\"data_root\":{},\"data_blocks\":{},\"created\":{},\"modified\":{},\"changed\":{},\"extents\":{}}}",
             object_id,
             record_lba,
             json_string(object_type_name(record.object_type)),
+            internal_role,
             record.flags,
             record.link_count,
             record.size_bytes,
@@ -312,7 +322,16 @@ fn render_json(
         if directory_index != 0 {
             output.push(',');
         }
-        write!(output, "{{\"owner\":{owner},\"entries\":[").expect("writing to String cannot fail");
+        let role = if owner == OBJECT_ORPHAN_DIRECTORY {
+            json_string("orphan-directory")
+        } else {
+            "null".into()
+        };
+        write!(
+            output,
+            "{{\"owner\":{owner},\"internal_role\":{role},\"entries\":["
+        )
+        .expect("writing to String cannot fail");
         for (entry_index, entry) in directory.entries.iter().enumerate() {
             if entry_index != 0 {
                 output.push(',');
@@ -399,9 +418,14 @@ fn render_text(
         view.selection.chosen.free_blocks_total,
     );
     for (&object_id, record) in &state.objects {
+        let role = if object_id == OBJECT_ORPHAN_DIRECTORY {
+            " [internal orphan-directory]"
+        } else {
+            ""
+        };
         writeln!(
             output,
-            "object {object_id} @{} {} flags {:#06x} links {} size {} allocated {} data {}/{} extents {}",
+            "object {object_id}{role} @{} {} flags {:#06x} links {} size {} allocated {} data {}/{} extents {}",
             state.object_map.lookup(object_id).unwrap_or(0),
             object_type_name(record.object_type),
             record.flags,
@@ -415,9 +439,14 @@ fn render_text(
         .expect("writing to String cannot fail");
     }
     for (&owner, directory) in &state.directories {
+        let role = if owner == OBJECT_ORPHAN_DIRECTORY {
+            " [internal orphan-directory]"
+        } else {
+            ""
+        };
         writeln!(
             output,
-            "directory {owner} entries {}",
+            "directory {owner}{role} entries {}",
             directory.entries.len()
         )
         .expect("writing to String cannot fail");

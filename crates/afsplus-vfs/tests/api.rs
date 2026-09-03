@@ -1,6 +1,7 @@
 use afsplus_block::{MemoryBackend, TraceBackend, TraceEvent};
 use afsplus_check::check_device;
 use afsplus_core::{mkfs, mount, MkfsParams, MountMode, MountOptions};
+use afsplus_format::ident::{Identification, RO_COMPAT_ORPHAN_DIRECTORY};
 use afsplus_format::{Timespec, OBJECT_ROOT};
 use afsplus_vfs::{AccessMode, Capabilities, NodeKind, Vfs, VfsError};
 
@@ -262,6 +263,132 @@ fn handle_api_covers_the_mountable_alpha_operation_slice() {
 }
 
 #[test]
+fn open_unlinked_file_keeps_identity_until_the_last_handle_closes() {
+    let mut vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    assert!(vfs.capabilities().contains(Capabilities::OPEN_UNLINKED));
+    let object = vfs.create_file(OBJECT_ROOT, "live", ts(1)).unwrap();
+    let writer = vfs.open_file(object, AccessMode::ReadWrite).unwrap();
+    let reader = vfs.open_file(object, AccessMode::ReadOnly).unwrap();
+    vfs.write(writer, 0, b"before", ts(2)).unwrap();
+    vfs.fsync(writer).unwrap();
+
+    vfs.unlink_file(OBJECT_ROOT, "live", ts(3)).unwrap();
+    assert!(matches!(
+        vfs.lookup(OBJECT_ROOT, "live"),
+        Err(VfsError::NotFound)
+    ));
+    assert!(matches!(vfs.stat(object), Err(VfsError::NotFound)));
+    assert!(matches!(
+        vfs.open_file(object, AccessMode::ReadOnly),
+        Err(VfsError::NotFound)
+    ));
+
+    let replacement = vfs.create_file(OBJECT_ROOT, "live", ts(4)).unwrap();
+    assert_ne!(replacement, object);
+    vfs.write(writer, 0, b"after!", ts(5)).unwrap();
+    vfs.fsync(writer).unwrap();
+    let mut content = [0u8; 6];
+    assert_eq!(vfs.read(reader, 0, &mut content).unwrap(), content.len());
+    assert_eq!(&content, b"after!");
+    vfs.truncate(writer, 3, ts(6)).unwrap();
+    vfs.close(writer).unwrap();
+    content.fill(0);
+    assert_eq!(vfs.read(reader, 0, &mut content).unwrap(), 3);
+    assert_eq!(&content[..3], b"aft");
+
+    vfs.close(reader).unwrap();
+    assert_eq!(vfs.lookup(OBJECT_ROOT, "live").unwrap(), replacement);
+    let mut volume = vfs.into_volume();
+    assert!(volume.visible_metadata(object).unwrap().is_none());
+
+    let mut dev = volume.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+    let mut remounted = Vfs::mount(dev, MountOptions::default()).unwrap();
+    assert_eq!(remounted.lookup(OBJECT_ROOT, "live").unwrap(), replacement);
+    assert!(matches!(remounted.stat(object), Err(VfsError::NotFound)));
+}
+
+#[test]
+fn atomic_replace_preserves_an_open_target_without_exposing_it() {
+    let mut vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let target = vfs.create_file(OBJECT_ROOT, "target", ts(1)).unwrap();
+    let target_handle = vfs.open_file(target, AccessMode::ReadWrite).unwrap();
+    vfs.write(target_handle, 0, b"old target", ts(2)).unwrap();
+    vfs.fsync(target_handle).unwrap();
+    let source = vfs.create_file(OBJECT_ROOT, "incoming", ts(3)).unwrap();
+    let source_handle = vfs.open_file(source, AccessMode::ReadWrite).unwrap();
+    vfs.write(source_handle, 0, b"new source", ts(4)).unwrap();
+    vfs.fsync(source_handle).unwrap();
+    vfs.close(source_handle).unwrap();
+
+    vfs.rename(OBJECT_ROOT, "incoming", OBJECT_ROOT, "target", true, ts(5))
+        .unwrap();
+    assert_eq!(vfs.lookup(OBJECT_ROOT, "target").unwrap(), source);
+    assert!(matches!(
+        vfs.lookup(OBJECT_ROOT, "incoming"),
+        Err(VfsError::NotFound)
+    ));
+    assert!(matches!(vfs.stat(target), Err(VfsError::NotFound)));
+    let mut old = [0u8; 10];
+    assert_eq!(vfs.read(target_handle, 0, &mut old).unwrap(), old.len());
+    assert_eq!(&old, b"old target");
+    vfs.write(target_handle, 0, b"still old!", ts(6)).unwrap();
+    vfs.fsync(target_handle).unwrap();
+    vfs.close(target_handle).unwrap();
+
+    let mut dev = vfs.into_volume().into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+    let mut remounted = Vfs::mount(dev, MountOptions::default()).unwrap();
+    assert_eq!(remounted.lookup(OBJECT_ROOT, "target").unwrap(), source);
+    assert!(matches!(remounted.stat(target), Err(VfsError::NotFound)));
+}
+
+#[test]
+fn hard_links_only_enter_orphan_state_on_the_final_open_unlink() {
+    let mut vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let object = vfs.create_file(OBJECT_ROOT, "first", ts(1)).unwrap();
+    let handle = vfs.open_file(object, AccessMode::ReadWrite).unwrap();
+    vfs.write(handle, 0, b"linked", ts(2)).unwrap();
+    vfs.fsync(handle).unwrap();
+    vfs.link_file(object, OBJECT_ROOT, "second", ts(3)).unwrap();
+
+    vfs.unlink_file(OBJECT_ROOT, "first", ts(4)).unwrap();
+    assert_eq!(vfs.lookup(OBJECT_ROOT, "second").unwrap(), object);
+    assert_eq!(vfs.pending_orphans().unwrap(), 0);
+    vfs.unlink_file(OBJECT_ROOT, "second", ts(5)).unwrap();
+    assert_eq!(vfs.pending_orphans().unwrap(), 1);
+    let mut content = [0u8; 6];
+    assert_eq!(vfs.read(handle, 0, &mut content).unwrap(), 6);
+    assert_eq!(&content, b"linked");
+    vfs.close(handle).unwrap();
+    assert_eq!(vfs.pending_orphans().unwrap(), 0);
+
+    let mut dev = vfs.into_volume().into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+}
+
+#[test]
+fn legacy_volume_without_orphan_feature_keeps_immediate_delete_contract() {
+    let mut dev = formatted();
+    let mut ident = Identification::decode(&dev.peek(0)).unwrap();
+    ident.features.ro_compat &= !RO_COMPAT_ORPHAN_DIRECTORY;
+    dev.apply_raw(0, &ident.encode(BS).unwrap());
+    let mut vfs = Vfs::mount(dev, MountOptions::default()).unwrap();
+    assert!(!vfs.capabilities().contains(Capabilities::OPEN_UNLINKED));
+    let object = vfs.create_file(OBJECT_ROOT, "legacy", ts(1)).unwrap();
+    let handle = vfs.open_file(object, AccessMode::ReadOnly).unwrap();
+    vfs.unlink_file(OBJECT_ROOT, "legacy", ts(2)).unwrap();
+    let mut byte = [0u8; 1];
+    assert!(matches!(
+        vfs.read(handle, 0, &mut byte),
+        Err(VfsError::NotFound)
+    ));
+}
+
+#[test]
 fn no_changes_vfs_remains_readable_and_issues_no_writes_or_flushes() {
     let dev = {
         let mut volume = mount(formatted()).unwrap();
@@ -288,6 +415,7 @@ fn no_changes_vfs_remains_readable_and_issues_no_writes_or_flushes() {
     assert_eq!(vfs.read(handle, 0, &mut data).unwrap(), data.len());
     assert_eq!(&data, b"content");
     vfs.fsync(handle).unwrap();
+    vfs.close(handle).unwrap();
     vfs.sync_filesystem().unwrap();
 
     let traced = vfs.into_volume().into_device();

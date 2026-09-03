@@ -19,7 +19,8 @@ use afsplus_format::crc32c::CHECKSUM_CRC32C;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::ident::{
     FeatureFlags, Identification, NameKeyAlgorithm, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG,
-    INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_SHARED_EXTENTS, UNICODE_VERSION_16_0_0,
+    INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
+    UNICODE_VERSION_16_0_0,
 };
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::reclaim::{ReclaimCaps, ReclaimRoot};
@@ -224,11 +225,12 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
             } else {
                 0
             },
-            ro_compat: if params.shared_extents {
-                RO_COMPAT_SHARED_EXTENTS
-            } else {
-                0
-            },
+            ro_compat: RO_COMPAT_ORPHAN_DIRECTORY
+                | if params.shared_extents {
+                    RO_COMPAT_SHARED_EXTENTS
+                } else {
+                    0
+                },
             compat: if params.data_policy {
                 COMPAT_DATA_POLICY
             } else {

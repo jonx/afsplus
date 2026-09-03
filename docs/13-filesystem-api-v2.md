@@ -69,6 +69,14 @@ can satisfy `fsync` through the bounded log instead of publishing a checkpoint
 per call. Unsupported categories below are not advertised in the capability
 mask.
 
+A volume carrying the orphan-directory feature advertises `OPEN_UNLINKED`
+(additive Rust capability bit 12). The VFS counts handles by stable object ID:
+final unlink and replacement hide the path immediately while existing handles
+continue to read, write, truncate and fsync. New opens or stat by a guessed ID
+cannot rediscover the orphan. `pending_orphans` is diagnostic state, and
+`resume_one_orphan` gives adapters an explicitly bounded idle-maintenance hook;
+read-write mount and filesystem sync each advance at most one orphan.
+
 `statfs` reports whether the mounted namespace is case-sensitive plus the
 three-part Unicode table version. Adapters must expose the volume policy rather
 than infer it from the host OS or filesystem name.

@@ -19,6 +19,7 @@
 
 #define AFSP_OBJECT_INVALID        UINT64_C(0)
 #define AFSP_OBJECT_ROOT           UINT64_C(1)
+#define AFSP_OBJECT_ORPHAN_DIRECTORY UINT64_C(2) /* ADR-066 */
 
 /* Experimental magic. Freeze before epoch 1. */
 #define AFSP_MAGIC_U64 UINT64_C(0x3153554c50534641) /* "AFSPLUS1" LE-ish marker */
@@ -85,10 +86,12 @@ enum afsp_extent_flag {
 };
 
 /*
- * RO_COMPAT feature bits (ADR-061). An implementation that does not honour
- * shared-extent reference counts must not mount read-write.
+ * RO_COMPAT feature bits. An implementation that does not honour
+ * shared-extent reference counts (ADR-061) or the persistent orphan
+ * lifecycle (ADR-066) must not mount read-write.
  */
 #define AFSP_RO_COMPAT_SHARED_EXTENTS (UINT64_C(1) << 0)
+#define AFSP_RO_COMPAT_ORPHAN_DIRECTORY (UINT64_C(1) << 1) /* ADR-066 */
 
 /*
  * Object-record flags are a validated namespace: an implementation rejects a

@@ -81,6 +81,13 @@ identity. File reads apply logged create, write and truncate data to that final
 identity. The reader content-verifies replacement blocks, validates replay
 preconditions and reports the first excluded tail slot and LBA.
 
+The C reader negotiates `org.aros.afsplus:orphan-directory` as `RO_COMPAT`
+bit 1 and returns `NOT_FOUND` for ordinary object lookup or enumeration of
+reserved object ID 2. It can therefore cross-read visible data on an active
+orphan volume without confusing lifecycle state with user namespace. Forensic
+tools, unlike the ordinary reader API, label that internal directory and its
+pending-entry count explicitly.
+
 Integrators get a versioned public ABI, symbolic and printable errors,
 structured stage/LBA/per-checkpoint diagnostics, a source-vendoring contract,
 a CMake target and a complete host-file example. Native targets replace only

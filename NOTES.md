@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Open-unlinked files gain a bounded crash-restartable lifetime](#2026-09-03--open-unlinked-files-gain-a-bounded-crash-restartable-lifetime)
 - [2026-09-03 — Q3 qualification exposes the missing emergency reserve](#2026-09-03--q3-qualification-exposes-the-missing-emergency-reserve)
 - [2026-09-03 — Checkpoint selection regains Rust/C parity](#2026-09-03--checkpoint-selection-regains-rustc-parity)
 - [2026-09-03 — Prototype commands become integration-grade tools](#2026-09-03--prototype-commands-become-integration-grade-tools)
@@ -35,6 +36,40 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Open-unlinked files gain a bounded crash-restartable lifetime
+
+The owner accepted ADR-066 after the first Q3 low-space measurements showed
+that final unlink could not safely retire an arbitrarily fragmented file in
+one reserve-sized transaction. The implementation reserves object ID 2 as a
+lazily-created hidden directory. A final visible link with live handles moves
+there atomically, including an open atomic-replace target, while the file's
+ordinary link count stays one. Existing handles retain read, write, truncate,
+data-policy and fsync identity; public lookup, stat, new open, hard-link and
+rename cannot rediscover internal state.
+
+Cleanup uses extent-tree subtree counts to read only a bounded tail. Each
+maintenance transaction removes at most the configured logical-extent budget
+and publishes a smaller orphan before a final small transaction deletes the
+entry and record. Read-write mount and filesystem sync advance one orphan;
+adapters also have an idle hook and a pending count. The checker treats object
+2 as an explicit feature-gated root and rejects malformed names/types,
+visible aliases and a missing feature bit. The dump labels the internal role;
+the independent C reader negotiates the `RO_COMPAT` bit but returns
+`NOT_FOUND` through its ordinary API.
+
+The qualification exercises multiple handles, hard links, name reuse, legacy
+fallback, open-target replacement, resumable multi-extent cleanup and every
+modeled write/flush cut of insertion, post-unlink update, cleanup and
+replacement. Every recovered intermediate is required to be checker-clean and
+semantically old or new; no mount-only oracle is used.
+
+The recorded optimized memory-backend run removed exactly eight of 33 sparse
+extents in 537 microseconds and left 25 for restart. It issued 24 reads, eight
+writes, 98,304 read bytes, 32,768 written bytes and two barriers; the committed
+transaction contained five metadata blocks, one bitmap page and 512 bytes of
+allocator bitmap payload. These are qualification evidence for this build,
+not a hardware-performance claim.
 
 ## 2026-09-03 — Q3 qualification exposes the missing emergency reserve
 

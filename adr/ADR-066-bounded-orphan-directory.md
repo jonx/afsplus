@@ -1,6 +1,6 @@
 # ADR-066: Bounded open-unlinked lifecycle through a reserved orphan directory
 
-Status: Proposed
+Status: Accepted; wire format experimental until M14
 Amends: ADR-039
 
 <!-- toc -->

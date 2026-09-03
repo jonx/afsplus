@@ -7,7 +7,7 @@ use afsplus_format::tree::{
     child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode, MAX_TREE_LEVEL,
 };
 
-use crate::tree::{lookup_floor, visit_tree_nodes, TreeSpec, TreeSummary};
+use crate::tree::{lookup_floor, read_range, visit_tree_nodes, TreeSpec, TreeSummary};
 use crate::CoreError;
 
 const VALUE_SIZE: usize = 24;
@@ -56,6 +56,12 @@ pub struct LoadedExtentMap {
 pub struct BuiltExtentMap {
     pub root_lba: u64,
     pub nodes: Vec<(u64, TreeNode)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtentTail {
+    pub extents: Vec<Extent>,
+    pub total_extents: u64,
 }
 
 pub fn spec(owner: u64, max_generation: u64) -> TreeSpec {
@@ -356,6 +362,44 @@ pub fn lookup_extent<D: BlockDevice>(
     };
     let extent = decode_extent(&key, &value, geo)?;
     Ok((logical_block < extent.logical_end()?).then_some(extent))
+}
+
+/// Reads at most `limit` logical extent records from the end of the map.
+/// Subtree item counters skip all preceding leaves, keeping cleanup work
+/// proportional to tree height plus the requested tail rather than file
+/// fragmentation.
+pub fn read_tail<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    owner: u64,
+    max_generation: u64,
+    limit: usize,
+) -> Result<ExtentTail, CoreError> {
+    let tree_spec = spec(owner, max_generation);
+    let summary = read_range(dev, geo, root_lba, tree_spec, 0, 0)?;
+    let requested = u64::try_from(limit).unwrap_or(u64::MAX);
+    let start = summary.total_items.saturating_sub(requested);
+    let page = read_range(dev, geo, root_lba, tree_spec, start, limit)?;
+    if page.total_items != summary.total_items {
+        return Err(CoreError::Corrupt(
+            "extent tree item count changed between bounded reads".into(),
+        ));
+    }
+    let extents = page
+        .items
+        .into_iter()
+        .map(|(key, value)| decode_extent(&key, &value, geo))
+        .collect::<Result<Vec<_>, _>>()?;
+    for pair in extents.windows(2) {
+        if pair[0].logical_end()? > pair[1].logical_start {
+            return Err(CoreError::Corrupt("logical extents overlap".into()));
+        }
+    }
+    Ok(ExtentTail {
+        extents,
+        total_extents: page.total_items,
+    })
 }
 
 pub fn load_all<D: BlockDevice>(

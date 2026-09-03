@@ -18,12 +18,14 @@ use afsplus_block::BlockDevice;
 use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::geometry::{Geometry, DESCRIPTOR_SLOTS};
-use afsplus_format::ident::{Identification, COMPAT_DATA_POLICY, RO_COMPAT_SHARED_EXTENTS};
+use afsplus_format::ident::{
+    Identification, COMPAT_DATA_POLICY, RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
+};
 use afsplus_format::object::{
     ObjectRecord, ObjectType, OBJECT_FLAG_DATA_IN_PLACE, OBJECT_FLAG_EXTENT_TREE,
 };
 use afsplus_format::reclaim::{ReclaimEntry, ReclaimRoot};
-use afsplus_format::{OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
+use afsplus_format::{OBJECT_FIRST_DYNAMIC, OBJECT_ORPHAN_DIRECTORY, OBJECT_ROOT};
 
 use crate::alloc::Bitmaps;
 use crate::allocation_root;
@@ -167,14 +169,21 @@ pub fn load_mount_state<D: BlockDevice>(
     })
 }
 
-fn validate_mapped_object_id(object_id: u64, checkpoint: &Checkpoint) -> Result<(), CoreError> {
+fn validate_mapped_object_id(
+    object_id: u64,
+    checkpoint: &Checkpoint,
+    orphan_directory_enabled: bool,
+) -> Result<(), CoreError> {
     if object_id >= checkpoint.next_object_id {
         return Err(CoreError::Corrupt(format!(
             "object {object_id} at or above next_object_id {}",
             checkpoint.next_object_id
         )));
     }
-    if object_id != OBJECT_ROOT && object_id < OBJECT_FIRST_DYNAMIC {
+    if object_id != OBJECT_ROOT
+        && !(orphan_directory_enabled && object_id == OBJECT_ORPHAN_DIRECTORY)
+        && object_id < OBJECT_FIRST_DYNAMIC
+    {
         return Err(CoreError::Corrupt(format!(
             "object {object_id} in reserved internal ID range"
         )));
@@ -258,6 +267,7 @@ pub fn load_committed_state<D: BlockDevice>(
     let mut flagged_intervals: Vec<(u64, u64)> = Vec::new();
     let mut unflagged_intervals: Vec<(u64, u64)> = Vec::new();
     let shared_enabled = ident.features.ro_compat & RO_COMPAT_SHARED_EXTENTS != 0;
+    let orphan_directory_enabled = ident.features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0;
 
     let object_map = object_map::load_all(
         dev,
@@ -274,7 +284,7 @@ pub fn load_committed_state<D: BlockDevice>(
     let mut directories = BTreeMap::new();
 
     for entry in &object_map.entries {
-        validate_mapped_object_id(entry.object_id, checkpoint)?;
+        validate_mapped_object_id(entry.object_id, checkpoint, orphan_directory_enabled)?;
         claim(entry.block, &mut claimed)?;
         metadata_blocks.push(entry.block);
         dev.read_block(entry.block, &mut buf)?;
@@ -298,6 +308,18 @@ pub fn load_committed_state<D: BlockDevice>(
                 "object record at block {} claims ID {}, map says {}",
                 entry.block, record.object_id, entry.object_id
             )));
+        }
+        if record.object_id == OBJECT_ORPHAN_DIRECTORY
+            && (record.object_type != ObjectType::Directory
+                || record.flags != 0
+                || record.link_count != 1
+                || record.size_bytes != 0
+                || record.allocated_bytes != 0
+                || record.data_blocks != 0)
+        {
+            return Err(CoreError::Corrupt(
+                "reserved orphan-directory object has invalid metadata".into(),
+            ));
         }
         match record.object_type {
             ObjectType::Directory => {
@@ -491,6 +513,22 @@ pub fn load_committed_state<D: BlockDevice>(
                     entry.child_id
                 )));
             }
+            if *dir_id == OBJECT_ORPHAN_DIRECTORY {
+                let expected_name = format!("{:016x}", entry.child_id);
+                if entry.name.as_slice() != expected_name.as_bytes()
+                    || entry.child_type_hint != 1
+                    || child.object_type != ObjectType::File
+                {
+                    return Err(CoreError::Corrupt(format!(
+                        "orphan directory entry for object {} has invalid name or type",
+                        entry.child_id
+                    )));
+                }
+            } else if entry.child_id == OBJECT_ORPHAN_DIRECTORY {
+                return Err(CoreError::Corrupt(format!(
+                    "directory {dir_id} exposes the reserved orphan directory"
+                )));
+            }
         }
     }
 
@@ -551,6 +589,9 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
     // Link counts: live references match, and nothing dangles unreferenced.
     let mut ref_counts: BTreeMap<u64, u32> = BTreeMap::new();
     ref_counts.insert(OBJECT_ROOT, 1);
+    if state.objects.contains_key(&OBJECT_ORPHAN_DIRECTORY) {
+        ref_counts.insert(OBJECT_ORPHAN_DIRECTORY, 1);
+    }
     for dir in state.directories.values() {
         for entry in &dir.entries {
             *ref_counts.entry(entry.child_id).or_insert(0) += 1;

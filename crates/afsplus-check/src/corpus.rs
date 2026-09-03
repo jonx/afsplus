@@ -294,7 +294,7 @@ pub fn build_corruption_corpus() -> Result<Vec<CorruptionCase>, String> {
         &[0],
         false,
         error(
-            "identification block invalid: checksum mismatch: stored 0x4e2d7dc5, computed 0xdc924a69",
+            "identification block invalid: checksum mismatch: stored 0xbe5953bc, computed 0x2ce66410",
         ),
     )?);
     {

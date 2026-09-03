@@ -1171,7 +1171,7 @@ int afspr_probe_detailed(const struct afspr_block_ops *ops,
                          struct afspr_diagnostic *diagnostic,
                          size_t diagnostic_size)
 {
-    struct afspr_ident ident;
+    struct afspr_ident ident = {0};
     struct afspr_checkpoint candidates[2];
     uint8_t valid_mask = 0u;
     uint8_t selected;
@@ -1435,7 +1435,7 @@ int afspr_lookup_object(const struct afspr_block_ops *ops,
                         struct afspr_diagnostic *diagnostic,
                         size_t diagnostic_size)
 {
-    struct afspr_ident ident;
+    struct afspr_ident ident = {0};
     struct afspr_tree_spec spec;
     uint8_t key[8];
     uint8_t found_key[8];
@@ -1457,6 +1457,13 @@ int afspr_lookup_object(const struct afspr_block_ops *ops,
                                                           : AFSPR_ERR_INVALID_ARGUMENT,
                             AFSPR_STAGE_ARGUMENTS,
                             AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    if (object_id == AFSPR_OBJECT_ORPHAN_DIRECTORY &&
+        (ident.ro_compat_features & AFSPR_RO_COMPAT_ORPHAN_DIRECTORY) != 0u) {
+        return afspr_report(diagnostic, AFSPR_ERR_NOT_FOUND,
+                            AFSPR_STAGE_TREE_TRAVERSAL,
+                            AFSPR_NO_CHECKPOINT_SLOT,
+                            volume->object_map_block);
     }
     spec.kind = AFSPR_TREE_KIND_OBJECT_MAP;
     spec.owner = 0u;
@@ -1630,6 +1637,12 @@ static int afspr_directory_entry_at_internal(
         return afspr_report(diagnostic, AFSPR_ERR_ABI,
                             AFSPR_STAGE_ARGUMENTS,
                             AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    if (directory->object_id == AFSPR_OBJECT_ORPHAN_DIRECTORY &&
+        (ident.ro_compat_features & AFSPR_RO_COMPAT_ORPHAN_DIRECTORY) != 0u) {
+        return afspr_report(diagnostic, AFSPR_ERR_NOT_FOUND,
+                            AFSPR_STAGE_TREE_TRAVERSAL,
+                            AFSPR_NO_CHECKPOINT_SLOT, directory->data_root);
     }
     if (directory->type != AFSPR_OBJECT_DIRECTORY) {
         return afspr_report(diagnostic, AFSPR_ERR_NOT_DIRECTORY,
@@ -1898,7 +1911,7 @@ int afspr_read_file(const struct afspr_block_ops *ops,
                     struct afspr_diagnostic *diagnostic,
                     size_t diagnostic_size)
 {
-    struct afspr_ident ident;
+    struct afspr_ident ident = {0};
     uint64_t count;
     uint64_t end;
     uint64_t logical_block;

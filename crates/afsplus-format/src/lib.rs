@@ -53,6 +53,9 @@ pub const FS_MAGIC: u64 = 0x3153_554C_5053_4641;
 /// Object ID constants (`spec/afsplus_format.h`).
 pub const OBJECT_INVALID: u64 = 0;
 pub const OBJECT_ROOT: u64 = 1;
+/// Reserved internal directory containing files whose last user-visible link
+/// was removed while a handle remained open (ADR-066).
+pub const OBJECT_ORPHAN_DIRECTORY: u64 = 2;
 /// Object IDs below this value are reserved for internal objects
 /// (`spec/disk-layout.md` rule 3). Dynamic allocation starts here.
 pub const OBJECT_FIRST_DYNAMIC: u64 = 16;

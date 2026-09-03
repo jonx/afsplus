@@ -37,7 +37,9 @@ Rules:
 
 1. checkpoint/superblock and metadata structures are logical-block aligned where their encoding requires it
 2. all physical ranges are bounds checked against total blocks
-3. internal objects have reserved object IDs
+3. object ID 0 is invalid, object ID 1 is the user root, object ID 2 is the
+   feature-gated orphan directory, IDs 3 through 15 remain reserved, and
+   dynamic allocation begins at 16
 4. placement hints are not semantic invariants
 5. redundant recovery/checkpoint descriptor locations are deterministic from immutable format parameters or discoverable through an independently validated format descriptor
 6. a small durability intent log uses a reserved/discoverable auxiliary area;

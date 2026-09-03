@@ -56,6 +56,11 @@ B+ tree traversal uses a bounded path stack.
 
 Catalog iteration streams records.
 
+Orphan cleanup reads the extent-tree tail by subtree ordinal and removes no
+more than the configured logical-extent budget in one maintenance call. A
+classic adapter can choose a small budget without changing the disk format;
+modern hosts can choose a larger one.
+
 ## 5. Unsupported features
 
 Classic implementations obey feature classes:

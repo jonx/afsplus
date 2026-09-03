@@ -76,6 +76,14 @@ Inject failure:
 
 Expected rule: mount chooses either the old valid checkpoint or the new valid checkpoint, never a hybrid authoritative tree.
 
+For open-unlinked files the allowed states are more specific: before orphan
+insertion the visible name and complete file remain; after it the name is
+absent and the canonical object-2 entry owns the complete file. Each cleanup
+cut may select the prior layout, a shorter tail-trimmed layout, or the final
+absent object. Atomic replacement of an open target is either the complete old
+two-name namespace or the new target plus a hidden old target, never a missing
+source with an unpreserved target.
+
 ## Allocation safety regressions
 
 Mandatory tests derived from pfs3aio failure classes:

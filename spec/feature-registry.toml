@@ -1,4 +1,4 @@
-registry_version = 3
+registry_version = 4
 
 [[feature]]
 id = "org.aros.afsplus:intent-log"
@@ -120,3 +120,14 @@ authoritative = true
 rebuildable = false
 discardable = false
 description = "Persistent per-file data-update policy (ADR-065): object records may carry OBJECT_FLAG_DATA_IN_PLACE, opting the file into ADR-062 private in-place updates. Ignoring implementations always use full data COW, which is strictly stronger; the validated object-flags namespace prevents unaware writers from silently dropping the per-file choice."
+
+[[feature]]
+id = "org.aros.afsplus:orphan-directory"
+short = "orphan-directory"
+class = "ro_compat"
+state_model = "disabled-enabled-active"
+lifecycle = "experimental"
+authoritative = true
+rebuildable = true
+discardable = false
+description = "Reserved internal object ID 2 indexes open-unlinked files for bounded post-close and post-crash cleanup (ADR-066). Unaware writers mount read-only; the visible namespace remains readable."

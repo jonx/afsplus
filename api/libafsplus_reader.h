@@ -21,6 +21,8 @@
 #define AFSPR_NO_CHECKPOINT_SLOT (-1)
 #define AFSPR_NO_LOG_SLOT UINT32_MAX
 
+#define AFSPR_OBJECT_ORPHAN_DIRECTORY UINT64_C(2)
+
 #define AFSPR_CAP_PROBE (UINT64_C(1) << 0)
 #define AFSPR_CAP_OBJECT_LOOKUP (UINT64_C(1) << 1)
 #define AFSPR_CAP_DIRECTORY_ORDINAL (UINT64_C(1) << 2)
@@ -40,6 +42,7 @@
 #define AFSPR_OBJECT_FLAG_DATA_IN_PLACE (UINT16_C(1) << 1)
 /* Required on the volume when an object carries DATA_IN_PLACE. */
 #define AFSPR_COMPAT_DATA_POLICY (UINT64_C(1) << 0)
+#define AFSPR_RO_COMPAT_ORPHAN_DIRECTORY (UINT64_C(1) << 1)
 
 #ifdef __cplusplus
 extern "C" {

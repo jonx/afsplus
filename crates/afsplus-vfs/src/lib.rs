@@ -12,7 +12,7 @@ use afsplus_core::volume::{DataUpdatePolicy, DirectoryCursor, ObjectMetadata, Vo
 use afsplus_core::{mount_with_options, CoreError, MountMode, MountOptions};
 use afsplus_format::ident::{
     NameKeyAlgorithm, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG_DATA_UPDATES,
-    RO_COMPAT_SHARED_EXTENTS,
+    RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::object::ObjectType;
 use afsplus_format::{Timespec, NAME_MAX_UTF8_BYTES, OBJECT_ROOT};
@@ -132,6 +132,9 @@ impl Capabilities {
     /// Files can be persistently opted into ADR-062 private in-place data
     /// updates (ADR-065).
     pub const DATA_POLICY: u64 = 1 << 11;
+    /// Open files remain usable after their final visible link is removed;
+    /// persistent crash cleanup is provided by ADR-066.
+    pub const OPEN_UNLINKED: u64 = 1 << 12;
 
     pub const BASELINE: Capabilities = Capabilities(
         Self::IO_64BIT
@@ -242,7 +245,14 @@ pub struct Vfs<D: BlockDevice> {
 impl<D: BlockDevice> Vfs<D> {
     pub fn mount(device: D, options: MountOptions) -> Result<Self, VfsError> {
         let volume = mount_with_options(device, options)?;
-        Ok(Self::new(volume))
+        let mut vfs = Self::new(volume);
+        if vfs.volume.mount_mode() == MountMode::ReadWrite {
+            match vfs.resume_one_orphan(Timespec::default()) {
+                Ok(()) | Err(VfsError::NoSpace) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(vfs)
     }
 
     pub fn new(volume: Volume<D>) -> Self {
@@ -272,6 +282,9 @@ impl<D: BlockDevice> Vfs<D> {
         if self.volume.ident().features.compat & COMPAT_DATA_POLICY != 0 {
             bits |= Capabilities::DATA_POLICY;
         }
+        if self.volume.ident().features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0 {
+            bits |= Capabilities::OPEN_UNLINKED;
+        }
         Capabilities(bits)
     }
 
@@ -291,6 +304,25 @@ impl<D: BlockDevice> Vfs<D> {
 
     pub fn pending_intent_records(&self) -> u32 {
         self.volume.pending_intent_records()
+    }
+
+    pub fn pending_orphans(&mut self) -> Result<u64, VfsError> {
+        Ok(self.volume.orphan_count()?)
+    }
+
+    pub fn set_orphan_cleanup_extent_budget(&mut self, extents: usize) {
+        self.volume.set_orphan_cleanup_extent_budget(extents);
+    }
+
+    /// Advances at most one orphan and at most the volume's configured
+    /// logical-extent budget. Adapters may call this from idle maintenance;
+    /// mount and filesystem sync already invoke it once.
+    pub fn resume_one_orphan(&mut self, now: Timespec) -> Result<(), VfsError> {
+        let Some(object_id) = self.volume.first_orphan()? else {
+            return Ok(());
+        };
+        self.volume.cleanup_orphan(object_id, now)?;
+        Ok(())
     }
 
     pub fn statfs(&self) -> StatFs {
@@ -314,6 +346,9 @@ impl<D: BlockDevice> Vfs<D> {
     }
 
     pub fn stat(&mut self, object_id: ObjectId) -> Result<Stat, VfsError> {
+        if self.volume.orphan_object(object_id)? {
+            return Err(VfsError::NotFound);
+        }
         self.volume
             .visible_metadata(object_id)?
             .map(Stat::from)
@@ -357,10 +392,23 @@ impl<D: BlockDevice> Vfs<D> {
     }
 
     pub fn close(&mut self, handle: Handle) -> Result<(), VfsError> {
-        self.handles
-            .remove(&handle)
-            .map(|_| ())
-            .ok_or(VfsError::Stale)
+        let state = self.handles.remove(&handle).ok_or(VfsError::Stale)?;
+        let OpenHandle::File { object_id, .. } = state else {
+            return Ok(());
+        };
+        if self.handles.values().any(
+            |state| matches!(state, OpenHandle::File { object_id: open_id, .. } if *open_id == object_id),
+        ) {
+            return Ok(());
+        }
+        if self.volume.mount_mode() != MountMode::ReadWrite
+            || self.volume.ident().features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY == 0
+        {
+            return Ok(());
+        }
+        self.checkpoint_data_window(Timespec::default())?;
+        self.volume.cleanup_orphan(object_id, Timespec::default())?;
+        Ok(())
     }
 
     pub fn read(
@@ -490,6 +538,22 @@ impl<D: BlockDevice> Vfs<D> {
         now: Timespec,
     ) -> Result<(), VfsError> {
         self.checkpoint_data_window(now)?;
+        let object_id = self.lookup(parent, name)?;
+        let metadata = self
+            .volume
+            .visible_metadata(object_id)?
+            .ok_or(VfsError::NotFound)?;
+        let open = self.handles.values().any(
+            |state| matches!(state, OpenHandle::File { object_id: open_id, .. } if *open_id == object_id),
+        );
+        if metadata.object_type == ObjectType::File
+            && metadata.link_count == 1
+            && open
+            && self.volume.ident().features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0
+        {
+            self.volume.orphan_file(parent, name, now)?;
+            return Ok(());
+        }
         Ok(self.volume.delete_file(parent, name, now)?)
     }
 
@@ -515,6 +579,34 @@ impl<D: BlockDevice> Vfs<D> {
     ) -> Result<(), VfsError> {
         self.checkpoint_data_window(now)?;
         if replace {
+            let target = match self.lookup(target_parent, target_name) {
+                Ok(object_id) => Some(object_id),
+                Err(VfsError::NotFound) => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(target_id) = target {
+                let source_id = self.lookup(source_parent, source_name)?;
+                let open = self.handles.values().any(
+                    |state| matches!(state, OpenHandle::File { object_id, .. } if *object_id == target_id),
+                );
+                let target_metadata = self
+                    .volume
+                    .visible_metadata(target_id)?
+                    .ok_or(VfsError::NotFound)?;
+                if target_id != source_id
+                    && target_metadata.link_count == 1
+                    && open
+                    && self.volume.ident().features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0
+                {
+                    return Ok(self.volume.rename_replace_orphan_target(
+                        source_parent,
+                        source_name,
+                        target_parent,
+                        target_name,
+                        now,
+                    )?);
+                }
+            }
             Ok(self.volume.rename_replace(
                 source_parent,
                 source_name,
@@ -660,10 +752,13 @@ impl<D: BlockDevice> Vfs<D> {
     pub fn sync_filesystem(&mut self) -> Result<(), VfsError> {
         if self.volume.mount_mode() == MountMode::ReadWrite && self.logged_data_fsync_enabled() {
             self.volume.window_commit(Timespec::default())?;
-            Ok(())
         } else {
-            Ok(self.volume.sync()?)
+            self.volume.sync()?;
         }
+        if self.volume.mount_mode() == MountMode::ReadWrite {
+            self.resume_one_orphan(Timespec::default())?;
+        }
+        Ok(())
     }
 
     pub fn into_volume(self) -> Volume<D> {

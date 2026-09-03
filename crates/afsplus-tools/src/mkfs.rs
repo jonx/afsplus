@@ -58,6 +58,10 @@ impl Profile {
     fn data_policy(self) -> bool {
         matches!(self, Self::Workstation | Self::Full)
     }
+
+    fn orphan_directory(self) -> bool {
+        true
+    }
 }
 
 struct Options {
@@ -486,6 +490,9 @@ fn enabled_features(profile: Profile) -> Vec<&'static str> {
         "org.aros.afsplus:intent-log",
         "org.aros.afsplus:intent-log-data-updates",
     ];
+    if profile.orphan_directory() {
+        features.push("org.aros.afsplus:orphan-directory");
+    }
     if profile.shared_extents() {
         features.push("org.aros.afsplus:shared-extents");
     }
@@ -570,6 +577,7 @@ mod tests {
             for (feature, enabled) in [
                 ("shared_extents", profile.shared_extents()),
                 ("data_policy", profile.data_policy()),
+                ("orphan_directory", profile.orphan_directory()),
             ] {
                 assert!(
                     policy.contains(&format!("allow_{feature} = {enabled}")),

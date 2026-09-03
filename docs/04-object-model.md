@@ -1,6 +1,6 @@
 # 04. Object Model
 
-> **ADRs:** none · **Spec:** none ·
+> **ADRs:** [ADR-066](../adr/ADR-066-bounded-orphan-directory.md) · **Spec:** none ·
 > **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
 
 ## 1. Stable objects
@@ -61,11 +61,17 @@ Deleting the final directory link while a file is open must not immediately recy
 
 ## 5. Orphan handling
 
-AFS+ must explicitly handle objects that have no directory links but remain open.
+Object ID 2 is reserved for the internal orphan directory when the
+`org.aros.afsplus:orphan-directory` feature is enabled. The directory is
+created lazily and is never linked from the user root. Its canonical
+lowercase hexadecimal entries preserve final-link files while a VFS handle
+is open; the ordinary object record retains `link_count == 1`.
 
-A transactionally maintained orphan structure records such objects until the final open reference is released.
-
-This prevents leaked extents and makes crash recovery deterministic.
+Last close and post-crash maintenance remove logical extent records from the
+tail under a runtime budget, publishing each shorter layout before the final
+small transaction removes the entry and object. This gives cleanup a durable
+restart point without an object-map scan. Public lookup, enumeration, stat,
+hard-link and rename APIs cannot address object 2 or rediscover its children.
 
 ## 6. ID reuse
 
@@ -81,7 +87,8 @@ The current core creates files and directories under any directory object ID.
 Same-directory rename and cross-directory move preserve the child object ID;
 directory moves into self/descendants are rejected before a transaction
 starts. Regular-file hard links update the object record and destination tree
-atomically. Unlink decrements the authoritative count and retains content
-until the final link, when record and data blocks enter checkpoint quarantine.
-Directory hard links and open-but-unlinked orphans are intentionally not yet
-implemented.
+atomically. A final unlink with no handle immediately retires the file. With
+live handles it atomically moves the only link into object 2; reads, writes,
+truncate and fsync retain stable identity until last close. Open atomic-replace
+targets follow the same rule in the replacement checkpoint. Directory hard
+links remain intentionally unsupported.

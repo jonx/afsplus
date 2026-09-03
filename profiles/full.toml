@@ -10,5 +10,6 @@ allow_intent_log = true
 allow_intent_log_data_updates = true
 allow_shared_extents = true
 allow_data_policy = true
+allow_orphan_directory = true
 require_metadata_journal = true
 require_metadata_checksums = true

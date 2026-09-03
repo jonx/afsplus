@@ -22,13 +22,14 @@ use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::crc32c::{crc32c, Hasher};
 use afsplus_format::dir::DirEntry;
 use afsplus_format::ident::{
-    Identification, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_SHARED_EXTENTS,
+    Identification, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG_DATA_UPDATES,
+    RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::intent_log::{LogOp, LogRecord, MAX_LOG_OPS};
 use afsplus_format::object::{
     ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_DATA_IN_PLACE, OBJECT_FLAG_EXTENT_TREE,
 };
-use afsplus_format::{validate_name, FormatError, Timespec, OBJECT_ROOT};
+use afsplus_format::{validate_name, FormatError, Timespec, OBJECT_ORPHAN_DIRECTORY, OBJECT_ROOT};
 
 use crate::alloc::{AllocStats, TxAllocator};
 use crate::allocation_root::{self, ReservedTreePool};
@@ -70,6 +71,15 @@ pub struct CommitStats {
     /// Total bytes issued to the device by this transaction.
     pub bytes_written: u64,
     pub alloc: AllocStats,
+}
+
+pub const DEFAULT_ORPHAN_CLEANUP_EXTENTS: usize = 16;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OrphanCleanupProgress {
+    pub extents_removed: usize,
+    pub object_removed: bool,
+    pub still_pending: bool,
 }
 
 /// Runtime data-update policy used by the Q1 architecture qualification.
@@ -137,6 +147,11 @@ impl From<ObjectRecord> for ObjectMetadata {
 struct StagedFileLayout {
     record_lba: u64,
     metadata_writes: Vec<(u64, Vec<u8>)>,
+}
+
+struct OrphanDataStep {
+    extents_removed: usize,
+    data_empty: bool,
 }
 
 /// One committed file whose logical layout is being edited inside an open
@@ -238,6 +253,10 @@ pub struct Volume<D: BlockDevice> {
     pending_intent_records: u32,
     /// Per-transaction reclamation budget in blocks (runtime policy).
     reclaim_batch_blocks: u64,
+    /// Maximum logical extent records removed from one orphan before a VFS
+    /// maintenance call returns. The wire format is independent of this
+    /// runtime budget (ADR-066).
+    orphan_cleanup_extent_budget: usize,
     /// Allocation-root node sets for (current, other) checkpoints, cached
     /// across commits so the reserved-pool exclusion set needs no tree walk
     /// per transaction. Populated lazily on the first commit (mount stays
@@ -280,6 +299,7 @@ impl<D: BlockDevice> Volume<D> {
             mount_mode,
             pending_intent_records: 0,
             reclaim_batch_blocks: crate::reclaim::DEFAULT_RECLAIM_BATCH_BLOCKS,
+            orphan_cleanup_extent_budget: DEFAULT_ORPHAN_CLEANUP_EXTENTS,
             allocation_tree_cache: None,
             alloc_rover_region: 0,
             window: None,
@@ -326,6 +346,14 @@ impl<D: BlockDevice> Volume<D> {
     /// queue head before each transaction allocates).
     pub fn set_reclaim_batch_blocks(&mut self, blocks: u64) {
         self.reclaim_batch_blocks = blocks.max(1);
+    }
+
+    pub fn set_orphan_cleanup_extent_budget(&mut self, extents: usize) {
+        self.orphan_cleanup_extent_budget = extents.max(1);
+    }
+
+    pub fn orphan_cleanup_extent_budget(&self) -> usize {
+        self.orphan_cleanup_extent_budget
     }
 
     /// Diagnostic: whether `lba` is currently quarantined. Walks the queue;
@@ -511,6 +539,7 @@ impl<D: BlockDevice> Volume<D> {
         directory_id: u64,
         name: &str,
     ) -> Result<Option<u64>, CoreError> {
+        self.ensure_public_object_id(directory_id)?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
         let directory_record = self.read_object(directory_id)?.ok_or(CoreError::NotFound)?;
         if directory_record.object_type != ObjectType::Directory {
@@ -536,6 +565,7 @@ impl<D: BlockDevice> Volume<D> {
 
     /// Lists a directory as `(original name, object ID)` pairs.
     pub fn list_directory(&mut self, directory_id: u64) -> Result<Vec<(String, u64)>, CoreError> {
+        self.ensure_public_object_id(directory_id)?;
         let directory_record = self.read_object(directory_id)?.ok_or(CoreError::NotFound)?;
         if directory_record.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
@@ -562,6 +592,7 @@ impl<D: BlockDevice> Volume<D> {
         cursor: Option<DirectoryCursor>,
         max_entries: usize,
     ) -> Result<DirectoryPage, CoreError> {
+        self.ensure_public_object_id(directory_id)?;
         if max_entries > MAX_DIRECTORY_PAGE_ENTRIES {
             return Err(CoreError::PrototypeLimit(
                 "directory page exceeds entry cap",
@@ -606,6 +637,7 @@ impl<D: BlockDevice> Volume<D> {
     /// mandatory object cache; modern implementations may add a bounded or
     /// aggressive cache above this API.
     pub fn stat(&mut self, object_id: u64) -> Result<Option<ObjectRecord>, CoreError> {
+        self.ensure_public_object_id(object_id)?;
         self.read_object(object_id)
     }
 
@@ -1618,6 +1650,7 @@ impl<D: BlockDevice> Volume<D> {
         now: Timespec,
     ) -> Result<u64, CoreError> {
         self.ensure_window_closed()?;
+        self.ensure_public_object_id(parent_id)?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
         let parent = self.read_object(parent_id)?.ok_or(CoreError::NotFound)?;
         if parent.object_type != ObjectType::Directory {
@@ -1780,6 +1813,7 @@ impl<D: BlockDevice> Volume<D> {
         now: Timespec,
     ) -> Result<u64, CoreError> {
         self.ensure_window_closed()?;
+        self.ensure_public_object_id(parent_id)?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
         let parent = self.read_object(parent_id)?.ok_or(CoreError::NotFound)?;
         if parent.object_type != ObjectType::Directory {
@@ -1923,6 +1957,7 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.ensure_public_object_id(parent_id)?;
         self.remove_entry(parent_id, name, now, ObjectType::File)
     }
 
@@ -1933,7 +1968,424 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.ensure_public_object_id(parent_id)?;
         self.remove_entry(parent_id, name, now, ObjectType::Directory)
+    }
+
+    /// Moves the final visible link of an open regular file into the reserved
+    /// orphan directory (ADR-066). The lazy directory setup, if needed, is a
+    /// separate preparatory checkpoint; the visible-link removal and orphan
+    /// insertion themselves are one atomic rename transaction.
+    pub fn orphan_file(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
+        self.ensure_window_closed()?;
+        if !self.orphan_directory_enabled() {
+            return Err(CoreError::FeatureDisabled(
+                "orphan-directory feature is not enabled on this volume",
+            ));
+        }
+        self.ensure_public_object_id(parent_id)?;
+        validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+        let parent = self.read_object(parent_id)?.ok_or(CoreError::NotFound)?;
+        if parent.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        let key = self.comparison_key(name.as_bytes())?;
+        let entry = directory::lookup_entry(
+            &mut self.dev,
+            &self.ident.geometry(),
+            parent.data_root,
+            parent_id,
+            self.checkpoint.generation,
+            &self.ident,
+            &key,
+        )?
+        .ok_or(CoreError::NotFound)?;
+        let victim = self
+            .read_object(entry.child_id)?
+            .ok_or_else(|| CoreError::Corrupt("orphan victim missing from object map".into()))?;
+        if entry.child_type_hint != 1 || victim.object_type != ObjectType::File {
+            return Err(if victim.object_type == ObjectType::Directory {
+                CoreError::IsDirectory
+            } else {
+                CoreError::Corrupt("orphan victim is not a regular file".into())
+            });
+        }
+        if victim.link_count != 1 {
+            return Err(CoreError::InvalidMove(
+                "only a file's final visible link can enter the orphan directory",
+            ));
+        }
+
+        self.ensure_orphan_directory(now)?;
+        let orphan_name = Self::orphan_name(victim.object_id);
+        if self.orphan_object(victim.object_id)? {
+            return Err(CoreError::Corrupt(format!(
+                "object {} already has an orphan entry",
+                victim.object_id
+            )));
+        }
+        self.rename_internal(parent_id, name, OBJECT_ORPHAN_DIRECTORY, &orphan_name, now)?;
+        Ok(victim.object_id)
+    }
+
+    /// Whether the reserved directory currently names `object_id`. This is
+    /// a bounded point lookup, used by adapters to keep guessed object IDs
+    /// from exposing open-unlinked files.
+    pub fn orphan_object(&mut self, object_id: u64) -> Result<bool, CoreError> {
+        if !self.orphan_directory_enabled() {
+            return Ok(false);
+        }
+        let Some(orphan_directory) = self.read_object(OBJECT_ORPHAN_DIRECTORY)? else {
+            return Ok(false);
+        };
+        self.validate_orphan_directory(orphan_directory)?;
+        let name = Self::orphan_name(object_id);
+        let key = self.comparison_key(name.as_bytes())?;
+        let entry = directory::lookup_entry(
+            &mut self.dev,
+            &self.ident.geometry(),
+            orphan_directory.data_root,
+            OBJECT_ORPHAN_DIRECTORY,
+            self.checkpoint.generation,
+            &self.ident,
+            &key,
+        )?;
+        let Some(entry) = entry else {
+            return Ok(false);
+        };
+        if entry.child_id != object_id
+            || entry.child_type_hint != 1
+            || entry.name.as_slice() != name.as_bytes()
+        {
+            return Err(CoreError::Corrupt(format!(
+                "orphan entry for object {object_id} has invalid identity or type"
+            )));
+        }
+        Ok(true)
+    }
+
+    /// Returns the number of persistent orphan entries using only the
+    /// reserved directory root and its authoritative subtree item count.
+    pub fn orphan_count(&mut self) -> Result<u64, CoreError> {
+        if !self.orphan_directory_enabled() {
+            return Ok(0);
+        }
+        let Some(record) = self.read_object(OBJECT_ORPHAN_DIRECTORY)? else {
+            return Ok(0);
+        };
+        self.validate_orphan_directory(record)?;
+        Ok(crate::tree::read_range(
+            &mut self.dev,
+            &self.ident.geometry(),
+            record.data_root,
+            directory::spec(OBJECT_ORPHAN_DIRECTORY, self.checkpoint.generation),
+            0,
+            0,
+        )?
+        .total_items)
+    }
+
+    /// Returns the first orphan ID without scanning the object map or the
+    /// complete internal directory.
+    pub fn first_orphan(&mut self) -> Result<Option<u64>, CoreError> {
+        if !self.orphan_directory_enabled() {
+            return Ok(None);
+        }
+        let Some(record) = self.read_object(OBJECT_ORPHAN_DIRECTORY)? else {
+            return Ok(None);
+        };
+        self.validate_orphan_directory(record)?;
+        let page = directory::read_page(
+            &mut self.dev,
+            &self.ident.geometry(),
+            record.data_root,
+            directory::spec(OBJECT_ORPHAN_DIRECTORY, self.checkpoint.generation),
+            &self.ident,
+            0,
+            1,
+        )?;
+        let Some(entry) = page.0.into_iter().next() else {
+            return Ok(None);
+        };
+        let expected_name = Self::orphan_name(entry.child_id);
+        if entry.child_type_hint != 1 || entry.name.as_slice() != expected_name.as_bytes() {
+            return Err(CoreError::Corrupt(format!(
+                "orphan entry for object {} has invalid name or type",
+                entry.child_id
+            )));
+        }
+        Ok(Some(entry.child_id))
+    }
+
+    /// Advances one orphan by at most the configured number of logical
+    /// extent records. Each shrinking step and the final object removal are
+    /// separate valid checkpoints, so a crash merely selects an earlier or
+    /// later restart point.
+    pub fn cleanup_orphan(
+        &mut self,
+        object_id: u64,
+        now: Timespec,
+    ) -> Result<OrphanCleanupProgress, CoreError> {
+        self.ensure_window_closed()?;
+        if !self.orphan_object(object_id)? {
+            return Ok(OrphanCleanupProgress::default());
+        }
+        let step =
+            self.cleanup_orphan_data_step(object_id, self.orphan_cleanup_extent_budget, now)?;
+        if !step.data_empty {
+            return Ok(OrphanCleanupProgress {
+                extents_removed: step.extents_removed,
+                object_removed: false,
+                still_pending: true,
+            });
+        }
+        let name = Self::orphan_name(object_id);
+        self.remove_entry(OBJECT_ORPHAN_DIRECTORY, &name, now, ObjectType::File)?;
+        Ok(OrphanCleanupProgress {
+            extents_removed: step.extents_removed,
+            object_removed: true,
+            still_pending: false,
+        })
+    }
+
+    fn cleanup_orphan_data_step(
+        &mut self,
+        object_id: u64,
+        limit: usize,
+        now: Timespec,
+    ) -> Result<OrphanDataStep, CoreError> {
+        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        if record.object_type != ObjectType::File || record.link_count != 1 {
+            return Err(CoreError::Corrupt(format!(
+                "orphan object {object_id} is not a singly-linked regular file"
+            )));
+        }
+        let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("orphan object {object_id} missing from object map"))
+        })?;
+        let (removed, total_extents) = if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
+            let tail = extent_map::read_tail(
+                &mut self.dev,
+                &self.ident.geometry(),
+                record.data_root,
+                object_id,
+                self.checkpoint.generation,
+                limit,
+            )?;
+            (tail.extents, tail.total_extents)
+        } else if record.data_blocks == 0 {
+            (Vec::new(), 0)
+        } else {
+            (
+                vec![Extent {
+                    logical_start: 0,
+                    physical_start: record.data_root,
+                    block_count: record.data_blocks,
+                    flags: 0,
+                }],
+                1,
+            )
+        };
+        if removed.is_empty() {
+            return Ok(OrphanDataStep {
+                extents_removed: 0,
+                data_empty: total_extents == 0,
+            });
+        }
+
+        let block_size = self.dev.block_size();
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            generation,
+            self.reclaim_batch_blocks,
+            self.alloc_rover_region,
+        )?;
+        let new_record_lba = tx.allocate(&mut self.dev)?;
+        tx.retire(&mut self.dev, record_lba)?;
+
+        let removed_blocks = removed.iter().try_fold(0u64, |total, extent| {
+            total
+                .checked_add(extent.block_count)
+                .ok_or(CoreError::PrototypeLimit(
+                    "orphan cleanup block count overflow",
+                ))
+        })?;
+        let remaining_blocks = record
+            .data_blocks
+            .checked_sub(removed_blocks)
+            .ok_or_else(|| CoreError::Corrupt("orphan extent count exceeds record".into()))?;
+        for extent in &removed {
+            self.release_data_run(&mut tx, generation, extent)?;
+        }
+
+        let (data_root, mut metadata_writes) = if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
+            let keys = removed
+                .iter()
+                .map(|extent| extent_map::encode_extent(*extent).map(|(key, _)| key))
+                .collect::<Result<Vec<_>, _>>()?;
+            let operations = keys
+                .iter()
+                .map(|key| TreeOperation::Delete { key })
+                .collect::<Vec<_>>();
+            let mutation = mutate_many(
+                &mut self.dev,
+                &self.ident.geometry(),
+                &mut tx,
+                record.data_root,
+                extent_map::spec(object_id, self.checkpoint.generation),
+                generation,
+                &operations,
+            )?;
+            (mutation.root_lba, mutation.writes)
+        } else {
+            (0, Vec::new())
+        };
+        let new_size = if remaining_blocks == 0 {
+            0
+        } else {
+            record.size_bytes.min(
+                removed[0]
+                    .logical_start
+                    .checked_mul(block_size as u64)
+                    .ok_or(CoreError::PrototypeLimit("orphan cleanup size overflow"))?,
+            )
+        };
+        let new_record = ObjectRecord {
+            size_bytes: new_size,
+            allocated_bytes: remaining_blocks
+                .checked_mul(block_size as u64)
+                .ok_or(CoreError::PrototypeLimit("orphan allocated size overflow"))?,
+            modified: now,
+            changed: now,
+            content_generation: generation,
+            data_root,
+            data_blocks: remaining_blocks,
+            ..record
+        };
+
+        let map_key = object_map::key(object_id);
+        let map_value = object_map::value(new_record_lba)?;
+        let map_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &[TreeOperation::Upsert {
+                key: &map_key,
+                value: &map_value,
+            }],
+        )?;
+        metadata_writes.push((new_record_lba, new_record.encode(block_size, generation)?));
+        metadata_writes.extend(map_mutation.writes);
+        self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            Vec::new(),
+            metadata_writes,
+            map_mutation.root_lba,
+        )?;
+
+        Ok(OrphanDataStep {
+            extents_removed: removed.len(),
+            data_empty: total_extents == removed.len() as u64,
+        })
+    }
+
+    fn ensure_orphan_directory(&mut self, now: Timespec) -> Result<(), CoreError> {
+        if let Some(record) = self.read_object(OBJECT_ORPHAN_DIRECTORY)? {
+            return self.validate_orphan_directory(record);
+        }
+
+        let block_size = self.dev.block_size();
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            generation,
+            self.reclaim_batch_blocks,
+            self.alloc_rover_region,
+        )?;
+        let directory_root_lba = tx.allocate(&mut self.dev)?;
+        let directory_record_lba = tx.allocate(&mut self.dev)?;
+        let record = ObjectRecord {
+            object_id: OBJECT_ORPHAN_DIRECTORY,
+            object_type: ObjectType::Directory,
+            flags: 0,
+            link_count: 1,
+            size_bytes: 0,
+            allocated_bytes: 0,
+            created: now,
+            modified: now,
+            changed: now,
+            protection: 0,
+            content_generation: generation,
+            data_root: directory_root_lba,
+            data_blocks: 0,
+        };
+        let map_key = object_map::key(OBJECT_ORPHAN_DIRECTORY);
+        let map_value = object_map::value(directory_record_lba)?;
+        let map_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &[TreeOperation::Upsert {
+                key: &map_key,
+                value: &map_value,
+            }],
+        )?;
+        let mut metadata_writes = vec![
+            (
+                directory_root_lba,
+                directory::empty_leaf(OBJECT_ORPHAN_DIRECTORY).encode(block_size, generation)?,
+            ),
+            (directory_record_lba, record.encode(block_size, generation)?),
+        ];
+        metadata_writes.extend(map_mutation.writes);
+        self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            Vec::new(),
+            metadata_writes,
+            map_mutation.root_lba,
+        )
+    }
+
+    fn validate_orphan_directory(&self, record: ObjectRecord) -> Result<(), CoreError> {
+        if record.object_id != OBJECT_ORPHAN_DIRECTORY
+            || record.object_type != ObjectType::Directory
+            || record.flags != 0
+            || record.link_count != 1
+            || record.size_bytes != 0
+            || record.allocated_bytes != 0
+            || record.data_blocks != 0
+        {
+            return Err(CoreError::Corrupt(
+                "reserved orphan-directory object has invalid metadata".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn orphan_name(object_id: u64) -> String {
+        format!("{object_id:016x}")
     }
 
     fn remove_entry(
@@ -2140,6 +2592,11 @@ impl<D: BlockDevice> Volume<D> {
         now: Timespec,
     ) -> Result<(), CoreError> {
         self.ensure_window_closed()?;
+        self.ensure_public_object_id(parent_id)?;
+        self.ensure_public_object_id(object_id)?;
+        if self.orphan_object(object_id)? {
+            return Err(CoreError::NotFound);
+        }
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
         let file = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
         if file.object_type != ObjectType::File {
@@ -2254,6 +2711,25 @@ impl<D: BlockDevice> Volume<D> {
     /// stable object ID. Replacement of an existing destination is a separate
     /// future operation with an explicit contract.
     pub fn rename(
+        &mut self,
+        source_parent_id: u64,
+        source_name: &str,
+        target_parent_id: u64,
+        target_name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.ensure_public_object_id(source_parent_id)?;
+        self.ensure_public_object_id(target_parent_id)?;
+        self.rename_internal(
+            source_parent_id,
+            source_name,
+            target_parent_id,
+            target_name,
+            now,
+        )
+    }
+
+    fn rename_internal(
         &mut self,
         source_parent_id: u64,
         source_name: &str,
@@ -2785,6 +3261,15 @@ impl<D: BlockDevice> Volume<D> {
         ops: &[BatchOp<'_>],
         now: Timespec,
     ) -> Result<Vec<Option<u64>>, CoreError> {
+        self.run_batch_internal(ops, now, false)
+    }
+
+    fn run_batch_internal(
+        &mut self,
+        ops: &[BatchOp<'_>],
+        now: Timespec,
+        orphan_replaced_target: bool,
+    ) -> Result<Vec<Option<u64>>, CoreError> {
         const MAX_BATCH_OPS: usize = 1024;
         if ops.is_empty() {
             return Ok(Vec::new());
@@ -2822,7 +3307,14 @@ impl<D: BlockDevice> Volume<D> {
         };
         let mut results = Vec::with_capacity(ops.len());
         for op in ops {
-            results.push(self.apply_batch_op(&mut tx, &mut pending, op, now, generation)?);
+            results.push(self.apply_batch_op(
+                &mut tx,
+                &mut pending,
+                op,
+                now,
+                generation,
+                orphan_replaced_target,
+            )?);
         }
         self.materialize_batch(tx, pending, now, generation, false)?;
         Ok(results)
@@ -2839,6 +3331,8 @@ impl<D: BlockDevice> Volume<D> {
         target_name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.ensure_public_object_id(source_parent_id)?;
+        self.ensure_public_object_id(target_parent_id)?;
         self.run_batch(
             &[BatchOp::Rename {
                 source_parent_id,
@@ -2848,6 +3342,40 @@ impl<D: BlockDevice> Volume<D> {
                 replace: true,
             }],
             now,
+        )?;
+        Ok(())
+    }
+
+    /// Atomic replacement variant used when the VFS proves the target's
+    /// final link still has a live handle. The replaced target enters object
+    /// 2 in the same checkpoint that installs the source at its name.
+    pub fn rename_replace_orphan_target(
+        &mut self,
+        source_parent_id: u64,
+        source_name: &str,
+        target_parent_id: u64,
+        target_name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.ensure_window_closed()?;
+        if !self.orphan_directory_enabled() {
+            return Err(CoreError::FeatureDisabled(
+                "orphan-directory feature is not enabled on this volume",
+            ));
+        }
+        self.ensure_public_object_id(source_parent_id)?;
+        self.ensure_public_object_id(target_parent_id)?;
+        self.ensure_orphan_directory(now)?;
+        self.run_batch_internal(
+            &[BatchOp::Rename {
+                source_parent_id,
+                source_name,
+                target_parent_id,
+                target_name,
+                replace: true,
+            }],
+            now,
+            true,
         )?;
         Ok(())
     }
@@ -3229,6 +3757,7 @@ impl<D: BlockDevice> Volume<D> {
         op: &BatchOp<'_>,
         now: Timespec,
         generation: u64,
+        orphan_replaced_target: bool,
     ) -> Result<Option<u64>, CoreError> {
         let block_size = self.dev.block_size();
         match op {
@@ -3354,6 +3883,9 @@ impl<D: BlockDevice> Volume<D> {
                     if let Some(existing) =
                         self.batch_lookup(pending, *target_parent_id, &target_key)?
                     {
+                        if existing.child_id == entry.child_id {
+                            return Ok(None);
+                        }
                         if !replace {
                             return Err(CoreError::AlreadyExists);
                         }
@@ -3363,7 +3895,48 @@ impl<D: BlockDevice> Volume<D> {
                         if target.object_type != ObjectType::File {
                             return Err(CoreError::IsDirectory);
                         }
-                        self.unlink_in_batch(tx, pending, generation, existing.child_id, now)?;
+                        if orphan_replaced_target {
+                            if target.link_count != 1 {
+                                return Err(CoreError::InvalidMove(
+                                    "only a final-link replacement target can become an orphan",
+                                ));
+                            }
+                            let orphan_name = Self::orphan_name(existing.child_id);
+                            let orphan_key = self.comparison_key(orphan_name.as_bytes())?;
+                            if self
+                                .batch_lookup(pending, OBJECT_ORPHAN_DIRECTORY, &orphan_key)?
+                                .is_some()
+                            {
+                                return Err(CoreError::Corrupt(format!(
+                                    "object {} already has an orphan entry",
+                                    existing.child_id
+                                )));
+                            }
+                            pending
+                                .dir_changes
+                                .entry(OBJECT_ORPHAN_DIRECTORY)
+                                .or_default()
+                                .insert(
+                                    orphan_key.clone(),
+                                    Some(DirEntry {
+                                        key: orphan_key,
+                                        name: orphan_name.into_bytes(),
+                                        child_type_hint: 1,
+                                        child_id: existing.child_id,
+                                    }),
+                                );
+                            pending.dir_timestamps.insert(OBJECT_ORPHAN_DIRECTORY, now);
+                            self.note_committed_record(pending, existing.child_id)?;
+                            pending.records.insert(
+                                existing.child_id,
+                                Some(ObjectRecord {
+                                    changed: now,
+                                    ..target
+                                }),
+                            );
+                        } else {
+                            self.unlink_in_batch(tx, pending, generation, existing.child_id, now)?;
+                        }
                     }
                 }
                 let target_parent = self
@@ -3479,6 +4052,18 @@ impl<D: BlockDevice> Volume<D> {
 
     fn data_policy_enabled(&self) -> bool {
         self.ident.features.compat & COMPAT_DATA_POLICY != 0
+    }
+
+    fn orphan_directory_enabled(&self) -> bool {
+        self.ident.features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0
+    }
+
+    fn ensure_public_object_id(&self, object_id: u64) -> Result<(), CoreError> {
+        if object_id == OBJECT_ORPHAN_DIRECTORY {
+            Err(CoreError::NotFound)
+        } else {
+            Ok(())
+        }
     }
 
     /// The transaction-scoped reference edit. Created empty; committed
@@ -3718,7 +4303,14 @@ impl<D: BlockDevice> Volume<D> {
         // yet covered by a log record cancels to nothing: the create is
         // scrubbed from the unlogged group so the record never mentions it.
         let cancels_unlogged = self.window_cancel_target(&window.pending, op)?;
-        let result = self.apply_batch_op(&mut window.tx, &mut window.pending, op, now, generation);
+        let result = self.apply_batch_op(
+            &mut window.tx,
+            &mut window.pending,
+            op,
+            now,
+            generation,
+            false,
+        );
         match result {
             Ok(created) => {
                 if let Some(cancelled) = cancels_unlogged {
@@ -4069,6 +4661,7 @@ impl<D: BlockDevice> Volume<D> {
                 target_parent_id,
                 target_name,
                 replace,
+                ..
             } => LogOp::Rename {
                 source_parent_id: *source_parent_id,
                 source_name: source_name.as_bytes().to_vec(),
@@ -4308,6 +4901,7 @@ impl<D: BlockDevice> Volume<D> {
                     },
                     *timestamp,
                     generation,
+                    false,
                 )
                 .map(|_| ())
             }
@@ -4333,6 +4927,7 @@ impl<D: BlockDevice> Volume<D> {
                     },
                     *timestamp,
                     generation,
+                    false,
                 )
                 .map(|_| ())
             }

@@ -15,7 +15,8 @@
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::ident::{
-    Identification, INCOMPAT_INTENT_LOG, INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_SHARED_EXTENTS,
+    Identification, INCOMPAT_INTENT_LOG, INCOMPAT_INTENT_LOG_DATA_UPDATES,
+    RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::{FormatError, DEFAULT_BLOCK_SIZE};
 
@@ -48,7 +49,7 @@ pub struct MountOptions {
 }
 
 pub const SUPPORTED_INCOMPAT_FEATURES: u64 = INCOMPAT_INTENT_LOG | INCOMPAT_INTENT_LOG_DATA_UPDATES;
-pub const SUPPORTED_RO_COMPAT_FEATURES: u64 = RO_COMPAT_SHARED_EXTENTS;
+pub const SUPPORTED_RO_COMPAT_FEATURES: u64 = RO_COMPAT_SHARED_EXTENTS | RO_COMPAT_ORPHAN_DIRECTORY;
 
 fn negotiate_features(ident: &Identification, mode: MountMode) -> Result<(), CoreError> {
     let unknown_incompat = ident.features.incompat & !SUPPORTED_INCOMPAT_FEATURES;

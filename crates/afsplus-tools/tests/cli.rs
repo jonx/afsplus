@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use afsplus_block::{BlockDevice, FileBackend};
 use afsplus_core::mount;
 use afsplus_format::ident::Identification;
-use afsplus_format::{Timespec, DEFAULT_BLOCK_SIZE};
+use afsplus_format::{Timespec, DEFAULT_BLOCK_SIZE, OBJECT_ROOT};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -111,7 +111,7 @@ fn formatter_json_is_exact_and_profile_features_are_explicit() {
     assert_status(&output, 0);
     assert_eq!(
         stdout(&output),
-        "{\"schema_version\":1,\"tool\":\"mkafsplus\",\"profile\":\"workstation\",\"uuid\":\"00112233445566778899aabbccddeeff\",\"label\":\"Test-é\",\"block_size\":4096,\"total_blocks\":512,\"region_blocks\":262144,\"name_key_algorithm\":\"unicode-nfc\",\"features\":[\"org.aros.afsplus:data-policy\",\"org.aros.afsplus:intent-log\",\"org.aros.afsplus:intent-log-data-updates\",\"org.aros.afsplus:shared-extents\"]}\n"
+        "{\"schema_version\":1,\"tool\":\"mkafsplus\",\"profile\":\"workstation\",\"uuid\":\"00112233445566778899aabbccddeeff\",\"label\":\"Test-é\",\"block_size\":4096,\"total_blocks\":512,\"region_blocks\":262144,\"name_key_algorithm\":\"unicode-nfc\",\"features\":[\"org.aros.afsplus:data-policy\",\"org.aros.afsplus:intent-log\",\"org.aros.afsplus:intent-log-data-updates\",\"org.aros.afsplus:orphan-directory\",\"org.aros.afsplus:shared-extents\"]}\n"
     );
     assert_eq!(fs::metadata(&image).unwrap().len(), 2 * 1024 * 1024);
 
@@ -241,6 +241,34 @@ fn info_and_dump_are_repeatable_and_work_on_a_read_only_populated_image() {
         use std::os::unix::fs::MetadataExt;
         assert_eq!(fs::metadata(&image).unwrap().mode() & 0o777, 0o444);
     }
+}
+
+#[test]
+fn dump_labels_internal_orphan_state_without_exposing_it_as_namespace() {
+    let temp = TempDir::new("orphan-dump");
+    let image = temp.join("orphan.afsplus");
+    assert_status(&format_image(&image, &[]), 0);
+    let device = FileBackend::open(&image, DEFAULT_BLOCK_SIZE, 512).unwrap();
+    let mut volume = mount(device).unwrap();
+    let object = volume
+        .create_file_in_root("open", b"pending", Timespec::default())
+        .unwrap();
+    volume
+        .orphan_file(OBJECT_ROOT, "open", Timespec::default())
+        .unwrap();
+    assert!(volume.orphan_object(object).unwrap());
+    drop(volume.into_device());
+
+    let json = run("afsplus-dump", [OsStr::new("--json"), image.as_os_str()]);
+    assert_status(&json, 0);
+    let json = stdout(&json);
+    assert!(json.contains("\"orphan_entries\":1"));
+    assert!(json.contains("\"object_id\":2"));
+    assert!(json.contains("\"internal_role\":\"orphan-directory\""));
+
+    let text = run("afsplus-dump", [image.as_os_str()]);
+    assert_status(&text, 0);
+    assert!(stdout(&text).contains("directory 2 [internal orphan-directory] entries 1"));
 }
 
 #[test]
