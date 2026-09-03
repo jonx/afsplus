@@ -22,6 +22,8 @@ use afsplus_core::verify::{full_sweep, load_committed_state};
 use afsplus_core::CoreError;
 use afsplus_format::ident::{Identification, NameKeyAlgorithm, RO_COMPAT_SHARED_EXTENTS};
 
+pub mod corpus;
+
 /// Versioned structured-output schema (ADR-025).
 pub const REPORT_SCHEMA_VERSION: u32 = 5;
 

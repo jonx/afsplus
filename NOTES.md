@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Checker corruption becomes a replayable corpus](#2026-09-03--checker-corruption-becomes-a-replayable-corpus)
 - [2026-09-03 — Portable C overlays the durable namespace](#2026-09-03--portable-c-overlays-the-durable-namespace)
 - [2026-09-03 — The per-file data policy becomes persistent](#2026-09-03--the-per-file-data-policy-becomes-persistent)
 - [2026-09-03 — Portable C reads the durable log view](#2026-09-03--portable-c-reads-the-durable-log-view)
@@ -30,6 +31,24 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Checker corruption becomes a replayable corpus
+
+The Rust checker gained a twelve-image corpus spanning identification,
+checkpoints, typed trees, object records, allocation bitmaps and the intent
+log. Each surface has a raw integrity failure and a valid-checksum semantic
+failure. Fixed UUIDs, timestamps and geometry make the sparse images and
+their exact JSON reports byte-reproducible; a versioned manifest names every
+changed LBA and byte range so another implementation can replay a failure
+without reading the Rust tests.
+
+Building the cases exposed two gaps before publication. Checkpoint decoding
+accepted nonzero reserved header and payload fields, so both retained records
+could carry unknown state without failing selection. Intent scanning also
+treated a nonzero undecodable record exactly like a zero unused slot. The
+decoder now rejects the checkpoint fields, while the log keeps its legal
+crash-boundary semantics and adds a forensic warning that distinguishes torn
+or damaged bytes from an empty tail.
 
 ## 2026-09-03 — Portable C overlays the durable namespace
 

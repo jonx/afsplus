@@ -54,7 +54,19 @@ pub fn scan<D: BlockDevice>(
         dev.read_block(*lba, &mut buf)?;
         let record = match LogRecord::decode(&buf) {
             Ok(record) => record,
-            Err(_) => break, // empty, stale-torn, or foreign slot: prefix ends
+            Err(error) => {
+                // A zero block is the ordinary unused tail. A nonzero block
+                // that does not decode is still a valid crash boundary, but
+                // preserving that distinction gives forensic callers a
+                // stable clue instead of making torn/corrupt media look
+                // indistinguishable from an empty slot.
+                if buf.iter().any(|byte| *byte != 0) {
+                    tail_note = Some(format!(
+                        "log slot {index} contains an invalid nonzero record: {error}"
+                    ));
+                }
+                break;
+            }
         };
         if record.uuid != *uuid || record.base_generation != base_generation {
             break; // stale binding from an earlier generation

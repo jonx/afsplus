@@ -131,6 +131,11 @@ impl Checkpoint {
     pub fn decode(block: &[u8], expected_uuid: &[u8; 16]) -> Result<Checkpoint, FormatError> {
         let header = BlockHeader::verify(block, block_type::CHECKPOINT)?;
         let p = header.payload(block);
+        if header.flags != 0 || header.owner != 0 {
+            return Err(FormatError::Invalid(
+                "checkpoint header reserved fields are nonzero",
+            ));
+        }
         if header.payload_len as usize != FIXED_PAYLOAD || p.len() < FIXED_PAYLOAD {
             return Err(FormatError::Invalid("checkpoint payload length mismatch"));
         }
@@ -162,6 +167,11 @@ impl Checkpoint {
         };
         if checkpoint.root_object_id != OBJECT_ROOT {
             return Err(FormatError::Invalid("root object ID is invalid"));
+        }
+        if checkpoint.flags != 0 {
+            return Err(FormatError::Invalid(
+                "checkpoint payload reserved flags are nonzero",
+            ));
         }
         Ok(checkpoint)
     }

@@ -1,7 +1,7 @@
 # Conformance Suite
 
 > **ADRs:** none · **Spec:** none ·
-> **Tests:** none · **Milestones:** M00, M01, M02, M05, M12, M14
+> **Tests:** [corruption-corpus](corruption-corpus.md) · **Milestones:** M00, M01, M02, M05, M12, M14
 
 A conforming implementation is tested against versioned images.
 
@@ -31,6 +31,16 @@ Required image families:
 - metadata checksum corruption
 
 Every image ships with a JSON expectation file.
+
+## Checker corruption corpus
+
+The [dedicated corruption corpus](corruption-corpus.md) generates twelve
+small images from one fixed Rust-formatted reference volume. Identification,
+checkpoint, typed-tree, object-record, allocation-bitmap and intent-log
+surfaces each receive a checksum failure and a valid-checksum semantic
+failure. Every case records its exact byte mutation and expected structured
+checker result in a versioned manifest, and every exported artifact must be
+byte-reproducible across runs.
 
 ## Portable C bootstrap gate
 
