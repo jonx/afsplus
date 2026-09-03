@@ -4,6 +4,7 @@ use std::path::Path;
 
 use afsplus_block::{BlockDevice, BlockError};
 use afsplus_core::mount::{select_checkpoint, Selection};
+use afsplus_core::volume::emergency_headroom_for_volume;
 use afsplus_core::CoreError;
 use afsplus_format::ident::{
     Identification, NameKeyAlgorithm, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG,
@@ -268,13 +269,17 @@ pub fn features_json(ident: &Identification) -> String {
 pub fn header_json(view: &HeaderView) -> String {
     let ident = &view.ident;
     let checkpoint = &view.selection.chosen;
+    let emergency_headroom = emergency_headroom_for_volume(ident.total_blocks);
+    let available_blocks = checkpoint
+        .free_blocks_total
+        .saturating_sub(emergency_headroom);
     let other_generation = view
         .selection
         .other
         .as_ref()
         .map_or_else(|| "null".to_owned(), |other| other.generation.to_string());
     format!(
-        "\"volume\":{{\"uuid\":{},\"label\":{},\"block_size\":{},\"total_blocks\":{},\"region_blocks\":{},\"log_slots\":{},\"name_key_algorithm\":{},\"case_sensitive\":{},\"unicode_version\":\"{}.{}.{}\",\"features\":{}}},\"checkpoint\":{{\"chosen_slot\":{},\"generation\":{},\"other_generation\":{},\"committed_tx_id\":{},\"next_object_id\":{},\"free_blocks\":{},\"object_map_lba\":{},\"allocation_root_lba\":{},\"reclaim_root_lba\":{},\"shared_extent_root_lba\":{},\"slot_status\":[{},{}]}}",
+        "\"volume\":{{\"uuid\":{},\"label\":{},\"block_size\":{},\"total_blocks\":{},\"region_blocks\":{},\"log_slots\":{},\"name_key_algorithm\":{},\"case_sensitive\":{},\"unicode_version\":\"{}.{}.{}\",\"features\":{}}},\"checkpoint\":{{\"chosen_slot\":{},\"generation\":{},\"other_generation\":{},\"committed_tx_id\":{},\"next_object_id\":{},\"free_blocks\":{},\"emergency_headroom_blocks\":{emergency_headroom},\"available_blocks\":{available_blocks},\"object_map_lba\":{},\"allocation_root_lba\":{},\"reclaim_root_lba\":{},\"shared_extent_root_lba\":{},\"slot_status\":[{},{}]}}",
         json_string(&uuid_hex(&ident.uuid)),
         json_string(&ident.label),
         ident.block_size(),

@@ -271,6 +271,11 @@ pub struct TxAllocator {
     retired_this_tx: RunSet,
     /// Region where allocation last succeeded; searches start here.
     rover_region: u32,
+    /// Raw free blocks that must remain after every allocation made by this
+    /// transaction. Normal growth transactions use the volume's emergency
+    /// metadata headroom; destructive/recovery transactions leave this at
+    /// zero so they can make forward progress at ENOSPC.
+    free_block_floor: u64,
     stats: AllocStats,
 }
 
@@ -311,6 +316,7 @@ impl TxAllocator {
             allocated_this_tx: RunSet::default(),
             retired_this_tx: RunSet::default(),
             rover_region: rover_region % geo.region_count().max(1),
+            free_block_floor: 0,
             stats: AllocStats::default(),
         };
         let promoted: Vec<_> = tx
@@ -339,6 +345,35 @@ impl TxAllocator {
         Ok(tx)
     }
 
+    /// Prevents subsequent allocations, including metadata allocations made
+    /// while sealing the transaction, from consuming the final `blocks` of
+    /// raw free capacity. The floor is runtime policy, not on-disk state.
+    pub fn set_free_block_floor(&mut self, blocks: u64) {
+        self.free_block_floor = blocks;
+    }
+
+    pub fn free_block_floor(&self) -> u64 {
+        self.free_block_floor
+    }
+
+    fn free_blocks_remaining(&self) -> u64 {
+        let made_available = self
+            .current_free_blocks_total
+            .saturating_add(self.stats.blocks_promoted);
+        let live_allocations = self
+            .stats
+            .blocks_allocated
+            .saturating_sub(self.stats.blocks_released);
+        made_available.saturating_sub(live_allocations)
+    }
+
+    fn ensure_above_floor(&self, blocks: u64) -> Result<(), CoreError> {
+        if self.free_blocks_remaining().saturating_sub(blocks) < self.free_block_floor {
+            return Err(CoreError::NoSpace);
+        }
+        Ok(())
+    }
+
     pub fn allocate<D: BlockDevice>(&mut self, dev: &mut D) -> Result<u64, CoreError> {
         self.allocate_run(dev, 1)
     }
@@ -352,6 +387,7 @@ impl TxAllocator {
         if len > self.geo.region_size as u64 {
             return Err(CoreError::NoSpace);
         }
+        self.ensure_above_floor(len)?;
         let geo = self.geo;
         let region_count = geo.region_count();
         for step in 0..region_count {
@@ -436,6 +472,7 @@ impl TxAllocator {
         if blocks == 0 {
             return Err(CoreError::Corrupt("claiming an empty run".into()));
         }
+        self.ensure_above_floor(blocks)?;
         let end = start
             .checked_add(blocks)
             .ok_or_else(|| CoreError::Corrupt("claimed run end overflows".into()))?;
@@ -798,7 +835,7 @@ mod tests {
     use afsplus_format::bitmap::BITMAP_PAGE_BLOCKS;
     use afsplus_format::Timespec;
 
-    use crate::{mkfs, mount, MkfsParams};
+    use crate::{mkfs, mount, CoreError, MkfsParams};
 
     #[test]
     fn slot_choice_avoids_both_retained_references() {
@@ -847,5 +884,48 @@ mod tests {
         assert_eq!(finished.stats.bitmap_pages_dirty, 2);
         assert_eq!(finished.stats.region_descriptors_dirty, 1);
         assert!(finished.stats.allocator_ram_bytes <= 2 * 4096);
+    }
+
+    #[test]
+    fn soft_floor_covers_data_and_transaction_sealing_allocations() {
+        let mut dev = MemoryBackend::new(4096, 64);
+        mkfs(
+            &mut dev,
+            &MkfsParams {
+                uuid: [18u8; 16],
+                label: "Headroom".into(),
+                region_size: 64,
+                reclaim_caps: Default::default(),
+                log_slots: 0,
+                shared_extents: false,
+                data_policy: false,
+                name_policy: crate::NamePolicy::Sensitive,
+                timestamp: Timespec::default(),
+            },
+        )
+        .unwrap();
+        let vol = mount(dev).unwrap();
+        let geo = vol.ident().geometry();
+        let checkpoint = vol.checkpoint().clone();
+        let free = checkpoint.free_blocks_total;
+        let mut dev = vol.into_device();
+
+        let mut too_large = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 0, 0).unwrap();
+        too_large.set_free_block_floor(8);
+        assert!(matches!(
+            too_large.allocate_run(&mut dev, free - 7),
+            Err(CoreError::NoSpace)
+        ));
+
+        let mut sealing = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 0, 0).unwrap();
+        sealing.set_free_block_floor(8);
+        sealing.allocate_run(&mut dev, free - 8).unwrap();
+        assert!(matches!(sealing.finish(&mut dev), Err(CoreError::NoSpace)));
+
+        let mut succeeds = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 0, 0).unwrap();
+        succeeds.set_free_block_floor(8);
+        succeeds.allocate_run(&mut dev, free - 9).unwrap();
+        let finished = succeeds.finish(&mut dev).unwrap();
+        assert_eq!(finished.free_blocks_total, 8);
     }
 }

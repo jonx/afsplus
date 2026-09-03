@@ -65,7 +65,9 @@ Object ID 2 is reserved for the internal orphan directory when the
 `org.aros.afsplus:orphan-directory` feature is enabled. The directory is
 created lazily and is never linked from the user root. Its canonical
 lowercase hexadecimal entries preserve final-link files while a VFS handle
-is open; the ordinary object record retains `link_count == 1`.
+is open; the filesystem-facing VFS also uses this bounded transition when no
+handle remains so unlink never has work proportional to file fragmentation.
+The ordinary object record retains `link_count == 1`.
 
 Last close and post-crash maintenance remove logical extent records from the
 tail under a runtime budget, publishing each shorter layout before the final
@@ -87,8 +89,10 @@ The current core creates files and directories under any directory object ID.
 Same-directory rename and cross-directory move preserve the child object ID;
 directory moves into self/descendants are rejected before a transaction
 starts. Regular-file hard links update the object record and destination tree
-atomically. A final unlink with no handle immediately retires the file. With
-live handles it atomically moves the only link into object 2; reads, writes,
-truncate and fsync retain stable identity until last close. Open atomic-replace
-targets follow the same rule in the replacement checkpoint. Directory hard
-links remain intentionally unsupported.
+atomically. The VFS atomically moves every final file link into object 2; with
+live handles, reads, writes, truncate and fsync retain stable identity until
+last close, while no-handle cases are immediately eligible for bounded idle
+cleanup. Final-link atomic-replace targets follow the same rule in the
+replacement checkpoint. The lower-level core still permits the legacy direct
+delete primitive for controlled tests and feature-absent volumes. Directory
+hard links remain intentionally unsupported.

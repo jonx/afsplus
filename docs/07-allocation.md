@@ -206,11 +206,43 @@ The authoritative source itself is selected by the prototype in section 3.
 
 ## 6. Metadata reservation
 
-A small emergency metadata reserve is required so the filesystem does not become impossible to commit/repair when nearly full.
+A small emergency metadata reserve prevents the filesystem from becoming
+impossible to commit or repair when nearly full. The current implementation
+uses a **soft, format-neutral floor**, not a separately formatted partition:
 
-Whether the reserve also becomes a core part of the allocation transaction algorithm is intentionally part of the section-3 experiment.
+```text
+total volume below 64 blocks -> 0 (minimal/test geometry only)
+otherwise                   -> clamp(ceil(total blocks / 32), 8, 64)
+```
 
-User-visible free-space reporting must distinguish normally allocatable space from emergency reserved metadata space and, where applicable, pending-reclaim capacity.
+Ordinary growth transactions set this raw-free floor on their transaction
+allocator. Every allocation made by that transaction — user data, COW tree
+nodes, object records and reclaim structures — is refused before I/O if it
+would cross the floor. File/directory creation, writes, preallocation,
+reflinks, hard links, policy changes and growth inside an intent-log window
+are normal growth. Destructive namespace transitions, truncation shrink,
+orphan setup/cleanup, reclaim and replay may consume the floor so they can
+make progress at ENOSPC.
+
+Filesystem-facing final unlink and replacement use ADR-066's orphan
+transition even when no process handle remains. The visible operation is
+therefore bounded independently of file fragmentation; idle or sync cleanup
+then removes at most its configured extent budget. Orphan cleanup promotes at
+least 16 reclaim blocks per step even when a diagnostic caller selected a
+smaller general reclaim budget, avoiding a maintenance loop that consumes COW
+metadata faster than it recycles prior generations.
+
+`free_blocks` is the checkpoint's authoritative raw free count.
+`available_blocks = free_blocks - emergency_headroom` (saturating at zero) is
+the capacity advertised for normal growth. VFS `statfs`, `afsplus-info` and
+`afsplus-dump` report the distinction. The floor may already be partly
+consumed after an emergency operation; in that state available capacity is
+zero until bounded reclaim restores it.
+
+This rule is qualification policy for the current prototype and adds no
+on-disk bit or bitmap ownership class. Q3 still requires the complete
+low-space and amplification evidence before the allocation encoding can be
+proposed for epoch-1 freeze.
 
 ## 7. Discard
 

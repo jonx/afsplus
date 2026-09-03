@@ -92,6 +92,7 @@ pub struct StatFs {
     pub block_size: u32,
     pub total_blocks: u64,
     pub free_blocks: u64,
+    pub emergency_headroom_blocks: u64,
     pub available_blocks: u64,
     pub max_name_bytes: u32,
     pub case_sensitive: bool,
@@ -328,11 +329,13 @@ impl<D: BlockDevice> Vfs<D> {
     pub fn statfs(&self) -> StatFs {
         let ident = self.volume.ident();
         let free = self.volume.free_blocks();
+        let emergency_headroom = self.volume.emergency_headroom_blocks();
         StatFs {
             block_size: ident.block_size() as u32,
             total_blocks: ident.total_blocks,
             free_blocks: free,
-            available_blocks: free,
+            emergency_headroom_blocks: emergency_headroom,
+            available_blocks: self.volume.available_blocks(),
             max_name_bytes: NAME_MAX_UTF8_BYTES as u32,
             case_sensitive: ident.name_key_algorithm != NameKeyAlgorithm::UnicodeNfcCasefold,
             unicode_version: ident.unicode_version,
@@ -543,14 +546,13 @@ impl<D: BlockDevice> Vfs<D> {
             .volume
             .visible_metadata(object_id)?
             .ok_or(VfsError::NotFound)?;
-        let open = self.handles.values().any(
-            |state| matches!(state, OpenHandle::File { object_id: open_id, .. } if *open_id == object_id),
-        );
         if metadata.object_type == ObjectType::File
             && metadata.link_count == 1
-            && open
             && self.volume.ident().features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0
         {
+            // Always make the visible namespace transition bounded. With no
+            // live handle the orphan is eligible for idle/sync cleanup
+            // immediately; with a live handle last-close starts cleanup.
             self.volume.orphan_file(parent, name, now)?;
             return Ok(());
         }
@@ -586,16 +588,12 @@ impl<D: BlockDevice> Vfs<D> {
             };
             if let Some(target_id) = target {
                 let source_id = self.lookup(source_parent, source_name)?;
-                let open = self.handles.values().any(
-                    |state| matches!(state, OpenHandle::File { object_id, .. } if *object_id == target_id),
-                );
                 let target_metadata = self
                     .volume
                     .visible_metadata(target_id)?
                     .ok_or(VfsError::NotFound)?;
                 if target_id != source_id
                     && target_metadata.link_count == 1
-                    && open
                     && self.volume.ident().features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0
                 {
                     return Ok(self.volume.rename_replace_orphan_target(

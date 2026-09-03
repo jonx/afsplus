@@ -26,7 +26,10 @@ barriers and publishes no generation, that delete plus bounded reclaim can
 recover deliberately retained headroom, that a near-full delete recovers to
 exactly its pre- or post-transaction state at every modeled power cut, and
 that one transaction can dirty at least 144 regions across a multi-node
-allocation root with bounded allocator memory.
+allocation root with bounded allocator memory. The VFS gate additionally
+fills a 160-region image, unlinks a highly fragmented final-link file through
+the bounded orphan transition, and drains it with an extent budget of eight
+while the caller's general reclaim budget is deliberately only one block.
 
 Run both optimized evidence workloads with:
 
@@ -57,11 +60,19 @@ a byte. The final exhaustive checker is mandatory.
   reclaim update.
 
 Every row reports whether the fill committed, raw free blocks after that
-commit, whether unlink committed, and the successful unlink's allocation,
-retirement, metadata-write and reclaim-structure counts. This is a diagnostic
-freeze workload: a green Rust test means the measurement completed and every
+commit, the runtime emergency floor, normally available blocks, whether unlink
+committed, and the successful unlink's allocation, retirement, metadata-write
+and reclaim-structure counts. Growth must either commit without crossing the
+floor or fail before its first media write. This is a diagnostic freeze
+workload: a green Rust test means the measurement completed and every
 committed image was structurally valid, not that its Q3 acceptance condition
 was met.
+
+The current format-neutral policy is
+`clamp(ceil(total_blocks / 32), 8, 64)` blocks on volumes of at least 64
+blocks; smaller test-only geometries retain a zero floor. The maximum is 256
+KiB at 4 KiB blocks and is not a dedicated disk area. Destructive/recovery
+transactions may consume it; ordinary growth cannot.
 
 ## Q3 acceptance boundary
 
@@ -80,7 +91,8 @@ The encoding is eligible for freeze only when all of these are true:
   allocation-root crash matrix and sparse 1-TiB mount qualification remain
   green.
 
-An observed headroom number is not itself a format constant. The chosen rule
-must cover structurally bounded emergency transactions rather than just the
-smallest fixture, and it must not turn into a fixed metadata partition that
-scales poorly on either classic or large volumes.
+The observed 3- and 5-block delete thresholds are not format constants. The
+chosen 8-to-64-block rule is deliberately conservative relative to those
+fixtures, and the fragmented VFS workload proves that visible unlink no
+longer scales with the file layout. The rule remains runtime policy: it does
+not turn into a fixed metadata partition or alter bitmap/checkpoint encoding.

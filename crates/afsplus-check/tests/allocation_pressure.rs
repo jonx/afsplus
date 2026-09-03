@@ -46,11 +46,34 @@ fn near_full_enospc_publishes_nothing_and_delete_can_recover_space() {
     vol.set_reclaim_batch_blocks(1);
     let file = vol.create_file_in_root("reserve", b"", ts(1)).unwrap();
     let before_fill = vol.free_blocks();
+    let emergency_headroom = vol.emergency_headroom_blocks();
+    assert_eq!(
+        vol.available_blocks(),
+        before_fill.saturating_sub(emergency_headroom)
+    );
+    let before_generation = vol.generation();
+    let before_metadata = vol.stat(file).unwrap().unwrap();
+    let normally_available = vol.available_blocks();
+    vol.device_mut().reset();
+    assert!(matches!(
+        vol.preallocate_file(file, 0, normally_available * BS as u64, ts(2)),
+        Err(CoreError::NoSpace)
+    ));
+    let floor_failure_io = vol.device_mut().stats();
+    assert_eq!(floor_failure_io.writes, 0);
+    assert_eq!(floor_failure_io.flushes, 0);
+    assert_eq!(vol.generation(), before_generation);
+    assert_eq!(vol.free_blocks(), before_fill);
+    assert_eq!(vol.stat(file).unwrap().unwrap(), before_metadata);
+
     let fill_blocks = before_fill - 24;
+    vol.device_mut().reset();
     vol.preallocate_file(file, 0, fill_blocks * BS as u64, ts(2))
         .unwrap();
     let near_full = vol.free_blocks();
     assert!(near_full <= 24, "fill left {near_full} free blocks");
+    assert!(near_full >= emergency_headroom);
+    assert_eq!(vol.available_blocks(), near_full - emergency_headroom);
 
     let generation = vol.generation();
     let metadata = vol.stat(file).unwrap().unwrap();
@@ -148,17 +171,16 @@ fn near_full_delete_survives_every_modeled_power_cut() {
 
 #[test]
 fn one_transaction_updates_a_multi_node_allocation_root_under_pressure() {
-    const REGIONS: u64 = 145;
+    const REGIONS: u64 = 160;
     const REGION_BLOCKS: u32 = 16;
     let dev = formatted(REGIONS * REGION_BLOCKS as u64, REGION_BLOCKS);
     let mut vol = mount(dev).unwrap();
     vol.set_reclaim_batch_blocks(1);
     let file = vol.create_file_in_root("wide", b"", ts(1)).unwrap();
-    let before = vol.free_blocks();
-
     // Leave enough ordinary space for the extent tree and commit metadata,
     // but force one transaction to cross the 144-record AFST leaf boundary.
-    vol.preallocate_file(file, 0, (before - 12) * BS as u64, ts(2))
+    let normally_available = vol.available_blocks();
+    vol.preallocate_file(file, 0, (normally_available - 12) * BS as u64, ts(2))
         .unwrap();
     let stats = vol.last_commit_stats().unwrap();
     assert!(
@@ -172,6 +194,7 @@ fn one_transaction_updates_a_multi_node_allocation_root_under_pressure() {
     );
     assert!(stats.allocation_tree_nodes_written > 1);
     assert!(stats.alloc.allocator_ram_bytes < 64 * 1024);
+    assert!(vol.free_blocks() >= vol.emergency_headroom_blocks());
 
     let mut dev = vol.into_device();
     let report = check_device(&mut dev);
@@ -190,7 +213,9 @@ fn q3_allocation_qualification() {
         .create_file_in_root("one-gib-region", b"", ts(1))
         .unwrap();
     let initial_free = vol.free_blocks();
-    let reserved_blocks = initial_free - 24;
+    let emergency_headroom = vol.emergency_headroom_blocks();
+    let initial_available = vol.available_blocks();
+    let reserved_blocks = initial_available - 24;
     vol.device_mut().reset();
     let started = Instant::now();
     vol.preallocate_file(file, 0, reserved_blocks * BS as u64, ts(2))
@@ -199,6 +224,7 @@ fn q3_allocation_qualification() {
     let commit = vol.last_commit_stats().unwrap();
     let io = vol.device_mut().stats();
     let final_free = vol.free_blocks();
+    let final_available = vol.available_blocks();
     let metadata_bytes_written = commit.metadata_blocks_written * BS as u64;
     let total_bytes_per_reserved_block_ppm =
         io.bytes_written.saturating_mul(1_000_000) / reserved_blocks;
@@ -206,7 +232,7 @@ fn q3_allocation_qualification() {
         metadata_bytes_written.saturating_mul(1_000_000) / reserved_blocks;
 
     println!(
-        "{{\"schema_version\":1,\"workload\":\"one-gib-region-near-full\",\"backend\":\"memory\",\"block_size\":{BS},\"total_blocks\":{},\"region_size\":{},\"initial_free_blocks\":{initial_free},\"logical_blocks_reserved\":{reserved_blocks},\"final_free_blocks\":{final_free},\"elapsed_ns\":{elapsed_ns},\"reads\":{},\"writes\":{},\"bytes_read\":{},\"bytes_written\":{},\"flushes\":{},\"metadata_blocks_written\":{},\"metadata_bytes_written\":{metadata_bytes_written},\"bitmap_pages_written\":{},\"region_descriptors_written\":{},\"allocation_records_updated\":{},\"allocation_tree_nodes_written\":{},\"allocator_peak_bytes\":{},\"total_bytes_per_reserved_block_ppm\":{total_bytes_per_reserved_block_ppm},\"metadata_bytes_per_reserved_block_ppm\":{metadata_bytes_per_reserved_block_ppm}}}",
+        "{{\"schema_version\":1,\"workload\":\"one-gib-region-near-full\",\"backend\":\"memory\",\"block_size\":{BS},\"total_blocks\":{},\"region_size\":{},\"emergency_headroom_blocks\":{emergency_headroom},\"initial_free_blocks\":{initial_free},\"initial_available_blocks\":{initial_available},\"logical_blocks_reserved\":{reserved_blocks},\"final_free_blocks\":{final_free},\"final_available_blocks\":{final_available},\"elapsed_ns\":{elapsed_ns},\"reads\":{},\"writes\":{},\"bytes_read\":{},\"bytes_written\":{},\"flushes\":{},\"metadata_blocks_written\":{},\"metadata_bytes_written\":{metadata_bytes_written},\"bitmap_pages_written\":{},\"region_descriptors_written\":{},\"allocation_records_updated\":{},\"allocation_tree_nodes_written\":{},\"allocator_peak_bytes\":{},\"total_bytes_per_reserved_block_ppm\":{total_bytes_per_reserved_block_ppm},\"metadata_bytes_per_reserved_block_ppm\":{metadata_bytes_per_reserved_block_ppm}}}",
         MAX_REGION_BLOCKS,
         MAX_REGION_BLOCKS,
         io.reads,
@@ -221,7 +247,8 @@ fn q3_allocation_qualification() {
         commit.allocation_tree_nodes_written,
         commit.alloc.allocator_ram_bytes,
     );
-    assert!(final_free <= 24);
+    assert!(final_free >= emergency_headroom);
+    assert!(final_available <= 24);
     assert_eq!(commit.region_descriptors_written, 1);
     assert_eq!(commit.allocation_records_updated, 1);
     assert!(commit.bitmap_pages_written <= 9);
@@ -257,8 +284,13 @@ fn q3_low_space_headroom_probe() {
             vol.set_reclaim_batch_blocks(1);
             let file = vol.create_file_in_root("reserve", b"", ts(1)).unwrap();
             let before = vol.free_blocks();
+            let emergency_headroom = vol.emergency_headroom_blocks();
             let result = vol.preallocate_file(file, 0, (before - headroom) * BS as u64, ts(2));
             let after = vol.free_blocks();
+            let available_after = vol.available_blocks();
+            if result.is_ok() {
+                assert!(after >= emergency_headroom);
+            }
             let delete_result = if result.is_ok() {
                 vol.delete_file_in_root("reserve", ts(3))
             } else {
@@ -267,7 +299,7 @@ fn q3_low_space_headroom_probe() {
             let deleted = delete_result.is_ok();
             let delete_stats = deleted.then(|| vol.last_commit_stats().unwrap());
             println!(
-                "{{\"schema_version\":1,\"workload\":\"low-space-delete-progress\",\"geometry\":\"{label}\",\"total_blocks\":{total_blocks},\"region_size\":{region_size},\"requested_headroom\":{headroom},\"fill_ok\":{},\"raw_free_after_fill\":{after},\"delete_ok\":{deleted},\"delete_blocks_allocated\":{},\"delete_blocks_retired\":{},\"delete_metadata_blocks_written\":{},\"delete_reclaim_structure_blocks\":{}}}",
+                "{{\"schema_version\":1,\"workload\":\"low-space-delete-progress\",\"geometry\":\"{label}\",\"total_blocks\":{total_blocks},\"region_size\":{region_size},\"emergency_headroom_blocks\":{emergency_headroom},\"requested_headroom\":{headroom},\"fill_ok\":{},\"raw_free_after_fill\":{after},\"available_after_fill\":{available_after},\"delete_ok\":{deleted},\"delete_blocks_allocated\":{},\"delete_blocks_retired\":{},\"delete_metadata_blocks_written\":{},\"delete_reclaim_structure_blocks\":{}}}",
                 result.is_ok(),
                 delete_stats.map_or(0, |stats| stats.alloc.blocks_allocated),
                 delete_stats.map_or(0, |stats| stats.alloc.blocks_retired),

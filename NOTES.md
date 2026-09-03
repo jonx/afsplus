@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Emergency headroom makes ENOSPC recoverable](#2026-09-03--emergency-headroom-makes-enospc-recoverable)
 - [2026-09-03 — Open-unlinked files gain a bounded crash-restartable lifetime](#2026-09-03--open-unlinked-files-gain-a-bounded-crash-restartable-lifetime)
 - [2026-09-03 — Q3 qualification exposes the missing emergency reserve](#2026-09-03--q3-qualification-exposes-the-missing-emergency-reserve)
 - [2026-09-03 — Checkpoint selection regains Rust/C parity](#2026-09-03--checkpoint-selection-regains-rustc-parity)
@@ -36,6 +37,36 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Emergency headroom makes ENOSPC recoverable
+
+The post-ADR-066 Q3 pass added a soft transaction-allocation floor rather
+than another reserved disk area. On volumes of at least 64 blocks the runtime
+keeps `clamp(ceil(total blocks / 32), 8, 64)` raw blocks for destructive and
+recovery work. Normal user/data and metadata allocations are checked against
+the same floor, including allocations performed only while sealing the
+reclaim queue, so a rejected growth transaction still issues no writes.
+`statfs`, `afsplus-info` and `afsplus-dump` now distinguish raw free,
+emergency headroom and normally available blocks.
+
+The filesystem-facing VFS uses the hidden orphan transition for every final
+file unlink or replacement, not only while a handle is open. Visible
+namespace removal is therefore independent of the target's extent count;
+cleanup is idle, bounded and restartable. A 160-region test grows the user
+namespace past a single tree leaf, fills a highly fragmented file down to the
+emergency boundary, removes its name in two bounded checkpoints, then drains
+it eight extents at a time. It deliberately configures the general reclaim
+budget to one block, which exposed a negative-progress loop; orphan cleanup
+now promotes at least 16 blocks per step and the same test converges.
+
+The optimized maximum-region run kept 64 emergency blocks and finished with
+85 raw/21 normally available blocks after reserving 262,011 data blocks. It
+issued 31 reads, 16 writes, 65,536 written bytes and two barriers, dirtied all
+nine bitmap pages, one descriptor and one allocation-root node, and retained
+the 32 KiB allocator-RAM bound. The 512-block and multi-node sweeps refused
+fills that would cross their 16- and 64-block floors; every accepted fill
+still completed destructive progress. These are memory-backend qualification
+figures, not device-latency claims.
 
 ## 2026-09-03 — Open-unlinked files gain a bounded crash-restartable lifetime
 

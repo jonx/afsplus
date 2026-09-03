@@ -576,7 +576,10 @@ impl<D: BlockDevice> ArosAdapter<D> {
         DiskInfo {
             write_protected: self.vfs.mount_mode() != MountMode::ReadWrite,
             total_blocks: stat.total_blocks,
-            used_blocks: stat.total_blocks.saturating_sub(stat.free_blocks),
+            // Classic DOS exposes total/used rather than a separate
+            // privileged raw-free counter. Count emergency headroom as used
+            // so applications see only normally allocatable capacity.
+            used_blocks: stat.total_blocks.saturating_sub(stat.available_blocks),
             bytes_per_block: stat.block_size,
             disk_type: DISK_TYPE_AFS_PLUS,
             in_use: !self.files.is_empty() || !self.locks.is_empty(),

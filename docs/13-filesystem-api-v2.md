@@ -71,15 +71,18 @@ mask.
 
 A volume carrying the orphan-directory feature advertises `OPEN_UNLINKED`
 (additive Rust capability bit 12). The VFS counts handles by stable object ID:
-final unlink and replacement hide the path immediately while existing handles
-continue to read, write, truncate and fsync. New opens or stat by a guessed ID
-cannot rediscover the orphan. `pending_orphans` is diagnostic state, and
-`resume_one_orphan` gives adapters an explicitly bounded idle-maintenance hook;
-read-write mount and filesystem sync each advance at most one orphan.
+every final file unlink and replacement uses the bounded orphan transition,
+while existing handles continue to read, write, truncate and fsync. A target
+with no handle becomes cleanup-eligible immediately. New opens or stat by a
+guessed ID cannot rediscover the orphan. `pending_orphans` is diagnostic state,
+and `resume_one_orphan` gives adapters an explicitly bounded idle-maintenance
+hook; read-write mount and filesystem sync each advance at most one orphan.
 
 `statfs` reports whether the mounted namespace is case-sensitive plus the
-three-part Unicode table version. Adapters must expose the volume policy rather
-than infer it from the host OS or filesystem name.
+three-part Unicode table version. `free_blocks` is the raw checkpoint count;
+`available_blocks` subtracts the runtime emergency-metadata headroom and is
+the value adapters advertise for normal growth. Adapters must expose these
+volume policies rather than infer them from the host OS or filesystem name.
 
 Required categories:
 

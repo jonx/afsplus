@@ -6,6 +6,7 @@ use afsplus_core::extent_map::{self, Extent};
 use afsplus_core::intent_log;
 use afsplus_core::mount::SUPPORTED_INCOMPAT_FEATURES;
 use afsplus_core::verify::{full_sweep, load_committed_state, CommittedState};
+use afsplus_core::volume::emergency_headroom_for_volume;
 use afsplus_format::ident::INCOMPAT_INTENT_LOG_DATA_UPDATES;
 use afsplus_format::intent_log::{LogOp, LogRecord};
 use afsplus_format::object::{ObjectType, OBJECT_FLAG_EXTENT_TREE};
@@ -404,8 +405,14 @@ fn render_text(
     log_tail: Option<&str>,
     findings: &[String],
 ) -> String {
+    let emergency_headroom = emergency_headroom_for_volume(view.ident.total_blocks);
+    let available_blocks = view
+        .selection
+        .chosen
+        .free_blocks_total
+        .saturating_sub(emergency_headroom);
     let mut output = format!(
-        "AFS+ metadata dump schema 1\nvolume {} label {:?}\ncheckpoint slot {} generation {} transaction {}\nobjects {} directories {} metadata blocks {} data blocks {} free {}\n",
+        "AFS+ metadata dump schema 1\nvolume {} label {:?}\ncheckpoint slot {} generation {} transaction {}\nobjects {} directories {} metadata blocks {} data blocks {} raw free {} emergency headroom {} normally available {}\n",
         crate::common::uuid_hex(&view.ident.uuid),
         view.ident.label,
         if view.selection.chosen_slot == 0 { "A" } else { "B" },
@@ -416,6 +423,8 @@ fn render_text(
         state.metadata_blocks.len(),
         state.data_blocks.len(),
         view.selection.chosen.free_blocks_total,
+        emergency_headroom,
+        available_blocks,
     );
     for (&object_id, record) in &state.objects {
         let role = if object_id == OBJECT_ORPHAN_DIRECTORY {

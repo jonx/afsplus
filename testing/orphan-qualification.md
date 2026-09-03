@@ -18,7 +18,10 @@ make portable-c-gate
 The VFS matrix covers multiple handles, read/write/truncate/fsync after final
 unlink, hard links, immediate name reuse, guessed-ID hiding, last-close
 cleanup, open-target atomic replacement and the explicit legacy-volume
-fallback when the feature is absent.
+fallback when the feature is absent. It also fills a multi-node allocation
+geometry with a deep namespace and fragmented file, proves no-handle unlink
+uses bounded orphan state near ENOSPC, then drains it with a deliberately tiny
+general reclaim setting.
 
 The checker matrix covers absent, empty and populated object-2 states. It
 forges valid-checksum semantic damage for a missing feature bit, noncanonical
@@ -50,8 +53,10 @@ intermediate image must remain checker-clean.
 Qualification output records, per cleanup step, extent records removed,
 remaining allocated bytes, block reads/writes, bytes written, flushes,
 allocator bitmap RAM and the configured extent budget. Q3 low-space
-qualification separately determines the emergency metadata headroom required
-for the bounded namespace and cleanup transactions.
+qualification separately enforces and reports the emergency metadata
+headroom required for the bounded namespace and cleanup transactions. Orphan
+cleanup has a 16-block minimum reclaim-promotion budget so repeated small
+steps cannot lose forward progress to their own COW metadata.
 
 ## Portable-reader contract
 

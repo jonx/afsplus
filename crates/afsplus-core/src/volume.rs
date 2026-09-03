@@ -74,6 +74,26 @@ pub struct CommitStats {
 }
 
 pub const DEFAULT_ORPHAN_CLEANUP_EXTENTS: usize = 16;
+pub const MIN_ORPHAN_CLEANUP_RECLAIM_BLOCKS: u64 = 16;
+
+/// Runtime-only soft reserve used by normal growth transactions. It scales
+/// from 8 blocks (32 KiB with the current format) to 64 blocks and therefore
+/// stays useful on classic media without becoming a large-volume partition.
+/// Images below 64 blocks are test/minimal geometries and retain the legacy
+/// zero-floor behavior because they cannot support the complete lifecycle.
+pub const MIN_EMERGENCY_HEADROOM_BLOCKS: u64 = 8;
+pub const MAX_EMERGENCY_HEADROOM_BLOCKS: u64 = 64;
+pub const EMERGENCY_HEADROOM_SCALE_BLOCKS: u64 = 32;
+pub const MIN_HEADROOM_VOLUME_BLOCKS: u64 = 64;
+
+pub fn emergency_headroom_for_volume(total_blocks: u64) -> u64 {
+    if total_blocks < MIN_HEADROOM_VOLUME_BLOCKS {
+        return 0;
+    }
+    total_blocks
+        .div_ceil(EMERGENCY_HEADROOM_SCALE_BLOCKS)
+        .clamp(MIN_EMERGENCY_HEADROOM_BLOCKS, MAX_EMERGENCY_HEADROOM_BLOCKS)
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OrphanCleanupProgress {
@@ -403,6 +423,25 @@ impl<D: BlockDevice> Volume<D> {
         self.checkpoint.free_blocks_total
     }
 
+    /// Raw blocks kept available to bounded destructive and recovery work.
+    /// This is implementation policy only: no bitmap bits or disk fields are
+    /// dedicated to the reserve, and emergency transactions may consume it.
+    pub fn emergency_headroom_blocks(&self) -> u64 {
+        emergency_headroom_for_volume(self.ident.total_blocks)
+    }
+
+    /// Capacity available to ordinary growth after preserving emergency
+    /// metadata headroom. Raw free space remains available through
+    /// [`Self::free_blocks`] for diagnostics and privileged maintenance.
+    pub fn available_blocks(&self) -> u64 {
+        self.free_blocks()
+            .saturating_sub(self.emergency_headroom_blocks())
+    }
+
+    fn protect_emergency_headroom(&self, tx: &mut TxAllocator) {
+        tx.set_free_block_floor(self.emergency_headroom_blocks());
+    }
+
     /// Peak bitmap bytes resident during the most recent transaction (zero
     /// before any mutation on this mount).
     pub fn allocator_ram_bytes(&self) -> usize {
@@ -483,6 +522,7 @@ impl<D: BlockDevice> Volume<D> {
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
         )?;
+        self.protect_emergency_headroom(&mut tx);
         let new_lba = tx.allocate(&mut self.dev)?;
         tx.retire(&mut self.dev, record_lba)?;
         let new_record = ObjectRecord {
@@ -842,6 +882,7 @@ impl<D: BlockDevice> Volume<D> {
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
         )?;
+        self.protect_emergency_headroom(&mut tx);
         if overwrite_in_place {
             let mut data_writes = Vec::with_capacity(write_block_count as usize);
             for (logical_block, block) in (first_block..end_block).zip(blocks) {
@@ -969,6 +1010,9 @@ impl<D: BlockDevice> Volume<D> {
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
         )?;
+        if new_size > record.size_bytes {
+            self.protect_emergency_headroom(&mut tx);
+        }
         let mut data_writes = Vec::new();
         if let Some((logical_block, block)) = tail_rewrite {
             let physical_start = tx.allocate(&mut self.dev)?;
@@ -1048,6 +1092,7 @@ impl<D: BlockDevice> Volume<D> {
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
         )?;
+        self.protect_emergency_headroom(&mut tx);
         let mut additions = Vec::new();
         for (logical_start, logical_end) in holes {
             additions.extend(allocate_extent_runs(
@@ -1143,6 +1188,7 @@ impl<D: BlockDevice> Volume<D> {
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
         )?;
+        self.protect_emergency_headroom(&mut tx);
 
         // One more reference per source run. A run shared for the first time
         // gains a record at two references (source + clone); an already
@@ -1513,6 +1559,7 @@ impl<D: BlockDevice> Volume<D> {
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
         )?;
+        self.protect_emergency_headroom(&mut tx);
         self.shared_refs_edit(generation)?.require_root();
         for extent in &shared_destination_extents {
             self.shared_prefetch(generation, extent.physical_start, extent.block_count)?;
@@ -1680,6 +1727,7 @@ impl<D: BlockDevice> Volume<D> {
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
         )?;
+        self.protect_emergency_headroom(&mut tx);
 
         // Data first: allocate one contiguous extent and stage its blocks.
         let data_block_count = (content.len() as u64).div_ceil(block_size as u64);
@@ -1842,6 +1890,7 @@ impl<D: BlockDevice> Volume<D> {
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
         )?;
+        self.protect_emergency_headroom(&mut tx);
         let directory_root_lba = tx.allocate(&mut self.dev)?;
         let directory_record_lba = tx.allocate(&mut self.dev)?;
         let parent_record_new_lba = tx.allocate(&mut self.dev)?;
@@ -2206,7 +2255,8 @@ impl<D: BlockDevice> Volume<D> {
             &self.checkpoint,
             self.other_checkpoint.as_ref(),
             generation,
-            self.reclaim_batch_blocks,
+            self.reclaim_batch_blocks
+                .max(MIN_ORPHAN_CLEANUP_RECLAIM_BLOCKS),
             self.alloc_rover_region,
         )?;
         let new_record_lba = tx.allocate(&mut self.dev)?;
@@ -2631,6 +2681,7 @@ impl<D: BlockDevice> Volume<D> {
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
         )?;
+        self.protect_emergency_headroom(&mut tx);
         let file_new_lba = tx.allocate(&mut self.dev)?;
         let parent_new_lba = tx.allocate(&mut self.dev)?;
         tx.retire(&mut self.dev, file_lba)?;
@@ -3290,6 +3341,12 @@ impl<D: BlockDevice> Volume<D> {
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
         )?;
+        if ops
+            .iter()
+            .any(|op| matches!(op, BatchOp::CreateFile { .. }))
+        {
+            self.protect_emergency_headroom(&mut tx);
+        }
         let mut pending = PendingBatch {
             dir_changes: BTreeMap::new(),
             dir_timestamps: BTreeMap::new(),
@@ -4260,7 +4317,7 @@ impl<D: BlockDevice> Volume<D> {
         // Windowed transactions never promote quarantined blocks: logged
         // data extents must be FREE in the committed bitmaps so replay can
         // claim them deterministically (ADR-037/063).
-        let tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin(
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -4269,6 +4326,7 @@ impl<D: BlockDevice> Volume<D> {
             0,
             self.alloc_rover_region,
         )?;
+        self.protect_emergency_headroom(&mut tx);
         Ok(OpenWindow {
             tx,
             pending: PendingBatch {

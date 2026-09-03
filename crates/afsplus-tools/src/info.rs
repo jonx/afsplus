@@ -1,6 +1,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use afsplus_core::volume::emergency_headroom_for_volume;
+
 use crate::common::{
     feature_names, features_json, header_json, name_algorithm_name, read_header, report_failure,
     uuid_hex, Failure, EXIT_OK,
@@ -91,6 +93,10 @@ fn execute(options: &Options) -> Result<String, Failure> {
 
     let ident = &view.ident;
     let checkpoint = &view.selection.chosen;
+    let emergency_headroom = emergency_headroom_for_volume(ident.total_blocks);
+    let available_blocks = checkpoint
+        .free_blocks_total
+        .saturating_sub(emergency_headroom);
     let feature_list = feature_names(ident);
     let features = if feature_list.is_empty() {
         "none".to_owned()
@@ -98,7 +104,7 @@ fn execute(options: &Options) -> Result<String, Failure> {
         feature_list.join(", ")
     };
     Ok(format!(
-        "AFS+ volume {}\nlabel: {:?}\ngeometry: {} blocks x {} bytes; region {} blocks\nnames: {} (Unicode {}.{}.{})\nfeatures: {}\nfeature masks: {}\ncheckpoint: slot {}, generation {}, transaction {}, free blocks {}\nslot A: {}\nslot B: {}",
+        "AFS+ volume {}\nlabel: {:?}\ngeometry: {} blocks x {} bytes; region {} blocks\nnames: {} (Unicode {}.{}.{})\nfeatures: {}\nfeature masks: {}\ncheckpoint: slot {}, generation {}, transaction {}, raw free {}, emergency headroom {}, normally available {} blocks\nslot A: {}\nslot B: {}",
         uuid_hex(&ident.uuid),
         ident.label,
         ident.total_blocks,
@@ -114,6 +120,8 @@ fn execute(options: &Options) -> Result<String, Failure> {
         checkpoint.generation,
         checkpoint.committed_tx_id,
         checkpoint.free_blocks_total,
+        emergency_headroom,
+        available_blocks,
         view.selection.slot_status[0],
         view.selection.slot_status[1],
     ))

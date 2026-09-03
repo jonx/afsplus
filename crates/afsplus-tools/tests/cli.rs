@@ -217,6 +217,8 @@ fn info_and_dump_are_repeatable_and_work_on_a_read_only_populated_image() {
     assert!(info.starts_with("{\"schema_version\":1,\"tool\":\"afsplus-info\""));
     assert!(info.contains("\"label\":\"quoted-\\\"-\\\\-é\""));
     assert!(info.contains("\"generation\":2"));
+    assert!(info.contains("\"emergency_headroom_blocks\":16"));
+    assert!(info.contains("\"available_blocks\":"));
 
     let dump_a = run("afsplus-dump", [OsStr::new("--json"), image.as_os_str()]);
     let dump_b = run("afsplus-dump", [OsStr::new("--json"), image.as_os_str()]);
@@ -226,6 +228,8 @@ fn info_and_dump_are_repeatable_and_work_on_a_read_only_populated_image() {
     let dump = stdout(&dump_a);
     assert!(dump.starts_with("{\"schema_version\":1,\"tool\":\"afsplus-dump\""));
     assert!(dump.contains("\"consistent\":true"));
+    assert!(dump.contains("\"emergency_headroom_blocks\":16"));
+    assert!(dump.contains("\"available_blocks\":"));
     assert!(dump.contains("\"directory_entries\":1"));
     assert!(dump.contains("\"allocation_regions\":1"));
     assert!(dump.contains("\"bitmap_pages\":[{"));

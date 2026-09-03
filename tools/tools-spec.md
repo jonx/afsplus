@@ -77,7 +77,10 @@ The bounded inspector opens the host file read-only and performs exactly the
 identification read plus the two checkpoint-slot reads. It validates the
 immutable identity, structurally selects the newest valid checkpoint and
 reports geometry, Unicode/name policy, raw feature masks, stable feature IDs,
-checkpoint roots and per-slot status. It never walks descendant metadata and
+checkpoint roots and per-slot status. Checkpoint output distinguishes the
+authoritative raw `free_blocks`, runtime `emergency_headroom_blocks` and
+saturating `available_blocks` advertised to normal growth. The headroom is
+computed from immutable geometry, so this adds no descendant read. The tool
 therefore remains suitable for quick probes of very large volumes.
 
 The `afsplus-info` JSON schema version is 1. It performs zero writes and uses
@@ -96,8 +99,9 @@ file extents, allocation-region/page summaries, referenced block sets,
 reclaim runs, shared-reference runs and the valid intent-log prefix. Numeric
 object/directory collections follow object ID order; entries follow on-disk
 comparison-key order and block sets are numerically sorted. It reports the
-full invariant sweep as `findings`, sets `consistent`, and exits 1 when
-findings are present.
+same raw-free/headroom/available split as `afsplus-info`, reports the full
+invariant sweep as `findings`, sets `consistent`, and exits 1 when findings
+are present.
 
 Unknown `INCOMPAT` bits stop the dump with `E_FEATURE`; guessing the layout of
 unknown authoritative state would make a debugging tool misleading. Invalid

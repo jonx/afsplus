@@ -214,6 +214,8 @@ fn handle_api_covers_the_mountable_alpha_operation_slice() {
     let stats = vfs.statfs();
     assert_eq!(stats.block_size, BS as u32);
     assert_eq!(stats.total_blocks, 8192);
+    assert_eq!(stats.emergency_headroom_blocks, 64);
+    assert_eq!(stats.free_blocks - stats.available_blocks, 64);
     assert!(stats.case_sensitive);
     assert_eq!(stats.unicode_version, [16, 0, 0]);
 
@@ -256,6 +258,75 @@ fn handle_api_covers_the_mountable_alpha_operation_slice() {
     vfs.unlink_file(OBJECT_ROOT, "final", ts(8)).unwrap();
     assert_eq!(vfs.lookup(directory, "linked").unwrap(), object);
     vfs.sync_filesystem().unwrap();
+
+    let mut dev = vfs.into_volume().into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+}
+
+#[test]
+fn near_full_fragmented_unlink_uses_bounded_orphan_progress() {
+    const REGIONS: u64 = 160;
+    const REGION_BLOCKS: u32 = 16;
+    let mut dev = MemoryBackend::new(BS, REGIONS * u64::from(REGION_BLOCKS));
+    mkfs(
+        &mut dev,
+        &MkfsParams {
+            uuid: [0x51; 16],
+            label: "VfsHeadroom".into(),
+            region_size: REGION_BLOCKS,
+            reclaim_caps: Default::default(),
+            log_slots: 0,
+            shared_extents: true,
+            data_policy: false,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
+            timestamp: ts(0),
+        },
+    )
+    .unwrap();
+    let mut volume = mount(dev).unwrap();
+    volume.set_reclaim_batch_blocks(1);
+    for index in 0..180 {
+        volume
+            .create_file_in_root(&format!("namespace-{index:03}"), b"", ts(1))
+            .unwrap();
+    }
+    let object = volume
+        .create_file_in_root("fragmented", b"", ts(1))
+        .unwrap();
+    let available = volume.available_blocks();
+    volume
+        .preallocate_file(object, 0, (available - 16) * BS as u64, ts(2))
+        .unwrap();
+    assert!(volume.free_blocks() >= volume.emergency_headroom_blocks());
+
+    let before_unlink = volume.generation();
+    let mut vfs = Vfs::new(volume);
+    vfs.set_orphan_cleanup_extent_budget(8);
+    vfs.unlink_file(OBJECT_ROOT, "fragmented", ts(3)).unwrap();
+    assert!(matches!(
+        vfs.lookup(OBJECT_ROOT, "fragmented"),
+        Err(VfsError::NotFound)
+    ));
+    assert_eq!(vfs.pending_orphans().unwrap(), 1);
+
+    let volume = vfs.into_volume();
+    assert_eq!(volume.generation(), before_unlink + 2);
+    let unlink_stats = volume.last_commit_stats().unwrap();
+    assert!(unlink_stats.alloc.blocks_retired < 32);
+
+    let mut vfs = Vfs::new(volume);
+    vfs.set_orphan_cleanup_extent_budget(8);
+    let mut cleanup_calls = 0;
+    while vfs.pending_orphans().unwrap() != 0 {
+        vfs.resume_one_orphan(ts(4 + cleanup_calls)).unwrap();
+        cleanup_calls += 1;
+        assert!(cleanup_calls < 64, "orphan cleanup did not converge");
+    }
+    assert!(
+        cleanup_calls > 1,
+        "fragmented cleanup was not actually batched"
+    );
 
     let mut dev = vfs.into_volume().into_device();
     let report = check_device(&mut dev);
