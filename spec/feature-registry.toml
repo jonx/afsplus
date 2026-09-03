@@ -109,3 +109,14 @@ authoritative = true
 rebuildable = true
 discardable = false
 description = "Shared data extents (reflinks, ADR-061): a volume-wide reference tree counts multi-owner physical runs. Reference counts must be honoured on every write and free, so unsupporting implementations mount read-only. Rebuildable by exhaustive scan of every extent map; never discardable while shared runs exist."
+
+[[feature]]
+id = "org.aros.afsplus:data-policy"
+short = "data-policy"
+class = "compat"
+state_model = "disabled-enabled-active"
+lifecycle = "experimental"
+authoritative = true
+rebuildable = false
+discardable = false
+description = "Persistent per-file data-update policy (ADR-065): object records may carry OBJECT_FLAG_DATA_IN_PLACE, opting the file into ADR-062 private in-place updates. Ignoring implementations always use full data COW, which is strictly stronger; the validated object-flags namespace prevents unaware writers from silently dropping the per-file choice."

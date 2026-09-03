@@ -33,6 +33,7 @@ fn run(image: &PathBuf, expected: &PathBuf, created_expected: &PathBuf) -> Resul
             reclaim_caps: Default::default(),
             log_slots: 8,
             shared_extents: false,
+            data_policy: false,
             name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: timestamp(1),
         },

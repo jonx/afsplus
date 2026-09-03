@@ -156,6 +156,7 @@ mod tests {
                 reclaim_caps: Default::default(),
                 log_slots: 8,
                 shared_extents: true,
+                data_policy: false,
                 name_policy: crate::NamePolicy::Sensitive,
                 timestamp: Timespec::default(),
             },

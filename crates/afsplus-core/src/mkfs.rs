@@ -18,7 +18,7 @@ use afsplus_format::checkpoint::{Checkpoint, RegionRecord};
 use afsplus_format::crc32c::CHECKSUM_CRC32C;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::ident::{
-    FeatureFlags, Identification, NameKeyAlgorithm, INCOMPAT_INTENT_LOG,
+    FeatureFlags, Identification, NameKeyAlgorithm, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG,
     INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_SHARED_EXTENTS, UNICODE_VERSION_16_0_0,
 };
 use afsplus_format::object::{ObjectRecord, ObjectType};
@@ -57,6 +57,11 @@ pub struct MkfsParams {
     /// `workstation` and `full` enable it, the classic and reader profiles do
     /// not. A volume without it rejects clone operations.
     pub shared_extents: bool,
+    /// Enables the persistent per-file data-update policy (ADR-065,
+    /// `COMPAT`). Same immutable-identification reasoning as
+    /// `shared_extents`: the choice is made here, per profile. Without it
+    /// the policy API refuses opt-ins and a flagged record is corruption.
+    pub data_policy: bool,
     /// Volume-default directory lookup policy (ADR-008).
     pub name_policy: NamePolicy,
     pub timestamp: Timespec,
@@ -224,7 +229,11 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
             } else {
                 0
             },
-            ..FeatureFlags::default()
+            compat: if params.data_policy {
+                COMPAT_DATA_POLICY
+            } else {
+                0
+            },
         },
         name_key_algorithm: match params.name_policy {
             NamePolicy::Sensitive => NameKeyAlgorithm::UnicodeNfc,

@@ -8,10 +8,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use afsplus_block::BlockDevice;
-use afsplus_core::volume::{DirectoryCursor, ObjectMetadata, Volume};
+use afsplus_core::volume::{DataUpdatePolicy, DirectoryCursor, ObjectMetadata, Volume};
 use afsplus_core::{mount_with_options, CoreError, MountMode, MountOptions};
 use afsplus_format::ident::{
-    NameKeyAlgorithm, INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_SHARED_EXTENTS,
+    NameKeyAlgorithm, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG_DATA_UPDATES,
+    RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::object::ObjectType;
 use afsplus_format::{Timespec, NAME_MAX_UTF8_BYTES, OBJECT_ROOT};
@@ -128,6 +129,9 @@ impl Capabilities {
     /// Existing-file writes/truncates can be made durable through the bounded
     /// intent log without publishing a checkpoint per fsync.
     pub const LOGGED_DATA_FSYNC: u64 = 1 << 10;
+    /// Files can be persistently opted into ADR-062 private in-place data
+    /// updates (ADR-065).
+    pub const DATA_POLICY: u64 = 1 << 11;
 
     pub const BASELINE: Capabilities = Capabilities(
         Self::IO_64BIT
@@ -264,6 +268,9 @@ impl<D: BlockDevice> Vfs<D> {
         }
         if self.logged_data_fsync_enabled() {
             bits |= Capabilities::LOGGED_DATA_FSYNC;
+        }
+        if self.volume.ident().features.compat & COMPAT_DATA_POLICY != 0 {
+            bits |= Capabilities::DATA_POLICY;
         }
         Capabilities(bits)
     }
@@ -589,6 +596,43 @@ impl<D: BlockDevice> Vfs<D> {
             length,
             now,
         )?)
+    }
+
+    /// The persistent per-file data-update policy (ADR-065): `true` when the
+    /// file is opted into private in-place updates.
+    pub fn data_policy(&mut self, handle: Handle) -> Result<bool, VfsError> {
+        let object_id = match self.handles.get(&handle).copied() {
+            Some(OpenHandle::File { object_id, .. }) => object_id,
+            Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
+            None => return Err(VfsError::Stale),
+        };
+        Ok(self.volume.file_data_policy(object_id)? == DataUpdatePolicy::InPlacePrivate)
+    }
+
+    /// Persistently opts the file into (or back out of) private in-place
+    /// updates. Requires write access and the volume data-policy feature;
+    /// the choice survives remounts (ADR-065).
+    pub fn set_data_policy(
+        &mut self,
+        handle: Handle,
+        in_place: bool,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        let (object_id, access) = match self.handles.get(&handle).copied() {
+            Some(OpenHandle::File { object_id, access }) => (object_id, access),
+            Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
+            None => return Err(VfsError::Stale),
+        };
+        if !access.can_write() {
+            return Err(VfsError::ReadOnly);
+        }
+        self.checkpoint_data_window(now)?;
+        let policy = if in_place {
+            DataUpdatePolicy::InPlacePrivate
+        } else {
+            DataUpdatePolicy::FullCow
+        };
+        Ok(self.volume.set_file_data_policy(object_id, policy, now)?)
     }
 
     pub fn fsync(&mut self, handle: Handle) -> Result<(), VfsError> {

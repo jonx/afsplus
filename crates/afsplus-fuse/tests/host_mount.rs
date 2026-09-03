@@ -108,6 +108,7 @@ fn create_image(path: &Path) {
             reclaim_caps: Default::default(),
             log_slots: 8,
             shared_extents: true,
+            data_policy: false,
             name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp,
         },

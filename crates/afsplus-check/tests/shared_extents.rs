@@ -336,6 +336,7 @@ fn formatted(label: &str) -> MemoryBackend {
             // Deliberately without the feature: the congruence tests plant
             // roots and flags on top and arm the bit themselves.
             shared_extents: false,
+            data_policy: false,
             name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: timestamp(1),
         },
@@ -355,6 +356,7 @@ fn formatted_shared(label: &str) -> MemoryBackend {
             reclaim_caps: Default::default(),
             log_slots: 0,
             shared_extents: true,
+            data_policy: false,
             name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: timestamp(1),
         },

@@ -47,6 +47,13 @@ pub const MAX_EXTENT_BLOCKS: u64 = 4096;
 /// physical extent. This experimental flag is not an epoch-1 commitment.
 pub const OBJECT_FLAG_EXTENT_TREE: u16 = 1 << 0;
 
+/// This file is persistently opted into ADR-062 private in-place data
+/// updates (ADR-065). Files only; legal only on a volume whose
+/// identification carries `COMPAT_DATA_POLICY` — that congruence is
+/// enforced by the contextual read paths and the checker, exactly like the
+/// shared-extent marker.
+pub const OBJECT_FLAG_DATA_IN_PLACE: u16 = 1 << 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectType {
     File,
@@ -171,7 +178,7 @@ impl ObjectRecord {
                 "link count zero without orphan support",
             ));
         }
-        if self.flags & !OBJECT_FLAG_EXTENT_TREE != 0 {
+        if self.flags & !(OBJECT_FLAG_EXTENT_TREE | OBJECT_FLAG_DATA_IN_PLACE) != 0 {
             return Err(FormatError::Invalid("object has unsupported flags"));
         }
         match self.object_type {

@@ -31,6 +31,7 @@ fn formatted() -> MemoryBackend {
             reclaim_caps: Default::default(),
             log_slots: 0,
             shared_extents: false,
+            data_policy: false,
             name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: ts(1),
         },

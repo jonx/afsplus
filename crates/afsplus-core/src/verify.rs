@@ -18,8 +18,10 @@ use afsplus_block::BlockDevice;
 use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::geometry::{Geometry, DESCRIPTOR_SLOTS};
-use afsplus_format::ident::{Identification, RO_COMPAT_SHARED_EXTENTS};
-use afsplus_format::object::{ObjectRecord, ObjectType, OBJECT_FLAG_EXTENT_TREE};
+use afsplus_format::ident::{Identification, COMPAT_DATA_POLICY, RO_COMPAT_SHARED_EXTENTS};
+use afsplus_format::object::{
+    ObjectRecord, ObjectType, OBJECT_FLAG_DATA_IN_PLACE, OBJECT_FLAG_EXTENT_TREE,
+};
 use afsplus_format::reclaim::{ReclaimEntry, ReclaimRoot};
 use afsplus_format::{OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
 
@@ -281,6 +283,14 @@ pub fn load_committed_state<D: BlockDevice>(
             return Err(CoreError::Corrupt(format!(
                 "object {} record block {} generation {record_generation} outside committed range",
                 entry.object_id, entry.block
+            )));
+        }
+        if record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0
+            && ident.features.compat & COMPAT_DATA_POLICY == 0
+        {
+            return Err(CoreError::Corrupt(format!(
+                "object {} carries OBJECT_FLAG_DATA_IN_PLACE without the data-policy feature",
+                entry.object_id
             )));
         }
         if record.object_id != entry.object_id {

@@ -128,6 +128,7 @@ fn run(options: Options) -> Result<(), String> {
             reclaim_caps: Default::default(),
             log_slots: 8,
             shared_extents: true,
+            data_policy: false,
             name_policy: options.name_policy,
             timestamp: now,
         },

@@ -37,6 +37,7 @@ fn formatted_with_policy(total: u64, log_slots: u16, name_policy: NamePolicy) ->
             reclaim_caps: Default::default(),
             log_slots,
             shared_extents: true,
+            data_policy: false,
             name_policy,
             timestamp: ts(0),
         },

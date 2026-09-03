@@ -90,4 +90,23 @@ enum afsp_extent_flag {
  */
 #define AFSP_RO_COMPAT_SHARED_EXTENTS (UINT64_C(1) << 0)
 
+/*
+ * Object-record flags are a validated namespace: an implementation rejects a
+ * record whose flags it does not understand, so a per-file choice stored
+ * here cannot be silently dropped. Bit 0 selects the typed extent-map layout
+ * for a file's data; bit 1 is the persistent opt-in to ADR-062 private
+ * in-place data updates (ADR-065), legal on file objects only and only when
+ * the volume carries AFSP_COMPAT_DATA_POLICY.
+ */
+enum afsp_object_flag {
+    AFSP_OBJECT_FLAG_EXTENT_TREE = 1u << 0,
+    AFSP_OBJECT_FLAG_DATA_IN_PLACE = 1u << 1 /* ADR-065 */
+};
+
+/*
+ * COMPAT feature bits. An implementation that ignores the per-file data
+ * policy always uses full data COW, which is strictly stronger (ADR-065).
+ */
+#define AFSP_COMPAT_DATA_POLICY (UINT64_C(1) << 0)
+
 #endif

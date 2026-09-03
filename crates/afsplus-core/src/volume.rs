@@ -22,11 +22,11 @@ use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::crc32c::{crc32c, Hasher};
 use afsplus_format::dir::DirEntry;
 use afsplus_format::ident::{
-    Identification, INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_SHARED_EXTENTS,
+    Identification, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::intent_log::{LogOp, LogRecord, MAX_LOG_OPS};
 use afsplus_format::object::{
-    ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_EXTENT_TREE,
+    ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_DATA_IN_PLACE, OBJECT_FLAG_EXTENT_TREE,
 };
 use afsplus_format::{validate_name, FormatError, Timespec, OBJECT_ROOT};
 
@@ -397,6 +397,97 @@ impl<D: BlockDevice> Volume<D> {
         self.data_update_policy = policy;
     }
 
+    /// The persistent per-file policy (ADR-065): `InPlacePrivate` when the
+    /// file's record carries `OBJECT_FLAG_DATA_IN_PLACE`.
+    pub fn file_data_policy(&mut self, object_id: u64) -> Result<DataUpdatePolicy, CoreError> {
+        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        if record.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        Ok(if record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0 {
+            DataUpdatePolicy::InPlacePrivate
+        } else {
+            DataUpdatePolicy::FullCow
+        })
+    }
+
+    /// Persistently opts a file into (or back out of) ADR-062 private
+    /// in-place updates by setting `OBJECT_FLAG_DATA_IN_PLACE` on its record
+    /// (ADR-065). A metadata-COW transaction: the change timestamp advances
+    /// and the choice survives remounts. Requires the volume `COMPAT`
+    /// data-policy feature; files only. Eligibility per write is unchanged —
+    /// shared, unwritten, unmapped or extending writes still take full COW.
+    pub fn set_file_data_policy(
+        &mut self,
+        object_id: u64,
+        policy: DataUpdatePolicy,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.ensure_window_closed()?;
+        if !self.data_policy_enabled() {
+            return Err(CoreError::FeatureDisabled(
+                "data-policy feature is not enabled on this volume",
+            ));
+        }
+        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        if record.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        let new_flags = match policy {
+            DataUpdatePolicy::InPlacePrivate => record.flags | OBJECT_FLAG_DATA_IN_PLACE,
+            DataUpdatePolicy::FullCow => record.flags & !OBJECT_FLAG_DATA_IN_PLACE,
+        };
+        if new_flags == record.flags {
+            return Ok(());
+        }
+        let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("object {object_id} missing from object map"))
+        })?;
+
+        let block_size = self.dev.block_size();
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            generation,
+            self.reclaim_batch_blocks,
+            self.alloc_rover_region,
+        )?;
+        let new_lba = tx.allocate(&mut self.dev)?;
+        tx.retire(&mut self.dev, record_lba)?;
+        let new_record = ObjectRecord {
+            flags: new_flags,
+            changed: now,
+            ..record
+        };
+        let map_key = object_map::key(object_id);
+        let map_value = object_map::value(new_lba)?;
+        let object_map_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &[TreeOperation::Upsert {
+                key: &map_key,
+                value: &map_value,
+            }],
+        )?;
+        let mut metadata_writes = vec![(new_lba, new_record.encode(block_size, generation)?)];
+        metadata_writes.extend(object_map_mutation.writes);
+        self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            Vec::new(),
+            metadata_writes,
+            object_map_mutation.root_lba,
+        )
+    }
+
     /// Filesystem-wide durability barrier. Successful immediate mutations
     /// are already durable; this also gives adapters an explicit sync hook.
     /// Read-only modes return success without touching the device.
@@ -682,7 +773,8 @@ impl<D: BlockDevice> Volume<D> {
         let end_block = end_offset.div_ceil(block_size);
         let write_block_count = end_block - first_block;
         let (old_extents, old_tree_blocks) = self.load_file_layout(&record)?;
-        let overwrite_in_place = self.data_update_policy == DataUpdatePolicy::InPlacePrivate
+        let overwrite_in_place = (self.data_update_policy == DataUpdatePolicy::InPlacePrivate
+            || record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0)
             && end_offset <= record.size_bytes
             && (first_block..end_block).all(|logical_block| {
                 extent_at(&old_extents, logical_block).is_some_and(|extent| extent.flags == 0)
@@ -2592,7 +2684,9 @@ impl<D: BlockDevice> Volume<D> {
         let new_record_lba = tx.allocate(&mut self.dev)?;
         tx.retire(&mut self.dev, record_lba)?;
         let new_record = ObjectRecord {
-            flags,
+            // Layout staging owns the layout flag; the persistent data-update
+            // policy (ADR-065) travels with the record across every rewrite.
+            flags: flags | (record.flags & OBJECT_FLAG_DATA_IN_PLACE),
             size_bytes: new_size,
             allocated_bytes: allocated_blocks
                 .checked_mul(block_size as u64)
@@ -3381,6 +3475,10 @@ impl<D: BlockDevice> Volume<D> {
     /// True when this volume may hold shared extents (ADR-061).
     fn shared_extents_enabled(&self) -> bool {
         self.ident.features.ro_compat & RO_COMPAT_SHARED_EXTENTS != 0
+    }
+
+    fn data_policy_enabled(&self) -> bool {
+        self.ident.features.compat & COMPAT_DATA_POLICY != 0
     }
 
     /// The transaction-scoped reference edit. Created empty; committed
@@ -4598,6 +4696,11 @@ impl<D: BlockDevice> Volume<D> {
         if block_generation == 0 || block_generation > self.checkpoint.generation {
             return Err(CoreError::Corrupt(format!(
                 "object {object_id} record block {lba} generation {block_generation} outside committed range"
+            )));
+        }
+        if record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0 && !self.data_policy_enabled() {
+            return Err(CoreError::Corrupt(format!(
+                "object {object_id} carries OBJECT_FLAG_DATA_IN_PLACE without the data-policy feature"
             )));
         }
         if record.object_id != object_id {

@@ -1,11 +1,18 @@
 # Data-update policy qualification
 
-> **ADRs:** [ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md) · **Spec:** [invariants](../spec/invariants.md) ·
-> **Tests:** `crates/afsplus-check/tests/data_policy.rs` · **Milestones:** M03, M14
+> **ADRs:** [ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md) · [ADR-065](../adr/ADR-065-persistent-data-update-policy.md) · **Spec:** [invariants](../spec/invariants.md) ·
+> **Tests:** `crates/afsplus-check/tests/data_policy.rs`, `crates/afsplus-check/tests/data_policy_persistence.rs` · **Milestones:** M03, M14
 
 This plan compares full data copy-on-write with the conservative private
-in-place prototype without changing the disk format. It is the executable
-qualification evidence for the policy accepted by ADR-062.
+in-place prototype and qualifies the persistent per-file opt-in that
+ADR-065 encodes. `data_policy.rs` exercises the runtime qualification
+switch; `data_policy_persistence.rs` proves the ADR-065 contract — the
+opt-in survives remounts and every layout rewrite, drives the in-place path
+exactly where the ADR-062 eligibility rules pass, shared blocks of a
+flagged file still take COW, a flagged record on a volume without the
+`COMPAT` feature is corruption for both the read path and the checker, and
+the power-cut contract holds through the persistent flag rather than the
+switch.
 
 ## Reproduction
 

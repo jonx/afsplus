@@ -59,6 +59,14 @@ pub const INCOMPAT_INTENT_LOG_DATA_UPDATES: u64 = 1 << 1;
 /// immutable, so the first clone cannot set it.
 pub const RO_COMPAT_SHARED_EXTENTS: u64 = 1 << 0;
 
+/// Per-file persistent data-update policy (ADR-065): object records on this
+/// volume may carry `OBJECT_FLAG_DATA_IN_PLACE`. An implementation that
+/// ignores the policy always uses full data COW, which is strictly stronger,
+/// so the bit is COMPAT; the validated object-flags namespace keeps unaware
+/// writers from silently dropping the per-file choice. Set by mkfs per
+/// profile; identification is immutable.
+pub const COMPAT_DATA_POLICY: u64 = 1 << 0;
+
 const LEGACY_PAYLOAD_LEN: usize = 73 + LABEL_MAX_BYTES;
 const FEATURE_PAYLOAD_LEN: usize = LEGACY_PAYLOAD_LEN + 3 * 8;
 const PAYLOAD_LEN: usize = FEATURE_PAYLOAD_LEN + 4;

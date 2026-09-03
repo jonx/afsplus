@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — The per-file data policy becomes persistent](#2026-09-03--the-per-file-data-policy-becomes-persistent)
 - [2026-09-03 — Portable C reads the durable log view](#2026-09-03--portable-c-reads-the-durable-log-view)
 - [2026-09-03 — Portable C failures become replayable artifacts](#2026-09-03--portable-c-failures-become-replayable-artifacts)
 - [2026-09-03 — The independent portable C reader starts executing](#2026-09-03--the-independent-portable-c-reader-starts-executing)
@@ -28,6 +29,27 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — The per-file data policy becomes persistent
+
+ADR-062 had fixed the hybrid data-update semantics but deliberately left the
+per-file opt-in unencoded, so the choice evaporated at every mount. ADR-065
+(approved on board decision #63) assigns the encoding: object flag bit 1,
+`OBJECT_FLAG_DATA_IN_PLACE`, protected against silent loss by the validated
+object-flags namespace every implementation already enforces, plus `COMPAT`
+bit 0 `org.aros.afsplus:data-policy` activated by mkfs profile with
+shared-extent-style congruence — a flagged record on a volume without the
+feature is corruption in the read path and the checker. The core gained
+`set_file_data_policy`/`file_data_policy` (a metadata-COW record update) and
+the VFS a `DATA_POLICY` capability with handle-based set/get; the write path
+takes the in-place route when the record carries the flag, under unchanged
+ADR-062 eligibility. One real bug surfaced while wiring it: layout staging
+rebuilt object flags from scratch, so any write dropped the freshly set
+policy bit — the persistence regression caught it immediately, and the bit
+now travels through every layout rewrite. Seven persistence regressions plus
+two VFS API tests cover remount survival, in-place stats, clearing, feature
+refusal, planted-flag fail-closed on both sides, shared-block COW fallback
+and the power-cut contract through the flag.
 
 ## 2026-09-03 — Portable C reads the durable log view
 

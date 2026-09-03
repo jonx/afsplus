@@ -32,6 +32,7 @@ fn formatted_with_options(shared_extents: bool, log_slots: u16) -> MemoryBackend
             reclaim_caps: Default::default(),
             log_slots,
             shared_extents,
+            data_policy: false,
             name_policy: afsplus_core::NamePolicy::Sensitive,
             timestamp: ts(0),
         },
@@ -292,4 +293,60 @@ fn no_changes_vfs_remains_readable_and_issues_no_writes_or_flushes() {
     let traced = vfs.into_volume().into_device();
     assert_eq!(traced.stats().writes, 0);
     assert_eq!(traced.stats().flushes, 0);
+}
+
+#[test]
+fn persistent_data_policy_is_exposed_and_survives_remount() {
+    let mut dev = MemoryBackend::new(BS, 8192);
+    mkfs(
+        &mut dev,
+        &MkfsParams {
+            uuid: [95u8; 16],
+            label: "PolicyApi".into(),
+            region_size: 4096,
+            reclaim_caps: Default::default(),
+            log_slots: 0,
+            shared_extents: false,
+            data_policy: true,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
+            timestamp: ts(0),
+        },
+    )
+    .unwrap();
+    let mut vfs = Vfs::mount(dev, MountOptions::default()).unwrap();
+    assert!(vfs.capabilities().contains(Capabilities::DATA_POLICY));
+
+    let object = vfs.create_file(OBJECT_ROOT, "database", ts(1)).unwrap();
+    let handle = vfs.open_file(object, AccessMode::ReadWrite).unwrap();
+    assert!(!vfs.data_policy(handle).unwrap());
+    vfs.set_data_policy(handle, true, ts(2)).unwrap();
+    assert!(vfs.data_policy(handle).unwrap());
+    vfs.close(handle).unwrap();
+
+    // A read-only handle cannot change the policy.
+    let read_only = vfs.open_file(object, AccessMode::ReadOnly).unwrap();
+    assert!(matches!(
+        vfs.set_data_policy(read_only, false, ts(3)),
+        Err(VfsError::ReadOnly)
+    ));
+    assert!(vfs.data_policy(read_only).unwrap());
+    vfs.close(read_only).unwrap();
+
+    // The opt-in is on disk: a fresh mount still reports it.
+    let dev = vfs.into_volume().into_device();
+    let mut vfs = Vfs::mount(dev, MountOptions::default()).unwrap();
+    let handle = vfs.open_file(object, AccessMode::ReadOnly).unwrap();
+    assert!(vfs.data_policy(handle).unwrap());
+}
+
+#[test]
+fn data_policy_capability_is_absent_without_the_feature() {
+    let mut vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    assert!(!vfs.capabilities().contains(Capabilities::DATA_POLICY));
+    let object = vfs.create_file(OBJECT_ROOT, "plain", ts(1)).unwrap();
+    let handle = vfs.open_file(object, AccessMode::ReadWrite).unwrap();
+    assert!(matches!(
+        vfs.set_data_policy(handle, true, ts(2)),
+        Err(VfsError::NotSupported)
+    ));
 }
