@@ -28,6 +28,18 @@ writer_truncate_missing_image="$work/portable-c-writer-truncate-missing.afsp"
 writer_truncate_directory_image="$work/portable-c-writer-truncate-directory.afsp"
 writer_truncate_torn_image="$work/portable-c-writer-truncate-torn.afsp"
 writer_truncate_flush_image="$work/portable-c-writer-truncate-flush.afsp"
+writer_write_image="$work/portable-c-writer-write.afsp"
+writer_write_low_memory_image="$work/portable-c-writer-write-low-memory.afsp"
+writer_write_invalid_image="$work/portable-c-writer-write-invalid.afsp"
+writer_write_tail_image="$work/portable-c-writer-write-tail.afsp"
+writer_write_no_feature_image="$work/portable-c-writer-write-no-feature.afsp"
+writer_write_data_torn_image="$work/portable-c-writer-write-data-torn.afsp"
+writer_write_data_flush_image="$work/portable-c-writer-write-data-flush.afsp"
+writer_write_record_torn_image="$work/portable-c-writer-write-record-torn.afsp"
+writer_write_record_flush_image="$work/portable-c-writer-write-record-flush.afsp"
+writer_write_descriptor_fail_image="$work/portable-c-writer-write-descriptor-fail.afsp"
+writer_write_bitmap_fail_image="$work/portable-c-writer-write-bitmap-fail.afsp"
+writer_write_no_space_image="$work/portable-c-writer-write-no-space.afsp"
 writer_torn_image="$work/portable-c-writer-torn.afsp"
 writer_torn_only_image="$work/portable-c-writer-torn-only.afsp"
 writer_flush_image="$work/portable-c-writer-flush.afsp"
@@ -35,6 +47,7 @@ writer_exists_image="$work/portable-c-writer-exists.afsp"
 writer_delete_image="$work/portable-c-writer-delete.afsp"
 writer_replace_image="$work/portable-c-writer-replace.afsp"
 sanitized_writer_image="$work/portable-c-writer-sanitized.afsp"
+sanitized_writer_write_image="$work/portable-c-writer-write-sanitized.afsp"
 intent_expected="$work/intent-expected.bin"
 intent_created_expected="$work/intent-created-expected.bin"
 source_tree="$work/source"
@@ -84,6 +97,17 @@ cp "$intent_image" "$writer_truncate_missing_image"
 cp "$intent_image" "$writer_truncate_directory_image"
 cp "$intent_image" "$writer_truncate_torn_image"
 cp "$intent_image" "$writer_truncate_flush_image"
+cp "$intent_image" "$writer_write_image"
+cp "$intent_image" "$writer_write_low_memory_image"
+cp "$intent_image" "$writer_write_invalid_image"
+cp "$intent_image" "$writer_write_tail_image"
+cp "$image" "$writer_write_no_feature_image"
+cp "$intent_image" "$writer_write_data_torn_image"
+cp "$intent_image" "$writer_write_data_flush_image"
+cp "$intent_image" "$writer_write_record_torn_image"
+cp "$intent_image" "$writer_write_record_flush_image"
+cp "$intent_image" "$writer_write_descriptor_fail_image"
+cp "$intent_image" "$writer_write_bitmap_fail_image"
 cp "$intent_image" "$writer_torn_image"
 cp "$intent_image" "$writer_torn_only_image"
 cp "$intent_image" "$writer_flush_image"
@@ -91,6 +115,7 @@ cp "$intent_image" "$writer_exists_image"
 cp "$intent_image" "$writer_delete_image"
 cp "$intent_image" "$writer_replace_image"
 cp "$intent_image" "$sanitized_writer_image"
+cp "$intent_image" "$sanitized_writer_write_image"
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
     --exhaust-object-ids "$writer_create_exhausted_image"
@@ -100,6 +125,12 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
     --clear-data-update-feature "$writer_truncate_no_feature_image"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --clear-data-update-feature "$writer_write_no_feature_image"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --make-no-space "$writer_write_no_space_image"
 
 "$compiler" -std=c99 -pedantic -Wall -Wextra -Werror -Wconversion \
     -Wshadow -Wstrict-prototypes \
@@ -140,6 +171,18 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 "$writer_probe" "$writer_truncate_directory_image" truncate-directory
 "$writer_probe" "$writer_truncate_torn_image" truncate-torn-retry
 "$writer_probe" "$writer_truncate_flush_image" truncate-flush-fail
+"$writer_probe" "$writer_write_image" write
+"$writer_probe" "$writer_write_low_memory_image" write-low-memory
+"$writer_probe" "$writer_write_invalid_image" write-invalid-range
+"$writer_probe" "$writer_write_tail_image" write-nonzero-tail
+"$writer_probe" "$writer_write_no_feature_image" write-no-feature
+"$writer_probe" "$writer_write_data_torn_image" write-data-torn-retry
+"$writer_probe" "$writer_write_data_flush_image" write-data-flush-fail
+"$writer_probe" "$writer_write_record_torn_image" write-record-torn-retry
+"$writer_probe" "$writer_write_record_flush_image" write-record-flush-fail
+"$writer_probe" "$writer_write_descriptor_fail_image" write-descriptor-read-fail
+"$writer_probe" "$writer_write_bitmap_fail_image" write-bitmap-read-fail
+"$writer_probe" "$writer_write_no_space_image" write-no-space
 "$writer_probe" "$writer_torn_image" torn-retry
 "$writer_probe" "$writer_torn_only_image" torn-only
 "$writer_probe" "$writer_flush_image" flush-fail
@@ -181,6 +224,26 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
     --verify-c-truncate-zero "$writer_truncate_torn_image" \
+    "$intent_expected" "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-write "$writer_write_image" \
+    "$intent_expected" "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-write "$writer_write_low_memory_image" \
+    "$intent_expected" "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-write "$writer_write_data_torn_image" \
+    "$intent_expected" "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-write "$writer_write_record_torn_image" \
+    "$intent_expected" "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-write "$writer_write_record_flush_image" \
     "$intent_expected" "$intent_created_expected"
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
@@ -251,6 +314,9 @@ if "$compiler" -std=c99 -g -fno-omit-frame-pointer \
     ASAN_OPTIONS=halt_on_error=1 \
         UBSAN_OPTIONS=halt_on_error=1 \
         "$sanitized_writer_probe" "$sanitized_writer_image"
+    ASAN_OPTIONS=halt_on_error=1 \
+        UBSAN_OPTIONS=halt_on_error=1 \
+        "$sanitized_writer_probe" "$sanitized_writer_write_image" write
 else
     echo "portable-c-writer sanitizers=SKIP compiler=$compiler"
 fi
@@ -346,6 +412,30 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_truncate_flush_image" >/dev/null
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_write_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_write_low_memory_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_write_invalid_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_write_tail_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_write_no_feature_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_write_data_torn_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_write_data_flush_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_write_record_torn_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_write_record_flush_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_write_descriptor_fail_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_write_bitmap_fail_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_write_no_space_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_torn_image" >/dev/null
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_torn_only_image" >/dev/null
@@ -358,4 +448,4 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_replace_image" >/dev/null
 
-echo "portable-c-gate result=PASS reader=PASS intent-view=PASS writer-create=PASS writer-truncate=PASS writer-rename=PASS writer-delete=PASS writer-replace=PASS"
+echo "portable-c-gate result=PASS reader=PASS intent-view=PASS writer-create=PASS writer-write-cow=PASS writer-truncate=PASS writer-rename=PASS writer-delete=PASS writer-replace=PASS"

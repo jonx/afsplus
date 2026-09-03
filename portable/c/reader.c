@@ -15,6 +15,8 @@
 #define AFSPR_BLOCK_TYPE_OBJECT UINT32_C(0x4f534641)
 #define AFSPR_BLOCK_TYPE_TREE UINT32_C(0x54534641)
 #define AFSPR_BLOCK_TYPE_INTENT UINT32_C(0x4a534641)
+#define AFSPR_BLOCK_TYPE_BITMAP UINT32_C(0x42534641)
+#define AFSPR_BLOCK_TYPE_REGION_DESCRIPTOR UINT32_C(0x47534641)
 #define AFSPR_CHECKSUM_CRC32C 1u
 #define AFSPR_IDENT_LEGACY_PAYLOAD 137u
 #define AFSPR_IDENT_FEATURE_PAYLOAD 161u
@@ -36,6 +38,13 @@
 #define AFSPR_TREE_KIND_OBJECT_MAP 1u
 #define AFSPR_TREE_KIND_DIRECTORY 2u
 #define AFSPR_TREE_KIND_EXTENT_MAP 3u
+#define AFSPR_TREE_KIND_ALLOCATION_ROOT 4u
+#define AFSPR_ALLOCATION_VALUE_SIZE 16u
+#define AFSPR_REGION_DESCRIPTOR_FIXED 16u
+#define AFSPR_BITMAP_FIXED 16u
+#define AFSPR_MAX_BITMAP_PAGES                                           \
+    ((AFSPR_MAX_REGION_BLOCKS + AFSPR_BITMAP_PAGE_BLOCKS - 1u) /          \
+     AFSPR_BITMAP_PAGE_BLOCKS)
 #define AFSPR_OBJECT_PAYLOAD 96u
 #define AFSPR_MAX_DIRECT_BLOCKS UINT64_C(4096)
 #define AFSPR_EXTENT_VALUE_SIZE 24u
@@ -161,6 +170,20 @@ struct afspr_log_operation {
     const uint8_t *extents;
     const uint8_t *source_name;
     const uint8_t *target_name;
+};
+
+struct afspr_bitmap_binding_view {
+    uint8_t slot;
+    uint32_t free_blocks;
+    uint64_t generation;
+};
+
+struct afspr_allocation_region_view {
+    uint32_t valid_blocks;
+    uint32_t free_blocks;
+    uint32_t page_count;
+    uint64_t descriptor_generation;
+    struct afspr_bitmap_binding_view pages[AFSPR_MAX_BITMAP_PAGES];
 };
 
 static uint16_t afspr_get_le16(const uint8_t *p)
@@ -459,6 +482,12 @@ static int afspr_tree_item_shape(const struct afspr_tree_spec *spec,
     }
     if (spec->kind == AFSPR_TREE_KIND_DIRECTORY) {
         return item->value_len >= 16u ? AFSPR_OK : AFSPR_ERR_CORRUPT;
+    }
+    if (spec->kind == AFSPR_TREE_KIND_ALLOCATION_ROOT) {
+        return item->key_len == 4u &&
+                       item->value_len == AFSPR_ALLOCATION_VALUE_SIZE
+                   ? AFSPR_OK
+                   : AFSPR_ERR_CORRUPT;
     }
     return AFSPR_ERR_UNSUPPORTED;
 }
@@ -4307,6 +4336,550 @@ int afspr_internal_intent_file_size(
                         AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
 }
 
+static uint32_t afspr_region_count(const struct afspr_ident *ident)
+{
+    uint64_t count = ident->total_blocks / ident->region_size;
+
+    if (ident->total_blocks % ident->region_size != 0u) {
+        ++count;
+    }
+    return (uint32_t)count;
+}
+
+static uint32_t afspr_bitmap_page_count(const struct afspr_ident *ident,
+                                        uint32_t region)
+{
+    uint32_t valid = afspr_region_valid_blocks(ident, region);
+
+    return (valid + AFSPR_BITMAP_PAGE_BLOCKS - 1u) /
+           AFSPR_BITMAP_PAGE_BLOCKS;
+}
+
+static uint32_t afspr_bitmap_page_valid_blocks(
+    const struct afspr_ident *ident, uint32_t region, uint32_t page)
+{
+    uint32_t valid = afspr_region_valid_blocks(ident, region);
+    uint32_t first = page * AFSPR_BITMAP_PAGE_BLOCKS;
+    uint32_t left = valid > first ? valid - first : 0u;
+
+    return left < AFSPR_BITMAP_PAGE_BLOCKS ? left
+                                           : AFSPR_BITMAP_PAGE_BLOCKS;
+}
+
+static int afspr_lookup_allocation_region(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_ident *ident,
+    const struct afspr_probe_result *volume, uint32_t region,
+    uint8_t *descriptor_slot, uint32_t *free_blocks,
+    uint64_t *descriptor_generation, struct afspr_diagnostic *diagnostic)
+{
+    struct afspr_tree_spec spec;
+    uint8_t search[4];
+    uint8_t value[AFSPR_ALLOCATION_VALUE_SIZE];
+    size_t value_len;
+    uint64_t leaf_lba = AFSPR_NO_BLOCK;
+    int found;
+    int status;
+
+    search[0] = (uint8_t)(region >> 24);
+    search[1] = (uint8_t)(region >> 16);
+    search[2] = (uint8_t)(region >> 8);
+    search[3] = (uint8_t)region;
+    spec.kind = AFSPR_TREE_KIND_ALLOCATION_ROOT;
+    spec.owner = 0u;
+    spec.max_generation = volume->generation;
+    status = afspr_tree_lookup_variable(
+        ops, scratch, ident, volume->allocation_root_block, &spec, search,
+        sizeof(search), value, sizeof(value), &value_len, &found, &leaf_lba,
+        diagnostic);
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (!found || value_len != sizeof(value) || value[1] != 0u ||
+        value[2] != 0u || value[3] != 0u ||
+        value[0] >= AFSPR_DESCRIPTOR_SLOTS) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_TREE_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, leaf_lba);
+    }
+    *descriptor_slot = value[0];
+    *free_blocks = afspr_get_le32(value + 4u);
+    *descriptor_generation = afspr_get_le64(value + 8u);
+    if (*free_blocks > afspr_region_valid_blocks(ident, region) ||
+        *descriptor_generation == 0u ||
+        *descriptor_generation > volume->generation) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_TREE_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, leaf_lba);
+    }
+    return AFSPR_OK;
+}
+
+static int afspr_load_allocation_region(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_ident *ident,
+    const struct afspr_probe_result *volume, uint32_t region,
+    struct afspr_allocation_region_view *decoded,
+    struct afspr_diagnostic *diagnostic)
+{
+    struct afspr_header header;
+    uint8_t descriptor_slot;
+    uint32_t recorded_free;
+    uint64_t recorded_generation;
+    uint64_t base = (uint64_t)region * ident->region_size;
+    uint64_t head = region == 0u ? AFSPR_BOOTSTRAP_BLOCKS : 0u;
+    uint64_t lba;
+    const uint8_t *payload;
+    uint64_t free_sum = 0u;
+    uint32_t expected_pages = afspr_bitmap_page_count(ident, region);
+    uint32_t index;
+    int status = afspr_lookup_allocation_region(
+        ops, scratch, ident, volume, region, &descriptor_slot,
+        &recorded_free, &recorded_generation, diagnostic);
+
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (expected_pages == 0u || expected_pages > AFSPR_MAX_BITMAP_PAGES) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_ALLOCATION_DESCRIPTOR_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    lba = base + head + descriptor_slot;
+    status = afspr_read_one(ops, lba, (uint8_t *)scratch->buffer);
+    if (status != AFSPR_OK) {
+        return afspr_report(diagnostic, status,
+                            AFSPR_STAGE_ALLOCATION_DESCRIPTOR_READ,
+                            AFSPR_NO_CHECKPOINT_SLOT, lba);
+    }
+    status = afspr_verify_header((const uint8_t *)scratch->buffer,
+                                 ops->block_size,
+                                 AFSPR_BLOCK_TYPE_REGION_DESCRIPTOR,
+                                 &header);
+    if (status != AFSPR_OK || header.flags != 0u ||
+        header.owner != region || header.generation != recorded_generation ||
+        header.payload_len !=
+            AFSPR_REGION_DESCRIPTOR_FIXED + expected_pages * 16u) {
+        return afspr_report(
+            diagnostic,
+            status == AFSPR_ERR_UNSUPPORTED ? status : AFSPR_ERR_CORRUPT,
+            AFSPR_STAGE_ALLOCATION_DESCRIPTOR_DECODE,
+            AFSPR_NO_CHECKPOINT_SLOT, lba);
+    }
+    payload = (const uint8_t *)scratch->buffer + AFSPR_HEADER_SIZE;
+    if (afspr_get_le32(payload) != region ||
+        afspr_get_le32(payload + 4u) !=
+            afspr_region_valid_blocks(ident, region) ||
+        afspr_get_le32(payload + 8u) != recorded_free ||
+        afspr_get_le32(payload + 12u) != expected_pages) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_ALLOCATION_DESCRIPTOR_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, lba);
+    }
+    memset(decoded, 0, sizeof(*decoded));
+    decoded->valid_blocks = afspr_get_le32(payload + 4u);
+    decoded->free_blocks = recorded_free;
+    decoded->page_count = expected_pages;
+    decoded->descriptor_generation = recorded_generation;
+    for (index = 0u; index < expected_pages; ++index) {
+        const uint8_t *binding =
+            payload + AFSPR_REGION_DESCRIPTOR_FIXED + index * 16u;
+        uint32_t page_valid =
+            afspr_bitmap_page_valid_blocks(ident, region, index);
+
+        decoded->pages[index].slot = binding[0];
+        decoded->pages[index].free_blocks = afspr_get_le32(binding + 4u);
+        decoded->pages[index].generation = afspr_get_le64(binding + 8u);
+        if (decoded->pages[index].slot >= AFSPR_BITMAP_SLOTS ||
+            decoded->pages[index].free_blocks > page_valid ||
+            decoded->pages[index].generation == 0u ||
+            decoded->pages[index].generation > recorded_generation) {
+            return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                AFSPR_STAGE_ALLOCATION_DESCRIPTOR_DECODE,
+                                AFSPR_NO_CHECKPOINT_SLOT, lba);
+        }
+        free_sum += decoded->pages[index].free_blocks;
+    }
+    if (free_sum != recorded_free) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_ALLOCATION_DESCRIPTOR_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, lba);
+    }
+    return AFSPR_OK;
+}
+
+static int afspr_load_allocation_bitmap(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_ident *ident, uint32_t region, uint32_t page,
+    const struct afspr_bitmap_binding_view *binding, const uint8_t **bits,
+    uint32_t *valid_blocks, uint64_t *bitmap_lba,
+    struct afspr_diagnostic *diagnostic)
+{
+    struct afspr_header header;
+    uint64_t base = (uint64_t)region * ident->region_size;
+    uint64_t head = region == 0u ? AFSPR_BOOTSTRAP_BLOCKS : 0u;
+    uint8_t *buffer =
+        (uint8_t *)scratch->buffer + (size_t)ops->block_size;
+    const uint8_t *payload;
+    uint32_t expected_valid =
+        afspr_bitmap_page_valid_blocks(ident, region, page);
+    uint32_t expected_first = page * AFSPR_BITMAP_PAGE_BLOCKS;
+    size_t byte_len = ((size_t)expected_valid + 7u) / 8u;
+    uint32_t free_count = 0u;
+    uint32_t index;
+    int status;
+
+    *bitmap_lba = base + head + AFSPR_DESCRIPTOR_SLOTS +
+                  (uint64_t)page * AFSPR_BITMAP_SLOTS + binding->slot;
+    status = afspr_read_one(ops, *bitmap_lba, buffer);
+    if (status != AFSPR_OK) {
+        return afspr_report(diagnostic, status,
+                            AFSPR_STAGE_ALLOCATION_BITMAP_READ,
+                            AFSPR_NO_CHECKPOINT_SLOT, *bitmap_lba);
+    }
+    status = afspr_verify_header(buffer, ops->block_size,
+                                 AFSPR_BLOCK_TYPE_BITMAP, &header);
+    if (status != AFSPR_OK || header.flags != 0u ||
+        header.owner != region || header.generation != binding->generation ||
+        header.payload_len != AFSPR_BITMAP_FIXED + byte_len) {
+        return afspr_report(
+            diagnostic,
+            status == AFSPR_ERR_UNSUPPORTED ? status : AFSPR_ERR_CORRUPT,
+            AFSPR_STAGE_ALLOCATION_BITMAP_DECODE,
+            AFSPR_NO_CHECKPOINT_SLOT, *bitmap_lba);
+    }
+    payload = buffer + AFSPR_HEADER_SIZE;
+    if (afspr_get_le32(payload) != region ||
+        afspr_get_le32(payload + 4u) != page ||
+        afspr_get_le32(payload + 8u) != expected_first ||
+        afspr_get_le32(payload + 12u) != expected_valid ||
+        expected_valid == 0u) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_ALLOCATION_BITMAP_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, *bitmap_lba);
+    }
+    *bits = payload + AFSPR_BITMAP_FIXED;
+    *valid_blocks = expected_valid;
+    for (index = 0u; index < expected_valid; ++index) {
+        if (((*bits)[index / 8u] & (uint8_t)(1u << (index % 8u))) == 0u) {
+            ++free_count;
+        }
+    }
+    for (index = expected_valid; index < byte_len * 8u; ++index) {
+        if (((*bits)[index / 8u] & (uint8_t)(1u << (index % 8u))) == 0u) {
+            return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                AFSPR_STAGE_ALLOCATION_BITMAP_DECODE,
+                                AFSPR_NO_CHECKPOINT_SLOT, *bitmap_lba);
+        }
+    }
+    if (free_count != binding->free_blocks) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_ALLOCATION_BITMAP_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, *bitmap_lba);
+    }
+    return AFSPR_OK;
+}
+
+static int afspr_validate_log_extent_is_free(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_ident *ident,
+    const struct afspr_probe_result *volume, uint64_t start, uint32_t blocks,
+    struct afspr_diagnostic *diagnostic)
+{
+    struct afspr_allocation_region_view allocation;
+    uint32_t region = (uint32_t)(start / ident->region_size);
+    uint64_t base = (uint64_t)region * ident->region_size;
+    uint32_t first = (uint32_t)(start - base);
+    uint32_t final = first + blocks;
+    uint32_t page = first / AFSPR_BITMAP_PAGE_BLOCKS;
+    int status = afspr_load_allocation_region(
+        ops, scratch, ident, volume, region, &allocation, diagnostic);
+
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    while (first < final) {
+        const uint8_t *bits;
+        uint32_t valid;
+        uint64_t bitmap_lba;
+        uint32_t page_first = page * AFSPR_BITMAP_PAGE_BLOCKS;
+        uint32_t local = first - page_first;
+        uint32_t page_end;
+
+        status = afspr_load_allocation_bitmap(
+            ops, scratch, ident, region, page, &allocation.pages[page],
+            &bits, &valid, &bitmap_lba, diagnostic);
+        if (status != AFSPR_OK) {
+            return status;
+        }
+        page_end = page_first + valid;
+        while (first < final && first < page_end) {
+            if ((bits[local / 8u] &
+                 (uint8_t)(1u << (local % 8u))) != 0u) {
+                return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                    AFSPR_STAGE_INTENT_DECODE,
+                                    AFSPR_NO_CHECKPOINT_SLOT, base + first);
+            }
+            ++first;
+            ++local;
+        }
+        ++page;
+    }
+    return AFSPR_OK;
+}
+
+static int afspr_validate_log_reservations(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_ident *ident,
+    const struct afspr_probe_result *volume,
+    const struct afspr_intent_view *view, uint64_t *reserved_blocks,
+    struct afspr_diagnostic *diagnostic)
+{
+    uint8_t *record_buffer = (uint8_t *)scratch->buffer;
+    uint64_t total = 0u;
+    uint32_t slot;
+
+    for (slot = 0u; slot < view->valid_records; ++slot) {
+        struct afspr_log_record first_record;
+        uint64_t lba;
+        uint16_t operation_index;
+        int status = afspr_read_intent_record(
+            ops, ident, volume, slot, record_buffer, &first_record, &lba,
+            diagnostic);
+
+        if (status != AFSPR_OK) {
+            return status;
+        }
+        for (operation_index = 0u;
+             operation_index < first_record.operation_count;
+             ++operation_index) {
+            struct afspr_log_record record;
+            struct afspr_log_operation operation;
+            uint16_t extent_count;
+            uint16_t extent_index;
+
+            status = afspr_read_intent_record(
+                ops, ident, volume, slot, record_buffer, &record, &lba,
+                diagnostic);
+            if (status != AFSPR_OK) {
+                return status;
+            }
+            if (afspr_log_operation_at(&record, operation_index,
+                                       &operation) != AFSPR_OK) {
+                return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                    AFSPR_STAGE_INTENT_DECODE,
+                                    AFSPR_NO_CHECKPOINT_SLOT, lba);
+            }
+            extent_count = operation.extent_count;
+            for (extent_index = 0u; extent_index < extent_count;
+                 ++extent_index) {
+                uint64_t start;
+                uint32_t blocks;
+
+                status = afspr_read_intent_record(
+                    ops, ident, volume, slot, record_buffer, &record, &lba,
+                    diagnostic);
+                if (status != AFSPR_OK) {
+                    return status;
+                }
+                if (afspr_log_operation_at(&record, operation_index,
+                                           &operation) != AFSPR_OK ||
+                    afspr_log_extent_at(&operation, extent_index, &start,
+                                        &blocks) != AFSPR_OK ||
+                    !afspr_log_extent_valid(ident, start, blocks)) {
+                    return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                        AFSPR_STAGE_INTENT_DECODE,
+                                        AFSPR_NO_CHECKPOINT_SLOT, lba);
+                }
+                if (UINT64_MAX - total < blocks) {
+                    return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                        AFSPR_STAGE_INTENT_DECODE,
+                                        AFSPR_NO_CHECKPOINT_SLOT, lba);
+                }
+                total += blocks;
+                status = afspr_validate_log_extent_is_free(
+                    ops, scratch, ident, volume, start, blocks, diagnostic);
+                if (status != AFSPR_OK) {
+                    return status;
+                }
+            }
+        }
+    }
+    *reserved_blocks = total;
+    return AFSPR_OK;
+}
+
+static int afspr_logged_extent_covering(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_ident *ident,
+    const struct afspr_probe_result *volume,
+    const struct afspr_intent_view *view, uint64_t candidate,
+    uint64_t *covered_until, struct afspr_diagnostic *diagnostic)
+{
+    uint8_t *record_buffer = (uint8_t *)scratch->buffer;
+    uint32_t slot;
+
+    *covered_until = candidate;
+    for (slot = 0u; slot < view->valid_records; ++slot) {
+        struct afspr_log_record record;
+        uint64_t lba;
+        uint16_t operation_index;
+        int status = afspr_read_intent_record(
+            ops, ident, volume, slot, record_buffer, &record, &lba,
+            diagnostic);
+
+        if (status != AFSPR_OK) {
+            return status;
+        }
+        for (operation_index = 0u;
+             operation_index < record.operation_count; ++operation_index) {
+            struct afspr_log_operation operation;
+            uint16_t extent_index;
+
+            if (afspr_log_operation_at(&record, operation_index,
+                                       &operation) != AFSPR_OK) {
+                return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                    AFSPR_STAGE_INTENT_DECODE,
+                                    AFSPR_NO_CHECKPOINT_SLOT, lba);
+            }
+            for (extent_index = 0u; extent_index < operation.extent_count;
+                 ++extent_index) {
+                uint64_t start;
+                uint32_t blocks;
+
+                if (afspr_log_extent_at(&operation, extent_index, &start,
+                                        &blocks) != AFSPR_OK) {
+                    return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                        AFSPR_STAGE_INTENT_DECODE,
+                                        AFSPR_NO_CHECKPOINT_SLOT, lba);
+                }
+                if (candidate >= start && candidate - start < blocks) {
+                    *covered_until = start + blocks;
+                    return AFSPR_OK;
+                }
+            }
+        }
+    }
+    return AFSPR_OK;
+}
+
+int afspr_internal_find_log_data_block(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_probe_result *volume,
+    const struct afspr_intent_view *view, uint64_t free_block_floor,
+    uint64_t *data_block, struct afspr_diagnostic *diagnostic,
+    size_t diagnostic_size)
+{
+    struct afspr_ident ident;
+    uint64_t reserved_blocks;
+    uint32_t region;
+    int status = afspr_prepare_operation(
+        ops, scratch, volume, AFSPR_INTENT_SCRATCH_SIZE, &ident, diagnostic,
+        diagnostic_size);
+
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (view == NULL || data_block == NULL ||
+        free_block_floor > volume->total_blocks) {
+        return afspr_report(diagnostic, AFSPR_ERR_INVALID_ARGUMENT,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    *data_block = AFSPR_NO_BLOCK;
+    if (view->abi_version != AFSPR_ABI_VERSION ||
+        view->base_generation != volume->generation ||
+        view->valid_records > volume->log_slots ||
+        (view->flags & AFSPR_INTENT_VIEW_FILE_DATA) == 0u ||
+        view->last_sequence != view->valid_records) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_INTENT_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, view->tail_block);
+    }
+    status = afspr_validate_log_reservations(
+        ops, scratch, &ident, volume, view, &reserved_blocks, diagnostic);
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (reserved_blocks > volume->free_blocks_total) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_INTENT_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    if (volume->free_blocks_total - reserved_blocks <= free_block_floor) {
+        return afspr_report(diagnostic, AFSPR_ERR_NOT_FOUND,
+                            AFSPR_STAGE_COMPLETE,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+
+    for (region = 0u; region < afspr_region_count(&ident); ++region) {
+        struct afspr_allocation_region_view allocation;
+        uint64_t base = (uint64_t)region * ident.region_size;
+        uint32_t page;
+
+        status = afspr_load_allocation_region(
+            ops, scratch, &ident, volume, region, &allocation, diagnostic);
+        if (status != AFSPR_OK) {
+            return status;
+        }
+        if (allocation.free_blocks == 0u) {
+            continue;
+        }
+        for (page = 0u; page < allocation.page_count; ++page) {
+            const uint8_t *bits;
+            uint32_t valid;
+            uint64_t bitmap_lba;
+            uint32_t page_first = page * AFSPR_BITMAP_PAGE_BLOCKS;
+            uint32_t local = 0u;
+
+            if (allocation.pages[page].free_blocks == 0u) {
+                continue;
+            }
+            status = afspr_load_allocation_bitmap(
+                ops, scratch, &ident, region, page,
+                &allocation.pages[page], &bits, &valid, &bitmap_lba,
+                diagnostic);
+            if (status != AFSPR_OK) {
+                return status;
+            }
+            while (local < valid) {
+                uint32_t region_index = page_first + local;
+                uint64_t candidate = base + region_index;
+
+                if ((bits[local / 8u] &
+                     (uint8_t)(1u << (local % 8u))) == 0u &&
+                    afspr_is_allocatable(&ident, candidate)) {
+                    uint64_t covered_until;
+
+                    status = afspr_logged_extent_covering(
+                        ops, scratch, &ident, volume, view, candidate,
+                        &covered_until, diagnostic);
+                    if (status != AFSPR_OK) {
+                        return status;
+                    }
+                    if (covered_until == candidate) {
+                        *data_block = candidate;
+                        return afspr_report(
+                            diagnostic, AFSPR_OK, AFSPR_STAGE_COMPLETE,
+                            AFSPR_NO_CHECKPOINT_SLOT, candidate);
+                    }
+                    if (covered_until > base + page_first + valid) {
+                        local = valid;
+                    } else {
+                        local = (uint32_t)(covered_until - base -
+                                           page_first);
+                    }
+                    continue;
+                }
+                ++local;
+            }
+        }
+    }
+    return afspr_report(diagnostic, AFSPR_ERR_NOT_FOUND,
+                        AFSPR_STAGE_COMPLETE, AFSPR_NO_CHECKPOINT_SLOT,
+                        AFSPR_NO_BLOCK);
+}
+
 int afspr_intent_file_size(const struct afspr_block_ops *ops,
                            const struct afspr_scratch *scratch,
                            const struct afspr_probe_result *volume,
@@ -4702,6 +5275,14 @@ const char *afspr_probe_stage_string(uint32_t stage)
         return "intent-log data";
     case AFSPR_STAGE_INTENT_NAMESPACE:
         return "intent-log namespace";
+    case AFSPR_STAGE_ALLOCATION_DESCRIPTOR_READ:
+        return "allocation descriptor read";
+    case AFSPR_STAGE_ALLOCATION_DESCRIPTOR_DECODE:
+        return "allocation descriptor decode";
+    case AFSPR_STAGE_ALLOCATION_BITMAP_READ:
+        return "allocation bitmap read";
+    case AFSPR_STAGE_ALLOCATION_BITMAP_DECODE:
+        return "allocation bitmap decode";
     default:
         return "unknown probe stage";
     }

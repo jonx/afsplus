@@ -40,18 +40,22 @@ Optional workstation features may be absent.
 
 The independent C path has a bounded writer slice: empty regular-file create,
 data-free truncate, delete and rename with or without replacement append to
-the preallocated intent log with one block write and one flush. Truncate
-already covers sparse growth and aligned shrink; unaligned shrink awaits a COW
-tail-block allocator. The code owns no memory and uses an 8 KiB minimum caller
-workspace. Callers with more RAM may provide the 56 KiB
+the preallocated intent log with one block write and one flush. One complete
+caller-assembled file block can also be written through allocation-validated
+COW: data write and flush precede the record write and flush, while the
+committed bitmap stays unchanged until replay. Truncate covers sparse growth
+and aligned shrink; unaligned shrink awaits the tail-block consumer of that
+allocator. The code owns no memory and uses an 8 KiB minimum caller workspace.
+Callers with more RAM may provide the 56 KiB
 recommended workspace; its call-local twelve-block cache reduces the qualified
 seven-record namespace preflight ceiling from 152 reads to 21; truncate drops
-from 178 to 21 without changing results or persistent state.
+from 178 to 21 and one-block COW from 223 to 25 without changing results or
+persistent state.
 Delete/replacement require ADR-066; recovery moves a
 final victim into restartable orphan cleanup without walking its extents.
-This does not yet make the C implementation a complete `classic-rw`
-filesystem: checkpoint materialization, allocation, nonempty creation/data
-write and native maintenance scheduling remain open.
+This does not make the C implementation a complete `classic-rw` filesystem:
+multi-block/byte-range writes, bitmap and checkpoint publication, nonempty
+creation, unaligned truncate and native maintenance scheduling are open.
 
 ## 3. 64-bit arithmetic
 

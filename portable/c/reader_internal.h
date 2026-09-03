@@ -23,6 +23,20 @@ int afspr_internal_intent_file_size(
     uint64_t *size_bytes, struct afspr_diagnostic *diagnostic,
     size_t diagnostic_size);
 
+/*
+ * Select one committed-free block while reserving the data extents named by
+ * the validated intent prefix. `view` must come from a successful immediately
+ * preceding log scan under writer serialization. The returned block remains
+ * FREE in the base checkpoint; durable ownership begins only when the caller
+ * publishes a log record naming it.
+ */
+int afspr_internal_find_log_data_block(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_probe_result *volume,
+    const struct afspr_intent_view *view, uint64_t free_block_floor,
+    uint64_t *data_block, struct afspr_diagnostic *diagnostic,
+    size_t diagnostic_size);
+
 int afspr_internal_preflight_file_namespace(
     const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
     const struct afspr_probe_result *volume, uint64_t source_parent_id,

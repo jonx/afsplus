@@ -15,6 +15,11 @@ int main(void)
                        AFSPW_CAP_RENAME_FILE_NO_REPLACE) != 0u
                    && (afspw_capabilities() &
                        AFSPW_CAP_TRUNCATE_FILE_DATA_FREE) != 0u
+                   && (afspw_capabilities() &
+                       AFSPW_CAP_WRITE_FILE_BLOCK_COW) != 0u
+                   && strcmp(afspr_probe_stage_string(
+                                 AFSPR_STAGE_ALLOCATION_BITMAP_DECODE),
+                             "allocation bitmap decode") == 0
                    && strcmp(
                           afspw_status_string(
                               AFSPW_ERR_TAIL_REWRITE_REQUIRED),

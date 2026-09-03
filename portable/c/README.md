@@ -165,18 +165,30 @@ are present.
 ## Bounded classic-rw mutations
 
 `afspw_create_empty_file`, `afspw_rename_file_no_replace`,
-`afspw_delete_file`, `afspw_rename_file_replace` and
-`afspw_truncate_file` are the independent media-mutating C slice. Each freshly
-probes the volume, rescans and semantically validates the durable view, proves
-the relevant operands and writes one record into the next preallocated intent
-slot, then invokes exactly one flush. Namespace calls use version 2. Data-free
-truncate uses version 3 and requires its incompatible feature. Empty create
-derives its returned object ID from the complete validated prefix, including
-gaps left by prior logged creates.
-They allocate no disk block and publish no checkpoint. The caller supplies
-read/write/flush callbacks, exclusive writer serialization and immutable name
-buffers. The hard minimum remains 8 KiB. Extra complete 4 KiB blocks in the
-same scratch area become a call-local read cache, up to sixteen entries;
+`afspw_delete_file`, `afspw_rename_file_replace`, `afspw_truncate_file` and
+`afspw_write_file_block_cow` are the independent media-mutating C slice. Each
+freshly probes the volume, rescans and semantically validates the durable view
+and proves the relevant operands before writing. Namespace calls use version
+2. Truncate and COW write use version 3 and require its incompatible feature.
+Empty create derives its returned object ID from the complete validated
+prefix, including gaps left by prior logged creates.
+
+Namespace and data-free truncate allocate no disk block. They write one record
+into the next preallocated intent slot and invoke one flush. The COW call
+accepts one caller-assembled complete logical block, validates the committed
+allocation-root/descriptor/bitmap chain and all data reservations in the
+durable prefix, then chooses one base-checkpoint-free block outside those
+reservations while preserving the Rust runtime emergency floor. It writes and
+flushes that data before writing and flushing its version-3 record. The bitmap
+intentionally stays unchanged until Rust or another full engine replays the
+record and preclaims the named block.
+
+The caller supplies read/write/flush callbacks, exclusive writer
+serialization and immutable name/data buffers. COW input cannot overlap the
+scratch area, growth must end in the replaced logical block, and bytes beyond
+a partial final EOF must be zero. The hard minimum remains 8 KiB. Extra
+complete 4 KiB blocks in the same scratch area become a call-local read cache,
+up to sixteen entries;
 `AFSPW_RECOMMENDED_SCRATCH_SIZE` supplies twelve entries (56 KiB total).
 Nothing is retained after the function returns, so retry and uncertain-I/O
 rules do not depend on cache invalidation.
@@ -187,6 +199,14 @@ status; the caller must discard cached state and recover/probe before deciding
 whether to retry. A full log returns `AFSPW_ERR_LOG_FULL` without write or
 flush and requires a checkpoint-capable implementation to materialize the
 prefix.
+
+The COW path distinguishes data-write, data-flush, record-write and
+record-flush uncertainty. A failed or torn data write has no durable reference
+and can be overwritten after a fresh probe. A failed record write or flush may
+have made the new extent reachable, so retry begins with recovery/probe rather
+than assuming either outcome. Allocation failures report the metadata or data
+LBA and preserve zero write/flush behavior; exhaustion returns
+`AFSPW_ERR_NO_SPACE` before changing media.
 
 `afspw_truncate_file` supports sparse growth and block-aligned shrink. A
 same-size request is a successful zero-I/O no-op reported explicitly in its
@@ -199,10 +219,11 @@ Delete and replacement require the ADR-066 orphan-directory feature. Rust
 replay preclaims logged data, then moves each final victim into persistent
 orphan state in the same checkpoint, lazily creating object 2 there if needed;
 it never retires the victim layout in proportion to fragmentation. Directory
-rename, nonempty create, data write, unaligned shrinking truncate, allocation,
-orphan maintenance and checkpoint publication remain later `classic-rw`
-slices. Modern Unicode profiles currently accept ASCII lookup names in this C
-path; legacy identity volumes retain exact UTF-8 lookup.
+rename, nonempty create, arbitrary byte-range or multi-block writes, unaligned
+shrinking truncate, bitmap/checkpoint publication, orphan maintenance and
+checkpoint materialization are later `classic-rw` slices. Modern Unicode
+profiles accept ASCII lookup names in this C path; legacy identity volumes
+retain exact UTF-8 lookup.
 
 ## Validation
 
@@ -232,10 +253,12 @@ flag on a data-policy volume, while the primary fixture injects the same flag
 without its feature and requires object-decode failure.
 
 The C writer copies that seven-record image and independently appends an eighth
-empty create, data-free truncate, non-replacing rename, delete and replacing
-rename. Each mutation uses one write and one flush; the C overlay verifies the
-result, then Rust replay checks the monotone create ID, zero shrink, sparse
-growth, visible content, retained orphan bytes and all filesystem invariants.
+empty create, one-block COW write, data-free truncate, non-replacing rename,
+delete and replacing rename. Metadata-only mutations use one write and one
+flush; COW write uses data-write/data-flush then record-write/record-flush. The
+C overlay verifies the result, then Rust replay checks the exact replacement
+bytes, monotone create ID, zero shrink, sparse growth, visible content,
+retained orphan bytes and all filesystem invariants.
 Case-insensitive create collision, a missing parent and exhausted object IDs
 all produce exact diagnostics and zero writes. A syntactically valid
 checkpoint whose object-ID watermark regresses below the highest object is
@@ -246,16 +269,23 @@ non-file object IDs with file-state diagnostics. A 64-byte torn
 namespace or truncate record is retried into the same slot; flush failure
 reports durability uncertainty; an existing destination and a full log
 produce zero media writes.
+The COW matrix covers a torn data write, failed data flush, torn record, failed
+record flush, exact descriptor/bitmap read diagnostics, nonzero EOF tail,
+invalid shrinking range and a 512-block fixture whose log reserves every
+ordinary-growth block while leaving the 16-block emergency floor untouched.
+Every refused case leaves authoritative media unchanged.
 Strict warnings, ASan/UBSan, Clang static analysis, CMake export consumption
 and the configured m68k compiler include both reader and writer. At the
 seven-record prefix, the 8 KiB namespace fallback makes at most 152
-logical-block reads; truncate currently needs at most 178. The recommended
-twelve-entry cache makes at most 21 for every mutation, while a torn-write
-retry makes at most 42 across both complete preflights. Empty create's 8 KiB
-path is independently capped at 144 reads. The test fixes these as
+logical-block reads; truncate needs at most 178 and COW allocation needs at
+most 223. The recommended twelve-entry cache makes at most 21 for every
+metadata-only mutation, while a torn-write retry makes at most 42 across both
+complete preflights. Cached COW write uses at most 25 reads, or 50 across a
+data/record torn retry. Empty create's 8 KiB path is independently capped at
+144 reads. The test fixes these as
 non-regression ceilings and cross-replays both memory profiles in Rust. The
 configured m68k compiler must also keep every writer function frame at or
-below 1 KiB (the largest is 740 bytes currently). The read counts are
+below 1 KiB (the largest measured frame is 768 bytes). The read counts are
 structural, not device-latency claims; merging the file-state and namespace
 passes remains a possible later low-memory optimization.
 The matrix also injects an I/O failure on the first log read, requires the

@@ -106,17 +106,20 @@ engines; the repository gate does not depend on such a runtime being installed.
 See the [embedding and fuzzing guide](../portable/c/README.md#fuzzing-and-exact-reproduction).
 
 The independent write path uses a separate ABI-1 writer surface. It validates
-the current checkpoint-plus-log view, then appends one empty-file create,
-data-free truncate, regular-file delete or rename record (with optional
-replacement) to the next preallocated log slot and flushes it. Create returns
-the monotone object ID chosen after all prior logged creates. Truncate covers
-sparse growth and block-aligned shrink; unaligned shrink explicitly waits for
-the COW tail-block slice. Rust replays and checks every variant. These calls
-need no allocator or checkpoint writer and remain bounded by log and tree paths;
-write and flush failures are explicitly uncertain. Delete/replacement require
+the checkpoint-plus-log view, then appends an empty-file create, data-free
+truncate, regular-file delete or rename record (with optional replacement),
+or one complete-block existing-file COW write. Create returns the monotone
+object ID chosen after all prior logged creates. Truncate covers sparse growth
+and block-aligned shrink; unaligned shrink uses a later tail-block consumer.
+Rust replays and checks every variant. Metadata-only calls need no allocator
+or checkpoint writer. The COW call independently validates allocation tree,
+descriptor and bitmap bindings, excludes every durable log reservation,
+preserves emergency headroom and performs data-flush before record-flush. All
+paths return explicit uncertainty stages. Delete/replacement require
 the orphan-directory feature, and final victims enter bounded cleanup during
 replay rather than being retired in proportion to their fragmentation. The
 same ABI keeps an 8 KiB minimum workspace and opportunistically uses extra
 caller scratch as a bounded call-local read cache; the recommended 56 KiB
-profile cuts every seven-record mutation preflight to 21 reads (from 152 for
-namespace operations and 178 for truncate).
+profile cuts seven-record namespace/truncate mutation preflight to 21 reads
+(from 152/178); the allocation-validating COW path uses 25 cached or 223
+minimum-memory reads.

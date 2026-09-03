@@ -124,14 +124,16 @@ exhaustive repair walking are separate expansion gates.
 ## Portable C writer gate
 
 The same gate compiles a separate ABI-1 writer and gives it copies of the
-seven-record Rust fixture. `afspw_create_empty_file`,
-`afspw_truncate_file`, `afspw_rename_file_no_replace`, `afspw_delete_file`
-and `afspw_rename_file_replace` must each append sequence 8 using exactly one
-block write and one flush. The C reader observes each resulting durable view;
-Rust then replays the C-produced record, verifies the empty create's monotone
-ID and zero bytes, verifies zero shrink and sparse growth, verifies visible
-contents, confirms final victims retain byte-exact orphan contents and runs
-the exhaustive checker.
+seven-record Rust fixture. `afspw_create_empty_file`, `afspw_truncate_file`,
+`afspw_rename_file_no_replace`, `afspw_delete_file` and
+`afspw_rename_file_replace` must each append sequence 8 using exactly one
+block write and one flush. `afspw_write_file_block_cow` must allocate one
+base-free/log-unreserved block, write and flush its complete contents, then
+append and flush sequence 8. The C reader observes each resulting durable
+view; Rust then replays the C-produced record, verifies the exact replacement
+bytes, empty create's monotone ID and zero bytes, zero shrink and sparse
+growth, visible contents and byte-exact final-victim orphans, then runs the
+exhaustive checker.
 
 A 64-byte torn record returns write-uncertain and is safely overwritten after
 a fresh scan. A failed flush returns durability-uncertain without claiming
@@ -147,17 +149,28 @@ zero-I/O success; unaligned shrink reports tail-rewrite-required with zero I/O.
 Missing objects and directory IDs return exact file-state diagnostics.
 Zero shrink and sparse growth replay in Rust, including a 178-read 8 KiB path,
 a 21-read cached path and a 42-read torn-record retry.
+One-block COW replay covers the 223-read 8 KiB path and 25-read cached path.
+Torn data and torn record retries use at most 50 cached reads; data-flush and
+record-flush failures identify distinct uncertainty stages. Invalid shrink,
+nonzero bytes after partial EOF, missing data-update support and exhaustion
+after subtracting every logged reservation perform zero writes. Descriptor and
+bitmap read failures identify the exact allocation LBA. A separate 512-block
+image places all ordinary-growth capacity in one valid log reservation while
+leaving the 16-block emergency floor untouched, so the writer must report
+`AFSPW_ERR_NO_SPACE` without reusing any of them.
 The writer is included in strict C99, ASan/UBSan, static-analysis, CMake
 install/consumer and configured m68k compile gates. The 8 KiB minimum-memory
 path and the recommended 56 KiB call-local-cache path are both replayed by
 Rust. On the fixed seven-record fixture the 8 KiB preflight ceilings are 152
-reads for namespace operations, 144 for create and 178 for truncate; every
-recommended-cache path is at most 21 reads. A torn-write retry is at most 42
-cached reads across both attempts. The configured m68k compiler must keep
+reads for namespace operations, 144 for create, 178 for truncate and 223 for
+COW write. Recommended-cache metadata-only paths use at most 21 reads and COW
+write uses at most 25. A metadata torn-write retry is at most 42 cached reads;
+a COW retry is at most 50. The configured m68k compiler must keep
 every writer function frame at or below 1 KiB. A failed first log read must
 identify the intent-scan stage and exact LBA, perform no write or flush, and
 succeed on a fresh 25-read retry. This qualifies four bounded namespace
-operations plus data-free truncate, not allocation, data writes or a complete
+operations, data-free truncate and one-block allocation-validating COW, not
+arbitrary byte/multi-block writes, checkpoint materialization or a complete
 classic-rw profile.
 
 ## Portable C fuzz mutation gate

@@ -14,8 +14,9 @@ use afsplus_format::ident::{Identification, INCOMPAT_INTENT_LOG_DATA_UPDATES};
 use afsplus_format::{Timespec, DEFAULT_BLOCK_SIZE, OBJECT_ROOT};
 
 const TOTAL_BLOCKS: u64 = 4096;
+const NO_SPACE_BLOCKS: u64 = 512;
 const C_TRUNCATE_GROW_SIZE: usize = 3 * DEFAULT_BLOCK_SIZE + 7;
-const USAGE: &str = "usage: afsplus-portable-c-log-fixture [--verify-c-create|--verify-c-truncate-zero|--verify-c-truncate-grow|--verify-c-rename|--verify-c-torn|--verify-c-delete|--verify-c-replace] IMAGE EXPECTED CREATED_EXPECTED";
+const USAGE: &str = "usage: afsplus-portable-c-log-fixture [--verify-c-create|--verify-c-write|--verify-c-truncate-zero|--verify-c-truncate-grow|--verify-c-rename|--verify-c-torn|--verify-c-delete|--verify-c-replace] IMAGE EXPECTED CREATED_EXPECTED";
 
 fn clear_data_update_feature(image: &Path) -> Result<(), String> {
     let mut device = FileBackend::open(image, DEFAULT_BLOCK_SIZE, TOTAL_BLOCKS)
@@ -35,6 +36,71 @@ fn clear_data_update_feature(image: &Path) -> Result<(), String> {
         .and_then(|()| device.flush())
         .map_err(|error| format!("cannot publish identification: {error}"))?;
     println!("image={} data_update_feature=CLEARED", image.display());
+    Ok(())
+}
+
+fn make_no_space_fixture(image: &Path) -> Result<(), String> {
+    if image.exists() {
+        return Err("refusing to replace an existing no-space fixture".into());
+    }
+    let mut device = FileBackend::create(image, DEFAULT_BLOCK_SIZE, NO_SPACE_BLOCKS)
+        .map_err(|error| format!("cannot create no-space fixture: {error}"))?;
+    mkfs(
+        &mut device,
+        &MkfsParams {
+            uuid: [0x6b; 16],
+            label: "PortableCNoSpace".into(),
+            region_size: NO_SPACE_BLOCKS as u32,
+            reclaim_caps: Default::default(),
+            log_slots: 2,
+            shared_extents: false,
+            data_policy: true,
+            name_policy: afsplus_core::NamePolicy::Insensitive,
+            timestamp: timestamp(1),
+        },
+    )
+    .map_err(|error| format!("no-space mkfs failed: {error}"))?;
+    let mut volume = mount(device).map_err(|error| format!("no-space mount failed: {error}"))?;
+    let target = vec![0x55; DEFAULT_BLOCK_SIZE + 123];
+    let target_id = volume
+        .create_file_in_root("Target.BIN", &target, timestamp(2))
+        .map_err(|error| format!("no-space target create failed: {error}"))?;
+    let filler_id = volume
+        .create_file_in_root("Filler.BIN", b"", timestamp(3))
+        .map_err(|error| format!("no-space filler create failed: {error}"))?;
+    if volume.emergency_headroom_blocks() != 16 {
+        return Err("no-space fixture emergency floor is not 16 blocks".into());
+    }
+    let base_free = volume.free_blocks();
+    let reservable = volume.available_blocks();
+    if reservable == 0 {
+        return Err("no-space fixture has no block available for log reservation".into());
+    }
+    let filler = vec![0xa7; reservable as usize * DEFAULT_BLOCK_SIZE];
+    volume
+        .window_write_file_at(filler_id, 0, &filler, timestamp(4))
+        .and_then(|()| volume.window_fsync())
+        .map_err(|error| format!("no-space reservation failed: {error}"))?;
+    if volume.free_blocks() != base_free {
+        return Err(format!(
+            "base free count changed before replay: expected {base_free}, got {}",
+            volume.free_blocks()
+        ));
+    }
+    drop(volume.into_device());
+    OpenOptions::new()
+        .write(true)
+        .open(image)
+        .and_then(|file| file.set_len(NO_SPACE_BLOCKS * DEFAULT_BLOCK_SIZE as u64))
+        .map_err(|error| format!("cannot preserve no-space geometry: {error}"))?;
+    println!(
+        "image={} no_space=READY target_object={} filler_object={} base_free={} logged_reserved={} emergency_floor=16",
+        image.display(),
+        target_id,
+        filler_id,
+        base_free,
+        reservable
+    );
     Ok(())
 }
 
@@ -255,6 +321,38 @@ fn verify_c_namespace(
         .map_err(|error| format!("cannot open C-written fixture: {error}"))?;
     let mut volume = mount(device).map_err(|error| format!("C-written replay failed: {error}"))?;
 
+    if mode == "write" {
+        let object_id = volume
+            .lookup_root("final.bin")
+            .map_err(|error| format!("COW-write target lookup failed: {error}"))?
+            .ok_or_else(|| "replay did not retain Final.BIN".to_owned())?;
+        let content = volume
+            .read_file(object_id)
+            .map_err(|error| format!("cannot read COW-written file: {error}"))?;
+        let mut wanted = expected.clone();
+        wanted[DEFAULT_BLOCK_SIZE..].fill(0x3c);
+        if content != wanted {
+            return Err("C one-block COW write content differs".into());
+        }
+        if !volume
+            .orphan_object(17)
+            .map_err(|error| format!("prior replacement orphan lookup failed: {error}"))?
+            || volume
+                .orphan_count()
+                .map_err(|error| format!("orphan count failed: {error}"))?
+                != 1
+        {
+            return Err("C COW write changed prior orphan state".into());
+        }
+        drop(volume.into_device());
+        println!(
+            "image={} c_write_replay=PASS visible_object={} bytes={} orphans=1",
+            image.display(),
+            object_id,
+            content.len()
+        );
+        return Ok(());
+    }
     if mode == "create" {
         let object_id = volume
             .lookup_root("c-empty.bin")
@@ -421,6 +519,23 @@ fn main() -> ExitCode {
             }
         };
     }
+    if first.as_os_str() == OsStr::new("--make-no-space") {
+        let Some(image) = arguments.next() else {
+            eprintln!("usage: afsplus-portable-c-log-fixture --make-no-space IMAGE");
+            return ExitCode::from(2);
+        };
+        if arguments.next().is_some() {
+            eprintln!("usage: afsplus-portable-c-log-fixture --make-no-space IMAGE");
+            return ExitCode::from(2);
+        }
+        return match make_no_space_fixture(&image) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("afsplus-portable-c-log-fixture: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if first.as_os_str() == OsStr::new("--exhaust-object-ids")
         || first.as_os_str() == OsStr::new("--regress-object-watermark")
     {
@@ -448,12 +563,14 @@ fn main() -> ExitCode {
     }
     let verify_rename = first.as_os_str() == OsStr::new("--verify-c-rename");
     let verify_create = first.as_os_str() == OsStr::new("--verify-c-create");
+    let verify_write = first.as_os_str() == OsStr::new("--verify-c-write");
     let verify_truncate_zero = first.as_os_str() == OsStr::new("--verify-c-truncate-zero");
     let verify_truncate_grow = first.as_os_str() == OsStr::new("--verify-c-truncate-grow");
     let verify_torn = first.as_os_str() == OsStr::new("--verify-c-torn");
     let verify_delete = first.as_os_str() == OsStr::new("--verify-c-delete");
     let verify_replace = first.as_os_str() == OsStr::new("--verify-c-replace");
     let verifies = verify_create
+        || verify_write
         || verify_truncate_zero
         || verify_truncate_grow
         || verify_rename
@@ -484,6 +601,8 @@ fn main() -> ExitCode {
     let result = if verifies {
         let mode = if verify_create {
             "create"
+        } else if verify_write {
+            "write"
         } else if verify_truncate_zero {
             "truncate-zero"
         } else if verify_truncate_grow {

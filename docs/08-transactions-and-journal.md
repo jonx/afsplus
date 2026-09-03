@@ -240,14 +240,17 @@ targets, object-ID progression and size transitions. A damaged tail is
 excluded at its exact slot and LBA.
 
 The independent ABI-1 C writer appends empty-file create, data-free truncate,
-delete, non-replacing rename and replacing rename records after a fresh
-semantic preflight. Create derives and returns the monotone object ID from the
-validated checkpoint-plus-log prefix; name collisions, missing parents and ID
-exhaustion fail before media I/O. Truncate supports sparse growth and aligned
-shrink in version 3; a same-size request is a zero-I/O success, while an
-unaligned shrink reports that a later COW tail rewrite is required. Each
-mutation performs one preallocated-block write and one flush, allocates no
-media and returns stable stage/LBA/sequence diagnostics. Delete and
+delete, non-replacing rename, replacing rename and one-complete-block COW
+write records after a fresh semantic preflight. Create derives and returns the
+monotone object ID from the validated checkpoint-plus-log prefix; name
+collisions, missing parents and ID exhaustion fail before media I/O. Truncate
+supports sparse growth and aligned shrink in version 3; a same-size request is
+a zero-I/O success, while an unaligned shrink reports that a later COW tail
+rewrite is required. Metadata-only mutations perform one preallocated-block
+write and one flush. COW write validates the committed allocation structures,
+excludes all logged data extents, preserves emergency headroom, then performs
+data-write/data-flush before record-write/record-flush. Every path returns
+stable stage/LBA/sequence diagnostics. Delete and
 replacement require the orphan-directory feature; truncate requires the data
 update feature. Write/flush failures are explicitly uncertain, and a full log
 requires checkpoint materialization by a fuller implementation.

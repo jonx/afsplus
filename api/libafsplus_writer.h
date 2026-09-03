@@ -5,9 +5,9 @@
 /*
  * Bounded mutation slice of the independent portable C path.
  *
- * These APIs append one regular-file namespace or data-free truncate
- * operation to the preallocated intent log and flush it. Final-link delete
- * and replacement require the ADR-066 orphan feature; replay moves the victim
+ * These APIs append one regular-file namespace, truncate or complete-block
+ * COW operation to the preallocated intent log. Final-link delete and
+ * replacement require the ADR-066 orphan feature; replay moves the victim
  * into bounded cleanup state.
  */
 
@@ -26,6 +26,7 @@
 #define AFSPW_CAP_RENAME_FILE_REPLACE (UINT64_C(1) << 2)
 #define AFSPW_CAP_CREATE_EMPTY_FILE (UINT64_C(1) << 3)
 #define AFSPW_CAP_TRUNCATE_FILE_DATA_FREE (UINT64_C(1) << 4)
+#define AFSPW_CAP_WRITE_FILE_BLOCK_COW (UINT64_C(1) << 5)
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,7 +39,12 @@ enum afspw_status {
     AFSPW_ERR_DURABILITY_UNCERTAIN = -103,
     AFSPW_ERR_WRITE_FEATURE = -104,
     AFSPW_ERR_OBJECT_ID_EXHAUSTED = -105,
-    AFSPW_ERR_TAIL_REWRITE_REQUIRED = -106
+    AFSPW_ERR_TAIL_REWRITE_REQUIRED = -106,
+    AFSPW_ERR_NO_SPACE = -107,
+    AFSPW_ERR_INVALID_WRITE_RANGE = -108,
+    AFSPW_ERR_NONZERO_TAIL = -109,
+    AFSPW_ERR_DATA_WRITE_UNCERTAIN = -110,
+    AFSPW_ERR_DATA_DURABILITY_UNCERTAIN = -111
 };
 
 enum afspw_stage {
@@ -53,7 +59,10 @@ enum afspw_stage {
     AFSPW_STAGE_FLUSH = 8,
     AFSPW_STAGE_COMPLETE = 9,
     AFSPW_STAGE_CREATE_LOOKUP = 10,
-    AFSPW_STAGE_FILE_STATE = 11
+    AFSPW_STAGE_FILE_STATE = 11,
+    AFSPW_STAGE_ALLOCATION = 12,
+    AFSPW_STAGE_DATA_WRITE = 13,
+    AFSPW_STAGE_DATA_FLUSH = 14
 };
 
 /*
@@ -120,6 +129,21 @@ struct afspw_truncate_result {
     uint32_t reserved;
 };
 
+struct afspw_write_result {
+    uint32_t abi_version;
+    uint32_t prior_records;
+    uint32_t sequence;
+    uint32_t log_slot;
+    uint64_t base_generation;
+    uint64_t log_block;
+    uint64_t data_block;
+    uint64_t logical_block;
+    uint64_t previous_size;
+    uint64_t new_size;
+    uint32_t data_blocks;
+    uint32_t reserved;
+};
+
 struct afspw_diagnostic {
     uint32_t abi_version;
     int32_t status;
@@ -163,6 +187,28 @@ int afspw_truncate_file(
     uint64_t object_id, uint64_t new_size,
     const struct afspr_timespec *timestamp,
     struct afspw_truncate_result *result, size_t result_size,
+    struct afspw_diagnostic *diagnostic, size_t diagnostic_size);
+
+/*
+ * Durably replace one complete logical file block with newly allocated COW
+ * data. The caller performs any read/modify/write assembly and supplies
+ * exactly one immutable filesystem block. new_size may preserve or grow the
+ * file, never shrink it; growth must end in this logical block. Bytes beyond
+ * a partial final EOF must be zero so a later extension cannot expose stale
+ * caller data.
+ *
+ * The data block must not overlap scratch. The function validates the
+ * committed allocation metadata and every active log reservation, preserves
+ * the runtime emergency free-space floor, writes and flushes the data, then
+ * writes and flushes one version-3 intent record. It never publishes a
+ * bitmap: replay claims the exact logged block before allocating metadata.
+ */
+int afspw_write_file_block_cow(
+    const struct afspw_block_ops *ops, const struct afspr_scratch *scratch,
+    uint64_t object_id, uint64_t logical_block, const void *block_data,
+    size_t block_data_size, uint64_t new_size,
+    const struct afspr_timespec *timestamp,
+    struct afspw_write_result *result, size_t result_size,
     struct afspw_diagnostic *diagnostic, size_t diagnostic_size);
 
 /*

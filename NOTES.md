@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Portable C allocates and logs its first COW data block](#2026-09-03--portable-c-allocates-and-logs-its-first-cow-data-block)
 - [2026-09-03 — Portable C emits its first version-3 data mutation](#2026-09-03--portable-c-emits-its-first-version-3-data-mutation)
 - [2026-09-03 — Portable C creates empty files without an allocator](#2026-09-03--portable-c-creates-empty-files-without-an-allocator)
 - [2026-09-03 — Portable C trades caller RAM for 7x fewer writer reads](#2026-09-03--portable-c-trades-caller-ram-for-7x-fewer-writer-reads)
@@ -43,6 +44,30 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Portable C allocates and logs its first COW data block
+
+The independent ABI-1 writer crossed the allocation boundary with
+`afspw_write_file_block_cow`. The API accepts one complete caller-assembled
+logical block, rejects shrinking ranges and nonzero data beyond a partial EOF,
+and keeps the 8 KiB no-heap contract. Its allocator decodes the fixed-key
+allocation root, selected region descriptor and bitmap pages independently of
+Rust, recross-checks all free counters, proves every existing log extent is
+base-checkpoint-free and skips those reservations before choosing a block.
+The same 8-to-64-block runtime emergency floor as the Rust writer protects
+recovery capacity.
+
+Durability is two-stage: write/flush the new data, then write/flush the
+version-3 record. Distinct statuses and stages identify data-write,
+data-flush, record-write and record-flush uncertainty. Torn data and torn
+record retries both recover through a fresh probe; Rust replay observes the
+exact 123-byte final-block replacement and the checker accepts the resulting
+allocation. The cached seven-record path needs 25 reads, the 8 KiB path 223,
+and either torn retry 50. A 512-block fixture reserves every ordinary-growth
+block in a prior record while retaining the 16-block emergency floor, and
+proves ENOSPC with zero writes; injected descriptor and bitmap failures report
+exact LBAs. Strict C, sanitizers, static analysis, CMake and m68k compilation
+retain a 768-byte maximum writer frame.
 
 ## 2026-09-03 — Portable C emits its first version-3 data mutation
 
