@@ -9,6 +9,13 @@ AFS+ stores hierarchy and component names.
 
 AROS stores namespace semantics.
 
+A symbolic-link target is the deliberate exception to the absence of stored
+paths: proposed ADR-068 stores its exact NUL-free UTF-8 text as the link's
+payload, but assigns no meaning to separators, prefixes or Assign syntax in
+the object codec. The path layer that follows the link supplies those
+semantics. Relative component targets form the portable interchange subset;
+OS-qualified targets still round-trip when they cannot resolve elsewhere.
+
 AFS+ never stores a full path like:
 
 ```text

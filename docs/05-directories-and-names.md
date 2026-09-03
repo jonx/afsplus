@@ -1,6 +1,6 @@
 # 05. Directories and Names
 
-> **ADRs:** none · **Spec:** none ·
+> **ADRs:** [ADR-068 proposed](../adr/ADR-068-portable-symlink-targets.md) · **Spec:** none ·
 > **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
 
 <!-- toc -->
@@ -84,8 +84,9 @@ changes the root directory from height 1 to 2, then removes it to force sibling
 merge and root collapse back to height 1. Every modeled crash image checks and
 recovers to exactly the complete pre- or post-transaction namespace.
 
-Opaque resumable directory cookies, atomic replacement, symlinks, and a
-formal orphan lifecycle remain later API/format work; they are not hidden
+Opaque resumable directory cookies and atomic replacement are implemented.
+ADR-068 proposes child-type hint 3 for an inline-target symbolic-link object;
+implementation remains the last open M03 namespace type. It is not hidden
 inside the completed Scale-1 directory-capacity gate.
 
 ## 3. UTF-8

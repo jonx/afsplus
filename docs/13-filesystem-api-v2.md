@@ -108,6 +108,13 @@ Required categories:
 - symlink
 - readlink
 
+ADR-068 proposes these as bounded `CreateSymlink(parent, name, target,
+metadata)` and `ReadLink(object, caller_buffer)` operations behind a
+`SYMLINKS` capability. Targets are exact NUL-free UTF-8 bytes; the object-ID
+VFS neither rewrites nor resolves them, and a short caller buffer receives the
+required size without hidden allocation. The proposal remains unimplemented
+until accepted.
+
 ### metadata
 
 - stat64

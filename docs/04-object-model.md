@@ -1,6 +1,7 @@
 # 04. Object Model
 
-> **ADRs:** [ADR-066](../adr/ADR-066-bounded-orphan-directory.md) · **Spec:** none ·
+> **ADRs:** [ADR-066](../adr/ADR-066-bounded-orphan-directory.md) ·
+> [ADR-068 proposed](../adr/ADR-068-portable-symlink-targets.md) · **Spec:** none ·
 > **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
 
 ## 1. Stable objects
@@ -96,3 +97,9 @@ cleanup. Final-link atomic-replace targets follow the same rule in the
 replacement checkpoint. The lower-level core still permits the legacy direct
 delete primitive for controlled tests and feature-absent volumes. Directory
 hard links remain intentionally unsupported.
+
+The proposed symlink representation keeps a NUL-free UTF-8 target inline
+after the fixed object-record fields, under the same whole-block checksum.
+The target has no allocation extents and is returned byte-for-byte; OS path
+layers, rather than the object codec, interpret its namespace syntax. This
+remains unimplemented until ADR-068 is accepted.
