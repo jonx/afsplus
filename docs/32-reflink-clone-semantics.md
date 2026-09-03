@@ -53,6 +53,15 @@ Only the modified logical range should require newly allocated storage when a sa
 
 This shared-range COW requirement is mandatory for reflink correctness even if the general policy for writes to **unshared** file data is later chosen to permit in-place overwrite. See [`docs/08-transactions-and-journal.md`](08-transactions-and-journal.md).
 
+The persistent per-file data-update policy
+([ADR-065](../adr/ADR-065-persistent-data-update-policy.md)) interacts with
+cloning as follows: the policy belongs to the object, so hard links share
+it; `CloneFile()` creates a new object and the destination starts at the
+full-COW creation default while the source keeps its opt-in; `CloneRange()`
+rewrites the destination's layout and the destination's own policy travels
+through that rewrite unchanged. In every case a shared physical range is
+COW regardless of policy.
+
 ## 5. CloneRange
 
 `CloneRange()` shares only the requested aligned or representable source range with a destination file.

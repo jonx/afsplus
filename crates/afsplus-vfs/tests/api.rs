@@ -341,12 +341,32 @@ fn persistent_data_policy_is_exposed_and_survives_remount() {
 
 #[test]
 fn data_policy_capability_is_absent_without_the_feature() {
-    let mut vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let base = {
+        let mut volume = mount(formatted()).unwrap();
+        volume.create_file_in_root("plain", b"old", ts(1)).unwrap();
+        volume.into_device()
+    };
+    let mut vfs = Vfs::mount(TraceBackend::new(base), MountOptions::default()).unwrap();
     assert!(!vfs.capabilities().contains(Capabilities::DATA_POLICY));
-    let object = vfs.create_file(OBJECT_ROOT, "plain", ts(1)).unwrap();
+    let object = vfs.lookup(OBJECT_ROOT, "plain").unwrap();
     let handle = vfs.open_file(object, AccessMode::ReadWrite).unwrap();
+
+    // Leave a durable intent record pending, then prove the refused call has
+    // zero side effects: it must not publish the data window into a
+    // checkpoint and clear the log behind the caller's back.
+    vfs.write(handle, 0, b"durable", ts(2)).unwrap();
+    vfs.fsync(handle).unwrap();
     assert!(matches!(
-        vfs.set_data_policy(handle, true, ts(2)),
+        vfs.set_data_policy(handle, true, ts(3)),
         Err(VfsError::NotSupported)
     ));
+
+    let traced = vfs.into_volume().into_device();
+    assert!(
+        traced
+            .events()
+            .iter()
+            .all(|event| !matches!(event, TraceEvent::Write { lba: 1 | 2 })),
+        "the unsupported policy request published the intent window"
+    );
 }

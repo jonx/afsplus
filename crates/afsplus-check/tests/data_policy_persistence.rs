@@ -248,3 +248,76 @@ fn in_place_write_after_a_crash_keeps_metadata_clean() {
         assert_eq!(&bytes[BS..], vec![0xAAu8; BS].as_slice());
     }
 }
+
+#[test]
+fn hard_links_share_the_object_policy() {
+    // The policy is per object, not per name: both links see the same choice.
+    let dev = formatted(true, false);
+    let mut vol = mount(dev).unwrap();
+    let id = vol
+        .create_file_in_root("first", &vec![0xC1u8; BS], ts(2))
+        .unwrap();
+    vol.link_file(id, OBJECT_ROOT, "second", ts(3)).unwrap();
+    vol.set_file_data_policy(id, DataUpdatePolicy::InPlacePrivate, ts(4))
+        .unwrap();
+    let via_link = vol.lookup_root("second").unwrap().unwrap();
+    assert_eq!(via_link, id, "hard links resolve to the same object");
+    assert_eq!(
+        vol.file_data_policy(via_link).unwrap(),
+        DataUpdatePolicy::InPlacePrivate
+    );
+}
+
+#[test]
+fn clone_file_destination_defaults_to_full_cow() {
+    // CloneFile creates a new object: the destination starts at the safe
+    // default while the source keeps its opt-in.
+    let dev = formatted(true, true);
+    let mut vol = mount(dev).unwrap();
+    let source = vol
+        .create_file_in_root("origin", &vec![0xC2u8; 2 * BS], ts(2))
+        .unwrap();
+    vol.set_file_data_policy(source, DataUpdatePolicy::InPlacePrivate, ts(3))
+        .unwrap();
+    let copy = vol.clone_file(source, OBJECT_ROOT, "copy", ts(4)).unwrap();
+    assert_eq!(
+        vol.file_data_policy(copy).unwrap(),
+        DataUpdatePolicy::FullCow,
+        "a clone starts at the creation default"
+    );
+    assert_eq!(
+        vol.file_data_policy(source).unwrap(),
+        DataUpdatePolicy::InPlacePrivate,
+        "cloning must not strip the source opt-in"
+    );
+}
+
+#[test]
+fn clone_range_retains_the_destination_policy() {
+    // CloneRange rewrites the destination layout; the destination's own
+    // persistent choice must travel through that rewrite.
+    let dev = formatted(true, true);
+    let mut vol = mount(dev).unwrap();
+    let source = vol
+        .create_file_in_root("donor", &vec![0xC3u8; 2 * BS], ts(2))
+        .unwrap();
+    let destination = vol
+        .create_file_in_root("target", &vec![0xC4u8; 2 * BS], ts(3))
+        .unwrap();
+    vol.set_file_data_policy(destination, DataUpdatePolicy::InPlacePrivate, ts(4))
+        .unwrap();
+    vol.clone_range(source, 0, destination, 0, BS as u64, ts(5))
+        .unwrap();
+    assert_eq!(
+        vol.file_data_policy(destination).unwrap(),
+        DataUpdatePolicy::InPlacePrivate,
+        "the destination keeps its persistent opt-in"
+    );
+    assert_eq!(
+        vol.file_data_policy(source).unwrap(),
+        DataUpdatePolicy::FullCow,
+        "the source is untouched"
+    );
+    let mut dev = vol.into_device();
+    assert!(check_device(&mut dev).is_clean());
+}

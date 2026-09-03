@@ -626,6 +626,12 @@ impl<D: BlockDevice> Vfs<D> {
         if !access.can_write() {
             return Err(VfsError::ReadOnly);
         }
+        // Gate on the feature BEFORE flushing the data window: a refused
+        // request must have zero side effects, so an unsupported call may not
+        // publish or clear pending durable intent records (review #62).
+        if self.volume.ident().features.compat & COMPAT_DATA_POLICY == 0 {
+            return Err(VfsError::NotSupported);
+        }
         self.checkpoint_data_window(now)?;
         let policy = if in_place {
             DataUpdatePolicy::InPlacePrivate
