@@ -179,10 +179,15 @@ data LBA. The replacement victim carries Rust's persistent private-in-place
 flag on a data-policy volume, while the primary fixture injects the same flag
 without its feature and requires object-decode failure.
 
-The same gate tests retained-checkpoint fallback and corrupt/ambiguous states,
-compiles the public example, and runs AddressSanitizer/UndefinedBehaviorSanitizer
-plus the compiler's static analyzer when supported. If the local AROS m68k
-compiler exists, it compiles the library for that target without linking host
+The same gate tests retained-checkpoint fallback and corrupt/ambiguous states.
+It independently sets the checkpoint header flags, header owner and payload
+flags on Rust-produced blocks, reseals their CRCs, and requires both fallback
+when one slot is invalid and complete selection failure when both slots are
+invalid. This pins the C reader to the Rust decoder's reserved-field contract
+instead of merely checking torn writes. The gate also compiles the public
+example and runs AddressSanitizer/UndefinedBehaviorSanitizer plus the
+compiler's static analyzer when supported. If the local AROS m68k compiler
+exists, it compiles the library for that target without linking host
 facilities. A separate test project consumes the CMake install, so a broken
 exported target cannot pass.
 

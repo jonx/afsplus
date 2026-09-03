@@ -270,6 +270,38 @@ fn checkpoint_roundtrip_and_uuid_binding() {
 }
 
 #[test]
+fn checkpoint_rejects_every_reserved_field() {
+    let checkpoint = sample_checkpoint();
+
+    for (flags, owner) in [(1, 0), (0, 1)] {
+        let mut block = checkpoint.encode(BS).unwrap();
+        BlockHeader {
+            block_type: block_type::CHECKPOINT,
+            flags,
+            owner,
+            generation: checkpoint.generation,
+            payload_len: 96,
+        }
+        .seal(&mut block);
+        assert!(matches!(
+            Checkpoint::decode(&block, &checkpoint.uuid),
+            Err(FormatError::Invalid(
+                "checkpoint header reserved fields are nonzero"
+            ))
+        ));
+    }
+
+    let mut payload_flags = checkpoint.clone();
+    payload_flags.flags = 1;
+    assert!(matches!(
+        Checkpoint::decode(&payload_flags.encode(BS).unwrap(), &checkpoint.uuid),
+        Err(FormatError::Invalid(
+            "checkpoint payload reserved flags are nonzero"
+        ))
+    ));
+}
+
+#[test]
 fn checkpoint_structural_validation() {
     let geo = Geometry {
         block_size: BS,

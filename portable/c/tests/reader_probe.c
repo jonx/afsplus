@@ -10,8 +10,11 @@
 #define TEST_BLOCK_SIZE 4096u
 #define TEST_PREFIX_BLOCKS 3u
 #define TEST_CHECKSUM_OFFSET 28u
+#define TEST_CHECKPOINT_HEADER_FLAGS_OFFSET 6u
+#define TEST_CHECKPOINT_HEADER_OWNER_OFFSET 8u
 #define TEST_IDENT_RO_COMPAT_OFFSET (32u + 145u)
 #define TEST_CHECKPOINT_OBJECT_MAP_OFFSET (32u + 32u)
+#define TEST_CHECKPOINT_PAYLOAD_FLAGS_OFFSET (32u + 80u)
 #define TEST_CHECKPOINT_SHARED_ROOT_OFFSET (32u + 88u)
 #define TEST_OBJECT_FLAGS_OFFSET (32u + 10u)
 
@@ -239,6 +242,7 @@ int main(int argc, char **argv)
     size_t bytes_read;
     unsigned selected;
     unsigned other;
+    size_t reserved_field;
     int status;
 
     require(argc == 3, "usage: reader_probe <image> <expected-file>");
@@ -622,6 +626,57 @@ int main(int argc, char **argv)
     require(fallback.selected_checkpoint == other &&
                 diagnostic.checkpoint_status[selected] == AFSPR_ERR_CORRUPT,
             "valid-checksum structural corruption was not localized");
+
+    {
+        const size_t reserved_offsets[] = {
+            TEST_CHECKPOINT_HEADER_FLAGS_OFFSET,
+            TEST_CHECKPOINT_HEADER_OWNER_OFFSET,
+            TEST_CHECKPOINT_PAYLOAD_FLAGS_OFFSET,
+        };
+
+        for (reserved_field = 0u;
+             reserved_field <
+             sizeof(reserved_offsets) / sizeof(reserved_offsets[0]);
+             ++reserved_field) {
+            size_t offset = reserved_offsets[reserved_field];
+            uint8_t *newest;
+            uint8_t *retained;
+
+            mutated = pristine;
+            newest = mutated.blocks +
+                     (size_t)(selected + 1u) * TEST_BLOCK_SIZE;
+            retained = mutated.blocks +
+                       (size_t)(other + 1u) * TEST_BLOCK_SIZE;
+            require(newest[offset] == 0u && retained[offset] == 0u,
+                    "Rust fixture did not zero a checkpoint reserved field");
+
+            newest[offset] = 1u;
+            reseal(newest);
+            status = probe_detailed(&memory_ops, scratch, sizeof(scratch),
+                                    &fallback, &diagnostic);
+            require(status == AFSPR_OK &&
+                        fallback.selected_checkpoint == other &&
+                        fallback.valid_checkpoint_mask ==
+                            (uint8_t)(1u << other) &&
+                        diagnostic.checkpoint_status[selected] ==
+                            AFSPR_ERR_CORRUPT &&
+                        diagnostic.checkpoint_status[other] == AFSPR_OK,
+                    "reserved checkpoint field did not trigger fallback");
+
+            retained[offset] = 1u;
+            reseal(retained);
+            status = probe_detailed(&memory_ops, scratch, sizeof(scratch),
+                                    &fallback, &diagnostic);
+            require(status == AFSPR_ERR_NO_CHECKPOINT &&
+                        diagnostic.stage ==
+                            AFSPR_STAGE_CHECKPOINT_SELECTION &&
+                        diagnostic.checkpoint_status[0] ==
+                            AFSPR_ERR_CORRUPT &&
+                        diagnostic.checkpoint_status[1] ==
+                            AFSPR_ERR_CORRUPT,
+                    "two reserved-field checkpoints remained selectable");
+        }
+    }
 
     mutated = pristine;
     put_le64(mutated.blocks + TEST_IDENT_RO_COMPAT_OFFSET, 0u);

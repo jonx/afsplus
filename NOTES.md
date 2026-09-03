@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Checkpoint selection regains Rust/C parity](#2026-09-03--checkpoint-selection-regains-rustc-parity)
 - [2026-09-03 — Prototype commands become integration-grade tools](#2026-09-03--prototype-commands-become-integration-grade-tools)
 - [2026-09-03 — Rust codec failures gain stable case identities](#2026-09-03--rust-codec-failures-gain-stable-case-identities)
 - [2026-09-03 — Checker corruption becomes a replayable corpus](#2026-09-03--checker-corruption-becomes-a-replayable-corpus)
@@ -33,6 +34,20 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Checkpoint selection regains Rust/C parity
+
+The checker corruption corpus made Rust reject three reserved checkpoint
+fields, but the independent C reader still accepted them when the block carried
+a matching CRC. That divergence let Rust and C select different retained
+generations from the same forged or future-format image.
+
+The portable decoder adopted the same zero requirements for common-header
+flags, common-header owner and payload flags. Its Rust-produced fixture mutates
+each field independently, reseals the block, and tests both safe fallback and
+the two-invalid-slot failure. A focused Rust codec regression pins the other
+side of the contract so either implementation changing alone becomes visible
+at its normal developer gate.
 
 ## 2026-09-03 — Prototype commands become integration-grade tools
 

@@ -703,7 +703,8 @@ static int afspr_decode_checkpoint(const uint8_t *block, size_t block_size,
     if (status != AFSPR_OK) {
         return status;
     }
-    if (header.payload_len != AFSPR_CHECKPOINT_PAYLOAD) {
+    if (header.flags != 0u || header.owner != 0u ||
+        header.payload_len != AFSPR_CHECKPOINT_PAYLOAD) {
         return AFSPR_ERR_CORRUPT;
     }
     p = block + AFSPR_HEADER_SIZE;
@@ -724,7 +725,8 @@ static int afspr_decode_checkpoint(const uint8_t *block, size_t block_size,
     checkpoint->committed_tx_id = afspr_get_le64(p + 64);
     checkpoint->free_blocks_total = afspr_get_le64(p + 72);
     checkpoint->shared_extent_root_block = afspr_get_le64(p + 88);
-    if (!afspr_is_allocatable(ident, checkpoint->object_map_block) ||
+    if (afspr_get_le64(p + 80) != 0u ||
+        !afspr_is_allocatable(ident, checkpoint->object_map_block) ||
         !afspr_is_allocatable(ident, checkpoint->allocation_root_block) ||
         !afspr_is_allocatable(ident, checkpoint->reclaim_root_block) ||
         (checkpoint->shared_extent_root_block != 0u &&

@@ -77,15 +77,17 @@ make portable-c-gate
 
 The executable corrupts the newest checkpoint and requires fallback to the
 retained older generation, then repeats that check with a valid checksum over
-an invalid root LBA so validation cannot stop at the CRC. It corrupts both
-slots and requires failure, duplicates a generation across both slots and
-requires ambiguity failure, rejects a bad identification checksum, and rejects
-an undersized scratch buffer. A feature/root mismatch in the selected newest
-checkpoint must fail instead of being hidden by fallback. Structured
-diagnostics must identify the failing stage, block and per-slot status. The
-gate also runs AddressSanitizer and UndefinedBehaviorSanitizer when supported,
-compiles the public example through CMake, and compiles the freestanding reader
-for AROS m68k when that toolchain is available.
+an invalid root LBA so validation cannot stop at the CRC. Valid-CRC mutations
+of checkpoint header flags, header owner and payload flags each require the
+same fallback; placing the same mutation in both slots requires failure with
+both per-slot statuses marked corrupt. It also duplicates a generation across
+both slots and requires ambiguity failure, rejects a bad identification
+checksum, and rejects an undersized scratch buffer. A feature/root mismatch in
+the selected newest checkpoint must fail instead of being hidden by fallback.
+Structured diagnostics must identify the failing stage, block and per-slot
+status. The gate also runs AddressSanitizer and UndefinedBehaviorSanitizer when
+supported, compiles the public example through CMake, and compiles the
+freestanding reader for AROS m68k when that toolchain is available.
 
 The same Rust-built fixture contains more than 300 files so both the object map
 and root directory require internal nodes. C walks the directory by ordinal,
