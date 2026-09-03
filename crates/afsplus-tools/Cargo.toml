@@ -1,0 +1,15 @@
+[package]
+name = "afsplus-tools"
+description = "Official AFS+ formatter and read-only inspection tools."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+afsplus-block = { path = "../afsplus-block" }
+afsplus-core = { path = "../afsplus-core" }
+afsplus-format = { path = "../afsplus-format" }
+
+[lints]
+workspace = true

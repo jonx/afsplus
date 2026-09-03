@@ -9,7 +9,7 @@ The qualification scripts themselves are listed in
 | Test plan | Qualifies | Gate | Feeds |
 |---|---|---|---|
 | [test-strategy.md](test-strategy.md) | The test pyramid: unit, property, portable-core, image, crash, fuzz, black-box handler, interoperability, application | `cargo test --workspace --all-features` | every milestone |
-| [conformance.md](conformance.md) | Versioned reference images decode to their expected output | `cargo test -p afsplus-check --test basic --test hardening --test mount_modes` plus the dedicated corruption corpus | M00, M02, M05, M12 |
+| [conformance.md](conformance.md) | Versioned reference images and official CLI output decode to their expected result | `cargo test -p afsplus-tools --all-features`; checker reader tests and dedicated corruption corpus | M00, M02, M05, M12 |
 | [corruption-corpus.md](corruption-corpus.md) | Integrity and valid-CRC semantic damage on every implemented wire surface is rejected or bounded at an intentional log-tail warning | `cargo test -p afsplus-check --test corruption_corpus`; replay artifacts from `afsplus-corruption-corpus` | M05 |
 | [crash-testing.md](crash-testing.md) | Every transaction boundary recovers to an allowed state under the modeled power-cut and fault model | `cargo test -p afsplus-check --test crash_matrix --test alloc_crash --test faults --test reclaim --test batch --test intent_log` | M03, M04 |
 | [intent-log-write-truncate-qualification.md](intent-log-write-truncate-qualification.md) | Existing-file records preserve old/new atomicity, monotone prefixes, shared owners and restartable recovery | `cargo test -p afsplus-check --test intent_log --test shared_crash`; optimized workloads in `fsync_workloads` | M04, M14 |

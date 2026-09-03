@@ -43,8 +43,8 @@ while [ "$fixture_index" -lt 300 ]; do
 done
 
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
-    -p afsplus-core --bin afsplus-mkfs -- \
-    --size-mib 16 --label PortableFuzz "$image"
+    -p afsplus-tools --bin mkafsplus -- \
+    --profile classic-rw --size-mib 16 --label PortableFuzz "$image"
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-core --bin afsplus-populate -- "$image" "$source_tree"
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \

@@ -142,8 +142,9 @@ echo "[aros-package] build the target-side S1 bootstrap pivot"
 build_target_program native/aros/tests/s1_pivot.c AFSPlusS1Pivot
 
 echo "[aros-package] create and verify the 64 MiB image"
-cargo run --quiet --release -p afsplus-core --bin afsplus-mkfs -- \
-    --size-mib 64 --label AFSPlusAlpha0 --case-insensitive "$staging/Unit19"
+cargo run --quiet --release -p afsplus-tools --bin mkafsplus -- \
+    --profile workstation --size-mib 64 --label AFSPlusAlpha0 \
+    --case-insensitive "$staging/Unit19"
 cargo run --quiet --release -p afsplus-check --bin afsplus-check -- \
     "$staging/Unit19" --json >"$staging/check-before.json"
 

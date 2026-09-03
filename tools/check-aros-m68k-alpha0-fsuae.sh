@@ -301,8 +301,9 @@ run_guest() {
 
 echo "[m68k-alpha0] run clean operation matrix"
 alpha_image="$work/Unit19.alpha0"
-cargo run --quiet --release -p afsplus-core --bin afsplus-mkfs -- \
-    --size-mib 64 --label AFSPlusAlpha0 --case-insensitive "$alpha_image"
+cargo run --quiet --release -p afsplus-tools --bin mkafsplus -- \
+    --profile workstation --size-mib 64 --label AFSPlusAlpha0 \
+    --case-insensitive "$alpha_image"
 run_guest alpha0 "$repo_root/native/aros/tests/m68k-alpha0-sequence" \
     "$alpha_image" "$serial_port_base"
 alpha_case="$result/cases/alpha0"

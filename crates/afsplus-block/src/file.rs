@@ -33,6 +33,28 @@ impl FileBackend {
         })
     }
 
+    /// Creates a new image without following or replacing an existing path.
+    ///
+    /// Formatters use this for a staged inode: retaining the returned open
+    /// file through the final flush avoids a close/reopen race in a writable
+    /// output directory.
+    pub fn create_new(
+        path: &Path,
+        block_size: usize,
+        total_blocks: u64,
+    ) -> Result<Self, BlockError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        Ok(FileBackend {
+            file,
+            block_size,
+            total_blocks,
+        })
+    }
+
     /// Opens an existing image read/write with an explicit geometry.
     ///
     /// The declared `total_blocks` may exceed the current file length: the
@@ -62,6 +84,16 @@ impl FileBackend {
 
     pub fn set_total_blocks(&mut self, total_blocks: u64) {
         self.total_blocks = total_blocks;
+    }
+
+    /// Persists the logical container length and all file metadata/content.
+    ///
+    /// Sparse writes need not reach the declared final LBA. A portable image
+    /// container nevertheless publishes its complete logical device size.
+    pub fn persist_len(&mut self, length: u64) -> Result<(), BlockError> {
+        self.file.set_len(length)?;
+        self.file.sync_all()?;
+        Ok(())
     }
 }
 

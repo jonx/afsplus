@@ -107,8 +107,8 @@ fi
 )
 
 cd "$repo_root"
-cargo run --quiet --release -p afsplus-core --bin afsplus-mkfs -- \
-    --size-mib "$image_size_mib" --label "$image_label" \
+cargo run --quiet --release -p afsplus-tools --bin mkafsplus -- \
+    --profile workstation --size-mib "$image_size_mib" --label "$image_label" \
     --case-insensitive "$result/Unit19.s1"
 cargo run --quiet --release -p afsplus-core --bin afsplus-populate -- \
     "$result/Unit19.s1" "$source_tree"

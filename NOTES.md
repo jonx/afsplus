@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Prototype commands become integration-grade tools](#2026-09-03--prototype-commands-become-integration-grade-tools)
 - [2026-09-03 — Rust codec failures gain stable case identities](#2026-09-03--rust-codec-failures-gain-stable-case-identities)
 - [2026-09-03 — Checker corruption becomes a replayable corpus](#2026-09-03--checker-corruption-becomes-a-replayable-corpus)
 - [2026-09-03 — Portable C overlays the durable namespace](#2026-09-03--portable-c-overlays-the-durable-namespace)
@@ -32,6 +33,26 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Prototype commands become integration-grade tools
+
+The formatter moved from a convenience binary to the official `mkafsplus`
+contract. It gained named compatibility profiles, reproducible UUID/timestamp
+inputs, stable JSON and diagnostics, and same-directory staging so a failed
+format never exposes a partial destination. This also uncovered an old
+geometry wart: arbitrary MiB sizes inherited the total block count as their
+region size and therefore failed whenever that count was not a power of two.
+The official formatter uses the fixed maximum region geometry and accepts
+ordinary image sizes.
+
+`afsplus-info` and `afsplus-dump` deliberately split cheap recognition from
+forensic depth. Info reads only identification and both checkpoint slots;
+dump walks the full committed object/directory/extent/allocation/reclaim/shared
+state and the durable log prefix. Both use a real OS read-only descriptor plus
+fail-closed mutation methods. Black-box tests run all three installed command
+names, pin the schema and exit contracts, distinguish corrupt media from host
+I/O, and repeat both inspectors against a populated mode-0444 image while
+proving its bytes and permissions unchanged.
 
 ## 2026-09-03 — Rust codec failures gain stable case identities
 

@@ -1,5 +1,5 @@
-name = "workstation"
-description = "Default modern AROS profile."
+name = "full"
+description = "All standardized features supported by this implementation."
 
 allow_catalog = true
 allow_change_stream = true

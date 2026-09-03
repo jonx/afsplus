@@ -43,6 +43,14 @@ as such in the crate docs.
   does not run: link counts, orphaned objects, bitmap ⟺ reachability
   equality, quarantine invariants, and shadow verification of the retained
   older checkpoint (warnings). Human and versioned JSON output (ADR-025).
+- `afsplus-tools` — official `mkafsplus`, `afsplus-info` and `afsplus-dump`
+  host commands. The formatter stages and flushes a complete image before
+  publication; both inspectors use an OS read-only descriptor. Info performs
+  only the three structural header/checkpoint reads, while dump exhaustively
+  emits objects, directories, extents, allocation/block ownership,
+  reclaim/shared state and the durable intent prefix. Stable diagnostic IDs,
+  exit statuses and deterministic JSON schemas are specified in
+  [`tools-spec.md`](../tools/tools-spec.md).
 - `afsplus-vfs` — filesystem-neutral API-v2 subset with stable object IDs,
   handles, caller-buffer 64-bit I/O, bounded generation-checked directory
   pages, stat/statfs, namespace operations, explicit durability, capability
@@ -59,6 +67,9 @@ cargo test -p afsplus-check --test measurements -- --nocapture   # cost table
 cargo run -p afsplus-core --example mkimage -- demo.img
 cargo run -p afsplus-core --bin afsplus-populate -- demo.img ./payload
 cargo run -p afsplus-check --bin afsplus-check -- demo.img --json
+cargo run -p afsplus-tools --bin mkafsplus -- --profile workstation demo.img
+cargo run -p afsplus-tools --bin afsplus-info -- --json demo.img
+cargo run -p afsplus-tools --bin afsplus-dump -- --json demo.img
 ```
 
 ## Status versus the plan

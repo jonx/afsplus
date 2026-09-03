@@ -32,6 +32,27 @@ Required image families:
 
 Every image ships with a JSON expectation file.
 
+## Official tool round trip
+
+The official formatter and inspectors have an executable host-side contract:
+
+```sh
+cargo test -p afsplus-tools --all-features
+```
+
+Black-box tests invoke the installed command names rather than private parsing
+functions. Fixed UUID and timestamp inputs make formatter JSON exact and
+repeatable. All five compatibility profiles must format and cross-read. A
+populated image verifies deterministic object, directory and extent output.
+After the image is changed to host mode `0444`, repeated info and dump runs
+must leave every byte and the permission mode unchanged. Corrupt media exits
+1 with a surface-specific diagnostic ID; bad invocation and missing host files
+exit 2. Help exits 0.
+
+This gate proves the CLI and schema contract. The Rust/C cross-reader fixtures
+below separately prove that the formatter's bytes are portable rather than a
+Rust-only interpretation.
+
 ## Checker corruption corpus
 
 The [dedicated corruption corpus](corruption-corpus.md) generates twelve

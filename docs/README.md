@@ -105,6 +105,7 @@ consumer ([09 Feature Framework](09-feature-framework.md)).
 | [boot-safe.toml](../profiles/boot-safe.toml) | Features a bootloader can depend on |
 | [classic-rw.toml](../profiles/classic-rw.toml) | Read/write on constrained classic systems |
 | [workstation.toml](../profiles/workstation.toml) | Full modern feature set |
+| [full.toml](../profiles/full.toml) | Every standardized feature supported by the implementation |
 
 ## Examples
 

@@ -223,6 +223,18 @@ make portable-c-gate  # C99 cross-reads checkpoint and durable-log file views
 make portable-c-fuzz-gate # reproducible sanitizer mutations of C reader paths
 ```
 
+The official host tools format and inspect an image without requiring a mount:
+
+```sh
+cargo run -p afsplus-tools --bin mkafsplus -- --profile workstation demo.img
+cargo run -p afsplus-tools --bin afsplus-info -- --json demo.img
+cargo run -p afsplus-tools --bin afsplus-dump -- --json demo.img
+```
+
+The two inspectors open the image read-only. Their deterministic JSON, exit
+statuses and stable diagnostic identifiers are defined in
+[tools/tools-spec.md](tools/tools-spec.md).
+
 The host mount CLI is built with:
 
 ```sh
