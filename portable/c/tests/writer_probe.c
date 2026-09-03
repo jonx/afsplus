@@ -15,10 +15,13 @@
 
 struct file_device {
     FILE *file;
+    const char *trace_label;
     uint64_t blocks;
     uint32_t reads;
     uint32_t writes;
     uint32_t flushes;
+    uint32_t fail_read_number;
+    uint32_t read_failures;
     int fail_write;
     int torn_write;
     int fail_flush;
@@ -45,7 +48,19 @@ static int read_blocks(void *opaque, uint64_t first, uint32_t count,
         first > UINT64_MAX / BLOCK_SIZE) {
         return -1;
     }
+    if (device->writes == 0u && getenv("AFSPLUS_TRACE_WRITER_READS") != NULL) {
+        fprintf(stderr,
+                "writer-preflight-read mode=%s lba=%llu blocks=%u\n",
+                device->trace_label, (unsigned long long)first,
+                (unsigned int)count);
+    }
     device->reads += count;
+    if (device->fail_read_number != 0u &&
+        device->reads == device->fail_read_number) {
+        device->fail_read_number = 0u;
+        ++device->read_failures;
+        return -1;
+    }
     offset = first * BLOCK_SIZE;
     bytes = (size_t)count * BLOCK_SIZE;
     if (offset > (uint64_t)LONG_MAX ||
@@ -130,7 +145,7 @@ int main(int argc, char **argv)
     struct afspw_rename_result result;
     struct afspw_diagnostic writer_diagnostic;
     struct afspr_timespec timestamp;
-    uint8_t workspace[AFSPW_SCRATCH_SIZE];
+    uint8_t workspace[AFSPW_RECOMMENDED_SCRATCH_SIZE];
     long length;
     const char *mode;
     const char *target = "C-Written.BIN";
@@ -140,13 +155,17 @@ int main(int argc, char **argv)
     int status;
 
     require(argc == 2 || argc == 3,
-            "usage: writer_probe IMAGE [success|delete|replace|torn-only|torn-retry|flush-fail|destination-exists]");
+            "usage: writer_probe IMAGE "
+            "[success|low-memory|read-fail-retry|delete|replace|torn-only|"
+            "torn-retry|flush-fail|destination-exists]");
     mode = argc == 3 ? argv[2] : "success";
     if (strcmp(mode, "destination-exists") == 0) {
         target = "Replace.TXT";
         target_len = 11u;
     } else {
         require(strcmp(mode, "success") == 0 ||
+                    strcmp(mode, "low-memory") == 0 ||
+                    strcmp(mode, "read-fail-retry") == 0 ||
                     strcmp(mode, "delete") == 0 ||
                     strcmp(mode, "replace") == 0 ||
                     strcmp(mode, "torn-only") == 0 ||
@@ -155,6 +174,7 @@ int main(int argc, char **argv)
                 "unknown mode");
     }
     memset(&device, 0, sizeof(device));
+    device.trace_label = mode;
     device.file = fopen(argv[1], "r+b");
     require(device.file != NULL, "open image");
     require(fseek(device.file, 0L, SEEK_END) == 0, "seek image end");
@@ -173,7 +193,9 @@ int main(int argc, char **argv)
     writer_ops.block_count = device.blocks;
     writer_ops.block_size = BLOCK_SIZE;
     scratch.buffer = workspace;
-    scratch.size = sizeof(workspace);
+    scratch.size = strcmp(mode, "low-memory") == 0
+                       ? AFSPW_SCRATCH_SIZE
+                       : sizeof(workspace);
     memset(&timestamp, 0, sizeof(timestamp));
     timestamp.seconds = 10;
 
@@ -186,6 +208,8 @@ int main(int argc, char **argv)
     device.torn_write = strcmp(mode, "torn-only") == 0 ||
                         strcmp(mode, "torn-retry") == 0;
     device.fail_flush = strcmp(mode, "flush-fail") == 0;
+    device.fail_read_number =
+        strcmp(mode, "read-fail-retry") == 0 ? 4u : 0u;
     if (strcmp(mode, "delete") == 0) {
         status = afspw_delete_file(
             &writer_ops, &scratch, UINT64_C(1), "Final.BIN", 9u,
@@ -205,12 +229,26 @@ int main(int argc, char **argv)
     if (strcmp(mode, "destination-exists") == 0) {
         require(status == AFSPW_ERR_DESTINATION_EXISTS &&
                     writer_diagnostic.stage == AFSPW_STAGE_TARGET_LOOKUP &&
-                    device.writes == 0u && device.flushes == 0u,
+                    device.reads <= 21u && device.writes == 0u &&
+                    device.flushes == 0u,
                 "existing destination refused before I/O");
         require(fclose(device.file) == 0, "close destination image");
         printf("portable-c-writer destination-exists=PASS reads=%u writes=0 flushes=0\n",
                device.reads);
         return 0;
+    }
+    if (strcmp(mode, "read-fail-retry") == 0) {
+        require(status == AFSPR_ERR_IO &&
+                    writer_diagnostic.stage == AFSPW_STAGE_INTENT_SCAN &&
+                    writer_diagnostic.reader_status == AFSPR_ERR_IO &&
+                    writer_diagnostic.block == UINT64_C(16) &&
+                    device.read_failures == 1u && device.writes == 0u &&
+                    device.flushes == 0u,
+                "read failure reports exact stage and leaves media untouched");
+        status = afspw_rename_file_no_replace(
+            &writer_ops, &scratch, UINT64_C(1), "Final.BIN", 9u,
+            UINT64_C(1), target, target_len, &timestamp, &result,
+            sizeof(result), &writer_diagnostic, sizeof(writer_diagnostic));
     }
     if (strcmp(mode, "torn-only") == 0 ||
         strcmp(mode, "torn-retry") == 0) {
@@ -219,6 +257,8 @@ int main(int argc, char **argv)
                     device.writes == 1u && device.flushes == 0u,
                 "torn write reported uncertain");
         if (strcmp(mode, "torn-only") == 0) {
+            require(device.reads <= 21u,
+                    "cached torn preflight read ceiling");
             require(fclose(device.file) == 0, "close torn image");
             printf("portable-c-writer torn-only=PASS reads=%u writes=1 flushes=0\n",
                    device.reads);
@@ -252,6 +292,19 @@ int main(int argc, char **argv)
     require(device.writes == expected_writes && device.flushes == 1u,
             "bounded write and flush counts");
     mutation_reads = device.reads;
+    if (strcmp(mode, "low-memory") == 0) {
+        require(mutation_reads <= 152u,
+                "8 KiB fallback preflight read ceiling");
+    } else if (strcmp(mode, "torn-retry") == 0) {
+        require(mutation_reads <= 42u,
+                "two cached preflights read ceiling");
+    } else if (strcmp(mode, "read-fail-retry") == 0) {
+        require(mutation_reads <= 25u,
+                "failed-read plus cached retry read ceiling");
+    } else {
+        require(mutation_reads <= 21u,
+                "cached preflight read ceiling");
+    }
 
     memset(&reader_ops, 0, sizeof(reader_ops));
     reader_ops.abi_version = AFSPR_ABI_VERSION;
@@ -306,7 +359,8 @@ int main(int argc, char **argv)
             "full log refuses without I/O");
 
     require(fclose(device.file) == 0, "close image");
-    printf("portable-c-writer mode=%s result=PASS prior=7 sequence=8 reads=%u writes=%u flushes=%u scratch=8192\n",
-           mode, mutation_reads, device.writes, device.flushes);
+    printf("portable-c-writer mode=%s result=PASS prior=7 sequence=8 reads=%u writes=%u flushes=%u scratch=%zu\n",
+           mode, mutation_reads, device.writes, device.flushes,
+           scratch.size);
     return 0;
 }

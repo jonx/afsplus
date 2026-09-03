@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Portable C trades caller RAM for 7x fewer writer reads](#2026-09-03--portable-c-trades-caller-ram-for-7x-fewer-writer-reads)
 - [2026-09-03 — Intent replay makes final namespace removal bounded](#2026-09-03--intent-replay-makes-final-namespace-removal-bounded)
 - [2026-09-03 — Portable C performs its first durable mutation](#2026-09-03--portable-c-performs-its-first-durable-mutation)
 - [2026-09-03 — Q3 allocation architecture accepted](#2026-09-03--q3-allocation-architecture-accepted)
@@ -41,6 +42,30 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+## 2026-09-03 — Portable C trades caller RAM for 7x fewer writer reads
+
+The bounded C writer used only 8 KiB, but its deliberately stateless semantic
+preflight reread the same log and metadata blocks many times. On the fixed
+seven-record qualification image that cost 142–152 logical reads before one
+log write. A call-local LRU now uses only complete extra blocks supplied after
+the mandatory workspace. It owns no memory, retains no media pointer and is
+discarded on every return; the exclusive-writer and uncertain-I/O contracts
+are unchanged.
+
+The 8 KiB path remains a first-class, cross-replayed low-memory configuration.
+The recommended size is 56 KiB: the original two-block workspace plus twelve
+cache entries. That profile needs 21 reads for rename, delete or replacement,
+and 42 across a torn-write retry's two full preflights, while preserving the
+single write and flush. The executable gate fixes all three numbers as upper
+bounds, compiles the same implementation for m68k and validates both memory
+profiles through Rust recovery and the checker. Its main m68k writer frame is
+760 bytes in the current toolchain and carries a 1 KiB regression ceiling.
+This is a memory/performance choice for adapters, not a second disk format or
+ABI. A transient first-log
+read failure additionally proves exact stage/LBA reporting, zero media writes
+and a clean fresh retry; the probe can print every preflight LBA under an
+environment switch for adapter diagnostics.
+
 ## 2026-09-03 — Intent replay makes final namespace removal bounded
 
 Durable-log replay no longer retires the complete layout of a final delete or
@@ -66,7 +91,8 @@ flushes once. The cross-language gate observes the namespace in C, replays it
 in Rust, verifies one or two expected persistent orphans and runs the exhaustive
 checker. The seven-record fixture measured 142 reads for delete, 148 for
 replacement and 152 for non-replacing rename, all with 8 KiB caller scratch;
-reducing those uncached reads remains a classic-hardware optimization target.
+the call-local cache described above subsequently addressed that
+classic-hardware optimization target without removing the 8 KiB path.
 
 ## 2026-09-03 — Portable C performs its first durable mutation
 

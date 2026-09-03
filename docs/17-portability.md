@@ -112,4 +112,7 @@ and flushes it. Rust replays and checks every variant. These calls need no
 allocator or checkpoint writer and remain bounded by log and tree paths;
 write and flush failures are explicitly uncertain. Delete/replacement require
 the orphan-directory feature, and final victims enter bounded cleanup during
-replay rather than being retired in proportion to their fragmentation.
+replay rather than being retired in proportion to their fragmentation. The
+same ABI keeps an 8 KiB minimum workspace and opportunistically uses extra
+caller scratch as a bounded call-local read cache; the recommended 56 KiB
+profile cuts the seven-record writer preflight ceiling from 152 reads to 21.

@@ -17,6 +17,9 @@
 
 #define AFSPW_ABI_VERSION 1u
 #define AFSPW_SCRATCH_SIZE AFSPR_INTENT_SCRATCH_SIZE
+#define AFSPW_MAX_CACHED_BLOCKS 16u
+#define AFSPW_RECOMMENDED_SCRATCH_SIZE                                    \
+    (AFSPW_SCRATCH_SIZE + 12u * AFSPR_MIN_SCRATCH_SIZE)
 #define AFSPW_CAP_RENAME_FILE_NO_REPLACE (UINT64_C(1) << 0)
 #define AFSPW_CAP_DELETE_FILE (UINT64_C(1) << 1)
 #define AFSPW_CAP_RENAME_FILE_REPLACE (UINT64_C(1) << 2)
@@ -64,6 +67,15 @@ struct afspw_block_ops {
     uint64_t block_count;
     uint32_t block_size;
 };
+
+/*
+ * AFSPW_SCRATCH_SIZE is the hard minimum and keeps the low-memory path at
+ * 8 KiB. Every additional complete 4 KiB block becomes one read-cache entry
+ * for the duration of a writer call, up to AFSPW_MAX_CACHED_BLOCKS. The
+ * recommended size supplies twelve entries, enough to retain the hot metadata
+ * and log working set in the qualification fixture. Cache contents never
+ * survive a call.
+ */
 
 /*
  * The result records durable-log coordinates and is shared by all namespace

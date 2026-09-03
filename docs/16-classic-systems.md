@@ -41,7 +41,10 @@ Optional workstation features may be absent.
 The independent C path has a bounded namespace-writer slice: regular-file
 delete and rename, with or without replacement, append to the preallocated
 intent log with one block write and one flush. It owns no memory and uses an
-8 KiB caller workspace. Delete/replacement require ADR-066; recovery moves a
+8 KiB minimum caller workspace. Callers with more RAM may provide the 56 KiB
+recommended workspace; its call-local twelve-block cache reduces the qualified
+seven-record preflight ceiling from 152 reads to 21 without changing results
+or persistent state. Delete/replacement require ADR-066; recovery moves a
 final victim into restartable orphan cleanup without walking its extents.
 This does not yet make the C implementation a complete `classic-rw`
 filesystem: checkpoint materialization, allocation, file creation/data

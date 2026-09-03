@@ -23,6 +23,15 @@ enum afspw_namespace_kind {
     AFSPW_NAMESPACE_RENAME_REPLACE = 3
 };
 
+struct afspw_reader_context {
+    const struct afspw_block_ops *ops;
+    uint8_t *cache;
+    uint64_t cache_lbas[AFSPW_MAX_CACHED_BLOCKS];
+    uint64_t cache_ages[AFSPW_MAX_CACHED_BLOCKS];
+    uint64_t cache_clock;
+    uint32_t cache_blocks;
+};
+
 static void afspw_put_le16(uint8_t *p, uint16_t value)
 {
     p[0] = (uint8_t)value;
@@ -105,10 +114,45 @@ static int afspw_reader_failure(struct afspw_diagnostic *diagnostic,
 static int afspw_read_adapter(void *context, uint64_t first_block,
                               uint32_t count, void *destination)
 {
-    const struct afspw_block_ops *ops =
-        (const struct afspw_block_ops *)context;
+    struct afspw_reader_context *reader =
+        (struct afspw_reader_context *)context;
+    uint32_t entry;
 
-    return ops->read_blocks(ops->ctx, first_block, count, destination);
+    if (count == 1u) {
+        for (entry = 0u; entry < reader->cache_blocks; ++entry) {
+            if (reader->cache_lbas[entry] == first_block) {
+                memcpy(destination,
+                       reader->cache +
+                           (size_t)entry * reader->ops->block_size,
+                       reader->ops->block_size);
+                reader->cache_ages[entry] = ++reader->cache_clock;
+                return 0;
+            }
+        }
+    }
+    if (reader->ops->read_blocks(reader->ops->ctx, first_block, count,
+                                 destination) != 0) {
+        return -1;
+    }
+    if (count == 1u && reader->cache_blocks != 0u) {
+        uint32_t victim = 0u;
+
+        for (entry = 0u; entry < reader->cache_blocks; ++entry) {
+            if (reader->cache_lbas[entry] == UINT64_MAX) {
+                victim = entry;
+                break;
+            }
+            if (reader->cache_ages[entry] < reader->cache_ages[victim]) {
+                victim = entry;
+            }
+        }
+        memcpy(reader->cache +
+                   (size_t)victim * reader->ops->block_size,
+               destination, reader->ops->block_size);
+        reader->cache_lbas[victim] = first_block;
+        reader->cache_ages[victim] = ++reader->cache_clock;
+    }
+    return 0;
 }
 
 static int afspw_encode_namespace(
@@ -178,6 +222,7 @@ static int afspw_append_namespace(
     struct afspw_diagnostic *diagnostic, size_t diagnostic_size)
 {
     struct afspr_block_ops reader_ops;
+    struct afspw_reader_context reader_context;
     struct afspr_probe_result volume;
     struct afspr_diagnostic reader_diagnostic;
     struct afspr_intent_view view;
@@ -230,9 +275,26 @@ static int afspw_append_namespace(
     result->abi_version = AFSPW_ABI_VERSION;
 
     memset(&reader_ops, 0, sizeof(reader_ops));
+    memset(&reader_context, 0, sizeof(reader_context));
+    reader_context.ops = ops;
+    reader_context.cache =
+        (uint8_t *)scratch->buffer + AFSPW_SCRATCH_SIZE;
+    {
+        size_t available_blocks =
+            (scratch->size - AFSPW_SCRATCH_SIZE) / ops->block_size;
+        uint32_t entry;
+
+        if (available_blocks > AFSPW_MAX_CACHED_BLOCKS) {
+            available_blocks = AFSPW_MAX_CACHED_BLOCKS;
+        }
+        reader_context.cache_blocks = (uint32_t)available_blocks;
+        for (entry = 0u; entry < reader_context.cache_blocks; ++entry) {
+            reader_context.cache_lbas[entry] = UINT64_MAX;
+        }
+    }
     reader_ops.abi_version = AFSPR_ABI_VERSION;
     reader_ops.struct_size = (uint32_t)sizeof(reader_ops);
-    reader_ops.ctx = (void *)ops;
+    reader_ops.ctx = &reader_context;
     reader_ops.read_blocks = afspw_read_adapter;
     reader_ops.block_count = ops->block_count;
     reader_ops.block_size = ops->block_size;

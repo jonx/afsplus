@@ -10,6 +10,8 @@ trap 'rm -R -- "$work"' EXIT HUP INT TERM
 image="$work/portable-c.afsp"
 intent_image="$work/portable-c-intent.afsp"
 writer_image="$work/portable-c-writer.afsp"
+writer_low_memory_image="$work/portable-c-writer-low-memory.afsp"
+writer_read_fail_image="$work/portable-c-writer-read-fail.afsp"
 writer_torn_image="$work/portable-c-writer-torn.afsp"
 writer_torn_only_image="$work/portable-c-writer-torn-only.afsp"
 writer_flush_image="$work/portable-c-writer-flush.afsp"
@@ -48,6 +50,8 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
     "$intent_image" "$intent_expected" "$intent_created_expected"
 cp "$intent_image" "$writer_image"
+cp "$intent_image" "$writer_low_memory_image"
+cp "$intent_image" "$writer_read_fail_image"
 cp "$intent_image" "$writer_torn_image"
 cp "$intent_image" "$writer_torn_only_image"
 cp "$intent_image" "$writer_flush_image"
@@ -77,6 +81,8 @@ cp "$intent_image" "$sanitized_writer_image"
     "$repo/portable/c/reader.c" "$repo/portable/c/writer.c" \
     "$repo/portable/c/tests/writer_probe.c" -o "$writer_probe"
 "$writer_probe" "$writer_image"
+"$writer_probe" "$writer_low_memory_image" low-memory
+"$writer_probe" "$writer_read_fail_image" read-fail-retry
 "$writer_probe" "$writer_torn_image" torn-retry
 "$writer_probe" "$writer_torn_only_image" torn-only
 "$writer_probe" "$writer_flush_image" flush-fail
@@ -86,6 +92,14 @@ cp "$intent_image" "$sanitized_writer_image"
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
     --verify-c-rename "$writer_image" "$intent_expected" \
+    "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-rename "$writer_low_memory_image" "$intent_expected" \
+    "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-rename "$writer_read_fail_image" "$intent_expected" \
     "$intent_created_expected"
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
@@ -179,10 +193,14 @@ if [ -x "$m68k_compiler" ]; then
     "$m68k_compiler" -std=c99 -Wall -Wextra -Werror \
         -I"$repo/api" -I"$repo/spec" \
         -c "$repo/portable/c/reader.c" -o "$work/reader-m68k.o"
-    "$m68k_compiler" -std=c99 -Wall -Wextra -Werror \
+    "$m68k_compiler" -std=c99 -Wall -Wextra -Werror -fstack-usage \
         -I"$repo/api" -I"$repo/spec" \
         -c "$repo/portable/c/writer.c" -o "$work/writer-m68k.o"
-    echo "portable-c-reader m68k-compile=PASS"
+    writer_stack=$(awk -F '\t' \
+        '$1 ~ /afspw_append_namespace$/ { print $2; found = 1 } \
+         END { if (!found) exit 1 }' "$work/writer-m68k.su")
+    test "$writer_stack" -le 1024
+    echo "portable-c-reader m68k-compile=PASS writer-frame=$writer_stack ceiling=1024"
 else
     echo "portable-c-reader m68k-compile=SKIP compiler-not-found"
 fi
@@ -212,6 +230,10 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$intent_image" >/dev/null
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_low_memory_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_read_fail_image" >/dev/null
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_torn_image" >/dev/null
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \

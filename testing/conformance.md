@@ -32,6 +32,16 @@ Required image families:
 
 Every image ships with a JSON expectation file.
 
+<!-- toc -->
+
+- [Official tool round trip](#official-tool-round-trip)
+- [Checker corruption corpus](#checker-corruption-corpus)
+- [Portable C bootstrap gate](#portable-c-bootstrap-gate)
+- [Portable C writer gate](#portable-c-writer-gate)
+- [Portable C fuzz mutation gate](#portable-c-fuzz-mutation-gate)
+
+<!-- /toc -->
+
 ## Official tool round trip
 
 The official formatter and inspectors have an executable host-side contract:
@@ -126,8 +136,15 @@ a fresh scan. A failed flush returns durability-uncertain without claiming
 success. An existing target and a full log return before media I/O. Delete and
 replacement are emitted only when the volume carries ADR-066's orphan feature.
 The writer is included in strict C99, ASan/UBSan, static-analysis, CMake
-install/consumer and configured m68k compile gates. This qualifies three
-bounded namespace operations, not allocation or a complete classic-rw profile.
+install/consumer and configured m68k compile gates. The 8 KiB minimum-memory
+path and the recommended 56 KiB call-local-cache path are both replayed by
+Rust. On the fixed seven-record fixture their preflight ceilings are 152 and
+21 reads respectively; a torn-write retry is at most 42 cached reads across
+both attempts. The configured m68k compiler must keep the main writer frame at
+or below 1 KiB. A failed first log read must identify the intent-scan stage
+and exact LBA, perform no write or flush, and succeed on a fresh 25-read
+retry. This qualifies three bounded namespace operations, not allocation or a
+complete classic-rw profile.
 
 ## Portable C fuzz mutation gate
 

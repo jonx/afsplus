@@ -170,8 +170,12 @@ slice. Each freshly probes the volume, rescans and semantically validates the
 durable namespace, proves the regular-file operands and writes one version-2
 record into the next preallocated intent slot, then invokes exactly one flush.
 They allocate no disk block and publish no checkpoint. The caller supplies
-read/write/flush callbacks, 8 KiB scratch, exclusive writer serialization and
-immutable name buffers.
+read/write/flush callbacks, exclusive writer serialization and immutable name
+buffers. The hard minimum remains 8 KiB. Extra complete 4 KiB blocks in the
+same scratch area become a call-local read cache, up to sixteen entries;
+`AFSPW_RECOMMENDED_SCRATCH_SIZE` supplies twelve entries (56 KiB total).
+Nothing is retained after the function returns, so retry and uncertain-I/O
+rules do not depend on cache invalidation.
 
 A torn record is the invalid tail and the same slot can be retried after a
 fresh probe. Write or flush callback failure returns an explicitly uncertain
@@ -224,10 +228,19 @@ write is retried into the same slot; a flush failure reports durability
 uncertainty; an existing destination and a full log produce zero media writes.
 Strict warnings, ASan/UBSan, Clang static analysis, CMake export consumption
 and the configured m68k compiler include both reader and writer. At the
-seven-record prefix, rename/replace/delete preflight makes 152/148/142 uncached
-logical-block reads respectively with 8 KiB scratch. These are bounded
-structural counts, not device-latency claims; adapter caching of the fixed log
-area and a single-pass prefix validator remain explicit pre-A500 optimization.
+seven-record prefix, the 8 KiB fallback makes at most 152 logical-block reads.
+The recommended twelve-entry cache makes at most 21 for rename, replace and
+delete, while the torn-write retry makes at most 42 across both complete
+preflights. The test fixes these as non-regression ceilings and cross-replays
+both memory profiles in Rust. The configured m68k compiler must also keep the
+writer's main frame at or below 1 KiB (760 bytes currently). The read counts
+are structural, not device-latency claims; a single-pass prefix validator
+remains a possible later optimization.
+The matrix also injects an I/O failure on the first log read, requires the
+exact writer stage and LBA with zero writes, then retries successfully in 25
+total reads. For a block-by-block preflight trace while diagnosing an adapter,
+run `AFSPLUS_TRACE_WRITER_READS=1 make portable-c-gate`; the test harness emits
+the mode, LBA and block count without changing library behavior.
 
 The same gate tests retained-checkpoint fallback and corrupt/ambiguous states.
 It independently sets the checkpoint header flags, header owner and payload
