@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Q3 qualification exposes the missing emergency reserve](#2026-09-03--q3-qualification-exposes-the-missing-emergency-reserve)
 - [2026-09-03 — Checkpoint selection regains Rust/C parity](#2026-09-03--checkpoint-selection-regains-rustc-parity)
 - [2026-09-03 — Prototype commands become integration-grade tools](#2026-09-03--prototype-commands-become-integration-grade-tools)
 - [2026-09-03 — Rust codec failures gain stable case identities](#2026-09-03--rust-codec-failures-gain-stable-case-identities)
@@ -34,6 +35,35 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Q3 qualification exposes the missing emergency reserve
+
+The first combined near-full allocation qualification found a liveness gap
+before the prototype encoding could be proposed for freeze. A successful
+preallocation could consume the last raw free blocks and leave the volume
+checker-clean but unable to allocate the metadata needed by unlink. On the
+512-block single-region fixture, unlink allocated four blocks after one
+quarantine promotion and failed with two raw free blocks; on the 145-region
+fixture it allocated five blocks, wrote two reclaim structures and failed
+with three raw free blocks. The observed thresholds are measurements, not a
+safe reserve definition.
+
+The same suite pinned the good side of the boundary: a failed ENOSPC attempt
+issued zero writes and zero barriers, a near-full unlink survived every
+modeled power cut as exactly the old or new generation, and bounded reclaim
+restored space. One maximum-size 1-GiB region reserved 262,075 blocks in 4.7
+ms in the recorded optimized memory-backend run, with 31 reads, 16 writes,
+two barriers, nine bitmap pages, one descriptor, one allocation-root
+record/node and 32 KiB of
+allocator bitmap payload. A 145-region transaction crossed the allocation
+root leaf boundary while staying below 64 KiB.
+
+This made the dependency on open-unlinked/orphan cleanup explicit. Unlinking
+a highly fragmented file cannot reserve metadata proportional to the whole
+file on a classic volume; namespace removal needs a bounded orphan step, then
+restartable reclamation. Q3 therefore stays open while that M03 machinery and
+the already-specified free-versus-available headroom contract are implemented
+and requalified.
 
 ## 2026-09-03 — Checkpoint selection regains Rust/C parity
 
