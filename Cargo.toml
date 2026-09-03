@@ -11,6 +11,7 @@ members = [
     "crates/afsplus-fuse",
     "crates/afsplus-macfuse-sys",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.1"

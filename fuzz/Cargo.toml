@@ -1,0 +1,15 @@
+[package]
+name = "afsplus-format-fuzz"
+description = "Deterministic, replayable fuzz targets for AFS+ wire codecs."
+version = "0.0.1"
+edition = "2021"
+license = "BSD-2-Clause"
+publish = false
+
+[workspace]
+
+[dependencies]
+afsplus-format = { path = "../crates/afsplus-format" }
+
+[lints.rust]
+unsafe_code = "forbid"

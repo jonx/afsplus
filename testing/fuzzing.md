@@ -1,7 +1,7 @@
 # Fuzzing
 
 > **ADRs:** none · **Spec:** none ·
-> **Tests:** [`check-portable-c-fuzz.sh`](../tools/check-portable-c-fuzz.sh) · **Milestones:** M01
+> **Tests:** [`check-portable-c-fuzz.sh`](../tools/check-portable-c-fuzz.sh), [`check-rust-codec-fuzz.sh`](../tools/check-rust-codec-fuzz.sh) · **Milestones:** M01
 
 ## Required properties
 
@@ -20,17 +20,44 @@ replayable without the original workstation.
 
 ## Target matrix
 
-| Wire surface | Portable C path corpus | Remaining work |
-|---|---|---|
-| Identification and retained checkpoints | Probe seed, header/block mutations | Add frozen reserved-field decisions |
-| Object record and object-map node | Root lookup plus multi-leaf paths | Add every object type and optional root |
-| Directory node | First/last ordinal in a 303-entry tree | Add complete Unicode comparison-key tables |
-| Extent node and file data | Directory-to-file read seed; direct/sparse synthetic coverage remains in conformance | Add committed tree-backed file seed |
-| Allocation-region metadata | None | Add with portable repair walker |
-| Intent-log record and referenced data | Rust-built v3 write/truncate/create prefix scan plus final namespace lookup | Add multi-operation record seeds |
-| Xattr record | None | Add when the portable reader exposes xattrs |
-| Catalog record | None | Add with catalog implementation |
-| Change-stream record | None | Add with change-stream implementation |
+| Wire surface | Rust codec target | Portable C path corpus | Remaining work |
+|---|---|---|---|
+| Identification and retained checkpoints | Canonical encode/decode seeds plus raw and resealed mutations | Probe seed, header/block mutations | Add frozen reserved-field decisions |
+| Object record and object-map node | File-object and generic tree-node targets | Root lookup plus multi-leaf paths | Add every object type and optional root |
+| Directory node | Generic tree-node structural target | First/last ordinal in a 303-entry tree | Add complete Unicode comparison-key tables |
+| Extent node and file data | Generic tree-node structural target | Directory-to-file read seed; direct/sparse synthetic coverage remains in conformance | Add committed tree-backed file seed |
+| Allocation-region metadata | None | None | Add with portable repair walker |
+| Intent-log record and referenced data | One v3 seed containing all five operation types | Rust-built v3 write/truncate/create prefix scan plus final namespace lookup | Add multi-record sequence target |
+| Xattr record | None | None | Add when the portable reader exposes xattrs |
+| Catalog record | None | None | Add with catalog implementation |
+| Change-stream record | None | None | Add with change-stream implementation |
+
+## Rust codec gate
+
+`make rust-codec-fuzz-gate` exercises identification, checkpoint, typed-tree,
+object-record and intent-log decoders. Each canonical seed must decode,
+re-encode and decode to byte-stable canonical form. The mandatory engine then
+runs 4,096 stable cases per target using checksum-breaking bit flips,
+CRC-resealed payload changes, short inputs, bounded multi-byte overwrites and
+bounded extensions. Rejected inputs are normal; an accepted input must retain
+the canonical round-trip property, and every decoder call is guarded so a
+panic names the exact target and case.
+
+The standalone crate has no network dependency and is excluded from the main
+workspace so constrained builders need not compile qualification tooling.
+Its lockfile and seed-schema version keep case identities stable. On failure,
+the gate writes the last target/case before execution and stores the exact
+input as a bounded `.afrf` artifact. Reproduce it with:
+
+```sh
+cargo run --manifest-path fuzz/Cargo.toml -- --replay failure.afrf
+```
+
+Confirmed regressions belong in `fuzz/regressions/`; every committed artifact
+is replayed by the gate. `AFSPLUS_RUST_FUZZ_RUNS` raises the deterministic
+per-target bound without changing any earlier case. A failure is preserved at
+`build/rust-codec-fuzz-failure.afrf` by default; set
+`AFSPLUS_RUST_FUZZ_ARTIFACT` to choose another durable path.
 
 ## Portable C corpus contract
 

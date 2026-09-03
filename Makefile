@@ -5,11 +5,11 @@
 
 PYTHON ?= python3
 
-.PHONY: check check-docs toc adr-index rust-gate portable-c-gate \
-	portable-c-fuzz-gate portable-c-fuzz-long
+.PHONY: check check-docs toc adr-index rust-gate rust-codec-fuzz-gate \
+	portable-c-gate portable-c-fuzz-gate portable-c-fuzz-long
 
 ## check: every repository gate (Rust quality gate + documentation)
-check: rust-gate portable-c-gate portable-c-fuzz-gate check-docs
+check: rust-gate rust-codec-fuzz-gate portable-c-gate portable-c-fuzz-gate check-docs
 
 ## check-docs: documentation contract (links, TOCs, indexes, references)
 check-docs:
@@ -24,6 +24,10 @@ rust-gate:
 	cargo fmt --all -- --check
 	cargo test --workspace --all-features
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+## rust-codec-fuzz-gate: deterministic format-codec mutations and artifact replay
+rust-codec-fuzz-gate:
+	tools/check-rust-codec-fuzz.sh
 
 ## portable-c-gate: compile the independent C99 reader and cross-read a Rust image
 portable-c-gate:

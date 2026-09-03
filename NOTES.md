@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Rust codec failures gain stable case identities](#2026-09-03--rust-codec-failures-gain-stable-case-identities)
 - [2026-09-03 — Checker corruption becomes a replayable corpus](#2026-09-03--checker-corruption-becomes-a-replayable-corpus)
 - [2026-09-03 — Portable C overlays the durable namespace](#2026-09-03--portable-c-overlays-the-durable-namespace)
 - [2026-09-03 — The per-file data policy becomes persistent](#2026-09-03--the-per-file-data-policy-becomes-persistent)
@@ -31,6 +32,26 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Rust codec failures gain stable case identities
+
+Five dependency-free fuzz targets began exercising the identification,
+checkpoint, typed-tree, object-record and intent-log codecs. Every seed must
+round-trip to one canonical block; the deterministic engine mixes raw CRC
+failures with resealed semantic mutations, short inputs, multi-byte changes
+and bounded extensions. The default gate runs 20,480 cases and records the
+target and case before each call.
+
+Before publication, the same engine also completed an extended run of 100,000
+cases per target (500,000 total) without a panic or canonical round-trip
+failure.
+
+The separate `.afrf` artifact format keeps the target, stable case number,
+seed-schema version and exact bytes needed for replay. This made failures
+portable across machines without requiring `cargo-fuzz` or a particular LLVM
+runtime, while leaving room for those engines to call the same pure decoder
+entry points later. Confirmed artifacts placed in `fuzz/regressions/` become
+permanent repository-gate inputs.
 
 ## 2026-09-03 — Checker corruption becomes a replayable corpus
 
