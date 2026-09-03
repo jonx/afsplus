@@ -79,3 +79,10 @@ a CMake target and a complete host-file example. Native targets replace only
 the logical-block callback. Intent-log replay, complete non-ASCII comparison-key
 validation and an independent repair walk remain later C capabilities, never
 implicit behavior of the bounded reader.
+
+The companion C fuzz harness records successful reads as compact sparse-device
+packets. Deterministic case numbers, artifact export and the standalone replay
+tool make sanitizer failures reproducible without retaining or sharing a full
+disk image. The same callback is directly consumable by libFuzzer-compatible
+engines; the repository gate does not depend on such a runtime being installed.
+See the [embedding and fuzzing guide](../portable/c/README.md#fuzzing-and-exact-reproduction).

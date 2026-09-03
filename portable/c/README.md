@@ -3,6 +3,16 @@
 The reader is a small C99 library for boot, recovery, classic and third-party
 integrations. It shares no executable code with the Rust implementation.
 
+<!-- toc -->
+
+- [Integration choices](#integration-choices)
+- [ABI and capability policy](#abi-and-capability-policy)
+- [Runtime contract](#runtime-contract)
+- [Validation](#validation)
+- [Fuzzing and exact reproduction](#fuzzing-and-exact-reproduction)
+
+<!-- /toc -->
+
 ## Integration choices
 
 For source vendoring, compile [`reader.c`](reader.c) and add
@@ -113,3 +123,44 @@ plus the compiler's static analyzer when supported. If the local AROS m68k
 compiler exists, it compiles the library for that target without linking host
 facilities. A separate test project consumes the CMake install, so a broken
 exported target cannot pass.
+
+## Fuzzing and exact reproduction
+
+Run the bounded mutation gate separately with:
+
+```sh
+make portable-c-fuzz-gate
+AFSPLUS_FUZZ_RUNS=250000 make portable-c-fuzz-long
+```
+
+The seed packer records only blocks actually read during a successful
+operation. Its `.afzf` packet carries the virtual device size, operation and
+arguments followed by `(LBA, 4096-byte block)` records. This keeps a complete
+probe, lookup, directory descent or file read between 12 and 48 KiB instead of
+copying a 16-MiB image. The packet reader treats absent blocks as I/O failures
+and never writes the source packet.
+
+The mandatory smoke engine makes every mutation a pure function of a seed and
+case number. It mutates every packet-header byte and the first 128 bytes of
+every observed block twice: once as a torn checksum and once with a recomputed
+CRC so structural decoders are reached. Later cases mix block-wide flips,
+overwrites, multi-byte changes and truncations, resealing alternate cases. If
+a sanitizer stops the process, the gate prints a progress file containing the
+seed and case. Recreate and preserve the exact input with:
+
+```sh
+build/afsplus-fuzz-smoke --case 1234 --artifact failure.afzf seed.afzf
+build/afsplus-fuzz-replay failure.afzf
+```
+
+The replay line includes each invoked operation's symbolic result plus the
+last diagnostic stage and LBA. This makes a small, immutable regression case
+that any developer can run. CMake can build `afsplus-fuzz-pack`,
+`afsplus-fuzz-replay` and
+`afsplus-fuzz-smoke` with `-DAFSPLUS_READER_BUILD_FUZZ_TOOLS=ON`.
+
+[`fuzz_target.c`](fuzz/fuzz_target.c) also exports the standard
+`LLVMFuzzerTestOneInput` entry point. When `-fsanitize=fuzzer` is available,
+the repository gate invokes it on the same corpus. Some Apple command-line
+tool installations omit the libFuzzer runtime; that is reported as a skip,
+while the deterministic ASan/UBSan engine remains mandatory.

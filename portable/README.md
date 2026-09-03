@@ -16,4 +16,10 @@ Run its Rust-to-C interoperability and corruption gate with:
 
 ```sh
 make portable-c-gate
+make portable-c-fuzz-gate
 ```
+
+The second command records the exact blocks touched by successful operations
+into compact `.afzf` seeds, then mutates and replays them under sanitizers.
+`make portable-c-fuzz-long` raises the deterministic run count for unattended
+qualification without requiring a platform fuzzing runtime.

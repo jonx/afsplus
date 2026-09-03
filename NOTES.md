@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Portable C failures become replayable artifacts](#2026-09-03--portable-c-failures-become-replayable-artifacts)
 - [2026-09-03 — The independent portable C reader starts executing](#2026-09-03--the-independent-portable-c-reader-starts-executing)
 - [2026-09-03 — FSKit durability moves to write replies](#2026-09-03--fskit-durability-moves-to-write-replies)
 - [2026-09-03 — Qualification order follows executable targets](#2026-09-03--qualification-order-follows-executable-targets)
@@ -26,6 +27,34 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Portable C failures become replayable artifacts
+
+The first portable-reader expansion substantially increased the amount of
+untrusted C parsing, so its next lot hardened that surface before adding more
+features. A host recorder now executes successful operations against a real
+Rust-built image and writes only the blocks that were actually observed. Five
+12–48-KiB packets retain checkpoint probing, object lookup, both extremes of a
+303-entry directory and a complete directory-to-file read without copying or
+carrying the complete disk image through every mutation.
+
+Each packet receives 4,096 stable mutations under AddressSanitizer and
+UndefinedBehaviorSanitizer in the ordinary repository gate. Every operation
+header byte and the first 128 bytes of each observed block are tested both
+with a broken checksum and with a recomputed CRC, so structural checks are not
+hidden behind the checksum gate. Block-wide deterministic flips, overwrites,
+multi-byte changes and truncations follow. The progress record is updated
+before execution, so a crash names a seed and case number; the same case can
+export an exact `.afzf` artifact and the replay tool reports symbolic operation
+results plus the terminal stage and LBA. This turns parser failures into small
+regression inputs an integrator can keep and exchange.
+
+The harness also exports the standard libFuzzer callback. The installed Apple
+command-line tools do not currently contain its link runtime, so that engine
+is opportunistic rather than a hidden local prerequisite; the deterministic
+sanitizer runner is the portable mandatory gate. The remaining M01 corpus is
+listed by wire surface instead of being represented as a generic “fuzzing
+open” checkbox.
 
 ## 2026-09-03 — The independent portable C reader starts executing
 

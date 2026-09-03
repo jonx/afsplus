@@ -68,3 +68,21 @@ decode phase.
 
 Intent-log replay, non-ASCII comparison-key conformance and exhaustive repair
 walking are separate expansion gates.
+
+## Portable C mutation gate
+
+The [fuzzing contract](fuzzing.md#portable-c-corpus-contract) extends the
+handwritten corruption matrix with compact recordings of successful Rust-to-C
+paths:
+
+```sh
+make portable-c-fuzz-gate
+```
+
+Five sparse-device packets cover probe, object lookup, both sides of the
+multi-leaf directory and a complete directory-to-file read. Each receives
+4,096 reproducible mutations under ASan/UBSan by default. A failure reports
+the seed and stable case number; the included artifact/replay tools reconstruct
+its exact bytes and print the terminal stage and LBA. Native libFuzzer consumes
+the same entry point and seeds when its runtime exists, but is not required for
+the deterministic gate.

@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.16)
 project(afsplus_portable_c VERSION 0.1.0 LANGUAGES C)
 
 option(AFSPLUS_READER_BUILD_EXAMPLE "Build the host-file probe example" ON)
+option(AFSPLUS_READER_BUILD_FUZZ_TOOLS "Build corpus and replay tools" OFF)
 
 add_library(afsplus_reader STATIC reader.c)
 add_library(AFSPlus::reader ALIAS afsplus_reader)
@@ -25,6 +26,30 @@ if(AFSPLUS_READER_BUILD_EXAMPLE)
     add_executable(afsplus-reader-probe examples/probe_file.c)
     target_link_libraries(afsplus-reader-probe PRIVATE AFSPlus::reader)
     set_target_properties(afsplus-reader-probe PROPERTIES C_EXTENSIONS OFF)
+endif()
+
+if(AFSPLUS_READER_BUILD_FUZZ_TOOLS)
+    add_library(afsplus_reader_fuzz_harness STATIC fuzz/harness.c)
+    target_link_libraries(afsplus_reader_fuzz_harness PUBLIC AFSPlus::reader)
+    target_include_directories(afsplus_reader_fuzz_harness
+        PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/fuzz")
+    set_target_properties(afsplus_reader_fuzz_harness PROPERTIES
+        C_EXTENSIONS OFF)
+
+    add_executable(afsplus-fuzz-pack fuzz/seed_pack.c)
+    target_link_libraries(afsplus-fuzz-pack
+        PRIVATE afsplus_reader_fuzz_harness)
+    set_target_properties(afsplus-fuzz-pack PROPERTIES C_EXTENSIONS OFF)
+
+    add_executable(afsplus-fuzz-replay fuzz/replay.c)
+    target_link_libraries(afsplus-fuzz-replay
+        PRIVATE afsplus_reader_fuzz_harness)
+    set_target_properties(afsplus-fuzz-replay PROPERTIES C_EXTENSIONS OFF)
+
+    add_executable(afsplus-fuzz-smoke fuzz/fuzz_target.c fuzz/smoke.c)
+    target_link_libraries(afsplus-fuzz-smoke
+        PRIVATE afsplus_reader_fuzz_harness)
+    set_target_properties(afsplus-fuzz-smoke PROPERTIES C_EXTENSIONS OFF)
 endif()
 
 include(GNUInstallDirs)

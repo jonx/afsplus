@@ -220,6 +220,7 @@ cargo build --workspace
 cargo test --workspace --all-features
 make check            # Rust/C gates, clippy and the documentation checker
 make portable-c-gate  # independent C99 reader cross-reads a Rust image
+make portable-c-fuzz-gate # reproducible sanitizer mutations of C reader paths
 ```
 
 The host mount CLI is built with:

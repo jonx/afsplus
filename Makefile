@@ -5,10 +5,11 @@
 
 PYTHON ?= python3
 
-.PHONY: check check-docs toc adr-index rust-gate portable-c-gate
+.PHONY: check check-docs toc adr-index rust-gate portable-c-gate \
+	portable-c-fuzz-gate portable-c-fuzz-long
 
 ## check: every repository gate (Rust quality gate + documentation)
-check: rust-gate portable-c-gate check-docs
+check: rust-gate portable-c-gate portable-c-fuzz-gate check-docs
 
 ## check-docs: documentation contract (links, TOCs, indexes, references)
 check-docs:
@@ -27,3 +28,12 @@ rust-gate:
 ## portable-c-gate: compile the independent C99 reader and cross-read a Rust image
 portable-c-gate:
 	tools/check-portable-c-reader.sh
+
+## portable-c-fuzz-gate: deterministic sanitizer mutations of compact C-reader seeds
+portable-c-fuzz-gate:
+	tools/check-portable-c-fuzz.sh
+
+## portable-c-fuzz-long: longer local mutation run (override AFSPLUS_FUZZ_RUNS)
+portable-c-fuzz-long:
+	AFSPLUS_FUZZ_RUNS=$${AFSPLUS_FUZZ_RUNS:-100000} \
+		tools/check-portable-c-fuzz.sh
