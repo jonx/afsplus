@@ -563,7 +563,8 @@ fn durable_shared_unlink_replay_is_crash_atomic_and_idempotent() {
     run_replay_matrix(&logged, &operations, pre_generation, |context, volume| {
         assert_eq!(volume.lookup_root("source").unwrap(), None, "{context}");
         assert_eq!(volume.read_file(survivor).unwrap(), content, "{context}");
-        assert!(shared_records(volume).is_empty(), "{context}");
+        assert!(volume.orphan_object(source).unwrap(), "{context}");
+        assert_eq!(shared_records(volume)[0].reference_count, 2, "{context}");
         assert!(
             !volume.quarantine_contains(shared_start).unwrap(),
             "{context}: replay of rc=2 -> rc=1 reclaimed survivor data"
@@ -614,10 +615,11 @@ fn durable_rename_replace_replay_preserves_the_shared_survivor() {
             "{context}"
         );
         assert_eq!(volume.lookup_root("incoming").unwrap(), None, "{context}");
-        assert!(volume.stat(target).unwrap().is_none(), "{context}");
+        assert!(volume.orphan_object(target).unwrap(), "{context}");
+        assert_eq!(volume.read_file(target).unwrap(), old_bytes, "{context}");
         assert_eq!(volume.read_file(incoming).unwrap(), new_bytes, "{context}");
         assert_eq!(volume.read_file(survivor).unwrap(), old_bytes, "{context}");
-        assert!(shared_records(volume).is_empty(), "{context}");
+        assert_eq!(shared_records(volume)[0].reference_count, 2, "{context}");
     });
 }
 

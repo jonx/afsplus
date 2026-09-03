@@ -113,19 +113,21 @@ exhaustive repair walking are separate expansion gates.
 
 ## Portable C writer gate
 
-The same gate compiles a separate ABI-1 writer and gives it a copy of the
-seven-record Rust fixture. `afspw_rename_file_no_replace` must append sequence
-8 using exactly one block write and one flush. The C reader observes the old
-name absent and new name present through the durable overlay; Rust then
-replays the C-produced record, verifies both surviving contents and runs the
-exhaustive checker.
+The same gate compiles a separate ABI-1 writer and gives it copies of the
+seven-record Rust fixture. `afspw_rename_file_no_replace`,
+`afspw_delete_file` and `afspw_rename_file_replace` must each append sequence
+8 using exactly one block write and one flush. The C reader observes each
+resulting durable namespace; Rust then replays the C-produced record, verifies
+visible contents, confirms final victims retain byte-exact orphan contents and
+runs the exhaustive checker.
 
 A 64-byte torn record returns write-uncertain and is safely overwritten after
 a fresh scan. A failed flush returns durability-uncertain without claiming
-success. An existing target and a full log return before media I/O. The writer
-is included in strict C99, ASan/UBSan, static-analysis, CMake install/consumer
-and configured m68k compile gates. This qualifies one bounded namespace
-operation, not allocation or a complete classic-rw profile.
+success. An existing target and a full log return before media I/O. Delete and
+replacement are emitted only when the volume carries ADR-066's orphan feature.
+The writer is included in strict C99, ASan/UBSan, static-analysis, CMake
+install/consumer and configured m68k compile gates. This qualifies three
+bounded namespace operations, not allocation or a complete classic-rw profile.
 
 ## Portable C fuzz mutation gate
 

@@ -105,10 +105,11 @@ disk image. The same callback is directly consumable by libFuzzer-compatible
 engines; the repository gate does not depend on such a runtime being installed.
 See the [embedding and fuzzing guide](../portable/c/README.md#fuzzing-and-exact-reproduction).
 
-The first independent write operation uses a separate ABI-1 writer surface.
-It validates the current checkpoint-plus-log view, appends one regular-file
-rename-without-replacement record to the next preallocated log slot and
-flushes it. Rust then replays and checks the result. The operation needs no
-allocator or checkpoint writer and remains bounded by the log and tree paths;
-write and flush failures are reported as durability-uncertain. Delete and
-replacement stay unavailable until their replay uses bounded orphan cleanup.
+The independent write path uses a separate ABI-1 writer surface. It validates
+the current checkpoint-plus-log view, then appends one regular-file delete or
+rename record (with optional replacement) to the next preallocated log slot
+and flushes it. Rust replays and checks every variant. These calls need no
+allocator or checkpoint writer and remain bounded by log and tree paths;
+write and flush failures are explicitly uncertain. Delete/replacement require
+the orphan-directory feature, and final victims enter bounded cleanup during
+replay rather than being retired in proportion to their fragmentation.

@@ -12,6 +12,7 @@ without treating a successful mount as proof of crash consistency.
 ```sh
 cargo test -p afsplus-vfs --test api
 cargo test -p afsplus-check --test orphans
+cargo test -p afsplus-check --test intent_replay_orphans
 make portable-c-gate
 ```
 
@@ -22,6 +23,14 @@ fallback when the feature is absent. It also fills a multi-node allocation
 geometry with a deep namespace and fragmented file, proves no-handle unlink
 uses bounded orphan state near ENOSPC, then drains it with a deliberately tiny
 general reclaim setting.
+
+The intent-replay matrix independently starts without object 2, logs final
+delete/replacement, and requires the replay checkpoint itself to create the
+hidden directory. A 33-extent victim near ENOSPC retains every data block while
+the replay retirement count stays below its extent count. Four durable records
+move 64 files into the newly staged tree in one checkpoint. Every modeled cut
+of a replacing replay converges to the new visible file plus the complete old
+file in orphan state.
 
 The checker matrix covers absent, empty and populated object-2 states. It
 forges valid-checksum semantic damage for a missing feature bit, noncanonical
@@ -36,7 +45,9 @@ modeled unflushed-tail subsets and representative torn writes for:
 - lazy object-2 creation and first orphan insertion;
 - a data update after unlink;
 - each tail cleanup and final object-removal checkpoint;
-- atomic replacement while the old target remains open.
+- atomic replacement while the old target remains open;
+- log replay that atomically creates object 2 and orphans a final delete or
+  replacement victim.
 
 Each recovered image must pass the exhaustive checker and match only the
 semantic states listed in [crash-testing.md](crash-testing.md). The test never
@@ -64,3 +75,6 @@ The C99 reader must report the `RO_COMPAT` feature, return `NOT_FOUND` for
 ordinary lookup of object 2, stay warning-free under strict/sanitized/static
 analysis builds and compile with the configured m68k compiler. Diagnostic dump
 output, unlike ordinary lookup, labels object 2 and reports its entry count.
+The C writer additionally requires this feature before emitting delete or
+replacing-rename records; its cross-language gate verifies one write, one
+flush, Rust replay, preserved victim bytes and a checker-clean result.

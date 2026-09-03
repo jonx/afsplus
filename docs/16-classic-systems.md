@@ -38,14 +38,14 @@ Adds:
 
 Optional workstation features may be absent.
 
-The independent C path now has its first bounded writable slice: a
-non-replacing regular-file rename appended to the preallocated intent log with
-one block write and one flush. It owns no memory and uses an 8 KiB caller
-workspace. This does not yet make the C implementation a complete
-`classic-rw` filesystem: checkpoint materialization, allocation, file data
-mutation and bounded delete/replacement remain open. In particular, delete is
-not exposed until intent replay routes final victims through ADR-066 rather
-than doing fragmentation-proportional retirement.
+The independent C path has a bounded namespace-writer slice: regular-file
+delete and rename, with or without replacement, append to the preallocated
+intent log with one block write and one flush. It owns no memory and uses an
+8 KiB caller workspace. Delete/replacement require ADR-066; recovery moves a
+final victim into restartable orphan cleanup without walking its extents.
+This does not yet make the C implementation a complete `classic-rw`
+filesystem: checkpoint materialization, allocation, file creation/data
+mutation and native maintenance scheduling remain open.
 
 ## 3. 64-bit arithmetic
 

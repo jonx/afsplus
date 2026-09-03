@@ -130,9 +130,9 @@ The executable cases prove:
 
 The gate covers the Rust core APIs and recovery path. A log record is bounded
 to one block and at most 16 physical extents per data operation.
-The VFS avoids the core's same-window delete/replace boundary by publishing the
-data window before any namespace or reflink transaction. The independent C
-writer therefore exposes only no-replace rename: delete/replacement wait until
-replay uses ADR-066's bounded orphan transition. Portable-C allocation/data
-emission, real-storage flush testing and final numeric wire allocation remain
-M14 work.
+The VFS may still publish a data window before immediate namespace/reflink
+transactions, but recovery now also handles a logged write followed by final
+delete/replacement: the final victim and its resulting layout enter ADR-066
+orphan state in the replay checkpoint. The independent C writer therefore
+exposes delete and both rename modes. Portable-C allocation/data emission,
+real-storage flush testing and final numeric wire allocation remain M14 work.

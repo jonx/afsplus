@@ -3,11 +3,11 @@
 #define LIBAFSPLUS_WRITER_H
 
 /*
- * First bounded media-mutating slice of the independent portable C path.
+ * Bounded namespace-mutating slice of the independent portable C path.
  *
- * This API appends one non-replacing regular-file rename to the preallocated
- * intent log and flushes it. It deliberately does not expose delete or
- * replacement until their replay uses ADR-066 bounded orphan cleanup.
+ * These APIs append one regular-file namespace operation to the preallocated
+ * intent log and flush it. Final-link delete and replacement require the
+ * ADR-066 orphan feature; replay moves the victim into bounded cleanup state.
  */
 
 #include "libafsplus_reader.h"
@@ -18,6 +18,8 @@
 #define AFSPW_ABI_VERSION 1u
 #define AFSPW_SCRATCH_SIZE AFSPR_INTENT_SCRATCH_SIZE
 #define AFSPW_CAP_RENAME_FILE_NO_REPLACE (UINT64_C(1) << 0)
+#define AFSPW_CAP_DELETE_FILE (UINT64_C(1) << 1)
+#define AFSPW_CAP_RENAME_FILE_REPLACE (UINT64_C(1) << 2)
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,6 +65,10 @@ struct afspw_block_ops {
     uint32_t block_size;
 };
 
+/*
+ * The result records durable-log coordinates and is shared by all namespace
+ * calls. Its historical tag is retained to keep ABI 1 source-compatible.
+ */
 struct afspw_rename_result {
     uint32_t abi_version;
     uint32_t prior_records;
@@ -97,6 +103,31 @@ uint64_t afspw_capabilities(void);
  * failures use AFSPW_ERR_* above. A successful return is AFSPR_OK.
  */
 int afspw_rename_file_no_replace(
+    const struct afspw_block_ops *ops, const struct afspr_scratch *scratch,
+    uint64_t source_parent_id, const void *source_name,
+    size_t source_name_len, uint64_t target_parent_id,
+    const void *target_name, size_t target_name_len,
+    const struct afspr_timespec *timestamp,
+    struct afspw_rename_result *result, size_t result_size,
+    struct afspw_diagnostic *diagnostic, size_t diagnostic_size);
+
+/*
+ * Durably remove one regular-file directory entry. A final link becomes a
+ * persistent orphan during Rust/reference replay and is reclaimed later in
+ * bounded steps; a non-final hard link is decremented normally.
+ */
+int afspw_delete_file(
+    const struct afspw_block_ops *ops, const struct afspr_scratch *scratch,
+    uint64_t parent_id, const void *name, size_t name_len,
+    const struct afspr_timespec *timestamp,
+    struct afspw_rename_result *result, size_t result_size,
+    struct afspw_diagnostic *diagnostic, size_t diagnostic_size);
+
+/*
+ * Durably rename one regular file, atomically replacing a regular-file target
+ * when present. A final replaced target enters bounded orphan cleanup state.
+ */
+int afspw_rename_file_replace(
     const struct afspw_block_ops *ops, const struct afspr_scratch *scratch,
     uint64_t source_parent_id, const void *source_name,
     size_t source_name_len, uint64_t target_parent_id,

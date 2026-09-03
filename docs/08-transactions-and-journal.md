@@ -207,6 +207,14 @@ physical extents and applies the final layout through the same COW transaction
 engine. Replaying a write against shared extents updates the volume-wide
 reference tree rather than overwriting shared storage.
 
+Replay preclaims every logged data extent before it allocates metadata. A
+final-link delete, or the victim of a replacing rename, is moved into the
+ADR-066 orphan directory in the same replay checkpoint; its record, extent
+tree and data are not retired there. If object 2 does not yet exist, its
+record, empty-root allocation and first entries are staged in that same COW
+overlay. No preparatory checkpoint may make the still-pending log stale.
+Cleanup remains a separate bounded and restartable maintenance operation.
+
 Version 3 requires the separate incompatible feature identity
 `org.aros.afsplus:intent-log-data-updates`. An older namespace-only
 implementation therefore rejects the volume before it can mistake an unknown
@@ -230,6 +238,13 @@ truncate data, including logged-only files, sparse growth and partial-block
 replacements. Semantic replay validation fails closed on invalid sources,
 targets, object-ID progression and size transitions. A damaged tail is
 excluded at its exact slot and LBA.
+
+The independent ABI-1 C writer appends delete, non-replacing rename and
+replacing rename records after the same fresh semantic preflight. Each call
+performs one preallocated-block write and one flush, allocates no media and
+returns stable stage/LBA/sequence diagnostics. Delete and replacement require
+the orphan-directory feature; write/flush failures are explicitly uncertain,
+and a full log requires checkpoint materialization by a fuller implementation.
 
 The record wire, mandatory log size, complete Unicode-table parity and
 real-device barrier validation are unfrozen M14 work; this does not constitute

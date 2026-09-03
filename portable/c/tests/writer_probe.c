@@ -140,13 +140,15 @@ int main(int argc, char **argv)
     int status;
 
     require(argc == 2 || argc == 3,
-            "usage: writer_probe IMAGE [success|torn-only|torn-retry|flush-fail|destination-exists]");
+            "usage: writer_probe IMAGE [success|delete|replace|torn-only|torn-retry|flush-fail|destination-exists]");
     mode = argc == 3 ? argv[2] : "success";
     if (strcmp(mode, "destination-exists") == 0) {
         target = "Replace.TXT";
         target_len = 11u;
     } else {
         require(strcmp(mode, "success") == 0 ||
+                    strcmp(mode, "delete") == 0 ||
+                    strcmp(mode, "replace") == 0 ||
                     strcmp(mode, "torn-only") == 0 ||
                     strcmp(mode, "torn-retry") == 0 ||
                     strcmp(mode, "flush-fail") == 0,
@@ -177,13 +179,29 @@ int main(int argc, char **argv)
 
     require((afspw_capabilities() & AFSPW_CAP_RENAME_FILE_NO_REPLACE) != 0u,
             "rename capability");
+    require((afspw_capabilities() & AFSPW_CAP_DELETE_FILE) != 0u,
+            "delete capability");
+    require((afspw_capabilities() & AFSPW_CAP_RENAME_FILE_REPLACE) != 0u,
+            "replace capability");
     device.torn_write = strcmp(mode, "torn-only") == 0 ||
                         strcmp(mode, "torn-retry") == 0;
     device.fail_flush = strcmp(mode, "flush-fail") == 0;
-    status = afspw_rename_file_no_replace(
-        &writer_ops, &scratch, UINT64_C(1), "Final.BIN", 9u, UINT64_C(1),
-        target, target_len, &timestamp, &result, sizeof(result),
-        &writer_diagnostic, sizeof(writer_diagnostic));
+    if (strcmp(mode, "delete") == 0) {
+        status = afspw_delete_file(
+            &writer_ops, &scratch, UINT64_C(1), "Final.BIN", 9u,
+            &timestamp, &result, sizeof(result), &writer_diagnostic,
+            sizeof(writer_diagnostic));
+    } else if (strcmp(mode, "replace") == 0) {
+        status = afspw_rename_file_replace(
+            &writer_ops, &scratch, UINT64_C(1), "Replace.TXT", 11u,
+            UINT64_C(1), "Final.BIN", 9u, &timestamp, &result,
+            sizeof(result), &writer_diagnostic, sizeof(writer_diagnostic));
+    } else {
+        status = afspw_rename_file_no_replace(
+            &writer_ops, &scratch, UINT64_C(1), "Final.BIN", 9u,
+            UINT64_C(1), target, target_len, &timestamp, &result,
+            sizeof(result), &writer_diagnostic, sizeof(writer_diagnostic));
+    }
     if (strcmp(mode, "destination-exists") == 0) {
         require(status == AFSPW_ERR_DESTINATION_EXISTS &&
                     writer_diagnostic.stage == AFSPW_STAGE_TARGET_LOOKUP &&
@@ -253,13 +271,30 @@ int main(int argc, char **argv)
                 view.last_sequence == 8u &&
                 view.tail_state == AFSPR_INTENT_TAIL_FULL,
             "C record is the complete durable tail");
-    require(lookup(&reader_ops, &scratch, &volume, &view, "Final.BIN",
-                   &entry) == AFSPR_ERR_NOT_FOUND,
-            "old name absent in durable view");
-    require(lookup(&reader_ops, &scratch, &volume, &view, "c-written.bin",
-                   &entry) == AFSPR_OK &&
-                entry.type_hint == AFSPR_OBJECT_FILE,
-            "new name visible in durable view");
+    if (strcmp(mode, "delete") == 0) {
+        require(lookup(&reader_ops, &scratch, &volume, &view, "Final.BIN",
+                       &entry) == AFSPR_ERR_NOT_FOUND,
+                "deleted name absent in durable view");
+        require(lookup(&reader_ops, &scratch, &volume, &view, "Replace.TXT",
+                       &entry) == AFSPR_OK,
+                "unrelated file remains after delete");
+    } else if (strcmp(mode, "replace") == 0) {
+        require(lookup(&reader_ops, &scratch, &volume, &view, "Replace.TXT",
+                       &entry) == AFSPR_ERR_NOT_FOUND,
+                "replacement source absent in durable view");
+        require(lookup(&reader_ops, &scratch, &volume, &view, "Final.BIN",
+                       &entry) == AFSPR_OK &&
+                    entry.type_hint == AFSPR_OBJECT_FILE,
+                "replacement target visible in durable view");
+    } else {
+        require(lookup(&reader_ops, &scratch, &volume, &view, "Final.BIN",
+                       &entry) == AFSPR_ERR_NOT_FOUND,
+                "old name absent in durable view");
+        require(lookup(&reader_ops, &scratch, &volume, &view,
+                       "c-written.bin", &entry) == AFSPR_OK &&
+                    entry.type_hint == AFSPR_OBJECT_FILE,
+                "new name visible in durable view");
+    }
 
     status = afspw_rename_file_no_replace(
         &writer_ops, &scratch, UINT64_C(1), "C-Written.BIN", 13u,

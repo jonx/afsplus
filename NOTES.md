@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Intent replay makes final namespace removal bounded](#2026-09-03--intent-replay-makes-final-namespace-removal-bounded)
 - [2026-09-03 — Portable C performs its first durable mutation](#2026-09-03--portable-c-performs-its-first-durable-mutation)
 - [2026-09-03 — Q3 allocation architecture accepted](#2026-09-03--q3-allocation-architecture-accepted)
 - [2026-09-03 — Emergency headroom makes ENOSPC recoverable](#2026-09-03--emergency-headroom-makes-enospc-recoverable)
@@ -40,6 +41,33 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+## 2026-09-03 — Intent replay makes final namespace removal bounded
+
+Durable-log replay no longer retires the complete layout of a final delete or
+replacement victim. It preclaims every logged data run before allocating
+metadata, then moves committed final victims into ADR-066 orphan state in the
+same replay checkpoint. If object 2 was never used, its record, empty tree root
+and first entries are created inside that transaction-local COW overlay; there
+is no preparatory checkpoint that could stale an unapplied log. A logged write
+or truncate followed by final removal publishes the final data layout under the
+orphan identity, while non-final hard-link removal still decrements normally.
+
+The focused gate replays a 33-extent victim with ordinary free space nearly
+exhausted and proves the replay retires fewer blocks than the victim has
+extents, writes no data and preserves every byte. Four durable records create
+64 orphans in one checkpoint, and every modeled write/flush/torn cut of a
+replacing replay converges to the new visible source plus the byte-exact old
+target in orphan state. Shared data remains referenced until bounded cleanup.
+
+With that invariant established, the ABI-1 C writer now exposes regular-file
+delete and replacing rename alongside non-replacing rename. Each operation
+performs a fresh semantic preflight, writes one preallocated log block and
+flushes once. The cross-language gate observes the namespace in C, replays it
+in Rust, verifies one or two expected persistent orphans and runs the exhaustive
+checker. The seven-record fixture measured 142 reads for delete, 148 for
+replacement and 152 for non-replacing rename, all with 8 KiB caller scratch;
+reducing those uncached reads remains a classic-hardware optimization target.
+
 ## 2026-09-03 — Portable C performs its first durable mutation
 
 The independent C99 path now appends a non-replacing regular-file rename to
@@ -52,14 +80,11 @@ same slot after a fresh scan, and never publishes a hybrid rename. Write and
 flush callback failures have separate explicitly uncertain results; full-log
 and existing-target cases perform zero media writes.
 
-The deliberately narrow surface avoids a correctness trap found during the
-audit: current intent replay can retire a delete or replacement victim
-directly, bypassing ADR-066's fragmentation-independent orphan transition.
-Those operations stay unavailable from C until replay is routed through the
-bounded lifecycle. The maximum-prefix test currently performs 152 uncached
-logical-block reads, one write and one flush with 8 KiB caller scratch. The
-read count is bounded but is now an explicit cache/algorithm optimization
-target before physical A500 performance qualification.
+The deliberately narrow initial surface exposed a correctness trap during its
+audit: replay could retire a delete or replacement victim directly. The next
+lot above closed that gap and expanded the same ABI. The original
+maximum-prefix measurement remains 152 uncached logical-block reads, one write
+and one flush with 8 KiB caller scratch.
 
 ## 2026-09-03 — Q3 allocation architecture accepted
 

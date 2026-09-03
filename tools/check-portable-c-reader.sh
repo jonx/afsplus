@@ -14,6 +14,8 @@ writer_torn_image="$work/portable-c-writer-torn.afsp"
 writer_torn_only_image="$work/portable-c-writer-torn-only.afsp"
 writer_flush_image="$work/portable-c-writer-flush.afsp"
 writer_exists_image="$work/portable-c-writer-exists.afsp"
+writer_delete_image="$work/portable-c-writer-delete.afsp"
+writer_replace_image="$work/portable-c-writer-replace.afsp"
 sanitized_writer_image="$work/portable-c-writer-sanitized.afsp"
 intent_expected="$work/intent-expected.bin"
 intent_created_expected="$work/intent-created-expected.bin"
@@ -50,6 +52,8 @@ cp "$intent_image" "$writer_torn_image"
 cp "$intent_image" "$writer_torn_only_image"
 cp "$intent_image" "$writer_flush_image"
 cp "$intent_image" "$writer_exists_image"
+cp "$intent_image" "$writer_delete_image"
+cp "$intent_image" "$writer_replace_image"
 cp "$intent_image" "$sanitized_writer_image"
 
 "$compiler" -std=c99 -pedantic -Wall -Wextra -Werror -Wconversion \
@@ -77,6 +81,8 @@ cp "$intent_image" "$sanitized_writer_image"
 "$writer_probe" "$writer_torn_only_image" torn-only
 "$writer_probe" "$writer_flush_image" flush-fail
 "$writer_probe" "$writer_exists_image" destination-exists
+"$writer_probe" "$writer_delete_image" delete
+"$writer_probe" "$writer_replace_image" replace
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
     --verify-c-rename "$writer_image" "$intent_expected" \
@@ -90,6 +96,14 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
     --verify-c-torn "$writer_torn_only_image" "$intent_expected" \
+    "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-delete "$writer_delete_image" "$intent_expected" \
+    "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-replace "$writer_replace_image" "$intent_expected" \
     "$intent_created_expected"
 
 "$compiler" -std=c99 -pedantic -Wall -Wextra -Werror -Wconversion \
@@ -206,5 +220,9 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_flush_image" >/dev/null
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_exists_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_delete_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_replace_image" >/dev/null
 
-echo "portable-c-gate result=PASS reader=PASS intent-view=PASS writer-rename=PASS"
+echo "portable-c-gate result=PASS reader=PASS intent-view=PASS writer-rename=PASS writer-delete=PASS writer-replace=PASS"

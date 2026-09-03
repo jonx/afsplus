@@ -184,6 +184,68 @@ where
     D: BlockDevice,
     A: TreeAllocator<D>,
 {
+    mutate_many_inner(
+        dev,
+        geo,
+        tx,
+        root_lba,
+        spec,
+        new_generation,
+        operations,
+        cache_pages,
+        false,
+    )
+}
+
+/// Applies operations to a transactionally allocated empty root. Unlike a
+/// committed root, this block is staged in the overlay immediately, so the
+/// first edit may reuse or split it without either reading it from the device
+/// or attempting to quarantine an allocation from the current transaction.
+/// This is used when a metadata tree and its first entries must become visible
+/// in the same checkpoint.
+#[allow(clippy::too_many_arguments)]
+pub fn mutate_new_empty_tree<D, A>(
+    dev: &mut D,
+    geo: &Geometry,
+    tx: &mut A,
+    root_lba: u64,
+    spec: TreeSpec,
+    new_generation: u64,
+    operations: &[TreeOperation<'_>],
+) -> Result<TreeMutation, CoreError>
+where
+    D: BlockDevice,
+    A: TreeAllocator<D>,
+{
+    mutate_many_inner(
+        dev,
+        geo,
+        tx,
+        root_lba,
+        spec,
+        new_generation,
+        operations,
+        usize::MAX,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mutate_many_inner<D, A>(
+    dev: &mut D,
+    geo: &Geometry,
+    tx: &mut A,
+    root_lba: u64,
+    spec: TreeSpec,
+    new_generation: u64,
+    operations: &[TreeOperation<'_>],
+    cache_pages: usize,
+    new_empty_root: bool,
+) -> Result<TreeMutation, CoreError>
+where
+    D: BlockDevice,
+    A: TreeAllocator<D>,
+{
     if cache_pages == 0 {
         return Err(CoreError::PrototypeLimit(
             "tree mutation cache must retain at least one page",
@@ -209,6 +271,11 @@ where
         decoded_residency: Rc::new(NodeResidency::default()),
         stats: TreeMutationStats::default(),
     };
+    if new_empty_root {
+        let node = TreeNode::leaf(spec.kind, spec.owner);
+        context.stage_node(root_lba, &node)?;
+        context.stats.nodes_allocated = 1;
+    }
     let mut root = root_lba;
     for operation in operations {
         match operation {

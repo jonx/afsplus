@@ -3556,13 +3556,14 @@ int afspr_intent_directory_cursor_init(
     return AFSPR_OK;
 }
 
-int afspr_internal_preflight_rename_no_replace(
+int afspr_internal_preflight_file_namespace(
     const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
     const struct afspr_probe_result *volume, uint64_t source_parent_id,
     const void *source_name, size_t source_name_len,
     uint64_t target_parent_id, const void *target_name,
-    size_t target_name_len, struct afspr_intent_view *view,
-    int *destination_conflict, uint32_t *phase,
+    size_t target_name_len, int inspect_target,
+    struct afspr_intent_view *view, int *destination_conflict,
+    int *destination_is_file, uint32_t *phase,
     struct afspr_diagnostic *diagnostic, size_t diagnostic_size)
 {
     struct afspr_ident ident;
@@ -3578,23 +3579,26 @@ int afspr_internal_preflight_rename_no_replace(
         diagnostic_size);
 
     if (phase != NULL) {
-        *phase = AFSPR_INTERNAL_RENAME_SCAN;
+        *phase = AFSPR_INTERNAL_NAMESPACE_SCAN;
     }
     if (status != AFSPR_OK) {
         return status;
     }
-    if (source_parent_id == 0u || target_parent_id == 0u ||
-        source_name == NULL || target_name == NULL ||
+    if (source_parent_id == 0u || source_name == NULL ||
         source_name_len == 0u ||
         source_name_len > AFSP_NAME_MAX_UTF8_BYTES ||
-        target_name_len == 0u ||
-        target_name_len > AFSP_NAME_MAX_UTF8_BYTES || view == NULL ||
-        destination_conflict == NULL || phase == NULL) {
+        (inspect_target != 0 &&
+         (target_parent_id == 0u || target_name == NULL ||
+          target_name_len == 0u ||
+          target_name_len > AFSP_NAME_MAX_UTF8_BYTES)) ||
+        view == NULL || destination_conflict == NULL ||
+        destination_is_file == NULL || phase == NULL) {
         return afspr_report(diagnostic, AFSPR_ERR_INVALID_ARGUMENT,
                             AFSPR_STAGE_ARGUMENTS,
                             AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
     }
     *destination_conflict = 0;
+    *destination_is_file = 0;
     status = afspr_scan_intent_log(ops, scratch, volume, view, sizeof(*view),
                                    diagnostic, diagnostic_size);
     if (status != AFSPR_OK || view->tail_state == AFSPR_INTENT_TAIL_FULL) {
@@ -3611,7 +3615,7 @@ int afspr_internal_preflight_rename_no_replace(
         return status;
     }
 
-    *phase = AFSPR_INTERNAL_RENAME_SOURCE;
+    *phase = AFSPR_INTERNAL_NAMESPACE_SOURCE;
     key = (uint8_t *)scratch->buffer + AFSPR_NAMESPACE_KEY_OFFSET;
     status = afspr_name_key(&ident, (const uint8_t *)source_name,
                             source_name_len, key, &key_len);
@@ -3635,7 +3639,11 @@ int afspr_internal_preflight_rename_no_replace(
                             AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
     }
 
-    *phase = AFSPR_INTERNAL_RENAME_TARGET;
+    if (inspect_target == 0) {
+        return AFSPR_OK;
+    }
+
+    *phase = AFSPR_INTERNAL_NAMESPACE_TARGET;
     status = afspr_name_key(&ident, (const uint8_t *)target_name,
                             target_name_len, key, &key_len);
     if (status != AFSPR_OK) {
@@ -3653,6 +3661,7 @@ int afspr_internal_preflight_rename_no_replace(
     if (status != AFSPR_OK) {
         return status;
     }
+    *destination_is_file = target.type_hint == AFSPR_OBJECT_FILE;
     *destination_conflict =
         source.object_id != target.object_id ||
         source.parent_id != target.parent_id ||

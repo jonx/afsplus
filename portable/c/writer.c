@@ -14,6 +14,14 @@
 #define AFSPW_LOG_FIXED_PAYLOAD 32u
 #define AFSPW_LOG_OP_FIXED 64u
 #define AFSPW_LOG_RECORD_VERSION 2u
+#define AFSPW_OP_DELETE 2u
+#define AFSPW_OP_RENAME 3u
+
+enum afspw_namespace_kind {
+    AFSPW_NAMESPACE_DELETE = 1,
+    AFSPW_NAMESPACE_RENAME_NO_REPLACE = 2,
+    AFSPW_NAMESPACE_RENAME_REPLACE = 3
+};
 
 static void afspw_put_le16(uint8_t *p, uint16_t value)
 {
@@ -103,15 +111,13 @@ static int afspw_read_adapter(void *context, uint64_t first_block,
     return ops->read_blocks(ops->ctx, first_block, count, destination);
 }
 
-static int afspw_encode_rename(uint8_t *block, size_t block_size,
-                               const struct afspr_probe_result *volume,
-                               uint32_t sequence, uint64_t source_parent_id,
-                               const uint8_t *source_name,
-                               size_t source_name_len,
-                               uint64_t target_parent_id,
-                               const uint8_t *target_name,
-                               size_t target_name_len,
-                               const struct afspr_timespec *timestamp)
+static int afspw_encode_namespace(
+    uint8_t *block, size_t block_size,
+    const struct afspr_probe_result *volume, uint32_t sequence,
+    enum afspw_namespace_kind kind, uint64_t source_parent_id,
+    const uint8_t *source_name, size_t source_name_len,
+    uint64_t target_parent_id, const uint8_t *target_name,
+    size_t target_name_len, const struct afspr_timespec *timestamp)
 {
     size_t payload_len = AFSPW_LOG_FIXED_PAYLOAD + AFSPW_LOG_OP_FIXED +
                          source_name_len + target_name_len;
@@ -131,8 +137,9 @@ static int afspw_encode_rename(uint8_t *block, size_t block_size,
     afspw_put_le16(payload + 30u, AFSPW_LOG_RECORD_VERSION);
 
     operation = payload + AFSPW_LOG_FIXED_PAYLOAD;
-    operation[0] = 3u;
-    operation[1] = 0u;
+    operation[0] = kind == AFSPW_NAMESPACE_DELETE ? AFSPW_OP_DELETE
+                                                   : AFSPW_OP_RENAME;
+    operation[1] = kind == AFSPW_NAMESPACE_RENAME_REPLACE ? 1u : 0u;
     afspw_put_le16(operation + 2u, (uint16_t)source_name_len);
     afspw_put_le16(operation + 4u, (uint16_t)target_name_len);
     afspw_put_le64(operation + 8u, source_parent_id);
@@ -140,8 +147,10 @@ static int afspw_encode_rename(uint8_t *block, size_t block_size,
     afspw_put_le64(operation + 48u, (uint64_t)timestamp->seconds);
     afspw_put_le32(operation + 56u, timestamp->nanoseconds);
     memcpy(operation + AFSPW_LOG_OP_FIXED, source_name, source_name_len);
-    memcpy(operation + AFSPW_LOG_OP_FIXED + source_name_len, target_name,
-           target_name_len);
+    if (target_name_len != 0u) {
+        memcpy(operation + AFSPW_LOG_OP_FIXED + source_name_len, target_name,
+               target_name_len);
+    }
 
     afspw_put_le32(block, AFSPW_BLOCK_TYPE_INTENT);
     afspw_put_le16(block + 4u, AFSPW_HEADER_VERSION);
@@ -154,10 +163,12 @@ static int afspw_encode_rename(uint8_t *block, size_t block_size,
 
 uint64_t afspw_capabilities(void)
 {
-    return AFSPW_CAP_RENAME_FILE_NO_REPLACE;
+    return AFSPW_CAP_RENAME_FILE_NO_REPLACE | AFSPW_CAP_DELETE_FILE |
+           AFSPW_CAP_RENAME_FILE_REPLACE;
 }
 
-int afspw_rename_file_no_replace(
+static int afspw_append_namespace(
+    enum afspw_namespace_kind kind,
     const struct afspw_block_ops *ops, const struct afspr_scratch *scratch,
     uint64_t source_parent_id, const void *source_name,
     size_t source_name_len, uint64_t target_parent_id,
@@ -173,6 +184,9 @@ int afspw_rename_file_no_replace(
     uint32_t preflight_phase;
     uint32_t sequence;
     int destination_conflict;
+    int destination_is_file;
+    int inspect_target = kind != AFSPW_NAMESPACE_DELETE;
+    int needs_orphan = kind != AFSPW_NAMESPACE_RENAME_NO_REPLACE;
     int status;
 
     if (diagnostic != NULL && diagnostic_size < sizeof(*diagnostic)) {
@@ -183,7 +197,8 @@ int afspw_rename_file_no_replace(
         diagnostic->block = AFSPR_NO_BLOCK;
     }
     if (ops == NULL || scratch == NULL || source_name == NULL ||
-        target_name == NULL || timestamp == NULL || result == NULL ||
+        timestamp == NULL || result == NULL ||
+        (inspect_target != 0 && target_name == NULL) ||
         ops->abi_version != AFSPW_ABI_VERSION ||
         ops->struct_size < sizeof(*ops) || ops->read_blocks == NULL ||
         ops->write_blocks == NULL || ops->flush == NULL ||
@@ -191,17 +206,20 @@ int afspw_rename_file_no_replace(
         ops->block_count == 0u || scratch->buffer == NULL ||
         scratch->size < AFSPW_SCRATCH_SIZE ||
         result_size < sizeof(*result) || source_parent_id == 0u ||
-        target_parent_id == 0u || source_name_len == 0u ||
+        (inspect_target != 0 && target_parent_id == 0u) ||
+        source_name_len == 0u ||
         source_name_len > AFSP_NAME_MAX_UTF8_BYTES ||
-        target_name_len == 0u ||
-        target_name_len > AFSP_NAME_MAX_UTF8_BYTES ||
+        (inspect_target != 0 &&
+         (target_name_len == 0u ||
+          target_name_len > AFSP_NAME_MAX_UTF8_BYTES)) ||
+        (inspect_target == 0 && target_name_len != 0u) ||
         timestamp->nanoseconds >= UINT32_C(1000000000) ||
         timestamp->reserved != 0u) {
         return afspw_report(diagnostic, AFSPR_ERR_INVALID_ARGUMENT,
                             AFSPW_STAGE_ARGUMENTS, AFSPR_NOT_CHECKED,
                             AFSPR_NO_BLOCK, 0u);
     }
-    if (source_parent_id == target_parent_id &&
+    if (inspect_target != 0 && source_parent_id == target_parent_id &&
         source_name_len == target_name_len &&
         memcmp(source_name, target_name, source_name_len) == 0) {
         return afspw_report(diagnostic, AFSPR_ERR_INVALID_ARGUMENT,
@@ -230,23 +248,30 @@ int afspw_rename_file_no_replace(
     if ((volume.incompat_features & AFSP_INCOMPAT_INTENT_LOG) == 0u ||
         volume.log_slots == 0u ||
         (volume.ro_compat_features &
-         ~AFSP_RO_COMPAT_ORPHAN_DIRECTORY) != 0u) {
+         ~(AFSP_RO_COMPAT_SHARED_EXTENTS |
+           AFSP_RO_COMPAT_ORPHAN_DIRECTORY)) != 0u) {
+        return afspw_report(diagnostic, AFSPW_ERR_WRITE_FEATURE,
+                            AFSPW_STAGE_PROBE, AFSPR_ERR_UNSUPPORTED,
+                            AFSPR_NO_BLOCK, 0u);
+    }
+    if (needs_orphan != 0 &&
+        (volume.ro_compat_features & AFSP_RO_COMPAT_ORPHAN_DIRECTORY) == 0u) {
         return afspw_report(diagnostic, AFSPW_ERR_WRITE_FEATURE,
                             AFSPW_STAGE_PROBE, AFSPR_ERR_UNSUPPORTED,
                             AFSPR_NO_BLOCK, 0u);
     }
 
-    status = afspr_internal_preflight_rename_no_replace(
+    status = afspr_internal_preflight_file_namespace(
         &reader_ops, scratch, &volume, source_parent_id, source_name,
         source_name_len, target_parent_id, target_name, target_name_len,
-        &view, &destination_conflict, &preflight_phase, &reader_diagnostic,
-        sizeof(reader_diagnostic));
+        inspect_target, &view, &destination_conflict, &destination_is_file,
+        &preflight_phase, &reader_diagnostic, sizeof(reader_diagnostic));
     if (status != AFSPR_OK) {
         uint32_t stage = AFSPW_STAGE_INTENT_SCAN;
 
-        if (preflight_phase == AFSPR_INTERNAL_RENAME_SOURCE) {
+        if (preflight_phase == AFSPR_INTERNAL_NAMESPACE_SOURCE) {
             stage = AFSPW_STAGE_SOURCE_LOOKUP;
-        } else if (preflight_phase == AFSPR_INTERNAL_RENAME_TARGET) {
+        } else if (preflight_phase == AFSPR_INTERNAL_NAMESPACE_TARGET) {
             stage = AFSPW_STAGE_TARGET_LOOKUP;
         }
         return afspw_reader_failure(diagnostic, status, stage,
@@ -272,17 +297,24 @@ int afspw_rename_file_no_replace(
     }
     sequence = view.valid_records + 1u;
 
-    if (destination_conflict != 0) {
+    if (kind == AFSPW_NAMESPACE_RENAME_NO_REPLACE &&
+        destination_conflict != 0) {
         return afspw_report(diagnostic, AFSPW_ERR_DESTINATION_EXISTS,
                             AFSPW_STAGE_TARGET_LOOKUP, AFSPR_OK,
                             AFSPR_NO_BLOCK, sequence);
     }
+    if (kind == AFSPW_NAMESPACE_RENAME_REPLACE &&
+        destination_conflict != 0 && destination_is_file == 0) {
+        return afspw_report(diagnostic, AFSPR_ERR_NOT_FILE,
+                            AFSPW_STAGE_TARGET_LOOKUP, AFSPR_ERR_NOT_FILE,
+                            AFSPR_NO_BLOCK, sequence);
+    }
 
-    status = afspw_encode_rename(
+    status = afspw_encode_namespace(
         (uint8_t *)scratch->buffer, ops->block_size, &volume, sequence,
-        source_parent_id, (const uint8_t *)source_name, source_name_len,
-        target_parent_id, (const uint8_t *)target_name, target_name_len,
-        timestamp);
+        kind, source_parent_id, (const uint8_t *)source_name,
+        source_name_len, target_parent_id, (const uint8_t *)target_name,
+        target_name_len, timestamp);
     if (status != AFSPR_OK) {
         return afspw_report(diagnostic, status, AFSPW_STAGE_ENCODE,
                             AFSPR_NOT_CHECKED, view.tail_block, sequence);
@@ -306,6 +338,51 @@ int afspw_rename_file_no_replace(
     result->log_block = view.tail_block;
     return afspw_report(diagnostic, AFSPR_OK, AFSPW_STAGE_COMPLETE,
                         AFSPR_OK, view.tail_block, sequence);
+}
+
+int afspw_rename_file_no_replace(
+    const struct afspw_block_ops *ops, const struct afspr_scratch *scratch,
+    uint64_t source_parent_id, const void *source_name,
+    size_t source_name_len, uint64_t target_parent_id,
+    const void *target_name, size_t target_name_len,
+    const struct afspr_timespec *timestamp,
+    struct afspw_rename_result *result, size_t result_size,
+    struct afspw_diagnostic *diagnostic, size_t diagnostic_size)
+{
+    return afspw_append_namespace(
+        AFSPW_NAMESPACE_RENAME_NO_REPLACE, ops, scratch, source_parent_id,
+        source_name, source_name_len, target_parent_id, target_name,
+        target_name_len, timestamp, result, result_size, diagnostic,
+        diagnostic_size);
+}
+
+int afspw_delete_file(
+    const struct afspw_block_ops *ops, const struct afspr_scratch *scratch,
+    uint64_t parent_id, const void *name, size_t name_len,
+    const struct afspr_timespec *timestamp,
+    struct afspw_rename_result *result, size_t result_size,
+    struct afspw_diagnostic *diagnostic, size_t diagnostic_size)
+{
+    return afspw_append_namespace(
+        AFSPW_NAMESPACE_DELETE, ops, scratch, parent_id, name, name_len, 0u,
+        NULL, 0u, timestamp, result, result_size, diagnostic,
+        diagnostic_size);
+}
+
+int afspw_rename_file_replace(
+    const struct afspw_block_ops *ops, const struct afspr_scratch *scratch,
+    uint64_t source_parent_id, const void *source_name,
+    size_t source_name_len, uint64_t target_parent_id,
+    const void *target_name, size_t target_name_len,
+    const struct afspr_timespec *timestamp,
+    struct afspw_rename_result *result, size_t result_size,
+    struct afspw_diagnostic *diagnostic, size_t diagnostic_size)
+{
+    return afspw_append_namespace(
+        AFSPW_NAMESPACE_RENAME_REPLACE, ops, scratch, source_parent_id,
+        source_name, source_name_len, target_parent_id, target_name,
+        target_name_len, timestamp, result, result_size, diagnostic,
+        diagnostic_size);
 }
 
 const char *afspw_status_string(int status)

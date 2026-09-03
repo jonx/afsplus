@@ -9,7 +9,7 @@ integrations. It shares no executable code with the Rust implementation.
 - [ABI and capability policy](#abi-and-capability-policy)
 - [Runtime contract](#runtime-contract)
 - [Durable intent-log view](#durable-intent-log-view)
-- [First classic-rw operation](#first-classic-rw-operation)
+- [Bounded classic-rw namespace operations](#bounded-classic-rw-namespace-operations)
 - [Validation](#validation)
 - [Fuzzing and exact reproduction](#fuzzing-and-exact-reproduction)
 
@@ -162,15 +162,16 @@ the base reader's structural behavior, whose stored non-ASCII comparison keys
 cannot receive a semantic name/key cross-check until frozen Unicode 16 tables
 are present.
 
-## First classic-rw operation
+## Bounded classic-rw namespace operations
 
-`afspw_rename_file_no_replace` is the first independent media-mutating C
-operation. It freshly probes the volume, rescans and semantically validates the
-durable namespace, proves that the source is a regular file and the target is
-absent, writes one version-2 rename record into the next preallocated intent
-slot, then invokes exactly one flush. It allocates no disk block and publishes
-no checkpoint. The caller supplies read/write/flush callbacks, 8 KiB scratch,
-exclusive writer serialization and immutable name buffers.
+`afspw_rename_file_no_replace`, `afspw_delete_file` and
+`afspw_rename_file_replace` are the independent media-mutating C namespace
+slice. Each freshly probes the volume, rescans and semantically validates the
+durable namespace, proves the regular-file operands and writes one version-2
+record into the next preallocated intent slot, then invokes exactly one flush.
+They allocate no disk block and publish no checkpoint. The caller supplies
+read/write/flush callbacks, 8 KiB scratch, exclusive writer serialization and
+immutable name buffers.
 
 A torn record is the invalid tail and the same slot can be retried after a
 fresh probe. Write or flush callback failure returns an explicitly uncertain
@@ -179,13 +180,14 @@ whether to retry. A full log returns `AFSPW_ERR_LOG_FULL` without write or
 flush and requires a checkpoint-capable implementation to materialize the
 prefix.
 
-The operation deliberately excludes replacement and unlink. Current Rust log
-replay can retire a replacement victim directly; exposing that through the C
-writer before it uses ADR-066's bounded orphan transition could make replay
-work proportional to file fragmentation. Directory rename, create, data write,
-truncate, allocation and checkpoint publication remain later `classic-rw`
-slices. Modern Unicode profiles currently accept ASCII lookup names in this C
-path; legacy identity volumes retain exact UTF-8 lookup.
+Delete and replacement require the ADR-066 orphan-directory feature. Rust
+replay preclaims logged data, then moves each final victim into persistent
+orphan state in the same checkpoint, lazily creating object 2 there if needed;
+it never retires the victim layout in proportion to fragmentation. Directory
+rename, create, data write, truncate, allocation, orphan maintenance and
+checkpoint publication remain later `classic-rw` slices. Modern Unicode
+profiles currently accept ASCII lookup names in this C path; legacy identity
+volumes retain exact UTF-8 lookup.
 
 ## Validation
 
@@ -214,17 +216,18 @@ data LBA. The replacement victim carries Rust's persistent private-in-place
 flag on a data-policy volume, while the primary fixture injects the same flag
 without its feature and requires object-decode failure.
 
-The C writer copies that seven-record image, appends the eighth non-replacing
-rename with one write and one flush, reads the resulting namespace through the
-independent C overlay, then lets Rust replay and exhaustively check it. A
-64-byte torn write is retried into the same slot; a flush failure reports
-durability uncertainty; an existing destination and a full log produce zero
-media writes. Strict warnings, ASan/UBSan, Clang static analysis, CMake export
-consumption and the configured m68k compiler include both reader and writer.
-The maximum-prefix preflight currently makes 152 uncached logical-block read
-callbacks with 8 KiB scratch. This is a bounded structural count, not a device
-latency claim; adapter caching of the fixed log area and a single-pass prefix
-validator are explicit optimization work before physical A500 qualification.
+The C writer copies that seven-record image and independently appends an eighth
+non-replacing rename, delete and replacing rename. Each uses one write and one
+flush; the C overlay verifies the namespace, then Rust replay checks visible
+content, retained orphan bytes and all filesystem invariants. A 64-byte torn
+write is retried into the same slot; a flush failure reports durability
+uncertainty; an existing destination and a full log produce zero media writes.
+Strict warnings, ASan/UBSan, Clang static analysis, CMake export consumption
+and the configured m68k compiler include both reader and writer. At the
+seven-record prefix, rename/replace/delete preflight makes 152/148/142 uncached
+logical-block reads respectively with 8 KiB scratch. These are bounded
+structural counts, not device-latency claims; adapter caching of the fixed log
+area and a single-pass prefix validator remain explicit pre-A500 optimization.
 
 The same gate tests retained-checkpoint fallback and corrupt/ambiguous states.
 It independently sets the checkpoint header flags, header owner and payload

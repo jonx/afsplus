@@ -33,7 +33,7 @@ use afsplus_format::{validate_name, FormatError, Timespec, OBJECT_ORPHAN_DIRECTO
 
 use crate::alloc::{AllocStats, TxAllocator};
 use crate::allocation_root::{self, ReservedTreePool};
-use crate::cow_tree::{mutate_many, TreeMutation, TreeOperation};
+use crate::cow_tree::{mutate_many, mutate_new_empty_tree, TreeMutation, TreeOperation};
 use crate::directory;
 use crate::extent_map::{self, Extent, EXTENT_SHARED, EXTENT_UNWRITTEN};
 use crate::intent_log;
@@ -226,6 +226,10 @@ struct PendingBatch {
     committed_record_lbas: BTreeMap<u64, u64>,
     /// Data runs of objects created by this batch (cancellable).
     created_data: BTreeMap<u64, (u64, u64)>,
+    /// Directory roots allocated by this transaction and not present in the
+    /// committed object map. Their first tree mutation must start from a
+    /// staged empty root rather than attempting to read/retire it.
+    created_directories: BTreeSet<u64>,
     /// Final logical layouts for committed files edited in this window.
     file_layouts: BTreeMap<u64, PendingFileLayout>,
     /// Still-live data runs allocated by existing-file log operations. A run
@@ -246,6 +250,10 @@ struct PendingBatch {
     logged_created: BTreeSet<u64>,
     /// Data runs of cancelled logged creates, quarantined at materialize.
     sacrificed: Vec<(u64, u64)>,
+    /// This batch contains a final-link orphan transition. Its publication is
+    /// destructive/recovery work and may consume the runtime emergency floor;
+    /// ordinary window growth remains floor-limited until materialization.
+    uses_emergency_headroom: bool,
     next_object_id: u64,
 }
 
@@ -3319,7 +3327,7 @@ impl<D: BlockDevice> Volume<D> {
         &mut self,
         ops: &[BatchOp<'_>],
         now: Timespec,
-        orphan_replaced_target: bool,
+        orphan_final_unlinks: bool,
     ) -> Result<Vec<Option<u64>>, CoreError> {
         const MAX_BATCH_OPS: usize = 1024;
         if ops.is_empty() {
@@ -3353,6 +3361,7 @@ impl<D: BlockDevice> Volume<D> {
             records: BTreeMap::new(),
             committed_record_lbas: BTreeMap::new(),
             created_data: BTreeMap::new(),
+            created_directories: BTreeSet::new(),
             file_layouts: BTreeMap::new(),
             window_allocations: Vec::new(),
             data_writes: Vec::new(),
@@ -3360,6 +3369,7 @@ impl<D: BlockDevice> Volume<D> {
             write_through: false,
             logged_created: BTreeSet::new(),
             sacrificed: Vec::new(),
+            uses_emergency_headroom: false,
             next_object_id: self.checkpoint.next_object_id,
         };
         let mut results = Vec::with_capacity(ops.len());
@@ -3370,7 +3380,7 @@ impl<D: BlockDevice> Volume<D> {
                 op,
                 now,
                 generation,
-                orphan_replaced_target,
+                orphan_final_unlinks,
             )?);
         }
         self.materialize_batch(tx, pending, now, generation, false)?;
@@ -3455,6 +3465,9 @@ impl<D: BlockDevice> Volume<D> {
         if directory.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
+        if pending.created_directories.contains(&directory_id) {
+            return Ok(None);
+        }
         // Entries are overlaid separately, so the committed tree root is the
         // right base even when the directory record has pending changes.
         let committed = self.read_object(directory_id)?.ok_or(CoreError::NotFound)?;
@@ -3479,6 +3492,53 @@ impl<D: BlockDevice> Volume<D> {
             return Ok(*record);
         }
         self.read_object(object_id)
+    }
+
+    /// Ensures object 2 exists in this batch without publishing a preparatory
+    /// checkpoint. Intent replay needs this form: a checkpoint in between
+    /// scanning the durable log and applying it would make those records
+    /// stale, so a crash could lose an fsynced delete or replacement.
+    fn ensure_pending_orphan_directory(
+        &mut self,
+        tx: &mut TxAllocator,
+        pending: &mut PendingBatch,
+        now: Timespec,
+        generation: u64,
+    ) -> Result<(), CoreError> {
+        if !self.orphan_directory_enabled() {
+            return Err(CoreError::FeatureDisabled(
+                "orphan-directory feature is not enabled on this volume",
+            ));
+        }
+        if let Some(record) = self.batch_record(pending, OBJECT_ORPHAN_DIRECTORY)? {
+            return self.validate_orphan_directory(record);
+        }
+
+        let floor = tx.free_block_floor();
+        tx.set_free_block_floor(0);
+        let root_result = tx.allocate(&mut self.dev);
+        tx.set_free_block_floor(floor);
+        let root_lba = root_result?;
+        pending.records.insert(
+            OBJECT_ORPHAN_DIRECTORY,
+            Some(ObjectRecord {
+                object_id: OBJECT_ORPHAN_DIRECTORY,
+                object_type: ObjectType::Directory,
+                flags: 0,
+                link_count: 1,
+                size_bytes: 0,
+                allocated_bytes: 0,
+                created: now,
+                modified: now,
+                changed: now,
+                protection: 0,
+                content_generation: generation,
+                data_root: root_lba,
+                data_blocks: 0,
+            }),
+        );
+        pending.created_directories.insert(OBJECT_ORPHAN_DIRECTORY);
+        Ok(())
     }
 
     fn ensure_pending_file_layout(
@@ -3814,7 +3874,7 @@ impl<D: BlockDevice> Volume<D> {
         op: &BatchOp<'_>,
         now: Timespec,
         generation: u64,
-        orphan_replaced_target: bool,
+        orphan_final_unlinks: bool,
     ) -> Result<Option<u64>, CoreError> {
         let block_size = self.dev.block_size();
         match op {
@@ -3901,7 +3961,14 @@ impl<D: BlockDevice> Volume<D> {
                 let entry = self
                     .batch_lookup(pending, *parent_id, &key)?
                     .ok_or(CoreError::NotFound)?;
-                self.unlink_in_batch(tx, pending, generation, entry.child_id, now)?;
+                self.unlink_in_batch(
+                    tx,
+                    pending,
+                    generation,
+                    entry.child_id,
+                    now,
+                    orphan_final_unlinks,
+                )?;
                 pending
                     .dir_changes
                     .entry(*parent_id)
@@ -3952,48 +4019,14 @@ impl<D: BlockDevice> Volume<D> {
                         if target.object_type != ObjectType::File {
                             return Err(CoreError::IsDirectory);
                         }
-                        if orphan_replaced_target {
-                            if target.link_count != 1 {
-                                return Err(CoreError::InvalidMove(
-                                    "only a final-link replacement target can become an orphan",
-                                ));
-                            }
-                            let orphan_name = Self::orphan_name(existing.child_id);
-                            let orphan_key = self.comparison_key(orphan_name.as_bytes())?;
-                            if self
-                                .batch_lookup(pending, OBJECT_ORPHAN_DIRECTORY, &orphan_key)?
-                                .is_some()
-                            {
-                                return Err(CoreError::Corrupt(format!(
-                                    "object {} already has an orphan entry",
-                                    existing.child_id
-                                )));
-                            }
-                            pending
-                                .dir_changes
-                                .entry(OBJECT_ORPHAN_DIRECTORY)
-                                .or_default()
-                                .insert(
-                                    orphan_key.clone(),
-                                    Some(DirEntry {
-                                        key: orphan_key,
-                                        name: orphan_name.into_bytes(),
-                                        child_type_hint: 1,
-                                        child_id: existing.child_id,
-                                    }),
-                                );
-                            pending.dir_timestamps.insert(OBJECT_ORPHAN_DIRECTORY, now);
-                            self.note_committed_record(pending, existing.child_id)?;
-                            pending.records.insert(
-                                existing.child_id,
-                                Some(ObjectRecord {
-                                    changed: now,
-                                    ..target
-                                }),
-                            );
-                        } else {
-                            self.unlink_in_batch(tx, pending, generation, existing.child_id, now)?;
-                        }
+                        self.unlink_in_batch(
+                            tx,
+                            pending,
+                            generation,
+                            existing.child_id,
+                            now,
+                            orphan_final_unlinks,
+                        )?;
                     }
                 }
                 let target_parent = self
@@ -4038,9 +4071,9 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     /// Drops one link from a file inside a batch: cancels a same-batch
-    /// creation entirely (its storage is released, never quarantined),
-    /// decrements a multiply-linked committed file, or retires a committed
-    /// file's record and storage.
+    /// creation entirely, decrements a multiply-linked committed file, moves
+    /// a final victim into bounded orphan state when requested, or performs
+    /// the legacy direct retirement path.
     fn unlink_in_batch(
         &mut self,
         tx: &mut TxAllocator,
@@ -4048,12 +4081,8 @@ impl<D: BlockDevice> Volume<D> {
         generation: u64,
         object_id: u64,
         now: Timespec,
+        orphan_final: bool,
     ) -> Result<(), CoreError> {
-        if pending.file_layouts.contains_key(&object_id) {
-            return Err(CoreError::PrototypeLimit(
-                "deleting a window-modified file requires a later log compaction rule",
-            ));
-        }
         let victim = self
             .batch_record(pending, object_id)?
             .ok_or_else(|| CoreError::Corrupt("unlink victim missing".into()))?;
@@ -4092,6 +4121,48 @@ impl<D: BlockDevice> Volume<D> {
                 }),
             );
             return Ok(());
+        }
+        if orphan_final && self.orphan_directory_enabled() {
+            pending.uses_emergency_headroom = true;
+            self.ensure_pending_orphan_directory(tx, pending, now, generation)?;
+            let orphan_name = Self::orphan_name(object_id);
+            let orphan_key = self.comparison_key(orphan_name.as_bytes())?;
+            if self
+                .batch_lookup(pending, OBJECT_ORPHAN_DIRECTORY, &orphan_key)?
+                .is_some()
+            {
+                return Err(CoreError::Corrupt(format!(
+                    "object {object_id} already has an orphan entry"
+                )));
+            }
+            pending
+                .dir_changes
+                .entry(OBJECT_ORPHAN_DIRECTORY)
+                .or_default()
+                .insert(
+                    orphan_key.clone(),
+                    Some(DirEntry {
+                        key: orphan_key,
+                        name: orphan_name.into_bytes(),
+                        child_type_hint: 1,
+                        child_id: object_id,
+                    }),
+                );
+            pending.dir_timestamps.insert(OBJECT_ORPHAN_DIRECTORY, now);
+            self.note_committed_record(pending, object_id)?;
+            pending.records.insert(
+                object_id,
+                Some(ObjectRecord {
+                    changed: now,
+                    ..victim
+                }),
+            );
+            return Ok(());
+        }
+        if pending.file_layouts.contains_key(&object_id) {
+            return Err(CoreError::PrototypeLimit(
+                "direct deletion of a window-modified file requires log compaction",
+            ));
         }
         self.note_committed_record(pending, object_id)?;
         let committed_lba = pending.committed_record_lbas[&object_id];
@@ -4335,6 +4406,7 @@ impl<D: BlockDevice> Volume<D> {
                 records: BTreeMap::new(),
                 committed_record_lbas: BTreeMap::new(),
                 created_data: BTreeMap::new(),
+                created_directories: BTreeSet::new(),
                 file_layouts: BTreeMap::new(),
                 window_allocations: Vec::new(),
                 data_writes: Vec::new(),
@@ -4342,6 +4414,7 @@ impl<D: BlockDevice> Volume<D> {
                 write_through: true,
                 logged_created: BTreeSet::new(),
                 sacrificed: Vec::new(),
+                uses_emergency_headroom: false,
                 next_object_id: self.checkpoint.next_object_id,
             },
             generation,
@@ -4367,7 +4440,7 @@ impl<D: BlockDevice> Volume<D> {
             op,
             now,
             generation,
-            false,
+            true,
         );
         match result {
             Ok(created) => {
@@ -4874,6 +4947,7 @@ impl<D: BlockDevice> Volume<D> {
             records: BTreeMap::new(),
             committed_record_lbas: BTreeMap::new(),
             created_data: BTreeMap::new(),
+            created_directories: BTreeSet::new(),
             file_layouts: BTreeMap::new(),
             window_allocations: Vec::new(),
             data_writes: Vec::new(),
@@ -4881,11 +4955,24 @@ impl<D: BlockDevice> Volume<D> {
             write_through: true,
             logged_created: BTreeSet::new(),
             sacrificed: Vec::new(),
+            uses_emergency_headroom: false,
             next_object_id: self.checkpoint.next_object_id,
         };
+        let records = scanned.records;
+        // Claim every record-referenced data run before allocating replay
+        // metadata. The committed bitmap intentionally still calls these
+        // runs FREE; pre-claiming prevents a lazily created orphan tree from
+        // selecting an LBA named by a later record in the same prefix.
+        for record in &records {
+            for op in &record.ops {
+                for (start, blocks) in op.data_extents() {
+                    tx.allocate_exact_run(&mut self.dev, *start, u64::from(*blocks))?;
+                }
+            }
+        }
         let mut last_timestamp = Timespec::default();
-        let replayed = scanned.records.len() as u32;
-        for record in scanned.records {
+        let replayed = records.len() as u32;
+        for record in records {
             for op in record.ops {
                 last_timestamp = op.timestamp();
                 self.apply_log_op(&mut tx, &mut pending, &op, generation)?;
@@ -4934,7 +5021,6 @@ impl<D: BlockDevice> Volume<D> {
                 timestamp,
                 ..
             } => self.apply_replay_create(
-                tx,
                 pending,
                 *parent_id,
                 &utf8(name)?,
@@ -4959,7 +5045,7 @@ impl<D: BlockDevice> Volume<D> {
                     },
                     *timestamp,
                     generation,
-                    false,
+                    true,
                 )
                 .map(|_| ())
             }
@@ -4985,7 +5071,7 @@ impl<D: BlockDevice> Volume<D> {
                     },
                     *timestamp,
                     generation,
-                    false,
+                    true,
                 )
                 .map(|_| ())
             }
@@ -4997,22 +5083,17 @@ impl<D: BlockDevice> Volume<D> {
                 extents,
                 timestamp,
                 ..
-            } => {
-                for (start, blocks) in extents {
-                    tx.allocate_exact_run(&mut self.dev, *start, u64::from(*blocks))?;
-                }
-                self.install_logged_file_range(
-                    tx,
-                    pending,
-                    *object_id,
-                    *logical_start,
-                    *expected_size_bytes,
-                    *new_size_bytes,
-                    extents,
-                    *timestamp,
-                    generation,
-                )
-            }
+            } => self.install_logged_file_range(
+                tx,
+                pending,
+                *object_id,
+                *logical_start,
+                *expected_size_bytes,
+                *new_size_bytes,
+                extents,
+                *timestamp,
+                generation,
+            ),
             LogOp::Truncate {
                 object_id,
                 logical_start,
@@ -5021,22 +5102,17 @@ impl<D: BlockDevice> Volume<D> {
                 extents,
                 timestamp,
                 ..
-            } => {
-                for (start, blocks) in extents {
-                    tx.allocate_exact_run(&mut self.dev, *start, u64::from(*blocks))?;
-                }
-                self.install_logged_truncate(
-                    tx,
-                    pending,
-                    *object_id,
-                    *logical_start,
-                    *expected_size_bytes,
-                    *new_size_bytes,
-                    extents,
-                    *timestamp,
-                    generation,
-                )
-            }
+            } => self.install_logged_truncate(
+                tx,
+                pending,
+                *object_id,
+                *logical_start,
+                *expected_size_bytes,
+                *new_size_bytes,
+                extents,
+                *timestamp,
+                generation,
+            ),
         }
     }
 
@@ -5046,7 +5122,6 @@ impl<D: BlockDevice> Volume<D> {
     #[allow(clippy::too_many_arguments)]
     fn apply_replay_create(
         &mut self,
-        tx: &mut TxAllocator,
         pending: &mut PendingBatch,
         parent_id: u64,
         name: &str,
@@ -5083,10 +5158,7 @@ impl<D: BlockDevice> Volume<D> {
             .ok_or(CoreError::PrototypeLimit("object ID space exhausted"))?;
         let (data_start, data_blocks) = match extents {
             [] => (0u64, 0u64),
-            [(start, blocks)] => {
-                tx.allocate_exact_run(&mut self.dev, *start, *blocks as u64)?;
-                (*start, *blocks as u64)
-            }
+            [(start, blocks)] => (*start, *blocks as u64),
             _ => {
                 return Err(CoreError::PrototypeLimit(
                     "multi-extent logged creates are not implemented",
@@ -5142,19 +5214,32 @@ impl<D: BlockDevice> Volume<D> {
         let block_size = self.dev.block_size();
         let mut meta_writes: Vec<(u64, Vec<u8>)> = Vec::new();
 
+        if pending.uses_emergency_headroom {
+            tx.set_free_block_floor(0);
+        }
+
         for (start, blocks) in std::mem::take(&mut pending.sacrificed) {
             tx.abandon_uncommitted_run(&mut self.dev, start, blocks)?;
         }
 
         let dir_ids: Vec<u64> = pending.dir_changes.keys().copied().collect();
         for dir_id in dir_ids {
+            let is_new = pending.created_directories.remove(&dir_id);
             let changes = pending
                 .dir_changes
                 .remove(&dir_id)
                 .expect("key listed above");
-            let committed = self
-                .read_object(dir_id)?
+            let base = self
+                .batch_record(&pending, dir_id)?
                 .ok_or_else(|| CoreError::Corrupt(format!("directory {dir_id} disappeared")))?;
+            let committed =
+                if is_new {
+                    None
+                } else {
+                    Some(self.read_object(dir_id)?.ok_or_else(|| {
+                        CoreError::Corrupt(format!("directory {dir_id} disappeared"))
+                    })?)
+                };
             let mut encoded: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
             for (key, change) in changes {
                 match change {
@@ -5167,23 +5252,27 @@ impl<D: BlockDevice> Volume<D> {
                     None => {
                         // A delete of a key with no committed entry is a
                         // same-batch create that was cancelled: skip it.
-                        let existed = directory::lookup_entry(
-                            &mut self.dev,
-                            &self.ident.geometry(),
-                            committed.data_root,
-                            dir_id,
-                            self.checkpoint.generation,
-                            &self.ident,
-                            &key,
-                        )?
-                        .is_some();
+                        let existed = if let Some(committed) = committed {
+                            directory::lookup_entry(
+                                &mut self.dev,
+                                &self.ident.geometry(),
+                                committed.data_root,
+                                dir_id,
+                                self.checkpoint.generation,
+                                &self.ident,
+                                &key,
+                            )?
+                            .is_some()
+                        } else {
+                            false
+                        };
                         if existed {
                             encoded.push((key, None));
                         }
                     }
                 }
             }
-            if encoded.is_empty() {
+            if encoded.is_empty() && !is_new {
                 continue;
             }
             let operations: Vec<TreeOperation<'_>> = encoded
@@ -5193,20 +5282,31 @@ impl<D: BlockDevice> Volume<D> {
                     None => TreeOperation::Delete { key },
                 })
                 .collect();
-            let mutation = mutate_many(
-                &mut self.dev,
-                &self.ident.geometry(),
-                &mut tx,
-                committed.data_root,
-                directory::spec(dir_id, self.checkpoint.generation),
-                generation,
-                &operations,
-            )?;
+            let mutation = if is_new {
+                mutate_new_empty_tree(
+                    &mut self.dev,
+                    &self.ident.geometry(),
+                    &mut tx,
+                    base.data_root,
+                    directory::spec(dir_id, self.checkpoint.generation),
+                    generation,
+                    &operations,
+                )?
+            } else {
+                mutate_many(
+                    &mut self.dev,
+                    &self.ident.geometry(),
+                    &mut tx,
+                    base.data_root,
+                    directory::spec(dir_id, self.checkpoint.generation),
+                    generation,
+                    &operations,
+                )?
+            };
             meta_writes.extend(mutation.writes);
-            self.note_committed_record(&mut pending, dir_id)?;
-            let base = self
-                .batch_record(&pending, dir_id)?
-                .ok_or_else(|| CoreError::Corrupt(format!("directory {dir_id} disappeared")))?;
+            if !is_new {
+                self.note_committed_record(&mut pending, dir_id)?;
+            }
             let directory_timestamp = pending.dir_timestamps.remove(&dir_id).unwrap_or(now);
             pending.records.insert(
                 dir_id,
@@ -5218,6 +5318,11 @@ impl<D: BlockDevice> Volume<D> {
                     ..base
                 }),
             );
+        }
+        if !pending.created_directories.is_empty() {
+            return Err(CoreError::Corrupt(
+                "created directory has no materialization entry".into(),
+            ));
         }
 
         // Materialize each existing-file window layout once, no matter how
