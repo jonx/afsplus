@@ -23,6 +23,7 @@
 #define AFSPW_CAP_RENAME_FILE_NO_REPLACE (UINT64_C(1) << 0)
 #define AFSPW_CAP_DELETE_FILE (UINT64_C(1) << 1)
 #define AFSPW_CAP_RENAME_FILE_REPLACE (UINT64_C(1) << 2)
+#define AFSPW_CAP_CREATE_EMPTY_FILE (UINT64_C(1) << 3)
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,7 +34,8 @@ enum afspw_status {
     AFSPW_ERR_DESTINATION_EXISTS = -101,
     AFSPW_ERR_WRITE_UNCERTAIN = -102,
     AFSPW_ERR_DURABILITY_UNCERTAIN = -103,
-    AFSPW_ERR_WRITE_FEATURE = -104
+    AFSPW_ERR_WRITE_FEATURE = -104,
+    AFSPW_ERR_OBJECT_ID_EXHAUSTED = -105
 };
 
 enum afspw_stage {
@@ -46,7 +48,8 @@ enum afspw_stage {
     AFSPW_STAGE_ENCODE = 6,
     AFSPW_STAGE_RECORD_WRITE = 7,
     AFSPW_STAGE_FLUSH = 8,
-    AFSPW_STAGE_COMPLETE = 9
+    AFSPW_STAGE_COMPLETE = 9,
+    AFSPW_STAGE_CREATE_LOOKUP = 10
 };
 
 /*
@@ -90,6 +93,16 @@ struct afspw_rename_result {
     uint64_t log_block;
 };
 
+struct afspw_create_result {
+    uint32_t abi_version;
+    uint32_t prior_records;
+    uint32_t sequence;
+    uint32_t log_slot;
+    uint64_t base_generation;
+    uint64_t log_block;
+    uint64_t object_id;
+};
+
 struct afspw_diagnostic {
     uint32_t abi_version;
     int32_t status;
@@ -101,6 +114,21 @@ struct afspw_diagnostic {
 };
 
 uint64_t afspw_capabilities(void);
+
+/*
+ * Durably create an empty regular file. The identifier is the monotone
+ * checkpoint-plus-log allocator watermark returned in result.object_id. The
+ * preflight also proves that the highest committed object remains below that
+ * watermark. This operation allocates no data block; reference replay
+ * allocates only the metadata needed to materialize the record into a
+ * checkpoint.
+ */
+int afspw_create_empty_file(
+    const struct afspw_block_ops *ops, const struct afspr_scratch *scratch,
+    uint64_t parent_id, const void *name, size_t name_len,
+    const struct afspr_timespec *timestamp,
+    struct afspw_create_result *result, size_t result_size,
+    struct afspw_diagnostic *diagnostic, size_t diagnostic_size);
 
 /*
  * Durably rename one regular-file directory entry without replacement.

@@ -143,6 +143,7 @@ int main(int argc, char **argv)
     struct afspr_directory_entry entry;
     struct afspr_diagnostic reader_diagnostic;
     struct afspw_rename_result result;
+    struct afspw_create_result create_result;
     struct afspw_diagnostic writer_diagnostic;
     struct afspr_timespec timestamp;
     uint8_t workspace[AFSPW_RECOMMENDED_SCRATCH_SIZE];
@@ -156,8 +157,10 @@ int main(int argc, char **argv)
 
     require(argc == 2 || argc == 3,
             "usage: writer_probe IMAGE "
-            "[success|low-memory|read-fail-retry|delete|replace|torn-only|"
-            "torn-retry|flush-fail|destination-exists]");
+            "[success|low-memory|read-fail-retry|create|create-low-memory|"
+            "create-exists|create-exhausted|create-bad-watermark|"
+            "create-missing-parent|delete|replace|torn-only|torn-retry|"
+            "flush-fail|destination-exists]");
     mode = argc == 3 ? argv[2] : "success";
     if (strcmp(mode, "destination-exists") == 0) {
         target = "Replace.TXT";
@@ -166,6 +169,12 @@ int main(int argc, char **argv)
         require(strcmp(mode, "success") == 0 ||
                     strcmp(mode, "low-memory") == 0 ||
                     strcmp(mode, "read-fail-retry") == 0 ||
+                    strcmp(mode, "create") == 0 ||
+                    strcmp(mode, "create-low-memory") == 0 ||
+                    strcmp(mode, "create-exists") == 0 ||
+                    strcmp(mode, "create-exhausted") == 0 ||
+                    strcmp(mode, "create-bad-watermark") == 0 ||
+                    strcmp(mode, "create-missing-parent") == 0 ||
                     strcmp(mode, "delete") == 0 ||
                     strcmp(mode, "replace") == 0 ||
                     strcmp(mode, "torn-only") == 0 ||
@@ -193,9 +202,12 @@ int main(int argc, char **argv)
     writer_ops.block_count = device.blocks;
     writer_ops.block_size = BLOCK_SIZE;
     scratch.buffer = workspace;
-    scratch.size = strcmp(mode, "low-memory") == 0
+    scratch.size = strcmp(mode, "low-memory") == 0 ||
+                           strcmp(mode, "create-low-memory") == 0
                        ? AFSPW_SCRATCH_SIZE
                        : sizeof(workspace);
+    memset(&result, 0, sizeof(result));
+    memset(&create_result, 0, sizeof(create_result));
     memset(&timestamp, 0, sizeof(timestamp));
     timestamp.seconds = 10;
 
@@ -205,12 +217,40 @@ int main(int argc, char **argv)
             "delete capability");
     require((afspw_capabilities() & AFSPW_CAP_RENAME_FILE_REPLACE) != 0u,
             "replace capability");
+    require((afspw_capabilities() & AFSPW_CAP_CREATE_EMPTY_FILE) != 0u,
+            "empty create capability");
+    require(strcmp(afspw_status_string(AFSPW_ERR_OBJECT_ID_EXHAUSTED),
+                   "object ID space exhausted") == 0 &&
+                strcmp(afspw_stage_string(AFSPW_STAGE_CREATE_LOOKUP),
+                       "create-lookup") == 0,
+            "create status and stage strings");
     device.torn_write = strcmp(mode, "torn-only") == 0 ||
                         strcmp(mode, "torn-retry") == 0;
     device.fail_flush = strcmp(mode, "flush-fail") == 0;
     device.fail_read_number =
         strcmp(mode, "read-fail-retry") == 0 ? 4u : 0u;
-    if (strcmp(mode, "delete") == 0) {
+    if (strcmp(mode, "create") == 0 ||
+        strcmp(mode, "create-low-memory") == 0 ||
+        strcmp(mode, "create-exists") == 0 ||
+        strcmp(mode, "create-exhausted") == 0 ||
+        strcmp(mode, "create-bad-watermark") == 0 ||
+        strcmp(mode, "create-missing-parent") == 0) {
+        const char *create_name =
+            (strcmp(mode, "create") == 0 ||
+             strcmp(mode, "create-low-memory") == 0)
+                ? "C-Empty.BIN"
+                : (strcmp(mode, "create-exists") == 0 ? "fInAl.bIn"
+                                                       : "New-Empty.BIN");
+        uint64_t create_parent =
+            strcmp(mode, "create-missing-parent") == 0 ? UINT64_C(999999)
+                                                        : UINT64_C(1);
+
+        status = afspw_create_empty_file(
+            &writer_ops, &scratch, create_parent, create_name,
+            strlen(create_name), &timestamp, &create_result,
+            sizeof(create_result), &writer_diagnostic,
+            sizeof(writer_diagnostic));
+    } else if (strcmp(mode, "delete") == 0) {
         status = afspw_delete_file(
             &writer_ops, &scratch, UINT64_C(1), "Final.BIN", 9u,
             &timestamp, &result, sizeof(result), &writer_diagnostic,
@@ -234,6 +274,52 @@ int main(int argc, char **argv)
                 "existing destination refused before I/O");
         require(fclose(device.file) == 0, "close destination image");
         printf("portable-c-writer destination-exists=PASS reads=%u writes=0 flushes=0\n",
+               device.reads);
+        return 0;
+    }
+    if (strcmp(mode, "create-exists") == 0) {
+        require(status == AFSPW_ERR_DESTINATION_EXISTS &&
+                    writer_diagnostic.stage == AFSPW_STAGE_CREATE_LOOKUP &&
+                    device.reads <= 21u && device.writes == 0u &&
+                    device.flushes == 0u,
+                "existing create name refused before I/O");
+        require(fclose(device.file) == 0, "close create conflict image");
+        printf("portable-c-writer create-exists=PASS reads=%u writes=0 flushes=0\n",
+               device.reads);
+        return 0;
+    }
+    if (strcmp(mode, "create-exhausted") == 0) {
+        require(status == AFSPW_ERR_OBJECT_ID_EXHAUSTED &&
+                    writer_diagnostic.stage == AFSPW_STAGE_CREATE_LOOKUP &&
+                    device.reads <= 9u && device.writes == 0u &&
+                    device.flushes == 0u,
+                "exhausted object IDs refused before I/O");
+        require(fclose(device.file) == 0, "close exhausted image");
+        printf("portable-c-writer create-exhausted=PASS reads=%u writes=0 flushes=0\n",
+               device.reads);
+        return 0;
+    }
+    if (strcmp(mode, "create-bad-watermark") == 0) {
+        require(status == AFSPR_ERR_CORRUPT &&
+                    writer_diagnostic.stage == AFSPW_STAGE_CREATE_LOOKUP &&
+                    writer_diagnostic.reader_status == AFSPR_ERR_CORRUPT &&
+                    writer_diagnostic.block != AFSPR_NO_BLOCK &&
+                    device.writes == 0u && device.flushes == 0u,
+                "regressed object watermark refused before I/O");
+        require(fclose(device.file) == 0, "close bad-watermark image");
+        printf("portable-c-writer create-bad-watermark=PASS reads=%u writes=0 flushes=0 block=%llu\n",
+               device.reads,
+               (unsigned long long)writer_diagnostic.block);
+        return 0;
+    }
+    if (strcmp(mode, "create-missing-parent") == 0) {
+        require(status == AFSPR_ERR_NOT_FOUND &&
+                    writer_diagnostic.stage == AFSPW_STAGE_CREATE_LOOKUP &&
+                    writer_diagnostic.reader_status == AFSPR_ERR_NOT_FOUND &&
+                    device.writes == 0u && device.flushes == 0u,
+                "missing create parent refused before I/O");
+        require(fclose(device.file) == 0, "close missing-parent image");
+        printf("portable-c-writer create-missing-parent=PASS reads=%u writes=0 flushes=0\n",
                device.reads);
         return 0;
     }
@@ -280,19 +366,38 @@ int main(int argc, char **argv)
     expected_writes = strcmp(mode, "torn-retry") == 0 ? 2u : 1u;
     if (strcmp(mode, "flush-fail") != 0) {
         require(status == AFSPR_OK, afspw_status_string(status));
-        require(result.abi_version == AFSPW_ABI_VERSION &&
-                    result.prior_records == 7u && result.sequence == 8u &&
-                    result.log_slot == 7u && result.base_generation != 0u &&
-                    result.log_block != AFSPR_NO_BLOCK,
-                "rename result coordinates");
-        require(writer_diagnostic.stage == AFSPW_STAGE_COMPLETE &&
-                    writer_diagnostic.block == result.log_block,
-                "successful completion diagnostic");
+        if (strcmp(mode, "create") == 0 ||
+            strcmp(mode, "create-low-memory") == 0) {
+            require(create_result.abi_version == AFSPW_ABI_VERSION &&
+                        create_result.prior_records == 7u &&
+                        create_result.sequence == 8u &&
+                        create_result.log_slot == 7u &&
+                        create_result.base_generation != 0u &&
+                        create_result.log_block != AFSPR_NO_BLOCK &&
+                        create_result.object_id == UINT64_C(19),
+                    "create result coordinates and monotone object ID");
+            require(writer_diagnostic.stage == AFSPW_STAGE_COMPLETE &&
+                        writer_diagnostic.block == create_result.log_block,
+                    "successful create diagnostic");
+        } else {
+            require(result.abi_version == AFSPW_ABI_VERSION &&
+                        result.prior_records == 7u &&
+                        result.sequence == 8u && result.log_slot == 7u &&
+                        result.base_generation != 0u &&
+                        result.log_block != AFSPR_NO_BLOCK,
+                    "rename result coordinates");
+            require(writer_diagnostic.stage == AFSPW_STAGE_COMPLETE &&
+                        writer_diagnostic.block == result.log_block,
+                    "successful completion diagnostic");
+        }
     }
     require(device.writes == expected_writes && device.flushes == 1u,
             "bounded write and flush counts");
     mutation_reads = device.reads;
-    if (strcmp(mode, "low-memory") == 0) {
+    if (strcmp(mode, "create-low-memory") == 0) {
+        require(mutation_reads <= 144u,
+                "8 KiB create preflight read ceiling");
+    } else if (strcmp(mode, "low-memory") == 0) {
         require(mutation_reads <= 152u,
                 "8 KiB fallback preflight read ceiling");
     } else if (strcmp(mode, "torn-retry") == 0) {
@@ -324,7 +429,22 @@ int main(int argc, char **argv)
                 view.last_sequence == 8u &&
                 view.tail_state == AFSPR_INTENT_TAIL_FULL,
             "C record is the complete durable tail");
-    if (strcmp(mode, "delete") == 0) {
+    if (strcmp(mode, "create") == 0 ||
+        strcmp(mode, "create-low-memory") == 0) {
+        uint64_t empty_size;
+
+        require(lookup(&reader_ops, &scratch, &volume, &view,
+                       "C-Empty.BIN", &entry) == AFSPR_OK &&
+                    entry.type_hint == AFSPR_OBJECT_FILE &&
+                    entry.object_id == create_result.object_id,
+                "created empty file visible in durable view");
+        require(afspr_intent_file_size(
+                    &reader_ops, &scratch, &volume, &view, entry.object_id,
+                    &empty_size, &reader_diagnostic,
+                    sizeof(reader_diagnostic)) == AFSPR_OK &&
+                    empty_size == 0u,
+                "created file has zero durable length");
+    } else if (strcmp(mode, "delete") == 0) {
         require(lookup(&reader_ops, &scratch, &volume, &view, "Final.BIN",
                        &entry) == AFSPR_ERR_NOT_FOUND,
                 "deleted name absent in durable view");

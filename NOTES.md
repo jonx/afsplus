@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Portable C creates empty files without an allocator](#2026-09-03--portable-c-creates-empty-files-without-an-allocator)
 - [2026-09-03 — Portable C trades caller RAM for 7x fewer writer reads](#2026-09-03--portable-c-trades-caller-ram-for-7x-fewer-writer-reads)
 - [2026-09-03 — Intent replay makes final namespace removal bounded](#2026-09-03--intent-replay-makes-final-namespace-removal-bounded)
 - [2026-09-03 — Portable C performs its first durable mutation](#2026-09-03--portable-c-performs-its-first-durable-mutation)
@@ -41,6 +42,26 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Portable C creates empty files without an allocator
+
+The ABI-1 portable writer now emits an empty regular-file create into one
+preallocated intent slot. Its semantic preflight validates the complete
+namespace prefix, proves the parent directory and name absence, advances over
+every prior logged create and returns the exact monotone object ID. The
+operation allocates no data block and publishes no checkpoint; Rust replay
+materializes its metadata later.
+
+The C reader sees object 19 and zero durable bytes immediately after the
+write, then Rust replay preserves the same identity and the checker accepts
+the result. A case-insensitive collision and missing parent return the exact
+create-lookup failure before any write. A separate valid checkpoint with
+`next_object_id = UINT64_MAX` proves exhaustion is distinct from corruption
+and also writes nothing. A second valid-checksum checkpoint regresses the
+watermark below the highest committed object; a bounded right-edge object-map
+lookup catches it before the writer can reuse an identity. The successful
+paths retain 144-read 8 KiB and 21-read cached ceilings, one block write, one
+flush and the bounded m68k stack contract.
 
 ## 2026-09-03 — Portable C trades caller RAM for 7x fewer writer reads
 

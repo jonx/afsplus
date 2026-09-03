@@ -239,12 +239,15 @@ replacements. Semantic replay validation fails closed on invalid sources,
 targets, object-ID progression and size transitions. A damaged tail is
 excluded at its exact slot and LBA.
 
-The independent ABI-1 C writer appends delete, non-replacing rename and
-replacing rename records after the same fresh semantic preflight. Each call
-performs one preallocated-block write and one flush, allocates no media and
-returns stable stage/LBA/sequence diagnostics. Delete and replacement require
-the orphan-directory feature; write/flush failures are explicitly uncertain,
-and a full log requires checkpoint materialization by a fuller implementation.
+The independent ABI-1 C writer appends empty-file create, delete,
+non-replacing rename and replacing rename records after the same fresh
+semantic preflight. Create derives and returns the monotone object ID from the
+validated checkpoint-plus-log prefix; name collisions, missing parents and ID
+exhaustion fail before media I/O. Each call performs one preallocated-block
+write and one flush, allocates no media and returns stable
+stage/LBA/sequence diagnostics. Delete and replacement require the
+orphan-directory feature; write/flush failures are explicitly uncertain, and
+a full log requires checkpoint materialization by a fuller implementation.
 
 The record wire, mandatory log size, complete Unicode-table parity and
 real-device barrier validation are unfrozen M14 work; this does not constitute

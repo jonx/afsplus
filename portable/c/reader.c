@@ -3298,6 +3298,7 @@ static int afspr_validate_namespace_prefix(
     const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
     const struct afspr_probe_result *volume,
     const struct afspr_intent_view *view,
+    uint64_t *final_next_object_id,
     struct afspr_diagnostic *diagnostic)
 {
     struct afspr_ident ident;
@@ -3539,6 +3540,9 @@ static int afspr_validate_namespace_prefix(
             }
         }
     }
+    if (final_next_object_id != NULL) {
+        *final_next_object_id = next_object_id;
+    }
     return AFSPR_OK;
 }
 
@@ -3561,9 +3565,9 @@ int afspr_internal_preflight_file_namespace(
     const struct afspr_probe_result *volume, uint64_t source_parent_id,
     const void *source_name, size_t source_name_len,
     uint64_t target_parent_id, const void *target_name,
-    size_t target_name_len, int inspect_target,
+    size_t target_name_len, int source_must_exist, int inspect_target,
     struct afspr_intent_view *view, int *destination_conflict,
-    int *destination_is_file, uint32_t *phase,
+    int *destination_is_file, uint64_t *next_object_id, uint32_t *phase,
     struct afspr_diagnostic *diagnostic, size_t diagnostic_size)
 {
     struct afspr_ident ident;
@@ -3592,13 +3596,15 @@ int afspr_internal_preflight_file_namespace(
           target_name_len == 0u ||
           target_name_len > AFSP_NAME_MAX_UTF8_BYTES)) ||
         view == NULL || destination_conflict == NULL ||
-        destination_is_file == NULL || phase == NULL) {
+        destination_is_file == NULL || next_object_id == NULL ||
+        phase == NULL) {
         return afspr_report(diagnostic, AFSPR_ERR_INVALID_ARGUMENT,
                             AFSPR_STAGE_ARGUMENTS,
                             AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
     }
     *destination_conflict = 0;
     *destination_is_file = 0;
+    *next_object_id = 0u;
     status = afspr_scan_intent_log(ops, scratch, volume, view, sizeof(*view),
                                    diagnostic, diagnostic_size);
     if (status != AFSPR_OK || view->tail_state == AFSPR_INTENT_TAIL_FULL) {
@@ -3609,8 +3615,8 @@ int afspr_internal_preflight_file_namespace(
                             AFSPR_STAGE_INTENT_NAMESPACE,
                             AFSPR_NO_CHECKPOINT_SLOT, view->tail_block);
     }
-    status = afspr_validate_namespace_prefix(ops, scratch, volume, view,
-                                             diagnostic);
+    status = afspr_validate_namespace_prefix(
+        ops, scratch, volume, view, next_object_id, diagnostic);
     if (status != AFSPR_OK) {
         return status;
     }
@@ -3626,10 +3632,27 @@ int afspr_internal_preflight_file_namespace(
     }
     end.slot = view->valid_records;
     end.operation = 0u;
+    if (source_must_exist == 0) {
+        status = afspr_namespace_parent_is_directory(
+            ops, scratch, volume, source_parent_id, diagnostic);
+        if (status != AFSPR_OK) {
+            return status;
+        }
+    }
     status = afspr_namespace_resolve_before(
         ops, scratch, volume, view, end, source_parent_id, key, key_len,
         source_result_name, sizeof(source_result_name), &source, NULL,
         diagnostic);
+    if (source_must_exist == 0) {
+        if (status == AFSPR_ERR_NOT_FOUND) {
+            return AFSPR_OK;
+        }
+        if (status == AFSPR_OK) {
+            *destination_conflict = 1;
+            return AFSPR_OK;
+        }
+        return status;
+    }
     if (status != AFSPR_OK) {
         return status;
     }
@@ -3668,6 +3691,52 @@ int afspr_internal_preflight_file_namespace(
         source.name_len != target.name_len ||
         memcmp(source.name, target.name, source.name_len) != 0;
     return AFSPR_OK;
+}
+
+int afspr_internal_validate_object_watermark(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_probe_result *volume, uint64_t next_object_id,
+    struct afspr_diagnostic *diagnostic, size_t diagnostic_size)
+{
+    struct afspr_ident ident;
+    struct afspr_tree_spec spec;
+    uint8_t search[8];
+    uint8_t found_key[8];
+    uint8_t value[8];
+    size_t value_len;
+    uint64_t leaf_lba;
+    int found;
+    int status = afspr_prepare_operation(
+        ops, scratch, volume, AFSPR_MIN_SCRATCH_SIZE, &ident, diagnostic,
+        diagnostic_size);
+
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (next_object_id == 0u) {
+        return afspr_report(diagnostic, AFSPR_ERR_INVALID_ARGUMENT,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    memset(search, UINT8_MAX, sizeof(search));
+    spec.kind = AFSPR_TREE_KIND_OBJECT_MAP;
+    spec.owner = 0u;
+    spec.max_generation = volume->generation;
+    status = afspr_tree_lookup_fixed(
+        ops, scratch, &ident, volume->object_map_block, &spec, search, 1,
+        found_key, value, sizeof(value), &value_len, &found, &leaf_lba,
+        diagnostic);
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (!found || value_len != sizeof(value) ||
+        afspr_get_be64(found_key) >= next_object_id) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_TREE_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, leaf_lba);
+    }
+    return afspr_report(diagnostic, AFSPR_OK, AFSPR_STAGE_COMPLETE,
+                        AFSPR_NO_CHECKPOINT_SLOT, leaf_lba);
 }
 
 int afspr_lookup_intent_directory_entry(
@@ -3710,7 +3779,7 @@ int afspr_lookup_intent_directory_entry(
         return status;
     }
     status = afspr_validate_namespace_prefix(ops, scratch, volume, view,
-                                             diagnostic);
+                                             NULL, diagnostic);
     if (status != AFSPR_OK) {
         return status;
     }
@@ -3881,7 +3950,7 @@ int afspr_intent_directory_next(
         return status;
     }
     status = afspr_validate_namespace_prefix(ops, scratch, volume, view,
-                                             diagnostic);
+                                             NULL, diagnostic);
     if (status != AFSPR_OK) {
         return status;
     }
@@ -4198,7 +4267,7 @@ static int afspr_load_intent_file_state(
 {
     struct afspr_log_position end;
     int status = afspr_validate_namespace_prefix(ops, scratch, volume, view,
-                                                  diagnostic);
+                                                  NULL, diagnostic);
 
     if (status != AFSPR_OK) {
         return status;

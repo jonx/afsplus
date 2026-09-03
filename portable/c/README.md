@@ -164,11 +164,14 @@ are present.
 
 ## Bounded classic-rw namespace operations
 
-`afspw_rename_file_no_replace`, `afspw_delete_file` and
-`afspw_rename_file_replace` are the independent media-mutating C namespace
-slice. Each freshly probes the volume, rescans and semantically validates the
-durable namespace, proves the regular-file operands and writes one version-2
-record into the next preallocated intent slot, then invokes exactly one flush.
+`afspw_create_empty_file`, `afspw_rename_file_no_replace`,
+`afspw_delete_file` and `afspw_rename_file_replace` are the independent
+media-mutating C namespace slice. Each freshly probes the volume, rescans and
+semantically validates the durable namespace, proves the relevant directory
+and regular-file operands and writes one version-2 record into the next
+preallocated intent slot, then invokes exactly one flush. Empty create derives
+its returned object ID from the complete validated prefix, including gaps left
+by prior logged creates.
 They allocate no disk block and publish no checkpoint. The caller supplies
 read/write/flush callbacks, exclusive writer serialization and immutable name
 buffers. The hard minimum remains 8 KiB. Extra complete 4 KiB blocks in the
@@ -188,8 +191,8 @@ Delete and replacement require the ADR-066 orphan-directory feature. Rust
 replay preclaims logged data, then moves each final victim into persistent
 orphan state in the same checkpoint, lazily creating object 2 there if needed;
 it never retires the victim layout in proportion to fragmentation. Directory
-rename, create, data write, truncate, allocation, orphan maintenance and
-checkpoint publication remain later `classic-rw` slices. Modern Unicode
+Directory rename, nonempty create, data write, truncate, allocation, orphan
+maintenance and checkpoint publication remain later `classic-rw` slices. Modern Unicode
 profiles currently accept ASCII lookup names in this C path; legacy identity
 volumes retain exact UTF-8 lookup.
 
@@ -221,9 +224,16 @@ flag on a data-policy volume, while the primary fixture injects the same flag
 without its feature and requires object-decode failure.
 
 The C writer copies that seven-record image and independently appends an eighth
-non-replacing rename, delete and replacing rename. Each uses one write and one
-flush; the C overlay verifies the namespace, then Rust replay checks visible
-content, retained orphan bytes and all filesystem invariants. A 64-byte torn
+empty create, non-replacing rename, delete and replacing rename. Each uses one
+write and one flush; the C overlay verifies the namespace and zero-length
+create, then Rust replay checks the monotone object ID, visible content,
+retained orphan bytes and all filesystem invariants. Case-insensitive create
+collision, a missing parent and exhausted object IDs all produce exact
+diagnostics and zero writes. A syntactically valid checkpoint whose object-ID
+watermark regresses below the highest object is also rejected on a bounded
+right-edge tree lookup rather than being amplified by the writer. The 8 KiB
+create path is independently replayed and capped at 144 reads; the cached path
+remains capped at 21. A 64-byte torn
 write is retried into the same slot; a flush failure reports durability
 uncertainty; an existing destination and a full log produce zero media writes.
 Strict warnings, ASan/UBSan, Clang static analysis, CMake export consumption

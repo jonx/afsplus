@@ -5,13 +5,59 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use afsplus_block::FileBackend;
+use afsplus_block::{BlockDevice, FileBackend};
 use afsplus_core::volume::BatchOp;
 use afsplus_core::volume::DataUpdatePolicy;
 use afsplus_core::{mkfs, mount, MkfsParams};
+use afsplus_format::checkpoint::Checkpoint;
+use afsplus_format::ident::Identification;
 use afsplus_format::{Timespec, DEFAULT_BLOCK_SIZE, OBJECT_ROOT};
 
 const TOTAL_BLOCKS: u64 = 4096;
+
+fn set_next_object_id(image: &Path, next_object_id: u64, label: &str) -> Result<(), String> {
+    let mut device = FileBackend::open(image, DEFAULT_BLOCK_SIZE, TOTAL_BLOCKS)
+        .map_err(|error| format!("cannot open exhaustion fixture: {error}"))?;
+    let mut block = vec![0u8; DEFAULT_BLOCK_SIZE];
+    device
+        .read_block(0, &mut block)
+        .map_err(|error| format!("cannot read identification: {error}"))?;
+    let ident = Identification::decode(&block)
+        .map_err(|error| format!("cannot decode identification: {error}"))?;
+    let mut selected: Option<(u64, Checkpoint)> = None;
+    for lba in [1u64, 2u64] {
+        device
+            .read_block(lba, &mut block)
+            .map_err(|error| format!("cannot read checkpoint {lba}: {error}"))?;
+        if let Ok(checkpoint) = Checkpoint::decode(&block, &ident.uuid) {
+            if selected
+                .as_ref()
+                .is_none_or(|(_, current)| checkpoint.generation > current.generation)
+            {
+                selected = Some((lba, checkpoint));
+            }
+        }
+    }
+    let (lba, mut checkpoint) =
+        selected.ok_or_else(|| "exhaustion fixture has no valid checkpoint".to_owned())?;
+    checkpoint.next_object_id = next_object_id;
+    let encoded = checkpoint
+        .encode(DEFAULT_BLOCK_SIZE)
+        .map_err(|error| format!("cannot encode exhausted checkpoint: {error}"))?;
+    device
+        .write_block(lba, &encoded)
+        .and_then(|()| device.flush())
+        .map_err(|error| format!("cannot publish exhausted checkpoint: {error}"))?;
+    println!(
+        "image={} {}=READY next_object_id={} generation={} checkpoint={}",
+        image.display(),
+        label,
+        next_object_id,
+        checkpoint.generation,
+        lba
+    );
+    Ok(())
+}
 
 fn timestamp(seconds: i64) -> Timespec {
     Timespec {
@@ -186,6 +232,41 @@ fn verify_c_namespace(
         .map_err(|error| format!("cannot open C-written fixture: {error}"))?;
     let mut volume = mount(device).map_err(|error| format!("C-written replay failed: {error}"))?;
 
+    if mode == "create" {
+        let object_id = volume
+            .lookup_root("c-empty.bin")
+            .map_err(|error| format!("created-name lookup failed: {error}"))?
+            .ok_or_else(|| "replay did not publish C-Empty.BIN".to_owned())?;
+        if object_id != 19 {
+            return Err(format!(
+                "C create returned object {object_id}, expected monotone ID 19"
+            ));
+        }
+        let content = volume
+            .read_file(object_id)
+            .map_err(|error| format!("cannot read C-created empty file: {error}"))?;
+        if !content.is_empty() {
+            return Err("C-created file is not empty".into());
+        }
+        if !volume
+            .orphan_object(17)
+            .map_err(|error| format!("prior replacement orphan lookup failed: {error}"))?
+            || volume
+                .orphan_count()
+                .map_err(|error| format!("orphan count failed: {error}"))?
+                != 1
+        {
+            return Err("C create changed prior orphan state".into());
+        }
+        drop(volume.into_device());
+        println!(
+            "image={} c_create_replay=PASS visible_object={} bytes=0 orphans=1",
+            image.display(),
+            object_id
+        );
+        return Ok(());
+    }
+
     let (absent_name, expected_name, expected_content) = match mode {
         "rename" => ("Final.BIN", "c-written.bin", expected.as_slice()),
         "torn" => ("C-Written.BIN", "Final.BIN", expected.as_slice()),
@@ -258,19 +339,45 @@ fn main() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1).map(PathBuf::from);
     let Some(first) = arguments.next() else {
         eprintln!(
-            "usage: afsplus-portable-c-log-fixture [--verify-c-rename|--verify-c-torn|--verify-c-delete|--verify-c-replace] IMAGE EXPECTED CREATED_EXPECTED"
+            "usage: afsplus-portable-c-log-fixture [--verify-c-create|--verify-c-rename|--verify-c-torn|--verify-c-delete|--verify-c-replace] IMAGE EXPECTED CREATED_EXPECTED"
         );
         return ExitCode::from(2);
     };
+    if first.as_os_str() == OsStr::new("--exhaust-object-ids")
+        || first.as_os_str() == OsStr::new("--regress-object-watermark")
+    {
+        let exhaust = first.as_os_str() == OsStr::new("--exhaust-object-ids");
+        let Some(image) = arguments.next() else {
+            eprintln!("usage: afsplus-portable-c-log-fixture [--exhaust-object-ids|--regress-object-watermark] IMAGE");
+            return ExitCode::from(2);
+        };
+        if arguments.next().is_some() {
+            eprintln!("usage: afsplus-portable-c-log-fixture [--exhaust-object-ids|--regress-object-watermark] IMAGE");
+            return ExitCode::from(2);
+        }
+        let result = if exhaust {
+            set_next_object_id(&image, u64::MAX, "object_id_exhaustion")
+        } else {
+            set_next_object_id(&image, 16, "object_watermark_regression")
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("afsplus-portable-c-log-fixture: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let verify_rename = first.as_os_str() == OsStr::new("--verify-c-rename");
+    let verify_create = first.as_os_str() == OsStr::new("--verify-c-create");
     let verify_torn = first.as_os_str() == OsStr::new("--verify-c-torn");
     let verify_delete = first.as_os_str() == OsStr::new("--verify-c-delete");
     let verify_replace = first.as_os_str() == OsStr::new("--verify-c-replace");
-    let verifies = verify_rename || verify_torn || verify_delete || verify_replace;
+    let verifies = verify_create || verify_rename || verify_torn || verify_delete || verify_replace;
     let image = if verifies {
         let Some(image) = arguments.next() else {
             eprintln!(
-                "usage: afsplus-portable-c-log-fixture [--verify-c-rename|--verify-c-torn|--verify-c-delete|--verify-c-replace] IMAGE EXPECTED CREATED_EXPECTED"
+                "usage: afsplus-portable-c-log-fixture [--verify-c-create|--verify-c-rename|--verify-c-torn|--verify-c-delete|--verify-c-replace] IMAGE EXPECTED CREATED_EXPECTED"
             );
             return ExitCode::from(2);
         };
@@ -280,24 +387,26 @@ fn main() -> ExitCode {
     };
     let Some(expected) = arguments.next() else {
         eprintln!(
-            "usage: afsplus-portable-c-log-fixture [--verify-c-rename|--verify-c-torn|--verify-c-delete|--verify-c-replace] IMAGE EXPECTED CREATED_EXPECTED"
+            "usage: afsplus-portable-c-log-fixture [--verify-c-create|--verify-c-rename|--verify-c-torn|--verify-c-delete|--verify-c-replace] IMAGE EXPECTED CREATED_EXPECTED"
         );
         return ExitCode::from(2);
     };
     let Some(created_expected) = arguments.next() else {
         eprintln!(
-            "usage: afsplus-portable-c-log-fixture [--verify-c-rename|--verify-c-torn|--verify-c-delete|--verify-c-replace] IMAGE EXPECTED CREATED_EXPECTED"
+            "usage: afsplus-portable-c-log-fixture [--verify-c-create|--verify-c-rename|--verify-c-torn|--verify-c-delete|--verify-c-replace] IMAGE EXPECTED CREATED_EXPECTED"
         );
         return ExitCode::from(2);
     };
     if arguments.next().is_some() {
         eprintln!(
-            "usage: afsplus-portable-c-log-fixture [--verify-c-rename|--verify-c-torn|--verify-c-delete|--verify-c-replace] IMAGE EXPECTED CREATED_EXPECTED"
+            "usage: afsplus-portable-c-log-fixture [--verify-c-create|--verify-c-rename|--verify-c-torn|--verify-c-delete|--verify-c-replace] IMAGE EXPECTED CREATED_EXPECTED"
         );
         return ExitCode::from(2);
     }
     let result = if verifies {
-        let mode = if verify_rename {
+        let mode = if verify_create {
+            "create"
+        } else if verify_rename {
             "rename"
         } else if verify_torn {
             "torn"

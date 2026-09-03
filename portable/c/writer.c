@@ -14,13 +14,15 @@
 #define AFSPW_LOG_FIXED_PAYLOAD 32u
 #define AFSPW_LOG_OP_FIXED 64u
 #define AFSPW_LOG_RECORD_VERSION 2u
+#define AFSPW_OP_CREATE 1u
 #define AFSPW_OP_DELETE 2u
 #define AFSPW_OP_RENAME 3u
 
 enum afspw_namespace_kind {
-    AFSPW_NAMESPACE_DELETE = 1,
-    AFSPW_NAMESPACE_RENAME_NO_REPLACE = 2,
-    AFSPW_NAMESPACE_RENAME_REPLACE = 3
+    AFSPW_NAMESPACE_CREATE = 1,
+    AFSPW_NAMESPACE_DELETE = 2,
+    AFSPW_NAMESPACE_RENAME_NO_REPLACE = 3,
+    AFSPW_NAMESPACE_RENAME_REPLACE = 4
 };
 
 struct afspw_reader_context {
@@ -161,7 +163,8 @@ static int afspw_encode_namespace(
     enum afspw_namespace_kind kind, uint64_t source_parent_id,
     const uint8_t *source_name, size_t source_name_len,
     uint64_t target_parent_id, const uint8_t *target_name,
-    size_t target_name_len, const struct afspr_timespec *timestamp)
+    size_t target_name_len, uint64_t created_object_id,
+    const struct afspr_timespec *timestamp)
 {
     size_t payload_len = AFSPW_LOG_FIXED_PAYLOAD + AFSPW_LOG_OP_FIXED +
                          source_name_len + target_name_len;
@@ -181,13 +184,18 @@ static int afspw_encode_namespace(
     afspw_put_le16(payload + 30u, AFSPW_LOG_RECORD_VERSION);
 
     operation = payload + AFSPW_LOG_FIXED_PAYLOAD;
-    operation[0] = kind == AFSPW_NAMESPACE_DELETE ? AFSPW_OP_DELETE
-                                                   : AFSPW_OP_RENAME;
+    operation[0] = kind == AFSPW_NAMESPACE_CREATE
+                       ? AFSPW_OP_CREATE
+                       : (kind == AFSPW_NAMESPACE_DELETE ? AFSPW_OP_DELETE
+                                                         : AFSPW_OP_RENAME);
     operation[1] = kind == AFSPW_NAMESPACE_RENAME_REPLACE ? 1u : 0u;
     afspw_put_le16(operation + 2u, (uint16_t)source_name_len);
     afspw_put_le16(operation + 4u, (uint16_t)target_name_len);
     afspw_put_le64(operation + 8u, source_parent_id);
     afspw_put_le64(operation + 16u, target_parent_id);
+    if (kind == AFSPW_NAMESPACE_CREATE) {
+        afspw_put_le64(operation + 24u, created_object_id);
+    }
     afspw_put_le64(operation + 48u, (uint64_t)timestamp->seconds);
     afspw_put_le32(operation + 56u, timestamp->nanoseconds);
     memcpy(operation + AFSPW_LOG_OP_FIXED, source_name, source_name_len);
@@ -208,7 +216,7 @@ static int afspw_encode_namespace(
 uint64_t afspw_capabilities(void)
 {
     return AFSPW_CAP_RENAME_FILE_NO_REPLACE | AFSPW_CAP_DELETE_FILE |
-           AFSPW_CAP_RENAME_FILE_REPLACE;
+           AFSPW_CAP_RENAME_FILE_REPLACE | AFSPW_CAP_CREATE_EMPTY_FILE;
 }
 
 static int afspw_append_namespace(
@@ -219,7 +227,8 @@ static int afspw_append_namespace(
     const void *target_name, size_t target_name_len,
     const struct afspr_timespec *timestamp,
     struct afspw_rename_result *result, size_t result_size,
-    struct afspw_diagnostic *diagnostic, size_t diagnostic_size)
+    struct afspw_diagnostic *diagnostic, size_t diagnostic_size,
+    uint64_t *created_object_id)
 {
     struct afspr_block_ops reader_ops;
     struct afspw_reader_context reader_context;
@@ -228,10 +237,14 @@ static int afspw_append_namespace(
     struct afspr_intent_view view;
     uint32_t preflight_phase;
     uint32_t sequence;
+    uint64_t next_object_id;
     int destination_conflict;
     int destination_is_file;
-    int inspect_target = kind != AFSPW_NAMESPACE_DELETE;
-    int needs_orphan = kind != AFSPW_NAMESPACE_RENAME_NO_REPLACE;
+    int source_must_exist = kind != AFSPW_NAMESPACE_CREATE;
+    int inspect_target = kind == AFSPW_NAMESPACE_RENAME_NO_REPLACE ||
+                         kind == AFSPW_NAMESPACE_RENAME_REPLACE;
+    int needs_orphan = kind == AFSPW_NAMESPACE_DELETE ||
+                       kind == AFSPW_NAMESPACE_RENAME_REPLACE;
     int status;
 
     if (diagnostic != NULL && diagnostic_size < sizeof(*diagnostic)) {
@@ -326,13 +339,16 @@ static int afspw_append_namespace(
     status = afspr_internal_preflight_file_namespace(
         &reader_ops, scratch, &volume, source_parent_id, source_name,
         source_name_len, target_parent_id, target_name, target_name_len,
-        inspect_target, &view, &destination_conflict, &destination_is_file,
-        &preflight_phase, &reader_diagnostic, sizeof(reader_diagnostic));
+        source_must_exist, inspect_target, &view, &destination_conflict,
+        &destination_is_file, &next_object_id, &preflight_phase,
+        &reader_diagnostic, sizeof(reader_diagnostic));
     if (status != AFSPR_OK) {
         uint32_t stage = AFSPW_STAGE_INTENT_SCAN;
 
         if (preflight_phase == AFSPR_INTERNAL_NAMESPACE_SOURCE) {
-            stage = AFSPW_STAGE_SOURCE_LOOKUP;
+            stage = kind == AFSPW_NAMESPACE_CREATE
+                        ? AFSPW_STAGE_CREATE_LOOKUP
+                        : AFSPW_STAGE_SOURCE_LOOKUP;
         } else if (preflight_phase == AFSPR_INTERNAL_NAMESPACE_TARGET) {
             stage = AFSPW_STAGE_TARGET_LOOKUP;
         }
@@ -359,6 +375,26 @@ static int afspw_append_namespace(
     }
     sequence = view.valid_records + 1u;
 
+    if (kind == AFSPW_NAMESPACE_CREATE && destination_conflict != 0) {
+        return afspw_report(diagnostic, AFSPW_ERR_DESTINATION_EXISTS,
+                            AFSPW_STAGE_CREATE_LOOKUP, AFSPR_OK,
+                            AFSPR_NO_BLOCK, sequence);
+    }
+    if (kind == AFSPW_NAMESPACE_CREATE && next_object_id == UINT64_MAX) {
+        return afspw_report(diagnostic, AFSPW_ERR_OBJECT_ID_EXHAUSTED,
+                            AFSPW_STAGE_CREATE_LOOKUP, AFSPR_OK,
+                            AFSPR_NO_BLOCK, sequence);
+    }
+    if (kind == AFSPW_NAMESPACE_CREATE) {
+        status = afspr_internal_validate_object_watermark(
+            &reader_ops, scratch, &volume, next_object_id,
+            &reader_diagnostic, sizeof(reader_diagnostic));
+        if (status != AFSPR_OK) {
+            return afspw_reader_failure(diagnostic, status,
+                                        AFSPW_STAGE_CREATE_LOOKUP,
+                                        &reader_diagnostic);
+        }
+    }
     if (kind == AFSPW_NAMESPACE_RENAME_NO_REPLACE &&
         destination_conflict != 0) {
         return afspw_report(diagnostic, AFSPW_ERR_DESTINATION_EXISTS,
@@ -376,7 +412,7 @@ static int afspw_append_namespace(
         (uint8_t *)scratch->buffer, ops->block_size, &volume, sequence,
         kind, source_parent_id, (const uint8_t *)source_name,
         source_name_len, target_parent_id, (const uint8_t *)target_name,
-        target_name_len, timestamp);
+        target_name_len, next_object_id, timestamp);
     if (status != AFSPR_OK) {
         return afspw_report(diagnostic, status, AFSPW_STAGE_ENCODE,
                             AFSPR_NOT_CHECKED, view.tail_block, sequence);
@@ -398,6 +434,9 @@ static int afspw_append_namespace(
     result->log_slot = view.tail_slot;
     result->base_generation = volume.generation;
     result->log_block = view.tail_block;
+    if (created_object_id != NULL) {
+        *created_object_id = next_object_id;
+    }
     return afspw_report(diagnostic, AFSPR_OK, AFSPW_STAGE_COMPLETE,
                         AFSPR_OK, view.tail_block, sequence);
 }
@@ -415,7 +454,7 @@ int afspw_rename_file_no_replace(
         AFSPW_NAMESPACE_RENAME_NO_REPLACE, ops, scratch, source_parent_id,
         source_name, source_name_len, target_parent_id, target_name,
         target_name_len, timestamp, result, result_size, diagnostic,
-        diagnostic_size);
+        diagnostic_size, NULL);
 }
 
 int afspw_delete_file(
@@ -428,7 +467,7 @@ int afspw_delete_file(
     return afspw_append_namespace(
         AFSPW_NAMESPACE_DELETE, ops, scratch, parent_id, name, name_len, 0u,
         NULL, 0u, timestamp, result, result_size, diagnostic,
-        diagnostic_size);
+        diagnostic_size, NULL);
 }
 
 int afspw_rename_file_replace(
@@ -444,7 +483,44 @@ int afspw_rename_file_replace(
         AFSPW_NAMESPACE_RENAME_REPLACE, ops, scratch, source_parent_id,
         source_name, source_name_len, target_parent_id, target_name,
         target_name_len, timestamp, result, result_size, diagnostic,
-        diagnostic_size);
+        diagnostic_size, NULL);
+}
+
+int afspw_create_empty_file(
+    const struct afspw_block_ops *ops, const struct afspr_scratch *scratch,
+    uint64_t parent_id, const void *name, size_t name_len,
+    const struct afspr_timespec *timestamp,
+    struct afspw_create_result *result, size_t result_size,
+    struct afspw_diagnostic *diagnostic, size_t diagnostic_size)
+{
+    struct afspw_rename_result common;
+    uint64_t object_id = 0u;
+    int status;
+
+    if (diagnostic != NULL && diagnostic_size < sizeof(*diagnostic)) {
+        return AFSPR_ERR_ABI;
+    }
+    if (result == NULL || result_size < sizeof(*result)) {
+        return afspw_report(diagnostic, AFSPR_ERR_INVALID_ARGUMENT,
+                            AFSPW_STAGE_ARGUMENTS, AFSPR_NOT_CHECKED,
+                            AFSPR_NO_BLOCK, 0u);
+    }
+    memset(result, 0, sizeof(*result));
+    result->abi_version = AFSPW_ABI_VERSION;
+    status = afspw_append_namespace(
+        AFSPW_NAMESPACE_CREATE, ops, scratch, parent_id, name, name_len, 0u,
+        NULL, 0u, timestamp, &common, sizeof(common), diagnostic,
+        diagnostic_size, &object_id);
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    result->prior_records = common.prior_records;
+    result->sequence = common.sequence;
+    result->log_slot = common.log_slot;
+    result->base_generation = common.base_generation;
+    result->log_block = common.log_block;
+    result->object_id = object_id;
+    return AFSPR_OK;
 }
 
 const char *afspw_status_string(int status)
@@ -460,6 +536,8 @@ const char *afspw_status_string(int status)
         return "durability uncertain";
     case AFSPW_ERR_WRITE_FEATURE:
         return "volume feature unsupported for writing";
+    case AFSPW_ERR_OBJECT_ID_EXHAUSTED:
+        return "object ID space exhausted";
     default:
         return afspr_status_string(status);
     }
@@ -488,6 +566,8 @@ const char *afspw_stage_string(uint32_t stage)
         return "flush";
     case AFSPW_STAGE_COMPLETE:
         return "complete";
+    case AFSPW_STAGE_CREATE_LOOKUP:
+        return "create-lookup";
     default:
         return "unknown";
     }

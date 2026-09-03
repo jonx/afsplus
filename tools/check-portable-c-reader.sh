@@ -12,6 +12,12 @@ intent_image="$work/portable-c-intent.afsp"
 writer_image="$work/portable-c-writer.afsp"
 writer_low_memory_image="$work/portable-c-writer-low-memory.afsp"
 writer_read_fail_image="$work/portable-c-writer-read-fail.afsp"
+writer_create_image="$work/portable-c-writer-create.afsp"
+writer_create_low_memory_image="$work/portable-c-writer-create-low-memory.afsp"
+writer_create_exists_image="$work/portable-c-writer-create-exists.afsp"
+writer_create_exhausted_image="$work/portable-c-writer-create-exhausted.afsp"
+writer_create_bad_watermark_image="$work/portable-c-writer-create-bad-watermark.afsp"
+writer_create_missing_parent_image="$work/portable-c-writer-create-missing-parent.afsp"
 writer_torn_image="$work/portable-c-writer-torn.afsp"
 writer_torn_only_image="$work/portable-c-writer-torn-only.afsp"
 writer_flush_image="$work/portable-c-writer-flush.afsp"
@@ -52,6 +58,12 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 cp "$intent_image" "$writer_image"
 cp "$intent_image" "$writer_low_memory_image"
 cp "$intent_image" "$writer_read_fail_image"
+cp "$intent_image" "$writer_create_image"
+cp "$intent_image" "$writer_create_low_memory_image"
+cp "$intent_image" "$writer_create_exists_image"
+cp "$image" "$writer_create_exhausted_image"
+cp "$image" "$writer_create_bad_watermark_image"
+cp "$intent_image" "$writer_create_missing_parent_image"
 cp "$intent_image" "$writer_torn_image"
 cp "$intent_image" "$writer_torn_only_image"
 cp "$intent_image" "$writer_flush_image"
@@ -59,6 +71,12 @@ cp "$intent_image" "$writer_exists_image"
 cp "$intent_image" "$writer_delete_image"
 cp "$intent_image" "$writer_replace_image"
 cp "$intent_image" "$sanitized_writer_image"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --exhaust-object-ids "$writer_create_exhausted_image"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --regress-object-watermark "$writer_create_bad_watermark_image"
 
 "$compiler" -std=c99 -pedantic -Wall -Wextra -Werror -Wconversion \
     -Wshadow -Wstrict-prototypes \
@@ -83,6 +101,12 @@ cp "$intent_image" "$sanitized_writer_image"
 "$writer_probe" "$writer_image"
 "$writer_probe" "$writer_low_memory_image" low-memory
 "$writer_probe" "$writer_read_fail_image" read-fail-retry
+"$writer_probe" "$writer_create_image" create
+"$writer_probe" "$writer_create_low_memory_image" create-low-memory
+"$writer_probe" "$writer_create_exists_image" create-exists
+"$writer_probe" "$writer_create_exhausted_image" create-exhausted
+"$writer_probe" "$writer_create_bad_watermark_image" create-bad-watermark
+"$writer_probe" "$writer_create_missing_parent_image" create-missing-parent
 "$writer_probe" "$writer_torn_image" torn-retry
 "$writer_probe" "$writer_torn_only_image" torn-only
 "$writer_probe" "$writer_flush_image" flush-fail
@@ -100,6 +124,14 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
     --verify-c-rename "$writer_read_fail_image" "$intent_expected" \
+    "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-create "$writer_create_image" "$intent_expected" \
+    "$intent_created_expected"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    --verify-c-create "$writer_create_low_memory_image" "$intent_expected" \
     "$intent_created_expected"
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
@@ -235,6 +267,16 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_read_fail_image" >/dev/null
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_create_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_create_low_memory_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_create_exists_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_create_exhausted_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-check -- "$writer_create_missing_parent_image" >/dev/null
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_torn_image" >/dev/null
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_torn_only_image" >/dev/null
@@ -247,4 +289,4 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$writer_replace_image" >/dev/null
 
-echo "portable-c-gate result=PASS reader=PASS intent-view=PASS writer-rename=PASS writer-delete=PASS writer-replace=PASS"
+echo "portable-c-gate result=PASS reader=PASS intent-view=PASS writer-create=PASS writer-rename=PASS writer-delete=PASS writer-replace=PASS"

@@ -124,17 +124,23 @@ exhaustive repair walking are separate expansion gates.
 ## Portable C writer gate
 
 The same gate compiles a separate ABI-1 writer and gives it copies of the
-seven-record Rust fixture. `afspw_rename_file_no_replace`,
-`afspw_delete_file` and `afspw_rename_file_replace` must each append sequence
-8 using exactly one block write and one flush. The C reader observes each
-resulting durable namespace; Rust then replays the C-produced record, verifies
-visible contents, confirms final victims retain byte-exact orphan contents and
-runs the exhaustive checker.
+seven-record Rust fixture. `afspw_create_empty_file`,
+`afspw_rename_file_no_replace`, `afspw_delete_file` and
+`afspw_rename_file_replace` must each append sequence 8 using exactly one
+block write and one flush. The C reader observes each resulting durable
+namespace; Rust then replays the C-produced record, verifies the empty create's
+monotone ID and zero bytes, verifies visible contents, confirms final victims
+retain byte-exact orphan contents and runs the exhaustive checker.
 
 A 64-byte torn record returns write-uncertain and is safely overwritten after
 a fresh scan. A failed flush returns durability-uncertain without claiming
 success. An existing target and a full log return before media I/O. Delete and
 replacement are emitted only when the volume carries ADR-066's orphan feature.
+Create additionally rejects a case-folded collision, a missing parent and an
+exhausted object-ID space before media I/O, with a create-specific diagnostic
+stage. A valid-checksum checkpoint with a regressed allocator watermark is
+rejected against the greatest committed object by a bounded tree lookup. Both
+the 144-read 8 KiB create and 21-read cached create are replayed in Rust.
 The writer is included in strict C99, ASan/UBSan, static-analysis, CMake
 install/consumer and configured m68k compile gates. The 8 KiB minimum-memory
 path and the recommended 56 KiB call-local-cache path are both replayed by
@@ -143,7 +149,7 @@ Rust. On the fixed seven-record fixture their preflight ceilings are 152 and
 both attempts. The configured m68k compiler must keep the main writer frame at
 or below 1 KiB. A failed first log read must identify the intent-scan stage
 and exact LBA, perform no write or flush, and succeed on a fresh 25-read
-retry. This qualifies three bounded namespace operations, not allocation or a
+retry. This qualifies four bounded namespace operations, not allocation or a
 complete classic-rw profile.
 
 ## Portable C fuzz mutation gate
