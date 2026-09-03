@@ -4593,8 +4593,13 @@ impl<D: BlockDevice> Volume<D> {
         }
         let mut buf = vec![0u8; self.dev.block_size()];
         self.dev.read_block(lba, &mut buf)?;
-        let record = ObjectRecord::decode(&buf)
+        let (record, block_generation) = ObjectRecord::decode_with_generation(&buf)
             .map_err(|e| CoreError::Corrupt(format!("object {object_id} record invalid: {e}")))?;
+        if block_generation == 0 || block_generation > self.checkpoint.generation {
+            return Err(CoreError::Corrupt(format!(
+                "object {object_id} record block {lba} generation {block_generation} outside committed range"
+            )));
+        }
         if record.object_id != object_id {
             return Err(CoreError::Corrupt(format!(
                 "object record at block {lba} claims ID {}, map says {object_id}",

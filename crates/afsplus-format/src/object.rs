@@ -128,6 +128,13 @@ impl ObjectRecord {
     }
 
     pub fn decode(block: &[u8]) -> Result<ObjectRecord, FormatError> {
+        Ok(Self::decode_with_generation(block)?.0)
+    }
+
+    /// Like [`ObjectRecord::decode`], but also returns the sealed header's
+    /// transaction generation so callers can bound it against the selected
+    /// checkpoint, exactly as tree-node access does.
+    pub fn decode_with_generation(block: &[u8]) -> Result<(ObjectRecord, u64), FormatError> {
         let header = BlockHeader::verify(block, block_type::OBJECT)?;
         let p = header.payload(block);
         if p.len() < PAYLOAD_LEN {
@@ -152,7 +159,7 @@ impl ObjectRecord {
             return Err(FormatError::Invalid("object ID does not match block owner"));
         }
         record.validate(block.len())?;
-        Ok(record)
+        Ok((record, header.generation))
     }
 
     fn validate(&self, block_size: usize) -> Result<(), FormatError> {

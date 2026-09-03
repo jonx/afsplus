@@ -110,7 +110,12 @@ pub fn load_mount_state<D: BlockDevice>(
     .ok_or_else(|| CoreError::Corrupt("root object missing from object map".into()))?;
     claim_root(root_record_lba, &mut roots)?;
     dev.read_block(root_record_lba, &mut buf)?;
-    let root_object = ObjectRecord::decode(&buf)?;
+    let (root_object, root_generation) = ObjectRecord::decode_with_generation(&buf)?;
+    if root_generation == 0 || root_generation > checkpoint.generation {
+        return Err(CoreError::Corrupt(format!(
+            "root object record block {root_record_lba} generation {root_generation} outside committed range"
+        )));
+    }
     if root_object.object_id != OBJECT_ROOT || root_object.object_type != ObjectType::Directory {
         return Err(CoreError::Corrupt(
             "root object is not the root directory".into(),
@@ -271,7 +276,13 @@ pub fn load_committed_state<D: BlockDevice>(
         claim(entry.block, &mut claimed)?;
         metadata_blocks.push(entry.block);
         dev.read_block(entry.block, &mut buf)?;
-        let record = ObjectRecord::decode(&buf)?;
+        let (record, record_generation) = ObjectRecord::decode_with_generation(&buf)?;
+        if record_generation == 0 || record_generation > checkpoint.generation {
+            return Err(CoreError::Corrupt(format!(
+                "object {} record block {} generation {record_generation} outside committed range",
+                entry.object_id, entry.block
+            )));
+        }
         if record.object_id != entry.object_id {
             return Err(CoreError::Corrupt(format!(
                 "object record at block {} claims ID {}, map says {}",
