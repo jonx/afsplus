@@ -95,12 +95,17 @@ Milestones: M03, M04 ([status](implementation/milestones.md)); the blockers are 
 
 ### B1. Allocation state
 
-- prototype allocation regions
-- explicitly test the COW free-space self-reference problem
-- compare PFS3-like metadata reserve, bitmap+delta, spacemap/log-like, or proven hybrid
-- verify nearly-full-volume behavior
+Architecture closed by [ADR-067](adr/ADR-067-epoch1-allocation-state.md):
 
-Do not freeze the authoritative region free-space encoding before this passes crash tests.
+- allocation regions are implemented and qualified;
+- the COW free-space self-reference problem is handled by deterministic triple
+  slots and a fixed `3N` allocation-root pool;
+- bitmap authority was selected over an authoritative delta or spacemap after
+  measurement; and
+- nearly-full-volume behavior has bounded destructive progress and explicit
+  emergency headroom.
+
+Exact byte layout and the global wire epoch remain subject to M14 review.
 
 ### B2. User-data update policy
 

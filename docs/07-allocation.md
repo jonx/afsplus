@@ -239,10 +239,11 @@ the capacity advertised for normal growth. VFS `statfs`, `afsplus-info` and
 consumed after an emergency operation; in that state available capacity is
 zero until bounded reclaim restores it.
 
-This rule is qualification policy for the current prototype and adds no
-on-disk bit or bitmap ownership class. Q3 still requires the complete
-low-space and amplification evidence before the allocation encoding can be
-proposed for epoch-1 freeze.
+This rule is runtime policy and adds no on-disk bit or bitmap ownership class.
+[ADR-067](../adr/ADR-067-epoch1-allocation-state.md) closes Q3 by selecting the
+triple-version region structures, fixed `3N` allocation-root pool, bitmap
+authority and segmented reclaim queue. Exact byte layout and the global wire
+epoch remain subject to M14 review.
 
 ## 7. Discard
 

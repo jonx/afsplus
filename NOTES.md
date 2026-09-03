@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Q3 allocation architecture accepted](#2026-09-03--q3-allocation-architecture-accepted)
 - [2026-09-03 — Emergency headroom makes ENOSPC recoverable](#2026-09-03--emergency-headroom-makes-enospc-recoverable)
 - [2026-09-03 — Open-unlinked files gain a bounded crash-restartable lifetime](#2026-09-03--open-unlinked-files-gain-a-bounded-crash-restartable-lifetime)
 - [2026-09-03 — Q3 qualification exposes the missing emergency reserve](#2026-09-03--q3-qualification-exposes-the-missing-emergency-reserve)
@@ -37,6 +38,20 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Q3 allocation architecture accepted
+
+The owner accepted ADR-067 after the post-orphan low-space requalification.
+Epoch 1 therefore keeps triple-version bitmap pages and region descriptors,
+the deterministic fixed-topology `3N` allocation-root pool, authoritative
+bitmaps and the segmented reclaim queue. Runtime emergency headroom, rover,
+locality hints and maintenance batch sizes remain tunable policy rather than
+new wire fields.
+
+This closes the allocation architecture question, not the global format
+freeze. M14 still owns exact byte-layout review, overflow bounds, feature
+negotiation and independent cross-reading before the wire epoch can be called
+stable.
 
 ## 2026-09-03 — Emergency headroom makes ENOSPC recoverable
 
