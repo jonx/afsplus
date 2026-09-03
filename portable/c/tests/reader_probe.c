@@ -66,6 +66,12 @@ static int file_read_blocks(void *ctx, uint64_t first_block, uint32_t count,
         } else if (device->corrupt_mode == 4) {
             put_le64((uint8_t *)dst + 16u, UINT64_MAX);
             reseal((uint8_t *)dst);
+        } else if (device->corrupt_mode == 5) {
+            ((uint8_t *)dst)[40] =
+                (uint8_t)(((uint8_t *)dst)[40] + 1u);
+            ((uint8_t *)dst)[56] =
+                (uint8_t)(((uint8_t *)dst)[56] + 1u);
+            reseal((uint8_t *)dst);
         }
     }
     return 0;
@@ -219,6 +225,8 @@ int main(int argc, char **argv)
     uint64_t file_offset = 0u;
     uint64_t corrupt_tree_lba;
     uint64_t object_lba;
+    uint64_t claimed_tree_lba;
+    uint64_t claimed_child_lba;
     FILE *expected_file;
     size_t bytes_read;
     unsigned selected;
@@ -268,9 +276,11 @@ int main(int argc, char **argv)
 
     require((afspr_capabilities() &
              (AFSPR_CAP_PROBE | AFSPR_CAP_OBJECT_LOOKUP |
-              AFSPR_CAP_DIRECTORY_ORDINAL | AFSPR_CAP_FILE_READ)) ==
+              AFSPR_CAP_DIRECTORY_ORDINAL | AFSPR_CAP_FILE_READ |
+              AFSPR_CAP_INTENT_LOG_SCAN | AFSPR_CAP_INTENT_FILE_READ)) ==
                 (AFSPR_CAP_PROBE | AFSPR_CAP_OBJECT_LOOKUP |
-                 AFSPR_CAP_DIRECTORY_ORDINAL | AFSPR_CAP_FILE_READ),
+                 AFSPR_CAP_DIRECTORY_ORDINAL | AFSPR_CAP_FILE_READ |
+                 AFSPR_CAP_INTENT_LOG_SCAN | AFSPR_CAP_INTENT_FILE_READ),
             "reader capability summary is incomplete");
 
     file_device.trace_count = 0u;
@@ -283,6 +293,19 @@ int main(int argc, char **argv)
             "root object is not a directory");
     require(file_device.trace_count >= 3u,
             "object lookup did not cross an internal object-map node");
+    claimed_tree_lba = file_device.trace[0];
+    claimed_child_lba = file_device.trace[1];
+    file_device.corrupt_lba = claimed_tree_lba;
+    file_device.corrupt_mode = 5;
+    status = afspr_lookup_object(
+        &file_ops, &(struct afspr_scratch){scratch, sizeof(scratch)}, &first,
+        1u, &root, sizeof(root), &diagnostic, sizeof(diagnostic));
+    require(status == AFSPR_ERR_CORRUPT &&
+                diagnostic.stage == AFSPR_STAGE_TREE_DECODE &&
+                diagnostic.block == claimed_child_lba,
+            "parent/child subtree over-claim was not localized");
+    file_device.corrupt_lba = UINT64_MAX;
+    file_device.corrupt_mode = 0;
     status = afspr_lookup_object(&file_ops,
                                  &(struct afspr_scratch){scratch,
                                                          sizeof(scratch)},

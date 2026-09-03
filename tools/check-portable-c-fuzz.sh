@@ -8,6 +8,9 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/afsplus-portable-c-fuzz.XXXXXX")
 trap 'rm -R -- "$work"' EXIT HUP INT TERM
 
 image="$work/portable-c-fuzz.afsp"
+intent_image="$work/portable-c-fuzz-intent.afsp"
+intent_expected="$work/intent-expected.bin"
+intent_created="$work/intent-created.bin"
 source_tree="$work/source"
 corpus="$work/corpus"
 packer="$work/afsplus-fuzz-pack"
@@ -44,6 +47,9 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     --size-mib 16 --label PortableFuzz "$image"
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-core --bin afsplus-populate -- "$image" "$source_tree"
+cargo run --quiet --manifest-path "$repo/Cargo.toml" \
+    -p afsplus-check --bin afsplus-portable-c-log-fixture -- \
+    "$intent_image" "$intent_expected" "$intent_created"
 
 cflags="-std=c99 -pedantic -Wall -Wextra -Werror -Wconversion -Wshadow -Wstrict-prototypes"
 includes="-I$repo/api -I$repo/spec -I$repo/portable/c/fuzz"
@@ -67,6 +73,7 @@ includes="-I$repo/api -I$repo/spec -I$repo/portable/c/fuzz"
 "$packer" "$image" "$corpus/02-directory-first.afzf" 2 0 0 0
 "$packer" "$image" "$corpus/03-directory-last.afzf" 2 302 0 0
 "$packer" "$image" "$corpus/04-directory-file.afzf" 4 302 0 777
+"$packer" "$intent_image" "$corpus/05-intent-scan.afzf" 5 0 0 0
 
 for seed in "$corpus"/*.afzf; do
     "$replay" -s "$seed"
@@ -131,4 +138,4 @@ fi
 
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-check --bin afsplus-check -- "$image" >/dev/null
-echo "portable-c-fuzz result=PASS runs-per-seed=$runs seeds=5"
+echo "portable-c-fuzz result=PASS runs-per-seed=$runs seeds=6"

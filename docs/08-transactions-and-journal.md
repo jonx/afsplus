@@ -222,9 +222,16 @@ the window first. The host FUSE protocol, packet-neutral AROS Rust adapter and
 its current C ABI bridge inherit these semantics without an OS-specific
 transaction fork.
 
-The record wire, mandatory log size, portable-C parity and real-device barrier
-validation remain unfrozen M14 work; the Rust result is not yet a universal
-cross-implementation cheap-file-`fsync` claim.
+The independent C99 reader now content-verifies the valid record prefix and
+constructs a no-write file-data view for create, write and truncate records,
+including logged-only files, sparse growth and partial-block replacements. A
+damaged tail is excluded at its exact slot and LBA. Rename and delete remain
+visible to the scan but deliberately disable file lookup until the independent
+namespace overlay exists.
+
+The record wire, mandatory log size, full portable-C namespace parity and
+real-device barrier validation remain unfrozen M14 work; the current result is
+not yet a universal cross-implementation cheap-file-`fsync` claim.
 
 AFS+ does not build a second redo-journal transaction engine: the log is a
 bounded durability layer over checkpoint COW.

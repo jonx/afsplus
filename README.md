@@ -219,7 +219,7 @@ commands build, test and check the repository:
 cargo build --workspace
 cargo test --workspace --all-features
 make check            # Rust/C gates, clippy and the documentation checker
-make portable-c-gate  # independent C99 reader cross-reads a Rust image
+make portable-c-gate  # C99 cross-reads checkpoint and durable-log file views
 make portable-c-fuzz-gate # reproducible sanitizer mutations of C reader paths
 ```
 

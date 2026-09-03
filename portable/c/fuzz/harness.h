@@ -17,7 +17,8 @@ enum afspr_fuzz_operation {
     AFSPR_FUZZ_LOOKUP_OBJECT = 1,
     AFSPR_FUZZ_DIRECTORY_ENTRY = 2,
     AFSPR_FUZZ_READ_OBJECT = 3,
-    AFSPR_FUZZ_DIRECTORY_FILE = 4
+    AFSPR_FUZZ_DIRECTORY_FILE = 4,
+    AFSPR_FUZZ_INTENT_SCAN = 5
 };
 
 struct afspr_fuzz_request {
@@ -34,6 +35,7 @@ struct afspr_fuzz_outcome {
     int object_status;
     int directory_status;
     int read_status;
+    int intent_status;
     uint64_t selected_object_id;
     size_t bytes_requested;
     struct afspr_diagnostic diagnostic;

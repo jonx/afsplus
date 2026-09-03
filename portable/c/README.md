@@ -8,6 +8,7 @@ integrations. It shares no executable code with the Rust implementation.
 - [Integration choices](#integration-choices)
 - [ABI and capability policy](#abi-and-capability-policy)
 - [Runtime contract](#runtime-contract)
+- [Durable intent-log view](#durable-intent-log-view)
 - [Validation](#validation)
 - [Fuzzing and exact reproduction](#fuzzing-and-exact-reproduction)
 
@@ -56,8 +57,9 @@ The caller provides:
 - a logical-block callback returning zero only after it filled the complete
   requested range;
 - the actual block count and logical block size of that device view;
-- one writable scratch buffer of at least one logical block, or
-  `AFSPR_TREE_SCRATCH_SIZE` bytes for directory iteration; and
+- one writable scratch buffer of at least one logical block,
+  `AFSPR_TREE_SCRATCH_SIZE` bytes for tree iteration, or
+  `AFSPR_INTENT_SCRATCH_SIZE` bytes for intent-log operations; and
 - storage for the result and, optionally, structured diagnostics.
 
 The bootstrap implementation accepts the prototype's 4-KiB logical blocks.
@@ -76,9 +78,10 @@ query: `AFSPR_ERR_BUFFER_TOO_SMALL` leaves the required length in
 `entry.name_len`.
 
 Every operation is read-only, allocation-free and bounded by the tree-height
-cap. The data destination and scratch buffer must not overlap. This slice reads
-the selected checkpoint-root view; intent-log replay is a separate capability
-and must not be inferred from `AFSPR_CAP_FILE_READ`.
+or configured log-slot cap. The data destination and scratch buffer must not
+overlap. `AFSPR_CAP_FILE_READ` names the selected checkpoint view only;
+callers explicitly select the durable overlay through the separate intent
+capabilities.
 
 `afspr_probe` is the compact call. `afspr_probe_detailed` additionally reports
 the failed stage, LBA, checkpoint slot and independent status of both slots.
@@ -102,6 +105,28 @@ keys awaits the frozen Unicode 16 tables; exhaustive whole-tree and allocation
 ownership checks remain the repair tool's job rather than ordinary bounded
 reads.
 
+## Durable intent-log view
+
+`afspr_scan_intent_log` validates the sequence bound to the selected
+checkpoint, verifies every referenced replacement block and returns the exact
+valid prefix plus the first excluded tail slot and LBA. A stale, empty,
+out-of-sequence or content-damaged tail is reported in `tail_state`; it does
+not erase earlier complete records. Device I/O and feature-contract failures
+remain hard errors with a structured stage and LBA.
+
+For create, write and truncate records, `afspr_intent_file_size` and
+`afspr_read_intent_file` expose the durable checkpoint-plus-log bytes without
+writing the device or allocating memory. They handle files created only in the
+log, sparse growth, partial-block replacement and shrink. The caller retains
+the `afspr_intent_view` and passes it back on each read; the library rescans
+before use so a stale or forged view is not trusted.
+
+A prefix containing rename or delete intentionally clears
+`AFSPR_INTENT_VIEW_FILE_DATA`: object identity then depends on the namespace
+overlay, which is the next independent-reader slice. Integrators must test the
+flag instead of assuming that a successful scan provides that later
+capability.
+
 ## Validation
 
 From the repository root:
@@ -116,6 +141,12 @@ decodes its object and compares bounded C reads with the original bytes. A
 synthetic but wire-valid extent root reuses those Rust-produced data blocks to
 exercise a sparse hole and typed extent lookup. Valid-checksum tree identity
 and extent-value corruptions must report the exact failing LBA.
+
+A second Rust fixture leaves three fsynced records beyond its checkpoint: an
+existing-file write, a truncate and a newly created file. C scans that prefix,
+reconstructs both final files in 777-byte reads and matches Rust-written oracle
+bytes. Content damage, a sequence gap and a missing v3 feature bit must stop or
+fail at the exact record or data LBA.
 
 The same gate tests retained-checkpoint fallback and corrupt/ambiguous states,
 compiles the public example, and runs AddressSanitizer/UndefinedBehaviorSanitizer

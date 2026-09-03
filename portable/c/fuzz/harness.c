@@ -34,6 +34,7 @@ static void afspr_fuzz_init_outcome(struct afspr_fuzz_outcome *outcome)
     outcome->object_status = AFSPR_NOT_CHECKED;
     outcome->directory_status = AFSPR_NOT_CHECKED;
     outcome->read_status = AFSPR_NOT_CHECKED;
+    outcome->intent_status = AFSPR_NOT_CHECKED;
     outcome->diagnostic.abi_version = AFSPR_ABI_VERSION;
     outcome->diagnostic.status = AFSPR_NOT_CHECKED;
     outcome->diagnostic.stage = AFSPR_STAGE_NONE;
@@ -121,13 +122,14 @@ int afspr_fuzz_exercise(const struct afspr_block_ops *ops,
                         const struct afspr_fuzz_request *request,
                         struct afspr_fuzz_outcome *outcome)
 {
-    uint8_t scratch_bytes[AFSPR_TREE_SCRATCH_SIZE];
+    uint8_t scratch_bytes[AFSPR_INTENT_SCRATCH_SIZE];
     uint8_t name[256];
     uint8_t output[AFSPR_FUZZ_MAX_OUTPUT];
     struct afspr_scratch scratch;
     struct afspr_probe_result volume;
     struct afspr_object object;
     struct afspr_directory_entry entry;
+    struct afspr_intent_view intent;
     uint64_t total_entries = 0u;
     size_t output_size;
     size_t bytes_read = 0u;
@@ -142,12 +144,19 @@ int afspr_fuzz_exercise(const struct afspr_block_ops *ops,
     memset(&volume, 0, sizeof(volume));
     memset(&object, 0, sizeof(object));
     memset(&entry, 0, sizeof(entry));
+    memset(&intent, 0, sizeof(intent));
 
     outcome->probe_status = afspr_probe_detailed(
         ops, &scratch, &volume, sizeof(volume), &outcome->diagnostic,
         sizeof(outcome->diagnostic));
     if (outcome->probe_status != AFSPR_OK ||
         request->operation == AFSPR_FUZZ_PROBE) {
+        return AFSPR_OK;
+    }
+    if (request->operation == AFSPR_FUZZ_INTENT_SCAN) {
+        outcome->intent_status = afspr_scan_intent_log(
+            ops, &scratch, &volume, &intent, sizeof(intent),
+            &outcome->diagnostic, sizeof(outcome->diagnostic));
         return AFSPR_OK;
     }
 

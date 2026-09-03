@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-03 — Portable C reads the durable log view](#2026-09-03--portable-c-reads-the-durable-log-view)
 - [2026-09-03 — Portable C failures become replayable artifacts](#2026-09-03--portable-c-failures-become-replayable-artifacts)
 - [2026-09-03 — The independent portable C reader starts executing](#2026-09-03--the-independent-portable-c-reader-starts-executing)
 - [2026-09-03 — FSKit durability moves to write replies](#2026-09-03--fskit-durability-moves-to-write-replies)
@@ -27,6 +28,31 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-03 — Portable C reads the durable log view
+
+The independent C99 implementation no longer stops at the selected
+checkpoint when a writer has acknowledged later fsync groups. With an 8-KiB
+caller-owned scratch buffer it scans the bounded intent-log prefix, validates
+record shape and sequence, content-verifies every referenced replacement block
+and reports the first excluded tail slot and LBA. No replay is written to the
+device.
+
+The first view layer resolves create, write and truncate records into final
+file sizes and bounded reads. Its cross-language fixture leaves three durable
+records over a Rust checkpoint, then C reconstructs an existing file after
+write-plus-shrink and a file that exists only in the log, byte-for-byte against
+Rust-produced oracle files. Damaged data, sequence gaps and missing feature
+contracts have exact regression expectations. Rename and delete explicitly
+disable the file-data view until namespace identity is overlaid rather than
+returning plausible but incomplete bytes.
+
+The same decoder is now the sixth compact mutation seed. Parent and child
+tree item counts are also compared during descent, closing an independent
+review observation where an internally consistent parent over-claim could
+otherwise hide reachable entries. Strict C99, sanitizer, analyzer, CMake and
+m68k compilation remain one gate so future integrators get the same failure
+coordinates as the in-tree build.
 
 ## 2026-09-03 — Portable C failures become replayable artifacts
 

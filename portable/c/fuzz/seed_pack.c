@@ -147,6 +147,9 @@ static int operation_succeeded(const struct afspr_fuzz_request *request,
     if (request->operation == AFSPR_FUZZ_PROBE) {
         return 1;
     }
+    if (request->operation == AFSPR_FUZZ_INTENT_SCAN) {
+        return outcome->intent_status == AFSPR_OK;
+    }
     if (outcome->object_status != AFSPR_OK) {
         return 0;
     }
@@ -219,9 +222,10 @@ int main(int argc, char **argv)
         !operation_succeeded(&request, &outcome)) {
         fprintf(stderr,
                 "trace did not complete: probe=%d object=%d directory=%d "
-                "read=%d stage=%s block=%llu\n",
+                "read=%d intent=%d stage=%s block=%llu\n",
                 outcome.probe_status, outcome.object_status,
                 outcome.directory_status, outcome.read_status,
+                outcome.intent_status,
                 afspr_probe_stage_string(outcome.diagnostic.stage),
                 (unsigned long long)outcome.diagnostic.block);
         goto cleanup;

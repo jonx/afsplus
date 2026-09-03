@@ -60,8 +60,9 @@ int main(int argc, char **argv)
     struct afspr_probe_result result;
     struct afspr_object root;
     struct afspr_directory_entry first;
+    struct afspr_intent_view intent;
     struct afspr_diagnostic diagnostic;
-    uint8_t block[AFSPR_TREE_SCRATCH_SIZE];
+    uint8_t block[AFSPR_INTENT_SCRATCH_SIZE];
     uint8_t name[256];
     uint64_t total_entries;
     long bytes;
@@ -105,6 +106,18 @@ int main(int argc, char **argv)
            result.label, (unsigned long long)result.generation,
            result.selected_checkpoint == 0u ? 'A' : 'B',
            (unsigned long long)result.total_blocks);
+
+    status = afspr_scan_intent_log(&ops, &scratch, &result, &intent,
+                                   sizeof(intent), &diagnostic,
+                                   sizeof(diagnostic));
+    if (status != AFSPR_OK) {
+        print_diagnostic(argv[1], status, &diagnostic);
+        fclose(reader.file);
+        return 1;
+    }
+    printf("pending-intent-records=%u operations=%u tail=%s\n",
+           intent.valid_records, intent.valid_operations,
+           afspr_intent_tail_string(intent.tail_state));
 
     status = afspr_lookup_object(&ops, &scratch, &result, 1u, &root,
                                  sizeof(root), &diagnostic,

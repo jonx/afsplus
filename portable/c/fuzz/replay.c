@@ -45,7 +45,9 @@ static int invoked_operations_succeeded(const struct afspr_fuzz_outcome *result)
            (result->directory_status == AFSPR_NOT_CHECKED ||
             result->directory_status == AFSPR_OK) &&
            (result->read_status == AFSPR_NOT_CHECKED ||
-            result->read_status == AFSPR_OK);
+            result->read_status == AFSPR_OK) &&
+           (result->intent_status == AFSPR_NOT_CHECKED ||
+            result->intent_status == AFSPR_OK);
 }
 
 int main(int argc, char **argv)
@@ -73,12 +75,13 @@ int main(int argc, char **argv)
     }
     status = afspr_fuzz_run_input(bytes, size, &result);
     printf("packet=%s bytes=%lu harness=%s probe=%s object=%s directory=%s "
-           "read=%s stage=%s block=",
+           "read=%s intent=%s stage=%s block=",
            path, (unsigned long)size, afspr_status_string(status),
            afspr_status_string(result.probe_status),
            afspr_status_string(result.object_status),
            afspr_status_string(result.directory_status),
            afspr_status_string(result.read_status),
+           afspr_status_string(result.intent_status),
            afspr_probe_stage_string(result.diagnostic.stage));
     if (result.diagnostic.block == AFSPR_NO_BLOCK) {
         printf("n/a\n");

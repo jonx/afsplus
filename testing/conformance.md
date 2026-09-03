@@ -63,10 +63,16 @@ looks up the selected object through the object map and compares file reads in
 boundaries. A wire-valid extent leaf maps those Rust-produced data blocks after
 a sparse hole, exercising extent-floor lookup and zero filling. Checksum and
 valid-checksum identity corruption in a selected tree node, plus a
-valid-checksum invalid extent flag, must identify the exact failing LBA and
-decode phase.
+valid-checksum invalid extent flag, and a parent/child subtree-count mismatch
+must identify the exact failing LBA and decode phase.
 
-Intent-log replay, non-ASCII comparison-key conformance and exhaustive repair
+A second Rust fixture leaves a three-record fsynced prefix containing an
+existing-file write, truncate and logged create. C must scan and
+content-verify the prefix, expose the final size and reproduce both files byte
+for byte without changing the image. A damaged replacement block and sequence
+gap terminate at their exact tail coordinates; a v3 record without its
+required feature bit is a hard format error. Namespace overlay for
+rename/delete, non-ASCII comparison-key conformance and exhaustive repair
 walking are separate expansion gates.
 
 ## Portable C mutation gate
@@ -79,8 +85,9 @@ paths:
 make portable-c-fuzz-gate
 ```
 
-Five sparse-device packets cover probe, object lookup, both sides of the
-multi-leaf directory and a complete directory-to-file read. Each receives
+Six sparse-device packets cover probe, object lookup, both sides of the
+multi-leaf directory, a complete directory-to-file read and an intent-log
+prefix scan with referenced data. Each receives
 4,096 reproducible mutations under ASan/UBSan by default. A failure reports
 the seed and stable case number; the included artifact/replay tools reconstruct
 its exact bytes and print the terminal stage and LBA. Native libFuzzer consumes

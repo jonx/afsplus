@@ -16,13 +16,19 @@
 #define AFSPR_LABEL_CAPACITY 65u
 #define AFSPR_MIN_SCRATCH_SIZE 4096u
 #define AFSPR_TREE_SCRATCH_SIZE 6144u
+#define AFSPR_INTENT_SCRATCH_SIZE 8192u
 #define AFSPR_NO_BLOCK UINT64_MAX
 #define AFSPR_NO_CHECKPOINT_SLOT (-1)
+#define AFSPR_NO_LOG_SLOT UINT32_MAX
 
 #define AFSPR_CAP_PROBE (UINT64_C(1) << 0)
 #define AFSPR_CAP_OBJECT_LOOKUP (UINT64_C(1) << 1)
 #define AFSPR_CAP_DIRECTORY_ORDINAL (UINT64_C(1) << 2)
 #define AFSPR_CAP_FILE_READ (UINT64_C(1) << 3)
+#define AFSPR_CAP_INTENT_LOG_SCAN (UINT64_C(1) << 4)
+#define AFSPR_CAP_INTENT_FILE_READ (UINT64_C(1) << 5)
+
+#define AFSPR_INTENT_VIEW_FILE_DATA (UINT32_C(1) << 0)
 
 #define AFSPR_OBJECT_FLAG_EXTENT_TREE (UINT16_C(1) << 0)
 
@@ -63,7 +69,19 @@ enum afspr_probe_stage {
     AFSPR_STAGE_OBJECT_DECODE = 12,
     AFSPR_STAGE_DIRECTORY_DECODE = 13,
     AFSPR_STAGE_EXTENT_DECODE = 14,
-    AFSPR_STAGE_DATA_READ = 15
+    AFSPR_STAGE_DATA_READ = 15,
+    AFSPR_STAGE_INTENT_READ = 16,
+    AFSPR_STAGE_INTENT_DECODE = 17,
+    AFSPR_STAGE_INTENT_DATA = 18
+};
+
+enum afspr_intent_tail {
+    AFSPR_INTENT_TAIL_NONE = 0,
+    AFSPR_INTENT_TAIL_INVALID = 1,
+    AFSPR_INTENT_TAIL_STALE = 2,
+    AFSPR_INTENT_TAIL_SEQUENCE = 3,
+    AFSPR_INTENT_TAIL_CONTENT = 4,
+    AFSPR_INTENT_TAIL_FULL = 5
 };
 
 enum afspr_object_type {
@@ -189,6 +207,26 @@ struct afspr_directory_entry {
     size_t name_len;
 };
 
+/*
+ * A read-only description of the valid intent-log prefix over one selected
+ * checkpoint. Scanning never replays to media. tail_slot is zero-based and is
+ * AFSPR_NO_LOG_SLOT when the log is disabled or every configured slot is
+ * valid. An invalid, stale or torn tail is a normal crash boundary and is
+ * excluded from the result; valid_records and valid_operations describe the
+ * complete durable prefix before it.
+ */
+struct afspr_intent_view {
+    uint32_t abi_version;
+    uint32_t valid_records;
+    uint32_t valid_operations;
+    uint32_t tail_state;
+    uint32_t tail_slot;
+    uint32_t flags;
+    uint64_t base_generation;
+    uint64_t last_sequence;
+    uint64_t tail_block;
+};
+
 int afspr_probe(const struct afspr_block_ops *ops,
                 const struct afspr_scratch *scratch,
                 struct afspr_probe_result *result, size_t result_size);
@@ -243,8 +281,47 @@ int afspr_read_file(const struct afspr_block_ops *ops,
                     struct afspr_diagnostic *diagnostic,
                     size_t diagnostic_size);
 
+/*
+ * Scans and content-verifies the valid prefix bound to volume->generation.
+ * AFSPR_INTENT_SCRATCH_SIZE holds one record and one referenced data block so
+ * the operation remains heap-free. A successful scan may report a non-NONE
+ * tail_state; I/O and feature-contract failures are returned as errors.
+ */
+int afspr_scan_intent_log(const struct afspr_block_ops *ops,
+                          const struct afspr_scratch *scratch,
+                          const struct afspr_probe_result *volume,
+                          struct afspr_intent_view *view, size_t view_size,
+                          struct afspr_diagnostic *diagnostic,
+                          size_t diagnostic_size);
+
+/*
+ * Resolves a regular file's final logical size through a validated view.
+ * This first slice is exact for create/write/truncate-only prefixes. A prefix
+ * containing delete or rename does not advertise FILE_DATA and returns
+ * UNSUPPORTED until the namespace overlay is implemented.
+ */
+int afspr_intent_file_size(const struct afspr_block_ops *ops,
+                           const struct afspr_scratch *scratch,
+                           const struct afspr_probe_result *volume,
+                           const struct afspr_intent_view *view,
+                           uint64_t object_id, uint64_t *size_bytes,
+                           struct afspr_diagnostic *diagnostic,
+                           size_t diagnostic_size);
+
+/* Reads the durable checkpoint-plus-intent view without modifying media. */
+int afspr_read_intent_file(const struct afspr_block_ops *ops,
+                           const struct afspr_scratch *scratch,
+                           const struct afspr_probe_result *volume,
+                           const struct afspr_intent_view *view,
+                           uint64_t object_id, uint64_t offset,
+                           void *destination, size_t destination_size,
+                           size_t *bytes_read,
+                           struct afspr_diagnostic *diagnostic,
+                           size_t diagnostic_size);
+
 const char *afspr_status_string(int status);
 const char *afspr_probe_stage_string(uint32_t stage);
+const char *afspr_intent_tail_string(uint32_t tail_state);
 
 #ifdef __cplusplus
 }
