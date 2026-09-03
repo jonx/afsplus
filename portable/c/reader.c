@@ -11,6 +11,8 @@
 #define AFSPR_HEADER_VERSION 1u
 #define AFSPR_BLOCK_TYPE_IDENT UINT32_C(0x49534641)
 #define AFSPR_BLOCK_TYPE_CHECKPOINT UINT32_C(0x43534641)
+#define AFSPR_BLOCK_TYPE_OBJECT UINT32_C(0x4f534641)
+#define AFSPR_BLOCK_TYPE_TREE UINT32_C(0x54534641)
 #define AFSPR_CHECKSUM_CRC32C 1u
 #define AFSPR_IDENT_LEGACY_PAYLOAD 137u
 #define AFSPR_IDENT_FEATURE_PAYLOAD 161u
@@ -25,6 +27,19 @@
 #define AFSPR_BITMAP_SLOTS UINT64_C(3)
 #define AFSPR_SUPPORTED_INCOMPAT                                             \
     (AFSP_INCOMPAT_INTENT_LOG | AFSP_INCOMPAT_INTENT_LOG_DATA_UPDATES)
+#define AFSPR_TREE_FIXED_PAYLOAD 32u
+#define AFSPR_TREE_ITEM_FIXED 8u
+#define AFSPR_TREE_MAX_LEVEL 15u
+#define AFSPR_TREE_MAX_KEY 1020u
+#define AFSPR_TREE_KIND_OBJECT_MAP 1u
+#define AFSPR_TREE_KIND_DIRECTORY 2u
+#define AFSPR_TREE_KIND_EXTENT_MAP 3u
+#define AFSPR_OBJECT_PAYLOAD 96u
+#define AFSPR_MAX_DIRECT_BLOCKS UINT64_C(4096)
+#define AFSPR_EXTENT_VALUE_SIZE 24u
+#define AFSPR_EXTENT_UNWRITTEN (UINT32_C(1) << 0)
+#define AFSPR_EXTENT_SHARED (UINT32_C(1) << 1)
+#define AFSPR_EXTENT_KNOWN_FLAGS (AFSPR_EXTENT_UNWRITTEN | AFSPR_EXTENT_SHARED)
 
 struct afspr_header {
     uint16_t flags;
@@ -63,6 +78,36 @@ struct afspr_checkpoint {
     uint64_t shared_extent_root_block;
 };
 
+struct afspr_tree_spec {
+    uint8_t kind;
+    uint64_t owner;
+    uint64_t max_generation;
+};
+
+struct afspr_tree_node {
+    const uint8_t *payload;
+    size_t payload_len;
+    uint8_t level;
+    uint32_t count;
+    uint64_t subtree_items;
+    uint64_t leftmost_child;
+    uint64_t leftmost_items;
+};
+
+struct afspr_tree_item {
+    const uint8_t *key;
+    size_t key_len;
+    const uint8_t *value;
+    size_t value_len;
+};
+
+struct afspr_extent {
+    uint64_t logical_start;
+    uint64_t physical_start;
+    uint64_t block_count;
+    uint32_t flags;
+};
+
 static uint16_t afspr_get_le16(const uint8_t *p)
 {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
@@ -78,6 +123,38 @@ static uint64_t afspr_get_le64(const uint8_t *p)
 {
     return (uint64_t)afspr_get_le32(p) |
            ((uint64_t)afspr_get_le32(p + 4) << 32);
+}
+
+static void afspr_put_be64(uint8_t *p, uint64_t value)
+{
+    unsigned index;
+
+    for (index = 0; index < 8u; ++index) {
+        p[index] = (uint8_t)(value >> (56u - index * 8u));
+    }
+}
+
+static uint64_t afspr_get_be64(const uint8_t *p)
+{
+    uint64_t value = 0u;
+    unsigned index;
+
+    for (index = 0; index < 8u; ++index) {
+        value = (value << 8) | p[index];
+    }
+    return value;
+}
+
+static int afspr_bytes_compare(const uint8_t *left, size_t left_len,
+                               const uint8_t *right, size_t right_len)
+{
+    size_t common = left_len < right_len ? left_len : right_len;
+    int compared = memcmp(left, right, common);
+
+    if (compared != 0) {
+        return compared;
+    }
+    return left_len < right_len ? -1 : left_len > right_len ? 1 : 0;
 }
 
 static uint32_t afspr_crc32c_update(uint32_t crc, const uint8_t *data,
@@ -253,6 +330,204 @@ static int afspr_is_allocatable(const struct afspr_ident *ident, uint64_t lba)
     region = (uint32_t)(lba / ident->region_size);
     base = (uint64_t)region * ident->region_size;
     return lba - base >= afspr_region_reserved_blocks(ident, region);
+}
+
+static int afspr_tree_item_at(const struct afspr_tree_node *node,
+                              uint32_t wanted,
+                              struct afspr_tree_item *item)
+{
+    size_t offset = AFSPR_TREE_FIXED_PAYLOAD;
+    uint32_t index;
+
+    if (wanted >= node->count) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    for (index = 0; index <= wanted; ++index) {
+        size_t key_len;
+        size_t value_len;
+
+        if (offset > node->payload_len ||
+            node->payload_len - offset < AFSPR_TREE_ITEM_FIXED) {
+            return AFSPR_ERR_CORRUPT;
+        }
+        key_len = afspr_get_le16(node->payload + offset);
+        value_len = afspr_get_le16(node->payload + offset + 2u);
+        offset += AFSPR_TREE_ITEM_FIXED;
+        if (key_len > node->payload_len - offset ||
+            value_len > node->payload_len - offset - key_len) {
+            return AFSPR_ERR_CORRUPT;
+        }
+        if (index == wanted) {
+            item->key = node->payload + offset;
+            item->key_len = key_len;
+            item->value = node->payload + offset + key_len;
+            item->value_len = value_len;
+            return AFSPR_OK;
+        }
+        offset += key_len + value_len;
+    }
+    return AFSPR_ERR_CORRUPT;
+}
+
+static int afspr_tree_child(const struct afspr_ident *ident,
+                            const struct afspr_tree_item *item,
+                            uint64_t *lba, uint64_t *subtree_items)
+{
+    if (item->value_len != 16u) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    *lba = afspr_get_le64(item->value);
+    *subtree_items = afspr_get_le64(item->value + 8u);
+    if (!afspr_is_allocatable(ident, *lba) || *subtree_items == 0u) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    return AFSPR_OK;
+}
+
+static int afspr_tree_item_shape(const struct afspr_tree_spec *spec,
+                                 uint8_t level,
+                                 const struct afspr_tree_item *item)
+{
+    if (level != 0u) {
+        return item->value_len == 16u ? AFSPR_OK : AFSPR_ERR_CORRUPT;
+    }
+    if (spec->kind == AFSPR_TREE_KIND_OBJECT_MAP) {
+        return item->key_len == 8u && item->value_len == 8u
+                   ? AFSPR_OK
+                   : AFSPR_ERR_CORRUPT;
+    }
+    if (spec->kind == AFSPR_TREE_KIND_EXTENT_MAP) {
+        return item->key_len == 8u &&
+                       item->value_len == AFSPR_EXTENT_VALUE_SIZE
+                   ? AFSPR_OK
+                   : AFSPR_ERR_CORRUPT;
+    }
+    if (spec->kind == AFSPR_TREE_KIND_DIRECTORY) {
+        return item->value_len >= 16u ? AFSPR_OK : AFSPR_ERR_CORRUPT;
+    }
+    return AFSPR_ERR_UNSUPPORTED;
+}
+
+static int afspr_decode_tree_node(
+    const uint8_t *block, size_t block_size, const struct afspr_ident *ident,
+    const struct afspr_tree_spec *spec, int expected_level, int is_root,
+    const uint8_t *lower, size_t lower_len, const uint8_t *upper,
+    size_t upper_len, struct afspr_tree_node *node)
+{
+    struct afspr_header header;
+    struct afspr_tree_item item;
+    const uint8_t *previous_key = NULL;
+    size_t previous_key_len = 0u;
+    size_t offset = AFSPR_TREE_FIXED_PAYLOAD;
+    uint64_t counted;
+    uint32_t index;
+    int status = afspr_verify_header(block, block_size,
+                                     AFSPR_BLOCK_TYPE_TREE, &header);
+
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (header.flags != 0u || header.owner != spec->owner ||
+        header.generation == 0u || header.generation > spec->max_generation ||
+        header.payload_len < AFSPR_TREE_FIXED_PAYLOAD) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    node->payload = block + AFSPR_HEADER_SIZE;
+    node->payload_len = header.payload_len;
+    if (node->payload[0] != spec->kind || node->payload[2] != 0u ||
+        node->payload[3] != 0u) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    node->level = node->payload[1];
+    node->count = afspr_get_le32(node->payload + 4u);
+    node->subtree_items = afspr_get_le64(node->payload + 8u);
+    node->leftmost_child = afspr_get_le64(node->payload + 16u);
+    node->leftmost_items = afspr_get_le64(node->payload + 24u);
+    if (node->level > AFSPR_TREE_MAX_LEVEL ||
+        (expected_level >= 0 && node->level != (uint8_t)expected_level) ||
+        (!is_root && node->count == 0u) ||
+        node->count >
+            (node->payload_len - AFSPR_TREE_FIXED_PAYLOAD) /
+                AFSPR_TREE_ITEM_FIXED) {
+        return AFSPR_ERR_CORRUPT;
+    }
+
+    counted = node->level == 0u ? node->count : node->leftmost_items;
+    if (node->level == 0u) {
+        if (node->leftmost_child != 0u || node->leftmost_items != 0u) {
+            return AFSPR_ERR_CORRUPT;
+        }
+    } else if (!afspr_is_allocatable(ident, node->leftmost_child) ||
+               node->leftmost_items == 0u || node->count == 0u) {
+        return AFSPR_ERR_CORRUPT;
+    }
+
+    for (index = 0; index < node->count; ++index) {
+        uint64_t child_lba;
+        uint64_t child_items;
+
+        if (offset > node->payload_len ||
+            node->payload_len - offset < AFSPR_TREE_ITEM_FIXED ||
+            node->payload[offset + 4u] != 0u ||
+            node->payload[offset + 5u] != 0u ||
+            node->payload[offset + 6u] != 0u ||
+            node->payload[offset + 7u] != 0u) {
+            return AFSPR_ERR_CORRUPT;
+        }
+        item.key_len = afspr_get_le16(node->payload + offset);
+        item.value_len = afspr_get_le16(node->payload + offset + 2u);
+        offset += AFSPR_TREE_ITEM_FIXED;
+        if (item.key_len == 0u || item.key_len > AFSPR_TREE_MAX_KEY ||
+            item.value_len == 0u || item.key_len > node->payload_len - offset ||
+            item.value_len > node->payload_len - offset - item.key_len) {
+            return AFSPR_ERR_CORRUPT;
+        }
+        item.key = node->payload + offset;
+        item.value = item.key + item.key_len;
+        if ((previous_key != NULL &&
+             afspr_bytes_compare(previous_key, previous_key_len, item.key,
+                                 item.key_len) >= 0) ||
+            afspr_tree_item_shape(spec, node->level, &item) != AFSPR_OK) {
+            return AFSPR_ERR_CORRUPT;
+        }
+        if (node->level != 0u) {
+            status = afspr_tree_child(ident, &item, &child_lba,
+                                      &child_items);
+            if (status != AFSPR_OK || UINT64_MAX - counted < child_items) {
+                return AFSPR_ERR_CORRUPT;
+            }
+            counted += child_items;
+        }
+        previous_key = item.key;
+        previous_key_len = item.key_len;
+        offset += item.key_len + item.value_len;
+    }
+    if (offset != node->payload_len || counted != node->subtree_items) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    if (node->count != 0u) {
+        struct afspr_tree_item first;
+        struct afspr_tree_item last;
+
+        if (afspr_tree_item_at(node, 0u, &first) != AFSPR_OK ||
+            afspr_tree_item_at(node, node->count - 1u, &last) != AFSPR_OK) {
+            return AFSPR_ERR_CORRUPT;
+        }
+        if (lower != NULL &&
+            (afspr_bytes_compare(first.key, first.key_len, lower, lower_len) <
+                 0 ||
+             (node->level == 0u &&
+              afspr_bytes_compare(first.key, first.key_len, lower,
+                                  lower_len) != 0))) {
+            return AFSPR_ERR_CORRUPT;
+        }
+        if (upper != NULL &&
+            afspr_bytes_compare(last.key, last.key_len, upper, upper_len) >=
+                0) {
+            return AFSPR_ERR_CORRUPT;
+        }
+    }
+    return AFSPR_OK;
 }
 
 static int afspr_decode_ident(const uint8_t *block, size_t block_size,
@@ -439,6 +714,239 @@ static int afspr_report(struct afspr_diagnostic *diagnostic, int status,
     return status;
 }
 
+static void afspr_ident_from_result(const struct afspr_probe_result *volume,
+                                    struct afspr_ident *ident)
+{
+    memset(ident, 0, sizeof(*ident));
+    ident->version = volume->identification_version;
+    memcpy(ident->uuid, volume->uuid, sizeof(ident->uuid));
+    ident->block_shift = volume->block_shift;
+    ident->checksum_algorithm = volume->checksum_algorithm;
+    ident->log_slots = volume->log_slots;
+    ident->region_size = volume->region_size;
+    ident->total_blocks = volume->total_blocks;
+    ident->checkpoint_slots[0] = 1u;
+    ident->checkpoint_slots[1] = 2u;
+    ident->metadata_start = volume->metadata_start;
+    ident->compat_features = volume->compat_features;
+    ident->ro_compat_features = volume->ro_compat_features;
+    ident->incompat_features = volume->incompat_features;
+    ident->name_key_algorithm = volume->name_key_algorithm;
+    memcpy(ident->unicode_version, volume->unicode_version,
+           sizeof(ident->unicode_version));
+}
+
+static int afspr_prepare_operation(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_probe_result *volume, size_t minimum_scratch,
+    struct afspr_ident *ident, struct afspr_diagnostic *diagnostic,
+    size_t diagnostic_size)
+{
+    if (diagnostic != NULL && diagnostic_size < sizeof(*diagnostic)) {
+        return AFSPR_ERR_ABI;
+    }
+    if (diagnostic != NULL) {
+        afspr_diagnostic_init(diagnostic);
+    }
+    if (ops == NULL || scratch == NULL || volume == NULL || ident == NULL ||
+        ops->read_blocks == NULL || scratch->buffer == NULL) {
+        return afspr_report(diagnostic, AFSPR_ERR_INVALID_ARGUMENT,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    if (ops->abi_version != AFSPR_ABI_VERSION ||
+        ops->struct_size < sizeof(*ops) ||
+        volume->abi_version != AFSPR_ABI_VERSION) {
+        return afspr_report(diagnostic, AFSPR_ERR_ABI,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    if (ops->block_size != AFSP_DEFAULT_BLOCK_SIZE ||
+        volume->block_shift != AFSP_DEFAULT_BLOCK_SHIFT) {
+        return afspr_report(diagnostic, AFSPR_ERR_UNSUPPORTED,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    if (scratch->size < minimum_scratch) {
+        return afspr_report(diagnostic, AFSPR_ERR_SCRATCH_TOO_SMALL,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    afspr_ident_from_result(volume, ident);
+    if (volume->generation == 0u || volume->total_blocks == 0u ||
+        volume->total_blocks > ops->block_count ||
+        !afspr_geometry_valid(ident)) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    return AFSPR_OK;
+}
+
+static int afspr_tree_lookup_fixed(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_ident *ident, uint64_t root_lba,
+    const struct afspr_tree_spec *spec, const uint8_t search[8], int floor,
+    uint8_t found_key[8], uint8_t *found_value, size_t value_capacity,
+    size_t *found_value_len, int *found, uint64_t *leaf_lba,
+    struct afspr_diagnostic *diagnostic)
+{
+    uint64_t visited[AFSPR_TREE_MAX_LEVEL + 1u];
+    uint8_t lower[8];
+    uint8_t upper[8];
+    size_t lower_len = 0u;
+    size_t upper_len = 0u;
+    uint64_t lba = root_lba;
+    int expected_level = -1;
+    unsigned depth;
+
+    *found = 0;
+    *found_value_len = 0u;
+    if (!afspr_is_allocatable(ident, root_lba)) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_TREE_TRAVERSAL,
+                            AFSPR_NO_CHECKPOINT_SLOT, root_lba);
+    }
+    for (depth = 0; depth <= AFSPR_TREE_MAX_LEVEL; ++depth) {
+        struct afspr_tree_node node;
+        uint32_t index;
+        uint32_t separator = 0u;
+        int status;
+
+        for (index = 0; index < depth; ++index) {
+            if (visited[index] == lba) {
+                return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                    AFSPR_STAGE_TREE_TRAVERSAL,
+                                    AFSPR_NO_CHECKPOINT_SLOT, lba);
+            }
+        }
+        visited[depth] = lba;
+        status = afspr_read_one(ops, lba, (uint8_t *)scratch->buffer);
+        if (status != AFSPR_OK) {
+            return afspr_report(diagnostic, status, AFSPR_STAGE_TREE_READ,
+                                AFSPR_NO_CHECKPOINT_SLOT, lba);
+        }
+        status = afspr_decode_tree_node(
+            (const uint8_t *)scratch->buffer, ops->block_size, ident, spec,
+            expected_level, depth == 0u,
+            lower_len == 0u ? NULL : lower, lower_len,
+            upper_len == 0u ? NULL : upper, upper_len, &node);
+        if (status != AFSPR_OK) {
+            return afspr_report(diagnostic, status, AFSPR_STAGE_TREE_DECODE,
+                                AFSPR_NO_CHECKPOINT_SLOT, lba);
+        }
+        if (node.level == 0u) {
+            struct afspr_tree_item candidate;
+            struct afspr_tree_item item;
+            int have_candidate = 0;
+
+            *leaf_lba = lba;
+
+            for (index = 0; index < node.count; ++index) {
+                int compared;
+
+                status = afspr_tree_item_at(&node, index, &item);
+                if (status != AFSPR_OK) {
+                    return afspr_report(diagnostic, status,
+                                        AFSPR_STAGE_TREE_DECODE,
+                                        AFSPR_NO_CHECKPOINT_SLOT, lba);
+                }
+                compared = afspr_bytes_compare(item.key, item.key_len,
+                                               search, 8u);
+                if ((!floor && compared == 0) || (floor && compared <= 0)) {
+                    candidate = item;
+                    have_candidate = 1;
+                    if (!floor || compared == 0) {
+                        break;
+                    }
+                } else if (compared > 0) {
+                    break;
+                }
+            }
+            if (have_candidate) {
+                if (candidate.key_len != 8u ||
+                    candidate.value_len > value_capacity) {
+                    return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                        AFSPR_STAGE_TREE_DECODE,
+                                        AFSPR_NO_CHECKPOINT_SLOT, lba);
+                }
+                memcpy(found_key, candidate.key, 8u);
+                memcpy(found_value, candidate.value,
+                       candidate.value_len);
+                *found_value_len = candidate.value_len;
+                *found = 1;
+            }
+            return AFSPR_OK;
+        }
+
+        for (index = 0; index < node.count; ++index) {
+            struct afspr_tree_item item;
+
+            status = afspr_tree_item_at(&node, index, &item);
+            if (status != AFSPR_OK) {
+                return afspr_report(diagnostic, status,
+                                    AFSPR_STAGE_TREE_DECODE,
+                                    AFSPR_NO_CHECKPOINT_SLOT, lba);
+            }
+            if (afspr_bytes_compare(item.key, item.key_len, search, 8u) <=
+                0) {
+                separator = index + 1u;
+            } else {
+                break;
+            }
+        }
+        if (separator == 0u) {
+            struct afspr_tree_item first;
+
+            status = afspr_tree_item_at(&node, 0u, &first);
+            if (status != AFSPR_OK || first.key_len != 8u) {
+                return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                    AFSPR_STAGE_TREE_DECODE,
+                                    AFSPR_NO_CHECKPOINT_SLOT, lba);
+            }
+            memcpy(upper, first.key, 8u);
+            upper_len = 8u;
+            lba = node.leftmost_child;
+        } else {
+            struct afspr_tree_item selected_item;
+            uint64_t ignored_items;
+
+            status = afspr_tree_item_at(&node, separator - 1u,
+                                        &selected_item);
+            if (status != AFSPR_OK || selected_item.key_len != 8u ||
+                afspr_tree_child(ident, &selected_item, &lba,
+                                 &ignored_items) != AFSPR_OK) {
+                return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                    AFSPR_STAGE_TREE_DECODE,
+                                    AFSPR_NO_CHECKPOINT_SLOT, lba);
+            }
+            memcpy(lower, selected_item.key, 8u);
+            lower_len = 8u;
+            if (separator < node.count) {
+                struct afspr_tree_item next;
+
+                status = afspr_tree_item_at(&node, separator, &next);
+                if (status != AFSPR_OK || next.key_len != 8u) {
+                    return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                        AFSPR_STAGE_TREE_DECODE,
+                                        AFSPR_NO_CHECKPOINT_SLOT, lba);
+                }
+                memcpy(upper, next.key, 8u);
+                upper_len = 8u;
+            }
+        }
+        if (node.level == 0u || !afspr_is_allocatable(ident, lba)) {
+            return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                AFSPR_STAGE_TREE_TRAVERSAL,
+                                AFSPR_NO_CHECKPOINT_SLOT, lba);
+        }
+        expected_level = (int)node.level - 1;
+    }
+    return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                        AFSPR_STAGE_TREE_TRAVERSAL,
+                        AFSPR_NO_CHECKPOINT_SLOT, lba);
+}
+
 int afspr_probe_detailed(const struct afspr_block_ops *ops,
                          const struct afspr_scratch *scratch,
                          struct afspr_probe_result *result, size_t result_size,
@@ -584,6 +1092,688 @@ int afspr_probe(const struct afspr_block_ops *ops,
     return afspr_probe_detailed(ops, scratch, result, result_size, NULL, 0u);
 }
 
+uint64_t afspr_capabilities(void)
+{
+    return AFSPR_CAP_PROBE | AFSPR_CAP_OBJECT_LOOKUP |
+           AFSPR_CAP_DIRECTORY_ORDINAL | AFSPR_CAP_FILE_READ;
+}
+
+static int afspr_decode_timespec(const uint8_t *encoded,
+                                 struct afspr_timespec *timestamp)
+{
+    timestamp->seconds = (int64_t)afspr_get_le64(encoded);
+    timestamp->nanoseconds = afspr_get_le32(encoded + 8u);
+    timestamp->reserved = 0u;
+    return timestamp->nanoseconds < UINT32_C(1000000000)
+               ? AFSPR_OK
+               : AFSPR_ERR_CORRUPT;
+}
+
+static int afspr_decode_object(const uint8_t *block, size_t block_size,
+                               const struct afspr_ident *ident,
+                               uint64_t max_generation,
+                               uint64_t expected_object_id,
+                               struct afspr_object *object)
+{
+    struct afspr_header header;
+    const uint8_t *p;
+    uint64_t expected_allocated;
+    uint64_t data_end;
+    uint64_t lba;
+    int status = afspr_verify_header(block, block_size,
+                                     AFSPR_BLOCK_TYPE_OBJECT, &header);
+
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (header.flags != 0u || header.owner != expected_object_id ||
+        header.generation == 0u || header.generation > max_generation ||
+        header.payload_len < AFSPR_OBJECT_PAYLOAD) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    p = block + AFSPR_HEADER_SIZE;
+    memset(object, 0, sizeof(*object));
+    object->abi_version = AFSPR_ABI_VERSION;
+    object->object_id = afspr_get_le64(p);
+    object->type = p[8];
+    object->flags = afspr_get_le16(p + 10u);
+    object->link_count = afspr_get_le32(p + 12u);
+    object->size_bytes = afspr_get_le64(p + 16u);
+    object->allocated_bytes = afspr_get_le64(p + 24u);
+    object->protection = afspr_get_le32(p + 68u);
+    object->content_generation = afspr_get_le64(p + 72u);
+    object->data_root = afspr_get_le64(p + 80u);
+    object->data_blocks = afspr_get_le64(p + 88u);
+    if (p[9] != 0u || object->object_id != expected_object_id ||
+        object->link_count == 0u ||
+        (object->flags & ~AFSPR_OBJECT_FLAG_EXTENT_TREE) != 0u ||
+        afspr_decode_timespec(p + 32u, &object->created) != AFSPR_OK ||
+        afspr_decode_timespec(p + 44u, &object->modified) != AFSPR_OK ||
+        afspr_decode_timespec(p + 56u, &object->changed) != AFSPR_OK) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    if (object->type == AFSPR_OBJECT_DIRECTORY) {
+        if (object->flags != 0u || object->size_bytes != 0u ||
+            object->data_blocks != 0u ||
+            !afspr_is_allocatable(ident, object->data_root)) {
+            return AFSPR_ERR_CORRUPT;
+        }
+        return AFSPR_OK;
+    }
+    if (object->type != AFSPR_OBJECT_FILE) {
+        return object->type == AFSPR_OBJECT_SYMLINK ||
+                       object->type == AFSPR_OBJECT_INTERNAL
+                   ? AFSPR_ERR_UNSUPPORTED
+                   : AFSPR_ERR_CORRUPT;
+    }
+    if (object->data_blocks > UINT64_MAX / block_size) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    expected_allocated = object->data_blocks * block_size;
+    if (object->allocated_bytes != expected_allocated) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    if ((object->flags & AFSPR_OBJECT_FLAG_EXTENT_TREE) != 0u) {
+        return afspr_is_allocatable(ident, object->data_root)
+                   ? AFSPR_OK
+                   : AFSPR_ERR_CORRUPT;
+    }
+    if (object->data_blocks > AFSPR_MAX_DIRECT_BLOCKS) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    if (object->data_blocks == 0u) {
+        return object->data_root == 0u && object->size_bytes == 0u
+                   ? AFSPR_OK
+                   : AFSPR_ERR_CORRUPT;
+    }
+    if (UINT64_MAX - object->data_root < object->data_blocks) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    data_end = object->data_root + object->data_blocks;
+    if (object->size_bytes > expected_allocated ||
+        object->size_bytes <= expected_allocated - block_size) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    for (lba = object->data_root; lba < data_end; ++lba) {
+        if (!afspr_is_allocatable(ident, lba)) {
+            return AFSPR_ERR_CORRUPT;
+        }
+    }
+    return AFSPR_OK;
+}
+
+int afspr_lookup_object(const struct afspr_block_ops *ops,
+                        const struct afspr_scratch *scratch,
+                        const struct afspr_probe_result *volume,
+                        uint64_t object_id, struct afspr_object *object,
+                        size_t object_size,
+                        struct afspr_diagnostic *diagnostic,
+                        size_t diagnostic_size)
+{
+    struct afspr_ident ident;
+    struct afspr_tree_spec spec;
+    uint8_t key[8];
+    uint8_t found_key[8];
+    uint8_t value[8];
+    size_t value_len;
+    uint64_t object_lba;
+    uint64_t leaf_lba;
+    int found;
+    int status = afspr_prepare_operation(
+        ops, scratch, volume, AFSPR_MIN_SCRATCH_SIZE, &ident, diagnostic,
+        diagnostic_size);
+
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (object == NULL || object_size < sizeof(*object) || object_id == 0u) {
+        return afspr_report(diagnostic,
+                            object_size < sizeof(*object) ? AFSPR_ERR_ABI
+                                                          : AFSPR_ERR_INVALID_ARGUMENT,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    spec.kind = AFSPR_TREE_KIND_OBJECT_MAP;
+    spec.owner = 0u;
+    spec.max_generation = volume->generation;
+    afspr_put_be64(key, object_id);
+    status = afspr_tree_lookup_fixed(
+        ops, scratch, &ident, volume->object_map_block, &spec, key, 0,
+        found_key, value, sizeof(value), &value_len, &found, &leaf_lba,
+        diagnostic);
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (!found) {
+        return afspr_report(diagnostic, AFSPR_ERR_NOT_FOUND,
+                            AFSPR_STAGE_TREE_TRAVERSAL,
+                            AFSPR_NO_CHECKPOINT_SLOT,
+                            volume->object_map_block);
+    }
+    if (value_len != sizeof(value) || afspr_get_be64(found_key) != object_id) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_TREE_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, leaf_lba);
+    }
+    object_lba = afspr_get_le64(value);
+    if (!afspr_is_allocatable(&ident, object_lba)) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_TREE_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, object_lba);
+    }
+    status = afspr_read_one(ops, object_lba, (uint8_t *)scratch->buffer);
+    if (status != AFSPR_OK) {
+        return afspr_report(diagnostic, status, AFSPR_STAGE_OBJECT_READ,
+                            AFSPR_NO_CHECKPOINT_SLOT, object_lba);
+    }
+    status = afspr_decode_object((const uint8_t *)scratch->buffer,
+                                 ops->block_size, &ident,
+                                 volume->generation, object_id, object);
+    if (status != AFSPR_OK) {
+        return afspr_report(diagnostic, status, AFSPR_STAGE_OBJECT_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, object_lba);
+    }
+    return afspr_report(diagnostic, AFSPR_OK, AFSPR_STAGE_COMPLETE,
+                        AFSPR_NO_CHECKPOINT_SLOT, object_lba);
+}
+
+static int afspr_ascii_key_matches(const struct afspr_ident *ident,
+                                   const uint8_t *key, size_t key_len,
+                                   const uint8_t *name, size_t name_len)
+{
+    size_t index;
+
+    if (ident->name_key_algorithm == 0u) {
+        return key_len == name_len && memcmp(key, name, name_len) == 0;
+    }
+    for (index = 0; index < name_len; ++index) {
+        if (name[index] >= 0x80u) {
+            return 1;
+        }
+    }
+    if (key_len != name_len) {
+        return 0;
+    }
+    for (index = 0; index < key_len; ++index) {
+        if (key[index] >= 0x80u) {
+            return 0;
+        }
+    }
+    for (index = 0; index < name_len; ++index) {
+        uint8_t expected = name[index];
+
+        if (ident->name_key_algorithm == 2u && expected >= 'A' &&
+            expected <= 'Z') {
+            expected = (uint8_t)(expected + ('a' - 'A'));
+        }
+        if (key[index] != expected) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int afspr_decode_directory_entry(
+    const struct afspr_ident *ident, const struct afspr_tree_item *item,
+    uint64_t parent_id, void *name_buffer, size_t name_capacity,
+    struct afspr_directory_entry *entry)
+{
+    size_t name_len;
+    const uint8_t *name;
+
+    if (item->value_len < 16u) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    name_len = afspr_get_le16(item->value);
+    if (item->value_len != 16u + name_len || name_len == 0u ||
+        name_len > 255u || item->value[3] != 0u || item->value[4] != 0u ||
+        item->value[5] != 0u || item->value[6] != 0u ||
+        item->value[7] != 0u ||
+        (item->value[2] != AFSPR_OBJECT_FILE &&
+         item->value[2] != AFSPR_OBJECT_DIRECTORY)) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    name = item->value + 16u;
+    if (!afspr_valid_utf8(name, name_len) || memchr(name, 0, name_len) != NULL ||
+        memchr(name, '/', name_len) != NULL ||
+        afspr_get_le64(item->value + 8u) == 0u ||
+        !afspr_ascii_key_matches(ident, item->key, item->key_len, name,
+                                 name_len)) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    memset(entry, 0, sizeof(*entry));
+    entry->abi_version = AFSPR_ABI_VERSION;
+    entry->type_hint = item->value[2];
+    entry->object_id = afspr_get_le64(item->value + 8u);
+    entry->parent_id = parent_id;
+    entry->name_len = name_len;
+    if (name_capacity < name_len) {
+        return AFSPR_ERR_BUFFER_TOO_SMALL;
+    }
+    if (name_buffer == NULL) {
+        return AFSPR_ERR_INVALID_ARGUMENT;
+    }
+    memcpy(name_buffer, name, name_len);
+    entry->name = (const uint8_t *)name_buffer;
+    return AFSPR_OK;
+}
+
+int afspr_directory_entry_at(const struct afspr_block_ops *ops,
+                             const struct afspr_scratch *scratch,
+                             const struct afspr_probe_result *volume,
+                             const struct afspr_object *directory,
+                             uint64_t ordinal, void *name_buffer,
+                             size_t name_capacity,
+                             struct afspr_directory_entry *entry,
+                             size_t entry_size, uint64_t *total_entries,
+                             struct afspr_diagnostic *diagnostic,
+                             size_t diagnostic_size)
+{
+    struct afspr_ident ident;
+    struct afspr_tree_spec spec;
+    uint64_t visited[AFSPR_TREE_MAX_LEVEL + 1u];
+    uint8_t *block;
+    uint8_t *lower;
+    uint8_t *upper;
+    size_t lower_len = 0u;
+    size_t upper_len = 0u;
+    uint64_t lba;
+    uint64_t remaining = ordinal;
+    int expected_level = -1;
+    unsigned depth;
+    int status = afspr_prepare_operation(
+        ops, scratch, volume, AFSPR_TREE_SCRATCH_SIZE, &ident, diagnostic,
+        diagnostic_size);
+
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (directory == NULL || entry == NULL ||
+        entry_size < sizeof(*entry)) {
+        return afspr_report(diagnostic,
+                            entry != NULL && entry_size < sizeof(*entry)
+                                ? AFSPR_ERR_ABI
+                                : AFSPR_ERR_INVALID_ARGUMENT,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    if (directory->abi_version != AFSPR_ABI_VERSION) {
+        return afspr_report(diagnostic, AFSPR_ERR_ABI,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    if (directory->type != AFSPR_OBJECT_DIRECTORY) {
+        return afspr_report(diagnostic, AFSPR_ERR_NOT_DIRECTORY,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    if (directory->flags != 0u || directory->size_bytes != 0u ||
+        directory->data_blocks != 0u ||
+        !afspr_is_allocatable(&ident, directory->data_root)) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_TREE_TRAVERSAL,
+                            AFSPR_NO_CHECKPOINT_SLOT,
+                            directory->data_root);
+    }
+
+    block = (uint8_t *)scratch->buffer;
+    lower = block + AFSP_DEFAULT_BLOCK_SIZE;
+    upper = lower + AFSPR_TREE_MAX_KEY;
+    lba = directory->data_root;
+    spec.kind = AFSPR_TREE_KIND_DIRECTORY;
+    spec.owner = directory->object_id;
+    spec.max_generation = volume->generation;
+
+    for (depth = 0; depth <= AFSPR_TREE_MAX_LEVEL; ++depth) {
+        struct afspr_tree_node node;
+        uint32_t index;
+
+        for (index = 0; index < depth; ++index) {
+            if (visited[index] == lba) {
+                return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                    AFSPR_STAGE_TREE_TRAVERSAL,
+                                    AFSPR_NO_CHECKPOINT_SLOT, lba);
+            }
+        }
+        visited[depth] = lba;
+        status = afspr_read_one(ops, lba, block);
+        if (status != AFSPR_OK) {
+            return afspr_report(diagnostic, status, AFSPR_STAGE_TREE_READ,
+                                AFSPR_NO_CHECKPOINT_SLOT, lba);
+        }
+        status = afspr_decode_tree_node(
+            block, ops->block_size, &ident, &spec, expected_level,
+            depth == 0u, lower_len == 0u ? NULL : lower, lower_len,
+            upper_len == 0u ? NULL : upper, upper_len, &node);
+        if (status != AFSPR_OK) {
+            return afspr_report(diagnostic, status, AFSPR_STAGE_TREE_DECODE,
+                                AFSPR_NO_CHECKPOINT_SLOT, lba);
+        }
+        if (depth == 0u) {
+            if (total_entries != NULL) {
+                *total_entries = node.subtree_items;
+            }
+            if (ordinal >= node.subtree_items) {
+                return afspr_report(diagnostic, AFSPR_ERR_NOT_FOUND,
+                                    AFSPR_STAGE_TREE_TRAVERSAL,
+                                    AFSPR_NO_CHECKPOINT_SLOT, lba);
+            }
+        }
+        if (node.level == 0u) {
+            struct afspr_tree_item item;
+
+            if (remaining >= node.count ||
+                afspr_tree_item_at(&node, (uint32_t)remaining, &item) !=
+                    AFSPR_OK) {
+                return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                    AFSPR_STAGE_TREE_TRAVERSAL,
+                                    AFSPR_NO_CHECKPOINT_SLOT, lba);
+            }
+            status = afspr_decode_directory_entry(
+                &ident, &item, directory->object_id, name_buffer,
+                name_capacity, entry);
+            return afspr_report(
+                diagnostic, status,
+                status == AFSPR_OK ? AFSPR_STAGE_COMPLETE
+                                   : AFSPR_STAGE_DIRECTORY_DECODE,
+                AFSPR_NO_CHECKPOINT_SLOT, lba);
+        }
+
+        {
+            uint32_t child_index = 0u;
+            uint64_t child_lba = node.leftmost_child;
+            uint64_t child_items = node.leftmost_items;
+            int chosen = remaining < child_items;
+
+            if (!chosen) {
+                remaining -= child_items;
+                for (index = 0; index < node.count; ++index) {
+                    struct afspr_tree_item item;
+
+                    if (afspr_tree_item_at(&node, index, &item) != AFSPR_OK ||
+                        afspr_tree_child(&ident, &item, &child_lba,
+                                         &child_items) != AFSPR_OK) {
+                        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                            AFSPR_STAGE_TREE_DECODE,
+                                            AFSPR_NO_CHECKPOINT_SLOT, lba);
+                    }
+                    if (remaining < child_items) {
+                        child_index = index + 1u;
+                        chosen = 1;
+                        break;
+                    }
+                    remaining -= child_items;
+                }
+            }
+            if (!chosen) {
+                return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                    AFSPR_STAGE_TREE_TRAVERSAL,
+                                    AFSPR_NO_CHECKPOINT_SLOT, lba);
+            }
+            if (child_index == 0u) {
+                struct afspr_tree_item first;
+
+                if (afspr_tree_item_at(&node, 0u, &first) != AFSPR_OK) {
+                    return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                        AFSPR_STAGE_TREE_DECODE,
+                                        AFSPR_NO_CHECKPOINT_SLOT, lba);
+                }
+                memcpy(upper, first.key, first.key_len);
+                upper_len = first.key_len;
+            } else {
+                struct afspr_tree_item selected_item;
+
+                if (afspr_tree_item_at(&node, child_index - 1u,
+                                       &selected_item) != AFSPR_OK) {
+                    return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                        AFSPR_STAGE_TREE_DECODE,
+                                        AFSPR_NO_CHECKPOINT_SLOT, lba);
+                }
+                memcpy(lower, selected_item.key, selected_item.key_len);
+                lower_len = selected_item.key_len;
+                if (child_index < node.count) {
+                    struct afspr_tree_item next;
+
+                    if (afspr_tree_item_at(&node, child_index, &next) !=
+                        AFSPR_OK) {
+                        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                            AFSPR_STAGE_TREE_DECODE,
+                                            AFSPR_NO_CHECKPOINT_SLOT, lba);
+                    }
+                    memcpy(upper, next.key, next.key_len);
+                    upper_len = next.key_len;
+                }
+            }
+            lba = child_lba;
+        }
+        expected_level = (int)node.level - 1;
+    }
+    return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                        AFSPR_STAGE_TREE_TRAVERSAL,
+                        AFSPR_NO_CHECKPOINT_SLOT, lba);
+}
+
+static int afspr_decode_extent(const struct afspr_ident *ident,
+                               const struct afspr_probe_result *volume,
+                               const uint8_t key[8], const uint8_t value[24],
+                               struct afspr_extent *extent)
+{
+    uint64_t logical_end;
+    uint64_t physical_end;
+    uint32_t first_region;
+    uint32_t last_region;
+
+    extent->logical_start = afspr_get_be64(key);
+    extent->physical_start = afspr_get_le64(value);
+    extent->block_count = afspr_get_le64(value + 8u);
+    extent->flags = afspr_get_le32(value + 16u);
+    if (value[20] != 0u || value[21] != 0u || value[22] != 0u ||
+        value[23] != 0u || extent->block_count == 0u ||
+        (extent->flags & ~AFSPR_EXTENT_KNOWN_FLAGS) != 0u ||
+        UINT64_MAX - extent->logical_start < extent->block_count ||
+        UINT64_MAX - extent->physical_start < extent->block_count) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    logical_end = extent->logical_start + extent->block_count;
+    physical_end = extent->physical_start + extent->block_count;
+    if (logical_end <= extent->logical_start ||
+        physical_end > ident->total_blocks ||
+        !afspr_is_allocatable(ident, extent->physical_start) ||
+        !afspr_is_allocatable(ident, physical_end - 1u)) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    first_region =
+        (uint32_t)(extent->physical_start / ident->region_size);
+    last_region = (uint32_t)((physical_end - 1u) / ident->region_size);
+    if (first_region != last_region ||
+        ((extent->flags & AFSPR_EXTENT_SHARED) != 0u &&
+         ((volume->ro_compat_features & AFSP_RO_COMPAT_SHARED_EXTENTS) == 0u ||
+          volume->shared_extent_root_block == 0u))) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    return AFSPR_OK;
+}
+
+static int afspr_extent_for_block(
+    const struct afspr_block_ops *ops, const struct afspr_scratch *scratch,
+    const struct afspr_ident *ident,
+    const struct afspr_probe_result *volume, const struct afspr_object *file,
+    uint64_t logical_block, struct afspr_extent *extent, int *mapped,
+    struct afspr_diagnostic *diagnostic)
+{
+    struct afspr_tree_spec spec;
+    uint8_t search[8];
+    uint8_t found_key[8];
+    uint8_t value[AFSPR_EXTENT_VALUE_SIZE];
+    size_t value_len;
+    uint64_t leaf_lba;
+    int found;
+    int status;
+
+    spec.kind = AFSPR_TREE_KIND_EXTENT_MAP;
+    spec.owner = file->object_id;
+    spec.max_generation = volume->generation;
+    afspr_put_be64(search, logical_block);
+    status = afspr_tree_lookup_fixed(
+        ops, scratch, ident, file->data_root, &spec, search, 1, found_key,
+        value, sizeof(value), &value_len, &found, &leaf_lba, diagnostic);
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    *mapped = 0;
+    if (!found) {
+        return AFSPR_OK;
+    }
+    if (value_len != AFSPR_EXTENT_VALUE_SIZE ||
+        afspr_decode_extent(ident, volume, found_key, value, extent) !=
+            AFSPR_OK) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_EXTENT_DECODE,
+                            AFSPR_NO_CHECKPOINT_SLOT, leaf_lba);
+    }
+    if (logical_block - extent->logical_start < extent->block_count) {
+        *mapped = 1;
+    }
+    return AFSPR_OK;
+}
+
+int afspr_read_file(const struct afspr_block_ops *ops,
+                    const struct afspr_scratch *scratch,
+                    const struct afspr_probe_result *volume,
+                    const struct afspr_object *file, uint64_t offset,
+                    void *destination, size_t destination_size,
+                    size_t *bytes_read,
+                    struct afspr_diagnostic *diagnostic,
+                    size_t diagnostic_size)
+{
+    struct afspr_ident ident;
+    uint64_t count;
+    uint64_t end;
+    uint64_t logical_block;
+    uint64_t final_block;
+    uint8_t *output = (uint8_t *)destination;
+    int status = afspr_prepare_operation(
+        ops, scratch, volume, AFSPR_MIN_SCRATCH_SIZE, &ident, diagnostic,
+        diagnostic_size);
+
+    if (status != AFSPR_OK) {
+        return status;
+    }
+    if (file == NULL || bytes_read == NULL ||
+        (destination == NULL && destination_size != 0u)) {
+        return afspr_report(diagnostic, AFSPR_ERR_INVALID_ARGUMENT,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    *bytes_read = 0u;
+    if (file->abi_version != AFSPR_ABI_VERSION) {
+        return afspr_report(diagnostic, AFSPR_ERR_ABI,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    if (file->type != AFSPR_OBJECT_FILE) {
+        return afspr_report(diagnostic, AFSPR_ERR_NOT_FILE,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    if ((file->flags & ~AFSPR_OBJECT_FLAG_EXTENT_TREE) != 0u ||
+        file->data_blocks > UINT64_MAX / ops->block_size ||
+        file->allocated_bytes != file->data_blocks * ops->block_size) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    if ((file->flags & AFSPR_OBJECT_FLAG_EXTENT_TREE) != 0u) {
+        if (!afspr_is_allocatable(&ident, file->data_root)) {
+            return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                AFSPR_STAGE_ARGUMENTS,
+                                AFSPR_NO_CHECKPOINT_SLOT, file->data_root);
+        }
+    } else if (file->data_blocks == 0u) {
+        if (file->data_root != 0u || file->size_bytes != 0u) {
+            return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                AFSPR_STAGE_ARGUMENTS,
+                                AFSPR_NO_CHECKPOINT_SLOT, file->data_root);
+        }
+    } else if (file->data_blocks > AFSPR_MAX_DIRECT_BLOCKS ||
+               !afspr_is_allocatable(&ident, file->data_root) ||
+               file->size_bytes > file->allocated_bytes ||
+               file->size_bytes <= file->allocated_bytes - ops->block_size) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_ARGUMENTS,
+                            AFSPR_NO_CHECKPOINT_SLOT, file->data_root);
+    }
+    if (destination_size == 0u || offset >= file->size_bytes) {
+        return afspr_report(diagnostic, AFSPR_OK, AFSPR_STAGE_COMPLETE,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
+    count = file->size_bytes - offset;
+    if (count > destination_size) {
+        count = destination_size;
+    }
+    end = offset + count;
+    logical_block = offset / ops->block_size;
+    final_block = (end - 1u) / ops->block_size;
+
+    for (; logical_block <= final_block; ++logical_block) {
+        struct afspr_extent extent;
+        uint64_t physical = 0u;
+        uint64_t block_start = logical_block * ops->block_size;
+        uint64_t copy_start = offset > block_start ? offset : block_start;
+        uint64_t block_end = block_start + ops->block_size;
+        uint64_t copy_end = end < block_end ? end : block_end;
+        size_t source_offset = (size_t)(copy_start - block_start);
+        size_t target_offset = (size_t)(copy_start - offset);
+        size_t copy_size = (size_t)(copy_end - copy_start);
+        int mapped = 0;
+
+        if ((file->flags & AFSPR_OBJECT_FLAG_EXTENT_TREE) != 0u) {
+            status = afspr_extent_for_block(
+                ops, scratch, &ident, volume, file, logical_block, &extent,
+                &mapped, diagnostic);
+            if (status != AFSPR_OK) {
+                return status;
+            }
+            if (mapped && (extent.flags & AFSPR_EXTENT_UNWRITTEN) == 0u) {
+                physical = extent.physical_start + logical_block -
+                           extent.logical_start;
+            } else {
+                mapped = 0;
+            }
+        } else if (logical_block < file->data_blocks) {
+            if (UINT64_MAX - file->data_root < logical_block) {
+                return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                    AFSPR_STAGE_DATA_READ,
+                                    AFSPR_NO_CHECKPOINT_SLOT,
+                                    file->data_root);
+            }
+            physical = file->data_root + logical_block;
+            mapped = 1;
+        }
+        if (mapped) {
+            if (!afspr_is_allocatable(&ident, physical)) {
+                return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                                    AFSPR_STAGE_DATA_READ,
+                                    AFSPR_NO_CHECKPOINT_SLOT, physical);
+            }
+            status = afspr_read_one(ops, physical,
+                                    (uint8_t *)scratch->buffer);
+            if (status != AFSPR_OK) {
+                return afspr_report(diagnostic, status,
+                                    AFSPR_STAGE_DATA_READ,
+                                    AFSPR_NO_CHECKPOINT_SLOT, physical);
+            }
+        } else {
+            memset(scratch->buffer, 0, ops->block_size);
+        }
+        memmove(output + target_offset,
+                (const uint8_t *)scratch->buffer + source_offset, copy_size);
+    }
+    *bytes_read = (size_t)count;
+    return afspr_report(diagnostic, AFSPR_OK, AFSPR_STAGE_COMPLETE,
+                        AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+}
+
 const char *afspr_status_string(int status)
 {
     switch (status) {
@@ -607,6 +1797,14 @@ const char *afspr_status_string(int status)
         return "no valid checkpoint";
     case AFSPR_ERR_AMBIGUOUS_CHECKPOINT:
         return "ambiguous checkpoints";
+    case AFSPR_ERR_NOT_FOUND:
+        return "not found";
+    case AFSPR_ERR_NOT_FILE:
+        return "object is not a file";
+    case AFSPR_ERR_NOT_DIRECTORY:
+        return "object is not a directory";
+    case AFSPR_ERR_BUFFER_TOO_SMALL:
+        return "output buffer too small";
     default:
         return "unknown reader status";
     }
@@ -631,6 +1829,22 @@ const char *afspr_probe_stage_string(uint32_t stage)
         return "checkpoint selection";
     case AFSPR_STAGE_COMPLETE:
         return "complete";
+    case AFSPR_STAGE_TREE_READ:
+        return "tree read";
+    case AFSPR_STAGE_TREE_DECODE:
+        return "tree decode";
+    case AFSPR_STAGE_TREE_TRAVERSAL:
+        return "tree traversal";
+    case AFSPR_STAGE_OBJECT_READ:
+        return "object read";
+    case AFSPR_STAGE_OBJECT_DECODE:
+        return "object decode";
+    case AFSPR_STAGE_DIRECTORY_DECODE:
+        return "directory decode";
+    case AFSPR_STAGE_EXTENT_DECODE:
+        return "extent decode";
+    case AFSPR_STAGE_DATA_READ:
+        return "file data read";
     default:
         return "unknown probe stage";
     }

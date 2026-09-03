@@ -17,10 +17,16 @@ compiler=${CC:-cc}
 mkdir "$source_tree"
 cp "$repo/README.md" "$source_tree/readme.md"
 cp "$repo/LICENSE.md" "$source_tree/license.md"
+touch "$source_tree/Café"
+fixture_index=0
+while [ "$fixture_index" -lt 300 ]; do
+    touch "$source_tree/item-$fixture_index"
+    fixture_index=$((fixture_index + 1))
+done
 
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-core --bin afsplus-mkfs -- \
-    --size-mib 4 --label PortableC "$image"
+    --size-mib 16 --label PortableC "$image"
 cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -p afsplus-core --bin afsplus-populate -- "$image" "$source_tree"
 
@@ -29,7 +35,7 @@ cargo run --quiet --manifest-path "$repo/Cargo.toml" \
     -I"$repo/api" -I"$repo/spec" \
     "$repo/portable/c/reader.c" "$repo/portable/c/tests/reader_probe.c" \
     -o "$probe"
-"$probe" "$image"
+"$probe" "$image" "$repo/README.md"
 
 "$compiler" -std=c99 -pedantic -Wall -Wextra -Werror -Wconversion \
     -Wshadow -Wstrict-prototypes \
@@ -53,7 +59,7 @@ if "$compiler" -std=c99 -g -fno-omit-frame-pointer \
     -o "$sanitized_probe" 2>/dev/null; then
     ASAN_OPTIONS=halt_on_error=1 \
         UBSAN_OPTIONS=halt_on_error=1 \
-        "$sanitized_probe" "$image"
+        "$sanitized_probe" "$image" "$repo/README.md"
 else
     echo "portable-c-reader sanitizers=SKIP compiler=$compiler"
 fi

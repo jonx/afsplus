@@ -56,5 +56,15 @@ gate also runs AddressSanitizer and UndefinedBehaviorSanitizer when supported,
 compiles the public example through CMake, and compiles the freestanding reader
 for AROS m68k when that toolchain is available.
 
-Object-tree traversal, intent-log inspection and file reads are separate
-expansion gates.
+The same Rust-built fixture contains more than 300 files so both the object map
+and root directory require internal nodes. C walks the directory by ordinal,
+looks up the selected object through the object map and compares file reads in
+777-byte caller buffers with the original input, crossing logical-block
+boundaries. A wire-valid extent leaf maps those Rust-produced data blocks after
+a sparse hole, exercising extent-floor lookup and zero filling. Checksum and
+valid-checksum identity corruption in a selected tree node, plus a
+valid-checksum invalid extent flag, must identify the exact failing LBA and
+decode phase.
+
+Intent-log replay, non-ASCII comparison-key conformance and exhaustive repair
+walking are separate expansion gates.

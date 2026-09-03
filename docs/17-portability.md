@@ -64,13 +64,18 @@ It should not require reverse engineering the format from AROS source.
 The `reader-minimal` C99 implementation lives under
 [`portable/`](../portable/README.md). Its core has no POSIX dependency, owns no
 memory, and receives logical-block I/O plus a scratch block from its caller.
-The bootstrap surface validates identification, compatibility summaries and
-geometry, then selects the newest structurally valid retained checkpoint. It
-does not share codecs with Rust; interoperability is established by consuming
-Rust-produced images and matching the corruption/fallback oracle in the
+The surface validates identification, compatibility summaries and geometry,
+selects the newest structurally valid retained checkpoint, then performs
+bounded lookups through typed object-map, directory and extent trees. It
+decodes object records and reads direct, sparse and tree-mapped regular files
+into caller-owned buffers. It does not share codecs with Rust;
+interoperability is established by consuming Rust-produced images and matching
+the corruption/fallback oracle in the
 [conformance gate](../testing/conformance.md#portable-c-bootstrap-gate).
 
 Integrators get a versioned public ABI, symbolic and printable errors,
 structured stage/LBA/per-checkpoint diagnostics, a source-vendoring contract,
 a CMake target and a complete host-file example. Native targets replace only
-the logical-block callback.
+the logical-block callback. Intent-log replay, complete non-ASCII comparison-key
+validation and an independent repair walk remain later C capabilities, never
+implicit behavior of the bounded reader.

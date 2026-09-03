@@ -12,6 +12,28 @@ struct file_reader {
     FILE *file;
 };
 
+static void print_diagnostic(const char *path, int status,
+                             const struct afspr_diagnostic *diagnostic)
+{
+    fprintf(stderr, "%s: %s during %s (", path,
+            afspr_status_string(status),
+            afspr_probe_stage_string(diagnostic->stage));
+    if (diagnostic->block == AFSPR_NO_BLOCK) {
+        fputs("block=n/a", stderr);
+    } else {
+        fprintf(stderr, "block=%llu",
+                (unsigned long long)diagnostic->block);
+    }
+    if (diagnostic->checkpoint_slot == AFSPR_NO_CHECKPOINT_SLOT) {
+        fputs(" slot=n/a", stderr);
+    } else {
+        fprintf(stderr, " slot=%d", (int)diagnostic->checkpoint_slot);
+    }
+    fprintf(stderr, ", A=%s, B=%s)\n",
+            afspr_status_string(diagnostic->checkpoint_status[0]),
+            afspr_status_string(diagnostic->checkpoint_status[1]));
+}
+
 static int read_blocks(void *ctx, uint64_t first_block, uint32_t count,
                        void *dst)
 {
@@ -36,8 +58,12 @@ int main(int argc, char **argv)
     struct afspr_block_ops ops;
     struct afspr_scratch scratch;
     struct afspr_probe_result result;
+    struct afspr_object root;
+    struct afspr_directory_entry first;
     struct afspr_diagnostic diagnostic;
-    uint8_t block[EXAMPLE_BLOCK_SIZE];
+    uint8_t block[AFSPR_TREE_SCRATCH_SIZE];
+    uint8_t name[256];
+    uint64_t total_entries;
     long bytes;
     int status;
 
@@ -70,23 +96,7 @@ int main(int argc, char **argv)
     status = afspr_probe_detailed(&ops, &scratch, &result, sizeof(result),
                                   &diagnostic, sizeof(diagnostic));
     if (status != AFSPR_OK) {
-        fprintf(stderr, "%s: %s during %s (", argv[1],
-                afspr_status_string(status),
-                afspr_probe_stage_string(diagnostic.stage));
-        if (diagnostic.block == AFSPR_NO_BLOCK) {
-            fputs("block=n/a", stderr);
-        } else {
-            fprintf(stderr, "block=%llu",
-                    (unsigned long long)diagnostic.block);
-        }
-        if (diagnostic.checkpoint_slot == AFSPR_NO_CHECKPOINT_SLOT) {
-            fputs(" slot=n/a", stderr);
-        } else {
-            fprintf(stderr, " slot=%d", (int)diagnostic.checkpoint_slot);
-        }
-        fprintf(stderr, ", A=%s, B=%s)\n",
-                afspr_status_string(diagnostic.checkpoint_status[0]),
-                afspr_status_string(diagnostic.checkpoint_status[1]));
+        print_diagnostic(argv[1], status, &diagnostic);
         fclose(reader.file);
         return 1;
     }
@@ -95,6 +105,30 @@ int main(int argc, char **argv)
            result.label, (unsigned long long)result.generation,
            result.selected_checkpoint == 0u ? 'A' : 'B',
            (unsigned long long)result.total_blocks);
+
+    status = afspr_lookup_object(&ops, &scratch, &result, 1u, &root,
+                                 sizeof(root), &diagnostic,
+                                 sizeof(diagnostic));
+    if (status != AFSPR_OK) {
+        print_diagnostic(argv[1], status, &diagnostic);
+        fclose(reader.file);
+        return 1;
+    }
+    status = afspr_directory_entry_at(
+        &ops, &scratch, &result, &root, 0u, name, sizeof(name), &first,
+        sizeof(first), &total_entries, &diagnostic, sizeof(diagnostic));
+    if (status == AFSPR_ERR_NOT_FOUND) {
+        puts("root-entries=0");
+    } else if (status != AFSPR_OK) {
+        print_diagnostic(argv[1], status, &diagnostic);
+        fclose(reader.file);
+        return 1;
+    } else {
+        printf("root-entries=%llu first=%.*s object=%llu\n",
+               (unsigned long long)total_entries, (int)first.name_len,
+               (const char *)first.name,
+               (unsigned long long)first.object_id);
+    }
     fclose(reader.file);
     return 0;
 }

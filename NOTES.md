@@ -50,6 +50,22 @@ validates the untouched source image. Object-tree traversal and file reads form
 the next reader slice rather than being simulated through the Rust
 implementation.
 
+The next slice made that bootstrap useful without turning it into a second
+host runtime. A 303-file Rust fixture forces object-map and directory descent
+through internal nodes; C enumerates the root by ordinal, resolves a file
+object, and reproduces its bytes through bounded 777-byte reads. A wire-valid
+extent leaf over the same Rust-written data adds sparse-hole and extent-floor
+coverage. Tree CRC, valid-checksum identity, generation/owner/level/range/count
+invariants, typed object/directory/extent values and exact failing LBAs are now
+checked along every accessed path. The API remains additive: the original
+entry shape stays intact, new operations advertise capability bits, and all
+storage remains caller-owned.
+
+Independent review also caught that the checkpoint payload's reserved `flags`
+word had no explicit reject-or-ignore rule in either implementation. Rather
+than make the C reader silently stricter than Rust, the freeze choice is now
+[Q10](implementation/open-questions.md) and must be closed during M14.
+
 ## 2026-09-03 — FSKit durability moves to write replies
 
 The owner chose a scoped workaround instead of debugging the macFUSE/Apple

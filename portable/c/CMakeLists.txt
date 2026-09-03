@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 cmake_minimum_required(VERSION 3.16)
-project(afsplus_portable_c VERSION 0.0.1 LANGUAGES C)
+project(afsplus_portable_c VERSION 0.1.0 LANGUAGES C)
 
 option(AFSPLUS_READER_BUILD_EXAMPLE "Build the host-file probe example" ON)
 
