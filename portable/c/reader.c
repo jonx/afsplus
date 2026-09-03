@@ -3597,6 +3597,12 @@ int afspr_lookup_intent_directory_entry(
     status = afspr_namespace_resolve_before(
         ops, scratch, volume, view, end, directory_id, key, key_len,
         name_buffer, name_capacity, entry, NULL, diagnostic);
+    if (status == AFSPR_ERR_BUFFER_TOO_SMALL ||
+        status == AFSPR_ERR_INVALID_ARGUMENT) {
+        return afspr_report(diagnostic, status,
+                            AFSPR_STAGE_INTENT_NAMESPACE,
+                            AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
+    }
     if (status != AFSPR_OK) {
         return status;
     }

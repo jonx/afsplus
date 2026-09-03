@@ -264,6 +264,16 @@ static void check_namespace(const struct afspr_block_ops *ops,
     require_entry(&entry, 18u, "Replace.TXT",
                   "rename replacement lookup");
     status = afspr_lookup_intent_directory_entry(
+        ops, scratch, volume, view, 1u, "replace.txt", 11u, name, 1u,
+        &entry, sizeof(entry), &diagnostic, sizeof(diagnostic));
+    require_status(status, AFSPR_ERR_BUFFER_TOO_SMALL,
+                   "namespace lookup sizing query", &diagnostic);
+    if (entry.name_len != strlen("Replace.TXT") ||
+        diagnostic.stage != AFSPR_STAGE_INTENT_NAMESPACE) {
+        fprintf(stderr, "namespace sizing query lost its output contract\n");
+        exit(EXIT_FAILURE);
+    }
+    status = afspr_lookup_intent_directory_entry(
         ops, scratch, volume, view, 1u, "final.bin", 9u, name,
         sizeof(name), &entry, sizeof(entry), &diagnostic,
         sizeof(diagnostic));
