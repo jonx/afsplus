@@ -309,3 +309,62 @@ fn q3_low_space_headroom_probe() {
         }
     }
 }
+
+#[test]
+fn repeated_near_full_cow_and_reclaim_preserve_shared_survivors() {
+    use afsplus_format::OBJECT_ROOT;
+    let mut vol = mount(formatted(512, 512)).unwrap();
+    vol.set_reclaim_batch_blocks(1);
+    let original: Vec<u8> = (0..4 * BS).map(|i| (i % 251) as u8).collect();
+    let keeper = vol.create_file_in_root("keeper", &original, ts(1)).unwrap();
+    let writer = vol
+        .clone_file(keeper, OBJECT_ROOT, "writer", ts(2))
+        .unwrap();
+    let mut expected = original.clone();
+    for cycle in 0..24 {
+        let now = ts(10 + cycle);
+        let pressure = vol.create_file_in_root("pressure", b"", now).unwrap();
+        let reserve = vol.available_blocks().saturating_sub(24);
+        assert!(reserve > 0, "cycle={cycle}: failed to restore capacity");
+        vol.preallocate_file(pressure, 0, reserve * BS as u64, now)
+            .unwrap();
+        let generation = vol.generation();
+        let free = vol.free_blocks();
+        let too_large = (free + 1) * BS as u64;
+        assert!(matches!(
+            vol.preallocate_file(pressure, reserve * BS as u64, too_large, now),
+            Err(CoreError::NoSpace)
+        ));
+        assert_eq!(vol.generation(), generation);
+        assert_eq!(vol.free_blocks(), free);
+        assert_eq!(vol.stat(pressure).unwrap().unwrap().size_bytes, 0);
+        // Write across a block boundary while almost full. Whether admitted
+        // or rejected, both owners must retain exactly their promised bytes.
+        let offset = (cycle as usize % 3 + 1) * BS - 7;
+        let data = vec![cycle as u8; 29];
+        match vol.write_file_at(writer, offset as u64, &data, now) {
+            Ok(()) => expected[offset..offset + data.len()].copy_from_slice(&data),
+            Err(CoreError::NoSpace) => assert_eq!(vol.generation(), generation),
+            Err(error) => panic!("cycle={cycle}: {error}"),
+        }
+        assert_eq!(vol.read_file(keeper).unwrap(), original, "cycle={cycle}");
+        assert_eq!(vol.read_file(writer).unwrap(), expected, "cycle={cycle}");
+        vol.delete_file_in_root("pressure", now).unwrap();
+        vol.set_reclaim_batch_blocks(64);
+        let mut converged = false;
+        for _ in 0..128 {
+            if vol.reclaim_step(now).unwrap() == 0 {
+                converged = true;
+                break;
+            }
+        }
+        assert!(converged, "cycle={cycle}: reclaim did not converge");
+        let mut image = vol.into_device();
+        let report = check_device(&mut image);
+        assert!(report.is_clean(), "cycle={cycle}: {:?}", report.errors);
+        vol = mount(image).unwrap();
+        vol.set_reclaim_batch_blocks(1);
+        assert_eq!(vol.read_file(keeper).unwrap(), original);
+        assert_eq!(vol.read_file(writer).unwrap(), expected);
+    }
+}

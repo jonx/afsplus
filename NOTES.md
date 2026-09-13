@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-13 — Exercise repeated pressure and define the snapshot experiment](#2026-09-13--exercise-repeated-pressure-and-define-the-snapshot-experiment)
 - [2026-09-13 — Reconcile invariants and block writes after uncertain publication](#2026-09-13--reconcile-invariants-and-block-writes-after-uncertain-publication)
 - [2026-09-13 — Complete BFS book review and fragmented allocation regression](#2026-09-13--complete-bfs-book-review-and-fragmented-allocation-regression)
 - [2026-09-03 — Portable C allocates and logs its first COW data block](#2026-09-03--portable-c-allocates-and-logs-its-first-cow-data-block)
@@ -46,6 +47,33 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-13 — Exercise repeated pressure and define the snapshot experiment
+
+After the first push, added a 24-cycle near-full test with shared survivors,
+forced growth failure, cross-block COW writes, bounded reclamation and remount.
+Each cycle preserves exact bytes, checks allocation ownership and restores
+capacity for the next cycle. This is live-sharing evidence, not snapshot
+implementation evidence.
+
+The [snapshot proposal](proposals/persistent-snapshot-prototype.md) separates
+registry publication, retention accounting, in-place isolation and admission.
+Source inspection identifies the relevant gaps: reclaim promotion has no
+snapshot predicate, retirement records have no birth information, in-place
+eligibility ignores snapshot ownership, and the fixed allocation pool cannot
+pin arbitrary old checkpoint roots. Q4 links the proposal and keeps the
+conservative-barrier versus precise-accounting experiment explicit.
+
+Clarified the failure invariant against accepted ADR-062 and its existing
+regression: opted-in in-place I/O can change user bytes before metadata
+publication fails. Full-COW byte preservation and rejection before I/O are
+separate stronger cases.
+
+Validation: 256 Rust workspace tests passed with 10 explicitly ignored;
+formatting, Clippy with warnings denied, documentation and whitespace checks
+passed. The targeted repeated-pressure test passed. Persistent snapshot wire
+semantics and implementation remain future work under the accepted direction.
+
 
 ## 2026-09-13 — Reconcile invariants and block writes after uncertain publication
 

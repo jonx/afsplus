@@ -82,6 +82,7 @@ owner decision. Passing one family cannot close an unimplemented family.
 |---|---|---|
 | Allocation and shared ownership | `allocation_pressure`, `shared_extents`, `shared_crash`, `alloc_crash`; exact bitmap/reachable ownership | M03/M05 |
 | User bytes and bounded resource pressure | `streaming_api`, `reclaim`, `orphans`; mixed I/O, delayed reuse and bounded cleanup; long combined soak additionally required | M03/M13 |
+| In-place error semantics | `data_policy::metadata_io_error_after_in_place_data_write_keeps_old_generation_but_not_old_bytes`; metadata integrity does not promise byte rollback after opted-in media writes | M03/M04 |
 | Uncertain checkpoint outcome | `faults`: final barrier failure, completed-write error and adoption-read error must block further mutation until remount | M03/M04 |
 | Compound replacement rollback | `faults`: dynamically count successful replacement writes/flushes, fail each index, require exact old/new namespace and bytes plus clean ownership | M03/M04 |
 | Replay interrupted again | `intent_log::write_and_truncate_replay_is_restartable_after_every_cut`, `intent_replay_orphans` | M04 |
@@ -95,3 +96,18 @@ owner decision. Passing one family cannot close an unimplemented family.
 
 Run the common gate with `cargo test --workspace --all-features`. The
 long-running, native and owner-decision rows cannot be closed by that command.
+
+## Repeated low-space and reclamation gate
+
+`cargo test -p afsplus-check --test allocation_pressure repeated_near_full`
+runs 24 cycles on a 512-block volume. Keep a file and its reflink, preallocate
+pressure storage to leave bounded headroom, force ENOSPC, attempt a cross-block
+COW write, then delete pressure storage and drain reclaim with a fixed step
+limit. Each cycle checks exact survivor bytes, checkpoint/free-count stability
+on rejected growth, exhaustive ownership and remount. Reclamation must converge
+and the next cycle must recover usable capacity.
+
+This exercises repeated pressure on live shared owners. Persistent snapshot
+ownership is a separate Q4 qualification under the
+[snapshot proposal](../proposals/persistent-snapshot-prototype.md); a reflink
+survivor is not a whole-volume snapshot.

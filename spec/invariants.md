@@ -147,8 +147,11 @@ per-file contracts:
 
 ## Failure and recovery boundaries
 
-- an operation rejected before publication must not change committed namespace,
-  file contents or allocation ownership
+- validation or capacity rejection before media I/O must not change committed
+  namespace, file contents or allocation ownership
+- full-COW failures before publication preserve old file bytes; an opted-in
+  in-place write that reaches media may change or tear its touched bytes even
+  when metadata publication fails, as specified by ADR-062
 - an I/O error during publication may have an uncertain durable outcome;
   recovery must select an allowed complete state, never a mixture
 - a writer with uncertain publication state must reconcile that state or
