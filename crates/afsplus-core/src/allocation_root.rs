@@ -193,6 +193,10 @@ pub fn bulk_build(
 /// Deterministic permanent `3N` node pool for the fixed region-key topology,
 /// independent of the current record values.
 pub fn reserved_pool_lbas(geo: &Geometry) -> Result<Vec<u64>, CoreError> {
+    derive_pool_lbas(geo, reserved_pool_block_count(geo)?)
+}
+
+fn reserved_pool_block_count(geo: &Geometry) -> Result<usize, CoreError> {
     let leaf_capacity = leaf_capacity(geo.block_size)?;
     let internal_fanout = internal_fanout(geo.block_size)?;
     let leaf_nodes = (geo.region_count() as usize).div_ceil(leaf_capacity);
@@ -203,7 +207,47 @@ pub fn reserved_pool_lbas(geo: &Geometry) -> Result<Vec<u64>, CoreError> {
         .checked_add(logical_nodes)
         .and_then(|twice| twice.checked_add(logical_nodes))
         .ok_or_else(|| CoreError::Corrupt("allocation-root pool size overflow".into()))?;
-    derive_pool_lbas(geo, pool_blocks)
+    Ok(pool_blocks)
+}
+
+/// Half-open physical envelope of the permanent pool, without enumerating
+/// regions or pool blocks. Reserved region heads inside the envelope are
+/// already excluded by geometry; bootstrap namespace blocks precede it.
+pub fn reserved_pool_bounds(geo: &Geometry) -> Result<(u64, u64), CoreError> {
+    geo.validate()?;
+    let count = reserved_pool_block_count(geo)? as u64;
+    let first = allocatable_at(geo, BOOTSTRAP_METADATA_BLOCKS as u64)?;
+    let last = allocatable_at(geo, BOOTSTRAP_METADATA_BLOCKS as u64 + count - 1)?;
+    Ok((first, last + 1))
+}
+
+fn allocatable_at(geo: &Geometry, ordinal: u64) -> Result<u64, CoreError> {
+    use afsplus_format::bitmap::BITMAP_PAGE_BLOCKS;
+    use afsplus_format::geometry::BITMAP_SLOTS;
+    let first_capacity = geo.region_valid_blocks(0) as u64 - geo.region0_reserved_blocks();
+    let lba = if ordinal < first_capacity {
+        geo.region0_reserved_blocks() + ordinal
+    } else {
+        let full_reserved = DESCRIPTOR_SLOTS as u64
+            + geo.region_size.div_ceil(BITMAP_PAGE_BLOCKS) as u64 * BITMAP_SLOTS as u64;
+        let capacity = geo.region_size as u64 - full_reserved;
+        let remainder = ordinal - first_capacity;
+        let region = 1 + remainder / capacity;
+        if region >= geo.region_count() as u64 {
+            return Err(CoreError::UnsupportedGeometry(
+                "volume cannot hold allocation-root pool",
+            ));
+        }
+        geo.region_base(region as u32)
+            + geo.region_reserved_blocks(region as u32)
+            + remainder % capacity
+    };
+    if !geo.is_allocatable(lba) {
+        return Err(CoreError::UnsupportedGeometry(
+            "volume cannot hold allocation-root pool",
+        ));
+    }
+    Ok(lba)
 }
 
 #[derive(Clone)]

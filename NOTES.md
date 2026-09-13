@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Read snapshot trees with bounded contextual checks](#2026-09-14---read-snapshot-trees-with-bounded-contextual-checks)
 - [2026-09-14 - Bind snapshot roots in the checkpoint codec](#2026-09-14---bind-snapshot-roots-in-the-checkpoint-codec)
 - [2026-09-14 - Add bounded key pages for persistent maintenance cursors](#2026-09-14---add-bounded-key-pages-for-persistent-maintenance-cursors)
 - [2026-09-13 - Add persistent snapshot record codecs](#2026-09-13---add-persistent-snapshot-record-codecs)
@@ -55,6 +56,20 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 - Read snapshot trees with bounded contextual checks
+
+Added typed registry and lifetime readers on the shared key-page path. Registry
+access validates control state and ID relationships. Lifetime pages check their
+predecessor and lookahead so overlaps or missing coalescing cannot hide across
+batch edges. Tests preserve sparse IDs, simulate cursor persistence/deletion
+and wrap, inject semantic corruption and verify read counts with zero writes.
+
+Added a constant-memory allocator-pool envelope for reserved-range exclusion.
+Its output matches the existing enumerated placement across small geometries
+and computes at the maximum region count without allocating a pool vector.
+These are reader prerequisites; bitmap/log ownership and atomic lifetime edits
+still belong to integrated snapshot transactions. No mount feature was enabled.
 
 ## 2026-09-14 - Bind snapshot roots in the checkpoint codec
 

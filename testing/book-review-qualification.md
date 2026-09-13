@@ -15,6 +15,7 @@ source, chapter coverage and architectural rationale. Results belong in
 - [Snapshot record codecs](#snapshot-record-codecs)
 - [Snapshot checkpoint extension](#snapshot-checkpoint-extension)
 - [Bounded key cursor prerequisite](#bounded-key-cursor-prerequisite)
+- [Typed snapshot tree access](#typed-snapshot-tree-access)
 - [Existing complementary gates](#existing-complementary-gates)
 - [Required future experiments](#required-future-experiments)
 - [Normative coverage map](#normative-coverage-map)
@@ -145,6 +146,30 @@ key page must preserve all successors; an explicit wrap must discover the
 insertion. Reject visited-child count mismatches, future generations and cycles.
 This prerequisite proves bounded key seeking. Transactional cursor persistence
 and release crash tests belong to the integrated ledger gate.
+
+## Typed snapshot tree access
+
+Run `cargo test -p afsplus-core --test snapshot_trees`. Registry pages must
+preserve sparse IDs and reject missing control records, wrong tree kind/owner,
+future capture generations, exhausted-ID misuse and reserved object-map roots.
+Lifetime pages validate their predecessor and one lookahead record, rejecting
+overlap and unmerged equal lifetimes across both batch edges. Cursor persistence
+is simulated between reads; actual atomic updates need the transaction gate.
+
+The leaf fixtures require two reads for registry control plus a page, three
+for lifetime control plus predecessor and page, and no writes or flushes.
+Reported reads must equal the traced device count. Multi-level traversal bounds
+are covered by the key-cursor prerequisite. Output includes generic key/value
+storage and typed records, both proportional to the requested page limit;
+traversal buffers are additional. Root counts are advertised counts with visited
+paths checked, not an exhaustive proof of all subtrees or retained-block sums.
+
+Compare the constant-memory allocation-pool envelope against enumerated pool
+blocks across region sizes, region counts and partial tails. Also calculate the
+envelope at the maximum supported region count without materializing that pool.
+Namespace range checks exclude region headers and permanent allocator storage;
+bitmap ownership, intent-log exclusion and cross-tree alias detection remain
+obligations of the enclosing transaction/checker integration.
 
 ## Existing complementary gates
 
