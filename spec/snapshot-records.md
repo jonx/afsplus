@@ -97,8 +97,14 @@ until a subsequent reclamation transaction observes the updated registry.
 Publish the ledger mutation, retained total, scan cursor and ordinary-quarantine
 transfer in the same checkpoint. Queue transfers at that publication generation;
 keep their allocation bits set through the existing selectable-checkpoint delay.
-Ledger and registry COW nodes remain housekeeping allocations. Preparing an edit
-alone cannot authorize physical reuse, publish a snapshot or enable the feature.
+Ledger and registry COW nodes remain housekeeping allocations. Close namespace
+capture before maintaining those trees. Require a successful lifetime seal before
+allocator finalization; a failed seal invalidates the transaction, and callers
+cannot mutate allocation ownership after sealing. Internal allocator finalization
+can still allocate its housekeeping blocks. Return lifetime writes and replacement
+roots with the bitmap/quarantine result for one checkpoint publication.
+Preparing an edit alone cannot authorize physical reuse, publish a snapshot or
+enable the feature.
 The [transaction preparation gate](../testing/book-review-qualification.md#lifetime-transaction-preparation)
 checks this stage independently of the enclosing Volume integration.
 

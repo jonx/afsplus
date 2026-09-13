@@ -23,16 +23,17 @@ requires an explicit production representation. Keep snapshot-owned namespace
 metadata separate from allocation/reclaim machinery governed by selectable
 checkpoints. Use [ADR-072](../adr/ADR-072-snapshot-record-codecs.md) for leaf codecs and
 [ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md) for checkpoint root binding.
-Use the [typed tree access gate](../testing/book-review-qualification.md#typed-snapshot-tree-access)
-and [lifetime transaction preparation](../testing/book-review-qualification.md#lifetime-transaction-preparation)
-as component baselines. Integrate allocator ownership classification, registry
-transactions, quarantine transfer and snapshot publication before enabling mounts.
+Use [typed tree access](../testing/book-review-qualification.md#typed-snapshot-tree-access),
+[lifetime transaction preparation](../testing/book-review-qualification.md#lifetime-transaction-preparation)
+and [allocator/quarantine binding](../testing/book-review-qualification.md#snapshot-allocator-and-quarantine-binding)
+as component baselines. Integrate Volume phase transitions, registry transactions,
+read handles and snapshot publication before enabling mounts.
 Use `tree::read_key_page` for bounded inclusive-key seeking; persist the next
 physical key and make scan wrap explicit.
 
-Before persistent registry implementation, make the proposed encoding and
-compatibility classification reviewable, record the format decision in an ADR,
-and follow [CONTRIBUTING](../CONTRIBUTING.md). Do not pin arbitrary old
+Implement registry transactions against ADR-072/073. Further format changes
+require the decision and compatibility process in
+[CONTRIBUTING](../CONTRIBUTING.md). Do not pin arbitrary old
 allocation roots in the fixed `3N` pool. Snapshot protection must override
 in-place write eligibility. The first consumer must enumerate and read a
 consistent view after remount, with exact metadata and byte oracles.

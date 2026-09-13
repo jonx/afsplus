@@ -17,6 +17,7 @@ source, chapter coverage and architectural rationale. Results belong in
 - [Bounded key cursor prerequisite](#bounded-key-cursor-prerequisite)
 - [Typed snapshot tree access](#typed-snapshot-tree-access)
 - [Lifetime transaction preparation](#lifetime-transaction-preparation)
+- [Snapshot allocator and quarantine binding](#snapshot-allocator-and-quarantine-binding)
 - [Existing complementary gates](#existing-complementary-gates)
 - [Required future experiments](#required-future-experiments)
 - [Normative coverage map](#normative-coverage-map)
@@ -197,6 +198,36 @@ The fixture publishes tree images without Volume or bitmap ownership. It does
 not prove integrated checkpoint cuts, quarantine delay, busy handles, namespace
 immutability or reboot recovery. Those remain requirements of the integrated
 snapshot gate; the format feature cannot be enabled on this evidence alone.
+
+## Snapshot allocator and quarantine binding
+
+Run `cargo test -p afsplus-core --test snapshot_allocator -- --nocapture`.
+The fixture uses real region bitmaps/descriptors, allocation-root slots,
+checkpoint selection and the segmented reclaim queue. It bootstraps snapshot
+trees explicitly; this is not a supported conversion or mount path.
+
+Require namespace allocation capture for ordinary and exact replay allocations.
+Released and log-sacrificed new blocks must not acquire committed lifetimes;
+sacrificed blocks remain quarantined. Housekeeping and ledger nodes must remain
+allocated without recursively entering the ledger. Refuse unsealed finalization,
+post-seal caller mutations and any reuse of an allocator whose lifetime seal
+failed. Only internal finalization can add housekeeping after sealing. Report allocator
+inline bytes for the target architecture; snapshot accounting is allocated only
+for enabled transactions, with that heap state and allocator overhead additional.
+
+After last-live retirement, storage stays allocated in the ledger and outside
+ordinary quarantine. A transfer removes it from the ledger, queues it at that
+publication generation and leaves its bitmap bit set. Exact reallocation becomes
+possible only in a subsequent transaction and establishes a new birth.
+
+Enumerate the power-cut model at every recorded transfer publication boundary.
+The selected state must have either the original lifetime/retained total or the
+new quarantine/retained total, with the allocation bit set in both cases. Require
+both generations to occur. Remove the metadata barrier as a negative control;
+the oracle must detect new-checkpoint publication with missing referenced state.
+The model covers full-write subsets and representative tears, not every physical
+reordering. These allocator images do not qualify file-namespace snapshots,
+registry transactions, read handles or native devices.
 
 ## Existing complementary gates
 

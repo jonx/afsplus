@@ -5668,6 +5668,9 @@ impl<D: BlockDevice> Volume<D> {
         let prewritten_data_blocks = std::mem::take(&mut self.pending_prewritten_data_blocks);
 
         let finished = tx.finish(&mut self.dev)?;
+        if let Some(lifetimes) = finished.snapshot_lifetimes {
+            meta_writes.extend(lifetimes.tree.writes);
+        }
         let (allocation_root, new_allocation_tree_blocks) =
             self.mutate_allocation_root(generation, &finished.dirty_records)?;
         let new_allocation_root_block = allocation_root.root_lba;
@@ -5726,7 +5729,7 @@ impl<D: BlockDevice> Volume<D> {
             free_blocks_total,
             flags: 0,
             shared_extent_root_block: shared_root,
-            snapshot_roots: self.checkpoint.snapshot_roots,
+            snapshot_roots: finished.snapshot_roots,
         };
         let checkpoint_bytes = new_checkpoint.encode(block_size)?;
         // A failed write may have reached the device, and a failed flush may

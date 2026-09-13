@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Bind lifetime accounting to allocator transactions](#2026-09-14---bind-lifetime-accounting-to-allocator-transactions)
 - [2026-09-14 - Prepare transactional lifetime edits](#2026-09-14---prepare-transactional-lifetime-edits)
 - [2026-09-14 - Read snapshot trees with bounded contextual checks](#2026-09-14---read-snapshot-trees-with-bounded-contextual-checks)
 - [2026-09-14 - Bind snapshot roots in the checkpoint codec](#2026-09-14---bind-snapshot-roots-in-the-checkpoint-codec)
@@ -57,6 +58,29 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 - Bind lifetime accounting to allocator transactions
+
+Added namespace capture, housekeeping and lifetime-seal phases to the transaction
+allocator. Births exclude released and log-sacrificed allocations. Last-live
+retirements stay in the ledger; eligible transfers enter the ordinary queue only
+with a successfully prepared lifetime mutation. Failed sealing poisons the
+transaction, unsealed finalization fails, and caller mutations after sealing fail.
+The finalized result carries replacement roots and writes into the common commit
+publication path. Volume orchestration and feature activation remain later work.
+
+The aarch64 inline allocator footprint measured 1,216 bytes with embedded
+snapshot state and 936 bytes after making that state a lazy allocation.
+Feature-absent transactions carry only the optional pointer. Enabled transactions
+still allocate the accounting object; its heap and allocator overhead are
+additional, so this is not a claim of lower total snapshot RAM or faster I/O.
+
+Four tests use real bitmap, descriptor, allocation-root and reclaim state. They
+verify housekeeping exclusion, exact replay births, guards and the delay between
+ledger release and reallocation. The transfer crash matrix covers 115 modeled
+states with exact ledger/quarantine ownership alternatives; deleting its metadata
+barrier is a required failing control. The specification now states the sealing
+and finalization obligations explicitly under ADR-071.
 
 ## 2026-09-14 - Prepare transactional lifetime edits
 

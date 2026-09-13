@@ -11,25 +11,29 @@
 //! block is reused while a selectable checkpoint can still reach its previous
 //! contents. Blocks allocated by an in-flight transaction and discarded
 //! before publication are released back to free immediately: no committed
-//! state can reference them.
+//! state can reference them. With persistent snapshots, namespace retirement
+//! first enters the lifetime ledger; only an eligible, atomically published
+//! transfer enters ordinary quarantine. Housekeeping uses quarantine directly.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use afsplus_block::BlockDevice;
 use afsplus_format::bitmap::BitmapPage;
-use afsplus_format::checkpoint::{Checkpoint, RegionRecord};
+use afsplus_format::checkpoint::{Checkpoint, RegionRecord, SnapshotRoots};
 use afsplus_format::geometry::{Geometry, BITMAP_SLOTS, DESCRIPTOR_SLOTS};
 use afsplus_format::region::RegionDescriptor;
 
 use crate::allocation_root;
 use crate::reclaim::{ReclaimStats, ReclaimTx};
+use crate::snapshot::edit::{mutate_lifetimes, LifetimeChanges, LifetimeMutation};
+use crate::snapshot::LifetimeRun;
 use crate::CoreError;
 
 /// Compact interval set used to track this transaction's own allocations
 /// and retirements without one map entry per block.
 #[derive(Debug, Default)]
 struct RunSet {
-    /// start -> end (exclusive), non-overlapping, non-adjacent runs.
+    /// start -> end (exclusive), non-overlapping runs.
     runs: std::collections::BTreeMap<u64, u64>,
 }
 
@@ -255,6 +259,23 @@ pub struct AllocStats {
     pub reclaim: ReclaimStats,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotPhase {
+    Namespace,
+    Housekeeping,
+    Preparing,
+    Sealed,
+    Finalizing,
+    Failed,
+}
+
+struct SnapshotAccounting {
+    phase: SnapshotPhase,
+    allocations: RunSet,
+    retirements: RunSet,
+    mutation: Option<LifetimeMutation>,
+}
+
 pub struct TxAllocator {
     geo: Geometry,
     current_checkpoint: Checkpoint,
@@ -273,6 +294,8 @@ pub struct TxAllocator {
     reclaim: Option<ReclaimTx>,
     allocated_this_tx: RunSet,
     retired_this_tx: RunSet,
+    // Feature-absent transactions carry only the optional pointer.
+    snapshot: Option<Box<SnapshotAccounting>>,
     /// Region where allocation last succeeded; searches start here.
     rover_region: u32,
     /// Raw free blocks that must remain after every allocation made by this
@@ -319,6 +342,14 @@ impl TxAllocator {
             reclaim: Some(reclaim),
             allocated_this_tx: RunSet::default(),
             retired_this_tx: RunSet::default(),
+            snapshot: current.snapshot_roots.map(|_| {
+                Box::new(SnapshotAccounting {
+                    phase: SnapshotPhase::Namespace,
+                    allocations: RunSet::default(),
+                    retirements: RunSet::default(),
+                    mutation: None,
+                })
+            }),
             rover_region: rover_region % geo.region_count().max(1),
             free_block_floor: 0,
             stats: AllocStats::default(),
@@ -347,6 +378,152 @@ impl TxAllocator {
                 .saturating_mul(new_generation.saturating_sub(run.retire_generation));
         }
         Ok(tx)
+    }
+
+    fn check_snapshot_health(&self) -> Result<(), CoreError> {
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.phase == SnapshotPhase::Failed)
+        {
+            return Err(CoreError::Corrupt(
+                "snapshot accounting failed; discard transaction".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_snapshot_writable(&self) -> Result<(), CoreError> {
+        self.check_snapshot_health()?;
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.phase == SnapshotPhase::Sealed)
+        {
+            return Err(CoreError::Corrupt(
+                "allocator mutation after lifetime seal".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn track_snapshot_allocation(&mut self, start: u64, end: u64) -> Result<(), CoreError> {
+        if let Some(snapshot) = &mut self.snapshot {
+            if snapshot.phase == SnapshotPhase::Namespace
+                && !snapshot.allocations.insert(start, end)
+            {
+                return Err(CoreError::Corrupt("snapshot allocations overlap".into()));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_snapshot_release(&self, start: u64, end: u64) -> Result<(), CoreError> {
+        if self.snapshot.as_ref().is_some_and(|s| {
+            matches!(s.phase, SnapshotPhase::Preparing | SnapshotPhase::Sealed)
+                && s.allocations.overlaps(start, end)
+        }) {
+            return Err(CoreError::Corrupt(
+                "namespace release after lifetime preparation".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Close namespace allocation capture before shared-reference, registry,
+    /// lifetime and other housekeeping tree maintenance. Existing non-snapshot
+    /// transactions need no phase transition.
+    pub fn begin_snapshot_housekeeping(&mut self) -> Result<(), CoreError> {
+        self.check_snapshot_health()?;
+        if let Some(snapshot) = &mut self.snapshot {
+            if snapshot.phase != SnapshotPhase::Namespace {
+                return Err(CoreError::Corrupt(
+                    "snapshot housekeeping entered twice".into(),
+                ));
+            }
+            snapshot.phase = SnapshotPhase::Housekeeping;
+        }
+        Ok(())
+    }
+
+    /// Prepare the ledger and queue eligible transfers in this allocator
+    /// transaction. New lifetime nodes are housekeeping, preventing recursive
+    /// lifetime records. A failure poisons this transaction until discarded.
+    /// `finish` returns the new root and writes with the bitmap/quarantine state.
+    pub fn seal_snapshot_lifetimes<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        transfers: Vec<LifetimeRun>,
+        next_scan_position: Option<u64>,
+        max_records: usize,
+        max_views: usize,
+    ) -> Result<(), CoreError> {
+        self.check_snapshot_health()?;
+        let Some(snapshot) = &mut self.snapshot else {
+            if !transfers.is_empty() || next_scan_position.is_some() {
+                return Err(CoreError::FeatureDisabled("persistent snapshots"));
+            }
+            return Ok(());
+        };
+        if snapshot.phase != SnapshotPhase::Housekeeping {
+            return Err(CoreError::Corrupt(
+                "lifetime preparation requires housekeeping phase".into(),
+            ));
+        }
+        let changes = LifetimeChanges {
+            allocations: snapshot
+                .allocations
+                .runs
+                .iter()
+                .map(|(&start, &end)| (start, end - start))
+                .collect(),
+            retirements: snapshot
+                .retirements
+                .runs
+                .iter()
+                .map(|(&start, &end)| (start, end - start))
+                .collect(),
+            transfers,
+            next_scan_position,
+        };
+        snapshot.phase = SnapshotPhase::Preparing;
+        let geo = self.geo;
+        let roots = self
+            .current_checkpoint
+            .snapshot_roots
+            .expect("snapshot accounting has roots");
+        let result = (|| {
+            let mutation = mutate_lifetimes(
+                dev,
+                &geo,
+                self,
+                roots,
+                self.current_checkpoint.generation,
+                self.new_generation,
+                &changes,
+                max_records,
+                max_views,
+            )?;
+            for &(start, blocks) in &mutation.quarantine {
+                self.retire_run(dev, start, blocks)?;
+            }
+            Ok(mutation)
+        })();
+        let snapshot = self
+            .snapshot
+            .as_mut()
+            .expect("snapshot accounting persists");
+        match result {
+            Ok(mutation) => {
+                snapshot.phase = SnapshotPhase::Sealed;
+                snapshot.mutation = Some(mutation);
+                Ok(())
+            }
+            Err(error) => {
+                snapshot.phase = SnapshotPhase::Failed;
+                Err(error)
+            }
+        }
     }
 
     /// Prevents subsequent allocations, including metadata allocations made
@@ -392,6 +569,7 @@ impl TxAllocator {
         dev: &mut D,
         len: u64,
     ) -> Result<u64, CoreError> {
+        self.check_snapshot_writable()?;
         self.stats.allocation_searches += 1;
         assert!(len > 0);
         if len > self.geo.region_size as u64 {
@@ -460,6 +638,7 @@ impl TxAllocator {
                         "allocator returned overlapping run at {lba}"
                     )));
                 }
+                self.track_snapshot_allocation(lba, lba + len)?;
                 self.rover_region = region;
                 self.stats.blocks_allocated += len;
                 return Ok(lba);
@@ -482,6 +661,7 @@ impl TxAllocator {
         start: u64,
         blocks: u64,
     ) -> Result<(), CoreError> {
+        self.check_snapshot_writable()?;
         if blocks == 0 {
             return Err(CoreError::Corrupt("claiming an empty run".into()));
         }
@@ -515,12 +695,14 @@ impl TxAllocator {
                 "claimed run {start}+{blocks} overlaps this transaction"
             )));
         }
+        self.track_snapshot_allocation(start, end)?;
         self.stats.blocks_allocated += blocks;
         Ok(())
     }
 
-    /// Quarantines a committed run: its bits stay allocated and it enters
-    /// the reclaim queue. Blocks allocated by this same transaction must use
+    /// Retires a committed run while keeping its bits allocated. Namespace
+    /// capture sends it to the snapshot ledger; housekeeping and feature-absent
+    /// transactions send it to quarantine. Allocations from this transaction use
     /// [`TxAllocator::release_uncommitted`] instead.
     pub fn retire_run<D: BlockDevice>(
         &mut self,
@@ -528,6 +710,7 @@ impl TxAllocator {
         start: u64,
         blocks: u64,
     ) -> Result<(), CoreError> {
+        self.check_snapshot_writable()?;
         if blocks == 0 || blocks > u32::MAX as u64 {
             return Err(CoreError::Corrupt(format!(
                 "retiring invalid run length {blocks}"
@@ -573,10 +756,20 @@ impl TxAllocator {
                 self.pages.remove(&key);
             }
         }
-        self.reclaim
+        if let Some(snapshot) = self
+            .snapshot
             .as_mut()
-            .expect("reclaim lives until finish")
-            .append_run(&self.geo, start, blocks as u32)?;
+            .filter(|s| s.phase == SnapshotPhase::Namespace)
+        {
+            if !snapshot.retirements.insert(start, end) {
+                return Err(CoreError::Corrupt("snapshot run retired twice".into()));
+            }
+        } else {
+            self.reclaim
+                .as_mut()
+                .expect("reclaim lives until finish")
+                .append_run(&self.geo, start, blocks as u32)?;
+        }
         self.stats.blocks_retired += blocks;
         Ok(())
     }
@@ -590,6 +783,7 @@ impl TxAllocator {
         start: u64,
         blocks: u64,
     ) -> Result<(), CoreError> {
+        self.check_snapshot_writable()?;
         let _ = dev;
         if blocks == 0 || blocks > u32::MAX as u64 {
             return Err(CoreError::Corrupt("abandoning invalid run".into()));
@@ -597,11 +791,17 @@ impl TxAllocator {
         let end = start
             .checked_add(blocks)
             .ok_or_else(|| CoreError::Corrupt("abandoned run end overflows".into()))?;
+        self.check_snapshot_release(start, end)?;
         for lba in start..end {
             if !self.allocated_this_tx.remove_block(lba) {
                 return Err(CoreError::Corrupt(format!(
                     "abandoning block {lba} that this transaction did not allocate"
                 )));
+            }
+        }
+        if let Some(snapshot) = &mut self.snapshot {
+            for lba in start..end {
+                snapshot.allocations.remove_block(lba);
             }
         }
         if !self.retired_this_tx.insert(start, end) {
@@ -625,6 +825,11 @@ impl TxAllocator {
         dev: &mut D,
         lba: u64,
     ) -> Result<(), CoreError> {
+        self.check_snapshot_writable()?;
+        let end = lba
+            .checked_add(1)
+            .ok_or_else(|| CoreError::Corrupt("release block overflows".into()))?;
+        self.check_snapshot_release(lba, end)?;
         if !self.allocated_this_tx.remove_block(lba) {
             return Err(CoreError::Corrupt(format!(
                 "releasing block {lba} that this transaction did not allocate"
@@ -640,6 +845,9 @@ impl TxAllocator {
             return Err(CoreError::Corrupt(format!(
                 "released block {lba} was not marked allocated"
             )));
+        }
+        if let Some(snapshot) = &mut self.snapshot {
+            snapshot.allocations.remove_block(lba);
         }
         self.mark_dirty(region, page_index);
         self.stats.blocks_released += 1;
@@ -710,6 +918,19 @@ impl TxAllocator {
     }
 
     pub fn finish<D: BlockDevice>(mut self, dev: &mut D) -> Result<FinishedAlloc, CoreError> {
+        self.check_snapshot_health()?;
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.phase != SnapshotPhase::Sealed)
+        {
+            return Err(CoreError::Corrupt(
+                "snapshot lifetime accounting must be sealed before allocator finish".into(),
+            ));
+        }
+        if let Some(snapshot) = &mut self.snapshot {
+            snapshot.phase = SnapshotPhase::Finalizing;
+        }
         // Rebuild the reclaim queue first: sealing and the new root allocate
         // ordinary blocks, which must land in the dirty bitmap state emitted
         // below. The allocation count is known before allocating (ADR-036),
@@ -802,7 +1023,21 @@ impl TxAllocator {
         self.stats.region_descriptors_dirty = descriptor_writes.len() as u64;
         let resident = self.pages.values().map(|page| page.bits.len() as u64).sum();
         self.stats.allocator_ram_bytes = self.stats.allocator_ram_bytes.max(resident);
+        let snapshot_lifetimes = self.snapshot.and_then(|s| s.mutation);
+        let snapshot_roots = self
+            .current_checkpoint
+            .snapshot_roots
+            .map(|roots| SnapshotRoots {
+                lifetimes: snapshot_lifetimes
+                    .as_ref()
+                    .expect("sealed lifetime mutation")
+                    .tree
+                    .root_lba,
+                ..roots
+            });
         Ok(FinishedAlloc {
+            snapshot_roots,
+            snapshot_lifetimes,
             bitmap_writes,
             descriptor_writes,
             dirty_records,
@@ -817,6 +1052,10 @@ impl TxAllocator {
 }
 
 pub struct FinishedAlloc {
+    /// Publish these roots with the lifetime writes in this result, never
+    /// the old checkpoint's roots. None for feature-absent transactions.
+    pub snapshot_roots: Option<SnapshotRoots>,
+    pub snapshot_lifetimes: Option<LifetimeMutation>,
     pub bitmap_writes: Vec<(u64, Vec<u8>)>,
     pub descriptor_writes: Vec<(u64, Vec<u8>)>,
     /// Only records whose descriptor/bitmap state changed in this
