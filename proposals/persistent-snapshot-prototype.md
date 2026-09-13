@@ -71,6 +71,21 @@ usage. Report conservative retained capacity distinctly from exact reachable
 snapshot data and immediately available space. Blocks shared by multiple
 snapshots must not be charged as independently allocated copies.
 
+### Executable comparison and integration gate
+
+Use the [accounting model gate](../testing/book-review-qualification.md#snapshot-accounting-model)
+for lifetime boundaries, unrelated churn and bounded scan progress. Integrate
+birth generations or explicit ownership with last-live-reference retirement,
+including reflinks. A retirement record alone cannot recover allocation birth.
+Precise predicates also need traversal past protected entries; retaining the
+sealed FIFO head would preserve the churn failure even with exact ownership.
+
+Before selection, propose storage for lifetime information and the durable
+scan cursor, bound snapshot lookup work, and measure queue rewrite I/O.
+Separate snapshot namespace reachability from allocator and reclaim metadata
+needed by selectable checkpoints. Include crash-safe release, emergency
+metadata headroom and independent checker ownership in the integrated gate.
+
 ## S3: In-place writes and all mutation paths
 
 Conservative candidate: force full data COW while any persistent snapshot

@@ -44,6 +44,38 @@ compare contents again. Failure messages identify seed and operation.
 This is bounded deterministic regression coverage. It does not prove
 exhaustive state exploration, simultaneous-thread safety or native durability.
 
+## Snapshot accounting model
+
+Run `cargo test -p afsplus-core --test snapshot_retention_model -- --nocapture`.
+The [isolated model](../crates/afsplus-core/tests/snapshot_retention_model.rs)
+compares oldest-generation FIFO retention with birth/retirement lifetime
+intersection and a rotating bounded scan. Captured addresses and independent
+32-byte payload copies provide the immutable-view oracle. A deliberately
+unsafe reuse case must trip that oracle.
+
+The workload budgets are experiment-local: 64 and 256 logical data blocks,
+one live block, one retained old block, four times capacity in unrelated
+create/delete cycles, and at most eight queue entries examined per reclaim
+call. The useful-work target is completion of every cycle with only one
+retained block and capacity minus two free blocks. Test explicit allocation
+failure without live-state changes, equality at birth/retirement boundaries,
+three snapshot-release orders, eventual progress behind 32 protected entries,
+and complete reclamation within `ceil(queued / 8)` calls after final release.
+
+The model assumes atomic COW updates and a lifetime ending at the last live
+reference. It excludes selectable-checkpoint delays, sharing transitions,
+metadata blocks, allocation-root reuse, registry persistence and crashes.
+Its scan rotates entries in memory; the production sealed FIFO cannot do
+that without a new representation or rewrite protocol. Eight examined entries
+also permit up to eight times the snapshot count in lifetime comparisons.
+
+Printed counts measure logical capacity and queue work only. Host allocations
+scale with modeled blocks, queued retirements and captured files per view.
+There is no device I/O, so CPU timing, peak RAM, metadata amplification and
+recovery costs require an integrated prototype. Neither candidate qualifies
+for shipping from this gate. Preserve these cases when integrating registry,
+last-reference tracking, forced COW and a crash-safe reclaim cursor.
+
 ## Existing complementary gates
 
 | Concern | Executable suite | Required observation |

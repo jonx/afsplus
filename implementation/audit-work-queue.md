@@ -9,22 +9,18 @@ oracle and backend. Snapshot work does not replace the other rows.
 
 ## Resume here
 
-Start Q4's **conservative oldest-snapshot retention-barrier experiment**.
-Persistent consistent snapshots are the accepted direction under
-[ADR-069](../adr/ADR-069-consistent-snapshots-first.md) and
-[ADR-070](../adr/ADR-070-persistent-snapshot-priority.md). The barrier is the
-first measurement baseline, not a selected shipping accounting format.
+Continue Q4 with an integrated ownership/reclaim design, using the
+[snapshot accounting model](../testing/book-review-qualification.md#snapshot-accounting-model)
+as the regression baseline. Persistent consistent snapshots are the accepted
+direction under [ADR-069](../adr/ADR-069-consistent-snapshots-first.md) and
+[ADR-070](../adr/ADR-070-persistent-snapshot-priority.md).
 
-Read [snapshot proposal S1–S4](../proposals/persistent-snapshot-prototype.md)
-and inspect `TxAllocator::begin`, `ReclaimTx::consume`, `consume_segment`,
-`Volume::write_file_at` and the common checkpoint commit tail before edits.
-Implement an isolated retention experiment with an immutable view oracle;
-measure unrelated churn, retained capacity, ENOSPC, release and reclaim work.
-Separate that experiment from an advertised persistent snapshot facility.
-If the conservative policy retains unacceptable unrelated churn, prototype
-precise ownership accounting against the same workload before selecting it.
-Set workload/resource acceptance budgets explicitly before calling either
-candidate acceptable.
+Resolve lifetime metadata across reflinks and last-live-reference retirement;
+choose a bounded persistent traversal that can pass protected queue entries;
+measure metadata reserves and write amplification. The model's rotating queue
+requires an explicit production representation. Keep snapshot-owned namespace
+metadata separate from allocation/reclaim machinery governed by selectable
+checkpoints. Record the accounting choice under Q4 before freezing it.
 
 Before persistent registry implementation, make the proposed encoding and
 compatibility classification reviewable, record the format decision in an ADR,
@@ -45,7 +41,7 @@ adapter work can proceed while a format question is discussed.
 | Mixed I/O correctness | M03/M05; file/extent operations | `streaming_api` three-seed byte oracle | Extend with each new storage representation; preserve sparse, unwritten, truncate and clone isolation through remount. |
 | Repeated resource pressure | M03/M13; reclaim and sharing | `allocation_pressure::repeated_near_full_cow_and_reclaim_preserve_shared_survivors` | Add retained-view pressure to the 24-cycle baseline; require bounded progress and explicit admission failure. |
 | Persistent snapshot views | Q4, M14; retention experiment, then accepted registry encoding | ADR-069/070; proposal S1–S4 | Build registry, protected ownership, read view and release; exact multi-view oracle after live mutation, reboot and create/delete crashes. |
-| Retention and accounting policy | Q4; same workload for both candidates | Retirement-generation queue and fixed allocation pool | Measure conservative barrier first; compare precise accounting if needed; decide limits, active-handle deletion and capacity reporting explicitly. |
+| Retention and accounting policy | Q4; same workload for both candidates | Retirement-generation queue and fixed allocation pool | Integrate and measure lifetime accounting plus traversal past protected entries; decide limits, active-handle deletion and capacity reporting explicitly. |
 | Salvage and extraction | Q11, M05; damage classification | `corruption_corpus`, `mount_modes`, no-changes VFS test | Define supported damage classes; extract to a separate destination with explicit missing/untrusted-data report and zero source writes. |
 | Repair | Q11, M05/M14; salvage corpus and accepted repair operations | Checker invariants; recovery design | Implement selected repairs transactionally; report identities/actions/loss; crash each repair boundary and verify exact allowed outcomes. |
 | Backup and restoration | Q11, M13; stable snapshot view for online consistency | Clone/mixed-I/O tests do not prove backup | Run a real archive/restore consumer; compare names, links, bytes, sparse semantics, timestamps, attributes and security metadata. |

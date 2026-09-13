@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-13 - Measure snapshot retention and reclaim traversal](#2026-09-13---measure-snapshot-retention-and-reclaim-traversal)
 - [2026-09-13 — Prepare the complete implementation handoff](#2026-09-13--prepare-the-complete-implementation-handoff)
 - [2026-09-13 — Exercise repeated pressure and define the snapshot experiment](#2026-09-13--exercise-repeated-pressure-and-define-the-snapshot-experiment)
 - [2026-09-13 — Reconcile invariants and block writes after uncertain publication](#2026-09-13--reconcile-invariants-and-block-writes-after-uncertain-publication)
@@ -48,6 +49,37 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-13 - Measure snapshot retention and reclaim traversal
+
+Added five isolated Rust model tests for Q4. With one live block and one
+snapshot-owned old block, oldest-generation FIFO retention exhausted 64-block
+capacity after 62 unrelated temporary-file cycles (63 retired blocks, zero
+free). At 256 blocks it exhausted after 254 cycles (255 retired, zero free).
+Lifetime intersection with a rotating scan completed 256 and 1,024 cycles
+respectively, retaining one block and leaving 62 and 254 free. It examined
+two entries per cycle in this workload; each reclaim call is capped at eight
+entries. After releasing all views, both policies reclaimed every queued
+entry within the asserted budget.
+
+The tests also cover birth/retirement equality, three release orders, progress
+past 32 protected entries, failed allocation preserving live state, and a
+negative control that detects deliberately reused snapshot media. These
+results reject conservative FIFO retention for the model's bounded unrelated
+churn target. They justify integrating more precise accounting for measurement.
+The rotating in-memory scan is an experimental mechanism: sealed production
+queue traversal, lifetime storage, reflinks, snapshot metadata, selectable
+checkpoint protection, persistence and crash recovery need their own design
+and evidence. No production format or filesystem API was changed.
+
+Updated Q4, the proposal, qualification plan and handoff to include the
+protected-head traversal requirement. Shipping budgets and the accounting
+format remain explicit decisions. The complete audit queue is preserved.
+
+Validation: workspace tests passed (261 passed, 10 ignored); formatting,
+Clippy with warnings denied, documentation checks and whitespace checks passed.
+The five model tests are included in that total.
+
 
 ## 2026-09-13 — Prepare the complete implementation handoff
 
