@@ -14,6 +14,20 @@ not authorize mounts. AFST kinds 6 and 7 denote the snapshot registry and
 lifetime ledger. Both require owner zero and the common checked block header.
 Keys are eight-byte big-endian integers; each leaf value is 32 bytes.
 
+## Checkpoint binding
+
+[ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md) extends the checkpoint
+payload from 96 to 112 bytes on snapshot-enabled volumes. Offsets 96 and 104
+hold the registry and lifetime roots as little-endian u64 values. Both are
+nonzero, distinct and within allocatable geometry. Feature-absent checkpoints
+use exactly 96 bytes. Reject other payload lengths; keep flags at offset 80
+zero. The checksum covers the complete block.
+
+After structural selection, reject disagreement between the selected payload
+and immutable snapshot bit. This error cannot cause fallback to an older
+namespace. Root/control reads remain bounded; full ownership validation belongs
+to the checker. Publishing both roots uses the common COW checkpoint boundary.
+
 ## Registry control and entries
 
 Key zero stores the next snapshot ID at value offset 0 as a little-endian u64.
@@ -74,5 +88,5 @@ salvage policy before discarding registered views or lifetime evidence.
 One record uses 48 bytes including key and generic item overhead. A 4 KiB leaf
 holds 84 records. Fixed-record codecs use stack arrays with no heap allocation.
 Record count, tree packing, cursor updates and snapshot count determine the
-integrated metadata/RAM cost and require measured qualification. Root binding
-and the transactional persistence protocol need a follow-up format record.
+integrated metadata/RAM cost and require measured qualification. Root binding follows ADR-073; transactional lifetime maintenance and persistence
+require the integrated ownership and crash gates.

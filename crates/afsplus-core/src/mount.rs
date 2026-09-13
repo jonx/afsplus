@@ -16,7 +16,7 @@ use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::ident::{
     Identification, INCOMPAT_INTENT_LOG, INCOMPAT_INTENT_LOG_DATA_UPDATES,
-    RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
+    INCOMPAT_PERSISTENT_SNAPSHOTS, RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::{FormatError, DEFAULT_BLOCK_SIZE};
 
@@ -106,7 +106,7 @@ pub fn select_checkpoint<D: BlockDevice>(
         &mut slot_status,
     )?;
 
-    match (candidates[0].take(), candidates[1].take()) {
+    let selection = match (candidates[0].take(), candidates[1].take()) {
         (None, None) => Err(CoreError::NoValidCheckpoint {
             slot_a: slot_status[0].clone(),
             slot_b: slot_status[1].clone(),
@@ -139,7 +139,14 @@ pub fn select_checkpoint<D: BlockDevice>(
                 slot_status,
             })
         }
+    }?;
+    let snapshots_enabled = ident.features.incompat & INCOMPAT_PERSISTENT_SNAPSHOTS != 0;
+    if selection.chosen.snapshot_roots.is_some() != snapshots_enabled {
+        return Err(CoreError::Corrupt(
+            "selected checkpoint snapshot extension disagrees with incompatible feature".into(),
+        ));
     }
+    Ok(selection)
 }
 
 fn read_checkpoint_candidate<D: BlockDevice>(

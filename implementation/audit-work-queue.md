@@ -21,8 +21,10 @@ persistent traversal that can pass protected queue entries;
 measure metadata reserves and write amplification. The model's rotating queue
 requires an explicit production representation. Keep snapshot-owned namespace
 metadata separate from allocation/reclaim machinery governed by selectable
-checkpoints. Use [ADR-072](../adr/ADR-072-snapshot-record-codecs.md) for leaf codecs; define
-checkpoint root binding and transaction sequencing before enabling snapshot mounts.
+checkpoints. Use [ADR-072](../adr/ADR-072-snapshot-record-codecs.md) for leaf codecs and
+[ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md) for checkpoint root binding.
+Implement typed tree access, lifetime maintenance and snapshot publication
+before enabling snapshot mounts.
 Use `tree::read_key_page` for bounded inclusive-key seeking; persist the next
 physical key and make scan wrap explicit.
 

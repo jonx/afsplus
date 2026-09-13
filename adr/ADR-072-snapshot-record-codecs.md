@@ -2,6 +2,7 @@
 
 Status: Accepted for the ADR-071 prototype; integration and wire freeze require qualification
 Amends: ADR-071
+Amended by: ADR-073
 
 ## Context
 

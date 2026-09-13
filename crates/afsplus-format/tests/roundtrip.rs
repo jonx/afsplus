@@ -69,6 +69,7 @@ fn sample_checkpoint() -> Checkpoint {
         free_blocks_total: 800,
         flags: 0,
         shared_extent_root_block: 0,
+        snapshot_roots: None,
     }
 }
 
@@ -1032,4 +1033,75 @@ fn dir_overflow_is_reported_not_truncated() {
         .unwrap();
     }
     assert!(matches!(dir.encode(BS, 5), Err(FormatError::Overflow(_))));
+}
+
+#[test]
+fn snapshot_checkpoint_extension_matches_independent_block_images() {
+    use afsplus_format::checkpoint::SnapshotRoots;
+    let legacy = sample_checkpoint();
+    assert_eq!(
+        legacy.encode(BS).unwrap(),
+        include_bytes!("fixtures/checkpoint-legacy-v1.bin").as_slice()
+    );
+    let mut extended = legacy.clone();
+    extended.snapshot_roots = Some(SnapshotRoots {
+        registry: 30,
+        lifetimes: 31,
+    });
+    let image = extended.encode(BS).unwrap();
+    assert_eq!(
+        image,
+        include_bytes!("fixtures/checkpoint-snapshot-v1.bin").as_slice()
+    );
+    assert_eq!(Checkpoint::decode(&image, &[7; 16]).unwrap(), extended);
+    assert_eq!(le::get_u64(&image[128..136]), 30);
+    assert_eq!(le::get_u64(&image[136..144]), 31);
+    for length in 0..129 {
+        let mut invalid = image.clone();
+        let mut header = BlockHeader::verify(&invalid, block_type::CHECKPOINT).unwrap();
+        header.payload_len = length;
+        header.seal(&mut invalid);
+        assert_eq!(
+            Checkpoint::decode(&invalid, &[7; 16]).is_ok(),
+            length == 96 || length == 112
+        );
+    }
+    for size in 0..144 {
+        assert!(extended.encode(size).is_err());
+    }
+    for roots in [
+        SnapshotRoots {
+            registry: 0,
+            lifetimes: 31,
+        },
+        SnapshotRoots {
+            registry: 30,
+            lifetimes: 0,
+        },
+        SnapshotRoots {
+            registry: 30,
+            lifetimes: 30,
+        },
+    ] {
+        let mut invalid = image.clone();
+        let header = BlockHeader::verify(&invalid, block_type::CHECKPOINT).unwrap();
+        le::put_u64(&mut invalid[128..136], roots.registry);
+        le::put_u64(&mut invalid[136..144], roots.lifetimes);
+        header.seal(&mut invalid);
+        assert!(Checkpoint::decode(&invalid, &[7; 16]).is_err());
+    }
+    extended.snapshot_roots = Some(SnapshotRoots {
+        registry: 4,
+        lifetimes: 31,
+    });
+    assert!(extended
+        .validate_structural(&sample_ident().geometry())
+        .is_err());
+    extended.snapshot_roots = Some(SnapshotRoots {
+        registry: 1024,
+        lifetimes: 31,
+    });
+    assert!(extended
+        .validate_structural(&sample_ident().geometry())
+        .is_err());
 }

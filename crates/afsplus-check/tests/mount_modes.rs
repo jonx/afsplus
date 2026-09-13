@@ -182,3 +182,45 @@ fn snapshot_record_codecs_do_not_implicitly_enable_snapshot_mounts() {
         .iter()
         .any(|error| error.contains("incompatible")));
 }
+
+#[test]
+fn selected_snapshot_extension_mismatch_never_falls_back() {
+    use afsplus_format::checkpoint::{Checkpoint, SnapshotRoots};
+    use afsplus_format::ident::INCOMPAT_PERSISTENT_SNAPSHOTS;
+    for extended in [false, true] {
+        let mut image = formatted();
+        let mut ident = Identification::decode(&image.peek(layout::IDENT_LBA)).unwrap();
+        if !extended {
+            ident.features.incompat |= INCOMPAT_PERSISTENT_SNAPSHOTS;
+        }
+        image.apply_raw(layout::IDENT_LBA, &ident.encode(BS).unwrap());
+        let mut newest = Checkpoint::decode(&image.peek(layout::CKPT_SLOT_A), &ident.uuid).unwrap();
+        newest.generation += 1;
+        newest.committed_tx_id = newest.generation;
+        if extended {
+            newest.snapshot_roots = Some(SnapshotRoots {
+                registry: 100,
+                lifetimes: 101,
+            });
+        }
+        image.apply_raw(layout::CKPT_SLOT_B, &newest.encode(BS).unwrap());
+        let error = match afsplus_core::mount::select_checkpoint(&mut image, &ident) {
+            Ok(_) => panic!("mismatched selected snapshot checkpoint was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("snapshot extension disagrees"));
+        // The same extended checkpoint selects normally when its feature agrees.
+        if extended {
+            ident.features.incompat |= INCOMPAT_PERSISTENT_SNAPSHOTS;
+            image.apply_raw(layout::IDENT_LBA, &ident.encode(BS).unwrap());
+            let chosen = afsplus_core::mount::select_checkpoint(&mut image, &ident).unwrap();
+            assert_eq!(chosen.chosen.generation, newest.generation);
+            assert!(matches!(
+                mount(image),
+                Err(CoreError::UnsupportedIncompatFeatures(
+                    INCOMPAT_PERSISTENT_SNAPSHOTS
+                ))
+            ));
+        }
+    }
+}

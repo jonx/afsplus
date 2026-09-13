@@ -87,8 +87,10 @@ before checkpoint replay or any other write. Version-1/2 prototype images
 remain readable and writable with their explicit legacy byte-identity key
 behavior; version 1 additionally derives its intent-log feature bit.
 
-The experimental incompatible assignments currently include bit 0 for the
-base intent log and bit 1 for version-3 existing-file data-update records.
+The experimental incompatible assignments include bit 0 for the base intent
+log, bit 1 for version-3 existing-file data updates, and bit 2 for persistent
+snapshot ownership. Bit 2 binds the registry/lifetime checkpoint extension in
+[ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md).
 Bit 1 requires bit 0. The split prevents an older namespace-only replay
 implementation from interpreting an unknown but valid data-update record as a
 torn tail; see [ADR-064](../adr/ADR-064-intent-log-data-update-compatibility.md).

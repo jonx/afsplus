@@ -13,6 +13,7 @@ source, chapter coverage and architectural rationale. Results belong in
 - [Executable mixed-I/O oracle](#executable-mixed-io-oracle)
 - [Snapshot accounting model](#snapshot-accounting-model)
 - [Snapshot record codecs](#snapshot-record-codecs)
+- [Snapshot checkpoint extension](#snapshot-checkpoint-extension)
 - [Bounded key cursor prerequisite](#bounded-key-cursor-prerequisite)
 - [Existing complementary gates](#existing-complementary-gates)
 - [Required future experiments](#required-future-experiments)
@@ -111,6 +112,22 @@ mutates a valid image's identification, reseals its checksum, and requires
 `AFSPR_ERR_UNSUPPORTED` for the snapshot bit. Run
 `make portable-c-gate` for that independent rejection contract. A codec test
 never grants snapshot mount capability or proves create/delete crash safety.
+
+## Snapshot checkpoint extension
+
+Run `cargo test -p afsplus-format snapshot_checkpoint_extension` and the mount
+mode gate above. [Independent checkpoint block images](../crates/afsplus-format/tests/fixtures/checkpoint-roots.json)
+fix legacy and extended byte output; their bytes were assembled separately
+from the Rust encoder using explicit offsets and a bitwise CRC32C loop.
+Run `python3 crates/afsplus-format/tests/fixtures/generate-checkpoint-fixtures.py`
+to check reproducibility without writes; `--write` regenerates the fixtures.
+
+Require exact legacy output, two appended root fields, rejection of every
+other payload length, short encoder buffers, zero/equal/out-of-geometry roots,
+and valid-CRC selected-feature mismatches. A mismatched newest checkpoint must
+produce an error even with an older structural candidate. The C rejection
+fixture carries the snapshot feature and two extended checkpoints. Standalone
+root references in these fixtures do not qualify the persistent tree writer.
 
 ## Bounded key cursor prerequisite
 

@@ -6,7 +6,8 @@ The layout uses a discoverable auxiliary intent-log area alongside checkpoint
 COW. Its exact size and record encoding remain unfrozen until the operation
 coverage and interoperability gates of
 [ADR-063](../adr/ADR-063-intent-log-epoch1.md) pass. The authoritative
-allocation encoding remains a separate epoch-1 freeze question.
+allocation architecture follows [ADR-067](../adr/ADR-067-epoch1-allocation-state.md);
+exact byte layouts require the epoch-1 freeze gate.
 
 ```text
 +----------------------------------+
@@ -45,5 +46,6 @@ Rules:
 6. a small durability intent log uses a reserved/discoverable auxiliary area;
    no record format or mandatory size is frozen until cross-implementation,
    real-device and independent format-review gates pass
-7. allocation regions are required for bounded resource use, but their authoritative free-space encoding remains an epoch-1 prototype decision (reserved allocator, bitmap+delta, spacemap-like log, or proven hybrid)
+7. allocation regions use the authoritative triple-version bitmap/descriptor
+   slots, fixed allocation-root pool and segmented quarantine of ADR-067
 8. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0

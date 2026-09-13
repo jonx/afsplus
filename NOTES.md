@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Bind snapshot roots in the checkpoint codec](#2026-09-14---bind-snapshot-roots-in-the-checkpoint-codec)
 - [2026-09-14 - Add bounded key pages for persistent maintenance cursors](#2026-09-14---add-bounded-key-pages-for-persistent-maintenance-cursors)
 - [2026-09-13 - Add persistent snapshot record codecs](#2026-09-13---add-persistent-snapshot-record-codecs)
 - [2026-09-13 - Accept the integrated lifetime experiment and handle rule](#2026-09-13---accept-the-integrated-lifetime-experiment-and-handle-rule)
@@ -54,6 +55,29 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 - Bind snapshot roots in the checkpoint codec
+
+Added ADR-073 before extending checkpoint encoding. Feature-absent checkpoints
+retain their 96-byte payload; the snapshot extension appends two roots in a
+112-byte payload. Selection rejects feature/payload mismatches without falling
+back to older namespace state. Snapshot mounts stay unsupported through this
+codec unit.
+
+Independent full-block fixtures fix both encodings, with a separate bitwise
+CRC32C construction. Tests cover lengths, root bounds, valid-CRC mismatches,
+legacy byte stability and short encoder buffers. The short-buffer test also
+removed an existing size-subtraction panic in checkpoint encoding. Updated the
+C refusal fixture to carry extended checkpoint headers as well as the feature.
+
+Reconciled the disk-layout draft's stale open allocation-architecture language
+with the accepted ADR-067; exact wire freeze remains a separate gate.
+
+Validation passed: 276 workspace tests, 10 ignored; formatting, Clippy with
+warnings denied, documentation, whitespace and independent fixture reproduction.
+The portable-C reader/writer, sanitizer and static-analysis gate passed; its
+optional m68k and CMake checks were skipped for unavailable configured tools.
+
 
 ## 2026-09-14 - Add bounded key pages for persistent maintenance cursors
 

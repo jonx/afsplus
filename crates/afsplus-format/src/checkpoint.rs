@@ -34,6 +34,8 @@
 //! 72     8    total free blocks
 //! 80     8    flags (zero; reserved)
 //! 88     8    shared-extent reference-tree root LBA (0 = no tree; ADR-061)
+//! 96     8    snapshot registry root (extended payload only; ADR-073)
+//! 104    8    lifetime ledger root (extended payload only; ADR-073)
 //! ```
 
 use alloc::vec;
@@ -44,6 +46,24 @@ use crate::header::{block_type, BlockHeader, HEADER_SIZE};
 use crate::{le, FormatError, OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
 
 const FIXED_PAYLOAD: usize = 96;
+const SNAPSHOT_PAYLOAD: usize = 112;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotRoots {
+    pub registry: u64,
+    pub lifetimes: u64,
+}
+
+impl SnapshotRoots {
+    fn validate(self) -> Result<(), FormatError> {
+        if self.registry == 0 || self.lifetimes == 0 || self.registry == self.lifetimes {
+            return Err(FormatError::Invalid(
+                "snapshot roots must be nonzero and distinct",
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Per-region allocation-state binding, stored as the value of an
 /// allocation-root tree record (ADR-035). No longer carried inline by the
@@ -77,6 +97,8 @@ pub struct Checkpoint {
     /// that has never cloned; allocated by the first clone and kept allocated
     /// afterwards, even once the tree is empty again.
     pub shared_extent_root_block: u64,
+    /// Negotiated by INCOMPAT_PERSISTENT_SNAPSHOTS; absent uses legacy bytes.
+    pub snapshot_roots: Option<SnapshotRoots>,
 }
 
 impl Checkpoint {
@@ -94,7 +116,13 @@ impl Checkpoint {
                 "checkpoint requires an allocation root",
             ));
         }
-        if FIXED_PAYLOAD > block_size - HEADER_SIZE {
+        let payload_len = if let Some(roots) = self.snapshot_roots {
+            roots.validate()?;
+            SNAPSHOT_PAYLOAD
+        } else {
+            FIXED_PAYLOAD
+        };
+        if payload_len > block_size.saturating_sub(HEADER_SIZE) {
             return Err(FormatError::Overflow("checkpoint payload"));
         }
 
@@ -111,13 +139,17 @@ impl Checkpoint {
         le::put_u64(&mut p[72..80], self.free_blocks_total);
         le::put_u64(&mut p[80..88], self.flags);
         le::put_u64(&mut p[88..96], self.shared_extent_root_block);
+        if let Some(roots) = self.snapshot_roots {
+            le::put_u64(&mut p[96..104], roots.registry);
+            le::put_u64(&mut p[104..112], roots.lifetimes);
+        }
 
         BlockHeader {
             block_type: block_type::CHECKPOINT,
             flags: 0,
             owner: 0,
             generation: self.generation,
-            payload_len: FIXED_PAYLOAD as u32,
+            payload_len: payload_len as u32,
         }
         .seal(&mut block);
         Ok(block)
@@ -136,7 +168,11 @@ impl Checkpoint {
                 "checkpoint header reserved fields are nonzero",
             ));
         }
-        if header.payload_len as usize != FIXED_PAYLOAD || p.len() < FIXED_PAYLOAD {
+        if !matches!(
+            header.payload_len as usize,
+            FIXED_PAYLOAD | SNAPSHOT_PAYLOAD
+        ) || p.len() < FIXED_PAYLOAD
+        {
             return Err(FormatError::Invalid("checkpoint payload length mismatch"));
         }
         let mut uuid = [0u8; 16];
@@ -164,6 +200,16 @@ impl Checkpoint {
             free_blocks_total: le::get_u64(&p[72..80]),
             flags: le::get_u64(&p[80..88]),
             shared_extent_root_block: le::get_u64(&p[88..96]),
+            snapshot_roots: if p.len() == SNAPSHOT_PAYLOAD {
+                let roots = SnapshotRoots {
+                    registry: le::get_u64(&p[96..104]),
+                    lifetimes: le::get_u64(&p[104..112]),
+                };
+                roots.validate()?;
+                Some(roots)
+            } else {
+                None
+            },
         };
         if checkpoint.root_object_id != OBJECT_ROOT {
             return Err(FormatError::Invalid("root object ID is invalid"));
@@ -179,6 +225,14 @@ impl Checkpoint {
     /// Everything checkable without any further I/O. This is the whole basis
     /// on which mount *selects* a checkpoint.
     pub fn validate_structural(&self, geo: &Geometry) -> Result<(), FormatError> {
+        if let Some(roots) = self.snapshot_roots {
+            roots.validate()?;
+            if !geo.is_allocatable(roots.registry) || !geo.is_allocatable(roots.lifetimes) {
+                return Err(FormatError::Invalid(
+                    "snapshot roots outside allocatable bounds",
+                ));
+            }
+        }
         if !geo.is_allocatable(self.allocation_root_block) {
             return Err(FormatError::Invalid(
                 "allocation root block out of allocatable bounds",

@@ -5726,6 +5726,7 @@ impl<D: BlockDevice> Volume<D> {
             free_blocks_total,
             flags: 0,
             shared_extent_root_block: shared_root,
+            snapshot_roots: self.checkpoint.snapshot_roots,
         };
         let checkpoint_bytes = new_checkpoint.encode(block_size)?;
         // A failed write may have reached the device, and a failed flush may

@@ -611,6 +611,16 @@ int main(int argc, char **argv)
     put_le64(mutated.blocks + 32u + 153u,
              first.incompat_features | AFSP_INCOMPAT_PERSISTENT_SNAPSHOTS);
     reseal(mutated.blocks);
+    {
+        size_t slot;
+        for (slot = 1u; slot <= 2u; ++slot) {
+            uint8_t *checkpoint = mutated.blocks + slot * TEST_BLOCK_SIZE;
+            put_le32(checkpoint + 24u, 112u);
+            put_le64(checkpoint + 128u, 100u);
+            put_le64(checkpoint + 136u, 101u);
+            reseal(checkpoint);
+        }
+    }
     status = probe_detailed(&memory_ops, scratch, sizeof(scratch), &fallback,
                             &diagnostic);
     require(status == AFSPR_ERR_UNSUPPORTED,

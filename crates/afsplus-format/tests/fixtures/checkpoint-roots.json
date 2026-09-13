@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "scope": "standalone checkpoint blocks",
+  "generation": 5,
+  "uuid": "07070707070707070707070707070707",
+  "images": [
+    {
+      "file": "checkpoint-legacy-v1.bin",
+      "payload_bytes": 96,
+      "snapshot_roots": null
+    },
+    {
+      "file": "checkpoint-snapshot-v1.bin",
+      "payload_bytes": 112,
+      "snapshot_roots": {
+        "registry": 30,
+        "lifetimes": 31
+      }
+    }
+  ]
+}
