@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-13 - Prepare the integrated snapshot accounting decision](#2026-09-13---prepare-the-integrated-snapshot-accounting-decision)
 - [2026-09-13 - Measure snapshot retention and reclaim traversal](#2026-09-13---measure-snapshot-retention-and-reclaim-traversal)
 - [2026-09-13 — Prepare the complete implementation handoff](#2026-09-13--prepare-the-complete-implementation-handoff)
 - [2026-09-13 — Exercise repeated pressure and define the snapshot experiment](#2026-09-13--exercise-repeated-pressure-and-define-the-snapshot-experiment)
@@ -49,6 +50,20 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-13 - Prepare the integrated snapshot accounting decision
+
+Made the Q4 integrated candidate reviewable: physical-run lifetimes retain
+birth across reflinks, a durable bounded scan transfers eligible runs to
+ordinary checkpoint quarantine, and housekeeping metadata is excluded from
+recursive snapshot ownership. The proposal spells out reader roots, ID
+exhaustion, incompatible-feature negotiation, metadata admission and busy-on-
+active-handle deletion. These are proposed experiment choices awaiting owner
+discussion; no disk fields, feature bits or accepted ADRs were changed.
+
+The next independent queue work is read-only extraction with an explicit loss
+report and a corruption corpus. Documentation and whitespace checks passed.
+
 
 ## 2026-09-13 - Measure snapshot retention and reclaim traversal
 

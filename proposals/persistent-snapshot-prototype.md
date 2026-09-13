@@ -10,6 +10,19 @@ The accepted direction is persistent consistent snapshots for the first
 backup/scanner consumer. The mechanisms below are candidates for experiments,
 not accepted disk semantics or a claim of snapshot support.
 
+<!-- toc -->
+
+- [Source constraints](#source-constraints)
+- [S1: Registry and consistent boundary](#s1-registry-and-consistent-boundary)
+- [S2: Retention accounting experiment](#s2-retention-accounting-experiment)
+  - [Executable comparison and integration gate](#executable-comparison-and-integration-gate)
+- [S3: In-place writes and all mutation paths](#s3-in-place-writes-and-all-mutation-paths)
+- [S4: Admission, release and handles](#s4-admission-release-and-handles)
+- [S5: Integrated accounting candidate for review](#s5-integrated-accounting-candidate-for-review)
+- [Prototype exit criteria](#prototype-exit-criteria)
+
+<!-- /toc -->
+
 ## Source constraints
 
 - `TxAllocator::begin` consumes the committed reclaim queue before allocating.
@@ -110,6 +123,75 @@ the public name while retaining a tombstone until the final reference closes.
 If runtime handles disappear after reboot, recovery must distinguish an
 explicitly deleted view from a retained persistent view. Test bounded release
 and reclamation under interruption before accepting either option.
+
+## S5: Integrated accounting candidate for review
+
+Decision requested: prototype a physical-run lifetime ledger and bounded
+persistent traversal, with full COW while snapshots exist. This chooses the
+next integrated experiment. Shipping encoding and resource budgets require
+its evidence and a format ADR.
+
+The ledger maps physical starts to length, allocation birth, and optional
+last-live-reference retirement generation. Adjacent runs merge only when all
+lifetime fields match. Splitting a reflink run preserves its original birth;
+creating another live reference never resets birth. Retirement occurs when
+the last live mapping disappears. The shared-extent tree keeps its live-count
+meaning. A retained generation S owns a retired run exactly when
+`birth <= S < retirement`, under the continuous-live-lifetime assumption.
+Importing a mapping from an old snapshot requires a separate lifetime rule
+before exposing snapshot-to-live reflinks or rollback.
+
+Track namespace object-map nodes, object records, directory/extent nodes and
+file data. Classify allocation-root pages, bitmap/descriptor slots, reclaim
+queue nodes, snapshot-registry nodes and ledger nodes as housekeeping. Their
+lifetime follows selectable-checkpoint protection. They never recursively
+insert themselves into the snapshot ledger. Require an exhaustive checker to
+verify the classification and both ownership domains, including orphan data.
+
+Retired snapshot-domain runs enter the ledger's retained state. A durable
+cursor scans a bounded number of ledger records per transaction and transfers
+eligible runs to ordinary checkpoint quarantine. It advances past protected
+records, wraps explicitly, and preserves progress across remount. Transfer
+and ledger removal commit atomically; ordinary quarantine supplies the existing
+selectable-checkpoint delay before physical reuse. Test exact bitmap accounting
+so transferred runs cannot be charged, freed or queued twice. New allocations
+behind the cursor are visited on the next wrap. Final snapshot release records
+its registry change atomically; reclamation proceeds incrementally afterwards.
+
+Candidate tree values use independent integer fields and explicit reserved
+bytes. Assign tree identities and checkpoint root fields in the format ADR;
+never reuse the checkpoint's unresolved reserved flags. The registry needs a
+monotonic next-ID counter, captured generation, committed transaction ID and
+object-map root. Exhaustion must fail explicitly, without wrapping IDs.
+A snapshot-aware reader resolves only captured namespace state. Mount reads
+bounded roots and the cursor; exhaustive ledger scans belong to maintenance.
+
+Compatibility candidate: a negotiated incompatible feature because old tools
+cannot validate the extended checkpoint and ownership semantics. Keep legacy
+feature-absent images readable; independently test old readers rejecting new
+images before mutation. Require Rust/C corpus agreement on root references,
+record ordering, arithmetic overflow, reserved bytes and cursor recovery.
+
+Admission candidate: reject new snapshots explicitly when their configured
+count or metadata-reserve budget would be exceeded. Preserve registered views
+until explicit deletion. Measure worst-case ledger/registry tree split and
+ordinary quarantine publication costs to size emergency reserves. Report live,
+retained, quarantine and immediately available capacity separately. A physical
+block shared across snapshots consumes capacity once.
+
+Handle candidate: return busy on deletion while local snapshot readers hold
+handles. This keeps the first persistence contract free of deferred-deletion
+tombstones. Closing handles permits explicit deletion; a reboot releases
+runtime handles while preserving registered views. A later unlink-like policy
+requires a separate decision and crash-safe tombstone proof.
+
+Integration measurements include each mutation path, last-reference transitions,
+old-view temporary churn, maximum configured snapshot count, queue wrap,
+create/delete admission at ENOSPC, ledger split/rebalance, and every publication
+cut. Count ledger/registry/quarantine I/O, reclaimed blocks per step, peak RAM,
+read amplification and emergency headroom. Compare against the same image and
+workload with snapshots disabled. Passing the isolated model supplies only the
+initial lifetime and traversal oracle.
 
 ## Prototype exit criteria
 
