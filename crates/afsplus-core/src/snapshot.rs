@@ -1,6 +1,7 @@
 //! Typed, bounded readers for the experimental snapshot trees (ADR-071–073).
 //! These readers do not enable mounts or establish global bitmap ownership.
 pub mod edit;
+pub(crate) mod view;
 
 use afsplus_block::BlockDevice;
 use afsplus_format::geometry::Geometry;

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Integrate persistent snapshot lifecycle into Volume](#2026-09-14--integrate-persistent-snapshot-lifecycle-into-volume)
 - [2026-09-14 - Bind lifetime accounting to allocator transactions](#2026-09-14---bind-lifetime-accounting-to-allocator-transactions)
 - [2026-09-14 - Prepare transactional lifetime edits](#2026-09-14---prepare-transactional-lifetime-edits)
 - [2026-09-14 - Read snapshot trees with bounded contextual checks](#2026-09-14---read-snapshot-trees-with-bounded-contextual-checks)
@@ -58,6 +59,36 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Integrate persistent snapshot lifecycle into Volume
+
+Implemented registry creation/deletion, mount-scoped reader leases, captured
+namespace reads and resumable directory cursors under ADR-071/072/073. Creation
+closes the intent window; registered snapshots override in-place writes. The
+common transaction tail seals lifetimes, publishes both roots and transfers
+eligible storage into ordinary quarantine. Deletion uses emergency headroom and
+refuses active handles. Reclaim reports scan and promotion separately.
+
+The full workspace all-features gate passed: 299 tests, zero failures and ten
+explicitly ignored qualification tests. Formatting, all-target/all-feature
+Clippy with warnings denied, documentation and whitespace checks passed.
+
+Eight targeted memory-backend tests passed. Create cuts covered 197 modeled
+states (193 absent, 4 present); delete cuts covered 115 (4 absent, 111 present),
+checking membership and exact bytes. A 512-block fixture held an old view through
+160 churn cycles with minimum free space 475 blocks and maximum retired count
+12; releasing the view released its five protected blocks. Additional tests
+covered private/shared COW, log-window capture and replay, cursor/handle remount
+identity, near-full admission/deletion, uncertain final flush and exhausted IDs
+without publishing a pending window.
+
+Formatting and mounting snapshot images remain test-only. Ordinary mounts reject
+the feature until full ownership checking and supported configuration are
+qualified. These tests do not prove host authorization, backup restoration,
+portable-C parity, shipping budgets or native durability. Q5 explicitly owns
+snapshot management and historical-read access/revocation policy; the handoff
+moves to checker integration and the real consumer.
+
 
 ## 2026-09-14 - Bind lifetime accounting to allocator transactions
 

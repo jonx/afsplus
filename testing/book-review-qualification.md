@@ -18,6 +18,7 @@ source, chapter coverage and architectural rationale. Results belong in
 - [Typed snapshot tree access](#typed-snapshot-tree-access)
 - [Lifetime transaction preparation](#lifetime-transaction-preparation)
 - [Snapshot allocator and quarantine binding](#snapshot-allocator-and-quarantine-binding)
+- [Volume snapshot orchestration](#volume-snapshot-orchestration)
 - [Existing complementary gates](#existing-complementary-gates)
 - [Required future experiments](#required-future-experiments)
 - [Normative coverage map](#normative-coverage-map)
@@ -228,6 +229,37 @@ the oracle must detect new-checkpoint publication with missing referenced state.
 The model covers full-write subsets and representative tears, not every physical
 reordering. These allocator images do not qualify file-namespace snapshots,
 registry transactions, read handles or native devices.
+
+## Volume snapshot orchestration
+
+Run `cargo test -p afsplus-core volume::snapshots::tests --all-features -- --nocapture`.
+The fixtures use a test-only formatter and mount constructor; ordinary mount
+must reject INCOMPAT bit 2 until the complete feature qualification authorizes
+support. Explicit work limits belong to the fixture, not shipping defaults.
+
+Require captured names, metadata and streaming bytes to survive live write,
+rename, create, reflink and remount. Cloned reader handles keep deletion busy;
+old-mount handles are stale and cannot pin a new mount. Cursors resume only the
+matching persistent view and directory. Snapshot creation closes the log window;
+later live overlays and replay cannot change captured bytes. Registered views
+must override private and shared in-place eligibility.
+
+Enumerate modeled cuts for actual Volume creation and deletion. Verify exact
+membership and bytes for each selectable outcome, with both before and after
+states represented. Inject an uncertain final flush and require mutation rejection
+until remount resolves the published state. ID exhaustion must fail without
+publishing a pending namespace window; deleting a view must not reuse its ID.
+
+Hold a deleted file through an old view while repeatedly creating and removing
+unrelated files on a small volume. Track minimum free space and maximum retired
+blocks, verify the old bytes throughout, then delete the view and require bounded
+scan progress toward release. Creation must preserve emergency space; deletion
+must be able to use that reserve. Report scan work independently of promotion.
+
+These memory-backend tests do not qualify the full snapshot ownership checker,
+host authorization/API, a backup/restore consumer, portable C, production resource
+limits or native durability. The crash model covers full-write subsets and
+representative tears, not every physical reordering.
 
 ## Existing complementary gates
 

@@ -26,12 +26,16 @@ checkpoints. Use [ADR-072](../adr/ADR-072-snapshot-record-codecs.md) for leaf co
 Use [typed tree access](../testing/book-review-qualification.md#typed-snapshot-tree-access),
 [lifetime transaction preparation](../testing/book-review-qualification.md#lifetime-transaction-preparation)
 and [allocator/quarantine binding](../testing/book-review-qualification.md#snapshot-allocator-and-quarantine-binding)
-as component baselines. Integrate Volume phase transitions, registry transactions,
-read handles and snapshot publication before enabling mounts.
+and [Volume orchestration](../testing/book-review-qualification.md#volume-snapshot-orchestration)
+as component baselines. Extend the full checker to reconcile captured namespaces,
+ledger lifetimes, housekeeping, quarantine and allocation bits before enabling
+supported mounts. Qualify explicit mount/formatter configuration, resource
+admission and the filesystem-neutral backup consumer. Keep historical-read and
+management authorization under Q5.
 Use `tree::read_key_page` for bounded inclusive-key seeking; persist the next
 physical key and make scan wrap explicit.
 
-Implement registry transactions against ADR-072/073. Further format changes
+Validate registry transactions against ADR-072/073. Further format changes
 require the decision and compatibility process in
 [CONTRIBUTING](../CONTRIBUTING.md). Do not pin arbitrary old
 allocation roots in the fixed `3N` pool. Snapshot protection must override
@@ -50,7 +54,7 @@ adapter work can proceed while a format question is discussed.
 | Mixed I/O correctness | M03/M05; file/extent operations | `streaming_api` three-seed byte oracle | Extend with each new storage representation; preserve sparse, unwritten, truncate and clone isolation through remount. |
 | Repeated resource pressure | M03/M13; reclaim and sharing | `allocation_pressure::repeated_near_full_cow_and_reclaim_preserve_shared_survivors` | Add retained-view pressure to the 24-cycle baseline; require bounded progress and explicit admission failure. |
 | Persistent snapshot views | Q4, M14; retention experiment, then accepted registry encoding | ADR-069/070; proposal S1–S4 | Build registry, protected ownership, read view and release; exact multi-view oracle after live mutation, reboot and create/delete crashes. |
-| Retention and accounting policy | Q4; same workload for both candidates | Retirement-generation queue and fixed allocation pool | Integrate and measure lifetime accounting plus traversal past protected entries; decide limits, active-handle deletion and capacity reporting explicitly. |
+| Retention and accounting policy | Q4; same workload for both candidates | Retirement-generation queue and fixed allocation pool | Integrate and measure lifetime accounting plus traversal past protected entries; measure admission limits and capacity reporting; preserve the accepted busy-on-active-handle deletion rule. |
 | Salvage and extraction | Q11, M05; damage classification | [Extraction corpus](../testing/extraction-qualification.md), `corruption_corpus`, `mount_modes` | Define supported damage classes; extract to a separate destination with explicit missing/untrusted-data report and zero source writes. |
 | Repair | Q11, M05/M14; salvage corpus and accepted repair operations | Checker invariants; recovery design | Implement selected repairs transactionally; report identities/actions/loss; crash each repair boundary and verify exact allowed outcomes. |
 | Backup and restoration | Q11, M13; stable snapshot view for online consistency | Clone/mixed-I/O tests do not prove backup | Run a real archive/restore consumer; compare names, links, bytes, sparse semantics, timestamps, attributes and security metadata. |

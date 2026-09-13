@@ -108,6 +108,8 @@ pub enum CoreError {
     ReadOnly,
     /// A generation-bound iterator or handle no longer names its view.
     Stale,
+    /// A resource has active users and cannot be removed yet.
+    Busy,
     /// An operation needs a feature the volume does not enable (ADR-061:
     /// identification is immutable, so the operation cannot enable it).
     FeatureDisabled(&'static str),
@@ -156,6 +158,7 @@ impl fmt::Display for CoreError {
             }
             CoreError::ReadOnly => write!(f, "volume is mounted read-only"),
             CoreError::Stale => write!(f, "filesystem cursor or handle is stale"),
+            CoreError::Busy => write!(f, "filesystem resource is busy"),
             CoreError::UnsupportedIncompatFeatures(bits) => {
                 write!(
                     f,

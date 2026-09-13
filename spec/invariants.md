@@ -145,6 +145,20 @@ per-file contracts:
 - growth preserves the configured emergency metadata headroom; destructive
   operations and bounded reclaim may consume it to restore forward progress
 
+For the experimental persistent snapshot feature,
+[ADR-071](../adr/ADR-071-snapshot-lifetime-prototype.md) and
+[snapshot records](snapshot-records.md) additionally require:
+
+- namespace allocation birth survives reflinks; last-live retirement preserves
+  that birth and cannot transfer to quarantine while a registered generation
+  intersects its lifetime
+- registry, ledger, cursor, retained total and quarantine changes publish at one
+  checkpoint boundary; housekeeping never recursively enters the lifetime ledger
+- registered snapshots force data COW; historical reads use the captured roots
+  and do not consult the live shared-reference count as their ownership authority
+- snapshot creation resolves the intent window; deletion refuses active reader
+  handles, and handle identity cannot cross a remount
+
 ## Failure and recovery boundaries
 
 - validation or capacity rejection before media I/O must not change committed

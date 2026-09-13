@@ -210,7 +210,7 @@ impl From<CoreError> for VfsError {
             CoreError::NoSpace => VfsError::NoSpace,
             CoreError::ReadOnly => VfsError::ReadOnly,
             CoreError::Stale => VfsError::Stale,
-            CoreError::WindowOpen | CoreError::WindowPoisoned => VfsError::Busy,
+            CoreError::WindowOpen | CoreError::WindowPoisoned | CoreError::Busy => VfsError::Busy,
             CoreError::UnsupportedGeometry(_)
             | CoreError::UnsupportedIncompatFeatures(_)
             | CoreError::ReadOnlyRequiredFeatures(_)

@@ -6,6 +6,18 @@ implement the accounting direction in
 [book-review gate](../testing/book-review-qualification.md#snapshot-record-codecs).
 The [milestone table](../implementation/milestones.md) owns implementation state.
 
+<!-- toc -->
+
+- [Feature and tree identities](#feature-and-tree-identities)
+- [Checkpoint binding](#checkpoint-binding)
+- [Registry control and entries](#registry-control-and-entries)
+- [Lifetime control and entries](#lifetime-control-and-entries)
+- [Transactional lifetime edits](#transactional-lifetime-edits)
+- [Volume lifecycle and read views](#volume-lifecycle-and-read-views)
+- [Failure and resource contract](#failure-and-resource-contract)
+
+<!-- /toc -->
+
 ## Feature and tree identities
 
 `org.aros.afsplus:persistent-snapshots` uses INCOMPAT bit 2. Implementations need
@@ -107,6 +119,46 @@ Preparing an edit alone cannot authorize physical reuse, publish a snapshot or
 enable the feature.
 The [transaction preparation gate](../testing/book-review-qualification.md#lifetime-transaction-preparation)
 checks this stage independently of the enclosing Volume integration.
+
+## Volume lifecycle and read views
+
+Under ADR-071, snapshot creation closes the intent window before capturing the
+committed namespace and publishes the registry entry through the common commit
+engine. Admission checks include explicit work budgets, view capacity and ID
+exhaustion; reject exhausted IDs before closing a pending window. Creation
+preserves emergency metadata headroom. Deletion can consume that headroom to
+release retention, without promising success under every resource shortage.
+Uncertain checkpoint publication requires remount before further mutation.
+
+A runtime handle pins its registered view. Clones share that lease; deletion
+returns busy until the last handle closes. Handles belong to one mount and are
+stale after remount. A directory cursor identifies volume, snapshot, generation,
+directory and ordinal; a matching persistent view can resume it with a newly
+opened handle. A cursor alone does not retain a snapshot.
+
+Reads resolve objects, directories and extents through the captured object-map
+root and generation, independently of live caches or an open intent window.
+Registered views force COW even for files with persistent in-place opt-in.
+Historical reflinks do not use the live shared-reference count to decide whether
+their bytes exist. No rollback or historical-to-live clone is implied.
+
+Reclaim examines bounded ledger pages and streams the committed registry within
+an explicit view budget. A creation capturing generation G cannot protect a
+previously retired run whose retirement is at most G. Consulting the original
+registry during creation is therefore safe; consulting it during deletion can
+conservatively delay release by a subsequent transaction. Transfer validation
+rechecks exact lifetimes and all views before sealing ownership changes.
+Report scanned records, scan wrap, transfers and physical promotions separately;
+zero net ordinary-queue reduction does not mean the retained scan is finished.
+
+The core experiment requires explicit edit, view and reclaim budgets. Selecting
+shipping limits requires measured admission and resource qualification under
+[Q4](../implementation/open-questions.md). Host management authorization and
+historical-read access/revocation policy require the
+[Q5](../implementation/open-questions.md) security gate before exposure through
+filesystem-neutral host capabilities. Core read handles do not establish that
+policy. Full checker ownership, supported mount/formatter negotiation and a
+real backup consumer are separate integration gates.
 
 ## Failure and resource contract
 

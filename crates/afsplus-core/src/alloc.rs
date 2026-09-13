@@ -271,6 +271,7 @@ enum SnapshotPhase {
 
 struct SnapshotAccounting {
     phase: SnapshotPhase,
+    registry_root: u64,
     allocations: RunSet,
     retirements: RunSet,
     mutation: Option<LifetimeMutation>,
@@ -342,9 +343,10 @@ impl TxAllocator {
             reclaim: Some(reclaim),
             allocated_this_tx: RunSet::default(),
             retired_this_tx: RunSet::default(),
-            snapshot: current.snapshot_roots.map(|_| {
+            snapshot: current.snapshot_roots.map(|roots| {
                 Box::new(SnapshotAccounting {
                     phase: SnapshotPhase::Namespace,
+                    registry_root: roots.registry,
                     allocations: RunSet::default(),
                     retirements: RunSet::default(),
                     mutation: None,
@@ -443,6 +445,28 @@ impl TxAllocator {
             }
             snapshot.phase = SnapshotPhase::Housekeeping;
         }
+        Ok(())
+    }
+
+    /// Install the result of a registry COW mutation before sealing lifetimes.
+    pub(crate) fn set_snapshot_registry_root(&mut self, root: u64) -> Result<(), CoreError> {
+        self.check_snapshot_health()?;
+        let snapshot = self
+            .snapshot
+            .as_mut()
+            .ok_or(CoreError::FeatureDisabled("persistent snapshots"))?;
+        if snapshot.phase != SnapshotPhase::Housekeeping
+            || !self.geo.is_allocatable(root)
+            || self
+                .current_checkpoint
+                .snapshot_roots
+                .is_some_and(|roots| roots.lifetimes == root)
+        {
+            return Err(CoreError::Corrupt(
+                "invalid snapshot registry publication".into(),
+            ));
+        }
+        snapshot.registry_root = root;
         Ok(())
     }
 
@@ -1023,17 +1047,18 @@ impl TxAllocator {
         self.stats.region_descriptors_dirty = descriptor_writes.len() as u64;
         let resident = self.pages.values().map(|page| page.bits.len() as u64).sum();
         self.stats.allocator_ram_bytes = self.stats.allocator_ram_bytes.max(resident);
+        let registry_root = self.snapshot.as_ref().map(|s| s.registry_root);
         let snapshot_lifetimes = self.snapshot.and_then(|s| s.mutation);
         let snapshot_roots = self
             .current_checkpoint
             .snapshot_roots
-            .map(|roots| SnapshotRoots {
+            .map(|_| SnapshotRoots {
+                registry: registry_root.expect("snapshot registry root"),
                 lifetimes: snapshot_lifetimes
                     .as_ref()
                     .expect("sealed lifetime mutation")
                     .tree
                     .root_lba,
-                ..roots
             });
         Ok(FinishedAlloc {
             snapshot_roots,

@@ -15,7 +15,14 @@
 //! ([`CommitStats`]) — metadata bytes, bitmap pages, region descriptors,
 //! flushes, retired and promoted blocks, reclaim latency, allocator RAM.
 
+mod snapshots;
+use snapshots::SnapshotRegistryChange;
+pub use snapshots::{
+    SnapshotCommitStats, SnapshotDirectoryCursor, SnapshotDirectoryPage, SnapshotHandle,
+    SnapshotInfo, SnapshotListPage, SnapshotMaintenance, SnapshotWorkLimits,
+};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Weak};
 
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
@@ -71,6 +78,7 @@ pub struct CommitStats {
     /// Total bytes issued to the device by this transaction.
     pub bytes_written: u64,
     pub alloc: AllocStats,
+    pub snapshots: SnapshotCommitStats,
 }
 
 pub const DEFAULT_ORPHAN_CLEANUP_EXTENTS: usize = 16;
@@ -307,6 +315,9 @@ pub struct Volume<D: BlockDevice> {
     /// Transaction-scoped count consumed by `commit_transaction`.
     pending_in_place_data_blocks: u64,
     pending_prewritten_data_blocks: u64,
+    snapshot_limits: Option<SnapshotWorkLimits>,
+    snapshot_handles: BTreeMap<u64, Weak<()>>,
+    snapshot_mount: Arc<()>,
 }
 
 impl<D: BlockDevice> Volume<D> {
@@ -338,6 +349,9 @@ impl<D: BlockDevice> Volume<D> {
             data_update_policy: DataUpdatePolicy::FullCow,
             pending_in_place_data_blocks: 0,
             pending_prewritten_data_blocks: 0,
+            snapshot_limits: None,
+            snapshot_handles: BTreeMap::new(),
+            snapshot_mount: Arc::new(()),
         }
     }
 
@@ -398,11 +412,17 @@ impl<D: BlockDevice> Volume<D> {
 
     /// Runs one maintenance transaction that only advances reclamation:
     /// promotes up to the configured budget from the queue head and commits.
-    /// Returns the number of blocks reclaimed (zero means the queue could
-    /// not shrink further and no commit was made).
+    /// Returns the net reduction in ordinary queued blocks. Zero can accompany
+    /// committed metadata or snapshot-scan progress; use
+    /// [`Self::snapshot_maintenance_step`] for separate lifetime progress.
     pub fn reclaim_step(&mut self, _now: Timespec) -> Result<u64, CoreError> {
         self.ensure_window_closed()?;
-        if self.state.reclaim_root.pending_blocks == 0 {
+        if self.state.reclaim_root.pending_blocks == 0
+            && self
+                .state
+                .snapshots
+                .is_none_or(|s| s.ledger.retained_blocks == 0)
+        {
             return Ok(0);
         }
         let before = self.state.reclaim_root.pending_blocks;
@@ -853,8 +873,9 @@ impl<D: BlockDevice> Volume<D> {
         let end_block = end_offset.div_ceil(block_size);
         let write_block_count = end_block - first_block;
         let (old_extents, old_tree_blocks) = self.load_file_layout(&record)?;
-        let overwrite_in_place = (self.data_update_policy == DataUpdatePolicy::InPlacePrivate
-            || record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0)
+        let overwrite_in_place = self.state.snapshots.is_none_or(|s| s.views == 0)
+            && (self.data_update_policy == DataUpdatePolicy::InPlacePrivate
+                || record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0)
             && end_offset <= record.size_bytes
             && (first_block..end_block).all(|logical_block| {
                 extent_at(&old_extents, logical_block).is_some_and(|extent| extent.flags == 0)
@@ -5597,12 +5618,38 @@ impl<D: BlockDevice> Volume<D> {
         &mut self,
         generation: u64,
         next_object_id: u64,
+        tx: TxAllocator,
+        data_writes: Vec<(u64, Vec<u8>)>,
+        meta_writes: Vec<(u64, Vec<u8>)>,
+        new_object_map_block: u64,
+    ) -> Result<(), CoreError> {
+        self.commit_transaction_inner(
+            generation,
+            next_object_id,
+            tx,
+            data_writes,
+            meta_writes,
+            new_object_map_block,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_transaction_inner(
+        &mut self,
+        generation: u64,
+        next_object_id: u64,
         mut tx: TxAllocator,
         data_writes: Vec<(u64, Vec<u8>)>,
         mut meta_writes: Vec<(u64, Vec<u8>)>,
         new_object_map_block: u64,
+        snapshot_change: Option<SnapshotRegistryChange>,
     ) -> Result<(), CoreError> {
         let block_size = self.dev.block_size();
+
+        tx.begin_snapshot_housekeeping()?;
+        let registry_nodes =
+            self.prepare_snapshot_registry(&mut tx, generation, snapshot_change, &mut meta_writes)?;
 
         // ADR-061: publish the shared-extent reference edit, if this
         // transaction made one, in the same checkpoint that publishes the
@@ -5667,8 +5714,12 @@ impl<D: BlockDevice> Volume<D> {
         let in_place_data_blocks = std::mem::take(&mut self.pending_in_place_data_blocks);
         let prewritten_data_blocks = std::mem::take(&mut self.pending_prewritten_data_blocks);
 
+        let mut snapshot_stats = self.prepare_snapshot_lifetimes(&mut tx)?;
+        snapshot_stats.registry_nodes_written = registry_nodes;
         let finished = tx.finish(&mut self.dev)?;
         if let Some(lifetimes) = finished.snapshot_lifetimes {
+            snapshot_stats.lifetime_nodes_written = lifetimes.tree.writes.len() as u64;
+            snapshot_stats.ledger_retired_blocks = lifetimes.state.retained_blocks;
             meta_writes.extend(lifetimes.tree.writes);
         }
         let (allocation_root, new_allocation_tree_blocks) =
@@ -5690,6 +5741,7 @@ impl<D: BlockDevice> Volume<D> {
             layout_promotions,
             shared_refs: shared_stats,
             alloc: finished.stats,
+            snapshots: snapshot_stats,
             ..CommitStats::default()
         };
 

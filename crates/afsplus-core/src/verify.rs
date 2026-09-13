@@ -62,9 +62,19 @@ pub struct CommittedState {
     pub shared_tree_blocks: Vec<u64>,
 }
 
+/// Snapshot control records and advertised view count, read along bounded
+/// root-to-control paths. Exhaustive ownership checking is a separate gate.
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotMountState {
+    pub registry: afsplus_format::snapshot::RegistryState,
+    pub views: u64,
+    pub ledger: afsplus_format::snapshot::LedgerState,
+}
+
 /// Bounded state needed to expose a mounted root namespace. The object map and
 /// directory are trees: mount validates their roots and descends on demand.
 pub struct MountState {
+    pub snapshots: Option<SnapshotMountState>,
     pub root_record_lba: u64,
     pub root_object: ObjectRecord,
     pub root_directory_root_lba: u64,
@@ -161,7 +171,31 @@ pub fn load_mount_state<D: BlockDevice>(
         }
     }
 
+    let snapshots = if let Some(snapshot_roots) = checkpoint.snapshot_roots {
+        claim_root(snapshot_roots.registry, &mut roots)?;
+        claim_root(snapshot_roots.lifetimes, &mut roots)?;
+        let (registry, views, _) = crate::snapshot::read_registry_state(
+            dev,
+            &geo,
+            snapshot_roots.registry,
+            checkpoint.generation,
+        )?;
+        let (ledger, _, _) = crate::snapshot::read_ledger_state(
+            dev,
+            &geo,
+            snapshot_roots.lifetimes,
+            checkpoint.generation,
+        )?;
+        Some(SnapshotMountState {
+            registry,
+            views,
+            ledger,
+        })
+    } else {
+        None
+    };
     Ok(MountState {
+        snapshots,
         root_record_lba,
         root_object,
         root_directory_root_lba: root_object.data_root,

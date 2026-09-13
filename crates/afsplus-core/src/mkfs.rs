@@ -69,6 +69,22 @@ pub struct MkfsParams {
 }
 
 pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), CoreError> {
+    mkfs_impl(dev, params, false)
+}
+
+#[cfg(test)]
+pub(crate) fn mkfs_snapshots<D: BlockDevice>(
+    dev: &mut D,
+    params: &MkfsParams,
+) -> Result<(), CoreError> {
+    mkfs_impl(dev, params, true)
+}
+
+fn mkfs_impl<D: BlockDevice>(
+    dev: &mut D,
+    params: &MkfsParams,
+    snapshots: bool,
+) -> Result<(), CoreError> {
     if dev.block_size() != DEFAULT_BLOCK_SIZE {
         return Err(CoreError::UnsupportedGeometry(
             "prototype supports only 4 KiB blocks",
@@ -146,6 +162,56 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
     initially_allocated.insert(omap_lba);
     initially_allocated.insert(reclaim_root_lba);
 
+    let snapshot_roots = if snapshots {
+        use afsplus_format::checkpoint::SnapshotRoots;
+        use afsplus_format::snapshot::{LedgerState, LifetimeRecord, RegistryState};
+        use afsplus_format::tree::{key_u64, TreeItem, TreeKind, TreeNode};
+        let blocks: Vec<_> = (geo.region0_reserved_blocks()..geo.total_blocks)
+            .filter(|lba| geo.is_allocatable(*lba) && !initially_allocated.contains(lba))
+            .take(2)
+            .collect();
+        if blocks.len() != 2 {
+            return Err(CoreError::NoSpace);
+        }
+        let roots = SnapshotRoots {
+            registry: blocks[0],
+            lifetimes: blocks[1],
+        };
+        let mut registry = TreeNode::leaf(TreeKind::SnapshotRegistry, 0);
+        registry.items.push(TreeItem {
+            key: key_u64(0).to_vec(),
+            value: RegistryState { next_id: 1 }.encode()?.to_vec(),
+        });
+        registry.subtree_items = 1;
+        let mut ledger = TreeNode::leaf(TreeKind::SnapshotLifetimes, 0);
+        ledger.items.push(TreeItem {
+            key: key_u64(0).to_vec(),
+            value: LedgerState {
+                scan_position: 0,
+                retained_blocks: 0,
+            }
+            .encode(geo.total_blocks)?
+            .to_vec(),
+        });
+        ledger.items.push(TreeItem {
+            key: key_u64(root_record_lba).to_vec(),
+            value: LifetimeRecord {
+                blocks: 3,
+                birth: generation,
+                retirement: 0,
+            }
+            .encode(root_record_lba, generation, geo.total_blocks)?
+            .to_vec(),
+        });
+        ledger.subtree_items = 2;
+        dev.write_block(roots.registry, &registry.encode(block_size, generation)?)?;
+        dev.write_block(roots.lifetimes, &ledger.encode(block_size, generation)?)?;
+        initially_allocated.extend(blocks);
+        Some(roots)
+    } else {
+        None
+    };
+
     // Descriptor slot 0 binds bitmap-page slot 0. Reserved blocks and the
     // initial metadata are allocated; everything else is free.
     let mut regions = Vec::with_capacity(geo.region_count() as usize);
@@ -220,8 +286,12 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         region_size: params.region_size,
         log_slots: params.log_slots,
         features: FeatureFlags {
-            incompat: if params.log_slots > 0 {
+            incompat: (if params.log_slots > 0 {
                 INCOMPAT_INTENT_LOG | INCOMPAT_INTENT_LOG_DATA_UPDATES
+            } else {
+                0
+            }) | if snapshots {
+                afsplus_format::ident::INCOMPAT_PERSISTENT_SNAPSHOTS
             } else {
                 0
             },
@@ -265,7 +335,7 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
         free_blocks_total: regions.iter().map(|record| record.free_blocks as u64).sum(),
         flags: 0,
         shared_extent_root_block: 0,
-        snapshot_roots: None,
+        snapshot_roots,
     };
     dev.write_block(layout::CKPT_SLOT_A, &checkpoint.encode(block_size)?)?;
     dev.flush()?;
