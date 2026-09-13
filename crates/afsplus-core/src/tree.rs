@@ -18,7 +18,7 @@ pub struct TreeSpec {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TreeLookupStats {
     pub pages_read: u64,
-    /// One raw block plus one decoded current node, regardless of tree height.
+    /// Peak raw/decoded page equivalents; point lookups use two.
     pub peak_page_buffers: u8,
 }
 
@@ -201,6 +201,128 @@ pub fn read_range<D: BlockDevice>(
         dev, geo, root_lba, spec, None, None, None, true, start, limit, &mut path, &mut items,
     )?;
     Ok(TreeRangePage { items, total_items })
+}
+
+/// Reads at most `limit` entries starting at an inclusive binary key.
+/// Persistent maintenance cursors use keys so deleting earlier entries does
+/// not shift their position. Resume after the final returned key; explicitly
+/// wrap to the first key to revisit records inserted behind the cursor.
+/// Working memory is bounded by the tree height plus returned entries.
+pub fn read_key_page<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    spec: TreeSpec,
+    low: &[u8],
+    limit: usize,
+) -> Result<(TreeRangePage, TreeLookupStats), CoreError> {
+    if low.is_empty() || low.len() > MAX_TREE_KEY_BYTES {
+        return Err(CoreError::Corrupt(
+            "tree page key length out of range".into(),
+        ));
+    }
+    check_tree_lba(geo, root_lba)?;
+    let mut items = Vec::new();
+    let mut path = BTreeSet::new();
+    let mut stats = TreeLookupStats::default();
+    let total_items = read_key_page_node(
+        dev, geo, root_lba, spec, None, None, None, low, limit, &mut path, &mut items, &mut stats,
+    )?;
+    Ok((TreeRangePage { items, total_items }, stats))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_key_page_node<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    lba: u64,
+    spec: TreeSpec,
+    expected_level: Option<u8>,
+    lower: Option<&[u8]>,
+    upper: Option<&[u8]>,
+    low: &[u8],
+    limit: usize,
+    path: &mut BTreeSet<u64>,
+    out: &mut Vec<TreeFloorItem>,
+    stats: &mut TreeLookupStats,
+) -> Result<u64, CoreError> {
+    if !path.insert(lba) {
+        return Err(CoreError::Corrupt(format!("tree cycle at block {lba}")));
+    }
+    let result = (|| {
+        let mut buf = vec![0; geo.block_size];
+        dev.read_block(lba, &mut buf)?;
+        stats.pages_read += 1;
+        stats.peak_page_buffers = stats.peak_page_buffers.max((path.len() * 2) as u8);
+        let (node, generation) = TreeNode::decode(&buf)
+            .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        validate_node_identity(&node, generation, spec, expected_level, lba)?;
+        validate_node_range(&node, lower, upper, expected_level.is_none())?;
+        if out.len() >= limit {
+            return Ok(node.subtree_items);
+        }
+        if node.is_leaf() {
+            let start = node.items.partition_point(|item| item.key.as_slice() < low);
+            out.extend(
+                node.items[start..]
+                    .iter()
+                    .take(limit - out.len())
+                    .map(|item| (item.key.clone(), item.value.clone())),
+            );
+            return Ok(node.subtree_items);
+        }
+        for index in 0..=node.items.len() {
+            if out.len() >= limit {
+                break;
+            }
+            let child_upper = node
+                .items
+                .get(index)
+                .map(|item| item.key.as_slice())
+                .or(upper);
+            if child_upper.is_some_and(|bound| bound <= low) {
+                continue;
+            }
+            let (child, child_lower) = if index == 0 {
+                (
+                    afsplus_format::tree::ChildRef {
+                        lba: node.leftmost_child,
+                        subtree_items: node.leftmost_items,
+                    },
+                    lower,
+                )
+            } else {
+                (
+                    TreeNode::child_ref(&node.items[index - 1]).map_err(CoreError::Format)?,
+                    Some(node.items[index - 1].key.as_slice()),
+                )
+            };
+            check_tree_lba(geo, child.lba)?;
+            let actual = read_key_page_node(
+                dev,
+                geo,
+                child.lba,
+                spec,
+                Some(node.level - 1),
+                child_lower,
+                child_upper,
+                low,
+                limit,
+                path,
+                out,
+                stats,
+            )?;
+            if actual != child.subtree_items {
+                return Err(CoreError::Corrupt(format!(
+                    "tree child {} count {actual}, parent records {}",
+                    child.lba, child.subtree_items
+                )));
+            }
+        }
+        Ok(node.subtree_items)
+    })();
+    path.remove(&lba);
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -811,5 +933,167 @@ mod tests {
             .unwrap();
         assert!(validate_tree(&mut dev, &geo, 22, spec).is_err());
         assert!(lookup(&mut dev, &geo, 22, spec, &key_u64(60)).is_err());
+    }
+
+    fn key_page_fixture() -> (MemoryBackend, Geometry, TreeSpec, Vec<u64>) {
+        let geo = Geometry {
+            block_size: 4096,
+            total_blocks: 512,
+            region_size: 512,
+        };
+        let mut dev = MemoryBackend::new(4096, 512);
+        let keys: Vec<u64> = (1..=1024).map(|i| i * 3).collect();
+        for (index, group) in keys.chunks(8).enumerate() {
+            dev.write_block(20 + index as u64, &leaf(group).encode(4096, 1).unwrap())
+                .unwrap();
+        }
+        for branch in 0..16 {
+            let node = TreeNode {
+                kind: TreeKind::ObjectMap,
+                owner: 0,
+                level: 1,
+                subtree_items: 64,
+                leftmost_child: 20 + branch * 8,
+                leftmost_items: 8,
+                items: (1..8)
+                    .map(|index| TreeItem {
+                        key: key_u64((branch * 64 + index * 8 + 1) * 3).to_vec(),
+                        value: child_value(ChildRef {
+                            lba: 20 + branch * 8 + index,
+                            subtree_items: 8,
+                        })
+                        .unwrap(),
+                    })
+                    .collect(),
+            };
+            dev.write_block(200 + branch, &node.encode(4096, 1).unwrap())
+                .unwrap();
+        }
+        let root = TreeNode {
+            kind: TreeKind::ObjectMap,
+            owner: 0,
+            level: 2,
+            subtree_items: 1024,
+            leftmost_child: 200,
+            leftmost_items: 64,
+            items: (1..16)
+                .map(|branch| TreeItem {
+                    key: key_u64((branch * 64 + 1) * 3).to_vec(),
+                    value: child_value(ChildRef {
+                        lba: 200 + branch,
+                        subtree_items: 64,
+                    })
+                    .unwrap(),
+                })
+                .collect(),
+        };
+        dev.write_block(216, &root.encode(4096, 1).unwrap())
+            .unwrap();
+        (
+            dev,
+            geo,
+            TreeSpec {
+                kind: TreeKind::ObjectMap,
+                owner: 0,
+                max_generation: 1,
+            },
+            keys,
+        )
+    }
+
+    #[test]
+    fn key_pages_match_scan_oracle_with_bounded_branch_reads() {
+        use afsplus_block::TraceBackend;
+        let (dev, geo, spec, keys) = key_page_fixture();
+        let mut dev = TraceBackend::new(dev);
+        for low in [0, 1, 3, 5, 24, 25, 192, 193, 2998, 3072, 3073] {
+            for limit in [0, 1, 5, 20] {
+                dev.reset();
+                let (page, stats) =
+                    super::read_key_page(&mut dev, &geo, 216, spec, &key_u64(low), limit).unwrap();
+                let expected: Vec<_> = keys
+                    .iter()
+                    .copied()
+                    .filter(|&key| key >= low)
+                    .take(limit)
+                    .collect();
+                let actual: Vec<_> = page
+                    .items
+                    .iter()
+                    .map(|(key, value)| {
+                        let key = u64::from_be_bytes(key.as_slice().try_into().unwrap());
+                        assert_eq!(
+                            u64::from_le_bytes(value.as_slice().try_into().unwrap()),
+                            key + 1000
+                        );
+                        key
+                    })
+                    .collect();
+                assert_eq!(actual, expected, "low={low} limit={limit}");
+                assert_eq!(page.total_items, 1024);
+                assert_eq!(dev.stats().reads, stats.pages_read);
+                assert!(stats.pages_read <= 6 + (limit as u64).div_ceil(8));
+                assert!(stats.peak_page_buffers <= 6);
+                assert_eq!(dev.stats().writes, 0);
+                assert_eq!(dev.stats().flushes, 0);
+            }
+        }
+        assert!(super::read_key_page(&mut dev, &geo, 216, spec, &[], 1).is_err());
+    }
+
+    #[test]
+    fn key_cursor_survives_earlier_deletion_and_wrap_revisits_insertions() {
+        let (mut dev, geo, mut spec, _) = key_page_fixture();
+        let (first, _) = super::read_key_page(&mut dev, &geo, 216, spec, &key_u64(0), 5).unwrap();
+        let last = u64::from_be_bytes(first.items.last().unwrap().0.as_slice().try_into().unwrap());
+        assert_eq!(last, 15);
+        // Delete five earlier keys and insert one behind the persisted cursor.
+        dev.write_block(20, &leaf(&[2, 18, 21, 24]).encode(4096, 2).unwrap())
+            .unwrap();
+        let (mut branch, _) = TreeNode::decode(&dev.peek(200)).unwrap();
+        branch.leftmost_items -= 4;
+        branch.subtree_items -= 4;
+        dev.write_block(200, &branch.encode(4096, 2).unwrap())
+            .unwrap();
+        let (mut root, _) = TreeNode::decode(&dev.peek(216)).unwrap();
+        root.leftmost_items -= 4;
+        root.subtree_items -= 4;
+        dev.write_block(216, &root.encode(4096, 2).unwrap())
+            .unwrap();
+        spec.max_generation = 2;
+        validate_tree(&mut dev, &geo, 216, spec).unwrap();
+        let (next, _) =
+            super::read_key_page(&mut dev, &geo, 216, spec, &key_u64(last + 1), 3).unwrap();
+        assert_eq!(
+            next.items
+                .iter()
+                .map(|item| u64::from_be_bytes(item.0.as_slice().try_into().unwrap()))
+                .collect::<Vec<_>>(),
+            [18, 21, 24]
+        );
+        let (wrapped, _) = super::read_key_page(&mut dev, &geo, 216, spec, &key_u64(0), 1).unwrap();
+        assert_eq!(wrapped.items[0].0, key_u64(2));
+    }
+
+    #[test]
+    fn key_pages_reject_corrupt_visited_counts_generations_and_cycles() {
+        let (pristine, geo, spec, _) = key_page_fixture();
+        for mode in 0..3 {
+            let mut dev = pristine.clone();
+            let (mut root, _) = TreeNode::decode(&dev.peek(216)).unwrap();
+            if mode == 0 {
+                root.leftmost_items += 1;
+                root.subtree_items += 1;
+            }
+            if mode == 1 {
+                root.leftmost_child = 216;
+            }
+            dev.write_block(
+                216,
+                &root.encode(4096, if mode == 2 { 2 } else { 1 }).unwrap(),
+            )
+            .unwrap();
+            assert!(super::read_key_page(&mut dev, &geo, 216, spec, &key_u64(0), 1).is_err());
+        }
     }
 }

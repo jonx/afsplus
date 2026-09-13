@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Add bounded key pages for persistent maintenance cursors](#2026-09-14---add-bounded-key-pages-for-persistent-maintenance-cursors)
 - [2026-09-13 - Add persistent snapshot record codecs](#2026-09-13---add-persistent-snapshot-record-codecs)
 - [2026-09-13 - Accept the integrated lifetime experiment and handle rule](#2026-09-13---accept-the-integrated-lifetime-experiment-and-handle-rule)
 - [2026-09-13 - Add checkpoint extraction with explicit loss reporting](#2026-09-13---add-checkpoint-extraction-with-explicit-loss-reporting)
@@ -53,6 +54,25 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 - Add bounded key pages for persistent maintenance cursors
+
+Added a shared-tree key-page reader for the snapshot ledger's durable cursor.
+It seeks an inclusive key, stops at the caller's record budget and validates
+visited subtree counts, generations, ranges and cycles. A physical key cursor
+survives deletion of earlier records; wrapping explicitly revisits insertions
+behind the cursor.
+
+Three tests use a three-level, 1,024-record fixture and independent sorted-key
+oracles. Traced reads equal reported reads and obey the fixture's bounded-page
+budget. A mutation between reads deletes earlier records and inserts a new
+key behind the cursor; successor enumeration and wrap preserve the expected
+sets. This is a shared-core prerequisite; persistent cursor commit/recovery
+belongs to the upcoming snapshot integration.
+
+Validation passed: 274 workspace tests, 10 ignored; formatting, Clippy with
+warnings denied, documentation and whitespace checks.
+
 
 ## 2026-09-13 - Add persistent snapshot record codecs
 

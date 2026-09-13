@@ -13,6 +13,7 @@ source, chapter coverage and architectural rationale. Results belong in
 - [Executable mixed-I/O oracle](#executable-mixed-io-oracle)
 - [Snapshot accounting model](#snapshot-accounting-model)
 - [Snapshot record codecs](#snapshot-record-codecs)
+- [Bounded key cursor prerequisite](#bounded-key-cursor-prerequisite)
 - [Existing complementary gates](#existing-complementary-gates)
 - [Required future experiments](#required-future-experiments)
 - [Normative coverage map](#normative-coverage-map)
@@ -110,6 +111,23 @@ mutates a valid image's identification, reseals its checksum, and requires
 `AFSPR_ERR_UNSUPPORTED` for the snapshot bit. Run
 `make portable-c-gate` for that independent rejection contract. A codec test
 never grants snapshot mount capability or proves create/delete crash safety.
+
+## Bounded key cursor prerequisite
+
+Run `cargo test -p afsplus-core key_page` and
+`cargo test -p afsplus-core key_cursor`. A three-level, 1,024-record tree is
+compared with an independent ordered-key scan for inclusive lower bounds,
+gaps, branch transitions, zero limits and end-of-tree. Every page obeys the
+requested entry limit; traced device reads match reported reads, with at most
+`6 + ceil(limit / 8)` reads in the fixture and six raw/decoded node equivalents
+at peak. Output records and allocator overhead are additional memory costs.
+The test requires zero writes and flushes.
+
+Between pages, delete earlier records and insert behind the cursor. The next
+key page must preserve all successors; an explicit wrap must discover the
+insertion. Reject visited-child count mismatches, future generations and cycles.
+This prerequisite proves bounded key seeking. Transactional cursor persistence
+and release crash tests belong to the integrated ledger gate.
 
 ## Existing complementary gates
 
