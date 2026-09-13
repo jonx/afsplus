@@ -94,3 +94,24 @@ AROS transient notifications remain useful for live applications.
 The change stream complements them by surviving application downtime.
 
 A future notification implementation may use the change stream internally, but applications must not depend on that implementation detail.
+
+## 9. Gap-free handoff and reset identity
+
+Initial enumeration and its saved stream cursor must describe one provable
+boundary. Either retain a consistent view or bracket enumeration with change
+capture and reconcile mutations before declaring the consumer current. A
+cursor sampled only after an unconstrained traversal can silently lose changes.
+
+Reset must invalidate all previous cursors even when the filesystem UUID is
+unchanged and numeric sequences repeat. Choose a stream incarnation token or
+an equally strong non-reuse rule before freezing the cursor representation.
+This requirement refines the existing reset/rescan contract; the representation
+is an M10 design gate.
+
+Notification delivery uses bounded queues and occurs after the relevant
+transaction is committed. Overflow, cancellation, retention expiry and gaps
+must have explicit outcomes. A slow subscriber cannot retain unbounded
+transaction state or force callbacks into partially initialized objects.
+Subscription plus initial enumeration must close the same gap as persistent
+catch-up. See [book-review qualification](../testing/book-review-qualification.md)
+for the required race, reset and overflow experiments.

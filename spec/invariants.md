@@ -2,10 +2,29 @@
 
 A conforming implementation must enforce these invariants.
 
+<!-- toc -->
+
+- [Allocation](#allocation)
+- [Shared extents](#shared-extents)
+- [User-data updates](#user-data-updates)
+- [Objects](#objects)
+- [Directories](#directories)
+- [Journal](#journal)
+- [Catalog](#catalog)
+- [Checksums](#checksums)
+- [Retention and reclamation](#retention-and-reclamation)
+- [Failure and recovery boundaries](#failure-and-recovery-boundaries)
+- [Catalog completeness](#catalog-completeness)
+- [Change discovery](#change-discovery)
+- [Adapter and cache obligations](#adapter-and-cache-obligations)
+
+<!-- /toc -->
+
 ## Allocation
 
-- every allocated physical block is owned by exactly one live allocation,
-  except for data blocks accounted by the active shared-extents feature
+- every allocated physical block is accounted for as reserved metadata, a
+  reachable allocation or deferred reclamation; multiple live data mappings
+  require accounting by the active shared-extents feature
 - no free bitmap bit may mark a reachable authoritative metadata block as free
 - no extent may exceed volume bounds
 - extent logical ranges for a file do not overlap
@@ -90,7 +109,8 @@ per-file contracts:
 - checkpoint COW is the authoritative metadata transaction engine; group
   commit and the intent log feed that same engine rather than defining
   independent allocation or mutation semantics
-- a completed logged fsync group is replayed completely or not at all
+- a valid committed log group is replayed atomically; successful fsync
+  acknowledgement requires preserving its complete durable prefix on recovery
 - an active intent-log version may advertise only operations its recovery path
   can validate and replay
 - existing-file write/truncate records reference only replacement data made
@@ -112,3 +132,80 @@ per-file contracts:
 ## Checksums
 
 - corrupted metadata is not silently accepted
+
+## Retention and reclamation
+
+- no block may be reused or discarded while a selectable or explicitly
+  retained checkpoint can reach its previous contents
+- an object generation identifies a revision, not a promise of retained bytes;
+  exact-generation access returns that exact version or an explicit unavailable
+  result; retention duration is governed by Q4 in
+  [open questions](../implementation/open-questions.md)
+- shared-reference counts and retained-checkpoint protection are independent
+- growth preserves the configured emergency metadata headroom; destructive
+  operations and bounded reclaim may consume it to restore forward progress
+
+## Failure and recovery boundaries
+
+- an operation rejected before publication must not change committed namespace,
+  file contents or allocation ownership
+- an I/O error during publication may have an uncertain durable outcome;
+  recovery must select an allowed complete state, never a mixture
+- a writer with uncertain publication state must reconcile that state or
+  require remount before issuing another mutation from stale allocation state
+- replay interrupted by another failure must preserve all acknowledged durable
+  groups and must not replay an operation twice into a different semantic result
+- normal mount uses bounded structural validation; exhaustive ownership and
+  reachable-state validation belong to the checker
+- no-changes inspection performs no media writes; salvage reports untrusted or
+  missing information and never silently repairs the source
+- repair reports affected identities, actions and discarded information;
+  an inability to reconstruct data is not successful restoration
+
+## Catalog completeness
+
+When the optional catalog is advertised as current:
+
+- it covers every namespace link through its advertised metadata generation,
+  including links created before catalog construction began
+- rebuild publication requires a consistent view or a proven enumeration and
+  change-catch-up boundary; partial or interrupted builds are not current
+- multiple names for one object remain distinct link records; object-oriented
+  consumers deduplicate by stable object identity
+- a stale or invalid catalog falls back to authoritative traversal
+
+## Change discovery
+
+When the optional persistent change stream is supported:
+
+- only committed changes may be exposed as committed events
+- enumeration and its saved cursor must form a provable handoff with no silent
+  gap; sampling a cursor after an unconstrained traversal is insufficient
+- expired, discarded or reset history requires explicit rescan
+- a stream reset invalidates old cursors even when the filesystem UUID and
+  numeric sequence values repeat; the cursor encoding is an M10 design gate
+- event history is discardable and cannot be reconstructed from present state;
+  catalog rebuild must not be described as rebuilding lost event history
+- notification queues have bounded resource use and explicit overflow and
+  cancellation outcomes; callbacks cannot expose partially initialized objects
+
+## Adapter and cache obligations
+
+- namespace links, open object identity and per-open state have separate
+  lifetimes; removing a name cannot invalidate a surviving open reference
+- resources used by in-flight I/O remain valid until that I/O completes;
+  closing one handle does not imply all references have ended
+- buffered and bypass I/O are coherent under the advertised access contract
+- writeback and eviction preserve data-before-reference durability and cannot
+  overwrite a durable metadata version with an uncommitted version
+- resource exhaustion and writeback errors are observable; correctness cannot
+  depend on unbounded dirty buffering or assumed retry fairness
+- a host unable to represent security metadata preserves it or explicitly
+  rejects the operation rather than silently weakening it
+
+These clauses consolidate the accepted allocation/transaction contracts and
+[design requirements](../docs/33-practical-filesystem-design-review.md).
+They introduce no disk fields or API signatures. Query syntax, retention
+policy, security evaluation and recovery/repair algorithms are not frozen by
+these invariants. Their deciding experiments are in
+[book-review qualification](../testing/book-review-qualification.md).

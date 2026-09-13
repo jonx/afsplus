@@ -18,6 +18,7 @@ This table compares architectural capabilities, not marketing claims. AFS+ entri
   - [4.5 Clone semantics as part of the developer contract](#45-clone-semantics-as-part-of-the-developer-contract)
 - [5. Important features we should not chase merely to win a table](#5-important-features-we-should-not-chase-merely-to-win-a-table)
 - [6. Reference facts](#6-reference-facts)
+- [BFS and BeOS: historical comparison](#bfs-and-beos-historical-comparison)
 
 <!-- /toc -->
 
@@ -174,3 +175,26 @@ Key design references:
 - AmigaOS filesystem comparison: https://wiki.amigaos.net/wiki/UserDoc:AmigaOS_File_Systems
 
 Exact limits and implementation status must be revalidated whenever this comparison is used for release claims.
+
+## BFS and BeOS: historical comparison
+
+The [complete Practical File System Design review](33-practical-filesystem-design-review.md)
+covers the 1999 book chapter by chapter. This is a historical comparison,
+not a statement about current Haiku implementations. AFS+ delivery status
+remains in [milestones](../implementation/milestones.md).
+
+| Area | Historical BFS described in the book | AFS+ requirement and decision |
+|---|---|---|
+| Metadata discovery | Typed attributes, secondary indexes and live queries | Optional catalog and persistent catch-up with complete backfill, explicit freshness and rescan. |
+| Duplicate keys and queries | Duplicate lists; predicate-dependent search cost | Measure duplicate distributions; exact OR is not inherently a scan. Require an authoritative scan oracle. |
+| Namespace identity | Single-parent assumptions and no hard-link implementation | Keep stable objects separate from every parent/name link and open handle. |
+| Transactions | Metadata journal and grouped commits | COW checkpoints plus bounded intent records, data barriers and restartable recovery. |
+| Allocation | Preallocation with fragmentation fallback | Invocation-local fallback cap; authoritative bitmap verification and safe delayed reuse. |
+| Cache | Cache integration, bypass and lifetime concerns | Host-neutral coherence and durability contracts; measured policy and bounded memory. |
+| Encoding | Alignment-sensitive implementations | Explicit endian codecs and checked ranges, independent of native struct layout. |
+| Qualification | Synthetic, real-world and prolonged stress | Seeded byte oracles plus corruption/crash matrices, applications and native qualification. |
+
+The chapter review identifies what is already covered, the allocation change,
+and the owned experiments still required before optional facilities can be
+advertised. Old throughput numbers and implementation omissions are not
+permanent architectural limits.

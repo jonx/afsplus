@@ -5589,8 +5589,9 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     /// The common commit tail: durability ordering, checkpoint write, state
-    /// adoption, accounting. On any error the committed state is untouched
-    /// and the in-memory volume still serves the old generation.
+    /// adoption, accounting. Errors before publication leave the selected
+    /// generation unchanged. Once checkpoint I/O starts, an error makes the
+    /// durable outcome uncertain and further mutations require remount.
     #[allow(clippy::too_many_arguments)]
     fn commit_transaction(
         &mut self,
@@ -5726,10 +5727,14 @@ impl<D: BlockDevice> Volume<D> {
             flags: 0,
             shared_extent_root_block: shared_root,
         };
-        self.dev.write_block(
-            self.ident.checkpoint_slots[new_slot],
-            &new_checkpoint.encode(block_size)?,
-        )?;
+        let checkpoint_bytes = new_checkpoint.encode(block_size)?;
+        // A failed write may have reached the device, and a failed flush may
+        // leave a complete new checkpoint visible. Never retry using the old
+        // allocation state after publication has begun. Also cover failures
+        // while adopting the newly committed roots below.
+        self.window_poisoned = true;
+        self.dev
+            .write_block(self.ident.checkpoint_slots[new_slot], &checkpoint_bytes)?;
         self.dev.flush()?;
         stats.flushes += 1;
 
@@ -5756,6 +5761,7 @@ impl<D: BlockDevice> Volume<D> {
         self.other_checkpoint = Some(std::mem::replace(&mut self.checkpoint, new_checkpoint));
         self.current_slot = new_slot;
         self.last_commit = Some(stats);
+        self.window_poisoned = false;
         Ok(())
     }
 }
@@ -5927,7 +5933,7 @@ fn allocate_extent_runs<D: BlockDevice>(
     mut block_count: u64,
     flags: u32,
 ) -> Result<Vec<Extent>, CoreError> {
-    let max_run = maximum_allocatable_run(geo)?;
+    let mut max_run = maximum_allocatable_run(geo)?;
     let mut extents = Vec::new();
     while block_count > 0 {
         let mut candidate = block_count.min(max_run);
@@ -5936,6 +5942,11 @@ fn allocate_extent_runs<D: BlockDevice>(
                 Ok(start) => break start,
                 Err(CoreError::NoSpace) if candidate > 1 => {
                     candidate = candidate.div_ceil(2);
+                    // This call only consumes free space: an unsuccessful
+                    // large search cannot improve while allocating its tail.
+                    // Keep the fallback local so a later call can try larger
+                    // runs again after reclaim or transaction-local releases.
+                    max_run = candidate;
                 }
                 Err(error) => return Err(error),
             }
@@ -6025,4 +6036,70 @@ fn replace_logical_range(
         extents.push(replacement);
     }
     Ok((coalesce_extents(extents)?, removed))
+}
+
+#[cfg(test)]
+mod fragmentation_tests {
+    use super::*;
+    use crate::{mkfs, mount, MkfsParams};
+    use afsplus_block::MemoryBackend;
+
+    #[test]
+    fn fragmented_allocation_does_not_repeat_oversized_searches() {
+        let mut dev = MemoryBackend::new(4096, 512);
+        mkfs(
+            &mut dev,
+            &MkfsParams {
+                uuid: [0xBF; 16],
+                label: "Fragmented".into(),
+                region_size: 512,
+                reclaim_caps: Default::default(),
+                log_slots: 0,
+                shared_extents: false,
+                data_policy: false,
+                name_policy: crate::NamePolicy::Sensitive,
+                timestamp: Timespec::default(),
+            },
+        )
+        .unwrap();
+        let vol = mount(dev).unwrap();
+        let geo = vol.ident().geometry();
+        let checkpoint = vol.checkpoint().clone();
+        let mut dev = vol.into_device();
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 0, 0).unwrap();
+        // All ordinary free space is one contiguous suffix on this new image.
+        // Occupy alternate blocks to leave only isolated one-block holes.
+        let first = tx.allocate(&mut dev).unwrap();
+        for lba in (first + 2..geo.total_blocks).step_by(2) {
+            tx.allocate_exact_run(&mut dev, lba, 1).unwrap();
+        }
+        let before = tx.stats();
+        let extents = allocate_extent_runs(&mut tx, &mut dev, &geo, 0, 64, 0).unwrap();
+        let after = tx.stats();
+        let searches = after.allocation_searches - before.allocation_searches;
+        let bits = after.bitmap_bits_examined - before.bitmap_bits_examined;
+        eprintln!("fragmented 64-block allocation: searches={searches}, bitmap_bits={bits}");
+        assert_eq!(extents.len(), 64);
+        for (i, extent) in extents.iter().enumerate() {
+            assert_eq!(extent.logical_start, i as u64);
+            assert_eq!(extent.block_count, 1);
+            assert_eq!(extent.physical_start, first + 1 + 2 * i as u64);
+        }
+        assert!(
+            searches <= 70,
+            "repeated failed large-run searches: {searches}"
+        );
+        // A new request must retry larger runs after transaction-local frees.
+        for lba in (first + 2..first + 18).step_by(2) {
+            tx.release_uncommitted(&mut dev, lba).unwrap();
+        }
+        // The earlier extent allocations still occupy the intervening blocks;
+        // release those too, then verify no sticky global fragmentation hint.
+        for lba in (first + 1..first + 18).step_by(2) {
+            tx.release_uncommitted(&mut dev, lba).unwrap();
+        }
+        let contiguous = allocate_extent_runs(&mut tx, &mut dev, &geo, 0, 16, 0).unwrap();
+        assert_eq!(contiguous.len(), 1);
+        assert_eq!(contiguous[0].block_count, 16);
+    }
 }

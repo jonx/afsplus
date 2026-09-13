@@ -15,6 +15,7 @@
 - [Stage E: developer-contract accelerators and optional features](#stage-e-developer-contract-accelerators-and-optional-features)
 - [Stage F: production qualification](#stage-f-production-qualification)
 - [Epoch 1 freeze gates](#epoch-1-freeze-gates)
+- [Integrated recovery and storage qualification](#integrated-recovery-and-storage-qualification)
 
 <!-- /toc -->
 
@@ -275,3 +276,29 @@ Milestone: M14 ([status](implementation/milestones.md)). Do not freeze the forma
 - unknown security metadata can survive a simple-host round-trip without silent downgrade
 - iterator/concurrency visibility rules are documented and tested
 - Cargo/Git/Zed-style/Ferail workloads are qualified
+
+## Integrated recovery and storage qualification
+
+Before claiming safe daily user storage, qualify the
+[normative failure and recovery boundaries](spec/invariants.md#failure-and-recovery-boundaries)
+through the [coverage map](testing/book-review-qualification.md#normative-coverage-map).
+Checkpoint publication errors require reconciliation or remount before another
+mutation. Replacement tests enumerate each write/flush failure and verify
+complete namespace, bytes and ownership.
+
+[ADR-069](adr/ADR-069-consistent-snapshots-first.md) selects consistent filesystem
+snapshots as the first backup/scanner view, persistent across reboot under
+[ADR-070](adr/ADR-070-persistent-snapshot-priority.md). Prototype snapshot enumeration and
+reads against a fixed oracle while the live tree mutates, including in-place
+opt-in files. Q4 decides bounded retention, admission, persistent representation and reclamation
+from ENOSPC, release and crash evidence before stabilizing the format/API.
+Q11 decides supported salvage and restoration outcomes; M05 owns corruption
+classification/extraction and M13 owns actual backup/restore consumers.
+Q12 binds M07 host integration to M13 device/cache qualification. M14 requires
+these contracts and their stated limitations before format release; it does
+not substitute format freeze for demonstrated recovery.
+
+Choose implementations through the deciding experiments in
+[open questions](implementation/open-questions.md), record accepted decisions
+in ADRs, and turn accepted experiments into milestone gates. Missing platform
+support is implementation work with an owner, not a permanent scope limit.

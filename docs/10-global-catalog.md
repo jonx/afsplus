@@ -123,3 +123,20 @@ AFS+ may use the catalog. Another filesystem may use an MFT, optimized traversal
 The benchmark suite must include multi-million-link sequential catalog scans and compare them with fallback directory traversal.
 
 The specification defines the workload; numeric release targets are set from measured reference hardware rather than guessed in advance.
+
+## 11. Completeness and secondary-query gate
+
+Activation requires proof that the catalog covers all preexisting namespace
+links and every relevant mutation through its advertised generation. Online
+rebuild must use a retained consistent view or a validated enumeration and
+change-catch-up protocol. A partial build is never an authoritative negative
+answer. On interruption or a gap, discard the build or fall back to traversal.
+
+Catalog enumeration does not by itself define a secondary attribute-query
+language. Such a proposal must specify missing values, type comparisons,
+Unicode policy, duplicate results, predicate semantics and cancellation.
+Compare indexed results with an independent scan oracle, including exact OR
+and substring predicates. The required concurrent backfill and query cases
+are owned by [book-review qualification](../testing/book-review-qualification.md).
+These requirements refine complete validated publication; they do not freeze
+an index representation or public query API.

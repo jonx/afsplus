@@ -27,6 +27,7 @@
 - [10. Durability contract](#10-durability-contract)
 - [11. Concurrency and readers](#11-concurrency-and-readers)
 - [12. Testing gate](#12-testing-gate)
+- [Uncertain checkpoint publication](#uncertain-checkpoint-publication)
 
 <!-- /toc -->
 
@@ -317,3 +318,19 @@ Tests must distinguish:
 - historical generation stability
 
 because these are related but not identical guarantees.
+
+## Uncertain checkpoint publication
+
+Before checkpoint publication begins, rejected transactions retain the selected
+state. Once a checkpoint write is attempted, a device error may follow a
+completed or partial write. A final flush failure or failure to load the newly
+committed roots therefore requires remount before further mutations. Recovery
+selects an allowed complete state; failure does not promise that publication
+never happened. The Rust prototype reports this through its existing
+`WindowPoisoned` remount-required error mapping for both windows and immediate
+commits. No disk encoding or filesystem-facing ABI is changed.
+
+The [fault tests](../crates/afsplus-check/tests/faults.rs) cover failed final
+barriers, completed writes reporting errors, adoption reads and every
+write/flush failure in replacement. Pre-publication transient faults remain
+retryable when no uncertain checkpoint publication has occurred.

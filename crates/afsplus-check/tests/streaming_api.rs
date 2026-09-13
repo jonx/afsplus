@@ -119,3 +119,88 @@ fn directory_pages_are_bounded_complete_and_generation_checked() {
         Err(CoreError::Stale)
     ));
 }
+
+/// A deterministic byte-vector oracle independent of the extent implementation.
+/// Seed and operation number identify failures across sparse, unwritten and COW
+/// transitions; every remount also verifies authoritative allocation ownership.
+#[test]
+fn seeded_mixed_io_preserves_bytes_across_remounts_and_clones() {
+    for seed in [0xBF5u64, 0xDEAD_BEEF, 0x1234_5678] {
+        let mut state = seed;
+        let mut random = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut vol = mount(formatted(8192)).unwrap();
+        let object = vol.create_file_in_root("mixed", b"", ts(1)).unwrap();
+        let mut expected = Vec::<u8>::new();
+        let mut clone = None;
+        for step in 0..192 {
+            let offset = random() as usize % (32 * BS);
+            let length = 1 + random() as usize % (2 * BS + 3);
+            let now = ts(step + 2);
+            match random() % 3 {
+                0 => {
+                    let data: Vec<u8> = (0..length).map(|_| random() as u8).collect();
+                    vol.write_file_at(object, offset as u64, &data, now)
+                        .unwrap_or_else(|error| panic!("seed={seed:#x} step={step}: {error}"));
+                    if expected.len() < offset + length {
+                        expected.resize(offset + length, 0);
+                    }
+                    expected[offset..offset + length].copy_from_slice(&data);
+                }
+                1 => {
+                    vol.truncate_file(object, offset as u64, now).unwrap();
+                    expected.resize(offset, 0);
+                }
+                _ => {
+                    vol.preallocate_file(object, offset as u64, length as u64, now)
+                        .unwrap();
+                }
+            }
+            assert_eq!(
+                vol.read_file(object).unwrap(),
+                expected,
+                "seed={seed:#x} step={step}"
+            );
+            // Short reads must neither report bytes beyond EOF nor overwrite
+            // the unused part of the caller's destination buffer.
+            let mut buffer = vec![0xA5; length];
+            let count = vol
+                .read_file_at(object, offset as u64, &mut buffer)
+                .unwrap();
+            let wanted = expected.len().saturating_sub(offset).min(length);
+            assert_eq!(count, wanted, "seed={seed:#x} step={step}");
+            if wanted > 0 {
+                assert_eq!(&buffer[..count], &expected[offset..offset + count]);
+            }
+            assert!(buffer[count..].iter().all(|byte| *byte == 0xA5));
+            if step == 63 {
+                let id = vol
+                    .clone_file(object, OBJECT_ROOT, "snapshot-copy", now)
+                    .unwrap();
+                clone = Some((id, expected.clone()));
+            }
+            if let Some((id, bytes)) = &clone {
+                assert_eq!(
+                    vol.read_file(*id).unwrap(),
+                    *bytes,
+                    "clone changed: seed={seed:#x} step={step}"
+                );
+            }
+            if step % 16 == 15 {
+                let mut dev = vol.into_device();
+                let report = afsplus_check::check_device(&mut dev);
+                assert!(
+                    report.is_clean(),
+                    "seed={seed:#x} step={step}: {:?}",
+                    report.errors
+                );
+                vol = mount(dev).unwrap();
+                assert_eq!(vol.read_file(object).unwrap(), expected);
+            }
+        }
+    }
+}

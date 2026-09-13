@@ -100,7 +100,8 @@ pub enum CoreError {
     UnsupportedGeometry(&'static str),
     /// An operation window is open; immediate-commit operations are refused.
     WindowOpen,
-    /// The open window failed mid-mutation; remount to recover from the log.
+    /// Mutation or checkpoint publication failed ambiguously; remount to recover.
+    /// The variant name is retained for existing adapter error mappings.
     WindowPoisoned,
     /// The selected mount mode does not permit filesystem mutations.
     ReadOnly,
@@ -149,7 +150,7 @@ impl fmt::Display for CoreError {
             CoreError::WindowPoisoned => {
                 write!(
                     f,
-                    "the operation window failed mid-mutation; remount to recover"
+                    "transaction state is uncertain after mutation or publication failure; remount to recover"
                 )
             }
             CoreError::ReadOnly => write!(f, "volume is mounted read-only"),

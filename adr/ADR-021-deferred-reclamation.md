@@ -2,6 +2,8 @@
 
 Status: Proposed
 
+Amended by: ADR-069
+
 ## Context
 
 PFS3 persists operation state for long frees so interrupted work can resume safely. Large deletes/truncates can otherwise require oversized transactions, large temporary free lists, or long blocking operations.

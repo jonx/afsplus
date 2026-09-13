@@ -62,6 +62,13 @@ The initial implementation may be offline only, but the API should separate veri
 
 ## 6. Catalog/change-stream recovery
 
-These structures are rebuildable.
+The catalog is rebuildable from authoritative objects and directory links.
+Repair may discard it and rebuild a complete generation before activation.
 
-Repair should prefer dropping/rebuilding them over risking authoritative object or directory metadata.
+The change stream is discardable, but its lost ordered history cannot be
+reconstructed from current state. Discard/reset invalidates old cursors and
+requires a full rescan. It must never fabricate replacement historical events.
+See [change-stream semantics](11-change-stream.md) and the
+[normative invariants](../spec/invariants.md#change-discovery).
+
+Neither operation may risk authoritative object or directory metadata.

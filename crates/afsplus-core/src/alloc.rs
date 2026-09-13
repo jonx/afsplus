@@ -235,6 +235,10 @@ fn load_bitmap_page<D: BlockDevice>(
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AllocStats {
+    /// Extent searches, including requests rejected before scanning.
+    pub allocation_searches: u64,
+    /// Bitmap positions examined while searching for free runs.
+    pub bitmap_bits_examined: u64,
     pub blocks_allocated: u64,
     pub blocks_retired: u64,
     pub blocks_promoted: u64,
@@ -352,6 +356,11 @@ impl TxAllocator {
         self.free_block_floor = blocks;
     }
 
+    /// Resource counters for the current transaction, without sealing it.
+    pub fn stats(&self) -> AllocStats {
+        self.stats
+    }
+
     pub fn free_block_floor(&self) -> u64 {
         self.free_block_floor
     }
@@ -383,6 +392,7 @@ impl TxAllocator {
         dev: &mut D,
         len: u64,
     ) -> Result<u64, CoreError> {
+        self.stats.allocation_searches += 1;
         assert!(len > 0);
         if len > self.geo.region_size as u64 {
             return Err(CoreError::NoSpace);
@@ -406,11 +416,13 @@ impl TxAllocator {
             let mut run_start = 0u32;
             let mut run_len = 0u64;
             let mut found = None;
+            let mut examined = 0u64;
             for page_index in 0..geo.bitmap_page_count(region) {
                 let first_block = page_index * afsplus_format::bitmap::BITMAP_PAGE_BLOCKS;
                 {
                     let page = self.page_mut(dev, region, page_index)?;
                     for local_index in 0..page.valid_blocks {
+                        examined += 1;
                         let region_index = first_block + local_index;
                         let lba = base + region_index as u64;
                         if geo.is_allocatable(lba) && !page.is_allocated(local_index) {
@@ -434,6 +446,7 @@ impl TxAllocator {
                     break;
                 }
             }
+            self.stats.bitmap_bits_examined += examined;
             if let Some(start) = found {
                 for region_index in start..start + len as u32 {
                     let (page_index, local_index) = geo.bitmap_page_for_index(region_index);

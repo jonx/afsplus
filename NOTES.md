@@ -9,6 +9,8 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-13 — Reconcile invariants and block writes after uncertain publication](#2026-09-13--reconcile-invariants-and-block-writes-after-uncertain-publication)
+- [2026-09-13 — Complete BFS book review and fragmented allocation regression](#2026-09-13--complete-bfs-book-review-and-fragmented-allocation-regression)
 - [2026-09-03 — Portable C allocates and logs its first COW data block](#2026-09-03--portable-c-allocates-and-logs-its-first-cow-data-block)
 - [2026-09-03 — Portable C emits its first version-3 data mutation](#2026-09-03--portable-c-emits-its-first-version-3-data-mutation)
 - [2026-09-03 — Portable C creates empty files without an allocator](#2026-09-03--portable-c-creates-empty-files-without-an-allocator)
@@ -44,6 +46,96 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-13 — Reconcile invariants and block writes after uncertain publication
+
+Consolidated retention/reclamation, failure boundaries, catalog completeness,
+change discovery and adapter/cache obligations in [spec/invariants.md](spec/invariants.md).
+Corrected [recovery](docs/19-recovery-and-maintenance.md): catalog rebuild is
+possible; discarded stream history requires reset and rescan. Clarified that
+reserved and quarantined blocks are legitimate allocated ownership classes,
+and that an acknowledged fsync prefix cannot be discarded during recovery.
+These consolidate existing contracts without new wire fields or API signatures.
+
+The [coverage map](testing/book-review-qualification.md#normative-coverage-map)
+links every family to executable tests or an owner experiment. New failure
+coverage reproduced a correctness defect: after a complete checkpoint write
+and failed final flush, the mounted writer could mutate again from stale roots
+and allocation state. The common commit tail now sets its remount-required
+state before attempting checkpoint I/O and clears it only after successful
+adoption. Completed writes reporting errors and failed post-publication reads
+receive the same protection. Existing WindowPoisoned adapter mappings are
+reused; pre-publication transient failures keep their safe retry behavior.
+
+Added three tests: uncertain final-barrier mutation rejection; completed-write
+and adoption-read error handling; and a dynamically enumerated replacement
+write/flush fault matrix with exact namespace, content and checker oracles.
+The targeted six-test fault suite passed, including existing retry controls.
+
+John selected consistent filesystem snapshots first. [ADR-069](adr/ADR-069-consistent-snapshots-first.md)
+records the direction, the required snapshot protection against in-place
+updates and a backup/scanner prototype. Q4 retains the bounded-retention and
+persistence questions. New Q11 and Q12 own salvage/restore and storage-stack
+qualification; the roadmap places their experiments before safe daily storage
+claims. Snapshot storage and API encoding were not implemented or frozen.
+
+
+
+John subsequently selected persistent snapshots first; [ADR-070](adr/ADR-070-persistent-snapshot-priority.md)
+records that choice. The allocation-root pool has capacity for two selectable
+checkpoints plus one commit, so arbitrary snapshot pins cannot reuse that
+capacity proof. The persistent registry and retained-ownership design need
+explicit prototype evidence before wire/API decisions.
+
+Full validation: 255 Rust workspace tests passed, 10 explicitly ignored;
+formatting, Clippy with warnings denied, documentation and whitespace checks
+passed. The parent roadmap checker and all 13 checker fixtures also passed.
+No native or long-duration qualification is implied.
+
+## 2026-09-13 — Complete BFS book review and fragmented allocation regression
+
+Read the twelve chapters and construction-kit appendix of Giampaolo's
+*Practical File System Design* against source revision
+`44ea5ebb7ba1efb5fd37588956700500f1047e1e`. The
+[review](docs/33-practical-filesystem-design-review.md) records source identity,
+printed pages, chapter dispositions and corrections. Earlier research had
+misattributed substring-search costs to OR and overgeneralized alignment,
+old duplicate performance and the absence of COW antecedents.
+
+The allocator reproduced the book's repeated large-request fallback problem.
+For 64 isolated free blocks in the 512-block allocator fixture, the original
+loop made 385 allocation searches and examined 169,536 bitmap positions.
+Keeping a reduced request cap for one invocation cuts those counts to 70 and
+8,256 respectively (81.8% and 95.1% reductions). This is a work-count
+measurement, not a throughput claim. The cap uses the existing stack variable;
+two u64 counters add 16 bytes to AllocStats. No on-disk encoding or barrier
+changes. The regression checks exact extent positions and verifies a later
+request can use a newly freed contiguous run. Residual within-region rescans
+remain measurable follow-up work.
+
+Added a second independent byte-vector oracle covering three seeds and 576
+mixed write/truncate/preallocate operations, 36 exhaustive-check/remount
+boundaries, short-read buffer preservation and reflink isolation. It passed.
+Existing tests already cover interrupted replay, batch failure rollback,
+near-full progress and open-unlinked cleanup, so those engines were retained.
+
+Refined catalog completeness and stream rescan requirements with explicit
+backfill, enumeration/cursor handoff, reset identity and notification overflow
+gates. Cache coherence, VM reentrancy, query predicates and metadata-preserving
+transport have owner experiments in the
+[qualification plan](testing/book-review-qualification.md). These are
+requirements for their respective future facilities, not claims that those
+facilities were implemented. Accepted ADRs and unresolved format choices were
+preserved; allocation tuning is allowed by ADR-067's runtime-policy decision.
+
+Validation on this macOS arm64 host with an isolated temporary Rust 1.98.1
+installation: `cargo test --workspace --all-features` passed 252 tests with
+10 explicitly ignored tests; `cargo fmt --all -- --check` and
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` passed.
+`make toc`, `make check-docs` and whitespace validation passed. The ignored
+qualification workloads, long soak and native hardware gates were not run.
+All changes remain local; no mount, hardware write or publication was made.
+
 
 ## 2026-09-03 — Portable C allocates and logs its first COW data block
 

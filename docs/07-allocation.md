@@ -191,6 +191,14 @@ Preferred policy, independent of exact free-space encoding:
 
 Directories and their small child objects should have locality hints, not hard placement requirements.
 
+Extent allocation retains a reduced request size for the remainder of one
+allocation call after a failed large-run search. The cap is runtime-only and
+resets on the next call, so freed contiguous space can be used immediately.
+This avoids repeated oversized searches on fragmented volumes without
+changing the authoritative bitmap or reuse rules. The
+[book-review qualification](../testing/book-review-qualification.md) measures
+allocation searches and bitmap positions examined independently of I/O.
+
 ## 5. Free-space summaries
 
 Global/per-region free-space summaries may be accelerators.

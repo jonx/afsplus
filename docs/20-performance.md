@@ -92,3 +92,19 @@ The separate 1 TiB sparse-image qualification records format/mount/checker
 wall time and per-commit bitmap pages, allocation records, metadata nodes, and
 flushes. [`crates/afsplus-check/tests/measurements.rs`](../crates/afsplus-check/tests/measurements.rs) remains the executable source
 of those numbers so regressions cannot be papered over by documentation.
+
+## Cache integration qualification
+
+A host cache must preserve the transaction layer's durability barriers and
+provide coherent data across buffered and bypass operations. Dirty metadata
+versions remain pinned or copied until safe publication; eviction cannot
+write a newer uncommitted version into an older durable transaction.
+Bound pinned state and provide backpressure. Avoid global cache locks across
+blocking I/O, and test progress under contention and failed writeback.
+
+Native VM integration must state which callbacks may allocate or page-fault
+and test reclaim reentrancy under memory pressure. The
+[book review](33-practical-filesystem-design-review.md) and
+[qualification plan](../testing/book-review-qualification.md) own these
+integration experiments. Choose cache size, read-ahead and bypass thresholds
+from target workloads rather than importing the historical BFS constants.
