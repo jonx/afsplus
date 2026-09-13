@@ -24,8 +24,9 @@ metadata separate from allocation/reclaim machinery governed by selectable
 checkpoints. Use [ADR-072](../adr/ADR-072-snapshot-record-codecs.md) for leaf codecs and
 [ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md) for checkpoint root binding.
 Use the [typed tree access gate](../testing/book-review-qualification.md#typed-snapshot-tree-access)
-as the reader baseline. Implement lifetime maintenance and snapshot publication
-before enabling snapshot mounts.
+and [lifetime transaction preparation](../testing/book-review-qualification.md#lifetime-transaction-preparation)
+as component baselines. Integrate allocator ownership classification, registry
+transactions, quarantine transfer and snapshot publication before enabling mounts.
 Use `tree::read_key_page` for bounded inclusive-key seeking; persist the next
 physical key and make scan wrap explicit.
 

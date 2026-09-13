@@ -78,6 +78,30 @@ retirement upper bound. Global ownership validation checks live namespace,
 retained snapshots, housekeeping and quarantine separately. Codec validation
 checks fixed fields; it does not replace the contextual ownership proof.
 
+## Transactional lifetime edits
+
+[ADR-071](../adr/ADR-071-snapshot-lifetime-prototype.md) governs ownership edits.
+New namespace allocations receive the publication generation as birth; reflinks
+preserve the existing lifetime. Removing the last live reference splits affected
+runs while preserving birth and sets retirement to the new generation. Discard
+allocations removed within their birth transaction through uncommitted release.
+Merge adjacent equal lifetimes after all edits, with checked retained-count
+adjustments from the original and final affected retired records.
+
+Before a retired record can leave the ledger, verify its exact committed fields
+and every registered view's generation. No view may intersect its lifetime.
+Exceeding a configured preparation or registry-scan budget is an error, never
+permission to skip records. A deleted view can conservatively protect storage
+until a subsequent reclamation transaction observes the updated registry.
+
+Publish the ledger mutation, retained total, scan cursor and ordinary-quarantine
+transfer in the same checkpoint. Queue transfers at that publication generation;
+keep their allocation bits set through the existing selectable-checkpoint delay.
+Ledger and registry COW nodes remain housekeeping allocations. Preparing an edit
+alone cannot authorize physical reuse, publish a snapshot or enable the feature.
+The [transaction preparation gate](../testing/book-review-qualification.md#lifetime-transaction-preparation)
+checks this stage independently of the enclosing Volume integration.
+
 ## Failure and resource contract
 
 Reject incorrect key/value lengths before slicing, nonzero reserved bytes,

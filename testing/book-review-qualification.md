@@ -16,6 +16,7 @@ source, chapter coverage and architectural rationale. Results belong in
 - [Snapshot checkpoint extension](#snapshot-checkpoint-extension)
 - [Bounded key cursor prerequisite](#bounded-key-cursor-prerequisite)
 - [Typed snapshot tree access](#typed-snapshot-tree-access)
+- [Lifetime transaction preparation](#lifetime-transaction-preparation)
 - [Existing complementary gates](#existing-complementary-gates)
 - [Required future experiments](#required-future-experiments)
 - [Normative coverage map](#normative-coverage-map)
@@ -170,6 +171,32 @@ envelope at the maximum supported region count without materializing that pool.
 Namespace range checks exclude region headers and permanent allocator storage;
 bitmap ownership, intent-log exclusion and cross-tree alias detection remain
 obligations of the enclosing transaction/checker integration.
+
+## Lifetime transaction preparation
+
+Run `cargo test -p afsplus-core --test snapshot_lifetime_edits -- --nocapture`.
+Use persistent AFST nodes with a test-only allocator and a per-physical-block
+oracle. Require birth preservation across splitting and unordered retirement,
+canonical coalescing, exact retained totals/cursor updates, and unchanged old
+COW tree bytes. Reallocation after a ledger ownership gap must establish a new
+birth; release and reuse in one edit must fail.
+
+A 600-record sparse ledger's one-record retirement loads exactly the affected
+record and its two neighbors. Require at most nine preparation reads and fewer
+than twenty mutation device reads, with reported reads matching tracing. Report
+loaded records, traversal page equivalents, written nodes and mutation page
+peak; these are algorithmic resource counters, not host RSS measurements.
+
+Place a protecting view on the second registry page. Release must fail; an
+insufficient registry-scan budget must also fail. Test overlapping allocations,
+missing/double retirements, same-transaction birth retirement, live/changed/double
+transfers, invalid cursors, insufficient edit memory and a corrupt retained sum.
+These preparation failures must cause no allocator calls, writes or flushes.
+
+The fixture publishes tree images without Volume or bitmap ownership. It does
+not prove integrated checkpoint cuts, quarantine delay, busy handles, namespace
+immutability or reboot recovery. Those remain requirements of the integrated
+snapshot gate; the format feature cannot be enabled on this evidence alone.
 
 ## Existing complementary gates
 

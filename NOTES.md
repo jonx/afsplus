@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Prepare transactional lifetime edits](#2026-09-14---prepare-transactional-lifetime-edits)
 - [2026-09-14 - Read snapshot trees with bounded contextual checks](#2026-09-14---read-snapshot-trees-with-bounded-contextual-checks)
 - [2026-09-14 - Bind snapshot roots in the checkpoint codec](#2026-09-14---bind-snapshot-roots-in-the-checkpoint-codec)
 - [2026-09-14 - Add bounded key pages for persistent maintenance cursors](#2026-09-14---add-bounded-key-pages-for-persistent-maintenance-cursors)
@@ -56,6 +57,21 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 - Prepare transactional lifetime edits
+
+Added the lifetime mutation builder on the shared COW tree engine. It fetches
+affected committed records and neighbors before editing, preserves birth across
+splits, coalesces final equal lifetimes and adjusts retained totals with checked
+arithmetic. Requested transfers are matched against their exact committed records
+and the complete paged registry. Record and registry work budgets fail closed.
+The result includes staged tree writes and runs requiring atomic quarantine.
+
+Six tests compare disk-tree state with a per-block oracle, preserve old COW nodes,
+exercise second-page snapshot protection and require invalid preparation to stop
+before allocator calls. A 600-record sparse tree loads three lifetime records
+for one retirement. This unit leaves the Volume commit hooks, real bitmap
+quarantine, snapshot handles and integrated crash tests for the following work.
 
 ## 2026-09-14 - Read snapshot trees with bounded contextual checks
 
