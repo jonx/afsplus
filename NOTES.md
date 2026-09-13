@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-13 — Prepare the complete implementation handoff](#2026-09-13--prepare-the-complete-implementation-handoff)
 - [2026-09-13 — Exercise repeated pressure and define the snapshot experiment](#2026-09-13--exercise-repeated-pressure-and-define-the-snapshot-experiment)
 - [2026-09-13 — Reconcile invariants and block writes after uncertain publication](#2026-09-13--reconcile-invariants-and-block-writes-after-uncertain-publication)
 - [2026-09-13 — Complete BFS book review and fragmented allocation regression](#2026-09-13--complete-bfs-book-review-and-fragmented-allocation-regression)
@@ -47,6 +48,21 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-13 — Prepare the complete implementation handoff
+
+Added the [audit work queue](implementation/audit-work-queue.md) so snapshot
+work cannot displace salvage, repair, backup/restore, adapter/cache/device,
+catalog/query/stream, security, tiny-file and sustained application findings.
+Each row names its owner, existing evidence and completion gate.
+
+John authorized the recommended next step: measure the conservative
+oldest-snapshot retention barrier first. Q4 and the proposal record the
+experiment order; the shipping accounting mechanism, registry encoding and
+retention limits are not selected by that authorization. The handoff identifies
+the relevant source paths, invariant boundaries and format-review requirements.
+No snapshot implementation or additional runtime qualification is claimed.
+
 
 ## 2026-09-13 — Exercise repeated pressure and define the snapshot experiment
 

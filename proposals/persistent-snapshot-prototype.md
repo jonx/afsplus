@@ -52,7 +52,9 @@ No byte layout or feature bit is assigned by this proposal.
 
 ## S2: Retention accounting experiment
 
-Compare two candidates with the same workload and immutable view oracle:
+Start with the conservative oldest-snapshot barrier as the measurement baseline.
+Compare precise accounting against the same workload and immutable view oracle
+if the baseline fails the agreed resource budgets:
 
 | Candidate | Safety argument | Cost and deciding experiment |
 |---|---|---|
@@ -111,6 +113,6 @@ and reclamation under interruption before accepting either option.
    compatibility classification, parser corruption cases, repair behavior,
    capability semantics and CPU/RAM/I/O/amplification measurements.
 
-The next decision is the retention prototype strategy in S2. Registry encoding,
+The experiment starts with the S2 conservative baseline. Registry encoding,
 handle deletion and admission limits stay explicit Q4 work rather than being
 chosen accidentally in an implementation.

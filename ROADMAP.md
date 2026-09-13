@@ -302,3 +302,8 @@ Choose implementations through the deciding experiments in
 [open questions](implementation/open-questions.md), record accepted decisions
 in ADRs, and turn accepted experiments into milestone gates. Missing platform
 support is implementation work with an owner, not a permanent scope limit.
+
+The [audit implementation queue](implementation/audit-work-queue.md) carries
+the complete follow-up order and next-session entry point. Start with the
+conservative snapshot-retention experiment while preserving the independent
+recovery, adapter, discovery and application qualification work.
