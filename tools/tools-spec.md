@@ -3,6 +3,20 @@
 The commands in this document are product tools. Development-only build and
 qualification scripts are indexed separately in [README.md](README.md).
 
+<!-- toc -->
+
+- [Common command contract](#common-command-contract)
+- [mkafsplus](#mkafsplus)
+- [afsplus-info](#afsplus-info)
+- [afsplus-dump](#afsplus-dump)
+- [afsplus-extract](#afsplus-extract)
+- [afsplus-check](#afsplus-check)
+- [afsplus-resize](#afsplus-resize)
+- [afsplus-catalog](#afsplus-catalog)
+- [afsplus-fuse](#afsplus-fuse)
+
+<!-- /toc -->
+
 ## Common command contract
 
 Implemented commands accept `-h` or `--help`, print help on standard output
@@ -13,7 +27,7 @@ tool: error[E_IDENTIFIER]: precise context
 ```
 
 The stable identifier lets tests and integrations classify a failure without
-matching prose. Exit status is shared by all three tools:
+matching prose. Exit status is shared by the commands:
 
 | Status | Meaning |
 |---|---|
@@ -107,6 +121,56 @@ Unknown `INCOMPAT` bits stop the dump with `E_FEATURE`; guessing the layout of
 unknown authoritative state would make a debugging tool misleading. Invalid
 identification, checkpoint, state, extent-map and intent-log surfaces retain
 distinct diagnostic IDs. The `afsplus-dump` JSON schema version is 1.
+
+## afsplus-extract
+
+```text
+afsplus-extract [--max-entries N] [--max-bytes N] <image> <new-directory>
+```
+
+Extract readable namespace objects from an offline image's selected checkpoint
+using an OS read-only descriptor and `NO_CHANGES` mount. Use a stable offline
+copy: concurrent writers invalidate the consistency assumption. The output
+directory must be new. Original names never become host paths; file content
+uses `object-ID.bin`, with original name bytes and parent/child identities
+recorded in `manifest.jsonl`. Hard-linked objects are extracted once.
+
+The manifest is streaming JSON Lines, with `schema_version: 1` and
+`tool: "afsplus-extract"` on each line. Record order is header, traversal
+records, summary. `link` records contain original UTF-8 bytes as `name_hex`;
+`object` records contain every decoded core-record field, including timestamp
+seconds/nanoseconds, protection, flags, link count and content generation.
+`content` records bind object IDs to output files, recovered byte counts and
+completion. Physical data-root fields are diagnostic only. File byte streams
+materialize holes/unwritten extents as zeros; physical sparseness and reflink
+sharing are not reproduced on the destination filesystem.
+
+The header declares `scope: "selected-checkpoint"` and
+`data_integrity: "unchecked-payload"`: payload checksums are unavailable, so
+successful reads cannot establish original content integrity. Unknown feature
+semantics are refused with `E_FEATURE` before output creation. Unsupported
+object types and unreadable objects/directories become explicit findings;
+unaffected siblings continue. A damaged directory can hide all its descendants.
+Unreachable objects and damaged mount roots require additional salvage methods.
+
+Durable log records excluded from the checkpoint produce `E_PENDING_LOG`;
+an undecodable nonzero log tail produces `E_LOG_TAIL`. This extraction does
+not replay the log. Retain the source image for subsequent recovery.
+
+Defaults cap namespace links at 100,000 and extracted bytes at 1 GiB. Explicit
+positive limits override these values. Entry-limit truncation and skipped files
+produce findings. Streaming payload memory is 64 KiB; identity/queue memory is
+proportional to admitted entries, plus the core's metadata-reader resources.
+A data-read failure keeps the recovered prefix under `object-ID.partial` and
+reports its offset. Output creation always refuses existing filenames.
+
+Exit 0 means the declared checkpoint traversal finished without findings;
+exit 1 indicates partial extraction or rejected media; exit 2 indicates usage
+or host I/O failure. Require a final summary with `complete: true` before
+accepting a complete traversal. Missing/truncated summaries and `.partial`
+files preserve evidence of interrupted work. The manifest documents extraction;
+full metadata-preserving backup/restore is qualified separately under Q11.
+See the [extraction gate](../testing/extraction-qualification.md).
 
 ## afsplus-check
 

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-13 - Add checkpoint extraction with explicit loss reporting](#2026-09-13---add-checkpoint-extraction-with-explicit-loss-reporting)
 - [2026-09-13 - Prepare the integrated snapshot accounting decision](#2026-09-13---prepare-the-integrated-snapshot-accounting-decision)
 - [2026-09-13 - Measure snapshot retention and reclaim traversal](#2026-09-13---measure-snapshot-retention-and-reclaim-traversal)
 - [2026-09-13 — Prepare the complete implementation handoff](#2026-09-13--prepare-the-complete-implementation-handoff)
@@ -50,6 +51,32 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-13 - Add checkpoint extraction with explicit loss reporting
+
+Implemented `afsplus-extract` for Q11. It opens the source with an OS read-only
+descriptor, mounts with NO_CHANGES, and exports readable checkpoint files into
+a new destination. Numeric filenames prevent source names from becoming host
+paths. A streaming JSON Lines manifest preserves original name bytes, object
+and link identities, decoded core metadata and explicit loss findings.
+
+The corruption fixtures recover healthy siblings beside damaged object records
+and directory trees, refuse unreadable mount roots, and compare source bytes
+before and after. Tests cover exact multichunk/sparse logical bytes, hard links,
+Unicode names, timestamp precision, budgets and unknown-feature refusal. A
+read-only spy panics on any source write or flush attempt; injected data-read
+failure preserves the exact 64 KiB prefix, and pending durable log work is
+reported as excluded from checkpoint extraction.
+
+The tool requires a stable offline image. It reports unchecked payload integrity
+and preserves partial artifacts on failure. Raw discovery through damaged roots,
+full metadata-preserving restoration and transactional repair retain separate
+Q11 gates. Corrected the milestone's stale assignment of repair to the grow-
+resize milestone; recovery work follows Q11 under M05/M14.
+
+Validation passed: 266 workspace tests, 10 ignored; formatting, Clippy with
+warnings denied, documentation checks and whitespace checks.
+
 
 ## 2026-09-13 - Prepare the integrated snapshot accounting decision
 

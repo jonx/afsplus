@@ -8,6 +8,7 @@
 
 mod common;
 mod dump;
+mod extract;
 mod info;
 mod mkfs;
 
@@ -37,4 +38,12 @@ where
     I: IntoIterator<Item = OsString>,
 {
     dump::run(args)
+}
+
+/// Extracts readable checkpoint objects into a new, separate directory.
+pub fn run_extract<I>(args: I) -> u8
+where
+    I: IntoIterator<Item = OsString>,
+{
+    extract::run(args)
 }

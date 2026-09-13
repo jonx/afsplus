@@ -43,9 +43,9 @@ as such in the crate docs.
   does not run: link counts, orphaned objects, bitmap ⟺ reachability
   equality, quarantine invariants, and shadow verification of the retained
   older checkpoint (warnings). Human and versioned JSON output (ADR-025).
-- `afsplus-tools` — official `mkafsplus`, `afsplus-info` and `afsplus-dump`
+- `afsplus-tools` — official `mkafsplus`, `afsplus-info`, `afsplus-dump` and `afsplus-extract`
   host commands. The formatter stages and flushes a complete image before
-  publication; both inspectors use an OS read-only descriptor. Info performs
+  publication; inspection and extraction use an OS read-only descriptor. Info performs
   only the three structural header/checkpoint reads, while dump exhaustively
   emits objects, directories, extents, allocation/block ownership,
   reclaim/shared state and the durable intent prefix. Stable diagnostic IDs,
