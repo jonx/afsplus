@@ -38,6 +38,8 @@ enum afsp_feature_class {
  */
 #define AFSP_INCOMPAT_INTENT_LOG              (UINT64_C(1) << 0)
 #define AFSP_INCOMPAT_INTENT_LOG_DATA_UPDATES (UINT64_C(1) << 1)
+/* ADR-072: readers without full snapshot ownership support must reject. */
+#define AFSP_INCOMPAT_PERSISTENT_SNAPSHOTS   (UINT64_C(1) << 2)
 
 enum afsp_object_type {
     AFSP_OBJECT_FILE = 1,

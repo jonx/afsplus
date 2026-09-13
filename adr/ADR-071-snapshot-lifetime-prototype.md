@@ -2,6 +2,7 @@
 
 Status: Accepted for the integrated experiment; shipping wire and resource qualification open
 Amends: ADR-070
+Amended by: ADR-072
 
 ## Context
 

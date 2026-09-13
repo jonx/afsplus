@@ -23,6 +23,10 @@ pub enum TreeKind {
     AllocationRoot,
     /// Volume-wide shared-extent reference tree (ADR-061); owner 0.
     SharedExtents,
+    /// Persistent view registry, owner zero (ADR-072).
+    SnapshotRegistry,
+    /// Snapshot-domain allocation lifetimes, owner zero (ADR-072).
+    SnapshotLifetimes,
 }
 
 impl TreeKind {
@@ -33,6 +37,8 @@ impl TreeKind {
             TreeKind::ExtentMap => 3,
             TreeKind::AllocationRoot => 4,
             TreeKind::SharedExtents => 5,
+            TreeKind::SnapshotRegistry => 6,
+            TreeKind::SnapshotLifetimes => 7,
         }
     }
 
@@ -43,6 +49,8 @@ impl TreeKind {
             3 => Ok(TreeKind::ExtentMap),
             4 => Ok(TreeKind::AllocationRoot),
             5 => Ok(TreeKind::SharedExtents),
+            6 => Ok(TreeKind::SnapshotRegistry),
+            7 => Ok(TreeKind::SnapshotLifetimes),
             _ => Err(FormatError::Invalid("unknown tree kind")),
         }
     }

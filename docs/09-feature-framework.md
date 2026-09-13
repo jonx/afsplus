@@ -59,12 +59,18 @@ The current prototype identification block carries compact `COMPAT`,
 ```text
 INCOMPAT bit 0 = org.aros.afsplus:intent-log
 INCOMPAT bit 1 = org.aros.afsplus:intent-log-data-updates
+INCOMPAT bit 2 = org.aros.afsplus:persistent-snapshots
 ```
 
 Bit 1 depends on bit 0. It distinguishes version-3 records that may reference
 replacement COW data for an existing file from the namespace-only version-2
 record set. This prevents an older log-aware writer from treating a valid but
 unknown record as an ignorable torn tail ([ADR-064](../adr/ADR-064-intent-log-data-update-compatibility.md)).
+
+Bit 2 binds persistent views to their lifetime ownership protocol under
+[ADR-072](../adr/ADR-072-snapshot-record-codecs.md). Implementations must reject
+it until they support the complete protocol; fixed-record codecs alone grant
+no mount capability.
 
 Assigned read-only-compatible identities are:
 

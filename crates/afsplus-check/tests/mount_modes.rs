@@ -154,3 +154,31 @@ fn compatibility_classes_control_mount_policy() {
     rewrite_ident(&mut compat, |ident| ident.features.compat |= UNKNOWN);
     mount(compat).expect("unknown COMPAT is safe to ignore");
 }
+
+#[test]
+fn snapshot_record_codecs_do_not_implicitly_enable_snapshot_mounts() {
+    use afsplus_format::ident::INCOMPAT_PERSISTENT_SNAPSHOTS;
+    let mut image = formatted();
+    rewrite_ident(&mut image, |ident| {
+        ident.features.incompat |= INCOMPAT_PERSISTENT_SNAPSHOTS
+    });
+    for mode in [
+        MountMode::ReadWrite,
+        MountMode::ReadOnly,
+        MountMode::NoChanges,
+        MountMode::Recovery,
+    ] {
+        assert!(matches!(
+            mount_with_options(image.clone(), MountOptions { mode }),
+            Err(CoreError::UnsupportedIncompatFeatures(
+                INCOMPAT_PERSISTENT_SNAPSHOTS
+            ))
+        ));
+    }
+    let report = check_device(&mut image);
+    assert!(!report.is_clean());
+    assert!(report
+        .errors
+        .iter()
+        .any(|error| error.contains("incompatible")));
+}

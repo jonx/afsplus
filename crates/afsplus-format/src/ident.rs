@@ -52,6 +52,9 @@ pub const INCOMPAT_INTENT_LOG: u64 = 1 << 0;
 /// implementations from treating an unknown valid record as an empty/torn
 /// tail and silently losing a completed fsync (ADR-064).
 pub const INCOMPAT_INTENT_LOG_DATA_UPDATES: u64 = 1 << 1;
+/// Persistent snapshot ownership (ADR-072). Codecs alone do not authorize
+/// mounting this feature; the core must qualify the complete lifetime protocol.
+pub const INCOMPAT_PERSISTENT_SNAPSHOTS: u64 = 1 << 2;
 
 /// Shared data extents (ADR-061): reference counts must be honoured on every
 /// write and free, so an implementation without support mounts read-only.

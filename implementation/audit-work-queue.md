@@ -21,7 +21,8 @@ persistent traversal that can pass protected queue entries;
 measure metadata reserves and write amplification. The model's rotating queue
 requires an explicit production representation. Keep snapshot-owned namespace
 metadata separate from allocation/reclaim machinery governed by selectable
-checkpoints. Complete the follow-up format record before adding the negotiated wire representation.
+checkpoints. Use [ADR-072](../adr/ADR-072-snapshot-record-codecs.md) for leaf codecs; define
+checkpoint root binding and transaction sequencing before enabling snapshot mounts.
 
 Before persistent registry implementation, make the proposed encoding and
 compatibility classification reviewable, record the format decision in an ADR,

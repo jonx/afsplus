@@ -7,6 +7,19 @@ The [book review](../docs/33-practical-filesystem-design-review.md) records the
 source, chapter coverage and architectural rationale. Results belong in
 [milestones](../implementation/milestones.md) and [NOTES](../NOTES.md).
 
+<!-- toc -->
+
+- [Executable allocation regression](#executable-allocation-regression)
+- [Executable mixed-I/O oracle](#executable-mixed-io-oracle)
+- [Snapshot accounting model](#snapshot-accounting-model)
+- [Snapshot record codecs](#snapshot-record-codecs)
+- [Existing complementary gates](#existing-complementary-gates)
+- [Required future experiments](#required-future-experiments)
+- [Normative coverage map](#normative-coverage-map)
+- [Repeated low-space and reclamation gate](#repeated-low-space-and-reclamation-gate)
+
+<!-- /toc -->
+
 ## Executable allocation regression
 
 `volume::fragmentation_tests::fragmented_allocation_does_not_repeat_oversized_searches`
@@ -75,6 +88,28 @@ There is no device I/O, so CPU timing, peak RAM, metadata amplification and
 recovery costs require an integrated prototype. Neither candidate qualifies
 for shipping from this gate. Preserve these cases when integrating registry,
 last-reference tracking, forced COW and a crash-safe reclaim cursor.
+
+## Snapshot record codecs
+
+Run `cargo test -p afsplus-format --test snapshot_records` and
+`cargo test -p afsplus-check --test mount_modes`. The
+[record specification](../spec/snapshot-records.md) follows
+[ADR-072](../adr/ADR-072-snapshot-record-codecs.md).
+
+Require fixed expected bytes, explicit key/value endianness, ID exhaustion,
+every truncated/oversized record length, each reserved byte, future and invalid
+lifetimes, physical-range overflow and control bounds. Construct complete
+checksummed registry/ledger leaf block images, cross-check their typed values,
+and require corruption rejection across header, payload and padding mutations.
+These are standalone metadata images; full snapshot-enabled volume images
+belong to the integrated persistence gate.
+
+Until complete ownership support is integrated, all Rust mount modes and the
+checker must refuse the snapshot feature. The portable-C reader probe also
+mutates a valid image's identification, reseals its checksum, and requires
+`AFSPR_ERR_UNSUPPORTED` for the snapshot bit. Run
+`make portable-c-gate` for that independent rejection contract. A codec test
+never grants snapshot mount capability or proves create/delete crash safety.
 
 ## Existing complementary gates
 

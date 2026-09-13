@@ -1,4 +1,4 @@
-registry_version = 4
+registry_version = 5
 
 [[feature]]
 id = "org.aros.afsplus:intent-log"
@@ -131,3 +131,14 @@ authoritative = true
 rebuildable = true
 discardable = false
 description = "Reserved internal object ID 2 indexes open-unlinked files for bounded post-close and post-crash cleanup (ADR-066). Unaware writers mount read-only; the visible namespace remains readable."
+
+[[feature]]
+id = "org.aros.afsplus:persistent-snapshots"
+short = "persistent-snapshots"
+class = "incompat"
+state_model = "disabled-enabled-active"
+lifecycle = "experimental"
+authoritative = true
+rebuildable = false
+discardable = false
+description = "Persistent namespace views and physical-run lifetime ownership (ADR-071/072). INCOMPAT bit 2; mount support requires the complete registry, reclamation and crash protocol."

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 
 #include "libafsplus_reader.h"
+#include "afsplus_format.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -605,6 +606,16 @@ int main(int argc, char **argv)
     memory_ops.read_blocks = memory_read_blocks;
     memory_ops.block_count = block_count;
     memory_ops.block_size = TEST_BLOCK_SIZE;
+
+    mutated = pristine;
+    put_le64(mutated.blocks + 32u + 153u,
+             first.incompat_features | AFSP_INCOMPAT_PERSISTENT_SNAPSHOTS);
+    reseal(mutated.blocks);
+    status = probe_detailed(&memory_ops, scratch, sizeof(scratch), &fallback,
+                            &diagnostic);
+    require(status == AFSPR_ERR_UNSUPPORTED,
+            "snapshot ownership feature was accepted without implementation");
+
     selected = first.selected_checkpoint;
     other = selected ^ 1u;
 

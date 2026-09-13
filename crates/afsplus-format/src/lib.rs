@@ -36,6 +36,7 @@ pub mod omap;
 pub mod reclaim;
 pub mod region;
 pub mod retired;
+pub mod snapshot;
 pub mod tree;
 
 use core::fmt;

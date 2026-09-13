@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-13 - Add persistent snapshot record codecs](#2026-09-13---add-persistent-snapshot-record-codecs)
 - [2026-09-13 - Accept the integrated lifetime experiment and handle rule](#2026-09-13---accept-the-integrated-lifetime-experiment-and-handle-rule)
 - [2026-09-13 - Add checkpoint extraction with explicit loss reporting](#2026-09-13---add-checkpoint-extraction-with-explicit-loss-reporting)
 - [2026-09-13 - Prepare the integrated snapshot accounting decision](#2026-09-13---prepare-the-integrated-snapshot-accounting-decision)
@@ -52,6 +53,26 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-13 - Add persistent snapshot record codecs
+
+Added ADR-072 and the snapshot-record specification before codec implementation.
+Registry and lifetime values use fixed-size independent byte fields, separate
+AFST kinds and a negotiated incompatible identity. Validation covers reserved
+bytes, contextual generation/range bounds, ID exhaustion and lifetime endpoints.
+Conformance tests construct full checksummed leaf images and test corruption.
+
+The core supported-feature mask deliberately excludes snapshot ownership until
+integration. A named Rust mount/checker regression and an independent portable-C
+probe require feature rejection. Checkpoint root binding, lifetime maintenance,
+reader handles and crash-safe publication are the next integration work.
+
+Validation passed: 271 workspace tests, 10 ignored; formatting, Clippy with
+warnings denied, documentation and whitespace checks. The portable-C gate
+passed its reader/writer, sanitizer and static-analysis checks. Its optional
+m68k compiler and CMake checks were skipped because the configured tools were
+unavailable; those runs provide no m68k compilation or CMake-package evidence.
+
 
 ## 2026-09-13 - Accept the integrated lifetime experiment and handle rule
 
