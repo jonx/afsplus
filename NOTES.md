@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-13 - Accept the integrated lifetime experiment and handle rule](#2026-09-13---accept-the-integrated-lifetime-experiment-and-handle-rule)
 - [2026-09-13 - Add checkpoint extraction with explicit loss reporting](#2026-09-13---add-checkpoint-extraction-with-explicit-loss-reporting)
 - [2026-09-13 - Prepare the integrated snapshot accounting decision](#2026-09-13---prepare-the-integrated-snapshot-accounting-decision)
 - [2026-09-13 - Measure snapshot retention and reclaim traversal](#2026-09-13---measure-snapshot-retention-and-reclaim-traversal)
@@ -51,6 +52,15 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-13 - Accept the integrated lifetime experiment and handle rule
+
+John approved the lifetime-ledger prototype and selected busy-on-active-reader
+snapshot deletion. ADR-071 records both decisions and amends ADR-070. The
+proposal, Q4 and handoff link that decision. The follow-up wire record and
+integrated resource/crash evidence precede acceptance of persistent support.
+Documentation and whitespace checks passed.
+
 
 ## 2026-09-13 - Add checkpoint extraction with explicit loss reporting
 

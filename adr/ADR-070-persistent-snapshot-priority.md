@@ -2,6 +2,7 @@
 
 Status: Accepted direction; persistent representation and retention policy require prototype evidence
 Amends: ADR-069
+Amended by: ADR-071
 
 ## Context
 

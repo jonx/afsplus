@@ -126,10 +126,9 @@ and reclamation under interruption before accepting either option.
 
 ## S5: Integrated accounting candidate for review
 
-Decision requested: prototype a physical-run lifetime ledger and bounded
-persistent traversal, with full COW while snapshots exist. This chooses the
-next integrated experiment. Shipping encoding and resource budgets require
-its evidence and a format ADR.
+The integrated experiment follows [ADR-071](../adr/ADR-071-snapshot-lifetime-prototype.md):
+physical-run lifetimes, bounded persistent traversal and full COW while snapshots
+exist. Shipping encoding and resource budgets require integrated evidence.
 
 The ledger maps physical starts to length, allocation birth, and optional
 last-live-reference retirement generation. Adjacent runs merge only when all
@@ -179,8 +178,8 @@ ordinary quarantine publication costs to size emergency reserves. Report live,
 retained, quarantine and immediately available capacity separately. A physical
 block shared across snapshots consumes capacity once.
 
-Handle candidate: return busy on deletion while local snapshot readers hold
-handles. This keeps the first persistence contract free of deferred-deletion
+The accepted handle rule in [ADR-071](../adr/ADR-071-snapshot-lifetime-prototype.md)
+returns busy on deletion while local snapshot readers hold handles. This keeps the first persistence contract free of deferred-deletion
 tombstones. Closing handles permits explicit deletion; a reboot releases
 runtime handles while preserving registered views. A later unlink-like policy
 requires a separate decision and crash-safe tombstone proof.

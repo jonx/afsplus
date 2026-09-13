@@ -15,12 +15,13 @@ as the regression baseline. Persistent consistent snapshots are the accepted
 direction under [ADR-069](../adr/ADR-069-consistent-snapshots-first.md) and
 [ADR-070](../adr/ADR-070-persistent-snapshot-priority.md).
 
-Resolve lifetime metadata across reflinks and last-live-reference retirement;
-choose a bounded persistent traversal that can pass protected queue entries;
+Implement [ADR-071](../adr/ADR-071-snapshot-lifetime-prototype.md): lifetime
+metadata across reflinks and last-live-reference retirement, plus a bounded
+persistent traversal that can pass protected queue entries;
 measure metadata reserves and write amplification. The model's rotating queue
 requires an explicit production representation. Keep snapshot-owned namespace
 metadata separate from allocation/reclaim machinery governed by selectable
-checkpoints. Record the accounting choice under Q4 before freezing it.
+checkpoints. Complete the follow-up format record before adding the negotiated wire representation.
 
 Before persistent registry implementation, make the proposed encoding and
 compatibility classification reviewable, record the format decision in an ADR,
