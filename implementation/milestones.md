@@ -68,6 +68,7 @@ exist before that gate can run.
   - [Core diagnostic path inventory](#core-diagnostic-path-inventory)
   - [Tiny-cache test matrix tasks](#tiny-cache-test-matrix-tasks)
   - [Fuzzing and property-test tasks](#fuzzing-and-property-test-tasks)
+  - [Codec surface inventory](#codec-surface-inventory)
 - [Stage A executable-core audit](#stage-a-executable-core-audit)
 - [Individual list-item completion](#individual-list-item-completion)
 
@@ -138,6 +139,7 @@ and [subsystem trace identities](../docs/26-debug-observability.md).
 | Export and replay API/window context, including explicit deferred scenarios | Complete | [Version-5 contract](../testing/developer-harness.md#api-and-window-replay-bundles); 60 retained cases, 39 legacy comparisons and full workspace qualification |
 | Inventory implemented publication/subsystem paths and their missing event hooks | In progress | [Source-path inventory](#core-diagnostic-path-inventory); common-tail routing and mount attachment gap inspected; family-specific test mapping and pre-tail writes require completion |
 | Correlate object/block/view identities and allocator/tree/cache/reclaim paths | To do | Bounded events join API/window/commit context; cover the preceding inventory with normal/refusal/fault comparisons against unobserved execution |
+| Publication-family observation equivalence baseline | Complete | [Eight-family matrix](../testing/developer-harness.md#publication-family-observation-equivalence): 192 observed/unobserved pairs; 557 workspace tests pass, 10 explicit ignores, fmt/Clippy/7×4096 codec cases pass; retained `build/publication-families-92wlsaqm` |
 | Qualify export and event loss for the added core paths | To do | Retained replay artifacts, malformed-field controls and unchanged image/I/O results for each added path |
 
 Close `a-flight` only when these finite core tasks have evidence. Native adapters,
@@ -183,9 +185,10 @@ reclaim transitions; attach observation before mount recovery and to standalone
 format/verification entry points; qualify every named publication family and
 export/loss path. Existing wire versions must retain their replay contracts.
 
-This is a partial source audit, not closure of the inventory task. Formatting,
-standalone verification, pre-tail data writes, individual publication callers
-and diagnostic test ownership require inspection. Platform adapters keep their
+This is a partial source audit, not closure of the inventory task. The rows
+identify formatting, verification and pre-tail gaps; detailed subsystem
+transition coverage and test ownership for every publication caller require
+completion. Platform adapters keep their
 separate qualification owners in the [audit queue](audit-work-queue.md).
 
 ### Tiny-cache test matrix tasks
@@ -213,13 +216,37 @@ Parent: `a-fuzz`, roadmap entry `roadmap-32`. Origin:
 |---|---|---|
 | Seven codec targets and deterministic mutation/replay controls | Complete | [Rust codec gate](../testing/fuzzing.md#rust-codec-gate) |
 | Baseline generated semantic scenarios with exact byte/prefix oracles | Complete | [Seeded properties](../testing/fuzzing.md#seeded-semantic-properties) |
-| Audit executable wire surfaces against the target matrix | To do | Explicit coverage for snapshot-bearing checkpoints, object types/optional roots, reclaim codecs and multi-record intent sequences; record other implemented omissions |
+| Audit executable wire surfaces against the target matrix | In progress | [Codec surface inventory](#codec-surface-inventory) maps direct dispatch omissions and seed-shape gaps; operation generators and caller validation remain to audit |
 | Add missing executable codec targets and semantic operation generators | To do | Deterministic seeds, malformed/resealed inputs, independent accepted-state checks and bounded failure behavior |
 | Retain and replay failure/property cases across cache profiles | To do | Reproducible artifacts and negative controls for each newly covered family |
 
 Close `a-fuzz` when executable host surfaces and operation families have the
 required coverage. Frozen-field decisions, portable C qualification and future
 catalog/change-stream implementations keep their separate stage owners.
+
+### Codec surface inventory
+
+Owner: `a-fuzz` / `roadmap-32`, board task 3 (`codex`). Source inspection
+of [the fuzz dispatcher](../fuzz/src/lib.rs) distinguishes an executed target
+from an implemented decoder and a seed from a complete semantic family.
+
+| Surface | Inspected dispatch / seed | Required next coverage |
+|---|---|---|
+| Identification, checkpoint, tree node, object record, intent log, bitmap page, region descriptor | Seven direct decoder targets; deterministic mutation and accepted-input re-encoding | Preserve existing artifact target IDs and seed reproducibility when extending the campaign |
+| Snapshot-bearing checkpoint | `checkpoint_seed` sets `snapshot_roots: None` | Add explicit valid snapshot-root seeds and malformed root combinations; chance mutations are not evidence that the enabled form is reached |
+| Snapshot leaf values and keys | [Snapshot codecs](../crates/afsplus-format/src/snapshot.rs) decode registry control, snapshot records, lifetime records, ledger state and keys; no direct dispatch target | Exercise exact lengths, reserved fields, generation/block limits and caller validation separately from the enclosing tree checksum |
+| Reclaim root, segment and table | [Reclaim codecs](../crates/afsplus-format/src/reclaim.rs) have distinct decoders; no direct dispatch target | Valid structured seeds, truncation/resealed corruption and capacity/count/cursor relations with independent accepted-state checks |
+| Inline symlink and metadata-specific object decoding | [Object codecs](../crates/afsplus-format/src/object.rs) include borrowed symlink and metadata entry points; canonical object seed is a regular file | Explicit valid symlink and object-type seeds, UTF-8/length/flags/tail invariants, short-buffer behavior; identify which checks generic decoding already shares |
+| Legacy directory, object map and retired list | [Directory](../crates/afsplus-format/src/dir.rs), [object map](../crates/afsplus-format/src/omap.rs), [retired list](../crates/afsplus-format/src/retired.rs); [roundtrip tests](../crates/afsplus-format/tests/roundtrip.rs) exercise them, but direct fuzz dispatch omits them | Preserve these executable readers in the audit even when mounted core paths use newer trees; qualify them or document an explicit removal decision |
+| Tree payload meaning and cross-record relations | Generic tree target decodes node structure from an ObjectMap leaf seed; [directory](../crates/afsplus-core/src/directory.rs), [extent map](../crates/afsplus-core/src/extent_map.rs), [object map](../crates/afsplus-core/src/object_map.rs), [allocation root](../crates/afsplus-core/src/allocation_root.rs) and [shared extents](../crates/afsplus-core/src/shared_extents.rs) validate payloads against geometry and ownership | Add generated valid/invalid payloads through core entry points, including range overflow, refcounts and canonical ordering; generic tree admission does not prove application-level validity |
+| Directory spelling and comparison keys | [Name-key validation](../crates/afsplus-core/src/name_key.rs) checks the stored key against the versioned normalization algorithm | Generated Unicode spelling/key pairs, length bounds and wrong-key rejection; preserve original spelling and locale independence |
+| Intent record versus replay sequence | Seed contains create/delete/rename/write/truncate operations within one record | Separate multi-record generation/sequence/prefix and restartability properties from single-record codec admission |
+
+This inventory does not close `a-fuzz`. Tree payload-specific validators, core
+mapping codecs, operation generators and retained failing-case coverage need
+an explicit disposition before the finite gate can close. Plain helper modules
+such as endian and checksum routines are dependencies, not automatically
+separate semantic targets.
 
 ## Stage A executable-core audit
 

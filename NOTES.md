@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Extend publication-family diagnostic comparisons](#2026-09-15--extend-publication-family-diagnostic-comparisons)
 - [2026-09-14 - Export and replay API and deferred-window diagnostics](#2026-09-14---export-and-replay-api-and-deferred-window-diagnostics)
 - [2026-09-14 - Map Stage A acceptance gates to visible roadmap entries](#2026-09-14---map-stage-a-acceptance-gates-to-visible-roadmap-entries)
 - [2026-09-14 - Correlate deferred windows and qualify the real FSKit boundary](#2026-09-14---correlate-deferred-windows-and-qualify-the-real-fskit-boundary)
@@ -141,6 +142,38 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Extend publication-family diagnostic comparisons
+
+The Stage A source audit identified fourteen callers of the shared publication
+tail and separated routing evidence from executed observation tests. It also
+identified writes before that tail (window payloads and tree-cache spills),
+mount-time recovery before recorder attachment, and standalone formatter and
+verifier entry points. These findings are tracked under `a-flight` in
+[the diagnostic inventory](implementation/milestones.md#core-diagnostic-path-inventory).
+
+A new [flight integration test](crates/afsplus-core/tests/flight.rs) exercises
+eight publication families at all four cache profiles, two ring capacities,
+and successful execution or failures at flush index zero or one. All 192
+observed/unobserved pairs passed the targeted run, comparing results, I/O and
+every image block. The first compile exposed a test-only accessor error: the
+fault backend has a consuming `into_inner`, not a borrowed `inner`; the test
+was corrected to consume the wrappers after comparing their traces.
+
+The [test procedure](testing/developer-harness.md#publication-family-observation-equivalence)
+limits this evidence to observation equivalence and the selected failure
+indices. It does not claim power-cut coverage, every publication family, or
+new object/block/view events. The full quality gate passed: 557 workspace tests, zero failures and ten
+explicit ignores across 89 groups; formatting, Clippy and seven codec targets
+with 4096 cases each also passed. The retained evidence directory is
+`build/publication-families-92wlsaqm`; source fingerprints matched through
+validation. This is hosted evidence, without a new hardware qualification.
+
+While the Rust sources stayed fixed, the codec audit identified distinct
+snapshot/reclaim/symlink/legacy decoder surfaces and tree-payload validators
+that the seven-target dispatcher does not directly cover. Their requirements
+are recorded in the [codec inventory](implementation/milestones.md#codec-surface-inventory),
+without closing the fuzzing gate.
 
 ## 2026-09-14 - Export and replay API and deferred-window diagnostics
 

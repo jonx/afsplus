@@ -1046,3 +1046,114 @@ fn enabling_observation_mid_window_attaches_before_the_next_read_api() {
     assert_eq!(events[1].kind, EventKind::ApiBegin);
     assert_eq!(events[1].window, 1);
 }
+
+#[test]
+fn publication_families_preserve_results_images_and_io_with_small_rings() {
+    use afsplus_core::flight::ApiMethod;
+    use afsplus_core::{mount_with_options, MountOptions};
+    use afsplus_format::OBJECT_ROOT;
+
+    let now = Timespec::default();
+    let mut fixture = mount(window_image(false)).unwrap();
+    let source = fixture
+        .create_file_in_root("source", b"original", now)
+        .unwrap();
+    let original = fixture.into_device();
+    let methods = [
+        ApiMethod::CreateDirectoryInRoot,
+        ApiMethod::CreateSymlink,
+        ApiMethod::LinkFile,
+        ApiMethod::Rename,
+        ApiMethod::CloneFile,
+        ApiMethod::DeleteFileInRoot,
+        ApiMethod::TruncateFile,
+        ApiMethod::SetObjectProtection,
+    ];
+    for pages in [2, 4, 8, usize::MAX] {
+        for (family, method) in methods.into_iter().enumerate() {
+            for failure in [None, Some(0), Some(1)] {
+                for capacity in [1, 1024] {
+                    let mut devices = Vec::new();
+                    let mut results = Vec::new();
+                    for observed in [false, true] {
+                        let mut volume = mount_with_options(
+                            TraceBackend::new(FaultBackend::new(
+                                original.clone(),
+                                FaultPlan {
+                                    fail_flush_index: failure,
+                                    ..Default::default()
+                                },
+                            )),
+                            MountOptions {
+                                tree_cache_pages: NonZeroUsize::new(pages),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                        if observed {
+                            let mut ring = recorder(capacity);
+                            ring.enable_api_observation();
+                            volume.replace_flight_recorder(Some(ring));
+                        }
+                        let result = match family {
+                            0 => volume
+                                .create_directory_in_root("directory", now)
+                                .map(|_| ()),
+                            1 => volume
+                                .create_symlink(OBJECT_ROOT, "symbolic", "source", now)
+                                .map(|_| ()),
+                            2 => volume.link_file(source, OBJECT_ROOT, "hard", now),
+                            3 => volume.rename(OBJECT_ROOT, "source", OBJECT_ROOT, "renamed", now),
+                            4 => volume
+                                .clone_file(source, OBJECT_ROOT, "clone", now)
+                                .map(|_| ()),
+                            5 => volume.delete_file_in_root("source", now),
+                            6 => volume.truncate_file(source, 3, now),
+                            7 => volume.set_object_protection(source, 7, now),
+                            _ => unreachable!(),
+                        };
+                        assert_eq!(
+                            result.is_ok(),
+                            failure.is_none(),
+                            "{method:?}, pages={pages}, failure={failure:?}"
+                        );
+                        results.push(format!("{result:?}"));
+                        if observed {
+                            let ring = volume.replace_flight_recorder(None).unwrap();
+                            let last = ring.events().last().unwrap();
+                            assert_eq!(last.api.method, Some(method));
+                            assert_eq!(
+                                last.kind,
+                                if result.is_ok() {
+                                    EventKind::ApiSucceeded
+                                } else {
+                                    EventKind::ApiFailed
+                                }
+                            );
+                            if capacity == 1 {
+                                assert!(ring.dropped() > 0);
+                            } else {
+                                assert_eq!(ring.dropped(), 0);
+                                assert!(ring.events().any(|event| event.kind == EventKind::Begin));
+                            }
+                        }
+                        devices.push(volume.into_device());
+                    }
+                    assert_eq!(results[0], results[1]);
+                    assert_eq!(devices[0].events(), devices[1].events());
+                    let images: Vec<_> = devices
+                        .into_iter()
+                        .map(|device| device.into_inner().into_inner())
+                        .collect();
+                    for lba in 0..original.total_blocks() {
+                        assert_eq!(
+                            images[0].peek(lba),
+                            images[1].peek(lba),
+                            "{method:?}, pages={pages}, failure={failure:?}, lba={lba}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

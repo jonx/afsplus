@@ -35,6 +35,7 @@
 - [Common checkpoint-tail flight recorder](#common-checkpoint-tail-flight-recorder)
 - [Category selection and live diagnostics](#category-selection-and-live-diagnostics)
 - [Core API call spans](#core-api-call-spans)
+  - [Publication-family observation equivalence](#publication-family-observation-equivalence)
 - [Deferred-window observation](#deferred-window-observation)
 - [API and window replay bundles](#api-and-window-replay-bundles)
 - [Selected-category and live-delivery bundles](#selected-category-and-live-delivery-bundles)
@@ -1123,6 +1124,28 @@ wrappers. Pure getters, raw-device access, recorder control, constructors,
 mount/recovery, handle destruction and platform adapters need their own scope.
 Object/block/view identifiers and platform coverage are owned by the
 [internal coverage queue](../implementation/audit-work-queue.md#complete-work-queue).
+
+### Publication-family observation equivalence
+
+Run the `afsplus-core` integration test
+`publication_families_preserve_results_images_and_io_with_small_rings` in
+[flight.rs](../crates/afsplus-core/tests/flight.rs). It exercises directory
+creation, symlink creation, hardlink creation, rename, whole-file clone, unlink,
+truncate and protection updates independently from the same formatted fixture.
+Each family runs at 2/4/8/unlimited cache pages, with no injected failure or a
+failure at flush index 0 or 1, and with ring capacity 1 or 1024.
+
+For each combination, compare the exact result, block-I/O trace and every image
+block between unobserved and observed execution. Require a successful result
+without injection and an error with injection. The retained final API event
+must identify the outer method and its matching outcome. A one-event ring must
+report loss; the larger ring must retain a commit-begin event without loss.
+
+These are observation-equivalence tests, not power-cut or mount-recovery
+qualification. They cover the two selected flush indices, not every possible
+write, read or barrier failure. Internal object/block/view event coverage has
+its separate owner in the
+[diagnostic inventory](../implementation/milestones.md#core-diagnostic-path-inventory).
 
 ## Deferred-window observation
 
