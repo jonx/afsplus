@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Measure requested heap across real filesystem phases](#2026-09-14--measure-requested-heap-across-real-filesystem-phases)
 - [2026-09-14 — Explain each completion-table entry](#2026-09-14--explain-each-completion-table-entry)
 - [2026-09-14 — Require checker evidence in replay verdicts](#2026-09-14--require-checker-evidence-in-replay-verdicts)
 - [2026-09-14 — Show completion on individual stage and phase entries](#2026-09-14--show-completion-on-individual-stage-and-phase-entries)
@@ -123,6 +124,41 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Measure requested heap across real filesystem phases
+
+Added a host-only `afsplus-measure` executable with a narrowly confined System
+allocator forwarding boundary. The filesystem crates retain their unsafe-code
+prohibition. The meter records live requested bytes, phase peaks and successful
+allocation/reallocation deltas; deterministic failure tests prove that refused
+requests preserve both counters and the original allocation.
+
+The fixed-memory workload measures format, mount, sixteen-file creation, boundary
+writes, truncation, rename, deletion, sync, remount, exact content verification
+and both full checker passes. Its 16 MiB fixture and result storage are allocated
+before sampling. The block provider and counters allocate no per-I/O records.
+The report exposes successful I/O, payload denominators and retained/temporary
+heap separately. This closes a measurement blind spot in the earlier bitmap-only
+RAM counter, while leaving cache ownership and steady RSS qualification open.
+
+A retained debug run in `/private/tmp/afsplus-heap-qualification-fho1lfxy` contains
+phase metrics, per-command CPU/RSS and observed source/binary identity with report
+hashes. It used about 0.397 CPU seconds and 21,118,976 bytes peak process RSS.
+These are an instrumentation qualification sample, not a performance baseline.
+The requested-heap peaks above phase entry were 55,558 bytes for creation and
+28,458 bytes for each checker pass; fixture storage stays in the entry baseline.
+Allocator overhead, stack and OS memory require separate measurements.
+
+Validation: 501 Rust tests passed, 10 explicit qualification tests ignored,
+workspace Clippy and formatting passed; three workload report tests, four
+per-command accounting tests and thirteen documentation tests passed. The full
+Rust log is `/private/tmp/afsplus-heap-workspace.log`.
+
+The cache audit also confirmed that volume publication uses the unbounded tree
+entry point. Before enabling constrained profiles, allocation-root node tracking
+must include spilled final nodes and commit metrics must include early spill
+writes. Those requirements are recorded in the Stage A status table; the full
+queue and all native qualification gates are preserved.
 
 ## 2026-09-14 — Explain each completion-table entry
 

@@ -51,6 +51,10 @@ as such in the crate docs.
   reclaim/shared state and the durable intent prefix. Stable diagnostic IDs,
   exit statuses and deterministic JSON schemas are specified in
   [`tools-spec.md`](../tools/tools-spec.md).
+- `afsplus-measure`: host-only requested-heap and I/O workload with separately
+  measured core, remount and checker phases. Its isolated System allocator
+  forwarding boundary measures successful Rust allocation requests. See the
+  [measurement scope](../testing/benchmark-contract.md#phased-requested-heap-workload).
 - `afsplus-backup`: filesystem-neutral archive primitives. PAX record decoding
   borrows admitted input and rejects duplicate keys, malformed lengths and
   exhausted byte/record limits. Profile semantics, integrity and completion

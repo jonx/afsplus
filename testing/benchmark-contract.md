@@ -25,6 +25,7 @@ AFS+ must measure performance and resource use continuously. A new filesystem ha
 - [8. Regression gates](#8-regression-gates)
 - [9. Benchmark philosophy](#9-benchmark-philosophy)
 - [Per-command host accounting](#per-command-host-accounting)
+- [Phased requested-heap workload](#phased-requested-heap-workload)
 
 <!-- /toc -->
 
@@ -295,3 +296,68 @@ A nonzero exit or signal retains its status and makes the wrapper fail. Launch o
 measurement errors produce an explicit error outcome with no invented metrics.
 An absent, incomplete or malformed report cannot certify measurement completion.
 Run `python3 tools/test-measure-command.py` for private temporary-fixture tests.
+
+## Phased requested-heap workload
+
+Build and run the host-only [afsplus-measure](../crates/afsplus-measure/src/main.rs)
+executable for the deterministic `small-files-v1` workload:
+
+```sh
+cargo build -p afsplus-measure --offline
+target/debug/afsplus-measure
+python3 tools/test-measure-workload.py
+```
+
+The executable accepts no arguments or device paths. Its fixed 16 MiB memory
+image is allocated before sampling, with 4096-byte blocks, 256-block regions,
+eight intent-log slots, shared extents enabled, data policy disabled and sensitive
+names. A fixed UUID and operation timestamps make the image repeatable. The core
+uses its default runtime settings. This workload has no configurable cache cap.
+
+The operation ladder creates sixteen 6000-byte files, writes across a block
+boundary in eight files, truncates eight files, renames one and deletes one.
+Separate phases measure format, initial mount, creation, edits, sync, unmount,
+raw checker, remount, exact namespace/content verification, final unmount and
+recovered checker. Both complete checker reports must be clean and the exact
+fifteen-file result must match before a success report is emitted. An assertion
+failure exits unsuccessfully; partial output cannot establish qualification.
+
+Schema version 1 JSON reports each phase's:
+
+- requested Rust heap at entry and exit, peak live requested bytes, peak above
+  entry, acquired bytes and released bytes;
+- elapsed monotonic time, successful logical block reads/writes, bytes and
+  flush calls;
+- explicit application payload read/write denominators, with zero indicating
+  that a corresponding amplification ratio is undefined.
+
+Acquired/released bytes include successful realloc growth/shrink deltas. Failed
+allocation requests leave the counters unchanged. At quiescent phase boundaries,
+`end - start = acquired - released`. Exit bytes describe memory retained at that
+boundary. A peak above entry describes additional live requested bytes during
+the phase; it cannot identify ownership when allocations replace older objects.
+The last edit transaction's bitmap payload peak is reported separately from the
+whole-process heap measurements.
+
+The image and preallocated result-row storage stay live across all samples. The
+block provider and I/O counters allocate no memory while servicing requests;
+there is no growing trace log. Samples include filesystem allocations and small
+workload allocations such as formatted names. JSON formatting occurs after all
+samples. The image CRC32C supports deterministic-output regression checks; source
+and artifact identity require the benchmark bundle's cryptographic hashes.
+
+The [allocator forwarding boundary](../crates/afsplus-measure/src/heap.rs) is
+confined to this host executable's crate. It forwards valid requests to Rust's
+`System` allocator and updates atomic integers without allocation, formatting,
+locking or unwinding in callbacks. Other filesystem crates keep their unsafe-code
+prohibition. Phase reset and sampling require a single-threaded quiescent
+workload. Internal allocator fragmentation, moving-realloc copy peaks, direct C
+allocation, stack, mappings and OS cache memory are outside these counters.
+
+Pair the executable with [per-command accounting](#per-command-host-accounting)
+for CPU and process peak RSS. Those process totals include fixture setup, final
+image checksum and JSON output; they cannot attribute CPU time to individual
+phases. Steady RSS, individual cache ownership, other
+workload families, constrained cache profiles and native resource qualification
+require their own measurements. A 16 MiB fixture allocation is host test overhead
+and does not establish a classic-system memory requirement.

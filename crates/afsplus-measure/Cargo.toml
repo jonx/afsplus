@@ -1,0 +1,19 @@
+[package]
+name = "afsplus-measure"
+description = "Host-only requested-heap and I/O qualification workloads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+afsplus-block = { path = "../afsplus-block" }
+afsplus-format = { path = "../afsplus-format" }
+afsplus-core = { path = "../afsplus-core" }
+afsplus-check = { path = "../afsplus-check" }
+
+# Only heap.rs permits unsafe: a host-only System allocator forwarding boundary.
+# Filesystem libraries keep the workspace-wide prohibition.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"

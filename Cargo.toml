@@ -5,6 +5,7 @@ members = [
     "crates/afsplus-block",
     "crates/afsplus-core",
     "crates/afsplus-check",
+    "crates/afsplus-measure",
     "crates/afsplus-tools",
     "crates/afsplus-vfs",
     "crates/afsplus-backup",
