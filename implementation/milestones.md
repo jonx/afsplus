@@ -65,6 +65,7 @@ exist before that gate can run.
 - [Scoped stage acceptance](#scoped-stage-acceptance)
 - [Stage A task tracking](#stage-a-task-tracking)
   - [Structured flight recorder tasks](#structured-flight-recorder-tasks)
+  - [Core diagnostic path inventory](#core-diagnostic-path-inventory)
   - [Tiny-cache test matrix tasks](#tiny-cache-test-matrix-tasks)
   - [Fuzzing and property-test tasks](#fuzzing-and-property-test-tasks)
 - [Stage A executable-core audit](#stage-a-executable-core-audit)
@@ -135,13 +136,32 @@ and [subsystem trace identities](../docs/26-debug-observability.md).
 | API call/root/parent identities and refusal/unwind outcomes | Complete | [66-entry API scope and tests](../testing/developer-harness.md#core-api-call-spans) |
 | Deferred-window identities and acknowledged versus attempted intent groups | Complete | [Window observation](../testing/developer-harness.md#deferred-window-observation); commit `9ec9591` |
 | Export and replay API/window context, including explicit deferred scenarios | Complete | [Version-5 contract](../testing/developer-harness.md#api-and-window-replay-bundles); 60 retained cases, 39 legacy comparisons and full workspace qualification |
-| Inventory implemented publication/subsystem paths and their missing event hooks | To do | Enumerated path-to-hook/test matrix; distinguish core mount/recovery from later platform adapters |
+| Inventory implemented publication/subsystem paths and their missing event hooks | In progress | [Source-path inventory](#core-diagnostic-path-inventory); common-tail routing and mount attachment gap inspected; family-specific test mapping and pre-tail writes require completion |
 | Correlate object/block/view identities and allocator/tree/cache/reclaim paths | To do | Bounded events join API/window/commit context; cover the preceding inventory with normal/refusal/fault comparisons against unobserved execution |
 | Qualify export and event loss for the added core paths | To do | Retained replay artifacts, malformed-field controls and unchanged image/I/O results for each added path |
 
 Close `a-flight` only when these finite core tasks have evidence. Native adapters,
 external consumer schedules and future unimplemented subsystems retain their
 [full-queue owners](audit-work-queue.md#complete-work-queue).
+
+### Core diagnostic path inventory
+
+Owner: `a-flight` / `roadmap-30`, board task 2 (`codex`). This inventory
+separates source routing from executed diagnostic qualification. A common
+helper does not prove that every caller has an observation-equivalence test.
+
+| Path | Inspected evidence | Coverage disposition and next check |
+|---|---|---|
+| Ordinary checkpoint publication | [Volume](../crates/afsplus-core/src/volume.rs), `commit_transaction` → `commit_transaction_inner` → `commit_transaction_body` | Common tail emits begin, data completion, metadata durability, publication, checkpoint durability and adoption/failure; enumerate caller families and their named normal/refusal/fault tests |
+| Snapshot registry publication | [Snapshot operations](../crates/afsplus-core/src/volume/snapshots.rs), `commit_snapshot_change` calls `commit_transaction_inner` | Same tail; map create/delete/maintenance and retained-view tests separately rather than inferring full coverage from routing |
+| Deferred-window publication | [Volume](../crates/afsplus-core/src/volume.rs), pending-window object-map publication calls `commit_transaction_inner` | Same tail and window identity; inspect writes before this call independently of `DataWritesComplete` |
+| Mount selection and intent recovery | [Mount](../crates/afsplus-core/src/mount.rs), `mount_configured` constructs the volume and invokes `recover_intent_log` or `inspect_intent_log` before returning it | Missing caller-supplied recorder during mount; design bounded attachment before selection/recovery and compare successful, refused and damaged-log mounts without changing mount semantics |
+| Allocator, tree, cache and reclamation | [Event vocabulary](../crates/afsplus-core/src/flight.rs), [allocation attribution](../crates/afsplus-core/src/allocation_trace.rs) | No dedicated subsystem event kinds in this vocabulary; allocation-domain attribution is resource accounting, not an object/block/view event trace. Enumerate subsystem transitions and their test owners before adding hooks |
+
+This is a partial source audit, not closure of the inventory task. Formatting,
+standalone verification, pre-tail data writes, individual publication callers
+and diagnostic test ownership require inspection. Platform adapters keep their
+separate qualification owners in the [audit queue](audit-work-queue.md).
 
 ### Tiny-cache test matrix tasks
 
