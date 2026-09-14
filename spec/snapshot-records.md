@@ -159,13 +159,31 @@ zero net ordinary-queue reduction does not mean the retained scan is finished.
 The core experiment requires explicit edit, view and reclaim budgets. Selecting
 shipping limits requires measured admission and resource qualification under
 [Q4](../implementation/open-questions.md). Host management authorization and
-historical-read access/revocation policy require the
-[Q5](../implementation/open-questions.md) security gate before exposure through
-filesystem-neutral host capabilities. Core read handles do not establish that
+historical-read access/revocation follow
+[ADR-075](../adr/ADR-075-revocable-backup-capability.md) for trusted backup.
+The [Q5](../implementation/open-questions.md) security gate requires testing
+that host contract before exposure through filesystem-neutral capabilities;
+ordinary-user historical browsing remains a separate decision. Core read handles do not establish that
 policy. Full checker ownership, supported writable-mount negotiation and a real backup
 consumer are separate integration gates. `mkfs_with_options` accepts an explicit
 `MkfsOptions::persistent_snapshots` choice for new images; baseline `mkfs`
 keeps the feature absent. This is not an in-place conversion.
+
+`mount_with_snapshot_limits(device, options, limits)` explicitly opts the Rust
+core into snapshot feature negotiation. All three budgets must be positive,
+reclaim work must fit the edit budget, and the registered view count must fit
+the supplied view budget. Validate these conditions before replay or orphan
+recovery can write. The ordinary `mount` and `mount_with_options` entry points
+retain their baseline supported-feature mask and reject bit 2. No shipping
+budget, adapter capability or filesystem API v2 ABI is implied by this core API.
+
+ReadOnly and NoChanges inspect the pending log without writing and expose the
+selected committed namespace. Recovery replays acknowledged log operations,
+then denies user mutations; ReadWrite permits both replay and later mutations.
+Every mode validates selected bounded snapshot root/control state without
+falling back on descendant corruption. Exhaustive per-view namespace checking
+belongs to maintenance. Caller limits bound mutation work; a read-only mount
+still requires explicit opt-in and valid view admission.
 
 ## Exhaustive ownership checking
 

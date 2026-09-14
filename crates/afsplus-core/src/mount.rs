@@ -21,7 +21,7 @@ use afsplus_format::ident::{
 use afsplus_format::{FormatError, DEFAULT_BLOCK_SIZE};
 
 use crate::verify::load_mount_state;
-use crate::volume::Volume;
+use crate::volume::{SnapshotWorkLimits, Volume};
 use crate::{layout, CoreError};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -51,8 +51,18 @@ pub struct MountOptions {
 pub const SUPPORTED_INCOMPAT_FEATURES: u64 = INCOMPAT_INTENT_LOG | INCOMPAT_INTENT_LOG_DATA_UPDATES;
 pub const SUPPORTED_RO_COMPAT_FEATURES: u64 = RO_COMPAT_SHARED_EXTENTS | RO_COMPAT_ORPHAN_DIRECTORY;
 
-fn negotiate_features(ident: &Identification, mode: MountMode) -> Result<(), CoreError> {
-    let unknown_incompat = ident.features.incompat & !SUPPORTED_INCOMPAT_FEATURES;
+fn negotiate_features(
+    ident: &Identification,
+    mode: MountMode,
+    snapshot_limits: Option<SnapshotWorkLimits>,
+) -> Result<(), CoreError> {
+    let supported = SUPPORTED_INCOMPAT_FEATURES
+        | if snapshot_limits.is_some() {
+            INCOMPAT_PERSISTENT_SNAPSHOTS
+        } else {
+            0
+        };
+    let unknown_incompat = ident.features.incompat & !supported;
     if unknown_incompat != 0 {
         return Err(CoreError::UnsupportedIncompatFeatures(unknown_incompat));
     }
@@ -235,8 +245,29 @@ pub fn mount<D: BlockDevice>(dev: D) -> Result<Volume<D>, CoreError> {
 }
 
 pub fn mount_with_options<D: BlockDevice>(
+    dev: D,
+    options: MountOptions,
+) -> Result<Volume<D>, CoreError> {
+    mount_configured(dev, options, None)
+}
+
+/// Explicitly enable the persistent-snapshot experiment with caller-selected
+/// budgets. Limits and registered-view admission are checked before recovery
+/// can write. Ordinary mount entry points continue to reject snapshot images.
+/// ReadOnly/NoChanges inspect without replay; Recovery replays then forbids
+/// user mutations, just as for images without snapshots.
+pub fn mount_with_snapshot_limits<D: BlockDevice>(
+    dev: D,
+    options: MountOptions,
+    limits: SnapshotWorkLimits,
+) -> Result<Volume<D>, CoreError> {
+    mount_configured(dev, options, Some(limits))
+}
+
+fn mount_configured<D: BlockDevice>(
     mut dev: D,
     options: MountOptions,
+    snapshot_limits: Option<SnapshotWorkLimits>,
 ) -> Result<Volume<D>, CoreError> {
     if dev.block_size() != DEFAULT_BLOCK_SIZE {
         return Err(CoreError::UnsupportedGeometry(
@@ -247,7 +278,7 @@ pub fn mount_with_options<D: BlockDevice>(
     let mut buf = vec![0u8; dev.block_size()];
     dev.read_block(layout::IDENT_LBA, &mut buf)?;
     let ident = Identification::decode(&buf)?;
-    negotiate_features(&ident, options.mode)?;
+    negotiate_features(&ident, options.mode, snapshot_limits)?;
     if ident.total_blocks > dev.total_blocks() {
         return Err(CoreError::Corrupt(format!(
             "identification declares {} blocks but device has {}",
@@ -278,6 +309,9 @@ pub fn mount_with_options<D: BlockDevice>(
     })?;
 
     let mut volume = Volume::new(dev, ident, selection, state, options.mode);
+    if let Some(limits) = snapshot_limits {
+        volume.set_snapshot_work_limits(limits)?;
+    }
     if options.mode.writes_during_mount() {
         volume.recover_intent_log()?;
     } else {

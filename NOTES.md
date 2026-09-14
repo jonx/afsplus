@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Configure snapshot limits before writable mount recovery](#2026-09-14--configure-snapshot-limits-before-writable-mount-recovery)
 - [2026-09-14 — Protect both checkpoint generations during reclamation](#2026-09-14--protect-both-checkpoint-generations-during-reclamation)
 - [2026-09-14 — Verify snapshot ownership and select stronger recovery retention](#2026-09-14--verify-snapshot-ownership-and-select-stronger-recovery-retention)
 - [2026-09-14 — Integrate persistent snapshot lifecycle into Volume](#2026-09-14--integrate-persistent-snapshot-lifecycle-into-volume)
@@ -61,6 +62,33 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Configure snapshot limits before writable mount recovery
+
+Added an explicit `mount_with_snapshot_limits` core entry point. It validates
+runtime budgets and existing view admission before recovery can write, while
+baseline mount APIs retain their feature mask. Snapshot orchestration fixtures
+now use the public mount path, including their both-slot crash and churn checks.
+No disk encoding or filesystem API v2 ABI changed.
+
+The owner selected revocable host backup authority after comparing live-file
+permission checks. ADR-075 records per-operation checks, historical access
+independent of later live permissions, cleanup after revocation and the host
+admission/conformance gates. Ordinary-user historical browsing remains open.
+
+New mount fixtures cover all four modes, rejected budgets with pending durable
+replay, unknown feature bits and corrupt selected roots with write/flush traps.
+The one-to-90-view fixture measured nine versus ten mount reads before readers
+or exhaustive checking, then verified every captured view. Shipping resource
+profiles and host authorization remain independent requirements.
+Snapshot-aware recovery preserved acknowledged live bytes and captured bytes
+across 346 modeled interrupted states, with both-slot ownership checks after
+recovery. The model covers full-write subsets and representative tears.
+
+Validation: 311 workspace all-features tests passed, zero failed and ten were
+ignored. Formatting, workspace Clippy with warnings denied, documentation,
+three checker fixtures and whitespace validation passed. These are host-side
+results; adapter authorization and native qualification remain separate gates.
 
 ## 2026-09-14 — Protect both checkpoint generations during reclamation
 

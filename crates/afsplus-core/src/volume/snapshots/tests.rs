@@ -1,6 +1,5 @@
 use super::*;
 use crate::mount::select_checkpoint;
-use crate::verify::load_mount_state;
 use crate::{MkfsParams, NamePolicy};
 use afsplus_block::{for_each_crash_state, MemoryBackend, RecordingBackend};
 
@@ -18,21 +17,10 @@ fn limits() -> SnapshotWorkLimits {
     }
 }
 
-// Deliberately test-only until namespace/checker/resource qualification permits
-// enabling the feature in normal mount negotiation.
-fn open<D: BlockDevice>(mut dev: D, mode: MountMode) -> Volume<D> {
-    let mut buf = vec![0; 4096];
-    dev.read_block(0, &mut buf).unwrap();
-    let ident = Identification::decode(&buf).unwrap();
-    let selection = select_checkpoint(&mut dev, &ident).unwrap();
-    let state = load_mount_state(&mut dev, &ident, &selection.chosen).unwrap();
-    let mut volume = Volume::new(dev, ident, selection, state, mode);
-    volume.set_snapshot_work_limits(limits()).unwrap();
-    if mode == MountMode::ReadWrite || mode == MountMode::Recovery {
-        volume.recover_intent_log().unwrap();
-    } else {
-        volume.inspect_intent_log().unwrap();
-    }
+// Exercise the public opt-in mount path, including configuration before replay.
+fn open<D: BlockDevice>(dev: D, mode: MountMode) -> Volume<D> {
+    let mut volume =
+        crate::mount_with_snapshot_limits(dev, crate::MountOptions { mode }, limits()).unwrap();
     verify(&mut volume);
     volume
 }
@@ -888,4 +876,247 @@ fn missing_or_unreadable_older_snapshot_roots_cannot_authorize_in_place_writes()
         assert_eq!(volume.read_file(file).unwrap(), b"after!");
         verify(&mut volume);
     }
+}
+
+/// Any accidental recovery write makes a rejected-mount test fail immediately.
+struct ForbidWrites(MemoryBackend);
+impl BlockDevice for ForbidWrites {
+    fn block_size(&self) -> usize {
+        self.0.block_size()
+    }
+    fn total_blocks(&self) -> u64 {
+        self.0.total_blocks()
+    }
+    fn read_block(&mut self, lba: u64, out: &mut [u8]) -> Result<(), afsplus_block::BlockError> {
+        self.0.read_block(lba, out)
+    }
+    fn write_block(&mut self, _: u64, _: &[u8]) -> Result<(), afsplus_block::BlockError> {
+        panic!("rejected mount wrote to the source")
+    }
+    fn flush(&mut self) -> Result<(), afsplus_block::BlockError> {
+        panic!("rejected mount flushed the source")
+    }
+}
+
+#[test]
+fn public_snapshot_mount_validates_admission_before_pending_recovery_writes() {
+    let mut volume = open(formatted(1024, 8), MountMode::ReadWrite);
+    volume.snapshot_create(now(2)).unwrap();
+    volume.snapshot_create(now(3)).unwrap();
+    volume
+        .window_op(
+            &BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: "pending",
+                content: b"durable",
+            },
+            now(4),
+        )
+        .unwrap();
+    volume.window_fsync().unwrap();
+    let base = volume.into_device();
+    for mode in [
+        MountMode::ReadWrite,
+        MountMode::Recovery,
+        MountMode::ReadOnly,
+        MountMode::NoChanges,
+    ] {
+        assert!(matches!(
+            crate::mount_with_options(ForbidWrites(base.clone()), crate::MountOptions { mode }),
+            Err(CoreError::UnsupportedIncompatFeatures(_))
+        ));
+        for bad in [
+            SnapshotWorkLimits {
+                max_views: 1,
+                ..limits()
+            },
+            SnapshotWorkLimits {
+                max_views: 0,
+                ..limits()
+            },
+            SnapshotWorkLimits {
+                max_edit_records: 0,
+                ..limits()
+            },
+            SnapshotWorkLimits {
+                reclaim_records: 0,
+                ..limits()
+            },
+            SnapshotWorkLimits {
+                reclaim_records: usize::MAX,
+                ..limits()
+            },
+            SnapshotWorkLimits {
+                reclaim_records: 4097,
+                ..limits()
+            },
+        ] {
+            assert!(matches!(
+                crate::mount_with_snapshot_limits(
+                    ForbidWrites(base.clone()),
+                    crate::MountOptions { mode },
+                    bad
+                ),
+                Err(CoreError::PrototypeLimit(_))
+            ));
+        }
+    }
+}
+
+#[test]
+fn public_snapshot_mount_modes_preserve_history_and_replay_only_when_requested() {
+    use afsplus_block::TraceBackend;
+    let mut volume = open(formatted(1024, 8), MountMode::ReadWrite);
+    let file = volume
+        .create_file_in_root("file", b"before", now(2))
+        .unwrap();
+    let id = volume.snapshot_create(now(3)).unwrap();
+    volume
+        .window_write_file_at(file, 0, b"after!", now(4))
+        .unwrap();
+    volume.window_fsync().unwrap();
+    let generation = volume.generation();
+    let base = volume.into_device();
+    for mode in [
+        MountMode::ReadOnly,
+        MountMode::NoChanges,
+        MountMode::Recovery,
+        MountMode::ReadWrite,
+    ] {
+        let mut volume = open(TraceBackend::new(base.clone()), mode);
+        let handle = volume.snapshot_open(id).unwrap();
+        assert_eq!(bytes(&mut volume, &handle, file), b"before");
+        let replay = matches!(mode, MountMode::ReadWrite | MountMode::Recovery);
+        assert_eq!(
+            volume.read_file(file).unwrap(),
+            if replay { b"after!" } else { b"before" }
+        );
+        if replay {
+            assert!(volume.generation() > generation);
+            assert_eq!(volume.pending_intent_records(), 0);
+        } else {
+            assert_eq!(volume.generation(), generation);
+            assert!(volume.pending_intent_records() > 0);
+        }
+        if mode != MountMode::ReadWrite {
+            assert!(matches!(
+                volume.snapshot_create(now(5)),
+                Err(CoreError::ReadOnly)
+            ));
+            assert!(matches!(
+                volume.create_file_in_root("forbidden", b"x", now(5)),
+                Err(CoreError::ReadOnly)
+            ));
+        }
+        let trace = volume.into_device();
+        if replay {
+            assert!(trace.stats().writes > 0);
+            assert!(trace.stats().flushes > 0);
+        } else {
+            assert_eq!(trace.stats().writes, 0);
+            assert_eq!(trace.stats().flushes, 0);
+        }
+    }
+}
+
+#[test]
+fn public_snapshot_mount_rejects_unknown_features_and_corrupt_selected_roots_without_writes() {
+    let mut volume = open(formatted(1024, 8), MountMode::ReadWrite);
+    volume.snapshot_create(now(2)).unwrap();
+    let roots = volume.checkpoint.snapshot_roots.unwrap();
+    let base = volume.into_device();
+    for mode in [
+        MountMode::ReadWrite,
+        MountMode::Recovery,
+        MountMode::ReadOnly,
+        MountMode::NoChanges,
+    ] {
+        for lba in [roots.registry, roots.lifetimes] {
+            let mut damaged = base.clone();
+            damaged.apply_raw(lba, &[0; 4096]);
+            assert!(matches!(
+                crate::mount_with_snapshot_limits(
+                    ForbidWrites(damaged),
+                    crate::MountOptions { mode },
+                    limits()
+                ),
+                Err(CoreError::Corrupt(_))
+            ));
+        }
+        let mut damaged = base.clone();
+        let mut ident = Identification::decode(&damaged.peek(0)).unwrap();
+        ident.features.incompat |= 1 << 63;
+        damaged.apply_raw(0, &ident.encode(4096).unwrap());
+        assert!(
+            matches!(crate::mount_with_snapshot_limits(ForbidWrites(damaged), crate::MountOptions { mode }, limits()), Err(CoreError::UnsupportedIncompatFeatures(bits)) if bits == 1 << 63)
+        );
+    }
+}
+
+#[test]
+fn public_snapshot_mount_bounds_root_reads_across_registry_pages() {
+    use afsplus_block::TraceBackend;
+    let mut volume = open(formatted(2048, 0), MountMode::ReadWrite);
+    let file = volume
+        .create_file_in_root("stable", b"kept", now(2))
+        .unwrap();
+    let mut ids = Vec::new();
+    let mut reads = Vec::new();
+    for count in 1..=90 {
+        ids.push(volume.snapshot_create(now(count + 2)).unwrap());
+        if count == 1 || count == 90 {
+            let mut mounted = crate::mount_with_snapshot_limits(
+                TraceBackend::new(volume.into_device()),
+                crate::MountOptions {
+                    mode: MountMode::NoChanges,
+                },
+                limits(),
+            )
+            .unwrap();
+            let io = mounted.dev.stats();
+            assert_eq!(io.writes, 0);
+            assert_eq!(io.flushes, 0);
+            reads.push(io.reads);
+            for &id in &ids {
+                let handle = mounted.snapshot_open(id).unwrap();
+                assert_eq!(bytes(&mut mounted, &handle, file), b"kept");
+            }
+            verify(&mut mounted);
+            volume = open(mounted.into_device().into_inner(), MountMode::ReadWrite);
+        }
+    }
+    // One registry split may add root/control path reads; mount must not walk
+    // each view or its namespace. Measure before any reader or full checker.
+    assert!(reads[1] <= reads[0] + 4, "mount reads: {reads:?}");
+    eprintln!("snapshot mount reads at 1 and 90 registered views: {reads:?}");
+}
+
+#[test]
+fn public_snapshot_mount_recovery_cuts_preserve_acknowledged_live_and_historical_bytes() {
+    let mut volume = open(formatted(512, 8), MountMode::ReadWrite);
+    let file = volume
+        .create_file_in_root("file", b"before", now(2))
+        .unwrap();
+    let id = volume.snapshot_create(now(3)).unwrap();
+    volume
+        .window_write_file_at(file, 0, b"after!", now(4))
+        .unwrap();
+    volume.window_fsync().unwrap();
+    let base = volume.into_device();
+    let recording = open(RecordingBackend::new(base.clone()), MountMode::Recovery);
+    let (_, log) = recording.into_device().into_parts();
+    assert!(!log.is_empty());
+    let mut states = 0;
+    for cut in 0..=log.len() {
+        for_each_crash_state(&base, &log, cut, |state| {
+            let mut recovered = open(state.image, MountMode::Recovery);
+            assert_eq!(recovered.read_file(file).unwrap(), b"after!");
+            let handle = recovered.snapshot_open(id).unwrap();
+            assert_eq!(bytes(&mut recovered, &handle, file), b"before");
+            assert_eq!(recovered.pending_intent_records(), 0);
+            states += 1;
+        });
+    }
+    eprintln!("snapshot-aware recovery crash states: {states}");
+    assert!(states > log.len());
 }

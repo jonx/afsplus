@@ -20,6 +20,7 @@
 - [10. Raw-media threat test](#10-raw-media-threat-test)
 - [11. Failure injection](#11-failure-injection)
 - [12. Benchmark reporting](#12-benchmark-reporting)
+- [13. Trusted snapshot backup authority](#13-trusted-snapshot-backup-authority)
 
 <!-- /toc -->
 
@@ -185,3 +186,16 @@ Every security optimization must report at least:
 - access-check latency p50/p95/p99
 
 A faster ACL mechanism that materially weakens portability or enforcement fidelity is not an acceptable optimization.
+
+## 13. Trusted snapshot backup authority
+
+[ADR-075](../adr/ADR-075-revocable-backup-capability.md) requires a host-granted,
+filesystem-scoped backup capability. A filesystem-neutral harness must cover
+missing/wrong-scope authority, revocation between operations on existing and
+duplicated handles, denial before data disclosure or mutation, and cleanup after
+revocation. Verify consistent reads after live permission changes and deletion.
+
+Qualify concurrent authorization/revocation admission in each host adapter and
+keep feature discovery separate from caller privilege. Test explicit re-grant
+without reviving old grants. Ordinary-user historical access and rich ACL
+mapping remain separate gates; this capability does not establish their policy.

@@ -29,11 +29,13 @@ Use [typed tree access](../testing/book-review-qualification.md#typed-snapshot-t
 [Volume orchestration](../testing/book-review-qualification.md#volume-snapshot-orchestration)
 and [exhaustive ownership checking](../testing/book-review-qualification.md#exhaustive-snapshot-checker)
 and [previous-checkpoint retention](../testing/book-review-qualification.md#previous-checkpoint-retention)
-as component baselines. Qualify writable snapshot mount configuration with
-explicit work limits before recovery, then add a filesystem-neutral host API
-and real backup consumer. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
+and [explicit mount/recovery](../testing/book-review-qualification.md#explicit-snapshot-mount-and-recovery)
+as component baselines. Add a filesystem-neutral host API and real backup
+consumer, preserving explicit work limits before recovery. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
 with both-slot crash oracles, generation-aware quarantine and measured
-low-space progress. Keep historical-read and management authorization under Q5.
+low-space progress. Implement [ADR-075](../adr/ADR-075-revocable-backup-capability.md)
+for revocable trusted-backup authority; keep ordinary-user historical access
+and rich ACL decisions under Q5.
 Use `tree::read_key_page` for bounded inclusive-key seeking; persist the next
 physical key and make scan wrap explicit.
 

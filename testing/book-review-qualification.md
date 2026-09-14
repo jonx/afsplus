@@ -25,6 +25,7 @@ source, chapter coverage and architectural rationale. Results belong in
 - [Required future experiments](#required-future-experiments)
 - [Normative coverage map](#normative-coverage-map)
 - [Repeated low-space and reclamation gate](#repeated-low-space-and-reclamation-gate)
+- [Explicit snapshot mount and recovery](#explicit-snapshot-mount-and-recovery)
 
 <!-- /toc -->
 
@@ -235,9 +236,9 @@ registry transactions, read handles or native devices.
 ## Volume snapshot orchestration
 
 Run `cargo test -p afsplus-core volume::snapshots::tests --all-features -- --nocapture`.
-The fixtures use an explicit snapshot formatter option and a test-only mount constructor; ordinary mount
-must reject INCOMPAT bit 2 until the complete feature qualification authorizes
-support. Explicit work limits belong to the fixture, not shipping defaults.
+The fixtures use explicit snapshot formatting and the public
+`mount_with_snapshot_limits` opt-in. Baseline mount entry points reject bit 2.
+Explicit work limits belong to the fixture, not shipping defaults.
 
 Require captured names, metadata and streaming bytes to survive live write,
 rename, create, reflink and remount. Cloned reader handles keep deletion busy;
@@ -284,7 +285,7 @@ A retained block marked free in the decoded bitmap must fail the full sweep.
 
 The checker-facing fixture independently inserts an initial view, verifies it
 through `check_device`, and records zero writes/flushes. The same image must be
-refused by ordinary mount until writable support is qualified. Report corrupt
+refused by baseline mount without explicit snapshot limits. Report corrupt
 ledger control as an error. No checker operation repairs or removes a view.
 
 Memory scales with physical ownership sets and traversed namespaces, not a
@@ -387,3 +388,24 @@ This exercises repeated pressure on live shared owners. Persistent snapshot
 ownership is a separate Q4 qualification under the
 [snapshot proposal](../proposals/persistent-snapshot-prototype.md); a reflink
 survivor is not a whole-volume snapshot.
+
+## Explicit snapshot mount and recovery
+
+Run `cargo test -p afsplus-core public_snapshot_mount --all-features -- --nocapture`.
+Require invalid budgets and over-budget registered views to reject before any
+write or flush, even with durable pending replay. Unknown incompatible bits and
+corrupt selected registry/ledger roots must refuse all modes without falling
+back. Baseline mount entry points must still reject snapshot images.
+
+Compare ReadOnly/NoChanges against Recovery/ReadWrite on the same pending-log
+image: exact committed versus acknowledged live bytes, unchanged historical
+bytes, correct mutation refusal and zero writes/flushes in inspecting modes.
+Interrupt recovery at each recorded boundary and enumerate full-write subsets
+plus representative tears. Subsequent recovery must preserve acknowledged live
+bytes and registered historical bytes; full ownership checks cover both slots.
+
+Measure mount I/O before reader calls or exhaustive checks at one and 90 views,
+including a registry split. Require bounded root/control-path growth rather
+than per-view namespace traversal, then open every view and verify its bytes.
+This fixture does not choose shipping limits, qualify host authorization or
+establish native resource and durability guarantees.
