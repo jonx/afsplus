@@ -135,3 +135,89 @@ fn event_ranges_and_recording_budget_span_remounts() {
         assert_eq!(run.result.peek(lba), prefix_run.result.peek(lba));
     }
 }
+
+#[test]
+fn structural_findings_cannot_hide_behind_a_readable_namespace() {
+    use afsplus_check::scenario::inspect_checked;
+    use afsplus_core::{allocation_root, object_map};
+    use afsplus_format::{
+        bitmap::{BitmapPage, BITMAP_PAGE_BLOCKS},
+        checkpoint::Checkpoint,
+        ident::Identification,
+        region::RegionDescriptor,
+    };
+    // Use a fully synchronized fixture: pending log recovery could otherwise
+    // reuse the deliberately misclassified block before namespace observation.
+    let run = Plan::parse(LADDER).unwrap().run().unwrap();
+    let mut volume = mount(run.result).unwrap();
+    volume.sync().unwrap();
+    let object = volume.lookup_root("out").unwrap().unwrap();
+    let mut image = volume.into_device();
+    let ident = Identification::decode(&image.peek(0)).unwrap();
+    let geo = ident.geometry();
+    let checkpoint = [1, 2]
+        .into_iter()
+        .filter_map(|lba| Checkpoint::decode(&image.peek(lba), &ident.uuid).ok())
+        .max_by_key(|cp| cp.generation)
+        .unwrap();
+    let object_lba = object_map::lookup_lba(
+        &mut image,
+        &geo,
+        checkpoint.object_map_block,
+        checkpoint.generation,
+        object,
+    )
+    .unwrap()
+    .unwrap();
+    let region = (object_lba / u64::from(geo.region_size)) as u32;
+    let local = (object_lba % u64::from(geo.region_size)) as u32;
+    let page = local / BITMAP_PAGE_BLOCKS;
+    let allocation = allocation_root::lookup_record(
+        &mut image,
+        &geo,
+        checkpoint.allocation_root_block,
+        checkpoint.generation,
+        region,
+    )
+    .unwrap()
+    .unwrap();
+    let (descriptor, _) = RegionDescriptor::decode(
+        &image.peek(geo.descriptor_slot_lba(region, allocation.descriptor_slot)),
+    )
+    .unwrap();
+    let lba = geo.bitmap_slot_lba(region, page, descriptor.pages[page as usize].slot);
+    let (mut bitmap, generation) = BitmapPage::decode(&image.peek(lba)).unwrap();
+    let target = local - bitmap.first_block;
+    assert!(bitmap.is_allocated(target));
+    let other = (0..bitmap.valid_blocks)
+        .find(|&index| !bitmap.is_allocated(index))
+        .unwrap();
+    bitmap.set_allocated(target, false);
+    bitmap.set_allocated(other, true);
+    image
+        .write_block(lba, &bitmap.encode(4096, generation).unwrap())
+        .unwrap();
+    let original = image.clone();
+    let observed = inspect_checked(image.clone(), 1024 * 1024);
+    assert!(observed.entries.is_ok(), "{:?}", observed.entries);
+    assert!(!observed.is_clean());
+    assert!(!observed.raw.is_clean());
+    assert!(!observed.recovered.unwrap().is_clean());
+    for lba in 0..original.total_blocks() {
+        assert_eq!(image.peek(lba), original.peek(lba));
+    }
+}
+
+#[test]
+fn checked_inspection_requires_clean_raw_and_recovered_views() {
+    use afsplus_check::scenario::inspect_checked;
+    let run = Plan::parse(LADDER).unwrap().run().unwrap();
+    let observed = inspect_checked(run.result, 2);
+    assert!(observed.is_clean(), "{}", observed.raw.render_text());
+    assert_eq!(observed.entries.unwrap()[0].data, Some(vec![0, 255]));
+    let run = Plan::parse(LADDER).unwrap().run().unwrap();
+    let refused = inspect_checked(run.result, 1);
+    assert!(!refused.is_clean());
+    assert!(refused.raw.is_clean());
+    assert!(refused.recovered.unwrap().is_clean());
+}

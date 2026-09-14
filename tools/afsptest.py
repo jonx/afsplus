@@ -99,9 +99,29 @@ def unframe(stream, file_bytes, total_bytes):
     return result
 
 
+def checker_report(field, optional=False):
+    if optional and field == "-":
+        return None
+    report = json.loads(bytes.fromhex(field), object_pairs_hook=bundle._unique)
+    if not isinstance(report, dict) or set(report) != {"schema_version", "clean", "volume", "slots", "warnings", "errors"}:
+        raise ValueError("checker report fields")
+    if type(report["schema_version"]) is not int or report["schema_version"] != 5 or type(report["clean"]) is not bool:
+        raise ValueError("checker report version/verdict")
+    for key in ("slots", "warnings", "errors"):
+        if not isinstance(report[key], list) or any(not isinstance(item, str) for item in report[key]):
+            raise ValueError("checker diagnostic array")
+    if report["clean"] != (not report["errors"]) or (report["clean"] and not isinstance(report["volume"], dict)):
+        raise ValueError("checker verdict contradicts findings")
+    return report
+
+
+def structural_success(actual):
+    return all(actual[key] is not None and actual[key]["clean"] for key in ("raw_check", "recovered_check"))
+
+
 def observation(wire):
     lines = wire.decode("ascii").splitlines()
-    if len(lines) < 3 or lines[0] != "AFSOBS01":
+    if len(lines) < 5 or lines[0] != "AFSOBS02":
         raise ValueError("observation version")
     run = lines[1].split(" ")
     failure = None
@@ -109,14 +129,20 @@ def observation(wire):
         if len(run) != 4 or run[:2] != ["run", "error"]:
             raise ValueError("run outcome")
         failure = {"operation": int(run[2]), "error": bytes.fromhex(run[3]).decode()}
-    observe = lines[2].split(" ")
+    raw = lines[2].split(" ")
+    recovered = lines[3].split(" ")
+    if len(raw) != 2 or raw[0] != "raw-check" or len(recovered) != 2 or recovered[0] != "recovered-check":
+        raise ValueError("checker observation fields")
+    raw_check = checker_report(raw[1])
+    recovered_check = checker_report(recovered[1], optional=True)
+    observe = lines[4].split(" ")
     error = None
     if observe != ["observe", "ok"]:
-        if len(observe) != 3 or observe[:2] != ["observe", "error"] or len(lines) != 3:
+        if len(observe) != 3 or observe[:2] != ["observe", "error"] or len(lines) != 5:
             raise ValueError("observation outcome")
         error = bytes.fromhex(observe[2]).decode()
     entries = []
-    for line in lines[3:]:
+    for line in lines[5:]:
         fields = line.split(" ")
         if len(fields) not in (2, 3) or fields[0] not in ("file", "directory"):
             raise ValueError("observation entry")
@@ -128,7 +154,8 @@ def observation(wire):
         elif len(fields) != 2:
             raise ValueError("directory payload")
         entries.append(entry)
-    return {"version": 1, "view": "remounted", "failure": failure, "inspection_error": error, "entries": entries}
+    return {"version": 2, "view": "remounted", "failure": failure, "inspection_error": error,
+        "raw_check": raw_check, "recovered_check": recovered_check, "entries": entries}
 
 
 def admit_fault(fault, value):
@@ -171,7 +198,8 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
         raise ValueError("source or runner changed during execution")
     actual = observation(records.pop("actual.wire"))
     expected = sorted(value["expected"], key=lambda entry: entry["path"])
-    success = actual["failure"] is None and actual["inspection_error"] is None and actual["entries"] == expected
+    success = (actual["failure"] is None and actual["inspection_error"] is None
+               and structural_success(actual) and actual["entries"] == expected)
     records.update({
         "operations.afstrace": raw,
         "run.json": encoded({"version": 1, "profile": "semantic-no-cut-v1" if fault["kind"] == "no-cut" else "semantic-power-cut-v1",
@@ -329,6 +357,11 @@ def failure_signature(records):
         if not 0 <= index < len(operations):
             raise ValueError("failure has no semantic operation")
         return encoded({"kind": "operation", "operation": operations[index], "error": failure["error"]})
+    structural = {key: None if actual[key] is None else actual[key]["errors"]
+                  for key in ("raw_check", "recovered_check")}
+    if not structural_success(actual):
+        return encoded({"kind": "structure", "findings": structural,
+                        "inspection_error": actual["inspection_error"]})
     if actual["inspection_error"] is not None:
         return encoded({"kind": "inspection", "error": actual["inspection_error"]})
     expected = {tuple(entry["path"]): entry for entry in json.loads(records["expected.json"])}

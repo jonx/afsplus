@@ -95,7 +95,7 @@ completion. Remaining stage mappings require their own acceptance audit.
 | I/O and write-amplification accounting | Trace records successful block reads, writes, bytes and flushes | Implemented counters and [per-command CPU/RSS collection](../testing/benchmark-contract.md#per-command-host-accounting); per-variant attribution, allocator/cache and steady-state RAM accounting remain open. |
 | SliceBackend | [Bounded slice](../crates/afsplus-block/src/slice.rs) and [sliced-volume test](../crates/afsplus-check/tests/sliced_volume.rs) | Implemented: block isolation/error tests, format/mutate/remount/check cycle and full workspace validation pass. |
 | OverlayBackend | [Bounded branches](../crates/afsplus-block/src/overlay.rs), [oracle comparison](../crates/afsplus-block/tests/overlay_replay.rs) and [filesystem branch/cut tests](../crates/afsplus-check/tests/overlay_volume.rs) | Implemented: isolation, admission, sparse-fork measurement, replay and full workspace gates pass. |
-| Structured flight recorder and operation replay | [Activity events](../crates/afsplus-block/src/activity.rs) and power-cut recording provide component evidence | Deterministic [crash images](../crates/afsplus-check/src/bin/afsplus-crash-fixtures.rs), bounded [semantic runner tests](../crates/afsplus-check/tests/scenario.rs) and [semantic bundle replay/minimization](../testing/developer-harness.md#integrated-semantic-bundles-and-minimization) plus [selected-crash bundles](../testing/developer-harness.md#selected-crash-bundles) provide host evidence; full-checker verdict integration, publication-family coverage, transaction-internal diagnostics and source/build reconstruction remain open. |
+| Structured flight recorder and operation replay | [Activity events](../crates/afsplus-block/src/activity.rs) and power-cut recording provide component evidence | Deterministic [crash images](../crates/afsplus-check/src/bin/afsplus-crash-fixtures.rs), bounded [semantic runner tests](../crates/afsplus-check/tests/scenario.rs) and [semantic bundle replay/minimization](../testing/developer-harness.md#integrated-semantic-bundles-and-minimization) plus [selected-crash bundles](../testing/developer-harness.md#selected-crash-bundles) and [checker-bound verdicts](../testing/developer-harness.md#checker-bound-replay-verdicts) provide host evidence; publication-family coverage, transaction-internal diagnostics and source/build reconstruction remain open. |
 | Tiny-cache matrix and fuzz/property tests | Existing linked conformance, fuzzing and crash tests | Audit each mutation family's required cache profiles and retained failure artifacts before stage closure. |
 
 Stage A remains partial because these finite requirements need implementation or
@@ -130,7 +130,7 @@ to one record; edit status here and regenerate navigation.
 | roadmap-13 | Complete | [evidence](../crates/afsplus-check/tests/basic.rs) |
 | roadmap-14 | Complete | [evidence](../crates/afsplus-format/src/object.rs) |
 | roadmap-15 | Complete | [evidence](../crates/afsplus-check/tests/basic.rs) |
-| roadmap-16 | Complete | [evidence](../crates/afsplus-check/tests/corruption_corpus.rs) |
+| roadmap-16 | Complete | [checker corpus](../crates/afsplus-check/tests/corruption_corpus.rs), [checked replay](../crates/afsplus-check/tests/scenario.rs) |
 | roadmap-17 | Complete | [evidence](../crates/afsplus-check/tests/crash_matrix.rs) |
 | roadmap-18 | Complete | [evidence](../crates/afsplus-check/tests/sliced_volume.rs) |
 | roadmap-19 | Complete | [evidence](../crates/afsplus-check/tests/overlay_volume.rs) |

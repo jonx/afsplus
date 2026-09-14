@@ -486,8 +486,53 @@ pub struct Entry {
 /// Inspect a private image copy, with explicit aggregate output limits.
 /// Unsupported object kinds and cycles are errors, never omitted entries.
 pub fn inspect(image: MemoryBackend, max_bytes: usize) -> Result<Vec<Entry>, String> {
-    use afsplus_format::object::ObjectType;
     let mut volume = mount(image).map_err(|e| e.to_string())?;
+    inspect_volume(&mut volume, max_bytes)
+}
+
+pub struct Inspection {
+    pub raw: crate::CheckReport,
+    pub recovered: Option<crate::CheckReport>,
+    pub entries: Result<Vec<Entry>, String>,
+}
+impl Inspection {
+    pub fn is_clean(&self) -> bool {
+        self.raw.is_clean()
+            && self
+                .recovered
+                .as_ref()
+                .is_some_and(crate::CheckReport::is_clean)
+            && self.entries.is_ok()
+    }
+}
+
+/// Full offline checks before and after recovery of an owned memory image.
+/// The recovered checker covers the exact volume used for namespace observation.
+pub fn inspect_checked(mut image: MemoryBackend, max_bytes: usize) -> Inspection {
+    let raw = crate::check_device(&mut image);
+    match mount(image) {
+        Err(error) => Inspection {
+            raw,
+            recovered: None,
+            entries: Err(error.to_string()),
+        },
+        Ok(mut volume) => {
+            let entries = inspect_volume(&mut volume, max_bytes);
+            let recovered = Some(crate::check_device(&mut volume.into_device()));
+            Inspection {
+                raw,
+                recovered,
+                entries,
+            }
+        }
+    }
+}
+
+fn inspect_volume(
+    volume: &mut afsplus_core::Volume<MemoryBackend>,
+    max_bytes: usize,
+) -> Result<Vec<Entry>, String> {
+    use afsplus_format::object::ObjectType;
     let mut queue = std::collections::VecDeque::from([(OBJECT_ROOT, Vec::<String>::new())]);
     let mut visited = std::collections::BTreeSet::from([OBJECT_ROOT]);
     let mut entries = Vec::new();

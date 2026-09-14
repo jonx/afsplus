@@ -23,6 +23,7 @@
 - [Bounded semantic scenario execution](#bounded-semantic-scenario-execution)
 - [Integrated semantic bundles and minimization](#integrated-semantic-bundles-and-minimization)
 - [Selected crash bundles](#selected-crash-bundles)
+- [Checker-bound replay verdicts](#checker-bound-replay-verdicts)
 
 <!-- /toc -->
 
@@ -373,6 +374,16 @@ candidate runs). Exhaustion publishes the best verified reduction with
 parent scenario digest and evaluation count. The original bundle is preserved
 and the reduced result is published exclusively as another complete bundle.
 
+To evaluate a fix or another implementation revision, run the retained scenario
+and fault inputs into a new bundle:
+
+```sh
+python3 tools/afsptest.py run original/operations.afstrace new-result --fault original/fault-model.json
+```
+
+This records an independent result with the selected runner and observed source
+identity. Strict replay verifies the original environment and artifacts.
+
 The focused gate checks fresh-process success and failure replay, exact input
 immutability, altered source/fault/base/trace/event refusal, operation failure
 preservation, pre-run image admission, removal of irrelevant operations with the
@@ -427,7 +438,37 @@ must pass the independent verifier and fresh replay.
 Run `cargo test -p afsplus-check --test crash_replay` and
 `python3 tools/test-afsptest.py`. These qualify selection and bundle transport;
 each publication path needs its existing allowed-state crash oracle and required
-cache/resource variants before its finite gate can close. The bundle's semantic
-verdict checks remounted namespace/content and trace consistency; integrating
-the full checker report into that verdict is required by the invariant-checking
-procedure above. Semantic success alone is not a clean structural-check verdict.
+cache/resource variants before its finite gate can close. The bundle verdict combines remounted namespace/content, trace consistency
+and the [raw/recovered checker reports](#checker-bound-replay-verdicts).
+
+## Checker-bound replay verdicts
+
+The `AFSOBS02` runner observation and version-2 `actual.json` retain two full
+version-5 checker reports: `raw_check` describes the selected result image before
+recovery; `recovered_check` describes the exact owned volume used for remounted
+namespace/content observation. Raw checking is read-only. Mount/recovery and the
+second check run on a memory copy, preserving the retained result image.
+Each report includes its checkpoint selection, volume summary, warnings and
+errors. If mount fails, the recovered report is absent and the inspection error
+is retained.
+
+Success requires both checker reports to be clean, a successful scenario and
+inspection, and an exact expected namespace/content match. Checker cleanliness
+uses the checker's error policy; warnings are retained without silently becoming
+errors. A missing report, unsupported schema or verdict that contradicts its
+error array cannot stand in for a clean check. Older observation payloads without
+checker evidence are rejected by this runner profile.
+
+Failure minimization preserves structural errors for both views and any
+inspection error. A reduction cannot replace a checker failure with merely
+matching file contents. Replaying a bundle regenerates and compares the complete
+reports, including warnings and summaries, alongside every other artifact.
+
+The Rust scenario gate creates a synchronized image, marks a reachable object
+block free and a different free block allocated, then reseals the bitmap. Counts
+remain consistent and namespace reads succeed, but both full checker views must
+reject the ownership defect. It also verifies clean raw/recovered views and
+explicit namespace-output budget refusal. Python gates require both reports,
+reject contradictory verdicts and preserve structural failure signatures.
+These tests establish verdict integration; the checker's full wire-surface
+coverage is tracked by its [corruption corpus](corruption-corpus.md).

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Require checker evidence in replay verdicts](#2026-09-14--require-checker-evidence-in-replay-verdicts)
 - [2026-09-14 — Show completion on individual stage and phase entries](#2026-09-14--show-completion-on-individual-stage-and-phase-entries)
 - [2026-09-14 — Bind selected crash states to replay bundles](#2026-09-14--bind-selected-crash-states-to-replay-bundles)
 - [2026-09-14 — Integrate semantic replay bundles and failure reduction](#2026-09-14--integrate-semantic-replay-bundles-and-failure-reduction)
@@ -121,6 +122,23 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Require checker evidence in replay verdicts
+
+Connected raw and recovered full checker reports to the scenario runner and
+version-2 observations. Bundle success requires both clean structural views and
+the exact expected namespace/content; warnings and full diagnostic reports are
+retained. Recovery operates on a private copy of the selected image. The
+minimizer preserves structural failures and replay compares complete reports.
+
+The negative control keeps allocation counts consistent while marking a
+reachable object block free. Namespace reads succeed, but both checker views
+reject the defect. An initial corpus-based fixture had pending intent-log
+recovery, which reused the misclassified block before observation; replacing it
+with a synchronized fixture tests the intended distinction directly.
+Validation passed: 498 Rust tests (10 ignored), workspace Clippy and formatting,
+20 Python replay/bundle tests, twelve documentation-checker tests, documentation
+validation and whitespace checks.
 
 ## 2026-09-14 — Show completion on individual stage and phase entries
 

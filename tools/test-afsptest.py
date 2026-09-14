@@ -167,6 +167,33 @@ class ReplayTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 tool.execute(tool.encoded(value), BINARY, fault=bad)
 
+    def test_checker_findings_are_required_and_preserved_in_the_failure_signature(self):
+        records, success = tool.execute(tool.encoded(fixture()), BINARY)
+        self.assertTrue(success)
+        actual = json.loads(records["actual.json"])
+        self.assertEqual(actual["version"], 2)
+        self.assertTrue(tool.structural_success(actual))
+        self.assertTrue(actual["raw_check"]["clean"])
+        self.assertTrue(actual["recovered_check"]["clean"])
+        for view in ("raw_check", "recovered_check"):
+            damaged = json.loads(records["actual.json"])
+            damaged[view]["clean"] = False
+            damaged[view]["errors"] = ["reachable block marked free"]
+            self.assertFalse(tool.structural_success(damaged))
+            edited = dict(records, **{"actual.json": tool.encoded(damaged)})
+            signature = json.loads(tool.failure_signature(edited))
+            self.assertEqual(signature["kind"], "structure")
+            self.assertEqual(signature["findings"][view], ["reachable block marked free"])
+        report = actual["raw_check"]
+        for field, value in (("schema_version", True), ("clean", 1), ("errors", ["hidden finding"])):
+            edited = dict(report, **{field: value})
+            with self.assertRaises(ValueError):
+                tool.checker_report(tool.encoded(edited).hex())
+        without_recovery = dict(actual, recovered_check=None)
+        self.assertFalse(tool.structural_success(without_recovery))
+        with self.assertRaises(ValueError):
+            tool.observation(b"AFSOBS01\nrun ok\nobserve ok\n")
+
     def test_export_budget_refuses_before_runner(self):
         with self.assertRaisesRegex(ValueError, "per-file budget"):
             tool.execute(tool.encoded(fixture()), Path("/no/such/runner"), file_bytes=4096)

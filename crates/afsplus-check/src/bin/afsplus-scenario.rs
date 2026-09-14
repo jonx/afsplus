@@ -2,7 +2,7 @@
 use afsplus_block::{BlockDevice, MemoryBackend};
 use afsplus_check::{
     replay_trace::{base_digest, Limits, Trace},
-    scenario::{inspect, Plan},
+    scenario::{inspect_checked, Plan},
 };
 use std::io::{self, Read, Write};
 
@@ -117,14 +117,27 @@ fn run() -> Result<(), String> {
         operations: run.log,
     }
     .encode(limits)?;
-    let mut observed = String::from("AFSOBS01\n");
+    let inspection = inspect_checked(run.result.clone(), 16 * 1024 * 1024);
+    let mut observed = String::from("AFSOBS02\n");
     match run.failure {
         Some((index, error)) => {
             observed.push_str(&format!("run error {index} {}\n", hex(error.as_bytes())))
         }
         None => observed.push_str("run ok\n"),
     }
-    match inspect(run.result.clone(), 16 * 1024 * 1024) {
+    observed.push_str(&format!(
+        "raw-check {}\n",
+        hex(inspection.raw.render_json().as_bytes())
+    ));
+    observed.push_str(&format!(
+        "recovered-check {}\n",
+        inspection
+            .recovered
+            .as_ref()
+            .map(|report| hex(report.render_json().as_bytes()))
+            .unwrap_or_else(|| "-".into())
+    ));
+    match inspection.entries {
         Err(error) => observed.push_str(&format!("observe error {}\n", hex(error.as_bytes()))),
         Ok(entries) => {
             observed.push_str("observe ok\n");
