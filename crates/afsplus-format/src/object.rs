@@ -115,6 +115,12 @@ impl ObjectRecord {
         }
         self.validate(block_size)?;
         let mut block = vec![0u8; block_size];
+        self.write_fields(&mut block);
+        self.seal_record(&mut block, transaction_generation, PAYLOAD_LEN);
+        Ok(block)
+    }
+
+    fn write_fields(&self, block: &mut [u8]) {
         let p = &mut block[HEADER_SIZE..];
         le::put_u64(&mut p[0..8], self.object_id);
         p[8] = self.object_type.to_wire();
@@ -129,16 +135,17 @@ impl ObjectRecord {
         le::put_u64(&mut p[72..80], self.content_generation);
         le::put_u64(&mut p[80..88], self.data_root);
         le::put_u64(&mut p[88..96], self.data_blocks);
+    }
 
+    fn seal_record(&self, block: &mut [u8], generation: u64, payload_len: usize) {
         BlockHeader {
             block_type: block_type::OBJECT,
             flags: 0,
             owner: self.object_id,
-            generation: transaction_generation,
-            payload_len: PAYLOAD_LEN as u32,
+            generation,
+            payload_len: payload_len as u32,
         }
-        .seal(&mut block);
-        Ok(block)
+        .seal(block);
     }
 
     pub fn decode(block: &[u8]) -> Result<ObjectRecord, FormatError> {
@@ -149,6 +156,12 @@ impl ObjectRecord {
     /// transaction generation so callers can bound it against the selected
     /// checkpoint, exactly as tree-node access does.
     pub fn decode_with_generation(block: &[u8]) -> Result<(ObjectRecord, u64), FormatError> {
+        let (record, header) = Self::decode_fields(block)?;
+        record.validate(block.len())?;
+        Ok((record, header.generation))
+    }
+
+    fn decode_fields(block: &[u8]) -> Result<(ObjectRecord, BlockHeader), FormatError> {
         let header = BlockHeader::verify(block, block_type::OBJECT)?;
         let p = header.payload(block);
         if p.len() < PAYLOAD_LEN {
@@ -172,11 +185,10 @@ impl ObjectRecord {
         if record.object_id != header.owner {
             return Err(FormatError::Invalid("object ID does not match block owner"));
         }
-        record.validate(block.len())?;
-        Ok((record, header.generation))
+        Ok((record, header))
     }
 
-    fn validate(&self, block_size: usize) -> Result<(), FormatError> {
+    fn validate_common(&self) -> Result<(), FormatError> {
         self.created.validate()?;
         self.modified.validate()?;
         self.changed.validate()?;
@@ -191,6 +203,11 @@ impl ObjectRecord {
         if self.flags & !(OBJECT_FLAG_EXTENT_TREE | OBJECT_FLAG_DATA_IN_PLACE) != 0 {
             return Err(FormatError::Invalid("object has unsupported flags"));
         }
+        Ok(())
+    }
+
+    fn validate(&self, block_size: usize) -> Result<(), FormatError> {
+        self.validate_common()?;
         match self.object_type {
             ObjectType::Directory => {
                 if self.flags != 0 {
@@ -248,5 +265,64 @@ impl ObjectRecord {
             }
         }
         Ok(())
+    }
+}
+
+/// Checksummed inline symlink payload. Fixed-record APIs deliberately reject it
+/// until callers explicitly preserve the target through every rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SymlinkRecord<'a> {
+    pub record: ObjectRecord,
+    pub target: &'a str,
+}
+
+impl<'a> SymlinkRecord<'a> {
+    pub fn maximum_target_bytes(block_size: usize) -> usize {
+        block_size.saturating_sub(HEADER_SIZE + PAYLOAD_LEN)
+    }
+
+    fn validate(&self, block_size: usize) -> Result<(), FormatError> {
+        self.record.validate_common()?;
+        if self.record.object_type != ObjectType::Symlink
+            || self.record.flags != 0
+            || self.record.data_root != 0
+            || self.record.data_blocks != 0
+            || self.record.allocated_bytes != 0
+            || self.record.size_bytes != self.target.len() as u64
+            || self.target.is_empty()
+            || self.target.as_bytes().contains(&0)
+            || self.target.len() > Self::maximum_target_bytes(block_size)
+            || self.target.len() > u32::MAX as usize - PAYLOAD_LEN
+        {
+            return Err(FormatError::Invalid("invalid inline symlink record"));
+        }
+        Ok(())
+    }
+
+    pub fn encode(&self, block_size: usize, generation: u64) -> Result<Vec<u8>, FormatError> {
+        self.validate(block_size)?;
+        let payload_len = PAYLOAD_LEN + self.target.len();
+        let mut block = vec![0; block_size];
+        self.record.write_fields(&mut block);
+        block[HEADER_SIZE + PAYLOAD_LEN..HEADER_SIZE + payload_len]
+            .copy_from_slice(self.target.as_bytes());
+        self.record.seal_record(&mut block, generation, payload_len);
+        Ok(block)
+    }
+
+    pub fn decode(block: &'a [u8]) -> Result<(Self, u64), FormatError> {
+        let (record, header) = ObjectRecord::decode_fields(block)?;
+        let payload = header.payload(block);
+        if header.flags != 0 || payload[9] != 0 {
+            return Err(FormatError::Invalid("symlink reserved fields are nonzero"));
+        }
+        let target = core::str::from_utf8(&payload[PAYLOAD_LEN..])
+            .map_err(|_| FormatError::Invalid("symlink target is not UTF-8"))?;
+        let result = Self { record, target };
+        result.validate(block.len())?;
+        if block[HEADER_SIZE + payload.len()..].iter().any(|b| *b != 0) {
+            return Err(FormatError::Invalid("symlink unused tail is nonzero"));
+        }
+        Ok((result, header.generation))
     }
 }

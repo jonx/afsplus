@@ -1166,3 +1166,76 @@ fn object_encoder_refuses_every_short_fixed_record_buffer() {
         assert_eq!(ObjectRecord::decode(&block).unwrap(), record);
     }
 }
+
+#[test]
+fn inline_symlink_codec_preserves_exact_targets_and_refuses_fixed_encoding() {
+    use afsplus_format::object::SymlinkRecord;
+    let maximum = "x".repeat(SymlinkRecord::maximum_target_bytes(BS));
+    for target in [
+        "missing",
+        "../dir/./name",
+        "/absolute//path",
+        "SYS:Tools",
+        "café/日本語",
+        &maximum,
+    ] {
+        let mut record = sample_record();
+        record.object_type = ObjectType::Symlink;
+        record.flags = 0;
+        record.size_bytes = target.len() as u64;
+        record.allocated_bytes = 0;
+        record.data_root = 0;
+        record.data_blocks = 0;
+        let source = SymlinkRecord { record, target };
+        let block = source.encode(BS, 7).unwrap();
+        let (decoded, generation) = SymlinkRecord::decode(&block).unwrap();
+        assert_eq!(decoded, source);
+        assert_eq!(generation, 7);
+        assert!(record.encode(BS, 8).is_err());
+        assert!(ObjectRecord::decode(&block).is_err());
+        for short in 0..HEADER_SIZE + 96 + target.len() {
+            assert!(source.encode(short, 7).is_err());
+        }
+    }
+}
+
+#[test]
+fn inline_symlink_codec_rejects_valid_crc_malformed_payloads() {
+    use afsplus_format::object::SymlinkRecord;
+    let mut record = sample_record();
+    record.object_type = ObjectType::Symlink;
+    record.flags = 0;
+    record.size_bytes = 3;
+    record.allocated_bytes = 0;
+    record.data_root = 0;
+    record.data_blocks = 0;
+    let source = SymlinkRecord {
+        record,
+        target: "abc",
+    };
+    let valid = source.encode(BS, 7).unwrap();
+    for case in 0..12 {
+        let mut block = valid.clone();
+        let mut header = BlockHeader::verify(&block, block_type::OBJECT).unwrap();
+        match case {
+            0 => block[HEADER_SIZE + 96] = 0xff,
+            1 => block[HEADER_SIZE + 96] = 0,
+            2 => block[HEADER_SIZE + 9] = 1,
+            3 => block[HEADER_SIZE + 10] = 1,
+            4 => block[HEADER_SIZE + 24] = 1,
+            5 => block[HEADER_SIZE + 80] = 1,
+            6 => block[HEADER_SIZE + 88] = 1,
+            7 => block[HEADER_SIZE + 16] = 2,
+            8 => header.payload_len -= 1,
+            9 => header.payload_len += 1,
+            10 => header.flags = 1,
+            11 => block[BS - 1] = 1,
+            _ => unreachable!(),
+        }
+        header.seal(&mut block);
+        assert!(SymlinkRecord::decode(&block).is_err(), "case {case}");
+    }
+    for n in 0..valid.len() {
+        assert!(SymlinkRecord::decode(&valid[..n]).is_err());
+    }
+}

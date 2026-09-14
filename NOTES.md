@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Cross-read inline symlink records with Rust and C](#2026-09-14---cross-read-inline-symlink-records-with-rust-and-c)
 - [2026-09-14 - Reject undersized object encoder buffers](#2026-09-14---reject-undersized-object-encoder-buffers)
 - [2026-09-14 - Bind directory and alias archive restoration](#2026-09-14---bind-directory-and-alias-archive-restoration)
 - [2026-09-14 - Reconcile the filesystem comparison with executable support](#2026-09-14---reconcile-the-filesystem-comparison-with-executable-support)
@@ -103,6 +104,20 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Cross-read inline symlink records with Rust and C
+
+Accepted ADR-068 for experimental implementation under delegated design authority,
+with its full integration and platform qualification requirements retained. Added
+an explicit borrowed-target Rust codec and an independent heap-free C record
+validator. Fixed-record operations reject symlinks until mutation paths preserve
+the variable payload; the standalone C function does not enable volume writes.
+
+Strict and sanitized C probes cross-read relative, absolute, AROS-qualified,
+Unicode and maximum-length Rust records and reject fourteen malformed variants
+per target. Rust also checks every undersized encoding buffer, truncated input,
+reserved fields and nonzero unused tails. Complete namespace mutations, snapshot
+reads, adapters and platform qualification remain separate implementation work.
 
 ## 2026-09-14 - Reject undersized object encoder buffers
 

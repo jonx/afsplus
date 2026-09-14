@@ -202,6 +202,15 @@ struct afspr_object {
     uint64_t data_blocks;
 };
 
+/* Validate one standalone ADR-068 record without I/O or allocation.
+ * On success target borrows block and is not NUL-terminated. Outputs are
+ * unchanged on error. This does not validate volume ownership/checkpoint reachability
+ * or enable symlink mutations in the reader/writer volume API. */
+int afspr_decode_symlink_record(const void *block, size_t block_size,
+                               struct afspr_object *object,
+                               const uint8_t **target, size_t *target_size,
+                               uint64_t *generation);
+
 /*
  * Initial placeholder: no function writes this type. Its layout is retained
  * for source compatibility; new integrations use afspr_directory_entry.

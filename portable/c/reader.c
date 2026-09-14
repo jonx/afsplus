@@ -1359,6 +1359,60 @@ static int afspr_decode_timespec(const uint8_t *encoded,
                : AFSPR_ERR_CORRUPT;
 }
 
+int afspr_decode_symlink_record(const void *input, size_t block_size,
+                               struct afspr_object *object,
+                               const uint8_t **target, size_t *target_size,
+                               uint64_t *generation)
+{
+    const uint8_t *block = (const uint8_t *)input;
+    const uint8_t *p;
+    size_t length;
+    size_t i;
+    struct afspr_header header;
+    struct afspr_object decoded;
+    int status;
+    if (input == NULL || object == NULL || target == NULL ||
+        target_size == NULL || generation == NULL) {
+        return AFSPR_ERR_INVALID_ARGUMENT;
+    }
+    status = afspr_verify_header(block, block_size, AFSPR_BLOCK_TYPE_OBJECT, &header);
+    if (status != AFSPR_OK) return status;
+    if (header.flags != 0u || header.payload_len <= AFSPR_OBJECT_PAYLOAD)
+        return AFSPR_ERR_CORRUPT;
+    p = block + AFSPR_HEADER_SIZE;
+    length = (size_t)header.payload_len - AFSPR_OBJECT_PAYLOAD;
+    memset(&decoded, 0, sizeof(decoded));
+    decoded.abi_version = AFSPR_ABI_VERSION;
+    decoded.object_id = afspr_get_le64(p);
+    decoded.type = p[8];
+    decoded.flags = afspr_get_le16(p + 10u);
+    decoded.link_count = afspr_get_le32(p + 12u);
+    decoded.size_bytes = afspr_get_le64(p + 16u);
+    decoded.allocated_bytes = afspr_get_le64(p + 24u);
+    decoded.protection = afspr_get_le32(p + 68u);
+    decoded.content_generation = afspr_get_le64(p + 72u);
+    decoded.data_root = afspr_get_le64(p + 80u);
+    decoded.data_blocks = afspr_get_le64(p + 88u);
+    if (decoded.object_id == 0u || decoded.object_id != header.owner ||
+        decoded.type != AFSPR_OBJECT_SYMLINK || p[9] != 0u ||
+        decoded.flags != 0u || decoded.link_count == 0u ||
+        decoded.size_bytes != length || decoded.allocated_bytes != 0u ||
+        decoded.data_root != 0u || decoded.data_blocks != 0u ||
+        afspr_decode_timespec(p + 32u, &decoded.created) != AFSPR_OK ||
+        afspr_decode_timespec(p + 44u, &decoded.modified) != AFSPR_OK ||
+        afspr_decode_timespec(p + 56u, &decoded.changed) != AFSPR_OK ||
+        !afspr_valid_utf8(p + AFSPR_OBJECT_PAYLOAD, length) ||
+        memchr(p + AFSPR_OBJECT_PAYLOAD, 0, length) != NULL)
+        return AFSPR_ERR_CORRUPT;
+    for (i = AFSPR_HEADER_SIZE + (size_t)header.payload_len; i < block_size; ++i)
+        if (block[i] != 0u) return AFSPR_ERR_CORRUPT;
+    *object = decoded;
+    *target = p + AFSPR_OBJECT_PAYLOAD;
+    *target_size = length;
+    *generation = header.generation;
+    return AFSPR_OK;
+}
+
 static int afspr_decode_object(const uint8_t *block, size_t block_size,
                                const struct afspr_ident *ident,
                                uint64_t max_generation,

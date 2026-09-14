@@ -1,6 +1,6 @@
 # Symlink Qualification
 
-> **ADRs:** [ADR-068 proposed](../adr/ADR-068-portable-symlink-targets.md) ·
+> **ADRs:** [ADR-068](../adr/ADR-068-portable-symlink-targets.md) ·
 > **Milestones:** M03, M05, M12, M14
 
 ## Purpose
@@ -11,6 +11,21 @@ remains an OS/path-layer test; this gate tests storage, object lifetime and
 adapter transport.
 
 ## Codec and corruption matrix
+
+Run `cargo test -p afsplus-format inline_symlink` for the explicit borrowed-target
+codec. Require maximum-length exact round-trip, refusal of every undersized
+encoding buffer and every truncated input, plus valid-CRC malformed target,
+allocation, flag, reserved-field and unused-tail cases. The ordinary fixed-record
+encoder/decoder must reject symlinks until its callers preserve their payloads.
+Run `cargo test -p afsplus-format --test symlink_c` on Unix hosts with a C compiler
+and address/undefined-behavior sanitizer support. The test compiles the independent
+[reader](../portable/c/reader.c) and [probe](../portable/c/tests/symlink_probe.c)
+under strict C99 warnings and sanitizers, cross-reads six Rust-generated targets,
+and compares refusal of fourteen valid-CRC malformed variants per target.
+It checks all truncated input lengths, borrowed target bytes, fixed metadata and
+unchanged output parameters on failure. These are private temporary regular-file
+fixtures. This host compiler gate does not claim m68k runtime qualification.
+Integrated filesystem qualification below is separate.
 
 Rust and portable C cross-read targets that are dangling, relative, absolute,
 AROS-qualified, Unicode, contain `.`/`..`, and reach the exact format maximum.
