@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Prioritize usable stage outcomes across the complete queue](#2026-09-14---prioritize-usable-stage-outcomes-across-the-complete-queue)
 - [2026-09-14 - Add bounded block-device partition views](#2026-09-14---add-bounded-block-device-partition-views)
 - [2026-09-14 - Audit finite executable-core stage requirements](#2026-09-14---audit-finite-executable-core-stage-requirements)
 - [2026-09-14 - Preserve scoped symlinks in bound archive groups](#2026-09-14---preserve-scoped-symlinks-in-bound-archive-groups)
@@ -113,6 +114,15 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Prioritize usable stage outcomes across the complete queue
+
+The owner asked to align the active goal with the milestone discussion. Recorded
+stage-first selection in the queue's resume instructions: evidence reconciliation,
+finite prerequisites and usable outcomes precede further expansion of one feature
+thread. Preserved the entire queue, snapshot/recovery context and physical-device
+boundaries. The goal-management interface cannot rewrite the active objective;
+repository instructions record this priority within its existing full scope.
 
 ## 2026-09-14 - Add bounded block-device partition views
 

@@ -10,6 +10,7 @@ oracle and backend. Snapshot work does not replace the other rows.
 <!-- toc -->
 
 - [Resume here](#resume-here)
+  - [Snapshot and recovery integration context](#snapshot-and-recovery-integration-context)
 - [Milestone closure audit order](#milestone-closure-audit-order)
 - [Complete work queue](#complete-work-queue)
 - [Boundaries to preserve](#boundaries-to-preserve)
@@ -18,6 +19,22 @@ oracle and backend. Snapshot work does not replace the other rows.
 <!-- /toc -->
 
 ## Resume here
+
+Prioritize completing usable roadmap stages. Reconcile each stage and milestone
+with implementation evidence; distinguish implemented capability, integrated
+consumer and platform qualification. Keep ongoing review visible and excluded
+from finite completion calculations. Preserve every requirement in the complete
+queue below, including explicit native hardware and user-decision gates.
+
+Use the [milestone closure audit order](#milestone-closure-audit-order) to select
+the next finite prerequisite. For Stage A, qualify bounded overlay branches after
+the slice requirement, then close the replay-artifact, resource-accounting and
+cache-profile gaps recorded in [milestones](milestones.md#stage-a-executable-core-audit).
+Update specs and status, validate and commit each completed unit, and push to the
+existing private origin. Do not resume open-ended feature expansion merely because
+it follows the previous implementation thread.
+
+### Snapshot and recovery integration context
 
 Continue Q4 with an integrated ownership/reclaim design, using the
 [snapshot accounting model](../testing/book-review-qualification.md#snapshot-accounting-model)
