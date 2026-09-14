@@ -124,6 +124,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-093](ADR-093-directory-and-hardlink-archive-groups.md) | Bind directory and hard-link archive groups to scoped restoration | Accepted | amended by [ADR-095](ADR-095-bound-symlink-archive-groups.md); amends [ADR-082](ADR-082-backup-object-metadata.md), [ADR-091](ADR-091-bound-regular-file-archive-groups.md), [ADR-092](ADR-092-scoped-restore-namespace-lookup.md) |
 | [ADR-094](ADR-094-scoped-symlink-transport.md) | Transport symlink targets through scoped backup and restore APIs | Accepted | amended by [ADR-095](ADR-095-bound-symlink-archive-groups.md); amends [ADR-068](ADR-068-portable-symlink-targets.md), [ADR-075](ADR-075-revocable-backup-capability.md), [ADR-077](ADR-077-separate-restore-authority.md) |
 | [ADR-095](ADR-095-bound-symlink-archive-groups.md) | Bind symlink archive targets to exact scoped restoration | Accepted | amends [ADR-093](ADR-093-directory-and-hardlink-archive-groups.md), [ADR-094](ADR-094-scoped-symlink-transport.md) |
+| [ADR-096](ADR-096-bounded-block-slices.md) | Expose bounded block-device slices | Accepted | — |
 
 <!-- /adr-index -->
 

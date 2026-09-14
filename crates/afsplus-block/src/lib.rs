@@ -14,6 +14,7 @@ pub mod fault;
 pub mod file;
 pub mod memory;
 pub mod powercut;
+pub mod slice;
 pub mod trace;
 
 use std::fmt;
@@ -25,6 +26,7 @@ pub use fault::{FaultBackend, FaultPlan};
 pub use file::FileBackend;
 pub use memory::MemoryBackend;
 pub use powercut::{crash_states, for_each_crash_state, CrashState, RecordedOp, RecordingBackend};
+pub use slice::SliceBackend;
 pub use trace::{IoStats, TraceBackend, TraceEvent};
 
 #[derive(Debug)]

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Add bounded block-device partition views](#2026-09-14---add-bounded-block-device-partition-views)
 - [2026-09-14 - Audit finite executable-core stage requirements](#2026-09-14---audit-finite-executable-core-stage-requirements)
 - [2026-09-14 - Preserve scoped symlinks in bound archive groups](#2026-09-14---preserve-scoped-symlinks-in-bound-archive-groups)
 - [2026-09-14 - Separate ongoing review from finite stage completion](#2026-09-14---separate-ongoing-review-from-finite-stage-completion)
@@ -112,6 +113,22 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Add bounded block-device partition views
+
+[ADR-096](adr/ADR-096-bounded-block-slices.md) defines fixed nonempty slices
+with overflow-safe admission, logical access checks, nested translation and
+forwarded parent barriers. The wrapper needs no additional block allocation.
+Tests verify neighboring sentinels, boundary buffers and parent failure behavior.
+A real filesystem cycle formats and mutates two differently offset slices,
+checks exact sparse/truncated contents through remount, runs the checker and
+confirms every surrounding block is unchanged.
+
+The all-feature workspace suite passed 474 tests with zero failures and ten
+ignored qualification tests across 78 suites. Clippy, formatting, documentation,
+seven checker fixtures and whitespace validation passed. The finite Stage A
+slice requirement is implemented; overlay, replay, resource accounting and other
+stage gates remain open. No physical storage was accessed by the qualification.
 
 ## 2026-09-14 - Audit finite executable-core stage requirements
 

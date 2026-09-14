@@ -16,6 +16,7 @@
 - [Block ownership assertions](#block-ownership-assertions)
 - [Remote AROS target mode](#remote-aros-target-mode)
 - [Rule](#rule)
+- [Bounded partition views](#bounded-partition-views)
 
 <!-- /toc -->
 
@@ -181,3 +182,18 @@ For Macaros Native, the M5-to-M1 development control path can be used to collect
 ## Rule
 
 A filesystem bug fixed without a reproducible regression scenario is not considered fully fixed unless reproduction is genuinely impossible.
+
+## Bounded partition views
+
+[ADR-096](../adr/ADR-096-bounded-block-slices.md) defines a fixed, nonempty
+parent-block interval with subtraction-first capacity admission. Reads and writes
+validate logical bounds and exact buffer size before translating the address;
+flush forwards the parent barrier and its errors. Nested views allocate no
+additional transfer buffer and consuming a view returns its parent.
+
+Run `cargo test -p afsplus-block` for translation, neighboring sentinels, nested
+views, invalid ranges/buffers and forwarded failure checks. Run
+`cargo test -p afsplus-check --test sliced_volume` for format, sparse write,
+rename, truncate, sync, remount and exhaustive checking within a populated parent
+image. Every surrounding block must retain its sentinel contents. These tests
+use memory images and establish no physical partition or device qualification.
