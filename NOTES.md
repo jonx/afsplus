@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Measure resident memory around workload phases](#2026-09-14---measure-resident-memory-around-workload-phases)
 - [2026-09-14 - Bind internal commit diagnostics to semantic replay](#2026-09-14---bind-internal-commit-diagnostics-to-semantic-replay)
 - [2026-09-14 - Observe the common checkpoint publication tail](#2026-09-14---observe-the-common-checkpoint-publication-tail)
 - [2026-09-14 - Automate retained-host replay reconstruction](#2026-09-14---automate-retained-host-replay-reconstruction)
@@ -135,6 +136,25 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Measure resident memory around workload phases
+
+Added opt-in `--resident-rounds 3..32` to the host workload. A safe-Rust, fixed
+self-only ps query records RSS outside each phase's requested-heap/wall interval,
+with separate probe timing. Default execution keeps its original report profile.
+Repeated reads follow exact initial verification, with measured oracle preparation
+and release, unchanged generation and zero write/flush assertions. Version-2
+reports retain each sample and its observed range rather than asserting a plateau.
+
+Four measurement unit tests, seven workload integration tests, formatting and
+all-target/all-feature Clippy pass. The enabled/disabled image and original I/O
+comparisons cover small files and cache profiles 2/4/8/unlimited. A separate
+16-round observation retained five workload/process report pairs and source,
+runner and ps hashes in ignored `build/resident-series-21ddwr0y`; each repeated
+read matched exact bytes and caused no image writes. Full offline workspace
+validation passes: 517 tests passed, 10 ignored, none failed. Documentation
+validation and its 13 tests pass. RSS includes observer/runtime/fixture state; individual ownership,
+sustained mixed workload behavior, Linux execution and native evidence remain open.
 
 ## 2026-09-14 - Bind internal commit diagnostics to semantic replay
 

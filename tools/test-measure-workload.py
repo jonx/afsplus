@@ -91,6 +91,56 @@ class WorkloadTests(unittest.TestCase):
                 if row["name"].endswith("check"):
                     self.assertEqual(row["writes"], 0)
 
+    def test_resident_series_preserves_workload_and_accounts_for_its_oracle(self):
+        for pages in (None, 2, 4, 8, "unlimited"):
+            profile = [] if pages is None else ["--cache-profile", str(pages)]
+            plain = json.loads(subprocess.run([BINARY, *profile], capture_output=True,
+                check=True, timeout=60).stdout)
+            measured = json.loads(subprocess.run([BINARY, *profile, "--resident-rounds", "3"],
+                capture_output=True, check=True, timeout=60).stdout)
+            self.assertEqual(measured["version"], 2)
+            self.assertEqual(measured["image_crc32c"], plain["image_crc32c"])
+            self.assertEqual(measured["resident_provider"], "ps-rss-kib-v1")
+            rows = measured["phases"]
+            for row in rows:
+                for field in ("resident_start_bytes", "resident_end_bytes"):
+                    self.assertGreater(row[field], 0)
+                    self.assertEqual(row[field] % 1024, 0)
+                self.assertEqual(row["heap_end_bytes"] - row["heap_start_bytes"],
+                    row["heap_acquired_bytes"] - row["heap_released_bytes"])
+            original = {r["name"]: r for r in plain["phases"]}
+            for row in rows:
+                if row["name"] not in original:
+                    continue
+                for field in ("reads", "writes", "flushes", "bytes_read", "bytes_written"):
+                    self.assertEqual(row[field], original[row["name"]][field])
+            steady = [r for r in rows if r["name"] == "steady-read"]
+            self.assertEqual(len(steady), 3)
+            expected_bytes = original["read-verify"]["logical_payload_read_bytes"]
+            for row in steady:
+                self.assertEqual((row["writes"], row["flushes"]), (0,0))
+                self.assertEqual(row["logical_payload_read_bytes"], expected_bytes)
+                self.assertEqual(row["heap_start_bytes"], row["heap_end_bytes"])
+                self.assertEqual(row["reads"], steady[0]["reads"])
+            prepare = next(r for r in rows if r["name"] == "steady-prepare")
+            release = next(r for r in rows if r["name"] == "steady-release")
+            self.assertEqual(prepare["logical_payload_read_bytes"], expected_bytes)
+            self.assertEqual(prepare["heap_end_bytes"] - prepare["heap_start_bytes"],
+                release["heap_start_bytes"] - release["heap_end_bytes"])
+            series = measured["steady_read"]
+            values = [r["resident_end_bytes"] for r in steady]
+            self.assertEqual((series["end_min_bytes"],series["end_max_bytes"]), (min(values),max(values)))
+            self.assertFalse(series["plateau_verified"])
+            self.assertEqual(rows[0]["heap_start_bytes"], rows[-1]["heap_end_bytes"])
+
+    def test_resident_admission_rejects_missing_duplicate_and_unbounded_rounds(self):
+        for arguments in (["--resident-rounds"], ["--resident-rounds", "0"],
+                ["--resident-rounds", "2"], ["--resident-rounds", "33"],
+                ["--resident-rounds", "03"], ["--resident-rounds", "3", "--resident-rounds", "3"]):
+            result = subprocess.run([BINARY, *arguments], capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, b"")
+
     def test_invalid_cache_profiles_refuse_without_report(self):
         for pages in ("0", "1", "3", "999", "image.img"):
             result = subprocess.run([BINARY, "--cache-profile", pages],

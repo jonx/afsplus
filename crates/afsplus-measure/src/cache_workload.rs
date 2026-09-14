@@ -8,7 +8,7 @@ fn name(i: usize) -> String {
 
 pub fn run(pages: usize) {
     let io = Cell::new(IoStats::default());
-    let mut rows = Vec::with_capacity(12);
+    let mut rows = Vec::with_capacity(14 + resident::rounds());
     let mut dev = Image {
         bytes: vec![0; BLOCKS as usize * BS],
         io: &io,
@@ -97,6 +97,7 @@ pub fn run(pages: usize) {
     });
     row.payload_read = 96 * 7;
     rows.push(row);
+    steady_reads(&mut volume, &io, &mut rows);
     let (row, mut dev) = phase("final-unmount", &io, || volume.into_device());
     rows.push(row);
     let (row, ()) = phase("recovered-check", &io, || {

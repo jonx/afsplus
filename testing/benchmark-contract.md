@@ -27,6 +27,7 @@ AFS+ must measure performance and resource use continuously. A new filesystem ha
 - [Per-command host accounting](#per-command-host-accounting)
 - [Phased requested-heap workload](#phased-requested-heap-workload)
 - [Tree-cache batch measurements](#tree-cache-batch-measurements)
+- [Phase-boundary resident memory and repeated reads](#phase-boundary-resident-memory-and-repeated-reads)
 
 <!-- /toc -->
 
@@ -401,3 +402,64 @@ The executable accepts only the four named measurement profiles; the underlying
 Rust mount option accepts any nonzero count. These are host memory-image results;
 physical storage latency and classic-machine resource qualification need their
 own measurements.
+
+## Phase-boundary resident memory and repeated reads
+
+The host-only workload accepts `--resident-rounds N`, with N from 3 through 32,
+optionally combined with `--cache-profile 2|4|8|unlimited`. Default commands retain
+their version-1 reports and perform no RSS probes. Opting in produces version-2
+reports with whole-process RSS at the beginning and end of every phase and a
+post-warmup series of repeated reads against unchanged, previously verified files.
+For example:
+
+```sh
+target/debug/afsplus-measure --cache-profile 2 --resident-rounds 16
+```
+
+The `ps-rss-kib-v1` provider runs the fixed `/bin/ps -o rss= -p SELF` command
+without a shell or inherited environment, selecting only the still-running
+workload process. It normalizes units using the [Apple ps manual](https://raw.githubusercontent.com/apple-oss-distributions/adv_cmds/main/ps/ps.1)
+and [Linux procps manual](https://man7.org/linux/man-pages/man1/ps.1.html):
+RSS is reported in 1024-byte units. These provider contracts were reviewed on
+2026-09-14. The implementation uses safe Rust process APIs; it introduces no new
+unsafe ABI boundary. Other target OSes refuse this option before workload I/O.
+Empty, ambiguous, zero, overflowing and failed provider results refuse a successful
+report. Only macOS execution is currently qualified; Linux units are documented,
+but Linux runtime qualification remains open.
+
+RSS probes occur outside each phase's wall-time and requested-heap interval.
+Their durations are separately reported as `resident_start_probe_wall_ns` and
+`resident_end_probe_wall_ns`; sampling still affects process scheduling and
+allocator history. Whole-command CPU/time accounting includes observer overhead.
+Use an uninstrumented companion run for performance conclusions. Resident values
+include process runtime, mappings, shared pages, the fixture and verification
+state; they are not private heap, filesystem-owned cache memory, a process-tree
+sum or a measurement of all physical memory consumed on behalf of the process.
+Do not subtract the nominal 16 MiB image allocation from RSS: allocated virtual
+bytes need not be resident.
+
+After initial exact read verification, `steady-prepare` captures the expected
+names, IDs and bytes in a separately measured phase. Each `steady-read` repeats
+the same enumeration and exact byte comparison; checkpoint generation must remain
+unchanged and writes/flushes must be zero. `steady-release` measures disposal of
+the retained oracle. All phases retain I/O and requested-heap accounting, so the
+oracle's setup, retained storage and release are visible. Report storage is
+reserved before measurement and formatting occurs after sampling.
+
+The `steady_read` summary reports round count and first/last/minimum/maximum end
+RSS. `plateau_verified` remains false: a bounded stationary-work series measures
+resident behavior, not an automatically proven plateau, leak absence or long-term
+resource bound. Keep the raw series, per-command report, executable/provider
+hashes and measured-source hashes in private artifacts. Mixed mutations, aged and
+near-full workloads, cache ownership, sustained duration and native/constrained
+qualification remain separate resource gates.
+
+`tools/test-measure-workload.py` compares enabled/disabled image CRCs and original
+phase I/O across the small-file workload and all four cache profiles, checks
+read-only repeated phases, oracle heap balance, RSS series and argument refusals.
+The resident parser unit test covers missing/ambiguous values and overflow.
+A macOS 16-round observation measured end-RSS ranges of 5,177,344–5,210,112 bytes
+for small files, and respectively 9,142,272–9,191,424; 9,191,424–9,224,192;
+9,158,656–9,191,424; and 9,306,112–9,338,880 bytes for cache profiles 2, 4, 8 and
+unlimited. These are one host observation with instrumentation and an in-memory
+fixture, not portable memory requirements or evidence that one cache policy wins.

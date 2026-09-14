@@ -1,6 +1,7 @@
 //! Single-threaded, memory-only host qualification. No filesystem paths accepted.
 mod cache_workload;
 mod heap;
+mod resident;
 
 use afsplus_block::{trace::IoStats, BlockDevice, BlockError};
 use afsplus_check::check_device;
@@ -72,6 +73,8 @@ impl BlockDevice for Image<'_> {
 
 struct Row {
     name: &'static str,
+    resident_start: Option<resident::Snapshot>,
+    resident_end: Option<resident::Snapshot>,
     before: heap::Sample,
     after: heap::Sample,
     io: IoStats,
@@ -81,15 +84,19 @@ struct Row {
 }
 
 fn phase<T>(name: &'static str, io: &Cell<IoStats>, work: impl FnOnce() -> T) -> (Row, T) {
+    let resident_start = resident::snapshot();
     io.set(IoStats::default());
     let start = Instant::now();
     let before = HEAP.begin();
     let result = work();
     let after = HEAP.sample();
     let wall_ns = start.elapsed().as_nanos();
+    let resident_end = resident::snapshot();
     (
         Row {
             name,
+            resident_start,
+            resident_end,
             before,
             after,
             io: io.get(),
@@ -110,25 +117,57 @@ fn ts(seconds: i64) -> Timespec {
 
 fn main() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
-    if !arguments.is_empty() {
-        if arguments.len() == 2 && arguments[0] == "--cache-profile" {
-            let pages = match arguments[1].to_str() {
-                Some("2") => Some(2),
-                Some("4") => Some(4),
-                Some("8") => Some(8),
-                Some("unlimited") => Some(usize::MAX),
-                _ => None,
-            };
-            if let Some(pages) = pages {
-                cache_workload::run(pages);
-                return;
-            }
+    let mut pages = None;
+    let mut rounds = None;
+    let mut valid = true;
+    for pair in arguments.chunks(2) {
+        if pair.len() != 2 {
+            valid = false;
+            break;
         }
-        eprintln!("usage: afsplus-measure (no arguments), or --cache-profile 2|4|8|unlimited");
+        match pair[0].to_str() {
+            Some("--cache-profile") if pages.is_none() => {
+                pages = match pair[1].to_str() {
+                    Some("2") => Some(2),
+                    Some("4") => Some(4),
+                    Some("8") => Some(8),
+                    Some("unlimited") => Some(usize::MAX),
+                    _ => {
+                        valid = false;
+                        None
+                    }
+                };
+            }
+            Some("--resident-rounds") if rounds.is_none() => {
+                rounds = pair[1].to_str().and_then(|s| {
+                    if s.starts_with('0') || !s.bytes().all(|b| b.is_ascii_digit()) {
+                        return None;
+                    }
+                    s.parse::<usize>().ok().filter(|n| (3..=32).contains(n))
+                });
+                if rounds.is_none() {
+                    valid = false;
+                }
+            }
+            _ => valid = false,
+        }
+    }
+    if !valid {
+        eprintln!("usage: afsplus-measure (no arguments), or [--cache-profile 2|4|8|unlimited] [--resident-rounds 3..32]");
         std::process::exit(1);
     }
+    if let Some(count) = rounds {
+        resident::configure(count).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        });
+    }
+    if let Some(pages) = pages {
+        cache_workload::run(pages);
+        return;
+    }
     let io = Cell::new(IoStats::default());
-    let mut rows = Vec::with_capacity(12);
+    let mut rows = Vec::with_capacity(14 + resident::rounds());
     let mut dev = Image {
         bytes: vec![0; BLOCKS as usize * BS],
         io: &io,
@@ -216,6 +255,7 @@ fn main() {
     });
     row.payload_read = 8 * 6000 + 7 * 1024;
     rows.push(row);
+    steady_reads(&mut volume, &io, &mut rows);
     let (row, mut dev) = phase("final-unmount", &io, || volume.into_device());
     rows.push(row);
     let (row, ()) = phase("recovered-check", &io, || {
@@ -224,6 +264,57 @@ fn main() {
     });
     rows.push(row);
     report("small-files-v1", &dev, bitmap_peak, &rows, None);
+}
+
+/// Repeated read-only work after exact initial read verification. The expected
+/// names and bytes have separate preparation/release phases, so oracle costs
+/// remain visible without being repeated inside each read phase.
+fn steady_reads(
+    volume: &mut afsplus_core::Volume<Image<'_>>,
+    io: &Cell<IoStats>,
+    rows: &mut Vec<Row>,
+) {
+    if resident::rounds() == 0 {
+        return;
+    }
+    let (mut prepare, expected) = phase("steady-prepare", io, || {
+        volume
+            .list_root()
+            .unwrap()
+            .into_iter()
+            .map(|(name, id)| {
+                let bytes = volume.read_file(id).unwrap();
+                (name, id, bytes)
+            })
+            .collect::<Vec<_>>()
+    });
+    prepare.payload_read = expected
+        .iter()
+        .map(|(_, _, bytes)| bytes.len() as u64)
+        .sum();
+    rows.push(prepare);
+    let generation = volume.generation();
+    for _ in 0..resident::rounds() {
+        let (mut row, bytes) = phase("steady-read", io, || {
+            let names = volume.list_root().unwrap();
+            assert_eq!(names.len(), expected.len());
+            let mut bytes = 0;
+            for ((name, id), (expected_name, expected_id, expected_bytes)) in
+                names.iter().zip(&expected)
+            {
+                assert_eq!((name, id), (expected_name, expected_id));
+                assert_eq!(&volume.read_file(*id).unwrap(), expected_bytes);
+                bytes += expected_bytes.len() as u64;
+            }
+            bytes
+        });
+        assert_eq!(volume.generation(), generation);
+        assert_eq!((row.io.writes, row.io.flushes), (0, 0));
+        row.payload_read = bytes;
+        rows.push(row);
+    }
+    let (release, ()) = phase("steady-release", io, || drop(expected));
+    rows.push(release);
 }
 
 fn report(
@@ -235,7 +326,17 @@ fn report(
 ) {
     let image_crc = afsplus_format::crc32c::crc32c(&dev.bytes);
     // Reporting occurs after all samples so JSON formatting cannot inflate a phase.
-    println!("{{\"version\":1,\"workload\":\"{workload}\",\"outcome\":\"pass\",\"backend\":\"fixed-memory\",\"image_bytes\":{},\"image_crc32c\":{},\"last_edit_bitmap_payload_peak_bytes\":{},", dev.bytes.len(), image_crc, bitmap_peak);
+    let version = if resident::rounds() == 0 { 1 } else { 2 };
+    println!("{{\"version\":{version},\"workload\":\"{workload}\",\"outcome\":\"pass\",\"backend\":\"fixed-memory\",\"image_bytes\":{},\"image_crc32c\":{},\"last_edit_bitmap_payload_peak_bytes\":{},", dev.bytes.len(), image_crc, bitmap_peak);
+    if resident::rounds() != 0 {
+        let samples: Vec<_> = rows
+            .iter()
+            .filter(|r| r.name == "steady-read")
+            .map(|r| r.resident_end.unwrap().bytes)
+            .collect();
+        println!("\"resident_provider\":\"ps-rss-kib-v1\",\"resident_scope\":\"whole-process phase boundaries\",\"resident_platform\":\"{}\",\"steady_read\":{{\"rounds\":{},\"end_min_bytes\":{},\"end_max_bytes\":{},\"end_first_bytes\":{},\"end_last_bytes\":{},\"plateau_verified\":false}},", std::env::consts::OS,
+            samples.len(), samples.iter().min().unwrap(), samples.iter().max().unwrap(), samples[0], samples.last().unwrap());
+    }
     if let Some((pages, stats)) = cache {
         let pages = if pages == usize::MAX {
             "\"unlimited\"".to_owned()
@@ -259,7 +360,13 @@ fn report(
         if i != 0 {
             println!(",");
         }
-        println!("{{\"name\":\"{}\",\"wall_ns\":{},\"heap_start_bytes\":{},\"heap_end_bytes\":{},\"heap_peak_bytes\":{},\"heap_peak_above_start_bytes\":{},\"heap_acquired_bytes\":{},\"heap_released_bytes\":{},\"reads\":{},\"writes\":{},\"bytes_read\":{},\"bytes_written\":{},\"flushes\":{},\"logical_payload_written_bytes\":{},\"logical_payload_read_bytes\":{}}}",
+        let rss = match (row.resident_start, row.resident_end) {
+            (Some(start), Some(end)) => {
+                format!(",\"resident_start_bytes\":{},\"resident_end_bytes\":{},\"resident_start_probe_wall_ns\":{},\"resident_end_probe_wall_ns\":{}", start.bytes, end.bytes, start.probe_wall_ns, end.probe_wall_ns)
+            }
+            _ => String::new(),
+        };
+        println!("{{\"name\":\"{}\",\"wall_ns\":{},\"heap_start_bytes\":{},\"heap_end_bytes\":{},\"heap_peak_bytes\":{},\"heap_peak_above_start_bytes\":{},\"heap_acquired_bytes\":{},\"heap_released_bytes\":{},\"reads\":{},\"writes\":{},\"bytes_read\":{},\"bytes_written\":{},\"flushes\":{},\"logical_payload_written_bytes\":{},\"logical_payload_read_bytes\":{}{rss}}}",
             row.name, row.wall_ns, row.before.live, row.after.live, row.after.peak,
             row.after.peak - row.before.live,
             row.after.acquired.wrapping_sub(row.before.acquired), row.after.released.wrapping_sub(row.before.released),
