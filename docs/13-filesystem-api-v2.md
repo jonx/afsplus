@@ -408,6 +408,12 @@ near-full workloads and metadata headroom need separate qualification. Full arch
 reservation-consumption and destination alignment/capacity evidence under
 [ADR-078](../adr/ADR-078-backup-preservation-modes.md).
 
+The [archive envelope](../spec/backup-envelope.md) supplies stream-integrity
+receipts under [ADR-081](../adr/ADR-081-ordinary-pax-completion-member.md).
+Profile validation binds those receipts to source enumeration, required
+metadata and the selected preservation/loss contract before a consumer reports
+complete backup or restoration.
+
 `sync` reports filesystem durability; it does not certify a complete archive
 restore. The PAX consumer must separately verify its preservation profile,
 integrity, completion and interrupted/partial-work outcome under

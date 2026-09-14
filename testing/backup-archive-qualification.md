@@ -73,6 +73,41 @@ and sparse streams require separate workload evidence. Header buffers are fixed
 at 512 bytes; name allocations are bounded by field widths. Total runtime RAM
 and constrained-target execution require separate measurements.
 
+## Completion envelope
+
+[ADR-081](../adr/ADR-081-ordinary-pax-completion-member.md) and the
+[envelope specification](../spec/backup-envelope.md) define version 2.
+Run `cargo test -p afsplus-backup` and
+[check-backup-envelope.sh](../tools/check-backup-envelope.sh). The host gate uses
+OpenSSL with SHA-512/256 support for independent digest verification, Python for
+raw tar/count checks, and Python/bsdtar for ordinary file recovery. Set
+`AFSPLUS_OPENSSL` for an explicit executable; the script recognizes the existing
+Homebrew OpenSSL 3 path on macOS. This executable is a test dependency.
+
+Require exact receipt equality, delayed receipt availability, changed body/header
+rejection, every truncated fixture prefix, missing/duplicate/altered terminal
+records, wrong counts, unsupported controls, trailing members, unfinished writes
+and flush failures. Validate body count/byte limits separately from the bounded
+control payloads. Raw body paths reject control collisions and parent traversal;
+resolved PAX names and symlink-safe destination behavior require profile checks.
+
+Verify identical digests with the compact portable hash backend by running the
+crate tests and independent gate with:
+
+```sh
+RUSTFLAGS='--cfg sha2_backend="soft" --cfg sha2_backend_soft="compact"' cargo test -p afsplus-backup
+RUSTFLAGS='--cfg sha2_backend="soft" --cfg sha2_backend_soft="compact"' tools/check-backup-envelope.sh
+```
+
+[RustCrypto sha2](https://docs.rs/crate/sha2/0.11.0) defines these backend
+configuration flags. Keep software/default build artifacts separate during
+concurrent qualification. The hash state is incremental; input length is counted
+in 128 bits and admitted within the standard's domain. Tests at the maximum
+counter validate refusal without output, independently of huge-file workloads.
+An integrity receipt provides no sender authentication and cannot replace the
+preservation profile or host grants. Native/older CPU execution, peak RAM,
+throughput and sustained large streams need separate measurements.
+
 ## Integration acceptance
 
 Record decoding establishes syntax only. The complete consumer must enforce the

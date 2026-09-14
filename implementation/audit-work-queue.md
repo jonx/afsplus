@@ -32,7 +32,9 @@ and [previous-checkpoint retention](../testing/book-review-qualification.md#prev
 and [explicit mount/recovery](../testing/book-review-qualification.md#explicit-snapshot-mount-and-recovery)
 as component baselines. Integrate the [trusted backup extension](../docs/13-filesystem-api-v2.md#8-trusted-snapshot-backup-extension)
 with the [PAX archive/restore direction](../adr/ADR-076-pax-backup-interchange.md)
-and [archive qualification](../testing/backup-archive-qualification.md),
+and [archive qualification](../testing/backup-archive-qualification.md), using
+[envelope receipts](../spec/backup-envelope.md) for integrity/termination and
+separate preservation-profile validation,
 preserving explicit work limits before
 recovery. Use the [metadata restoration primitive](../testing/book-review-qualification.md#metadata-restoration-primitive)
 and the [checked destination interface](../docs/13-filesystem-api-v2.md#9-destination-scoped-restore-extension).

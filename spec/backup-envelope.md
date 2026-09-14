@@ -1,0 +1,70 @@
+# PAX completion envelope version 2
+
+[ADR-081](../adr/ADR-081-ordinary-pax-completion-member.md) defines the integrity and
+termination contract. [Archive qualification](../testing/backup-archive-qualification.md)
+owns its executable gates. This envelope carries a body whose preservation
+semantics are validated separately.
+
+## Control headers
+
+The first tar member is a PAX global header named
+`_AROS_BACKUP/begin`. Its unique UTF-8 records are exactly:
+
+| Keyword | Value |
+|---|---|
+| `AROS.backup.envelope` | `2` |
+| `AROS.backup.algorithm` | `sha512-256` |
+
+The final member is an ordinary regular file named
+`_AROS_BACKUP/complete.pax`. Its unique records are exactly:
+
+| Keyword | Value |
+|---|---|
+| `AROS.backup.end` | `2` |
+| `AROS.backup.bytes` | Decimal byte count immediately before this header |
+| `AROS.backup.members` | Decimal body-header count |
+| `AROS.backup.hash` | 64 lowercase hexadecimal characters encoding SHA-512/256 |
+
+Each control header uses the exact path and type above, zero uid/gid/mtime,
+empty link/user/group strings, and its actual PAX payload byte size. The
+beginning mode is zero; the terminal mode is `0600`. Payloads
+are at most 4096 bytes, with standard zero block padding. Unknown or duplicate
+fields are rejected. Record order is immaterial. Decimal counts use canonical
+unsigned syntax, with `0` as the sole leading-zero form. Repeating the beginning
+control inside the body is invalid. Body global headers are refused. Source objects occupy `files/`, with a `files`
+directory representing the root. Auxiliary records occupy `_AROS_BACKUP/metadata/`.
+Body paths are canonical relative paths without empty, dot or parent components;
+only directories may have a trailing slash. Hard-link targets stay under `files/`.
+Local PAX headers carry metadata for interpretation by the preservation layer,
+which must validate resolved names against the same namespace rules. A symlink
+target is data and never grants authority to traverse it during restoration.
+Profile-aware restoration consumes control/auxiliary entries separately and
+unwraps the source root; ordinary tar recovery exposes the `files` subtree.
+
+## Digest domain and completion
+
+The digest begins at byte zero and ends immediately before the final control
+header. It covers complete beginning/body headers, payloads and padding. Its
+byte count uses unsigned 128-bit arithmetic and cannot exceed `(2^128-1)/8`,
+keeping the input below the hash standard's bit-length limit. The streamed
+archive, including control records and end framing, fits the same bound. Body member counts
+include every body tar header, including PAX metadata headers, and exclude the
+two envelope control headers. Counts fit unsigned 64-bit framing admission.
+
+A valid terminal record is followed by two zero tar end blocks and EOF. A caller
+may admit a bounded number of additional complete zero blocks. Any later member,
+partial trailing block or nonzero trailing bytes cause failure. Integrity receipts
+are available only after counts, hash, end framing and EOF all verify. Output
+receipts require successful end-marker output and sink flush; the sink defines
+whether flush implies durable storage.
+
+Control parsing uses fixed limits: 4096 payload bytes, four records, 64 keyword
+bytes and 128 value bytes. Body member/payload limits are supplied independently.
+Stream payloads through caller buffers. No allocation may scale with a declared
+file size. Higher layers validate PAX size overrides before applying them to
+framing. No override is permitted for an envelope control header.
+
+The unkeyed hash detects changed or incomplete streams without authenticating a
+sender. Full preservation or content recovery requires its own profile validation,
+source/restore authority and explicit loss reporting under
+[ADR-078](../adr/ADR-078-backup-preservation-modes.md).

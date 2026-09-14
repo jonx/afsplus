@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Bind archive integrity and termination to an independently checked envelope](#2026-09-14---bind-archive-integrity-and-termination-to-an-independently-checked-envelope)
 - [2026-09-14 - Add streamed tar framing and independent recovery checks](#2026-09-14---add-streamed-tar-framing-and-independent-recovery-checks)
 - [2026-09-14 - Add bounded PAX record parsing for the archive consumer](#2026-09-14---add-bounded-pax-record-parsing-for-the-archive-consumer)
 - [2026-09-14 - Bound shrink working sets and retirements](#2026-09-14---bound-shrink-working-sets-and-retirements)
@@ -82,6 +83,39 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-14 - Bind archive integrity and termination to an independently checked envelope
+
+Accepted [ADR-080](adr/ADR-080-pax-completion-envelope.md) under delegated
+recommended-option authority, selecting SHA-512/256 and 128-bit byte accounting
+after the NIST message-domain review exposed SHA-256's smaller bit-length limit.
+RustCrypto sha2 0.11.0 supplies the implementation; seven packages were added to
+the lockfile. The digest is unkeyed and makes no authentication claim.
+
+Independent recovery rejected the terminal global-header prototype: Python
+3.9.6 tarfile required a subsequent member. [ADR-081](adr/ADR-081-ordinary-pax-completion-member.md)
+superseded it with version 2, a regular terminal control file and separated
+`files`/auxiliary namespaces. The accepted earlier decision remains intact as
+history. Source names resembling control names can live under the source subtree.
+The bundled Python/LibreSSL lacked SHA-512/256; the gate uses existing OpenSSL
+3.6.4 independently, without adding a runtime dependency on that executable.
+
+Eighteen archive-crate tests passed on both default and compact software hash
+backends. They cover delayed receipts, exact counts/digests, truncated prefixes,
+changed body/control bytes, unsupported versions, duplicate/missing completion,
+path/control collisions, limits and failed output/flush. Review extended the
+raw-name guard to local PAX header names, and its regression cases pass on both
+backends. Independent OpenSSL
+hashes and Python/bsdtar ordinary recovery passed for both backends, including a
+changed-payload negative oracle. Formatting, Clippy, documentation checks,
+three checker fixtures and whitespace validation passed. The full workspace
+suite passed 380 tests, with zero failures and ten ignored.
+
+Profile interpretation, opaque metadata transport, actual authorized snapshot
+and restore consumers, performance/peak RAM and native/older-system execution
+remain queue requirements. The receipt establishes stream integrity and actual
+termination; it does not establish full preservation or authenticated provenance.
 
 ## 2026-09-14 - Add streamed tar framing and independent recovery checks
 

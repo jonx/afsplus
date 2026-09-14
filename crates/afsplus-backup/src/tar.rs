@@ -183,6 +183,9 @@ impl Header {
         if self.path.is_empty() {
             return Err(Error::Invalid("empty member name"));
         }
+        if self.path.len() > 256 {
+            return Err(Error::Limit);
+        }
         if !self.kind.has_payload() && self.size != 0 {
             return Err(Error::Invalid("non-data member size"));
         }
@@ -256,6 +259,9 @@ pub struct Reader<R> {
     state: State,
 }
 impl<R: Read> Reader<R> {
+    pub(crate) fn stream(&self) -> &R {
+        &self.inner
+    }
     pub fn new(inner: R, limits: Limits) -> Self {
         Self {
             inner,
@@ -365,6 +371,9 @@ pub struct Writer<W> {
     poisoned: bool,
 }
 impl<W: Write> Writer<W> {
+    pub(crate) fn stream(&self) -> &W {
+        &self.inner
+    }
     pub fn new(inner: W, limits: Limits) -> Self {
         Self {
             inner,
