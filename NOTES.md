@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Qualify snapshot leaf and key codecs](#2026-09-15--qualify-snapshot-leaf-and-key-codecs)
 - [2026-09-15 — Export and replay object-map diagnostics](#2026-09-15--export-and-replay-object-map-diagnostics)
 - [2026-09-15 — Integrate the first cache-family qualification matrix](#2026-09-15--integrate-the-first-cache-family-qualification-matrix)
 - [2026-09-15 — Review object resolution and preserve returned IDs](#2026-09-15--review-object-resolution-and-preserve-returned-ids)
@@ -145,6 +146,29 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Qualify snapshot leaf and key codecs
+
+Integrated the reviewed agent commit `9ae581f`: five deterministic snapshot
+codec targets append IDs 8–12 without changing the seven historical seed
+fingerprints. Independent byte-field oracles check admission and decoded
+values; explicit dispatch prevents later targets from being misclassified.
+The checks include exact lengths, reserved bytes, numeric boundaries, ID
+exhaustion and half-open lifetime membership.
+
+The agent's source-bound full workspace passed 572 tests, zero failures and ten
+ignored tests on base `97c564f`. Its final fuzz campaign passed 12 x 4096 cases
+and eight unit tests, with saved artifact replays, formatting and Clippy.
+I verified its 602-file evidence manifest and the reviewed corrections.
+Integration into the export-qualified main tree reran all 49,152 fuzz cases,
+eight unit tests and replay controls successfully. The format crate and fuzz
+manifests had no intervening changes. These are separate qualification scopes,
+not a claimed new combined full-workspace run.
+
+Evidence is retained in `build/snapshot-codec-integration-ijm6odz7`, including
+the unchanged sealed agent proof. The fixed generation/geometry context is
+explicit in the test plan. Enclosing tree ownership, cross-record accounting,
+other codecs and semantic operation generators remain open under Stage A.
 
 ## 2026-09-15 — Export and replay object-map diagnostics
 

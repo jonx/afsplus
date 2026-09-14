@@ -42,7 +42,7 @@ if ! cargo run --quiet --release --manifest-path "$manifest" -- \
     exit 1
 fi
 
-for target in tree-node bitmap-page region-descriptor; do
+for target in tree-node bitmap-page region-descriptor snapshot-registry snapshot-record snapshot-lifetime snapshot-ledger snapshot-key; do
     replay="$work/$target.afrf"
     cargo run --quiet --release --manifest-path "$manifest" -- \
         --target "$target" --case 47 --artifact "$replay"

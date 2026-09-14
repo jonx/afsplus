@@ -1,5 +1,7 @@
 //! Deterministic, replayable fuzz targets for the `afsplus-format` codecs.
 
+mod snapshot;
+
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
@@ -38,10 +40,15 @@ pub enum CodecTarget {
     IntentLog = 5,
     BitmapPage = 6,
     RegionDescriptor = 7,
+    SnapshotRegistry = 8,
+    SnapshotRecord = 9,
+    SnapshotLifetime = 10,
+    SnapshotLedger = 11,
+    SnapshotKey = 12,
 }
 
 impl CodecTarget {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 12] = [
         Self::Identification,
         Self::Checkpoint,
         Self::TreeNode,
@@ -49,6 +56,11 @@ impl CodecTarget {
         Self::IntentLog,
         Self::BitmapPage,
         Self::RegionDescriptor,
+        Self::SnapshotRegistry,
+        Self::SnapshotRecord,
+        Self::SnapshotLifetime,
+        Self::SnapshotLedger,
+        Self::SnapshotKey,
     ];
 
     pub fn name(self) -> &'static str {
@@ -60,6 +72,11 @@ impl CodecTarget {
             Self::IntentLog => "intent-log",
             Self::BitmapPage => "bitmap-page",
             Self::RegionDescriptor => "region-descriptor",
+            Self::SnapshotRegistry => "snapshot-registry",
+            Self::SnapshotRecord => "snapshot-record",
+            Self::SnapshotLifetime => "snapshot-lifetime",
+            Self::SnapshotLedger => "snapshot-ledger",
+            Self::SnapshotKey => "snapshot-key",
         }
     }
 
@@ -80,6 +97,7 @@ impl CodecTarget {
             Self::IntentLog => block_type::INTENT_LOG,
             Self::BitmapPage => block_type::BITMAP,
             Self::RegionDescriptor => block_type::REGION_DESCRIPTOR,
+            _ => unreachable!("snapshot leaf values have no block header"),
         }
     }
 }
@@ -283,6 +301,9 @@ fn region_seed_descriptor() -> RegionDescriptor {
 }
 
 fn accepts(target: CodecTarget, input: &[u8]) -> bool {
+    if snapshot::handles(target) {
+        return snapshot::accepts(target, input);
+    }
     match target {
         CodecTarget::Identification => Identification::decode(input).is_ok(),
         CodecTarget::Checkpoint => Checkpoint::decode(input, &UUID).is_ok_and(|value| {
@@ -300,10 +321,14 @@ fn accepts(target: CodecTarget, input: &[u8]) -> bool {
         CodecTarget::BitmapPage => BitmapPage::decode(input).is_ok(),
         CodecTarget::RegionDescriptor => RegionDescriptor::decode(input)
             .is_ok_and(|(d, generation)| d.validate(&allocation_geometry(), 1, generation).is_ok()),
+        _ => unreachable!(),
     }
 }
 
 pub fn canonical_seed(target: CodecTarget) -> Result<Vec<u8>, String> {
+    if snapshot::handles(target) {
+        return snapshot::seed(target);
+    }
     match target {
         CodecTarget::Identification => identification_seed(),
         CodecTarget::Checkpoint => checkpoint_seed(),
@@ -316,10 +341,14 @@ pub fn canonical_seed(target: CodecTarget) -> Result<Vec<u8>, String> {
         CodecTarget::RegionDescriptor => region_seed_descriptor()
             .encode(DEFAULT_BLOCK_SIZE, 7)
             .map_err(|e| e.to_string()),
+        _ => unreachable!(),
     }
 }
 
 fn roundtrip(target: CodecTarget, input: &[u8]) -> Result<(), String> {
+    if snapshot::handles(target) {
+        return snapshot::exercise(target, input);
+    }
     match target {
         CodecTarget::Identification => {
             if let Ok(decoded) = Identification::decode(input) {
@@ -475,6 +504,7 @@ fn roundtrip(target: CodecTarget, input: &[u8]) -> Result<(), String> {
                 }
             }
         }
+        _ => unreachable!(),
     }
     Ok(())
 }
@@ -490,6 +520,9 @@ pub fn mutated_input(target: CodecTarget, case: u64) -> Result<Vec<u8>, String> 
     let seed = canonical_seed(target)?;
     if case == 0 {
         return Ok(seed);
+    }
+    if snapshot::handles(target) {
+        return Ok(snapshot::mutate(target, case, seed));
     }
     let random = splitmix64(case ^ ((target as u64) << 56) ^ u64::from(SEED_SCHEMA_VERSION));
     let index = random as usize % seed.len();
@@ -696,6 +729,11 @@ mod tests {
                 (1_397_445_837, 1_646_714_288),
                 (2_056_605_176, 3_969_668_773),
                 (3_251_275_802, 4_105_609_348),
+                (3_025_747_490, 4_283_471_495),
+                (2_787_334_268, 1_549_429_375),
+                (1_278_262_154, 32_389_227),
+                (533_851_047, 67_109_637),
+                (3_346_469_996, 389_921_249),
             ]
         );
     }

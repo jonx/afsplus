@@ -38,6 +38,7 @@ replayable without the original workstation.
 | Extent node and file data | Generic tree-node structural target | Directory-to-file read seed; direct/sparse synthetic coverage remains in conformance | Add committed tree-backed file seed |
 | Allocation-region metadata | Bitmap-page and region-descriptor targets, including a partial final page | None | Add portable repair-walker corpus |
 | Intent-log record and referenced data | One v3 seed containing all five operation types | Rust-built v3 write/truncate/create prefix scan plus final namespace lookup | Add multi-record sequence target |
+| Snapshot registry, captured record, lifetime ledger and keys | Five direct headerless value/key targets with independent admission oracles | None | Add enclosing tree ownership and cross-record semantic properties |
 | Xattr record | None | None | Add when the portable reader exposes xattrs |
 | Catalog record | None | None | Add with catalog implementation |
 | Change-stream record | None | None | Add with change-stream implementation |
@@ -45,7 +46,7 @@ replayable without the original workstation.
 ## Rust codec gate
 
 `make rust-codec-fuzz-gate` exercises identification, checkpoint, typed-tree,
-object-record, intent-log, bitmap-page and region-descriptor decoders. Each canonical seed must be accepted,
+object-record, intent-log, bitmap-page, region-descriptor and five snapshot leaf/key decoders. Each canonical seed must be accepted,
 re-encode and decode to byte-stable canonical form. The mandatory engine then
 runs 4,096 stable cases per target using checksum-breaking bit flips,
 CRC-resealed payload changes, short inputs, bounded multi-byte overwrites and
@@ -58,7 +59,7 @@ workspace so constrained builders need not compile qualification tooling.
 The standard `make rust-gate` includes this separate workspace through
 `rust-codec-fuzz-gate`. Its lockfile and seed-schema version keep case identities
 stable: target IDs 1–5 and their seed bytes are unchanged; allocation targets
-append IDs 6–7 under seed schema 1. On failure,
+append IDs 6–7 and snapshot targets append IDs 8–12 under seed schema 1. On failure,
 the gate writes the last target/case before execution and stores the exact
 input as a bounded `.afrf` artifact. Reproduce it with:
 
@@ -82,6 +83,18 @@ mutation checks and a stable round trip. Region inputs must pass both decoding
 and geometry/generation validation. CRC-resealed negative controls exercise
 page counts, slot and generation bindings, valid-block counts and bitmap padding.
 The gate replays exact saved inputs for tree, bitmap and region targets.
+
+Snapshot leaf seeds are exact 32-byte registry, captured-root, lifetime and
+ledger control values, plus an 8-byte big-endian key. These values have no CRC
+header: their direct mutations deliberately bypass the enclosing tree checksum.
+Independent wire-field predicates check exact length, reserved zero bytes,
+generation/transaction ordering, physical ranges and control limits. Accepted
+values require exact canonical bytes; registry exhaustion and half-open lifetime
+membership have additional oracles. Fixed context is generation 17, 8,192 blocks
+and lifetime start 101. Exhaustive short/extended lengths, every byte mutation
+and numeric boundary controls complement 4,096 cases per target. Saved artifacts
+for all five targets are replayed by the gate. This scope does not validate tree
+ownership, snapshot visibility, cross-record accounting or crash consistency.
 
 The [format regression suite](../crates/afsplus-format/tests/roundtrip.rs)
 requires undersized bitmap, region, directory, object-map, retired-list,

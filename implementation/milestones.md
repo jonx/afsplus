@@ -214,10 +214,10 @@ Parent: `a-fuzz`, roadmap entry `roadmap-32`. Origin:
 
 | Task | State | Evidence or next observable result |
 |---|---|---|
-| Seven codec targets and deterministic mutation/replay controls | Complete | [Rust codec gate](../testing/fuzzing.md#rust-codec-gate) |
+| Twelve codec targets and deterministic mutation/replay controls | Complete | [Rust codec gate](../testing/fuzzing.md#rust-codec-gate) |
 | Baseline generated semantic scenarios with exact byte/prefix oracles | Complete | [Seeded properties](../testing/fuzzing.md#seeded-semantic-properties) |
 | Audit executable wire surfaces against the target matrix | In progress | [Codec surface inventory](#codec-surface-inventory) maps direct dispatch omissions and seed-shape gaps; operation generators and caller validation remain to audit |
-| Add missing executable codec targets and semantic operation generators | To do | Deterministic seeds, malformed/resealed inputs, independent accepted-state checks and bounded failure behavior |
+| Add missing executable codec targets and semantic operation generators | In progress | Five direct snapshot targets qualified: 12 total targets x 4096 cases, eight fuzz tests, independent fields/length/boundary oracles; retained `build/snapshot-codec-integration-ijm6odz7`. Reclaim, other listed codecs and semantic generators remain open |
 | Retain and replay failure/property cases across cache profiles | To do | Reproducible artifacts and negative controls for each newly covered family |
 
 Close `a-fuzz` when executable host surfaces and operation families have the
@@ -234,7 +234,7 @@ from an implemented decoder and a seed from a complete semantic family.
 |---|---|---|
 | Identification, checkpoint, tree node, object record, intent log, bitmap page, region descriptor | Seven direct decoder targets; deterministic mutation and accepted-input re-encoding | Preserve existing artifact target IDs and seed reproducibility when extending the campaign |
 | Snapshot-bearing checkpoint | `checkpoint_seed` sets `snapshot_roots: None` | Add explicit valid snapshot-root seeds and malformed root combinations; chance mutations are not evidence that the enabled form is reached |
-| Snapshot leaf values and keys | [Snapshot codecs](../crates/afsplus-format/src/snapshot.rs) decode registry control, snapshot records, lifetime records, ledger state and keys; no direct dispatch target | Exercise exact lengths, reserved fields, generation/block limits and caller validation separately from the enclosing tree checksum |
+| Snapshot leaf values and keys | [Snapshot codecs](../crates/afsplus-format/src/snapshot.rs) decode registry control, snapshot records, lifetime records, ledger state and keys; direct targets 8–12, fixed-context independent admission and field oracles qualified | Extend context coverage and caller/tree/cross-record validation; direct leaf coverage does not qualify ownership or visibility |
 | Reclaim root, segment and table | [Reclaim codecs](../crates/afsplus-format/src/reclaim.rs) have distinct decoders; no direct dispatch target | Valid structured seeds, truncation/resealed corruption and capacity/count/cursor relations with independent accepted-state checks |
 | Inline symlink and metadata-specific object decoding | [Object codecs](../crates/afsplus-format/src/object.rs) include borrowed symlink and metadata entry points; canonical object seed is a regular file | Explicit valid symlink and object-type seeds, UTF-8/length/flags/tail invariants, short-buffer behavior; identify which checks generic decoding already shares |
 | Legacy directory, object map and retired list | [Directory](../crates/afsplus-format/src/dir.rs), [object map](../crates/afsplus-format/src/omap.rs), [retired list](../crates/afsplus-format/src/retired.rs); [roundtrip tests](../crates/afsplus-format/tests/roundtrip.rs) exercise them, but direct fuzz dispatch omits them | Preserve these executable readers in the audit even when mounted core paths use newer trees; qualify them or document an explicit removal decision |
