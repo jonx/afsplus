@@ -325,6 +325,8 @@ impl TxAllocator {
         batch_blocks: u64,
         rover_region: u32,
     ) -> Result<TxAllocator, CoreError> {
+        let _allocation_scope =
+            crate::allocation_trace::enter(crate::allocation_trace::Domain::Allocator);
         let reclaim = ReclaimTx::begin(
             dev,
             geo,
@@ -355,6 +357,8 @@ impl TxAllocator {
             allocated_this_tx: RunSet::default(),
             retired_this_tx: RunSet::default(),
             snapshot: current.snapshot_roots.map(|roots| {
+                let _scope =
+                    crate::allocation_trace::enter(crate::allocation_trace::Domain::Snapshot);
                 Box::new(SnapshotAccounting {
                     phase: SnapshotPhase::Namespace,
                     registry_root: roots.registry,
@@ -604,6 +608,8 @@ impl TxAllocator {
         dev: &mut D,
         len: u64,
     ) -> Result<u64, CoreError> {
+        let _allocation_scope =
+            crate::allocation_trace::enter(crate::allocation_trace::Domain::Allocator);
         self.check_snapshot_writable()?;
         self.stats.allocation_searches += 1;
         assert!(len > 0);
@@ -696,6 +702,8 @@ impl TxAllocator {
         start: u64,
         blocks: u64,
     ) -> Result<(), CoreError> {
+        let _allocation_scope =
+            crate::allocation_trace::enter(crate::allocation_trace::Domain::Allocator);
         self.check_snapshot_writable()?;
         if blocks == 0 {
             return Err(CoreError::Corrupt("claiming an empty run".into()));
@@ -745,6 +753,8 @@ impl TxAllocator {
         start: u64,
         blocks: u64,
     ) -> Result<(), CoreError> {
+        let _allocation_scope =
+            crate::allocation_trace::enter(crate::allocation_trace::Domain::Allocator);
         self.check_snapshot_writable()?;
         if blocks == 0 || blocks > u32::MAX as u64 {
             return Err(CoreError::Corrupt(format!(
@@ -953,6 +963,8 @@ impl TxAllocator {
     }
 
     pub fn finish<D: BlockDevice>(mut self, dev: &mut D) -> Result<FinishedAlloc, CoreError> {
+        let _allocation_scope =
+            crate::allocation_trace::enter(crate::allocation_trace::Domain::Allocator);
         self.check_snapshot_health()?;
         if self
             .snapshot

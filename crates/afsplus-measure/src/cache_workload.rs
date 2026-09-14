@@ -8,11 +8,13 @@ fn name(i: usize) -> String {
 
 pub fn run(pages: usize) {
     let io = Cell::new(IoStats::default());
-    let mut rows = Vec::with_capacity(14 + resident::rounds());
-    let mut dev = Image {
+    let mut rows = allocation_trace::within(Domain::Reporting, || {
+        Vec::with_capacity(14 + resident::rounds())
+    });
+    let mut dev = allocation_trace::within(Domain::Fixture, || Image {
         bytes: vec![0; BLOCKS as usize * BS],
         io: &io,
-    };
+    });
     let options = MountOptions {
         tree_cache_pages: std::num::NonZeroUsize::new(pages),
         ..Default::default()
@@ -78,6 +80,7 @@ pub fn run(pages: usize) {
     let (row, mut dev) = phase("unmount", &io, || volume.into_device());
     rows.push(row);
     let (row, ()) = phase("raw-check", &io, || {
+        let _scope = allocation_trace::enter(Domain::Verifier);
         let report = check_device(&mut dev);
         assert!(report.is_clean(), "raw checker: {:?}", report.errors);
     });
@@ -101,6 +104,7 @@ pub fn run(pages: usize) {
     let (row, mut dev) = phase("final-unmount", &io, || volume.into_device());
     rows.push(row);
     let (row, ()) = phase("recovered-check", &io, || {
+        let _scope = allocation_trace::enter(Domain::Verifier);
         let report = check_device(&mut dev);
         assert!(report.is_clean(), "recovered checker: {:?}", report.errors);
     });

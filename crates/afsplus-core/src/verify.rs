@@ -96,6 +96,8 @@ pub fn load_mount_state<D: BlockDevice>(
     ident: &Identification,
     checkpoint: &Checkpoint,
 ) -> Result<MountState, CoreError> {
+    let _allocation_scope =
+        crate::allocation_trace::enter(crate::allocation_trace::Domain::Verifier);
     let geo = ident.geometry();
     let mut buf = vec![0u8; geo.block_size];
     let mut roots = BTreeSet::new();

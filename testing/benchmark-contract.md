@@ -28,6 +28,7 @@ AFS+ must measure performance and resource use continuously. A new filesystem ha
 - [Phased requested-heap workload](#phased-requested-heap-workload)
 - [Tree-cache batch measurements](#tree-cache-batch-measurements)
 - [Phase-boundary resident memory and repeated reads](#phase-boundary-resident-memory-and-repeated-reads)
+- [Allocation origins and instrumentation cost](#allocation-origins-and-instrumentation-cost)
 
 <!-- /toc -->
 
@@ -463,3 +464,64 @@ for small files, and respectively 9,142,272–9,191,424; 9,191,424–9,224,192;
 9,158,656–9,191,424; and 9,306,112–9,338,880 bytes for cache profiles 2, 4, 8 and
 unlimited. These are one host observation with instrumentation and an in-memory
 fixture, not portable memory requirements or evidence that one cache policy wins.
+
+
+## Allocation origins and instrumentation cost
+
+Build the optional host meter with `cargo build --offline -p afsplus-measure
+--features allocation-domains`. Keep a separate copy of that executable before
+building the ordinary meter without features. Run
+`python3 tools/test-allocation-origins.py --tagged /path/to/tagged-measure
+--baseline /path/to/ordinary-measure` to compare both variants across the small
+file workload and the 2/4/8/unlimited cache profiles.
+
+The feature emits schema version 3 with allocation profile
+`requested-origins-v1`. Each phase includes `allocation_origins`,
+`tracking_overhead` and `underlying_requests`; each contains entry, exit, peak,
+acquired and released requested bytes. The nine origins are:
+
+| Origin | Allocation context |
+|---|---|
+| other | Unclassified requests, including setup outside explicit scopes |
+| fixture | Fixed memory image storage |
+| reporting | Preallocated phase report storage |
+| allocator | Transaction allocator begin, allocation, retirement and finish |
+| tree | Staged tree mutation, including opaque container storage |
+| batch | Batch work outside a more specific nested scope |
+| snapshot | Snapshot-accounting initialization |
+| verifier | Reachable-state loading and explicit workload verification |
+| oracle | Retained expected contents for repeated-read verification |
+
+An allocation keeps its original context through successful reallocations and
+freeing, even on another thread or after a container moves. This is **allocation
+origin, not current ownership**. Nested scopes temporarily override outer scopes;
+uninstrumented work inherits the enclosing context or `other`. A backend that
+allocates inside a core call can inherit that call's context. The fixed image
+backend performs no allocation in its block read/write methods. Snapshot context
+coverage does not imply that all snapshot-related work is independently measured.
+
+The optional allocator stores an aligned private header before every payload.
+`tracking_overhead` counts its header and padding; `underlying_requests` counts
+the extended requests sent to the underlying allocator. At quiescent entry/exit
+boundaries, origin bytes sum to requested payload bytes, and payload plus tracking
+overhead equals underlying requested bytes. Independent origin peaks need not
+occur together and must not be summed as a simultaneous process peak. Failed
+requests preserve existing bytes and counters. Allocation callbacks use fixed
+atomic counters and non-dropping thread-local context without allocating a
+separate tracking table. Alignment and size-overflow handling, failed growth,
+zeroing, cross-thread free and scope unwinding have allocator regression tests.
+
+The instrumentation changes heap layouts, timing and potentially resident memory.
+Compare ordinary and tagged executables using identical workloads, image hashes
+and I/O denominators; retain their separate executable hashes. Header/padding
+accounting does not measure the underlying allocator's private metadata, internal
+reallocation-copy transients, C allocations, mappings or stack. RSS sampling is
+an independent observation and can be combined with the tagged mode. Sampling
+and peak resets require quiescent single-threaded phase boundaries; thread-safe
+counters do not establish an atomic parallel-workload snapshot. Default builds
+retain the ordinary allocator and have no allocation-context TLS observation.
+
+The integration test checks unchanged image CRCs and I/O, per-origin balance,
+fixture separation, release of mutation/verifier state and oracle lifetime across
+repeated reads. Broader ownership accounting, sustained mixed workloads and native
+resource qualification remain separate acceptance requirements.

@@ -66,4 +66,5 @@ enforces that.
 | [check-backup-sparse.sh](check-backup-sparse.sh) | Cross-read sparse content with Python/libarchive and verify wide raw size encodings | [sparse archive](../spec/backup-sparse.md) |
 
 | [check-backup-envelope.sh](check-backup-envelope.sh) | Verify envelope hashes/counts independently with OpenSSL and recover body files through Python/bsdtar | [archive envelope](../spec/backup-envelope.md) |
+| [test-allocation-origins.py](test-allocation-origins.py) | Compare tagged and ordinary workloads, origin balance, tracking cost and retained oracle lifetime | [allocation origins](../testing/benchmark-contract.md#allocation-origins-and-instrumentation-cost) |
 | [test-measure-workload.py](test-measure-workload.py) | Check phase heap balance, repeatable I/O, forced cache-profile spills, payload denominators and memory-only argument admission | [benchmark contract](../testing/benchmark-contract.md#phased-requested-heap-workload) |

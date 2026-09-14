@@ -26,6 +26,7 @@
 
 pub mod alloc;
 pub mod allocation_root;
+pub mod allocation_trace;
 pub mod cow_tree;
 pub mod directory;
 pub mod extent_map;

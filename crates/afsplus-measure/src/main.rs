@@ -5,13 +5,18 @@ mod resident;
 
 use afsplus_block::{trace::IoStats, BlockDevice, BlockError};
 use afsplus_check::check_device;
+use afsplus_core::allocation_trace::{self as allocation_trace, Domain};
 use afsplus_core::{mkfs, mount, MkfsParams, NamePolicy};
 use afsplus_format::{Timespec, OBJECT_ROOT};
 use std::cell::Cell;
 use std::time::Instant;
 
+#[cfg(not(feature = "allocation-domains"))]
 #[global_allocator]
 static HEAP: heap::Meter = heap::Meter::new();
+#[cfg(feature = "allocation-domains")]
+#[global_allocator]
+static HEAP: heap::TaggedMeter = heap::TaggedMeter::new();
 const BS: usize = 4096;
 const BLOCKS: u64 = 4096;
 
@@ -73,6 +78,10 @@ impl BlockDevice for Image<'_> {
 
 struct Row {
     name: &'static str,
+    #[cfg(feature = "allocation-domains")]
+    origins_before: heap::Details,
+    #[cfg(feature = "allocation-domains")]
+    origins_after: heap::Details,
     resident_start: Option<resident::Snapshot>,
     resident_end: Option<resident::Snapshot>,
     before: heap::Sample,
@@ -88,13 +97,21 @@ fn phase<T>(name: &'static str, io: &Cell<IoStats>, work: impl FnOnce() -> T) ->
     io.set(IoStats::default());
     let start = Instant::now();
     let before = HEAP.begin();
+    #[cfg(feature = "allocation-domains")]
+    let origins_before = HEAP.details();
     let result = work();
     let after = HEAP.sample();
+    #[cfg(feature = "allocation-domains")]
+    let origins_after = HEAP.details();
     let wall_ns = start.elapsed().as_nanos();
     let resident_end = resident::snapshot();
     (
         Row {
             name,
+            #[cfg(feature = "allocation-domains")]
+            origins_before,
+            #[cfg(feature = "allocation-domains")]
+            origins_after,
             resident_start,
             resident_end,
             before,
@@ -116,6 +133,8 @@ fn ts(seconds: i64) -> Timespec {
 }
 
 fn main() {
+    #[cfg(feature = "allocation-domains")]
+    afsplus_core::allocation_trace::enable();
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     let mut pages = None;
     let mut rounds = None;
@@ -167,11 +186,13 @@ fn main() {
         return;
     }
     let io = Cell::new(IoStats::default());
-    let mut rows = Vec::with_capacity(14 + resident::rounds());
-    let mut dev = Image {
+    let mut rows = allocation_trace::within(Domain::Reporting, || {
+        Vec::with_capacity(14 + resident::rounds())
+    });
+    let mut dev = allocation_trace::within(Domain::Fixture, || Image {
         bytes: vec![0; BLOCKS as usize * BS],
         io: &io,
-    };
+    });
     // The image and result-row capacity are allocated before the first phase.
     let (row, ()) = phase("format", &io, || {
         mkfs(
@@ -226,6 +247,7 @@ fn main() {
     let (row, mut dev) = phase("unmount", &io, || volume.into_device());
     rows.push(row);
     let (row, ()) = phase("raw-check", &io, || {
+        let _scope = allocation_trace::enter(Domain::Verifier);
         let report = check_device(&mut dev);
         assert!(report.is_clean(), "raw checker: {:?}", report.errors);
     });
@@ -259,6 +281,7 @@ fn main() {
     let (row, mut dev) = phase("final-unmount", &io, || volume.into_device());
     rows.push(row);
     let (row, ()) = phase("recovered-check", &io, || {
+        let _scope = allocation_trace::enter(Domain::Verifier);
         let report = check_device(&mut dev);
         assert!(report.is_clean(), "recovered checker: {:?}", report.errors);
     });
@@ -278,6 +301,7 @@ fn steady_reads(
         return;
     }
     let (mut prepare, expected) = phase("steady-prepare", io, || {
+        let _scope = allocation_trace::enter(Domain::Oracle);
         volume
             .list_root()
             .unwrap()
@@ -326,8 +350,16 @@ fn report(
 ) {
     let image_crc = afsplus_format::crc32c::crc32c(&dev.bytes);
     // Reporting occurs after all samples so JSON formatting cannot inflate a phase.
-    let version = if resident::rounds() == 0 { 1 } else { 2 };
+    let version = if cfg!(feature = "allocation-domains") {
+        3
+    } else if resident::rounds() == 0 {
+        1
+    } else {
+        2
+    };
     println!("{{\"version\":{version},\"workload\":\"{workload}\",\"outcome\":\"pass\",\"backend\":\"fixed-memory\",\"image_bytes\":{},\"image_crc32c\":{},\"last_edit_bitmap_payload_peak_bytes\":{},", dev.bytes.len(), image_crc, bitmap_peak);
+    #[cfg(feature = "allocation-domains")]
+    println!("\"allocation_profile\":\"requested-origins-v1\",");
     if resident::rounds() != 0 {
         let samples: Vec<_> = rows
             .iter()
@@ -366,6 +398,8 @@ fn report(
             }
             _ => String::new(),
         };
+        #[cfg(feature = "allocation-domains")]
+        let rss = rss + &allocation_json(row.origins_before, row.origins_after);
         println!("{{\"name\":\"{}\",\"wall_ns\":{},\"heap_start_bytes\":{},\"heap_end_bytes\":{},\"heap_peak_bytes\":{},\"heap_peak_above_start_bytes\":{},\"heap_acquired_bytes\":{},\"heap_released_bytes\":{},\"reads\":{},\"writes\":{},\"bytes_read\":{},\"bytes_written\":{},\"flushes\":{},\"logical_payload_written_bytes\":{},\"logical_payload_read_bytes\":{}{rss}}}",
             row.name, row.wall_ns, row.before.live, row.after.live, row.after.peak,
             row.after.peak - row.before.live,
@@ -374,4 +408,33 @@ fn report(
             row.payload_written, row.payload_read);
     }
     println!("]}}");
+}
+
+#[cfg(feature = "allocation-domains")]
+fn allocation_json(before: heap::Details, after: heap::Details) -> String {
+    use std::fmt::Write;
+    fn sample(before: heap::Sample, after: heap::Sample) -> String {
+        format!("{{\"start_bytes\":{},\"end_bytes\":{},\"peak_bytes\":{},\"acquired_bytes\":{},\"released_bytes\":{}}}",
+            before.live,after.live,after.peak,after.acquired.wrapping_sub(before.acquired),after.released.wrapping_sub(before.released))
+    }
+    let mut result = String::from(",\"allocation_origins\":{");
+    for (i, name) in allocation_trace::NAMES.iter().enumerate() {
+        if i != 0 {
+            result.push(',');
+        }
+        write!(
+            &mut result,
+            "\"{name}\":{}",
+            sample(before.origins[i], after.origins[i])
+        )
+        .unwrap();
+    }
+    write!(
+        &mut result,
+        "}},\"tracking_overhead\":{},\"underlying_requests\":{}",
+        sample(before.overhead, after.overhead),
+        sample(before.system, after.system)
+    )
+    .unwrap();
+    result
 }

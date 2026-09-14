@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+allocation-domains = ["afsplus-core/allocation-tracing"]
+
 [dependencies]
 afsplus-block = { path = "../afsplus-block" }
 afsplus-format = { path = "../afsplus-format" }

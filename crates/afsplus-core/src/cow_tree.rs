@@ -293,6 +293,8 @@ where
     D: BlockDevice,
     A: TreeAllocator<D>,
 {
+    let _allocation_scope = crate::allocation_trace::enter(crate::allocation_trace::Domain::Tree);
+
     if cache_pages == 0 {
         return Err(CoreError::PrototypeLimit(
             "tree mutation cache must retain at least one page",

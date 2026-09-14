@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Attribute requested allocations to their original context](#2026-09-14--attribute-requested-allocations-to-their-original-context)
 - [2026-09-14 - Measure resident memory around workload phases](#2026-09-14---measure-resident-memory-around-workload-phases)
 - [2026-09-14 - Bind internal commit diagnostics to semantic replay](#2026-09-14---bind-internal-commit-diagnostics-to-semantic-replay)
 - [2026-09-14 - Observe the common checkpoint publication tail](#2026-09-14---observe-the-common-checkpoint-publication-tail)
@@ -136,6 +137,34 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Attribute requested allocations to their original context
+
+The optional `allocation-domains` host meter records allocation origin through
+resize and release rather than estimating opaque container overhead or confusing
+allocation origin with current ownership. The production allocator is unchanged.
+A private aligned header supplies the tag; its padding and size are accounted
+separately from payload requests. The unsafe boundary stays in the existing host
+meter module. Core hooks are safe, feature-controlled observation scopes.
+
+Paired measurements retained in `build/allocation-origin-mxmddr3e` cover small
+files and the 2/4/8/unlimited cache profiles. Images and block I/O agree with the
+ordinary executable. In batch creation, tree-origin peaks were 40,288, 48,480,
+64,864 and 204,128 bytes respectively; batch-origin peaks were 1,665,784 bytes
+for the bounded profiles and 1,668,344 bytes unlimited. Allocator-origin peaks
+were 36,952 bytes. These independent peaks are not additive. In particular,
+limiting cached pages does not bound the prepared batch's whole memory footprint.
+
+Allocator tests cover alignment, zeroing, preserved bytes, successful/failed
+resize, header overflow, cross-thread freeing and scope unwinding. The full
+all-features workspace gate passed 520 tests with zero failures and ten explicitly
+ignored tests across 87 suites; Clippy, formatting, seven ordinary workload tests,
+two origin integration tests and thirteen documentation checker tests passed. Integration
+checks cover per-origin balance, separate instrumentation costs, unchanged image
+and I/O results, and oracle retention/release with RSS observations. Broader
+ownership, sustained mixed-workload and native resource gates remain open in the
+[queue](implementation/audit-work-queue.md); the measurement contract defines
+[the interpretation and limits](testing/benchmark-contract.md#allocation-origins-and-instrumentation-cost).
 
 ## 2026-09-14 - Measure resident memory around workload phases
 

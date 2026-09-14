@@ -3958,6 +3958,8 @@ impl<D: BlockDevice> Volume<D> {
         ops: &[BatchOp<'_>],
         now: Timespec,
     ) -> Result<Vec<Option<u64>>, CoreError> {
+        let _allocation_scope =
+            crate::allocation_trace::enter(crate::allocation_trace::Domain::Batch);
         metadata::validate_time(now)?;
         self.run_batch_internal(ops, now, false)
     }
