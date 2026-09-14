@@ -3,12 +3,17 @@
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
-This table compares architectural capabilities, not marketing claims. AFS+ entries marked Planned or Proposed are not implemented yet.
+This table compares architectural capabilities and the AFS+ implementation.
+The AFS+ column is an evidence-linked summary of
+[milestones](../implementation/milestones.md), the authoritative acceptance
+record. Implemented prototype support does not imply a frozen format,
+production readiness or qualification on physical Apple Silicon or Amiga hardware.
 
 <!-- toc -->
 
 - [1. Why compare](#1-why-compare)
 - [2. High-level comparison](#2-high-level-comparison)
+  - [AFS+ evidence and scope](#afs-evidence-and-scope)
 - [3. Where AFS+ should clearly outperform classic Amiga filesystems](#3-where-afs-should-clearly-outperform-classic-amiga-filesystems)
 - [4. Where AFS+ can offer something uncommon even among modern filesystems](#4-where-afs-can-offer-something-uncommon-even-among-modern-filesystems)
   - [4.1 Global object stream plus persistent change stream](#41-global-object-stream-plus-persistent-change-stream)
@@ -49,37 +54,69 @@ Legend:
 - YES: mature/native feature
 - PARTIAL: limited, optional, variant-dependent, or provided indirectly
 - NO: not normally provided by the filesystem itself
-- PLAN: planned AFS+ baseline
+- IMPL: executable AFS+ implementation with hosted tests; prototype scope, not a maturity claim
+- PLAN: planned AFS+ baseline, not implemented
 - PROP: proposed AFS+ extension, not frozen
 
-| Capability | FFS/AFS | PFS3 | SFS/SFS2 | exFAT | NTFS | ext4 | XFS | Btrfs | OpenZFS | APFS | ReFS | AFS+ |
+| Capability | AFS+ | FFS/AFS | PFS3 | SFS/SFS2 | exFAT | NTFS | ext4 | XFS | Btrfs | OpenZFS | APFS | ReFS |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Native 64-bit file/offset contract | NO | PARTIAL / variant dependent | PARTIAL / SFS2 | YES | YES | YES | YES | YES | YES | YES | YES | PLAN |
-| Extent-based file data | NO | YES, anode chains | YES-ish internal allocation | cluster chains/extents | YES | YES | YES | YES | YES | YES | YES | PLAN |
-| Scalable indexed directories | legacy hash/list | limited | B-tree based design | linear directory sets | indexed | HTree | B+ trees | B-trees | ZAP/tree structures | B-trees | B+ trees | PLAN B+ tree |
-| Metadata crash consistency | validation model | atomic COW/root commit | transactional/journal-style | NO | journal | journal | journal | COW | COW transaction groups | COW | COW/checkpoint style | PLAN COW checkpoints candidate |
-| Metadata checksums | NO | NO | NO | NO | limited/internal, not end-to-end | YES | YES | YES | YES | internal integrity mechanisms | YES | PLAN |
-| User-data checksums | NO | NO | NO | NO | NO | NO | NO | YES by default | YES | not exposed as general end-to-end contract | optional Integrity Streams | PROP optional |
-| Snapshots | NO | NO | NO | NO | external VSS, not NTFS-native snapshots | NO | NO native snapshots | YES | YES | YES | YES | PROP |
-| Reflink / block clone | NO | NO | NO | NO | NO general reflink | NO | YES | YES | YES clones | YES clones | YES | PLAN epoch-1 shared extents |
-| Transparent compression | NO | NO | NO | NO | YES | fs-level compression not standard | NO general transparent compression | YES | YES | YES on modern APFS deployments/platform features | YES on current ReFS | PROP provider |
-| Encryption in filesystem | NO | NO | NO | NO | EFS | fscrypt | fscrypt integration | external/per-file mechanisms depending stack | native dataset encryption | YES | YES in current ReFS/Windows stack | PROP, likely block/file policy layer |
-| Hard links | YES | YES | YES | NO | YES | YES | YES | YES | YES | YES | YES | PLAN |
-| Symlinks | YES/variant | YES | YES | NO | YES | YES | YES | YES | YES | YES | YES | PLAN |
-| Extended attributes | limited Amiga metadata | Amiga metadata | Amiga metadata | NO native rich xattrs | YES | YES | YES | YES | YES | YES | YES | PLAN |
-| Per-directory case policy | NO | NO | NO | NO | optional case-sensitive dirs on Windows | YES casefold dirs | NO common per-dir policy | filesystem policy variants | dataset policy | case behavior is platform-controlled | YES/Windows policy dependent | PLAN |
-| Stable file/object ID | legacy lock/object concepts | anode identity | object nodes | synthesized | YES | inode+generation | inode+generation | object/inode IDs | object IDs | YES | YES | PLAN explicit 64-bit object ID |
-| Persistent change stream | NO | NO | NO | NO | YES, USN | NO | NO general public journal | NO stable general API | no NTFS-like general change API | platform notification APIs, no public FS change journal | YES, USN-compatible ecosystem | PLAN optional change-stream |
-| Fast global object enumeration | NO | NO | NO | directory walk | YES via MFT-oriented techniques | directory walk | directory/inode scan | tree scan | object traversal | private/internal | Windows metadata APIs | PLAN optional global catalog |
-| Reverse physical->owner mapping | NO | NO | NO | NO | internal tooling | NO general | YES, rmap | internal trees | block birth/ownership metadata internally | private | internal | PROP rebuildable reverse-map |
-| Online scrub | NO | limited tools | limited | NO | chkdsk mostly offline/online phases | e2scrub limited | YES | YES | YES | fsck largely system-managed | YES scrubber | PROP targeted scrub |
-| Online repair | NO | tools/offline | limited | NO | limited | limited | YES, modern XFS | limited depending damage | self-heal with redundancy, tools | system-managed | self-heal with redundancy | PROP |
-| Portable reference core | handler-specific | current portable work exists, historical driver OS-coupled | multiple ports but distinct implementations | many independent implementations | proprietary | Linux-specific core | Linux-specific core | Linux-specific core | multi-OS but large integrated stack | proprietary | proprietary | PLAN Rust reference core + C ABI |
-| Low-memory implementation profile | YES | YES, excellent | YES | YES | moderate | moderate | moderate/high | higher | high | not a target | moderate/high | PLAN explicit profile |
-| Built-in machine-readable feature API | legacy packets | private packets | private APIs | simple | rich Windows APIs | ioctl/statx mix | rich ioctl/tooling | ioctl/tooling | properties/ioctl tooling | Foundation/API stack | Windows APIs | PLAN Filesystem API v2 |
-| Structured admin/tool API, no screen scraping | NO | NO | NO | NO | PARTIAL | fragmented | improving | fragmented | strong CLI/property model but still tool-specific | strong APIs | Windows APIs | PLAN |
-| First-class developer trace / explain mode | NO | NO | NO | NO | ETW ecosystem, filesystem-specific internals | kernel tracing, not filesystem contract | tracing/debug tools | tracepoints/debug | extensive diagnostics, not portable FS contract | private Apple tooling | ETW/Windows diagnostics | PLAN |
-| Strict zero-write forensic mount | not formalized | read-only behavior | read-only behavior | possible | possible | `noload`/RO combinations, semantics vary | RO semantics | RO semantics | readonly datasets/import options | system-controlled | readonly | PLAN `NO_CHANGES` contract |
+| Built by me | ✓ | — | — | — | — | — | — | — | — | — | — | — |
+| Native 64-bit file/offset contract | IMPL, 64-bit core/VFS; sparse growth to `u64::MAX` | NO | PARTIAL / variant dependent | PARTIAL / SFS2 | YES | YES | YES | YES | YES | YES | YES | YES |
+| Extent-based file data | IMPL, extents, holes and unwritten reservations | NO | YES, anode chains | YES-ish internal allocation | cluster chains/extents | YES | YES | YES | YES | YES | YES | YES |
+| Scalable indexed directories | IMPL, B+ tree; million-entry qualification open | legacy hash/list | limited | B-tree based design | linear directory sets | indexed | HTree | B+ trees | B-trees | ZAP/tree structures | B-trees | B+ trees |
+| Metadata crash consistency | IMPL, COW checkpoints + intent replay; modeled crash tests | validation model | atomic COW/root commit | transactional/journal-style | NO | journal | journal | journal | COW | COW transaction groups | COW | COW/checkpoint style |
+| Metadata checksums | IMPL, CRC32C metadata validation | NO | NO | NO | NO | limited/internal, not end-to-end | YES | YES | YES | YES | internal integrity mechanisms | YES |
+| User-data checksums | PROP optional | NO | NO | NO | NO | NO | NO | NO | YES by default | YES | not exposed as general end-to-end contract | optional Integrity Streams |
+| Snapshots | IMPL, persistent registry, captured reads and bounded reclaim; consumer qualification open | NO | NO | NO | NO | external VSS, not NTFS-native snapshots | NO | NO native snapshots | YES | YES | YES | YES |
+| Reflink / block clone | IMPL, shared extents, file/range clones and COW isolation | NO | NO | NO | NO | NO general reflink | NO | YES | YES | YES clones | YES clones | YES |
+| Transparent compression | PROP provider | NO | NO | NO | NO | YES | fs-level compression not standard | NO general transparent compression | YES | YES | YES on modern APFS deployments/platform features | YES on current ReFS |
+| Encryption in filesystem | PROP, likely block/file policy layer | NO | NO | NO | NO | EFS | fscrypt | fscrypt integration | external/per-file mechanisms depending stack | native dataset encryption | YES | YES in current ReFS/Windows stack |
+| Hard links | IMPL, shared object identity and open-unlinked lifetime | YES | YES | YES | NO | YES | YES | YES | YES | YES | YES | YES |
+| Symlinks | PLAN | YES/variant | YES | YES | NO | YES | YES | YES | YES | YES | YES | YES |
+| Extended attributes | PLAN on-disk rich xattrs; PARTIAL opaque backup/restore transport | limited Amiga metadata | Amiga metadata | Amiga metadata | NO native rich xattrs | YES | YES | YES | YES | YES | YES | YES |
+| Per-directory case policy | PLAN per-directory selection; PARTIAL volume name policy | NO | NO | NO | NO | optional case-sensitive dirs on Windows | YES casefold dirs | NO common per-dir policy | filesystem policy variants | dataset policy | case behavior is platform-controlled | YES/Windows policy dependent |
+| Stable file/object ID | IMPL, explicit 64-bit object IDs | legacy lock/object concepts | anode identity | object nodes | synthesized | YES | inode+generation | inode+generation | object/inode IDs | object IDs | YES | YES |
+| Persistent change stream | PLAN optional change-stream | NO | NO | NO | NO | YES, USN | NO | NO general public journal | NO stable general API | no NTFS-like general change API | platform notification APIs, no public FS change journal | YES, USN-compatible ecosystem |
+| Fast global object enumeration | PLAN optional global catalog | NO | NO | NO | directory walk | YES via MFT-oriented techniques | directory walk | directory/inode scan | tree scan | object traversal | private/internal | Windows metadata APIs |
+| Reverse physical->owner mapping | PROP rebuildable reverse-map | NO | NO | NO | NO | internal tooling | NO general | YES, rmap | internal trees | block birth/ownership metadata internally | private | internal |
+| Online scrub | PROP targeted scrub | NO | limited tools | limited | NO | chkdsk mostly offline/online phases | e2scrub limited | YES | YES | YES | fsck largely system-managed | YES scrubber |
+| Online repair | PROP | NO | tools/offline | limited | NO | limited | limited | YES, modern XFS | limited depending damage | self-heal with redundancy, tools | system-managed | self-heal with redundancy |
+| Portable reference core | IMPL Rust core + C ABI; PARTIAL independent C99 reader/writer subset | handler-specific | current portable work exists, historical driver OS-coupled | multiple ports but distinct implementations | many independent implementations | proprietary | Linux-specific core | Linux-specific core | Linux-specific core | multi-OS but large integrated stack | proprietary | proprietary |
+| Low-memory implementation profile | PARTIAL, bounded operations and heap-free C reader; whole-system budgets open | YES | YES, excellent | YES | YES | moderate | moderate | moderate/high | higher | high | not a target | moderate/high |
+| Built-in machine-readable feature API | PARTIAL, portable VFS capability/handle API and C subset | legacy packets | private packets | private APIs | simple | rich Windows APIs | ioctl/statx mix | rich ioctl/tooling | ioctl/tooling | properties/ioctl tooling | Foundation/API stack | Windows APIs |
+| Structured admin/tool API, no screen scraping | PARTIAL, structured formatter/info/dump/check tools; full management API open | NO | NO | NO | NO | PARTIAL | fragmented | improving | fragmented | strong CLI/property model but still tool-specific | strong APIs | Windows APIs |
+| First-class developer trace / explain mode | PARTIAL, I/O traces, fault injection and checker diagnostics; full explain API open | NO | NO | NO | NO | ETW ecosystem, filesystem-specific internals | kernel tracing, not filesystem contract | tracing/debug tools | tracepoints/debug | extensive diagnostics, not portable FS contract | private Apple tooling | ETW/Windows diagnostics |
+| Strict zero-write forensic mount | IMPL, `NO_CHANGES` with zero-write/flush tests | not formalized | read-only behavior | read-only behavior | possible | possible | `noload`/RO combinations, semantics vary | RO semantics | RO semantics | readonly datasets/import options | system-controlled | readonly |
+
+### AFS+ evidence and scope
+
+The implemented entries are supported by the
+[core and API gates](../implementation/milestones.md) and their executable tests:
+
+- Extents, namespace mutations, IDs and metadata: [core](../crates/afsplus-core/src/volume.rs),
+  [metadata tests](../crates/afsplus-check/tests/metadata.rs),
+  [bounded sparse I/O qualification](../testing/data-policy-qualification.md).
+- Checkpoints, checksums and recovery: [crash matrix](../crates/afsplus-check/tests/crash_matrix.rs),
+  [corruption corpus](../crates/afsplus-check/tests/corruption_corpus.rs),
+  [zero-write mount tests](../crates/afsplus-check/tests/mount_modes.rs).
+- Snapshots and clones: [snapshot implementation/tests](../crates/afsplus-core/src/volume/snapshots.rs),
+  [snapshot checker tests](../crates/afsplus-check/tests/snapshots.rs),
+  [clone tests](../crates/afsplus-check/tests/shared_clone.rs),
+  [open-unlinked tests](../crates/afsplus-check/tests/orphans.rs).
+- Portability and application interfaces: [VFS tests](../crates/afsplus-vfs/tests/api.rs),
+  [independent C conformance](../testing/conformance.md),
+  [hosted and emulator qualification](../testing/aros-system-volume-qualification.md).
+- Tools and backup consumers: [tool contracts](../tools/tools-spec.md),
+  [developer harness](../testing/developer-harness.md),
+  [archive qualification](../testing/backup-archive-qualification.md).
+
+Host macFUSE/FSKit and AROS hosted/emulator results are separate from physical
+hardware qualification. The independent C implementation covers a narrower
+operation set than the Rust core. Bounded primitives and constrained-reader
+tests are evidence toward older-system support, not a complete memory or
+performance qualification. Archive preservation transport does not supply
+AFS+ on-disk xattr storage. The [audit queue](../implementation/audit-work-queue.md)
+tracks the remaining workload, recovery, security and resource gates.
 
 ## 3. Where AFS+ should clearly outperform classic Amiga filesystems
 
@@ -132,7 +169,10 @@ AFS+ plans these interfaces before the format is frozen. See [`docs/26-debug-obs
 
 ### 4.4 Derived accelerators that never become correctness dependencies
 
-The global catalog, change stream, directory statistics, and reverse mapping should be rebuildable or safely discardable whenever practical.
+The catalog, directory statistics and reverse mapping are derived accelerators
+that can be rebuilt from authoritative state. Lost change-stream history cannot
+be reconstructed: discarding it requires cursor invalidation and an explicit
+rescan, as specified by [the change-stream contract](11-change-stream.md).
 
 This makes aggressive performance and maintenance features less dangerous to portability and recovery.
 

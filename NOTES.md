@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Reconcile the filesystem comparison with executable support](#2026-09-14---reconcile-the-filesystem-comparison-with-executable-support)
 - [2026-09-14 - Reopen created restore entries with bounded active handles](#2026-09-14---reopen-created-restore-entries-with-bounded-active-handles)
 - [2026-09-14 - Bind exact regular-file metadata to allocation and opaque inventories](#2026-09-14---bind-exact-regular-file-metadata-to-allocation-and-opaque-inventories)
 - [2026-09-14 - Bind archive allocation records to verified sparse restoration](#2026-09-14---bind-archive-allocation-records-to-verified-sparse-restoration)
@@ -100,6 +101,16 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Reconcile the filesystem comparison with executable support
+
+The owner requested an implementation-aware comparison and a personal “Built
+by me” row checked only for AFS+. Replaced stale planned labels for implemented
+core capabilities with explicit prototype support, linked code and qualification
+evidence, and distinguished partial APIs and constrained profiles from complete
+platform qualification. Unimplemented facilities retain planned/proposed labels.
+Corrected the accelerator discussion: lost change history requires a reset and
+rescan, not reconstruction. No filesystem behavior or format changed.
 
 ## 2026-09-14 - Reopen created restore entries with bounded active handles
 
