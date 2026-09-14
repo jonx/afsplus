@@ -404,7 +404,64 @@ pub struct Volume<D: BlockDevice> {
     snapshot_mount: Arc<()>,
 }
 
+struct ApiTraceGuard<'a, D: BlockDevice> {
+    volume: &'a mut Volume<D>,
+    token: Option<crate::flight::ApiToken>,
+    outcome: crate::flight::ApiOutcome,
+}
+
+impl<D: BlockDevice> Drop for ApiTraceGuard<'_, D> {
+    fn drop(&mut self) {
+        let generation = self.volume.checkpoint.generation;
+        if let (Some(recorder), Some(token)) = (&mut self.volume.flight, self.token.take()) {
+            recorder.end_api(token, generation, self.outcome, self.volume.window_poisoned);
+        }
+    }
+}
+
 impl<D: BlockDevice> Volume<D> {
+    fn trace_api<T, E>(
+        &mut self,
+        method: crate::flight::ApiMethod,
+        body: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let generation = self.checkpoint.generation;
+        let token = self
+            .flight
+            .as_mut()
+            .and_then(|recorder| recorder.begin_api(method, generation, self.window_poisoned));
+        let Some(token) = token else {
+            return body(self);
+        };
+        let mut guard = ApiTraceGuard {
+            volume: self,
+            token: Some(token),
+            outcome: crate::flight::ApiOutcome::Unwound,
+        };
+        let result = body(&mut *guard.volume);
+        guard.outcome = if result.is_ok() {
+            crate::flight::ApiOutcome::Succeeded
+        } else {
+            crate::flight::ApiOutcome::Failed
+        };
+        result
+    }
+
+    fn trace_api_infallible(
+        &mut self,
+        method: crate::flight::ApiMethod,
+        body: impl FnOnce(&mut Self),
+    ) {
+        let result: Result<(), std::convert::Infallible> = self.trace_api(method, |volume| {
+            body(volume);
+            Ok(())
+        });
+        match result {
+            Ok(()) => (),
+            Err(never) => match never {},
+        }
+    }
+
     pub(crate) fn new(
         dev: D,
         ident: Identification,
@@ -493,10 +550,23 @@ impl<D: BlockDevice> Volume<D> {
     /// Sets the per-transaction reclamation budget (blocks promoted from the
     /// queue head before each transaction allocates).
     pub fn set_reclaim_batch_blocks(&mut self, blocks: u64) {
+        self.trace_api_infallible(crate::flight::ApiMethod::SetReclaimBatchBlocks, |volume| {
+            volume.set_reclaim_batch_blocks_untraced(blocks)
+        })
+    }
+
+    fn set_reclaim_batch_blocks_untraced(&mut self, blocks: u64) {
         self.reclaim_batch_blocks = blocks.max(1);
     }
 
     pub fn set_orphan_cleanup_extent_budget(&mut self, extents: usize) {
+        self.trace_api_infallible(
+            crate::flight::ApiMethod::SetOrphanCleanupExtentBudget,
+            |volume| volume.set_orphan_cleanup_extent_budget_untraced(extents),
+        )
+    }
+
+    fn set_orphan_cleanup_extent_budget_untraced(&mut self, extents: usize) {
         self.orphan_cleanup_extent_budget = extents.max(1);
     }
 
@@ -505,6 +575,12 @@ impl<D: BlockDevice> Volume<D> {
     /// memory costs. Runtime-only; reapply through MountOptions at remount.
     /// An open intent window must be closed before changing its resource policy.
     pub fn set_tree_cache_pages(&mut self, pages: usize) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SetTreeCachePages, |volume| {
+            volume.set_tree_cache_pages_untraced(pages)
+        })
+    }
+
+    fn set_tree_cache_pages_untraced(&mut self, pages: usize) -> Result<(), CoreError> {
         let pages = std::num::NonZeroUsize::new(pages).ok_or(CoreError::PrototypeLimit(
             "tree cache requires at least one page",
         ))?;
@@ -526,6 +602,12 @@ impl<D: BlockDevice> Volume<D> {
     /// Diagnostic: whether `lba` is currently quarantined. Walks the queue;
     /// intended for tests and tooling, not the I/O path.
     pub fn quarantine_contains(&mut self, lba: u64) -> Result<bool, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::QuarantineContains, |volume| {
+            volume.quarantine_contains_untraced(lba)
+        })
+    }
+
+    fn quarantine_contains_untraced(&mut self, lba: u64) -> Result<bool, CoreError> {
         crate::reclaim::contains(
             &mut self.dev,
             &self.ident.geometry(),
@@ -542,6 +624,12 @@ impl<D: BlockDevice> Volume<D> {
     /// `last_commit_stats().alloc.reclaim.blocked_by_checkpoint` or use
     /// [`Self::snapshot_maintenance_step`] for separate lifetime progress.
     pub fn reclaim_step(&mut self, now: Timespec) -> Result<u64, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::ReclaimStep, |volume| {
+            volume.reclaim_step_untraced(now)
+        })
+    }
+
+    fn reclaim_step_untraced(&mut self, now: Timespec) -> Result<u64, CoreError> {
         metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         if self.state.reclaim_root.pending_blocks == 0
@@ -617,12 +705,24 @@ impl<D: BlockDevice> Volume<D> {
     /// Selects the runtime-only data update policy. Newly mounted volumes
     /// always start in [`DataUpdatePolicy::FullCow`].
     pub fn set_data_update_policy(&mut self, policy: DataUpdatePolicy) {
+        self.trace_api_infallible(crate::flight::ApiMethod::SetDataUpdatePolicy, |volume| {
+            volume.set_data_update_policy_untraced(policy)
+        })
+    }
+
+    fn set_data_update_policy_untraced(&mut self, policy: DataUpdatePolicy) {
         self.data_update_policy = policy;
     }
 
     /// The persistent per-file policy (ADR-065): `InPlacePrivate` when the
     /// file's record carries `OBJECT_FLAG_DATA_IN_PLACE`.
     pub fn file_data_policy(&mut self, object_id: u64) -> Result<DataUpdatePolicy, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::FileDataPolicy, |volume| {
+            volume.file_data_policy_untraced(object_id)
+        })
+    }
+
+    fn file_data_policy_untraced(&mut self, object_id: u64) -> Result<DataUpdatePolicy, CoreError> {
         let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
         if record.object_type != ObjectType::File {
             return Err(CoreError::IsDirectory);
@@ -641,6 +741,17 @@ impl<D: BlockDevice> Volume<D> {
     /// data-policy feature; files only. Eligibility per write is unchanged —
     /// shared, unwritten, unmapped or extending writes still take full COW.
     pub fn set_file_data_policy(
+        &mut self,
+        object_id: u64,
+        policy: DataUpdatePolicy,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SetFileDataPolicy, |volume| {
+            volume.set_file_data_policy_untraced(object_id, policy, now)
+        })
+    }
+
+    fn set_file_data_policy_untraced(
         &mut self,
         object_id: u64,
         policy: DataUpdatePolicy,
@@ -675,6 +786,12 @@ impl<D: BlockDevice> Volume<D> {
     /// are already durable; this also gives adapters an explicit sync hook.
     /// Read-only modes return success without touching the device.
     pub fn sync(&mut self) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::Sync, |volume| {
+            volume.sync_untraced()
+        })
+    }
+
+    fn sync_untraced(&mut self) -> Result<(), CoreError> {
         if !self.mount_mode.allows_user_writes() {
             return Ok(());
         }
@@ -685,11 +802,27 @@ impl<D: BlockDevice> Volume<D> {
 
     /// Looks a name up in the root directory.
     pub fn lookup_root(&mut self, name: &str) -> Result<Option<u64>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::LookupRoot, |volume| {
+            volume.lookup_root_untraced(name)
+        })
+    }
+
+    fn lookup_root_untraced(&mut self, name: &str) -> Result<Option<u64>, CoreError> {
         self.lookup_in_directory(OBJECT_ROOT, name)
     }
 
     /// Looks a name up in a directory identified by its stable object ID.
     pub fn lookup_in_directory(
+        &mut self,
+        directory_id: u64,
+        name: &str,
+    ) -> Result<Option<u64>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::LookupInDirectory, |volume| {
+            volume.lookup_in_directory_untraced(directory_id, name)
+        })
+    }
+
+    fn lookup_in_directory_untraced(
         &mut self,
         directory_id: u64,
         name: &str,
@@ -715,11 +848,26 @@ impl<D: BlockDevice> Volume<D> {
 
     /// Lists the root directory as (original name, object ID) pairs.
     pub fn list_root(&mut self) -> Result<Vec<(String, u64)>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::ListRoot, |volume| {
+            volume.list_root_untraced()
+        })
+    }
+
+    fn list_root_untraced(&mut self) -> Result<Vec<(String, u64)>, CoreError> {
         self.list_directory(OBJECT_ROOT)
     }
 
     /// Lists a directory as `(original name, object ID)` pairs.
     pub fn list_directory(&mut self, directory_id: u64) -> Result<Vec<(String, u64)>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::ListDirectory, |volume| {
+            volume.list_directory_untraced(directory_id)
+        })
+    }
+
+    fn list_directory_untraced(
+        &mut self,
+        directory_id: u64,
+    ) -> Result<Vec<(String, u64)>, CoreError> {
         self.ensure_public_object_id(directory_id)?;
         let directory_record = self.read_object(directory_id)?.ok_or(CoreError::NotFound)?;
         if directory_record.object_type != ObjectType::Directory {
@@ -742,6 +890,17 @@ impl<D: BlockDevice> Volume<D> {
     /// Reads a bounded directory page. Cursors bind to the mounted checkpoint
     /// generation; callers must restart after any commit that makes one stale.
     pub fn read_directory_page(
+        &mut self,
+        directory_id: u64,
+        cursor: Option<DirectoryCursor>,
+        max_entries: usize,
+    ) -> Result<DirectoryPage, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::ReadDirectoryPage, |volume| {
+            volume.read_directory_page_untraced(directory_id, cursor, max_entries)
+        })
+    }
+
+    fn read_directory_page_untraced(
         &mut self,
         directory_id: u64,
         cursor: Option<DirectoryCursor>,
@@ -792,6 +951,12 @@ impl<D: BlockDevice> Volume<D> {
     /// mandatory object cache; modern implementations may add a bounded or
     /// aggressive cache above this API.
     pub fn stat(&mut self, object_id: u64) -> Result<Option<ObjectRecord>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::Stat, |volume| {
+            volume.stat_untraced(object_id)
+        })
+    }
+
+    fn stat_untraced(&mut self, object_id: u64) -> Result<Option<ObjectRecord>, CoreError> {
         self.ensure_public_object_id(object_id)?;
         self.read_object(object_id)
     }
@@ -799,6 +964,17 @@ impl<D: BlockDevice> Volume<D> {
     /// Read committed semantic allocation without flushing or materializing
     /// an open mutation window. Cursors are entry ordinals, not byte offsets.
     pub fn file_allocation_page(
+        &mut self,
+        object_id: u64,
+        start: u64,
+        limit: usize,
+    ) -> Result<FileAllocationPage, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::FileAllocationPage, |volume| {
+            volume.file_allocation_page_untraced(object_id, start, limit)
+        })
+    }
+
+    fn file_allocation_page_untraced(
         &mut self,
         object_id: u64,
         start: u64,
@@ -889,6 +1065,15 @@ impl<D: BlockDevice> Volume<D> {
         &mut self,
         object_id: u64,
     ) -> Result<Option<ObjectMetadata>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::VisibleMetadata, |volume| {
+            volume.visible_metadata_untraced(object_id)
+        })
+    }
+
+    fn visible_metadata_untraced(
+        &mut self,
+        object_id: u64,
+    ) -> Result<Option<ObjectMetadata>, CoreError> {
         if let Some(window) = self.window.as_ref() {
             if let Some(record) = window.pending.records.get(&object_id) {
                 let Some(record) = *record else {
@@ -920,6 +1105,12 @@ impl<D: BlockDevice> Volume<D> {
     /// Reads a file's visible content, including existing-file edits in the
     /// open intent-log window.
     pub fn read_file(&mut self, object_id: u64) -> Result<Vec<u8>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::ReadFile, |volume| {
+            volume.read_file_untraced(object_id)
+        })
+    }
+
+    fn read_file_untraced(&mut self, object_id: u64) -> Result<Vec<u8>, CoreError> {
         let record = self
             .visible_metadata(object_id)?
             .ok_or_else(|| CoreError::Corrupt(format!("no object {object_id}")))?;
@@ -939,6 +1130,17 @@ impl<D: BlockDevice> Volume<D> {
     /// holes and unwritten extents are returned as zeros. Existing-file edits
     /// in the open intent-log window take precedence over the committed map.
     pub fn read_file_at(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> Result<usize, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::ReadFileAt, |volume| {
+            volume.read_file_at_untraced(object_id, offset, destination)
+        })
+    }
+
+    fn read_file_at_untraced(
         &mut self,
         object_id: u64,
         offset: u64,
@@ -1027,11 +1229,36 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WriteFileAt, |volume| {
+            volume.write_file_at_untraced(object_id, offset, content, now)
+        })
+    }
+
+    fn write_file_at_untraced(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        content: &[u8],
+        now: Timespec,
+    ) -> Result<(), CoreError> {
         self.write_file_at_with_limits(object_id, offset, content, now, None)
     }
 
     /// Atomic write with explicit touched-block and local extent-record budgets.
     pub fn write_file_at_bounded(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        content: &[u8],
+        now: Timespec,
+        limits: FileEditLimits,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WriteFileAtBounded, |volume| {
+            volume.write_file_at_bounded_untraced(object_id, offset, content, now, limits)
+        })
+    }
+
+    fn write_file_at_bounded_untraced(
         &mut self,
         object_id: u64,
         offset: u64,
@@ -1315,11 +1542,34 @@ impl<D: BlockDevice> Volume<D> {
         new_size: u64,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::TruncateFile, |volume| {
+            volume.truncate_file_untraced(object_id, new_size, now)
+        })
+    }
+
+    fn truncate_file_untraced(
+        &mut self,
+        object_id: u64,
+        new_size: u64,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
         self.truncate_file_with_limits(object_id, new_size, now, None)
     }
 
     /// Resize atomically with bounded affected extent records and retired blocks.
     pub fn truncate_file_bounded(
+        &mut self,
+        object_id: u64,
+        new_size: u64,
+        now: Timespec,
+        limits: FileEditLimits,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::TruncateFileBounded, |volume| {
+            volume.truncate_file_bounded_untraced(object_id, new_size, now, limits)
+        })
+    }
+
+    fn truncate_file_bounded_untraced(
         &mut self,
         object_id: u64,
         new_size: u64,
@@ -1524,6 +1774,18 @@ impl<D: BlockDevice> Volume<D> {
         length: u64,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::PreallocateFile, |volume| {
+            volume.preallocate_file_untraced(object_id, offset, length, now)
+        })
+    }
+
+    fn preallocate_file_untraced(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        length: u64,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
         self.preallocate_file_bounded(
             object_id,
             offset,
@@ -1538,6 +1800,19 @@ impl<D: BlockDevice> Volume<D> {
 
     /// Reserve using local extent edits with explicit block and record budgets.
     pub fn preallocate_file_bounded(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        length: u64,
+        now: Timespec,
+        limits: FileEditLimits,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::PreallocateFileBounded, |volume| {
+            volume.preallocate_file_bounded_untraced(object_id, offset, length, now, limits)
+        })
+    }
+
+    fn preallocate_file_bounded_untraced(
         &mut self,
         object_id: u64,
         offset: u64,
@@ -1660,6 +1935,18 @@ impl<D: BlockDevice> Volume<D> {
     /// afterwards, and a direct-layout source is promoted to an extent tree
     /// because the direct representation has no flag word.
     pub fn clone_file(
+        &mut self,
+        source_id: u64,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::CloneFile, |volume| {
+            volume.clone_file_untraced(source_id, parent_id, name, now)
+        })
+    }
+
+    fn clone_file_untraced(
         &mut self,
         source_id: u64,
         parent_id: u64,
@@ -1924,6 +2211,27 @@ impl<D: BlockDevice> Volume<D> {
     /// reference-delta plan, not operation ordering by accident.
     #[allow(clippy::too_many_arguments)]
     pub fn clone_range(
+        &mut self,
+        source_id: u64,
+        source_offset: u64,
+        destination_id: u64,
+        destination_offset: u64,
+        length: u64,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::CloneRange, |volume| {
+            volume.clone_range_untraced(
+                source_id,
+                source_offset,
+                destination_id,
+                destination_offset,
+                length,
+                now,
+            )
+        })
+    }
+
+    fn clone_range_untraced(
         &mut self,
         source_id: u64,
         source_offset: u64,
@@ -2216,6 +2524,17 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::CreateFileInRoot, |volume| {
+            volume.create_file_in_root_untraced(name, content, now)
+        })
+    }
+
+    fn create_file_in_root_untraced(
+        &mut self,
+        name: &str,
+        content: &[u8],
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
         metadata::validate_time(now)?;
         self.create_file_in_directory(OBJECT_ROOT, name, content, now)
     }
@@ -2228,11 +2547,35 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::CreateFileInDirectory, |volume| {
+            volume.create_file_in_directory_untraced(parent_id, name, content, now)
+        })
+    }
+
+    fn create_file_in_directory_untraced(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        content: &[u8],
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
         self.create_leaf_in_directory(parent_id, name, content, None, now)
     }
 
     /// Store an opaque UTF-8 target without resolving it.
     pub fn create_symlink(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        target: &str,
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::CreateSymlink, |volume| {
+            volume.create_symlink_untraced(parent_id, name, target, now)
+        })
+    }
+
+    fn create_symlink_untraced(
         &mut self,
         parent_id: u64,
         name: &str,
@@ -2427,12 +2770,33 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::CreateDirectoryInRoot, |volume| {
+            volume.create_directory_in_root_untraced(name, now)
+        })
+    }
+
+    fn create_directory_in_root_untraced(
+        &mut self,
+        name: &str,
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
         metadata::validate_time(now)?;
         self.create_directory(OBJECT_ROOT, name, now)
     }
 
     /// Creates an empty directory in an arbitrary parent directory.
     pub fn create_directory(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::CreateDirectory, |volume| {
+            volume.create_directory_untraced(parent_id, name, now)
+        })
+    }
+
+    fn create_directory_untraced(
         &mut self,
         parent_id: u64,
         name: &str,
@@ -2576,12 +2940,29 @@ impl<D: BlockDevice> Volume<D> {
     /// retired, not freed: they stay quarantined until no still-selectable
     /// checkpoint can reference them.
     pub fn delete_file_in_root(&mut self, name: &str, now: Timespec) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::DeleteFileInRoot, |volume| {
+            volume.delete_file_in_root_untraced(name, now)
+        })
+    }
+
+    fn delete_file_in_root_untraced(&mut self, name: &str, now: Timespec) -> Result<(), CoreError> {
         metadata::validate_time(now)?;
         self.delete_file(OBJECT_ROOT, name, now)
     }
 
     /// Deletes a file link from an arbitrary directory.
     pub fn delete_file(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::DeleteFile, |volume| {
+            volume.delete_file_untraced(parent_id, name, now)
+        })
+    }
+
+    fn delete_file_untraced(
         &mut self,
         parent_id: u64,
         name: &str,
@@ -2599,6 +2980,17 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::RemoveDirectory, |volume| {
+            volume.remove_directory_untraced(parent_id, name, now)
+        })
+    }
+
+    fn remove_directory_untraced(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
         metadata::validate_time(now)?;
         self.ensure_public_object_id(parent_id)?;
         self.remove_entry(parent_id, name, now, ObjectType::Directory)
@@ -2609,6 +3001,17 @@ impl<D: BlockDevice> Volume<D> {
     /// separate preparatory checkpoint; the visible-link removal and orphan
     /// insertion themselves are one atomic rename transaction.
     pub fn orphan_file(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::OrphanFile, |volume| {
+            volume.orphan_file_untraced(parent_id, name, now)
+        })
+    }
+
+    fn orphan_file_untraced(
         &mut self,
         parent_id: u64,
         name: &str,
@@ -2670,6 +3073,12 @@ impl<D: BlockDevice> Volume<D> {
     /// a bounded point lookup, used by adapters to keep guessed object IDs
     /// from exposing open-unlinked files.
     pub fn orphan_object(&mut self, object_id: u64) -> Result<bool, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::OrphanObject, |volume| {
+            volume.orphan_object_untraced(object_id)
+        })
+    }
+
+    fn orphan_object_untraced(&mut self, object_id: u64) -> Result<bool, CoreError> {
         if !self.orphan_directory_enabled() {
             return Ok(false);
         }
@@ -2705,6 +3114,12 @@ impl<D: BlockDevice> Volume<D> {
     /// Returns the number of persistent orphan entries using only the
     /// reserved directory root and its authoritative subtree item count.
     pub fn orphan_count(&mut self) -> Result<u64, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::OrphanCount, |volume| {
+            volume.orphan_count_untraced()
+        })
+    }
+
+    fn orphan_count_untraced(&mut self) -> Result<u64, CoreError> {
         if !self.orphan_directory_enabled() {
             return Ok(0);
         }
@@ -2726,6 +3141,12 @@ impl<D: BlockDevice> Volume<D> {
     /// Returns the first orphan ID without scanning the object map or the
     /// complete internal directory.
     pub fn first_orphan(&mut self) -> Result<Option<u64>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::FirstOrphan, |volume| {
+            volume.first_orphan_untraced()
+        })
+    }
+
+    fn first_orphan_untraced(&mut self) -> Result<Option<u64>, CoreError> {
         if !self.orphan_directory_enabled() {
             return Ok(None);
         }
@@ -2760,6 +3181,16 @@ impl<D: BlockDevice> Volume<D> {
     /// separate valid checkpoints, so a crash merely selects an earlier or
     /// later restart point.
     pub fn cleanup_orphan(
+        &mut self,
+        object_id: u64,
+        now: Timespec,
+    ) -> Result<OrphanCleanupProgress, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::CleanupOrphan, |volume| {
+            volume.cleanup_orphan_untraced(object_id, now)
+        })
+    }
+
+    fn cleanup_orphan_untraced(
         &mut self,
         object_id: u64,
         now: Timespec,
@@ -3229,6 +3660,18 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::LinkFile, |volume| {
+            volume.link_file_untraced(object_id, parent_id, name, now)
+        })
+    }
+
+    fn link_file_untraced(
+        &mut self,
+        object_id: u64,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
         metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         self.ensure_public_object_id(parent_id)?;
@@ -3352,6 +3795,25 @@ impl<D: BlockDevice> Volume<D> {
     /// stable object ID. Replacement of an existing destination is a separate
     /// future operation with an explicit contract.
     pub fn rename(
+        &mut self,
+        source_parent_id: u64,
+        source_name: &str,
+        target_parent_id: u64,
+        target_name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::Rename, |volume| {
+            volume.rename_untraced(
+                source_parent_id,
+                source_name,
+                target_parent_id,
+                target_name,
+                now,
+            )
+        })
+    }
+
+    fn rename_untraced(
         &mut self,
         source_parent_id: u64,
         source_name: &str,
@@ -4007,6 +4469,16 @@ impl<D: BlockDevice> Volume<D> {
         ops: &[BatchOp<'_>],
         now: Timespec,
     ) -> Result<Vec<Option<u64>>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::RunBatch, |volume| {
+            volume.run_batch_untraced(ops, now)
+        })
+    }
+
+    fn run_batch_untraced(
+        &mut self,
+        ops: &[BatchOp<'_>],
+        now: Timespec,
+    ) -> Result<Vec<Option<u64>>, CoreError> {
         let _allocation_scope =
             crate::allocation_trace::enter(crate::allocation_trace::Domain::Batch);
         metadata::validate_time(now)?;
@@ -4110,6 +4582,25 @@ impl<D: BlockDevice> Volume<D> {
         target_name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::RenameReplace, |volume| {
+            volume.rename_replace_untraced(
+                source_parent_id,
+                source_name,
+                target_parent_id,
+                target_name,
+                now,
+            )
+        })
+    }
+
+    fn rename_replace_untraced(
+        &mut self,
+        source_parent_id: u64,
+        source_name: &str,
+        target_parent_id: u64,
+        target_name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
         metadata::validate_time(now)?;
         self.ensure_public_object_id(source_parent_id)?;
         self.ensure_public_object_id(target_parent_id)?;
@@ -4130,6 +4621,28 @@ impl<D: BlockDevice> Volume<D> {
     /// final link still has a live handle. The replaced target enters object
     /// 2 in the same checkpoint that installs the source at its name.
     pub fn rename_replace_orphan_target(
+        &mut self,
+        source_parent_id: u64,
+        source_name: &str,
+        target_parent_id: u64,
+        target_name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(
+            crate::flight::ApiMethod::RenameReplaceOrphanTarget,
+            |volume| {
+                volume.rename_replace_orphan_target_untraced(
+                    source_parent_id,
+                    source_name,
+                    target_parent_id,
+                    target_name,
+                    now,
+                )
+            },
+        )
+    }
+
+    fn rename_replace_orphan_target_untraced(
         &mut self,
         source_parent_id: u64,
         source_name: &str,
@@ -5136,6 +5649,16 @@ impl<D: BlockDevice> Volume<D> {
     /// [`Volume::window_fsync`] and not checkpointed until
     /// [`Volume::window_commit`].
     pub fn window_op(&mut self, op: &BatchOp<'_>, now: Timespec) -> Result<Option<u64>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WindowOp, |volume| {
+            volume.window_op_untraced(op, now)
+        })
+    }
+
+    fn window_op_untraced(
+        &mut self,
+        op: &BatchOp<'_>,
+        now: Timespec,
+    ) -> Result<Option<u64>, CoreError> {
         metadata::validate_time(now)?;
         let mut window = self.take_or_open_window()?;
         let generation = window.generation;
@@ -5189,6 +5712,18 @@ impl<D: BlockDevice> Volume<D> {
     /// replacement blocks are always newly allocated COW data, independent
     /// of the file's ordinary ADR-062 policy.
     pub fn window_write_file_at(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        content: &[u8],
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WindowWriteFileAt, |volume| {
+            volume.window_write_file_at_untraced(object_id, offset, content, now)
+        })
+    }
+
+    fn window_write_file_at_untraced(
         &mut self,
         object_id: u64,
         offset: u64,
@@ -5319,6 +5854,17 @@ impl<D: BlockDevice> Volume<D> {
     /// Stages an existing-file truncate in the intent-log window. Shrinking
     /// a materialized partial tail uses one fresh, zero-tailed COW block.
     pub fn window_truncate_file(
+        &mut self,
+        object_id: u64,
+        new_size: u64,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WindowTruncateFile, |volume| {
+            volume.window_truncate_file_untraced(object_id, new_size, now)
+        })
+    }
+
+    fn window_truncate_file_untraced(
         &mut self,
         object_id: u64,
         new_size: u64,
@@ -5520,6 +6066,12 @@ impl<D: BlockDevice> Volume<D> {
     /// the record then receives the completion barrier. Namespace-only
     /// groups keep the original one-barrier path (ADR-037/063).
     pub fn window_fsync(&mut self) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WindowFsync, |volume| {
+            volume.window_fsync_untraced()
+        })
+    }
+
+    fn window_fsync_untraced(&mut self) -> Result<(), CoreError> {
         if !self.mount_mode.allows_user_writes() {
             return Err(CoreError::ReadOnly);
         }
@@ -5601,6 +6153,12 @@ impl<D: BlockDevice> Volume<D> {
     /// publishes a checkpoint when any record was logged, so stale records
     /// can never be mistaken for live ones.
     pub fn window_commit(&mut self, now: Timespec) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WindowCommit, |volume| {
+            volume.window_commit_untraced(now)
+        })
+    }
+
+    fn window_commit_untraced(&mut self, now: Timespec) -> Result<(), CoreError> {
         metadata::validate_time(now)?;
         if !self.mount_mode.allows_user_writes() {
             return Err(CoreError::ReadOnly);
@@ -6166,6 +6724,16 @@ impl<D: BlockDevice> Volume<D> {
     /// Return the required byte count. A short buffer is left unchanged.
     /// Targets are opaque and never followed by this operation.
     pub fn read_link(&mut self, object_id: u64, output: &mut [u8]) -> Result<usize, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::ReadLink, |volume| {
+            volume.read_link_untraced(object_id, output)
+        })
+    }
+
+    fn read_link_untraced(
+        &mut self,
+        object_id: u64,
+        output: &mut [u8],
+    ) -> Result<usize, CoreError> {
         self.ensure_public_object_id(object_id)?;
         let block = self.symlink_block(object_id)?;
         let (link, _) = afsplus_format::object::SymlinkRecord::decode(&block)?;
@@ -6213,6 +6781,17 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     pub fn unlink_symlink(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::UnlinkSymlink, |volume| {
+            volume.unlink_symlink_untraced(parent_id, name, now)
+        })
+    }
+
+    fn unlink_symlink_untraced(
         &mut self,
         parent_id: u64,
         name: &str,

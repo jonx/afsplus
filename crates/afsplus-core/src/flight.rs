@@ -1,4 +1,4 @@
-//! Optional bounded diagnostics for the common checkpoint publication tail.
+//! Optional bounded diagnostics for core API calls and checkpoint publication.
 //!
 //! These are runtime observations, not on-disk records or a durability oracle.
 //! Ring construction allocates once; ring emission neither allocates nor reads
@@ -7,7 +7,7 @@
 use std::collections::{TryReserveError, VecDeque};
 use std::num::NonZeroUsize;
 
-/// Categories emitted by the common commit tail. Other subsystem coverage has
+/// Categories emitted by API observation and the commit tail. Other coverage has
 /// separate integration gates; a category name alone is not that evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
@@ -15,6 +15,7 @@ pub enum Category {
     Checkpoint,
     Io,
     Error,
+    Api,
 }
 
 /// Runtime selection, independent of ring capacity and event identity.
@@ -23,7 +24,7 @@ pub struct Categories(u8);
 
 impl Categories {
     pub const NONE: Self = Self(0);
-    pub const ALL: Self = Self(15);
+    pub const ALL: Self = Self(31);
 
     pub const fn with(self, category: Category) -> Self {
         Self(self.0 | (1 << category as u8))
@@ -45,6 +46,10 @@ pub enum EventKind {
     CheckpointDurable,
     Adopted,
     Failed,
+    ApiBegin,
+    ApiSucceeded,
+    ApiFailed,
+    ApiUnwound,
 }
 
 impl EventKind {
@@ -56,6 +61,9 @@ impl EventKind {
                 Category::Checkpoint
             }
             Self::Failed => Category::Error,
+            Self::ApiBegin | Self::ApiSucceeded | Self::ApiFailed | Self::ApiUnwound => {
+                Category::Api
+            }
         }
     }
 }
@@ -92,6 +100,99 @@ mod tests {
     }
 }
 
+/// Core API method identities. Append new IDs; never renumber or reuse them.
+/// These are diagnostic identifiers, not filesystem API v2 ABI ordinals.
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiMethod {
+    CleanupOrphan = 1,
+    CloneFile = 2,
+    CloneRange = 3,
+    CreateDirectory = 4,
+    CreateDirectoryInRoot = 5,
+    CreateFileInDirectory = 6,
+    CreateFileInRoot = 7,
+    CreateSymlink = 8,
+    DeleteFile = 9,
+    DeleteFileInRoot = 10,
+    FileAllocationPage = 11,
+    FileDataPolicy = 12,
+    FirstOrphan = 13,
+    LinkFile = 14,
+    ListDirectory = 15,
+    ListRoot = 16,
+    LookupInDirectory = 17,
+    LookupRoot = 18,
+    OrphanCount = 19,
+    OrphanFile = 20,
+    OrphanObject = 21,
+    PreallocateFile = 22,
+    PreallocateFileBounded = 23,
+    QuarantineContains = 24,
+    ReadDirectoryPage = 25,
+    ReadFile = 26,
+    ReadFileAt = 27,
+    ReadLink = 28,
+    ReclaimStep = 29,
+    RemoveDirectory = 30,
+    Rename = 31,
+    RenameReplace = 32,
+    RenameReplaceOrphanTarget = 33,
+    RestoreObjectMetadata = 34,
+    RunBatch = 35,
+    SetDataUpdatePolicy = 36,
+    SetFileDataPolicy = 37,
+    SetObjectProtection = 38,
+    SetOrphanCleanupExtentBudget = 39,
+    SetReclaimBatchBlocks = 40,
+    SetSnapshotWorkLimits = 41,
+    SetTreeCachePages = 42,
+    SnapshotAllocationPage = 43,
+    SnapshotCreate = 44,
+    SnapshotDelete = 45,
+    SnapshotList = 46,
+    SnapshotLookup = 47,
+    SnapshotMaintenanceStep = 48,
+    SnapshotOpen = 49,
+    SnapshotReadDirectoryPage = 50,
+    SnapshotReadFileAt = 51,
+    SnapshotReadLink = 52,
+    SnapshotStat = 53,
+    Stat = 54,
+    Sync = 55,
+    TruncateFile = 56,
+    TruncateFileBounded = 57,
+    UnlinkSymlink = 58,
+    VisibleMetadata = 59,
+    WindowCommit = 60,
+    WindowFsync = 61,
+    WindowOp = 62,
+    WindowTruncateFile = 63,
+    WindowWriteFileAt = 64,
+    WriteFileAt = 65,
+    WriteFileAtBounded = 66,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ApiContext {
+    pub operation: u64,
+    pub span: u64,
+    pub parent_span: u64,
+    pub method: Option<ApiMethod>,
+}
+
+pub(crate) struct ApiToken {
+    previous: ApiContext,
+    active: ApiContext,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ApiOutcome {
+    Succeeded,
+    Failed,
+    Unwound,
+}
+
 /// An attempt is unique within this recorder, including retries that reuse a
 /// checkpoint generation. It starts at the common commit tail, not API entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,9 +201,12 @@ pub struct Event {
     pub attempt: u64,
     pub generation: u64,
     pub kind: EventKind,
-    /// For `Failed`, publication may have started and remount is required.
-    /// This does not assert that the checkpoint reached durable storage.
+    /// The volume has marked publication uncertain and requires remount.
+    /// API events sample this flag at entry/exit; it is not a durability verdict
+    /// or a claim that unwinding restored all in-memory filesystem state.
     pub requires_remount: bool,
+    /// Zero context denotes no observed API (including legacy commit-only scope).
+    pub api: ApiContext,
 }
 
 /// Outcome of a nonblocking live-adapter delivery attempt.
@@ -143,6 +247,10 @@ pub struct FlightRecorder {
     sink_closed: bool,
     delivered: u64,
     missed: u64,
+    api_enabled: bool,
+    api_next: u64,
+    api_context: ApiContext,
+    api_exhausted: bool,
 }
 
 impl std::fmt::Debug for FlightRecorder {
@@ -159,6 +267,9 @@ impl std::fmt::Debug for FlightRecorder {
             .field("sink_closed", &self.sink_closed)
             .field("delivered", &self.delivered)
             .field("missed", &self.missed)
+            .field("api_enabled", &self.api_enabled)
+            .field("api_context", &self.api_context)
+            .field("api_exhausted", &self.api_exhausted)
             .finish()
     }
 }
@@ -179,6 +290,10 @@ impl FlightRecorder {
             sink_closed: false,
             delivered: 0,
             missed: 0,
+            api_enabled: false,
+            api_next: 0,
+            api_context: ApiContext::default(),
+            api_exhausted: false,
         })
     }
 
@@ -249,8 +364,79 @@ impl FlightRecorder {
         self.missed
     }
 
+    /// Opt in to core API spans. Existing commit-only profiles do not enable
+    /// this scope, preserving their event sequences and historical wire bytes.
+    pub fn enable_api_observation(&mut self) {
+        self.api_enabled = true;
+    }
+
+    pub fn api_observation_enabled(&self) -> bool {
+        self.api_enabled
+    }
+
+    pub(crate) fn begin_api(
+        &mut self,
+        method: ApiMethod,
+        generation: u64,
+        requires_remount: bool,
+    ) -> Option<ApiToken> {
+        if !self.api_enabled {
+            return None;
+        }
+        if self.api_next == u64::MAX || self.api_exhausted {
+            self.api_exhausted = true;
+            self.dropped = self.dropped.saturating_add(1);
+            return None;
+        }
+        self.api_next += 1;
+        let previous = self.api_context;
+        self.api_context = ApiContext {
+            operation: if previous.span == 0 {
+                self.api_next
+            } else {
+                previous.operation
+            },
+            span: self.api_next,
+            parent_span: previous.span,
+            method: Some(method),
+        };
+        let token = ApiToken {
+            previous,
+            active: self.api_context,
+        };
+        self.emit(generation, EventKind::ApiBegin, requires_remount);
+        Some(token)
+    }
+
+    pub(crate) fn end_api(
+        &mut self,
+        token: ApiToken,
+        generation: u64,
+        outcome: ApiOutcome,
+        requires_remount: bool,
+    ) {
+        if self.api_context != token.active {
+            // Never attribute a stale guard to a different active scope.
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        self.emit(
+            generation,
+            match outcome {
+                ApiOutcome::Succeeded => EventKind::ApiSucceeded,
+                ApiOutcome::Failed => EventKind::ApiFailed,
+                ApiOutcome::Unwound => EventKind::ApiUnwound,
+            },
+            requires_remount,
+        );
+        self.api_context = token.previous;
+    }
+
     pub(crate) fn emit(&mut self, generation: u64, kind: EventKind, requires_remount: bool) {
-        if self.sequence == u64::MAX || (kind == EventKind::Begin && self.attempt == u64::MAX) {
+        if self.api_exhausted
+            || self.sequence == u64::MAX
+            || (kind == EventKind::Begin && self.attempt == u64::MAX)
+        {
             self.dropped = self.dropped.saturating_add(1);
             // Refuse all following events rather than reuse an identity.
             self.sequence = u64::MAX;
@@ -270,10 +456,15 @@ impl FlightRecorder {
         }
         let event = Event {
             sequence: self.sequence,
-            attempt: self.attempt,
+            attempt: if kind.category() == Category::Api {
+                0
+            } else {
+                self.attempt
+            },
             generation,
             kind,
             requires_remount,
+            api: self.api_context,
         };
         self.events.push_back(event);
         if let Some(sink) = &mut self.sink {
@@ -400,5 +591,66 @@ mod sink_tests {
         ring.sequence = u64::MAX;
         ring.emit(3, EventKind::Adopted, false);
         assert_eq!((ring.delivered(), ring.missed()), (2, 7));
+    }
+}
+
+#[cfg(test)]
+mod api_tests {
+    use super::*;
+
+    #[test]
+    fn nested_api_spans_share_a_request_and_bind_only_commits_to_attempts() {
+        let mut ring = FlightRecorder::new(NonZeroUsize::new(32).unwrap()).unwrap();
+        assert!(ring.begin_api(ApiMethod::Sync, 1, false).is_none());
+        assert_eq!(ring.sequence(), 0);
+        ring.enable_api_observation();
+        let outer = ring
+            .begin_api(ApiMethod::CreateFileInRoot, 1, false)
+            .unwrap();
+        let inner = ring
+            .begin_api(ApiMethod::CreateFileInDirectory, 1, false)
+            .unwrap();
+        ring.emit(2, EventKind::Begin, false);
+        ring.emit(2, EventKind::Adopted, false);
+        ring.end_api(inner, 2, ApiOutcome::Succeeded, false);
+        ring.end_api(outer, 2, ApiOutcome::Failed, false);
+        let events: Vec<_> = ring.events().copied().collect();
+        assert!(events.iter().all(|e| e.api.operation == 1));
+        assert_eq!((events[1].api.span, events[1].api.parent_span), (2, 1));
+        assert_eq!(events[2].api, events[1].api);
+        assert_eq!((events[2].attempt, events[3].attempt), (1, 1));
+        assert_eq!(events[5].api.span, 1);
+        assert_eq!(events[5].kind, EventKind::ApiFailed);
+        assert_eq!(events[5].attempt, 0);
+        assert_eq!(ring.api_context, ApiContext::default());
+        let next = ring.begin_api(ApiMethod::Stat, 2, false).unwrap();
+        assert_eq!(
+            (ring.api_context.operation, ring.api_context.parent_span),
+            (3, 0)
+        );
+        ring.end_api(next, 2, ApiOutcome::Succeeded, false);
+    }
+
+    #[test]
+    fn filtered_api_spans_keep_context_and_exhaustion_never_reuses_it() {
+        let mut ring = FlightRecorder::new(NonZeroUsize::new(1).unwrap()).unwrap();
+        ring.enable_api_observation();
+        ring.set_categories(Categories::NONE.with(Category::Checkpoint));
+        let token = ring.begin_api(ApiMethod::Sync, 1, false).unwrap();
+        ring.emit(2, EventKind::Begin, false);
+        ring.emit(2, EventKind::CheckpointDurable, false);
+        ring.end_api(token, 2, ApiOutcome::Succeeded, false);
+        let event = *ring.events().last().unwrap();
+        assert_eq!(
+            (event.api.operation, event.api.span, event.sequence),
+            (1, 1, 3)
+        );
+        assert_eq!(ring.filtered(), 3);
+        assert_eq!(ring.dropped(), 0);
+        ring.api_next = u64::MAX;
+        assert!(ring.begin_api(ApiMethod::Sync, 2, false).is_none());
+        ring.emit(3, EventKind::Begin, false);
+        assert_eq!(*ring.events().last().unwrap(), event);
+        assert_eq!(ring.dropped(), 2);
     }
 }

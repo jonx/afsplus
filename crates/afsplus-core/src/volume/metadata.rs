@@ -44,6 +44,17 @@ impl<D: BlockDevice> Volume<D> {
         protection: u32,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SetObjectProtection, |volume| {
+            volume.set_object_protection_untraced(object_id, protection, now)
+        })
+    }
+
+    fn set_object_protection_untraced(
+        &mut self,
+        object_id: u64,
+        protection: u32,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
         self.ensure_window_closed()?;
         self.ensure_public_object_id(object_id)?;
         validate_time(now)?;
@@ -60,6 +71,16 @@ impl<D: BlockDevice> Volume<D> {
     /// Requires independently authorized host restore access before invocation.
     /// Unlike ordinary metadata edits, this preserves the archived change time.
     pub fn restore_object_metadata(
+        &mut self,
+        object_id: u64,
+        metadata: PreservedMetadata,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::RestoreObjectMetadata, |volume| {
+            volume.restore_object_metadata_untraced(object_id, metadata)
+        })
+    }
+
+    fn restore_object_metadata_untraced(
         &mut self,
         object_id: u64,
         metadata: PreservedMetadata,

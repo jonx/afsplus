@@ -147,6 +147,15 @@ impl<D: BlockDevice> Volume<D> {
         &mut self,
         limits: SnapshotWorkLimits,
     ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SetSnapshotWorkLimits, |volume| {
+            volume.set_snapshot_work_limits_untraced(limits)
+        })
+    }
+
+    fn set_snapshot_work_limits_untraced(
+        &mut self,
+        limits: SnapshotWorkLimits,
+    ) -> Result<(), CoreError> {
         if limits.max_edit_records == 0
             || limits.max_views == 0
             || limits.reclaim_records == 0
@@ -173,6 +182,12 @@ impl<D: BlockDevice> Volume<D> {
     /// Commit any open intent window, then durably register its consistent
     /// namespace. An uncertain publication poisons the Volume as usual.
     pub fn snapshot_create(&mut self, now: Timespec) -> Result<u64, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SnapshotCreate, |volume| {
+            volume.snapshot_create_untraced(now)
+        })
+    }
+
+    fn snapshot_create_untraced(&mut self, now: Timespec) -> Result<u64, CoreError> {
         metadata::validate_time(now)?;
         self.snapshot_state()?;
         if !self.mount_mode.allows_user_writes() {
@@ -197,6 +212,12 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     pub fn snapshot_delete(&mut self, id: u64, now: Timespec) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SnapshotDelete, |volume| {
+            volume.snapshot_delete_untraced(id, now)
+        })
+    }
+
+    fn snapshot_delete_untraced(&mut self, id: u64, now: Timespec) -> Result<(), CoreError> {
         metadata::validate_time(now)?;
         self.snapshot_state()?;
         if !self.mount_mode.allows_user_writes() {
@@ -245,6 +266,16 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     pub fn snapshot_list(
+        &mut self,
+        low_id: u64,
+        limit: usize,
+    ) -> Result<SnapshotListPage, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SnapshotList, |volume| {
+            volume.snapshot_list_untraced(low_id, limit)
+        })
+    }
+
+    fn snapshot_list_untraced(
         &mut self,
         low_id: u64,
         limit: usize,
@@ -303,6 +334,12 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     pub fn snapshot_open(&mut self, id: u64) -> Result<SnapshotHandle, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SnapshotOpen, |volume| {
+            volume.snapshot_open_untraced(id)
+        })
+    }
+
+    fn snapshot_open_untraced(&mut self, id: u64) -> Result<SnapshotHandle, CoreError> {
         let record = self.snapshot_record(id)?;
         let lease = self
             .snapshot_handles
@@ -335,6 +372,16 @@ impl<D: BlockDevice> Volume<D> {
         handle: &SnapshotHandle,
         object_id: u64,
     ) -> Result<Option<ObjectMetadata>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SnapshotStat, |volume| {
+            volume.snapshot_stat_untraced(handle, object_id)
+        })
+    }
+
+    fn snapshot_stat_untraced(
+        &mut self,
+        handle: &SnapshotHandle,
+        object_id: u64,
+    ) -> Result<Option<ObjectMetadata>, CoreError> {
         let view = self.snapshot_view(handle)?;
         Ok(
             snapshot::view::object(&mut self.dev, &self.ident, view, object_id)?
@@ -344,6 +391,18 @@ impl<D: BlockDevice> Volume<D> {
     /// Enumerate at most 64 captured allocation records by ordinal. The caller
     /// must retain the same snapshot and object when resuming at `next`.
     pub fn snapshot_allocation_page(
+        &mut self,
+        handle: &SnapshotHandle,
+        object_id: u64,
+        start: u64,
+        limit: usize,
+    ) -> Result<SnapshotAllocationPage, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SnapshotAllocationPage, |volume| {
+            volume.snapshot_allocation_page_untraced(handle, object_id, start, limit)
+        })
+    }
+
+    fn snapshot_allocation_page_untraced(
         &mut self,
         handle: &SnapshotHandle,
         object_id: u64,
@@ -368,11 +427,34 @@ impl<D: BlockDevice> Volume<D> {
         object_id: u64,
         destination: &mut [u8],
     ) -> Result<usize, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SnapshotReadLink, |volume| {
+            volume.snapshot_read_link_untraced(handle, object_id, destination)
+        })
+    }
+
+    fn snapshot_read_link_untraced(
+        &mut self,
+        handle: &SnapshotHandle,
+        object_id: u64,
+        destination: &mut [u8],
+    ) -> Result<usize, CoreError> {
         let view = self.snapshot_view(handle)?;
         snapshot::view::read_link(&mut self.dev, &self.ident, view, object_id, destination)
     }
 
     pub fn snapshot_read_file_at(
+        &mut self,
+        handle: &SnapshotHandle,
+        object_id: u64,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> Result<usize, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SnapshotReadFileAt, |volume| {
+            volume.snapshot_read_file_at_untraced(handle, object_id, offset, destination)
+        })
+    }
+
+    fn snapshot_read_file_at_untraced(
         &mut self,
         handle: &SnapshotHandle,
         object_id: u64,
@@ -390,6 +472,17 @@ impl<D: BlockDevice> Volume<D> {
         )
     }
     pub fn snapshot_lookup(
+        &mut self,
+        handle: &SnapshotHandle,
+        directory_id: u64,
+        name: &str,
+    ) -> Result<Option<u64>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SnapshotLookup, |volume| {
+            volume.snapshot_lookup_untraced(handle, directory_id, name)
+        })
+    }
+
+    fn snapshot_lookup_untraced(
         &mut self,
         handle: &SnapshotHandle,
         directory_id: u64,
@@ -415,6 +508,21 @@ impl<D: BlockDevice> Volume<D> {
         .map(|entry| entry.child_id))
     }
     pub fn snapshot_read_directory_page(
+        &mut self,
+        handle: &SnapshotHandle,
+        directory_id: u64,
+        cursor: Option<SnapshotDirectoryCursor>,
+        limit: usize,
+    ) -> Result<SnapshotDirectoryPage, CoreError> {
+        self.trace_api(
+            crate::flight::ApiMethod::SnapshotReadDirectoryPage,
+            |volume| {
+                volume.snapshot_read_directory_page_untraced(handle, directory_id, cursor, limit)
+            },
+        )
+    }
+
+    fn snapshot_read_directory_page_untraced(
         &mut self,
         handle: &SnapshotHandle,
         directory_id: u64,
@@ -469,6 +577,16 @@ impl<D: BlockDevice> Volume<D> {
     /// Maintenance reports scan progress separately from physical promotion.
     /// A wrapped pass containing protected runs may reclaim nothing.
     pub fn snapshot_maintenance_step(
+        &mut self,
+        now: Timespec,
+    ) -> Result<SnapshotMaintenance, CoreError> {
+        self.trace_api(
+            crate::flight::ApiMethod::SnapshotMaintenanceStep,
+            |volume| volume.snapshot_maintenance_step_untraced(now),
+        )
+    }
+
+    fn snapshot_maintenance_step_untraced(
         &mut self,
         now: Timespec,
     ) -> Result<SnapshotMaintenance, CoreError> {

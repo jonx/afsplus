@@ -231,6 +231,12 @@ fn run() -> Result<(), String> {
                     EventKind::CheckpointDurable => 5,
                     EventKind::Adopted => 6,
                     EventKind::Failed => 7,
+                    EventKind::ApiBegin
+                    | EventKind::ApiSucceeded
+                    | EventKind::ApiFailed
+                    | EventKind::ApiUnwound => {
+                        return Err("API spans require an extended export profile".into())
+                    }
                 });
                 flight.push(u8::from(internal.requires_remount));
             }

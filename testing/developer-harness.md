@@ -33,6 +33,7 @@
 - [Automated host reconstruction](#automated-host-reconstruction)
 - [Common checkpoint-tail flight recorder](#common-checkpoint-tail-flight-recorder)
 - [Category selection and live diagnostics](#category-selection-and-live-diagnostics)
+- [Core API call spans](#core-api-call-spans)
 - [Selected-category and live-delivery bundles](#selected-category-and-live-delivery-bundles)
 - [Internal diagnostic bundles](#internal-diagnostic-bundles)
 
@@ -961,8 +962,9 @@ started; they do not claim which state survived a real power loss.
 
 The recorder defaults to disabled, performs no clock reads, stores no names or
 payloads and adds no on-disk fields. The ring capacity bounds its event storage,
-not total filesystem or process memory. API-wide identities and
-allocator/tree/cache/intent-log/recovery events have separate integration gates.
+not total filesystem or process memory. [Core API spans](#core-api-call-spans)
+provide opt-in call correlation. Allocator/tree/cache/intent-log/recovery events
+have separate integration gates.
 Category selection and live adapters follow the contract below. Internal export is provided by
 the opt-in [version-3 bundle profile](#internal-diagnostic-bundles); older semantic
 profiles retain their original operation-only flight artifact.
@@ -1012,10 +1014,8 @@ or adapter; small ring/queue capacities are valid with observable loss.
 
 The recorder owns only the caller-bounded ring, fixed counters and an optional
 boxed adapter. Adapter state and any transport queue have separate caller-owned
-bounds. macOS AArch64 layout qualification records 112 bytes for the recorder
-or its Option (64 before this interface), with 32-byte events; allocator rounding,
-adapter state and queue storage are additional. This is not a cross-platform ABI
-or a whole-process bound. Tests use a one-event bounded channel to exercise delivery, saturation,
+bounds. Layout qualification and the optional API scope are described under
+[core API spans](#core-api-call-spans). Tests use a one-event bounded channel to exercise delivery, saturation,
 consumer disconnection and reattachment without requiring a live network or GUI.
 The ring's overwrite count and the live channel's missed count are independent.
 
@@ -1031,6 +1031,61 @@ Their AFSPSC03/AFSFLT02 bytes and prior replay identities are unchanged.
 [Version 4](#selected-category-and-live-delivery-bundles) binds selected categories
 and deterministic live-delivery observations without interpreting intentional
 gaps as overwrites.
+
+## Core API call spans
+
+Call `FlightRecorder::enable_api_observation()` before installation to observe
+mutable operational `Volume` entry points, including nested calls and refusals
+before commit. The default scope emits only the common commit-tail events;
+semantic profiles 1 through 4 preserve that scope and their original wire bytes.
+API-span export requires an extended profile. The legacy encoder refuses API
+kinds rather than dropping them from a purportedly complete recording.
+
+Each observed call receives a monotonic span ID, its parent's span ID and the
+root call's operation ID. Top-level calls have parent zero and use their own
+span as the operation ID. `ApiMethod` assigns explicit append-only diagnostic
+IDs; these have no filesystem API v2 ABI meaning. Commit events carry the active
+API context, their existing commit-attempt ID and checkpoint generation. API
+events use attempt zero. One root call can contain several commit attempts.
+Calls which stage work into an operation window and a subsequent commit call
+have separate roots; window/intent linkage requires a separate identity layer.
+
+The guard emits `ApiBegin` before validation and `ApiSucceeded` or `ApiFailed`
+on return. During Rust unwinding it emits `ApiUnwound` and restores the parent
+context. Process abort cannot run that guard. Success describes a returned
+result; durability follows the operation's contract and independent recovery
+checks. Failure or unwinding does not imply rollback. The remount flag samples
+the volume's known publication-uncertainty state at each event.
+
+`Category::Api` selects admission after identity assignment, so filtered API
+events leave detectable sequence gaps and commit events retain their context.
+The all-category mask includes bit 4; version-4 bundles accept only the original
+four category bits. Span exhaustion stops emission with saturating loss
+accounting, preventing identity reuse or attribution to a stale parent.
+Replacing the recorder starts a separate identity domain; callers must retain
+that boundary when combining recordings.
+
+Storage is caller-bounded and allocation occurs at ring construction. Emission
+reads no clock and stores no file names or payloads. The macOS AArch64 layout
+probe reports a 64-byte event and a 152-byte recorder or recorder Option.
+At capacity N, requested event storage is `64 * N` bytes, plus allocator rounding;
+optional adapter state and transport storage have separate bounds. A volume
+without a recorder allocates no ring. Small capacities preserve filesystem
+semantics while exposing overwritten or missed diagnostics. Other target layouts
+and native resource budgets require their own measurements.
+
+[Core tests](../crates/afsplus-core/tests/flight.rs) compare observed and plain
+operation results, full device traces and every image block at 2/4/8/unlimited
+cache sizes. Cases cover all three non-empty-file barriers, nested calls,
+duplicate-name refusals, snapshot preservation, protection changes, pinned-view
+deletion refusal and a provider unwind before writes. Unit tests cover filtering,
+exhaustion and context restoration. The
+[coverage guard](../crates/afsplus-core/tests/api_coverage.rs) checks registered
+mutable entries in the three Volume implementation sources against their outer
+wrappers. Pure getters, raw-device access, recorder control, constructors,
+mount/recovery, handle destruction and platform adapters need their own scope.
+Object/block/view identifiers and deferred-window correlation are owned by the
+[internal coverage queue](../implementation/audit-work-queue.md#complete-work-queue).
 
 ## Selected-category and live-delivery bundles
 

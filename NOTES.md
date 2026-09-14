@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Correlate core API calls with checkpoint attempts](#2026-09-14---correlate-core-api-calls-with-checkpoint-attempts)
 - [2026-09-14 — Replay selected diagnostics and bounded consumer delivery](#2026-09-14--replay-selected-diagnostics-and-bounded-consumer-delivery)
 - [2026-09-14 — Filter commit diagnostics and attach a bounded live consumer](#2026-09-14--filter-commit-diagnostics-and-attach-a-bounded-live-consumer)
 - [2026-09-14 — Exercise allocation codecs and reject undersized encoder output](#2026-09-14--exercise-allocation-codecs-and-reject-undersized-encoder-output)
@@ -133,6 +134,41 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+
+## 2026-09-14 - Correlate core API calls with checkpoint attempts
+
+Added opt-in API spans around 66 mutable operational Volume entries. Nested
+calls share their root operation ID and keep separate span/parent identities;
+commit events carry the active context. Early refusals and Rust unwinding have
+explicit outcomes. A guard restores parent context, and a source coverage test
+checks the mutable entry registry against its wrappers.
+
+Targeted comparisons cover four cache profiles, every barrier of a non-empty
+file creation, duplicate names, snapshot preservation, protection changes,
+active-handle deletion refusal and an injected provider unwind before writes.
+The first barrier test expected checkpoint uncertainty one flush too early;
+the corrected scenario includes the preceding data barrier and all three cuts.
+The semantic outcomes, device traces and complete images match plain execution.
+
+The measured macOS AArch64 event layout grew from 32 to 64 bytes; the recorder
+and its Option grew from 112 to 152 bytes. Optional small rings retain bounded
+storage with explicit diagnostic loss. Native and other-architecture resource
+qualification is separate. Semantic profiles 1 through 4 keep API observation
+disabled; 39 retained cases reproduce their flight bytes and semantic verdicts,
+including five selected cuts and two expected negative cases.
+
+Core call spans are one scope of the observability requirement. The queue names
+extended export, deferred-window/intent correlation, object/block/view metadata,
+mount/recovery and platform adapters as subsequent work. API success describes
+a returned result; failure and unwinding do not promise rollback.
+
+Local retained evidence: `build/api-spans-707ic93v`, including private source,
+layout probes, copied runner and fresh legacy replay bundles. Qualification
+passed format, strict all-feature Clippy, seven fuzz targets at 4,096 cases each,
+546 workspace tests (zero failures, 10 explicitly ignored, 89 result groups),
+20 replay tests and 13 documentation fixtures. All 39 legacy cases match six
+artifacts exactly, including full images and block traces.
 
 ## 2026-09-14 — Replay selected diagnostics and bounded consumer delivery
 

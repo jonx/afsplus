@@ -80,6 +80,11 @@ Trace records use these IDs consistently across:
 
 This makes one logical operation traceable across subsystem boundaries.
 
+The optional Rust [core API span contract](../testing/developer-harness.md#core-api-call-spans)
+defines nested call identities, commit correlation, outcome semantics and bounded
+storage. Deferred-window, object and platform scopes follow their own integration
+requirements.
+
 ## 3. Binary flight recorder
 
 AFS+ should include a fixed-size in-memory ring buffer for structured trace events.
