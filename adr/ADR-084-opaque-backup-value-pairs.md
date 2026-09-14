@@ -1,7 +1,7 @@
 # ADR-084: Stream opaque backup values as bound descriptor and data pairs
 
 Status: Accepted under the owner's delegated recommended-option authority; complete archive-profile integration required
-Amended by: ADR-085
+Amended by: ADR-085, ADR-086
 Amends: ADR-076, ADR-082, ADR-083
 
 ## Context

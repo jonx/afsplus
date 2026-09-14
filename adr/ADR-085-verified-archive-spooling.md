@@ -1,6 +1,7 @@
 # ADR-085: Verify a bounded scratch archive before incremental restoration
 
 Status: Accepted under the owner's delegated recommended-option authority; full inventory and native qualification required
+Amended by: ADR-086
 Amends: ADR-084
 
 ## Context

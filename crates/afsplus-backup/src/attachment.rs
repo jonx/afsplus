@@ -17,6 +17,7 @@ pub enum Error {
     Restore(RestoreError),
     Invalid,
     Limit,
+    NeedsVerifiedReplay,
 }
 pub struct Binding<'a> {
     pub ordinal: u64,
@@ -37,7 +38,7 @@ pub struct Target<'a, O> {
 fn path(ordinal: u64, suffix: &str) -> String {
     format!("_AROS_BACKUP/metadata/value-{ordinal}.{suffix}")
 }
-fn header(path: String, kind: tar::Kind, size: u64) -> tar::Header {
+pub(crate) fn header(path: String, kind: tar::Kind, size: u64) -> tar::Header {
     tar::Header {
         path,
         link: String::new(),
@@ -122,7 +123,7 @@ fn parse(bytes: &[u8], limits: pax::Limits) -> Result<(&str, MetadataClass, Meta
         },
     ))
 }
-fn ordinary(m: &member::Member<'_>, expected: &str) -> bool {
+pub(crate) fn ordinary(m: &member::Member<'_>, expected: &str) -> bool {
     m.path == expected
         && m.kind == tar::Kind::File
         && m.mode == 0o600
@@ -239,10 +240,15 @@ impl<P: SnapshotBackend> Captured<'_, '_, P> {
 }
 /// A private value awaiting verified input from its original reader.
 pub struct Staged<U, O> {
+    class: MetadataClass,
+    entry: MetadataEntry,
     upload: RestoreUpload<U, O>,
     identity: Arc<()>,
 }
 impl<U, O> Staged<U, O> {
+    pub fn description(&self) -> (MetadataClass, &MetadataEntry) {
+        (self.class, &self.entry)
+    }
     pub fn publish<R: Read, P: OpaqueRestoreBackend<Upload = U, Object = O>>(
         self,
         archive: &stream::Reader<R>,
@@ -323,6 +329,8 @@ fn stage_inner<R: Read, P: OpaqueRestoreBackend>(
         left -= count as u64;
     }
     Ok(Staged {
+        class,
+        entry,
         upload,
         identity: archive.identity(),
     })

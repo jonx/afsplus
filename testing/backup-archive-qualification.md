@@ -14,6 +14,7 @@
 - [Object metadata admission](#object-metadata-admission)
 - [Opaque values through an authorized archive consumer](#opaque-values-through-an-authorized-archive-consumer)
 - [Verified scratch replay](#verified-scratch-replay)
+- [Complete object inventory groups](#complete-object-inventory-groups)
 
 <!-- /toc -->
 
@@ -227,3 +228,27 @@ upload slot, releasing staging after each publication before replay EOF. A repla
 failure must withdraw early-publication admission. Full inventory validation,
 segmented large-archive storage, sustained workload measurements and native
 provider lifecycle tests have separate completion gates.
+
+
+## Complete object inventory groups
+
+Run `cargo test -p afsplus-backup --all-features` for
+[inventory manifests](../spec/backup-inventory.md) under
+[ADR-086](../adr/ADR-086-backup-inventory-manifests.md). Round-trip empty,
+single-entry and 70-entry groups using pages of 1, 3 and 64 entries, one-byte
+transfer buffers, a 512-byte spool chunk and root plus one upload slot.
+Compare every restored key and byte, summaries and next ordinals. Descriptor
+page calls must equal two complete enumerations, independent of value size.
+
+Refuse uninspected sources, second-pass encoding changes with equal count/size,
+entry/byte/page/ordinal limits, malformed or incomplete manifest fields,
+noncanonical integers, duplicate keys, mismatched hashes/counts/sizes/classes,
+wrong paths, unverified replay and revoked destination authority. Failures must
+return no success summary, poison further archive use and release every upload;
+earlier complete publications are a documented partial outcome. Check empty
+manifests at the final ordinal and checked arithmetic overflow.
+
+These are hosted component fixtures, not complete backup-job or older-machine
+qualification. Cross-object completeness, data/namespace/reservation binding,
+content-recovery loss reports and native resource/durability evidence belong to
+the enclosing archive and platform gates.

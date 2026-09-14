@@ -57,6 +57,7 @@ empty attribute or security inventory. Use [opaque captured transport](../docs/1
 and [staged destination publication](../docs/13-filesystem-api-v2.md#staged-opaque-metadata-restoration)
 for the authorized consumer, with [bound opaque archive pairs](../spec/backup-opaque-values.md)
 and publication gated on verified input from the original reader. Use
+[inventory manifests](../spec/backup-inventory.md) and
 [verified scratch replay](../spec/backup-spool.md) for bounded incremental
 publication. Implement and qualify the AFS+ storage mapping, complete inventory
 matching and large-inventory workloads, including segmented scratch beyond

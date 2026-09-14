@@ -79,6 +79,7 @@ format-change procedure in [CONTRIBUTING.md](../CONTRIBUTING.md).
 | [Backup object metadata](../spec/backup-object-metadata.md) | Exact preservation fields and explicit inventory knowledge |
 | [Opaque backup values](../spec/backup-opaque-values.md) | Bound descriptor/data pairs for binary preservation metadata |
 | [Verified archive scratch replay](../spec/backup-spool.md) | Chunk integrity, bounded replay and incremental publication |
+| [Object inventory manifests](../spec/backup-inventory.md) | Complete counted descriptor groups and bounded preservation |
 | [snapshot-records.md](../spec/snapshot-records.md) | Experimental persistent registry and lifetime leaf encoding |
 | [invariants.md](../spec/invariants.md) | Core invariants a conforming implementation enforces |
 | [compatibility-rules.md](../spec/compatibility-rules.md) | Mount decision algorithm and feature compatibility classes |

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Bind full object inventories to counted descriptor manifests](#2026-09-14---bind-full-object-inventories-to-counted-descriptor-manifests)
 - [2026-09-14 - Replay verified scratch archives with bounded upload slots](#2026-09-14---replay-verified-scratch-archives-with-bounded-upload-slots)
 - [2026-09-14 - Carry opaque values through an authorized archive consumer](#2026-09-14---carry-opaque-values-through-an-authorized-archive-consumer)
 - [2026-09-14 - Stage opaque destination metadata before atomic publication](#2026-09-14---stage-opaque-destination-metadata-before-atomic-publication)
@@ -93,6 +94,32 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Bind full object inventories to counted descriptor manifests
+
+Under the owner's delegated authority, ADR-086 chose a two-pass descriptor
+manifest rather than retaining every key in memory. Counts, byte totals and
+ordered SHA-512/256 descriptors bind each inspected object inventory. Export
+refuses unknown inventory knowledge and poisons completion on source changes.
+Verified scratch import enforces path, class, key and ordinal binding with one
+upload slot, refusing success and further reader use after any discrepancy.
+Earlier complete publications are explicitly partial restoration, not rollback.
+
+The full all-features workspace gate passed 415 tests with zero failures and
+10 explicitly ignored qualification probes. Formatting, strict Clippy,
+documentation, three checker fixtures and whitespace validation passed.
+The archive component's 45 tests passed. Inventories of 0, 1 and 70 entries
+round-tripped every key and byte with pages of 1, 3 and 64 entries, one-byte
+transfer buffers and 512-byte scratch chunks. Descriptor calls were exactly two
+complete enumerations. Failure cases covered altered hashes/counts/byte sums,
+duplicate keys, class/path mismatch, revoked grants, unverified replay,
+uninspected sources, changing descriptors and admission/ordinal boundaries.
+
+This is a full-preservation inventory component, not whole-job completion.
+Cross-object namespace/data/reservation binding, AFS+ opaque storage mapping,
+content-recovery loss reporting and native/older-system measurements retain
+their queue gates. Small buffer fixtures establish hosted resource behavior;
+they do not establish a working m68000 or bare-metal backup service.
 
 ## 2026-09-14 - Replay verified scratch archives with bounded upload slots
 

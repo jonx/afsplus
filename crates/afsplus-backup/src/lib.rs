@@ -16,3 +16,6 @@ pub mod attachment;
 
 #[cfg(feature = "consumer")]
 pub mod spool;
+
+#[cfg(feature = "consumer")]
+pub mod inventory;
