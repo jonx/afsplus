@@ -32,6 +32,47 @@ record count; encoding preflights the complete output byte size. Test every
 limit independently in both directions, including exact-boundary admission.
 Caller buffer limits, process peak RAM and target runtime need separate evidence.
 
+## Tar framing and independent recovery
+
+Run `cargo test -p afsplus-backup` and
+[check-backup-tar.sh](../tools/check-backup-tar.sh). The host gate requires
+Python tarfile and bsdtar. It regenerates the retained Python ustar fixture,
+recovers the Rust writer's exact ordinary-file bytes with both independent
+readers, compares Python-visible header metadata, and requires a changed-payload
+negative control to fail its byte oracle. Extraction streams to a private
+temporary file; it does not apply archive paths to a host directory.
+
+The [framing module](../crates/afsplus-backup/src/tar.rs) validates the unsigned
+header checksum, ustar magic/version, octal numeric fields, fixed UTF-8 name
+fields, supported member types, reserved bytes and zero payload padding.
+It supports files, directories, links and PAX local/global headers. Unsupported
+numeric/header encodings and member types are explicit errors. Long names use
+the ustar prefix when representable; the profile layer supplies PAX names and
+nonrepresentable numbers through its validated metadata rules.
+
+A reader requires `begin_payload` after each header, selecting its raw size or
+an independently validated PAX size override for a regular file. Selection
+precedes payload I/O and respects the caller's member-byte bound. Stream payloads
+through caller buffers, drain the exact admitted length and check padding before
+advancing. An unfinished member returns busy. Errors after consuming stream
+bytes poison the stream; subsequent operations cannot resume ambiguously.
+
+Require two zero end blocks and actual EOF, admitting only a configured number
+of extra complete zero blocks. Bound the member count independently of member
+bytes. The writer preflights a header and size before output, refuses excessive
+payload input, and reports partial-write/padding/end-marker/flush errors.
+Successful finish establishes framing; destination durability and profile
+completion need their own validation.
+
+Tests cover the Python fixture, every truncated prefix of the Rust fixture,
+header/padding/end-marker damage, valid-checksum malformed fields, long UTF-8
+names, unsupported types, numeric boundaries, member/byte/padding limits,
+payload sequencing, maximum 64-bit override arithmetic and partial I/O errors.
+A giant declared length test checks arithmetic/state admission only. Full large
+and sparse streams require separate workload evidence. Header buffers are fixed
+at 512 bytes; name allocations are bounded by field widths. Total runtime RAM
+and constrained-target execution require separate measurements.
+
 ## Integration acceptance
 
 Record decoding establishes syntax only. The complete consumer must enforce the
@@ -44,6 +85,6 @@ file recovery, sparse layouts, hard-link identity, timestamps, attributes,
 security metadata, reservations, revocation, truncated output, conflicting
 metadata, unknown requirements and resource pressure under ADR-076/078.
 Every full-preservation omission requires refusal; explicit content recovery
-reports the losses allowed by its profile. Archive framing, profile identity,
+reports the losses allowed by its profile. Profile identity,
 integrity and completion semantics follow the format decision process before
 normative archive fixtures are generated.

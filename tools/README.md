@@ -45,3 +45,5 @@ enforces that.
 | [qemu-file-backed-memory.sh](qemu-file-backed-memory.sh) | QEMU wrapper that adds a shared file-backed RAM object to an otherwise standard command line | [ADR-054](../adr/ADR-054-native-macaros-crash-replay-extraction.md) |
 | [macos-fskit-modules.sh](macos-fskit-modules.sh) | Inspects and, reversibly, enables the macFUSE FSKit modules when the System Settings switches are inert | [docs/macos-fskit-activation.md](../docs/macos-fskit-activation.md) |
 | [third-party-probe-example.c](third-party-probe-example.c) | Pseudocode example of how a generic disk utility identifies an AFS+ volume | [docs/18-third-party-integration.md](../docs/18-third-party-integration.md) |
+
+| [check-backup-tar.sh](check-backup-tar.sh) | Cross-read ordinary tar framing with Python and bsdtar, reproduce the fixture and reject changed payloads in the oracle | [backup archive qualification](../testing/backup-archive-qualification.md) |

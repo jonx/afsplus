@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Add streamed tar framing and independent recovery checks](#2026-09-14---add-streamed-tar-framing-and-independent-recovery-checks)
 - [2026-09-14 - Add bounded PAX record parsing for the archive consumer](#2026-09-14---add-bounded-pax-record-parsing-for-the-archive-consumer)
 - [2026-09-14 - Bound shrink working sets and retirements](#2026-09-14---bound-shrink-working-sets-and-retirements)
 - [2026-09-14 - Grow sparse files without enumerating mappings](#2026-09-14---grow-sparse-files-without-enumerating-mappings)
@@ -80,6 +81,30 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-14 - Add streamed tar framing and independent recovery checks
+
+Added strict ustar headers and a caller-buffer streaming reader/writer.
+Member counts, effective payload sizes and trailing zero blocks have explicit
+limits. The profile must validate PAX overrides before body selection. Invalid
+headers/padding, truncated bodies/end markers and uncertain I/O poison the
+reader/writer; successful finish establishes framing, with profile completion
+and destination durability as separate requirements.
+
+Eleven crate tests passed, including six framing tests: independent Python
+fixture decoding, every truncated Rust-archive prefix, valid-checksum malformed
+headers, long UTF-8 names, limit/sequencing checks, 64-bit override arithmetic,
+and partial write/padding/finish/flush/read failures. The independent host gate
+passed with Python tarfile and bsdtar 3.5.3 / libarchive 3.7.4, exact ordinary-file
+payloads, Python header metadata, reproducible fixture bytes and a changed-byte
+negative oracle. It extracted only to a private temporary buffer/file.
+
+Formatting, Clippy, documentation checks, three checker fixtures and whitespace
+validation passed. The full workspace suite passed 373 tests, with zero failures
+and ten ignored. Sparse/full-metadata interoperability, the preservation profile,
+integrity/completion, real authorized consumers and constrained/native runtime
+remain integration requirements; ordinary tar success does not close them.
 
 ## 2026-09-14 - Add bounded PAX record parsing for the archive consumer
 
