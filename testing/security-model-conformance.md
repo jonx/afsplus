@@ -1,7 +1,7 @@
 # Security Model Conformance and Performance Tests
 
-> **ADRs:** none · **Spec:** none ·
-> **Tests:** none · **Milestones:** M14
+> **ADRs:** [ADR-031](../adr/ADR-031-portable-security-acls.md), [ADR-075](../adr/ADR-075-revocable-backup-capability.md) · **Spec:** [security model](../docs/30-portable-security-model.md), [backup API](../docs/13-filesystem-api-v2.md#8-trusted-snapshot-backup-extension) ·
+> **Tests:** [backup harness](../crates/afsplus-vfs/tests/backup.rs) · **Milestones:** M14
 
 <!-- toc -->
 
@@ -199,3 +199,27 @@ Qualify concurrent authorization/revocation admission in each host adapter and
 keep feature discovery separate from caller privilege. Test explicit re-grant
 without reviving old grants. Ordinary-user historical access and rich ACL
 mapping remain separate gates; this capability does not establish their policy.
+
+
+Run `cargo test -p afsplus-vfs --all-features` for the backup service harness.
+Require all denied operations to leave backend call counters and caller buffers
+unchanged. Check reader-budget exhaustion, duplicate leases, busy deletion,
+cleanup after revocation and new grants without old-reader resurrection.
+An in-backend probe must observe revocation excluded throughout the read, and
+a concurrent read/revoke trace must complete the admitted call before admitting
+no further reads under that grant. The consumer facade must not expose the
+unchecked backend hook.
+
+Use one consumer for an independent provider and AFS+. Compare original names,
+metadata and streamed bytes after live content changes, deletion and remount;
+old-service grants/readers must fail on the remounted service. The independent
+provider additionally changes live protection metadata. AFS+ protection mutation,
+rich ACL transport and actual OS authentication require their own integration
+tests; the independent provider does not qualify those missing bridges.
+
+
+Plant a valid-CRC captured object-map leaf that omits a directory's child.
+A direct absent-object lookup can return not-found, but directory enumeration
+must report corruption because it follows an existing authoritative reference.
+The inspecting mount and reader must issue zero writes/flushes; the exhaustive
+checker must independently reject the damaged image.

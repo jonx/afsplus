@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Enforce revocable authority on the backup interface](#2026-09-14--enforce-revocable-authority-on-the-backup-interface)
 - [2026-09-14 — Configure snapshot limits before writable mount recovery](#2026-09-14--configure-snapshot-limits-before-writable-mount-recovery)
 - [2026-09-14 — Protect both checkpoint generations during reclamation](#2026-09-14--protect-both-checkpoint-generations-during-reclamation)
 - [2026-09-14 — Verify snapshot ownership and select stronger recovery retention](#2026-09-14--verify-snapshot-ownership-and-select-stronger-recovery-retention)
@@ -62,6 +63,49 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Enforce revocable authority on the backup interface
+
+Added the filesystem-neutral backup service and consumer facade under ADR-075.
+The host owns grant issuance and privileged backend access. Every consumer call
+checks its service-bound grant and retains a shared permit throughout backend
+execution; revocation takes the exclusive lock and returns after admitted work.
+Readers bind to their original grant. Final close releases the provider lease
+before its explicit reader budget, even when authority has been revoked.
+
+The same paged/streaming consumer runs against an independent provider and AFS+.
+AFS+ captured names, metadata and bytes survive live write, deletion and remount;
+old-service authority cannot access the new service. The independent provider
+also changes live protection metadata. Tests distinguish denied calls from
+backend access, preserve denied-read buffers, exercise duplication, busy deletion,
+reader exhaustion, new grants and concurrent revocation. A compile-fail fixture
+checks that the consumer facade has no unchecked backend hook.
+
+Review corrected a missing-object error mapping: a captured directory entry
+whose object is absent reports corruption. A valid-CRC damaged-image fixture
+distinguishes that broken reference from an ordinary absent-object lookup,
+checks zero source writes/flushes and requires independent checker rejection.
+
+The Rust interface is additive and does not advertise C/IPC or OS support.
+AFS+ protection mutation, exact restoration, sparse/attribute/security transport
+and real host authentication remain owned follow-up work. A test collector is
+not a complete archive/restore consumer.
+
+Archive research on 2026-09-14 compared PAX with preservation metadata against
+a dedicated container; the owner selected PAX and ADR-076 records the
+direction, complete-versus-partial distinction and preservation gates. The
+[GNU tar manual](https://www.gnu.org/software/tar/manual/tar.html) documents
+PAX-based xattr/ACL storage and GNU sparse extensions. The
+[tar 0.4.46 builder](https://docs.rs/tar/0.4.46/tar/struct.Builder.html) exposes
+streamed entry and PAX-extension writing; host-path convenience methods do not
+replace snapshot enumeration. Format choice still requires exact preservation,
+unsupported-metadata refusal and independent extraction tests.
+
+Validation: the final workspace all-features suite passed 319 tests with zero
+failures and ten ignored tests. Formatting, workspace Clippy with warnings
+denied, documentation checks, three checker fixtures and whitespace validation
+passed. These are host-side results, not native authentication or full restore
+qualification.
 
 ## 2026-09-14 — Configure snapshot limits before writable mount recovery
 

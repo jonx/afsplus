@@ -1,6 +1,6 @@
 # 13. Filesystem API v2
 
-> **ADRs:** [ADR-039](../adr/ADR-039-portable-vfs-slice.md) · **Spec:** none ·
+> **ADRs:** [ADR-039](../adr/ADR-039-portable-vfs-slice.md), [ADR-075](../adr/ADR-075-revocable-backup-capability.md) · **Spec:** none ·
 > **Tests:** [test-strategy](../testing/test-strategy.md) · **Milestones:** M07
 
 <!-- toc -->
@@ -20,6 +20,8 @@
 - [5. Large files](#5-large-files)
 - [6. Rust](#6-rust)
 - [7. Zed](#7-zed)
+- [8. Trusted snapshot backup extension](#8-trusted-snapshot-backup-extension)
+  - [Versioning and compatibility](#versioning-and-compatibility)
 
 <!-- /toc -->
 
@@ -225,3 +227,59 @@ Zed-facing requirements include:
 - efficient large-directory enumeration
 
 These are platform API requirements, not AFS+ private APIs.
+
+## 8. Trusted snapshot backup extension
+
+[ADR-075](../adr/ADR-075-revocable-backup-capability.md) defines authorization
+for the trusted backup service. The Rust extension in `afsplus_vfs::backup`
+separates a trusted `SnapshotBackend`, host-owned `BackupService` and issuer,
+and a consumer-facing `BackupClient` facade. Consumers use semantic view IDs,
+revision IDs, object IDs, metadata, paged names and caller-buffer reads. No
+allocation addresses, tree records or AFS+ management shortcuts cross this API.
+
+The host receives `BackupAuthority` during service construction and issues opaque
+`BackupGrant` values only after authenticating a privileged backup caller.
+Grants are bound to that service instance, including its mount lifetime; knowing
+a volume UUID, snapshot ID or reader ID confers no authority. A support feature
+bit must never be treated as a grant. The host backend hook is privileged and
+must not be exposed through the consumer facade or an IPC request.
+
+Every create, delete, list, open, view-info, stat, directory-page and data-read
+operation checks authority before invoking the backend. Readers carry the grant
+under which they opened; a fresh grant does not reactivate an old reader. Cloned
+grants share revocation, and cloned readers share their original grant and lease.
+Wrong-service and revoked authority return `BackupError::Denied` without data
+or metadata disclosure or backend calls. Provider errors retain their distinct
+`VfsError` category.
+
+Operation admission holds a shared grant lock for the entire backend call.
+Revocation acquires the exclusive lock, marks the grant revoked, and returns
+only after previously admitted operations have finished. Calls admitted before
+that boundary can return data; subsequent calls fail. This cannot retract data
+already delivered. A backend must not synchronously revoke its own in-flight
+grant. Host cancellation, lock contention and OS authentication require adapter
+qualification; no scheduler fairness or revocation latency bound is implied.
+
+Reader admission requires an explicit positive maximum of simultaneous logical
+reader opens. Copies share one provider reader allocation. The final close/drop
+releases the provider view before returning its budget; cleanup does not require
+authorization. Deletion stays busy while any provider reader lease remains,
+including revoked readers. The host must clean up handles on client disconnect.
+Cursors alone confer no authority and do not pin views.
+
+### Versioning and compatibility
+
+This additive Rust module is an experimental source interface within version
+0.0.1. Its generic types, locks and handles have no C layout or serialized grant
+representation. It does not change existing API-v2 structs, result numbers,
+capability identities, legacy DOS behavior or adapter advertisements. A C/IPC
+bridge needs versioned extension negotiation, opaque server-side handle mapping,
+explicit denial translation and host authentication tests before advertisement.
+The existing C header is not a wire encoding of these Rust types.
+
+The provider mapping uses existing `Stat`, `DirectoryEntry` and 64-bit offsets.
+The same consumer must run against an independent provider and AFS+; grants and
+backend types cannot be used to teach the consumer a disk layout. Exact archive
+and restoration additionally require sparse-range enumeration, attributes,
+security-container transport and metadata restoration operations. This reader
+interface alone does not establish a complete backup format or restore contract.

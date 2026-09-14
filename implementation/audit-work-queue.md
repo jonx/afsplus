@@ -30,8 +30,11 @@ Use [typed tree access](../testing/book-review-qualification.md#typed-snapshot-t
 and [exhaustive ownership checking](../testing/book-review-qualification.md#exhaustive-snapshot-checker)
 and [previous-checkpoint retention](../testing/book-review-qualification.md#previous-checkpoint-retention)
 and [explicit mount/recovery](../testing/book-review-qualification.md#explicit-snapshot-mount-and-recovery)
-as component baselines. Add a filesystem-neutral host API and real backup
-consumer, preserving explicit work limits before recovery. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
+as component baselines. Integrate the [trusted backup extension](../docs/13-filesystem-api-v2.md#8-trusted-snapshot-backup-extension)
+with the [PAX archive/restore direction](../adr/ADR-076-pax-backup-interchange.md),
+preserving explicit work limits before
+recovery. Add exact metadata restoration and sparse/attribute/security transport
+with explicit unsupported-state refusal; qualify native host grant issuance. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
 with both-slot crash oracles, generation-aware quarantine and measured
 low-space progress. Implement [ADR-075](../adr/ADR-075-revocable-backup-capability.md)
 for revocable trusted-backup authority; keep ordinary-user historical access

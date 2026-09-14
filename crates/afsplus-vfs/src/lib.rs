@@ -4,6 +4,8 @@
 //! into [`afsplus_core::Volume`] operations and keeps OS-specific paths,
 //! errno values, FUSE request types, and DOS packets outside the core.
 
+pub mod backup;
+
 use std::collections::BTreeMap;
 use std::fmt;
 
