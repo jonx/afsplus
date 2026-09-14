@@ -16,6 +16,7 @@ struct Source {
     uninspected: bool,
     page_calls: usize,
     mutate_second_pass: bool,
+    directory: bool,
 }
 impl Source {
     fn new(bytes: Vec<u8>) -> Self {
@@ -25,6 +26,7 @@ impl Source {
             uninspected: false,
             page_calls: 0,
             mutate_second_pass: false,
+            directory: false,
         }
     }
 }
@@ -46,8 +48,14 @@ impl SnapshotBackend for Source {
     fn info(&mut self, _: &Self::View) -> Result<ViewInfo, VfsError> {
         unimplemented!()
     }
-    fn stat(&mut self, _: &Self::View, _: u64) -> Result<Stat, VfsError> {
-        Ok(file_stat())
+    fn stat(&mut self, view: &Self::View, _: u64) -> Result<Stat, VfsError> {
+        let mut stat = file_stat();
+        if view.directory {
+            stat.kind = afsplus_vfs::NodeKind::Directory;
+            stat.size = 0;
+            stat.allocated_size = 0;
+        }
+        Ok(stat)
     }
     fn read(
         &mut self,
@@ -182,11 +190,16 @@ struct Destination {
     core_metadata: Option<RestoreMetadata>,
     round_metadata: bool,
     reject_opaque: bool,
+    directory: bool,
+    empty: Option<bool>,
 }
 impl RestoreBackend for Destination {
     type Object = ();
     fn root(&mut self) -> Result<(), VfsError> {
         Ok(())
+    }
+    fn directory_empty(&mut self, _: &()) -> Result<bool, VfsError> {
+        self.empty.ok_or(VfsError::NotSupported)
     }
     fn create_file(&mut self, _: &(), _: &str, _: Timespec) -> Result<(), VfsError> {
         unimplemented!()
@@ -251,6 +264,9 @@ impl RestoreBackend for Destination {
     }
     fn stat(&mut self, _: &()) -> Result<Stat, VfsError> {
         let mut stat = file_stat();
+        if self.directory {
+            stat.kind = afsplus_vfs::NodeKind::Directory;
+        }
         stat.size = self.size;
         stat.allocated_size = self.ranges.iter().map(|r| r.length).sum();
         let metadata = self.core_metadata.unwrap_or(RestoreMetadata {
@@ -1145,7 +1161,9 @@ fn changed_file_archive(fault: u8) -> Vec<u8> {
         let size = size_override.unwrap_or(header.size);
         input.begin_payload(size_override).unwrap();
         let mut payload = vec![0; size as usize];
-        assert_eq!(input.read_payload(&mut payload).unwrap(), payload.len());
+        if !payload.is_empty() {
+            assert_eq!(input.read_payload(&mut payload).unwrap(), payload.len());
+        }
         if header.kind == tar::Kind::PaxLocal {
             pending = pax::decode(&payload, limits())
                 .unwrap()
@@ -1188,7 +1206,9 @@ fn changed_file_archive(fault: u8) -> Vec<u8> {
             header.size = payload.len() as u64;
         }
         output.start(&header, size_override).unwrap();
-        output.write_payload(&payload).unwrap();
+        if !payload.is_empty() {
+            output.write_payload(&payload).unwrap();
+        }
     }
     output.finish().unwrap().0
 }
@@ -1296,6 +1316,309 @@ fn full_file_export_refuses_unknown_inventories_revocation_and_ordinal_exhaustio
             file_limits(),
         );
         assert!(result.is_err());
+        assert!(writer.finish().is_err());
+    }
+}
+
+fn directory_archive(mode: afsplus_backup::file::Mode, entries: usize) -> Vec<u8> {
+    use afsplus_backup::{file, namespace};
+    let mut backend = Source::new(vec![0, 255, 42]);
+    backend.directory = true;
+    backend.entries = entries;
+    backend.uninspected = mode == file::Mode::Recovery;
+    let (mut source, authority) = BackupService::new(backend, 1).unwrap();
+    let grant = authority.grant();
+    let view = source.open(&grant, 1).unwrap();
+    let mut writer = envelope::Writer::new(Vec::new(), framing()).unwrap();
+    let report = namespace::export(
+        &mut Captured {
+            client: &mut source.client(),
+            reader: &view,
+            object: 1,
+        },
+        &mut writer,
+        &namespace::Binding {
+            ordinal: 0,
+            path: "files",
+            entry: namespace::Entry::Directory,
+        },
+        mode,
+        &mut [0; 1],
+        namespace::Limits {
+            records: limits(),
+            inventory: file_limits().inventory,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        report.next_ordinal,
+        Some(if mode == file::Mode::Full {
+            3 + entries as u64
+        } else {
+            2
+        })
+    );
+    writer.finish().unwrap().0
+}
+#[test]
+fn directory_groups_preserve_opaque_values_or_validate_explicit_recovery_loss() {
+    use afsplus_backup::{file, namespace, spool};
+    use std::io::Cursor;
+    for entries in [0, 1] {
+        for archive_mode in [file::Mode::Full, file::Mode::Recovery] {
+            for mode in [file::Mode::Full, file::Mode::Recovery] {
+                let wire = directory_archive(archive_mode, entries);
+                let mut spool = spool::Verified::capture(
+                    wire.as_slice(),
+                    Cursor::new(Vec::new()),
+                    spool::Limits {
+                        chunk_bytes: 512,
+                        archive_bytes: wire.len() as u64,
+                        store_bytes: wire.len() as u64 * 2,
+                    },
+                    framing(),
+                    limits(),
+                )
+                .unwrap();
+                let mut reader = spool.reader(framing(), limits()).unwrap();
+                let (mut dest, _, _, object) = destination();
+                dest.backend_mut().directory = true;
+                dest.backend_mut().empty = Some(true);
+                dest.backend_mut().reject_opaque = mode == file::Mode::Recovery || entries == 0;
+                let result = namespace::restore_directory(
+                    &mut reader,
+                    &mut dest.client(),
+                    &Target {
+                        ordinal: 0,
+                        path: "files",
+                        object: &object,
+                    },
+                    &mut [0; 1],
+                    namespace::RestoreOptions {
+                        mode,
+                        limits: namespace::Limits {
+                            records: limits(),
+                            inventory: file_limits().inventory,
+                        },
+                    },
+                );
+                if mode == file::Mode::Full && archive_mode == file::Mode::Recovery {
+                    assert!(result.is_err());
+                    assert!(reader.next_member().is_err());
+                    assert!(dest.backend_mut().core_metadata.is_none());
+                    continue;
+                }
+                let report = result.unwrap();
+                let expected = file_stat();
+                let stat = dest.stat(&object).unwrap();
+                assert_eq!(stat.kind, afsplus_vfs::NodeKind::Directory);
+                assert_eq!(
+                    (stat.protection, stat.created, stat.modified, stat.changed),
+                    (
+                        expected.protection,
+                        expected.created,
+                        expected.modified,
+                        expected.changed
+                    )
+                );
+                if mode == file::Mode::Full {
+                    assert_eq!(dest.backend_mut().publications, entries);
+                    assert!(matches!(
+                        report.opaque,
+                        file::OpaqueDisposition::Preserved(_)
+                    ));
+                    if entries != 0 {
+                        assert_eq!(
+                            dest.backend_mut().installed.as_ref().unwrap().2,
+                            vec![0, 255, 42]
+                        );
+                    }
+                } else {
+                    assert_eq!(dest.backend_mut().publications, 0);
+                    match report.opaque {
+                        file::OpaqueDisposition::Omitted {
+                            knowledge,
+                            transported,
+                        } => {
+                            if archive_mode == file::Mode::Full {
+                                assert_eq!(transported.unwrap().security.count, entries as u64);
+                            } else {
+                                assert_eq!(knowledge.security, InventoryKnowledge::Uninspected);
+                                assert!(transported.is_none());
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                assert!(reader.next_member().unwrap().is_none());
+                assert_eq!(dest.backend_mut().active.load(Ordering::SeqCst), 0);
+            }
+        }
+    }
+}
+fn changed_directory_archive(fault: u8) -> Vec<u8> {
+    use afsplus_backup::{file, metadata};
+    let wire = directory_archive(file::Mode::Full, 1);
+    let mut input = envelope::Reader::new(wire.as_slice(), framing()).unwrap();
+    let mut output = envelope::Writer::new(Vec::new(), framing()).unwrap();
+    let mut pending = None;
+    while let Some(mut header) = input.next_header().unwrap() {
+        let size_override = if header.kind == tar::Kind::File {
+            pending.take()
+        } else {
+            None
+        };
+        let size = size_override.unwrap_or(header.size);
+        input.begin_payload(size_override).unwrap();
+        let mut payload = vec![0; size as usize];
+        if !payload.is_empty() {
+            assert_eq!(input.read_payload(&mut payload).unwrap(), payload.len());
+        }
+        if header.kind == tar::Kind::PaxLocal {
+            pending = pax::decode(&payload, limits())
+                .unwrap()
+                .iter()
+                .find(|r| r.key == "size")
+                .map(|r| r.value.parse::<u64>().unwrap());
+        }
+        if header.path.contains("directory-v1-full") {
+            let mut object = metadata::decode(&payload, limits()).unwrap();
+            match fault {
+                0 => object.path = "files/wrong",
+                1 => object.kind = tar::Kind::File,
+                2 => object.modified.nanos += 1,
+                3 => object.security = afsplus_backup::metadata::Inventory::Empty,
+                4 => header.path = header.path.replace("v1", "v2"),
+                _ => {}
+            }
+            // A non-directory object cannot encode the root path, so use a valid
+            // file path and verify the group rejects both conflicts.
+            if fault == 1 {
+                object.path = "files/wrong";
+            }
+            payload = metadata::encode(&object, limits()).unwrap();
+            header.size = payload.len() as u64;
+        }
+        if header.path.contains("namespace-") && fault == 5 {
+            header.path = header.path.replace("namespace-1", "namespace-9");
+        }
+        if header.kind == tar::Kind::Directory {
+            if fault == 6 {
+                header.path = "files/namespace.9".into();
+            }
+            if fault == 7 {
+                header.mode = 0o600;
+            }
+        }
+        output.start(&header, size_override).unwrap();
+        if !payload.is_empty() {
+            output.write_payload(&payload).unwrap();
+        }
+    }
+    output.finish().unwrap().0
+}
+#[test]
+fn directory_bindings_empty_destination_and_authority_fail_closed() {
+    use afsplus_backup::{file, namespace, spool};
+    use std::io::Cursor;
+    for fault in 0..=12 {
+        let wire = if fault < 8 {
+            changed_directory_archive(fault)
+        } else {
+            directory_archive(file::Mode::Full, 1)
+        };
+        let mut spool = spool::Verified::capture(
+            wire.as_slice(),
+            Cursor::new(Vec::new()),
+            spool::Limits {
+                chunk_bytes: 512,
+                archive_bytes: wire.len() as u64,
+                store_bytes: wire.len() as u64 * 2,
+            },
+            framing(),
+            limits(),
+        )
+        .unwrap();
+        let mut reader = spool.reader(framing(), limits()).unwrap();
+        let (mut dest, authority, grant, object) = destination();
+        dest.backend_mut().directory = fault != 8;
+        dest.backend_mut().empty = if fault == 9 { None } else { Some(fault != 10) };
+        dest.backend_mut().round_metadata = fault == 11;
+        if fault == 12 {
+            authority.revoke(&grant).unwrap();
+        }
+        let result = namespace::restore_directory(
+            &mut reader,
+            &mut dest.client(),
+            &Target {
+                ordinal: 0,
+                path: "files",
+                object: &object,
+            },
+            &mut [0; 1],
+            namespace::RestoreOptions {
+                mode: file::Mode::Full,
+                limits: namespace::Limits {
+                    records: limits(),
+                    inventory: file_limits().inventory,
+                },
+            },
+        );
+        assert!(result.is_err(), "fault {fault}");
+        assert!(reader.next_member().is_err());
+        if fault != 11 {
+            assert!(dest.backend_mut().core_metadata.is_none());
+            assert_eq!(dest.backend_mut().publications, 0);
+        }
+        assert_eq!(dest.backend_mut().active.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn namespace_export_failures_poison_completion() {
+    use afsplus_backup::{file, namespace};
+    for fault in 0..8 {
+        let mut backend = Source::new(vec![0, 255]);
+        backend.directory = fault != 1 && fault != 4;
+        backend.uninspected = fault == 0;
+        backend.mutate_second_pass = fault == 5;
+        let (mut source, authority) = BackupService::new(backend, 1).unwrap();
+        let grant = authority.grant();
+        let view = source.open(&grant, 1).unwrap();
+        if fault == 2 {
+            authority.revoke(&grant).unwrap();
+        }
+        let mut writer = envelope::Writer::new(Vec::new(), framing()).unwrap();
+        let mut scratch = [0; 1];
+        let result = namespace::export(
+            &mut Captured {
+                client: &mut source.client(),
+                reader: &view,
+                object: 1,
+            },
+            &mut writer,
+            &namespace::Binding {
+                ordinal: if fault == 3 { u64::MAX } else { 0 },
+                path: if fault == 4 { "files/alias" } else { "files" },
+                entry: if fault == 4 {
+                    namespace::Entry::HardLink {
+                        primary_path: "files/alias",
+                    }
+                } else {
+                    namespace::Entry::Directory
+                },
+            },
+            file::Mode::Full,
+            &mut scratch[..usize::from(fault != 7)],
+            namespace::Limits {
+                records: pax::Limits {
+                    bytes: if fault == 6 { 0 } else { 4096 },
+                    ..limits()
+                },
+                inventory: file_limits().inventory,
+            },
+        );
+        assert!(result.is_err(), "fault {fault}");
         assert!(writer.finish().is_err());
     }
 }

@@ -1048,3 +1048,499 @@ fn captured_afs_file_group_recovers_exact_metadata_with_explicit_unknown_invento
     assert_eq!(allocations.ranges.len(), 1);
     assert!(!allocations.ranges[0].unwritten);
 }
+
+#[test]
+fn captured_directory_file_and_alias_groups_restore_identity_and_final_metadata() {
+    use afsplus_backup::{allocation, attachment, file, inventory, namespace};
+    use afsplus_vfs::{backup::InventoryKnowledge, restore::RestoreMetadata};
+    let mut source = volume();
+    let directory = source.create_directory_in_root("docs", time()).unwrap();
+    let file_id = source
+        .create_file_in_directory(directory, "file", b"captured", time())
+        .unwrap();
+    source
+        .link_file(file_id, afsplus_format::OBJECT_ROOT, "alias", time())
+        .unwrap();
+    let file_meta = afsplus_core::volume::PreservedMetadata {
+        protection: 0x1234,
+        created: Timespec {
+            seconds: -111,
+            nanoseconds: 123,
+        },
+        modified: time(),
+        changed: Timespec {
+            seconds: 222,
+            nanoseconds: 345,
+        },
+    };
+    let dir_meta = afsplus_core::volume::PreservedMetadata {
+        protection: 0x5678,
+        created: Timespec {
+            seconds: -333,
+            nanoseconds: 456,
+        },
+        modified: Timespec {
+            seconds: 444,
+            nanoseconds: 567,
+        },
+        changed: Timespec {
+            seconds: -555,
+            nanoseconds: 678,
+        },
+    };
+    source.restore_object_metadata(file_id, file_meta).unwrap();
+    source.restore_object_metadata(directory, dir_meta).unwrap();
+    let snapshot = source.snapshot_create(time()).unwrap();
+    source
+        .write_file_at(file_id, 0, b"LIVE NOW", time())
+        .unwrap();
+    source
+        .create_file_in_directory(directory, "later", b"not captured", time())
+        .unwrap();
+    let source =
+        mount_with_snapshot_limits(source.into_device(), MountOptions::default(), work()).unwrap();
+    let (mut source, authority) = BackupService::new(source, 1).unwrap();
+    let grant = authority.grant();
+    let view = source.open(&grant, snapshot).unwrap();
+    let inventory = inventory::Limits {
+        values: 16,
+        value_bytes: 4096,
+        page_entries: 1,
+        records: records(),
+    };
+    let ns_limits = namespace::Limits {
+        records: records(),
+        inventory,
+    };
+    let file_limits = file::Limits {
+        contents: consumer::Options {
+            map: limits(),
+            records: records(),
+            page_entries: 1,
+        },
+        inventory,
+    };
+    let mut writer = envelope::Writer::new(Vec::new(), framing()).unwrap();
+    let dir = namespace::export(
+        &mut Captured {
+            client: &mut source.client(),
+            reader: &view,
+            object: directory,
+        },
+        &mut writer,
+        &namespace::Binding {
+            ordinal: 0,
+            path: "files/docs",
+            entry: namespace::Entry::Directory,
+        },
+        file::Mode::Recovery,
+        &mut [0; 512],
+        ns_limits,
+    )
+    .unwrap();
+    assert_eq!(dir.next_ordinal, Some(2));
+    let file = file::export(
+        &mut Captured {
+            client: &mut source.client(),
+            reader: &view,
+            object: file_id,
+        },
+        &mut writer,
+        (2, "files/docs/file"),
+        file::Mode::Recovery,
+        &mut [0; 512],
+        file_limits,
+    )
+    .unwrap();
+    assert_eq!(file.next_ordinal, Some(5));
+    let alias = namespace::export(
+        &mut Captured {
+            client: &mut source.client(),
+            reader: &view,
+            object: file_id,
+        },
+        &mut writer,
+        &namespace::Binding {
+            ordinal: 5,
+            path: "files/alias",
+            entry: namespace::Entry::HardLink {
+                primary_path: "files/docs/file",
+            },
+        },
+        file::Mode::Recovery,
+        &mut [0; 512],
+        ns_limits,
+    )
+    .unwrap();
+    assert_eq!(alias.next_ordinal, Some(7));
+    let wire = writer.finish().unwrap().0;
+    // Independent standard-library reader sees ordinary directory/link semantics.
+    let path = std::env::temp_dir().join(format!("afsplus-namespace-{}.tar", std::process::id()));
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    let mut output = open.open(&path).unwrap();
+    use std::io::Write;
+    output.write_all(&wire).unwrap();
+    drop(output);
+    let checked=std::process::Command::new("python3").args(["-c","import sys,tarfile\nwith tarfile.open(sys.argv[1]) as t:\n d=t.getmember('files/docs');a=t.getmember('files/alias')\n assert d.isdir() and d.mode==0o700\n assert a.islnk() and a.linkname=='files/docs/file'\n assert t.extractfile(a).read()==b'captured'\n"]).arg(&path).status().unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(checked.success());
+    let mut spool = spool::Verified::capture_sparse(
+        wire.as_slice(),
+        Cursor::new(Vec::new()),
+        spool::Limits {
+            chunk_bytes: 512,
+            archive_bytes: wire.len() as u64,
+            store_bytes: wire.len() as u64 * 2,
+        },
+        framing(),
+        records(),
+    )
+    .unwrap();
+    let mut reader = spool.reader(framing(), records()).unwrap();
+    let mut dest = volume();
+    let outside = dest
+        .create_file_in_root("outside", b"untouched", time())
+        .unwrap();
+    let selected = dest.create_directory_in_root("selected", time()).unwrap();
+    let (mut dest, authority) =
+        RestoreService::new(AfsRestoreDestination::new(dest, selected).unwrap(), 3).unwrap();
+    let grant = authority.grant();
+    let root = dest.root(&grant).unwrap();
+    let directory = dest.create_directory(&root, "docs", time()).unwrap();
+    let restored_dir_id = dest.stat(&directory).unwrap().object_id;
+    let options = namespace::RestoreOptions {
+        mode: file::Mode::Recovery,
+        limits: ns_limits,
+    };
+    let report = namespace::restore_directory(
+        &mut reader,
+        &mut dest.client(),
+        &attachment::Target {
+            ordinal: 0,
+            path: "files/docs",
+            object: &directory,
+        },
+        &mut [0; 512],
+        options,
+    )
+    .unwrap();
+    assert_eq!(report.next_ordinal, Some(2));
+    assert!(matches!(
+        report.opaque,
+        file::OpaqueDisposition::Omitted {
+            transported: None,
+            ..
+        }
+    ));
+    let restored = dest.create_file(&directory, "file", time()).unwrap();
+    drop(directory);
+    let report = file::restore(
+        &mut reader,
+        &mut dest.client(),
+        &attachment::Target {
+            ordinal: 2,
+            path: "files/docs/file",
+            object: &restored,
+        },
+        &mut [0; 512],
+        file::RestoreOptions {
+            mode: file::Mode::Recovery,
+            allocation: allocation::RestoreOptions {
+                limits: file_limits.contents,
+                mode: allocation::Mode::RecoverContents,
+                reservation_chunk: 0,
+                reservation_bytes: 0,
+                readback_entries: 0,
+            },
+            inventory,
+        },
+        time(),
+    )
+    .unwrap();
+    let knowledge = match report.opaque {
+        file::OpaqueDisposition::Omitted { knowledge, .. } => knowledge,
+        _ => unreachable!(),
+    };
+    assert_eq!(knowledge.security, InventoryKnowledge::Uninspected);
+    let report = namespace::restore_alias(
+        &mut reader,
+        &mut dest.client(),
+        &namespace::AliasTarget {
+            ordinal: 5,
+            path: "files/alias",
+            parent: &root,
+            name: "alias",
+            primary: namespace::Primary {
+                object: &restored,
+                path: "files/docs/file",
+                knowledge,
+            },
+        },
+        options,
+        time(),
+    )
+    .unwrap();
+    assert_eq!(report.links, 2);
+    assert_eq!(report.next_ordinal, Some(7));
+    let restored_file_id = report.object_id;
+    drop(restored);
+    let directory = dest.lookup_created(&root, "docs").unwrap();
+    dest.metadata(
+        &directory,
+        RestoreMetadata {
+            protection: dir_meta.protection as u64,
+            created: dir_meta.created,
+            modified: dir_meta.modified,
+            changed: dir_meta.changed,
+        },
+    )
+    .unwrap();
+    assert!(reader.next_member().unwrap().is_none());
+    dest.sync(&grant).unwrap();
+    let volume = dest.into_backend().into_volume();
+    let mut volume =
+        mount_with_snapshot_limits(volume.into_device(), MountOptions::default(), work()).unwrap();
+    assert_eq!(volume.read_file(outside).unwrap(), b"untouched");
+    assert_eq!(
+        volume.lookup_in_directory(selected, "alias").unwrap(),
+        Some(restored_file_id)
+    );
+    assert_eq!(
+        volume.lookup_in_directory(restored_dir_id, "file").unwrap(),
+        Some(restored_file_id)
+    );
+    assert_eq!(volume.read_file(restored_file_id).unwrap(), b"captured");
+    assert!(volume
+        .lookup_in_directory(restored_dir_id, "later")
+        .unwrap()
+        .is_none());
+    for (id, expected) in [(restored_dir_id, dir_meta), (restored_file_id, file_meta)] {
+        let stat = volume.stat(id).unwrap().unwrap();
+        assert_eq!(
+            (stat.protection, stat.created, stat.modified, stat.changed),
+            (
+                expected.protection,
+                expected.created,
+                expected.modified,
+                expected.changed
+            )
+        );
+    }
+    assert_eq!(
+        volume.stat(restored_file_id).unwrap().unwrap().link_count,
+        2
+    );
+}
+
+fn alias_only_archive(primary_path: &str) -> Vec<u8> {
+    use afsplus_backup::{file, inventory, namespace};
+    let mut source = volume();
+    let id = source
+        .create_file_in_root("primary", b"source", time())
+        .unwrap();
+    let snapshot = source.snapshot_create(time()).unwrap();
+    let (mut source, authority) = BackupService::new(source, 1).unwrap();
+    let grant = authority.grant();
+    let view = source.open(&grant, snapshot).unwrap();
+    let mut writer = envelope::Writer::new(Vec::new(), framing()).unwrap();
+    namespace::export(
+        &mut Captured {
+            client: &mut source.client(),
+            reader: &view,
+            object: id,
+        },
+        &mut writer,
+        &namespace::Binding {
+            ordinal: u64::MAX - 1,
+            path: "files/alias",
+            entry: namespace::Entry::HardLink { primary_path },
+        },
+        file::Mode::Recovery,
+        &mut [0; 1],
+        namespace::Limits {
+            records: records(),
+            inventory: inventory::Limits {
+                values: 16,
+                value_bytes: 4096,
+                page_entries: 1,
+                records: records(),
+            },
+        },
+    )
+    .unwrap();
+    writer.finish().unwrap().0
+}
+#[test]
+fn alias_conflicts_and_resource_refusal_do_not_create_a_link() {
+    use afsplus_backup::{file, inventory, namespace};
+    use afsplus_vfs::backup::{InventoryKnowledge, MetadataInventory};
+    for fault in 0..=8 {
+        let wire = alias_only_archive(if fault == 5 {
+            "files/wrong"
+        } else {
+            "files/primary"
+        });
+        let mut spool = spool::Verified::capture(
+            wire.as_slice(),
+            Cursor::new(Vec::new()),
+            spool::Limits {
+                chunk_bytes: 512,
+                archive_bytes: wire.len() as u64,
+                store_bytes: wire.len() as u64 * 2,
+            },
+            framing(),
+            records(),
+        )
+        .unwrap();
+        let mut reader = spool.reader(framing(), records()).unwrap();
+        let (mut dest, authority) = RestoreService::new(
+            AfsRestoreDestination::new(volume(), afsplus_format::OBJECT_ROOT).unwrap(),
+            if fault == 0 { 2 } else { 3 },
+        )
+        .unwrap();
+        let grant = authority.grant();
+        let root = dest.root(&grant).unwrap();
+        let primary = dest.create_file(&root, "primary", time()).unwrap();
+        dest.write(&primary, 0, b"restored", time()).unwrap();
+        let primary_id = dest.stat(&primary).unwrap().object_id;
+        if fault == 1 {
+            let occupied = dest.create_file(&root, "alias", time()).unwrap();
+            drop(occupied);
+        }
+        if fault == 2 {
+            dest.metadata(
+                &primary,
+                afsplus_vfs::restore::RestoreMetadata {
+                    protection: 1,
+                    created: time(),
+                    modified: time(),
+                    changed: time(),
+                },
+            )
+            .unwrap();
+        }
+        if fault == 3 {
+            authority.revoke(&grant).unwrap();
+        }
+        let knowledge = MetadataInventory {
+            attributes: if fault == 4 {
+                InventoryKnowledge::Empty
+            } else {
+                InventoryKnowledge::Uninspected
+            },
+            security: InventoryKnowledge::Uninspected,
+        };
+        let result = namespace::restore_alias(
+            &mut reader,
+            &mut dest.client(),
+            &namespace::AliasTarget {
+                ordinal: if fault == 8 { u64::MAX } else { u64::MAX - 1 },
+                path: "files/alias",
+                parent: &root,
+                name: if fault == 6 { "wrong" } else { "alias" },
+                primary: namespace::Primary {
+                    object: &primary,
+                    path: "files/primary",
+                    knowledge,
+                },
+            },
+            namespace::RestoreOptions {
+                mode: if fault == 7 {
+                    file::Mode::Full
+                } else {
+                    file::Mode::Recovery
+                },
+                limits: namespace::Limits {
+                    records: records(),
+                    inventory: inventory::Limits {
+                        values: 16,
+                        value_bytes: 4096,
+                        page_entries: 1,
+                        records: records(),
+                    },
+                },
+            },
+            time(),
+        );
+        assert!(result.is_err(), "fault {fault}");
+        assert!(reader.next_member().is_err());
+        let mut volume = dest.into_backend().into_volume();
+        assert_eq!(volume.stat(primary_id).unwrap().unwrap().link_count, 1);
+        assert_eq!(volume.lookup_root("alias").unwrap().is_some(), fault == 1);
+        assert_eq!(volume.read_file(primary_id).unwrap(), b"restored");
+    }
+}
+#[test]
+fn alias_last_ordinal_is_explicit_and_identity_is_shared() {
+    use afsplus_backup::{file, inventory, namespace};
+    use afsplus_vfs::backup::{InventoryKnowledge, MetadataInventory};
+    let wire = alias_only_archive("files/primary");
+    let mut spool = spool::Verified::capture(
+        wire.as_slice(),
+        Cursor::new(Vec::new()),
+        spool::Limits {
+            chunk_bytes: 512,
+            archive_bytes: wire.len() as u64,
+            store_bytes: wire.len() as u64 * 2,
+        },
+        framing(),
+        records(),
+    )
+    .unwrap();
+    let mut reader = spool.reader(framing(), records()).unwrap();
+    let (mut dest, authority) = RestoreService::new(
+        AfsRestoreDestination::new(volume(), afsplus_format::OBJECT_ROOT).unwrap(),
+        3,
+    )
+    .unwrap();
+    let grant = authority.grant();
+    let root = dest.root(&grant).unwrap();
+    let primary = dest.create_file(&root, "primary", time()).unwrap();
+    dest.write(&primary, 0, b"restored", time()).unwrap();
+    let report = namespace::restore_alias(
+        &mut reader,
+        &mut dest.client(),
+        &namespace::AliasTarget {
+            ordinal: u64::MAX - 1,
+            path: "files/alias",
+            parent: &root,
+            name: "alias",
+            primary: namespace::Primary {
+                object: &primary,
+                path: "files/primary",
+                knowledge: MetadataInventory {
+                    attributes: InventoryKnowledge::Uninspected,
+                    security: InventoryKnowledge::Uninspected,
+                },
+            },
+        },
+        namespace::RestoreOptions {
+            mode: file::Mode::Recovery,
+            limits: namespace::Limits {
+                records: records(),
+                inventory: inventory::Limits {
+                    values: 16,
+                    value_bytes: 4096,
+                    page_entries: 1,
+                    records: records(),
+                },
+            },
+        },
+        time(),
+    )
+    .unwrap();
+    assert_eq!(report.next_ordinal, None);
+    assert_eq!(report.links, 2);
+    assert!(reader.next_member().unwrap().is_none());
+    let alias = dest.lookup_created(&root, "alias").unwrap();
+    dest.write(&alias, 0, b"changed!", time()).unwrap();
+    let mut bytes = [0; 8];
+    dest.client().read(&primary, 0, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"changed!");
+}

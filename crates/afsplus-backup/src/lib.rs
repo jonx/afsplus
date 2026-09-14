@@ -27,3 +27,6 @@ pub mod allocation;
 
 #[cfg(feature = "consumer")]
 pub mod file;
+
+#[cfg(feature = "consumer")]
+pub mod namespace;

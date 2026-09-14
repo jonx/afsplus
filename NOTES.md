@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Bind directory and alias archive restoration](#2026-09-14---bind-directory-and-alias-archive-restoration)
 - [2026-09-14 - Reconcile the filesystem comparison with executable support](#2026-09-14---reconcile-the-filesystem-comparison-with-executable-support)
 - [2026-09-14 - Reopen created restore entries with bounded active handles](#2026-09-14---reopen-created-restore-entries-with-bounded-active-handles)
 - [2026-09-14 - Bind exact regular-file metadata to allocation and opaque inventories](#2026-09-14---bind-exact-regular-file-metadata-to-allocation-and-opaque-inventories)
@@ -101,6 +102,24 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Bind directory and alias archive restoration
+
+Added ADR-093 directory and hard-link groups to the archive consumer. Directory
+restoration checks scoped emptiness, preserves full inventories or explicitly
+reports recovery losses, and verifies exact metadata. Alias restoration checks
+the primary descriptor and destination capacity before linking, then verifies
+shared identity and incremented link count. Added the optional grant-held
+one-entry emptiness query without creating another active handle.
+
+Qualification covers a real snapshot directory/file/alias archive, live mutation,
+Python tarfile inspection, bounded handle reopening, final directory metadata,
+remount, shared writes, malformed bindings, revoked grants and resource refusals.
+Full-directory opaque preservation uses a semantic provider; AFS+ opaque storage,
+symlinks, complete namespace planning and durable job reports are separate gates.
+The specification, API contract, qualification plan and queue preserve that scope.
+The full workspace suite passed with 453 tests and 10 ignored qualification
+workloads. Formatting, Clippy and documentation checks passed.
 
 ## 2026-09-14 - Reconcile the filesystem comparison with executable support
 

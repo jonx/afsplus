@@ -20,6 +20,8 @@ pub struct Reader<R> {
     inner: envelope::Reader<R>,
     limits: pax::Limits,
     header: Option<tar::Header>,
+    #[cfg(feature = "consumer")]
+    local_path: Option<String>,
     records: Vec<u8>,
     remaining: u64,
     poisoned: bool,
@@ -51,6 +53,8 @@ impl<R: Read> Reader<R> {
             inner: envelope::Reader::new(input, framing).map_err(Error::Envelope)?,
             limits: records,
             header: None,
+            #[cfg(feature = "consumer")]
+            local_path: None,
             records: Vec::new(),
             remaining: 0,
             poisoned: false,
@@ -77,6 +81,10 @@ impl<R: Read> Reader<R> {
         }
         self.poisoned = true;
         self.header = None;
+        #[cfg(feature = "consumer")]
+        {
+            self.local_path = None;
+        }
         self.records.clear();
         let Some(mut header) = self.inner.next_header().map_err(Error::Envelope)? else {
             self.complete = true;
@@ -84,6 +92,10 @@ impl<R: Read> Reader<R> {
             return Ok(None);
         };
         if header.kind == tar::Kind::PaxLocal {
+            #[cfg(feature = "consumer")]
+            {
+                self.local_path = Some(header.path.clone());
+            }
             let size = usize::try_from(header.size).map_err(|_| Error::Limit)?;
             if size > self.limits.bytes {
                 return Err(Error::Limit);
@@ -182,6 +194,11 @@ impl<R: Read> Reader<R> {
                 .map_err(Error::Member)?
                 .mtime,
         )
+    }
+
+    #[cfg(feature = "consumer")]
+    pub(crate) fn local_path_is(&self, path: &str) -> bool {
+        !self.poisoned && self.local_path.as_deref() == Some(path)
     }
 
     pub fn receipt(&self) -> Option<&envelope::Receipt> {

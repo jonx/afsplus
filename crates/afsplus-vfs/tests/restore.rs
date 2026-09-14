@@ -53,6 +53,7 @@ struct Mock {
     reservation_support: bool,
     allocation_reply: Option<AllocationPage>,
     lookup_support: bool,
+    empty_support: bool,
 }
 impl Mock {
     fn new() -> Self {
@@ -75,6 +76,7 @@ impl Mock {
             reservation_support: true,
             allocation_reply: None,
             lookup_support: true,
+            empty_support: true,
         }
     }
     fn create(&mut self, parent: u64, name: &str, kind: NodeKind) -> Result<u64, VfsError> {
@@ -118,6 +120,13 @@ impl RestoreBackend for Mock {
             .get(&(*parent, name.into()))
             .copied()
             .ok_or(VfsError::NotFound)
+    }
+    fn directory_empty(&mut self, directory: &u64) -> Result<bool, VfsError> {
+        self.calls += 1;
+        if !self.empty_support {
+            return Err(VfsError::NotSupported);
+        }
+        Ok(!self.names.keys().any(|(parent, _)| parent == directory))
     }
     fn create_file(&mut self, parent: &u64, name: &str, _: Timespec) -> Result<u64, VfsError> {
         self.create(*parent, name, NodeKind::File)
@@ -1184,6 +1193,9 @@ fn afs_created_lookup_is_read_only_confined_and_supports_final_metadata_after_li
         RestoreService::new(AfsRestoreDestination::new(volume, selected).unwrap(), 3).unwrap();
     let grant = authority.grant();
     let mut current = service.root(&grant).unwrap();
+    counts.set([0; 3]);
+    assert!(service.client().directory_empty(&current).unwrap());
+    assert_eq!(&counts.get()[1..], &[0, 0]);
     let mut dirs = vec![selected];
     for _ in 0..8 {
         let child = service.create_directory(&current, "child", now(4)).unwrap();
@@ -1193,6 +1205,9 @@ fn afs_created_lookup_is_read_only_confined_and_supports_final_metadata_after_li
     let file = service.create_file(&current, "file", now(5)).unwrap();
     service.write(&file, 0, b"restored", now(6)).unwrap();
     let id = service.stat(&file).unwrap().object_id;
+    counts.set([0; 3]);
+    assert!(!service.client().directory_empty(&current).unwrap());
+    assert_eq!(&counts.get()[1..], &[0, 0]);
     drop(current);
     let root = service.root(&grant).unwrap();
     service.link(&file, &root, "alias", now(7)).unwrap();
@@ -1250,4 +1265,36 @@ fn afs_created_lookup_is_read_only_confined_and_supports_final_metadata_after_li
             afsplus_core::volume::ObjectMetadata::from(volume.stat(id).unwrap().unwrap()),
         ));
     }
+}
+
+#[test]
+fn directory_emptiness_is_scoped_and_never_defaults_unsupported_to_empty() {
+    let (mut service, authority) = RestoreService::new(Mock::new(), 2).unwrap();
+    let grant = authority.grant();
+    let root = service.root(&grant).unwrap();
+    assert!(service.directory_empty(&root).unwrap());
+    let file = service.create_file(&root, "file", now(1)).unwrap();
+    assert!(!service.client().directory_empty(&root).unwrap());
+    assert_eq!(
+        service.directory_empty(&file),
+        Err(RestoreError::Filesystem(VfsError::NotDirectory))
+    );
+    let id = service.stat(&file).unwrap().object_id;
+    service.backend_mut().nodes.get_mut(&id).unwrap().stat.kind = NodeKind::Symlink;
+    assert_eq!(
+        service.directory_empty(&file),
+        Err(RestoreError::Filesystem(VfsError::NotDirectory))
+    );
+    service.backend_mut().empty_support = false;
+    assert_eq!(
+        service.directory_empty(&root),
+        Err(RestoreError::Filesystem(VfsError::NotSupported))
+    );
+    let (mut foreign, _) = RestoreService::new(Mock::new(), 2).unwrap();
+    assert_eq!(foreign.directory_empty(&root), Err(RestoreError::Denied));
+    assert_eq!(foreign.backend_mut().calls, 0);
+    authority.revoke(&grant).unwrap();
+    let before = service.backend_mut().calls;
+    assert_eq!(service.directory_empty(&root), Err(RestoreError::Denied));
+    assert_eq!(service.backend_mut().calls, before);
 }

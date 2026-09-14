@@ -18,6 +18,7 @@
 - [Sparse content consumer](#sparse-content-consumer)
 - [Allocation-preserving consumer](#allocation-preserving-consumer)
 - [Bound regular-file groups](#bound-regular-file-groups)
+- [Directory and hard-link groups](#directory-and-hard-link-groups)
 
 <!-- /toc -->
 
@@ -372,3 +373,34 @@ different scopes. They do not establish AFS+ opaque storage support, directories
 symlinks, hard-link identity, whole-namespace completeness, durable job loss
 reports, sustained resource use or native/older-system qualification. Preserve
 those acceptance gates explicitly.
+
+## Directory and hard-link groups
+
+Run `cargo test -p afsplus-backup --all-features` and
+`cargo test -p afsplus-vfs --all-features` for
+[bound namespace groups](../spec/backup-namespace.md).
+
+Require a real captured directory/primary/alias archive to recover exact captured
+bytes after live mutation, retain hard-link identity, and preserve an outside
+file. Close and reopen scoped directory handles within a three-handle budget,
+finalize directory metadata after namespace edits, synchronize and compare exact
+remount metadata. Independently inspect ordinary directory and hard-link members
+with Python tarfile. Use only a private regular-file archive fixture.
+
+With semantic opaque providers, exercise full and recovery directory profiles,
+empty and present inventories, validated discarded values and explicit unknown
+knowledge. Refuse malformed kind/path/time/profile/header ordinals, wrong target
+kind, unsupported/nonempty destinations, rounding and revoked grants. Export
+failures must poison completion, including count/buffer/ordinal refusal and
+changed captured inventories.
+
+Alias refusal cases cover occupied names, insufficient handles, mismatched
+primary metadata/knowledge/path, wrong basename, incompatible profiles and
+ordinal overflow. Require no new link on preflight refusal. At the last valid
+ordinal require explicit exhaustion; writing through a successful alias must
+change bytes observed through its primary.
+
+VFS emptiness tests require the original grant through stat and query, no extra
+handle, zero writes/flushes, and explicit unsupported, foreign and revoked errors.
+These component oracles do not prove complete namespace enumeration, durable
+loss reports, AFS+ opaque storage, symlink restoration or native hardware behavior.

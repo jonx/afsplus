@@ -29,6 +29,7 @@
   - [Committed destination allocation readback](#committed-destination-allocation-readback)
   - [Staged opaque metadata restoration](#staged-opaque-metadata-restoration)
   - [Scoped created-entry lookup](#scoped-created-entry-lookup)
+  - [Scoped directory emptiness](#scoped-directory-emptiness)
 
 <!-- /toc -->
 
@@ -589,3 +590,18 @@ hard-link identity and finalize metadata after all namespace mutations.
 Run the [created-entry lookup gate](../testing/security-model-conformance.md#21-scoped-created-entry-lookup).
 The additive Rust trait default preserves provider compilation; no C ABI, feature
 identity or filesystem disk record is changed.
+
+### Scoped directory emptiness
+
+[ADR-093](../adr/ADR-093-directory-and-hardlink-archive-groups.md) adds the optional
+`directory_empty` restore query. Hold the original destination grant through
+kind validation and provider access. Require a directory; do not follow a
+symlink or create another active restore handle. Return `NotSupported` when the
+provider lacks the query, never assume an unsupported directory is empty.
+The AFS+ provider reads a directory page limited to one entry. The operation
+performs no mutation or durability barrier. Revocation and foreign handles
+refuse access under the same rules as other restore queries.
+
+[Directory archive groups](../spec/backup-namespace.md) use this query before
+restoring metadata. It is an observation within the isolated restore namespace,
+not a lock against unrelated actors; destination isolation is a host obligation.

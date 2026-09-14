@@ -52,8 +52,8 @@ objects present before the restore job; distinguish partial restoration from com
 Use the [sparse content consumer](../spec/backup-sparse.md) for bounded content
 transport and the [allocation-preserving consumer](../spec/backup-allocation.md)
 for reservation binding and verified coverage. Use [bound regular-file groups](../spec/backup-file.md)
-for exact metadata/content/inventory agreement. Integrate directories, symlinks
-and the hard-link graph; use [scoped created-entry lookup](../docs/13-filesystem-api-v2.md#scoped-created-entry-lookup)
+for exact metadata/content/inventory agreement. Use [directory and alias groups](../spec/backup-namespace.md) as namespace
+components; integrate symlinks and the complete hard-link graph; use [scoped created-entry lookup](../docs/13-filesystem-api-v2.md#scoped-created-entry-lookup)
 to reopen entries with bounded active handles and finalize metadata after namespace edits. Persist explicit
 content-recovery loss reports and validate every object and archive-wide binding
 before full-job preservation success. Use

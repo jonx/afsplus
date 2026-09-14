@@ -62,6 +62,10 @@ pub trait RestoreBackend {
     ) -> Result<Self::Object, VfsError> {
         Err(VfsError::NotSupported)
     }
+    /// Inspect at most one entry; unsupported enumeration is not emptiness.
+    fn directory_empty(&mut self, _directory: &Self::Object) -> Result<bool, VfsError> {
+        Err(VfsError::NotSupported)
+    }
     fn create_file(
         &mut self,
         parent: &Self::Object,
@@ -287,6 +291,16 @@ impl<P: RestoreBackend> RestoreService<P> {
         }
         let object = self.backend.lookup_created(&parent.0.object, name)?;
         Ok(Self::wrap(object, parent.0.grant.clone(), budget))
+    }
+    pub fn directory_empty(
+        &mut self,
+        directory: &RestoreObject<P::Object>,
+    ) -> Result<bool, RestoreError> {
+        let _permit = self.admit(&directory.0.grant)?;
+        if self.backend.stat(&directory.0.object)?.kind != crate::NodeKind::Directory {
+            return Err(VfsError::NotDirectory.into());
+        }
+        Ok(self.backend.directory_empty(&directory.0.object)?)
     }
     fn create(
         &mut self,
@@ -566,6 +580,12 @@ impl<P: RestoreBackend> RestoreClient<'_, P> {
     ) -> Result<RestoreObject<P::Object>, RestoreError> {
         self.0.lookup_created(parent, name)
     }
+    pub fn directory_empty(
+        &mut self,
+        directory: &RestoreObject<P::Object>,
+    ) -> Result<bool, RestoreError> {
+        self.0.directory_empty(directory)
+    }
     pub fn create_file(
         &mut self,
         parent: &RestoreObject<P::Object>,
@@ -682,6 +702,13 @@ impl<D: afsplus_block::BlockDevice> RestoreBackend for AfsRestoreDestination<D> 
         self.volume
             .lookup_in_directory(*parent, name)?
             .ok_or(VfsError::NotFound)
+    }
+    fn directory_empty(&mut self, directory: &u64) -> Result<bool, VfsError> {
+        Ok(self
+            .volume
+            .read_directory_page(*directory, None, 1)?
+            .entries
+            .is_empty())
     }
     fn create_file(&mut self, parent: &u64, name: &str, now: Timespec) -> Result<u64, VfsError> {
         Ok(self
@@ -838,6 +865,10 @@ mod authority_tests {
         fn root(&mut self) -> Result<(), VfsError> {
             Ok(())
         }
+        fn directory_empty(&mut self, _: &()) -> Result<bool, VfsError> {
+            self.check();
+            Ok(true)
+        }
         fn create_file(&mut self, _: &(), _: &str, _: Timespec) -> Result<(), VfsError> {
             Ok(())
         }
@@ -920,6 +951,25 @@ mod authority_tests {
             self.check();
             Ok(())
         }
+    }
+    #[test]
+    fn directory_emptiness_holds_original_permit_without_a_new_handle() {
+        let (mut service, authority) = RestoreService::new(
+            Probe {
+                grants: vec![],
+                calls: 0,
+            },
+            1,
+        )
+        .unwrap();
+        let grant = authority.grant();
+        let root = service.root(&grant).unwrap();
+        service.backend_mut().grants = vec![grant.clone()];
+        assert!(service.client().directory_empty(&root).unwrap());
+        assert_eq!(service.backend_mut().calls, 2);
+        authority.revoke(&grant).unwrap();
+        assert_eq!(service.directory_empty(&root), Err(RestoreError::Denied));
+        assert_eq!(service.backend_mut().calls, 2);
     }
     #[test]
     fn created_lookup_holds_operation_permit_across_stat_and_lookup() {

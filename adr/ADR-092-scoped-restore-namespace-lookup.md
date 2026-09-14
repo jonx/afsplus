@@ -1,6 +1,7 @@
 # ADR-092: Reopen created restore entries within the isolated destination
 
 Status: Accepted under the owner's delegated recommended-option authority; namespace consumer and native qualification required
+Amended by: ADR-093
 Amends: ADR-077, ADR-091
 
 ## Context

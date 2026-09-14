@@ -74,26 +74,26 @@ fn name(mode: Mode, ordinal: u64) -> String {
         }
     )
 }
-fn timestamp(t: Timespec) -> Timestamp {
+pub(crate) fn timestamp(t: Timespec) -> Timestamp {
     Timestamp {
         seconds: t.seconds,
         nanos: t.nanoseconds,
     }
 }
-fn timespec(t: Timestamp) -> Timespec {
+pub(crate) fn timespec(t: Timestamp) -> Timespec {
     Timespec {
         seconds: t.seconds,
         nanoseconds: t.nanos,
     }
 }
-fn inventory_state(k: InventoryKnowledge) -> metadata::Inventory {
+pub(crate) fn inventory_state(k: InventoryKnowledge) -> metadata::Inventory {
     match k {
         InventoryKnowledge::Empty => metadata::Inventory::Empty,
         InventoryKnowledge::Present => metadata::Inventory::Present,
         InventoryKnowledge::Uninspected => metadata::Inventory::Uninspected,
     }
 }
-fn knowledge(m: &metadata::Object<'_>) -> MetadataInventory {
+pub(crate) fn knowledge(m: &metadata::Object<'_>) -> MetadataInventory {
     let convert = |k| match k {
         metadata::Inventory::Empty => InventoryKnowledge::Empty,
         metadata::Inventory::Present => InventoryKnowledge::Present,
@@ -104,7 +104,7 @@ fn knowledge(m: &metadata::Object<'_>) -> MetadataInventory {
         security: convert(m.security),
     }
 }
-fn inspected(k: MetadataInventory) -> bool {
+pub(crate) fn inspected(k: MetadataInventory) -> bool {
     k.attributes != InventoryKnowledge::Uninspected && k.security != InventoryKnowledge::Uninspected
 }
 fn ordinals(ordinal: u64, mode: Mode) -> Result<(u64, Option<u64>), Error> {
