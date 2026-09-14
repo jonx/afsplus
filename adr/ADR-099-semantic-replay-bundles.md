@@ -96,6 +96,22 @@ files or a warm-cache build alone cannot satisfy that gate. Compiler, sysroot,
 linker, SDK and environment preservation are separate inputs; observed executable
 digests are not copies of those inputs or a build-provenance certificate.
 
+## Host toolchain profile
+
+A reconstructed build records explicit compiler/sysroot, linker, SDK and runtime
+requirements. Preserve selected non-system toolchain bytes and their relative
+library layouts. Name the host OS/architecture and runtime prerequisites rather
+than claiming that a copied compiler eliminates them. Tool selection applies to
+host build scripts as well as filesystem crates. Require independent absent-linker
+and empty-SDK controls, alongside the empty-dependency-source control, before
+accepting the reconstructed build's input selection.
+
+Host-profile semantic reproducibility is separate from bit-identical executables,
+cross-host compatibility and physical provider qualification. A prototype copy
+inventory cannot substitute for a qualified reusable package verifier or build
+orchestrator. Additional host profiles follow the portability gates without
+implicitly requiring every platform to close the first executable host stage.
+
 ## Qualification
 
 Require fresh-process export/read/replay equivalence, exact expected-state checks,

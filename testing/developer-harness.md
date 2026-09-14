@@ -29,6 +29,7 @@
 - [Comparing a rebuilt runner](#comparing-a-rebuilt-runner)
 - [Preserving and restoring working sources](#preserving-and-restoring-working-sources)
 - [Retaining registry dependencies for a cold build](#retaining-registry-dependencies-for-a-cold-build)
+- [Copied host toolchain and SDK qualification](#copied-host-toolchain-and-sdk-qualification)
 
 <!-- /toc -->
 
@@ -783,3 +784,60 @@ A cold Cargo cache removes dependency-cache reuse from the build evidence. It do
 not preserve or qualify the selected compiler's sysroot, linker, platform SDK or
 host libraries. Their bytes and build-environment inputs require a separate
 retained toolchain/platform profile before claiming self-contained reconstruction.
+
+
+## Copied host toolchain and SDK qualification
+
+A host reconstruction profile identifies the compiler, sysroot, linker, SDK and
+host-runtime requirements separately. For the Darwin ARM64 profile, preserve the
+Rust toolchain tree, the selected Clang driver and linker, their non-system shared
+libraries, Clang resource directory and selected SDK tree. Preserve regular-file
+bytes/modes and relative symlink targets/modes; compare each copy with its source
+and retain a content inventory. System libraries referenced under `/usr/lib` and
+`/System/Library` are prerequisites of the named macOS host profile, not files
+implicitly supplied by the dependency package.
+
+A private experimental directory uses these roles:
+
+| Role | Relative location | Selection during build |
+|---|---|---|
+| Cargo and rustc | `rust/bin/cargo`, `rust/bin/rustc` | Explicit executable paths and `RUSTC` |
+| Rust sysroot | `rust/` | `--sysroot` in encoded Rust flags |
+| Clang driver | `apple/bin/clang` | `-C linker=...` |
+| Apple linker | `apple/bin/ld` | `-C link-arg=--ld-path=...` |
+| Linker libraries | `apple/lib/` | Preserved relative runtime-library layout |
+| Clang resources | `clang-resource/` | Explicit driver `-resource-dir` arguments |
+| SDK | `sdk/` | Explicit driver `-isysroot` arguments and `SDKROOT` |
+
+Pass Rust arguments with `CARGO_ENCODED_RUSTFLAGS` so paths are individual
+arguments, including spaces. Apply the selected linker and sysroot to host build
+scripts as well as target crates. A native host build without an explicit Cargo
+`--target` uses this flag scope; inspect verbose compiler invocations rather than
+assuming build scripts inherit the intended tools. Record the deployment target,
+selected environment, Cargo command and original source/dependency manifest hashes.
+An initially empty Cargo home and fresh target directory are independent of the
+retained toolchain trees.
+
+Require a frozen offline build and these independent negative controls, each with
+its own fresh Cargo home and target directory:
+
+- substitute a nonexistent selected linker; compilation must fail because that
+  linker is absent, rather than silently using the installed linker;
+- substitute an empty SDK directory in both `SDKROOT` and the explicit linker
+  arguments; the build must fail for missing SDK link inputs;
+- preserve the [empty registry-source control](#retaining-registry-dependencies-for-a-cold-build).
+
+Then compare all retained cache-profile bundles using the rebuilt runner. Require
+exact equality of all non-metadata artifacts and unchanged originals. The copied
+file inventory, build inputs, positive/negative logs and comparison reports are
+separate evidence. An experimental copy manifest records observations; a reusable
+package verifier and build orchestrator need explicit schema/admission and
+publication tests before replacing this procedure.
+
+A successful documented host-profile reconstruction is distinct from bit-identical
+executables, another host's runtime compatibility and physical-device durability.
+Qualify other hosts under the [portability stage](../ROADMAP.md#stage-d-portability-and-host-tooling)
+and M01/M12 with their own toolchain/runtime profiles. Keep that requirement visible
+without making every host platform a prerequisite for Stage A's executable host
+core. The complete queue retains the native-provider and sustained-qualification
+gates independently.

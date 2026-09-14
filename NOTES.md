@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Reconstruct replay with copied tools and SDK](#2026-09-14---reconstruct-replay-with-copied-tools-and-sdk)
 - [2026-09-14 - Rebuild replay with retained dependencies and an empty Cargo cache](#2026-09-14---rebuild-replay-with-retained-dependencies-and-an-empty-cargo-cache)
 - [2026-09-14 - Preserve working sources for independent replay reconstruction](#2026-09-14---preserve-working-sources-for-independent-replay-reconstruction)
 - [2026-09-14 - Compare reconstructed runners without weakening strict replay](#2026-09-14---compare-reconstructed-runners-without-weakening-strict-replay)
@@ -131,6 +132,37 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Reconstruct replay with copied tools and SDK
+
+An isolated Darwin ARM64 experiment copied the Rust toolchain, selected Apple
+Clang/linker and their four non-system linker libraries, Clang resources and the
+MacOSX27.0 SDK. The copied inventory matched source bytes, modes and symlink targets
+for 42,147 entries, containing 1,687,125,731 regular-file bytes. Files and directory
+entries were synchronized before the copy manifest was recorded. The experiment
+used macOS 26.6.2, build 25G83; its system runtime libraries remain an explicit host
+prerequisite, separate from the copied tools and SDK.
+
+A frozen offline build from restored `ae5edbd` sources and retained registry
+sources passed with a fresh Cargo home and target. All 13 verbose Rust compilation
+commands selected the copied Rust sysroot, Clang and linker; SDK/resource arguments
+and deployment target 11.0 were explicit. A nonexistent selected linker failed
+with the expected Clang linker-selection error. An empty SDK failed to find the
+System library. Both controls failed while linking a host build script, confirming
+that tool selection also reached that part of the build.
+
+The new runner reproduced all eight non-metadata roles for the 2/4/8/unlimited
+cache profiles, preserving every original bundle hash. The copied tools, copy
+manifest, selected build inputs, positive/negative logs and four comparisons are
+retained in `/private/tmp/afsplus-toolchain-probe-67a10vfm`; `qualification.json`
+binds the source, dependency, copy and build-input manifest hashes.
+
+This is a real same-host reconstruction experiment, not a reusable toolchain
+package implementation, bit-identical executable claim or another-host result.
+The next implementation is the verified package/build orchestration around these
+measured inputs. Other-host qualification has an explicit M01/M12 Stage D queue
+entry; it is not an added all-platform prerequisite for Stage A. Existing flight,
+resource/cache, native-provider and complete audit-queue requirements are unchanged.
 
 ## 2026-09-14 - Rebuild replay with retained dependencies and an empty Cargo cache
 
