@@ -26,10 +26,89 @@ def fixture():
 
 
 class ReplayTests(unittest.TestCase):
-    def test_v5_deferred_groups_join_calls_and_survive_replay(self):
+    def test_v6_object_wire_rejects_truncation_and_inconsistent_presence(self):
+        profile = {"version": 6, "flight_categories": 127, "flight_sink": None}
+        previous = (0,) * 7
+        def wire(kind=20, present=1, object_id=9, block=0, view=3):
+            tx = int(kind == 1)
+            header = struct.pack("<QQQQQQBI", 0, 0, 1, tx, 0, 0, 0, 1)
+            event = struct.pack("<QQQBBQQQHQIBQQQ", 1, tx, 2, kind, 0,
+                                0, 0, 0, 0, 0, 0, present, object_id, block, view)
+            return header + event
+        valid = wire()
+        self.assertEqual(tool.selected_batch(valid, 0, previous, 1, profile, 0)[0], len(valid))
+        for length in range(len(valid)):
+            with self.assertRaises(ValueError):
+                tool.selected_batch(valid[:length], 0, previous, 1, profile, 0)
+        for bad in (wire(present=0), wire(present=2), wire(block=8),
+                    wire(kind=22, block=8), wire(kind=23),
+                    wire(kind=1), wire(kind=1, present=0),
+                    wire(kind=1, present=0, object_id=0, view=0, block=8)):
+            with self.assertRaises(ValueError):
+                tool.selected_batch(bad, 0, previous, 1, profile, 0)
+        # Resolved addresses are observations, including an invalid address;
+        # later metadata checks, not this decoder, determine filesystem validity.
+        for valid in (wire(kind=21, block=0xffffffffffffffff), wire(kind=22),
+                      wire(kind=1, present=0, object_id=0, view=0)):
+            tool.selected_batch(valid, 0, previous, 1, profile, 0)
+
+    def test_v6_object_profiles_preserve_images_and_replay(self):
         for pages in (2, 4, 8, "unlimited"):
             value = fixture()
             value.update(version=5, flight_capacity=256, flight_categories=63, flight_sink=None)
+            value["volume"]["tree_cache_pages"] = pages
+            plain, success = tool.execute(tool.encoded(value), BINARY)
+            self.assertTrue(success)
+            for mask in (0, 64, 127):
+                for capacity in (1, 256):
+                    observed = dict(value, version=6, flight_categories=mask,
+                                    flight_capacity=capacity,
+                                    flight_sink={"capacity": 1, "disconnect_before": 2})
+                    records, success = tool.execute(tool.encoded(observed), BINARY)
+                    self.assertTrue(success)
+                    self.assertEqual(records["flight-recorder.bin"][:8], b"AFSFLT05")
+                    for role in ("start.img", "result.img", "block-io.afstrace", "actual.json"):
+                        self.assertEqual(records[role], plain[role])
+                    with tempfile.TemporaryDirectory(prefix="afsplus-object-replay-") as temporary:
+                        path = Path(temporary) / "bundle"
+                        tool.bundle.publish(path, records)
+                        self.assertTrue(tool.replay(path, BINARY))
+                    if mask == 64 and capacity == 256:
+                        wire = records["flight-recorder.bin"]
+                        offset = 28
+                        kinds = set()
+                        for _ in range(struct.unpack_from("<I", wire, 8)[0]):
+                            offset += 29
+                            batch = struct.unpack_from("<QQQQQQBI", wire, offset)
+                            offset += 53
+                            for _ in range(batch[-1]):
+                                kind = wire[offset + 24]
+                                kinds.add(kind)
+                                self.assertEqual(wire[offset + 64], 1)
+                                self.assertEqual(struct.unpack_from("<Q", wire, offset + 81)[0], 0)
+                                bad = bytearray(wire)
+                                bad[offset + 64] = 0
+                                with self.assertRaises(ValueError):
+                                    tool.validate_trace(dict(records, **{"flight-recorder.bin": bytes(bad)}))
+                                if kind in (20, 22):
+                                    bad = bytearray(wire)
+                                    struct.pack_into("<Q", bad, offset + 73, 1)
+                                    with self.assertRaises(ValueError):
+                                        tool.validate_trace(dict(records, **{"flight-recorder.bin": bytes(bad)}))
+                                offset += 89
+                        self.assertTrue({20, 21} <= kinds)
+                        self.assertEqual(offset, len(wire))
+
+    def test_v5_deferred_groups_join_calls_and_survive_replay(self):
+        self.check_deferred_groups(5, 63)
+
+    def test_v6_deferred_groups_join_calls_and_survive_replay(self):
+        self.check_deferred_groups(6, 127)
+
+    def check_deferred_groups(self, version, mask):
+        for pages in (2, 4, 8, "unlimited"):
+            value = fixture()
+            value.update(version=version, flight_capacity=256, flight_categories=mask, flight_sink=None)
             value["volume"]["tree_cache_pages"] = pages
             value["operations"] = [value["operations"][0],
                 {"op": "window_write", "label": "f", "offset": 1, "data": "42"},
@@ -48,7 +127,7 @@ class ReplayTests(unittest.TestCase):
                 self.assertEqual(batch[0], 0)
                 for _ in range(batch[-1]):
                     events.append(struct.unpack_from("<QQQBBQQQHQI", wire, offset))
-                    offset += 64
+                    offset += 89 if version == 6 else 64
             durable = [event for event in events if event[3] == 15]
             self.assertEqual([event[-1] for event in durable], [1, 2])
             self.assertEqual({event[-2] for event in durable}, {1})
@@ -194,6 +273,9 @@ class ReplayTests(unittest.TestCase):
 
     def test_v4_minimization_and_cuts_preserve_delivery_policy(self):
         self.check_minimization_and_cuts(4, 4)
+
+    def test_v6_minimization_and_cuts_preserve_object_scope(self):
+        self.check_minimization_and_cuts(6, 127)
 
     def test_v5_minimization_and_cuts_preserve_api_window_scope(self):
         self.check_minimization_and_cuts(5, 63)

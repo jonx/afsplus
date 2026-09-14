@@ -22,6 +22,15 @@ def fixture():
 
 
 class ScenarioTests(unittest.TestCase):
+    def test_v6_object_category_is_version_bound(self):
+        value = fixture()
+        value.update(version=6, flight_capacity=256, flight_categories=127, flight_sink=None)
+        value["volume"]["tree_cache_pages"] = 2
+        self.assertTrue(scenario.compile_commands(json.dumps(value).encode()).startswith(b"AFSPSC06\n"))
+        for version, mask in ((5, 127), (6, 128), (6, True), (6, -1)):
+            with self.assertRaises(ValueError):
+                scenario.validate(json.dumps(dict(value, version=version, flight_categories=mask)).encode())
+
     def test_v5_scope_and_category_bounds_are_versioned(self):
         value = fixture()
         value.update(version=5, flight_capacity=256, flight_categories=63, flight_sink=None)

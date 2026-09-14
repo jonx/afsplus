@@ -39,6 +39,7 @@
 - [Object-map observation](#object-map-observation)
 - [Deferred-window observation](#deferred-window-observation)
 - [API and window replay bundles](#api-and-window-replay-bundles)
+- [Object-map replay bundles](#object-map-replay-bundles)
 - [Selected-category and live-delivery bundles](#selected-category-and-live-delivery-bundles)
 - [Internal diagnostic bundles](#internal-diagnostic-bundles)
 
@@ -1163,8 +1164,8 @@ identities. `Category::Object` (runtime bit 6) controls event admission; filteri
 API records does not disable their identity context. Default recorders do not
 emit object events, preserving the sequence and event vocabulary of replay
 profiles through version 5. Those profiles neither export object payloads nor
-accept the new category bit. Extended object export has its separate task in
-[the diagnostic tracker](../implementation/milestones.md#structured-flight-recorder-tasks).
+accept the new category bit. [Version 6](#object-map-replay-bundles) defines
+the object export contract.
 
 `ObjectLookup` identifies the requested object before object-map I/O.
 `ObjectMapped` identifies the resolved metadata block; it does not assert that
@@ -1300,6 +1301,37 @@ loss on four cache profiles with identical images and block traces, malformed
 API fields, minimization, selected cuts and two durable groups linked across
 separate API roots. Cuts immediately before and after the first group's durable
 boundary require exact old or acknowledged file bytes after remount.
+
+## Object-map replay bundles
+
+Semantic JSON version 6 uses `AFSPSC06`, preserves version-5 commands and
+geometry, and admits category masks 0–127. Bit 6 selects object-map events.
+Object observation also enables API identities, even when API records are
+filtered. Earlier versions retain their original event scope and bytes.
+
+`AFSFLT05` retains the selected-profile, operation and batch headers. Each
+89-byte event contains the complete 64-byte API/window event followed by a
+one-byte presence flag and three little-endian u64s: object ID, resolved
+metadata-block address, and view ID. Kinds 20, 21 and 22 mean `ObjectLookup`,
+`ObjectMapped` and `ObjectMissing`; their presence flag is one. Other events
+have flag zero and all three object fields zero. Lookup and missing events
+have block zero. Object events have commit-attempt zero. Their generation
+identifies the viewed checkpoint, not allocation birth.
+
+A mapped address is an observation before range/read/checksum validation;
+the wire reader must not mistake it for an integrity verdict. The presence
+flag, kind, unused fields, category, API context and loss/delivery accounting
+are independently checked. Truncation is refused before unpacking payloads.
+Replay compares the exact emitted artifact in addition to filesystem state.
+The scenario command set exercises live-view resolution (view zero); captured
+view execution has its own core tests and needs scenario commands before it
+can claim end-to-end historical-view replay coverage.
+
+Run the [replay tests](../tools/test-afsptest.py) for four cache profiles,
+zero/object/all category masks, one/256-event rings, deterministic consumer
+disconnection, exact image/I/O comparisons and malformed object controls.
+The [scenario admission tests](../tools/test-replay-scenario.py) enforce
+version and category bounds before invoking the runner.
 
 ## Selected-category and live-delivery bundles
 

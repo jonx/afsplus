@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Export and replay object-map diagnostics](#2026-09-15--export-and-replay-object-map-diagnostics)
 - [2026-09-15 — Integrate the first cache-family qualification matrix](#2026-09-15--integrate-the-first-cache-family-qualification-matrix)
 - [2026-09-15 — Review object resolution and preserve returned IDs](#2026-09-15--review-object-resolution-and-preserve-returned-ids)
 - [2026-09-15 — Extend publication-family diagnostic comparisons](#2026-09-15--extend-publication-family-diagnostic-comparisons)
@@ -144,6 +145,34 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Export and replay object-map diagnostics
+
+Added explicit semantic scenario version 6 and `AFSFLT05` object payloads.
+The independent reader checks event presence, kind, zero fields and truncation
+without treating a mapped address as an integrity verdict. Earlier profiles
+keep their event vocabulary and byte representation. Board review 9 approved
+the encoding and admission code after independent inspection.
+
+The source-stable Rust gate passed 573 tests with zero failures and ten ignored
+across 90 groups. Clippy, formatting, seven codec targets with 4096 cases each,
+scenario admission and documentation checks passed. The retained campaign has
+99 historical six-artifact comparisons, 24 new profile/filter/ring bundles,
+twelve deferred-window cases, a failure-preserving reduction and five selected
+create cuts. Original historical artifacts were unchanged. The source capsule
+restored all 581 tracked files with identical hashes.
+
+After the Rust gate, two permanent Python wrappers were added for the already
+retained v6 deferred and minimization cases. The final Python suite passed all
+28 tests; production and Rust sources were unchanged. The source capsule
+records the initial tested tree; the final patch includes these test wrappers
+and result documentation. Evidence is `build/object-export-i1lx25ko`.
+
+This is live-view replay qualification. Captured-view scenario commands,
+independent expected historical state and mount-specific lease handling are
+explicit prerequisites for snapshot replay. Allocator/tree/cache/reclaim and
+mount-time observation remain separate open diagnostic tasks. No native
+hardware or full Stage A completion is claimed.
 
 ## 2026-09-15 — Integrate the first cache-family qualification matrix
 

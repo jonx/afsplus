@@ -174,7 +174,9 @@ fn run() -> Result<(), String> {
     // Semantic flight records bind operation indices and resolved object IDs to
     // half-open successful block-log ranges. V2 additionally carries internal
     // commit-tail batches, including explicit ring-loss accounting.
-    let mut flight = if plan.api_observation() {
+    let mut flight = if plan.object_observation() {
+        b"AFSFLT05"
+    } else if plan.api_observation() {
         b"AFSFLT04"
     } else if plan.diagnostic_profile().is_some() {
         b"AFSFLT03"
@@ -245,6 +247,9 @@ fn run() -> Result<(), String> {
                     EventKind::WindowFailed if plan.api_observation() => 17,
                     EventKind::WindowClosed if plan.api_observation() => 18,
                     EventKind::WindowDetached if plan.api_observation() => 19,
+                    EventKind::ObjectLookup if plan.object_observation() => 20,
+                    EventKind::ObjectMapped if plan.object_observation() => 21,
+                    EventKind::ObjectMissing if plan.object_observation() => 22,
                     _ => return Err("API/window spans require an extended export profile".into()),
                 });
                 flight.push(u8::from(internal.requires_remount));
@@ -261,6 +266,15 @@ fn run() -> Result<(), String> {
                     );
                     flight.extend_from_slice(&internal.window.to_le_bytes());
                     flight.extend_from_slice(&internal.log_sequence.to_le_bytes());
+                }
+                if plan.object_observation() {
+                    flight.push(u8::from(internal.object.is_some()));
+                    let (object, block, view) = internal
+                        .object
+                        .map_or((0, 0, 0), |c| (c.object_id, c.record_block, c.view_id));
+                    for value in [object, block, view] {
+                        flight.extend_from_slice(&value.to_le_bytes());
+                    }
                 }
             }
         }

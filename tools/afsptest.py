@@ -240,7 +240,8 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
 
 
 def selected_batch(flight, offset, previous, capacity, profile, index):
-    extended = profile["version"] == 5
+    extended = profile["version"] >= 5
+    objects = profile["version"] == 6
     if len(flight) - offset < 53:
         raise ValueError("flight truncated selected batch")
     lost, filtered, sequence, attempt, delivered, missed, closed, retained = struct.unpack(
@@ -268,7 +269,7 @@ def selected_batch(flight, offset, previous, capacity, profile, index):
         expected_closed = bool(old_closed or (disconnected and selected))
     if (delivered, missed, closed) != (expected_delivered, expected_missed, expected_closed):
         raise ValueError("flight live delivery differs from deterministic profile")
-    event_size = 64 if extended else 26
+    event_size = 89 if objects else 64 if extended else 26
     if len(flight) - offset < retained * event_size:
         raise ValueError("flight truncated selected event")
     cursor, observed_attempt = old_sequence, old_attempt
@@ -276,6 +277,8 @@ def selected_batch(flight, offset, previous, capacity, profile, index):
     if extended:
         categories.update({kind: 16 for kind in range(8, 12)})
         categories.update({kind: 32 for kind in range(12, 20)})
+    if objects:
+        categories.update({kind: 64 for kind in range(20, 23)})
     contexts = {}
     for ordinal in range(retained):
         seq, tx, generation, kind, remount = struct.unpack("<QQQBB", flight[offset:offset + 26])
@@ -301,7 +304,7 @@ def selected_batch(flight, offset, previous, capacity, profile, index):
                     or (8 <= kind <= 11 and span == 0)
                     or (kind >= 8 and tx != 0)
                     or window > seq or (window == 0 and group != 0)
-                    or (kind >= 12 and window == 0)
+                    or (12 <= kind <= 19 and window == 0)
                     or (kind in (14, 15, 16) and group == 0)):
                 raise ValueError("flight API/window context")
             if span:
@@ -309,6 +312,16 @@ def selected_batch(flight, offset, previous, capacity, profile, index):
                 if span in contexts and contexts[span] != context:
                     raise ValueError("flight reused span context")
                 contexts[span] = context
+        if objects:
+            present, object_id, block, view = struct.unpack(
+                "<BQQQ", flight[offset:offset + 25])
+            offset += 25
+            if (present != int(20 <= kind <= 22)
+                    or (not present and (object_id or block or view))
+                    or (kind in (20, 22) and block != 0)):
+                raise ValueError("flight object context")
+            # A resolved address may itself be corrupt. Mapping is observed before
+            # metadata range/checksum validation, so it is not an integrity verdict.
         cursor = seq
         observed_attempt = max(observed_attempt, tx)
     return offset, (sequence, attempt, lost, filtered, delivered, missed, closed)
@@ -358,7 +371,7 @@ def validate_trace(records):
     flight = records["flight-recorder.bin"]
     internal = scenario_value["version"] >= 3
     selected = scenario_value["version"] >= 4
-    magic = b"AFSFLT04" if scenario_value["version"] == 5 else b"AFSFLT03" if selected else b"AFSFLT02" if internal else b"AFSFLT01"
+    magic = b"AFSFLT05" if scenario_value["version"] == 6 else b"AFSFLT04" if scenario_value["version"] == 5 else b"AFSFLT03" if selected else b"AFSFLT02" if internal else b"AFSFLT01"
     if len(flight) < 12 or flight[:8] != magic:
         raise ValueError("flight version")
     events = struct.unpack("<I", flight[8:12])[0]

@@ -51,6 +51,7 @@ pub struct Plan {
     flight_capacity: Option<usize>,
     diagnostic_profile: Option<DiagnosticProfile>,
     api_observation: bool,
+    object_observation: bool,
     blocks: u64,
     region: u32,
     log_slots: u16,
@@ -246,19 +247,23 @@ impl Plan {
         let version = lines.next();
         if !matches!(
             version,
-            Some("AFSPSC01" | "AFSPSC02" | "AFSPSC03" | "AFSPSC04" | "AFSPSC05")
+            Some("AFSPSC01" | "AFSPSC02" | "AFSPSC03" | "AFSPSC04" | "AFSPSC05" | "AFSPSC06")
         ) {
             return Err("scenario protocol version".into());
         }
         let mut header: Vec<_> = lines.next().ok_or("missing geometry")?.split(' ').collect();
-        let diagnostic_profile = if matches!(version, Some("AFSPSC04" | "AFSPSC05")) {
+        let diagnostic_profile = if matches!(version, Some("AFSPSC04" | "AFSPSC05" | "AFSPSC06")) {
             let disconnect_before = match header.pop().ok_or("missing disconnect index")? {
                 "none" => None,
                 value => Some(integer(value, 1024)? as usize),
             };
             let sink_capacity =
                 integer(header.pop().ok_or("missing sink capacity")?, 256)? as usize;
-            let maximum = if version == Some("AFSPSC05") { 63 } else { 15 };
+            let maximum = match version {
+                Some("AFSPSC06") => 127,
+                Some("AFSPSC05") => 63,
+                _ => 15,
+            };
             let categories = integer(header.pop().ok_or("missing category mask")?, maximum)? as u8;
             if sink_capacity == 0 && disconnect_before.is_some() {
                 return Err("disconnect requires an attached sink".into());
@@ -271,7 +276,10 @@ impl Plan {
         } else {
             None
         };
-        let flight_capacity = if matches!(version, Some("AFSPSC03" | "AFSPSC04" | "AFSPSC05")) {
+        let flight_capacity = if matches!(
+            version,
+            Some("AFSPSC03" | "AFSPSC04" | "AFSPSC05" | "AFSPSC06")
+        ) {
             let capacity = integer(header.pop().ok_or("missing flight capacity")?, 256)? as usize;
             if capacity == 0 {
                 return Err("zero flight capacity".into());
@@ -282,7 +290,7 @@ impl Plan {
         };
         let cache_profile = if matches!(
             version,
-            Some("AFSPSC02" | "AFSPSC03" | "AFSPSC04" | "AFSPSC05")
+            Some("AFSPSC02" | "AFSPSC03" | "AFSPSC04" | "AFSPSC05" | "AFSPSC06")
         ) {
             Some(match header.pop() {
                 Some("2") => 2,
@@ -331,7 +339,7 @@ impl Plan {
                     directory: false,
                 },
                 [kind @ ("write" | "window_write"), l, o, d]
-                    if *kind == "write" || version == Some("AFSPSC05") =>
+                    if *kind == "write" || matches!(version, Some("AFSPSC05" | "AFSPSC06")) =>
                 {
                     Operation::Write {
                         deferred: *kind == "window_write",
@@ -341,7 +349,7 @@ impl Plan {
                     }
                 }
                 [kind @ ("truncate" | "window_truncate"), l, s]
-                    if *kind == "truncate" || version == Some("AFSPSC05") =>
+                    if *kind == "truncate" || matches!(version, Some("AFSPSC05" | "AFSPSC06")) =>
                 {
                     Operation::Truncate {
                         deferred: *kind == "window_truncate",
@@ -363,8 +371,12 @@ impl Plan {
                     directory: true,
                 },
                 ["sync"] => Operation::Sync,
-                ["window_fsync"] if version == Some("AFSPSC05") => Operation::WindowFsync,
-                ["window_commit"] if version == Some("AFSPSC05") => Operation::WindowCommit,
+                ["window_fsync"] if matches!(version, Some("AFSPSC05" | "AFSPSC06")) => {
+                    Operation::WindowFsync
+                }
+                ["window_commit"] if matches!(version, Some("AFSPSC05" | "AFSPSC06")) => {
+                    Operation::WindowCommit
+                }
                 ["remount"] => Operation::Remount,
                 _ => return Err("unknown scenario command or arity".into()),
             };
@@ -387,7 +399,8 @@ impl Plan {
             cache_profile,
             flight_capacity,
             diagnostic_profile,
-            api_observation: version == Some("AFSPSC05"),
+            api_observation: matches!(version, Some("AFSPSC05" | "AFSPSC06")),
+            object_observation: version == Some("AFSPSC06"),
             blocks,
             region,
             log_slots,
@@ -400,6 +413,10 @@ impl Plan {
     /// Explicit v2 resource profile; v1 keeps its original unlimited contract.
     pub fn diagnostic_profile(&self) -> Option<DiagnosticProfile> {
         self.diagnostic_profile
+    }
+
+    pub fn object_observation(&self) -> bool {
+        self.object_observation
     }
 
     pub fn api_observation(&self) -> bool {
@@ -446,6 +463,9 @@ impl Plan {
         if self.api_observation {
             ring.enable_api_observation();
         }
+        if self.object_observation {
+            ring.enable_object_observation();
+        }
         let mut receiver = None;
         let mut disconnect_before = None;
         if let Some(profile) = self.diagnostic_profile {
@@ -459,6 +479,7 @@ impl Plan {
                 Category::Error,
                 Category::Api,
                 Category::Window,
+                Category::Object,
             ]
             .into_iter()
             .enumerate()

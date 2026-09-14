@@ -496,3 +496,20 @@ fn extended_diagnostic_commands_are_version_bound_and_range_checked() {
     )
     .is_err());
 }
+
+#[test]
+fn object_observation_is_an_explicit_version_six_profile() {
+    for (version, mask, valid) in [
+        ("AFSPSC05", 64, false),
+        ("AFSPSC06", 127, true),
+        ("AFSPSC06", 128, false),
+    ] {
+        let wire = format!("{version}\nformat 4096 256 64 8 2 256 {mask} 0 none\nsync\n");
+        let plan = Plan::parse(wire.as_bytes());
+        assert_eq!(plan.is_ok(), valid);
+        if let Ok(plan) = plan {
+            assert!(plan.object_observation());
+            assert!(plan.api_observation());
+        }
+    }
+}

@@ -51,13 +51,13 @@ def validate(encoded):
     scenario = json.loads(encoded, object_pairs_hook=unique)
     if not isinstance(scenario, dict):
         raise ValueError("scenario must be an object")
-    version = integer(scenario.get("version"), 1, 5)
+    version = integer(scenario.get("version"), 1, 6)
     fields(scenario, "version volume operations expected" + (" flight_capacity" if version >= 3 else "")
            + (" flight_categories flight_sink" if version >= 4 else ""))
     if version >= 3:
         integer(scenario["flight_capacity"], 1, 256)
     if version >= 4:
-        integer(scenario["flight_categories"], 0, 63 if version == 5 else 15)
+        integer(scenario["flight_categories"], 0, 127 if version == 6 else 63 if version == 5 else 15)
         sink = scenario["flight_sink"]
         if sink is not None:
             fields(sink, "capacity disconnect_before")
@@ -89,7 +89,7 @@ def validate(encoded):
         "write": "op label offset data", "truncate": "op label size",
         "rename": "op label parent name", "unlink": "op label", "rmdir": "op label",
         "sync": "op", "remount": "op"}
-    if version == 5:
+    if version >= 5:
         schemas.update(window_write="op label offset data", window_truncate="op label size",
                        window_fsync="op", window_commit="op")
     for operation in operations:
@@ -160,7 +160,7 @@ def compile_commands(encoded):
         lines[0] = "AFSPSC03"
         lines[1] += " " + str(scenario["flight_capacity"])
     if scenario["version"] >= 4:
-        lines[0] = "AFSPSC05" if scenario["version"] == 5 else "AFSPSC04"
+        lines[0] = "AFSPSC06" if scenario["version"] == 6 else "AFSPSC05" if scenario["version"] == 5 else "AFSPSC04"
         sink = scenario["flight_sink"]
         capacity = 0 if sink is None else sink["capacity"]
         disconnect = None if sink is None else sink["disconnect_before"]
