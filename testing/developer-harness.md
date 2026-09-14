@@ -21,6 +21,7 @@
 - [Persistent block-operation traces](#persistent-block-operation-traces)
 - [Bundle integrity and publication](#bundle-integrity-and-publication)
 - [Bounded semantic scenario execution](#bounded-semantic-scenario-execution)
+- [Integrated semantic bundles and minimization](#integrated-semantic-bundles-and-minimization)
 
 <!-- /toc -->
 
@@ -312,3 +313,68 @@ These checks cover runner and codec components. Complete bundle replay additiona
 requires source/fault binding, flight-record export, fresh-process semantic
 comparison and failure-preserving minimization from
 [ADR-099](../adr/ADR-099-semantic-replay-bundles.md).
+
+## Integrated semantic bundles and minimization
+
+Build the private memory runner and use the JSON schema admitted by
+[replay-scenario.py](../tools/replay-scenario.py):
+
+```sh
+cargo build -p afsplus-check --bin afsplus-scenario
+python3 tools/afsptest.py run scenario.json /private/tmp/new-afsplus-bundle
+python3 tools/afsptest.py replay /private/tmp/new-afsplus-bundle
+python3 tools/afsptest.py minimize /private/tmp/failing-afsplus-bundle /private/tmp/reduced-afsplus-bundle --max-runs 128
+python3 tools/test-afsptest.py
+```
+
+[afsptest.py](../tools/afsptest.py) combines the admitted scenario, memory runner,
+block-trace codec and exclusive bundle publisher. The `semantic-no-cut-v1`
+profile binds an explicit version-1 `no-cut` fault model; unsupported fault
+models are refused before execution. Replay verifies every artifact digest,
+trace checksum, base-image digest, geometry, reconstructed result and semantic
+event ranges, then reruns the scenario in a fresh runner process and compares
+all artifact bytes. Images are private memory fixtures. The input bundle is
+read-only. A deliberately wrong expected state produces a failure bundle and
+reproduces as failure, never as a successful qualification.
+
+Exit codes are 0 for semantic success, 2 for a captured/reproduced semantic
+failure, and 1 for admission, execution-infrastructure or binding failure.
+The runner is selected by the caller's `--runner` option, never bundle content.
+Exports admit image size before execution; runner input, output roles and framed
+lengths have bounded profiles. Output goes through a private temporary spool
+with a 120-second runner timeout, then the bundle's file/aggregate admission.
+Default per-artifact admission is 64 MiB and aggregate admission is 256 MiB;
+explicit larger limits do not enlarge the Rust runner's own profile.
+
+Run metadata records the observed Git revision, a digest of tracked and unignored
+working files (including symlink targets and modes), and the runner executable's
+digest. Source/runner changes during execution are rejected. These bind the
+observed source and selected executable, not an attestation that the executable
+was built from that source. The matching source tree and executable must be
+retained for reproduction; dirty-source reconstruction and build provenance need
+separate evidence.
+
+The semantic flight format is `AFSFLT01`, a little-endian event count followed
+by 29-byte records: operation index (u32), first and exclusive-end block-operation
+indices (u64 each), resolved object identity (u64; zero where inapplicable), and
+success (u8). It captures successful and failed semantic operations across
+remounts and maps them to the recorded write/barrier stream. It does not replace
+transaction-internal diagnostics or capture block-read activity.
+
+Minimization first reproduces the retained failure. It removes contiguous
+operation ranges and rejects invalid label dependencies before execution.
+Operation failures require the same operation record and error; observation
+failures require the same error; expected-state failures require the same exact
+set of expected/observed differences. Parser or infrastructure failure cannot
+become a replacement reproducer. The execution budget is explicit (1–4096
+candidate runs). Exhaustion publishes the best verified reduction with
+`budget_exhausted`; it makes no minimality claim. Reduction metadata carries the
+parent scenario digest and evaluation count. The original bundle is preserved
+and the reduced result is published exclusively as another complete bundle.
+
+The focused gate checks fresh-process success and failure replay, exact input
+immutability, altered source/fault/base/trace/event refusal, operation failure
+preservation, pre-run image admission, removal of irrelevant operations with the
+same failure signature, and explicit budget exhaustion. Crash-cut selection and
+minimization, transaction-internal flight diagnostics, portable source/build
+reconstruction and cache/resource qualification are additional stage gates.

@@ -40,7 +40,16 @@ pub struct Plan {
     log_slots: u16,
     operations: Vec<Operation>,
 }
+#[derive(Debug)]
+pub struct Event {
+    pub operation: usize,
+    pub first_block_operation: usize,
+    pub end_block_operation: usize,
+    pub object_id: u64,
+    pub success: bool,
+}
 pub struct Run {
+    pub events: Vec<Event>,
     pub base: MemoryBackend,
     pub result: MemoryBackend,
     pub log: Vec<RecordedOp>,
@@ -111,12 +120,18 @@ impl BlockDevice for Recorder {
         Ok(())
     }
 }
-fn finish(base: MemoryBackend, recorder: Recorder, failure: Option<(usize, String)>) -> Run {
+fn finish(
+    base: MemoryBackend,
+    recorder: Recorder,
+    failure: Option<(usize, String)>,
+    events: Vec<Event>,
+) -> Run {
     let state = Rc::try_unwrap(recorder.0)
         .ok()
         .expect("volume released recorder")
         .into_inner();
     Run {
+        events,
         base,
         result: state.image,
         log: state.log,
@@ -296,7 +311,14 @@ impl Plan {
         })));
         let mut volume = match mount(recorder.clone()) {
             Ok(volume) => volume,
-            Err(error) => return Ok(finish(base, recorder, Some((0, error.to_string())))),
+            Err(error) => {
+                return Ok(finish(
+                    base,
+                    recorder,
+                    Some((0, error.to_string())),
+                    Vec::new(),
+                ))
+            }
         };
         // id, parent id, original name, directory kind; labels never select host paths.
         let mut labels = BTreeMap::from([(
@@ -305,19 +327,52 @@ impl Plan {
         )]);
         let mut used = std::collections::BTreeSet::from(["root".to_owned()]);
         let mut failure = None;
+        let mut events = Vec::with_capacity(self.operations.len());
         for (index, op) in self.operations.iter().enumerate() {
             let now = Timespec {
                 seconds: index as i64 + 1,
                 nanoseconds: 0,
             };
+            let first_block_operation = recorder.0.borrow().log.len();
+            let object_label = match op {
+                Operation::Create { label, .. }
+                | Operation::Write { label, .. }
+                | Operation::Truncate { label, .. }
+                | Operation::Rename { label, .. }
+                | Operation::Remove { label, .. } => Some(label),
+                _ => None,
+            };
+            let previous_id = object_label
+                .and_then(|label| labels.get(label))
+                .map(|v| v.0)
+                .unwrap_or(0);
             if matches!(op, Operation::Remount) {
                 drop(volume);
                 volume = match mount(recorder.clone()) {
                     Ok(volume) => volume,
                     Err(error) => {
-                        return Ok(finish(base, recorder, Some((index, error.to_string()))))
+                        events.push(Event {
+                            operation: index,
+                            first_block_operation,
+                            end_block_operation: recorder.0.borrow().log.len(),
+                            object_id: 0,
+                            success: false,
+                        });
+                        return Ok(finish(
+                            base,
+                            recorder,
+                            Some((index, error.to_string())),
+                            events,
+                        ));
                     }
                 };
+                events.push(Event {
+                    operation: index,
+                    first_block_operation,
+                    end_block_operation: recorder.0.borrow().log.len(),
+                    object_id: 0,
+                    success: true,
+                });
                 continue;
             }
             let result = (|| -> Result<(), String> {
@@ -401,13 +456,23 @@ impl Plan {
                 }
                 Ok(())
             })();
+            events.push(Event {
+                operation: index,
+                first_block_operation,
+                end_block_operation: recorder.0.borrow().log.len(),
+                object_id: object_label
+                    .and_then(|label| labels.get(label))
+                    .map(|v| v.0)
+                    .unwrap_or(previous_id),
+                success: result.is_ok(),
+            });
             if let Err(error) = result {
                 failure = Some((index, error));
                 break;
             }
         }
         drop(volume);
-        Ok(finish(base, recorder, failure))
+        Ok(finish(base, recorder, failure, events))
     }
 }
 

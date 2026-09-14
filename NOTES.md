@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Integrate semantic replay bundles and failure reduction](#2026-09-14--integrate-semantic-replay-bundles-and-failure-reduction)
 - [2026-09-14 — Add bounded semantic runner and bundle admission components](#2026-09-14--add-bounded-semantic-runner-and-bundle-admission-components)
 - [2026-09-14 - Preserve bounded block-operation replay traces](#2026-09-14---preserve-bounded-block-operation-replay-traces)
 - [2026-09-14 - Add bounded memory overlay branches and cut-state replay](#2026-09-14---add-bounded-memory-overlay-branches-and-cut-state-replay)
@@ -118,6 +119,30 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Integrate semantic replay bundles and failure reduction
+
+Added the memory-runner executable and private afsptest run/replay/minimize
+workflow. Fresh runner processes emit exact images, a bound block trace,
+namespace/content observations and semantic event ranges with resolved object
+IDs. The Python tool independently validates trace/base/result binding and
+replays every artifact byte under an explicit no-cut fault model. A wrong
+expected state remains a failure after replay.
+
+Bounded deletion-based minimization preserves the same observable failure,
+rejects broken label dependencies and records budget exhaustion. Original
+bundles remain untouched. Tests cover fresh processes, tampered/resealed bindings,
+operation failures, export admission, irrelevant-operation reduction and limited
+search. A Rust regression verifies log budgets and event ranges across remounts.
+
+The source digest describes the observed working tree and the executable has its
+own digest. This does not attest build provenance or reconstruct an unavailable
+dirty source tree. Crash-cut integration, transaction-internal diagnostics and
+source/build reconstruction remain explicit Stage A work; this commit does not
+close the stage.
+Validation passed: 494 Rust tests (10 ignored), workspace Clippy and formatting,
+17 Python replay/bundle tests, seven documentation-checker fixtures, documentation
+validation and whitespace checks.
 
 ## 2026-09-14 — Add bounded semantic runner and bundle admission components
 

@@ -103,3 +103,35 @@ fn exact_observation_refuses_insufficient_content_budget() {
         }]
     );
 }
+
+#[test]
+fn event_ranges_and_recording_budget_span_remounts() {
+    let prefix = b"AFSPSC01\nformat 4096 256 64 8\ncreate a root 61 01\nremount\n";
+    let full = b"AFSPSC01\nformat 4096 256 64 8\ncreate a root 61 01\nremount\ncreate b root 62 02\nsync\n";
+    let prefix_run = Plan::parse(prefix).unwrap().run().unwrap();
+    let run = Plan::parse(full)
+        .unwrap()
+        .run_with_limits(RecordingLimits {
+            operations: prefix_run.log.len(),
+            payload_bytes: 64 * 1024 * 1024,
+        })
+        .unwrap();
+    assert_eq!(run.failure.as_ref().map(|f| f.0), Some(2));
+    assert_eq!(run.log.len(), prefix_run.log.len());
+    assert_eq!(run.events.len(), 3);
+    let mut end = 0;
+    for (index, event) in run.events.iter().enumerate() {
+        assert_eq!(event.operation, index);
+        assert_eq!(event.first_block_operation, end);
+        assert!(event.end_block_operation >= end);
+        end = event.end_block_operation;
+    }
+    assert!(run.events[0].object_id > 0);
+    assert!(run.events[0].success);
+    assert!(run.events[1].success);
+    assert!(!run.events[2].success);
+    assert_eq!(end, run.log.len());
+    for lba in 0..run.result.total_blocks() {
+        assert_eq!(run.result.peek(lba), prefix_run.result.peek(lba));
+    }
+}
