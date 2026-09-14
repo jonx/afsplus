@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Filter commit diagnostics and attach a bounded live consumer](#2026-09-14--filter-commit-diagnostics-and-attach-a-bounded-live-consumer)
 - [2026-09-14 — Exercise allocation codecs and reject undersized encoder output](#2026-09-14--exercise-allocation-codecs-and-reject-undersized-encoder-output)
 - [2026-09-14 — Qualify seeded semantic properties and reconcile Stage A accounting](#2026-09-14--qualify-seeded-semantic-properties-and-reconcile-stage-a-accounting)
 - [2026-09-14 — Avoid copying caller payloads into atomic batch staging](#2026-09-14--avoid-copying-caller-payloads-into-atomic-batch-staging)
@@ -131,6 +132,44 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Filter commit diagnostics and attach a bounded live consumer
+
+The commit-tail recorder gained four runtime categories and a live-adapter
+callback. Filtering preserves sequence and attempt assignment, including a
+filtered Begin. Intentional filtering, local ring loss and unsuccessful live
+delivery have separate saturating counters. A busy adapter permits later
+attempts; a closed adapter is retained but not called until explicitly replaced.
+The callback is trusted bounded host code, with consumer processing dispatched
+outside filesystem operations through a preallocated queue.
+
+Focused validation passed four recorder unit tests and six integration tests.
+The selection test covers all 16 masks, all four cache profiles and three barrier
+outcomes (192 combinations). The bounded one-event consumer covers all four
+profiles and the same three outcomes, including saturation and disconnection;
+operation results, device traces and every image block match unobserved execution.
+The prior serialized replay profiles keep ALL selection and no live sink, so
+selected-category export and wider subsystem identities remain explicit queue work.
+Eight historical ALL-category cases (four cache profiles, capacities 1 and 32)
+were rerun with the copied runner under `historical-replay`: their flight artifact
+bytes match the retained originals exactly, and every semantic oracle passes.
+
+Evidence is retained in `build/live-diagnostics-appscpxr`. The source companion
+binds revision `e14afbcb7ce7246b56c08a01bad267e7a84a93f0` and working-tree digest
+`dac6b47ceb25c207ae522693c77d17ba9b0d01e1675d2e72971bf4ea79330bbe`. A standalone macOS
+AArch64 layout probe, compiled outside Cargo's active artifact directory, measured
+recorder/optional-recorder size changing from 64 to 112 bytes; events remain
+32 bytes. This is 48 bytes of fixed additional state, including when the optional
+field is empty. Disabled diagnostics allocate no ring or adapter. Enabled ring
+and transport capacity remain caller-bounded; these layout figures are not a
+whole-process memory measurement or a 32-bit target qualification.
+
+Final sequential validation passed 538 workspace tests with zero failures
+and 10 ignored across 88 result groups, plus formatting, Clippy and
+28,672 codec mutation cases. Documentation checks and all 13 checker fixture
+tests passed. The source verification matched 187 build-source files to the
+retained companion.
+
 
 ## 2026-09-14 — Exercise allocation codecs and reject undersized encoder output
 

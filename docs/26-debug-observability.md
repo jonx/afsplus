@@ -138,6 +138,10 @@ ERROR
 ## 4. Live attachment
 
 The portable core exposes a trace-sink callback.
+The [runtime adapter contract](../testing/developer-harness.md#category-selection-and-live-diagnostics)
+defines category admission and separate local-loss/live-delivery counters. A
+trusted bounded callback hands events to a consumer queue; arbitrary consumer
+processing runs outside the filesystem operation.
 
 Possible front-ends:
 

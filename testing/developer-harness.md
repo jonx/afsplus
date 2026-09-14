@@ -32,6 +32,7 @@
 - [Copied host toolchain and SDK qualification](#copied-host-toolchain-and-sdk-qualification)
 - [Automated host reconstruction](#automated-host-reconstruction)
 - [Common checkpoint-tail flight recorder](#common-checkpoint-tail-flight-recorder)
+- [Category selection and live diagnostics](#category-selection-and-live-diagnostics)
 - [Internal diagnostic bundles](#internal-diagnostic-bundles)
 
 <!-- /toc -->
@@ -959,9 +960,9 @@ started; they do not claim which state survived a real power loss.
 
 The recorder defaults to disabled, performs no clock reads, stores no names or
 payloads and adds no on-disk fields. The ring capacity bounds its event storage,
-not total filesystem or process memory. The first scope does not yet provide
-API-wide identities, category masks, live callbacks,
-or allocator/tree/cache/intent-log/recovery events. Internal export is provided by
+not total filesystem or process memory. API-wide identities and
+allocator/tree/cache/intent-log/recovery events have separate integration gates.
+Category selection and live adapters follow the contract below. Internal export is provided by
 the opt-in [version-3 bundle profile](#internal-diagnostic-bundles); older semantic
 profiles retain their original operation-only flight artifact.
 Those integration requirements remain open under [ADR-023](../adr/ADR-023-developer-observability.md)
@@ -973,6 +974,62 @@ retry after a metadata barrier fault, checkpoint-write and final-barrier failure
 and failed adoption after a successful barrier. The recorder unit test exercises
 fixed allocation capacity and identifier exhaustion. These are host observations;
 they neither qualify a physical provider nor close all publication-family gates.
+
+## Category selection and live diagnostics
+
+`FlightRecorder::set_categories` changes future admission using `Categories::ALL`,
+`Categories::NONE` or a selection assembled with `with(Category)`. Transaction
+covers Begin/Adopted, I/O covers DataWritesComplete, checkpoint covers the three
+metadata/publication durability observations, and error covers Failed. These
+categories describe the common commit tail, not all activity in those subsystems.
+
+Selection happens after sequence/attempt identity assignment. A filtered Begin
+advances the attempt, so subsequent failure events retain their identity. Mask
+changes preserve existing records; drains remove them. Both preserve identities
+and cumulative counts. `filtered()`
+counts intentional exclusions; `dropped()` counts overwrites and identity
+exhaustion. Exhaustion stops identifiable events before live delivery. All
+counters saturate, and no identifier wraps.
+
+`replace_sink(Some(Box<dyn LiveSink>))` attaches a trusted synchronous adapter;
+`None` detaches it and returns its ownership. The adapter's `try_event` callback
+receives each selected event after local ring insertion. `Accepted` increments
+`delivered()`, `Busy` increments `missed()` and permits subsequent attempts, and
+`Closed` increments `missed()` and disables further callbacks. Further selected
+events while closed also count as missed. Replacement clears Closed state while
+preserving cumulative counters and ring contents; no adapter is dropped inside
+emission. Detached or deliberately filtered events do not count as missed.
+
+The callback runs inside filesystem operations and must be bounded, nonblocking,
+nonallocating, non-reentrant and non-unwinding. It must not mutate filesystem
+state. A preallocated queue moves arbitrary consumer processing outside that
+operation. Explicit Busy/Closed results cannot change the filesystem result;
+arbitrary host-code panics or execution time are outside this trusted-adapter
+contract. This is an optional Rust diagnostic interface, with no filesystem API
+v2 ABI, capability or disk-format change. Uninstalled diagnostics allocate no ring
+or adapter; small ring/queue capacities are valid with observable loss.
+
+The recorder owns only the caller-bounded ring, fixed counters and an optional
+boxed adapter. Adapter state and any transport queue have separate caller-owned
+bounds. macOS AArch64 layout qualification records 112 bytes for the recorder
+or its Option (64 before this interface), with 32-byte events; allocator rounding,
+adapter state and queue storage are additional. This is not a cross-platform ABI
+or a whole-process bound. Tests use a one-event bounded channel to exercise delivery, saturation,
+consumer disconnection and reattachment without requiring a live network or GUI.
+The ring's overwrite count and the live channel's missed count are independent.
+
+The [core tests](../crates/afsplus-core/tests/flight.rs) compare every block,
+device trace and operation result across 16 selections, 2/4/8/unlimited cache
+profiles and successful/failed barrier paths. A bounded consumer has separate
+four-profile failure checks. Unit cases cover mask changes inside an attempt,
+drain, exhaustion, Busy/Closed behaviour, replacement and Send/Sync preservation.
+These gates do not establish arbitrary adapter safety or other subsystem coverage.
+
+Serialized semantic profiles use ALL categories and no live adapter. Their
+AFSPSC03/AFSFLT02 bytes and prior replay identities are unchanged. Exporting
+selected categories, filtered counts or live delivery observations requires a
+versioned profile with explicit admission and replay rules; the existing format
+must not interpret intentional gaps as overwrites.
 
 ## Internal diagnostic bundles
 

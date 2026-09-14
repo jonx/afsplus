@@ -220,3 +220,147 @@ fn checkpoint_write_failure_does_not_claim_durability() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn every_category_selection_preserves_four_profile_io_images_and_failures() {
+    use afsplus_core::flight::{Categories, Category};
+    use afsplus_core::{mount_with_options, MountOptions};
+    for pages in [2, 4, 8, usize::MAX] {
+        for bits in 0u8..16 {
+            let mut selected = Categories::NONE;
+            for (bit, category) in [
+                Category::Transaction,
+                Category::Checkpoint,
+                Category::Io,
+                Category::Error,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if bits & (1 << bit) != 0 {
+                    selected = selected.with(category);
+                }
+            }
+            for failure in [None, Some(0), Some(1)] {
+                let original = image();
+                let options = MountOptions {
+                    tree_cache_pages: NonZeroUsize::new(pages),
+                    ..Default::default()
+                };
+                let backend = |image| {
+                    TraceBackend::new(FaultBackend::new(
+                        image,
+                        FaultPlan {
+                            fail_flush_index: failure,
+                            ..Default::default()
+                        },
+                    ))
+                };
+                let mut plain = mount_with_options(backend(original.clone()), options).unwrap();
+                let mut observed = mount_with_options(backend(original), options).unwrap();
+                let mut ring = recorder(32);
+                ring.set_categories(selected);
+                observed.replace_flight_recorder(Some(ring));
+                for name in ["first", "second"] {
+                    let a = plain.create_file_in_root(name, b"data", Timespec::default());
+                    let b = observed.create_file_in_root(name, b"data", Timespec::default());
+                    assert_eq!(format!("{a:?}"), format!("{b:?}"));
+                }
+                let ring = observed.replace_flight_recorder(None).unwrap();
+                assert_eq!(ring.dropped(), 0);
+                assert!(ring.events().all(|e| selected.contains(e.kind.category())));
+                if bits == 0 {
+                    assert_eq!(ring.events().len(), 0);
+                    assert!(ring.filtered() > 0);
+                }
+                if bits == 15 {
+                    assert_eq!(ring.filtered(), 0);
+                }
+                let plain = plain.into_device();
+                let observed = observed.into_device();
+                assert_eq!(plain.events(), observed.events());
+                let plain = plain.into_inner().into_inner();
+                let observed = observed.into_inner().into_inner();
+                for lba in 0..256 {
+                    assert_eq!(plain.peek(lba), observed.peek(lba));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bounded_live_consumer_survives_backpressure_and_disconnect_without_changing_volume() {
+    use afsplus_core::flight::{Categories, Category, Event, SinkResult};
+    use afsplus_core::{mount_with_options, MountOptions};
+    use std::sync::mpsc::{sync_channel, TrySendError};
+    for pages in [2, 4, 8, usize::MAX] {
+        for failure in [None, Some(0), Some(1)] {
+            let original = image();
+            let options = MountOptions {
+                tree_cache_pages: NonZeroUsize::new(pages),
+                ..Default::default()
+            };
+            let backend = |image| {
+                TraceBackend::new(FaultBackend::new(
+                    image,
+                    FaultPlan {
+                        fail_flush_index: failure,
+                        ..Default::default()
+                    },
+                ))
+            };
+            let mut plain = mount_with_options(backend(original.clone()), options).unwrap();
+            let mut observed = mount_with_options(backend(original), options).unwrap();
+            let (sender, receiver) = sync_channel::<Event>(1);
+            let mut ring = recorder(1);
+            ring.replace_sink(Some(Box::new(move |event: Event| {
+                match sender.try_send(event) {
+                    Ok(()) => SinkResult::Accepted,
+                    Err(TrySendError::Full(_)) => SinkResult::Busy,
+                    Err(TrySendError::Disconnected(_)) => SinkResult::Closed,
+                }
+            })));
+            observed.replace_flight_recorder(Some(ring));
+            for name in ["first", "second"] {
+                let a = plain.create_file_in_root(name, b"data", Timespec::default());
+                let b = observed.create_file_in_root(name, b"data", Timespec::default());
+                assert_eq!(format!("{a:?}"), format!("{b:?}"));
+                let ring = observed.flight_recorder().unwrap();
+                if let Ok(event) = receiver.try_recv() {
+                    assert_eq!(event.kind, EventKind::Begin);
+                    assert!(event.sequence < ring.events().last().unwrap().sequence);
+                }
+            }
+            drop(receiver);
+            let mut ring = observed.replace_flight_recorder(None).unwrap();
+            ring.set_categories(Categories::NONE.with(Category::Transaction));
+            observed.replace_flight_recorder(Some(ring));
+            let a = plain.create_file_in_root("third", b"data", Timespec::default());
+            let b = observed.create_file_in_root("third", b"data", Timespec::default());
+            assert_eq!(format!("{a:?}"), format!("{b:?}"));
+            let ring = observed.replace_flight_recorder(None).unwrap();
+            if failure.is_none() {
+                assert_eq!(
+                    (
+                        ring.delivered(),
+                        ring.missed(),
+                        ring.filtered(),
+                        ring.dropped()
+                    ),
+                    (2, 12, 4, 13)
+                );
+                assert!(ring.sink_closed());
+                assert_eq!(ring.events().last().unwrap().sequence, 18);
+            }
+            let plain = plain.into_device();
+            let observed = observed.into_device();
+            assert_eq!(plain.events(), observed.events());
+            let plain = plain.into_inner().into_inner();
+            let observed = observed.into_inner().into_inner();
+            for lba in 0..256 {
+                assert_eq!(plain.peek(lba), observed.peek(lba));
+            }
+        }
+    }
+}
