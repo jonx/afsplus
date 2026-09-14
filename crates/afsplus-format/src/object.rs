@@ -106,6 +106,13 @@ impl ObjectRecord {
         block_size: usize,
         transaction_generation: u64,
     ) -> Result<Vec<u8>, FormatError> {
+        let minimum = HEADER_SIZE + PAYLOAD_LEN;
+        if block_size < minimum {
+            return Err(FormatError::WrongBufferSize {
+                expected: minimum,
+                actual: block_size,
+            });
+        }
         self.validate(block_size)?;
         let mut block = vec![0u8; block_size];
         let p = &mut block[HEADER_SIZE..];

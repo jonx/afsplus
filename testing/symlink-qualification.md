@@ -35,6 +35,20 @@ the symlink object and COW metadata, never an extent or orphan entry. Replacing
 a symlink creates a new object; hard-link creation for symlink objects returns
 the documented unsupported result in the first implementation.
 
+## Payload-preserving rewrite coverage
+
+Exercise every object-record rewrite with a nontrivial inline target, including
+ordinary protection changes, exact restore metadata, same-directory rename,
+cross-directory rename and replacement. Compare exact target bytes, object ID
+and all required metadata after remount and through retained snapshots. A fixed
+96-byte re-encoding of a symlink must refuse rather than omit its target.
+
+Require directory leaf validation, object lookup and exhaustive ownership checking
+to agree on type hint 3 before enabling writable namespace operations. Targets
+must never be interpreted as data extents, entered into regular-file orphan
+cleanup, or followed by the object-ID API. Include a valid-CRC malformed target
+in metadata-mutation tests and require refusal before publication.
+
 ## Adapter and constrained gates
 
 The Rust VFS, FUSE, Hosted MacAROS and independent C API read the same fixture.

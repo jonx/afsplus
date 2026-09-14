@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Reject undersized object encoder buffers](#2026-09-14---reject-undersized-object-encoder-buffers)
 - [2026-09-14 - Bind directory and alias archive restoration](#2026-09-14---bind-directory-and-alias-archive-restoration)
 - [2026-09-14 - Reconcile the filesystem comparison with executable support](#2026-09-14---reconcile-the-filesystem-comparison-with-executable-support)
 - [2026-09-14 - Reopen created restore entries with bounded active handles](#2026-09-14---reopen-created-restore-entries-with-bounded-active-handles)
@@ -102,6 +103,18 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Reject undersized object encoder buffers
+
+Reviewing the fixed record before the symlink extension found that an empty
+file encoded into a caller-selected buffer shorter than 128 bytes could panic
+while slicing the common header or fixed fields. The regression reproduced the
+zero-length panic before the fix. The encoder checks the fixed header/payload
+minimum before allocation or field writes and returns WrongBufferSize.
+The test checks every size from 0 through 127 and round-trips the exact minimum,
+one byte above it and the ordinary block size. No valid wire representation
+changes. Complete symlink codecs and payload-preserving namespace/metadata
+rewrites retain their separate implementation gates.
 
 ## 2026-09-14 - Bind directory and alias archive restoration
 

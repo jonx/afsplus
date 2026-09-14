@@ -1139,3 +1139,30 @@ fn object_and_log_encoders_reject_timestamps_their_readers_cannot_decode() {
         }
     }
 }
+
+#[test]
+fn object_encoder_refuses_every_short_fixed_record_buffer() {
+    let mut record = sample_record();
+    record.object_type = ObjectType::File;
+    record.flags = 0;
+    record.size_bytes = 0;
+    record.allocated_bytes = 0;
+    record.data_root = 0;
+    record.data_blocks = 0;
+    let minimum = HEADER_SIZE + 96;
+    for actual in 0..minimum {
+        assert_eq!(
+            record.encode(actual, 1),
+            Err(FormatError::WrongBufferSize {
+                expected: minimum,
+                actual
+            }),
+            "buffer length {actual}"
+        );
+    }
+    for actual in [minimum, minimum + 1, BS] {
+        let block = record.encode(actual, 1).unwrap();
+        assert_eq!(block.len(), actual);
+        assert_eq!(ObjectRecord::decode(&block).unwrap(), record);
+    }
+}
