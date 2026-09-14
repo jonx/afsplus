@@ -1,14 +1,16 @@
-# Bound directory and hard-link archive groups
+# Bound directory, symlink and hard-link archive groups
 
 [ADR-093](../adr/ADR-093-directory-and-hardlink-archive-groups.md) defines
-namespace components alongside [primary regular-file groups](backup-file.md).
+namespace components, extended by [ADR-095](../adr/ADR-095-bound-symlink-archive-groups.md)
+for symlinks, alongside [primary regular-file groups](backup-file.md).
 The enclosing job owns complete enumeration, parent placement and link graphs.
 
 ## Wire binding
 
 An ordinary auxiliary member under `_AROS_BACKUP/metadata/` contains the exact
 [version-1 object metadata](backup-object-metadata.md). Its name is
-`directory-v1-{full|recovery}-N.pax` or `hardlink-v1-{full|recovery}-N.pax`.
+`directory-v1-{full|recovery}-N.pax`, `symlink-v1-{full|recovery}-N.pax`
+or `hardlink-v1-{full|recovery}-N.pax`.
 Require canonical decimal ordinals, matching raw/effective auxiliary paths,
 mode 0600, zero uid/gid/mtime and empty link/user/group fields.
 
@@ -52,6 +54,30 @@ exact metadata and a link count increased by one. Every operation uses the
 original scoped restore grants. An alias report does not certify preservation
 of the primary's contents or opaque metadata.
 
+## Symlink target preservation
+
+Symlinks use zero-payload ordinary members with mode 0600 and an explicit local
+PAX `linkpath`. The raw header contains the namespace placeholder `files/primary`;
+missing local `linkpath` is invalid. Preserve target spelling exactly, including
+absolute and parent syntax, without resolving or normalizing it. Full groups
+append inventories at N+2; recovery groups retain captured inventory knowledge.
+
+Export reads the captured target through the original grant, admits its required
+length against the record-byte budget, and requires nonempty NUL-free UTF-8 with
+length equal to captured logical size. Recheck target bytes, stat and inventory
+knowledge before completing the group.
+
+Restore validates group/profile/ordinal bindings and the destination basename
+before creating a fresh scoped symlink. Apply inventory handling for the requested
+mode and exact core metadata. Read back the target and verify exact bytes, size,
+symlink kind, one link, protection and all timestamps. Return the created handle
+and explicit preservation or omission report. A target mismatch fails restoration.
+
+Full restoration with an opaque value needs slots for the parent, created symlink
+and one staged upload. Slot exhaustion fails explicitly and releases temporary
+handles; it can leave a partial symlink if creation preceded the failure. Recovery
+never silently replaces full preservation to fit a smaller handle budget.
+
 ## Resources and completion
 
 Record, ordinal, inventory, transfer-buffer and active-handle limits apply.
@@ -66,7 +92,8 @@ Errors poison further reader use but can leave partial destination mutations.
 The enclosing job validates every parent binding, chooses canonical primaries,
 rejects duplicate/omitted entries and inconsistent aliases, finalizes directory
 metadata after child edits, persists losses, verifies EOF and synchronizes the
-destination. Symlink targets and AFS+ opaque storage have separate gates.
+destination. AFS+ opaque storage and whole-job symlink namespace safety have
+separate gates.
 No filesystem disk record, feature identity or C ABI changes with these groups.
 
 See [namespace qualification](../testing/backup-archive-qualification.md#directory-and-hard-link-groups).

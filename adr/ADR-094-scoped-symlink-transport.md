@@ -1,6 +1,7 @@
 # ADR-094: Transport symlink targets through scoped backup and restore APIs
 
 Status: Accepted
+Amended by: ADR-095
 Amends: ADR-068, ADR-075, ADR-077
 
 ## Context

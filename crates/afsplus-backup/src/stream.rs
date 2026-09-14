@@ -201,6 +201,16 @@ impl<R: Read> Reader<R> {
         !self.poisoned && self.local_path.as_deref() == Some(path)
     }
 
+    #[cfg(feature = "consumer")]
+    pub(crate) fn local_value_is(&self, key: &str, value: &str) -> bool {
+        !self.poisoned
+            && pax::decode(&self.records, self.limits).is_ok_and(|records| {
+                records
+                    .iter()
+                    .any(|record| record.key == key && record.value == value)
+            })
+    }
+
     pub fn receipt(&self) -> Option<&envelope::Receipt> {
         if self.complete && !self.poisoned {
             self.inner.receipt()

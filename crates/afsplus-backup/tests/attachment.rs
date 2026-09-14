@@ -17,6 +17,7 @@ struct Source {
     page_calls: usize,
     mutate_second_pass: bool,
     directory: bool,
+    symlink: Option<String>,
 }
 impl Source {
     fn new(bytes: Vec<u8>) -> Self {
@@ -27,6 +28,7 @@ impl Source {
             page_calls: 0,
             mutate_second_pass: false,
             directory: false,
+            symlink: None,
         }
     }
 }
@@ -55,7 +57,19 @@ impl SnapshotBackend for Source {
             stat.size = 0;
             stat.allocated_size = 0;
         }
+        if let Some(target) = &view.symlink {
+            stat.kind = afsplus_vfs::NodeKind::Symlink;
+            stat.size = target.len() as u64;
+            stat.allocated_size = 0;
+        }
         Ok(stat)
+    }
+    fn read_link(&mut self, view: &Self::View, _: u64, out: &mut [u8]) -> Result<usize, VfsError> {
+        let target = view.symlink.as_ref().ok_or(VfsError::NotSupported)?;
+        if out.len() >= target.len() {
+            out[..target.len()].copy_from_slice(target.as_bytes());
+        }
+        Ok(target.len())
     }
     fn read(
         &mut self,
@@ -191,6 +205,7 @@ struct Destination {
     round_metadata: bool,
     reject_opaque: bool,
     directory: bool,
+    symlink: Option<String>,
     empty: Option<bool>,
 }
 impl RestoreBackend for Destination {
@@ -200,6 +215,25 @@ impl RestoreBackend for Destination {
     }
     fn directory_empty(&mut self, _: &()) -> Result<bool, VfsError> {
         self.empty.ok_or(VfsError::NotSupported)
+    }
+    fn create_symlink(
+        &mut self,
+        _: &(),
+        _: &str,
+        target: &str,
+        _: Timespec,
+    ) -> Result<(), VfsError> {
+        self.directory = false;
+        self.symlink = Some(target.to_owned());
+        self.size = target.len() as u64;
+        Ok(())
+    }
+    fn read_link(&mut self, _: &(), out: &mut [u8]) -> Result<usize, VfsError> {
+        let target = self.symlink.as_ref().ok_or(VfsError::NotSupported)?;
+        if out.len() >= target.len() {
+            out[..target.len()].copy_from_slice(target.as_bytes());
+        }
+        Ok(target.len())
     }
     fn create_file(&mut self, _: &(), _: &str, _: Timespec) -> Result<(), VfsError> {
         unimplemented!()
@@ -266,6 +300,9 @@ impl RestoreBackend for Destination {
         let mut stat = file_stat();
         if self.directory {
             stat.kind = afsplus_vfs::NodeKind::Directory;
+        }
+        if self.symlink.is_some() {
+            stat.kind = afsplus_vfs::NodeKind::Symlink;
         }
         stat.size = self.size;
         stat.allocated_size = self.ranges.iter().map(|r| r.length).sum();
@@ -1620,5 +1657,275 @@ fn namespace_export_failures_poison_completion() {
         );
         assert!(result.is_err(), "fault {fault}");
         assert!(writer.finish().is_err());
+    }
+}
+
+#[test]
+fn symlink_groups_preserve_binary_security_or_report_recovery_loss() {
+    use afsplus_backup::{file, namespace, spool};
+    use std::io::Cursor;
+    for entries in [0, 1] {
+        for archive_mode in [file::Mode::Full, file::Mode::Recovery] {
+            for mode in [file::Mode::Full, file::Mode::Recovery] {
+                let wire = symlink_archive(archive_mode, entries);
+                let mut spool = spool::Verified::capture(
+                    wire.as_slice(),
+                    Cursor::new(Vec::new()),
+                    spool::Limits {
+                        chunk_bytes: 512,
+                        archive_bytes: wire.len() as u64,
+                        store_bytes: wire.len() as u64 * 2,
+                    },
+                    framing(),
+                    limits(),
+                )
+                .unwrap();
+                let mut reader = spool.reader(framing(), limits()).unwrap();
+                // Parent, created symlink and one staged opaque upload each hold a slot.
+                let (mut dest, restore_authority) =
+                    RestoreService::new(Destination::default(), 3).unwrap();
+                dest.set_metadata_limit(Some(65536));
+                let restore_grant = restore_authority.grant();
+                let parent = dest.root(&restore_grant).unwrap();
+                dest.backend_mut().directory = true;
+                dest.backend_mut().reject_opaque = mode == file::Mode::Recovery || entries == 0;
+                let result = namespace::restore_symlink(
+                    &mut reader,
+                    &mut dest.client(),
+                    &namespace::SymlinkTarget {
+                        ordinal: 0,
+                        path: "files/link",
+                        parent: &parent,
+                        name: "link",
+                    },
+                    &mut [0; 1],
+                    namespace::RestoreOptions {
+                        mode,
+                        limits: namespace::Limits {
+                            records: limits(),
+                            inventory: file_limits().inventory,
+                        },
+                    },
+                    Timespec::default(),
+                );
+                if mode == file::Mode::Full && archive_mode == file::Mode::Recovery {
+                    assert!(result.is_err());
+                    assert!(reader.next_member().is_err());
+                    assert!(dest.backend_mut().symlink.is_none());
+                    continue;
+                }
+                let report = result.unwrap();
+                assert!(reader.next_member().unwrap().is_none());
+                assert_eq!(
+                    dest.backend_mut().symlink.as_deref(),
+                    Some("../café/target")
+                );
+                assert_eq!(
+                    dest.stat(&report.object).unwrap().protection,
+                    file_stat().protection
+                );
+                if mode == file::Mode::Full {
+                    assert_eq!(dest.backend_mut().publications, entries);
+                    assert!(matches!(
+                        report.opaque,
+                        file::OpaqueDisposition::Preserved(_)
+                    ));
+                    if entries != 0 {
+                        assert_eq!(
+                            dest.backend_mut().installed.as_ref().unwrap().2,
+                            vec![0, 255, 42]
+                        );
+                    }
+                } else {
+                    assert_eq!(dest.backend_mut().publications, 0);
+                    match report.opaque {
+                        file::OpaqueDisposition::Omitted {
+                            knowledge,
+                            transported,
+                        } => {
+                            if archive_mode == file::Mode::Full {
+                                assert_eq!(transported.unwrap().security.count, entries as u64);
+                            } else {
+                                assert_eq!(knowledge.security, InventoryKnowledge::Uninspected);
+                                assert!(transported.is_none());
+                            }
+                        }
+                        _ => panic!("recovery must report omitted metadata"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn symlink_archive(archive_mode: afsplus_backup::file::Mode, entries: usize) -> Vec<u8> {
+    use afsplus_backup::{file, namespace};
+    let mut backend = Source::new(vec![0, 255, 42]);
+    backend.symlink = Some("../café/target".into());
+    backend.entries = entries;
+    backend.uninspected = archive_mode == file::Mode::Recovery;
+    let (mut source, authority) = BackupService::new(backend, 1).unwrap();
+    let grant = authority.grant();
+    let view = source.open(&grant, 1).unwrap();
+    let mut writer = envelope::Writer::new(Vec::new(), framing()).unwrap();
+    namespace::export(
+        &mut Captured {
+            client: &mut source.client(),
+            reader: &view,
+            object: 1,
+        },
+        &mut writer,
+        &namespace::Binding {
+            ordinal: 0,
+            path: "files/link",
+            entry: namespace::Entry::Symlink,
+        },
+        archive_mode,
+        &mut [0; 1],
+        namespace::Limits {
+            records: limits(),
+            inventory: file_limits().inventory,
+        },
+    )
+    .unwrap();
+    writer.finish().unwrap().0
+}
+
+fn changed_symlink_archive(fault: u8) -> Vec<u8> {
+    use afsplus_backup::{file, metadata};
+    let wire = symlink_archive(file::Mode::Full, 1);
+    let mut input = envelope::Reader::new(wire.as_slice(), framing()).unwrap();
+    let mut output = envelope::Writer::new(Vec::new(), framing()).unwrap();
+    let mut pending = None;
+    while let Some(mut header) = input.next_header().unwrap() {
+        let size_override = if header.kind == tar::Kind::File {
+            pending.take()
+        } else {
+            None
+        };
+        input.begin_payload(size_override).unwrap();
+        let mut payload = vec![0; size_override.unwrap_or(header.size) as usize];
+        if !payload.is_empty() {
+            assert_eq!(input.read_payload(&mut payload).unwrap(), payload.len());
+        }
+        if header.kind == tar::Kind::PaxLocal {
+            pending = pax::decode(&payload, limits())
+                .unwrap()
+                .iter()
+                .find(|r| r.key == "size")
+                .map(|r| r.value.parse::<u64>().unwrap());
+        }
+        if header.path.contains("symlink-v1-full-") && fault <= 3 {
+            let mut object = metadata::decode(&payload, limits()).unwrap();
+            match fault {
+                0 => object.path = "files/wrong",
+                1 => object.kind = tar::Kind::Directory,
+                2 => object.modified.nanos += 1,
+                3 => header.path = header.path.replace("v1", "v2"),
+                _ => unreachable!(),
+            }
+            payload = metadata::encode(&object, limits()).unwrap();
+        }
+        if header.path.contains("namespace-1.pax") && (4..=6).contains(&fault) {
+            let mut records = pax::decode(&payload, limits()).unwrap();
+            match fault {
+                4 => records.iter_mut().find(|r| r.key == "path").unwrap().value = "files/wrong",
+                5 => records.retain(|r| r.key != "linkpath"),
+                6 => records.iter_mut().find(|r| r.key == "mtime").unwrap().value = "123",
+                _ => unreachable!(),
+            }
+            payload = pax::encode(&records, limits()).unwrap();
+        }
+        if header.kind == tar::Kind::Symlink {
+            match fault {
+                7 => header.kind = tar::Kind::HardLink,
+                8 => header.mode = 0o777,
+                9 => header.path = "files/namespace.2".into(),
+                _ => (),
+            }
+        }
+        if header.path.contains("inventory-") && fault == 10 {
+            let mut records = pax::decode(&payload, limits()).unwrap();
+            let bad = "0".repeat(64);
+            records
+                .iter_mut()
+                .find(|r| r.key == "AROS.inventory.security_hash")
+                .unwrap()
+                .value = &bad;
+            payload = pax::encode(&records, limits()).unwrap();
+        }
+        if size_override.is_none() {
+            header.size = payload.len() as u64;
+        }
+        output.start(&header, size_override).unwrap();
+        if !payload.is_empty() {
+            output.write_payload(&payload).unwrap();
+        }
+    }
+    output.finish().unwrap().0
+}
+#[test]
+fn malformed_symlink_groups_refuse_success_and_release_uploads() {
+    use afsplus_backup::{file, namespace, spool};
+    use std::io::Cursor;
+    for fault in 0..=10 {
+        for mode in [file::Mode::Full, file::Mode::Recovery] {
+            let wire = changed_symlink_archive(fault);
+            // Re-sign the envelope so this exercises semantic group validation.
+            let captured = spool::Verified::capture(
+                wire.as_slice(),
+                Cursor::new(Vec::new()),
+                spool::Limits {
+                    chunk_bytes: 512,
+                    archive_bytes: wire.len() as u64,
+                    store_bytes: wire.len() as u64 * 2,
+                },
+                framing(),
+                limits(),
+            );
+            if fault == 7 {
+                // A relative parent traversal is invalid as a hard-link source;
+                // the replay spool rejects it before destination admission.
+                assert!(captured.is_err());
+                continue;
+            }
+            let mut spool = captured.unwrap();
+            let mut reader = spool.reader(framing(), limits()).unwrap();
+            let (mut dest, authority) = RestoreService::new(Destination::default(), 3).unwrap();
+            dest.set_metadata_limit(Some(65536));
+            let grant = authority.grant();
+            let parent = dest.root(&grant).unwrap();
+            dest.backend_mut().directory = true;
+            let result = namespace::restore_symlink(
+                &mut reader,
+                &mut dest.client(),
+                &namespace::SymlinkTarget {
+                    ordinal: 0,
+                    path: "files/link",
+                    parent: &parent,
+                    name: "link",
+                },
+                &mut [0; 1],
+                namespace::RestoreOptions {
+                    mode,
+                    limits: namespace::Limits {
+                        records: limits(),
+                        inventory: file_limits().inventory,
+                    },
+                },
+                Timespec::default(),
+            );
+            assert!(result.is_err(), "fault {fault}, mode {mode:?}");
+            assert!(reader.next_member().is_err());
+            assert_eq!(dest.backend_mut().active.load(Ordering::SeqCst), 0);
+            assert!(dest.backend_mut().core_metadata.is_none());
+            if fault < 10 {
+                assert!(dest.backend_mut().symlink.is_none());
+            }
+            // The failed group's created handle and upload slots have been released.
+            let spare = dest.root(&grant).unwrap();
+            let last = dest.root(&grant).unwrap();
+            drop((spare, last));
+        }
     }
 }

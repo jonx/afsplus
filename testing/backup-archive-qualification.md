@@ -19,6 +19,7 @@
 - [Allocation-preserving consumer](#allocation-preserving-consumer)
 - [Bound regular-file groups](#bound-regular-file-groups)
 - [Directory and hard-link groups](#directory-and-hard-link-groups)
+- [Symlink archive groups](#symlink-archive-groups)
 
 <!-- /toc -->
 
@@ -404,3 +405,26 @@ VFS emptiness tests require the original grant through stat and query, no extra
 handle, zero writes/flushes, and explicit unsupported, foreign and revoked errors.
 These component oracles do not prove complete namespace enumeration, durable
 loss reports, AFS+ opaque storage, symlink restoration or native hardware behavior.
+
+## Symlink archive groups
+
+Run `cargo test -p afsplus-backup --all-features --test attachment` and
+`cargo test -p afsplus-backup --all-features --test sparse_consumer symlink_archive`.
+Require the [namespace contract](../spec/backup-namespace.md#symlink-target-preservation)
+and [ADR-095](../adr/ADR-095-bound-symlink-archive-groups.md):
+
+- Captured export after live unlink, one-byte transfer buffers, exact target and
+  metadata restoration through remount, and unchanged outside-file contents.
+- Absolute, parent, Amiga-style and Unicode targets plus the maximum inline target;
+  independent Python tar inspection of the effective target without extraction.
+- Full/recovery mode combinations with empty or binary security inventories;
+  explicit loss knowledge, no opaque publication during recovery, and refusal
+  of full restoration from a recovery archive.
+- Re-enveloped malformed descriptors, profiles, paths, times, kind, neutral mode,
+  ordinal names, missing local target and inconsistent inventory hash. Require
+  rejection before destination admission where the replay parser detects the
+  error; otherwise require group failure, poisoned replay and released uploads
+  and created-object handles. A late inventory error may leave a partial symlink.
+- Revoked grants, insufficient handles, wrong source bindings and destination
+  basenames refuse success. Native durability and complete namespace-job safety
+  require their own qualification.

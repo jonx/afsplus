@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Preserve scoped symlinks in bound archive groups](#2026-09-14---preserve-scoped-symlinks-in-bound-archive-groups)
 - [2026-09-14 - Separate ongoing review from finite stage completion](#2026-09-14---separate-ongoing-review-from-finite-stage-completion)
 - [2026-09-14 — Generate visible milestone and stage progress](#2026-09-14--generate-visible-milestone-and-stage-progress)
 - [2026-09-14 - Add scoped symlink transport and VFS dispatch](#2026-09-14---add-scoped-symlink-transport-and-vfs-dispatch)
@@ -110,6 +111,29 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Preserve scoped symlinks in bound archive groups
+
+[ADR-095](adr/ADR-095-bound-symlink-archive-groups.md) binds captured targets,
+exact metadata and full/recovery opaque inventories to symlink namespace groups.
+Restoration creates through the destination grant, checks exact target readback
+and reports preservation or explicit metadata loss. Real-volume tests cover live
+unlink after capture, maximum inline targets, independent tar inspection and
+remount. Binary security fixture tests cover full/recovery combinations.
+
+Malformed re-enveloped archives exposed a missing-local-linkpath bug: restoration
+could accept the raw tar placeholder as the target. The reader now requires the
+explicit local target. Regression cases cover descriptors, profiles, names,
+timestamps, kind, mode, ordinal and inventory mismatch, with poisoned replay and
+released temporary handles on failure. Full opaque restoration needs a third
+slot for the staged upload in addition to parent and created-object handles.
+
+The full all-feature workspace run passed 470 tests with zero failures and ten
+ignored qualification tests across 77 suites. Clippy with warnings denied,
+formatting, seven documentation fixture tests, documentation and whitespace
+checks passed. Whole-job enumeration, graph completeness, durable loss reporting,
+source mutation/limit fault expansion and native qualification remain separate
+work; this commit does not complete the backup/restore queue gate.
 
 ## 2026-09-14 - Separate ongoing review from finite stage completion
 

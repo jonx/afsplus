@@ -17,6 +17,7 @@ use std::io::{Read, Write};
 #[derive(Clone, Copy)]
 pub enum Entry<'a> {
     Directory,
+    Symlink,
     HardLink { primary_path: &'a str },
 }
 pub struct Binding<'a> {
@@ -67,13 +68,26 @@ pub struct AliasReport {
     pub mode: Mode,
     pub archive_mode: Mode,
 }
+pub struct SymlinkTarget<'a, O> {
+    pub ordinal: u64,
+    pub path: &'a str,
+    pub parent: &'a RestoreObject<O>,
+    pub name: &'a str,
+}
+pub struct SymlinkReport<O> {
+    pub object: RestoreObject<O>,
+    pub next_ordinal: Option<u64>,
+    pub mode: Mode,
+    pub archive_mode: Mode,
+    pub opaque: file::OpaqueDisposition,
+}
 fn name(kind: tar::Kind, mode: Mode, n: u64) -> String {
     format!(
         "_AROS_BACKUP/metadata/{}-v1-{}-{n}.pax",
-        if kind == tar::Kind::Directory {
-            "directory"
-        } else {
-            "hardlink"
+        match kind {
+            tar::Kind::Directory => "directory",
+            tar::Kind::Symlink => "symlink",
+            _ => "hardlink",
         },
         if mode == Mode::Full {
             "full"
@@ -87,11 +101,12 @@ fn raw_name(n: u64) -> String {
 }
 fn slots(n: u64, kind: tar::Kind, mode: Mode) -> Result<(u64, Option<u64>), Error> {
     let body = n.checked_add(1).ok_or(Error::Limit)?;
-    let inventory = if kind == tar::Kind::Directory && mode == Mode::Full {
-        Some(body.checked_add(1).ok_or(Error::Limit)?)
-    } else {
-        None
-    };
+    let inventory =
+        if matches!(kind, tar::Kind::Directory | tar::Kind::Symlink) && mode == Mode::Full {
+            Some(body.checked_add(1).ok_or(Error::Limit)?)
+        } else {
+            None
+        };
     Ok((body, inventory))
 }
 fn emit_body<W: Write>(
@@ -112,7 +127,7 @@ fn emit_body<W: Write>(
             value: &time,
         },
     ];
-    if object.kind == tar::Kind::HardLink {
+    if matches!(object.kind, tar::Kind::HardLink | tar::Kind::Symlink) {
         records.push(pax::Record {
             key: "linkpath",
             value: link,
@@ -166,6 +181,7 @@ fn export_inner<P: SnapshotBackend, W: Write>(
     }
     let (kind, expected_kind, link) = match binding.entry {
         Entry::Directory => (tar::Kind::Directory, NodeKind::Directory, ""),
+        Entry::Symlink => (tar::Kind::Symlink, NodeKind::Symlink, ""),
         Entry::HardLink { primary_path } => (tar::Kind::HardLink, NodeKind::File, primary_path),
     };
     if kind == tar::Kind::HardLink
@@ -181,6 +197,16 @@ fn export_inner<P: SnapshotBackend, W: Write>(
     if stat.kind != expected_kind {
         return Err(Error::Unsupported);
     }
+    let captured_target = if kind == tar::Kind::Symlink {
+        Some(read_captured_target(
+            source,
+            stat.size,
+            limits.records.bytes,
+        )?)
+    } else {
+        None
+    };
+    let link = captured_target.as_deref().unwrap_or(link);
     let knowledge = source
         .client
         .metadata_inventory(source.reader, source.object)
@@ -232,6 +258,11 @@ fn export_inner<P: SnapshotBackend, W: Write>(
     {
         return Err(Error::Invalid);
     }
+    if let Some(expected) = captured_target {
+        if read_captured_target(source, stat.size, limits.records.bytes)? != expected {
+            return Err(Error::Invalid);
+        }
+    }
     Ok(ExportReport {
         next_ordinal: inventory
             .as_ref()
@@ -240,6 +271,35 @@ fn export_inner<P: SnapshotBackend, W: Write>(
         inventory,
     })
 }
+fn read_captured_target<P: SnapshotBackend>(
+    source: &mut attachment::Captured<'_, '_, P>,
+    size: u64,
+    limit: usize,
+) -> Result<String, Error> {
+    let required = source
+        .client
+        .read_link(source.reader, source.object, &mut [])
+        .map_err(Error::Source)?;
+    if required == 0 || required > limit || required as u64 != size {
+        return Err(Error::Limit);
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(required)
+        .map_err(|_| Error::Limit)?;
+    bytes.resize(required, 0);
+    if source
+        .client
+        .read_link(source.reader, source.object, &mut bytes)
+        .map_err(Error::Source)?
+        != required
+        || bytes.contains(&0)
+    {
+        return Err(Error::Invalid);
+    }
+    String::from_utf8(bytes).map_err(|_| Error::Invalid)
+}
+
 fn read_object<R: Read>(
     reader: &mut stream::Reader<R>,
     n: u64,
@@ -279,8 +339,8 @@ fn read_body<R: Read>(
     reader: &mut stream::Reader<R>,
     n: u64,
     object: &metadata::Object<'_>,
-    link: &str,
-) -> Result<(), Error> {
+    link: Option<&str>,
+) -> Result<String, Error> {
     let m = reader
         .next_member()
         .map_err(Error::Stream)?
@@ -292,7 +352,7 @@ fn read_body<R: Read>(
     };
     if m.kind != object.kind
         || m.path != object.path
-        || m.link != link
+        || link.is_some_and(|expected| m.link != expected)
         || m.mode != mode
         || m.uid != 0
         || m.gid != 0
@@ -304,12 +364,14 @@ fn read_body<R: Read>(
     {
         return Err(Error::Invalid);
     }
-    if !reader.raw_path_is(&raw_name(n))
+    let target = m.link.to_owned();
+    if (object.kind == tar::Kind::Symlink && !reader.local_value_is("linkpath", &target))
+        || !reader.raw_path_is(&raw_name(n))
         || !reader.local_path_is(&format!("_AROS_BACKUP/metadata/namespace-{n}.pax"))
     {
         return Err(Error::Invalid);
     }
-    Ok(())
+    Ok(target)
 }
 fn core_metadata(object: &metadata::Object<'_>) -> RestoreMetadata {
     RestoreMetadata {
@@ -369,7 +431,7 @@ fn restore_directory_inner<R: Read, P: OpaqueRestoreBackend>(
         return Err(Error::Invalid);
     }
     let (body, inventory_ordinal) = slots(target.ordinal, object.kind, archive_mode)?;
-    read_body(reader, body, &object, "")?;
+    read_body(reader, body, &object, Some(""))?;
     if !client
         .directory_empty(target.object)
         .map_err(Error::Destination)?
@@ -481,7 +543,7 @@ fn restore_alias_inner<R: Read, P: RestoreBackend>(
         return Err(Error::Invalid);
     }
     let (body, _) = slots(target.ordinal, object.kind, archive_mode)?;
-    read_body(reader, body, &object, target.primary.path)?;
+    read_body(reader, body, &object, Some(target.primary.path))?;
     let before = client
         .stat(target.primary.object)
         .map_err(Error::Destination)?;
@@ -525,5 +587,136 @@ fn restore_alias_inner<R: Read, P: RestoreBackend>(
         links,
         mode: options.mode,
         archive_mode,
+    })
+}
+
+pub fn restore_symlink<R: Read, P: OpaqueRestoreBackend>(
+    reader: &mut stream::Reader<R>,
+    client: &mut RestoreClient<'_, P>,
+    target: &SymlinkTarget<'_, P::Object>,
+    scratch: &mut [u8],
+    options: RestoreOptions,
+    now: Timespec,
+) -> Result<SymlinkReport<P::Object>, Error> {
+    let result = restore_symlink_inner(reader, client, target, scratch, options, now);
+    if result.is_err() {
+        reader.invalidate();
+    }
+    result
+}
+fn restore_symlink_inner<R: Read, P: OpaqueRestoreBackend>(
+    reader: &mut stream::Reader<R>,
+    client: &mut RestoreClient<'_, P>,
+    target: &SymlinkTarget<'_, P::Object>,
+    scratch: &mut [u8],
+    options: RestoreOptions,
+    now: Timespec,
+) -> Result<SymlinkReport<P::Object>, Error> {
+    if !reader.can_publish() {
+        return Err(Error::NeedsVerifiedReplay);
+    }
+    if scratch.is_empty() {
+        return Err(Error::Limit);
+    }
+    let (archive_mode, wire) = read_object(
+        reader,
+        target.ordinal,
+        tar::Kind::Symlink,
+        options.limits.records,
+    )?;
+    if options.mode == Mode::Full && archive_mode != Mode::Full {
+        return Err(Error::Unsupported);
+    }
+    let object = metadata::decode(&wire, options.limits.records).map_err(Error::Metadata)?;
+    if object.kind != tar::Kind::Symlink || object.path != target.path {
+        return Err(Error::Invalid);
+    }
+    let knowledge = file::knowledge(&object);
+    if archive_mode == Mode::Full && !file::inspected(knowledge) {
+        return Err(Error::Invalid);
+    }
+    let (body, inventory_ordinal) = slots(target.ordinal, object.kind, archive_mode)?;
+    let link = read_body(reader, body, &object, None)?;
+    if target.path.rsplit('/').next() != Some(target.name)
+        || link.is_empty()
+        || link.as_bytes().contains(&0)
+        || link.len() > options.limits.records.bytes
+    {
+        return Err(Error::Invalid);
+    }
+    let created = client
+        .create_symlink(target.parent, target.name, &link, now)
+        .map_err(Error::Destination)?;
+    let inventory = if let Some(n) = inventory_ordinal {
+        Some(
+            if options.mode == Mode::Full {
+                inventory::restore(
+                    reader,
+                    client,
+                    &attachment::Target {
+                        ordinal: n,
+                        path: target.path,
+                        object: &created,
+                    },
+                    knowledge,
+                    scratch,
+                    options.limits.inventory,
+                )
+            } else {
+                inventory::discard(
+                    reader,
+                    n,
+                    target.path,
+                    knowledge,
+                    scratch,
+                    options.limits.inventory,
+                )
+            }
+            .map_err(Error::Inventory)?,
+        )
+    } else {
+        None
+    };
+    client
+        .metadata(&created, core_metadata(&object))
+        .map_err(Error::Destination)?;
+    let stat = client.stat(&created).map_err(Error::Destination)?;
+    if stat.kind != NodeKind::Symlink
+        || stat.size != link.len() as u64
+        || stat.links != 1
+        || !same_metadata(&stat, &object)
+    {
+        return Err(Error::Invalid);
+    }
+    let mut actual = Vec::new();
+    actual
+        .try_reserve_exact(link.len())
+        .map_err(|_| Error::Limit)?;
+    actual.resize(link.len(), 0);
+    if client
+        .read_link(&created, &mut actual)
+        .map_err(Error::Destination)?
+        != link.len()
+        || actual != link.as_bytes()
+    {
+        return Err(Error::Invalid);
+    }
+    let next_ordinal = inventory
+        .as_ref()
+        .map_or(body.checked_add(1), |s| s.next_ordinal);
+    let opaque = if options.mode == Mode::Full {
+        file::OpaqueDisposition::Preserved(inventory.ok_or(Error::Invalid)?)
+    } else {
+        file::OpaqueDisposition::Omitted {
+            knowledge,
+            transported: inventory,
+        }
+    };
+    Ok(SymlinkReport {
+        object: created,
+        next_ordinal,
+        mode: options.mode,
+        archive_mode,
+        opaque,
     })
 }

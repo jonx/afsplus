@@ -57,8 +57,9 @@ components; integrate symlinks and the complete hard-link graph. Use the
 [core symlink and retained-target gates](../testing/symlink-qualification.md#core-namespace-and-retained-target-gates)
 for namespace storage and [scoped target transport](../docs/13-filesystem-api-v2.md#scoped-symlink-target-transport)
 for VFS unlink dispatch, grant-held captured reads and destination creation.
-Bind archive target/profile/metadata and verify exact readback before claiming
-complete symlink preservation; use [scoped created-entry lookup](../docs/13-filesystem-api-v2.md#scoped-created-entry-lookup)
+Use [bound symlink archive groups](../spec/backup-namespace.md#symlink-target-preservation)
+for target/profile/metadata binding and exact readback; integrate them into the
+complete namespace job before claiming whole-backup preservation; use [scoped created-entry lookup](../docs/13-filesystem-api-v2.md#scoped-created-entry-lookup)
 to reopen entries with bounded active handles and finalize metadata after namespace edits. Persist explicit
 content-recovery loss reports and validate every object and archive-wide binding
 before full-job preservation success. Use

@@ -1544,3 +1544,214 @@ fn alias_last_ordinal_is_explicit_and_identity_is_shared() {
     dest.client().read(&primary, 0, &mut bytes).unwrap();
     assert_eq!(&bytes, b"changed!");
 }
+
+fn symlink_namespace_limits() -> afsplus_backup::namespace::Limits {
+    let mut records = records();
+    records.bytes = 8192;
+    records.value_bytes = 4096;
+    afsplus_backup::namespace::Limits {
+        records,
+        inventory: afsplus_backup::inventory::Limits {
+            values: 16,
+            value_bytes: 4096,
+            page_entries: 1,
+            records,
+        },
+    }
+}
+fn captured_symlink_archive(target: &str) -> Vec<u8> {
+    use afsplus_backup::{file, namespace};
+    let mut source = volume();
+    let id = source
+        .create_symlink(afsplus_format::OBJECT_ROOT, "link", target, time())
+        .unwrap();
+    source.set_object_protection(id, 0x8765, time()).unwrap();
+    let snapshot = source.snapshot_create(time()).unwrap();
+    source
+        .unlink_symlink(afsplus_format::OBJECT_ROOT, "link", time())
+        .unwrap();
+    let (mut source, authority) = BackupService::new(source, 1).unwrap();
+    let grant = authority.grant();
+    let view = source.open(&grant, snapshot).unwrap();
+    let mut writer = envelope::Writer::new(Vec::new(), framing()).unwrap();
+    let report = namespace::export(
+        &mut Captured {
+            client: &mut source.client(),
+            reader: &view,
+            object: id,
+        },
+        &mut writer,
+        &namespace::Binding {
+            ordinal: 0,
+            path: "files/link",
+            entry: namespace::Entry::Symlink,
+        },
+        file::Mode::Recovery,
+        &mut [0; 1],
+        symlink_namespace_limits(),
+    )
+    .unwrap();
+    assert_eq!(report.next_ordinal, Some(2));
+    writer.finish().unwrap().0
+}
+
+#[test]
+fn captured_symlink_archive_restores_exact_opaque_targets_and_metadata() {
+    use afsplus_backup::{file, namespace};
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+    let maximum = "x".repeat(3968);
+    for target in [
+        "../missing",
+        "/outside//path",
+        "SYS:Tools",
+        "../café/日本語",
+        &maximum,
+    ] {
+        let wire = captured_symlink_archive(target);
+        let mut child = Command::new("python3").args(["-c", "import sys,tarfile,io\nt=tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read()))\nx=t.getmember('files/link')\nassert x.issym() and x.linkname==sys.argv[1] and x.size==0\n", target])
+            .stdin(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(&wire).unwrap();
+        assert!(child.wait().unwrap().success());
+        let limits = symlink_namespace_limits();
+        let mut spool = spool::Verified::capture_sparse(
+            wire.as_slice(),
+            Cursor::new(Vec::new()),
+            spool::Limits {
+                chunk_bytes: 512,
+                archive_bytes: wire.len() as u64,
+                store_bytes: wire.len() as u64 * 2,
+            },
+            framing(),
+            limits.records,
+        )
+        .unwrap();
+        let mut reader = spool.reader(framing(), limits.records).unwrap();
+        let mut dest = volume();
+        let outside = dest
+            .create_file_in_root("outside", b"untouched", time())
+            .unwrap();
+        let selected = dest.create_directory_in_root("selected", time()).unwrap();
+        let (mut dest, authority) =
+            RestoreService::new(AfsRestoreDestination::new(dest, selected).unwrap(), 2).unwrap();
+        let grant = authority.grant();
+        let root = dest.root(&grant).unwrap();
+        let report = namespace::restore_symlink(
+            &mut reader,
+            &mut dest.client(),
+            &namespace::SymlinkTarget {
+                ordinal: 0,
+                path: "files/link",
+                parent: &root,
+                name: "link",
+            },
+            &mut [0; 1],
+            namespace::RestoreOptions {
+                mode: file::Mode::Recovery,
+                limits,
+            },
+            time(),
+        )
+        .unwrap();
+        assert_eq!(report.next_ordinal, Some(2));
+        assert!(matches!(
+            report.opaque,
+            file::OpaqueDisposition::Omitted { .. }
+        ));
+        let id = dest.stat(&report.object).unwrap().object_id;
+        assert!(reader.next_member().unwrap().is_none());
+        dest.sync(&grant).unwrap();
+        drop(report);
+        drop(root);
+        let mut volume = mount_with_snapshot_limits(
+            dest.into_backend().into_volume().into_device(),
+            MountOptions::default(),
+            work(),
+        )
+        .unwrap();
+        let mut bytes = vec![0; target.len()];
+        assert_eq!(volume.read_link(id, &mut bytes).unwrap(), target.len());
+        assert_eq!(bytes, target.as_bytes());
+        let stat = volume.stat(id).unwrap().unwrap();
+        assert_eq!(stat.protection, 0x8765);
+        assert_eq!(stat.created, time());
+        assert_eq!(stat.modified, time());
+        assert_eq!(stat.changed, time());
+        assert_eq!(volume.read_file(outside).unwrap(), b"untouched");
+    }
+}
+
+#[test]
+fn symlink_archive_refusals_do_not_create_destination_entries() {
+    use afsplus_backup::{file, namespace};
+    let wire = captured_symlink_archive("../opaque");
+    for fault in 0..6 {
+        let limits = symlink_namespace_limits();
+        let mut spool = spool::Verified::capture_sparse(
+            wire.as_slice(),
+            Cursor::new(Vec::new()),
+            spool::Limits {
+                chunk_bytes: 512,
+                archive_bytes: wire.len() as u64,
+                store_bytes: wire.len() as u64 * 2,
+            },
+            framing(),
+            limits.records,
+        )
+        .unwrap();
+        let mut reader = spool.reader(framing(), limits.records).unwrap();
+        let (mut dest, authority) = RestoreService::new(
+            AfsRestoreDestination::new(volume(), afsplus_format::OBJECT_ROOT).unwrap(),
+            if fault == 0 { 1 } else { 2 },
+        )
+        .unwrap();
+        let grant = authority.grant();
+        let root = dest.root(&grant).unwrap();
+        if fault == 1 {
+            authority.revoke(&grant).unwrap();
+        }
+        let mut options = namespace::RestoreOptions {
+            mode: file::Mode::Recovery,
+            limits,
+        };
+        if fault == 2 {
+            options.mode = file::Mode::Full;
+        }
+        let result = namespace::restore_symlink(
+            &mut reader,
+            &mut dest.client(),
+            &namespace::SymlinkTarget {
+                ordinal: if fault == 3 { 1 } else { 0 },
+                path: if fault == 4 {
+                    "files/other"
+                } else {
+                    "files/link"
+                },
+                parent: &root,
+                name: if fault == 5 { "other" } else { "link" },
+            },
+            &mut [0; 1],
+            options,
+            time(),
+        );
+        assert!(result.is_err(), "fault {fault}");
+        assert!(reader.next_member().is_err());
+        drop(result);
+        drop(root);
+        let mut volume = dest.into_backend().into_volume();
+        assert_eq!(
+            volume
+                .lookup_in_directory(afsplus_format::OBJECT_ROOT, "link")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            volume
+                .lookup_in_directory(afsplus_format::OBJECT_ROOT, "other")
+                .unwrap(),
+            None
+        );
+    }
+}

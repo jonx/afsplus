@@ -1,6 +1,7 @@
 # ADR-093: Bind directory and hard-link archive groups to scoped restoration
 
 Status: Accepted
+Amended by: ADR-095
 Amends: ADR-082, ADR-091, ADR-092
 
 ## Context
