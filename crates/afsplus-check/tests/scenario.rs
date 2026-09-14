@@ -6,6 +6,81 @@ use afsplus_core::mount;
 const LADDER: &[u8] = b"AFSPSC01\nformat 4096 256 64 8\nmkdir d root 737263\ncreate f d 636166c3a9 00ff\nwrite f 4 42\ntruncate f 2\nrename f root 6f7574\nrmdir d\ncreate spare root 74656d70 -\nunlink spare\nsync\nremount\n";
 
 #[test]
+fn version_two_ladder_and_checked_observation_preserve_every_cache_profile() {
+    for (profile, pages) in [("2", 2), ("4", 4), ("8", 8), ("unlimited", usize::MAX)] {
+        let wire = std::str::from_utf8(LADDER).unwrap().replacen(
+            "AFSPSC01\nformat 4096 256 64 8",
+            &format!("AFSPSC02\nformat 4096 256 64 8 {profile}"),
+            1,
+        );
+        let plan = Plan::parse(wire.as_bytes()).unwrap();
+        assert_eq!(plan.cache_profile(), Some(pages));
+        let run = plan.run().unwrap();
+        assert!(run.failure.is_none());
+        let observed = plan.inspect_checked(run.result, 1024);
+        assert!(observed.is_clean());
+        assert_eq!(observed.cache_pages, Some(pages));
+        let entries = observed.entries.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, ["out"]);
+        assert_eq!(entries[0].data, Some(vec![0, 255]));
+    }
+    for profile in ["0", "1", "3", "02", "2.0", "Unlimited", "8 extra"] {
+        assert!(
+            Plan::parse(format!("AFSPSC02\nformat 4096 256 64 8 {profile}\n").as_bytes()).is_err()
+        );
+    }
+    assert!(Plan::parse(b"AFSPSC01\nformat 4096 256 64 8 2\n").is_err());
+}
+
+#[test]
+fn constrained_profile_changes_real_spill_order_before_and_after_remount() {
+    fn run(profile: &str) -> afsplus_check::scenario::Run {
+        use std::fmt::Write;
+        let mut wire = format!("AFSPSC02\nformat 4096 1024 256 8 {profile}\n");
+        for i in 0..120 {
+            if i == 60 {
+                wire.push_str("remount\n");
+            }
+            let name = format!("{i:04}-{}", "n".repeat(180));
+            let hex: String = name.bytes().map(|b| format!("{b:02x}")).collect();
+            writeln!(wire, "create f{i} root {hex} 01").unwrap();
+        }
+        let plan = Plan::parse(wire.as_bytes()).unwrap();
+        let run = plan.run().unwrap();
+        assert!(run.failure.is_none(), "{:?}", run.failure);
+        let observed = plan.inspect_checked(run.result.clone(), 1024);
+        assert!(observed.is_clean());
+        let entries = observed.entries.unwrap();
+        assert_eq!(entries.len(), 120);
+        assert!(entries.iter().all(|entry| entry.data == Some(vec![1])));
+        run
+    }
+    let tiny = run("2");
+    let normal = run("unlimited");
+    fn signature(run: &afsplus_check::scenario::Run, index: usize) -> Vec<Option<(u64, u32)>> {
+        let event = &run.events[index];
+        run.log[event.first_block_operation..event.end_block_operation]
+            .iter()
+            .map(|op| match op {
+                RecordedOp::Write { lba, data } => {
+                    Some((*lba, afsplus_format::crc32c::crc32c(data)))
+                }
+                RecordedOp::Flush => None,
+            })
+            .collect()
+    }
+    for range in [0..60, 61..121] {
+        assert!(
+            range
+                .into_iter()
+                .any(|index| signature(&tiny, index) != signature(&normal, index)),
+            "configured cache must affect actual I/O on both sides of remount"
+        );
+    }
+}
+
+#[test]
 fn image_ladder_and_recorded_replay_have_exact_namespace_and_data() {
     let run = Plan::parse(LADDER).unwrap().run().unwrap();
     assert_eq!(run.failure, None);

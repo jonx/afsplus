@@ -25,6 +25,7 @@
 - [Selected crash bundles](#selected-crash-bundles)
 - [Checker-bound replay verdicts](#checker-bound-replay-verdicts)
 - [Integrated tree-cache profiles](#integrated-tree-cache-profiles)
+- [Cache-bound semantic bundles](#cache-bound-semantic-bundles)
 
 <!-- /toc -->
 
@@ -285,9 +286,10 @@ semantic runner described in [ADR-099](../adr/ADR-099-semantic-replay-bundles.md
 
 ## Bounded semantic scenario execution
 
-[replay-scenario.py](../tools/replay-scenario.py) admits a version-1 JSON scenario
-and compiles its operation list to the fixed ASCII `AFSPSC01` protocol consumed
-by [the memory runner](../crates/afsplus-check/src/scenario.rs). Names and data are
+[replay-scenario.py](../tools/replay-scenario.py) admits a
+[versioned JSON scenario](#cache-bound-semantic-bundles) and compiles its
+operation list to the corresponding fixed ASCII protocol consumed by
+[the memory runner](../crates/afsplus-check/src/scenario.rs). Names and data are
 hex fields; object labels resolve only inside the fixture. JSON admission checks
 label dependencies and kinds before compilation. The Rust parser independently
 checks syntax, geometry, operation count and payload/range limits; direct protocol
@@ -513,3 +515,64 @@ mutation families need their own forced-eviction, error, crash and low-space
 cases. Bulk tree builders, total-volume memory caps, shared-cache pinning and native profiles have
 separate qualification requirements. Retain source/profile identity and failure
 artifacts with each broader scenario's semantic oracle.
+
+
+## Cache-bound semantic bundles
+
+Scenario version 2 requires `volume.tree_cache_pages` to be the integer `2`, `4`
+or `8`, or the string `"unlimited"`. The same policy applies to initial mount,
+every explicit remount, and recovery/inspection of the selected result image.
+The [scenario compiler](../tools/replay-scenario.py) rejects missing profiles,
+unknown values, boolean or floating-point aliases and cross-version fields.
+
+| Scenario JSON | Command wire | Observation wire | Actual JSON | Resource policy |
+|---|---|---|---|---|
+| version 1 | AFSPSC01 | AFSOBS02 | version 2 | implicit unlimited |
+| version 2 | AFSPSC02 | AFSOBS03 | version 3 | explicit qualified profile |
+
+The version-2 `format` line appends the canonical profile token after the four
+geometry values. AFSOBS03 adds `cache-pages TOKEN` immediately after its version
+line; the remaining checker/outcome/namespace records follow AFSOBS02. Version-3
+actual JSON adds `cache_pages`. Successful inspection confirms the effective
+mounted policy. On mount failure the record retains the attempted profile and
+the failure verdict; it establishes no resource qualification.
+
+For example, this complete version-2 input creates and remounts a file:
+
+```json
+{
+  "version": 2,
+  "volume": {"block_size": 4096, "blocks": 256, "region_size": 64,
+             "log_slots": 8, "tree_cache_pages": 4},
+  "operations": [
+    {"op": "create", "label": "f", "parent": "root", "name": "file", "data": "0042"},
+    {"op": "sync"},
+    {"op": "remount"}
+  ],
+  "expected": [{"path": ["file"], "kind": "file", "data": "0042"}]
+}
+```
+
+The enclosing bundle manifest, run metadata, block trace and semantic flight
+record retain their respective version-1 formats. Cache selection is bound
+through the preserved scenario and observation. Replay rejects a missing,
+mismatched or downgraded observation before semantic execution, including a
+resealed bundle whose contents pass its manifest hashes. Version-1 scenarios
+retain their original wire encoding and default policy; historical bundles
+require their exact observed source and runner identity.
+
+Minimization preserves the volume configuration and includes the profile in the
+version-2 scenario's failure signature. An otherwise identical failure under a
+different cache configuration cannot replace the original reproducer. Selected
+crash outcomes use the same policy for recovered observation.
+
+Run `cargo test -p afsplus-check --test scenario`,
+`python3 tools/test-replay-scenario.py` and `python3 tools/test-afsptest.py`.
+The Rust ladder covers mkdir/create/write/truncate/rename/unlink/rmdir/sync/remount
+under all four profiles and checks exact bytes with both checker views. A
+120-file wide-name scenario must change actual block/flush ordering under two
+pages on both sides of remount relative to unlimited execution. Python gates
+publish and replay the full ladder in fresh processes, check untouched original
+artifacts, reject resource/version mismatches, preserve profiles during failure
+reduction and verify selected crash outcomes under all four profiles. Wider
+mutation-family matrices and their failure artifacts retain their own gates.

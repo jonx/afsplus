@@ -1,6 +1,6 @@
 //! Experimental Stage A semantic runner (ADR-099), confined to memory images.
 use afsplus_block::{BlockDevice, BlockError, MemoryBackend, RecordedOp};
-use afsplus_core::{mkfs, mount, MkfsParams, NamePolicy};
+use afsplus_core::{mkfs, mount, mount_with_options, MkfsParams, MountOptions, NamePolicy};
 use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
@@ -35,6 +35,8 @@ pub enum Operation {
     Remount,
 }
 pub struct Plan {
+    // None identifies the original version-1 default profile.
+    cache_profile: Option<usize>,
     blocks: u64,
     region: u32,
     log_slots: u16,
@@ -195,10 +197,22 @@ impl Plan {
         }
         let input = std::str::from_utf8(wire).map_err(|_| "scenario wire UTF-8")?;
         let mut lines = input.lines();
-        if lines.next() != Some("AFSPSC01") {
+        let version = lines.next();
+        if !matches!(version, Some("AFSPSC01" | "AFSPSC02")) {
             return Err("scenario protocol version".into());
         }
-        let header: Vec<_> = lines.next().ok_or("missing geometry")?.split(' ').collect();
+        let mut header: Vec<_> = lines.next().ok_or("missing geometry")?.split(' ').collect();
+        let cache_profile = if version == Some("AFSPSC02") {
+            Some(match header.pop() {
+                Some("2") => 2,
+                Some("4") => 4,
+                Some("8") => 8,
+                Some("unlimited") => usize::MAX,
+                _ => return Err("scenario tree cache profile".into()),
+            })
+        } else {
+            None
+        };
         let ["format", "4096", blocks, region, log] = header.as_slice() else {
             return Err("scenario format profile".into());
         };
@@ -277,6 +291,7 @@ impl Plan {
             operations.push(op);
         }
         Ok(Self {
+            cache_profile,
             blocks,
             region,
             log_slots,
@@ -285,6 +300,22 @@ impl Plan {
     }
     pub fn run(&self) -> Result<Run, String> {
         self.run_with_limits(RecordingLimits::default())
+    }
+    /// Explicit v2 resource profile; v1 keeps its original unlimited contract.
+    pub fn cache_profile(&self) -> Option<usize> {
+        self.cache_profile
+    }
+
+    fn mount_options(&self) -> MountOptions {
+        MountOptions {
+            tree_cache_pages: self.cache_profile.and_then(std::num::NonZeroUsize::new),
+            ..Default::default()
+        }
+    }
+
+    /// Observe/recover a selected result under the same policy as execution.
+    pub fn inspect_checked(&self, image: MemoryBackend, max_bytes: usize) -> Inspection {
+        inspect_checked_with_options(image, max_bytes, self.mount_options())
     }
     pub fn run_with_limits(&self, limits: RecordingLimits) -> Result<Run, String> {
         let mut base = MemoryBackend::new(4096, self.blocks);
@@ -309,7 +340,7 @@ impl Plan {
             bytes: 0,
             limits,
         })));
-        let mut volume = match mount(recorder.clone()) {
+        let mut volume = match mount_with_options(recorder.clone(), self.mount_options()) {
             Ok(volume) => volume,
             Err(error) => {
                 return Ok(finish(
@@ -348,7 +379,7 @@ impl Plan {
                 .unwrap_or(0);
             if matches!(op, Operation::Remount) {
                 drop(volume);
-                volume = match mount(recorder.clone()) {
+                volume = match mount_with_options(recorder.clone(), self.mount_options()) {
                     Ok(volume) => volume,
                     Err(error) => {
                         events.push(Event {
@@ -491,6 +522,8 @@ pub fn inspect(image: MemoryBackend, max_bytes: usize) -> Result<Vec<Entry>, Str
 }
 
 pub struct Inspection {
+    /// Effective policy of the successfully mounted observation volume.
+    pub cache_pages: Option<usize>,
     pub raw: crate::CheckReport,
     pub recovered: Option<crate::CheckReport>,
     pub entries: Result<Vec<Entry>, String>,
@@ -508,18 +541,29 @@ impl Inspection {
 
 /// Full offline checks before and after recovery of an owned memory image.
 /// The recovered checker covers the exact volume used for namespace observation.
-pub fn inspect_checked(mut image: MemoryBackend, max_bytes: usize) -> Inspection {
+pub fn inspect_checked(image: MemoryBackend, max_bytes: usize) -> Inspection {
+    inspect_checked_with_options(image, max_bytes, MountOptions::default())
+}
+
+fn inspect_checked_with_options(
+    mut image: MemoryBackend,
+    max_bytes: usize,
+    options: MountOptions,
+) -> Inspection {
     let raw = crate::check_device(&mut image);
-    match mount(image) {
+    match mount_with_options(image, options) {
         Err(error) => Inspection {
+            cache_pages: None,
             raw,
             recovered: None,
             entries: Err(error.to_string()),
         },
         Ok(mut volume) => {
+            let cache_pages = Some(volume.tree_cache_pages());
             let entries = inspect_volume(&mut volume, max_bytes);
             let recovered = Some(crate::check_device(&mut volume.into_device()));
             Inspection {
+                cache_pages,
                 raw,
                 recovered,
                 entries,

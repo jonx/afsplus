@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Bind semantic replay and reduction to cache profiles](#2026-09-14--bind-semantic-replay-and-reduction-to-cache-profiles)
 - [2026-09-14 — Integrate staged-tree cache profiles into transactions and recovery](#2026-09-14--integrate-staged-tree-cache-profiles-into-transactions-and-recovery)
 - [2026-09-14 — Measure requested heap across real filesystem phases](#2026-09-14--measure-requested-heap-across-real-filesystem-phases)
 - [2026-09-14 — Explain each completion-table entry](#2026-09-14--explain-each-completion-table-entry)
@@ -125,6 +126,43 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Bind semantic replay and reduction to cache profiles
+
+Added version-2 semantic scenarios with an explicit 2/4/8/unlimited tree-cache
+profile. The compiler emits AFSPSC02, and the runner applies the setting at
+initial mount, every remount and selected-result recovery/inspection. Version-1
+scenarios preserve their original unlimited behavior and command encoding.
+AFSOBS03 and version-3 actual JSON carry the selected profile; successful
+inspection checks the effective mounted policy. Failed inspection retains the
+attempted setting with its failure verdict.
+
+Independent bundle validation rejects missing, mismatched, downgraded and wrongly
+typed policy records even when an edited bundle has valid manifest hashes.
+Reduction preserves the volume configuration and includes its cache setting in
+the failure signature, so another resource configuration cannot replace the
+original reproducer. The proposed replay ADR and the protocol documentation were
+updated explicitly; the outer bundle, block trace and semantic flight formats
+retain their version-1 framing.
+
+The full directory/file operation ladder passes under all four profiles with
+exact content and both checker views. A 120-file wide-name scenario proves that
+two-page execution changes actual I/O ordering on both sides of remount.
+Fresh-process bundle replay leaves original artifacts untouched. Reduction and
+selected-crash observation preserve the four profiles, with negative controls for
+missing or contradictory profile evidence. The documented JSON example also
+passes the scenario compiler.
+
+Validation: 509 Rust tests passed, 10 explicit qualification tests ignored,
+workspace Clippy and formatting passed, 26 replay/admission/bundle Python tests
+and thirteen documentation tests passed. The expanded minimizer case was checked
+under all four settings. The full Rust log is
+`/private/tmp/afsplus-profile-replay-workspace.log`.
+
+Source/build reconstruction, transaction-internal diagnostics and additional
+mutation-family cache/fault artifacts remain explicit work. This unit does not
+establish physical-storage or classic-machine qualification, and Stage A stays
+partial until its finite acceptance evidence is complete.
 
 ## 2026-09-14 — Integrate staged-tree cache profiles into transactions and recovery
 

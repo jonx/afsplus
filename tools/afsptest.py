@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-2-Clause
-"""Run and reproduce bounded private semantic bundles (no-cut profile)."""
+"""Run and reproduce bounded private semantic bundles with cache and crash profiles."""
 import argparse
 import hashlib
 import importlib.util
@@ -121,6 +121,13 @@ def structural_success(actual):
 
 def observation(wire):
     lines = wire.decode("ascii").splitlines()
+    cache = None
+    if lines and lines[0] == "AFSOBS03":
+        if len(lines) < 6 or lines[1] not in ("cache-pages 2", "cache-pages 4", "cache-pages 8", "cache-pages unlimited"):
+            raise ValueError("observation cache profile")
+        raw_cache = lines.pop(1).split(" ")[1]
+        cache = raw_cache if raw_cache == "unlimited" else int(raw_cache)
+        lines[0] = "AFSOBS02"
     if len(lines) < 5 or lines[0] != "AFSOBS02":
         raise ValueError("observation version")
     run = lines[1].split(" ")
@@ -154,8 +161,27 @@ def observation(wire):
         elif len(fields) != 2:
             raise ValueError("directory payload")
         entries.append(entry)
-    return {"version": 2, "view": "remounted", "failure": failure, "inspection_error": error,
+    result = {"version": 2, "view": "remounted", "failure": failure, "inspection_error": error,
         "raw_check": raw_check, "recovered_check": recovered_check, "entries": entries}
+    if cache is not None:
+        result.update(version=3, cache_pages=cache)
+    return result
+
+
+def bind_cache_profile(value, actual):
+    """Admitted configuration and observed policy must agree before replay."""
+    if not isinstance(actual, dict):
+        raise ValueError("observation object")
+    expected_version = 3 if value["version"] == 2 else 2
+    if type(actual.get("version")) is not int or actual["version"] != expected_version:
+        raise ValueError("scenario/observation profile version binding")
+    if value["version"] == 2:
+        expected = value["volume"]["tree_cache_pages"]
+        observed = actual.get("cache_pages")
+        if type(observed) is not type(expected) or observed != expected:
+            raise ValueError("scenario/observation cache profile binding")
+    elif "cache_pages" in actual:
+        raise ValueError("version-1 scenario cannot declare a cache profile")
 
 
 def admit_fault(fault, value):
@@ -197,6 +223,7 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
     if source_identity() != identity or executable_digest(binary) != binary_hash:
         raise ValueError("source or runner changed during execution")
     actual = observation(records.pop("actual.wire"))
+    bind_cache_profile(value, actual)
     expected = sorted(value["expected"], key=lambda entry: entry["path"])
     success = (actual["failure"] is None and actual["inspection_error"] is None
                and structural_success(actual) and actual["entries"] == expected)
@@ -214,6 +241,8 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
 
 def validate_trace(records):
     """Independent wire/base/result admission before semantic execution."""
+    scenario_value = scenario.validate(records["operations.afstrace"])
+    bind_cache_profile(scenario_value, json.loads(records["actual.json"], object_pairs_hook=scenario.unique))
     wire = records["block-io.afstrace"]
     if len(wire) < 96 or wire[:8] != b"AFSTRC00" or hashlib.sha256(wire[:-32]).digest() != wire[-32:]:
         raise ValueError("block trace integrity")
@@ -268,7 +297,7 @@ def validate_trace(records):
         end = last
         ranges.append((first, last))
     fault = admit_fault(json.loads(records["fault-model.json"], object_pairs_hook=bundle._unique),
-                        scenario.validate(records["operations.afstrace"]))
+                        scenario_value)
     selection = None
     if fault["kind"] == "power-cut-v1":
         if fault["operation"] >= len(ranges):
@@ -350,27 +379,33 @@ def replay(path, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
 
 def failure_signature(records):
     actual = json.loads(records["actual.json"])
+    value = scenario.validate(records["operations.afstrace"])
+    bind_cache_profile(value, actual)
+    def pack(signature):
+        if value["version"] == 2:
+            signature["tree_cache_pages"] = value["volume"]["tree_cache_pages"]
+        return encoded(signature)
     if actual["failure"] is not None:
         failure = actual["failure"]
-        operations = scenario.validate(records["operations.afstrace"])["operations"]
+        operations = value["operations"]
         index = failure["operation"]
         if not 0 <= index < len(operations):
             raise ValueError("failure has no semantic operation")
-        return encoded({"kind": "operation", "operation": operations[index], "error": failure["error"]})
+        return pack({"kind": "operation", "operation": operations[index], "error": failure["error"]})
     structural = {key: None if actual[key] is None else actual[key]["errors"]
                   for key in ("raw_check", "recovered_check")}
     if not structural_success(actual):
-        return encoded({"kind": "structure", "findings": structural,
+        return pack({"kind": "structure", "findings": structural,
                         "inspection_error": actual["inspection_error"]})
     if actual["inspection_error"] is not None:
-        return encoded({"kind": "inspection", "error": actual["inspection_error"]})
+        return pack({"kind": "inspection", "error": actual["inspection_error"]})
     expected = {tuple(entry["path"]): entry for entry in json.loads(records["expected.json"])}
     observed = {tuple(entry["path"]): entry for entry in actual["entries"]}
     differences = [{"path": list(path), "expected": expected.get(path), "actual": observed.get(path)}
         for path in sorted(set(expected) | set(observed)) if expected.get(path) != observed.get(path)]
     if not differences:
         raise ValueError("minimization requires a reproducing failure")
-    return encoded({"kind": "state", "differences": differences})
+    return pack({"kind": "state", "differences": differences})
 
 
 def minimize(path, output, binary, max_runs=128, file_bytes=bundle.DEFAULT_FILE_BYTES,

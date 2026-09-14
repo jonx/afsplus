@@ -17,12 +17,12 @@ enforces that.
 |---|---|---|
 | [measure-command.py](measure-command.py) | Record per-child CPU, wall time and normalized peak RSS without a shell or report overwrite | [benchmark contract](../testing/benchmark-contract.md) |
 | [test-measure-command.py](test-measure-command.py) | Temporary-fixture accounting, failure, signal and overwrite-refusal checks | [benchmark contract](../testing/benchmark-contract.md) |
-| [afsptest.py](afsptest.py) | Execute, reproduce and minimize private semantic bundles under the no-cut profile | [developer harness](../testing/developer-harness.md) |
+| [afsptest.py](afsptest.py) | Execute, reproduce and minimize private semantic bundles with explicit cache profiles and selected crash states | [developer harness](../testing/developer-harness.md) |
 | [test-afsptest.py](test-afsptest.py) | Fresh-process replay, negative controls, binding refusal and minimization checks | [developer harness](../testing/developer-harness.md) |
 | [replay-bundle.py](replay-bundle.py) | Bounded replay artifact publication and integrity verification; semantic validation is separate | [developer harness](../testing/developer-harness.md) |
 | [test-replay-bundle.py](test-replay-bundle.py) | Temporary-fixture publication, interruption, integrity and role-admission checks | [developer harness](../testing/developer-harness.md) |
 | [replay-scenario.py](replay-scenario.py) | Strict bounded semantic scenario admission for the replay runner | [developer harness](../testing/developer-harness.md) |
-| [test-replay-scenario.py](test-replay-scenario.py) | Scenario operation, label, payload and geometry admission fixtures | [developer harness](../testing/developer-harness.md) |
+| [test-replay-scenario.py](test-replay-scenario.py) | Scenario operation, label, payload, geometry and versioned cache-profile admission fixtures | [developer harness](../testing/developer-harness.md) |
 | [tools-spec.md](tools-spec.md) | Specification of the official CLI tools | [docs/README.md](../docs/README.md) |
 | [progress-markers.py](progress-markers.py) | Generate and verify milestone/stage navigation labels from the milestone table | [documentation rules](../docs/DOCUMENTATION.md) |
 | [check-docs.py](check-docs.py) | Documentation contract checker: links, anchors, TOCs, ADR index, navigation blocks, index rows, status rules | [docs/DOCUMENTATION.md](../docs/DOCUMENTATION.md) |

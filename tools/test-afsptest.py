@@ -26,6 +26,103 @@ def fixture():
 
 
 class ReplayTests(unittest.TestCase):
+    def test_v2_ladder_profiles_survive_fresh_replay_without_artifact_writes(self):
+        for pages in (2, 4, 8, "unlimited"):
+            value = fixture()
+            value["version"] = 2
+            value["volume"]["tree_cache_pages"] = pages
+            value["operations"] = [
+                {"op": "mkdir", "label": "d", "parent": "root", "name": "src"},
+                {"op": "create", "label": "f", "parent": "d", "name": "café", "data": "00ff"},
+                {"op": "write", "label": "f", "offset": 4, "data": "42"},
+                {"op": "truncate", "label": "f", "size": 2},
+                {"op": "rename", "label": "f", "parent": "root", "name": "out"},
+                {"op": "rmdir", "label": "d"},
+                {"op": "create", "label": "spare", "parent": "root", "name": "temp", "data": ""},
+                {"op": "unlink", "label": "spare"}, {"op": "sync"}, {"op": "remount"}]
+            value["expected"] = [{"path": ["out"], "kind": "file", "data": "00ff"}]
+            records, success = tool.execute(tool.encoded(value), BINARY)
+            self.assertTrue(success)
+            actual = json.loads(records["actual.json"])
+            self.assertEqual(actual["version"], 3)
+            self.assertEqual(actual["cache_pages"], pages)
+            with tempfile.TemporaryDirectory(prefix="afsplus-profile-replay-") as temporary:
+                path = Path(temporary) / "bundle"
+                tool.bundle.publish(path, records)
+                before = {p.name: p.read_bytes() for p in path.iterdir()}
+                result = self.cli("replay", path)
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                self.assertEqual(before, {p.name: p.read_bytes() for p in path.iterdir()})
+
+    def test_v2_profile_binding_rejects_resealed_mismatches_and_silent_fallback(self):
+        value = fixture()
+        value["version"] = 2
+        value["volume"]["tree_cache_pages"] = 2
+        records, success = tool.execute(tool.encoded(value), BINARY)
+        self.assertTrue(success)
+        for change in ({"cache_pages": 4}, {"cache_pages": True}, {"version": 2}, {"cache_pages": "2"}):
+            edited = dict(records)
+            actual = json.loads(records["actual.json"])
+            actual.update(change)
+            edited["actual.json"] = tool.encoded(actual)
+            with self.assertRaisesRegex(ValueError, "binding"):
+                tool.validate_trace(edited)
+        edited = dict(records)
+        actual = json.loads(records["actual.json"])
+        del actual["cache_pages"]
+        edited["actual.json"] = tool.encoded(actual)
+        with tempfile.TemporaryDirectory(prefix="afsplus-profile-mismatch-") as temporary:
+            path = Path(temporary) / "resealed"
+            tool.bundle.publish(path, edited)
+            with self.assertRaisesRegex(ValueError, "binding"):
+                tool.replay(path, BINARY)
+        for text in ("02", "0", "true", "Unlimited"):
+            with self.assertRaises(ValueError):
+                tool.observation(f"AFSOBS03\ncache-pages {text}\nrun ok\nraw-check -\nrecovered-check -\nobserve ok\n".encode())
+
+    def test_v2_minimization_keeps_profile_in_scenario_observation_and_signature(self):
+        for pages in (2, 4, 8, "unlimited"):
+            value = fixture()
+            value["version"] = 2
+            value["volume"]["tree_cache_pages"] = pages
+            value["operations"][:0] = [
+                {"op": "create", "label": "spare", "parent": "root", "name": "temp", "data": ""},
+                {"op": "unlink", "label": "spare"}]
+            value["expected"][0]["data"] = "ffff"
+            records, success = tool.execute(tool.encoded(value), BINARY)
+            self.assertFalse(success)
+            self.assertEqual(json.loads(tool.failure_signature(records))["tree_cache_pages"], pages)
+            other = dict(records)
+            changed_value = json.loads(records["operations.afstrace"])
+            changed_value["volume"]["tree_cache_pages"] = 4 if pages == 2 else 2
+            changed_actual = json.loads(records["actual.json"])
+            changed_actual["cache_pages"] = 4 if pages == 2 else 2
+            other["operations.afstrace"] = tool.encoded(changed_value)
+            other["actual.json"] = tool.encoded(changed_actual)
+            self.assertNotEqual(tool.failure_signature(records), tool.failure_signature(other))
+            with tempfile.TemporaryDirectory(prefix="afsplus-profile-minimize-") as temporary:
+                root = Path(temporary)
+                tool.bundle.publish(root / "original", records)
+                result = tool.minimize(root / "original", root / "reduced", BINARY)
+                self.assertLess(result["operations"], len(value["operations"]))
+                reduced = tool.bundle.read_bundle(root / "reduced")
+                self.assertEqual(json.loads(reduced["operations.afstrace"])["volume"]["tree_cache_pages"], pages)
+                self.assertEqual(json.loads(reduced["actual.json"])["cache_pages"], pages)
+                self.assertEqual(tool.failure_signature(reduced), tool.failure_signature(records))
+                self.assertFalse(tool.replay(root / "reduced", BINARY))
+
+    def test_v2_selected_crash_observation_uses_each_cache_profile(self):
+        for pages in (2, 4, 8, "unlimited"):
+            value = fixture()
+            value["version"] = 2
+            value["volume"]["tree_cache_pages"] = pages
+            value["expected"] = []
+            fault = {"version": 1, "kind": "power-cut-v1", "operation": 0, "offset": 1, "variant": 0}
+            records, success = tool.execute(tool.encoded(value), BINARY, fault=fault)
+            self.assertTrue(success)
+            self.assertEqual(json.loads(records["actual.json"])["cache_pages"], pages)
+            self.assertTrue(tool.verify_replay(records, BINARY, tool.bundle.DEFAULT_FILE_BYTES, tool.bundle.DEFAULT_TOTAL_BYTES))
+
     def cli(self, *args):
         return subprocess.run([sys.executable, str(Path(tool.__file__)), "--runner", str(BINARY), *map(str, args)],
             capture_output=True, timeout=120)

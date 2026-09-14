@@ -2,7 +2,7 @@
 use afsplus_block::{BlockDevice, MemoryBackend};
 use afsplus_check::{
     replay_trace::{base_digest, Limits, Trace},
-    scenario::{inspect_checked, Plan},
+    scenario::Plan,
 };
 use std::io::{self, Read, Write};
 
@@ -86,7 +86,8 @@ fn run() -> Result<(), String> {
     } else {
         (None, input.as_slice())
     };
-    let mut run = Plan::parse(commands)?.run()?;
+    let plan = Plan::parse(commands)?;
+    let mut run = plan.run()?;
     if let Some((operation, offset, variant)) = fault {
         if run.failure.is_some() {
             return Err("fault scenario did not finish recording".into());
@@ -117,8 +118,23 @@ fn run() -> Result<(), String> {
         operations: run.log,
     }
     .encode(limits)?;
-    let inspection = inspect_checked(run.result.clone(), 16 * 1024 * 1024);
-    let mut observed = String::from("AFSOBS02\n");
+    let inspection = plan.inspect_checked(run.result.clone(), 16 * 1024 * 1024);
+    let mut observed = if let Some(pages) = plan.cache_profile() {
+        if inspection
+            .cache_pages
+            .is_some_and(|effective| effective != pages)
+        {
+            return Err("inspection cache policy mismatch".into());
+        }
+        let profile = if pages == usize::MAX {
+            "unlimited".to_owned()
+        } else {
+            pages.to_string()
+        };
+        format!("AFSOBS03\ncache-pages {profile}\n")
+    } else {
+        String::from("AFSOBS02\n")
+    };
     match run.failure {
         Some((index, error)) => {
             observed.push_str(&format!("run error {index} {}\n", hex(error.as_bytes())))

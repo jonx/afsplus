@@ -50,9 +50,13 @@ def validate(encoded):
         raise ValueError("scenario input limit")
     scenario = json.loads(encoded, object_pairs_hook=unique)
     fields(scenario, "version volume operations expected")
-    integer(scenario["version"], 1, 1)
+    version = integer(scenario["version"], 1, 2)
     volume = scenario["volume"]
-    fields(volume, "block_size blocks region_size log_slots")
+    fields(volume, "block_size blocks region_size log_slots" + (" tree_cache_pages" if version == 2 else ""))
+    if version == 2:
+        pages = volume["tree_cache_pages"]
+        if not ((type(pages) is int and pages in (2, 4, 8)) or pages == "unlimited"):
+            raise ValueError("unsupported scenario tree cache profile")
     # This runner profile follows mkfs_impl; larger format profiles need qualification.
     bs = integer(volume["block_size"], 4096, 4096)
     region = integer(volume["region_size"], 64, 16384)
@@ -133,6 +137,9 @@ def compile_commands(encoded):
     volume = scenario["volume"]
     lines = ["AFSPSC01", "format {} {} {} {}".format(
         volume["block_size"], volume["blocks"], volume["region_size"], volume["log_slots"])]
+    if scenario["version"] == 2:
+        lines[0] = "AFSPSC02"
+        lines[1] += " " + str(volume["tree_cache_pages"])
     for operation in scenario["operations"]:
         kind = operation["op"]
         if kind in ("mkdir", "create"):

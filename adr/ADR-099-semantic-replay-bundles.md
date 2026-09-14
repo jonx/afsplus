@@ -7,7 +7,9 @@ Status: Proposed
 A replay bundle preserves the inputs needed to reproduce a specific filesystem
 qualification run. The bundle binds a versioned semantic scenario, source revision
 and dirty-worktree identity, base geometry/image identity, recorded block trace,
-fault-model version and selected cut, expected state and observed diagnostics.
+fault-model version and selected cut, explicit resource policy, expected state
+and observed diagnostics. Versioned cache profiles bind execution, remount and
+recovered observation; missing or conflicting policy records are rejected.
 Each file has a fixed relative role and content digest in a manifest. Reject
 absolute paths, parent traversal, symlinks, duplicate roles, missing roles,
 unknown versions and unbounded file sizes before replay admission.
@@ -40,7 +42,7 @@ through explicit outcome fields; integrity alone cannot imply test success.
 A minimizer starts from a reproducing failure and tests deletion of semantic
 operation ranges under the same deterministic settings and fault model. Invalid
 label dependencies are rejected candidates. Retain a reduction only when the
-same observable failure signature recurs; an unrelated parser error, resource
+same observable failure signature, including any explicit cache profile, recurs; an unrelated parser error, resource
 refusal or missing prerequisite cannot replace the original failure. Preserve the
 original bundle and publish a new complete bundle for the reduced reproducer.
 

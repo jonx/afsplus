@@ -22,6 +22,25 @@ def fixture():
 
 
 class ScenarioTests(unittest.TestCase):
+    def test_v2_cache_profile_is_explicit_and_compiled_canonically(self):
+        for pages in (2, 4, 8, "unlimited"):
+            value = fixture()
+            value["version"] = 2
+            value["volume"]["tree_cache_pages"] = pages
+            raw = json.dumps(value).encode()
+            self.assertEqual(scenario.validate(raw), value)
+            self.assertTrue(scenario.compile_commands(raw).startswith(
+                f"AFSPSC02\nformat 4096 256 64 8 {pages}\n".encode()))
+
+    def test_missing_unknown_or_cross_version_cache_profiles_refuse(self):
+        for pages in (None, 0, 1, 3, 9, True, 2.0, "2", "02", {}, []):
+            value = fixture()
+            value["version"] = 2
+            if pages is not None: value["volume"]["tree_cache_pages"] = pages
+            with self.assertRaises(ValueError): scenario.validate(json.dumps(value).encode())
+        value = fixture()
+        value["volume"]["tree_cache_pages"] = 2
+        with self.assertRaises(ValueError): scenario.validate(json.dumps(value).encode())
     def test_image_operation_ladder_preserves_exact_input(self):
         value = fixture()
         self.assertEqual(scenario.validate(json.dumps(value).encode()), value)
