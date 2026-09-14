@@ -24,6 +24,7 @@
 - [Integrated semantic bundles and minimization](#integrated-semantic-bundles-and-minimization)
 - [Selected crash bundles](#selected-crash-bundles)
 - [Checker-bound replay verdicts](#checker-bound-replay-verdicts)
+- [Integrated tree-cache profiles](#integrated-tree-cache-profiles)
 
 <!-- /toc -->
 
@@ -472,3 +473,43 @@ explicit namespace-output budget refusal. Python gates require both reports,
 reject contradictory verdicts and preserve structural failure signatures.
 These tests establish verdict integration; the checker's full wire-surface
 coverage is tracked by its [corruption corpus](corruption-corpus.md).
+
+
+## Integrated tree-cache profiles
+
+[The runtime policy](../docs/27-rust-implementation-strategy.md#10-transaction-tree-resource-policy)
+applies at mount, including replay, and at every transaction allocator. Run:
+
+```sh
+cargo test -p afsplus-check --test cache_profiles -- --nocapture
+cargo test -p afsplus-core allocation_cache_keeps_spilled_nodes_across_checkpoint_rotation
+cargo test -p afsplus-core constrained_
+```
+
+The [integrated matrix](../crates/afsplus-check/tests/cache_profiles.rs) uses
+2/4/8 staged pages and the unlimited profile. A 192-file wide-name batch forces
+actual spills in every constrained profile. Creation, deletion and remount must
+preserve the exact namespace and bytes. A separately fsynced, uncheckpointed
+192-file window must replay under the chosen mount profile and be idempotent.
+Commit bytes and flushes must equal observed device requests, including early
+spills. Zero-page configuration and changes during an open window must refuse.
+
+A directory-split fixture must produce a real spill with two pages. Every modeled
+write/flush cut enumerates the existing whole-write subsets and representative
+tears, requiring a clean raw checker and exactly the old or new namespace. Four
+injected early write failures must preserve the old view and allow a successful
+retry with exact contents. These checks use memory devices exclusively.
+
+The allocation-root rotation regression spreads dirty records across several
+leaves and compares both cached node sets with fresh traversals after three
+checkpoints. Both selectable checkpoints must pass full invariant sweeps.
+The snapshot profile matrix checks shared survivors, historical bytes after
+batched deletion and remount, both checkpoint views and physical-request
+accounting under all four profiles.
+
+Use the [batch resource workload](benchmark-contract.md#tree-cache-batch-measurements)
+for per-profile heap and I/O reports. This matrix proves the named paths; other
+mutation families need their own forced-eviction, error, crash and low-space
+cases. Bulk tree builders, total-volume memory caps, shared-cache pinning and native profiles have
+separate qualification requirements. Retain source/profile identity and failure
+artifacts with each broader scenario's semantic oracle.

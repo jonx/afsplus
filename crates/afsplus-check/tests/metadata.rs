@@ -57,7 +57,10 @@ fn formatted(snapshots: bool, log_slots: u16) -> MemoryBackend {
 fn open<D: BlockDevice>(dev: D, mode: MountMode) -> Volume<D> {
     mount_with_snapshot_limits(
         dev,
-        MountOptions { mode },
+        MountOptions {
+            mode,
+            ..Default::default()
+        },
         SnapshotWorkLimits {
             max_edit_records: 4096,
             max_views: 128,

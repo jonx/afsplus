@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Integrate staged-tree cache profiles into transactions and recovery](#2026-09-14--integrate-staged-tree-cache-profiles-into-transactions-and-recovery)
 - [2026-09-14 — Measure requested heap across real filesystem phases](#2026-09-14--measure-requested-heap-across-real-filesystem-phases)
 - [2026-09-14 — Explain each completion-table entry](#2026-09-14--explain-each-completion-table-entry)
 - [2026-09-14 — Require checker evidence in replay verdicts](#2026-09-14--require-checker-evidence-in-replay-verdicts)
@@ -124,6 +125,63 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Integrate staged-tree cache profiles into transactions and recovery
+
+Carried the optional nonzero mount cache policy into all nineteen volume
+transaction constructors and the reserved allocation-root pool. The shared COW
+engine consumes the transaction policy, including empty-tree initialization,
+snapshot/lifetime edits, shared-reference edits and intent recovery. Existing
+callers keep the unlimited default through explicit default mount fields. Changing
+policy during an open window refuses, preserving that transaction's resource
+contract. The disk format and C ABI did not change.
+
+This refines the implicit unlimited behavior into an explicit runtime choice;
+the earlier rationale of letting modern hosts retain their staged working set is
+preserved. The policy covers each shared-engine mutation. Bulk builders, pending
+publication buffers, batch overlays and total-volume admission remain distinct
+resource work. The specification records both pre-eviction and post-eviction
+residency because admitting an image temporarily uses one extra staged entry.
+
+Fixed the prerequisite allocation-root cache assumption: its retained node set
+must come from every live pool allocation, including spilled nodes. Using only
+pending write buffers would omit reachable nodes and permit later premature
+reuse. A three-checkpoint regression compares cached sets with fresh traversal
+and full sweeps of both selectable checkpoints. Commit accounting also includes
+all successful provisional writes; unique final-node counts stay separate.
+
+The new integrated matrix covers 2/4/8/unlimited profiles through a 192-file batch,
+deletes and remount; an uncheckpointed fsynced window replays under the same
+profile. A real two-page directory split passes every modeled cut. Four early
+spill failures preserve the old view and allow retry. Snapshot/shared-survivor
+checks preserve historical bytes across deletion and remount in all four profiles.
+
+Retained debug measurements in `/private/tmp/afsplus-cache-qualification-6xwvt3zh`
+include phase heap/I/O, per-process CPU/RSS, observed source/binary hashes and a
+separate toolchain observation. The 16 MiB fixture is outside the additional
+phase heap figures below; batch inputs and publication buffers are included.
+
+| Staged pages | Create peak above entry, bytes | Create writes | Delete peak above entry, bytes | Delete writes |
+|---|---:|---:|---:|---:|
+| 2 | 1,770,528 | 645 | 119,949 | 199 |
+| 4 | 1,782,816 | 438 | 128,141 | 25 |
+| 8 | 1,799,200 | 437 | 142,563 | 22 |
+| Unlimited | 1,941,024 | 437 | 169,088 | 22 |
+
+The two-page setting saved requested heap while increasing repeated I/O. Four and
+eight pages avoided most of that cost on this workload. One debug sample cannot
+select a universal default or establish physical-storage performance.
+
+Validation: 507 Rust tests passed, 10 explicit qualification tests ignored,
+workspace Clippy and formatting passed, five measurement tests and thirteen
+documentation tests passed. The full log is
+`/private/tmp/afsplus-integrated-cache-workspace.log`.
+
+Stage A remains partial: the semantic operation ladder and its retained artifacts
+need the profile matrix, and the harness requires every mutation suite to cover
+its variants. Wider workload, bulk-builder, whole-heap and native requirements
+stay in the full queue and their later milestone order. Native hardware evidence
+was not produced by these host tests.
 
 ## 2026-09-14 — Measure requested heap across real filesystem phases
 

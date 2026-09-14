@@ -72,6 +72,8 @@ pub struct FileAllocationPage {
 /// Measured cost of the last committed transaction.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CommitStats {
+    /// Tree work across the transaction, including early spill writes.
+    pub tree_mutations: crate::cow_tree::TreeMutationStats,
     pub data_blocks_written: u64,
     /// Previously written data overwritten at its committed physical address. This is
     /// a subset of `data_blocks_written` and is zero under the default full
@@ -79,7 +81,7 @@ pub struct CommitStats {
     pub data_blocks_overwritten_in_place: u64,
     /// Previously unwritten private blocks initialized before COW publication.
     pub data_blocks_initialized_from_reservation: u64,
-    /// COW metadata blocks (records, directories, object map, retired list).
+    /// Successful metadata write requests, including repeated provisional spills.
     pub metadata_blocks_written: u64,
     pub bitmap_pages_written: u64,
     pub region_descriptors_written: u64,
@@ -306,6 +308,7 @@ pub struct FileEditLimits {
 }
 
 pub struct Volume<D: BlockDevice> {
+    tree_cache_pages: std::num::NonZeroUsize,
     dev: D,
     ident: Identification,
     checkpoint: Checkpoint,
@@ -360,6 +363,7 @@ impl<D: BlockDevice> Volume<D> {
         mount_mode: MountMode,
     ) -> Self {
         Volume {
+            tree_cache_pages: std::num::NonZeroUsize::MAX,
             dev,
             ident,
             checkpoint: selection.chosen,
@@ -426,6 +430,25 @@ impl<D: BlockDevice> Volume<D> {
         self.orphan_cleanup_extent_budget = extents.max(1);
     }
 
+    /// Bound resident staged images in each COW tree mutation. Other metadata,
+    /// decoded nodes, accumulated publication buffers and data have separate
+    /// memory costs. Runtime-only; reapply through MountOptions at remount.
+    /// An open intent window must be closed before changing its resource policy.
+    pub fn set_tree_cache_pages(&mut self, pages: usize) -> Result<(), CoreError> {
+        let pages = std::num::NonZeroUsize::new(pages).ok_or(CoreError::PrototypeLimit(
+            "tree cache requires at least one page",
+        ))?;
+        if self.window.is_some() {
+            return Err(CoreError::Busy);
+        }
+        self.tree_cache_pages = pages;
+        Ok(())
+    }
+
+    pub fn tree_cache_pages(&self) -> usize {
+        self.tree_cache_pages.get()
+    }
+
     pub fn orphan_cleanup_extent_budget(&self) -> usize {
         self.orphan_cleanup_extent_budget
     }
@@ -469,7 +492,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         self.commit_transaction(
             generation,
             self.checkpoint.next_object_id,
@@ -1040,7 +1064,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         self.protect_emergency_headroom(&mut tx);
         if overwrite_in_place {
             let mut data_writes = Vec::with_capacity(write_block_count as usize);
@@ -1266,7 +1291,8 @@ impl<D: BlockDevice> Volume<D> {
                 generation,
                 self.reclaim_batch_blocks,
                 self.alloc_rover_region,
-            )?;
+            )?
+            .with_tree_cache_pages(self.tree_cache_pages);
             self.protect_emergency_headroom(&mut tx);
             let staged = self.stage_extent_delta(
                 &mut tx,
@@ -1351,7 +1377,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         if new_size > record.size_bytes {
             self.protect_emergency_headroom(&mut tx);
         }
@@ -1502,7 +1529,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         self.protect_emergency_headroom(&mut tx);
         let mut additions = Vec::new();
         for (logical_start, logical_end) in holes {
@@ -1617,7 +1645,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         self.protect_emergency_headroom(&mut tx);
 
         // One more reference per source run. A run shared for the first time
@@ -1989,7 +2018,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         self.protect_emergency_headroom(&mut tx);
         self.shared_refs_edit(generation)?.require_root();
         for extent in &shared_destination_extents {
@@ -2188,7 +2218,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         self.protect_emergency_headroom(&mut tx);
 
         // Data first: allocate one contiguous extent and stage its blocks.
@@ -2367,7 +2398,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         self.protect_emergency_headroom(&mut tx);
         let directory_root_lba = tx.allocate(&mut self.dev)?;
         let directory_record_lba = tx.allocate(&mut self.dev)?;
@@ -2741,7 +2773,8 @@ impl<D: BlockDevice> Volume<D> {
             self.reclaim_batch_blocks
                 .max(MIN_ORPHAN_CLEANUP_RECLAIM_BLOCKS),
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         let new_record_lba = tx.allocate(&mut self.dev)?;
         tx.retire(&mut self.dev, record_lba)?;
 
@@ -2851,7 +2884,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         let directory_root_lba = tx.allocate(&mut self.dev)?;
         let directory_record_lba = tx.allocate(&mut self.dev)?;
         let record = ObjectRecord {
@@ -3014,7 +3048,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
 
         let parent_record_new_lba = tx.allocate(&mut self.dev)?;
         let victim_record_new_lba = if keep_file_object {
@@ -3164,7 +3199,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         self.protect_emergency_headroom(&mut tx);
         let file_new_lba = tx.allocate(&mut self.dev)?;
         let parent_new_lba = tx.allocate(&mut self.dev)?;
@@ -3365,7 +3401,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         let source_parent_new_lba = tx.allocate(&mut self.dev)?;
         let target_parent_new_lba = if target_parent_id == source_parent_id {
             source_parent_new_lba
@@ -3929,7 +3966,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         if ops
             .iter()
             .any(|op| matches!(op, BatchOp::CreateFile { .. }))
@@ -4979,7 +5017,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             0,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         self.protect_emergency_headroom(&mut tx);
         Ok(OpenWindow {
             tx,
@@ -5527,7 +5566,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             0,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         let mut pending = PendingBatch {
             dir_changes: BTreeMap::new(),
             dir_timestamps: BTreeMap::new(),
@@ -6198,7 +6238,8 @@ impl<D: BlockDevice> Volume<D> {
         // commit leaves the committed view intact.
         self.allocation_tree_cache = Some((current_blocks.clone(), older_blocks.clone()));
         let pool_lbas = allocation_root::reserved_pool_lbas(&geo)?;
-        let mut pool = ReservedTreePool::new(pool_lbas, &current_blocks, &older_blocks)?;
+        let mut pool = ReservedTreePool::new(pool_lbas, &current_blocks, &older_blocks)?
+            .with_tree_cache_pages(self.tree_cache_pages);
         let encoded: Vec<_> = dirty_records
             .iter()
             .map(|(region, record)| {
@@ -6228,7 +6269,7 @@ impl<D: BlockDevice> Volume<D> {
             .copied()
             .filter(|lba| !retired.contains(lba))
             .collect();
-        new_blocks.extend(mutation.writes.iter().map(|(lba, _)| *lba));
+        new_blocks.extend(pool.allocated_nodes());
         new_blocks.sort_unstable();
         new_blocks.dedup();
         Ok((mutation, new_blocks))
@@ -6328,7 +6369,7 @@ impl<D: BlockDevice> Volume<D> {
                             generation,
                             &operations,
                         )?;
-                        shared_nodes_written = mutation.writes.len() as u64;
+                        shared_nodes_written = mutation.stats.final_nodes_written;
                         meta_writes.extend(mutation.writes);
                         shared_root = mutation.root_lba;
                     }
@@ -6345,21 +6386,24 @@ impl<D: BlockDevice> Volume<D> {
         snapshot_stats.registry_nodes_written = registry_nodes;
         let finished = tx.finish(&mut self.dev)?;
         if let Some(lifetimes) = finished.snapshot_lifetimes {
-            snapshot_stats.lifetime_nodes_written = lifetimes.tree.writes.len() as u64;
+            snapshot_stats.lifetime_nodes_written = lifetimes.tree.stats.final_nodes_written;
             snapshot_stats.ledger_retired_blocks = lifetimes.state.retained_blocks;
             meta_writes.extend(lifetimes.tree.writes);
         }
         let (allocation_root, new_allocation_tree_blocks) =
             self.mutate_allocation_root(generation, &finished.dirty_records)?;
         let new_allocation_root_block = allocation_root.root_lba;
+        let mut tree_mutations = finished.tree_mutations;
+        tree_mutations.include(allocation_root.stats);
         meta_writes.extend(allocation_root.writes);
         meta_writes.extend(finished.reclaim_writes);
 
         let mut stats = CommitStats {
+            tree_mutations,
             data_blocks_written: data_writes.len() as u64 + prewritten_data_blocks,
             data_blocks_overwritten_in_place: in_place_data_blocks,
             data_blocks_initialized_from_reservation: initialized_reservations,
-            metadata_blocks_written: meta_writes.len() as u64,
+            metadata_blocks_written: meta_writes.len() as u64 + tree_mutations.staged_spill_writes,
             bitmap_pages_written: finished.bitmap_writes.len() as u64,
             region_descriptors_written: finished.descriptor_writes.len() as u64,
             allocation_records_updated: finished.dirty_records.len() as u64,
@@ -6743,6 +6787,81 @@ mod fragmentation_tests {
     use super::*;
     use crate::{mkfs, mount, MkfsParams};
     use afsplus_block::MemoryBackend;
+
+    #[test]
+    fn allocation_cache_keeps_spilled_nodes_across_checkpoint_rotation() {
+        let mut dev = MemoryBackend::new(4096, 16 * 1024);
+        mkfs(
+            &mut dev,
+            &MkfsParams {
+                uuid: [0xcc; 16],
+                label: "CacheRotation".into(),
+                region_size: 16,
+                reclaim_caps: Default::default(),
+                log_slots: 0,
+                shared_extents: false,
+                data_policy: false,
+                name_policy: crate::NamePolicy::Sensitive,
+                timestamp: Timespec::default(),
+            },
+        )
+        .unwrap();
+        let mut volume = mount(afsplus_block::TraceBackend::new(dev)).unwrap();
+        volume.set_tree_cache_pages(2).unwrap();
+        for round in 0..3 {
+            // Spread dirty region records across allocation-root leaf boundaries.
+            volume.alloc_rover_region = 120 + round * 120;
+            let names: Vec<_> = (0..256).map(|i| format!("r{round}-{i:04}")).collect();
+            let operations: Vec<_> = names
+                .iter()
+                .map(|name| BatchOp::CreateFile {
+                    parent_id: OBJECT_ROOT,
+                    name,
+                    content: b"",
+                })
+                .collect();
+            volume.dev.reset();
+            volume.run_batch(&operations, Timespec::default()).unwrap();
+            let stats = volume.last_commit_stats().unwrap();
+            assert!(
+                stats.allocation_tree_nodes_written > 2,
+                "fixture must spill allocation-root nodes"
+            );
+            assert!(stats.tree_mutations.staged_spill_writes > 0);
+            assert_eq!(stats.bytes_written, volume.dev.stats().bytes_written);
+            let (cached, older_cached) = volume.allocation_tree_cache.as_ref().unwrap().clone();
+            for (checkpoint, mut expected) in [
+                (volume.checkpoint.clone(), cached),
+                (volume.other_checkpoint.clone().unwrap(), older_cached),
+            ] {
+                let mut actual = allocation_root::load_tree_blocks(
+                    &mut volume.dev,
+                    &volume.ident.geometry(),
+                    checkpoint.allocation_root_block,
+                    checkpoint.generation,
+                )
+                .unwrap();
+                actual.sort_unstable();
+                expected.sort_unstable();
+                assert_eq!(
+                    expected, actual,
+                    "checkpoint {} cache loses spilled nodes",
+                    checkpoint.generation
+                );
+                let state = crate::verify::load_committed_state(
+                    &mut volume.dev,
+                    &volume.ident,
+                    &checkpoint,
+                )
+                .unwrap();
+                assert!(
+                    crate::verify::full_sweep(&state, &volume.ident.geometry(), &checkpoint)
+                        .is_empty()
+                );
+            }
+        }
+        assert_eq!(volume.list_root().unwrap().len(), 768);
+    }
 
     #[test]
     fn fragmented_allocation_does_not_repeat_oversized_searches() {

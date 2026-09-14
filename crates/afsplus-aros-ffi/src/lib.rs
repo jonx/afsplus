@@ -424,7 +424,13 @@ pub extern "C" fn afsplus_aros_mount(
             write_block: device.write_block,
             flush: device.flush,
         };
-        let vfs = Vfs::mount(callback_device, MountOptions { mode })?;
+        let vfs = Vfs::mount(
+            callback_device,
+            MountOptions {
+                mode,
+                ..Default::default()
+            },
+        )?;
         let adapter = ArosAdapter::new(
             vfs,
             ArosConfig {

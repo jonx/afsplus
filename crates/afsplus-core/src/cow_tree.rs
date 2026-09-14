@@ -19,6 +19,12 @@ use crate::CoreError;
 /// region transaction allocator; the allocation-root tree uses a permanently
 /// reserved triple-version pool to avoid describing its own allocations.
 pub trait TreeAllocator<D: BlockDevice> {
+    /// Runtime staged-image budget for each tree mutation in this transaction.
+    fn tree_cache_pages(&self) -> usize {
+        usize::MAX
+    }
+    /// Successful mutation accounting, including provisional spill I/O.
+    fn record_tree_mutation(&mut self, _stats: TreeMutationStats) {}
     fn allocate_tree_block(&mut self, dev: &mut D) -> Result<u64, CoreError>;
     /// Quarantines a node the committed state reaches.
     fn retire_tree_block(&mut self, dev: &mut D, lba: u64) -> Result<(), CoreError>;
@@ -29,6 +35,12 @@ pub trait TreeAllocator<D: BlockDevice> {
 }
 
 impl<D: BlockDevice> TreeAllocator<D> for TxAllocator {
+    fn tree_cache_pages(&self) -> usize {
+        self.tree_cache_pages.get()
+    }
+    fn record_tree_mutation(&mut self, stats: TreeMutationStats) {
+        self.tree_mutations.include(stats);
+    }
     fn allocate_tree_block(&mut self, dev: &mut D) -> Result<u64, CoreError> {
         self.allocate(dev)
     }
@@ -61,12 +73,45 @@ pub struct TreeMutationStats {
     pub staged_spill_writes: u64,
     /// Provisional images reloaded while the same transaction continues.
     pub staged_spill_reloads: u64,
-    /// Maximum final staged images retained in memory at once.
+    /// Maximum resident staged entries after enforcing the cache limit.
     pub max_resident_staged_nodes: u64,
+    /// Resident staged entries before eviction, including the admitted image.
+    /// Decoding/encoding temporaries and caller-held mutation results are separate.
+    pub max_staged_nodes_before_eviction: u64,
     /// Maximum decoded or derived full nodes alive at once. Compact descent
     /// frames and child descriptors are not full-page equivalents.
     pub max_live_decoded_nodes: u64,
     pub max_depth: u8,
+}
+
+impl TreeMutationStats {
+    /// Sum work across mutations; residency/depth fields retain their maximum.
+    pub fn include(&mut self, other: Self) {
+        self.node_reads += other.node_reads;
+        self.device_reads += other.device_reads;
+        self.nodes_allocated += other.nodes_allocated;
+        self.committed_nodes_retired += other.committed_nodes_retired;
+        self.final_nodes_written += other.final_nodes_written;
+        self.splits += other.splits;
+        self.root_splits += other.root_splits;
+        self.deletes += other.deletes;
+        self.merges += other.merges;
+        self.redistributions += other.redistributions;
+        self.root_collapses += other.root_collapses;
+        self.staged_nodes_discarded += other.staged_nodes_discarded;
+        self.staged_spill_writes += other.staged_spill_writes;
+        self.staged_spill_reloads += other.staged_spill_reloads;
+        self.max_resident_staged_nodes = self
+            .max_resident_staged_nodes
+            .max(other.max_resident_staged_nodes);
+        self.max_staged_nodes_before_eviction = self
+            .max_staged_nodes_before_eviction
+            .max(other.max_staged_nodes_before_eviction);
+        self.max_live_decoded_nodes = self
+            .max_live_decoded_nodes
+            .max(other.max_live_decoded_nodes);
+        self.max_depth = self.max_depth.max(other.max_depth);
+    }
 }
 
 #[derive(Debug)]
@@ -85,8 +130,8 @@ pub enum TreeOperation<'a> {
 /// Applies multiple upserts under one COW overlay. Repeated changes to a node
 /// allocated by this transaction update its staged image in place; committed
 /// nodes are never overwritten. This default entry point keeps the complete
-/// dirty overlay in memory for modern hosts; [`mutate_many_with_cache_limit`]
-/// provides provisional spill/reload for constrained profiles. After any
+/// dirty overlay in memory when the allocator uses its default budget;
+/// constrained allocator profiles use provisional spill/reload. After any
 /// error, the caller must abort and discard the surrounding allocator
 /// transaction rather than reuse its partially prepared state.
 #[allow(clippy::too_many_arguments)]
@@ -112,8 +157,8 @@ where
 
 /// Deletes several keys under one COW overlay. Empty children are removed,
 /// underfull siblings are merged or redistributed, and a one-child root is
-/// collapsed. As with [`upsert_many`], dirty-node spill is a later tiny-cache
-/// layer; committed blocks are never overwritten. An error requires aborting
+/// collapsed. As with [`upsert_many`], the allocator's cache policy controls
+/// dirty-node spill; committed blocks are never overwritten. An error requires aborting
 /// and discarding the surrounding allocator transaction.
 #[allow(clippy::too_many_arguments)]
 pub fn delete_many<D, A>(
@@ -151,6 +196,7 @@ where
     D: BlockDevice,
     A: TreeAllocator<D>,
 {
+    let cache_pages = tx.tree_cache_pages();
     mutate_many_with_cache_limit(
         dev,
         geo,
@@ -159,7 +205,7 @@ where
         spec,
         new_generation,
         operations,
-        usize::MAX,
+        cache_pages,
     )
 }
 
@@ -217,6 +263,7 @@ where
     D: BlockDevice,
     A: TreeAllocator<D>,
 {
+    let cache_pages = tx.tree_cache_pages();
     mutate_many_inner(
         dev,
         geo,
@@ -225,7 +272,7 @@ where
         spec,
         new_generation,
         operations,
-        usize::MAX,
+        cache_pages,
         true,
     )
 }
@@ -337,6 +384,7 @@ where
     context.stats.final_nodes_written = context.writes.len() as u64;
     context.stats.max_live_decoded_nodes = context.decoded_residency.peak.get();
     debug_assert_eq!(context.decoded_residency.live.get(), 0);
+    context.tx.record_tree_mutation(context.stats);
     let writes = context
         .writes
         .into_iter()
@@ -912,6 +960,10 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
     }
 
     fn enforce_cache_limit(&mut self) -> Result<(), CoreError> {
+        self.stats.max_staged_nodes_before_eviction = self
+            .stats
+            .max_staged_nodes_before_eviction
+            .max(self.resident_staged_nodes as u64);
         while self.resident_staged_nodes > self.cache_pages {
             let (_, lba) = self
                 .resident_lru
@@ -1503,6 +1555,10 @@ mod tests {
             assert!(mutation.stats.staged_spill_writes > 0);
             assert!(mutation.stats.staged_spill_reloads > 0);
             assert!(mutation.stats.max_resident_staged_nodes <= cache_pages as u64);
+            assert_eq!(
+                mutation.stats.max_staged_nodes_before_eviction,
+                cache_pages as u64 + 1
+            );
             assert!(
                 mutation.stats.max_live_decoded_nodes <= 2,
                 "insertion retained {} decoded nodes with a {cache_pages}-page staged cache",
@@ -1541,6 +1597,17 @@ mod tests {
                 },
             )
             .unwrap();
+            // The reserved-pool exclusion set must include spilled images.
+            // Filtering only mutation.writes would omit live committed nodes.
+            let mut tracked: Vec<_> = pool.allocated_nodes().collect();
+            tracked.extend(
+                [100]
+                    .into_iter()
+                    .filter(|lba| !pool.retired_nodes().any(|r| r == *lba)),
+            );
+            tracked.sort_unstable();
+            current_blocks.sort_unstable();
+            assert_eq!(tracked, current_blocks);
             let delete_keys: Vec<_> = (0..999u64)
                 .map(|ordinal| wide_key((ordinal * 137) % 999))
                 .collect();

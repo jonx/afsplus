@@ -639,6 +639,7 @@ fn missing_captured_directory_child_is_corruption_not_an_absent_lookup() {
         TraceBackend::new(dev),
         MountOptions {
             mode: MountMode::NoChanges,
+            ..Default::default()
         },
         limits,
     )

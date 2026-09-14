@@ -125,6 +125,7 @@ fn execute(options: &Options) -> Result<usize, Failure> {
         device,
         MountOptions {
             mode: MountMode::NoChanges,
+            ..Default::default()
         },
     )
     .map_err(|e| core_failure("E_MOUNT", "cannot inspect selected checkpoint", e))?;
@@ -406,6 +407,7 @@ mod tests {
             },
             MountOptions {
                 mode: MountMode::NoChanges,
+                ..Default::default()
             },
         )
         .unwrap();

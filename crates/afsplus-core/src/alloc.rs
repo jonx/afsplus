@@ -278,6 +278,8 @@ struct SnapshotAccounting {
 }
 
 pub struct TxAllocator {
+    pub(crate) tree_cache_pages: std::num::NonZeroUsize,
+    pub(crate) tree_mutations: crate::cow_tree::TreeMutationStats,
     geo: Geometry,
     current_checkpoint: Checkpoint,
     other_checkpoint: Option<Checkpoint>,
@@ -308,6 +310,10 @@ pub struct TxAllocator {
 }
 
 impl TxAllocator {
+    pub(crate) fn with_tree_cache_pages(mut self, pages: std::num::NonZeroUsize) -> Self {
+        self.tree_cache_pages = pages;
+        self
+    }
     /// Starts a transaction: reads the committed reclaim queue and consumes
     /// up to `batch_blocks` from its head, clearing the promoted runs' bits.
     pub fn begin<D: BlockDevice>(
@@ -331,6 +337,8 @@ impl TxAllocator {
             batch_blocks,
         )?;
         let mut tx = TxAllocator {
+            tree_cache_pages: std::num::NonZeroUsize::MAX,
+            tree_mutations: Default::default(),
             geo: *geo,
             current_checkpoint: current.clone(),
             other_checkpoint: other.cloned(),
@@ -1064,6 +1072,7 @@ impl TxAllocator {
                     .root_lba,
             });
         Ok(FinishedAlloc {
+            tree_mutations: self.tree_mutations,
             snapshot_roots,
             snapshot_lifetimes,
             bitmap_writes,
@@ -1080,6 +1089,7 @@ impl TxAllocator {
 }
 
 pub struct FinishedAlloc {
+    pub tree_mutations: crate::cow_tree::TreeMutationStats,
     /// Publish these roots with the lifetime writes in this result, never
     /// the old checkpoint's roots. None for feature-absent transactions.
     pub snapshot_roots: Option<SnapshotRoots>,

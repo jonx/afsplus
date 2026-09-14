@@ -15,6 +15,7 @@
 - [7. What should remain C-accessible](#7-what-should-remain-c-accessible)
 - [8. Testing advantage](#8-testing-advantage)
 - [9. Development principle](#9-development-principle)
+- [10. Transaction tree resource policy](#10-transaction-tree-resource-policy)
 
 <!-- /toc -->
 
@@ -197,3 +198,43 @@ A production AROS bug should ideally become a small host-side reproducer against
 The physical AROS handler is an adapter around a filesystem core, not the place where the filesystem is invented.
 
 That separation is one of the main reasons AFS+ can advance before Macaros Native's storage stack is complete.
+
+
+## 10. Transaction tree resource policy
+
+The Rust mount configuration carries an optional nonzero staged-tree page limit.
+An omitted limit retains the modern-host unlimited default. The selected policy
+is installed before intent-log recovery and copied into every subsequent
+transaction for the shared COW mutation engine, including snapshot,
+shared-reference and allocation-root edits.
+Changing a mounted volume's policy requires a closed intent window and a positive
+page count. The option is a Rust host configuration field; the C ABI, filesystem
+API-v2 operations and disk feature identities have independent versioning.
+
+Each COW mutation owns its encoded node images. When its resident staged entries
+exceed the limit, it writes provisional images to transaction-local unreachable
+blocks and reloads them as needed. The metadata barrier covers those writes before
+checkpoint publication. A failed mutation discards its allocator transaction;
+committed and retained checkpoint blocks stay protected. Owned node values remain
+valid across eviction. Shared-cache page handles and pinning follow
+[ADR-022](../adr/ADR-022-cache-pinning.md).
+
+The reserved allocation-root pool exposes its complete live allocation set,
+including already spilled nodes and excluding discarded nodes. Cross-checkpoint
+cache rotation uses that set plus unchanged committed nodes. The vector of
+pending write buffers contains only resident images and cannot identify every
+new reachable node.
+
+Commit accounting sums successful provisional writes and final pending writes.
+Component final-node counts describe distinct final nodes; repeated spills also
+contribute to total metadata write requests and bytes. Tree accounting reports
+spill/reload counts, decoded-node residency and both pre-eviction and
+post-eviction staged-entry peaks. The admitted image can temporarily bring the
+pre-eviction count to the configured limit plus one.
+
+This is a per-mutation staged-entry budget. Transaction metadata already returned
+by earlier mutations, bitmap/descriptors, batch overlays, decoded values, encoded
+buffers, bulk tree builders, user data and checker storage require separate
+accounting and budgets.
+The [profile qualification](../testing/developer-harness.md#integrated-tree-cache-profiles)
+combines these counters with measured requested heap and exact semantic checks.

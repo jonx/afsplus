@@ -103,6 +103,7 @@ fn fragmented_final_delete_replays_through_orphan_state_near_enospc() {
         logged.clone(),
         MountOptions {
             mode: MountMode::NoChanges,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -252,6 +253,7 @@ fn every_replacing_replay_cut_converges_to_visible_new_and_orphaned_old() {
                 state.image.clone(),
                 MountOptions {
                     mode: MountMode::NoChanges,
+                    ..Default::default()
                 },
             )
             .unwrap_or_else(|error| panic!("{context}: raw mount: {error}"));

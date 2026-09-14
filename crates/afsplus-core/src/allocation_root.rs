@@ -502,6 +502,7 @@ fn validate_record(record: RegionRecord) -> RecordValidation {
 /// from either retained checkpoint are excluded. A block allocated and then
 /// discarded within the same uncommitted mutation may be reused immediately.
 pub struct ReservedTreePool {
+    tree_cache_pages: std::num::NonZeroUsize,
     pool: BTreeSet<u64>,
     available: BTreeSet<u64>,
     allocated_here: BTreeSet<u64>,
@@ -509,6 +510,16 @@ pub struct ReservedTreePool {
 }
 
 impl ReservedTreePool {
+    pub(crate) fn with_tree_cache_pages(mut self, pages: std::num::NonZeroUsize) -> Self {
+        self.tree_cache_pages = pages;
+        self
+    }
+
+    /// Final live allocations, including images already spilled to the device.
+    /// Discarded transaction-local nodes are removed by release_tree_block.
+    pub fn allocated_nodes(&self) -> impl Iterator<Item = u64> + '_ {
+        self.allocated_here.iter().copied()
+    }
     /// Committed pool nodes this mutation retired (replaced COW paths).
     pub fn retired_nodes(&self) -> impl Iterator<Item = u64> + '_ {
         self.retired_here.iter().copied()
@@ -535,6 +546,7 @@ impl ReservedTreePool {
             available.remove(lba);
         }
         Ok(ReservedTreePool {
+            tree_cache_pages: std::num::NonZeroUsize::MAX,
             pool,
             available,
             allocated_here: BTreeSet::new(),
@@ -544,6 +556,9 @@ impl ReservedTreePool {
 }
 
 impl<D: BlockDevice> TreeAllocator<D> for ReservedTreePool {
+    fn tree_cache_pages(&self) -> usize {
+        self.tree_cache_pages.get()
+    }
     fn allocate_tree_block(&mut self, _dev: &mut D) -> Result<u64, CoreError> {
         let lba = self.available.pop_first().ok_or(CoreError::NoSpace)?;
         self.retired_here.remove(&lba);

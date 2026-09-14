@@ -26,6 +26,7 @@ AFS+ must measure performance and resource use continuously. A new filesystem ha
 - [9. Benchmark philosophy](#9-benchmark-philosophy)
 - [Per-command host accounting](#per-command-host-accounting)
 - [Phased requested-heap workload](#phased-requested-heap-workload)
+- [Tree-cache batch measurements](#tree-cache-batch-measurements)
 
 <!-- /toc -->
 
@@ -308,7 +309,8 @@ target/debug/afsplus-measure
 python3 tools/test-measure-workload.py
 ```
 
-The executable accepts no arguments or device paths. Its fixed 16 MiB memory
+The default workload accepts no arguments. The executable accepts no device
+paths. Its fixed 16 MiB memory
 image is allocated before sampling, with 4096-byte blocks, 256-block regions,
 eight intent-log slots, shared extents enabled, data policy disabled and sensitive
 names. A fixed UUID and operation timestamps make the image repeatable. The core
@@ -361,3 +363,41 @@ phases. Steady RSS, individual cache ownership, other
 workload families, constrained cache profiles and native resource qualification
 require their own measurements. A 16 MiB fixture allocation is host test overhead
 and does not establish a classic-system memory requirement.
+
+
+## Tree-cache batch measurements
+
+Run the same wide-name workload with each staged-tree profile:
+
+```sh
+cargo build -p afsplus-measure --offline
+target/debug/afsplus-measure --cache-profile 2
+target/debug/afsplus-measure --cache-profile 4
+target/debug/afsplus-measure --cache-profile 8
+target/debug/afsplus-measure --cache-profile unlimited
+python3 tools/test-measure-workload.py
+```
+
+The [tree-cache-batch-v1 workload](../crates/afsplus-measure/src/cache_workload.rs)
+creates 192 files with 185-byte names and seven-byte contents in one transaction,
+deletes odd-numbered files in another, then verifies all 96 surviving files and
+both full checker views across remount. Formatting uses the fixed-memory geometry
+and feature settings of the small-file workload. The profile is applied before
+both mounts. Workload input strings and batch vectors are included in each
+phase's requested heap and released before its exit sample.
+
+The version-1 JSON report adds `cache_pages` and `tree_phases` for creation and
+deletion. These retain spill writes, reloads, pre/post-eviction staged-entry
+peaks, decoded-node peaks and total metadata write requests. Each constrained
+creation must cause real spills. Every commit must reconcile its byte/flush
+accounting with the provider counters. Zero payload modification gives an
+undefined amplification ratio for deletion; report its absolute I/O cost.
+
+Compare the same phase across profiles using requested heap, total I/O and
+payload denominators. Pair separate process runs with the CPU/RSS collector.
+A smaller staged cache can add repeated I/O, and total heap can be dominated by
+batch overlays and pending publication buffers. Report those costs together.
+The executable accepts only the four named measurement profiles; the underlying
+Rust mount option accepts any nonzero count. These are host memory-image results;
+physical storage latency and classic-machine resource qualification need their
+own measurements.

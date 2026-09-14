@@ -228,7 +228,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         if matches!(&change, SnapshotRegistryChange::Create { .. }) {
             self.protect_emergency_headroom(&mut tx);
         }
@@ -562,7 +563,7 @@ impl<D: BlockDevice> Volume<D> {
             &operations,
         )?;
         tx.set_snapshot_registry_root(mutation.root_lba)?;
-        let count = mutation.writes.len() as u64;
+        let count = mutation.stats.final_nodes_written;
         writes.extend(mutation.writes);
         Ok(count)
     }

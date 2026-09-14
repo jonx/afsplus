@@ -17,10 +17,98 @@ fn limits() -> SnapshotWorkLimits {
     }
 }
 
+#[test]
+fn constrained_tree_profiles_preserve_snapshots_and_shared_survivors() {
+    for pages in [2, 4, 8, usize::MAX] {
+        let mut volume = crate::mount_with_snapshot_limits(
+            afsplus_block::TraceBackend::new(formatted(4096, 64)),
+            crate::MountOptions {
+                tree_cache_pages: std::num::NonZeroUsize::new(pages),
+                ..Default::default()
+            },
+            limits(),
+        )
+        .unwrap();
+        let names: Vec<_> = (0..192)
+            .map(|i| format!("{i:04}-{}", "s".repeat(180)))
+            .collect();
+        let creates: Vec<_> = names
+            .iter()
+            .map(|name| BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name,
+                content: b"historical",
+            })
+            .collect();
+        volume.dev.reset();
+        let ids = volume.run_batch(&creates, now(2)).unwrap();
+        let stats = volume.last_commit_stats().unwrap();
+        assert_eq!(stats.bytes_written, volume.dev.stats().bytes_written);
+        assert!(stats.tree_mutations.max_resident_staged_nodes <= pages as u64);
+        if pages != usize::MAX {
+            assert!(stats.tree_mutations.staged_spill_writes > 0);
+        }
+        let snapshot = volume.snapshot_create(now(3)).unwrap();
+        let handle = volume.snapshot_open(snapshot).unwrap();
+        let source = ids[0].unwrap();
+        let clone = volume
+            .clone_file(source, OBJECT_ROOT, "clone", now(4))
+            .unwrap();
+        volume.dev.reset();
+        let deletes: Vec<_> = names
+            .iter()
+            .step_by(2)
+            .map(|name| BatchOp::DeleteFile {
+                parent_id: OBJECT_ROOT,
+                name,
+            })
+            .collect();
+        volume.run_batch(&deletes, now(5)).unwrap();
+        let stats = volume.last_commit_stats().unwrap();
+        assert_eq!(stats.bytes_written, volume.dev.stats().bytes_written);
+        assert!(stats.tree_mutations.max_resident_staged_nodes <= pages as u64);
+        assert!(stats.snapshots.lifetime_nodes_written > 0);
+        assert_eq!(volume.read_file(clone).unwrap(), b"historical");
+        for (i, id) in ids.iter().enumerate() {
+            let mut data = [0; 10];
+            assert_eq!(
+                volume
+                    .snapshot_read_file_at(&handle, id.unwrap(), 0, &mut data)
+                    .unwrap(),
+                10
+            );
+            assert_eq!(&data, b"historical");
+            assert_eq!(volume.lookup_root(&names[i]).unwrap().is_some(), i % 2 != 0);
+        }
+        verify(&mut volume);
+        drop(handle);
+        let mut volume = crate::mount_with_snapshot_limits(
+            volume.into_device(),
+            crate::MountOptions {
+                tree_cache_pages: std::num::NonZeroUsize::new(pages),
+                ..Default::default()
+            },
+            limits(),
+        )
+        .unwrap();
+        let handle = volume.snapshot_open(snapshot).unwrap();
+        assert_eq!(bytes(&mut volume, &handle, source), b"historical");
+        assert_eq!(volume.read_file(clone).unwrap(), b"historical");
+        verify(&mut volume);
+    }
+}
+
 // Exercise the public opt-in mount path, including configuration before replay.
 fn open<D: BlockDevice>(dev: D, mode: MountMode) -> Volume<D> {
-    let mut volume =
-        crate::mount_with_snapshot_limits(dev, crate::MountOptions { mode }, limits()).unwrap();
+    let mut volume = crate::mount_with_snapshot_limits(
+        dev,
+        crate::MountOptions {
+            mode,
+            ..Default::default()
+        },
+        limits(),
+    )
+    .unwrap();
     verify(&mut volume);
     volume
 }
@@ -922,7 +1010,13 @@ fn public_snapshot_mount_validates_admission_before_pending_recovery_writes() {
         MountMode::NoChanges,
     ] {
         assert!(matches!(
-            crate::mount_with_options(ForbidWrites(base.clone()), crate::MountOptions { mode }),
+            crate::mount_with_options(
+                ForbidWrites(base.clone()),
+                crate::MountOptions {
+                    mode,
+                    ..Default::default()
+                }
+            ),
             Err(CoreError::UnsupportedIncompatFeatures(_))
         ));
         for bad in [
@@ -954,7 +1048,10 @@ fn public_snapshot_mount_validates_admission_before_pending_recovery_writes() {
             assert!(matches!(
                 crate::mount_with_snapshot_limits(
                     ForbidWrites(base.clone()),
-                    crate::MountOptions { mode },
+                    crate::MountOptions {
+                        mode,
+                        ..Default::default()
+                    },
                     bad
                 ),
                 Err(CoreError::PrototypeLimit(_))
@@ -1037,7 +1134,10 @@ fn public_snapshot_mount_rejects_unknown_features_and_corrupt_selected_roots_wit
             assert!(matches!(
                 crate::mount_with_snapshot_limits(
                     ForbidWrites(damaged),
-                    crate::MountOptions { mode },
+                    crate::MountOptions {
+                        mode,
+                        ..Default::default()
+                    },
                     limits()
                 ),
                 Err(CoreError::Corrupt(_))
@@ -1048,7 +1148,7 @@ fn public_snapshot_mount_rejects_unknown_features_and_corrupt_selected_roots_wit
         ident.features.incompat |= 1 << 63;
         damaged.apply_raw(0, &ident.encode(4096).unwrap());
         assert!(
-            matches!(crate::mount_with_snapshot_limits(ForbidWrites(damaged), crate::MountOptions { mode }, limits()), Err(CoreError::UnsupportedIncompatFeatures(bits)) if bits == 1 << 63)
+            matches!(crate::mount_with_snapshot_limits(ForbidWrites(damaged), crate::MountOptions { mode, ..Default::default() }, limits()), Err(CoreError::UnsupportedIncompatFeatures(bits)) if bits == 1 << 63)
         );
     }
 }
@@ -1069,6 +1169,7 @@ fn public_snapshot_mount_bounds_root_reads_across_registry_pages() {
                 TraceBackend::new(volume.into_device()),
                 crate::MountOptions {
                     mode: MountMode::NoChanges,
+                    ..Default::default()
                 },
                 limits(),
             )

@@ -46,6 +46,10 @@ impl MountMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MountOptions {
     pub mode: MountMode,
+    /// Resident staged images per COW tree mutation, including intent recovery.
+    /// None preserves the unlimited modern-host default. Other memory has
+    /// separate budgets; this is not a total-volume heap limit.
+    pub tree_cache_pages: Option<std::num::NonZeroUsize>,
 }
 
 pub const SUPPORTED_INCOMPAT_FEATURES: u64 = INCOMPAT_INTENT_LOG | INCOMPAT_INTENT_LOG_DATA_UPDATES;
@@ -309,6 +313,11 @@ fn mount_configured<D: BlockDevice>(
     })?;
 
     let mut volume = Volume::new(dev, ident, selection, state, options.mode);
+    volume.set_tree_cache_pages(
+        options
+            .tree_cache_pages
+            .map_or(usize::MAX, |pages| pages.get()),
+    )?;
     if let Some(limits) = snapshot_limits {
         volume.set_snapshot_work_limits(limits)?;
     }

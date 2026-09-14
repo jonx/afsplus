@@ -104,7 +104,8 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.reclaim_batch_blocks,
             self.alloc_rover_region,
-        )?;
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
         self.protect_emergency_headroom(&mut tx);
         let new_lba = tx.allocate(&mut self.dev)?;
         tx.retire(&mut self.dev, record_lba)?;

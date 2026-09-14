@@ -64,6 +64,40 @@ class WorkloadTests(unittest.TestCase):
         self.assertEqual(result.stdout, b"")
         self.assertIn(b"no arguments", result.stderr)
 
+    def test_cache_profiles_measure_actual_spills_and_balanced_heap(self):
+        for pages in (2, 4, 8, "unlimited"):
+            result = subprocess.run([BINARY, "--cache-profile", str(pages)],
+                                    capture_output=True, check=True, timeout=60)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["workload"], "tree-cache-batch-v1")
+            self.assertEqual(report["outcome"], "pass")
+            self.assertEqual(report["cache_pages"], pages)
+            trees = report["tree_phases"]
+            self.assertEqual([t["phase"] for t in trees], ["batch-create", "batch-delete"])
+            if pages == "unlimited":
+                self.assertTrue(all(t["spill_writes"] == 0 for t in trees))
+            else:
+                self.assertGreater(trees[0]["spill_writes"], 0)
+                self.assertTrue(all(t["staged_peak_pages"] <= pages for t in trees))
+                self.assertTrue(all(t["staged_before_eviction_peak_pages"] <= pages + 1 for t in trees))
+            rows = report["phases"]
+            self.assertEqual(rows[0]["heap_start_bytes"], rows[-1]["heap_end_bytes"])
+            for row in rows:
+                self.assertEqual(row["heap_end_bytes"] - row["heap_start_bytes"],
+                                 row["heap_acquired_bytes"] - row["heap_released_bytes"])
+                self.assertGreaterEqual(row["heap_peak_bytes"], max(
+                    row["heap_start_bytes"], row["heap_end_bytes"]))
+                self.assertEqual(row["bytes_written"], row["writes"] * 4096)
+                if row["name"].endswith("check"):
+                    self.assertEqual(row["writes"], 0)
+
+    def test_invalid_cache_profiles_refuse_without_report(self):
+        for pages in ("0", "1", "3", "999", "image.img"):
+            result = subprocess.run([BINARY, "--cache-profile", pages],
+                                    capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, b"")
+
 
 if __name__ == "__main__":
     unittest.main()

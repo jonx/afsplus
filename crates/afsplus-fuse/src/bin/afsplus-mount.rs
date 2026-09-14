@@ -59,8 +59,14 @@ fn run() -> Result<(), String> {
     let (uid, gid) = mount_ownership(&image, &mountpoint)?;
 
     let (device, identification) = open_image(&image)?;
-    let vfs = Vfs::mount(device, MountOptions { mode })
-        .map_err(|error| format!("cannot mount {}: {error}", image.display()))?;
+    let vfs = Vfs::mount(
+        device,
+        MountOptions {
+            mode,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| format!("cannot mount {}: {error}", image.display()))?;
     let filesystem = FuserFilesystem::new(
         vfs,
         FuseConfig {

@@ -553,6 +553,7 @@ fn write_and_truncate_replay_is_restartable_after_every_cut() {
                 raw_image,
                 MountOptions {
                     mode: MountMode::NoChanges,
+                    ..Default::default()
                 },
             )
             .unwrap_or_else(|error| panic!("{context}: {error}"));

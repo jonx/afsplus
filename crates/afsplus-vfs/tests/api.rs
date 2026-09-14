@@ -473,6 +473,7 @@ fn no_changes_vfs_remains_readable_and_issues_no_writes_or_flushes() {
         traced,
         MountOptions {
             mode: MountMode::NoChanges,
+            ..Default::default()
         },
     )
     .unwrap();

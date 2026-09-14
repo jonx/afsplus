@@ -67,6 +67,7 @@ fn no_changes_observes_pending_log_with_zero_writes() {
         traced,
         MountOptions {
             mode: MountMode::NoChanges,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -87,6 +88,7 @@ fn no_changes_observes_pending_log_with_zero_writes() {
         traced.into_inner(),
         MountOptions {
             mode: MountMode::Recovery,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -128,6 +130,7 @@ fn compatibility_classes_control_mount_policy() {
         ro_compat,
         MountOptions {
             mode: MountMode::NoChanges,
+            ..Default::default()
         },
     )
     .expect("unknown RO_COMPAT is safe in NO_CHANGES");
@@ -144,7 +147,8 @@ fn compatibility_classes_control_mount_policy() {
         mount_with_options(
             incompat,
             MountOptions {
-                mode: MountMode::NoChanges
+                mode: MountMode::NoChanges,
+                ..Default::default()
             },
         ),
         Err(CoreError::UnsupportedIncompatFeatures(UNKNOWN))
@@ -169,7 +173,13 @@ fn snapshot_record_codecs_do_not_implicitly_enable_snapshot_mounts() {
         MountMode::Recovery,
     ] {
         assert!(matches!(
-            mount_with_options(image.clone(), MountOptions { mode }),
+            mount_with_options(
+                image.clone(),
+                MountOptions {
+                    mode,
+                    ..Default::default()
+                }
+            ),
             Err(CoreError::UnsupportedIncompatFeatures(
                 INCOMPAT_PERSISTENT_SNAPSHOTS
             ))

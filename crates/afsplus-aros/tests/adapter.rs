@@ -188,6 +188,7 @@ fn read_only_mount_and_invalid_offsets_map_to_dos_errors() {
         formatted(),
         MountOptions {
             mode: MountMode::ReadOnly,
+            ..Default::default()
         },
     )
     .unwrap();

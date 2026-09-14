@@ -166,6 +166,7 @@ fn run_replay_matrix(
                 raw_image,
                 MountOptions {
                     mode: MountMode::NoChanges,
+                    ..Default::default()
                 },
             )
             .unwrap_or_else(|error| panic!("{context}: no-changes mount failed: {error}"));

@@ -1,4 +1,5 @@
 //! Single-threaded, memory-only host qualification. No filesystem paths accepted.
+mod cache_workload;
 mod heap;
 
 use afsplus_block::{trace::IoStats, BlockDevice, BlockError};
@@ -108,8 +109,22 @@ fn ts(seconds: i64) -> Timespec {
 }
 
 fn main() {
-    if std::env::args_os().len() != 1 {
-        eprintln!("usage: afsplus-measure (fixed memory-only workload, no arguments)");
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if !arguments.is_empty() {
+        if arguments.len() == 2 && arguments[0] == "--cache-profile" {
+            let pages = match arguments[1].to_str() {
+                Some("2") => Some(2),
+                Some("4") => Some(4),
+                Some("8") => Some(8),
+                Some("unlimited") => Some(usize::MAX),
+                _ => None,
+            };
+            if let Some(pages) = pages {
+                cache_workload::run(pages);
+                return;
+            }
+        }
+        eprintln!("usage: afsplus-measure (no arguments), or --cache-profile 2|4|8|unlimited");
         std::process::exit(1);
     }
     let io = Cell::new(IoStats::default());
@@ -208,9 +223,38 @@ fn main() {
         assert!(report.is_clean(), "recovered checker: {:?}", report.errors);
     });
     rows.push(row);
+    report("small-files-v1", &dev, bitmap_peak, &rows, None);
+}
+
+fn report(
+    workload: &str,
+    dev: &Image<'_>,
+    bitmap_peak: usize,
+    rows: &[Row],
+    cache: Option<(usize, [afsplus_core::volume::CommitStats; 2])>,
+) {
     let image_crc = afsplus_format::crc32c::crc32c(&dev.bytes);
     // Reporting occurs after all samples so JSON formatting cannot inflate a phase.
-    println!("{{\"version\":1,\"workload\":\"small-files-v1\",\"outcome\":\"pass\",\"backend\":\"fixed-memory\",\"image_bytes\":{},\"image_crc32c\":{},\"last_edit_bitmap_payload_peak_bytes\":{},\"phases\":[", dev.bytes.len(), image_crc, bitmap_peak);
+    println!("{{\"version\":1,\"workload\":\"{workload}\",\"outcome\":\"pass\",\"backend\":\"fixed-memory\",\"image_bytes\":{},\"image_crc32c\":{},\"last_edit_bitmap_payload_peak_bytes\":{},", dev.bytes.len(), image_crc, bitmap_peak);
+    if let Some((pages, stats)) = cache {
+        let pages = if pages == usize::MAX {
+            "\"unlimited\"".to_owned()
+        } else {
+            pages.to_string()
+        };
+        println!("\"cache_pages\":{pages},\"tree_phases\":[");
+        for (i, stats) in stats.iter().enumerate() {
+            if i > 0 {
+                println!(",");
+            }
+            let tree = stats.tree_mutations;
+            println!("{{\"phase\":\"{}\",\"spill_writes\":{},\"spill_reloads\":{},\"staged_peak_pages\":{},\"staged_before_eviction_peak_pages\":{},\"decoded_peak_nodes\":{},\"metadata_writes\":{}}}",
+                if i == 0 { "batch-create" } else { "batch-delete" }, tree.staged_spill_writes,
+                tree.staged_spill_reloads, tree.max_resident_staged_nodes, tree.max_staged_nodes_before_eviction, tree.max_live_decoded_nodes, stats.metadata_blocks_written);
+        }
+        println!("],");
+    }
+    println!("\"phases\":[");
     for (i, row) in rows.iter().enumerate() {
         if i != 0 {
             println!(",");
