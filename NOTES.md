@@ -10,6 +10,7 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- toc -->
 
 - [2026-09-14 — Refresh implementation navigation and remaining work](#2026-09-14--refresh-implementation-navigation-and-remaining-work)
+- [2026-09-14 - Preserve symlink targets through core namespace transactions](#2026-09-14---preserve-symlink-targets-through-core-namespace-transactions)
 - [2026-09-14 — Simplify ADR decision statuses](#2026-09-14--simplify-adr-decision-statuses)
 - [2026-09-14 - Cross-read inline symlink records with Rust and C](#2026-09-14---cross-read-inline-symlink-records-with-rust-and-c)
 - [2026-09-14 - Reject undersized object encoder buffers](#2026-09-14---reject-undersized-object-encoder-buffers)
@@ -121,6 +122,20 @@ and added snapshot/backup deliverables to the implementation plan.
 Source and test inspection establish these corrections. Cargo was unavailable
 in this session, so no fresh Rust test result is claimed. Hardware and complete
 consumer qualification remain explicit work. Acceptance gates are unchanged.
+
+## 2026-09-14 - Preserve symlink targets through core namespace transactions
+
+Added core symlink creation, bounded live/captured target reads, final unlink,
+and payload-preserving metadata and rename rewrites. Explicit metadata decoding
+validates the complete inline payload. Directory validation and live/historical
+ownership checking accept symlink metadata without treating targets as extents.
+Short buffers return the required length and remain unchanged.
+
+Targeted tests cover metadata edits, cross-directory rename, remount, final
+unlink, retained snapshots and zero-write refusal. Modeled publication cuts for
+create/rename/unlink/restore require complete old or new namespace and metadata,
+exact captured bytes and exhaustive checking. Atomic replacement, VFS/backup
+capabilities, OS adapters and native qualification retain separate gates.
 
 ## 2026-09-14 — Simplify ADR decision statuses
 

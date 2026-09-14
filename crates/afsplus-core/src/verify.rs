@@ -129,7 +129,7 @@ pub fn load_mount_state<D: BlockDevice>(
     .ok_or_else(|| CoreError::Corrupt("root object missing from object map".into()))?;
     claim_root(root_record_lba, &mut roots)?;
     dev.read_block(root_record_lba, &mut buf)?;
-    let (root_object, root_generation) = ObjectRecord::decode_with_generation(&buf)?;
+    let (root_object, root_generation) = ObjectRecord::decode_metadata_with_generation(&buf)?;
     if root_generation == 0 || root_generation > checkpoint.generation {
         return Err(CoreError::Corrupt(format!(
             "root object record block {root_record_lba} generation {root_generation} outside committed range"
@@ -328,7 +328,7 @@ pub fn load_committed_state<D: BlockDevice>(
         claim(entry.block, &mut claimed)?;
         metadata_blocks.push(entry.block);
         dev.read_block(entry.block, &mut buf)?;
-        let (record, record_generation) = ObjectRecord::decode_with_generation(&buf)?;
+        let (record, record_generation) = ObjectRecord::decode_metadata_with_generation(&buf)?;
         if record_generation == 0 || record_generation > checkpoint.generation {
             return Err(CoreError::Corrupt(format!(
                 "object {} record block {} generation {record_generation} outside committed range",
@@ -438,6 +438,7 @@ pub fn load_committed_state<D: BlockDevice>(
                     }
                 }
             }
+            ObjectType::Symlink => {}
             _ => unreachable!("rejected by ObjectRecord::decode"),
         }
         objects.insert(record.object_id, record);
@@ -603,7 +604,7 @@ fn validate_namespace_graph(
             })?;
             let hint_matches = matches!(
                 (entry.child_type_hint, child.object_type),
-                (1, ObjectType::File) | (2, ObjectType::Directory)
+                (1, ObjectType::File) | (2, ObjectType::Directory) | (3, ObjectType::Symlink)
             );
             if !hint_matches {
                 return Err(CoreError::Corrupt(format!(

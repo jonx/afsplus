@@ -52,7 +52,11 @@ Use the [sparse content consumer](../spec/backup-sparse.md) for bounded content
 transport and the [allocation-preserving consumer](../spec/backup-allocation.md)
 for reservation binding and verified coverage. Use [bound regular-file groups](../spec/backup-file.md)
 for exact metadata/content/inventory agreement. Use [directory and alias groups](../spec/backup-namespace.md) as namespace
-components; integrate symlinks and the complete hard-link graph; use [scoped created-entry lookup](../docs/13-filesystem-api-v2.md#scoped-created-entry-lookup)
+components; integrate symlinks and the complete hard-link graph. Use the
+[core symlink and retained-target gates](../testing/symlink-qualification.md#core-namespace-and-retained-target-gates)
+for namespace storage; add VFS unlink dispatch, grant-held captured target reads,
+scoped destination creation and archive target binding before claiming complete
+symlink preservation; use [scoped created-entry lookup](../docs/13-filesystem-api-v2.md#scoped-created-entry-lookup)
 to reopen entries with bounded active handles and finalize metadata after namespace edits. Persist explicit
 content-recovery loss reports and validate every object and archive-wide binding
 before full-job preservation success. Use

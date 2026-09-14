@@ -161,6 +161,21 @@ impl ObjectRecord {
         Ok((record, header.generation))
     }
 
+    /// Validate all inline payload bytes, returning metadata for explicit
+    /// payload-aware callers. Re-encoding a symlink still requires its target.
+    pub fn decode_metadata_with_generation(
+        block: &[u8],
+    ) -> Result<(ObjectRecord, u64), FormatError> {
+        let (record, header) = Self::decode_fields(block)?;
+        if record.object_type == ObjectType::Symlink {
+            let link = SymlinkRecord::from_verified_fields(block, record, header)?;
+            Ok((link.record, header.generation))
+        } else {
+            record.validate(block.len())?;
+            Ok((record, header.generation))
+        }
+    }
+
     fn decode_fields(block: &[u8]) -> Result<(ObjectRecord, BlockHeader), FormatError> {
         let header = BlockHeader::verify(block, block_type::OBJECT)?;
         let p = header.payload(block);
@@ -312,6 +327,17 @@ impl<'a> SymlinkRecord<'a> {
 
     pub fn decode(block: &'a [u8]) -> Result<(Self, u64), FormatError> {
         let (record, header) = ObjectRecord::decode_fields(block)?;
+        Ok((
+            Self::from_verified_fields(block, record, header)?,
+            header.generation,
+        ))
+    }
+
+    fn from_verified_fields(
+        block: &'a [u8],
+        record: ObjectRecord,
+        header: BlockHeader,
+    ) -> Result<Self, FormatError> {
         let payload = header.payload(block);
         if header.flags != 0 || payload[9] != 0 {
             return Err(FormatError::Invalid("symlink reserved fields are nonzero"));
@@ -323,6 +349,6 @@ impl<'a> SymlinkRecord<'a> {
         if block[HEADER_SIZE + payload.len()..].iter().any(|b| *b != 0) {
             return Err(FormatError::Invalid("symlink unused tail is nonzero"));
         }
-        Ok((result, header.generation))
+        Ok(result)
     }
 }

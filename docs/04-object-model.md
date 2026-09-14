@@ -1,7 +1,7 @@
 # 04. Object Model
 
 > **ADRs:** [ADR-066](../adr/ADR-066-bounded-orphan-directory.md) ·
-> [ADR-068 proposed](../adr/ADR-068-portable-symlink-targets.md) · **Spec:** none ·
+> [ADR-068](../adr/ADR-068-portable-symlink-targets.md) · **Spec:** none ·
 > **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
 
 ## 1. Stable objects
@@ -98,11 +98,21 @@ replacement checkpoint. The lower-level core still permits the legacy direct
 delete primitive for controlled tests and feature-absent volumes. Directory
 hard links remain intentionally unsupported.
 
-The proposed symlink representation keeps a NUL-free UTF-8 target inline
+The symlink representation keeps a NUL-free UTF-8 target inline
 after the fixed object-record fields, under the same whole-block checksum.
 The target has no allocation extents and is returned byte-for-byte; OS path
-layers, rather than the object codec, interpret its namespace syntax. This
-remains unimplemented until ADR-068 is accepted.
+layers, rather than the object codec, interpret its namespace syntax. The explicit target codec validates the full variable payload before returning
+metadata. Fixed-record encoding rejects symlinks, so mutation paths cannot
+silently discard target bytes.
+
+`create_symlink` atomically publishes a type-3 object and directory entry.
+`read_link` and `snapshot_read_link` return the required target byte count;
+when the buffer is shorter, it is unchanged. Targets are not NUL-terminated or
+followed. Protection edits, exact metadata restoration and rename preserve the
+inline bytes under the new checksum. `unlink_symlink` retires metadata without
+data extents or regular-file orphan handling. Symlink hard links are refused.
+Changing a target requires replacement with a new object; atomic replacement
+and adapter exposure require their own qualified operation paths.
 
 ## Metadata mutation and restoration
 

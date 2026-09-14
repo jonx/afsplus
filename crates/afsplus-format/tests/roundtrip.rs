@@ -1191,6 +1191,10 @@ fn inline_symlink_codec_preserves_exact_targets_and_refuses_fixed_encoding() {
         let (decoded, generation) = SymlinkRecord::decode(&block).unwrap();
         assert_eq!(decoded, source);
         assert_eq!(generation, 7);
+        assert_eq!(
+            ObjectRecord::decode_metadata_with_generation(&block).unwrap(),
+            (record, 7)
+        );
         assert!(record.encode(BS, 8).is_err());
         assert!(ObjectRecord::decode(&block).is_err());
         for short in 0..HEADER_SIZE + 96 + target.len() {
@@ -1234,6 +1238,10 @@ fn inline_symlink_codec_rejects_valid_crc_malformed_payloads() {
         }
         header.seal(&mut block);
         assert!(SymlinkRecord::decode(&block).is_err(), "case {case}");
+        assert!(
+            ObjectRecord::decode_metadata_with_generation(&block).is_err(),
+            "metadata case {case}"
+        );
     }
     for n in 0..valid.len() {
         assert!(SymlinkRecord::decode(&valid[..n]).is_err());

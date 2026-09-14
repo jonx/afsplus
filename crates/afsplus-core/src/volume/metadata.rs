@@ -95,7 +95,7 @@ impl<D: BlockDevice> Volume<D> {
             CoreError::Corrupt(format!("object {object_id} missing from object map"))
         })?;
         let generation = self.next_generation()?;
-        let encoded = record.encode(self.dev.block_size(), generation)?;
+        let encoded = self.encode_preserving_target(record, generation)?;
         let mut tx = TxAllocator::begin(
             &mut self.dev,
             &self.ident.geometry(),

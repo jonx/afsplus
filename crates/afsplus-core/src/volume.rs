@@ -2128,6 +2128,35 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        self.create_leaf_in_directory(parent_id, name, content, None, now)
+    }
+
+    /// Store an opaque UTF-8 target without resolving it.
+    pub fn create_symlink(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        target: &str,
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
+        if target.is_empty()
+            || target.as_bytes().contains(&0)
+            || target.len()
+                > afsplus_format::object::SymlinkRecord::maximum_target_bytes(self.dev.block_size())
+        {
+            return Err(CoreError::InvalidMetadata("invalid symlink target"));
+        }
+        self.create_leaf_in_directory(parent_id, name, &[], Some(target), now)
+    }
+
+    fn create_leaf_in_directory(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        content: &[u8],
+        target: Option<&str>,
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
         metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         self.ensure_public_object_id(parent_id)?;
@@ -2188,10 +2217,14 @@ impl<D: BlockDevice> Volume<D> {
 
         let file_record = ObjectRecord {
             object_id,
-            object_type: ObjectType::File,
+            object_type: if target.is_some() {
+                ObjectType::Symlink
+            } else {
+                ObjectType::File
+            },
             flags: 0,
             link_count: 1,
-            size_bytes: content.len() as u64,
+            size_bytes: target.map_or(content.len(), str::len) as u64,
             allocated_bytes: data_block_count * block_size as u64,
             created: now,
             modified: now,
@@ -2205,7 +2238,7 @@ impl<D: BlockDevice> Volume<D> {
         let directory_entry = DirEntry {
             key,
             name: name.as_bytes().to_vec(),
-            child_type_hint: 1,
+            child_type_hint: if target.is_some() { 3 } else { 1 },
             child_id: object_id,
         };
         let (directory_key, directory_value) =
@@ -2257,7 +2290,17 @@ impl<D: BlockDevice> Volume<D> {
         let omap_lba = omap_mutation.root_lba;
 
         let mut meta_writes = vec![
-            (file_record_lba, file_record.encode(block_size, generation)?),
+            (
+                file_record_lba,
+                match target {
+                    Some(target) => afsplus_format::object::SymlinkRecord {
+                        record: file_record,
+                        target,
+                    }
+                    .encode(block_size, generation)?,
+                    None => file_record.encode(block_size, generation)?,
+                },
+            ),
             (
                 parent_record_new_lba,
                 new_parent.encode(block_size, generation)?,
@@ -2910,7 +2953,7 @@ impl<D: BlockDevice> Volume<D> {
             .ok_or_else(|| CoreError::Corrupt("victim missing from object map".into()))?;
         if !matches!(
             (entry.child_type_hint, victim.object_type),
-            (1, ObjectType::File) | (2, ObjectType::Directory)
+            (1, ObjectType::File) | (2, ObjectType::Directory) | (3, ObjectType::Symlink)
         ) {
             return Err(CoreError::Corrupt(
                 "directory entry type hint does not match victim object".into(),
@@ -3285,7 +3328,7 @@ impl<D: BlockDevice> Volume<D> {
             .ok_or_else(|| CoreError::Corrupt("moved object missing from object map".into()))?;
         if !matches!(
             (source_entry.child_type_hint, moved.object_type),
-            (1, ObjectType::File) | (2, ObjectType::Directory)
+            (1, ObjectType::File) | (2, ObjectType::Directory) | (3, ObjectType::Symlink)
         ) {
             return Err(CoreError::Corrupt(
                 "source entry type hint does not match moved object".into(),
@@ -3442,7 +3485,10 @@ impl<D: BlockDevice> Volume<D> {
                 source_parent_new_lba,
                 new_source_parent.encode(block_size, generation)?,
             ),
-            (moved_new_lba, new_moved.encode(block_size, generation)?),
+            (
+                moved_new_lba,
+                self.encode_preserving_target(new_moved, generation)?,
+            ),
         ];
         metadata_writes.extend(source_mutation.writes);
         if let (Some(record), Some(mutation)) = (new_target_parent, target_mutation) {
@@ -5977,6 +6023,64 @@ impl<D: BlockDevice> Volume<D> {
             .ok_or(CoreError::PrototypeLimit("generation counter exhausted"))
     }
 
+    /// Return the required byte count. A short buffer is left unchanged.
+    /// Targets are opaque and never followed by this operation.
+    pub fn read_link(&mut self, object_id: u64, output: &mut [u8]) -> Result<usize, CoreError> {
+        self.ensure_public_object_id(object_id)?;
+        let block = self.symlink_block(object_id)?;
+        let (link, _) = afsplus_format::object::SymlinkRecord::decode(&block)?;
+        let required = link.target.len();
+        if output.len() >= required {
+            output[..required].copy_from_slice(link.target.as_bytes());
+        }
+        Ok(required)
+    }
+
+    fn symlink_block(&mut self, object_id: u64) -> Result<Vec<u8>, CoreError> {
+        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        if record.object_type != ObjectType::Symlink {
+            return Err(CoreError::InvalidMetadata("object is not a symlink"));
+        }
+        let lba = self
+            .object_record_lba(object_id)?
+            .ok_or(CoreError::NotFound)?;
+        let mut block = vec![0; self.dev.block_size()];
+        self.dev.read_block(lba, &mut block)?;
+        let (link, generation) = afsplus_format::object::SymlinkRecord::decode(&block)?;
+        if link.record != record || generation == 0 || generation > self.checkpoint.generation {
+            return Err(CoreError::Corrupt(
+                "symlink changed during target lookup".into(),
+            ));
+        }
+        Ok(block)
+    }
+
+    fn encode_preserving_target(
+        &mut self,
+        record: ObjectRecord,
+        generation: u64,
+    ) -> Result<Vec<u8>, CoreError> {
+        if record.object_type != ObjectType::Symlink {
+            return Ok(record.encode(self.dev.block_size(), generation)?);
+        }
+        let block = self.symlink_block(record.object_id)?;
+        let (old, _) = afsplus_format::object::SymlinkRecord::decode(&block)?;
+        Ok(afsplus_format::object::SymlinkRecord {
+            record,
+            target: old.target,
+        }
+        .encode(self.dev.block_size(), generation)?)
+    }
+
+    pub fn unlink_symlink(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.remove_entry(parent_id, name, now, ObjectType::Symlink)
+    }
+
     fn read_object(&mut self, object_id: u64) -> Result<Option<ObjectRecord>, CoreError> {
         if object_id == OBJECT_ROOT {
             return Ok(Some(self.state.root_object));
@@ -5991,7 +6095,7 @@ impl<D: BlockDevice> Volume<D> {
         }
         let mut buf = vec![0u8; self.dev.block_size()];
         self.dev.read_block(lba, &mut buf)?;
-        let (record, block_generation) = ObjectRecord::decode_with_generation(&buf)
+        let (record, block_generation) = ObjectRecord::decode_metadata_with_generation(&buf)
             .map_err(|e| CoreError::Corrupt(format!("object {object_id} record invalid: {e}")))?;
         if block_generation == 0 || block_generation > self.checkpoint.generation {
             return Err(CoreError::Corrupt(format!(

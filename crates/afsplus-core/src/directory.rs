@@ -232,7 +232,7 @@ fn validate_logical_entry(ident: &Identification, entry: &DirEntry) -> Result<()
             "directory entry references invalid object".into(),
         ));
     }
-    if !matches!(entry.child_type_hint, 1 | 2) {
+    if !matches!(entry.child_type_hint, 1..=3) {
         return Err(CoreError::Corrupt(
             "directory entry has invalid child type hint".into(),
         ));

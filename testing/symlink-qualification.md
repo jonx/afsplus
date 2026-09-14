@@ -75,3 +75,18 @@ The portable C reader uses caller-owned buffers and passes strict warnings,
 sanitizers, static analysis, deterministic fuzz replay and the configured m68k
 compiler. Qualification records maximum stack/workspace use and the exact I/O
 count for a maximum-length target.
+
+## Core namespace and retained-target gates
+
+Run `cargo test -p afsplus-check --test metadata symlink_` for core creation,
+metadata edits, rename, remount and unlink. Exercise both snapshot-disabled and
+snapshot-enabled volumes. The publication test enumerates modeled crash states
+for creation, cross-directory rename, unlink and exact metadata restoration.
+Require complete old/new namespace and object metadata, exact captured target
+bytes, short-buffer no-copy behavior and exhaustive ownership checking.
+
+Admission tests require zero writes and flushes for malformed/oversized targets,
+occupied names, unsupported symlink hard links, read-only mutations and short
+live/captured target reads. These tests do not qualify atomic replacement,
+provider grants, archive symlink groups or mounted OS adapters. Add those cases
+before their respective capability and preservation claims.

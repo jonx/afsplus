@@ -27,7 +27,7 @@ pub(crate) fn object<D: BlockDevice>(
     namespace_range(&geo, lba, 1)?;
     let mut buf = vec![0; geo.block_size];
     dev.read_block(lba, &mut buf)?;
-    let (record, generation) = ObjectRecord::decode_with_generation(&buf)?;
+    let (record, generation) = ObjectRecord::decode_metadata_with_generation(&buf)?;
     if generation == 0 || generation > view.generation || record.object_id != id {
         return Err(CoreError::Corrupt(
             "snapshot object identity or generation mismatch".into(),
@@ -55,6 +55,36 @@ pub(crate) fn object<D: BlockDevice>(
         _ => (),
     }
     Ok(Some(record))
+}
+
+pub(crate) fn read_link<D: BlockDevice>(
+    dev: &mut D,
+    ident: &Identification,
+    view: SnapshotRecord,
+    id: u64,
+    output: &mut [u8],
+) -> Result<usize, CoreError> {
+    let record = object(dev, ident, view, id)?.ok_or(CoreError::NotFound)?;
+    if record.object_type != ObjectType::Symlink {
+        return Err(CoreError::InvalidMetadata("object is not a symlink"));
+    }
+    let geo = ident.geometry();
+    let lba = object_map::lookup_lba(dev, &geo, view.object_map_root, view.generation, id)?
+        .ok_or(CoreError::NotFound)?;
+    namespace_range(&geo, lba, 1)?;
+    let mut block = vec![0; geo.block_size];
+    dev.read_block(lba, &mut block)?;
+    let (link, generation) = afsplus_format::object::SymlinkRecord::decode(&block)?;
+    if link.record != record || generation == 0 || generation > view.generation {
+        return Err(CoreError::Corrupt(
+            "captured symlink identity mismatch".into(),
+        ));
+    }
+    let required = link.target.len();
+    if output.len() >= required {
+        output[..required].copy_from_slice(link.target.as_bytes());
+    }
+    Ok(required)
 }
 
 pub(crate) fn read_at<D: BlockDevice>(

@@ -360,6 +360,17 @@ impl<D: BlockDevice> Volume<D> {
         self.read_allocation_page(&record, object_id, view.generation, start, limit)
     }
 
+    /// Return required target bytes without copying into a short buffer.
+    pub fn snapshot_read_link(
+        &mut self,
+        handle: &SnapshotHandle,
+        object_id: u64,
+        destination: &mut [u8],
+    ) -> Result<usize, CoreError> {
+        let view = self.snapshot_view(handle)?;
+        snapshot::view::read_link(&mut self.dev, &self.ident, view, object_id, destination)
+    }
+
     pub fn snapshot_read_file_at(
         &mut self,
         handle: &SnapshotHandle,

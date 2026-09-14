@@ -396,3 +396,173 @@ fn invalid_operation_times_never_enter_namespace_or_log_windows() {
         .unwrap();
     clean(volume);
 }
+
+#[test]
+fn symlink_namespace_preserves_target_through_metadata_rename_and_remount() {
+    for snapshots in [false, true] {
+        let mut volume = open(formatted(snapshots, 0), MountMode::ReadWrite);
+        let target = "../café/./SYS:Tools";
+        let id = volume
+            .create_symlink(OBJECT_ROOT, "link", target, time(2))
+            .unwrap();
+        let directory = volume.create_directory_in_root("dir", time(3)).unwrap();
+        let _snapshot = snapshots.then(|| volume.snapshot_create(time(4)).unwrap());
+        let mut short = [0x55; 1];
+        assert_eq!(volume.read_link(id, &mut short).unwrap(), target.len());
+        assert_eq!(short, [0x55]);
+        volume.set_object_protection(id, 123, time(5)).unwrap();
+        volume.restore_object_metadata(id, wanted()).unwrap();
+        volume
+            .rename(OBJECT_ROOT, "link", directory, "moved", time(6))
+            .unwrap();
+        let mut data = [0; 128];
+        assert_eq!(volume.read_link(id, &mut data).unwrap(), target.len());
+        assert_eq!(&data[..target.len()], target.as_bytes());
+        let mut dev = volume.into_device();
+        let report = check_device(&mut dev);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let mut volume = open(dev, MountMode::ReadWrite);
+        assert_eq!(
+            volume.lookup_in_directory(directory, "moved").unwrap(),
+            Some(id)
+        );
+        assert_eq!(volume.read_link(id, &mut data).unwrap(), target.len());
+        assert_eq!(&data[..target.len()], target.as_bytes());
+        volume.unlink_symlink(directory, "moved", time(7)).unwrap();
+        assert!(volume.stat(id).unwrap().is_none());
+        let mut dev = volume.into_device();
+        let report = check_device(&mut dev);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+}
+
+#[test]
+fn symlink_publication_cuts_preserve_namespace_and_captured_target() {
+    for operation in 0..4 {
+        let mut volume = open(formatted(true, 0), MountMode::ReadWrite);
+        let id = volume
+            .create_symlink(OBJECT_ROOT, "link", "../captured", time(2))
+            .unwrap();
+        let dir = volume.create_directory_in_root("dir", time(3)).unwrap();
+        let old = volume.stat(id).unwrap().unwrap();
+        let snapshot = volume.snapshot_create(time(4)).unwrap();
+        let generation = volume.generation();
+        let base = volume.into_device();
+        let mut recording = open(RecordingBackend::new(base.clone()), MountMode::ReadWrite);
+        match operation {
+            0 => {
+                recording
+                    .create_symlink(dir, "new", "SYS:Tools", time(5))
+                    .unwrap();
+            }
+            1 => recording
+                .rename(OBJECT_ROOT, "link", dir, "new", time(5))
+                .unwrap(),
+            2 => recording
+                .unlink_symlink(OBJECT_ROOT, "link", time(5))
+                .unwrap(),
+            3 => recording.restore_object_metadata(id, wanted()).unwrap(),
+            _ => unreachable!(),
+        }
+        let new = recording.stat(id).unwrap();
+        let new_entry = recording.lookup_in_directory(dir, "new").unwrap();
+        let (_, log) = recording.into_device().into_parts();
+        let mut outcomes = [0, 0];
+        for cut in 0..=log.len() {
+            for_each_crash_state(&base, &log, cut, |state| {
+                let mut volume = open(state.image, MountMode::ReadWrite);
+                let committed = volume.generation() == generation + 1;
+                assert!(committed || volume.generation() == generation);
+                outcomes[usize::from(committed)] += 1;
+                assert_eq!(
+                    volume.stat(id).unwrap(),
+                    if committed { new } else { Some(old) }
+                );
+                assert_eq!(
+                    volume.lookup_in_directory(dir, "new").unwrap(),
+                    if committed { new_entry } else { None }
+                );
+                assert_eq!(
+                    volume.lookup_in_directory(OBJECT_ROOT, "link").unwrap(),
+                    if committed && (operation == 1 || operation == 2) {
+                        None
+                    } else {
+                        Some(id)
+                    }
+                );
+                let view = volume.snapshot_open(snapshot).unwrap();
+                let mut bytes = [0x55; 64];
+                assert_eq!(
+                    volume
+                        .snapshot_read_link(&view, id, &mut bytes[..1])
+                        .unwrap(),
+                    11
+                );
+                assert_eq!(bytes[0], 0x55);
+                assert_eq!(
+                    volume.snapshot_read_link(&view, id, &mut bytes).unwrap(),
+                    11
+                );
+                assert_eq!(&bytes[..11], b"../captured");
+                if let Some(new_id) = new_entry.filter(|_| committed) {
+                    let expected = if operation == 0 {
+                        b"SYS:Tools".as_slice()
+                    } else {
+                        b"../captured".as_slice()
+                    };
+                    assert_eq!(
+                        volume.read_link(new_id, &mut bytes).unwrap(),
+                        expected.len()
+                    );
+                    assert_eq!(&bytes[..expected.len()], expected);
+                }
+                drop(view);
+                clean(volume);
+            });
+        }
+        assert!(outcomes.iter().all(|count| *count > 0));
+    }
+}
+
+#[test]
+fn symlink_refusals_and_short_reads_do_not_write() {
+    let mut volume = open(formatted(true, 0), MountMode::ReadWrite);
+    let id = volume
+        .create_symlink(OBJECT_ROOT, "link", "target", time(2))
+        .unwrap();
+    let snapshot = volume.snapshot_create(time(3)).unwrap();
+    let base = volume.into_device();
+    for mode in [
+        MountMode::ReadWrite,
+        MountMode::ReadOnly,
+        MountMode::NoChanges,
+    ] {
+        let mut volume = open(TraceBackend::new(base.clone()), mode);
+        let generation = volume.generation();
+        for target in ["", "a\0b", &"x".repeat(3969)] {
+            assert!(volume
+                .create_symlink(OBJECT_ROOT, "bad", target, time(4))
+                .is_err());
+        }
+        assert!(volume.link_file(id, OBJECT_ROOT, "alias", time(4)).is_err());
+        assert!(volume
+            .create_symlink(OBJECT_ROOT, "link", "other", time(4))
+            .is_err());
+        if mode != MountMode::ReadWrite {
+            assert!(volume
+                .create_symlink(OBJECT_ROOT, "new", "other", time(4))
+                .is_err());
+            assert!(volume.unlink_symlink(OBJECT_ROOT, "link", time(4)).is_err());
+        }
+        let view = volume.snapshot_open(snapshot).unwrap();
+        let mut short = [0x55; 2];
+        assert_eq!(volume.read_link(id, &mut short).unwrap(), 6);
+        assert_eq!(volume.snapshot_read_link(&view, id, &mut short).unwrap(), 6);
+        assert_eq!(short, [0x55; 2]);
+        drop(view);
+        assert_eq!(volume.generation(), generation);
+        let trace = volume.into_device();
+        assert_eq!(trace.stats().writes, 0);
+        assert_eq!(trace.stats().flushes, 0);
+    }
+}

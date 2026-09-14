@@ -262,7 +262,7 @@ fn historical_namespace<D: BlockDevice>(
         )?;
         claim_meta(entry.block, &mut metadata)?;
         dev.read_block(entry.block, &mut buf)?;
-        let (record, generation) = ObjectRecord::decode_with_generation(&buf)?;
+        let (record, generation) = ObjectRecord::decode_metadata_with_generation(&buf)?;
         if generation == 0 || generation > view.generation || record.object_id != entry.object_id {
             return Err(CoreError::Corrupt(
                 "historical object identity or generation mismatch".into(),
@@ -331,6 +331,7 @@ fn historical_namespace<D: BlockDevice>(
             ObjectType::File => {
                 claim_data(record.data_root, record.data_blocks, false, &mut data)?;
             }
+            ObjectType::Symlink => {}
             _ => unreachable!("object decoder rejects unsupported types"),
         }
         objects.insert(record.object_id, record);
