@@ -1,6 +1,6 @@
 # ADR-026: Bounded atomic namespace batches
 
-Status: Internal group-commit mechanism accepted by ADR-063; public AtomicBatch API remains proposed
+Status: Partially accepted
 Amended by: ADR-063
 
 ## Context

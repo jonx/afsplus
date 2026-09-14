@@ -1,6 +1,6 @@
 # ADR-069: Develop consistent filesystem snapshots before individual version retention
 
-Status: Accepted direction; retention policy and on-disk representation require further decisions
+Status: Accepted
 Amends: ADR-021
 Amended by: ADR-070
 

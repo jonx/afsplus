@@ -1,6 +1,6 @@
 # ADR-046: Hosted AROS same-image qualification
 
-Status: Accepted for Mountable Alpha-0 S0
+Status: Accepted
 
 ## Context
 

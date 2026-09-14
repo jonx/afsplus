@@ -1,6 +1,6 @@
 # ADR-055: Add a native AROS/m68k emulator gate before Amiga 500 hardware
 
-Status: Accepted for pre-hardware qualification
+Status: Accepted
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR-009: Metadata transaction mechanism
 
-Status: Architecture resolved by ADR-063; final epoch-1 wire freeze remains M14
+Status: Accepted
 Amended by: ADR-020, ADR-063
 
 ## Context

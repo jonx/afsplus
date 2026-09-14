@@ -24,11 +24,10 @@ as the regression baseline. Persistent consistent snapshots are the accepted
 direction under [ADR-069](../adr/ADR-069-consistent-snapshots-first.md) and
 [ADR-070](../adr/ADR-070-persistent-snapshot-priority.md).
 
-Implement [ADR-071](../adr/ADR-071-snapshot-lifetime-prototype.md): lifetime
+Integrate and qualify [ADR-071](../adr/ADR-071-snapshot-lifetime-prototype.md): lifetime
 metadata across reflinks and last-live-reference retirement, plus a bounded
 persistent traversal that can pass protected queue entries;
-measure metadata reserves and write amplification. The model's rotating queue
-requires an explicit production representation. Keep snapshot-owned namespace
+measure metadata reserves and write amplification. Qualify the persistent traversal and its resource limits against the model. Keep snapshot-owned namespace
 metadata separate from allocation/reclaim machinery governed by selectable
 checkpoints. Use [ADR-072](../adr/ADR-072-snapshot-record-codecs.md) for leaf codecs and
 [ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md) for checkpoint root binding.
@@ -84,7 +83,7 @@ matching and large-inventory workloads, including segmented scratch beyond
 host file/seek limits. Complete attribute/security archive transport
 with explicit unsupported-state refusal under [ADR-078](../adr/ADR-078-backup-preservation-modes.md); qualify native host grant issuance. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
 with both-slot crash oracles, generation-aware quarantine and measured
-low-space progress. Implement [ADR-075](../adr/ADR-075-revocable-backup-capability.md)
+low-space progress. Integrate and qualify [ADR-075](../adr/ADR-075-revocable-backup-capability.md)
 for revocable trusted-backup authority; keep ordinary-user historical access
 and rich ACL decisions under Q5.
 Use `tree::read_key_page` for bounded inclusive-key seeking; persist the next
@@ -108,11 +107,11 @@ adapter work can proceed while a format question is discussed.
 | Uncertain publication | M03/M04; common commit engine | `faults` final-barrier, completed-write and adoption-read regressions | Preserve remount-required mutation rejection; extend each new publication path to the same oracle. |
 | Mixed I/O correctness | M03/M05; file/extent operations | `streaming_api` three-seed byte oracle | Extend with each new storage representation; preserve sparse, unwritten, truncate and clone isolation through remount. |
 | Repeated resource pressure | M03/M13; reclaim and sharing | Shared-survivor baseline and [24-cycle retained-view fixture](../testing/allocation-qualification.md#repeated-retained-view-pressure) | Preserve exact live/historical bytes and both-slot verification with one/eight-record scans; extend to aged multi-region sustained consumers and full memory accounting. |
-| Persistent snapshot views | Q4, M14; retention experiment, then accepted registry encoding | ADR-069/070; proposal S1–S4 | Build registry, protected ownership, read view and release; exact multi-view oracle after live mutation, reboot and create/delete crashes. |
+| Persistent snapshot views | Q4, M14; retention experiment, then accepted registry encoding | ADR-071/072/073; snapshot trees, allocator and Volume orchestration gates | Extend registry, ownership, read-view and release integration with full-consumer multi-view oracles, reboot and create/delete crash coverage. |
 | Retention and accounting policy | Q4; same workload for both candidates | Retirement-generation queue and fixed allocation pool | Integrate and measure lifetime accounting plus traversal past protected entries; measure admission limits and capacity reporting; preserve the accepted busy-on-active-handle deletion rule. |
 | Salvage and extraction | Q11, M05; damage classification | [Extraction corpus](../testing/extraction-qualification.md), `corruption_corpus`, `mount_modes` | Define supported damage classes; extract to a separate destination with explicit missing/untrusted-data report and zero source writes. |
 | Repair | Q11, M05/M14; salvage corpus and accepted repair operations | Checker invariants; recovery design | Implement selected repairs transactionally; report identities/actions/loss; crash each repair boundary and verify exact allowed outcomes. |
-| Backup and restoration | Q11, M13; stable snapshot view for online consistency | Clone/mixed-I/O tests do not prove backup | Run a real archive/restore consumer; compare names, links, bytes, sparse semantics, timestamps, attributes and security metadata. |
+| Backup and restoration | Q11, M13; stable snapshot view for online consistency | Scoped restore and bound file/directory/alias archive groups; backup archive qualification | Integrate whole-job archive/restore, symlinks and complete hard-link graph; compare names, bytes, sparse allocation, timestamps, attributes and security metadata. |
 | Adapter lifetime/concurrency | M07/M13; host API lifetime contract | VFS open-unlinked, replacement, hard-link and no-changes tests | Exercise concurrent read/write/append/close/unmount and independent versus duplicated state; retain in-flight resources and bound cancellation. |
 | Cache and VM integration | Q12, M07/M13; adapter/provider contract | Host block-fault tests; cache invariants | Test bypass/buffered coherence, eviction, failed writeback, low-memory reentrancy and contention progress on actual adapters. |
 | Device durability and lifecycle | Q12, M13/M14; native provider and authorized hardware procedure | Simulated cuts and injected faults | Qualify DMA completion, barriers, shutdown, sleep/wake and power interruption separately on the target; document provider limits. Hardware writes require discussion. |

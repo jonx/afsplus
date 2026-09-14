@@ -1,6 +1,6 @@
 # ADR-077: Separate destination restore authority from backup authority
 
-Status: Accepted by the owner; restore interface and host qualification required
+Status: Accepted
 Amended by: ADR-083, ADR-089, ADR-092
 
 ## Context

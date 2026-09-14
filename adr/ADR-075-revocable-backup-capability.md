@@ -1,6 +1,6 @@
 # ADR-075: Require revocable host authority for trusted snapshot backup
 
-Status: Accepted by the owner; host API and conformance qualification required
+Status: Accepted
 
 ## Context
 

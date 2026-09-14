@@ -1,6 +1,6 @@
 # ADR-080: Bind PAX completion to a streamed integrity envelope
 
-Status: Superseded by ADR-081 after independent Python tarfile recovery rejected the terminal global header
+Status: Superseded
 Amends: ADR-076
 Superseded by: ADR-081
 

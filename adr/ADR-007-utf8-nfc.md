@@ -1,6 +1,6 @@
 # ADR-007: UTF-8 names with NFC normalization
 
-Status: Accepted for the executable prototype; epoch-1 interoperability validation pending
+Status: Accepted
 
 ## Decision
 AFS+ stores the original valid UTF-8 spelling. Its comparison key, not the

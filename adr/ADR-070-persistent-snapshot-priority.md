@@ -1,6 +1,6 @@
 # ADR-070: Make the first consistent snapshots persistent
 
-Status: Accepted direction; persistent representation and retention policy require prototype evidence
+Status: Accepted
 Amends: ADR-069
 Amended by: ADR-071
 

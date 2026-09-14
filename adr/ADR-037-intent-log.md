@@ -1,6 +1,6 @@
 # ADR-037: Intent log for forced durability between checkpoints
 
-Status: Mechanism accepted by ADR-063; record wire remains experimental
+Status: Accepted
 Amended by: ADR-063
 
 ## Context

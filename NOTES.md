@@ -9,6 +9,8 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Refresh implementation navigation and remaining work](#2026-09-14--refresh-implementation-navigation-and-remaining-work)
+- [2026-09-14 — Simplify ADR decision statuses](#2026-09-14--simplify-adr-decision-statuses)
 - [2026-09-14 - Cross-read inline symlink records with Rust and C](#2026-09-14---cross-read-inline-symlink-records-with-rust-and-c)
 - [2026-09-14 - Reject undersized object encoder buffers](#2026-09-14---reject-undersized-object-encoder-buffers)
 - [2026-09-14 - Bind directory and alias archive restoration](#2026-09-14---bind-directory-and-alias-archive-restoration)
@@ -104,6 +106,83 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Refresh implementation navigation and remaining work
+
+Applied the approved docs-refresh review against commit f711cff and the local
+working tree. Added phase/stage/milestone navigation; corrected the roadmap's
+conditional hybrid-policy and intent-log experiments to ADR-062/063/064/065.
+The replaced roadmap text asked to prototype full COW versus private in-place
+and add an intent log only after measurement; the accepted ADRs own that
+measurement and its decisions. Updated symlink codec and API summaries,
+separated snapshot component integration from whole-job backup qualification,
+and added snapshot/backup deliverables to the implementation plan.
+
+Source and test inspection establish these corrections. Cargo was unavailable
+in this session, so no fresh Rust test result is claimed. Hardware and complete
+consumer qualification remain explicit work. Acceptance gates are unchanged.
+
+## 2026-09-14 — Simplify ADR decision statuses
+
+Normalized decision labels and removed approval attribution from ADR headers.
+The index links implementation progress and the detailed work queue. Acceptance
+is separate from implementation completion and format freeze. Proposed and
+superseded decisions retain their lifecycle meaning; ADR-026 is partially
+accepted because its public AtomicBatch API is proposed.
+
+Technical qualifications removed from the status labels are retained below as
+historical context; their linked decisions and milestone gates govern scope.
+
+- [ADR-007](adr/ADR-007-utf8-nfc.md): Accepted for the executable prototype; epoch-1 interoperability validation pending.
+- [ADR-008](adr/ADR-008-case-policy.md): Accepted; volume-default implementation complete, per-directory override pending.
+- [ADR-009](adr/ADR-009-journal.md): Architecture resolved by ADR-063; final epoch-1 wire freeze remains M14.
+- [ADR-018](adr/ADR-018-inline-data-optional.md): Reopened after PFS4 review.
+- [ADR-020](adr/ADR-020-checkpoint-commit.md): Mechanism accepted by ADR-063; final epoch-1 wire and real-device gates remain M14.
+- [ADR-022](adr/ADR-022-cache-pinning.md): Accepted as an implementation invariant.
+- [ADR-026](adr/ADR-026-bounded-atomic-batches.md): Internal group-commit mechanism accepted by ADR-063; public AtomicBatch API remains proposed.
+- [ADR-027](adr/ADR-027-reflink-clones.md): Accepted as an epoch-1 format requirement; implementation may be staged.
+- [ADR-028](adr/ADR-028-rust-reference-core.md): Accepted implementation direction.
+- [ADR-029](adr/ADR-029-dual-reference-implementations.md): Accepted project policy.
+- [ADR-031](adr/ADR-031-portable-security-acls.md): Proposed, split into container-first and semantics-later phases.
+- [ADR-034](adr/ADR-034-bounded-cow-tree.md): Accepted for the prototype; four authoritative adapters published.
+- [ADR-035](adr/ADR-035-allocation-root-reserved-pool.md): Accepted and authoritative in the executable prototype.
+- [ADR-036](adr/ADR-036-reclaim-queue.md): Accepted for the prototype (Reclaim Scale-2); wire format experimental.
+- [ADR-037](adr/ADR-037-intent-log.md): Mechanism accepted by ADR-063; record wire remains experimental.
+- [ADR-038](adr/ADR-038-mount-policy-and-feature-summary.md): Accepted for the Mountable Alpha-0 prototype.
+- [ADR-039](adr/ADR-039-portable-vfs-slice.md): Accepted for Mountable Alpha-0.
+- [ADR-040](adr/ADR-040-fuse-protocol-boundary.md): Accepted for Mountable Alpha-0.
+- [ADR-041](adr/ADR-041-aros-dos-adapter.md): Accepted for Mountable Alpha-0.
+- [ADR-042](adr/ADR-042-aros-c-boundary.md): Accepted for Mountable Alpha-0.
+- [ADR-043](adr/ADR-043-native-aros-dospacket-translator.md): Accepted for Mountable Alpha-0.
+- [ADR-044](adr/ADR-044-aros-trackdisk-viewport.md): Accepted for Mountable Alpha-0.
+- [ADR-045](adr/ADR-045-native-aros-handler-shell.md): Accepted for Mountable Alpha-0 integration.
+- [ADR-046](adr/ADR-046-hosted-aros-same-image.md): Accepted for Mountable Alpha-0 S0.
+- [ADR-047](adr/ADR-047-hosted-aros-crash-replay.md): Accepted for Hosted and native-QEMU qualification.
+- [ADR-048](adr/ADR-048-hosted-aros-system-pivot.md): Accepted; S1a and Hosted S1b qualified.
+- [ADR-049](adr/ADR-049-hosted-aros-desktop-pivot.md): Accepted for Hosted S1b.
+- [ADR-050](adr/ADR-050-external-aros-handler-lifecycle.md): Accepted for Hosted and native-QEMU lifecycle.
+- [ADR-051](adr/ADR-051-explicit-aros-aarch64-platform-profiles.md): Accepted; apple-aarch64 pre-hardware runtime profile qualified.
+- [ADR-052](adr/ADR-052-versioned-directory-comparison-keys.md): Accepted for the executable prototype.
+- [ADR-053](adr/ADR-053-native-macaros-retained-image-transport.md): Accepted for pre-hardware QEMU qualification.
+- [ADR-054](adr/ADR-054-native-macaros-crash-replay-extraction.md): Accepted for native MacAROS pre-hardware qualification.
+- [ADR-055](adr/ADR-055-aros-m68k-emulator-gate.md): Accepted for pre-hardware qualification.
+- [ADR-056](adr/ADR-056-native-aros-m68k-alpha0-and-replay.md): Accepted for the M68020-or-newer emulator reference profile.
+- [ADR-057](adr/ADR-057-plain-m68000-emulator-gate.md): Accepted for A500-configured emulator functionality and recovery.
+- [ADR-058](adr/ADR-058-m68000-memory-and-restart-lifecycle.md): Accepted for the A500-configured emulator profile.
+- [ADR-059](adr/ADR-059-guest-failure-diagnostics-are-gate-verdicts.md): Accepted for all current AROS runtime gates.
+- [ADR-061](adr/ADR-061-shared-extent-references.md): Accepted; wire format experimental until M14.
+- [ADR-062](adr/ADR-062-explicit-hybrid-data-updates.md): Accepted as the epoch-1 data-update architecture; the persistent policy encoding is assigned by ADR-065.
+- [ADR-063](adr/ADR-063-intent-log-epoch1.md): Accepted as the epoch-1 durability architecture; intent-log wire remains experimental.
+- [ADR-064](adr/ADR-064-intent-log-data-update-compatibility.md): Accepted for the experimental version-3 record set; final wire freeze remains M14.
+- [ADR-065](adr/ADR-065-persistent-data-update-policy.md): Accepted; wire format experimental until M14.
+- [ADR-066](adr/ADR-066-bounded-orphan-directory.md): Accepted; wire format experimental until M14.
+- [ADR-067](adr/ADR-067-epoch1-allocation-state.md): Accepted; exact wire format remains experimental until M14.
+- [ADR-069](adr/ADR-069-consistent-snapshots-first.md): Accepted direction; retention policy and on-disk representation require further decisions.
+- [ADR-070](adr/ADR-070-persistent-snapshot-priority.md): Accepted direction; persistent representation and retention policy require prototype evidence.
+- [ADR-071](adr/ADR-071-snapshot-lifetime-prototype.md): Accepted for the integrated experiment; shipping wire and resource qualification open.
+- [ADR-072](adr/ADR-072-snapshot-record-codecs.md): Accepted for the ADR-071 prototype; integration and wire freeze require qualification.
+- [ADR-073](adr/ADR-073-snapshot-checkpoint-roots.md): Accepted for the ADR-071 prototype; writable snapshot support requires integration.
+- [ADR-080](adr/ADR-080-pax-completion-envelope.md): Superseded by ADR-081 after independent Python tarfile recovery rejected the terminal global header.
 
 ## 2026-09-14 - Cross-read inline symlink records with Rust and C
 

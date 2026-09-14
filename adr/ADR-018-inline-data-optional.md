@@ -1,6 +1,6 @@
 # ADR-018: Tiny-file storage optimization
 
-Status: Reopened after PFS4 review
+Status: Reopened
 
 ## Context
 

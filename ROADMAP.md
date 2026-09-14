@@ -2,6 +2,7 @@
 
 <!-- toc -->
 
+- [Stage and milestone map](#stage-and-milestone-map)
 - [Stage 0: Amiga-native design review](#stage-0-amiga-native-design-review)
 - [Stage A: make the core executable](#stage-a-make-the-core-executable)
 - [Stage B: resolve the epoch-1 architecture blockers](#stage-b-resolve-the-epoch-1-architecture-blockers)
@@ -19,6 +20,22 @@
 
 <!-- /toc -->
 
+## Stage and milestone map
+
+Stages group dependencies; [implementation phases](implementation/implementation-plan.md)
+identify deliverables. A milestone may contribute to several stages. Progress
+is recorded only in [milestones](implementation/milestones.md).
+
+| Stage | Contributing milestones | Intended outcome |
+|---|---|---|
+| [Stage 0](#stage-0-amiga-native-design-review) | Design review, no numbered milestone | Amiga filesystem design references |
+| [Stage A](#stage-a-make-the-core-executable) | [M00](implementation/milestones.md), [M01](implementation/milestones.md), [M02](implementation/milestones.md), [M03](implementation/milestones.md), [M04](implementation/milestones.md), [M05](implementation/milestones.md) | Executable core and reader/format foundations |
+| [Stage B](#stage-b-resolve-the-epoch-1-architecture-blockers) | [M00](implementation/milestones.md), [M03](implementation/milestones.md), [M04](implementation/milestones.md) | Allocation, update and durability architecture |
+| [Stage C](#stage-c-integrate-aros-and-begin-independent-c-portability) | [M06](implementation/milestones.md), [M07](implementation/milestones.md), [M12](implementation/milestones.md) | AROS adapters and independent C integration |
+| [Stage D](#stage-d-portability-and-host-tooling) | [M01](implementation/milestones.md), [M08](implementation/milestones.md), [M12](implementation/milestones.md) | Portable implementations and host tooling |
+| [Stage E](#stage-e-developer-contract-accelerators-and-optional-features) | [M09](implementation/milestones.md), [M10](implementation/milestones.md) | Catalog and persistent change services |
+| [Stage F](#stage-f-production-qualification) | [M00](implementation/milestones.md), [M05](implementation/milestones.md), [M11](implementation/milestones.md), [M13](implementation/milestones.md), [M14](implementation/milestones.md) | Maintenance, workload qualification and format freeze |
+
 ## Stage 0: Amiga-native design review
 
 Milestones: none — the outcome is [docs/23](docs/23-pfs3-stage0-review.md). Subsystem-by-subsystem source review continues only when implementation reaches that subsystem.
@@ -35,7 +52,7 @@ See [`implementation/peer-review-prototype-plan.md`](implementation/peer-review-
 
 ## Stage A: make the core executable
 
-Milestones: M02, M03, M04, M05 ([status](implementation/milestones.md)).
+Milestones: [M00](implementation/milestones.md), [M01](implementation/milestones.md), [M02](implementation/milestones.md), [M03](implementation/milestones.md), [M04](implementation/milestones.md), [M05](implementation/milestones.md).
 
 Primary goal:
 
@@ -92,7 +109,7 @@ Do not block this stage on:
 
 ## Stage B: resolve the epoch-1 architecture blockers
 
-Milestones: M03, M04 ([status](implementation/milestones.md)); the blockers are tracked as questions in [implementation/open-questions.md](implementation/open-questions.md).
+Milestones: [M00](implementation/milestones.md), [M03](implementation/milestones.md), [M04](implementation/milestones.md).
 
 ### B1. Allocation state
 
@@ -110,32 +127,28 @@ Exact byte layout and the global wire epoch remain subject to M14 review.
 
 ### B2. User-data update policy
 
-Prototype/measure:
+[ADR-062](adr/ADR-062-explicit-hybrid-data-updates.md) defines full COW by
+default and explicit private in-place opt-in. [ADR-065](adr/ADR-065-persistent-data-update-policy.md)
+defines the persistent policy. Shared, snapshot-protected or uncertain ranges
+require COW. Qualify the policy across Rust, portable C and host adapters.
 
-- full data COW
-- in-place overwrite for unshared committed data
-- hybrid policy only if measurements justify its extra semantics
-
-Required workloads:
-
-- random 4 KiB rewrites
-- VM/database-style files
-- reflink/shared-range writes
-- crash before/after metadata commit
-- historical content-generation handle cost
-
-Reflink-shared ranges always COW.
+Required workloads include random 4 KiB rewrites, database/VM hot sets, append,
+reflinks, retained snapshots and crashes at each publication boundary. Measure
+CPU, RAM, I/O amplification, fragmentation and recovery against the
+[data-policy evidence](implementation/data-policy-bakeoff.md).
 
 ### B3. Checkpoint and fsync
 
-- implement checkpoint-COW transaction engine first
-- benchmark repeated small write + `fsync`
-- benchmark Git/package-manager rename/fsync patterns
-- add a small durability/intent-log prototype **only if measurements show the checkpoint path needs it**
+[ADR-063](adr/ADR-063-intent-log-epoch1.md) defines checkpoint COW, bounded
+group commit and an intent log. [ADR-064](adr/ADR-064-intent-log-data-update-compatibility.md)
+defines existing-file write/truncate log compatibility. Preserve one shared
+mutation/recovery engine.
 
-Do not build a second complete redo-journal engine solely for a bake-off.
-
-The format keeps a discoverable extension point for future auxiliary durability-log state without freezing its record encoding yet.
+Qualify namespace and existing-file durability across adapters and portable C,
+including replay interruption, torn writes and real-device barriers. Use the
+[fsync baseline](implementation/fsync-intent-log-baseline.md) and
+[write/truncate qualification](testing/intent-log-write-truncate-qualification.md).
+Wire freeze and hardware acceptance belong to [M14](implementation/milestones.md).
 
 ### B4. Core filesystem structures
 
@@ -161,7 +174,7 @@ Do **not** require full canonical NFSv4/Windows ACL evaluation semantics in the 
 
 ## Stage C: integrate AROS and begin independent C portability
 
-Milestones: M06, M07 ([status](implementation/milestones.md)).
+Milestones: [M06](implementation/milestones.md), [M07](implementation/milestones.md), [M12](implementation/milestones.md).
 
 - AROS handler
 - DOS compatibility
@@ -188,7 +201,7 @@ Portable C work begins from the stable executable spec/conformance corpus:
 
 ## Stage D: portability and host tooling
 
-Milestones: M01, M08, M12 ([status](implementation/milestones.md)).
+Milestones: [M01](implementation/milestones.md), [M08](implementation/milestones.md), [M12](implementation/milestones.md).
 
 - FUSE host mount
 - third-party probe kit
@@ -205,7 +218,7 @@ If rich multi-user ACL semantics remain a project goal, this is the earliest sen
 
 ## Stage E: developer-contract accelerators and optional features
 
-Milestones: M09, M10 ([status](implementation/milestones.md)).
+Milestones: [M09](implementation/milestones.md), [M10](implementation/milestones.md).
 
 A proposed feature enters this stage only after the core is proven and at least one real consumer exists.
 
@@ -233,7 +246,7 @@ Features that fail to earn real use may be deprecated/retired. Their IDs remain 
 
 ## Stage F: production qualification
 
-Milestones: M11, M13, M14 ([status](implementation/milestones.md)).
+Milestones: [M00](implementation/milestones.md), [M05](implementation/milestones.md), [M11](implementation/milestones.md), [M13](implementation/milestones.md), [M14](implementation/milestones.md).
 
 - grow resize
 - minimum-size query
@@ -304,6 +317,5 @@ in ADRs, and turn accepted experiments into milestone gates. Missing platform
 support is implementation work with an owner, not a permanent scope limit.
 
 The [audit implementation queue](implementation/audit-work-queue.md) carries
-the complete follow-up order and next-session entry point. Start with the
-conservative snapshot-retention experiment while preserving the independent
+the complete follow-up order and next-session entry point. Continue with integrated snapshot/backup qualification while preserving the independent
 recovery, adapter, discovery and application qualification work.

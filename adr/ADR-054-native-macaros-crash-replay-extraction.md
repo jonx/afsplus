@@ -1,6 +1,6 @@
 # ADR-054: Extract native-QEMU RAM and qualify intent-log replay
 
-Status: Accepted for native MacAROS pre-hardware qualification
+Status: Accepted
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR-047: Replay modeled power-cut images through the native AROS handler
 
-Status: Accepted for Hosted and native-QEMU qualification
+Status: Accepted
 
 ## Context
 

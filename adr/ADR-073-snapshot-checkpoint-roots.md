@@ -1,6 +1,6 @@
 # ADR-073: Bind snapshot roots through an incompatible checkpoint extension
 
-Status: Accepted for the ADR-071 prototype; writable snapshot support requires integration
+Status: Accepted
 Amends: ADR-072
 
 ## Context

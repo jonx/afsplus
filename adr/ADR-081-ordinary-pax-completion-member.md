@@ -1,6 +1,6 @@
 # ADR-081: Use an ordinary terminal member in a separate archive namespace
 
-Status: Accepted under the owner's delegated recommended-option authority; preservation-profile integration required
+Status: Accepted
 Amended by: ADR-087, ADR-088
 Supersedes: ADR-080
 

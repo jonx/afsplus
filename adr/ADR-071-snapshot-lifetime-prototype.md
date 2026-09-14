@@ -1,6 +1,6 @@
 # ADR-071: Prototype persistent lifetime accounting and busy snapshot deletion
 
-Status: Accepted for the integrated experiment; shipping wire and resource qualification open
+Status: Accepted
 Amends: ADR-070
 Amended by: ADR-072, ADR-074
 

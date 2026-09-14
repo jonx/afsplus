@@ -1,6 +1,6 @@
 # ADR-022: Explicit cache-page pinning and stale-reference detection
 
-Status: Accepted as an implementation invariant
+Status: Accepted
 
 ## Context
 

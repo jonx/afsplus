@@ -1,6 +1,6 @@
 # ADR-045: Native AROS handler shell assembly
 
-Status: Accepted for Mountable Alpha-0 integration
+Status: Accepted
 
 ## Context
 

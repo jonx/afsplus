@@ -1,6 +1,6 @@
 # ADR-078: Distinguish full backup preservation from content recovery
 
-Status: Accepted by the owner; profile and destination qualification required
+Status: Accepted
 Amended by: ADR-079, ADR-087, ADR-089, ADR-090, ADR-091
 Amends: ADR-076
 

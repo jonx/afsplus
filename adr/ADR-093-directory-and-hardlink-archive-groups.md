@@ -1,6 +1,6 @@
 # ADR-093: Bind directory and hard-link archive groups to scoped restoration
 
-Status: Accepted under the owner's delegated recommended-option authority; enclosing namespace/job qualification required
+Status: Accepted
 Amends: ADR-082, ADR-091, ADR-092
 
 ## Context

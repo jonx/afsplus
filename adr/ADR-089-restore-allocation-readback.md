@@ -1,6 +1,6 @@
 # ADR-089: Verify restored allocation through scoped bounded readback
 
-Status: Accepted under the owner's delegated recommended-option authority; complete allocation-preservation consumer required
+Status: Accepted
 Amended by: ADR-090
 Amends: ADR-077, ADR-078
 

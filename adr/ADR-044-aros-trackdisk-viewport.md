@@ -1,6 +1,6 @@
 # ADR-044: Bounded AROS trackdisk viewport
 
-Status: Accepted for Mountable Alpha-0
+Status: Accepted
 
 ## Context
 

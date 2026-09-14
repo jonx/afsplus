@@ -1,6 +1,6 @@
 # ADR-049: Qualify the Hosted desktop session after the AFS+ system pivot
 
-Status: Accepted for Hosted S1b
+Status: Accepted
 
 ## Context
 

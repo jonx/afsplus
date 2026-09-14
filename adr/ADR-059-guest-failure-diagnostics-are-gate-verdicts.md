@@ -1,6 +1,6 @@
 # ADR-059: Treat guest failure diagnostics as qualification verdicts
 
-Status: Accepted for all current AROS runtime gates
+Status: Accepted
 
 ## Context
 

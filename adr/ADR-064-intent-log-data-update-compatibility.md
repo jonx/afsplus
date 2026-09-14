@@ -1,6 +1,6 @@
 # ADR-064: Fail closed on intent-log data-update records
 
-Status: Accepted for the experimental version-3 record set; final wire freeze remains M14
+Status: Accepted
 Amends: ADR-063
 
 ## Context

@@ -1,6 +1,6 @@
 # ADR-039: Portable handle API and generation-bound directory cookies
 
-Status: Accepted for Mountable Alpha-0
+Status: Accepted
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR-090: Bind allocation records to sparse contents and verify restoration
 
-Status: Accepted under the owner's delegated recommended-option authority; whole-job and native qualification required
+Status: Accepted
 Amended by: ADR-091
 Amends: ADR-078, ADR-087, ADR-089
 

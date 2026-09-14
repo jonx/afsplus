@@ -1,6 +1,6 @@
 # ADR-063: Checkpoint COW plus an intent log for epoch-1 durability
 
-Status: Accepted as the epoch-1 durability architecture; intent-log wire remains experimental
+Status: Accepted
 Amends: ADR-009, ADR-020, ADR-026, ADR-037
 Amended by: ADR-064
 

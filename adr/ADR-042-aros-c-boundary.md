@@ -1,6 +1,6 @@
 # ADR-042: Versioned C boundary for native AROS handlers
 
-Status: Accepted for Mountable Alpha-0
+Status: Accepted
 Amended by: ADR-056, ADR-057
 
 ## Context

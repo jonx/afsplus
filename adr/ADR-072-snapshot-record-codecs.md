@@ -1,6 +1,6 @@
 # ADR-072: Define experimental snapshot registry and lifetime record codecs
 
-Status: Accepted for the ADR-071 prototype; integration and wire freeze require qualification
+Status: Accepted
 Amends: ADR-071
 Amended by: ADR-073
 

@@ -1,6 +1,6 @@
 # ADR-062: Explicit hybrid policy for committed user-data updates
 
-Status: Accepted as the epoch-1 data-update architecture; the persistent policy encoding is assigned by ADR-065
+Status: Accepted
 Amended by: ADR-079
 Amends: ADR-020, ADR-061
 

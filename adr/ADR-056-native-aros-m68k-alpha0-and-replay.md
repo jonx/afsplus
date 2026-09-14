@@ -1,6 +1,6 @@
 # ADR-056: Qualify Alpha-0 and intent-log replay on native AROS/m68k
 
-Status: Accepted for the M68020-or-newer emulator reference profile
+Status: Accepted
 
 ## Context
 

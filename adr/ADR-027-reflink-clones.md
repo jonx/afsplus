@@ -1,6 +1,6 @@
 # ADR-027: Reflink file and range cloning
 
-Status: Accepted as an epoch-1 format requirement; implementation may be staged
+Status: Accepted
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR-036: Segmented reclaim queue with bounded, resumable batches
 
-Status: Accepted for the prototype (Reclaim Scale-2); wire format experimental
+Status: Accepted
 Amended by: ADR-074
 
 <!-- toc -->

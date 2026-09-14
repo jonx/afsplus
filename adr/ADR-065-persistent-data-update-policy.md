@@ -1,6 +1,6 @@
 # ADR-065: Persistent per-file data-update policy encoding
 
-Status: Accepted; wire format experimental until M14
+Status: Accepted
 Amends: ADR-062
 
 ## Context

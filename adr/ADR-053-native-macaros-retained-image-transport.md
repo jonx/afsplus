@@ -1,6 +1,6 @@
 # ADR-053: Qualify native MacAROS with a retained-image block transport
 
-Status: Accepted for pre-hardware QEMU qualification
+Status: Accepted
 
 ## Context
 

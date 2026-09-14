@@ -1,6 +1,6 @@
 # ADR-020: Copy-on-write metadata with alternating checkpoints
 
-Status: Mechanism accepted by ADR-063; final epoch-1 wire and real-device gates remain M14
+Status: Accepted
 Amended by: ADR-062, ADR-063
 
 ## Context

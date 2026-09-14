@@ -1,6 +1,6 @@
 # ADR-067: Select the epoch-1 authoritative allocation-state architecture
 
-Status: Accepted; exact wire format remains experimental until M14
+Status: Accepted
 Amends: ADR-035, ADR-036
 
 ## Context

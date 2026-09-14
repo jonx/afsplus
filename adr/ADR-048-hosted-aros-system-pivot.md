@@ -1,6 +1,6 @@
 # ADR-048: Split Hosted system-volume qualification into S1a and S1b
 
-Status: Accepted; S1a and Hosted S1b qualified
+Status: Accepted
 
 ## Context
 

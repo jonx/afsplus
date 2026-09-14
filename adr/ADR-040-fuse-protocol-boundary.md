@@ -1,6 +1,6 @@
 # ADR-040: Testable FUSE protocol boundary and host mount entry point
 
-Status: Accepted for Mountable Alpha-0
+Status: Accepted
 
 ## Context
 

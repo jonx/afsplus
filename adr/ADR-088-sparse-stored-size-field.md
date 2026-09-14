@@ -1,6 +1,6 @@
 # ADR-088: Keep sparse stored size in the raw tar header
 
-Status: Accepted under the owner's delegated recommended-option authority after independent-reader failure
+Status: Accepted
 Amends: ADR-087, ADR-081
 
 ## Context

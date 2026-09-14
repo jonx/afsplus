@@ -1,6 +1,6 @@
 # ADR-051: Make AROS AArch64 platform profiles explicit
 
-Status: Accepted; apple-aarch64 pre-hardware runtime profile qualified
+Status: Accepted
 
 ## Context
 

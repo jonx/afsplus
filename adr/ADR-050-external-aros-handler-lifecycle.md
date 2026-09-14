@@ -1,6 +1,6 @@
 # ADR-050: Keep the AROS handler external and qualify its unload/reload lifecycle
 
-Status: Accepted for Hosted and native-QEMU lifecycle
+Status: Accepted
 
 ## Context
 

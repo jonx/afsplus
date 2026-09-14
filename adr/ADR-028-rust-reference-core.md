@@ -1,6 +1,6 @@
 # ADR-028: Rust reference core with language-neutral format
 
-Status: Accepted implementation direction
+Status: Accepted
 
 ## Context
 

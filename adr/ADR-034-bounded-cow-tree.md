@@ -1,6 +1,6 @@
 # ADR-034: Shared bounded copy-on-write tree engine
 
-Status: Accepted for the prototype; four authoritative adapters published
+Status: Accepted
 
 <!-- toc -->
 

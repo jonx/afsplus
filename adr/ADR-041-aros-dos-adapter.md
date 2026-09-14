@@ -1,6 +1,6 @@
 # ADR-041: Packet-neutral AROS DOS adapter
 
-Status: Accepted for Mountable Alpha-0
+Status: Accepted
 
 ## Context
 

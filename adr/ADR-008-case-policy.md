@@ -1,6 +1,6 @@
 # ADR-008: Case behavior is configurable
 
-Status: Accepted; volume-default implementation complete, per-directory override pending
+Status: Accepted
 
 ## Decision
 AFS+ supports case-sensitive and case-insensitive directories, with a volume

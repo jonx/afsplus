@@ -1,6 +1,6 @@
 # ADR-079: Initialize private unwritten reservations before publishing written mappings
 
-Status: Accepted under the owner's delegated design authority; qualification required
+Status: Accepted
 Amends: ADR-062, ADR-074, ADR-078
 
 ## Context

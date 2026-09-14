@@ -1,6 +1,6 @@
 # ADR-038: Explicit mount policy and identification feature summary
 
-Status: Accepted for the Mountable Alpha-0 prototype
+Status: Accepted
 
 ## Context
 

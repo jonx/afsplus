@@ -1,6 +1,6 @@
 # ADR-086: Bind complete object inventories to counted descriptor manifests
 
-Status: Accepted under the owner's delegated recommended-option authority; complete backup-job qualification required
+Status: Accepted
 Amended by: ADR-091
 Amends: ADR-082, ADR-084, ADR-085
 

@@ -1,6 +1,6 @@
 # ADR-029: Rust primary implementation plus portable C implementation
 
-Status: Accepted project policy
+Status: Accepted
 
 ## Context
 

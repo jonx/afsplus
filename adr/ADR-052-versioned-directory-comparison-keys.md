@@ -1,6 +1,6 @@
 # ADR-052: Put versioned directory comparison keys on disk
 
-Status: Accepted for the executable prototype
+Status: Accepted
 
 ## Context
 

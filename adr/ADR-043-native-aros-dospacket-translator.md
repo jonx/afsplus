@@ -1,6 +1,6 @@
 # ADR-043: Native AROS DosPacket translator
 
-Status: Accepted for Mountable Alpha-0
+Status: Accepted
 
 ## Context
 

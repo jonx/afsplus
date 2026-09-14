@@ -5,6 +5,19 @@ contributor. [`tools/check-docs.py`](../tools/check-docs.py) enforces the mechan
 judgement, and this page is its reference. [AGENTS.md](../AGENTS.md) points
 here; [CONTRIBUTING.md](../CONTRIBUTING.md) names the checker.
 
+<!-- toc -->
+
+- [1. Finished-state text](#1-finished-state-text)
+- [2. Four kinds of document, one home per fact](#2-four-kinds-of-document-one-home-per-fact)
+- [3. Per-document rules](#3-per-document-rules)
+- [4. Navigation block](#4-navigation-block)
+- [5. Tables of contents](#5-tables-of-contents)
+- [6. Links](#6-links)
+- [7. Checklist before committing](#7-checklist-before-committing)
+- [8. The checker](#8-the-checker)
+
+<!-- /toc -->
+
 ## 1. Finished-state text
 
 Every document except the journal describes the finished state: what AFS+ is,
@@ -51,6 +64,10 @@ drafts awaiting team review have theirs, [proposals/](../proposals/README.md).
   test plan or design document the row links.
 - **ROADMAP.md** carries the plan only: stages, order, exit criteria, and the
   milestones each stage feeds. It carries no `Status:` line.
+- **ADR status vocabulary:** use `Accepted`, `Proposed`, `Partially accepted`,
+  `Reopened` or `Superseded`. Omit approval attribution and implementation
+  progress from status lines. Scope follows decision and relation text;
+  qualification progress belongs in the milestone table.
 - **ADRs** become immutable when they are accepted, not when they are written.
   A record whose `Status:` is `Proposed` is a draft under review and may be
   revised in place while its review thread is open; once its status records

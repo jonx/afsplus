@@ -1,6 +1,6 @@
 # ADR-031: Portable security metadata and canonical ACL candidate
 
-Status: Proposed, split into container-first and semantics-later phases
+Status: Proposed
 
 ## Context
 

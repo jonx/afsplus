@@ -1,6 +1,6 @@
 # ADR-058: Bound M68000 emulator memory and qualify stable handler restarts
 
-Status: Accepted for the A500-configured emulator profile
+Status: Accepted
 
 ## Context
 
