@@ -76,3 +76,22 @@ M00 contributes to Stage F's finite epoch-1 freeze. Reader implementation and
 image-operation evidence feed Stage A through M01 and M03. Continued source review
 and future format evolution are ongoing activities, excluded from finite stage
 completion. Remaining stage mappings require their own acceptance audit.
+
+## Stage A executable-core audit
+
+| Requirement | Evidence and scope | Disposition |
+|---|---|---|
+| Workspace, format, block, core and checker | [Block module surface](../crates/afsplus-block/src/lib.rs), formatter M02, image-operation M03 and checker M05 gates | Implemented components; preserve the independent semantic oracles. |
+| Memory and sparse host-file devices | [Memory backend](../crates/afsplus-block/src/memory.rs) and [file backend](../crates/afsplus-block/src/file.rs) | Implemented host test inputs; physical-device qualification is separate. |
+| Tracing, deterministic faults and simulated cuts | [Trace](../crates/afsplus-block/src/trace.rs), [faults](../crates/afsplus-block/src/fault.rs), [power cuts](../crates/afsplus-block/src/powercut.rs) and [crash matrices](../crates/afsplus-check/tests/crash_matrix.rs) | Implemented bounded-operation simulation; exhaustive coverage must be established for each publication path. |
+| I/O and write-amplification accounting | Trace records successful block reads, writes, bytes and flushes | Implemented counters; complete CPU/RAM and workload denominator accounting remains unverified against the stage requirement. |
+| SliceBackend | Block module exports contain no partition-view wrapper | Implementation required: bounded logical-to-parent translation, overflow refusal, no out-of-view writes and forwarded durability errors. |
+| OverlayBackend | Block module exports contain no branch wrapper | Implementation required: isolated branch reads/writes and explicit branch durability semantics, with unchanged-base and cut/replay tests. |
+| Structured flight recorder and operation replay | [Activity events](../crates/afsplus-block/src/activity.rs) and power-cut recording provide component evidence | Complete persistent artifact/replay contract from [developer harness](../testing/developer-harness.md) remains unverified; event callbacks alone do not close it. |
+| Tiny-cache matrix and fuzz/property tests | Existing linked conformance, fuzzing and crash tests | Audit each mutation family's required cache profiles and retained failure artifacts before stage closure. |
+
+Stage A remains partial because these finite requirements need implementation or
+stronger evidence. Resolve bounded device wrappers before branch-based replay,
+then qualify artifact reproduction and total resource accounting. Keep the full
+[audit queue](audit-work-queue.md#complete-work-queue), including later consumers
+and physical-provider gates, in the dependency order.

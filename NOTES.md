@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Audit finite executable-core stage requirements](#2026-09-14---audit-finite-executable-core-stage-requirements)
 - [2026-09-14 - Preserve scoped symlinks in bound archive groups](#2026-09-14---preserve-scoped-symlinks-in-bound-archive-groups)
 - [2026-09-14 - Separate ongoing review from finite stage completion](#2026-09-14---separate-ongoing-review-from-finite-stage-completion)
 - [2026-09-14 — Generate visible milestone and stage progress](#2026-09-14--generate-visible-milestone-and-stage-progress)
@@ -111,6 +112,16 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Audit finite executable-core stage requirements
+
+Inspected Stage A's explicit deliverables against block-module exports, trace
+accounting and crash/corruption tests. The core and host fault-simulation
+components exist. Slice and overlay wrappers are missing from the block surface;
+complete artifact replay, CPU/RAM accounting and mutation cache-profile coverage
+need stronger evidence or implementation. Recorded these in the status home and
+ordered their dependencies in the full audit queue. Stage completion remains
+partial for finite work, independently of ongoing review and epoch-1 freeze.
 
 ## 2026-09-14 - Preserve scoped symlinks in bound archive groups
 

@@ -119,7 +119,11 @@ Stage completion must be supported by the stage's own usable outcome.
 3. Record capability, integrated-consumer and platform gates in the status home,
    with component-owned evidence and explicit unverified findings. Reconcile
    stage-marker generation with those gates before changing completion labels.
-4. Select the next implementation unit by the missing prerequisite for a usable
+4. Resolve the [Stage A finite gaps](milestones.md#stage-a-executable-core-audit):
+   bounded slice wrapper, isolated overlay with explicit durability semantics,
+   artifact replay and CPU/RAM accounting. These feed the existing publication,
+   mixed-I/O, resource-pressure and sustained-qualification rows below.
+5. Select subsequent implementation units by the missing prerequisite for a usable
    stage outcome; retain whole-job backup/restore and every other queue item.
 
 ## Complete work queue
