@@ -51,7 +51,9 @@ for local edits, and [sparse growth](../testing/data-policy-qualification.md#spa
 for size extension. Use [bounded shrinking](../testing/data-policy-qualification.md#bounded-shrinking)
 for admitted tail retirement; implement persistent bounded cleanup for arbitrary
 large atomic truncation before qualifying unrestricted constrained resizing.
-Add attribute/security transport
+Use [explicit object metadata and inventory knowledge](../spec/backup-object-metadata.md)
+for preservation admission; an unavailable enumeration API must not imply an
+empty attribute or security inventory. Add attribute/security transport
 with explicit unsupported-state refusal under [ADR-078](../adr/ADR-078-backup-preservation-modes.md); qualify native host grant issuance. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
 with both-slot crash oracles, generation-aware quarantine and measured
 low-space progress. Implement [ADR-075](../adr/ADR-075-revocable-backup-capability.md)

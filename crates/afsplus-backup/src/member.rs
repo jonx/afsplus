@@ -17,7 +17,7 @@ pub struct Timestamp {
     pub nanos: u32,
 }
 
-fn unsigned(text: &str) -> Result<u64, Error> {
+pub(crate) fn unsigned(text: &str) -> Result<u64, Error> {
     if text.is_empty() || (text.len() > 1 && text.starts_with('0')) {
         return Err(Error::Invalid);
     }

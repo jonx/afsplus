@@ -8,3 +8,5 @@ pub mod tar;
 pub mod member;
 
 pub mod stream;
+
+pub mod metadata;

@@ -11,6 +11,7 @@
 - [Integration acceptance](#integration-acceptance)
 - [Effective member admission](#effective-member-admission)
 - [Streaming local-record binding](#streaming-local-record-binding)
+- [Object metadata admission](#object-metadata-admission)
 
 <!-- /toc -->
 
@@ -164,3 +165,16 @@ before buffer allocation, permanent failure for dangling/stacked/escaping local
 records, and absent receipts for every truncated archive prefix. Completion is
 checked separately from member consumption and cannot hide a dangling local
 record even if the underlying envelope digest is valid.
+
+## Object metadata admission
+
+Run `cargo test -p afsplus-backup metadata::tests` against the
+[object metadata contract](../spec/backup-object-metadata.md) selected by
+[ADR-082](../adr/ADR-082-backup-object-metadata.md). Compare exact protection,
+three signed nanosecond timestamps, source path and kind. Exercise all nine
+combinations of attribute/security inventory knowledge and reordered fields.
+Every required field must fail when omitted. Unknown versions/keys/kinds,
+duplicate fields, malformed scalars, escaping paths and every truncated prefix
+must fail; exact byte admission applies to encoding and decoding. A decoded
+string must borrow the admitted input. Archive-wide matching, lossless inventory
+transport and authorized restoration are separate integration requirements.

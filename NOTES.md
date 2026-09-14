@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Preserve exact object metadata and inventory knowledge](#2026-09-14---preserve-exact-object-metadata-and-inventory-knowledge)
 - [2026-09-14 - Bind local PAX records to streamed ordinary members](#2026-09-14---bind-local-pax-records-to-streamed-ordinary-members)
 - [2026-09-14 - Validate effective PAX member fields before restoration](#2026-09-14---validate-effective-pax-member-fields-before-restoration)
 - [2026-09-14 - Bind archive integrity and termination to an independently checked envelope](#2026-09-14---bind-archive-integrity-and-termination-to-an-independently-checked-envelope)
@@ -87,6 +88,24 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Preserve exact object metadata and inventory knowledge
+
+Accepted ADR-082 under the owner's delegated recommended-option authority.
+Inspection found no attribute/security enumeration in the authorized snapshot
+API; treating that limitation as an empty inventory would misstate preservation.
+The versioned object payload therefore records empty, present or uninspected
+inventories explicitly, alongside exact protection, three timestamps, path and
+kind. Added a bounded borrowing codec with required-field, numeric, namespace,
+duplicate, truncation and inventory-state regressions. Updated the specification,
+Q11, queue dependency and documentation indexes. The accepted ADR-076 body is
+unchanged; its amendment relation links the new decision.
+
+Validation passed: 390 workspace tests, zero failures, ten ignored tests;
+28 archive tests; formatting, workspace Clippy, documentation checks, three
+checker fixtures and whitespace validation. No filesystem disk record or ABI
+changed. Complete inventory transport, archive-wide matching and authorized
+restoration remain implementation work; codec success cannot close those gates.
 
 ## 2026-09-14 - Bind local PAX records to streamed ordinary members
 

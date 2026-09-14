@@ -76,6 +76,7 @@ format-change procedure in [CONTRIBUTING.md](../CONTRIBUTING.md).
 | [afsplus_format.h](../spec/afsplus_format.h) | On-disk constants, magic values and record layouts as a C header |
 | [disk-layout.md](../spec/disk-layout.md) | Logical volume layout; offsets marked TBD freeze at epoch 1 |
 | [backup-envelope.md](../spec/backup-envelope.md) | Versioned PAX integrity/completion controls and namespace separation |
+| [Backup object metadata](../spec/backup-object-metadata.md) | Exact preservation fields and explicit inventory knowledge |
 | [snapshot-records.md](../spec/snapshot-records.md) | Experimental persistent registry and lifetime leaf encoding |
 | [invariants.md](../spec/invariants.md) | Core invariants a conforming implementation enforces |
 | [compatibility-rules.md](../spec/compatibility-rules.md) | Mount decision algorithm and feature compatibility classes |
