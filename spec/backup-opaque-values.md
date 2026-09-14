@@ -41,15 +41,18 @@ Any export failure poisons the envelope writer, preventing a completion receipt.
 Import checks ordinal, source path, descriptor fields and binary-member size
 before beginning a destination upload under its original restore grant. It
 uses staged publication under [ADR-083](../adr/ADR-083-staged-opaque-metadata-restore.md).
-Failure poisons stream completion and releases private staging. A staged value
+Failure poisons stream completion and releases private staging. An unverified-input staged value
 can publish only after its original reader verifies the terminal digest and EOF.
-A receipt from a different reader cannot release it. Earlier successful
+A [verified scratch replay](backup-spool.md) supplies prior integrity admission
+while checking each replayed chunk, permitting one value to publish at a time.
+Both modes retain reader-identity binding; another reader cannot release a value. Earlier successful
 publications are not rolled back if a later destination publication fails.
 The optional Rust `consumer` feature supplies this transport without requiring
 the VFS dependency for standalone framing/metadata codecs.
 
 Multiple pending values consume destination staging and handle budgets. The
-complete consumer must schedule or spool large inventories within those budgets;
+complete consumer must schedule large inventories within those budgets using
+verified replay or another qualified staging strategy;
 exhaustion requires explicit failure, never bypassing integrity admission.
 
 This pair protocol does not establish archive-wide object identity, ordinal/key

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Replay verified scratch archives with bounded upload slots](#2026-09-14---replay-verified-scratch-archives-with-bounded-upload-slots)
 - [2026-09-14 - Carry opaque values through an authorized archive consumer](#2026-09-14---carry-opaque-values-through-an-authorized-archive-consumer)
 - [2026-09-14 - Stage opaque destination metadata before atomic publication](#2026-09-14---stage-opaque-destination-metadata-before-atomic-publication)
 - [2026-09-14 - Stream opaque captured attributes and security metadata](#2026-09-14---stream-opaque-captured-attributes-and-security-metadata)
@@ -92,6 +93,34 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Replay verified scratch archives with bounded upload slots
+
+Accepted ADR-085 under delegated recommended-option authority. Added quota-bound
+scratch capture, a privately retained Merkle root and checked replay. Capture
+verifies the archive through chunk proofs before returning a replay capability.
+Each replayed chunk is checked before exposing bytes; no caller-supplied root or
+scratch mutation handle is exposed. Verified replay permits one staged value to
+publish and release its upload slot before the next, while ordinary streaming
+input retains its final-EOF gate. Reader identity and failure checks remain.
+
+The integrated test restored 20 distinct keys with only root plus one upload
+slot. Other tests compare an independently calculated Python SHA-256 root,
+exercise odd trees and partial chunks, reject altered/locally resealed/reordered
+bytes and proof hashes, enforce quotas and I/O failure handling, and replay an
+actual temporary regular file. The complete workspace passed 410 tests with
+zero failures and ten ignored tests; the archive consumer passed 40 tests.
+Formatting, workspace Clippy, documentation checks, three checker fixtures and
+whitespace validation passed.
+
+The 3,584-byte fixture used 4,032 scratch bytes with 512-byte chunks and four
+levels: capture plus verification/replay made 68 reads/8,896 read bytes and
+21 writes/4,032 write bytes. With 4,096-byte chunks it used 4,128 scratch bytes,
+one level, three reads/8,224 read bytes and two writes/4,128 write bytes. Maximum
+read requests equaled one chunk in each case. These are small host resource
+oracles, not sustained workload or whole-process RSS measurements. Full inventory
+validation, segmented scratch beyond host seek limits, AFS+ metadata storage and
+native lifecycle qualification remain owned queue work.
 
 ## 2026-09-14 - Carry opaque values through an authorized archive consumer
 

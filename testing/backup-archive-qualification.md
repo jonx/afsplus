@@ -13,6 +13,7 @@
 - [Streaming local-record binding](#streaming-local-record-binding)
 - [Object metadata admission](#object-metadata-admission)
 - [Opaque values through an authorized archive consumer](#opaque-values-through-an-authorized-archive-consumer)
+- [Verified scratch replay](#verified-scratch-replay)
 
 <!-- /toc -->
 
@@ -190,7 +191,8 @@ transport. Test source snapshot capture, descriptor enumeration, two-byte export
 archive framing and three-byte staged import with exact key/encoding/binary
 comparisons. Include empty values and live source mutation after capture.
 
-Publication requires the original reader's verified digest and EOF. Reject a
+For an unverified input stream, publication requires the original reader's
+verified digest and EOF. Reject a
 matching receipt from another reader, premature publication, revoked destination
 authority, wrong source binding and changed payload bytes. Every truncated
 archive prefix must leave active destination metadata absent and release staging.
@@ -202,3 +204,26 @@ These fixtures qualify one opaque-value transport component through independent
 in-memory providers. Complete object/inventory matching, unique keys/ordinals,
 large-inventory staging/spooling, sparse data, AFS+ opaque storage, generic-tool
 metadata recovery and native resource/durability behavior need separate gates.
+
+## Verified scratch replay
+
+Run `cargo test -p afsplus-backup --all-features` for
+[verified scratch](../spec/backup-spool.md) under
+[ADR-085](../adr/ADR-085-verified-archive-spooling.md). Compare the three-leaf root
+with Python hashlib using an independent recursive tree split. Exercise odd tree
+sizes and partial chunks, modified and locally resealed data, reordered chunks,
+changed proof hashes, nonzero padding and truncated storage. A failed chunk must
+leave the caller buffer unchanged and permanently fail replay.
+
+Capture must refuse invalid quotas, malformed/truncated archives and scratch
+read/write/seek/flush errors. Exact archive/scratch admission boundaries must
+succeed. A temporary regular file must replay through final completion and match
+its reported scratch size. `scratch_overhead_and_read_requests_are_measured`
+prints chunk size, archive/scratch bytes, levels and read/write counts/bytes;
+maximum scratch read request must not exceed one chunk.
+
+The integrated consumer must restore 20 distinct keys with only root plus one
+upload slot, releasing staging after each publication before replay EOF. A replay
+failure must withdraw early-publication admission. Full inventory validation,
+segmented large-archive storage, sustained workload measurements and native
+provider lifecycle tests have separate completion gates.

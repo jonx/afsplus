@@ -26,6 +26,8 @@ pub struct Reader<R> {
     complete: bool,
     #[cfg(feature = "consumer")]
     identity: Arc<()>,
+    #[cfg(feature = "consumer")]
+    verified_source: bool,
 }
 impl<R: Read> Reader<R> {
     pub fn new(input: R, framing: tar::Limits, records: pax::Limits) -> Result<Self, Error> {
@@ -41,6 +43,8 @@ impl<R: Read> Reader<R> {
             complete: false,
             #[cfg(feature = "consumer")]
             identity: Arc::new(()),
+            #[cfg(feature = "consumer")]
+            verified_source: false,
         })
     }
 
@@ -117,6 +121,16 @@ impl<R: Read> Reader<R> {
         self.remaining -= count as u64;
         self.poisoned = false;
         Ok(count)
+    }
+
+    #[cfg(feature = "consumer")]
+    pub(crate) fn admit_verified_source(&mut self) {
+        self.verified_source = true;
+    }
+
+    #[cfg(feature = "consumer")]
+    pub(crate) fn can_publish(&self) -> bool {
+        !self.poisoned && (self.complete || self.verified_source)
     }
 
     #[cfg(feature = "consumer")]

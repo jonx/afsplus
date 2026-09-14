@@ -66,7 +66,7 @@ impl SnapshotBackend for Source {
         out: &mut [u8],
     ) -> Result<usize, VfsError> {
         assert_eq!(class, MetadataClass::Security);
-        assert_eq!(key, "vendor.descriptor");
+        assert!(key.starts_with("vendor.descriptor"));
         if offset >= view.len() as u64 {
             return Ok(0);
         }
@@ -78,6 +78,7 @@ impl SnapshotBackend for Source {
 }
 #[derive(Default)]
 struct Destination {
+    publications: usize,
     installed: Option<(MetadataClass, MetadataEntry, Vec<u8>)>,
     active: Arc<AtomicUsize>,
 }
@@ -152,6 +153,7 @@ impl OpaqueRestoreBackend for Destination {
         Ok(())
     }
     fn finish_opaque(&mut self, mut upload: Upload) -> Result<(), VfsError> {
+        self.publications += 1;
         self.installed = Some((
             upload.class,
             upload.entry.clone(),
@@ -362,4 +364,83 @@ fn every_truncated_archive_refuses_publication() {
         assert!(dest.backend_mut().installed.is_none());
         assert_eq!(dest.backend_mut().active.load(Ordering::SeqCst), 0);
     }
+}
+
+#[test]
+fn verified_spool_restores_many_values_with_one_upload_slot() {
+    use afsplus_backup::spool::{Limits, Verified};
+    use std::io::Cursor;
+    let bytes = vec![0, 255, 42, 128, 0, 1];
+    let (mut source, authority) = BackupService::new(Source(bytes.clone()), 1).unwrap();
+    let grant = authority.grant();
+    let captured = source.open(&grant, 1).unwrap();
+    let framing = tar::Limits {
+        members: 100,
+        ..framing()
+    };
+    let mut writer = envelope::Writer::new(Vec::new(), framing).unwrap();
+    for ordinal in 0..20 {
+        let entry = MetadataEntry {
+            key: format!("vendor.descriptor.{ordinal}"),
+            ..entry(bytes.len() as u64)
+        };
+        Captured {
+            client: &mut source.client(),
+            reader: &captured,
+            object: 1,
+        }
+        .export(
+            &mut writer,
+            &Binding {
+                ordinal,
+                path: "files",
+                class: MetadataClass::Security,
+                entry: &entry,
+            },
+            &mut [0; 2],
+            limits(),
+        )
+        .unwrap();
+    }
+    let wire = writer.finish().unwrap().0;
+    let mut spool = Verified::capture(
+        wire.as_slice(),
+        Cursor::new(Vec::new()),
+        Limits {
+            chunk_bytes: 512,
+            archive_bytes: wire.len() as u64,
+            store_bytes: wire.len() as u64 * 2,
+        },
+        framing,
+        limits(),
+    )
+    .unwrap();
+    let stats = spool.stats();
+    assert!(stats.tree_levels < 16);
+    assert_eq!(stats.chunk_bytes, 512);
+    let mut reader = spool.reader(framing, limits()).unwrap();
+    let (mut dest, _, _, object) = destination(); // Exactly root + one upload.
+    for ordinal in 0..20 {
+        let staged = stage(
+            &mut reader,
+            &mut dest.client(),
+            &Target {
+                ordinal,
+                path: "files",
+                object: &object,
+            },
+            &mut [0; 2],
+            limits(),
+        )
+        .unwrap();
+        assert!(reader.receipt().is_none());
+        staged.publish(&reader, &mut dest.client()).unwrap();
+        assert_eq!(dest.backend_mut().active.load(Ordering::SeqCst), 0);
+        let installed = dest.backend_mut().installed.as_ref().unwrap();
+        assert_eq!(installed.1.key, format!("vendor.descriptor.{ordinal}"));
+        assert_eq!(installed.2, bytes);
+    }
+    assert!(reader.next_member().unwrap().is_none());
+    assert!(reader.receipt().is_some());
+    assert_eq!(dest.backend_mut().publications, 20);
 }

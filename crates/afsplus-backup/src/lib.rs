@@ -13,3 +13,6 @@ pub mod metadata;
 
 #[cfg(feature = "consumer")]
 pub mod attachment;
+
+#[cfg(feature = "consumer")]
+pub mod spool;

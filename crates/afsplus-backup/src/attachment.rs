@@ -237,7 +237,7 @@ impl<P: SnapshotBackend> Captured<'_, '_, P> {
         Ok(())
     }
 }
-/// A private value awaiting integrity completion of its original reader.
+/// A private value awaiting verified input from its original reader.
 pub struct Staged<U, O> {
     upload: RestoreUpload<U, O>,
     identity: Arc<()>,
@@ -248,13 +248,13 @@ impl<U, O> Staged<U, O> {
         archive: &stream::Reader<R>,
         client: &mut RestoreClient<'_, P>,
     ) -> Result<(), Error> {
-        if archive.receipt().is_none() || !Arc::ptr_eq(&self.identity, &archive.identity()) {
+        if !archive.can_publish() || !Arc::ptr_eq(&self.identity, &archive.identity()) {
             return Err(Error::Invalid);
         }
         client.finish_opaque(self.upload).map_err(Error::Restore)
     }
 }
-/// Stage one bound value. Publication requires completion of this exact reader.
+/// Stage one bound value. Publication requires verified input from this exact reader.
 /// The complete consumer also owns inventory uniqueness and final synchronization.
 pub fn stage<R: Read, P: OpaqueRestoreBackend>(
     archive: &mut stream::Reader<R>,
