@@ -52,7 +52,58 @@ fn run() -> Result<(), String> {
         .take(4 * 1024 * 1024 + 1)
         .read_to_end(&mut input)
         .map_err(|e| e.to_string())?;
-    let mut run = Plan::parse(&input)?.run()?;
+    let (fault, commands) = if input.starts_with(b"AFSCUT01 ") {
+        let split = input
+            .iter()
+            .position(|&b| b == b'\n')
+            .ok_or("cut header terminator")?;
+        let header = std::str::from_utf8(&input[..split]).map_err(|_| "cut header encoding")?;
+        let fields: Vec<_> = header.split(' ').collect();
+        let ["AFSCUT01", operation, offset, variant] = fields.as_slice() else {
+            return Err("cut header fields".into());
+        };
+        let number = |text: &str, maximum: usize| -> Result<usize, String> {
+            if text.is_empty()
+                || !text.bytes().all(|b| b.is_ascii_digit())
+                || (text.len() > 1 && text.starts_with('0'))
+            {
+                return Err("cut integer encoding".into());
+            }
+            let value = text.parse::<usize>().map_err(|_| "cut integer")?;
+            if value > maximum {
+                return Err("cut integer admission".into());
+            }
+            Ok(value)
+        };
+        (
+            Some((
+                number(operation, 1023)?,
+                number(offset, 65536)?,
+                number(variant, 4131)?,
+            )),
+            &input[split + 1..],
+        )
+    } else {
+        (None, input.as_slice())
+    };
+    let mut run = Plan::parse(commands)?.run()?;
+    if let Some((operation, offset, variant)) = fault {
+        if run.failure.is_some() {
+            return Err("fault scenario did not finish recording".into());
+        }
+        let event = run
+            .events
+            .get(operation)
+            .ok_or("fault operation outside scenario")?;
+        let cut = event
+            .first_block_operation
+            .checked_add(offset)
+            .ok_or("fault cut overflow")?;
+        if cut > event.end_block_operation {
+            return Err("fault offset outside operation".into());
+        }
+        run.result = afsplus_check::crash_replay::select(&run.base, &run.log, cut, variant)?;
+    }
     let limits = Limits {
         wire_bytes: 66 * 1024 * 1024,
         operations: 65536,

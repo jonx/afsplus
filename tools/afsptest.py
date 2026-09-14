@@ -131,8 +131,22 @@ def observation(wire):
     return {"version": 1, "view": "remounted", "failure": failure, "inspection_error": error, "entries": entries}
 
 
-def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundle.DEFAULT_TOTAL_BYTES):
+def admit_fault(fault, value):
+    if not isinstance(fault, dict) or type(fault.get("version")) is not int or fault["version"] != 1:
+        raise ValueError("fault model version")
+    if fault == FAULT:
+        return fault
+    if set(fault) != {"version", "kind", "operation", "offset", "variant"} or fault["kind"] != "power-cut-v1":
+        raise ValueError("unsupported fault model")
+    scenario.integer(fault["operation"], 0, len(value["operations"]) - 1)
+    scenario.integer(fault["offset"], 0, 65536)
+    scenario.integer(fault["variant"], 0, 4131)
+    return fault
+
+
+def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundle.DEFAULT_TOTAL_BYTES, fault=None):
     value = scenario.validate(raw)
+    fault = admit_fault(FAULT if fault is None else fault, value)
     # Admit image exports before starting the runner.
     image_bytes = value["volume"]["blocks"] * value["volume"]["block_size"]
     if image_bytes > file_bytes:
@@ -140,6 +154,8 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
     if 2 * image_bytes > total_bytes:
         raise ValueError("image exports exceed aggregate budget")
     commands = scenario.compile_commands(raw)
+    if fault["kind"] == "power-cut-v1":
+        commands = ("AFSCUT01 {operation} {offset} {variant}\n".format(**fault)).encode() + commands
     identity = source_identity()
     binary_hash = executable_digest(binary)
     # Runner output is intrinsically bounded by its profile; temporary spool
@@ -158,12 +174,13 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
     success = actual["failure"] is None and actual["inspection_error"] is None and actual["entries"] == expected
     records.update({
         "operations.afstrace": raw,
-        "run.json": encoded({"version": 1, "profile": "semantic-no-cut-v1",
+        "run.json": encoded({"version": 1, "profile": "semantic-no-cut-v1" if fault["kind"] == "no-cut" else "semantic-power-cut-v1",
             "source_observed": identity, "runner_sha256": binary_hash, "outcome": "pass" if success else "failure"}),
-        "fault-model.json": encoded(FAULT),
+        "fault-model.json": encoded(fault),
         "expected.json": encoded(expected),
         "actual.json": encoded(actual),
     })
+    validate_trace(records)
     return records, success
 
 
@@ -183,6 +200,7 @@ def validate_trace(records):
     if value.digest() != wire[32:64]:
         raise ValueError("base identity binding")
     result = bytearray(base)
+    operations = []
     offset = 64
     for _ in range(count):
         if offset >= len(wire) - 32:
@@ -197,11 +215,14 @@ def validate_trace(records):
                 raise ValueError("trace LBA")
             offset += 8
             result[lba * bs:(lba + 1) * bs] = wire[offset:offset + bs]
+            operations.append((lba, offset))
             offset += bs
-        elif tag != 2:
+        elif tag == 2:
+            operations.append(None)
+        else:
             raise ValueError("trace operation tag")
-    if offset != len(wire) - 32 or result != records["result.img"]:
-        raise ValueError("block trace result binding")
+    if offset != len(wire) - 32:
+        raise ValueError("block trace trailing records")
     flight = records["flight-recorder.bin"]
     if len(flight) < 12 or flight[:8] != b"AFSFLT01":
         raise ValueError("flight version")
@@ -209,6 +230,7 @@ def validate_trace(records):
     if events > 1024 or len(flight) != 12 + 29 * events:
         raise ValueError("flight event admission")
     end = 0
+    ranges = []
     for index in range(events):
         operation, first, last, _, success = struct.unpack("<IQQQB", flight[12 + 29 * index:41 + 29 * index])
         if operation != index or not end <= first <= last <= count or success not in (0, 1):
@@ -216,6 +238,47 @@ def validate_trace(records):
         if not success and index != events - 1:
             raise ValueError("flight continued past failure")
         end = last
+        ranges.append((first, last))
+    fault = admit_fault(json.loads(records["fault-model.json"], object_pairs_hook=bundle._unique),
+                        scenario.validate(records["operations.afstrace"]))
+    selection = None
+    if fault["kind"] == "power-cut-v1":
+        if fault["operation"] >= len(ranges):
+            raise ValueError("fault operation has no event")
+        first, last = ranges[fault["operation"]]
+        cut = first + fault["offset"]
+        if cut > last:
+            raise ValueError("fault offset outside event")
+        durable = max((i + 1 for i, op in enumerate(operations[:cut]) if op is None), default=0)
+        tail = operations[durable:cut]
+        if len(tail) > 12:
+            raise ValueError("fault tail exceeds model")
+        subsets = 1 << len(tail)
+        tears = (64, 2048, 4064)
+        variant = fault["variant"]
+        if variant >= subsets + len(tail) * len(tears):
+            raise ValueError("fault variant outside model")
+        selection = {"tail_writes": len(tail), "variant": variant,
+                     "kind": "subset" if variant < subsets else "tear"}
+        result = bytearray(base)
+        def apply(op, length=bs):
+            if op is not None:
+                lba, start = op
+                result[lba * bs:lba * bs + length] = wire[start:start + length]
+        for op in operations[:durable]:
+            apply(op)
+        if variant < subsets:
+            for i, op in enumerate(tail):
+                if variant & (1 << i):
+                    apply(op)
+        else:
+            selected, tear = divmod(variant - subsets, len(tears))
+            for op in tail[:selected]:
+                apply(op)
+            apply(tail[selected], tears[tear])
+    if result != records["result.img"]:
+        raise ValueError("block trace result binding")
+    return selection
 
 
 def verify_replay(retained, binary, file_bytes, total_bytes):
@@ -233,14 +296,15 @@ def verify_replay(retained, binary, file_bytes, total_bytes):
             raise ValueError("reduction parent digest")
         if type(reduction["evaluations"]) is not int or not 0 <= reduction["evaluations"] <= 4096 or type(reduction["budget_exhausted"]) is not bool:
             raise ValueError("reduction budget")
-    if type(meta["version"]) is not int or meta["version"] != 1 or meta["profile"] != "semantic-no-cut-v1":
+    fault = admit_fault(json.loads(retained["fault-model.json"], object_pairs_hook=bundle._unique),
+                        scenario.validate(retained["operations.afstrace"]))
+    profile = "semantic-no-cut-v1" if fault["kind"] == "no-cut" else "semantic-power-cut-v1"
+    if type(meta["version"]) is not int or meta["version"] != 1 or meta["profile"] != profile:
         raise ValueError("run profile")
-    if retained["fault-model.json"] != encoded(FAULT):
-        raise ValueError("unsupported fault model")
     if meta["source_observed"] != source_identity() or meta["runner_sha256"] != executable_digest(binary):
         raise ValueError("source or runner identity mismatch")
     validate_trace(retained)
-    regenerated, success = execute(retained["operations.afstrace"], binary, file_bytes, total_bytes)
+    regenerated, success = execute(retained["operations.afstrace"], binary, file_bytes, total_bytes, fault)
     if reduction is not None:
         regenerated_meta = json.loads(regenerated["run.json"])
         regenerated_meta["reduction"] = reduction
@@ -284,8 +348,10 @@ def minimize(path, output, binary, max_runs=128, file_bytes=bundle.DEFAULT_FILE_
     if verify_replay(original, binary, file_bytes, total_bytes):
         raise ValueError("cannot minimize a successful run")
     signature = failure_signature(original)
+    selection = validate_trace(original)
     best = original
     value = scenario.validate(original["operations.afstrace"])
+    fault = json.loads(original["fault-model.json"])
     runs = 0
     granularity = 2
     exhausted = False
@@ -294,6 +360,13 @@ def minimize(path, output, binary, max_runs=128, file_bytes=bundle.DEFAULT_FILE_
         chunk = (count + granularity - 1) // granularity
         reduced = False
         for start in range(0, count, chunk):
+            candidate_fault = dict(fault)
+            if fault["kind"] == "power-cut-v1":
+                anchor = fault["operation"]
+                if start <= anchor < min(start + chunk, count):
+                    continue
+                if anchor >= start + chunk:
+                    candidate_fault["operation"] -= chunk
             candidate = dict(value)
             candidate["operations"] = value["operations"][:start] + value["operations"][start + chunk:]
             raw = encoded(candidate)
@@ -305,9 +378,18 @@ def minimize(path, output, binary, max_runs=128, file_bytes=bundle.DEFAULT_FILE_
                 exhausted = True
                 break
             runs += 1
-            records, success = execute(raw, binary, file_bytes, total_bytes)
-            if not success and failure_signature(records) == signature:
-                value, best = candidate, records
+            try:
+                records, success = execute(raw, binary, file_bytes, total_bytes, candidate_fault)
+            except ValueError as error:
+                # An altered operation may no longer contain the selected cut.
+                # Reject that candidate; never substitute its admission failure.
+                refusals = {"fault offset outside operation", "crash variant outside model",
+                            "crash tail exceeds exhaustive model", "fault scenario did not finish recording"}
+                if str(error).strip() in {"runner failed: scenario refused: " + reason for reason in refusals}:
+                    continue
+                raise
+            if not success and validate_trace(records) == selection and failure_signature(records) == signature:
+                value, best, fault = candidate, records, candidate_fault
                 granularity = max(2, granularity - 1)
                 reduced = True
                 break
@@ -335,6 +417,7 @@ def main():
     run = commands.add_parser("run")
     run.add_argument("scenario", type=Path)
     run.add_argument("output", type=Path)
+    run.add_argument("--fault", type=Path, help="versioned no-cut or anchored power-cut JSON")
     repeat = commands.add_parser("replay")
     repeat.add_argument("bundle", type=Path)
     shrink = commands.add_parser("minimize")
@@ -353,7 +436,14 @@ def main():
                 raw = bundle._read(directory, args.scenario.name, scenario.MAX_INPUT)
             finally:
                 os.close(directory)
-            records, success = execute(raw, args.runner, args.file_bytes, args.total_bytes)
+            fault = None
+            if args.fault is not None:
+                directory = bundle._directory(args.fault.parent)
+                try:
+                    fault = json.loads(bundle._read(directory, args.fault.name, 4096), object_pairs_hook=bundle._unique)
+                finally:
+                    os.close(directory)
+            records, success = execute(raw, args.runner, args.file_bytes, args.total_bytes, fault)
             bundle.publish(args.output, records, args.file_bytes, args.total_bytes)
         else:
             success = replay(args.bundle, args.runner, args.file_bytes, args.total_bytes)

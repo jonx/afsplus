@@ -22,6 +22,7 @@
 - [Bundle integrity and publication](#bundle-integrity-and-publication)
 - [Bounded semantic scenario execution](#bounded-semantic-scenario-execution)
 - [Integrated semantic bundles and minimization](#integrated-semantic-bundles-and-minimization)
+- [Selected crash bundles](#selected-crash-bundles)
 
 <!-- /toc -->
 
@@ -328,9 +329,9 @@ python3 tools/test-afsptest.py
 ```
 
 [afsptest.py](../tools/afsptest.py) combines the admitted scenario, memory runner,
-block-trace codec and exclusive bundle publisher. The `semantic-no-cut-v1`
-profile binds an explicit version-1 `no-cut` fault model; unsupported fault
-models are refused before execution. Replay verifies every artifact digest,
+block-trace codec and exclusive bundle publisher. The `semantic-no-cut-v1` profile binds an explicit version-1 `no-cut` fault
+model. The [selected-crash profile](#selected-crash-bundles) binds an anchored
+power-cut model; unsupported fault models are refused before execution. Replay verifies every artifact digest,
 trace checksum, base-image digest, geometry, reconstructed result and semantic
 event ranges, then reruns the scenario in a fresh runner process and compares
 all artifact bytes. Images are private memory fixtures. The input bundle is
@@ -375,6 +376,58 @@ and the reduced result is published exclusively as another complete bundle.
 The focused gate checks fresh-process success and failure replay, exact input
 immutability, altered source/fault/base/trace/event refusal, operation failure
 preservation, pre-run image admission, removal of irrelevant operations with the
-same failure signature, and explicit budget exhaustion. Crash-cut selection and
-minimization, transaction-internal flight diagnostics, portable source/build
-reconstruction and cache/resource qualification are additional stage gates.
+same failure signature, and explicit budget exhaustion. Transaction-internal flight diagnostics, portable source/build reconstruction
+and cache/resource qualification are additional stage gates. Selected crash
+replay uses the profile below; publication-family coverage needs its own oracles.
+
+## Selected crash bundles
+
+The `semantic-power-cut-v1` profile takes `--fault fault.json` on the run
+command. A fault file has this exact shape:
+
+```json
+{"version":1,"kind":"power-cut-v1","operation":0,"offset":1,"variant":0}
+```
+
+The operation index selects a semantic event. The offset selects a cut within
+that event's half-open block-log range, allowing both boundary cuts. The variant
+uses the ordering of the [power-cut model](../crates/afsplus-block/src/powercut.rs):
+all subsets of the unflushed writes, followed by in-order single-write tears at
+64, 2048 and 4064 bytes. The 4 KiB runner profile admits at most 12 unflushed
+writes and refuses a larger tail, an absent operation, an out-of-range offset or
+an unavailable variant. Variant zero with an empty tail selects the completed
+durable prefix. This is the stated simulation model, not every physically
+possible storage failure.
+
+The runner records a successful baseline scenario before selecting its crash
+prefix. Its retained block trace and semantic flight describe that baseline;
+the result image and remounted namespace/content observation describe the
+selected crash. A baseline that fails to finish recording cannot qualify a
+selected crash. [crash_replay::select](../crates/afsplus-check/src/crash_replay.rs)
+selects one state directly, avoiding enumeration of unrelated images. The Rust
+gate compares every selected variant with the existing enumerator, including
+repeated LBAs, 512-byte/4-KiB devices, every cut of the fixture, and invalid
+geometry/tail/selection refusal.
+
+The Python verifier independently derives the durable prefix and selected
+subset/tear from the retained trace and event range, verifies the result image
+before semantic re-execution, and compares the regenerated bundle byte-for-byte.
+Expected state is supplied explicitly in the scenario. A mountable image that
+violates that state is a failure. The selected-crash tests require the old empty
+namespace at the first unflushed write (loss/full/three tear variants), and exact
+committed file contents at the completed transaction boundary.
+
+Minimization never deletes the anchored operation. Removing earlier operations
+remaps its index; the operation-local offset and variant stay fixed. Acceptance
+also requires the same unflushed-tail count and variant kind, as well as the
+same observable failure signature. A changed or inadmissible cut cannot replace
+the original fault. Original bundles are preserved, and reduced crash bundles
+must pass the independent verifier and fresh replay.
+
+Run `cargo test -p afsplus-check --test crash_replay` and
+`python3 tools/test-afsptest.py`. These qualify selection and bundle transport;
+each publication path needs its existing allowed-state crash oracle and required
+cache/resource variants before its finite gate can close. The bundle's semantic
+verdict checks remounted namespace/content and trace consistency; integrating
+the full checker report into that verdict is required by the invariant-checking
+procedure above. Semantic success alone is not a clean structural-check verdict.

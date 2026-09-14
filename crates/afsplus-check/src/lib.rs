@@ -16,6 +16,7 @@
 //! The checker never writes (`spec/compatibility-rules.md`: repair tools are
 //! stricter than normal mounts; this prototype checker is verify-only).
 
+pub mod crash_replay;
 pub mod replay_trace;
 pub mod scenario;
 

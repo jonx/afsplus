@@ -119,6 +119,54 @@ class ReplayTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 tool.unframe(io.BytesIO(bad), 0, 0)
 
+    def test_selected_crashes_replay_and_minimize_with_a_stable_anchor(self):
+        value = {"version": 1, "volume": fixture()["volume"],
+            "operations": [{"op": "create", "label": "f", "parent": "root", "name": "a", "data": "01"}],
+            "expected": []}
+        with tempfile.TemporaryDirectory(prefix="afsplus-cut-") as temporary:
+            root = Path(temporary)
+            for variant in range(5):  # One unflushed write: loss/full plus three tears.
+                fault = {"version": 1, "kind": "power-cut-v1", "operation": 0, "offset": 1, "variant": variant}
+                records, success = tool.execute(tool.encoded(value), BINARY, fault=fault)
+                self.assertTrue(success)
+                tool.validate_trace(records)
+                output = root / str(variant)
+                tool.bundle.publish(output, records)
+                result = self.cli("replay", output)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            value["operations"][:0] = [
+                {"op": "create", "label": "spare", "parent": "root", "name": "temp", "data": ""},
+                {"op": "unlink", "label": "spare"}]
+            value["operations"].append({"op": "sync"})
+            value["expected"] = [{"path": ["missing"], "kind": "file", "data": ""}]
+            fault = {"version": 1, "kind": "power-cut-v1", "operation": 2, "offset": 1, "variant": 0}
+            records, success = tool.execute(tool.encoded(value), BINARY, fault=fault)
+            self.assertFalse(success)
+            original = root / "original"
+            tool.bundle.publish(original, records)
+            report = tool.minimize(original, root / "reduced", BINARY)
+            self.assertFalse(report["budget_exhausted"])
+            reduced = tool.bundle.read_bundle(root / "reduced")
+            selected = json.loads(reduced["fault-model.json"])
+            self.assertEqual(selected, dict(fault, operation=0))
+            self.assertEqual(tool.failure_signature(records), tool.failure_signature(reduced))
+            self.assertFalse(tool.replay(root / "reduced", BINARY))
+
+    def test_durable_cut_keeps_committed_content_and_invalid_anchor_refuses(self):
+        value = {"version": 1, "volume": fixture()["volume"],
+            "operations": [{"op": "create", "label": "f", "parent": "root", "name": "a", "data": "01"}],
+            "expected": [{"path": ["a"], "kind": "file", "data": "01"}]}
+        records, success = tool.execute(tool.encoded(value), BINARY)
+        self.assertTrue(success)
+        _, first, last, _, _ = struct.unpack("<IQQQB", records["flight-recorder.bin"][12:41])
+        fault = {"version": 1, "kind": "power-cut-v1", "operation": 0, "offset": last - first, "variant": 0}
+        records, success = tool.execute(tool.encoded(value), BINARY, fault=fault)
+        self.assertTrue(success)
+        tool.validate_trace(records)
+        for bad in (dict(fault, offset=65536), dict(fault, operation=True), dict(fault, variant=4132)):
+            with self.assertRaises(ValueError):
+                tool.execute(tool.encoded(value), BINARY, fault=bad)
+
     def test_export_budget_refuses_before_runner(self):
         with self.assertRaisesRegex(ValueError, "per-file budget"):
             tool.execute(tool.encoded(fixture()), Path("/no/such/runner"), file_bytes=4096)

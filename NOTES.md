@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Bind selected crash states to replay bundles](#2026-09-14--bind-selected-crash-states-to-replay-bundles)
 - [2026-09-14 — Integrate semantic replay bundles and failure reduction](#2026-09-14--integrate-semantic-replay-bundles-and-failure-reduction)
 - [2026-09-14 — Add bounded semantic runner and bundle admission components](#2026-09-14--add-bounded-semantic-runner-and-bundle-admission-components)
 - [2026-09-14 - Preserve bounded block-operation replay traces](#2026-09-14---preserve-bounded-block-operation-replay-traces)
@@ -119,6 +120,28 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Bind selected crash states to replay bundles
+
+Connected anchored crash selection to the private semantic runner and bundle
+workflow. The direct selector matches every variant of the existing bounded
+subset/tear oracle in the fixture, including repeated writes and 512-byte/4-KiB
+devices. Python independently reconstructs the selected image from the retained
+trace before replay. Tests check pre-publication loss/full/tear states, committed
+content at the durable boundary, fresh-process replay and invalid selection.
+
+Crash minimization retains the target operation and remaps its index after
+earlier deletions. It preserves the local offset, variant, unflushed-tail size
+and observable failure, preventing a reduction from silently changing the fault
+kind. The successful baseline trace is retained separately in meaning from the
+selected result image. Baseline recording must complete for this profile.
+
+Stage A still needs publication-family coverage, transaction-internal diagnostics,
+source/build reconstruction and resource/cache qualification. The selected-state
+transport does not prove every publication path or physical storage behavior.
+Validation passed: 496 Rust tests (10 ignored), workspace Clippy and formatting,
+19 Python replay/bundle tests, seven documentation-checker fixtures, documentation
+validation and whitespace checks.
 
 ## 2026-09-14 — Integrate semantic replay bundles and failure reduction
 
