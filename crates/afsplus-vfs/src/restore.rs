@@ -1,8 +1,8 @@
 //! Destination-scoped restoration, separately authorized under ADR-077.
 use crate::authority::{Grant, Issuer, Scope};
 use crate::backup::{
-    valid_metadata_text, MetadataClass, MetadataEntry, MAX_METADATA_ENCODING_BYTES,
-    MAX_METADATA_KEY_BYTES,
+    valid_metadata_text, AllocationPage, AllocationRange, MetadataClass, MetadataEntry,
+    MAX_METADATA_ENCODING_BYTES, MAX_METADATA_KEY_BYTES,
 };
 use crate::{Stat, VfsError};
 use afsplus_format::Timespec;
@@ -96,6 +96,16 @@ pub trait RestoreBackend {
         object: &Self::Object,
         metadata: RestoreMetadata,
     ) -> Result<(), VfsError>;
+    /// Committed semantic allocation, with entry-ordinal cursors. Unsupported
+    /// enumeration is not evidence of an empty allocation inventory.
+    fn allocations(
+        &mut self,
+        _object: &Self::Object,
+        _start: u64,
+        _limit: usize,
+    ) -> Result<AllocationPage, VfsError> {
+        Err(VfsError::NotSupported)
+    }
     fn stat(&mut self, object: &Self::Object) -> Result<Stat, VfsError>;
     fn read(
         &mut self,
@@ -358,6 +368,35 @@ impl<P: RestoreBackend> RestoreService<P> {
         metadata.validate()?;
         Ok(self.backend.metadata(&object.0.object, metadata)?)
     }
+    pub fn allocations(
+        &mut self,
+        object: &RestoreObject<P::Object>,
+        start: u64,
+        limit: usize,
+    ) -> Result<AllocationPage, RestoreError> {
+        let _permit = self.admit(&object.0.grant)?;
+        if limit == 0 || limit > 64 {
+            return Err(VfsError::Limit("allocation page limit out of range").into());
+        }
+        let page = self.backend.allocations(&object.0.object, start, limit)?;
+        if page.ranges.len() > limit
+            || (!page.eof && page.ranges.is_empty())
+            || start.checked_add(page.ranges.len() as u64) != Some(page.next)
+        {
+            return Err(VfsError::Corrupt("invalid allocation page progress".into()).into());
+        }
+        let mut end = 0u128;
+        for range in &page.ranges {
+            if range.length == 0 || (range.offset as u128) < end {
+                return Err(VfsError::Corrupt("invalid allocation range ordering".into()).into());
+            }
+            end = range.offset as u128 + range.length as u128;
+            if end > (1u128 << 64) {
+                return Err(VfsError::Corrupt("allocation byte range overflow".into()).into());
+            }
+        }
+        Ok(page)
+    }
     pub fn stat(&mut self, object: &RestoreObject<P::Object>) -> Result<Stat, RestoreError> {
         let _permit = self.admit(&object.0.grant)?;
         Ok(self.backend.stat(&object.0.object)?)
@@ -554,6 +593,14 @@ impl<P: RestoreBackend> RestoreClient<'_, P> {
     ) -> Result<(), RestoreError> {
         self.0.metadata(object, metadata)
     }
+    pub fn allocations(
+        &mut self,
+        object: &RestoreObject<P::Object>,
+        start: u64,
+        limit: usize,
+    ) -> Result<AllocationPage, RestoreError> {
+        self.0.allocations(object, start, limit)
+    }
     pub fn stat(&mut self, object: &RestoreObject<P::Object>) -> Result<Stat, RestoreError> {
         self.0.stat(object)
     }
@@ -695,6 +742,27 @@ impl<D: afsplus_block::BlockDevice> RestoreBackend for AfsRestoreDestination<D> 
             },
         )?)
     }
+    fn allocations(
+        &mut self,
+        object: &u64,
+        start: u64,
+        limit: usize,
+    ) -> Result<AllocationPage, VfsError> {
+        let page = self.volume.file_allocation_page(*object, start, limit)?;
+        Ok(AllocationPage {
+            ranges: page
+                .ranges
+                .into_iter()
+                .map(|range| AllocationRange {
+                    offset: range.offset,
+                    length: range.length,
+                    unwritten: range.unwritten,
+                })
+                .collect(),
+            next: page.next,
+            eof: page.eof,
+        })
+    }
     fn stat(&mut self, object: &u64) -> Result<Stat, VfsError> {
         Ok(self
             .volume
@@ -758,6 +826,19 @@ mod authority_tests {
         fn metadata(&mut self, _: &(), _: RestoreMetadata) -> Result<(), VfsError> {
             unreachable!()
         }
+        fn allocations(
+            &mut self,
+            _: &(),
+            start: u64,
+            _: usize,
+        ) -> Result<AllocationPage, VfsError> {
+            self.check();
+            Ok(AllocationPage {
+                ranges: vec![],
+                next: start,
+                eof: true,
+            })
+        }
         fn stat(&mut self, _: &()) -> Result<Stat, VfsError> {
             unreachable!()
         }
@@ -787,6 +868,22 @@ mod authority_tests {
             self.check();
             Ok(())
         }
+    }
+    #[test]
+    fn allocation_readback_holds_operation_permit() {
+        let (mut service, authority) = RestoreService::new(
+            Probe {
+                grants: vec![],
+                calls: 0,
+            },
+            1,
+        )
+        .unwrap();
+        let grant = authority.grant();
+        let object = service.root(&grant).unwrap();
+        service.backend_mut().grants = vec![grant];
+        assert!(service.client().allocations(&object, 0, 1).unwrap().eof);
+        assert_eq!(service.backend_mut().calls, 1);
     }
     #[test]
     fn opaque_upload_holds_admission_during_all_provider_calls() {

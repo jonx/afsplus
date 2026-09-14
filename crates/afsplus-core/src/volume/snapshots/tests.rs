@@ -2396,3 +2396,83 @@ fn repeated_near_full_cycles_preserve_retained_views_and_recover_capacity() {
         println!("retained_pressure cycles=24 blocks=512 scan_budget={scan_budget} steps={total_steps} scanned={total_scanned} promoted={total_promoted} admitted_writes={admitted_writes} min_free={min_free} maintenance_allocator_bitmap_peak={max_allocator} maintenance_reads={reads} maintenance_writes={writes} maintenance_bytes_read={bytes_read} maintenance_bytes_written={bytes_written} maintenance_flushes={flushes} maintenance_ns={maintenance_ns}");
     }
 }
+
+#[test]
+fn live_allocation_pages_are_read_only_and_distinct_from_captured_layouts() {
+    use afsplus_block::TraceBackend;
+    let mut volume = open(TraceBackend::new(formatted(512, 0)), MountMode::ReadWrite);
+    let empty = volume.create_file_in_root("empty", &[], now(2)).unwrap();
+    let file = volume
+        .create_file_in_root("file", b"written", now(2))
+        .unwrap();
+    volume.device_mut().reset();
+    assert!(volume
+        .file_allocation_page(empty, 0, 1)
+        .unwrap()
+        .ranges
+        .is_empty());
+    assert_eq!(
+        volume.file_allocation_page(file, 0, 1).unwrap().ranges,
+        vec![FileAllocationRange {
+            offset: 0,
+            length: 4096,
+            unwritten: false
+        }]
+    );
+    assert_eq!(volume.device_mut().stats().writes, 0);
+    assert_eq!(volume.device_mut().stats().flushes, 0);
+    volume
+        .preallocate_file(file, 4 * 4096, 8192, now(3))
+        .unwrap();
+    let id = volume.snapshot_create(now(4)).unwrap();
+    let view = volume.snapshot_open(id).unwrap();
+    let old = volume.snapshot_allocation_page(&view, file, 0, 64).unwrap();
+    volume
+        .write_file_at(file, 4 * 4096, b"changed", now(5))
+        .unwrap();
+    volume.device_mut().reset();
+    let live = volume.file_allocation_page(file, 0, 64).unwrap();
+    assert_eq!(live.ranges.len(), 3);
+    assert!(!live.ranges[1].unwritten);
+    assert!(live.ranges[2].unwritten);
+    assert_eq!(
+        volume.snapshot_allocation_page(&view, file, 0, 64).unwrap(),
+        old
+    );
+    for limit in [0, 65] {
+        assert!(volume.file_allocation_page(file, 0, limit).is_err());
+    }
+    assert!(volume.file_allocation_page(file, u64::MAX, 1).is_err());
+    assert!(volume.file_allocation_page(empty, 1, 1).is_err());
+    assert!(matches!(
+        volume.file_allocation_page(OBJECT_ROOT, 0, 1),
+        Err(CoreError::IsDirectory)
+    ));
+    assert_eq!(volume.device_mut().stats().writes, 0);
+    assert_eq!(volume.device_mut().stats().flushes, 0);
+}
+#[test]
+fn committed_allocation_readback_refuses_pending_windows_without_flushing() {
+    use afsplus_block::TraceBackend;
+    let mut volume = open(TraceBackend::new(formatted(1024, 16)), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("file", b"old", now(2)).unwrap();
+    volume
+        .window_write_file_at(file, 8192, b"pending", now(3))
+        .unwrap();
+    volume.device_mut().reset();
+    let generation = volume.generation();
+    assert!(matches!(
+        volume.file_allocation_page(file, 0, 1),
+        Err(CoreError::Busy)
+    ));
+    assert_eq!(volume.generation(), generation);
+    assert_eq!(volume.device_mut().stats().writes, 0);
+    assert_eq!(volume.device_mut().stats().flushes, 0);
+    volume.window_commit(now(4)).unwrap();
+    volume.device_mut().reset();
+    let page = volume.file_allocation_page(file, 0, 64).unwrap();
+    assert_eq!(page.ranges.len(), 2);
+    assert_eq!(page.ranges[1].offset, 8192);
+    assert_eq!(volume.device_mut().stats().writes, 0);
+    assert_eq!(volume.device_mut().stats().flushes, 0);
+}

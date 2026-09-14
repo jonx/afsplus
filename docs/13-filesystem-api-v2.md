@@ -26,6 +26,7 @@
   - [Captured allocation enumeration](#captured-allocation-enumeration)
   - [Versioning and compatibility](#versioning-and-compatibility)
 - [9. Destination-scoped restore extension](#9-destination-scoped-restore-extension)
+  - [Committed destination allocation readback](#committed-destination-allocation-readback)
   - [Staged opaque metadata restoration](#staged-opaque-metadata-restoration)
 
 <!-- /toc -->
@@ -484,6 +485,36 @@ A native C/IPC extension requires version negotiation, server-owned opaque
 handles, denial translation and destination/authentication qualification.
 The [restore harness](../testing/security-model-conformance.md#14-destination-restore-authority)
 runs the same consumer against an independent provider and AFS+.
+
+### Committed destination allocation readback
+
+Under [ADR-089](../adr/ADR-089-restore-allocation-readback.md),
+`allocations(object, start, limit)` returns committed semantic byte ranges with
+written/unwritten state, an entry-ordinal next cursor and EOF. Its range shape
+matches [captured allocation enumeration](#captured-allocation-enumeration),
+including rounded tails and reservations beyond logical EOF, without physical
+addresses or sharing hints. Logical size comes from stat.
+
+The original object's restore grant is checked and held through every provider
+call. Limits are 1 through 64 entries. Responses must fit the limit, advance by
+the returned entry count and contain ordered positive-length ranges with a
+mathematical end at most 2^64. A nonterminal empty page, overlapping ranges,
+overflow or inconsistent cursor is corruption. Unsupported enumeration returns
+`NotSupported`, never an empty successful result.
+
+The AFS+ implementation shares bounded extent-page reads with the snapshot
+reader. It refuses an open intent-log mutation window with `Busy`; the caller
+must explicitly commit that window before requesting committed allocation.
+The query performs no implicit commit, flush or repair. Pagination does not
+create a snapshot or freeze a complete sequence: the host must serialize edits
+and enumeration of its owned destination objects and restart after any edit.
+
+Full allocation preservation requires comparing exact byte coverage and
+written/unwritten state, independently of adjacent extent segmentation, then
+checking logical size. Matching total allocated bytes is insufficient. A
+mismatch or unavailable readback cannot justify preservation success. This is
+an additive Rust source API, with native/C ABI and provider qualification kept
+separate. See the [readback gate](../testing/security-model-conformance.md#20-destination-allocation-readback).
 
 ### Staged opaque metadata restoration
 

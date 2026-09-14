@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Add scoped allocation readback for full restore verification](#2026-09-14---add-scoped-allocation-readback-for-full-restore-verification)
 - [2026-09-14 - Transport captured sparse contents through the archive consumer](#2026-09-14---transport-captured-sparse-contents-through-the-archive-consumer)
 - [2026-09-14 - Exercise repeated low-space reclamation with retained snapshots](#2026-09-14---exercise-repeated-low-space-reclamation-with-retained-snapshots)
 - [2026-09-14 - Bind full object inventories to counted descriptor manifests](#2026-09-14---bind-full-object-inventories-to-counted-descriptor-manifests)
@@ -96,6 +97,33 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Add scoped allocation readback for full restore verification
+
+ADR-089 chose explicit destination allocation readback before accepting full
+reservation preservation. A successful reservation call or matching total byte
+count cannot identify changed holes or written/unwritten coverage. The new
+restore query holds the original object's revocable grant, validates bounded
+page responses and refuses missing provider support. The AFS+ query shares the
+bounded extent reader with captured snapshots and adds no format or C ABI change.
+
+Targeted tests passed one-entry enumeration, written data, beyond-EOF
+reservations and a final range ending at 2^64, with exact layout after remount.
+They rejected malformed pages, invalid budgets, foreign services and revoked
+grants. The operation-permit probe covers the query itself. Core tests proved
+zero query writes/barriers for empty, direct and tree layouts, and showed that
+live allocation changes leave captured layouts unchanged. An open log window
+caused explicit refusal without flushing; an explicit window commit made its
+new layout available. Ordinary sync intentionally does not commit an open window.
+
+The full workspace all-features gate passed 430 tests with zero failures and
+10 explicitly ignored qualification probes. Formatting, strict Clippy,
+documentation, three checker fixtures and whitespace validation passed.
+
+This supplies verification evidence for the allocation-preserving archive
+consumer. The archive allocation record, binding to sparse data, reservation
+restore ordering and semantic coverage comparison remain the next integration
+work. Full job and native/older-system qualification remain separate.
 
 ## 2026-09-14 - Transport captured sparse contents through the archive consumer
 

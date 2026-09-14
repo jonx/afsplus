@@ -1,5 +1,5 @@
 use afsplus_format::Timespec;
-use afsplus_vfs::backup::{MetadataClass, MetadataEntry};
+use afsplus_vfs::backup::{AllocationPage, AllocationRange, MetadataClass, MetadataEntry};
 use afsplus_vfs::restore::*;
 use afsplus_vfs::{NodeKind, Stat, VfsError};
 use std::sync::{
@@ -51,6 +51,7 @@ struct Mock {
     blocked_write: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
     reservations: Vec<(u64, u64, u64)>,
     reservation_support: bool,
+    allocation_reply: Option<AllocationPage>,
 }
 impl Mock {
     fn new() -> Self {
@@ -71,6 +72,7 @@ impl Mock {
             blocked_write: None,
             reservations: vec![],
             reservation_support: true,
+            allocation_reply: None,
         }
     }
     fn create(&mut self, parent: u64, name: &str, kind: NodeKind) -> Result<u64, VfsError> {
@@ -96,6 +98,11 @@ impl Mock {
 }
 impl RestoreBackend for Mock {
     type Object = u64;
+    fn allocations(&mut self, object: &u64, _: u64, _: usize) -> Result<AllocationPage, VfsError> {
+        self.calls += 1;
+        self.nodes.get(object).ok_or(VfsError::NotFound)?;
+        self.allocation_reply.clone().ok_or(VfsError::NotSupported)
+    }
     fn root(&mut self) -> Result<u64, VfsError> {
         self.calls += 1;
         Ok(1)
@@ -867,4 +874,159 @@ fn staging_write_failures_poison_upload_and_finish_errors_never_expose_partial_v
         service.backend_mut().staging_active.load(Ordering::SeqCst),
         0
     );
+}
+
+#[test]
+fn allocation_readback_is_bounded_revocable_and_never_defaults_to_empty() {
+    let (mut service, authority) = RestoreService::new(Mock::new(), 4).unwrap();
+    let grant = authority.grant();
+    let root = service.root(&grant).unwrap();
+    assert_eq!(
+        service.client().allocations(&root, 0, 1),
+        Err(RestoreError::Filesystem(VfsError::NotSupported))
+    );
+    let before = service.backend_mut().calls;
+    for limit in [0, 65] {
+        assert!(service.client().allocations(&root, 0, limit).is_err());
+    }
+    assert_eq!(service.backend_mut().calls, before);
+    let valid = AllocationPage {
+        ranges: vec![AllocationRange {
+            offset: u64::MAX - 4095,
+            length: 4096,
+            unwritten: true,
+        }],
+        next: 1,
+        eof: true,
+    };
+    service.backend_mut().allocation_reply = Some(valid.clone());
+    assert_eq!(service.client().allocations(&root, 0, 1).unwrap(), valid);
+    let (mut other, _) = RestoreService::new(Mock::new(), 2).unwrap();
+    assert_eq!(
+        other.client().allocations(&root, 0, 1),
+        Err(RestoreError::Denied)
+    );
+    assert_eq!(other.backend_mut().calls, 0);
+    authority.revoke(&grant).unwrap();
+    let before = service.backend_mut().calls;
+    assert_eq!(
+        service.client().allocations(&root, 0, 1),
+        Err(RestoreError::Denied)
+    );
+    assert_eq!(service.backend_mut().calls, before);
+}
+#[test]
+fn malformed_allocation_readback_pages_are_refused() {
+    let (mut service, authority) = RestoreService::new(Mock::new(), 2).unwrap();
+    let grant = authority.grant();
+    let root = service.root(&grant).unwrap();
+    for fault in 0..6 {
+        let mut page = AllocationPage {
+            ranges: vec![AllocationRange {
+                offset: 5,
+                length: 2,
+                unwritten: false,
+            }],
+            next: 1,
+            eof: true,
+        };
+        match fault {
+            0 => {
+                page.ranges.push(page.ranges[0]);
+                page.next = 2;
+            }
+            1 => {
+                page.ranges.clear();
+                page.next = 0;
+                page.eof = false;
+            }
+            2 => page.next = 0,
+            3 => page.ranges[0].length = 0,
+            4 => {
+                page.ranges.push(AllocationRange {
+                    offset: 6,
+                    length: 2,
+                    unwritten: true,
+                });
+                page.next = 2;
+            }
+            _ => {
+                page.ranges[0].offset = u64::MAX;
+                page.ranges[0].length = 2;
+            }
+        }
+        service.backend_mut().allocation_reply = Some(page);
+        assert!(
+            matches!(
+                service
+                    .client()
+                    .allocations(&root, 0, if fault == 4 { 2 } else { 1 }),
+                Err(RestoreError::Filesystem(VfsError::Corrupt(_)))
+            ),
+            "fault {fault}"
+        );
+    }
+}
+#[test]
+fn afs_allocation_readback_matches_committed_pages_and_survives_remount() {
+    let backend = AfsRestoreDestination::new(afs_volume(), afsplus_format::OBJECT_ROOT).unwrap();
+    let (mut service, authority) = RestoreService::new(backend, 2).unwrap();
+    service.set_reservation_limit(8192);
+    let grant = authority.grant();
+    let root = service.root(&grant).unwrap();
+    let file = service.create_file(&root, "layout", now(2)).unwrap();
+    service.write(&file, 4096, b"written", now(3)).unwrap();
+    service.reserve(&file, 4 * 4096, 8192, now(4)).unwrap();
+    service
+        .reserve(&file, u64::MAX - 4095, 4096, now(5))
+        .unwrap();
+    let id = service.stat(&file).unwrap().object_id;
+    let expected = vec![
+        AllocationRange {
+            offset: 4096,
+            length: 4096,
+            unwritten: false,
+        },
+        AllocationRange {
+            offset: 4 * 4096,
+            length: 8192,
+            unwritten: true,
+        },
+        AllocationRange {
+            offset: u64::MAX - 4095,
+            length: 4096,
+            unwritten: true,
+        },
+    ];
+    let mut actual = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let page = service.client().allocations(&file, cursor, 1).unwrap();
+        actual.extend(page.ranges);
+        cursor = page.next;
+        if page.eof {
+            break;
+        }
+    }
+    assert_eq!(actual, expected);
+    service.client().sync(&grant).unwrap();
+    let volume = service.into_backend().into_volume();
+    let mut volume = afsplus_core::mount_with_snapshot_limits(
+        volume.into_device(),
+        afsplus_core::MountOptions::default(),
+        limits(),
+    )
+    .unwrap();
+    let page = volume.file_allocation_page(id, 0, 64).unwrap();
+    assert_eq!(
+        page.ranges
+            .iter()
+            .map(|r| (r.offset, r.length, r.unwritten))
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|r| (r.offset, r.length, r.unwritten))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(volume.stat(id).unwrap().unwrap().size_bytes, 4103);
 }

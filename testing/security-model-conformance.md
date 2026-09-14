@@ -27,6 +27,7 @@
 - [17. Captured metadata inventory knowledge](#17-captured-metadata-inventory-knowledge)
 - [18. Opaque captured metadata transport](#18-opaque-captured-metadata-transport)
 - [19. Staged opaque destination metadata](#19-staged-opaque-destination-metadata)
+- [20. Destination allocation readback](#20-destination-allocation-readback)
 
 <!-- /toc -->
 
@@ -359,3 +360,33 @@ no success result and exactly the allowed old/complete-new active value.
 The remounted AFS+ refusal fixture must issue zero writes/flushes. These are host
 memory-provider oracles; durable staging requires crash tests, cleanup recovery
 and measured RAM/I/O qualification before advertising native support.
+
+
+## 20. Destination allocation readback
+
+Run `cargo test -p afsplus-vfs --all-features` plus
+`cargo test -p afsplus-core allocation_readback` and
+`cargo test -p afsplus-core live_allocation_pages` for
+[ADR-089](../adr/ADR-089-restore-allocation-readback.md).
+
+The service oracle must reject invalid limits before provider invocation,
+refuse unsupported enumeration, and validate page progress, bounds and ordering.
+Include nonterminal empty pages, excessive entries, wrong cursors, zero-length
+and overlapping ranges, and an end exceeding 2^64. A range ending exactly at
+2^64 must succeed. Foreign services and revoked grants must fail without provider
+calls; the in-backend probe must observe the operation permit held.
+
+The AFS+ fixture compares one-entry pages for written data, holes, unwritten
+reservations beyond EOF and the final rounded address block, then synchronizes
+and remounts to compare the same allocation and logical size. Core queries must
+issue no writes or barriers. Compare empty/direct/tree layouts and show that
+live mutation changes committed readback without changing a retained snapshot's
+layout. Invalid cursors/limits and directory queries must preserve the no-write
+contract. An open mutation window must cause explicit refusal without a flush;
+after explicit window commit, queries must show its committed allocation.
+
+These gates qualify scoped readback, not the complete preservation consumer.
+The consumer must bind archive allocation to sparse data, restore reservations,
+compare byte coverage independently of extent segmentation, and refuse
+unsupported or mismatched destinations. Native ownership, concurrency and
+resource evidence retain separate gates.

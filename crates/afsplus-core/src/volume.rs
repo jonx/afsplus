@@ -20,8 +20,9 @@ pub use metadata::PreservedMetadata;
 mod snapshots;
 use snapshots::SnapshotRegistryChange;
 pub use snapshots::{
-    SnapshotCommitStats, SnapshotDirectoryCursor, SnapshotDirectoryPage, SnapshotHandle,
-    SnapshotInfo, SnapshotListPage, SnapshotMaintenance, SnapshotWorkLimits,
+    SnapshotAllocationPage, SnapshotAllocationRange, SnapshotCommitStats, SnapshotDirectoryCursor,
+    SnapshotDirectoryPage, SnapshotHandle, SnapshotInfo, SnapshotListPage, SnapshotMaintenance,
+    SnapshotWorkLimits,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Weak};
@@ -52,6 +53,21 @@ use crate::object_map;
 use crate::shared_extents::{self, RefEdit, RefEditStats};
 use crate::verify::{load_mount_state, MountState};
 use crate::CoreError;
+
+/// Semantic byte allocation. Rounded tails and reservations can exceed EOF.
+/// Physical addresses and sharing representation are deliberately absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileAllocationRange {
+    pub offset: u64,
+    pub length: u64,
+    pub unwritten: bool,
+}
+#[derive(Debug, PartialEq, Eq)]
+pub struct FileAllocationPage {
+    pub ranges: Vec<FileAllocationRange>,
+    pub next: u64,
+    pub eof: bool,
+}
 
 /// Measured cost of the last committed transaction.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -684,6 +700,92 @@ impl<D: BlockDevice> Volume<D> {
     pub fn stat(&mut self, object_id: u64) -> Result<Option<ObjectRecord>, CoreError> {
         self.ensure_public_object_id(object_id)?;
         self.read_object(object_id)
+    }
+
+    /// Read committed semantic allocation without flushing or materializing
+    /// an open mutation window. Cursors are entry ordinals, not byte offsets.
+    pub fn file_allocation_page(
+        &mut self,
+        object_id: u64,
+        start: u64,
+        limit: usize,
+    ) -> Result<FileAllocationPage, CoreError> {
+        if limit == 0 || limit > 64 {
+            return Err(CoreError::PrototypeLimit(
+                "allocation page limit out of range",
+            ));
+        }
+        if self.window.is_some() {
+            return Err(CoreError::Busy);
+        }
+        let record = self.stat(object_id)?.ok_or(CoreError::NotFound)?;
+        self.read_allocation_page(&record, object_id, self.checkpoint.generation, start, limit)
+    }
+
+    fn read_allocation_page(
+        &mut self,
+        record: &ObjectRecord,
+        object_id: u64,
+        generation: u64,
+        start: u64,
+        limit: usize,
+    ) -> Result<FileAllocationPage, CoreError> {
+        if record.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        let geo = self.ident.geometry();
+        let (extents, total) =
+            if record.flags & afsplus_format::object::OBJECT_FLAG_EXTENT_TREE != 0 {
+                let page = extent_map::read_page(
+                    &mut self.dev,
+                    &geo,
+                    record.data_root,
+                    object_id,
+                    generation,
+                    start,
+                    limit,
+                )?;
+                (page.extents, page.total_extents)
+            } else if record.data_blocks != 0 {
+                let records = if start == 0 {
+                    vec![extent_map::Extent {
+                        logical_start: 0,
+                        physical_start: record.data_root,
+                        block_count: record.data_blocks,
+                        flags: 0,
+                    }]
+                } else {
+                    vec![]
+                };
+                (records, 1)
+            } else {
+                (vec![], 0)
+            };
+        if start > total {
+            return Err(CoreError::PrototypeLimit("allocation cursor beyond end"));
+        }
+        let mut ranges = Vec::with_capacity(extents.len());
+        for extent in extents {
+            let offset = extent
+                .logical_start
+                .checked_mul(geo.block_size as u64)
+                .ok_or_else(|| CoreError::Corrupt("allocation byte offset overflows".into()))?;
+            let length = extent
+                .block_count
+                .checked_mul(geo.block_size as u64)
+                .ok_or_else(|| CoreError::Corrupt("allocation byte length overflows".into()))?;
+            ranges.push(FileAllocationRange {
+                offset,
+                length,
+                unwritten: extent.flags & extent_map::EXTENT_UNWRITTEN != 0,
+            });
+        }
+        let next = start + ranges.len() as u64;
+        Ok(FileAllocationPage {
+            ranges,
+            next,
+            eof: next == total,
+        })
     }
 
     /// Returns filesystem-facing metadata through the open intent-log

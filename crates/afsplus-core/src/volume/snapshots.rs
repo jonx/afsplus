@@ -97,20 +97,9 @@ pub struct SnapshotDirectoryPage {
     pub eof: bool,
 }
 
-/// Semantic allocation in bytes, including block-rounded tails and reservations
-/// beyond EOF. Gaps are holes; physical addresses and sharing hints are excluded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SnapshotAllocationRange {
-    pub offset: u64,
-    pub length: u64,
-    pub unwritten: bool,
-}
-#[derive(Debug)]
-pub struct SnapshotAllocationPage {
-    pub ranges: Vec<SnapshotAllocationRange>,
-    pub next: u64,
-    pub eof: bool,
-}
+/// Captured allocation uses the same semantic range representation as live readback.
+pub type SnapshotAllocationRange = super::FileAllocationRange;
+pub type SnapshotAllocationPage = super::FileAllocationPage;
 
 pub(super) enum SnapshotRegistryChange {
     Create { id: u64, record: SnapshotRecord },
@@ -368,64 +357,7 @@ impl<D: BlockDevice> Volume<D> {
         }
         let record = snapshot::view::object(&mut self.dev, &self.ident, view, object_id)?
             .ok_or(CoreError::NotFound)?;
-        if record.object_type != ObjectType::File {
-            return Err(CoreError::IsDirectory);
-        }
-        let geo = self.ident.geometry();
-        let (extents, total) =
-            if record.flags & afsplus_format::object::OBJECT_FLAG_EXTENT_TREE != 0 {
-                let page = extent_map::read_page(
-                    &mut self.dev,
-                    &geo,
-                    record.data_root,
-                    object_id,
-                    view.generation,
-                    start,
-                    limit,
-                )?;
-                (page.extents, page.total_extents)
-            } else if record.data_blocks != 0 {
-                let records = if start == 0 {
-                    vec![extent_map::Extent {
-                        logical_start: 0,
-                        physical_start: record.data_root,
-                        block_count: record.data_blocks,
-                        flags: 0,
-                    }]
-                } else {
-                    vec![]
-                };
-                (records, 1)
-            } else {
-                (vec![], 0)
-            };
-        if start > total {
-            return Err(CoreError::PrototypeLimit(
-                "snapshot allocation cursor beyond end",
-            ));
-        }
-        let mut ranges = Vec::with_capacity(extents.len());
-        for extent in extents {
-            let offset = extent
-                .logical_start
-                .checked_mul(geo.block_size as u64)
-                .ok_or_else(|| CoreError::Corrupt("allocation byte offset overflows".into()))?;
-            let length = extent
-                .block_count
-                .checked_mul(geo.block_size as u64)
-                .ok_or_else(|| CoreError::Corrupt("allocation byte length overflows".into()))?;
-            ranges.push(SnapshotAllocationRange {
-                offset,
-                length,
-                unwritten: extent.flags & extent_map::EXTENT_UNWRITTEN != 0,
-            });
-        }
-        let next = start + ranges.len() as u64;
-        Ok(SnapshotAllocationPage {
-            ranges,
-            next,
-            eof: next == total,
-        })
+        self.read_allocation_page(&record, object_id, view.generation, start, limit)
     }
 
     pub fn snapshot_read_file_at(
