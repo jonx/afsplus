@@ -895,3 +895,156 @@ fn allocation_restore_refuses_unsupported_or_wrong_coverage_and_accepts_segmenta
         }
     }
 }
+
+#[test]
+fn captured_afs_file_group_recovers_exact_metadata_with_explicit_unknown_inventory_loss() {
+    use afsplus_backup::{allocation, file, inventory};
+    use afsplus_vfs::backup::InventoryKnowledge;
+    let mut source = volume();
+    let id = source.create_file_in_root("source", &[], time()).unwrap();
+    source.write_file_at(id, 4096, b"captured", time()).unwrap();
+    source.preallocate_file(id, 8192, 4096, time()).unwrap();
+    source.truncate_file(id, (1 << 40) + 23, time()).unwrap();
+    let preserved = afsplus_core::volume::PreservedMetadata {
+        protection: 0xa5a5,
+        created: Timespec {
+            seconds: -1234,
+            nanoseconds: 987654321,
+        },
+        modified: time(),
+        changed: Timespec {
+            seconds: -999,
+            nanoseconds: 222333444,
+        },
+    };
+    source.restore_object_metadata(id, preserved).unwrap();
+    let snapshot = source.snapshot_create(time()).unwrap();
+    source.write_file_at(id, 4096, b"LIVE NOW", time()).unwrap();
+    let source =
+        mount_with_snapshot_limits(source.into_device(), MountOptions::default(), work()).unwrap();
+    let (mut source, authority) = BackupService::new(source, 1).unwrap();
+    let grant = authority.grant();
+    let view = source.open(&grant, snapshot).unwrap();
+    let limits = file::Limits {
+        contents: consumer::Options {
+            map: limits(),
+            records: records(),
+            page_entries: 1,
+        },
+        inventory: inventory::Limits {
+            values: 16,
+            value_bytes: 4096,
+            page_entries: 1,
+            records: records(),
+        },
+    };
+    let ordinal = u64::MAX - 2;
+    let mut writer = envelope::Writer::new(Vec::new(), framing()).unwrap();
+    let exported = file::export(
+        &mut Captured {
+            client: &mut source.client(),
+            reader: &view,
+            object: id,
+        },
+        &mut writer,
+        (ordinal, "files/captured"),
+        file::Mode::Recovery,
+        &mut [0; 512],
+        limits,
+    )
+    .unwrap();
+    assert_eq!(exported.next_ordinal, None);
+    assert_eq!(
+        exported.knowledge.attributes,
+        InventoryKnowledge::Uninspected
+    );
+    assert_eq!(exported.knowledge.security, InventoryKnowledge::Uninspected);
+    let wire = writer.finish().unwrap().0;
+    let mut spool = spool::Verified::capture_sparse(
+        wire.as_slice(),
+        Cursor::new(Vec::new()),
+        spool::Limits {
+            chunk_bytes: 512,
+            archive_bytes: wire.len() as u64,
+            store_bytes: wire.len() as u64 * 2,
+        },
+        framing(),
+        records(),
+    )
+    .unwrap();
+    let mut reader = spool.reader(framing(), records()).unwrap();
+    let backend = AfsRestoreDestination::new(volume(), afsplus_format::OBJECT_ROOT).unwrap();
+    let (mut dest, authority) = RestoreService::new(backend, 2).unwrap();
+    let grant = authority.grant();
+    let root = dest.root(&grant).unwrap();
+    let restored = dest
+        .create_file(&root, "restored", Timespec::default())
+        .unwrap();
+    let report = file::restore(
+        &mut reader,
+        &mut dest.client(),
+        &afsplus_backup::attachment::Target {
+            ordinal,
+            path: "files/captured",
+            object: &restored,
+        },
+        &mut [0; 512],
+        file::RestoreOptions {
+            mode: file::Mode::Recovery,
+            allocation: allocation::RestoreOptions {
+                limits: limits.contents,
+                mode: allocation::Mode::RecoverContents,
+                reservation_chunk: 0,
+                reservation_bytes: 0,
+                readback_entries: 0,
+            },
+            inventory: limits.inventory,
+        },
+        Timespec::default(),
+    )
+    .unwrap();
+    assert_eq!(report.next_ordinal, None);
+    assert_eq!(
+        report.allocation.allocation,
+        allocation::Disposition::Discarded {
+            ranges: 1,
+            bytes: 4096
+        }
+    );
+    assert!(matches!(
+        report.opaque,
+        file::OpaqueDisposition::Omitted {
+            knowledge: afsplus_vfs::backup::MetadataInventory {
+                attributes: InventoryKnowledge::Uninspected,
+                security: InventoryKnowledge::Uninspected
+            },
+            transported: None
+        }
+    ));
+    assert!(reader.next_member().unwrap().is_none());
+    dest.client().sync(&grant).unwrap();
+    let restored_id = dest.stat(&restored).unwrap().object_id;
+    let backend = dest.into_backend().into_volume();
+    let mut restored =
+        mount_with_snapshot_limits(backend.into_device(), MountOptions::default(), work()).unwrap();
+    let stat = restored.stat(restored_id).unwrap().unwrap();
+    assert_eq!(stat.size_bytes, (1 << 40) + 23);
+    assert_eq!(
+        (stat.protection, stat.created, stat.modified, stat.changed),
+        (
+            preserved.protection,
+            preserved.created,
+            preserved.modified,
+            preserved.changed
+        )
+    );
+    let mut bytes = [0; 8];
+    restored
+        .read_file_at(restored_id, 4096, &mut bytes)
+        .unwrap();
+    assert_eq!(&bytes, b"captured");
+    let allocations = restored.file_allocation_page(restored_id, 0, 64).unwrap();
+    assert!(allocations.eof);
+    assert_eq!(allocations.ranges.len(), 1);
+    assert!(!allocations.ranges[0].unwritten);
+}

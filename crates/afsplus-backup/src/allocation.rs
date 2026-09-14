@@ -340,7 +340,30 @@ pub fn restore<R: Read, P: RestoreBackend>(
     options: RestoreOptions,
     now: Timespec,
 ) -> Result<Report, Error> {
-    let result = restore_inner(reader, client, target, scratch, options, now);
+    let result = restore_inner(reader, client, target, scratch, options, now, None);
+    if result.is_err() {
+        reader.invalidate();
+    }
+    result
+}
+pub(crate) fn restore_bound<R: Read, P: RestoreBackend>(
+    reader: &mut stream::Reader<R>,
+    client: &mut RestoreClient<'_, P>,
+    target: &Target<'_, P::Object>,
+    scratch: &mut [u8],
+    options: RestoreOptions,
+    now: Timespec,
+    modified: crate::member::Timestamp,
+) -> Result<Report, Error> {
+    let result = restore_inner(
+        reader,
+        client,
+        target,
+        scratch,
+        options,
+        now,
+        Some(modified),
+    );
     if result.is_err() {
         reader.invalidate();
     }
@@ -353,6 +376,7 @@ fn restore_inner<R: Read, P: RestoreBackend>(
     scratch: &mut [u8],
     options: RestoreOptions,
     now: Timespec,
+    modified: Option<crate::member::Timestamp>,
 ) -> Result<Report, Error> {
     if !reader.can_publish() {
         return Err(Error::NeedsVerifiedReplay);
@@ -369,6 +393,11 @@ fn restore_inner<R: Read, P: RestoreBackend>(
     let map = consumer::prepare_restore(reader, client, &file, options.limits.map)?;
     if !reader.raw_path_is(&format!("files/GNUSparseFile.{sparse_ordinal}/payload")) {
         return Err(Error::Invalid);
+    }
+    if let Some(expected) = modified {
+        if reader.current_mtime().map_err(Error::Stream)? != expected {
+            return Err(Error::Invalid);
+        }
     }
     match_written(&layout, &map)?;
     let reserved = layout.ranges.iter().filter(|r| r.unwritten);

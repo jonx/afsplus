@@ -82,3 +82,16 @@ metadata and groups, reject extras/omissions, preserve namespace and links,
 handle sparse data and reservations, reach replay EOF and synchronize the
 destination. Explicit content recovery with loss reporting is a separate mode;
 it does not relabel uninspected or discarded metadata as an empty inventory.
+
+
+## Explicit recovery consumption
+
+Under [ADR-091](../adr/ADR-091-bound-regular-file-archive-groups.md), a verified
+recovery consumer can validate and drain an inspected group without destination
+uploads. It applies the same manifest, class/key order, descriptor digest,
+path/ordinal and payload-length checks and returns the transported counts/bytes
+for loss accounting. Raw as well as effective auxiliary names match their exact
+ordinals. Recovery cannot bypass a malformed manifest or treat Uninspected
+knowledge as Empty. [Regular-file groups](backup-file.md) distinguish omitted
+inventories from transported full-group inventories and require persistent
+loss-reporting at the enclosing job boundary.

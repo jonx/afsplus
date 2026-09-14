@@ -167,6 +167,23 @@ impl<R: Read> Reader<R> {
         !self.poisoned && self.header.as_ref().is_some_and(|h| h.path == path)
     }
 
+    #[cfg(feature = "consumer")]
+    pub(crate) fn current_mtime(&self) -> Result<member::Timestamp, Error> {
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
+        let header = self
+            .header
+            .as_ref()
+            .ok_or(Error::Invalid("no current member"))?;
+        let records = pax::decode(&self.records, self.limits).map_err(Error::Pax)?;
+        Ok(
+            member::resolve_mode(header, &records, self.limits, self.sparse)
+                .map_err(Error::Member)?
+                .mtime,
+        )
+    }
+
     pub fn receipt(&self) -> Option<&envelope::Receipt> {
         if self.complete && !self.poisoned {
             self.inner.receipt()

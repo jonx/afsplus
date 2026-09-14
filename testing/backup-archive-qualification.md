@@ -17,6 +17,7 @@
 - [Complete object inventory groups](#complete-object-inventory-groups)
 - [Sparse content consumer](#sparse-content-consumer)
 - [Allocation-preserving consumer](#allocation-preserving-consumer)
+- [Bound regular-file groups](#bound-regular-file-groups)
 
 <!-- /toc -->
 
@@ -332,3 +333,42 @@ This component gate does not certify complete object/namespace preservation,
 AFS+ opaque metadata storage, job-level loss-report persistence, sustained large
 payloads, spooled maps, older-machine peak memory or native durability. Preserve
 those gates in the enclosing backup and platform qualification.
+
+## Bound regular-file groups
+
+Run `cargo test -p afsplus-backup --all-features` for
+[regular-file groups](../spec/backup-file.md) and
+[ADR-091](../adr/ADR-091-bound-regular-file-archive-groups.md).
+
+The real AFS+ fixture sets distinct protection and nanosecond timestamps, captures
+a sparse file with reservations, changes its live bytes and exports recovery
+from a remounted view. Use a 512-byte transfer buffer and one-entry pages. Restore,
+consume EOF, synchronize and remount; compare exact captured bytes, size,
+protection and all timestamps, and confirm reservations are omitted with the
+correct loss count/bytes. Attribute and security knowledge must be explicitly
+Uninspected rather than asserted empty. Exercise the final available group
+ordinals and require explicit exhaustion.
+
+A separate semantic provider fixture covers full inventory transport, including
+unknown binary security bytes, signed timestamp extremes and full-width
+protection. One-byte transfers and one-entry pages must preserve the file and
+opaque values without hole expansion. Recovery of a full group must validate
+its inventory counts/bytes and report them as discarded while making zero opaque
+publications, even when the provider refuses uploads. Recovery groups retain
+Uninspected knowledge and no fabricated transported summary. Full restore must
+refuse a recovery group before writes.
+
+Rebuild valid integrity envelopes containing conflicting file paths, kinds,
+mtime, inventory knowledge, descriptor hashes or value paths. Unknown group
+versions also fail. Check which failures precede file writes, and withhold core
+metadata finalization after inventory failure. A provider that rounds timestamps
+must not yield a file-success report. Revoke destination authority and exhaust
+inventory counts/pages, buffers and mode consistency; require sticky failure and
+release of staged uploads. Source revocation, uninspected full-export inventory,
+second-pass descriptor mutation and ordinal exhaustion must poison export.
+
+The real AFS+ recovery fixture and the semantic full-inventory provider prove
+different scopes. They do not establish AFS+ opaque storage support, directories,
+symlinks, hard-link identity, whole-namespace completeness, durable job loss
+reports, sustained resource use or native/older-system qualification. Preserve
+those acceptance gates explicitly.

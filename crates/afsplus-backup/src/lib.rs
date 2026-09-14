@@ -24,3 +24,6 @@ pub mod sparse;
 
 #[cfg(feature = "consumer")]
 pub mod allocation;
+
+#[cfg(feature = "consumer")]
+pub mod file;

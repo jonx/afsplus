@@ -379,27 +379,7 @@ fn restore_inner<R: Read, P: OpaqueRestoreBackend>(
     if scratch.is_empty() {
         return Err(Error::Limit);
     }
-    let m = archive
-        .next_member()
-        .map_err(Error::Stream)?
-        .ok_or(Error::Invalid)?;
-    if !attachment::ordinary(&m, &name(target.ordinal)) {
-        return Err(Error::Invalid);
-    }
-    let size = usize::try_from(m.size).map_err(|_| Error::Limit)?;
-    if size > limits.records.bytes {
-        return Err(Error::Limit);
-    }
-    let mut wire = vec![0; size];
-    if size != 0 && archive.read_payload(&mut wire).map_err(Error::Stream)? != size {
-        return Err(Error::Invalid);
-    }
-    let (path, expected) = decode(&wire, target.ordinal, &limits)?;
-    if path != target.path {
-        return Err(Error::Invalid);
-    }
-    known(knowledge.attributes, expected.attributes.count)?;
-    known(knowledge.security, expected.security.count)?;
+    let expected = read_manifest(archive, target.ordinal, target.path, knowledge, limits)?;
     let mut next = target.ordinal;
     for (class, planned) in [
         (MetadataClass::Attribute, &expected.attributes),
@@ -431,6 +411,110 @@ fn restore_inner<R: Read, P: OpaqueRestoreBackend>(
                 return Err(Error::Invalid);
             }
             staged.publish(archive, client)?;
+        }
+        if actual.summary() != *planned {
+            return Err(Error::Invalid);
+        }
+    }
+    Ok(expected)
+}
+
+fn read_manifest<R: Read>(
+    archive: &mut stream::Reader<R>,
+    ordinal: u64,
+    expected_path: &str,
+    knowledge: MetadataInventory,
+    limits: Limits,
+) -> Result<Summary, Error> {
+    let m = archive
+        .next_member()
+        .map_err(Error::Stream)?
+        .ok_or(Error::Invalid)?;
+    if !attachment::ordinary(&m, &name(ordinal)) {
+        return Err(Error::Invalid);
+    }
+    let size = usize::try_from(m.size).map_err(|_| Error::Limit)?;
+    if !archive.raw_path_is(&name(ordinal)) {
+        return Err(Error::Invalid);
+    }
+    if size > limits.records.bytes {
+        return Err(Error::Limit);
+    }
+    let mut wire = Vec::new();
+    wire.try_reserve_exact(size).map_err(|_| Error::Limit)?;
+    wire.resize(size, 0);
+    if size != 0 && archive.read_payload(&mut wire).map_err(Error::Stream)? != size {
+        return Err(Error::Invalid);
+    }
+    let (path, expected) = decode(&wire, ordinal, &limits)?;
+    if path != expected_path {
+        return Err(Error::Invalid);
+    }
+    known(knowledge.attributes, expected.attributes.count)?;
+    known(knowledge.security, expected.security.count)?;
+    Ok(expected)
+}
+/// Validate and drain an inspected inventory for explicit content recovery.
+/// No destination metadata operation is performed; the summary records loss.
+pub fn discard<R: Read>(
+    archive: &mut stream::Reader<R>,
+    ordinal: u64,
+    path: &str,
+    knowledge: MetadataInventory,
+    scratch: &mut [u8],
+    limits: Limits,
+) -> Result<Summary, Error> {
+    let result = discard_inner(archive, ordinal, path, knowledge, scratch, limits);
+    if result.is_err() {
+        archive.invalidate();
+    }
+    result
+}
+fn discard_inner<R: Read>(
+    archive: &mut stream::Reader<R>,
+    ordinal: u64,
+    path: &str,
+    knowledge: MetadataInventory,
+    scratch: &mut [u8],
+    limits: Limits,
+) -> Result<Summary, Error> {
+    if !archive.can_publish() {
+        return Err(Error::NeedsVerifiedReplay);
+    }
+    if scratch.is_empty() {
+        return Err(Error::Limit);
+    }
+    let expected = read_manifest(archive, ordinal, path, knowledge, limits)?;
+    let mut next = ordinal;
+    for (class, planned) in [
+        (MetadataClass::Attribute, &expected.attributes),
+        (MetadataClass::Security, &expected.security),
+    ] {
+        let mut actual = Accumulator::new(class);
+        for _ in 0..planned.count {
+            next = next.checked_add(1).ok_or(Error::Limit)?;
+            let (actual_class, entry) =
+                attachment::read_description(archive, next, path, limits.records)?;
+            if actual_class != class {
+                return Err(Error::Invalid);
+            }
+            actual.add(&entry, &limits)?;
+            if actual.bytes > planned.bytes
+                || (actual.count == planned.count && actual.summary() != *planned)
+            {
+                return Err(Error::Invalid);
+            }
+            let mut left = entry.size;
+            while left != 0 {
+                let want = left.min(scratch.len() as u64) as usize;
+                let n = archive
+                    .read_payload(&mut scratch[..want])
+                    .map_err(Error::Stream)?;
+                if n == 0 || n > want {
+                    return Err(Error::Invalid);
+                }
+                left -= n as u64;
+            }
         }
         if actual.summary() != *planned {
             return Err(Error::Invalid);

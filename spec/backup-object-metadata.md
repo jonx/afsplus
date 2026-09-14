@@ -51,6 +51,7 @@ Callers supply byte, record-count, keyword and value limits to the PAX codec.
 Decoding borrows the admitted payload strings. Encoding validates the complete
 metadata object and record budgets before allocating serialized output. No
 allocation depends on a source file's declared size. Unknown transports require
-an explicit handler or refusal. The object payload alone does not define sparse
-transport, auxiliary member ordering, archive-wide bookkeeping or publication;
-these require their own integrated preservation gates before reporting success.
+an explicit handler or refusal. The [regular-file group](backup-file.md) binds
+primary-file metadata to sparse contents, allocation and opaque inventories. The payload alone defines no
+namespace graph, archive-wide bookkeeping or job publication; those require
+integrated preservation gates before reporting job success.

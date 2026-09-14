@@ -285,32 +285,7 @@ fn stage_inner<R: Read, P: OpaqueRestoreBackend>(
     if scratch.is_empty() {
         return Err(Error::Limit);
     }
-    let m = archive
-        .next_member()
-        .map_err(Error::Stream)?
-        .ok_or(Error::Invalid)?;
-    if !ordinary(&m, &path(target.ordinal, "pax")) {
-        return Err(Error::Invalid);
-    }
-    let size = usize::try_from(m.size).map_err(|_| Error::Limit)?;
-    if size > limits.bytes {
-        return Err(Error::Limit);
-    }
-    let mut wire = vec![0; size];
-    if size != 0 && archive.read_payload(&mut wire).map_err(Error::Stream)? != size {
-        return Err(Error::Invalid);
-    }
-    let (source, class, entry) = parse(&wire, limits)?;
-    if source != target.path {
-        return Err(Error::Invalid);
-    }
-    let m = archive
-        .next_member()
-        .map_err(Error::Stream)?
-        .ok_or(Error::Invalid)?;
-    if !ordinary(&m, &path(target.ordinal, "bin")) || m.size != entry.size {
-        return Err(Error::Invalid);
-    }
+    let (class, entry) = read_description(archive, target.ordinal, target.path, limits)?;
     let mut upload = client
         .begin_opaque(target.object, class, &entry)
         .map_err(Error::Restore)?;
@@ -334,6 +309,49 @@ fn stage_inner<R: Read, P: OpaqueRestoreBackend>(
         upload,
         identity: archive.identity(),
     })
+}
+
+pub(crate) fn read_description<R: Read>(
+    archive: &mut stream::Reader<R>,
+    ordinal: u64,
+    expected_path: &str,
+    limits: pax::Limits,
+) -> Result<(MetadataClass, MetadataEntry), Error> {
+    let m = archive
+        .next_member()
+        .map_err(Error::Stream)?
+        .ok_or(Error::Invalid)?;
+    if !ordinary(&m, &path(ordinal, "pax")) {
+        return Err(Error::Invalid);
+    }
+    let size = usize::try_from(m.size).map_err(|_| Error::Limit)?;
+    if !archive.raw_path_is(&path(ordinal, "pax")) {
+        return Err(Error::Invalid);
+    }
+    if size > limits.bytes {
+        return Err(Error::Limit);
+    }
+    let mut wire = Vec::new();
+    wire.try_reserve_exact(size).map_err(|_| Error::Limit)?;
+    wire.resize(size, 0);
+    if size != 0 && archive.read_payload(&mut wire).map_err(Error::Stream)? != size {
+        return Err(Error::Invalid);
+    }
+    let (source, class, entry) = parse(&wire, limits)?;
+    if source != expected_path {
+        return Err(Error::Invalid);
+    }
+    let m = archive
+        .next_member()
+        .map_err(Error::Stream)?
+        .ok_or(Error::Invalid)?;
+    if !ordinary(&m, &path(ordinal, "bin")) || m.size != entry.size {
+        return Err(Error::Invalid);
+    }
+    if !archive.raw_path_is(&path(ordinal, "bin")) {
+        return Err(Error::Invalid);
+    }
+    Ok((class, entry))
 }
 
 #[cfg(test)]

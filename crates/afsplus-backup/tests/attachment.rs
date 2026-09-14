@@ -47,10 +47,53 @@ impl SnapshotBackend for Source {
         unimplemented!()
     }
     fn stat(&mut self, _: &Self::View, _: u64) -> Result<Stat, VfsError> {
-        unimplemented!()
+        Ok(file_stat())
     }
-    fn read(&mut self, _: &Self::View, _: u64, _: u64, _: &mut [u8]) -> Result<usize, VfsError> {
-        unimplemented!()
+    fn read(
+        &mut self,
+        _: &Self::View,
+        _: u64,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<usize, VfsError> {
+        let n = out.len().min((file_stat().size - offset) as usize);
+        for (i, b) in out[..n].iter_mut().enumerate() {
+            *b = match offset + i as u64 {
+                4096 => b'c',
+                4097 => 0,
+                4098 => b'o',
+                4099 => b'r',
+                _ => 0,
+            };
+        }
+        Ok(n)
+    }
+    fn allocations(
+        &mut self,
+        _: &Self::View,
+        _: u64,
+        start: u64,
+        limit: usize,
+    ) -> Result<AllocationPage, VfsError> {
+        let all = [
+            AllocationRange {
+                offset: 4096,
+                length: 4,
+                unwritten: false,
+            },
+            AllocationRange {
+                offset: 8192,
+                length: 4096,
+                unwritten: true,
+            },
+        ];
+        let ranges: Vec<_> = all.into_iter().skip(start as usize).take(limit).collect();
+        let next = start + ranges.len() as u64;
+        Ok(AllocationPage {
+            ranges,
+            next,
+            eof: next >= 2,
+        })
     }
     fn directory(
         &mut self,
@@ -133,6 +176,12 @@ struct Destination {
     all: std::collections::BTreeMap<String, Vec<u8>>,
     installed: Option<(MetadataClass, MetadataEntry, Vec<u8>)>,
     active: Arc<AtomicUsize>,
+    file: Vec<u8>,
+    size: u64,
+    ranges: Vec<AllocationRange>,
+    core_metadata: Option<RestoreMetadata>,
+    round_metadata: bool,
+    reject_opaque: bool,
 }
 impl RestoreBackend for Destination {
     type Object = ();
@@ -145,20 +194,76 @@ impl RestoreBackend for Destination {
     fn create_directory(&mut self, _: &(), _: &str, _: Timespec) -> Result<(), VfsError> {
         unimplemented!()
     }
-    fn write(&mut self, _: &(), _: u64, _: &[u8], _: Timespec) -> Result<(), VfsError> {
-        unimplemented!()
+    fn write(&mut self, _: &(), offset: u64, bytes: &[u8], _: Timespec) -> Result<(), VfsError> {
+        let end = offset as usize + bytes.len();
+        self.file.resize(self.file.len().max(end), 0);
+        self.file[offset as usize..end].copy_from_slice(bytes);
+        self.ranges.push(AllocationRange {
+            offset,
+            length: bytes.len() as u64,
+            unwritten: false,
+        });
+        self.size = self.size.max(end as u64);
+        Ok(())
     }
-    fn resize(&mut self, _: &(), _: u64, _: Timespec) -> Result<(), VfsError> {
-        unimplemented!()
+    fn reserve(&mut self, _: &(), offset: u64, length: u64, _: Timespec) -> Result<(), VfsError> {
+        self.ranges.push(AllocationRange {
+            offset,
+            length,
+            unwritten: true,
+        });
+        Ok(())
+    }
+    fn allocations(
+        &mut self,
+        _: &(),
+        start: u64,
+        limit: usize,
+    ) -> Result<AllocationPage, VfsError> {
+        self.ranges.sort_by_key(|r| r.offset);
+        let ranges: Vec<_> = self
+            .ranges
+            .iter()
+            .skip(start as usize)
+            .take(limit)
+            .copied()
+            .collect();
+        let next = start + ranges.len() as u64;
+        Ok(AllocationPage {
+            ranges,
+            next,
+            eof: next >= self.ranges.len() as u64,
+        })
+    }
+    fn resize(&mut self, _: &(), size: u64, _: Timespec) -> Result<(), VfsError> {
+        self.size = size;
+        Ok(())
     }
     fn link(&mut self, _: &(), _: &(), _: &str, _: Timespec) -> Result<(), VfsError> {
         unimplemented!()
     }
-    fn metadata(&mut self, _: &(), _: RestoreMetadata) -> Result<(), VfsError> {
-        unimplemented!()
+    fn metadata(&mut self, _: &(), mut metadata: RestoreMetadata) -> Result<(), VfsError> {
+        if self.round_metadata {
+            metadata.modified.nanoseconds = 0;
+        }
+        self.core_metadata = Some(metadata);
+        Ok(())
     }
     fn stat(&mut self, _: &()) -> Result<Stat, VfsError> {
-        unimplemented!()
+        let mut stat = file_stat();
+        stat.size = self.size;
+        stat.allocated_size = self.ranges.iter().map(|r| r.length).sum();
+        let metadata = self.core_metadata.unwrap_or(RestoreMetadata {
+            protection: 0,
+            created: Timespec::default(),
+            modified: Timespec::default(),
+            changed: Timespec::default(),
+        });
+        stat.protection = metadata.protection;
+        stat.created = metadata.created;
+        stat.modified = metadata.modified;
+        stat.changed = metadata.changed;
+        Ok(stat)
     }
     fn read(&mut self, _: &(), _: u64, _: &mut [u8]) -> Result<usize, VfsError> {
         unimplemented!()
@@ -186,6 +291,9 @@ impl OpaqueRestoreBackend for Destination {
         class: MetadataClass,
         entry: &MetadataEntry,
     ) -> Result<Upload, VfsError> {
+        if self.reject_opaque {
+            return Err(VfsError::NotSupported);
+        }
         self.active.fetch_add(1, Ordering::SeqCst);
         Ok(Upload {
             class,
@@ -814,5 +922,380 @@ fn malformed_inventory_never_returns_success_or_keeps_uploads() {
         if fault >= 4 {
             assert_eq!(dest.backend_mut().publications, 0);
         }
+    }
+}
+
+fn file_stat() -> Stat {
+    Stat {
+        object_id: 1,
+        kind: afsplus_vfs::NodeKind::File,
+        size: (1 << 40) + 1,
+        allocated_size: 4100,
+        links: 1,
+        protection: u64::MAX,
+        created: Timespec {
+            seconds: i64::MIN,
+            nanoseconds: 999999999,
+        },
+        modified: Timespec {
+            seconds: -42,
+            nanoseconds: 123456789,
+        },
+        changed: Timespec {
+            seconds: i64::MAX,
+            nanoseconds: 1,
+        },
+        content_generation: 7,
+    }
+}
+fn file_limits() -> afsplus_backup::file::Limits {
+    afsplus_backup::file::Limits {
+        contents: afsplus_backup::sparse::consumer::Options {
+            map: afsplus_backup::sparse::Limits {
+                entries: 64,
+                map_bytes: 4096,
+                data_bytes: 4096,
+                logical_bytes: u64::MAX,
+            },
+            records: limits(),
+            page_entries: 1,
+        },
+        inventory: afsplus_backup::inventory::Limits {
+            values: 16,
+            value_bytes: 4096,
+            page_entries: 1,
+            records: limits(),
+        },
+    }
+}
+fn file_archive(mode: afsplus_backup::file::Mode, uninspected: bool) -> Vec<u8> {
+    let mut backend = Source::new(vec![0, 255, 42, 128, 1]);
+    backend.uninspected = uninspected;
+    let (mut source, authority) = BackupService::new(backend, 1).unwrap();
+    let grant = authority.grant();
+    let view = source.open(&grant, 1).unwrap();
+    source.backend_mut().bytes.fill(99);
+    let mut writer = envelope::Writer::new(Vec::new(), framing()).unwrap();
+    let report = afsplus_backup::file::export(
+        &mut Captured {
+            client: &mut source.client(),
+            reader: &view,
+            object: 1,
+        },
+        &mut writer,
+        (0, "files/file"),
+        mode,
+        &mut [0; 1],
+        file_limits(),
+    )
+    .unwrap();
+    assert_eq!(
+        report.next_ordinal,
+        Some(if mode == afsplus_backup::file::Mode::Full {
+            5
+        } else {
+            3
+        })
+    );
+    writer.finish().unwrap().0
+}
+#[test]
+fn bound_file_groups_preserve_exact_metadata_and_validate_explicit_recovery_losses() {
+    use afsplus_backup::{allocation, file, spool};
+    use std::io::Cursor;
+    for archive_mode in [file::Mode::Full, file::Mode::Recovery] {
+        let wire = file_archive(archive_mode, archive_mode == file::Mode::Recovery);
+        for mode in [file::Mode::Full, file::Mode::Recovery] {
+            let mut spool = spool::Verified::capture_sparse(
+                wire.as_slice(),
+                Cursor::new(Vec::new()),
+                spool::Limits {
+                    chunk_bytes: 512,
+                    archive_bytes: wire.len() as u64,
+                    store_bytes: wire.len() as u64 * 2,
+                },
+                framing(),
+                limits(),
+            )
+            .unwrap();
+            let mut reader = spool.reader(framing(), limits()).unwrap();
+            let (mut dest, _, _, object) = destination();
+            dest.set_reservation_limit(4096);
+            // Recovery must work even when the provider refuses every opaque upload.
+            dest.backend_mut().reject_opaque = mode == file::Mode::Recovery;
+            let report = file::restore(
+                &mut reader,
+                &mut dest.client(),
+                &Target {
+                    ordinal: 0,
+                    path: "files/file",
+                    object: &object,
+                },
+                &mut [0; 1],
+                file::RestoreOptions {
+                    mode,
+                    allocation: allocation::RestoreOptions {
+                        limits: file_limits().contents,
+                        mode: if mode == file::Mode::Full {
+                            allocation::Mode::PreserveAllocation
+                        } else {
+                            allocation::Mode::RecoverContents
+                        },
+                        reservation_chunk: 4096,
+                        reservation_bytes: 4096,
+                        readback_entries: 64,
+                    },
+                    inventory: file_limits().inventory,
+                },
+                Timespec::default(),
+            );
+            if mode == file::Mode::Full && archive_mode == file::Mode::Recovery {
+                assert!(report.is_err());
+                assert!(reader.next_member().is_err());
+                assert!(dest.backend_mut().file.is_empty());
+                continue;
+            }
+            let report = report.unwrap();
+            assert_eq!(report.archive_mode, archive_mode);
+            assert_eq!(
+                report.next_ordinal,
+                Some(if archive_mode == file::Mode::Full {
+                    5
+                } else {
+                    3
+                })
+            );
+            let expected = file_stat();
+            let actual = dest.stat(&object).unwrap();
+            assert_eq!(
+                (
+                    actual.size,
+                    actual.protection,
+                    actual.created,
+                    actual.modified,
+                    actual.changed
+                ),
+                (
+                    expected.size,
+                    expected.protection,
+                    expected.created,
+                    expected.modified,
+                    expected.changed
+                )
+            );
+            assert_eq!(&dest.backend_mut().file[4096..], b"c\0or");
+            if mode == file::Mode::Full {
+                assert_eq!(
+                    dest.backend_mut().installed.as_ref().unwrap().2,
+                    vec![0, 255, 42, 128, 1]
+                );
+                assert!(matches!(
+                    report.opaque,
+                    file::OpaqueDisposition::Preserved(_)
+                ));
+                assert_eq!(
+                    report.allocation.allocation,
+                    allocation::Disposition::Preserved
+                );
+            } else {
+                assert_eq!(dest.backend_mut().publications, 0);
+                assert_eq!(
+                    report.allocation.allocation,
+                    allocation::Disposition::Discarded {
+                        ranges: 1,
+                        bytes: 4096
+                    }
+                );
+                match report.opaque {
+                    file::OpaqueDisposition::Omitted {
+                        knowledge,
+                        transported,
+                    } => {
+                        assert_eq!(knowledge.attributes, InventoryKnowledge::Empty);
+                        if archive_mode == file::Mode::Full {
+                            assert_eq!(knowledge.security, InventoryKnowledge::Present);
+                            let summary = transported.unwrap();
+                            assert_eq!((summary.security.count, summary.security.bytes), (1, 5));
+                        } else {
+                            assert_eq!(knowledge.security, InventoryKnowledge::Uninspected);
+                            assert!(transported.is_none());
+                        }
+                    }
+                    _ => panic!("recovery must report omissions"),
+                }
+            }
+            assert!(reader.next_member().unwrap().is_none());
+            assert_eq!(dest.backend_mut().active.load(Ordering::SeqCst), 0);
+        }
+    }
+}
+
+fn changed_file_archive(fault: u8) -> Vec<u8> {
+    use afsplus_backup::{file, metadata};
+    let wire = file_archive(file::Mode::Full, false);
+    let mut input = envelope::Reader::new(wire.as_slice(), framing()).unwrap();
+    let mut output = envelope::Writer::new(Vec::new(), framing()).unwrap();
+    let mut pending = None;
+    while let Some(mut header) = input.next_header().unwrap() {
+        let size_override = if header.kind == tar::Kind::File {
+            pending.take()
+        } else {
+            None
+        };
+        let size = size_override.unwrap_or(header.size);
+        input.begin_payload(size_override).unwrap();
+        let mut payload = vec![0; size as usize];
+        assert_eq!(input.read_payload(&mut payload).unwrap(), payload.len());
+        if header.kind == tar::Kind::PaxLocal {
+            pending = pax::decode(&payload, limits())
+                .unwrap()
+                .iter()
+                .find(|r| r.key == "size")
+                .map(|r| r.value.parse::<u64>().unwrap());
+        }
+        if header.path.contains("file-v1-full-") && fault <= 4 {
+            let mut object = metadata::decode(&payload, limits()).unwrap();
+            match fault {
+                0 => object.path = "files/wrong",
+                1 => object.kind = tar::Kind::Directory,
+                2 => object.modified.nanos += 1,
+                3 => object.security = metadata::Inventory::Empty,
+                4 => header.path = header.path.replace("v1", "v2"),
+                _ => unreachable!(),
+            }
+            payload = metadata::encode(&object, limits()).unwrap();
+            header.size = payload.len() as u64;
+        }
+        if header.path.contains("inventory-") && fault == 5 {
+            let mut records = pax::decode(&payload, limits()).unwrap();
+            let bad = "0".repeat(64);
+            records
+                .iter_mut()
+                .find(|r| r.key == "AROS.inventory.security_hash")
+                .unwrap()
+                .value = &bad;
+            payload = pax::encode(&records, limits()).unwrap();
+            header.size = payload.len() as u64;
+        }
+        if header.path.contains("value-") && header.path.ends_with(".pax") && fault == 6 {
+            let mut records = pax::decode(&payload, limits()).unwrap();
+            records
+                .iter_mut()
+                .find(|r| r.key == "AROS.value.path")
+                .unwrap()
+                .value = "files/wrong";
+            payload = pax::encode(&records, limits()).unwrap();
+            header.size = payload.len() as u64;
+        }
+        output.start(&header, size_override).unwrap();
+        output.write_payload(&payload).unwrap();
+    }
+    output.finish().unwrap().0
+}
+#[test]
+fn file_group_conflicts_rounding_and_revocation_never_report_preservation() {
+    use afsplus_backup::{allocation, file, spool};
+    use std::io::Cursor;
+    for fault in 0..=12 {
+        for mode in [file::Mode::Full, file::Mode::Recovery] {
+            let wire = if fault <= 6 {
+                changed_file_archive(fault)
+            } else {
+                file_archive(file::Mode::Full, false)
+            };
+            let mut spool = spool::Verified::capture_sparse(
+                wire.as_slice(),
+                Cursor::new(Vec::new()),
+                spool::Limits {
+                    chunk_bytes: 512,
+                    archive_bytes: wire.len() as u64,
+                    store_bytes: wire.len() as u64 * 2,
+                },
+                framing(),
+                limits(),
+            )
+            .unwrap();
+            let mut reader = spool.reader(framing(), limits()).unwrap();
+            let (mut dest, authority, grant, object) = destination();
+            dest.set_reservation_limit(4096);
+            dest.backend_mut().round_metadata = fault == 7;
+            if fault == 8 {
+                authority.revoke(&grant).unwrap();
+            }
+            let allocation_mode = if (mode == file::Mode::Full) != (fault == 10) {
+                allocation::Mode::PreserveAllocation
+            } else {
+                allocation::Mode::RecoverContents
+            };
+            let mut scratch = [0; 1];
+            let result = file::restore(
+                &mut reader,
+                &mut dest.client(),
+                &Target {
+                    ordinal: 0,
+                    path: "files/file",
+                    object: &object,
+                },
+                &mut scratch[..usize::from(fault != 11)],
+                file::RestoreOptions {
+                    mode,
+                    allocation: allocation::RestoreOptions {
+                        limits: file_limits().contents,
+                        mode: allocation_mode,
+                        reservation_chunk: 4096,
+                        reservation_bytes: 4096,
+                        readback_entries: 64,
+                    },
+                    inventory: afsplus_backup::inventory::Limits {
+                        values: if fault == 9 { 0 } else { 16 },
+                        page_entries: if fault == 12 { 0 } else { 1 },
+                        ..file_limits().inventory
+                    },
+                },
+                Timespec::default(),
+            );
+            assert!(result.is_err(), "fault {fault}: {result:?}");
+            assert!(reader.next_member().is_err());
+            if matches!(fault, 0 | 1 | 2 | 4 | 8 | 10 | 11) {
+                assert!(dest.backend_mut().file.is_empty(), "fault {fault}");
+            }
+            if fault != 7 {
+                assert!(dest.backend_mut().core_metadata.is_none());
+            }
+            assert_eq!(dest.backend_mut().active.load(Ordering::SeqCst), 0);
+            if mode == file::Mode::Recovery {
+                assert_eq!(dest.backend_mut().publications, 0);
+            }
+        }
+    }
+}
+#[test]
+fn full_file_export_refuses_unknown_inventories_revocation_and_ordinal_exhaustion() {
+    use afsplus_backup::file;
+    for fault in 0..4 {
+        let mut backend = Source::new(vec![0, 255]);
+        backend.uninspected = fault == 0;
+        backend.mutate_second_pass = fault == 3;
+        let (mut source, authority) = BackupService::new(backend, 1).unwrap();
+        let grant = authority.grant();
+        let view = source.open(&grant, 1).unwrap();
+        if fault == 1 {
+            authority.revoke(&grant).unwrap();
+        }
+        let mut writer = envelope::Writer::new(Vec::new(), framing()).unwrap();
+        let result = file::export(
+            &mut Captured {
+                client: &mut source.client(),
+                reader: &view,
+                object: 1,
+            },
+            &mut writer,
+            (if fault == 2 { u64::MAX - 2 } else { 0 }, "files/file"),
+            file::Mode::Full,
+            &mut [0; 1],
+            file_limits(),
+        );
+        assert!(result.is_err());
+        assert!(writer.finish().is_err());
     }
 }

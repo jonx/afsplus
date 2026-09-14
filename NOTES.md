@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Bind exact regular-file metadata to allocation and opaque inventories](#2026-09-14---bind-exact-regular-file-metadata-to-allocation-and-opaque-inventories)
 - [2026-09-14 - Bind archive allocation records to verified sparse restoration](#2026-09-14---bind-archive-allocation-records-to-verified-sparse-restoration)
 - [2026-09-14 - Add scoped allocation readback for full restore verification](#2026-09-14---add-scoped-allocation-readback-for-full-restore-verification)
 - [2026-09-14 - Transport captured sparse contents through the archive consumer](#2026-09-14---transport-captured-sparse-contents-through-the-archive-consumer)
@@ -98,6 +99,40 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Bind exact regular-file metadata to allocation and opaque inventories
+
+ADR-091 used the delegated recommended-option authority to define explicit full
+and recovery regular-file groups. The group binds exact metadata to allocation,
+sparse contents and optional complete opaque inventories. Full restore refuses a
+recovery group before writes. Recovery of a full group validates and drains its
+opaque values without destination uploads and reports their counts/bytes and
+captured knowledge. Uninspected inventories remain explicit uncertainty.
+
+The real AFS+ snapshot fixture recovered captured bytes, sparse length,
+protection and three distinct nanosecond timestamps through remount, despite
+later live-source writes. It used 512-byte transfers and one-entry pages and
+reported omitted reservations and uninspected inventories. A separate semantic
+provider fixture preserved full-width protection, signed timestamp extremes and
+unknown binary security values with one-byte transfers. These are different
+evidence scopes: the latter does not establish AFS+ opaque storage support.
+
+Rebuilt valid envelopes with conflicting file paths, kinds, mtime, inventory
+knowledge/digests and value bindings were refused. Timestamp rounding at the
+destination withheld success. Revoked authority, resource limits, mode conflicts,
+unknown versions and source export failures poisoned further archive use. Core
+metadata was applied after contents/inventories, then read back exactly. Existing
+opaque parsing was shared with the recovery drain, with raw/effective ordinal
+checks and fallible admitted record allocation.
+
+The full workspace all-features gate passed 441 tests with zero failures and
+10 explicitly ignored qualification probes. Formatting, strict Clippy,
+documentation, three checker fixtures and whitespace validation passed.
+
+The no-default-features archive gate passed 33 tests. Namespace orchestration
+must still preserve directories, symlinks and hard-link aliases, finalize metadata
+after namespace edits, validate whole-job completeness, synchronize and persist
+loss reports. Native/older-system resource and durability gates remain separate.
 
 ## 2026-09-14 - Bind archive allocation records to verified sparse restoration
 

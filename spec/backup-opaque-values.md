@@ -60,3 +60,13 @@ uniqueness, inventory completeness or whole-job durability. The complete consume
 must enforce these, report partial restoration after any later failure and check
 final integrity/EOF before reporting success. Content recovery has a separate
 explicit loss-reporting policy under [ADR-078](../adr/ADR-078-backup-preservation-modes.md).
+
+
+## Recovery validation
+
+[ADR-091](../adr/ADR-091-bound-regular-file-archive-groups.md) requires raw and
+effective descriptor/data paths to match their expected ordinal names. A
+[recovery inventory consumer](backup-inventory.md#explicit-recovery-consumption)
+can validate descriptors and drain exact payloads without staging destination
+uploads. Discarding values does not waive binding, ordering, size or integrity
+checks and must produce explicit loss accounting.

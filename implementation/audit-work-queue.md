@@ -42,9 +42,11 @@ Define existing-destination merge/overwrite/resume under Q11 before exposing
 pre-existing destination objects; distinguish partial restoration from completion.
 Use the [sparse content consumer](../spec/backup-sparse.md) for bounded content
 transport and the [allocation-preserving consumer](../spec/backup-allocation.md)
-for reservation binding and verified coverage. Persist explicit content-recovery
-loss reports and validate every object and archive-wide binding before full-job
-preservation success. Use
+for reservation binding and verified coverage. Use [bound regular-file groups](../spec/backup-file.md)
+for exact metadata/content/inventory agreement. Integrate directories, symlinks
+and the hard-link graph; finalize metadata after namespace edits. Persist explicit
+content-recovery loss reports and validate every object and archive-wide binding
+before full-job preservation success. Use
 [committed destination allocation readback](../docs/13-filesystem-api-v2.md#committed-destination-allocation-readback)
 to compare restored coverage and written/unwritten state, rather than trusting
 reservation success or allocated-byte totals alone.
