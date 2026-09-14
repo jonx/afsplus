@@ -308,6 +308,7 @@ pub struct FileEditLimits {
 }
 
 pub struct Volume<D: BlockDevice> {
+    flight: Option<crate::flight::FlightRecorder>,
     tree_cache_pages: std::num::NonZeroUsize,
     dev: D,
     ident: Identification,
@@ -363,6 +364,7 @@ impl<D: BlockDevice> Volume<D> {
         mount_mode: MountMode,
     ) -> Self {
         Volume {
+            flight: None,
             tree_cache_pages: std::num::NonZeroUsize::MAX,
             dev,
             ident,
@@ -388,6 +390,25 @@ impl<D: BlockDevice> Volume<D> {
             snapshot_limits: None,
             snapshot_handles: BTreeMap::new(),
             snapshot_mount: Arc::new(()),
+        }
+    }
+
+    /// Replace optional commit-tail diagnostics. Existing records are returned.
+    /// Installation does not perform I/O or change filesystem policy.
+    pub fn replace_flight_recorder(
+        &mut self,
+        recorder: Option<crate::flight::FlightRecorder>,
+    ) -> Option<crate::flight::FlightRecorder> {
+        std::mem::replace(&mut self.flight, recorder)
+    }
+
+    pub fn flight_recorder(&self) -> Option<&crate::flight::FlightRecorder> {
+        self.flight.as_ref()
+    }
+
+    fn flight_event(&mut self, generation: u64, kind: crate::flight::EventKind) {
+        if let Some(recorder) = &mut self.flight {
+            recorder.emit(generation, kind, self.window_poisoned);
         }
     }
 
@@ -6305,6 +6326,38 @@ impl<D: BlockDevice> Volume<D> {
         &mut self,
         generation: u64,
         next_object_id: u64,
+        tx: TxAllocator,
+        data_writes: Vec<(u64, Vec<u8>)>,
+        meta_writes: Vec<(u64, Vec<u8>)>,
+        new_object_map_block: u64,
+        snapshot_change: Option<SnapshotRegistryChange>,
+    ) -> Result<(), CoreError> {
+        self.flight_event(generation, crate::flight::EventKind::Begin);
+        let result = self.commit_transaction_body(
+            generation,
+            next_object_id,
+            tx,
+            data_writes,
+            meta_writes,
+            new_object_map_block,
+            snapshot_change,
+        );
+        self.flight_event(
+            generation,
+            if result.is_ok() {
+                crate::flight::EventKind::Adopted
+            } else {
+                crate::flight::EventKind::Failed
+            },
+        );
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_transaction_body(
+        &mut self,
+        generation: u64,
+        next_object_id: u64,
         mut tx: TxAllocator,
         data_writes: Vec<(u64, Vec<u8>)>,
         mut meta_writes: Vec<(u64, Vec<u8>)>,
@@ -6426,6 +6479,8 @@ impl<D: BlockDevice> Volume<D> {
             stats.flushes += 1;
         }
 
+        self.flight_event(generation, crate::flight::EventKind::DataWritesComplete);
+
         // 2. COW metadata, dirty bitmap pages, then their new region
         // descriptors, all before the publication barrier.
         for (lba, block) in meta_writes
@@ -6437,6 +6492,8 @@ impl<D: BlockDevice> Volume<D> {
         }
         self.dev.flush()?;
         stats.flushes += 1;
+
+        self.flight_event(generation, crate::flight::EventKind::MetadataDurable);
 
         // 3. Alternate checkpoint slot, then the commit barrier.
         let new_slot = 1 - self.current_slot;
@@ -6461,10 +6518,13 @@ impl<D: BlockDevice> Volume<D> {
         // allocation state after publication has begun. Also cover failures
         // while adopting the newly committed roots below.
         self.window_poisoned = true;
+        self.flight_event(generation, crate::flight::EventKind::PublicationBegin);
         self.dev
             .write_block(self.ident.checkpoint_slots[new_slot], &checkpoint_bytes)?;
         self.dev.flush()?;
         stats.flushes += 1;
+
+        self.flight_event(generation, crate::flight::EventKind::CheckpointDurable);
 
         stats.bytes_written = (stats.data_blocks_written
             + stats.metadata_blocks_written

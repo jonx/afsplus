@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Observe the common checkpoint publication tail](#2026-09-14---observe-the-common-checkpoint-publication-tail)
 - [2026-09-14 - Automate retained-host replay reconstruction](#2026-09-14---automate-retained-host-replay-reconstruction)
 - [2026-09-14 - Reconstruct replay with copied tools and SDK](#2026-09-14---reconstruct-replay-with-copied-tools-and-sdk)
 - [2026-09-14 - Rebuild replay with retained dependencies and an empty Cargo cache](#2026-09-14---rebuild-replay-with-retained-dependencies-and-an-empty-cargo-cache)
@@ -133,6 +134,25 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Observe the common checkpoint publication tail
+
+Added an optional caller-sized flight ring to the common Volume commit tail,
+including snapshot registry commits through that same function. Emission does
+not allocate or read a clock; attempts distinguish retries at the same checkpoint
+generation. Events distinguish data/metadata completion, publication beginning,
+checkpoint barrier completion, root adoption and failure. An error after
+publication reports the remount requirement without inventing a durability verdict.
+
+Four integration tests pass: exact enabled/disabled I/O and image equality with
+a three-record ring, prepublication retry versus final-barrier uncertainty,
+checkpoint-write failure, and failed adoption after a successful checkpoint
+barrier. A unit test covers fixed storage capacity and identifier exhaustion.
+Full offline workspace validation passes: 514 tests passed, 10 ignored, none failed.
+Formatting, all-target/all-feature Clippy with warnings denied, documentation
+validation and its 13 checker tests also pass. API-wide identities, category masks,
+callbacks, export and other subsystem coverage remain open; the semantic bundle
+flight artifact is unchanged. No on-disk format or physical-provider claim changes.
 
 ## 2026-09-14 - Automate retained-host replay reconstruction
 

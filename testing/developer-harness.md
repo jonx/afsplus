@@ -31,6 +31,7 @@
 - [Retaining registry dependencies for a cold build](#retaining-registry-dependencies-for-a-cold-build)
 - [Copied host toolchain and SDK qualification](#copied-host-toolchain-and-sdk-qualification)
 - [Automated host reconstruction](#automated-host-reconstruction)
+- [Common checkpoint-tail flight recorder](#common-checkpoint-tail-flight-recorder)
 
 <!-- /toc -->
 
@@ -933,3 +934,40 @@ negative-control reasons, unchanged originals, input changes, bounded logs and
 publication failures. Those protocol tests use fake build tools that copy a runner;
 real copied-toolchain builds and their negative controls are separate integration
 evidence. Source, dependency and replay component tests retain their own gates.
+
+## Common checkpoint-tail flight recorder
+
+`afsplus_core::flight::FlightRecorder::new(NonZeroUsize)` reserves a caller-sized
+ring fallibly. Install it with `Volume::replace_flight_recorder(Some(recorder))`;
+passing `None` returns the old recorder and disables emission. Installation does
+not change filesystem policy or perform device I/O. Emission uses the reserved
+storage, overwrites the oldest record at capacity and counts discarded records.
+Sequence and attempt identifiers do not wrap: exhaustion stops recording and
+increments the saturating dropped counter. Records are readable in sequence order.
+
+The [common commit tail](../crates/afsplus-core/src/volume.rs) emits begin,
+queued-data completion, metadata barrier completion, checkpoint publication begin,
+checkpoint barrier completion, and either successful root adoption or failure.
+An attempt starts at this tail, not at public API entry. Failed retries may reuse
+an on-disk generation but receive distinct recorder attempt IDs. Data completion
+covers this tail's queued writes and its conditional barrier; it is not an
+assertion about unrelated earlier writes or intent-log durability. A successful
+checkpoint barrier followed by a failed root reload emits both facts. Failure
+records report whether the volume requires remount because publication may have
+started; they do not claim which state survived a real power loss.
+
+The recorder defaults to disabled, performs no clock reads, stores no names or
+payloads and adds no on-disk fields. The ring capacity bounds its event storage,
+not total filesystem or process memory. The first scope does not yet provide
+API-wide identities, category masks, live callbacks, a serialized binary export,
+or allocator/tree/cache/intent-log/recovery events. The semantic runner's existing
+`flight-recorder.bin` is still its operation trace, not this internal ring.
+Those integration requirements remain open under [ADR-023](../adr/ADR-023-developer-observability.md)
+and [observability](../docs/26-debug-observability.md).
+
+[Integration tests](../crates/afsplus-core/tests/flight.rs) compare enabled and
+disabled device traces and every image block, exercise three-record overwrite,
+retry after a metadata barrier fault, checkpoint-write and final-barrier failures,
+and failed adoption after a successful barrier. The recorder unit test exercises
+fixed allocation capacity and identifier exhaustion. These are host observations;
+they neither qualify a physical provider nor close all publication-family gates.

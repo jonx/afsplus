@@ -29,6 +29,7 @@ pub mod allocation_root;
 pub mod cow_tree;
 pub mod directory;
 pub mod extent_map;
+pub mod flight;
 pub mod intent_log;
 pub mod mkfs;
 pub mod mount;
