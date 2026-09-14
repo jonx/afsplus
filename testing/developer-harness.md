@@ -6,6 +6,7 @@
 <!-- toc -->
 
 - [Goal](#goal)
+- [Stage A finite acceptance](#stage-a-finite-acceptance)
 - [Host-native inner loop](#host-native-inner-loop)
 - [Scenario format](#scenario-format)
 - [Failure minimization](#failure-minimization)
@@ -56,6 +57,38 @@ fault-model.json
 expected.json
 actual.json
 ```
+
+## Stage A finite acceptance
+
+The executable-core stage requires these host-level outcomes:
+
+- A workspace with format, device, core and checker components; disk semantics
+  are independent of platform namespace syntax.
+- Memory and sparse-file devices, deterministic tracing/faults/cuts, and bounded
+  partition views and isolated overlay branches with explicit flush semantics.
+- Formatting, mutation, checkpoint publication, simulated interruption, remount
+  and independent exact-state verification, including a deliberately broken
+  ordering negative control.
+- The [finite accounting harness](benchmark-contract.md#stage-a-accounting-acceptance).
+- Retained source, dependencies, qualified host tools and semantic artifacts
+  sufficient for fresh reconstruction, replay and failure minimization.
+- Bounded core diagnostics correlating API calls, deferred operations and commit
+  attempts across executable subsystem paths, with export/replay, loss accounting
+  and failure comparisons against unobserved execution.
+- The 2/4/8/unlimited cache matrix across executable mutation/publication families,
+  with spill, refusal, recovery and exact-image invariants.
+- Malformed-input and property coverage of executable codecs and operation
+  families, with deterministic seeds, independent semantic checks and preserved
+  failure artifacts.
+
+New executable families extend their corresponding regression matrix. Proposed
+wire structures receive qualification when their implementation is admitted.
+Platform adapters, cross-host reconstruction and physical-provider evidence feed
+Stages C/D/F; epoch freeze, sustained application benchmarks and native resource
+budgets retain their own gates. Completion of the Stage A host scope does not
+satisfy those later requirements. The
+[scoped status registry](../implementation/milestones.md#scoped-stage-acceptance)
+owns each disposition and its evidence.
 
 ## Host-native inner loop
 

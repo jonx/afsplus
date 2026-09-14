@@ -135,6 +135,61 @@ def describe_item_table(text, descriptions):
     return '\n'.join(lines) + '\n'
 
 
+STAGE_GATE_HEADER = '| Stage | Gate | Requirement | Status | Acceptance / evidence |'
+STAGE_GATE_DECLARATION = re.compile(r'^<!-- stage-gates: (Stage [A-F]) = ([a-z0-9,-]+) -->$', re.M)
+
+
+def scoped_stage_states(text, roadmap):
+    """Require an exact owner/plan gate inventory before overriding aggregates."""
+    declared = {}
+    for match in STAGE_GATE_DECLARATION.finditer(roadmap):
+        stage, ids = match[1], match[2].split(',')
+        if stage in declared or len(ids) != len(set(ids)) or any(not key for key in ids):
+            raise ValueError(f'Duplicate or empty stage gate declaration: {stage}')
+        declared[stage] = set(ids)
+    for line in roadmap.splitlines():
+        if '<!-- stage-gates:' in line and not STAGE_GATE_DECLARATION.fullmatch(line):
+            raise ValueError('Malformed stage gate declaration')
+    rows = {}
+    seen_ids = set()
+    active = False
+    header_seen = False
+    for line in text.splitlines():
+        if line == STAGE_GATE_HEADER:
+            if header_seen:
+                raise ValueError('Duplicate stage gate table')
+            active = header_seen = True
+            continue
+        if active and not line.startswith('|'):
+            active = False
+        if not active or line.startswith('|---'):
+            continue
+        cells = [cell.strip() for cell in line.split('|')[1:-1]]
+        if len(cells) != 5:
+            raise ValueError('Invalid stage gate row')
+        stage, key, requirement, status, evidence = cells
+        if stage not in declared or not re.fullmatch(r'[a-z0-9-]+', key) or not requirement:
+            raise ValueError(f'Undeclared or invalid stage gate: {stage}/{key}')
+        if key in seen_ids:
+            raise ValueError(f'Duplicate stage gate ownership: {key}')
+        if status not in ('Complete', 'Partial', 'Not started', 'Ongoing'):
+            raise ValueError(f'Invalid stage gate status: {key}')
+        if not re.search(r'\[[^]]+\]\([^)]+\)', evidence):
+            raise ValueError(f'Stage gate needs acceptance/evidence link: {key}')
+        seen_ids.add(key)
+        rows.setdefault(stage, {})[key] = state(status)
+    if header_seen and not rows:
+        raise ValueError('Empty stage gate table')
+    result = {}
+    for stage, required in declared.items():
+        owned = rows.get(stage, {})
+        if set(owned) != required:
+            raise ValueError(f'Stage gate coverage mismatch: {stage}')
+        finite = [value for value in owned.values() if value is not None]
+        result[stage] = (2 if all(v == 2 for v in finite) else (1 if any(finite) else 0)) if finite else None
+    return result
+
+
 def refresh(root, write=False):
     path = root / 'implementation/milestones.md'
     states = {}
@@ -166,6 +221,7 @@ def refresh(root, write=False):
             raise ValueError(f'No contributing milestones for {stage}')
         finite = [v for v in values if v is not None]
         states[stage] = (2 if all(v == 2 for v in finite) else (1 if any(finite) else 0)) if finite else None
+    states.update(scoped_stage_states(path.read_text(), (root / 'ROADMAP.md').read_text()))
     # Stage 0 has no numbered milestone; its ongoing source review is explicit.
     states['Stage 0'] = None
     stale = []

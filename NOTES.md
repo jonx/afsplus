@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Compute stage progress from scoped acceptance gates](#2026-09-14---compute-stage-progress-from-scoped-acceptance-gates)
 - [2026-09-14 - Correlate core API calls with checkpoint attempts](#2026-09-14---correlate-core-api-calls-with-checkpoint-attempts)
 - [2026-09-14 — Replay selected diagnostics and bounded consumer delivery](#2026-09-14--replay-selected-diagnostics-and-bounded-consumer-delivery)
 - [2026-09-14 — Filter commit diagnostics and attach a bounded live consumer](#2026-09-14--filter-commit-diagnostics-and-attach-a-bounded-live-consumer)
@@ -135,6 +136,29 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+
+
+## 2026-09-14 - Compute stage progress from scoped acceptance gates
+
+Replaced Stage A's inherited whole-milestone completion calculation with eight
+explicit finite gates. Five are complete: executable core, device harness,
+checkpoint/cut verification, host accounting and reproducible replay. Core
+flight coverage, mutation-family cache coverage and codec/property coverage
+remain partial. The stage therefore stays partial, with the outstanding work
+visible in its own acceptance inventory.
+
+A shared milestone can keep its platform, hardware or format-freeze requirements
+without reopening a completed earlier scope. Other stages retain conservative
+milestone aggregation until their individual scope audit. The namespace
+independence maintenance item is explicitly ongoing and stays unstruck.
+
+The generator checks the roadmap's exact required-ID declaration against the
+status owner's rows before writing anything. Tests cover both disagreements
+between shared milestones and scoped gates, ongoing exclusion, missing/extra
+rows, duplicate ownership/declarations, invalid states, absent evidence and
+read-only/error atomicity. Eighteen temporary-fixture tests, documentation
+validation, reproducible navigation and whitespace checks pass. No filesystem
+implementation changed in this unit.
 
 ## 2026-09-14 - Correlate core API calls with checkpoint attempts
 

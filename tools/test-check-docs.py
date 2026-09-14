@@ -198,5 +198,91 @@ class ItemProgressTests(unittest.TestCase):
             self.assertEqual({name: (root / name).read_text() for name in paths}, before)
 
 
+class ScopedStageTests(unittest.TestCase):
+    def module(self):
+        spec = importlib.util.spec_from_file_location(
+            'scoped_progress', Path(__file__).with_name('progress-markers.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def table(self, rows):
+        return self.module().STAGE_GATE_HEADER + '\n|---|---|---|---|---|\n' + rows
+
+    def row(self, key='a-core', status='Complete', stage='Stage A', evidence='[test](test.md)'):
+        return f'| {stage} | {key} | Executable core | {status} | {evidence} |\n'
+
+    def test_scoped_completion_does_not_require_shared_milestone_completion(self):
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'implementation').mkdir()
+            for name in ['README.md', 'ROADMAP.md', 'implementation/README.md',
+                         'implementation/implementation-plan.md']:
+                (root / name).write_text('[Stage A](a) [Stage B](b) [M01](m)\n')
+            (root / 'ROADMAP.md').write_text(
+                '<!-- stage-gates: Stage A = a-core -->\n[Stage A](a)\n')
+            path = root / 'implementation/milestones.md'
+            base = ('| ID | Milestone | Status | Stages |\n'
+                    '| M01 | Shared reader | Partial | Stage A, Stage B, Stage C, Stage D, Stage E, Stage F |\n\n')
+            path.write_text(base + self.table(self.row()))
+            before = (root / 'README.md').read_text()
+            self.assertTrue(module.refresh(root))
+            self.assertEqual((root / 'README.md').read_text(), before)
+            module.refresh(root, True)
+            text = (root / 'README.md').read_text()
+            self.assertIn('[~~Stage A~~]', text)
+            self.assertIn(r'[\[Stage B\]]', text)
+            self.assertIn(r'[\[M01\]]', text)
+            self.assertEqual(module.refresh(root), [])
+            path.write_text(base.replace('Partial', 'Complete') + self.table(self.row(status='Partial')))
+            module.refresh(root, True)
+            text = (root / 'README.md').read_text()
+            self.assertIn(r'[\[Stage A\]]', text)
+            self.assertIn('[~~M01~~]', text)
+            # Invalid ownership must refuse the whole write, retaining navigation.
+            path.write_text(base + self.table(self.row(key='missing')))
+            with self.assertRaises(ValueError):
+                module.refresh(root, True)
+            self.assertEqual((root / 'README.md').read_text(), text)
+
+    def test_partial_and_ongoing_gates_have_distinct_completion_semantics(self):
+        module = self.module()
+        roadmap = '<!-- stage-gates: Stage A = a-core,a-review -->'
+        for finite, expected in [('Complete', 2), ('Partial', 1), ('Not started', 0), ('Ongoing', None)]:
+            table = self.table(self.row(status=finite) + self.row('a-review', 'Ongoing'))
+            self.assertEqual(module.scoped_stage_states(table, roadmap), {'Stage A': expected})
+
+    def test_missing_or_extra_gate_refuses_scope_override(self):
+        module = self.module()
+        for rows in ['', self.row('other'), self.row() + self.row('extra')]:
+            with self.assertRaises(ValueError):
+                module.scoped_stage_states(self.table(rows), '<!-- stage-gates: Stage A = a-core -->')
+
+    def test_duplicate_gate_ownership_and_declarations_are_rejected(self):
+        module = self.module()
+        declaration = '<!-- stage-gates: Stage A = a-core -->'
+        for table, roadmap in [
+            (self.table(self.row() + self.row()), declaration),
+            (self.table(self.row()), declaration + '\n' + declaration),
+            (self.table(self.row()), '<!-- stage-gates: Stage A = a-core,a-core -->'),
+            (self.table(self.row() + self.row(stage='Stage B')),
+             declaration + '\n<!-- stage-gates: Stage B = a-core -->'),
+            (self.table(self.row()) + '\n' + self.table(self.row()), declaration),
+        ]:
+            with self.assertRaises(ValueError):
+                module.scoped_stage_states(table, roadmap)
+
+    def test_invalid_status_missing_evidence_and_malformed_scope_fail_closed(self):
+        module = self.module()
+        declaration = '<!-- stage-gates: Stage A = a-core -->'
+        for row in [self.row(status='Done'), self.row(evidence='none'), self.row(stage='Stage Z')]:
+            with self.assertRaises(ValueError):
+                module.scoped_stage_states(self.table(row), declaration)
+        for roadmap in ['', '<!-- stage-gates: Stage A=a-core -->', '<!-- stage-gates: Stage A = a-core, -->']:
+            with self.assertRaises(ValueError):
+                module.scoped_stage_states(self.table(self.row()), roadmap)
+
+
 if __name__ == "__main__":
     unittest.main()

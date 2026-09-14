@@ -4,9 +4,11 @@ Progress notation: plain `M01` means not started, `[M01]` means started or
 partial, and ~~M01~~ means complete. Stage labels follow the same convention.
 Links retain the visible brackets or strikethrough. `make toc` refreshes these
 labels from the milestone status cells; `make check-docs` detects stale labels.
-Stage completion requires every contributing milestone to be complete; Stage 0
-tracks ongoing design review separately and is partial. Prototype completion
-with open qualification is partial.
+Stage completion follows the scoped finite acceptance gates in
+[milestones](implementation/milestones.md#scoped-stage-acceptance). A stage without
+an acceptance inventory uses contributing milestones conservatively. Stage 0
+tracks ongoing design review, excluded from finite completion. A completed
+stage scope can coexist with a shared milestone awaiting later qualification.
 
 
 <!-- toc -->
@@ -61,6 +63,8 @@ See [`implementation/peer-review-prototype-plan.md`](implementation/peer-review-
 
 ## \[Stage A\]: make the core executable
 
+<!-- stage-gates: Stage A = a-core,a-devices,a-checkpoint,a-accounting,a-replay,a-flight,a-cache,a-fuzz -->
+
 Milestones: [\[M01\]](implementation/milestones.md), [~~M02~~](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md), [\[M05\]](implementation/milestones.md).
 
 Primary goal:
@@ -81,7 +85,7 @@ Build first:
 - ~~`afsplus-block`~~ <!-- progress: roadmap-03 -->
 - ~~`afsplus-core`~~ <!-- progress: roadmap-04 -->
 - ~~`afsplus-check`~~ <!-- progress: roadmap-05 -->
-- keep core disk semantics independent from host namespaces
+- keep core disk semantics independent from host namespaces <!-- progress: roadmap-33 -->
 - ~~sparse raw host-file backend~~ <!-- progress: roadmap-06 -->
 - ~~memory block backend~~ <!-- progress: roadmap-07 -->
 - ~~trace wrapper~~ <!-- progress: roadmap-08 -->

@@ -187,3 +187,12 @@ Document discovery prunes excluded trees before traversal, so concurrent Cargo
 cleanup inside the build tree is not an input error. Errors in included
 source directories are reported. Run `python3 tools/test-check-docs.py` for the
 temporary-fixture discovery regressions.
+
+Scoped stage completion uses the acceptance registry in
+[implementation/milestones.md](../implementation/milestones.md#scoped-stage-acceptance).
+A `stage-gates` comment in the corresponding roadmap section declares the exact
+required IDs. The progress checker rejects missing/extra rows, duplicate ownership,
+invalid states and missing evidence links before writing navigation. Finite
+scope completion is independent of a shared milestone's later platform or
+release requirements. Stages without a scoped inventory use milestone aggregates
+conservatively; scope audits precede their closure.

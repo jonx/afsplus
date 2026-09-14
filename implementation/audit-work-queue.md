@@ -136,10 +136,11 @@ Stage completion must be supported by the stage's own usable outcome.
 3. Record capability, integrated-consumer and platform gates in the status home,
    with component-owned evidence and explicit unverified findings. Reconcile
    stage-marker generation with those gates before changing completion labels.
-4. Resolve the [Stage A finite gaps](milestones.md#stage-a-executable-core-audit):
-   bounded slice wrapper, isolated overlay with explicit durability semantics,
-   artifact replay and CPU/RAM accounting. These feed the existing publication,
-   mixed-I/O, resource-pressure and sustained-qualification rows below.
+4. Resolve the [scoped Stage A gates](milestones.md#scoped-stage-acceptance)
+   in dependency order: core diagnostic correlation and export, mutation-family
+   cache/fault coverage, then executable codec/property coverage. Preserve the
+   qualified device, reconstruction and accounting foundations; their later
+   platform and sustained-workload requirements stay in the rows below.
 5. Extend [seeded semantic properties](../testing/fuzzing.md#seeded-semantic-properties)
    to ungenerated operation families and uncovered codec surfaces; preserve exact
    oracles, prefix checks, cache policy and complete failure artifacts.

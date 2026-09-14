@@ -62,6 +62,7 @@ exist before that gate can run.
 <!-- toc -->
 
 - [Early milestone boundary audit](#early-milestone-boundary-audit)
+- [Scoped stage acceptance](#scoped-stage-acceptance)
 - [Stage A executable-core audit](#stage-a-executable-core-audit)
 - [Individual list-item completion](#individual-list-item-completion)
 
@@ -84,6 +85,30 @@ M00 contributes to Stage F's finite epoch-1 freeze. Reader implementation and
 image-operation evidence feed Stage A through M01 and M03. Continued source review
 and future format evolution are ongoing activities, excluded from finite stage
 completion. Remaining stage mappings require their own acceptance audit.
+
+## Scoped stage acceptance
+
+A stage closes when all finite gates declared in its roadmap section are
+complete in this table. Ongoing rows stay visible and do not enter that
+calculation. The checker requires the declaration and owner table to contain
+exactly the same gate IDs. Milestone labels retain their full cross-stage scope.
+Stages without an audited inventory use their contributing milestone states
+conservatively. Each later stage receives its own scope audit before closure.
+
+The [Stage A acceptance contract](../testing/developer-harness.md#stage-a-finite-acceptance)
+separates executable host foundations from platform and release qualification.
+The detailed evidence follows in the executable-core audit.
+
+| Stage | Gate | Requirement | Status | Acceptance / evidence |
+|---|---|---|---|---|
+| Stage A | a-core | Host-independent executable core and workspace | Complete | [Workspace/core evidence](#stage-a-executable-core-audit), [core boundary](../crates/afsplus-core/src/lib.rs) |
+| Stage A | a-devices | Bounded host devices, faults, slices and overlays | Complete | [Device evidence](#stage-a-executable-core-audit), [bounded overlays](../testing/developer-harness.md#bounded-overlay-branches) |
+| Stage A | a-checkpoint | Format, mutate, checkpoint, cut, remount and verify | Complete | [Crash matrix](../crates/afsplus-check/tests/crash_matrix.rs), [checker verdict](../testing/developer-harness.md#checker-bound-replay-verdicts) |
+| Stage A | a-accounting | Finite host CPU, heap, RSS and I/O harness | Complete | [Accounting acceptance](../testing/benchmark-contract.md#stage-a-accounting-acceptance) |
+| Stage A | a-replay | Retained artifacts and qualified host reconstruction | Complete | [Automated reconstruction](../testing/developer-harness.md#automated-host-reconstruction), [replay evidence](#stage-a-executable-core-audit) |
+| Stage A | a-flight | Correlated core diagnostics and bounded replay export | Partial | [Core API spans](../testing/developer-harness.md#core-api-call-spans), [coverage queue](audit-work-queue.md#complete-work-queue) |
+| Stage A | a-cache | Cache-profile qualification across executable mutation families | Partial | [Integrated cache profiles](../testing/developer-harness.md#integrated-tree-cache-profiles), [coverage evidence](#stage-a-executable-core-audit) |
+| Stage A | a-fuzz | Executable codec and semantic-property coverage | Partial | [Fuzz/property gates](../testing/fuzzing.md), [coverage evidence](#stage-a-executable-core-audit) |
 
 ## Stage A executable-core audit
 
@@ -150,6 +175,7 @@ so each identifier has a readable description and a direct navigation link.
 | roadmap-30 | structured flight recorder | [Stage A: make the core executable](../ROADMAP.md#stage-a-make-the-core-executable) | Partial | [evidence](../testing/developer-harness.md) |
 | roadmap-31 | tiny-cache test matrix | [Stage A: make the core executable](../ROADMAP.md#stage-a-make-the-core-executable) | Partial | [integrated profiles](../testing/developer-harness.md#integrated-tree-cache-profiles) |
 | roadmap-32 | fuzzing/property tests | [Stage A: make the core executable](../ROADMAP.md#stage-a-make-the-core-executable) | Partial | [evidence](../testing/fuzzing.md) |
+| roadmap-33 | keep core disk semantics independent from host namespaces | [Stage A: make the core executable](../ROADMAP.md#stage-a-make-the-core-executable) | Ongoing | [namespace boundary](../adr/ADR-017-namespace-outside-format.md), [core dependencies](../crates/afsplus-core/Cargo.toml) |
 | implementation-01 | host-file block backend | [Phase 1: portable reader](implementation-plan.md#phase-1-portable-reader) | Complete | [evidence](../crates/afsplus-block/src/file.rs) |
 | implementation-02 | superblock discovery | [Phase 1: portable reader](implementation-plan.md#phase-1-portable-reader) | Complete | [evidence](../crates/afsplus-check/tests/mount_modes.rs) |
 | implementation-03 | feature negotiation | [Phase 1: portable reader](implementation-plan.md#phase-1-portable-reader) | Complete | [evidence](../crates/afsplus-check/tests/mount_modes.rs) |
