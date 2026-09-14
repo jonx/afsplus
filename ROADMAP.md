@@ -76,34 +76,34 @@ format image
 
 Build first:
 
-- establish Rust workspace
-- `afsplus-format`
-- `afsplus-block`
-- `afsplus-core`
-- `afsplus-check`
+- ~~establish Rust workspace~~ <!-- progress: roadmap-01 -->
+- ~~`afsplus-format`~~ <!-- progress: roadmap-02 -->
+- ~~`afsplus-block`~~ <!-- progress: roadmap-03 -->
+- ~~`afsplus-core`~~ <!-- progress: roadmap-04 -->
+- ~~`afsplus-check`~~ <!-- progress: roadmap-05 -->
 - keep core disk semantics independent from host namespaces
-- sparse raw host-file backend
-- memory block backend
-- trace wrapper
-- deterministic fault-injection wrapper
-- power-cut simulation backend
-- minimal format/checkpoint descriptor
-- checkpoint slots A/B
-- root object
-- minimal metadata encoding
-- first create-object transaction
-- remount/invariant checker
-- deterministic crash matrix after every write/flush
-- benchmark harness with CPU/RAM/I/O/flush/write-amplification accounting
+- ~~sparse raw host-file backend~~ <!-- progress: roadmap-06 -->
+- ~~memory block backend~~ <!-- progress: roadmap-07 -->
+- ~~trace wrapper~~ <!-- progress: roadmap-08 -->
+- ~~deterministic fault-injection wrapper~~ <!-- progress: roadmap-09 -->
+- ~~power-cut simulation backend~~ <!-- progress: roadmap-10 -->
+- ~~minimal format/checkpoint descriptor~~ <!-- progress: roadmap-11 -->
+- ~~checkpoint slots A/B~~ <!-- progress: roadmap-12 -->
+- ~~root object~~ <!-- progress: roadmap-13 -->
+- ~~minimal metadata encoding~~ <!-- progress: roadmap-14 -->
+- ~~first create-object transaction~~ <!-- progress: roadmap-15 -->
+- ~~remount/invariant checker~~ <!-- progress: roadmap-16 -->
+- ~~deterministic crash matrix after every write/flush~~ <!-- progress: roadmap-17 -->
+- benchmark harness with CPU/RAM/I/O/flush/write-amplification accounting <!-- progress: roadmap-29 -->
 
 Then add:
 
-- SliceBackend for partition/disk-image viewports
-- OverlayBackend for cheap writable test branches
-- structured flight recorder
-- operation record/replay
-- tiny-cache test matrix
-- fuzzing/property tests
+- ~~SliceBackend for partition/disk-image viewports~~ <!-- progress: roadmap-18 -->
+- ~~OverlayBackend for cheap writable test branches~~ <!-- progress: roadmap-19 -->
+- structured flight recorder <!-- progress: roadmap-30 -->
+- ~~operation record/replay~~ <!-- progress: roadmap-20 -->
+- tiny-cache test matrix <!-- progress: roadmap-31 -->
+- fuzzing/property tests <!-- progress: roadmap-32 -->
 
 Do not block this stage on:
 
@@ -161,15 +161,15 @@ Wire freeze and hardware acceptance belong to [\[M14\]](implementation/milestone
 
 ### B4. Core filesystem structures
 
-- B+ tree directories
+- ~~B+ tree directories~~ <!-- progress: roadmap-21 -->
 - normalized/versioned Unicode comparison keys while preserving original UTF-8 names
-- extent mapping
-- sparse files
+- ~~extent mapping~~ <!-- progress: roadmap-22 -->
+- ~~sparse files~~ <!-- progress: roadmap-23 -->
 - preallocation
-- shared-extent/reference prototype for reflinks
-- CloneFile/CloneRange semantics
-- deferred reclamation
-- checker
+- ~~shared-extent/reference prototype for reflinks~~ <!-- progress: roadmap-24 -->
+- ~~CloneFile/CloneRange semantics~~ <!-- progress: roadmap-25 -->
+- ~~deferred reclamation~~ <!-- progress: roadmap-26 -->
+- ~~checker~~ <!-- progress: roadmap-27 -->
 - explain APIs
 - semantic image diff
 
@@ -212,7 +212,7 @@ Portable C work begins from the stable executable spec/conformance corpus:
 
 Milestones: [\[M01\]](implementation/milestones.md), [~~M08~~](implementation/milestones.md), [\[M12\]](implementation/milestones.md).
 
-- FUSE host mount
+- ~~FUSE host mount~~ <!-- progress: roadmap-28 -->
 - third-party probe kit
 - compatibility profiles
 - portable C `classic-rw` qualification

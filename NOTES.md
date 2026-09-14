@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Show completion on individual stage and phase entries](#2026-09-14--show-completion-on-individual-stage-and-phase-entries)
 - [2026-09-14 — Bind selected crash states to replay bundles](#2026-09-14--bind-selected-crash-states-to-replay-bundles)
 - [2026-09-14 — Integrate semantic replay bundles and failure reduction](#2026-09-14--integrate-semantic-replay-bundles-and-failure-reduction)
 - [2026-09-14 — Add bounded semantic runner and bundle admission components](#2026-09-14--add-bounded-semantic-runner-and-bundle-admission-components)
@@ -120,6 +121,24 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Show completion on individual stage and phase entries
+
+Added generated strikethrough to completed individual roadmap and implementation
+list entries, with status/evidence records in the milestone document. Partial and
+ongoing items remain unstruck. Completion of a component is separate from the
+containing phase's acceptance and platform gates. Phase 0 retains the actual
+reader-format freeze requirement and points to Stage F; implemented codecs are
+not falsely marked frozen.
+
+Documented the rule and extended navigation validation for item identities,
+evidence links, duplicate/orphan markers, idempotence and reopening. Validation
+is read-only by default and checks all item bindings before writing files.
+Also restored two shadowed progress tests by giving their test class a unique
+name and using the authoritative milestone-table header in its fixture.
+All twelve documentation/checker tests, generated navigation, documentation and
+whitespace checks passed. Checker-verdict implementation work is separate and
+continues after this documentation unit.
 
 ## 2026-09-14 — Bind selected crash states to replay bundles
 

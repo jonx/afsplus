@@ -5,8 +5,11 @@ partial, and ~~M01~~ means complete. Stage labels follow the same convention.
 Links retain the visible brackets or strikethrough. `make toc` refreshes these
 labels from the milestone status cells; `make check-docs` detects stale labels.
 Stage completion requires every contributing milestone to be complete; Stage 0
-tracks ongoing design review separately and is partial. Prototype completion
-with open qualification is partial.
+tracks ongoing design review separately and is excluded from finite completion. Prototype completion
+with open qualification is partial. Completed individual list entries are also
+struck through, using the [item records](milestones.md#individual-list-item-completion).
+A completed component does not complete its phase's separate acceptance gates.
+Phase 0 entries require a frozen contract, rather than an executable codec alone.
 
 
 The implementation is deliberately staged so the on-disk format is exercised on host files before any AROS disk is at risk.
@@ -39,7 +42,7 @@ in the [audit queue](audit-work-queue.md).
 
 ## Phase 0: specification freeze for reader subset
 
-> **Roadmap:** [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers), [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [M00](milestones.md)
+> **Roadmap:** [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [M00](milestones.md)
 
 Deliver:
 
@@ -62,19 +65,19 @@ No read/write handler work begins until a reader can parse reference images.
 
 Implement:
 
-- host-file block backend
-- superblock discovery
-- feature negotiation
-- object read
-- directory lookup/iteration
-- extent read
-- metadata validation
+- ~~host-file block backend~~ <!-- progress: implementation-01 -->
+- ~~superblock discovery~~ <!-- progress: implementation-02 -->
+- ~~feature negotiation~~ <!-- progress: implementation-03 -->
+- ~~object read~~ <!-- progress: implementation-04 -->
+- ~~directory lookup/iteration~~ <!-- progress: implementation-05 -->
+- ~~extent read~~ <!-- progress: implementation-06 -->
+- ~~metadata validation~~ <!-- progress: implementation-07 -->
 
 Acceptance:
 
 - reads all conformance images
 - bounded-memory tests
-- fuzz targets active
+- ~~fuzz targets active~~ <!-- progress: implementation-18 -->
 - builds on macOS/Linux and at least one AROS target
 
 ## Phase 2: formatter and image builder
@@ -85,9 +88,9 @@ Implement `mkafsplus`.
 
 Acceptance:
 
-- deterministic test mode
-- round-trip reader tests
-- no native struct serialization
+- ~~deterministic test mode~~ <!-- progress: implementation-08 -->
+- ~~round-trip reader tests~~ <!-- progress: implementation-09 -->
+- ~~no native struct serialization~~ <!-- progress: implementation-10 -->
 
 ## Phase 3: allocator and mutations
 
@@ -95,13 +98,13 @@ Acceptance:
 
 Implement:
 
-- allocation regions
-- file create/write/truncate
-- mkdir
-- unlink
-- rename
-- hard links
-- symlinks
+- ~~allocation regions~~ <!-- progress: implementation-11 -->
+- ~~file create/write/truncate~~ <!-- progress: implementation-12 -->
+- ~~mkdir~~ <!-- progress: implementation-13 -->
+- ~~unlink~~ <!-- progress: implementation-14 -->
+- ~~rename~~ <!-- progress: implementation-15 -->
+- ~~hard links~~ <!-- progress: implementation-16 -->
+- symlinks <!-- progress: implementation-17 -->
 
 Initially run only against disposable images.
 
@@ -213,7 +216,7 @@ Only after:
 
 - conformance suite
 - crash tests
-- FUSE interop
+- ~~FUSE interop~~ <!-- progress: implementation-19 -->
 - AROS real-disk testing
 - independent reader review
 - specification audit

@@ -153,6 +153,17 @@ calculations; an all-ongoing group receives no completion mark. Stage 0 represen
 ongoing design review. M00 is the finite epoch-1 reader-format freeze in Stage F. Preserve stable
 heading anchors and clickable links.
 
+Completed individual entries in roadmap stage lists and implementation-plan
+deliverable/acceptance lists must also be struck through. Record each marked
+item's status and evidence in
+[the item table](../implementation/milestones.md#individual-list-item-completion).
+A stable hidden progress marker binds the list entry to that record; the
+navigation generator adds or removes strikethrough. Mark an item complete only
+when its own stated scope is satisfied. Partial, unverified and ongoing entries
+stay unstruck, even if a related component is implemented. A frozen-format item
+requires the freeze decision; an implementation alone does not close it.
+Item completion does not automatically close the containing stage or phase.
+
 ## 8. The checker
 
 ```sh

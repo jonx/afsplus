@@ -59,6 +59,14 @@ is the repeatable pre-hardware gate for the second platform, not a fourth
 platform; native MacAROS is ordered last because its bare-metal target must
 exist before that gate can run.
 
+<!-- toc -->
+
+- [Early milestone boundary audit](#early-milestone-boundary-audit)
+- [Stage A executable-core audit](#stage-a-executable-core-audit)
+- [Individual list-item completion](#individual-list-item-completion)
+
+<!-- /toc -->
+
 ## Early milestone boundary audit
 
 Completion labels remain governed by the full milestone table until the evidence
@@ -95,3 +103,66 @@ stronger evidence. Resolve bounded device wrappers before branch-based replay,
 then qualify artifact reproduction and total resource accounting. Keep the full
 [audit queue](audit-work-queue.md#complete-work-queue), including later consumers
 and physical-provider gates, in the dependency order.
+
+## Individual list-item completion
+
+These records drive strikethrough on individual roadmap and implementation-plan
+entries. A completed implementation item does not close its phase's separate
+acceptance tests, platform qualification or format freeze. Unregistered entries
+remain unmarked until their full stated requirement has evidence. Ongoing work
+is never struck through. Stable hidden markers bind each generated list entry
+to one record; edit status here and regenerate navigation.
+
+| Item | Status | Evidence |
+|---|---|---|
+| roadmap-01 | Complete | [evidence](../Cargo.toml) |
+| roadmap-02 | Complete | [evidence](../crates/afsplus-format/src/lib.rs) |
+| roadmap-03 | Complete | [evidence](../crates/afsplus-block/src/lib.rs) |
+| roadmap-04 | Complete | [evidence](../crates/afsplus-core/src/lib.rs) |
+| roadmap-05 | Complete | [evidence](../crates/afsplus-check/src/lib.rs) |
+| roadmap-06 | Complete | [evidence](../crates/afsplus-block/src/file.rs) |
+| roadmap-07 | Complete | [evidence](../crates/afsplus-block/src/memory.rs) |
+| roadmap-08 | Complete | [evidence](../crates/afsplus-block/src/trace.rs) |
+| roadmap-09 | Complete | [evidence](../crates/afsplus-check/tests/faults.rs) |
+| roadmap-10 | Complete | [evidence](../crates/afsplus-check/tests/crash_matrix.rs) |
+| roadmap-11 | Complete | [evidence](../crates/afsplus-format/src/checkpoint.rs) |
+| roadmap-12 | Complete | [evidence](../crates/afsplus-check/tests/crash_matrix.rs) |
+| roadmap-13 | Complete | [evidence](../crates/afsplus-check/tests/basic.rs) |
+| roadmap-14 | Complete | [evidence](../crates/afsplus-format/src/object.rs) |
+| roadmap-15 | Complete | [evidence](../crates/afsplus-check/tests/basic.rs) |
+| roadmap-16 | Complete | [evidence](../crates/afsplus-check/tests/corruption_corpus.rs) |
+| roadmap-17 | Complete | [evidence](../crates/afsplus-check/tests/crash_matrix.rs) |
+| roadmap-18 | Complete | [evidence](../crates/afsplus-check/tests/sliced_volume.rs) |
+| roadmap-19 | Complete | [evidence](../crates/afsplus-check/tests/overlay_volume.rs) |
+| roadmap-20 | Complete | [evidence](../tools/test-afsptest.py) |
+| roadmap-21 | Complete | [evidence](../crates/afsplus-core/src/directory.rs) |
+| roadmap-22 | Complete | [evidence](../crates/afsplus-check/tests/basic.rs) |
+| roadmap-23 | Complete | [evidence](../crates/afsplus-check/tests/data_policy.rs) |
+| roadmap-24 | Complete | [evidence](../crates/afsplus-check/tests/shared_extents.rs) |
+| roadmap-25 | Complete | [evidence](../crates/afsplus-check/tests/shared_clone.rs) |
+| roadmap-26 | Complete | [evidence](../crates/afsplus-check/tests/reclaim.rs) |
+| roadmap-27 | Complete | [evidence](../crates/afsplus-check/tests/corruption_corpus.rs) |
+| roadmap-28 | Complete | [evidence](../testing/aros-system-volume-qualification.md) |
+| roadmap-29 | Partial | [evidence](../testing/benchmark-contract.md) |
+| roadmap-30 | Partial | [evidence](../testing/developer-harness.md) |
+| roadmap-31 | Partial | [evidence](../testing/developer-harness.md) |
+| roadmap-32 | Partial | [evidence](../testing/fuzzing.md) |
+| implementation-01 | Complete | [evidence](../crates/afsplus-block/src/file.rs) |
+| implementation-02 | Complete | [evidence](../crates/afsplus-check/tests/mount_modes.rs) |
+| implementation-03 | Complete | [evidence](../crates/afsplus-check/tests/mount_modes.rs) |
+| implementation-04 | Complete | [evidence](../crates/afsplus-check/tests/basic.rs) |
+| implementation-05 | Complete | [evidence](../crates/afsplus-check/tests/basic.rs) |
+| implementation-06 | Complete | [evidence](../crates/afsplus-check/tests/basic.rs) |
+| implementation-07 | Complete | [evidence](../crates/afsplus-check/tests/corruption_corpus.rs) |
+| implementation-08 | Complete | [evidence](../testing/conformance.md) |
+| implementation-09 | Complete | [evidence](../crates/afsplus-check/tests/basic.rs) |
+| implementation-10 | Complete | [evidence](../crates/afsplus-format/src/lib.rs) |
+| implementation-11 | Complete | [evidence](../testing/allocation-qualification.md) |
+| implementation-12 | Complete | [evidence](../crates/afsplus-check/tests/basic.rs) |
+| implementation-13 | Complete | [evidence](../crates/afsplus-check/tests/basic.rs) |
+| implementation-14 | Complete | [evidence](../crates/afsplus-check/tests/basic.rs) |
+| implementation-15 | Complete | [evidence](../crates/afsplus-check/tests/crash_matrix.rs) |
+| implementation-16 | Complete | [hard-link lifetime test](../crates/afsplus-check/tests/basic.rs) |
+| implementation-17 | Partial | [evidence](../testing/symlink-qualification.md) |
+| implementation-18 | Complete | [active codec targets](../testing/fuzzing.md) |
+| implementation-19 | Complete | M08; [same-image FUSE/AROS qualification](../testing/aros-system-volume-qualification.md) |

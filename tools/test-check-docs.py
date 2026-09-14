@@ -60,7 +60,7 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual({path.name: path.read_text() for path in root.iterdir()}, {name: name for name in ["z.md", "a.md", "ignore.txt"]})
 
 
-class ProgressTests(unittest.TestCase):
+class LegacyProgressTests(unittest.TestCase):
     def test_decorated_ids_remain_valid_milestone_rows(self):
         for token in ['M01', r'\[M01\]', '~~M01~~']:
             self.assertEqual(checker.MILESTONE_ROW.match(f'| {token} | Reader | Partial |')[1], '01')
@@ -76,7 +76,7 @@ class ProgressTests(unittest.TestCase):
                 (root / name).write_text('[M01](milestones.md) [Stage A](ROADMAP.md)\n')
             path = root / 'implementation/milestones.md'
             for status, expected in [('Not started', 'M01'), ('Prototype complete, wire experimental', r'\[M01\]'), ('Complete', '~~M01~~')]:
-                path.write_text('| M01 | Reader | ' + status + ' | ' + ', '.join('Stage ' + s for s in 'ABCDEF') + ' |\n')
+                path.write_text('| ID | Milestone | Status | Stages |\n| M01 | Reader | ' + status + ' | ' + ', '.join('Stage ' + s for s in 'ABCDEF') + ' |\n')
                 progress.refresh(root, True)
                 self.assertIn('[' + expected + '](milestones.md)', (root / 'README.md').read_text())
                 self.assertEqual(progress.refresh(root), [])
@@ -119,6 +119,59 @@ class ProgressTests(unittest.TestCase):
     def test_other_tables_cannot_override_milestone_status(self):
         self.assertIn("[~~Stage A~~]", self.run_fixture(
             "Complete", extra="| M00 | Audit | Not started | notes |\n"))
+
+
+class ItemProgressTests(unittest.TestCase):
+    def module(self):
+        spec = importlib.util.spec_from_file_location('item_progress', Path(__file__).with_name('progress-markers.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_item_completion_reopens_and_ongoing_stays_unstruck(self):
+        module = self.module()
+        text = "- [component](code.rs) <!-- progress: component -->\n"
+        complete = module.refresh_items(text, {"component": 2}, set())
+        self.assertEqual(complete, "- ~~[component](code.rs)~~ <!-- progress: component -->\n")
+        self.assertEqual(module.refresh_items(complete, {"component": 2}, set()), complete)
+        for state in (0, 1, None):
+            self.assertEqual(module.refresh_items(complete, {"component": state}, set()), text)
+
+    def test_unknown_duplicate_and_missing_evidence_refuse(self):
+        module = self.module()
+        text = "- component <!-- progress: component -->\n"
+        with self.assertRaises(ValueError): module.refresh_items(text, {}, set())
+        with self.assertRaises(ValueError): module.refresh_items(text + text, {"component": 2}, set())
+        header = "| Item | Status | Evidence |\n|---|---|---|\n"
+        for rows in ("| component | Complete | absent |\n",
+                     "| component | Invented | [proof](proof.md) |\n",
+                     "| component | Complete | [proof](proof.md) |\n" * 2):
+            with self.assertRaises(ValueError): module.item_states(header + rows)
+
+    def test_read_only_default_and_orphan_refusal_are_atomic(self):
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "implementation").mkdir()
+            paths = ["README.md", "ROADMAP.md", "implementation/README.md", "implementation/implementation-plan.md"]
+            for name in paths: (root / name).write_text("[Stage A](#stage-a)\n")
+            roadmap = root / "ROADMAP.md"
+            roadmap.write_text("- component <!-- progress: component -->\n")
+            owner = root / "implementation/milestones.md"
+            table = ("| ID | Milestone | Status | Stages |\n"
+                     "| M01 | Component | Complete | Stage A, Stage B, Stage C, Stage D, Stage E, Stage F |\n\n"
+                     "| Item | Status | Evidence |\n|---|---|---|\n"
+                     "| component | Complete | [proof](proof.md) |\n")
+            owner.write_text(table)
+            before = roadmap.read_text()
+            self.assertIn("ROADMAP.md", module.refresh(root))
+            self.assertEqual(roadmap.read_text(), before)
+            module.refresh(root, True)
+            self.assertEqual(module.refresh(root), [])
+            before = {name: (root / name).read_text() for name in paths}
+            owner.write_text(table + "| orphan | Complete | [proof](proof.md) |\n")
+            with self.assertRaises(ValueError): module.refresh(root, True)
+            self.assertEqual({name: (root / name).read_text() for name in paths}, before)
 
 
 if __name__ == "__main__":
