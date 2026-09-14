@@ -12,6 +12,8 @@ ROW = re.compile(r'^\|\s*(?:~~|\\\[)?(M\d{2})(?:~~|\\\])?\s*\|')
 
 
 def state(status):
+    if status.startswith('Ongoing'):
+        return None
     if status.startswith('Not started'):
         return 0
     if status.startswith('Complete —') or status == 'Complete':
@@ -21,28 +23,39 @@ def state(status):
 
 def label(token, states):
     value = states[token]
-    return token if value == 0 else (rf'\[{token}\]' if value == 1 else f'~~{token}~~')
+    return token if value in (None, 0) else (rf'\[{token}\]' if value == 1 else f'~~{token}~~')
 
 
 def refresh(root, write=False):
     path = root / 'implementation/milestones.md'
     states = {}
     groups = {f'Stage {s}': [] for s in 'ABCDEF'}
+    in_milestones = False
     for line in path.read_text().splitlines():
+        if line.startswith('| ID | Milestone | Status |'):
+            in_milestones = True
+            continue
+        if in_milestones and not line.startswith('|'):
+            in_milestones = False
+        if not in_milestones:
+            continue
         m = ROW.match(line)
         if not m:
             continue
         cells = line.split('|')
         token = m[1]
+        if token in states:
+            raise ValueError(f'Duplicate milestone {token}')
         states[token] = state(cells[3].strip())
         for stage in set(re.findall(r'Stage [A-F]', cells[-2])):
             groups[stage].append(states[token])
     for stage, values in groups.items():
         if not values:
             raise ValueError(f'No contributing milestones for {stage}')
-        states[stage] = 2 if all(v == 2 for v in values) else (1 if any(values) else 0)
+        finite = [v for v in values if v is not None]
+        states[stage] = (2 if all(v == 2 for v in finite) else (1 if any(finite) else 0)) if finite else None
     # Stage 0 has no numbered milestone; its ongoing source review is explicit.
-    states['Stage 0'] = 1
+    states['Stage 0'] = None
     stale = []
     for name in ['README.md', 'ROADMAP.md', 'implementation/README.md',
                  'implementation/implementation-plan.md', 'implementation/milestones.md']:

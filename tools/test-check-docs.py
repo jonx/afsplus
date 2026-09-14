@@ -82,5 +82,44 @@ class ProgressTests(unittest.TestCase):
                 self.assertEqual(progress.refresh(root), [])
 
 
+class ProgressTests(unittest.TestCase):
+    def run_fixture(self, finite, ongoing="Ongoing", extra=""):
+        spec = importlib.util.spec_from_file_location(
+            "afsplus_progress", Path(__file__).with_name("progress-markers.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "implementation").mkdir()
+            stages = ", ".join(f"Stage {s}" for s in "ABCDEF")
+            table = ("| ID | Milestone | Status | Exit criteria | Design | Test plan | Roadmap stages |\n"
+                     "|---|---|---|---|---|---|---|\n"
+                     f"| M00 | Release | {finite} | gate | design | tests | {stages} |\n"
+                     f"| M01 | Review | {ongoing} | ongoing | design | tests | {stages} |\n\n" + extra)
+            (root / "implementation/milestones.md").write_text(table)
+            for name in ["README.md", "ROADMAP.md", "implementation/README.md",
+                         "implementation/implementation-plan.md"]:
+                (root / name).write_text("[Stage A](#a) [~~Stage 0~~](#zero)\n")
+            before = (root / "README.md").read_text()
+            self.assertTrue(module.refresh(root))
+            self.assertEqual((root / "README.md").read_text(), before)
+            module.refresh(root, write=True)
+            self.assertEqual(module.refresh(root), [])
+            return (root / "README.md").read_text()
+
+    def test_ongoing_work_does_not_prevent_finite_completion(self):
+        self.assertIn("[~~Stage A~~]", self.run_fixture("Complete"))
+
+    def test_unfinished_finite_gate_still_counts(self):
+        self.assertIn(r"[\[Stage A\]]", self.run_fixture("Partial"))
+
+    def test_all_ongoing_is_not_completed(self):
+        self.assertIn("[Stage A]", self.run_fixture("Ongoing"))
+
+    def test_other_tables_cannot_override_milestone_status(self):
+        self.assertIn("[~~Stage A~~]", self.run_fixture(
+            "Complete", extra="| M00 | Audit | Not started | notes |\n"))
+
+
 if __name__ == "__main__":
     unittest.main()

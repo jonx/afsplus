@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Separate ongoing review from finite stage completion](#2026-09-14---separate-ongoing-review-from-finite-stage-completion)
 - [2026-09-14 — Generate visible milestone and stage progress](#2026-09-14--generate-visible-milestone-and-stage-progress)
 - [2026-09-14 - Add scoped symlink transport and VFS dispatch](#2026-09-14---add-scoped-symlink-transport-and-vfs-dispatch)
 - [2026-09-14 — Refresh implementation navigation and remaining work](#2026-09-14--refresh-implementation-navigation-and-remaining-work)
@@ -109,6 +110,20 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Separate ongoing review from finite stage completion
+
+The owner asked that moving-target work remain visible without preventing stage
+completion. Progress aggregation now excludes explicit Ongoing statuses and keeps
+all-ongoing groups uncompleted. Stage 0 is ongoing review. M00 retains its finite
+epoch-1 reader-format freeze and contributes to Stage F, with independent decoding
+and resolution of experimental fields required before closure.
+
+The early milestone audit records executable evidence and remaining integration
+and qualification obligations without changing completion labels. The progress
+parser reads only the authoritative milestone table; supplemental audit rows
+cannot override it. Seven documentation/discovery/progress fixture tests and the
+read-only documentation checker pass. The full filesystem queue remains intact.
 
 ## 2026-09-14 — Generate visible milestone and stage progress
 

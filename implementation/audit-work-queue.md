@@ -10,6 +10,7 @@ oracle and backend. Snapshot work does not replace the other rows.
 <!-- toc -->
 
 - [Resume here](#resume-here)
+- [Milestone closure audit order](#milestone-closure-audit-order)
 - [Complete work queue](#complete-work-queue)
 - [Boundaries to preserve](#boundaries-to-preserve)
 - [Verification and delivery](#verification-and-delivery)
@@ -100,6 +101,25 @@ require the decision and compatibility process in
 allocation roots in the fixed `3N` pool. Snapshot protection must override
 in-place write eligibility. The first consumer must enumerate and read a
 consistent view after remount, with exact metadata and byte oracles.
+
+## Milestone closure audit order
+
+Before extending the consumer feature set, reconcile each milestone's stated
+exit criterion with its implementation, integration and platform qualification
+evidence in [milestones](milestones.md). Preserve all queue requirements below.
+Stage completion must be supported by the stage's own usable outcome.
+
+1. Inspect executable-core evidence for M03, simulated publication/recovery for
+   M04, and corruption detection for M05. Distinguish additional salvage and
+   repair requirements from detection, and physical durability from simulated
+   crash correctness.
+2. Separate reader implementation from the format-freeze requirement in M00,
+   retaining all epoch-1 freeze requirements under the final qualification order.
+3. Record capability, integrated-consumer and platform gates in the status home,
+   with component-owned evidence and explicit unverified findings. Reconcile
+   stage-marker generation with those gates before changing completion labels.
+4. Select the next implementation unit by the missing prerequisite for a usable
+   stage outcome; retain whole-job backup/restore and every other queue item.
 
 ## Complete work queue
 

@@ -147,8 +147,10 @@ Progress labels in the start page, roadmap and implementation navigation are
 generated views of milestone status. Use plain IDs for not started, visible
 brackets for partial work and strikethrough for complete. This generated
 navigation is an exception to the single-home status rule; edit the milestone
-status cell and run `make toc`. Stage labels aggregate their contributing
-milestones, with Stage 0 representing ongoing design review. Preserve stable
+status cell and run `make toc`. Stage labels aggregate their finite contributing
+milestones. Ongoing activities stay visible and are excluded from completion
+calculations; an all-ongoing group receives no completion mark. Stage 0 represents
+ongoing design review. M00 is the finite epoch-1 reader-format freeze in Stage F. Preserve stable
 heading anchors and clickable links.
 
 ## 8. The checker

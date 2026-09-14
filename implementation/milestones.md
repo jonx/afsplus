@@ -4,8 +4,10 @@ Progress notation: plain `M01` means not started, `[M01]` means started or
 partial, and ~~M01~~ means complete. Stage labels follow the same convention.
 Links retain the visible brackets or strikethrough. `make toc` refreshes these
 labels from the milestone status cells; `make check-docs` detects stale labels.
-Stage completion requires every contributing milestone to be complete; Stage 0
-tracks ongoing design review separately and is partial. Prototype completion
+Stage completion requires every finite contributing milestone to be complete.
+An `Ongoing` status stays visible and is excluded from that calculation. Stage 0
+tracks ongoing design review separately, with a plain label and explicit ongoing
+scope in the stage map. An all-ongoing group cannot be marked complete. Prototype completion
 with open qualification is partial.
 
 
@@ -28,7 +30,7 @@ M14.
 
 | ID | Milestone | Status | Exit criteria | Design | Test plan | Roadmap stages |
 |---|---|---|---|---|---|---|
-| M00 | Reader format frozen | Not started — identification, checkpoint and typed-node codecs are executable; every field marked TBD, Proposed or experimental is unfrozen | Reference image can be independently decoded | [03](../docs/03-on-disk-format.md), [disk-layout](../spec/disk-layout.md) | [conformance](../testing/conformance.md) | [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers), [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) |
+| M00 | Reader format frozen | Not started — identification, checkpoint and typed-node codecs are executable; every field marked TBD, Proposed or experimental is unfrozen | Epoch-1 reader contract frozen, with independent reference-image decoding and experimental-field decisions resolved | [03](../docs/03-on-disk-format.md), [disk-layout](../spec/disk-layout.md) | [conformance](../testing/conformance.md) | [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) |
 | \[M01\] | Portable reader | Partial — C99 seven-seed sanitizer corpus and five Rust codec fuzz targets pass; Unicode keys and remaining wire surfaces open | macOS/Linux/AROS builds, fuzz clean | [17](../docs/17-portability.md), [16](../docs/16-classic-systems.md) | [fuzzing](../testing/fuzzing.md), [conformance](../testing/conformance.md) | [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage D\]](../ROADMAP.md#stage-d-portability-and-host-tooling) |
 | ~~M02~~ | Formatter | Complete — official staged `mkafsplus`, bounded `afsplus-info`, exhaustive `afsplus-dump` and deterministic JSON/black-box gates pass | reader/formatter round-trip | [03](../docs/03-on-disk-format.md), [tools-spec](../tools/tools-spec.md) | [conformance](../testing/conformance.md) | [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable) |
 | \[M03\] | RW core | Prototype — mutation/reflink/pressure and core symlink crash gates pass; Rust/C codecs cross-validated; symlink replacement/adapters open | create/read/write/rename/unlink on images | [04](../docs/04-object-model.md), [05](../docs/05-directories-and-names.md), [06](../docs/06-files-and-extents.md), [07](../docs/07-allocation.md), [32](../docs/32-reflink-clone-semantics.md) | [crash-testing](../testing/crash-testing.md), [allocation](../testing/allocation-qualification.md), [shared-extents](../testing/shared-extents-qualification.md), [data-policy](../testing/data-policy-qualification.md), [orphans](../testing/orphan-qualification.md), [symlinks](../testing/symlink-qualification.md), [book review](../testing/book-review-qualification.md) | [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) |
@@ -56,3 +58,21 @@ target on a physical A500, then native MacAROS on Apple Silicon. The emulator
 is the repeatable pre-hardware gate for the second platform, not a fourth
 platform; native MacAROS is ordered last because its bare-metal target must
 exist before that gate can run.
+
+## Early milestone boundary audit
+
+Completion labels remain governed by the full milestone table until the evidence
+and gate mapping below are reconciled. This audit separates executable capability
+from integration and final qualification without dropping any acceptance gate.
+
+| Milestone | Executable capability evidence | Additional obligation | Closure decision |
+|---|---|---|---|
+| [M00](#milestones-and-acceptance-gates) | Identification, checkpoint and typed-node codecs; independent C conformance linked above | Stable epoch-1 reader contract and resolution of experimental fields | Reader-format freeze remains open; independent decoding alone does not prove freeze. |
+| [\[M03\]](#milestones-and-acceptance-gates) | Image mutation and [semantic crash matrices](../crates/afsplus-check/tests/crash_matrix.rs), plus linked symlink and sharing qualification | Symlink replacement, complete operation coverage and adapter integration | Audit the bounded image-operation gate separately before changing the whole-milestone label. |
+| [\[M04\]](#milestones-and-acceptance-gates) | The crash matrix includes an intentionally misordered-publication negative control and exact allowed recovery states | Each publication path, portable implementation scope, format freeze and physical provider durability | Simulated crash correctness and physical durability need distinct evidence; no hardware completion claim follows from the host suite. |
+| [\[M05\]](#milestones-and-acceptance-gates) | [Corruption corpus](../crates/afsplus-check/tests/corruption_corpus.rs) checks twelve deterministic cases over six wire surfaces, exact diagnostics and reproducible exported artifacts | Coverage of additional wire surfaces, broader salvage and transactional repair under Q11 | Existing detection capability is implemented; full checker/recovery coverage remains open. |
+
+M00 contributes to Stage F's finite epoch-1 freeze. Reader implementation and
+image-operation evidence feed Stage A through M01 and M03. Continued source review
+and future format evolution are ongoing activities, excluded from finite stage
+completion. Remaining stage mappings require their own acceptance audit.

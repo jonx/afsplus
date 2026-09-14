@@ -12,7 +12,7 @@ with open qualification is partial.
 <!-- toc -->
 
 - [Stage and milestone map](#stage-and-milestone-map)
-- [\[Stage 0\]: Amiga-native design review](#stage-0-amiga-native-design-review)
+- [Stage 0: Amiga-native design review](#stage-0-amiga-native-design-review)
 - [\[Stage A\]: make the core executable](#stage-a-make-the-core-executable)
 - [\[Stage B\]: resolve the epoch-1 architecture blockers](#stage-b-resolve-the-epoch-1-architecture-blockers)
   - [B1. Allocation state](#b1-allocation-state)
@@ -37,15 +37,15 @@ is recorded only in [milestones](implementation/milestones.md).
 
 | Stage | Contributing milestones | Intended outcome |
 |---|---|---|
-| [\[Stage 0\]](#stage-0-amiga-native-design-review) | Design review, no numbered milestone | Amiga filesystem design references |
-| [\[Stage A\]](#stage-a-make-the-core-executable) | [M00](implementation/milestones.md), [\[M01\]](implementation/milestones.md), [~~M02~~](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md), [\[M05\]](implementation/milestones.md) | Executable core and reader/format foundations |
-| [\[Stage B\]](#stage-b-resolve-the-epoch-1-architecture-blockers) | [M00](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md) | Allocation, update and durability architecture |
+| [Stage 0](#stage-0-amiga-native-design-review) | Ongoing design review, excluded from finite completion | Amiga filesystem design references |
+| [\[Stage A\]](#stage-a-make-the-core-executable) | [\[M01\]](implementation/milestones.md), [~~M02~~](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md), [\[M05\]](implementation/milestones.md) | Executable core and reader/format foundations |
+| [\[Stage B\]](#stage-b-resolve-the-epoch-1-architecture-blockers) | [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md) | Allocation, update and durability architecture |
 | [\[Stage C\]](#stage-c-integrate-aros-and-begin-independent-c-portability) | [\[M06\]](implementation/milestones.md), [\[M07\]](implementation/milestones.md), [\[M12\]](implementation/milestones.md) | AROS adapters and independent C integration |
 | [\[Stage D\]](#stage-d-portability-and-host-tooling) | [\[M01\]](implementation/milestones.md), [~~M08~~](implementation/milestones.md), [\[M12\]](implementation/milestones.md) | Portable implementations and host tooling |
 | [Stage E](#stage-e-developer-contract-accelerators-and-optional-features) | [M09](implementation/milestones.md), [M10](implementation/milestones.md) | Catalog and persistent change services |
 | [\[Stage F\]](#stage-f-production-qualification) | [M00](implementation/milestones.md), [\[M05\]](implementation/milestones.md), [M11](implementation/milestones.md), [\[M13\]](implementation/milestones.md), [\[M14\]](implementation/milestones.md) | Maintenance, workload qualification and format freeze |
 
-## \[Stage 0\]: Amiga-native design review
+## Stage 0: Amiga-native design review
 
 Milestones: none — the outcome is [docs/23](docs/23-pfs3-stage0-review.md). Subsystem-by-subsystem source review continues only when implementation reaches that subsystem.
 
@@ -61,7 +61,7 @@ See [`implementation/peer-review-prototype-plan.md`](implementation/peer-review-
 
 ## \[Stage A\]: make the core executable
 
-Milestones: [M00](implementation/milestones.md), [\[M01\]](implementation/milestones.md), [~~M02~~](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md), [\[M05\]](implementation/milestones.md).
+Milestones: [\[M01\]](implementation/milestones.md), [~~M02~~](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md), [\[M05\]](implementation/milestones.md).
 
 Primary goal:
 
@@ -118,7 +118,7 @@ Do not block this stage on:
 
 ## \[Stage B\]: resolve the epoch-1 architecture blockers
 
-Milestones: [M00](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md).
+Milestones: [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md).
 
 ### B1. Allocation state
 
