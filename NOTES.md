@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Compare reconstructed runners without weakening strict replay](#2026-09-14---compare-reconstructed-runners-without-weakening-strict-replay)
 - [2026-09-14 - Reconstruct the semantic runner in an isolated checkout](#2026-09-14---reconstruct-the-semantic-runner-in-an-isolated-checkout)
 - [2026-09-14 — Bind semantic replay and reduction to cache profiles](#2026-09-14--bind-semantic-replay-and-reduction-to-cache-profiles)
 - [2026-09-14 — Integrate staged-tree cache profiles into transactions and recovery](#2026-09-14--integrate-staged-tree-cache-profiles-into-transactions-and-recovery)
@@ -128,6 +129,31 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Compare reconstructed runners without weakening strict replay
+
+Added `afsptest.py compare-rebuilt` with an explicit caller-selected source root.
+The command requires the original source identity, admits historical metadata and
+expected-state bindings, and compares all eight non-metadata roles byte for byte.
+It preserves two complete bundles and publishes a separate report containing both
+runner identities, both outcomes and every artifact digest. Exact replay still
+refuses a different binary. Matching failure artifacts remain a failure verdict;
+matching final files cannot hide differences in diagnostics or block traces.
+
+Nine focused regression tests passed, covering all four cache profiles, passing
+and failing scenarios, a selected crash, altered diagnostics, source/metadata
+refusal, publication errors and untouched originals. The existing 13 semantic,
+seven scenario-admission and six bundle tests also passed. No Rust code changed.
+
+The real isolated offline rebuild of `ae5edbd` was compared through fresh CLI
+processes against all four retained cache bundles. Every comparison exited 0,
+all eight compared roles matched exactly, each runner identity differed as
+expected, and original file hashes were unchanged. New paired artifacts and
+`qualification.json` are retained privately in
+`/private/tmp/afsplus-rebuilt-cli-ac_wnyst`.
+This is automated comparison evidence, not automated build provenance or a
+portable source/dependency/toolchain package. Those reconstruction gates remain
+open alongside the rest of Stage A.
 
 ## 2026-09-14 - Reconstruct the semantic runner in an isolated checkout
 

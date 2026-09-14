@@ -46,6 +46,21 @@ same observable failure signature, including any explicit cache profile, recurs;
 refusal or missing prerequisite cannot replace the original failure. Preserve the
 original bundle and publish a new complete bundle for the reduced reproducer.
 
+## Rebuilt-runner comparison
+
+Exact replay requires the recorded source and executable identities. A separately
+named rebuilt comparison permits a different caller-selected executable only
+when the observed source identity matches the original. Compare all non-metadata
+artifact bytes, preserve both complete bundles and report both executable digests
+and outcomes. A diagnostic or block-trace difference is a comparison failure even
+if the semantic run passes. An equal failing run is a reproduced failure, never
+a successful qualification. Keep original reduction metadata with the original.
+
+Publish a distinct comparison completion record after synchronizing both bundles.
+Never overwrite original or partial output. The comparison records observations;
+it cannot attest build provenance or replace preservation of sources, toolchains
+and dependencies. Exact replay has no identity-bypass option.
+
 ## Qualification
 
 Require fresh-process export/read/replay equivalence, exact expected-state checks,

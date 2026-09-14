@@ -36,14 +36,14 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def source_identity():
+def source_identity(root=ROOT):
     """Observed source identity, not an attestation of binary build provenance."""
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root).decode().strip()
     paths = subprocess.check_output(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT).split(b"\0")
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=root).split(b"\0")
     tree = hashlib.sha256()
     for raw in sorted(set(paths) - {b""}):
-        path = ROOT / os.fsdecode(raw)
+        path = Path(root) / os.fsdecode(raw)
         tree.update(len(raw).to_bytes(4, "little") + raw)
         try:
             info = path.lstat()
@@ -197,7 +197,7 @@ def admit_fault(fault, value):
     return fault
 
 
-def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundle.DEFAULT_TOTAL_BYTES, fault=None):
+def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundle.DEFAULT_TOTAL_BYTES, fault=None, *, source_root=ROOT):
     value = scenario.validate(raw)
     fault = admit_fault(FAULT if fault is None else fault, value)
     # Admit image exports before starting the runner.
@@ -209,7 +209,7 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
     commands = scenario.compile_commands(raw)
     if fault["kind"] == "power-cut-v1":
         commands = ("AFSCUT01 {operation} {offset} {variant}\n".format(**fault)).encode() + commands
-    identity = source_identity()
+    identity = source_identity(source_root)
     binary_hash = executable_digest(binary)
     # Runner output is intrinsically bounded by its profile; temporary spool
     # avoids an unbounded subprocess.PIPE allocation. It is never a caller image.
@@ -220,7 +220,7 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
             raise ValueError("runner failed: " + errors.read(4096).decode(errors="replace"))
         output.seek(0)
         records = unframe(output, file_bytes, total_bytes)
-    if source_identity() != identity or executable_digest(binary) != binary_hash:
+    if source_identity(source_root) != identity or executable_digest(binary) != binary_hash:
         raise ValueError("source or runner changed during execution")
     actual = observation(records.pop("actual.wire"))
     bind_cache_profile(value, actual)
@@ -338,14 +338,14 @@ def validate_trace(records):
     return selection
 
 
-def verify_replay(retained, binary, file_bytes, total_bytes):
-    # Neither runner path nor commands are selected by bundle metadata.
+def admit_run(retained):
+    """Validate historical metadata independently of the selected executable."""
     meta = json.loads(retained["run.json"], object_pairs_hook=bundle._unique)
     required = {"version", "profile", "source_observed", "runner_sha256", "outcome"}
     if not isinstance(meta, dict) or set(meta) not in (required, required | {"reduction"}):
         raise ValueError("run metadata fields")
     reduction = meta.get("reduction")
-    if reduction is not None:
+    if "reduction" in meta:
         if not isinstance(reduction, dict) or set(reduction) != {"parent_scenario_sha256", "evaluations", "budget_exhausted"}:
             raise ValueError("reduction metadata")
         parent = reduction["parent_scenario_sha256"]
@@ -358,9 +358,36 @@ def verify_replay(retained, binary, file_bytes, total_bytes):
     profile = "semantic-no-cut-v1" if fault["kind"] == "no-cut" else "semantic-power-cut-v1"
     if type(meta["version"]) is not int or meta["version"] != 1 or meta["profile"] != profile:
         raise ValueError("run profile")
+    source = meta["source_observed"]
+    def hex_digest(value, lengths):
+        return isinstance(value, str) and len(value) in lengths and all(c in "0123456789abcdef" for c in value)
+    if (not isinstance(source, dict) or set(source) != {"revision", "working_tree_sha256"}
+            or not hex_digest(source["revision"], (40, 64))
+            or not hex_digest(source["working_tree_sha256"], (64,))
+            or not hex_digest(meta["runner_sha256"], (64,))):
+        raise ValueError("run source or runner identity schema")
+    value = scenario.validate(retained["operations.afstrace"])
+    expected = sorted(value["expected"], key=lambda entry: entry["path"])
+    if retained["expected.json"] != encoded(expected):
+        raise ValueError("scenario/expected state binding")
+    actual = json.loads(retained["actual.json"], object_pairs_hook=bundle._unique)
+    if not isinstance(actual, dict) or not {"failure", "inspection_error", "raw_check", "recovered_check", "entries"} <= set(actual):
+        raise ValueError("run observation fields")
+    clean = all(isinstance(actual[key], dict) and actual[key].get("clean") is True
+                for key in ("raw_check", "recovered_check"))
+    success = actual["failure"] is None and actual["inspection_error"] is None and clean and actual["entries"] == expected
+    if meta["outcome"] != ("pass" if success else "failure"):
+        raise ValueError("run outcome contradicts observation")
+    validate_trace(retained)
+    return meta, fault
+
+
+def verify_replay(retained, binary, file_bytes, total_bytes):
+    # Neither runner path nor commands are selected by bundle metadata.
+    meta, fault = admit_run(retained)
+    reduction = meta.get("reduction")
     if meta["source_observed"] != source_identity() or meta["runner_sha256"] != executable_digest(binary):
         raise ValueError("source or runner identity mismatch")
-    validate_trace(retained)
     regenerated, success = execute(retained["operations.afstrace"], binary, file_bytes, total_bytes, fault)
     if reduction is not None:
         regenerated_meta = json.loads(regenerated["run.json"])
@@ -375,6 +402,64 @@ def verify_replay(retained, binary, file_bytes, total_bytes):
 def replay(path, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundle.DEFAULT_TOTAL_BYTES):
     retained = bundle.read_bundle(path, file_bytes, total_bytes)
     return verify_replay(retained, binary, file_bytes, total_bytes)
+
+
+def compare_rebuilt(path, output, binary, source_root, file_bytes=bundle.DEFAULT_FILE_BYTES,
+                    total_bytes=bundle.DEFAULT_TOTAL_BYTES):
+    """Compare a caller-selected rebuilt runner; never waive exact replay binding.
+
+    Both complete bundles are retained beneath a fresh directory. report.json is
+    its completion record, published only after the nested bundles are durable.
+    This observes source and binary identities, not build provenance.
+    """
+    retained = bundle.read_bundle(path, file_bytes, total_bytes)
+    original_meta, fault = admit_run(retained)
+    if source_identity(source_root) != original_meta["source_observed"]:
+        raise ValueError("rebuilt comparison source identity mismatch")
+    output = Path(output)
+    # Do not put generated evidence into either observed source tree or the input
+    # bundle. Such output would contaminate its own source identity or originals.
+    destination = output.resolve()
+    for protected in (Path(source_root).resolve(), Path(path).resolve()):
+        if destination == protected or protected in destination.parents:
+            raise ValueError("comparison output overlaps source or original bundle")
+    if os.path.lexists(output):
+        raise ValueError("comparison output already exists")
+    regenerated, success = execute(retained["operations.afstrace"], binary, file_bytes,
+                                   total_bytes, fault, source_root=source_root)
+    rebuilt_meta, _ = admit_run(regenerated)
+    if rebuilt_meta["source_observed"] != original_meta["source_observed"]:
+        raise ValueError("rebuilt comparison source changed before execution")
+    roles = sorted(bundle.ROLES - {"run.json"})
+    differences = [role for role in roles if retained[role] != regenerated[role]]
+    report = {"version": 1, "kind": "rebuilt-semantic-comparison-v1",
+        "source_observed": original_meta["source_observed"],
+        "original_runner_sha256": original_meta["runner_sha256"],
+        "rebuilt_runner_sha256": rebuilt_meta["runner_sha256"],
+        "runner_identical": original_meta["runner_sha256"] == rebuilt_meta["runner_sha256"],
+        "original_outcome": original_meta["outcome"], "rebuilt_outcome": rebuilt_meta["outcome"],
+        "semantic_artifacts_equal": not differences, "differing_roles": differences,
+        "build_provenance_attested": False,
+        "artifacts": [{"role": role, "original_sha256": digest(retained[role]),
+                       "rebuilt_sha256": digest(regenerated[role])} for role in sorted(bundle.ROLES)]}
+    os.mkdir(output, 0o700)
+    directory = bundle._directory(output)
+    try:
+        bundle.publish(output / "original", retained, file_bytes, total_bytes)
+        bundle.publish(output / "rebuilt", regenerated, file_bytes, total_bytes)
+        bundle._write(directory, "report.pending", encoded(report))
+        os.link("report.pending", "report.json", src_dir_fd=directory,
+                dst_dir_fd=directory, follow_symlinks=False)
+        os.unlink("report.pending", dir_fd=directory)
+        os.fsync(directory)
+        parent = bundle._directory(output.parent)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+    finally:
+        os.close(directory)
+    return report, success
 
 
 def failure_signature(records):
@@ -492,8 +577,18 @@ def main():
     shrink.add_argument("bundle", type=Path)
     shrink.add_argument("output", type=Path)
     shrink.add_argument("--max-runs", type=int, default=128)
+    compare = commands.add_parser("compare-rebuilt")
+    compare.add_argument("bundle", type=Path)
+    compare.add_argument("output", type=Path)
+    compare.add_argument("--source-root", type=Path, required=True,
+                         help="caller-selected checkout matching the original source identity")
     args = parser.parse_args()
     try:
+        if args.command == "compare-rebuilt":
+            report, success = compare_rebuilt(args.bundle, args.output, args.runner,
+                args.source_root, args.file_bytes, args.total_bytes)
+            print("rebuilt comparison: " + encoded(report).decode().strip())
+            raise SystemExit(0 if report["semantic_artifacts_equal"] and success else 2)
         if args.command == "minimize":
             report = minimize(args.bundle, args.output, args.runner, args.max_runs, args.file_bytes, args.total_bytes)
             print("failure reduction: " + encoded(report).decode().strip())

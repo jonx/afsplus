@@ -26,6 +26,7 @@
 - [Checker-bound replay verdicts](#checker-bound-replay-verdicts)
 - [Integrated tree-cache profiles](#integrated-tree-cache-profiles)
 - [Cache-bound semantic bundles](#cache-bound-semantic-bundles)
+- [Comparing a rebuilt runner](#comparing-a-rebuilt-runner)
 
 <!-- /toc -->
 
@@ -576,3 +577,61 @@ publish and replay the full ladder in fresh processes, check untouched original
 artifacts, reject resource/version mismatches, preserve profiles during failure
 reduction and verify selected crash outcomes under all four profiles. Wider
 mutation-family matrices and their failure artifacts retain their own gates.
+
+
+## Comparing a rebuilt runner
+
+A rebuilt executable can reproduce every filesystem artifact without sharing the
+original executable digest. Exact `replay` continues to require both source and
+runner identity. Use a separate comparison for a caller-selected rebuilt runner:
+
+```sh
+python3 tools/afsptest.py --runner /private/build/debug/afsplus-scenario \
+  compare-rebuilt /private/evidence/original /private/evidence/comparison \
+  --source-root /private/reconstructed-source
+```
+
+The selected checkout must match the original observed revision and complete
+working-tree digest, including unignored files, modes and symlink targets. The
+command admits the original metadata, expected-state binding, cache/fault policy,
+trace and images before execution. It checks the selected source and executable
+identities before and after execution. Neither checkout paths nor executables
+are selected by bundle metadata. This command does not perform a build or attest
+that the selected executable came from the selected sources.
+
+The comparison requires byte equality of all eight non-metadata roles, including
+both images, the full block trace, semantic flight events, scenario, fault model
+and expected/actual JSON. Equal final file contents alone are insufficient.
+`run.json` records are retained separately: the original reduction history and
+executable identity are never transferred to the new run as invented provenance.
+Each outcome must agree with its own observation and expected state.
+
+A fresh private output directory contains complete `original/` and `rebuilt/`
+bundles and a version-1 `report.json`. The report names both executable digests,
+the shared observed source identity, both outcomes, every role's pair of digests,
+all differing non-metadata roles and explicit `build_provenance_attested: false`.
+It is a comparison record, not an exact-replay certificate. Each nested bundle
+has the ordinary integrity manifest; the report is published after both bundles
+and its contents are synchronized. A late directory-barrier failure returns an
+error even if a complete report can be read. Partial output is retained for
+diagnosis and cannot be overwritten by retrying the same destination.
+
+Output inside the selected source tree or original bundle is refused. Original
+artifacts are only read; the report preserves copies in separate directories.
+The existing per-file and aggregate admission limits apply independently to each
+bundle. Retaining two complete copies requires up to twice the aggregate artifact
+budget, plus manifests and the comparison report.
+
+Exit 0 means all compared artifacts agree and the rebuilt semantic run passes.
+Exit 2 means a semantic failure or artifact difference, including an exactly
+reproduced failure. Exit 1 means admission, execution or publication failed.
+Inspect both `semantic_artifacts_equal` and the two outcome fields; equality does
+not turn a failing scenario into a successful qualification.
+
+Run `python3 tools/test-rebuilt-comparison.py` for all four cache profiles,
+distinct executable identities with exact-replay refusal, operation and expected-
+state failures, a selected crash, diagnostic drift despite a passing semantic
+verdict, metadata/source refusal before execution, source changes at execution,
+original preservation, output collisions and publication-failure boundaries.
+Toolchain/dependency preservation, dirty-source capture, build reconstruction
+and cross-host qualification need their own evidence beyond this comparison.
