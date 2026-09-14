@@ -123,3 +123,22 @@ Every full-preservation omission requires refusal; explicit content recovery
 reports the losses allowed by its profile. Profile identity,
 integrity and completion semantics follow the format decision process before
 normative archive fixtures are generated.
+
+## Effective member admission
+
+Run `cargo test -p afsplus-backup member::tests` for effective local-PAX field
+validation. The oracle supplies a safe raw header and malicious overriding
+paths, verifies hard-link containment and symlink data semantics, exercises
+unknown-field refusal, duplicate records and explicit byte budgets, and checks
+64-bit numeric boundaries. Exact signed timestamp cases cover nanoseconds,
+negative fractions and both signed-second limits without floating-point
+conversion. Invalid precision is refused, never rounded.
+
+The [member contract](../spec/backup-envelope.md#effective-ordinary-member-fields)
+is an admission prerequisite for the preservation consumer. Its tests do not
+qualify sparse/security transport, archive-wide identity or actual restoration.
+
+The [Oracle PAX reference](https://docs.oracle.com/cd/E88353_01/html/E37839/pax-1.html)
+describes field overrides and decimal subsecond units. The preservation
+interface deliberately refuses precision loss and retains identity fields
+without looking up host accounts.

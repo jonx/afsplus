@@ -119,7 +119,7 @@ fn control_header(path: &str, size: u64) -> tar::Header {
 fn reserved(header: &tar::Header) -> bool {
     matches!(header.path.as_str(), BEGIN | END)
 }
-fn canonical(path: &str, directory: bool, metadata: bool) -> bool {
+pub(crate) fn canonical(path: &str, directory: bool, metadata: bool) -> bool {
     if path.ends_with('/') && !directory {
         return false;
     }

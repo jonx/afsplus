@@ -68,3 +68,37 @@ The unkeyed hash detects changed or incomplete streams without authenticating a
 sender. Full preservation or content recovery requires its own profile validation,
 source/restore authority and explicit loss reporting under
 [ADR-078](../adr/ADR-078-backup-preservation-modes.md).
+
+## Effective ordinary member fields
+
+The ordinary-member admission interface resolves a single local PAX block
+before payload-size selection. It accepts `path`, `linkpath`, `size`, `uid`,
+`gid`, `mtime`, `uname` and `gname`. Other keywords require a dedicated
+preservation-profile handler and cause explicit refusal at this interface.
+This includes sparse, attribute and security transports; ignoring their records
+is not content recovery. Duplicate keywords and configured record/byte budgets
+are checked even for directly supplied records.
+
+Resolved paths obey the body namespace rules above. Hard-link targets obey the
+source namespace rules. Symlink targets are nonempty data, with no traversal
+authority. Ordinary files and directories have empty link fields; every non-file
+member has zero effective payload size. PAX header members themselves are not
+ordinary objects. Strings are borrowed from admitted inputs, bounded by the
+configured value-byte limit and free of NUL bytes.
+
+The interface retains numeric identities and textual owner/group names as
+separate archive facts. It performs no host account lookup or authorization
+mapping; that policy belongs to the preservation consumer.
+
+Size and identity overrides use canonical unsigned decimal values through
+`2^64-1`. Timestamps use signed 64-bit floor seconds and nanoseconds below
+`10^9`. Decimal input has an optional minus sign, canonical whole digits and
+an optional fraction of one through nine digits. Negative zero, excessive
+precision and overflow are refused without rounding. For example, `-1.25`
+means seconds `-2` plus `750000000` nanoseconds. Output removes trailing
+fractional zeros. Negative timestamp interchange is an explicit profile
+extension; ordinary tools may have narrower timestamp support.
+
+This interface implements the resolved-field checks required by
+[ADR-081](../adr/ADR-081-ordinary-pax-completion-member.md); it does not establish
+archive-wide object identity, metadata completeness, or restore completion.

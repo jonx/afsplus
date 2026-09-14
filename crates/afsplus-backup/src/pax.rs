@@ -137,8 +137,9 @@ fn wire_length(record: Record<'_>) -> Result<usize, Error> {
     }
 }
 
-/// Preflights every record and total byte count before allocating output.
-pub fn encode(records: &[Record<'_>], limits: Limits) -> Result<Vec<u8>, Error> {
+/// Validates fields and budgets without allocating a serialized record block.
+/// Duplicate-key bookkeeping is bounded by the admitted record count.
+pub fn encoded_len(records: &[Record<'_>], limits: Limits) -> Result<usize, Error> {
     limits.validate()?;
     if records.len() > limits.records {
         return Err(Error::Limit);
@@ -157,6 +158,12 @@ pub fn encode(records: &[Record<'_>], limits: Limits) -> Result<Vec<u8>, Error> 
             return Err(Error::Limit);
         }
     }
+    Ok(total)
+}
+
+/// Preflights every record and total byte count before allocating output.
+pub fn encode(records: &[Record<'_>], limits: Limits) -> Result<Vec<u8>, Error> {
+    let total = encoded_len(records, limits)?;
     let mut output = Vec::with_capacity(total);
     for &record in records {
         output.extend_from_slice(wire_length(record)?.to_string().as_bytes());

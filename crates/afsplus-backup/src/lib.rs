@@ -4,3 +4,5 @@
 pub mod envelope;
 pub mod pax;
 pub mod tar;
+
+pub mod member;

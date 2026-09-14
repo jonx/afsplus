@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Validate effective PAX member fields before restoration](#2026-09-14---validate-effective-pax-member-fields-before-restoration)
 - [2026-09-14 - Bind archive integrity and termination to an independently checked envelope](#2026-09-14---bind-archive-integrity-and-termination-to-an-independently-checked-envelope)
 - [2026-09-14 - Add streamed tar framing and independent recovery checks](#2026-09-14---add-streamed-tar-framing-and-independent-recovery-checks)
 - [2026-09-14 - Add bounded PAX record parsing for the archive consumer](#2026-09-14---add-bounded-pax-record-parsing-for-the-archive-consumer)
@@ -84,6 +85,25 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-14 - Validate effective PAX member fields before restoration
+
+Added borrowed ordinary-member resolution with explicit PAX record admission,
+resolved namespace and hard-link checks, strict numeric overrides, unsupported
+metadata refusal and exact signed nanosecond conversion. Reused the envelope's
+canonical-path rule and extracted record preflight without serializing another
+payload buffer. Added four regression tests covering override escapes, links,
+resource admission and timestamp/numeric boundaries. The contract retains
+numeric and textual identities separately; host account mapping and complete
+preservation semantics belong to the consumer.
+
+Validation: all 384 workspace tests passed, zero failed and ten were ignored.
+The archive crate passed 22 tests. Formatting, workspace Clippy, documentation
+checking, three checker fixtures and whitespace validation passed. This is host
+admission evidence, not native or older-hardware qualification. Full sparse,
+attribute/security transport and integrated archive restoration remain queue
+work; no milestone was closed by these helper tests.
 
 ## 2026-09-14 - Bind archive integrity and termination to an independently checked envelope
 
