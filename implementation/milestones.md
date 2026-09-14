@@ -158,6 +158,31 @@ helper does not prove that every caller has an observation-equivalence test.
 | Mount selection and intent recovery | [Mount](../crates/afsplus-core/src/mount.rs), `mount_configured` constructs the volume and invokes `recover_intent_log` or `inspect_intent_log` before returning it | Missing caller-supplied recorder during mount; design bounded attachment before selection/recovery and compare successful, refused and damaged-log mounts without changing mount semantics |
 | Allocator, tree, cache and reclamation | [Event vocabulary](../crates/afsplus-core/src/flight.rs), [allocation attribution](../crates/afsplus-core/src/allocation_trace.rs) | No dedicated subsystem event kinds in this vocabulary; allocation-domain attribution is resource accounting, not an object/block/view event trace. Enumerate subsystem transitions and their test owners before adding hooks |
 
+The direct publication callers in [Volume](../crates/afsplus-core/src/volume.rs)
+are `reclaim_step_untraced`, `clone_file_untraced`, `clone_range_untraced`,
+`create_leaf_in_directory`, `create_directory_untraced`,
+`cleanup_orphan_data_step`, `ensure_orphan_directory`, `remove_entry`,
+`link_file_untraced`, `rename_internal`, `commit_staged_file_layout` and
+`materialize_batch`. Metadata adds `commit_object_metadata`; snapshots add
+`commit_snapshot_change`. Each caller needs family-specific evidence; the
+wrapper `commit_transaction` is not an additional user-operation family.
+
+| Additional path | Source and existing diagnostic test | Missing evidence / implementation dependency |
+|---|---|---|
+| Window create write-through, existing-file writes and truncate tail zeroing | [Volume](../crates/afsplus-core/src/volume.rs), `apply_batch_op`, window write/truncate implementations; [flight tests](../crates/afsplus-core/tests/flight.rs), `window_data_failures_distinguish_discarded_mutations_from_retained_fsync_state` | Four-profile mutation/flush failure comparisons exist; per-object/logical-range/physical-block events are missing before common-tail entry |
+| Intent-group durability and empty-group fsync | [Volume](../crates/afsplus-core/src/volume.rs), `window_fsync_untraced`; [flight tests](../crates/afsplus-core/tests/flight.rs), `deferred_windows_join_api_calls_groups_and_commits_without_changing_io` | Group begin/durable/failure identifies log publication; the preceding existing-file data barrier and empty-group flush need distinct I/O event ownership |
+| Dirty tree-cache eviction | [COW tree](../crates/afsplus-core/src/cow_tree.rs), `enforce_cache_limit` writes staged blocks before final publication | Spill counters exist; block identity, eviction/reload and write-failure events require bounded propagation into tree edits. Coordinate tests with `a-cache`, without treating cache correctness as diagnostic qualification |
+| Format publication | [Formatter](../crates/afsplus-core/src/mkfs.rs), metadata/identification barrier then slot-A publication barrier | Formatter takes a device, not a Volume recorder; explicit observation entry and interrupted-format comparisons are needed. Preserve its non-atomic formatting contract |
+| Standalone verification | [Verifier](../crates/afsplus-core/src/verify.rs), `load_mount_state`, `load_committed_state`, `full_sweep` | Structured findings and block I/O are distinct from flight events; define error-location correlation without making exhaustive verification part of normal mount |
+| API guard registration | [API coverage test](../crates/afsplus-core/tests/api_coverage.rs), `every_mutable_operational_entry_has_a_registered_outer_guard` | Source registration proves guard presence only; it does not execute each method or prove its subsystem coverage |
+| Snapshot metadata and busy-delete outcomes | [Flight tests](../crates/afsplus-core/tests/flight.rs), `api_snapshot_and_metadata_calls_preserve_captured_state_and_busy_refusals` | Four-profile protection/captured-state/busy-delete image and I/O comparisons exist; this does not cover every maintenance/reclaim failure or attach view IDs to events |
+
+Next implementation order: establish object/block/view context and bounded
+subsystem propagation; instrument pre-tail writes and allocation/tree/cache/
+reclaim transitions; attach observation before mount recovery and to standalone
+format/verification entry points; qualify every named publication family and
+export/loss path. Existing wire versions must retain their replay contracts.
+
 This is a partial source audit, not closure of the inventory task. Formatting,
 standalone verification, pre-tail data writes, individual publication callers
 and diagnostic test ownership require inspection. Platform adapters keep their
