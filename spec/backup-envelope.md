@@ -102,3 +102,20 @@ extension; ordinary tools may have narrower timestamp support.
 This interface implements the resolved-field checks required by
 [ADR-081](../adr/ADR-081-ordinary-pax-completion-member.md); it does not establish
 archive-wide object identity, metadata completeness, or restore completion.
+
+## Streaming local-record binding
+
+The ordinary-member stream binds at most one local PAX block to the immediately
+following ordinary header. Stacked blocks and a block followed by envelope
+completion are invalid. Metadata bytes are admitted before allocating the
+record buffer. All effective fields are validated before selecting payload
+framing or exposing the member to the consumer. Overrides expire when advancing
+to the next member.
+
+The caller supplies payload buffers and must finish the current payload before
+advancing. An early advance reports busy without consuming input. Malformed
+metadata, framing and uncertain input errors permanently fail the stream;
+completion cannot be recovered by skipping the failed member. Empty or finished
+payload reads return zero. An integrity receipt is exposed only after ordinary
+member admission, envelope verification and actual EOF, with no pending local
+records. It does not certify preservation completeness or successful restoration.

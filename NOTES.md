@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Bind local PAX records to streamed ordinary members](#2026-09-14---bind-local-pax-records-to-streamed-ordinary-members)
 - [2026-09-14 - Validate effective PAX member fields before restoration](#2026-09-14---validate-effective-pax-member-fields-before-restoration)
 - [2026-09-14 - Bind archive integrity and termination to an independently checked envelope](#2026-09-14---bind-archive-integrity-and-termination-to-an-independently-checked-envelope)
 - [2026-09-14 - Add streamed tar framing and independent recovery checks](#2026-09-14---add-streamed-tar-framing-and-independent-recovery-checks)
@@ -86,6 +87,22 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Bind local PAX records to streamed ordinary members
+
+Integrated effective-field admission with envelope reading. Local records apply
+exactly once; stacked or dangling blocks fail permanently. Metadata bytes are
+bounded before buffer allocation and effective size selects framing before
+payload access. Caller buffers stream contents, early advancement reports busy,
+and a completion receipt cannot bypass local-record failure. Added exact
+one-member override and payload oracles, admission/poisoning checks and every
+truncated archive prefix. Full preservation and actual restoration remain
+separate queue gates.
+
+Validation passed: 387 workspace tests, zero failures, ten ignored tests;
+25 archive tests; formatting and workspace Clippy; documentation checker,
+three checker fixtures and whitespace validation. No filesystem record or
+native ABI changed, and no hardware qualification is inferred.
 
 ## 2026-09-14 - Validate effective PAX member fields before restoration
 

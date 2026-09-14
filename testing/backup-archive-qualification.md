@@ -3,6 +3,17 @@
 > **ADRs:** [ADR-076](../adr/ADR-076-pax-backup-interchange.md), [ADR-078](../adr/ADR-078-backup-preservation-modes.md) · **Spec:** none ·
 > **Tests:** none · **Milestones:** M13, M14
 
+<!-- toc -->
+
+- [PAX record codec](#pax-record-codec)
+- [Tar framing and independent recovery](#tar-framing-and-independent-recovery)
+- [Completion envelope](#completion-envelope)
+- [Integration acceptance](#integration-acceptance)
+- [Effective member admission](#effective-member-admission)
+- [Streaming local-record binding](#streaming-local-record-binding)
+
+<!-- /toc -->
+
 ## PAX record codec
 
 Run `cargo test -p afsplus-backup` for the bounded extended-header codec in
@@ -142,3 +153,14 @@ The [Oracle PAX reference](https://docs.oracle.com/cd/E88353_01/html/E37839/pax-
 describes field overrides and decimal subsecond units. The preservation
 interface deliberately refuses precision loss and retains identity fields
 without looking up host accounts.
+
+## Streaming local-record binding
+
+Run `cargo test -p afsplus-backup stream::tests`. The integrated reader oracle
+verifies that local path, size and signed-time overrides apply exactly once,
+that raw placeholder size does not misframe payload bytes, and that reads use
+caller-sized buffers. It verifies retryable busy advancement, metadata admission
+before buffer allocation, permanent failure for dangling/stacked/escaping local
+records, and absent receipts for every truncated archive prefix. Completion is
+checked separately from member consumption and cannot hide a dangling local
+record even if the underlying envelope digest is valid.
