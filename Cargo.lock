@@ -47,6 +47,7 @@ dependencies = [
  "afsplus-block",
  "afsplus-core",
  "afsplus-format",
+ "sha2",
 ]
 
 [[package]]

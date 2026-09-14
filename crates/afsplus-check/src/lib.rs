@@ -16,6 +16,8 @@
 //! The checker never writes (`spec/compatibility-rules.md`: repair tools are
 //! stricter than normal mounts; this prototype checker is verify-only).
 
+pub mod replay_trace;
+
 use afsplus_block::BlockDevice;
 use afsplus_core::mount::select_checkpoint;
 use afsplus_core::verify::{full_sweep, load_committed_state};

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Preserve bounded block-operation replay traces](#2026-09-14---preserve-bounded-block-operation-replay-traces)
 - [2026-09-14 - Add bounded memory overlay branches and cut-state replay](#2026-09-14---add-bounded-memory-overlay-branches-and-cut-state-replay)
 - [2026-09-14 - Measure host commands with per-child CPU and RSS](#2026-09-14---measure-host-commands-with-per-child-cpu-and-rss)
 - [2026-09-14 - Prioritize usable stage outcomes across the complete queue](#2026-09-14---prioritize-usable-stage-outcomes-across-the-complete-queue)
@@ -116,6 +117,23 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Preserve bounded block-operation replay traces
+
+[ADR-098](adr/ADR-098-bound-block-replay-traces.md) binds versioned recorded writes
+and flushes to block geometry and the complete logical base-image identity.
+The codec admits operation/wire/base limits, verifies the artifact digest before
+returning decoded operations, and rejects malformed records and trailing bytes.
+Base verification is exhaustive read-only harness work, separate from normal mount.
+
+Tests cover every truncated prefix and single-byte mutation, resealed malformed
+headers/records, bounded admission and modified-base refusal without writes.
+A persisted file round-trip feeds decoded operations into the overlay cut oracle;
+Python independently verifies the geometry, operations and both SHA-256 digests.
+The all-feature offline workspace suite passed 488 tests with zero failures and
+ten ignored qualification tests across 81 suites. Clippy, formatting,
+documentation, seven checker fixtures and whitespace checks passed. Semantic
+bundles, fresh-run reproduction and minimization remain open Stage A work.
 
 ## 2026-09-14 - Add bounded memory overlay branches and cut-state replay
 

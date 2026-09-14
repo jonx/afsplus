@@ -18,6 +18,7 @@
 - [Rule](#rule)
 - [Bounded partition views](#bounded-partition-views)
 - [Bounded overlay branches](#bounded-overlay-branches)
+- [Persistent block-operation traces](#persistent-block-operation-traces)
 
 <!-- /toc -->
 
@@ -228,3 +229,31 @@ Payload/index measurements exclude allocator overhead, shared-base memory and
 total process RAM. Full resource accounting and persistent replay artifacts keep
 separate stage gates. A persistent scratch provider needs crash-safe payload/index
 publication before it can replace the memory provider for larger workloads.
+
+## Persistent block-operation traces
+
+[ADR-098](../adr/ADR-098-bound-block-replay-traces.md) specifies version-1 trace
+geometry, base identity, write/flush records and whole-artifact SHA-256. The
+[codec](../crates/afsplus-check/src/replay_trace.rs) validates caller bounds and
+all serialized input before returning operations. Base verification reads the
+admitted logical image and never writes it; this exhaustive operation belongs
+to offline replay qualification and never to normal mount.
+
+Run `cargo test -p afsplus-check --test replay_trace`. Require deterministic
+serialization and persisted file readback, Python-independent geometry/operation
+and digest checks, every truncated prefix and single-byte corruption, resealed
+invalid headers/tags/LBAs, trailing data, caller admission limits, modified-base
+refusal and zero writes during verification. Feed decoded operations to the
+overlay cut enumerator and compare every state with the original memory oracle.
+
+Wire-byte and operation-count caps jointly bound decoder allocations, including
+operation-vector overhead. Base-block and block-size caps bound exhaustive hash
+work and its single transfer buffer. Callers must retain a stable base between
+identity verification and replay, such as an exclusively owned memory provider;
+a verified digest cannot prevent later external changes to a host file.
+
+This trace carries block I/O and base identity. The enclosing bundle must also
+bind the source revision, semantic scenario, fault selection and expected/actual
+state, and publish a completion record only after all artifacts are durable.
+Serialization alone does not close semantic replay, minimization or the complete
+failure-artifact gate.

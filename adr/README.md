@@ -126,6 +126,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-095](ADR-095-bound-symlink-archive-groups.md) | Bind symlink archive targets to exact scoped restoration | Accepted | amends [ADR-093](ADR-093-directory-and-hardlink-archive-groups.md), [ADR-094](ADR-094-scoped-symlink-transport.md) |
 | [ADR-096](ADR-096-bounded-block-slices.md) | Expose bounded block-device slices | Accepted | — |
 | [ADR-097](ADR-097-bounded-memory-overlay-branches.md) | Share immutable bases across bounded memory overlay branches | Accepted | — |
+| [ADR-098](ADR-098-bound-block-replay-traces.md) | Bind persistent block replay traces to their base image | Accepted | — |
 
 <!-- /adr-index -->
 
