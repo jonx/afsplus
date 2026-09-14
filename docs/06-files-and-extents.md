@@ -83,6 +83,21 @@ Reserved mappings carry `EXTENT_UNWRITTEN`. They count as allocated storage,
 read as logical zeros and preserve file size. Reservation changes ctime while
 preserving modification time and content generation.
 
+The host Rust `preallocate_file_bounded` entry point admits a maximum number
+of touched logical blocks and extent records through `FileEditLimits`. Its
+local tree window includes boundary neighbors for coalescing; those neighbors
+count toward the record budget. Allocation runs and the resulting local layout
+also fit that budget. Exhaustion returns a limit error before device writes.
+Existing trees receive changed-key COW edits, preserving unrelated mappings
+and the common checkpoint publication protocol. Empty/direct layouts use the
+fixed-size direct representation before any necessary promotion.
+
+The convenience `preallocate_file` entry point preserves unrestricted request
+admission. Constrained callers use explicit limits and may split reservations
+into separately durable requests. These bounds cover extent-edit working sets;
+allocator, retention, tree-path, and ordinary write/truncate memory require
+separate resource qualification. The disk encoding and C ABI are unchanged.
+
 [ADR-079](../adr/ADR-079-initialize-private-unwritten-reservations.md) amends the
 fresh-allocation rule for private unwritten storage. A write initializes touched
 reserved blocks at their existing addresses, reconstructing complete blocks

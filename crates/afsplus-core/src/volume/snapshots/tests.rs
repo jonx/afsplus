@@ -1559,3 +1559,212 @@ fn reservation_write_io_errors_preserve_old_logical_zeros_and_require_reconcilia
         assert_eq!(bytes(&mut volume, &view, file), vec![0; 8192]);
     }
 }
+
+#[test]
+fn bounded_reservation_edits_skip_unrelated_fragmented_extents() {
+    use afsplus_block::TraceBackend;
+    let mut volume = open(formatted(8192, 0), MountMode::ReadWrite);
+    let file = volume
+        .create_file_in_root("fragmented", &[], now(2))
+        .unwrap();
+    for index in 0..600u64 {
+        volume
+            .preallocate_file(file, index * 3 * 4096, 4096, now(3))
+            .unwrap();
+    }
+    let snapshot = volume.snapshot_create(now(4)).unwrap();
+    let base = volume.into_device();
+    let mut volume = open(TraceBackend::new(base.clone()), MountMode::ReadWrite);
+    let before_reads = volume.dev.stats().reads;
+    volume
+        .preallocate_file_bounded(
+            file,
+            901 * 4096,
+            4096,
+            now(5),
+            FileEditLimits {
+                max_blocks: 1,
+                max_records: 4,
+            },
+        )
+        .unwrap();
+    let reads = volume.dev.stats().reads - before_reads;
+    let stats = volume.last_commit_stats().unwrap();
+    assert!(reads < 150, "range edit read {reads} blocks");
+    assert!(
+        stats.metadata_blocks_written < 20,
+        "rewrote unrelated extent tree nodes"
+    );
+    assert_eq!(volume.stat(file).unwrap().unwrap().data_blocks, 601);
+    assert_eq!(volume.stat(file).unwrap().unwrap().size_bytes, 0);
+    let view = volume.snapshot_open(snapshot).unwrap();
+    assert_eq!(
+        volume
+            .snapshot_stat(&view, file)
+            .unwrap()
+            .unwrap()
+            .allocated_bytes,
+        600 * 4096
+    );
+    verify(&mut volume);
+    let mut rejected = open(TraceBackend::new(base), MountMode::ReadWrite);
+    let before = rejected.dev.stats();
+    assert!(rejected
+        .preallocate_file_bounded(
+            file,
+            0,
+            9 * 4096,
+            now(6),
+            FileEditLimits {
+                max_blocks: 9,
+                max_records: 2
+            }
+        )
+        .is_err());
+    assert!(rejected
+        .preallocate_file_bounded(
+            file,
+            901 * 4096,
+            8192,
+            now(6),
+            FileEditLimits {
+                max_blocks: 1,
+                max_records: 4
+            }
+        )
+        .is_err());
+    assert_eq!(rejected.dev.stats().writes, before.writes);
+    assert_eq!(rejected.dev.stats().flushes, before.flushes);
+    assert_eq!(rejected.stat(file).unwrap().unwrap().data_blocks, 600);
+    println!(
+        "bounded_reservation fragmented_records=600 reads={reads} metadata={} bytes={} flushes={}",
+        stats.metadata_blocks_written, stats.bytes_written, stats.flushes
+    );
+}
+
+#[test]
+fn bounded_reservation_refusal_and_boundary_retry_preserve_layout() {
+    use afsplus_block::TraceBackend;
+    let mut volume = open(TraceBackend::new(formatted(512, 0)), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("bounded", &[], now(2)).unwrap();
+    let limits = FileEditLimits {
+        max_blocks: 1,
+        max_records: 4,
+    };
+    // Empty, before-first, between records, and after-last windows.
+    for block in [6, 0, 3, 9] {
+        volume
+            .preallocate_file_bounded(file, block * 4096, 4096, now(3), limits)
+            .unwrap();
+    }
+    let before = volume.stat(file).unwrap().unwrap();
+    let io = volume.dev.stats();
+    // Two neighbors fit, but inserting a third distinct run exceeds the result budget.
+    assert!(matches!(
+        volume.preallocate_file_bounded(
+            file,
+            4 * 4096,
+            4096,
+            now(4),
+            FileEditLimits {
+                max_blocks: 1,
+                max_records: 2
+            }
+        ),
+        Err(CoreError::PrototypeLimit(_))
+    ));
+    assert_eq!(volume.dev.stats().writes, io.writes);
+    assert_eq!(volume.dev.stats().flushes, io.flushes);
+    assert_eq!(volume.stat(file).unwrap().unwrap(), before);
+    volume
+        .preallocate_file_bounded(file, 4 * 4096, 4096, now(4), limits)
+        .unwrap();
+    let io = volume.dev.stats();
+    let before = volume.stat(file).unwrap().unwrap();
+    volume
+        .preallocate_file_bounded(file, 4 * 4096, 4096, now(5), limits)
+        .unwrap();
+    assert_eq!(volume.dev.stats().writes, io.writes);
+    assert_eq!(volume.stat(file).unwrap().unwrap(), before);
+    assert_eq!(before.data_blocks, 5);
+    verify(&mut volume);
+}
+
+#[test]
+fn bounded_reservation_tree_publication_preserves_snapshot_at_every_cut() {
+    let mut volume = open(formatted(1024, 0), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("tree", &[], now(2)).unwrap();
+    for block in 0..130 {
+        volume
+            .preallocate_file(file, block * 3 * 4096, 4096, now(3))
+            .unwrap();
+    }
+    let snapshot = volume.snapshot_create(now(4)).unwrap();
+    let before = volume.stat(file).unwrap().unwrap();
+    let old_layout = volume.load_file_layout(&before).unwrap().0;
+    let base = volume.into_device();
+    let mut recording = open(RecordingBackend::new(base.clone()), MountMode::ReadWrite);
+    recording
+        .preallocate_file_bounded(
+            file,
+            196 * 4096,
+            4096,
+            now(5),
+            FileEditLimits {
+                max_blocks: 1,
+                max_records: 4,
+            },
+        )
+        .unwrap();
+    let after = recording.stat(file).unwrap().unwrap();
+    let new_layout = recording.load_file_layout(&after).unwrap().0;
+    let (_, log) = recording.into_device().into_parts();
+    let mut counts = [0, 0];
+    for cut in 0..=log.len() {
+        for_each_crash_state(&base, &log, cut, |state| {
+            let mut volume = open(state.image, MountMode::ReadOnly);
+            let record = volume.stat(file).unwrap().unwrap();
+            assert!(record == before || record == after);
+            let published = record == after;
+            counts[usize::from(published)] += 1;
+            assert_eq!(
+                volume.load_file_layout(&record).unwrap().0,
+                if published {
+                    new_layout.clone()
+                } else {
+                    old_layout.clone()
+                }
+            );
+            let view = volume.snapshot_open(snapshot).unwrap();
+            assert_eq!(
+                volume
+                    .snapshot_stat(&view, file)
+                    .unwrap()
+                    .unwrap()
+                    .allocated_bytes,
+                130 * 4096
+            );
+            let mut cursor = 0;
+            loop {
+                let page = volume
+                    .snapshot_allocation_page(&view, file, cursor, 64)
+                    .unwrap();
+                for range in &page.ranges {
+                    assert_eq!(range.offset, cursor * 3 * 4096);
+                    assert_eq!(range.length, 4096);
+                    assert!(range.unwritten);
+                    cursor += 1;
+                }
+                if page.eof {
+                    break;
+                }
+            }
+            assert_eq!(cursor, 130);
+        });
+    }
+    assert!(counts.iter().all(|n| *n > 0));
+    println!(
+        "bounded_reservation_cuts old={} new={}",
+        counts[0], counts[1]
+    );
+}

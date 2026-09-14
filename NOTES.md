@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Bound reservation edits in fragmented files](#2026-09-14---bound-reservation-edits-in-fragmented-files)
 - [2026-09-14 — Cross-read initialized reservations through the portable C reader](#2026-09-14--cross-read-initialized-reservations-through-the-portable-c-reader)
 - [2026-09-14 — Initialize private unwritten reservations without replacement data allocation](#2026-09-14--initialize-private-unwritten-reservations-without-replacement-data-allocation)
 - [2026-09-14 — Add checked destination reservation restoration](#2026-09-14--add-checked-destination-reservation-restoration)
@@ -70,6 +71,33 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+
+## 2026-09-14 - Bound reservation edits in fragmented files
+
+The host Rust reservation entry point accepts explicit touched-block and
+extent-record budgets. Local key pages and changed-key COW edits avoid loading
+and rebuilding unrelated extent mappings. The checked restore provider uses
+64 records plus its existing host-granted byte bound. Refusal occurs before
+device writes; callers can retry smaller separately durable requests. The
+convenience core API preserves unrestricted request admission. No disk, C ABI,
+or native advertisement changed.
+
+The full workspace suite passed 353 tests, with zero failures and ten ignored.
+Formatting, warning-denying Clippy, documentation checks, three checker fixtures
+and whitespace validation passed.
+
+Three targeted tests passed. A one-block reservation among 600 fragmented
+records used 98 device reads, 12 metadata writes, 61440 written bytes and two
+flushes. Boundary/no-op and input/result-budget tests preserved exact records
+and issued zero writes on refusal. The multi-node publication oracle passed
+4300 crash states: 4296 old and four new, with exact live mappings and captured
+allocation ranges. Full graph checking covered selectable checkpoints.
+
+The design bounds local extent vectors; total peak RAM and before/after process
+memory measurements are unqualified. Ordinary writes/truncation and allocator
+working sets need their own bounds. Native and older-system execution remains
+UNVERIFIED. These gates stay in the complete queue.
 
 ## 2026-09-14 — Cross-read initialized reservations through the portable C reader
 

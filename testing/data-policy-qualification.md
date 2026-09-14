@@ -128,3 +128,22 @@ report. Missing compiler paths produce an explicit skip. Compilation is separate
 from emulator/hardware execution and total stack-depth/RAM qualification.
 Older-target resource profiles, bounded fragmented-layout traversal and sustained
 near-full reservation workloads require separate evidence.
+
+## Bounded reservation edits
+
+Run `cargo test -p afsplus-core bounded_reservation --all-features -- --nocapture`.
+A one-block edit in a file with 600 fragmented extents must read fewer than
+150 device blocks and write fewer than 20 metadata blocks. Check live and
+captured allocation accounting with full reachable-state verification.
+Exercise empty, before-first, interior, after-last and already-reserved windows.
+Block, input-record and result-record refusals must issue zero writes; retrying
+with sufficient limits must preserve the original mappings and succeed.
+
+For a multi-node tree, enumerate crash states around every publication cut.
+Require the complete old or new live layout, exact captured allocation ranges,
+and both selectable checkpoint graphs. Report the old/new outcome counts.
+The model limitations in [crash-testing](crash-testing.md) apply.
+
+The record budget bounds local extent vectors. Peak process RAM, allocator
+working sets, ordinary writes/truncation, and constrained native execution need
+separate measurements before a complete memory profile can be qualified.

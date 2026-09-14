@@ -279,6 +279,13 @@ struct OpenWindow {
     logged_records: u32,
 }
 
+/// Explicit reservation transaction admission; independent of disk encoding.
+#[derive(Debug, Clone, Copy)]
+pub struct FileEditLimits {
+    pub max_blocks: u64,
+    pub max_records: usize,
+}
+
 pub struct Volume<D: BlockDevice> {
     dev: D,
     ident: Identification,
@@ -1099,7 +1106,31 @@ impl<D: BlockDevice> Volume<D> {
         length: u64,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.preallocate_file_bounded(
+            object_id,
+            offset,
+            length,
+            now,
+            FileEditLimits {
+                max_blocks: u64::MAX,
+                max_records: usize::MAX - 1,
+            },
+        )
+    }
+
+    /// Reserve using local extent edits with explicit block and record budgets.
+    pub fn preallocate_file_bounded(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        length: u64,
+        now: Timespec,
+        limits: FileEditLimits,
+    ) -> Result<(), CoreError> {
         metadata::validate_time(now)?;
+        if limits.max_blocks == 0 || limits.max_records == 0 || limits.max_records == usize::MAX {
+            return Err(CoreError::PrototypeLimit("file edit limits invalid"));
+        }
         self.ensure_window_closed()?;
         if length == 0 {
             return Ok(());
@@ -1114,10 +1145,28 @@ impl<D: BlockDevice> Volume<D> {
         let block_size = self.dev.block_size() as u64;
         let start_block = offset / block_size;
         let end_block = end_offset.div_ceil(block_size);
+        if end_block - start_block > limits.max_blocks {
+            return Err(CoreError::PrototypeLimit(
+                "file edit block budget exhausted",
+            ));
+        }
         let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
             CoreError::Corrupt(format!("file {object_id} missing from object map"))
         })?;
-        let (old_extents, old_tree_blocks) = self.load_file_layout(&record)?;
+        let old_extents = if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
+            extent_map::read_window(
+                &mut self.dev,
+                &self.ident.geometry(),
+                record.data_root,
+                object_id,
+                self.checkpoint.generation,
+                start_block,
+                end_block,
+                limits.max_records,
+            )?
+        } else {
+            self.load_file_layout(&record)?.0
+        };
         let holes = logical_holes(&old_extents, start_block, end_block)?;
         if holes.is_empty() {
             return Ok(());
@@ -1136,34 +1185,50 @@ impl<D: BlockDevice> Volume<D> {
         self.protect_emergency_headroom(&mut tx);
         let mut additions = Vec::new();
         for (logical_start, logical_end) in holes {
-            additions.extend(allocate_extent_runs(
+            additions.extend(allocate_extent_runs_bounded(
                 &mut tx,
                 &mut self.dev,
                 &self.ident.geometry(),
                 logical_start,
                 logical_end - logical_start,
                 EXTENT_UNWRITTEN,
+                limits.max_records.saturating_sub(additions.len()),
             )?);
         }
         let mut new_extents = old_extents.clone();
         new_extents.extend(additions);
         let new_extents = coalesce_extents(new_extents)?;
-        let logical_size = record.size_bytes;
-
-        self.commit_file_layout(
-            record,
-            record_lba,
-            old_extents,
-            old_tree_blocks,
-            new_extents,
-            Vec::new(),
-            logical_size,
-            false,
-            now,
-            generation,
-            tx,
-            Vec::new(),
-        )
+        if new_extents.len() > limits.max_records {
+            return Err(CoreError::PrototypeLimit(
+                "file edit result record budget exhausted",
+            ));
+        }
+        let staged = if record.flags & OBJECT_FLAG_EXTENT_TREE == 0 {
+            self.stage_file_layout(
+                &mut tx,
+                record,
+                record_lba,
+                &old_extents,
+                &[],
+                &new_extents,
+                record.size_bytes,
+                false,
+                now,
+                now,
+                generation,
+            )?
+        } else {
+            self.stage_reservation_delta(
+                &mut tx,
+                record,
+                record_lba,
+                &old_extents,
+                &new_extents,
+                now,
+                generation,
+            )?
+        };
+        self.commit_staged_file_layout(record, staged, Vec::new(), generation, tx, Vec::new())
     }
 
     /// Clones a committed file into a new directory entry that shares every
@@ -3295,6 +3360,80 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn stage_reservation_delta(
+        &mut self,
+        tx: &mut TxAllocator,
+        record: ObjectRecord,
+        record_lba: u64,
+        old: &[Extent],
+        new: &[Extent],
+        now: Timespec,
+        generation: u64,
+    ) -> Result<StagedFileLayout, CoreError> {
+        let old_encoded = old
+            .iter()
+            .copied()
+            .map(extent_map::encode_extent)
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let new_encoded = new
+            .iter()
+            .copied()
+            .map(extent_map::encode_extent)
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut operations = Vec::new();
+        for key in old_encoded.keys() {
+            if !new_encoded.contains_key(key) {
+                operations.push(TreeOperation::Delete { key });
+            }
+        }
+        for (key, value) in &new_encoded {
+            if old_encoded.get(key) != Some(value) {
+                operations.push(TreeOperation::Upsert { key, value });
+            }
+        }
+        let sum = |items: &[Extent]| {
+            items.iter().try_fold(0u64, |total, e| {
+                total
+                    .checked_add(e.block_count)
+                    .ok_or_else(|| CoreError::Corrupt("extent allocation sum overflow".into()))
+            })
+        };
+        let added = sum(new)?
+            .checked_sub(sum(old)?)
+            .ok_or_else(|| CoreError::Corrupt("reservation removed allocation".into()))?;
+        let blocks = record
+            .data_blocks
+            .checked_add(added)
+            .ok_or(CoreError::PrototypeLimit("allocated blocks overflow"))?;
+        let mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            tx,
+            record.data_root,
+            extent_map::spec(record.object_id, self.checkpoint.generation),
+            generation,
+            &operations,
+        )?;
+        let mut writes = mutation.writes;
+        let lba = tx.allocate(&mut self.dev)?;
+        tx.retire(&mut self.dev, record_lba)?;
+        let updated = ObjectRecord {
+            data_root: mutation.root_lba,
+            data_blocks: blocks,
+            allocated_bytes: blocks
+                .checked_mul(self.dev.block_size() as u64)
+                .ok_or(CoreError::PrototypeLimit("allocated bytes overflow"))?,
+            changed: now,
+            ..record
+        };
+        writes.push((lba, updated.encode(self.dev.block_size(), generation)?));
+        Ok(StagedFileLayout {
+            record_lba: lba,
+            metadata_writes: writes,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn commit_file_layout(
         &mut self,
         record: ObjectRecord,
@@ -3323,6 +3462,18 @@ impl<D: BlockDevice> Volume<D> {
             now,
             generation,
         )?;
+        self.commit_staged_file_layout(record, staged, removed_extents, generation, tx, data_writes)
+    }
+
+    fn commit_staged_file_layout(
+        &mut self,
+        record: ObjectRecord,
+        staged: StagedFileLayout,
+        removed_extents: Vec<Extent>,
+        generation: u64,
+        mut tx: TxAllocator,
+        data_writes: Vec<(u64, Vec<u8>)>,
+    ) -> Result<(), CoreError> {
         let new_record_lba = staged.record_lba;
         let mut metadata_writes = staged.metadata_writes;
         for extent in removed_extents {
@@ -6021,13 +6172,29 @@ fn allocate_extent_runs<D: BlockDevice>(
     tx: &mut TxAllocator,
     dev: &mut D,
     geo: &afsplus_format::geometry::Geometry,
+    logical_start: u64,
+    block_count: u64,
+    flags: u32,
+) -> Result<Vec<Extent>, CoreError> {
+    allocate_extent_runs_bounded(tx, dev, geo, logical_start, block_count, flags, usize::MAX)
+}
+
+fn allocate_extent_runs_bounded<D: BlockDevice>(
+    tx: &mut TxAllocator,
+    dev: &mut D,
+    geo: &afsplus_format::geometry::Geometry,
     mut logical_start: u64,
     mut block_count: u64,
     flags: u32,
+    max_runs: usize,
 ) -> Result<Vec<Extent>, CoreError> {
     let mut max_run = maximum_allocatable_run(geo)?;
     let mut extents = Vec::new();
     while block_count > 0 {
+        if extents.len() == max_runs {
+            return Err(CoreError::PrototypeLimit("allocation run budget exhausted"));
+        }
+
         let mut candidate = block_count.min(max_run);
         let physical_start = loop {
             match tx.allocate_run(dev, candidate) {

@@ -383,10 +383,12 @@ handles are rejected before provider invocation. Admitted reservations hold
 revocation exclusion throughout the backend call. This additive source API
 changes no disk layout, C ABI or native capability advertisement.
 
-The byte limit bounds requested allocation per operation. It does not bound
-all core memory: preallocation loads the existing extent layout. Constrained
-qualification must replace or bound that traversal and measure metadata
-headroom on fragmented files. Private unwritten consumption follows
+The byte limit bounds requested allocation per operation. The AFS+ provider
+uses the [bounded local extent editor](06-files-and-extents.md#4-preallocation)
+with a 64-record limit, including boundary neighbors, allocated runs and the
+resulting local mappings. A limit refusal leaves the volume unchanged; a
+consumer may retry smaller separately durable requests. Total core memory and
+metadata headroom require separate measurement. Private unwritten consumption follows
 [ADR-079](../adr/ADR-079-initialize-private-unwritten-reservations.md); sustained
 near-full workloads and metadata headroom need separate qualification. Full archive preservation needs both
 reservation-consumption and destination alignment/capacity evidence under

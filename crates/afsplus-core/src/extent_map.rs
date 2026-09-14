@@ -364,6 +364,62 @@ pub fn lookup_extent<D: BlockDevice>(
     Ok((logical_block < extent.logical_end()?).then_some(extent))
 }
 
+/// Reads the requested logical interval plus its immediate neighbors, with
+/// explicit record admission. Fixed key pages avoid reading the rest of a file.
+#[allow(clippy::too_many_arguments)]
+pub fn read_window<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    root: u64,
+    owner: u64,
+    generation: u64,
+    start: u64,
+    end: u64,
+    limit: usize,
+) -> Result<Vec<Extent>, CoreError> {
+    if start >= end || limit == 0 || limit == usize::MAX {
+        return Err(CoreError::PrototypeLimit("extent window limits invalid"));
+    }
+    let tree_spec = spec(owner, generation);
+    let (floor, _) = lookup_floor(dev, geo, root, tree_spec, &key_u64(start))?;
+    let mut low = floor.map_or_else(|| key_u64(start).to_vec(), |(key, _)| key);
+    let mut result: Vec<Extent> = Vec::new();
+    loop {
+        let count = (limit + 1 - result.len()).min(64);
+        let (page, _) = crate::tree::read_key_page(dev, geo, root, tree_spec, &low, count)?;
+        let returned = page.items.len();
+        for (key, value) in page.items {
+            let extent = decode_extent(&key, &value, geo)?;
+            if result.last().is_some_and(|previous| {
+                previous
+                    .logical_end()
+                    .is_ok_and(|last| last > extent.logical_start)
+            }) {
+                return Err(CoreError::Corrupt("logical extents overlap".into()));
+            }
+            if result.len() == limit {
+                return Err(CoreError::PrototypeLimit(
+                    "extent window record budget exhausted",
+                ));
+            }
+            result.push(extent);
+            if extent.logical_start >= end {
+                return Ok(result);
+            }
+            low = key_u64(
+                extent
+                    .logical_start
+                    .checked_add(1)
+                    .ok_or_else(|| CoreError::Corrupt("extent cursor overflow".into()))?,
+            )
+            .to_vec();
+        }
+        if returned < count {
+            return Ok(result);
+        }
+    }
+}
+
 /// Reads a bounded ordinal page, including a predecessor check across pages.
 /// The caller supplies a bounded limit before this allocation.
 pub fn read_page<D: BlockDevice>(
