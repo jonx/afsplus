@@ -20,6 +20,8 @@ enforces that.
 | [afsptest.py](afsptest.py) | Execute, reproduce, minimize and compare rebuilt runners against private cache/crash bundles | [developer harness](../testing/developer-harness.md) |
 | [test-afsptest.py](test-afsptest.py) | Fresh-process replay, negative controls, binding refusal and minimization checks | [developer harness](../testing/developer-harness.md) |
 | [test-rebuilt-comparison.py](test-rebuilt-comparison.py) | Rebuilt-runner identity separation, artifact equality, failure verdicts and publication checks | [developer harness](../testing/developer-harness.md#comparing-a-rebuilt-runner) |
+| [replay-source.py](replay-source.py) | Capture and restore private Git revision, index and dirty working sources with bound identities | [developer harness](../testing/developer-harness.md#preserving-and-restoring-working-sources) |
+| [test-replay-source.py](test-replay-source.py) | Dirty/conflicted source reconstruction, path/size admission and publication regressions | [developer harness](../testing/developer-harness.md#preserving-and-restoring-working-sources) |
 | [replay-bundle.py](replay-bundle.py) | Bounded replay artifact publication and integrity verification; semantic validation is separate | [developer harness](../testing/developer-harness.md) |
 | [test-replay-bundle.py](test-replay-bundle.py) | Temporary-fixture publication, interruption, integrity and role-admission checks | [developer harness](../testing/developer-harness.md) |
 | [replay-scenario.py](replay-scenario.py) | Strict bounded semantic scenario admission for the replay runner | [developer harness](../testing/developer-harness.md) |

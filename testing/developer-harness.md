@@ -27,6 +27,7 @@
 - [Integrated tree-cache profiles](#integrated-tree-cache-profiles)
 - [Cache-bound semantic bundles](#cache-bound-semantic-bundles)
 - [Comparing a rebuilt runner](#comparing-a-rebuilt-runner)
+- [Preserving and restoring working sources](#preserving-and-restoring-working-sources)
 
 <!-- /toc -->
 
@@ -357,8 +358,8 @@ working files (including symlink targets and modes), and the runner executable's
 digest. Source/runner changes during execution are rejected. These bind the
 observed source and selected executable, not an attestation that the executable
 was built from that source. The matching source tree and executable must be
-retained for reproduction; dirty-source reconstruction and build provenance need
-separate evidence.
+retained for reproduction; [source packages](#preserving-and-restoring-working-sources)
+preserve the source identity independently of build-provenance evidence.
 
 The semantic flight format is `AFSFLT01`, a little-endian event count followed
 by 29-byte records: operation index (u32), first and exclusive-end block-operation
@@ -633,5 +634,74 @@ distinct executable identities with exact-replay refusal, operation and expected
 state failures, a selected crash, diagnostic drift despite a passing semantic
 verdict, metadata/source refusal before execution, source changes at execution,
 original preservation, output collisions and publication-failure boundaries.
-Toolchain/dependency preservation, dirty-source capture, build reconstruction
-and cross-host qualification need their own evidence beyond this comparison.
+[Working-source preservation](#preserving-and-restoring-working-sources),
+toolchain/dependency preservation, build reconstruction and cross-host qualification
+need their own evidence beyond this comparison.
+
+
+## Preserving and restoring working sources
+
+[replay-source.py](../tools/replay-source.py) captures the Git revision and its
+reachable history, index entries and working files needed to reproduce the
+observed source identity. The package is private qualification evidence, including
+uncommitted and untracked source contents and committed history. It is stored
+outside the source checkout and is not published by the tool.
+
+```sh
+python3 tools/replay-source.py capture /private/source /private/evidence/source-package
+python3 tools/replay-source.py restore /private/evidence/source-package /private/restored-source
+```
+
+Capture preserves tracked and unignored paths from the same Git inventory as the
+semantic harness. It records regular-file bytes and modes, safe relative symlink
+targets and modes, and missing tracked files. The Git index retains staged bytes
+independently of working bytes, including all three conflict stages; staged blobs
+are preserved even when the HEAD history does not contain them. A second source
+scan and revision/index comparison reject changes during capture.
+
+The version-1 `git-working-source-v1` manifest binds the observed revision and
+working-tree digest, raw path bytes encoded as hexadecimal, file kinds/modes,
+content-addressed blobs, the Git bundle and index objects. Paths are sorted for
+the harness's source-digest calculation. Each blob has a size and SHA-256 digest;
+Git blob identities are checked independently before restoration. The completion
+manifest is published after artifact synchronization, followed by directory and
+parent barriers. Existing and partial output paths cannot be overwritten. A late
+barrier failure is reported even if the manifest is readable.
+
+Admission limits are 32,768 worktree paths, 4,096 bytes per path or symlink target,
+64 MiB per blob, 256 MiB of unique package blobs and independently 256 MiB of
+expanded working-file contents. The manifest and Git index/list outputs have an
+8 MiB limit. Each Git subprocess has a 120-second deadline, bounded output and
+64 KiB of diagnostic output. These are artifact and working-tree bounds, not
+measurements of Git's internal pack expansion or peak RAM.
+
+Restoration admits the entire package before creating a new directory. Git
+clones a captured local bundle without checkout or templates; the tool writes
+admitted files directly and restores the index without executing source scripts,
+filters or hooks. It does not copy repository configuration. Global Git
+configuration is excluded from restoration commands, and global ignore rules
+cannot hide captured untracked paths from the restored inventory. Final source
+and index identities must match before the command reports success. The original
+package is only read. A restored working directory is a verified build input;
+the synchronized package is its retained reconstruction source.
+
+Refuse absolute or parent-traversing paths, Git-internal paths, duplicate paths,
+file ancestors, escaping symlinks, unsupported special files/mode bits and Git
+submodule index entries. Unsupported filename or symlink semantics on the
+receiving host fail explicitly. The package preserves source identity, not all
+local repository state: other branch/tag refs, reflogs, ignored build outputs,
+repository configuration and index optimization flags are outside this profile.
+The HEAD-reachable history and staged objects are sufficient for this profile's
+restored Git revision and index; it is not a general repository backup.
+
+Build into an external target directory using the retained lockfile, then use
+[the rebuilt comparison](#comparing-a-rebuilt-runner) with the restored source root.
+An offline build that uses an existing host cache establishes source restoration
+and semantic reconstruction on that host. A self-contained build package also
+requires preserved dependencies, toolchain and explicit build-environment inputs;
+source restoration alone does not attest these or establish cross-host results.
+
+Run `python3 tools/test-replay-source.py` for dirty/staged/conflicted index
+round-trips, missing and untracked files, permissions, Unicode/control-character
+names, symlinks, original preservation, path and artifact refusal, independent
+expanded-size limits, capture races and publication failure boundaries.

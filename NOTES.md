@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Preserve working sources for independent replay reconstruction](#2026-09-14---preserve-working-sources-for-independent-replay-reconstruction)
 - [2026-09-14 - Compare reconstructed runners without weakening strict replay](#2026-09-14---compare-reconstructed-runners-without-weakening-strict-replay)
 - [2026-09-14 - Reconstruct the semantic runner in an isolated checkout](#2026-09-14---reconstruct-the-semantic-runner-in-an-isolated-checkout)
 - [2026-09-14 — Bind semantic replay and reduction to cache profiles](#2026-09-14--bind-semantic-replay-and-reduction-to-cache-profiles)
@@ -129,6 +130,38 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Preserve working sources for independent replay reconstruction
+
+Added private source capture/restore with a Git-history bundle, content-addressed
+working files and independently retained staged objects. The manifest binds the
+same observed revision and working-tree digest as semantic replay. Dirty contents,
+missing files, executable modes, safe symlinks and conflicted index stages survive
+restoration. Paths, file kinds, object digests and artifact sizes are admitted
+before materialization; expanded file bytes have a separate bound so repeated
+references to one deduplicated blob cannot exceed the working-tree budget.
+
+The 12 focused regressions passed, including capture changes, unsafe paths,
+corrupted/symlinked artifacts, output collisions and late publication errors.
+An initial filename fixture used invalid UTF-8 bytes that this host filesystem
+rejects; the materialized round-trip uses Unicode plus tab/newline names. Special-
+file refusal targets tracked special files, because Git does not inventory an
+untracked FIFO. Bounded Git-output cancellation also handles a host refusal to
+signal a process group without replacing the original admission error.
+
+The real `ae5edbd` source package preserved 563 paths in 7,225,177 bytes of unique
+blobs. Restoring it produced the original source digest. A fresh external-target
+`cargo build --locked --offline -p afsplus-check --bin afsplus-scenario` from those
+restored sources passed; independent comparisons reproduced all eight non-metadata
+roles in each of the four retained cache-profile bundles, with unchanged original
+hashes. The package, restored sources, build log, comparisons and
+`qualification.json` are retained in
+`/private/tmp/afsplus-source-qualified-t1pq6p8k`.
+
+This qualifies the source-restoration step on the host. The build used the
+existing host toolchain and dependency cache; preserving those inputs and the
+build environment is the next reconstruction requirement. No Rust core change,
+native hardware result or overall Stage A completion is claimed.
 
 ## 2026-09-14 - Compare reconstructed runners without weakening strict replay
 

@@ -61,6 +61,24 @@ Never overwrite original or partial output. The comparison records observations;
 it cannot attest build provenance or replace preservation of sources, toolchains
 and dependencies. Exact replay has no identity-bypass option.
 
+## Working-source companion
+
+Preserve a separate content-addressed source package binding the same observed
+revision and working-tree digest as the semantic run. Include HEAD-reachable Git
+history, working-file bytes/modes, relative symlinks, missing tracked paths and
+index blobs/stages independently of working bytes. Refuse source changes during
+capture. Retain raw path bytes in the manifest and validate paths, kinds, index
+objects, per-file sizes, aggregate blob sizes and expanded worktree sizes before
+restoration into a fresh directory. Publish a completion manifest only after the
+package's artifacts and directory entries are synchronized.
+
+Restoration must reproduce both source and index identities before success. It
+never executes captured scripts or Git hooks. Unsupported host path/mode semantics
+fail explicitly. Keep package restoration separate from build execution and from
+preservation of dependencies, toolchains and build environment. The source
+companion is a reconstruction input, not a general repository backup or build
+provenance certificate.
+
 ## Qualification
 
 Require fresh-process export/read/replay equivalence, exact expected-state checks,
