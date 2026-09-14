@@ -84,21 +84,43 @@ pub struct Verified<S> {
     levels: Vec<Level>,
     root: [u8; 32],
     stats: Stats,
+    sparse: bool,
 }
 impl<S: Read + Write + Seek> Verified<S> {
     pub fn capture<R: Read>(
-        mut input: R,
+        input: R,
         store: S,
         limits: Limits,
         framing: tar::Limits,
         records: pax::Limits,
     ) -> Result<Self, Error> {
+        Self::capture_mode(input, store, limits, framing, records, false)
+    }
+    /// Explicit sparse-header admission; content maps require semantic validation.
+    pub fn capture_sparse<R: Read>(
+        input: R,
+        store: S,
+        limits: Limits,
+        framing: tar::Limits,
+        records: pax::Limits,
+    ) -> Result<Self, Error> {
+        Self::capture_mode(input, store, limits, framing, records, true)
+    }
+    fn capture_mode<R: Read>(
+        mut input: R,
+        store: S,
+        limits: Limits,
+        framing: tar::Limits,
+        records: pax::Limits,
+        sparse: bool,
+    ) -> Result<Self, Error> {
         let mut spool = Self::copy(&mut input, store, limits)?;
+        spool.sparse = sparse;
         {
             // This first pass deliberately has no early-publication capability.
             let cursor = Replay::new(&mut spool);
-            let mut reader =
-                stream::Reader::new(cursor, framing, records).map_err(Error::Stream)?;
+            let mut reader = stream::Reader::new_mode(cursor, framing, records, sparse)
+                .map_err(Error::Stream)?;
             let mut discard = [0; 512];
             while let Some(member) = reader.next_member().map_err(Error::Stream)? {
                 let mut remaining = member.size;
@@ -124,8 +146,9 @@ impl<S: Read + Write + Seek> Verified<S> {
         framing: tar::Limits,
         records: pax::Limits,
     ) -> Result<stream::Reader<Replay<'_, S>>, Error> {
-        let mut reader =
-            stream::Reader::new(Replay::new(self), framing, records).map_err(Error::Stream)?;
+        let sparse = self.sparse;
+        let mut reader = stream::Reader::new_mode(Replay::new(self), framing, records, sparse)
+            .map_err(Error::Stream)?;
         reader.admit_verified_source();
         Ok(reader)
     }
@@ -229,6 +252,7 @@ impl<S: Read + Write + Seek> Verified<S> {
             levels,
             root,
             stats,
+            sparse: false,
         })
     }
 }

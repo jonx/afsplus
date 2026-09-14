@@ -47,5 +47,6 @@ enforces that.
 | [third-party-probe-example.c](third-party-probe-example.c) | Pseudocode example of how a generic disk utility identifies an AFS+ volume | [docs/18-third-party-integration.md](../docs/18-third-party-integration.md) |
 
 | [check-backup-tar.sh](check-backup-tar.sh) | Cross-read ordinary tar framing with Python and bsdtar, reproduce the fixture and reject changed payloads in the oracle | [backup archive qualification](../testing/backup-archive-qualification.md) |
+| [check-backup-sparse.sh](check-backup-sparse.sh) | Cross-read sparse content with Python/libarchive and verify wide raw size encodings | [sparse archive](../spec/backup-sparse.md) |
 
 | [check-backup-envelope.sh](check-backup-envelope.sh) | Verify envelope hashes/counts independently with OpenSSL and recover body files through Python/bsdtar | [archive envelope](../spec/backup-envelope.md) |

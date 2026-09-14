@@ -24,6 +24,7 @@ pub struct Reader<R> {
     remaining: u64,
     poisoned: bool,
     complete: bool,
+    sparse: bool,
     #[cfg(feature = "consumer")]
     identity: Arc<()>,
     #[cfg(feature = "consumer")]
@@ -31,6 +32,19 @@ pub struct Reader<R> {
 }
 impl<R: Read> Reader<R> {
     pub fn new(input: R, framing: tar::Limits, records: pax::Limits) -> Result<Self, Error> {
+        Self::new_mode(input, framing, records, false)
+    }
+    /// Explicitly admit GNU sparse 1.0 headers. Payload remains condensed;
+    /// consumers must validate the map and distinguish logical from stored size.
+    pub fn new_sparse(input: R, framing: tar::Limits, records: pax::Limits) -> Result<Self, Error> {
+        Self::new_mode(input, framing, records, true)
+    }
+    pub(crate) fn new_mode(
+        input: R,
+        framing: tar::Limits,
+        records: pax::Limits,
+        sparse: bool,
+    ) -> Result<Self, Error> {
         // Validate even an empty archive's configured metadata admission.
         pax::encoded_len(&[], records).map_err(Error::Pax)?;
         Ok(Self {
@@ -41,6 +55,7 @@ impl<R: Read> Reader<R> {
             remaining: 0,
             poisoned: false,
             complete: false,
+            sparse,
             #[cfg(feature = "consumer")]
             identity: Arc::new(()),
             #[cfg(feature = "consumer")]
@@ -93,8 +108,13 @@ impl<R: Read> Reader<R> {
         }
         self.header = Some(header);
         let records = pax::decode(&self.records, self.limits).map_err(Error::Pax)?;
-        let effective = member::resolve(self.header.as_ref().unwrap(), &records, self.limits)
-            .map_err(Error::Member)?;
+        let effective = member::resolve_mode(
+            self.header.as_ref().unwrap(),
+            &records,
+            self.limits,
+            self.sparse,
+        )
+        .map_err(Error::Member)?;
         self.inner
             .begin_payload(if effective.kind == tar::Kind::File {
                 Some(effective.size)
@@ -138,7 +158,6 @@ impl<R: Read> Reader<R> {
         self.identity.clone()
     }
 
-    #[cfg(feature = "consumer")]
     pub(crate) fn invalidate(&mut self) {
         self.poisoned = true;
     }

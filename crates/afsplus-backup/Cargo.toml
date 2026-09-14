@@ -6,9 +6,10 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-consumer = ["dep:afsplus-vfs"]
+consumer = ["dep:afsplus-vfs", "dep:afsplus-format"]
 
 [dependencies]
+afsplus-format = { path = "../afsplus-format", optional = true }
 afsplus-vfs = { path = "../afsplus-vfs", optional = true }
 sha2 = { version = "0.11", default-features = false }
 
@@ -17,3 +18,5 @@ workspace = true
 
 [dev-dependencies]
 afsplus-format = { path = "../afsplus-format" }
+afsplus-core = { path = "../afsplus-core" }
+afsplus-block = { path = "../afsplus-block" }

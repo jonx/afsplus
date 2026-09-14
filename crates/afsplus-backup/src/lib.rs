@@ -19,3 +19,5 @@ pub mod spool;
 
 #[cfg(feature = "consumer")]
 pub mod inventory;
+
+pub mod sparse;

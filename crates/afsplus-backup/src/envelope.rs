@@ -218,7 +218,6 @@ impl<W: Write> Writer<W> {
         self.tar.write_payload(&bytes)?;
         Ok(())
     }
-    #[cfg(feature = "consumer")]
     pub(crate) fn invalidate(&mut self) {
         self.poisoned = true;
     }

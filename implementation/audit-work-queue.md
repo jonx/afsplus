@@ -40,6 +40,9 @@ recovery. Use the [metadata restoration primitive](../testing/book-review-qualif
 and the [checked destination interface](../docs/13-filesystem-api-v2.md#9-destination-scoped-restore-extension).
 Define existing-destination merge/overwrite/resume under Q11 before exposing
 pre-existing destination objects; distinguish partial restoration from completion.
+Use the [sparse content consumer](../spec/backup-sparse.md) for bounded content
+transport; persist its reservation-loss report in content recovery and complete
+reservation sidecars/restore ordering before full-preservation success.
 Use [captured allocation enumeration](../docs/13-filesystem-api-v2.md#captured-allocation-enumeration)
 for source ranges and the [destination reservation gate](../testing/security-model-conformance.md#16-destination-reservation-restoration)
 for restoration. Use [private reservation initialization](../testing/data-policy-qualification.md#private-unwritten-reservation-initialization)

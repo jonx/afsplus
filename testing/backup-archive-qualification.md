@@ -15,6 +15,7 @@
 - [Opaque values through an authorized archive consumer](#opaque-values-through-an-authorized-archive-consumer)
 - [Verified scratch replay](#verified-scratch-replay)
 - [Complete object inventory groups](#complete-object-inventory-groups)
+- [Sparse content consumer](#sparse-content-consumer)
 
 <!-- /toc -->
 
@@ -252,3 +253,42 @@ These are hosted component fixtures, not complete backup-job or older-machine
 qualification. Cross-object completeness, data/namespace/reservation binding,
 content-recovery loss reports and native resource/durability evidence belong to
 the enclosing archive and platform gates.
+
+
+## Sparse content consumer
+
+Run `cargo test -p afsplus-backup --all-features` and
+[check-backup-sparse.sh](../tools/check-backup-sparse.sh) for
+[sparse transport](../spec/backup-sparse.md),
+[ADR-087](../adr/ADR-087-sparse-archive-content.md) and
+[ADR-088](../adr/ADR-088-sparse-stored-size-field.md).
+
+The real-service fixture captures a file with written data, written zeros,
+unwritten ranges inside and beyond EOF, and a 1 TiB-plus logical length. Modify
+and shrink the live source after capture, then export through a remounted view.
+Require an archive below 16 KiB and fewer than 256 source block reads, with zero
+source writes/barriers. Restore into a scoped empty AFS+ file, synchronize,
+remount and compare captured bytes, sampled logical holes, exact logical size,
+written allocation and an untouched outside file. The content report must name
+both omitted reservation ranges and their total bytes; no full-preservation
+claim follows from their omission.
+
+Exercise one-entry allocation pages, caller transfer buffers, revoked source
+authority during output (including all-hole files), wrong destination paths,
+revoked destination grants and nonempty destination refusal. Failure must poison
+further archive use. Compare maps across multiple 512-byte blocks, empty maps,
+EOF markers and maximum unsigned logical length. Refuse malformed numbers,
+overlap, out-of-file and overflowing ranges, interior zero-length entries,
+nonzero padding, wrong stored lengths and each map/data/logical/count quota.
+Reject impossible map counts before allocation. Every truncated archive prefix
+must withhold completion. Default stream/spool constructors must refuse sparse
+headers; dedicated constructors must expose separate lengths and require map
+validation before writes.
+
+Python and libarchive must recover mixed, all-hole and empty members, preserving
+contents and following-member alignment. The all-hole extraction must not
+allocate its whole logical length. Python's independent numeric codec must match
+raw headers at the octal boundary and unsigned 64-bit maximum. Keep conflicting
+PAX `size` as a parser refusal regression. Header tests do not qualify a giant
+stored payload. Independent generic extraction is content recovery only; full
+metadata, reservation and complete-job oracles retain separate gates.

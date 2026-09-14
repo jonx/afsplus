@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Transport captured sparse contents through the archive consumer](#2026-09-14---transport-captured-sparse-contents-through-the-archive-consumer)
 - [2026-09-14 - Exercise repeated low-space reclamation with retained snapshots](#2026-09-14---exercise-repeated-low-space-reclamation-with-retained-snapshots)
 - [2026-09-14 - Bind full object inventories to counted descriptor manifests](#2026-09-14---bind-full-object-inventories-to-counted-descriptor-manifests)
 - [2026-09-14 - Replay verified scratch archives with bounded upload slots](#2026-09-14---replay-verified-scratch-archives-with-bounded-upload-slots)
@@ -95,6 +96,49 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Transport captured sparse contents through the archive consumer
+
+ADR-087 selected GNU sparse PAX 1.0 rather than expanding holes or replacing
+ordinary recovery with a private content container. Research used the GNU tar
+1.35 manual's sparse-format section, accessed on 2026-09-14. The exporter reads
+semantic allocation pages through the retained snapshot grant; the importer
+validates a bounded map before writing through the separate destination grant.
+Written zeros stay data. Omitted unwritten reservations have explicit range and
+byte totals for the enclosing content-recovery loss report.
+
+An independent Python 3.9.6 test exposed conflicting PAX `size` behavior:
+applying stored length after sparse metadata destroyed logical length and
+following-member alignment. ADR-088 moved stored size into the raw header and
+refused the conflicting override. Positive GNU binary size encoding handles the
+33-bit octal boundary through unsigned 64-bit maximum without imposing a format
+limit at 8 GiB. Python's independent numeric codec matched those headers. These
+are representation tests, not multi-gigabyte payload qualification.
+
+The sparse interop script passed Python 3.9.6 and bsdtar 3.5.3/libarchive 3.7.4
+for mixed, all-hole and empty entries, including following-member alignment and
+non-expanded all-hole extraction. The real AFS+ service test captured a file of
+1 TiB plus 23 bytes, changed and shrank the live source after capture, and
+restored the original content through verified replay into an isolated AFS+
+destination. After synchronization and remount, exact written bytes, sampled
+holes, logical size, written allocation and an outside file matched the oracle.
+The archive was below 16 KiB, with 8192 written bytes and an 8704-byte sparse
+payload. Export issued no source writes/barriers and fewer than 256 block reads.
+The report identified two omitted unwritten ranges totaling 8192 bytes.
+
+The workspace all-features gate passed 424 tests with zero failures and 10
+explicitly ignored qualification probes. The default archive crate passed
+33 tests. Formatting, strict Clippy, documentation, three checker fixtures,
+whitespace validation and independent sparse extraction passed.
+
+Targeted cases also passed source revocation during output for data and all-hole
+files, wrong path/revoked/nonempty destination refusal, multi-block maps,
+maximum logical length, malformed/count/overlap/overflow/padding/size cases,
+resource admission and every truncated archive prefix. Ordinary constructors
+explicitly refuse sparse fields; opt-in spool verification certifies integrity,
+with semantic map validation at the consumer. Full reservation sidecars, object
+metadata, namespace/link/inventory binding, complete-job outcomes, spooled large
+maps and native resource qualification retain their queue gates.
 
 ## 2026-09-14 - Exercise repeated low-space reclamation with retained snapshots
 

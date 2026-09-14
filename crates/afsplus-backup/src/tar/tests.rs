@@ -83,7 +83,7 @@ fn header_ranges_types_and_long_utf8_names() {
     assert!(matches!(h.encode(), Err(Error::Limit)));
     h = header();
     h.size = 1u64 << 33;
-    assert!(matches!(h.encode(), Err(Error::Limit)));
+    assert_eq!(Header::decode(&h.encode().unwrap()).unwrap(), h);
     h = header();
     h.kind = Kind::Directory;
     assert!(h.encode().is_err());
@@ -99,7 +99,7 @@ fn header_ranges_types_and_long_utf8_names() {
         h.size = 0;
         assert_eq!(Header::decode(&h.encode().unwrap()).unwrap(), h);
     }
-    // Valid checksum must not conceal unsupported type, binary numbers or text damage.
+    // Valid checksum must not conceal unsupported types, overflowing sizes or text damage.
     for (at, byte) in [(156, b'3'), (124, 0x80), (1, 0xff), (500, 1)] {
         let mut block = header().encode().unwrap();
         block[at] = byte;
@@ -248,4 +248,28 @@ fn partial_output_errors_poison_the_stream_and_cannot_report_success() {
     reader.begin_payload(None).unwrap();
     assert!(reader.read_payload(&mut [0; 5]).is_err());
     assert!(matches!(reader.next_header(), Err(Error::Poisoned)));
+}
+
+#[test]
+fn positive_binary_size_boundaries_and_resealed_invalid_fields() {
+    for size in [(1u64 << 33) - 1, 1u64 << 33, 1u64 << 63, u64::MAX] {
+        let mut h = header();
+        h.size = size;
+        let block = h.encode().unwrap();
+        assert_eq!(Header::decode(&block).unwrap(), h);
+        if size >= (1u64 << 33) {
+            assert_eq!(block[124], 0x80);
+            assert_eq!(&block[125..128], &[0; 3]);
+            assert_eq!(&block[128..136], &size.to_be_bytes());
+        }
+    }
+    for (at, byte) in [(124, 0xff), (125, 1), (108, 0x80)] {
+        let mut h = header();
+        h.size = u64::MAX;
+        let mut block = h.encode().unwrap();
+        block[at] = byte;
+        let sum = format!("{:06o}\0 ", checksum(&block));
+        block[148..156].copy_from_slice(sum.as_bytes());
+        assert!(Header::decode(&block).is_err());
+    }
 }

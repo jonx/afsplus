@@ -1,4 +1,4 @@
-//! Strict ustar framing with caller-buffer streaming and explicit PAX size overrides.
+//! Ustar framing with checked positive GNU size fields and explicit PAX overrides.
 //! Names, metadata semantics, integrity and backup completion belong to the profile.
 use std::io::{Read, Write};
 
@@ -71,7 +71,7 @@ pub struct Header {
     pub mode: u32,
     pub uid: u64,
     pub gid: u64,
-    /// Raw ustar field. A validated PAX record may override it before payload I/O.
+    /// Raw octal/positive-GNU size. Validated ordinary PAX may override it.
     pub size: u64,
     pub mtime: u64,
     pub uname: String,
@@ -94,6 +94,29 @@ fn number(bytes: &[u8]) -> Result<u64, Error> {
             .and_then(|n| n.checked_add((c - b'0') as u64))
             .ok_or(Error::Invalid("numeric overflow"))
     })
+}
+fn size_number(bytes: &[u8]) -> Result<u64, Error> {
+    if bytes[0] & 0x80 == 0 {
+        return number(bytes);
+    }
+    if bytes[0] != 0x80 {
+        return Err(Error::Invalid("negative or overflowing binary size"));
+    }
+    bytes[1..].iter().try_fold(0u64, |n, &b| {
+        n.checked_mul(256)
+            .and_then(|n| n.checked_add(b as u64))
+            .ok_or(Error::Invalid("binary size overflow"))
+    })
+}
+fn put_size(out: &mut [u8], value: u64) -> Result<(), Error> {
+    if value < (1u64 << 33) {
+        return put_number(out, value);
+    }
+    out.fill(0);
+    out[0] = 0x80;
+    let end = out.len();
+    out[end - 8..].copy_from_slice(&value.to_be_bytes());
+    Ok(())
 }
 fn text(bytes: &[u8]) -> Result<&str, Error> {
     let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
@@ -158,7 +181,7 @@ impl Header {
             format!("{prefix}/{name}")
         };
         let kind = Kind::decode(block[156])?;
-        let size = number(&block[124..136])?;
+        let size = size_number(&block[124..136])?;
         if !kind.has_payload() && size != 0 {
             return Err(Error::Invalid("non-data member size"));
         }
@@ -208,7 +231,7 @@ impl Header {
         put_number(&mut block[100..108], self.mode as u64)?;
         put_number(&mut block[108..116], self.uid)?;
         put_number(&mut block[116..124], self.gid)?;
-        put_number(&mut block[124..136], self.size)?;
+        put_size(&mut block[124..136], self.size)?;
         put_number(&mut block[136..148], self.mtime)?;
         block[156] = self.kind.byte();
         put_text(&mut block[157..257], &self.link)?;

@@ -95,6 +95,9 @@ impl Timestamp {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Member<'a> {
+    /// Logical file length for explicitly admitted GNU sparse 1.0 contents.
+    /// `size` remains the stored map-plus-data payload length.
+    pub sparse_size: Option<u64>,
     pub path: &'a str,
     pub link: &'a str,
     pub kind: tar::Kind,
@@ -114,11 +117,20 @@ pub fn resolve<'a>(
     records: &[pax::Record<'a>],
     limits: pax::Limits,
 ) -> Result<Member<'a>, Error> {
+    resolve_mode(header, records, limits, false)
+}
+pub(crate) fn resolve_mode<'a>(
+    header: &'a tar::Header,
+    records: &[pax::Record<'a>],
+    limits: pax::Limits,
+    sparse: bool,
+) -> Result<Member<'a>, Error> {
     pax::encoded_len(records, limits).map_err(Error::Pax)?;
     if matches!(header.kind, tar::Kind::PaxLocal | tar::Kind::PaxGlobal) {
         return Err(Error::Unsupported);
     }
     let mut result = Member {
+        sparse_size: None,
         path: &header.path,
         link: &header.link,
         kind: header.kind,
@@ -134,17 +146,43 @@ pub fn resolve<'a>(
         gname: &header.gname,
     };
     let mut time = None;
+    let mut sparse_fields = [None; 4];
+    let mut path_override = false;
+    let mut size_override = false;
     for record in records {
         match record.key {
-            "path" => result.path = record.value,
+            "path" => {
+                result.path = record.value;
+                path_override = true;
+            }
             "linkpath" => result.link = record.value,
-            "size" => result.size = unsigned(record.value)?,
+            "size" => {
+                result.size = unsigned(record.value)?;
+                size_override = true;
+            }
             "uid" => result.uid = unsigned(record.value)?,
             "gid" => result.gid = unsigned(record.value)?,
             "mtime" => time = Some(Timestamp::parse(record.value)?),
             "uname" => result.uname = record.value,
             "gname" => result.gname = record.value,
+            "GNU.sparse.major" if sparse => sparse_fields[0] = Some(record.value),
+            "GNU.sparse.minor" if sparse => sparse_fields[1] = Some(record.value),
+            "GNU.sparse.name" if sparse => sparse_fields[2] = Some(record.value),
+            "GNU.sparse.realsize" if sparse => sparse_fields[3] = Some(record.value),
             _ => return Err(Error::Unsupported),
+        }
+    }
+    if sparse_fields.iter().any(Option::is_some) {
+        if sparse_fields[0] != Some("1") || sparse_fields[1] != Some("0") {
+            return Err(Error::Unsupported);
+        }
+        if path_override || size_override || header.kind != tar::Kind::File {
+            return Err(Error::Invalid);
+        }
+        result.path = sparse_fields[2].ok_or(Error::Invalid)?;
+        result.sparse_size = Some(unsigned(sparse_fields[3].ok_or(Error::Invalid)?)?);
+        if !envelope::canonical(result.path, false, false) {
+            return Err(Error::Invalid);
         }
     }
     result.mtime = match time {

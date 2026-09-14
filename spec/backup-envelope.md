@@ -75,8 +75,9 @@ The ordinary-member admission interface resolves a single local PAX block
 before payload-size selection. It accepts `path`, `linkpath`, `size`, `uid`,
 `gid`, `mtime`, `uname` and `gname`. Other keywords require a dedicated
 preservation-profile handler and cause explicit refusal at this interface.
-This includes sparse, attribute and security transports; ignoring their records
-is not content recovery. Duplicate keywords and configured record/byte budgets
+The explicit [sparse-aware interface](backup-sparse.md) admits GNU sparse 1.0
+with separate logical and stored sizes. Default constructors refuse sparse,
+attribute and security transports; ignoring their records is not content recovery. Duplicate keywords and configured record/byte budgets
 are checked even for directly supplied records.
 
 Resolved paths obey the body namespace rules above. Hard-link targets obey the
@@ -119,3 +120,13 @@ completion cannot be recovered by skipping the failed member. Empty or finished
 payload reads return zero. An integrity receipt is exposed only after ordinary
 member admission, envelope verification and actual EOF, with no pending local
 records. It does not certify preservation completeness or successful restoration.
+
+
+## Raw size extension
+
+Under [ADR-088](../adr/ADR-088-sparse-stored-size-field.md), the raw 12-byte
+size field supports checked positive GNU binary encoding beyond the 33-bit
+octal limit. Other numeric fields retain octal encoding. Negative/overflowing
+binary sizes are invalid. Ordinary PAX size overrides retain their admission
+contract; sparse members instead carry stored size only in the raw header.
+See [sparse header admission](backup-sparse.md#header-admission).

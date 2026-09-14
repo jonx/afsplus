@@ -62,3 +62,13 @@ This implementation uses unsigned 64-bit seek addresses and explicit host quotas
 Archives exceeding a host file/seek limit require qualified segmented backing
 storage before that workload is supported; this is an owned large-archive gate,
 not permission to omit source data or weaken integrity verification.
+
+
+## Explicit sparse admission
+
+Sparse-aware capture and replay preserve the distinction between stored payload
+length and logical file length under [ADR-087](../adr/ADR-087-sparse-archive-content.md)
+and [ADR-088](../adr/ADR-088-sparse-stored-size-field.md). Ordinary constructors
+refuse these fields. The [content consumer](backup-sparse.md) must validate the
+map before writes; verified scratch certifies input integrity and header
+admission, not sparse-map semantics or complete restoration.
