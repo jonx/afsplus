@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Cross-read initialized reservations through the portable C reader](#2026-09-14--cross-read-initialized-reservations-through-the-portable-c-reader)
 - [2026-09-14 — Initialize private unwritten reservations without replacement data allocation](#2026-09-14--initialize-private-unwritten-reservations-without-replacement-data-allocation)
 - [2026-09-14 — Add checked destination reservation restoration](#2026-09-14--add-checked-destination-reservation-restoration)
 - [2026-09-14 — Delegate decisions while the owner is away](#2026-09-14--delegate-decisions-while-the-owner-is-away)
@@ -69,6 +70,29 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Cross-read initialized reservations through the portable C reader
+
+Added deterministic baseline-format images before and after private reservation
+initialization, plus a fallback image whose newer checkpoint is invalidated.
+The fallback keeps the changed physical payload while the older mapping must
+return logical zeros. A separate C probe verifies all 16,384 logical bytes in
+257-byte chunks. Strict C99 and ASan/UBSan runs passed the three images, with
+75/108/75 callback reads; negative controls rejected initialized data when zeros
+were expected.
+
+The probe uses 6 KiB caller scratch for directory traversal and 4 KiB for object
+lookup/file reads; a smaller lookup workspace is refused before I/O. These
+bounds exclude stack, stdio and process memory. The configured/default m68k
+compiler path was unavailable, so the optional compile gate reported SKIP;
+m68000 runtime and total-resource qualification remain unverified. The fixture
+has no snapshot-registry feature, keeping that portable consumer gate separate.
+
+Validation: 350 workspace/all-features tests passed, zero failed and 10 were
+ignored. Strict and sanitized C reads passed six image cases plus two negative
+controls. Formatting, Clippy, shell syntax, documentation, three checker
+fixtures and whitespace checks passed. The m68000 compile gate explicitly skipped.
+
 
 ## 2026-09-14 — Initialize private unwritten reservations without replacement data allocation
 

@@ -106,7 +106,25 @@ metadata and checkpoint barrier. Before publication, old logical bytes must
 survive despite changed unwritten physical payload. Uncertain checkpoint
 publication must reject subsequent mutation until reconciliation/remount.
 
-Portable C cross-reading of initialized and fallback images, older-target
-resource profiles, bounded fragmented-layout traversal and sustained near-full
-reservation workloads require separate evidence before their qualification.
-Existing record encoding compatibility alone cannot establish those results.
+Run [check-reservation-portability.sh](../tools/check-reservation-portability.sh)
+for independent portable C reads of original, initialized and older-checkpoint
+fallback images. The [fixture generator](../crates/afsplus-check/src/bin/afsplus-reservation-fixture.rs)
+uses the baseline format without snapshot-registry negotiation; the fallback
+image invalidates the newer checkpoint after physical initialization. Require
+exact logical zeros from the older unwritten mapping, and exact initialized
+bytes plus zero tails from the newer written mapping. This does not qualify a
+C snapshot-registry consumer.
+
+The [C probe](../portable/c/tests/reservation_probe.c) uses 6 KiB scratch for
+directory traversal, 4 KiB for object lookup/file reads and a 257-byte data
+buffer. It must reject insufficient lookup scratch before I/O. Strict C99 and
+ASan/UBSan runs must pass all three images, and an initialized-image-as-zeros
+negative control must fail with a byte mismatch. Report callback reads. Caller
+scratch sizes exclude stack frames, stdio and host process memory.
+
+An executable `AFSPLUS_M68K_CC` or the script's documented default toolchain
+path enables compile-only M68000 checks and a maximum static reader frame
+report. Missing compiler paths produce an explicit skip. Compilation is separate
+from emulator/hardware execution and total stack-depth/RAM qualification.
+Older-target resource profiles, bounded fragmented-layout traversal and sustained
+near-full reservation workloads require separate evidence.
