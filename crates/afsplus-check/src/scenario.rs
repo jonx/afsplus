@@ -34,10 +34,18 @@ pub enum Operation {
     Sync,
     Remount,
 }
+#[derive(Debug, Clone, Copy)]
+pub struct DiagnosticProfile {
+    pub categories: u8,
+    pub sink_capacity: usize,
+    pub disconnect_before: Option<usize>,
+}
+
 pub struct Plan {
     // None identifies the original version-1 default profile.
     cache_profile: Option<usize>,
     flight_capacity: Option<usize>,
+    diagnostic_profile: Option<DiagnosticProfile>,
     blocks: u64,
     region: u32,
     log_slots: u16,
@@ -59,17 +67,32 @@ pub struct Event {
 pub struct FlightBatch {
     pub events: Vec<afsplus_core::flight::Event>,
     pub dropped_total: u64,
+    pub filtered_total: u64,
+    pub sequence_total: u64,
+    pub attempt_total: u64,
+    pub delivered_total: u64,
+    pub missed_total: u64,
+    pub sink_closed: bool,
+}
+
+fn drain_flight(ring: &mut afsplus_core::flight::FlightRecorder) -> FlightBatch {
+    FlightBatch {
+        events: ring.drain().collect(),
+        dropped_total: ring.dropped(),
+        filtered_total: ring.filtered(),
+        sequence_total: ring.sequence(),
+        attempt_total: ring.attempt(),
+        delivered_total: ring.delivered(),
+        missed_total: ring.missed(),
+        sink_closed: ring.sink_closed(),
+    }
 }
 
 fn capture_flight<D: BlockDevice>(volume: &mut afsplus_core::Volume<D>) -> Option<FlightBatch> {
     let mut ring = volume.replace_flight_recorder(None)?;
-    let events = ring.drain().collect();
-    let dropped_total = ring.dropped();
+    let batch = drain_flight(&mut ring);
     volume.replace_flight_recorder(Some(ring));
-    Some(FlightBatch {
-        events,
-        dropped_total,
-    })
+    Some(batch)
 }
 pub struct Run {
     pub events: Vec<Event>,
@@ -219,11 +242,33 @@ impl Plan {
         let input = std::str::from_utf8(wire).map_err(|_| "scenario wire UTF-8")?;
         let mut lines = input.lines();
         let version = lines.next();
-        if !matches!(version, Some("AFSPSC01" | "AFSPSC02" | "AFSPSC03")) {
+        if !matches!(
+            version,
+            Some("AFSPSC01" | "AFSPSC02" | "AFSPSC03" | "AFSPSC04")
+        ) {
             return Err("scenario protocol version".into());
         }
         let mut header: Vec<_> = lines.next().ok_or("missing geometry")?.split(' ').collect();
-        let flight_capacity = if version == Some("AFSPSC03") {
+        let diagnostic_profile = if version == Some("AFSPSC04") {
+            let disconnect_before = match header.pop().ok_or("missing disconnect index")? {
+                "none" => None,
+                value => Some(integer(value, 1024)? as usize),
+            };
+            let sink_capacity =
+                integer(header.pop().ok_or("missing sink capacity")?, 256)? as usize;
+            let categories = integer(header.pop().ok_or("missing category mask")?, 15)? as u8;
+            if sink_capacity == 0 && disconnect_before.is_some() {
+                return Err("disconnect requires an attached sink".into());
+            }
+            Some(DiagnosticProfile {
+                categories,
+                sink_capacity,
+                disconnect_before,
+            })
+        } else {
+            None
+        };
+        let flight_capacity = if matches!(version, Some("AFSPSC03" | "AFSPSC04")) {
             let capacity = integer(header.pop().ok_or("missing flight capacity")?, 256)? as usize;
             if capacity == 0 {
                 return Err("zero flight capacity".into());
@@ -232,7 +277,7 @@ impl Plan {
         } else {
             None
         };
-        let cache_profile = if matches!(version, Some("AFSPSC02" | "AFSPSC03")) {
+        let cache_profile = if matches!(version, Some("AFSPSC02" | "AFSPSC03" | "AFSPSC04")) {
             Some(match header.pop() {
                 Some("2") => 2,
                 Some("4") => 4,
@@ -323,6 +368,7 @@ impl Plan {
         Ok(Self {
             cache_profile,
             flight_capacity,
+            diagnostic_profile,
             blocks,
             region,
             log_slots,
@@ -333,6 +379,10 @@ impl Plan {
         self.run_with_limits(RecordingLimits::default())
     }
     /// Explicit v2 resource profile; v1 keeps its original unlimited contract.
+    pub fn diagnostic_profile(&self) -> Option<DiagnosticProfile> {
+        self.diagnostic_profile
+    }
+
     pub fn flight_capacity(&self) -> Option<usize> {
         self.flight_capacity
     }
@@ -355,7 +405,7 @@ impl Plan {
     pub fn run_with_limits(&self, limits: RecordingLimits) -> Result<Run, String> {
         match self.flight_capacity {
             Some(capacity) => self.run_with_flight(limits, capacity),
-            None => self.run_observed(limits, None),
+            None => self.run_observed(limits, None, None, None),
         }
     }
 
@@ -366,17 +416,50 @@ impl Plan {
         if !(1..=256).contains(&capacity) {
             return Err("scenario flight capacity must be 1..=256".into());
         }
-        let ring = afsplus_core::flight::FlightRecorder::new(
+        let mut ring = afsplus_core::flight::FlightRecorder::new(
             std::num::NonZeroUsize::new(capacity).unwrap(),
         )
         .map_err(|e| e.to_string())?;
-        self.run_observed(limits, Some(ring))
+        let mut receiver = None;
+        let mut disconnect_before = None;
+        if let Some(profile) = self.diagnostic_profile {
+            use afsplus_core::flight::{Categories, Category, Event, SinkResult};
+            use std::sync::mpsc::{sync_channel, TrySendError};
+            let mut categories = Categories::NONE;
+            for (bit, category) in [
+                Category::Transaction,
+                Category::Checkpoint,
+                Category::Io,
+                Category::Error,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if profile.categories & (1 << bit) != 0 {
+                    categories = categories.with(category);
+                }
+            }
+            ring.set_categories(categories);
+            if profile.sink_capacity != 0 {
+                let (sender, rx) = sync_channel::<Event>(profile.sink_capacity);
+                ring.replace_sink(Some(Box::new(move |event| match sender.try_send(event) {
+                    Ok(()) => SinkResult::Accepted,
+                    Err(TrySendError::Full(_)) => SinkResult::Busy,
+                    Err(TrySendError::Disconnected(_)) => SinkResult::Closed,
+                })));
+                receiver = Some(rx);
+                disconnect_before = profile.disconnect_before;
+            }
+        }
+        self.run_observed(limits, Some(ring), receiver, disconnect_before)
     }
 
     fn run_observed(
         &self,
         limits: RecordingLimits,
         flight: Option<afsplus_core::flight::FlightRecorder>,
+        mut receiver: Option<std::sync::mpsc::Receiver<afsplus_core::flight::Event>>,
+        disconnect_before: Option<usize>,
     ) -> Result<Run, String> {
         let mut base = MemoryBackend::new(4096, self.blocks);
         mkfs(
@@ -421,6 +504,14 @@ impl Plan {
         let mut failure = None;
         let mut events = Vec::with_capacity(self.operations.len());
         for (index, op) in self.operations.iter().enumerate() {
+            // No concurrent consumer: service/disconnection is a deterministic
+            // scenario input, outside the filesystem operation being observed.
+            if let Some(rx) = &receiver {
+                while rx.try_recv().is_ok() {}
+            }
+            if disconnect_before == Some(index) {
+                receiver = None;
+            }
             let now = Timespec {
                 seconds: index as i64 + 1,
                 nanoseconds: 0,
@@ -450,10 +541,7 @@ impl Plan {
                             end_block_operation: recorder.0.borrow().log.len(),
                             object_id: 0,
                             success: false,
-                            flight: flight.as_mut().map(|ring| FlightBatch {
-                                events: ring.drain().collect(),
-                                dropped_total: ring.dropped(),
-                            }),
+                            flight: flight.as_mut().map(drain_flight),
                         });
                         return Ok(finish(
                             base,

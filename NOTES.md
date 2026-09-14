@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Replay selected diagnostics and bounded consumer delivery](#2026-09-14--replay-selected-diagnostics-and-bounded-consumer-delivery)
 - [2026-09-14 — Filter commit diagnostics and attach a bounded live consumer](#2026-09-14--filter-commit-diagnostics-and-attach-a-bounded-live-consumer)
 - [2026-09-14 — Exercise allocation codecs and reject undersized encoder output](#2026-09-14--exercise-allocation-codecs-and-reject-undersized-encoder-output)
 - [2026-09-14 — Qualify seeded semantic properties and reconcile Stage A accounting](#2026-09-14--qualify-seeded-semantic-properties-and-reconcile-stage-a-accounting)
@@ -132,6 +133,41 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Replay selected diagnostics and bounded consumer delivery
+
+Semantic profile 4 and AFSFLT03 bind category selection and a deterministic
+bounded consumer to persistent replay. Sequence/attempt endpoints make fully
+filtered batches explicit; separate loss and delivery counters obey independently
+checked conservation rules. The queue is serviced between operations and can
+be disconnected at a specified operation. Earlier protocol bytes are preserved.
+This adds no on-disk filesystem fields and does not model arbitrary external
+consumer timing.
+
+The Rust scenario tests passed 640 profile/mask/ring/consumer combinations with
+unchanged I/O and images, plus malformed-header admission. Twenty Python replay
+tests passed, including fresh-process comparisons, inconsistent counters and
+identities, preserved bundles, minimized failures and five selected-cut variants.
+A refused duplicate create preserves the prior counters without inventing a
+commit failure or delivery to a disconnected consumer. Seven scenario-admission
+and ten rebuilt-comparison contract tests passed too.
+
+Evidence is retained in `build/selected-diagnostics-9xqp6ug_`: 24 successful
+version-4 bundles, a wrong-byte failure and its minimized reproducer, five cut
+bundles and eight historical bundles. All were replayed; historical flight bytes
+match the retained originals exactly. The first source companion binds revision
+`24c36c68d7a17bf7019a9037a558dfecfa22aacd` and working-tree digest
+`26356be94f20d70d6dbc1a48bfde749a601bfc64f93742b23fa27a3638574b70`.
+The final source companion includes the additional runtime-refusal regression,
+with working-tree digest
+`9a5a2614a2de1da8be4f546e4630b29d8accac4bed7bd5cdf0c5c8120223ad3b`.
+Final sequential validation passed 540 workspace tests, zero failures and ten
+ignored tests across 88 result groups, plus formatting, Clippy and 28,672 codec
+mutation cases. Documentation and all 13 checker fixtures passed; 256 code/build
+files matched the final source companion.
+API-wide identities, wider internal subsystems and real-consumer scheduling
+qualification remain in the full audit queue.
+
 
 ## 2026-09-14 — Filter commit diagnostics and attach a bounded live consumer
 

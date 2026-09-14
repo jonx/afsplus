@@ -174,7 +174,9 @@ fn run() -> Result<(), String> {
     // Semantic flight records bind operation indices and resolved object IDs to
     // half-open successful block-log ranges. V2 additionally carries internal
     // commit-tail batches, including explicit ring-loss accounting.
-    let mut flight = if plan.flight_capacity().is_some() {
+    let mut flight = if plan.diagnostic_profile().is_some() {
+        b"AFSFLT03"
+    } else if plan.flight_capacity().is_some() {
         b"AFSFLT02"
     } else {
         b"AFSFLT01"
@@ -183,6 +185,16 @@ fn run() -> Result<(), String> {
     flight.extend_from_slice(&(run.events.len() as u32).to_le_bytes());
     if let Some(capacity) = plan.flight_capacity() {
         flight.extend_from_slice(&(capacity as u32).to_le_bytes());
+    }
+    if let Some(profile) = plan.diagnostic_profile() {
+        flight.extend_from_slice(&(profile.categories as u32).to_le_bytes());
+        flight.extend_from_slice(&(profile.sink_capacity as u32).to_le_bytes());
+        flight.extend_from_slice(
+            &profile
+                .disconnect_before
+                .map_or(u32::MAX, |n| n as u32)
+                .to_le_bytes(),
+        );
     }
     for event in run.events {
         flight.extend_from_slice(&(event.operation as u32).to_le_bytes());
@@ -194,6 +206,18 @@ fn run() -> Result<(), String> {
             use afsplus_core::flight::EventKind;
             let batch = event.flight.ok_or("missing internal flight batch")?;
             flight.extend_from_slice(&batch.dropped_total.to_le_bytes());
+            if plan.diagnostic_profile().is_some() {
+                for value in [
+                    batch.filtered_total,
+                    batch.sequence_total,
+                    batch.attempt_total,
+                    batch.delivered_total,
+                    batch.missed_total,
+                ] {
+                    flight.extend_from_slice(&value.to_le_bytes());
+                }
+                flight.push(u8::from(batch.sink_closed));
+            }
             flight.extend_from_slice(&(batch.events.len() as u32).to_le_bytes());
             for internal in batch.events {
                 flight.extend_from_slice(&internal.sequence.to_le_bytes());

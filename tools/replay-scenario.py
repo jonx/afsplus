@@ -51,10 +51,19 @@ def validate(encoded):
     scenario = json.loads(encoded, object_pairs_hook=unique)
     if not isinstance(scenario, dict):
         raise ValueError("scenario must be an object")
-    version = integer(scenario.get("version"), 1, 3)
-    fields(scenario, "version volume operations expected" + (" flight_capacity" if version == 3 else ""))
-    if version == 3:
+    version = integer(scenario.get("version"), 1, 4)
+    fields(scenario, "version volume operations expected" + (" flight_capacity" if version >= 3 else "")
+           + (" flight_categories flight_sink" if version == 4 else ""))
+    if version >= 3:
         integer(scenario["flight_capacity"], 1, 256)
+    if version == 4:
+        integer(scenario["flight_categories"], 0, 15)
+        sink = scenario["flight_sink"]
+        if sink is not None:
+            fields(sink, "capacity disconnect_before")
+            integer(sink["capacity"], 1, 256)
+            if sink["disconnect_before"] is not None:
+                integer(sink["disconnect_before"], 0, MAX_OPS)
     volume = scenario["volume"]
     fields(volume, "block_size blocks region_size log_slots" + (" tree_cache_pages" if version >= 2 else ""))
     if version >= 2:
@@ -144,9 +153,16 @@ def compile_commands(encoded):
     if scenario["version"] >= 2:
         lines[0] = "AFSPSC02"
         lines[1] += " " + str(volume["tree_cache_pages"])
-    if scenario["version"] == 3:
+    if scenario["version"] >= 3:
         lines[0] = "AFSPSC03"
         lines[1] += " " + str(scenario["flight_capacity"])
+    if scenario["version"] == 4:
+        lines[0] = "AFSPSC04"
+        sink = scenario["flight_sink"]
+        capacity = 0 if sink is None else sink["capacity"]
+        disconnect = None if sink is None else sink["disconnect_before"]
+        lines[1] += " {} {} {}".format(scenario["flight_categories"], capacity,
+                                      "none" if disconnect is None else disconnect)
     for operation in scenario["operations"]:
         kind = operation["op"]
         if kind in ("mkdir", "create"):

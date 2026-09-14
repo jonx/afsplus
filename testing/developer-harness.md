@@ -33,6 +33,7 @@
 - [Automated host reconstruction](#automated-host-reconstruction)
 - [Common checkpoint-tail flight recorder](#common-checkpoint-tail-flight-recorder)
 - [Category selection and live diagnostics](#category-selection-and-live-diagnostics)
+- [Selected-category and live-delivery bundles](#selected-category-and-live-delivery-bundles)
 - [Internal diagnostic bundles](#internal-diagnostic-bundles)
 
 <!-- /toc -->
@@ -1025,11 +1026,66 @@ four-profile failure checks. Unit cases cover mask changes inside an attempt,
 drain, exhaustion, Busy/Closed behaviour, replacement and Send/Sync preservation.
 These gates do not establish arbitrary adapter safety or other subsystem coverage.
 
-Serialized semantic profiles use ALL categories and no live adapter. Their
-AFSPSC03/AFSFLT02 bytes and prior replay identities are unchanged. Exporting
-selected categories, filtered counts or live delivery observations requires a
-versioned profile with explicit admission and replay rules; the existing format
-must not interpret intentional gaps as overwrites.
+Semantic profiles through version 3 use ALL categories and no live adapter.
+Their AFSPSC03/AFSFLT02 bytes and prior replay identities are unchanged.
+[Version 4](#selected-category-and-live-delivery-bundles) binds selected categories
+and deterministic live-delivery observations without interpreting intentional
+gaps as overwrites.
+
+## Selected-category and live-delivery bundles
+
+Semantic JSON version 4 includes the version-3 cache and `flight_capacity`
+requirements, plus `flight_categories` (integer 0–15) and `flight_sink`. Category
+bits are transaction=1, checkpoint=2, I/O=4, error=8. Zero selects no events but
+preserves sequence and attempt endpoints. `flight_sink` is null for no adapter,
+or an object with `capacity` (1–256) and `disconnect_before` (null or 0–1024).
+
+The deterministic consumer empties its bounded queue before each operation,
+then disconnects before the designated zero-based operation index. An index
+beyond the scenario length has no effect, allowing minimization to retain its
+original policy. Transport processing occurs outside the filesystem operation;
+callbacks use nonblocking queue admission. This is a reproducible diagnostic
+consumer fixture, not a model of arbitrary external scheduling or a network trace.
+
+The `AFSPSC04` geometry line appends category mask, sink capacity and disconnect
+index after the version-3 fields. Disabled sink capacity is zero; absent disconnect
+is the literal `none`. A zero-capacity sink with a disconnect index is rejected.
+All scenario, image, operation and retained-event limits also apply to this profile.
+
+`flight-recorder.bin` uses `AFSFLT03`. The 28-byte header consists of the magic,
+u32 operation count, u32 ring capacity, u32 category mask, u32 sink capacity and
+u32 disconnect index (0xffffffff for absent). Each original 29-byte operation
+record is followed by a 53-byte batch header: cumulative dropped, filtered,
+sequence endpoint, attempt endpoint, delivered and missed counts (six u64s),
+closed (u8), retained count (u32). Retained events use the unchanged 26-byte
+layout and kind codes from [version 3](#internal-diagnostic-bundles). Integers
+are little-endian and booleans are exactly zero or one.
+
+Admission binds the header to the scenario and checks monotonic endpoints and
+counters, selected kinds, ordered event identities and retained bounds. Per
+operation, generated events are the sequence-endpoint increase; selected events
+subtract the filtered-count increase. The retained count must equal the lesser
+of selected events and ring capacity, and the dropped-count increase must equal
+selected minus retained. Overwritten events precede the first retained event.
+These equations also cover empty batches and fully filtered trailing events.
+
+Live-delivery increases are derived independently from selected count, queue
+capacity and the disconnect index: before disconnection, accepted is the lesser
+of capacity and selected; the rest is missed. After disconnection all selected
+events are missed. Closed becomes true only after an attempted delivery to the
+disconnected consumer. A disabled sink has zero delivery counts and false Closed.
+No persisted counter is an attestation; exact replay additionally checks the
+source/executable identity, actual artifact bytes and independent semantic oracle.
+
+The failure signature binds cache, ring capacity, mask and complete sink policy.
+Minimization retains that policy, and selected-cut bundles retain the original
+full recording under the same durability-evidence limits as version 3. The
+[scenario tests](../crates/afsplus-check/tests/scenario.rs) compare 640
+profile/mask/capacity/consumer combinations against version-3 I/O and images.
+[Replay tests](../tools/test-afsptest.py) exercise fresh processes, byte-preserved
+bundles, malformed fields, counter conservation, minimization and selected cuts.
+API-wide identities and additional internal subsystems have separate coverage
+requirements; an empty remount batch does not establish recovery instrumentation.
 
 ## Internal diagnostic bundles
 

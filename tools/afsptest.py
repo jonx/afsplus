@@ -239,6 +239,53 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
     return records, success
 
 
+def selected_batch(flight, offset, previous, capacity, profile, index):
+    if len(flight) - offset < 53:
+        raise ValueError("flight truncated selected batch")
+    lost, filtered, sequence, attempt, delivered, missed, closed, retained = struct.unpack(
+        "<QQQQQQBI", flight[offset:offset + 53])
+    offset += 53
+    old_sequence, old_attempt, old_lost, old_filtered, old_delivered, old_missed, old_closed = previous
+    if (sequence < old_sequence or attempt < old_attempt or lost < old_lost
+            or filtered < old_filtered or delivered < old_delivered or missed < old_missed
+            or closed not in (0, 1) or attempt > sequence
+            or attempt - old_attempt > sequence - old_sequence
+            or (sequence == 0) != (attempt == 0)):
+        raise ValueError("flight selected counters or identities")
+    selected = sequence - old_sequence - (filtered - old_filtered)
+    if (selected < 0 or retained != min(capacity, selected)
+            or lost - old_lost != selected - retained):
+        raise ValueError("flight filtered/lost conservation")
+    sink = profile["flight_sink"]
+    if sink is None:
+        expected_delivered = expected_missed = expected_closed = 0
+    else:
+        disconnected = sink["disconnect_before"] is not None and index >= sink["disconnect_before"]
+        accepted = 0 if disconnected else min(sink["capacity"], selected)
+        expected_delivered = old_delivered + accepted
+        expected_missed = old_missed + selected - accepted
+        expected_closed = bool(old_closed or (disconnected and selected))
+    if (delivered, missed, closed) != (expected_delivered, expected_missed, expected_closed):
+        raise ValueError("flight live delivery differs from deterministic profile")
+    if len(flight) - offset < retained * 26:
+        raise ValueError("flight truncated selected event")
+    cursor, observed_attempt = old_sequence, old_attempt
+    categories = {1: 1, 2: 4, 3: 2, 4: 2, 5: 2, 6: 1, 7: 8}
+    for ordinal in range(retained):
+        seq, tx, generation, kind, remount = struct.unpack("<QQQBB", flight[offset:offset + 26])
+        offset += 26
+        if (not cursor < seq <= sequence or not observed_attempt <= tx <= attempt
+                or tx == 0 or tx > seq or generation == 0 or kind not in categories
+                or not profile["flight_categories"] & categories.get(kind, 0)
+                or remount not in (0, 1) or (kind == 6 and remount)
+                or (kind == 1 and tx == observed_attempt)):
+            raise ValueError("flight selected identity/category/event")
+        if ordinal == 0 and seq - old_sequence - 1 < lost - old_lost:
+            raise ValueError("flight overwritten events are not a prefix")
+        cursor, observed_attempt = seq, tx
+    return offset, (sequence, attempt, lost, filtered, delivered, missed, closed)
+
+
 def validate_trace(records):
     """Independent wire/base/result admission before semantic execution."""
     scenario_value = scenario.validate(records["operations.afstrace"])
@@ -281,8 +328,9 @@ def validate_trace(records):
     if offset != len(wire) - 32:
         raise ValueError("block trace trailing records")
     flight = records["flight-recorder.bin"]
-    internal = scenario_value["version"] == 3
-    magic = b"AFSFLT02" if internal else b"AFSFLT01"
+    internal = scenario_value["version"] >= 3
+    selected = scenario_value["version"] == 4
+    magic = b"AFSFLT03" if selected else b"AFSFLT02" if internal else b"AFSFLT01"
     if len(flight) < 12 or flight[:8] != magic:
         raise ValueError("flight version")
     events = struct.unpack("<I", flight[8:12])[0]
@@ -297,8 +345,20 @@ def validate_trace(records):
         if capacity != scenario_value["flight_capacity"]:
             raise ValueError("flight capacity differs from scenario")
         offset = 16
+    if selected:
+        if len(flight) < 28:
+            raise ValueError("flight selected profile header")
+        categories, sink_capacity, disconnect = struct.unpack("<III", flight[16:28])
+        sink = scenario_value["flight_sink"]
+        expected_sink = 0 if sink is None else sink["capacity"]
+        expected_disconnect = None if sink is None else sink["disconnect_before"]
+        expected_disconnect = 0xffffffff if expected_disconnect is None else expected_disconnect
+        if (categories, sink_capacity, disconnect) != (scenario_value["flight_categories"], expected_sink, expected_disconnect):
+            raise ValueError("flight selected profile differs from scenario")
+        offset = 28
     end = 0
     ranges = []
+    selected_state = (0, 0, 0, 0, 0, 0, 0)
     sequence = attempt = dropped = 0
     for index in range(events):
         if len(flight) - offset < 29:
@@ -311,7 +371,9 @@ def validate_trace(records):
             raise ValueError("flight continued past failure")
         end = last
         ranges.append((first, last))
-        if internal:
+        if selected:
+            offset, selected_state = selected_batch(flight, offset, selected_state, capacity, scenario_value, index)
+        elif internal:
             if len(flight) - offset < 12:
                 raise ValueError("flight truncated batch")
             lost, retained = struct.unpack("<QI", flight[offset:offset + 12])
@@ -505,8 +567,11 @@ def failure_signature(records):
     def pack(signature):
         if value["version"] >= 2:
             signature["tree_cache_pages"] = value["volume"]["tree_cache_pages"]
-        if value["version"] == 3:
+        if value["version"] >= 3:
             signature["flight_capacity"] = value["flight_capacity"]
+        if value["version"] == 4:
+            signature["flight_categories"] = value["flight_categories"]
+            signature["flight_sink"] = value["flight_sink"]
         return encoded(signature)
     if actual["failure"] is not None:
         failure = actual["failure"]

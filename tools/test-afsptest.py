@@ -26,6 +26,116 @@ def fixture():
 
 
 class ReplayTests(unittest.TestCase):
+    def test_v4_filtered_and_live_profiles_replay_without_changing_images(self):
+        for pages in (2, 4, 8, "unlimited"):
+            baseline = fixture()
+            baseline.update(version=3, flight_capacity=1)
+            baseline["volume"]["tree_cache_pages"] = pages
+            plain, success = tool.execute(tool.encoded(baseline), BINARY)
+            self.assertTrue(success)
+            for mask in (0, 1, 2, 4, 8, 15):
+                for sink in (None, {"capacity": 1, "disconnect_before": 2}):
+                    value = dict(baseline, version=4, flight_categories=mask, flight_sink=sink)
+                    records, success = tool.execute(tool.encoded(value), BINARY)
+                    self.assertTrue(success)
+                    self.assertEqual(records["flight-recorder.bin"][:8], b"AFSFLT03")
+                    for role in ("start.img", "result.img", "block-io.afstrace", "actual.json"):
+                        self.assertEqual(records[role], plain[role])
+                    with tempfile.TemporaryDirectory(prefix="afsplus-selected-flight-") as temporary:
+                        path = Path(temporary) / "bundle"
+                        tool.bundle.publish(path, records)
+                        before = {p.name: p.read_bytes() for p in path.iterdir()}
+                        replay = self.cli("replay", path)
+                        self.assertEqual(replay.returncode, 0, replay.stderr.decode())
+                        self.assertEqual(before, {p.name: p.read_bytes() for p in path.iterdir()})
+
+    def test_v4_runtime_failure_does_not_invent_commit_or_disconnect_events(self):
+        for pages in (2, 4, 8, "unlimited"):
+            for mask in (8, 15):
+                value = fixture()
+                first = value["operations"][0]
+                value["operations"] = [first, dict(first, label="other", data="99"), {"op": "sync"}]
+                value["expected"][0]["data"] = "00ff"
+                value.update(version=4, flight_capacity=1, flight_categories=mask,
+                             flight_sink={"capacity": 1, "disconnect_before": 1})
+                value["volume"]["tree_cache_pages"] = pages
+                records, success = tool.execute(tool.encoded(value), BINARY)
+                self.assertFalse(success)
+                actual = json.loads(records["actual.json"])
+                self.assertEqual(actual["failure"]["operation"], 1)
+                self.assertEqual(actual["entries"], value["expected"])
+                flight = records["flight-recorder.bin"]
+                self.assertEqual(struct.unpack_from("<I", flight, 8)[0], 2)
+                first_batch = struct.unpack_from("<QQQQQQBI", flight, 28+29)
+                second = 28+29+53+26*first_batch[-1]
+                self.assertEqual(flight[second+28], 0)
+                last_batch = struct.unpack_from("<QQQQQQBI", flight, second+29)
+                self.assertEqual(last_batch[:-1], first_batch[:-1])
+                self.assertEqual(last_batch[-1], 0)
+                self.assertEqual(last_batch[-2], 0)
+                tool.validate_trace(records)
+
+    def test_v4_selected_counters_and_profile_are_independently_checked(self):
+        value = fixture()
+        value.update(version=4, flight_capacity=1, flight_categories=2,
+                     flight_sink={"capacity": 1, "disconnect_before": 2})
+        value["volume"]["tree_cache_pages"] = 2
+        records, success = tool.execute(tool.encoded(value), BINARY)
+        self.assertTrue(success)
+        batch, event = 28 + 29, 28 + 29 + 53
+        self.assertEqual(struct.unpack_from("<QQQQQQBI", records["flight-recorder.bin"], batch),
+                         (2, 3, 6, 1, 1, 2, 0, 1))
+        changes = [(16, "I", 15), (20, "I", 0), (24, "I", 3),
+            (batch, "Q", 0), (batch+8, "Q", 0), (batch+16, "Q", 7),
+            (batch+24, "Q", 0), (batch+32, "Q", 2), (batch+40, "Q", 0),
+            (batch+48, "B", 1), (batch+49, "I", 2),
+            (event, "Q", 2), (event, "Q", 7), (event+8, "Q", 0),
+            (event+16, "Q", 0), (event+24, "B", 1), (event+25, "B", 2)]
+        for offset, fmt, number in changes:
+            flight = bytearray(records["flight-recorder.bin"])
+            struct.pack_into("<"+fmt, flight, offset, number)
+            with self.assertRaisesRegex(ValueError, "flight"):
+                tool.validate_trace(dict(records, **{"flight-recorder.bin": bytes(flight)}))
+        for wire in (records["flight-recorder.bin"][:-1], records["flight-recorder.bin"]+b"x",
+                     b"AFSFLT02"+records["flight-recorder.bin"][8:]):
+            with self.assertRaisesRegex(ValueError, "flight"):
+                tool.validate_trace(dict(records, **{"flight-recorder.bin": wire}))
+        for mask, sink in [(16, None), (True, None), (0, {"capacity": 0, "disconnect_before": None}),
+                           (0, {"capacity": 1, "disconnect_before": -1}),
+                           (0, {"capacity": 1, "disconnect_before": 1025})]:
+            with self.assertRaises(ValueError):
+                tool.scenario.validate(tool.encoded(dict(value, flight_categories=mask, flight_sink=sink)))
+
+    def test_v4_minimization_and_cuts_preserve_delivery_policy(self):
+        value = fixture()
+        value.update(version=4, flight_capacity=1, flight_categories=4,
+                     flight_sink={"capacity": 1, "disconnect_before": 2})
+        value["volume"]["tree_cache_pages"] = 2
+        value["operations"][:0] = [
+            {"op": "create", "label": "spare", "parent": "root", "name": "temp", "data": ""},
+            {"op": "unlink", "label": "spare"}]
+        value["expected"][0]["data"] = "ffff"
+        records, success = tool.execute(tool.encoded(value), BINARY)
+        self.assertFalse(success)
+        signature = json.loads(tool.failure_signature(records))
+        self.assertEqual(signature["flight_categories"], 4)
+        self.assertEqual(signature["flight_sink"], value["flight_sink"])
+        with tempfile.TemporaryDirectory(prefix="afsplus-selected-minimize-") as temporary:
+            root = Path(temporary)
+            tool.bundle.publish(root / "original", records)
+            result = tool.minimize(root / "original", root / "reduced", BINARY)
+            self.assertLess(result["operations"], len(value["operations"]))
+            reduced = tool.bundle.read_bundle(root / "reduced")
+            self.assertEqual(tool.failure_signature(reduced), tool.failure_signature(records))
+            self.assertFalse(tool.replay(root / "reduced", BINARY))
+        value["operations"] = [{"op": "create", "label": "f", "parent": "root", "name": "a", "data": "01"}]
+        value["expected"] = []
+        for variant in range(5):
+            records, success = tool.execute(tool.encoded(value), BINARY,
+                fault={"version": 1, "kind": "power-cut-v1", "operation": 0, "offset": 1, "variant": variant})
+            self.assertTrue(success)
+            tool.validate_trace(records)
+
     def test_v3_internal_flight_replays_all_profiles_and_reports_overwrite(self):
         for pages in (2, 4, 8, "unlimited"):
             for capacity in (1, 32):

@@ -208,6 +208,15 @@ impl FlightRecorder {
         std::mem::replace(&mut self.categories, categories)
     }
 
+    /// Last assigned identity, including events deliberately filtered out.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn attempt(&self) -> u64 {
+        self.attempt
+    }
+
     pub fn categories(&self) -> Categories {
         self.categories
     }

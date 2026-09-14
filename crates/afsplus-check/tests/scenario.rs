@@ -377,3 +377,96 @@ fn checked_inspection_requires_clean_raw_and_recovered_views() {
     assert!(refused.raw.is_clean());
     assert!(refused.recovered.unwrap().is_clean());
 }
+
+#[test]
+fn selected_diagnostics_retain_endpoints_and_deterministic_delivery_across_remounts() {
+    for profile in ["2", "4", "8", "unlimited"] {
+        for capacity in [1, 32] {
+            let operations = "create a root 61 01\nremount\ncreate b root 62 02\n";
+            let baseline = Plan::parse(
+                format!("AFSPSC03\nformat 4096 256 64 8 {profile} {capacity}\n{operations}")
+                    .as_bytes(),
+            )
+            .unwrap()
+            .run()
+            .unwrap();
+            assert!(baseline.failure.is_none());
+            for mask in 0u8..16 {
+                let selected = 2 * usize::from(mask & 1 != 0)
+                    + 3 * usize::from(mask & 2 != 0)
+                    + usize::from(mask & 4 != 0);
+                for (sink_capacity, disconnect) in
+                    [(0, "none"), (1, "none"), (8, "none"), (1, "0"), (1, "2")]
+                {
+                    let plan = Plan::parse(format!("AFSPSC04\nformat 4096 256 64 8 {profile} {capacity} {mask} {sink_capacity} {disconnect}\n{operations}").as_bytes()).unwrap();
+                    let run = plan.run().unwrap();
+                    assert!(run.failure.is_none());
+                    let first = run.events[0].flight.as_ref().unwrap();
+                    let middle = run.events[1].flight.as_ref().unwrap();
+                    let last = run.events[2].flight.as_ref().unwrap();
+                    assert_eq!((first.sequence_total, first.attempt_total), (6, 1));
+                    assert_eq!((middle.sequence_total, middle.attempt_total), (6, 1));
+                    assert!(middle.events.is_empty());
+                    assert_eq!((last.sequence_total, last.attempt_total), (12, 2));
+                    assert_eq!(last.filtered_total, (12 - 2 * selected) as u64);
+                    assert_eq!(
+                        last.dropped_total,
+                        (2 * selected.saturating_sub(capacity)) as u64
+                    );
+                    assert_eq!(last.events.len(), selected.min(capacity));
+                    let delivered = if sink_capacity == 0 || disconnect == "0" {
+                        0
+                    } else {
+                        selected.min(sink_capacity) * if disconnect == "2" { 1 } else { 2 }
+                    };
+                    assert_eq!(last.delivered_total, delivered as u64);
+                    assert_eq!(
+                        last.missed_total,
+                        if sink_capacity == 0 {
+                            0
+                        } else {
+                            (2 * selected - delivered) as u64
+                        }
+                    );
+                    assert_eq!(last.sink_closed, disconnect != "none" && selected != 0);
+                    assert_eq!(baseline.log.len(), run.log.len());
+                    for (a, b) in baseline.log.iter().zip(&run.log) {
+                        match (a, b) {
+                            (RecordedOp::Flush, RecordedOp::Flush) => (),
+                            (
+                                RecordedOp::Write { lba: a, data: x },
+                                RecordedOp::Write { lba: b, data: y },
+                            ) => {
+                                assert_eq!(a, b);
+                                assert_eq!(x, y);
+                            }
+                            _ => panic!("selected diagnostics changed block operations"),
+                        }
+                    }
+                    for lba in 0..256 {
+                        assert_eq!(baseline.result.peek(lba), run.result.peek(lba));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn selected_diagnostic_header_refuses_invalid_configuration() {
+    for suffix in [
+        "1 16 0 none",
+        "1 1 257 none",
+        "1 1 0 0",
+        "1 1 1 1025",
+        "0 1 1 none",
+        "1 1 1 -1",
+        "1 1 1",
+    ] {
+        assert!(
+            Plan::parse(format!("AFSPSC04\nformat 4096 256 64 8 2 {suffix}\nsync\n").as_bytes())
+                .is_err(),
+            "{suffix}"
+        );
+    }
+}
