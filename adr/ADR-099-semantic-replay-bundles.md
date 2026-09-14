@@ -107,9 +107,14 @@ and empty-SDK controls, alongside the empty-dependency-source control, before
 accepting the reconstructed build's input selection.
 
 Host-profile semantic reproducibility is separate from bit-identical executables,
-cross-host compatibility and physical provider qualification. A prototype copy
-inventory cannot substitute for a qualified reusable package verifier or build
-orchestrator. Additional host profiles follow the portability gates without
+cross-host compatibility and physical provider qualification. A sealed copy inventory requires exact role/path/content verification. The
+reconstruction driver restores source inputs into a new directory, uses independent
+empty caches/targets for build controls, preserves paired replay evidence and
+revalidates retained inputs and driver sources before publishing a bound completion
+report. Preserve the driver scripts with the result and record qualifier-host
+utilities separately from retained compiler inputs. Captured
+failures remain failures; a late publication error remains an error even when the
+completion record is readable. Additional host profiles follow the portability gates without
 implicitly requiring every platform to close the first executable host stage.
 
 ## Qualification

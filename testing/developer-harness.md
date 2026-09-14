@@ -30,6 +30,7 @@
 - [Preserving and restoring working sources](#preserving-and-restoring-working-sources)
 - [Retaining registry dependencies for a cold build](#retaining-registry-dependencies-for-a-cold-build)
 - [Copied host toolchain and SDK qualification](#copied-host-toolchain-and-sdk-qualification)
+- [Automated host reconstruction](#automated-host-reconstruction)
 
 <!-- /toc -->
 
@@ -797,7 +798,7 @@ and retain a content inventory. System libraries referenced under `/usr/lib` and
 `/System/Library` are prerequisites of the named macOS host profile, not files
 implicitly supplied by the dependency package.
 
-A private experimental directory uses these roles:
+The retained Darwin ARM64 directory uses these roles:
 
 | Role | Relative location | Selection during build |
 |---|---|---|
@@ -830,9 +831,9 @@ its own fresh Cargo home and target directory:
 Then compare all retained cache-profile bundles using the rebuilt runner. Require
 exact equality of all non-metadata artifacts and unchanged originals. The copied
 file inventory, build inputs, positive/negative logs and comparison reports are
-separate evidence. An experimental copy manifest records observations; a reusable
-package verifier and build orchestrator need explicit schema/admission and
-publication tests before replacing this procedure.
+separate evidence. The copy manifest records observations. Use the
+[automated reconstruction commands](#automated-host-reconstruction) to seal and
+verify the retained directory and execute the build/comparison gates.
 
 A successful documented host-profile reconstruction is distinct from bit-identical
 executables, another host's runtime compatibility and physical-device durability.
@@ -841,3 +842,94 @@ and M01/M12 with their own toolchain/runtime profiles. Keep that requirement vis
 without making every host platform a prerequisite for Stage A's executable host
 core. The complete queue retains the native-provider and sustained-qualification
 gates independently.
+
+
+## Automated host reconstruction
+
+[rebuild-replay.py](../tools/rebuild-replay.py) implements the Darwin ARM64
+retained-host profile. Prepare private copies of the four directory roots listed
+above; the tool does not copy installed tools or modify their installation.
+`seal-toolchain` inventories the copies, validates paths and required roles,
+synchronizes regular files and directory entries, rechecks the inventory and host,
+and publishes `copy-manifest.json` exclusively. Existing and incomplete manifests
+cannot be overwritten. Sealing records the selected bytes, not a successful build
+or upstream authenticity.
+
+```sh
+python3 tools/rebuild-replay.py seal-toolchain /private/retained-tools
+python3 tools/rebuild-replay.py verify-toolchain /private/retained-tools
+python3 tools/rebuild-replay.py build \
+  /private/evidence/source-package /private/evidence/dependencies \
+  /private/retained-tools /private/new-reconstruction \
+  --bundle /private/evidence/cache-2 \
+  --bundle /private/evidence/cache-4 \
+  --bundle /private/evidence/cache-8 \
+  --bundle /private/evidence/cache-unlimited
+```
+
+Verification checks the manifest schema, required executable/library roles, exact
+path inventory, file kinds/modes/sizes/hashes and safe component-relative symlinks.
+It streams regular-file hashing rather than loading the SDK into memory. The
+profile admits 100,000 file/link entries and directories, 1 GiB per regular file,
+4 GiB of regular-file contents, 4,096-byte paths/link targets and a 32 MiB manifest.
+Extra metadata/logs at the enclosing directory level are outside the four retained
+roots; extra files inside those roots cause refusal. These bounds cover admitted
+inputs and do not claim a whole-process RAM or build-output quota.
+
+The recorded Darwin system/release, ARM64 architecture and `sw_vers` values must
+match the receiving host. Hostname and kernel description text are observations,
+not machine identity restrictions. A different OS profile requires separate
+qualification rather than silently bypassing the host check.
+
+`build` admits one to sixteen caller-selected bundles and binds every bundle,
+source package and registry package to the same source identity. It verifies tools
+before execution, creates a fresh private output directory, preserves all six
+reconstruction-driver scripts under `driver/`, restores the source,
+verifies dependencies and runs the positive build plus all three negative controls.
+Each build uses an independently created empty Cargo home and target directory.
+Commands are fixed by the driver; metadata cannot supply shell commands. The
+recorded environment contains the selected PATH, Cargo/Rust/linker/SDK settings and
+only the existing HOME/TMPDIR values from the calling environment. Other inherited
+build flags and wrappers are excluded.
+
+Cargo runs with `--frozen --offline`, explicit Rust sysroot/linker/SDK arguments,
+a 300-second command deadline and an 8 MiB combined-output limit. Private logs are
+kept on success, command failure or timeout; existing logs cannot be replaced.
+Each negative control must return Cargo's diagnostic failure code 101 and contain
+the expected absent-linker, missing-System-library or missing-registry-package
+finding. An unrelated failure, timeout or unexpectedly successful control cannot
+qualify the reconstruction.
+
+The driver compares each original bundle with the rebuilt runner, preserves paired
+bundles and rechecks original role/manifest digests. It then revalidates toolchain,
+source-package, dependency and driver-source inputs. `qualification.json` binds their manifest
+hashes, the host observation, control results, per-bundle cache policy and semantic/
+artifact verdicts, plus hashes and sizes of the selected build inputs, logs, rebuilt
+executable, comparison reports and retained driver scripts. Python version/executable
+identity and Git version are recorded as qualifier-host observations; these host
+utilities are runtime prerequisites, not silently included in the copied compiler
+tree. The retained scripts can run from outside the development checkout. Evidence
+files and directories are synchronized
+before publishing this completion record. Partial output is retained; retry uses
+a new destination. A failed final barrier reports an error even when a readable
+completion record exists.
+
+Exit 0 means the complete selected reconstruction and comparisons passed. Exit 2
+means a reproduced semantic failure or artifact difference; failure evidence is
+retained. Exit 1 means admission, execution, control qualification or publication
+failed. A one-bundle reconstruction is useful for a bug reproducer but does not
+establish the complete four-profile cache gate. Require all four explicit profiles
+for that acceptance claim. Keep source, dependency, toolchain and original-bundle
+inputs alongside the driver and results in retained private storage, such as a
+Git-ignored `build/` qualification directory. Copy and verify existing evidence;
+never move or overwrite it. Synchronize copied inputs and bind their manifest
+hashes to the completed result. Temporary experiments alone are not the retained
+input set, and none of these SDK or private-source artifacts is implicitly
+published with the repository's code commits.
+
+Run `python3 tools/test-rebuild-replay.py` for sealing and capture changes, host/
+path/role/integrity refusal, four-profile orchestration, failure preservation,
+negative-control reasons, unchanged originals, input changes, bounded logs and
+publication failures. Those protocol tests use fake build tools that copy a runner;
+real copied-toolchain builds and their negative controls are separate integration
+evidence. Source, dependency and replay component tests retain their own gates.

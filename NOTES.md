@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Automate retained-host replay reconstruction](#2026-09-14---automate-retained-host-replay-reconstruction)
 - [2026-09-14 - Reconstruct replay with copied tools and SDK](#2026-09-14---reconstruct-replay-with-copied-tools-and-sdk)
 - [2026-09-14 - Rebuild replay with retained dependencies and an empty Cargo cache](#2026-09-14---rebuild-replay-with-retained-dependencies-and-an-empty-cargo-cache)
 - [2026-09-14 - Preserve working sources for independent replay reconstruction](#2026-09-14---preserve-working-sources-for-independent-replay-reconstruction)
@@ -132,6 +133,61 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Automate retained-host replay reconstruction
+
+Added `rebuild-replay.py` with exclusive toolchain sealing, exact retained-tree
+verification and complete reconstruction orchestration. The driver restores the
+source package, verifies registry dependencies, uses copied Rust/Clang/linker/SDK
+inputs with a fresh Cargo home and target per case, and requires positive build
+plus three independently meaningful negative controls. It compares retained
+bundles, rechecks original and input identities, and publishes a completion report
+binding inputs, logs, rebuilt binary, comparison reports and all six retained
+driver scripts. It also records the host Python/Git observations. The shared command
+helper retains bounded combined logs and exposes nonzero command status without
+weakening existing source/dependency behavior.
+
+The 14 protocol regressions cover sealing changes, host/path/role/integrity
+refusal, four-profile orchestration, preserved failures, changed retained inputs,
+negative-control reasons, output collisions and early/late publication errors.
+An additional focused negative-control case rejects diagnostic-looking output
+with a non-Cargo exit code. Build environments explicitly record the bounded
+whitelist, including inherited HOME/TMPDIR paths; unrelated flags and wrappers do
+not enter the process environment.
+
+A fresh CLI reconstruction passed against the original copied-toolchain probe in
+`/private/tmp/afsplus-orchestrated-rebuild-3xc9tw7h`. A second experiment copied the
+four retained tool roots into a new directory with spaces, sealed its 42,147-entry
+inventory using the new command, then rebuilt from source and dependency packages
+into another path with spaces. Positive build exited 0; absent linker, empty SDK
+and empty registry-source controls each exited 101 for their intended reasons.
+All four cache-profile comparisons were semantically successful and byte-equal.
+The completion report's thirteen bound evidence files were independently checked
+against their recorded sizes and digests.
+
+The second experiment is retained in
+`/private/tmp/afsplus-toolchain-sealed-m_1h848i`, with its new tool manifest,
+`rebuilt job/qualification.json`, inputs, logs and paired bundles. These are
+Darwin ARM64 host-profile results, not bit-identical executable, cross-host or
+hardware claims. A standalone copy of all six driver scripts also completed the
+entire reconstruction outside the development checkout in
+`/private/tmp/afsplus-standalone-rebuild-uzhn3p4p`; its nineteen bound evidence files
+include the retained driver sources and qualifier-host observations.
+
+The final source, dependency, toolchain, original-bundle and driver inputs were
+copied into the repository's Git-ignored
+`build/replay-reconstruction-mr66m1gq` directory without moving or overwriting any
+prior evidence. Reconstruction passed again using only those retained input paths.
+`result/qualification.json` records the build, all three intended control failures
+and four exact comparisons. Copied input files/directories were synchronized;
+`retained-inputs.json` binds their manifests and the completed result. This local
+retention set is excluded from Git publication, so the qualified inputs do not
+exist only under temporary directories.
+
+The host reconstruction prerequisite is implemented; Stage A's
+transaction-internal flight diagnostics, broader publication/cache families and
+full resource-accounting evidence remain open. No filesystem core or disk-format
+change was made in this unit.
 
 ## 2026-09-14 - Reconstruct replay with copied tools and SDK
 

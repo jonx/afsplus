@@ -42,14 +42,23 @@ def git(root, *args, data=None, limit=MANIFEST_BYTES, isolated=False):
     return run_command(root, command, data=data, limit=limit, env=env, label="Git")
 
 
-def run_command(root, command, *, data=None, limit=MANIFEST_BYTES, env=None, label="Command", timeout=120):
+class CommandFailure(ValueError):
+    def __init__(self, message, returncode):
+        super().__init__(message)
+        self.returncode = returncode
+
+
+def run_command(root, command, *, data=None, limit=MANIFEST_BYTES, env=None, label="Command", timeout=120,
+                merge_stderr=False, log_path=None):
     """Bound output and wall time for a fixed caller-owned command, without a shell."""
+    if log_path is not None and os.path.lexists(log_path):
+        raise FileExistsError("command log already exists")
     with tempfile.TemporaryFile() as inputs:
         if data is not None:
             inputs.write(data)
             inputs.seek(0)
         with subprocess.Popen(command, cwd=root, env=env, stdin=inputs, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, start_new_session=True) as process:
+                              stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE, start_new_session=True) as process:
             chunks = []
             size = 0
             error_chunks = []
@@ -58,7 +67,8 @@ def run_command(root, command, *, data=None, limit=MANIFEST_BYTES, env=None, lab
             try:
                 with selectors.DefaultSelector() as selector:
                     selector.register(process.stdout, selectors.EVENT_READ, "output")
-                    selector.register(process.stderr, selectors.EVENT_READ, "errors")
+                    if not merge_stderr:
+                        selector.register(process.stderr, selectors.EVENT_READ, "errors")
                     while selector.get_map():
                         if time.monotonic() >= deadline:
                             raise ValueError(label + " operation timed out")
@@ -80,7 +90,8 @@ def run_command(root, command, *, data=None, limit=MANIFEST_BYTES, env=None, lab
                                 error_chunks.append(chunk)
                 result = process.wait(timeout=max(0.01, deadline - time.monotonic()))
                 if result:
-                    raise ValueError(label + " operation failed: " + b"".join(error_chunks)[:4096].decode(errors="replace"))
+                    details = chunks if merge_stderr else error_chunks
+                    raise CommandFailure(label + " operation failed: " + b"".join(details)[:4096].decode(errors="replace"), result)
                 return b"".join(chunks)
             except BaseException:
                 try:
@@ -92,6 +103,14 @@ def run_command(root, command, *, data=None, limit=MANIFEST_BYTES, env=None, lab
                         process.kill()
                 process.wait()
                 raise
+            finally:
+                if log_path is not None:
+                    log_path = Path(log_path)
+                    directory = io._directory(log_path.parent)
+                    try:
+                        io._write(directory, log_path.name, b"".join(chunks + error_chunks))
+                    finally:
+                        os.close(directory)
 
 
 def path_bytes(value):
