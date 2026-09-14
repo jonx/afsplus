@@ -22,7 +22,7 @@ toc adr-index:
 	$(PYTHON) tools/check-docs.py --write
 
 ## rust-gate: the gate from CONTRIBUTING.md
-rust-gate:
+rust-gate: rust-codec-fuzz-gate
 	cargo fmt --all -- --check
 	cargo test --workspace --all-features
 	cargo clippy --workspace --all-targets --all-features -- -D warnings

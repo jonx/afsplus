@@ -67,7 +67,7 @@ impl RetiredList {
 
     pub fn encode(&self, block_size: usize, generation: u64) -> Result<Vec<u8>, FormatError> {
         let payload_len = 8 + self.entries.len() * ENTRY_SIZE;
-        if payload_len > block_size - HEADER_SIZE {
+        if block_size < HEADER_SIZE || payload_len > block_size - HEADER_SIZE {
             return Err(FormatError::Overflow(
                 "retired list exceeds one block (prototype limit)",
             ));

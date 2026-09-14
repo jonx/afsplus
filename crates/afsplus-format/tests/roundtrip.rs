@@ -1247,3 +1247,93 @@ fn inline_symlink_codec_rejects_valid_crc_malformed_payloads() {
         assert!(SymlinkRecord::decode(&valid[..n]).is_err());
     }
 }
+
+#[test]
+fn bitmap_encoder_refuses_short_output_without_underflow() {
+    let page = sample_bitmap();
+    let minimum = HEADER_SIZE + 16 + page.bits.len();
+    for size in 0..minimum {
+        assert!(page.encode(size, 9).is_err(), "size {size}");
+    }
+    let encoded = page.encode(minimum, 9).unwrap();
+    assert_eq!(BitmapPage::decode(&encoded).unwrap(), (page, 9));
+}
+
+#[test]
+fn region_descriptor_encoder_refuses_short_output_without_underflow() {
+    let descriptor = sample_region_descriptor();
+    let minimum = HEADER_SIZE + 16 + descriptor.pages.len() * 16;
+    for size in 0..minimum {
+        assert!(descriptor.encode(size, 9).is_err(), "size {size}");
+    }
+    let encoded = descriptor.encode(minimum, 9).unwrap();
+    assert_eq!(RegionDescriptor::decode(&encoded).unwrap(), (descriptor, 9));
+}
+
+#[test]
+fn omap_encoder_refuses_subheader_output() {
+    for size in 0..HEADER_SIZE {
+        assert!(ObjectMap::default().encode(size, 7).is_err(), "size={size}");
+    }
+}
+
+#[test]
+fn retired_encoder_refuses_subheader_output() {
+    for size in 0..HEADER_SIZE {
+        assert!(sample_retired().encode(size, 7).is_err(), "size={size}");
+    }
+}
+
+#[test]
+fn directory_encoder_refuses_subheader_output() {
+    for size in 0..HEADER_SIZE {
+        assert!(sample_dir().encode(size, 7).is_err(), "size={size}");
+    }
+}
+
+#[test]
+fn intent_encoder_refuses_subheader_output() {
+    for size in 0..HEADER_SIZE {
+        assert!(sample_log_record().encode(size).is_err(), "size={size}");
+    }
+}
+
+#[test]
+fn reclaim_encoder_refuses_subheader_output() {
+    for size in 0..HEADER_SIZE {
+        assert!(
+            sample_reclaim_root().encode(size, 7).is_err(),
+            "size={size}"
+        );
+    }
+}
+
+#[test]
+fn reclaim_segment_encoder_refuses_every_short_output() {
+    let record = sample_reclaim_segment();
+    let full = record.encode(BS, 7).unwrap();
+    let minimum = HEADER_SIZE
+        + BlockHeader::verify(&full, block_type::RECLAIM_SEGMENT)
+            .unwrap()
+            .payload_len as usize;
+    for size in 0..minimum {
+        assert!(record.encode(size, 7).is_err(), "size={size}");
+    }
+    let block = record.encode(minimum, 7).unwrap();
+    assert_eq!(ReclaimSegment::decode(&block).unwrap().0, record);
+}
+
+#[test]
+fn reclaim_table_encoder_refuses_every_short_output() {
+    let record = sample_reclaim_table();
+    let full = record.encode(BS, 7).unwrap();
+    let minimum = HEADER_SIZE
+        + BlockHeader::verify(&full, block_type::RECLAIM_TABLE)
+            .unwrap()
+            .payload_len as usize;
+    for size in 0..minimum {
+        assert!(record.encode(size, 7).is_err(), "size={size}");
+    }
+    let block = record.encode(minimum, 7).unwrap();
+    assert_eq!(ReclaimTable::decode(&block).unwrap().0, record);
+}

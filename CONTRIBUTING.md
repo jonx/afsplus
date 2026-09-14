@@ -41,7 +41,11 @@ than individual crates. Before committing Rust changes, run:
 cargo fmt --all -- --check
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+make rust-codec-fuzz-gate
 ```
+
+`make rust-gate` includes the separate codec-fuzz workspace. Keeping that crate
+out of ordinary component builds does not exempt it from the host quality gate.
 
 ## Documentation
 

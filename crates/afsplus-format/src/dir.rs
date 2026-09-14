@@ -116,7 +116,7 @@ impl DirBlock {
             validate_entry(entry)?;
             payload_len += ENTRY_FIXED + entry.key.len() + entry.name.len();
         }
-        if payload_len > block_size - HEADER_SIZE {
+        if block_size < HEADER_SIZE || payload_len > block_size - HEADER_SIZE {
             return Err(FormatError::Overflow(
                 "directory exceeds one block (prototype limit)",
             ));

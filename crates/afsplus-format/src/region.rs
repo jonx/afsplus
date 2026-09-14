@@ -31,7 +31,7 @@ impl RegionDescriptor {
             return Err(FormatError::Overflow("region descriptor page count"));
         }
         let payload_len = FIXED_PAYLOAD + self.pages.len() * PAGE_BINDING_SIZE;
-        if payload_len > block_size - HEADER_SIZE {
+        if block_size < HEADER_SIZE || payload_len > block_size - HEADER_SIZE {
             return Err(FormatError::Overflow("region descriptor exceeds one block"));
         }
         let sum = self.pages.iter().try_fold(0u32, |total, page| {

@@ -2,9 +2,11 @@
 
 use std::fmt;
 use std::fs;
+use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
+use afsplus_format::bitmap::{BitmapPage, BITMAP_PAGE_BLOCKS};
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::header::{block_type, BlockHeader, HEADER_SIZE};
@@ -14,6 +16,7 @@ use afsplus_format::ident::{
 };
 use afsplus_format::intent_log::{LogOp, LogRecord};
 use afsplus_format::object::{ObjectRecord, ObjectType};
+use afsplus_format::region::{BitmapBinding, RegionDescriptor};
 use afsplus_format::tree::{TreeItem, TreeKind, TreeNode};
 use afsplus_format::{Timespec, DEFAULT_BLOCK_SHIFT, DEFAULT_BLOCK_SIZE, OBJECT_ROOT};
 
@@ -33,15 +36,19 @@ pub enum CodecTarget {
     TreeNode = 3,
     ObjectRecord = 4,
     IntentLog = 5,
+    BitmapPage = 6,
+    RegionDescriptor = 7,
 }
 
 impl CodecTarget {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Identification,
         Self::Checkpoint,
         Self::TreeNode,
         Self::ObjectRecord,
         Self::IntentLog,
+        Self::BitmapPage,
+        Self::RegionDescriptor,
     ];
 
     pub fn name(self) -> &'static str {
@@ -51,6 +58,8 @@ impl CodecTarget {
             Self::TreeNode => "tree-node",
             Self::ObjectRecord => "object-record",
             Self::IntentLog => "intent-log",
+            Self::BitmapPage => "bitmap-page",
+            Self::RegionDescriptor => "region-descriptor",
         }
     }
 
@@ -69,6 +78,8 @@ impl CodecTarget {
             Self::TreeNode => block_type::TREE_NODE,
             Self::ObjectRecord => block_type::OBJECT,
             Self::IntentLog => block_type::INTENT_LOG,
+            Self::BitmapPage => block_type::BITMAP,
+            Self::RegionDescriptor => block_type::REGION_DESCRIPTOR,
         }
     }
 }
@@ -129,6 +140,7 @@ fn checkpoint_seed() -> Result<Vec<u8>, String> {
         free_blocks_total: 8000,
         flags: 0,
         shared_extent_root_block: 35,
+        snapshot_roots: None,
     }
     .encode(DEFAULT_BLOCK_SIZE)
     .map_err(|error| format!("checkpoint seed: {error}"))
@@ -229,6 +241,68 @@ fn intent_seed() -> Result<Vec<u8>, String> {
     .map_err(|error| format!("intent-log seed: {error}"))
 }
 
+fn allocation_geometry() -> Geometry {
+    Geometry {
+        block_size: DEFAULT_BLOCK_SIZE,
+        total_blocks: 2 * 65536 - 3,
+        region_size: 65536,
+    }
+}
+
+fn bitmap_seed_page() -> BitmapPage {
+    let geo = allocation_geometry();
+    let page_index = geo.bitmap_page_count(1) - 1;
+    let valid = geo.bitmap_page_valid_blocks(1, page_index);
+    let mut page = BitmapPage::all_free(1, page_index, page_index * BITMAP_PAGE_BLOCKS, valid);
+    page.set_allocated(0, true);
+    page.set_allocated(valid - 1, true);
+    page
+}
+
+fn region_seed_descriptor() -> RegionDescriptor {
+    let geo = allocation_geometry();
+    let pages: Vec<_> = (0..geo.bitmap_page_count(1))
+        .map(|index| BitmapBinding {
+            slot: (index % 3) as u8,
+            free_blocks: if index == 0 {
+                geo.bitmap_page_valid_blocks(1, index) - geo.region_reserved_blocks(1) as u32
+            } else if index + 1 == geo.bitmap_page_count(1) {
+                bitmap_seed_page().free_blocks()
+            } else {
+                geo.bitmap_page_valid_blocks(1, index)
+            },
+            generation: 5 + u64::from(index % 3),
+        })
+        .collect();
+    RegionDescriptor {
+        region: 1,
+        valid_blocks: geo.region_valid_blocks(1),
+        free_blocks: pages.iter().map(|p| p.free_blocks).sum(),
+        pages,
+    }
+}
+
+fn accepts(target: CodecTarget, input: &[u8]) -> bool {
+    match target {
+        CodecTarget::Identification => Identification::decode(input).is_ok(),
+        CodecTarget::Checkpoint => Checkpoint::decode(input, &UUID).is_ok_and(|value| {
+            value
+                .validate_structural(&Geometry {
+                    block_size: DEFAULT_BLOCK_SIZE,
+                    total_blocks: 8192,
+                    region_size: 4096,
+                })
+                .is_ok()
+        }),
+        CodecTarget::TreeNode => TreeNode::decode(input).is_ok(),
+        CodecTarget::ObjectRecord => ObjectRecord::decode_with_generation(input).is_ok(),
+        CodecTarget::IntentLog => LogRecord::decode(input).is_ok(),
+        CodecTarget::BitmapPage => BitmapPage::decode(input).is_ok(),
+        CodecTarget::RegionDescriptor => RegionDescriptor::decode(input)
+            .is_ok_and(|(d, generation)| d.validate(&allocation_geometry(), 1, generation).is_ok()),
+    }
+}
+
 pub fn canonical_seed(target: CodecTarget) -> Result<Vec<u8>, String> {
     match target {
         CodecTarget::Identification => identification_seed(),
@@ -236,6 +310,12 @@ pub fn canonical_seed(target: CodecTarget) -> Result<Vec<u8>, String> {
         CodecTarget::TreeNode => tree_seed(),
         CodecTarget::ObjectRecord => object_seed(),
         CodecTarget::IntentLog => intent_seed(),
+        CodecTarget::BitmapPage => bitmap_seed_page()
+            .encode(DEFAULT_BLOCK_SIZE, 7)
+            .map_err(|e| e.to_string()),
+        CodecTarget::RegionDescriptor => region_seed_descriptor()
+            .encode(DEFAULT_BLOCK_SIZE, 7)
+            .map_err(|e| e.to_string()),
     }
 }
 
@@ -316,6 +396,65 @@ fn roundtrip(target: CodecTarget, input: &[u8]) -> Result<(), String> {
                         != canonical
                 {
                     return Err("object canonical round-trip mismatch".into());
+                }
+            }
+        }
+        CodecTarget::BitmapPage => {
+            if let Ok((decoded, generation)) = BitmapPage::decode(input) {
+                let free = (0..decoded.valid_blocks)
+                    .filter(|index| decoded.bits[*index as usize / 8] & (1 << (*index % 8)) == 0)
+                    .count() as u32;
+                if free != decoded.free_blocks() {
+                    return Err("bitmap free count mismatch".into());
+                }
+                let mut edited = decoded.clone();
+                for index in [0, decoded.valid_blocks - 1] {
+                    let was = edited.is_allocated(index);
+                    let before = edited.free_blocks();
+                    if !edited.set_allocated(index, !was)
+                        || edited.is_allocated(index) == was
+                        || edited.free_blocks() != if was { before + 1 } else { before - 1 }
+                    {
+                        return Err("bitmap state/count update mismatch".into());
+                    }
+                }
+                let canonical = decoded
+                    .encode(DEFAULT_BLOCK_SIZE, generation)
+                    .map_err(|e| e.to_string())?;
+                let second = BitmapPage::decode(&canonical).map_err(|e| e.to_string())?;
+                if second != (decoded, generation)
+                    || second
+                        .0
+                        .encode(DEFAULT_BLOCK_SIZE, second.1)
+                        .map_err(|e| e.to_string())?
+                        != canonical
+                {
+                    return Err("bitmap canonical round-trip mismatch".into());
+                }
+            }
+        }
+        CodecTarget::RegionDescriptor => {
+            if let Ok((decoded, generation)) = RegionDescriptor::decode(input) {
+                // Decode is structural; the allocator additionally validates
+                // a descriptor against the selected region's trusted geometry.
+                if decoded
+                    .validate(&allocation_geometry(), 1, generation)
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                let canonical = decoded
+                    .encode(DEFAULT_BLOCK_SIZE, generation)
+                    .map_err(|e| e.to_string())?;
+                let second = RegionDescriptor::decode(&canonical).map_err(|e| e.to_string())?;
+                if second != (decoded, generation)
+                    || second
+                        .0
+                        .encode(DEFAULT_BLOCK_SIZE, second.1)
+                        .map_err(|e| e.to_string())?
+                        != canonical
+                {
+                    return Err("region canonical round-trip mismatch".into());
                 }
             }
         }
@@ -414,6 +553,13 @@ pub fn exercise(target: CodecTarget, input: &[u8]) -> Result<(), String> {
 
 pub fn run_case(target: CodecTarget, case: u64) -> Result<FuzzArtifact, String> {
     let input = mutated_input(target, case)?;
+    if case == 0 {
+        match catch_unwind(AssertUnwindSafe(|| accepts(target, &input))) {
+            Ok(true) => {}
+            Ok(false) => return Err(format!("{target}: canonical seed was rejected")),
+            Err(_) => return Err(format!("{target}: canonical seed decoder panicked")),
+        }
+    }
     exercise(target, &input)?;
     Ok(FuzzArtifact {
         target,
@@ -435,16 +581,40 @@ pub fn write_artifact(path: &Path, artifact: &FuzzArtifact) -> Result<(), String
     encoded.extend_from_slice(&artifact.case.to_le_bytes());
     encoded.extend_from_slice(&(artifact.input.len() as u32).to_le_bytes());
     encoded.extend_from_slice(&artifact.input);
-    fs::write(path, encoded).map_err(|error| format!("write {}: {error}", path.display()))
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| format!("create {}: {error}", path.display()))?;
+    file.write_all(&encoded)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("write/sync {}: {error}", path.display()))?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync artifact parent {}: {error}", parent.display()))
 }
 
 pub fn read_artifact(path: &Path) -> Result<FuzzArtifact, String> {
-    let metadata =
-        fs::metadata(path).map_err(|error| format!("stat {}: {error}", path.display()))?;
-    if metadata.len() > (ARTIFACT_HEADER_SIZE + MAX_ARTIFACT_BYTES) as u64 {
+    let file = fs::File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("stat {}: {error}", path.display()))?;
+    let limit = ARTIFACT_HEADER_SIZE + MAX_ARTIFACT_BYTES;
+    if !metadata.is_file() || metadata.len() > limit as u64 {
+        return Err("fuzz artifact exceeds the bounded regular-file format".into());
+    }
+    // Bound the read itself, not only an earlier length observation.
+    let mut encoded = Vec::new();
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut encoded)
+        .map_err(|error| format!("read {}: {error}", path.display()))?;
+    if encoded.len() > limit {
         return Err("fuzz artifact exceeds the bounded format".into());
     }
-    let encoded = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
     if encoded.len() < ARTIFACT_HEADER_SIZE || encoded[0..4] != ARTIFACT_MAGIC {
         return Err("fuzz artifact header is invalid".into());
     }
@@ -485,7 +655,9 @@ mod tests {
     #[test]
     fn canonical_seeds_decode_and_roundtrip() {
         for target in CodecTarget::ALL {
-            exercise(target, &canonical_seed(target).unwrap()).unwrap();
+            let input = canonical_seed(target).unwrap();
+            assert!(accepts(target, &input), "{target}: canonical seed rejected");
+            exercise(target, &input).unwrap();
         }
     }
 
@@ -512,7 +684,8 @@ mod tests {
             .collect();
         // Changing either column changes stable case identities. Bump
         // SEED_SCHEMA_VERSION and regenerate retained artifacts deliberately
-        // before updating these fingerprints.
+        // before updating these fingerprints. New target IDs append rows;
+        // the original five targets retain their exact version-1 bytes.
         assert_eq!(
             actual,
             vec![
@@ -521,24 +694,96 @@ mod tests {
                 (2_376_739_319, 847_916_959),
                 (3_397_820_429, 566_230_885),
                 (1_397_445_837, 1_646_714_288),
+                (2_056_605_176, 3_969_668_773),
+                (3_251_275_802, 4_105_609_348),
             ]
         );
     }
 
     #[test]
     fn artifact_roundtrip_is_exact_and_bounded() {
-        let artifact = run_case(CodecTarget::TreeNode, 47).unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "afsplus-rust-fuzz-artifact-{}-{}.afrf",
-            std::process::id(),
-            splitmix64(47)
-        ));
-        assert!(!path.exists());
-        write_artifact(&path, &artifact).unwrap();
-        let decoded = read_artifact(&path).unwrap();
-        fs::remove_file(&path).unwrap();
-        assert_eq!(decoded, artifact);
-        exercise(decoded.target, &decoded.input).unwrap();
+        for target in CodecTarget::ALL {
+            let artifact = run_case(target, 47).unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "afsplus-rust-fuzz-artifact-{}-{}.afrf",
+                std::process::id(),
+                target as u8
+            ));
+            assert!(!path.exists());
+            write_artifact(&path, &artifact).unwrap();
+            let saved = fs::read(&path).unwrap();
+            let decoded = read_artifact(&path).unwrap();
+            assert_eq!(decoded, artifact);
+            exercise(decoded.target, &decoded.input).unwrap();
+            let other = run_case(target, 48).unwrap();
+            assert!(
+                write_artifact(&path, &other).is_err(),
+                "retained artifact overwritten"
+            );
+            assert_eq!(fs::read(&path).unwrap(), saved);
+            fs::remove_file(&path).unwrap();
+        }
+    }
+
+    #[test]
+    fn allocation_seeds_exercise_geometry_and_partial_bitmap_pages() {
+        let geometry = allocation_geometry();
+        geometry.validate().unwrap();
+        let descriptor = region_seed_descriptor();
+        descriptor.validate(&geometry, 1, 7).unwrap();
+        assert_eq!(descriptor.pages.len(), 3);
+        assert_eq!(
+            descriptor.pages.iter().map(|p| p.slot).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        let page = bitmap_seed_page();
+        assert_eq!(page.page_index, 2);
+        assert_ne!(page.valid_blocks % 8, 0);
+        assert_eq!(page.free_blocks(), page.valid_blocks - 2);
+        assert_eq!(descriptor.pages[2].free_blocks, page.free_blocks());
+    }
+
+    #[test]
+    fn resealed_allocation_length_binding_and_padding_errors_are_rejected() {
+        for (target, offsets) in [
+            (
+                CodecTarget::BitmapPage,
+                vec![(4, u32::MAX), (8, 0), (12, 0), (12, u32::MAX)],
+            ),
+            (
+                CodecTarget::RegionDescriptor,
+                vec![
+                    (4, 0),
+                    (8, u32::MAX),
+                    (12, u32::MAX),
+                    (16, 3),
+                    (24, 0),
+                    (24, 9),
+                ],
+            ),
+        ] {
+            let seed = canonical_seed(target).unwrap();
+            let header = BlockHeader::verify(&seed, target.block_type()).unwrap();
+            for (offset, value) in offsets {
+                let mut input = seed.clone();
+                input[HEADER_SIZE + offset..HEADER_SIZE + offset + 4]
+                    .copy_from_slice(&value.to_le_bytes());
+                header.seal(&mut input);
+                BlockHeader::verify(&input, target.block_type()).unwrap();
+                assert!(
+                    !accepts(target, &input),
+                    "{target} field {offset} value {value}"
+                );
+                exercise(target, &input).unwrap();
+            }
+        }
+        let page = bitmap_seed_page();
+        let mut input = canonical_seed(CodecTarget::BitmapPage).unwrap();
+        let header = BlockHeader::verify(&input, block_type::BITMAP).unwrap();
+        input[HEADER_SIZE + 16 + page.bits.len() - 1] &= !(1 << (page.valid_blocks % 8));
+        header.seal(&mut input);
+        assert!(!accepts(CodecTarget::BitmapPage, &input));
+        exercise(CodecTarget::BitmapPage, &input).unwrap();
     }
 
     #[test]

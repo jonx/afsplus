@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Exercise allocation codecs and reject undersized encoder output](#2026-09-14--exercise-allocation-codecs-and-reject-undersized-encoder-output)
 - [2026-09-14 — Qualify seeded semantic properties and reconcile Stage A accounting](#2026-09-14--qualify-seeded-semantic-properties-and-reconcile-stage-a-accounting)
 - [2026-09-14 — Avoid copying caller payloads into atomic batch staging](#2026-09-14--avoid-copying-caller-payloads-into-atomic-batch-staging)
 - [2026-09-14 — Attribute requested allocations to their original context](#2026-09-14--attribute-requested-allocations-to-their-original-context)
@@ -130,6 +131,48 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Exercise allocation codecs and reject undersized encoder output
+
+The standalone Rust fuzz workspace had stopped compiling because its checkpoint
+seed lacked `snapshot_roots`. Restoring the absent optional root preserved all
+five historical seed fingerprints. The standard Rust quality gate now includes
+this workspace, while ordinary constrained component builds exclude the tooling.
+
+Bitmap-page and region-descriptor targets add partial final-page geometry,
+independently counted free bits, endpoint mutations and geometry/generation
+binding checks. Re-sealed corrupt fields test structural rejection beyond CRCs.
+Seven targets passed 4,096 cases each (28,672 total), with saved-input replay.
+Artifacts use exclusive durable creation and bounded reads; an existing retained
+artifact is refused rather than overwritten.
+
+Short-output tests reproduced arithmetic underflow in seven encoders: bitmap,
+region, directory, object map, retired list, intent log and reclaim root. A wider
+audit reproduced out-of-bounds slices in reclaim segments and tables too. All
+nine paths reject insufficient output capacity before accessing their payload.
+All 44 format round-trip regressions passed after correction, including exact
+minimum bitmap, region, reclaim-segment and reclaim-table buffers. Valid disk
+bytes and public signatures are unchanged.
+
+Evidence is retained under `build/allocation-codec-fzyacrz9`: a copied executable,
+six exact allocation artifacts replayed in fresh processes, negative reproduction
+logs, format tests, Clippy and the standalone gate. The source companion binds
+revision `42200acac170c7be2f98aa097f40300b48d538e2` and working-tree digest
+`068ca0e358e69385ea0e5c1be7c106f8d8a9487117ce96f57a22bba054b8a409`.
+The first workspace run completed executable tests but failed at doctest linking
+with missing compiled dependency crates after overlapping rebuilds. Its full log
+is retained; it is not a passing workspace verdict. An intermediate serial run was intentionally stopped when the two additional
+reclaim encoder defects were found. The complete code is validated sequentially
+without overlapping rebuilds; `final-source` retains the additional corrections
+with working-tree digest
+`4124fcb4e033f452c89e33d2d2b625073b961045b67167bc091f2f863952d7dc`.
+Final sequential validation passed: 533 workspace tests, zero failures,
+10 ignored tests across 88 result groups, plus Clippy, formatting and
+the seven-target fuzz gate. Six artifacts in `final-replay` were replayed with
+the copied final executable; 187 build-source files matched `final-source`.
+This is hosted codec qualification; additional codec families, semantic fault
+coverage and native platform evidence remain required by the audit queue.
+
 
 
 

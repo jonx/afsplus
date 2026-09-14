@@ -21,7 +21,7 @@ fn usage() -> &'static str {
     "usage: afsplus-format-fuzz [--runs N] [--target NAME] [--case N] \
      [--progress FILE] [--artifact FILE]\n\
      afsplus-format-fuzz --replay FILE\n\
-     targets: identification checkpoint tree-node object-record intent-log"
+     targets: identification checkpoint tree-node object-record intent-log bitmap-page region-descriptor"
 }
 
 fn value(arguments: &mut impl Iterator<Item = String>, option: &str) -> Result<String, String> {

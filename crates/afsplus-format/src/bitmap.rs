@@ -97,7 +97,7 @@ impl BitmapPage {
             return Err(FormatError::Invalid("bitmap byte length mismatch"));
         }
         let payload_len = BITMAP_FIXED_PAYLOAD + self.bits.len();
-        if payload_len > block_size - HEADER_SIZE {
+        if block_size < HEADER_SIZE || payload_len > block_size - HEADER_SIZE {
             return Err(FormatError::Overflow(
                 "region bitmap page exceeds one block",
             ));

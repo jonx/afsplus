@@ -120,7 +120,7 @@ impl ReclaimCaps {
         if self.inline_entries == 0 || self.segment_refs == 0 || self.table_refs == 0 {
             return Err(FormatError::Invalid("reclaim capacity is zero"));
         }
-        if root_payload_len(*self)? > block_size - HEADER_SIZE {
+        if block_size < HEADER_SIZE || root_payload_len(*self)? > block_size - HEADER_SIZE {
             return Err(FormatError::Overflow("reclaim root areas exceed one block"));
         }
         Ok(())
@@ -400,6 +400,9 @@ impl ReclaimSegment {
             ));
         }
         let payload_len = 8 + self.entries.len() * ENTRY_WIRE_SIZE;
+        if payload_len > block_size.saturating_sub(HEADER_SIZE) {
+            return Err(FormatError::Overflow("reclaim segment exceeds one block"));
+        }
         let mut block = vec![0u8; block_size];
         let p = &mut block[HEADER_SIZE..];
         le::put_u32(&mut p[0..4], self.entries.len() as u32);
@@ -459,6 +462,9 @@ impl ReclaimTable {
             return Err(FormatError::Invalid("reclaim table ref count out of range"));
         }
         let payload_len = 8 + self.refs.len() * REF_WIRE_SIZE;
+        if payload_len > block_size.saturating_sub(HEADER_SIZE) {
+            return Err(FormatError::Overflow("reclaim table exceeds one block"));
+        }
         let mut block = vec![0u8; block_size];
         let p = &mut block[HEADER_SIZE..];
         le::put_u32(&mut p[0..4], self.refs.len() as u32);

@@ -318,7 +318,7 @@ impl LogRecord {
             return Err(FormatError::Invalid("log record binding out of range"));
         }
         let payload_len = FIXED_PAYLOAD + self.ops.iter().map(LogOp::wire_len).sum::<usize>();
-        if payload_len > block_size - HEADER_SIZE {
+        if block_size < HEADER_SIZE || payload_len > block_size - HEADER_SIZE {
             return Err(FormatError::Overflow("fsync group exceeds one log record"));
         }
         let mut block = vec![0u8; block_size];

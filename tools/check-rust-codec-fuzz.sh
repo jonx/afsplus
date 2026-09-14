@@ -12,7 +12,6 @@ target_dir="$repo/target/rust-codec-fuzz"
 manifest="$repo/fuzz/Cargo.toml"
 progress="$work/current-case.txt"
 failure=${AFSPLUS_RUST_FUZZ_ARTIFACT:-"$repo/build/rust-codec-fuzz-failure.afrf"}
-replay="$work/replay.afrf"
 
 case "$runs" in
     ''|*[!0-9]*)
@@ -43,13 +42,16 @@ if ! cargo run --quiet --release --manifest-path "$manifest" -- \
     exit 1
 fi
 
-cargo run --quiet --release --manifest-path "$manifest" -- \
-    --target tree-node --case 47 --artifact "$replay"
-cargo run --quiet --release --manifest-path "$manifest" -- --replay "$replay"
+for target in tree-node bitmap-page region-descriptor; do
+    replay="$work/$target.afrf"
+    cargo run --quiet --release --manifest-path "$manifest" -- \
+        --target "$target" --case 47 --artifact "$replay"
+    cargo run --quiet --release --manifest-path "$manifest" -- --replay "$replay"
+done
 
 for regression in "$repo"/fuzz/regressions/*.afrf; do
     [ -e "$regression" ] || continue
     cargo run --quiet --release --manifest-path "$manifest" -- --replay "$regression"
 done
 
-echo "rust-codec-fuzz result=PASS runs-per-target=$runs targets=5"
+echo "rust-codec-fuzz gate=PASS runs-per-target=$runs"

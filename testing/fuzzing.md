@@ -3,6 +3,16 @@
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** [`check-portable-c-fuzz.sh`](../tools/check-portable-c-fuzz.sh), [`check-rust-codec-fuzz.sh`](../tools/check-rust-codec-fuzz.sh) · **Milestones:** M01
 
+<!-- toc -->
+
+- [Required properties](#required-properties)
+- [Target matrix](#target-matrix)
+- [Rust codec gate](#rust-codec-gate)
+- [Portable C corpus contract](#portable-c-corpus-contract)
+- [Seeded semantic properties](#seeded-semantic-properties)
+
+<!-- /toc -->
+
 ## Required properties
 
 Every target must demonstrate:
@@ -26,7 +36,7 @@ replayable without the original workstation.
 | Object record and object-map node | File-object and generic tree-node targets | Root lookup plus multi-leaf paths | Add every object type and optional root |
 | Directory node | Generic tree-node structural target | First/last ordinal in a 303-entry tree | Add complete Unicode comparison-key tables |
 | Extent node and file data | Generic tree-node structural target | Directory-to-file read seed; direct/sparse synthetic coverage remains in conformance | Add committed tree-backed file seed |
-| Allocation-region metadata | None | None | Add with portable repair walker |
+| Allocation-region metadata | Bitmap-page and region-descriptor targets, including a partial final page | None | Add portable repair-walker corpus |
 | Intent-log record and referenced data | One v3 seed containing all five operation types | Rust-built v3 write/truncate/create prefix scan plus final namespace lookup | Add multi-record sequence target |
 | Xattr record | None | None | Add when the portable reader exposes xattrs |
 | Catalog record | None | None | Add with catalog implementation |
@@ -35,7 +45,7 @@ replayable without the original workstation.
 ## Rust codec gate
 
 `make rust-codec-fuzz-gate` exercises identification, checkpoint, typed-tree,
-object-record and intent-log decoders. Each canonical seed must decode,
+object-record, intent-log, bitmap-page and region-descriptor decoders. Each canonical seed must be accepted,
 re-encode and decode to byte-stable canonical form. The mandatory engine then
 runs 4,096 stable cases per target using checksum-breaking bit flips,
 CRC-resealed payload changes, short inputs, bounded multi-byte overwrites and
@@ -45,7 +55,10 @@ panic names the exact target and case.
 
 The standalone crate has no network dependency and is excluded from the main
 workspace so constrained builders need not compile qualification tooling.
-Its lockfile and seed-schema version keep case identities stable. On failure,
+The standard `make rust-gate` includes this separate workspace through
+`rust-codec-fuzz-gate`. Its lockfile and seed-schema version keep case identities
+stable: target IDs 1–5 and their seed bytes are unchanged; allocation targets
+append IDs 6–7 under seed schema 1. On failure,
 the gate writes the last target/case before execution and stores the exact
 input as a bounded `.afrf` artifact. Reproduce it with:
 
@@ -57,7 +70,27 @@ Confirmed regressions belong in `fuzz/regressions/`; every committed artifact
 is replayed by the gate. `AFSPLUS_RUST_FUZZ_RUNS` raises the deterministic
 per-target bound without changing any earlier case. A failure is preserved at
 `build/rust-codec-fuzz-failure.afrf` by default; set
-`AFSPLUS_RUST_FUZZ_ARTIFACT` to choose another durable path.
+`AFSPLUS_RUST_FUZZ_ARTIFACT` to choose another durable path. Artifact publication
+uses exclusive creation and file/directory durability barriers. An existing
+artifact is an error and is never overwritten; failed publication may leave a
+partial file, which is not a successful retained reproducer. Reading bounds both
+the advertised file size and actual bytes read from the opened file.
+
+Allocation seeds cover a three-page region with a partial final bitmap page.
+Accepted bitmap inputs have an independently counted free-bit total, endpoint
+mutation checks and a stable round trip. Region inputs must pass both decoding
+and geometry/generation validation. CRC-resealed negative controls exercise
+page counts, slot and generation bindings, valid-block counts and bitmap padding.
+The gate replays exact saved inputs for tree, bitmap and region targets.
+
+The [format regression suite](../crates/afsplus-format/tests/roundtrip.rs)
+requires undersized bitmap, region, directory, object-map, retired-list,
+intent-log, reclaim-root, reclaim-segment and reclaim-table encoder outputs to return errors without panicking.
+Bitmap, region, reclaim-segment and reclaim-table tests also check the exact
+minimum successful buffer size.
+These are encoder admission checks; they do not change valid on-disk bytes.
+Snapshot-bearing checkpoint seeds, additional object types and optional roots,
+reclaim codecs and the other unassigned matrix surfaces require separate coverage.
 
 ## Portable C corpus contract
 
