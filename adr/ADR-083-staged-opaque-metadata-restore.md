@@ -1,6 +1,7 @@
 # ADR-083: Stage opaque metadata before destination publication
 
 Status: Accepted under the owner's delegated recommended-option authority; provider and archive integration qualification required
+Amended by: ADR-084
 Amends: ADR-077, ADR-082
 
 ## Context

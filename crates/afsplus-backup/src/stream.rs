@@ -2,6 +2,8 @@
 //! Completion certifies framing and admitted fields, not preservation completeness.
 use crate::{envelope, member, pax, tar};
 use std::io::Read;
+#[cfg(feature = "consumer")]
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum Error {
@@ -22,6 +24,8 @@ pub struct Reader<R> {
     remaining: u64,
     poisoned: bool,
     complete: bool,
+    #[cfg(feature = "consumer")]
+    identity: Arc<()>,
 }
 impl<R: Read> Reader<R> {
     pub fn new(input: R, framing: tar::Limits, records: pax::Limits) -> Result<Self, Error> {
@@ -35,6 +39,8 @@ impl<R: Read> Reader<R> {
             remaining: 0,
             poisoned: false,
             complete: false,
+            #[cfg(feature = "consumer")]
+            identity: Arc::new(()),
         })
     }
 
@@ -111,6 +117,16 @@ impl<R: Read> Reader<R> {
         self.remaining -= count as u64;
         self.poisoned = false;
         Ok(count)
+    }
+
+    #[cfg(feature = "consumer")]
+    pub(crate) fn identity(&self) -> Arc<()> {
+        self.identity.clone()
+    }
+
+    #[cfg(feature = "consumer")]
+    pub(crate) fn invalidate(&mut self) {
+        self.poisoned = true;
     }
 
     pub fn receipt(&self) -> Option<&envelope::Receipt> {

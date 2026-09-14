@@ -1,7 +1,7 @@
 # ADR-076: Use PAX tar with versioned backup preservation metadata
 
 Status: Accepted by the owner; archive profile and interoperability qualification required
-Amended by: ADR-078, ADR-080, ADR-081, ADR-082
+Amended by: ADR-078, ADR-080, ADR-081, ADR-082, ADR-084
 
 ## Context
 

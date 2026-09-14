@@ -12,6 +12,7 @@
 - [Effective member admission](#effective-member-admission)
 - [Streaming local-record binding](#streaming-local-record-binding)
 - [Object metadata admission](#object-metadata-admission)
+- [Opaque values through an authorized archive consumer](#opaque-values-through-an-authorized-archive-consumer)
 
 <!-- /toc -->
 
@@ -178,3 +179,26 @@ duplicate fields, malformed scalars, escaping paths and every truncated prefix
 must fail; exact byte admission applies to encoding and decoding. A decoded
 string must borrow the admitted input. Archive-wide matching, lossless inventory
 transport and authorized restoration are separate integration requirements.
+
+## Opaque values through an authorized archive consumer
+
+Run `cargo test -p afsplus-backup --all-features`. The optional `consumer`
+feature links the filesystem-neutral VFS interfaces; standalone codecs retain
+their independent dependency profile. [ADR-084](../adr/ADR-084-opaque-backup-value-pairs.md)
+and the [value-pair specification](../spec/backup-opaque-values.md) define the
+transport. Test source snapshot capture, descriptor enumeration, two-byte export,
+archive framing and three-byte staged import with exact key/encoding/binary
+comparisons. Include empty values and live source mutation after capture.
+
+Publication requires the original reader's verified digest and EOF. Reject a
+matching receipt from another reader, premature publication, revoked destination
+authority, wrong source binding and changed payload bytes. Every truncated
+archive prefix must leave active destination metadata absent and release staging.
+Short/long source values and revoked source reads must poison writer completion.
+Descriptor tests cover each missing field, unknown versions/keys/classes,
+malformed numeric fields, duplicates, budgets and every truncated payload.
+
+These fixtures qualify one opaque-value transport component through independent
+in-memory providers. Complete object/inventory matching, unique keys/ordinals,
+large-inventory staging/spooling, sparse data, AFS+ opaque storage, generic-tool
+metadata recovery and native resource/durability behavior need separate gates.

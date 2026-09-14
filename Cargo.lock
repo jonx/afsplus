@@ -29,6 +29,8 @@ dependencies = [
 name = "afsplus-backup"
 version = "0.0.1"
 dependencies = [
+ "afsplus-format",
+ "afsplus-vfs",
  "sha2",
 ]
 

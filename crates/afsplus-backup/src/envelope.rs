@@ -198,6 +198,7 @@ pub struct Writer<W> {
     tar: tar::Writer<HashIo<W>>,
     limits: tar::Limits,
     members: u64,
+    poisoned: bool,
 }
 impl<W: Write> Writer<W> {
     pub fn new(inner: W, limits: tar::Limits) -> Result<Self, Error> {
@@ -205,6 +206,7 @@ impl<W: Write> Writer<W> {
             tar: tar::Writer::new(HashIo::new(inner), framing_limits(limits)?),
             limits,
             members: 0,
+            poisoned: false,
         };
         writer.control(BEGIN, &begin_records())?;
         Ok(writer)
@@ -216,7 +218,14 @@ impl<W: Write> Writer<W> {
         self.tar.write_payload(&bytes)?;
         Ok(())
     }
+    #[cfg(feature = "consumer")]
+    pub(crate) fn invalidate(&mut self) {
+        self.poisoned = true;
+    }
     pub fn start(&mut self, header: &tar::Header, override_size: Option<u64>) -> Result<(), Error> {
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
         if !body_header(header) {
             return Err(Error::Invalid("reserved envelope member"));
         }
@@ -230,10 +239,16 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
     pub fn write_payload(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
         self.tar.write_payload(bytes)?;
         Ok(())
     }
     pub fn finish(mut self) -> Result<(W, Receipt), Error> {
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
         let receipt = self.tar.stream().receipt(self.members);
         let count = receipt.bytes.to_string();
         let members = receipt.members.to_string();

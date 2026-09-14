@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Carry opaque values through an authorized archive consumer](#2026-09-14---carry-opaque-values-through-an-authorized-archive-consumer)
 - [2026-09-14 - Stage opaque destination metadata before atomic publication](#2026-09-14---stage-opaque-destination-metadata-before-atomic-publication)
 - [2026-09-14 - Stream opaque captured attributes and security metadata](#2026-09-14---stream-opaque-captured-attributes-and-security-metadata)
 - [2026-09-14 - Inspect captured metadata knowledge through backup authority](#2026-09-14---inspect-captured-metadata-knowledge-through-backup-authority)
@@ -91,6 +92,33 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Carry opaque values through an authorized archive consumer
+
+Accepted ADR-084 under delegated recommended-option authority. Added bounded
+PAX descriptor/binary pairs with canonical ordinal and exact source-path, class,
+key, encoding and size binding. Export reads through the captured backup reader,
+checks exact length/EOF and poisons completion after any failure. Import opens a
+staged destination upload only after pair validation. Its staged result can
+publish only when that exact archive reader verifies the terminal digest and EOF;
+a receipt from another reader cannot release it. This avoids activating a value
+before later archive corruption is detected.
+
+End-to-end tests cross independent source and destination providers using two-
+and three-byte buffers, preserve unknown binary and empty values after live
+source mutation, and check exact identities. Wrong bindings, source-length errors,
+revocation, corrupted bytes, premature/foreign-reader publication and every
+truncated archive prefix leave active metadata absent and release staging.
+Descriptor tests cover required fields, versions, duplicates, limits and scalar
+boundaries. The consumer dependency is optional; standalone framing/metadata
+codecs do not require VFS. Updated the spec, queue and navigation.
+
+Validation passed: 403 workspace tests, zero failures, ten ignored tests;
+33 archive tests with the consumer and 28 standalone tests; formatting, workspace
+Clippy, documentation checks, three checker fixtures and whitespace validation.
+This qualifies an opaque-value transport component, not the whole backup job.
+Complete inventory/object matching, large-inventory staging/spooling, AFS+ opaque
+storage, generic metadata recovery and native resource/durability gates remain.
 
 ## 2026-09-14 - Stage opaque destination metadata before atomic publication
 

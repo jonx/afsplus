@@ -10,3 +10,6 @@ pub mod member;
 pub mod stream;
 
 pub mod metadata;
+
+#[cfg(feature = "consumer")]
+pub mod attachment;
