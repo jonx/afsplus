@@ -523,7 +523,15 @@ impl<D: afsplus_block::BlockDevice> RestoreBackend for AfsRestoreDestination<D> 
         )?)
     }
     fn resize(&mut self, object: &u64, size: u64, now: Timespec) -> Result<(), VfsError> {
-        Ok(self.volume.truncate_file(*object, size, now)?)
+        Ok(self.volume.truncate_file_bounded(
+            *object,
+            size,
+            now,
+            afsplus_core::volume::FileEditLimits {
+                max_blocks: 64,
+                max_records: 64,
+            },
+        )?)
     }
     fn link(
         &mut self,

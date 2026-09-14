@@ -24,6 +24,7 @@ switch.
 - [Bounded reservation edits](#bounded-reservation-edits)
 - [Bounded writes](#bounded-writes)
 - [Sparse growth](#sparse-growth)
+- [Bounded shrinking](#bounded-shrinking)
 
 <!-- /toc -->
 
@@ -191,3 +192,19 @@ reservations. Require the exact old or new object, corresponding full bytes,
 unchanged extent root and captured allocation. Full graph checking covers
 both selectable checkpoints. This gate covers growth; bounded shrinking and
 total allocator/retention RAM have separate resource requirements.
+
+## Bounded shrinking
+
+Run `cargo test -p afsplus-core bounded_shrink --all-features -- --nocapture`.
+Shrink a file with 301 fragmented records at a partial written tail, removing
+its reservation beyond EOF. Require fewer than 160 device reads, exact live
+bytes and allocation accounting, zero tails after regrowth, and unchanged
+captured bytes/accounting. Input-record and retired-block admission errors
+must issue zero writes and preserve the original object. Verify remounted
+bytes and both selectable checkpoint graphs.
+
+Shrink a shared file to an empty tree and preserve its peer through remount.
+Enumerate partial-tail shrink publication cuts with sharing, a snapshot and
+unwritten reservation. Every image must expose the complete old or new object
+and bytes while retaining exact shared-peer and captured content/accounting.
+Arbitrary large atomic shrink cleanup and total memory require separate gates.

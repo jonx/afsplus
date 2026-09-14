@@ -2077,3 +2077,186 @@ fn sparse_growth_publication_is_atomic_with_retained_reservations() {
     assert!(counts.iter().all(|n| *n > 0));
     println!("sparse_growth_cuts old={} new={}", counts[0], counts[1]);
 }
+
+#[test]
+fn bounded_shrink_edits_fragmented_tail_and_refuses_oversized_retirement() {
+    use afsplus_block::TraceBackend;
+    let mut volume = open(formatted(4096, 0), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("shrink", &[], now(2)).unwrap();
+    for block in 0..300 {
+        volume
+            .preallocate_file(file, block * 3 * 4096, 4096, now(3))
+            .unwrap();
+    }
+    volume
+        .write_file_at(file, 897 * 4096, &[0x55; 4096], now(4))
+        .unwrap();
+    volume.truncate_file(file, 900 * 4096, now(5)).unwrap();
+    volume
+        .preallocate_file(file, 903 * 4096, 4096, now(6))
+        .unwrap();
+    let snapshot = volume.snapshot_create(now(7)).unwrap();
+    let before = volume.stat(file).unwrap().unwrap();
+    let mut original = vec![0; 900 * 4096];
+    original[897 * 4096..898 * 4096].fill(0x55);
+    let mut volume = open(
+        TraceBackend::new(volume.into_device()),
+        MountMode::ReadWrite,
+    );
+    let io = volume.dev.stats();
+    assert!(matches!(
+        volume.truncate_file_bounded(
+            file,
+            0,
+            now(8),
+            FileEditLimits {
+                max_blocks: 512,
+                max_records: 4
+            }
+        ),
+        Err(CoreError::PrototypeLimit(_))
+    ));
+    assert!(matches!(
+        volume.truncate_file_bounded(
+            file,
+            897 * 4096 + 7,
+            now(8),
+            FileEditLimits {
+                max_blocks: 1,
+                max_records: 4
+            }
+        ),
+        Err(CoreError::PrototypeLimit(_))
+    ));
+    assert_eq!(volume.dev.stats().writes, io.writes);
+    assert_eq!(volume.stat(file).unwrap().unwrap(), before);
+    let reads_before = volume.dev.stats().reads;
+    volume
+        .truncate_file_bounded(
+            file,
+            897 * 4096 + 7,
+            now(8),
+            FileEditLimits {
+                max_blocks: 2,
+                max_records: 4,
+            },
+        )
+        .unwrap();
+    let reads = volume.dev.stats().reads - reads_before;
+    assert!(reads < 160, "bounded shrink used {reads} reads");
+    assert_eq!(volume.stat(file).unwrap().unwrap().data_blocks, 300);
+    assert_eq!(volume.read_file(file).unwrap(), original[..897 * 4096 + 7]);
+    volume
+        .truncate_file_bounded(
+            file,
+            900 * 4096,
+            now(9),
+            FileEditLimits {
+                max_blocks: 1,
+                max_records: 1,
+            },
+        )
+        .unwrap();
+    let mut expected = original.clone();
+    expected[897 * 4096 + 7..].fill(0);
+    assert_eq!(volume.read_file(file).unwrap(), expected);
+    let view = volume.snapshot_open(snapshot).unwrap();
+    assert_eq!(bytes(&mut volume, &view, file), original);
+    assert_eq!(
+        volume
+            .snapshot_stat(&view, file)
+            .unwrap()
+            .unwrap()
+            .allocated_bytes,
+        before.allocated_bytes
+    );
+    verify(&mut volume);
+    let mut volume = open(volume.into_device().into_inner(), MountMode::ReadOnly);
+    assert_eq!(volume.read_file(file).unwrap(), expected);
+    println!("bounded_shrink records=301 reads={reads}");
+}
+
+#[test]
+fn bounded_shrink_to_empty_tree_preserves_shared_peer() {
+    let mut volume = open(formatted(512, 0), MountMode::ReadWrite);
+    let file = volume
+        .create_file_in_root("shared-tail", &[0x51; 8192], now(2))
+        .unwrap();
+    let peer = volume
+        .clone_file(file, OBJECT_ROOT, "peer", now(3))
+        .unwrap();
+    volume
+        .truncate_file_bounded(
+            file,
+            0,
+            now(4),
+            FileEditLimits {
+                max_blocks: 2,
+                max_records: 2,
+            },
+        )
+        .unwrap();
+    assert_eq!(volume.stat(file).unwrap().unwrap().data_blocks, 0);
+    assert_eq!(volume.read_file(file).unwrap(), Vec::<u8>::new());
+    assert_eq!(volume.read_file(peer).unwrap(), vec![0x51; 8192]);
+    verify(&mut volume);
+    let mut volume = open(volume.into_device(), MountMode::ReadOnly);
+    assert_eq!(volume.read_file(file).unwrap(), Vec::<u8>::new());
+    assert_eq!(volume.read_file(peer).unwrap(), vec![0x51; 8192]);
+}
+
+#[test]
+fn bounded_shrink_crash_preserves_shared_and_captured_bytes() {
+    let mut volume = open(formatted(512, 0), MountMode::ReadWrite);
+    let file = volume
+        .create_file_in_root("cuts", &[0x55; 8192], now(2))
+        .unwrap();
+    volume.preallocate_file(file, 12288, 4096, now(3)).unwrap();
+    let peer = volume
+        .clone_file(file, OBJECT_ROOT, "peer", now(4))
+        .unwrap();
+    let snapshot = volume.snapshot_create(now(5)).unwrap();
+    let before = volume.stat(file).unwrap().unwrap();
+    let base = volume.into_device();
+    let mut recording = open(RecordingBackend::new(base.clone()), MountMode::ReadWrite);
+    recording
+        .truncate_file_bounded(
+            file,
+            7,
+            now(6),
+            FileEditLimits {
+                max_blocks: 3,
+                max_records: 4,
+            },
+        )
+        .unwrap();
+    let after = recording.stat(file).unwrap().unwrap();
+    let (_, log) = recording.into_device().into_parts();
+    let mut counts = [0, 0];
+    for cut in 0..=log.len() {
+        for_each_crash_state(&base, &log, cut, |state| {
+            let mut volume = open(state.image, MountMode::ReadOnly);
+            let record = volume.stat(file).unwrap().unwrap();
+            assert!(record == before || record == after);
+            let published = record == after;
+            counts[usize::from(published)] += 1;
+            assert_eq!(
+                volume.read_file(file).unwrap(),
+                vec![0x55; if published { 7 } else { 8192 }]
+            );
+            assert_eq!(volume.read_file(peer).unwrap(), vec![0x55; 8192]);
+            let view = volume.snapshot_open(snapshot).unwrap();
+            assert_eq!(bytes(&mut volume, &view, file), vec![0x55; 8192]);
+            assert_eq!(
+                volume
+                    .snapshot_stat(&view, file)
+                    .unwrap()
+                    .unwrap()
+                    .allocated_bytes,
+                before.allocated_bytes
+            );
+        });
+    }
+    assert!(counts.iter().all(|n| *n > 0));
+    println!("bounded_shrink_cuts old={} new={}", counts[0], counts[1]);
+}

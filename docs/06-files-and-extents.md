@@ -130,6 +130,22 @@ layout traversal and native/portable qualification have separate gates. See
 
 ## 5. Truncation
 
+The host Rust `truncate_file_bounded` entry point limits affected tail records
+and retired allocated blocks. It counts a replaced partial written tail as one
+retired block, and includes reservations beyond the old EOF. Holes consume no
+retirement budget. The local window includes its boundary predecessor; input
+and result mappings fit the record limit. Budget exhaustion precedes device
+writes. Existing extent trees retain their representation, including an empty
+tree after truncation to zero. Shared references, captured views and selectable
+checkpoints govern the common retirement path.
+
+The unrestricted `truncate_file` entry point keeps its request admission.
+Arbitrary large atomic truncation on constrained profiles requires persistent
+bounded cleanup and crash-safe publication semantics; the bounded entry point
+reports an explicit limit when the request exceeds its working set. Callers
+may use separately durable intermediate sizes only when their operation permits
+that visible sequence. See [bounded shrink qualification](../testing/data-policy-qualification.md#bounded-shrinking).
+
 Shrinking a file must:
 
 1. update logical size transactionally

@@ -391,6 +391,12 @@ provider budget reports a limit error without a partial write. These limits
 bound data buffers and local extent vectors; total allocator and retention
 memory require independent qualification.
 
+The AFS+ restore provider uses `truncate_file_bounded` for resizing. Shrinking
+admits at most 64 retired allocated blocks and 64 local records, counting a
+replaced partial tail and reservations beyond EOF. Growth preserves existing
+tree mappings without enumeration. Excessive shrinking returns a limit error
+before writes; the service does not silently split an atomic resize.
+
 The byte limit bounds requested allocation per operation. The AFS+ provider
 uses the [bounded local extent editor](06-files-and-extents.md#4-preallocation)
 with a 64-record limit, including boundary neighbors, allocated runs and the

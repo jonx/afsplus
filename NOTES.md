@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Bound shrink working sets and retirements](#2026-09-14---bound-shrink-working-sets-and-retirements)
 - [2026-09-14 - Grow sparse files without enumerating mappings](#2026-09-14---grow-sparse-files-without-enumerating-mappings)
 - [2026-09-14 - Bound atomic writes for restore consumers](#2026-09-14---bound-atomic-writes-for-restore-consumers)
 - [2026-09-14 - Bound reservation edits in fragmented files](#2026-09-14---bound-reservation-edits-in-fragmented-files)
@@ -76,6 +77,30 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-14 - Bound shrink working sets and retirements
+
+The host Rust bounded resize entry point admits affected tail records and
+retired allocated blocks. A replaced partial written tail counts once;
+reservations beyond EOF count toward retirement, and holes do not. Local tree
+edits preserve unrelated mappings and may retain an empty tree. Shared data
+and captured views use the existing reference/lifetime retirement machinery.
+The restore provider admits 64 records and 64 retired blocks per resize,
+refusing excessive work before writes without silently splitting the operation.
+
+Three targeted tests passed. A partial-tail edit among 301 fragmented records
+used 99 device reads and preserved snapshots through shrink/regrowth/remount.
+Record/block refusals issued zero writes. Empty-tree truncation preserved its
+shared peer. The publication oracle passed 1171 states (1167 old, four new),
+checking exact live records/bytes, shared-peer content and captured accounting.
+
+Formatting, Clippy, documentation checks, three checker fixtures and whitespace
+validation passed. The full workspace suite passed 362 tests, with zero
+failures and ten ignored. Arbitrary large atomic truncation requires persistent
+bounded cleanup and its own crash
+oracles. Total RAM and native/constrained runtime need separate qualification.
+Those requirements remain in the complete queue.
 
 ## 2026-09-14 - Grow sparse files without enumerating mappings
 

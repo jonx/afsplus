@@ -282,7 +282,10 @@ struct OpenWindow {
 /// Explicit reservation transaction admission; independent of disk encoding.
 #[derive(Debug, Clone, Copy)]
 pub struct FileEditLimits {
+    /// Touched logical blocks for writes/reservations; retired allocated blocks
+    /// (including a replaced partial tail) for shrinking. Growth retires none.
     pub max_blocks: u64,
+    /// Local mapping records, including boundary neighbors and result records.
     pub max_records: usize,
 }
 
@@ -1115,6 +1118,30 @@ impl<D: BlockDevice> Volume<D> {
         new_size: u64,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.truncate_file_with_limits(object_id, new_size, now, None)
+    }
+
+    /// Resize atomically with bounded affected extent records and retired blocks.
+    pub fn truncate_file_bounded(
+        &mut self,
+        object_id: u64,
+        new_size: u64,
+        now: Timespec,
+        limits: FileEditLimits,
+    ) -> Result<(), CoreError> {
+        if limits.max_blocks == 0 || limits.max_records == 0 || limits.max_records == usize::MAX {
+            return Err(CoreError::PrototypeLimit("file edit limits invalid"));
+        }
+        self.truncate_file_with_limits(object_id, new_size, now, Some(limits))
+    }
+
+    fn truncate_file_with_limits(
+        &mut self,
+        object_id: u64,
+        new_size: u64,
+        now: Timespec,
+        limits: Option<FileEditLimits>,
+    ) -> Result<(), CoreError> {
         metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
@@ -1160,7 +1187,24 @@ impl<D: BlockDevice> Volume<D> {
             );
         }
         let block_size = self.dev.block_size() as u64;
-        let (old_extents, old_tree_blocks) = self.load_file_layout(&record)?;
+        let local_tree = limits.is_some() && record.flags & OBJECT_FLAG_EXTENT_TREE != 0;
+        let (old_extents, old_tree_blocks) = if let Some(limit) = limits.filter(|_| local_tree) {
+            (
+                extent_map::read_window(
+                    &mut self.dev,
+                    &self.ident.geometry(),
+                    record.data_root,
+                    object_id,
+                    self.checkpoint.generation,
+                    new_size / block_size,
+                    u64::MAX,
+                    limit.max_records,
+                )?,
+                Vec::new(),
+            )
+        } else {
+            self.load_file_layout(&record)?
+        };
         let mut new_extents = old_extents.clone();
         let mut removed_extents = Vec::new();
         let mut tail_rewrite = None;
@@ -1182,6 +1226,20 @@ impl<D: BlockDevice> Volume<D> {
             }
         }
 
+        if let Some(limit) = limits {
+            let retired = removed_extents.iter().try_fold(
+                u64::from(tail_rewrite.is_some()),
+                |sum, extent| {
+                    sum.checked_add(extent.block_count)
+                        .ok_or(CoreError::PrototypeLimit("retired block count overflow"))
+                },
+            )?;
+            if retired > limit.max_blocks {
+                return Err(CoreError::PrototypeLimit(
+                    "file edit retirement block budget exhausted",
+                ));
+            }
+        }
         let generation = self.next_generation()?;
         let mut tx = TxAllocator::begin(
             &mut self.dev,
@@ -1215,6 +1273,32 @@ impl<D: BlockDevice> Volume<D> {
             data_writes.push((physical_start, block));
         }
 
+        if limits.is_some_and(|limit| new_extents.len() > limit.max_records) {
+            return Err(CoreError::PrototypeLimit(
+                "file edit result record budget exhausted",
+            ));
+        }
+        if local_tree {
+            let staged = self.stage_extent_delta(
+                &mut tx,
+                record,
+                record_lba,
+                &old_extents,
+                &new_extents,
+                new_size,
+                true,
+                now,
+                generation,
+            )?;
+            return self.commit_staged_file_layout(
+                record,
+                staged,
+                removed_extents,
+                generation,
+                tx,
+                data_writes,
+            );
+        }
         self.commit_file_layout(
             record,
             record_lba,
