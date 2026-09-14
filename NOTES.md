@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Reconstruct the semantic runner in an isolated checkout](#2026-09-14---reconstruct-the-semantic-runner-in-an-isolated-checkout)
 - [2026-09-14 — Bind semantic replay and reduction to cache profiles](#2026-09-14--bind-semantic-replay-and-reduction-to-cache-profiles)
 - [2026-09-14 — Integrate staged-tree cache profiles into transactions and recovery](#2026-09-14--integrate-staged-tree-cache-profiles-into-transactions-and-recovery)
 - [2026-09-14 — Measure requested heap across real filesystem phases](#2026-09-14--measure-requested-heap-across-real-filesystem-phases)
@@ -126,6 +127,37 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-14 - Reconstruct the semantic runner in an isolated checkout
+
+An offline, locked debug build of `afsplus-check --bin afsplus-scenario` in a
+fresh local clone of `ae5edbd9a9d40b658b2638b5f36f21e69b38eb81`, with a fresh
+external target directory and the existing host Cargo cache, reproduced all
+eight non-metadata roles of each retained 2/4/8/unlimited cache-profile bundle
+byte for byte. Both structural checker verdicts and the semantic verdict passed
+in every regenerated bundle. Original bundle file hashes remained unchanged.
+The checkout's observed source digest also matched the retained source digest.
+
+The rebuilt executable digest differed: original
+`7504565ff12e613807500cd6aa1bf15d65e52aaa855d8879bc47c7079d4e306f`, rebuilt
+`2dfd95bc660783766dbc38fbb4a803dbc742d22f79261df373a8bf636c6cb8bd`.
+Only `run.json` differed between each original and regenerated bundle. Strict
+replay correctly refused all four rebuilt-runner attempts with an identity
+mismatch. This is evidence of semantic reconstruction on this host, not a
+bit-reproducible build or cross-host qualification. The cause of the executable
+difference was not isolated; checkout paths and build environment remain inputs
+to investigate rather than an assumed explanation.
+
+The private experiment directory is
+`/private/tmp/afsplus-rebuild-r49m5_or`: `build.log`, `identity.json`,
+`comparison.json`, the detached source checkout, fresh target directory and four
+new `rebuilt-*` bundles. Temporary artifacts are not durable distribution.
+The build used the existing Cargo cache, so dependency/toolchain preservation,
+dirty-source capture, a portable reconstruction package and automated comparison
+remain required. The next implementation must keep exact replay strict and
+report rebuilt semantic comparisons separately, preserving both identities and
+all original artifacts.
 
 ## 2026-09-14 — Bind semantic replay and reduction to cache profiles
 
