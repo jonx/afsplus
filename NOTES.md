@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Integrate the first cache-family qualification matrix](#2026-09-15--integrate-the-first-cache-family-qualification-matrix)
 - [2026-09-15 — Review object resolution and preserve returned IDs](#2026-09-15--review-object-resolution-and-preserve-returned-ids)
 - [2026-09-15 — Extend publication-family diagnostic comparisons](#2026-09-15--extend-publication-family-diagnostic-comparisons)
 - [2026-09-14 - Export and replay API and deferred-window diagnostics](#2026-09-14---export-and-replay-api-and-deferred-window-diagnostics)
@@ -143,6 +144,27 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Integrate the first cache-family qualification matrix
+
+Integrated codex-cache's reviewed commit `cdd96b4` into the object-observation
+core at `be97dbe`. The ten-test target passed with zero failures and zero
+ignored tests in the isolated combined checkout. All 162 Rust source hashes
+match the integrated sources. The campaign includes 72,220 namespace cuts,
+576 write/barrier faults, 1,384 recovery cuts and twelve early spill faults.
+Its captured-directory oracle enumerates every page and verifies final EOF.
+
+The retained evidence is `build/cache-matrix-review-0vur3dno`, including the
+agent's raw results and the combined-checkout Clippy and target logs. The
+main core's separate full suite passed 562/0/10; the original agent's full
+suite predates the final pagination strengthening. Neither is described as a
+full-suite run of this final combined checkout. Qualification composes that
+core gate with the ten integration tests on hash-identical sources.
+
+The source inventory names 26 families and their omitted combinations.
+Stage A cache qualification stays open for clone/shared transitions, orphan
+lifecycles, snapshot maintenance, reclaim and the other explicit omissions.
+No native memory-pressure or hardware durability claim follows from this lot.
 
 ## 2026-09-15 — Review object resolution and preserve returned IDs
 

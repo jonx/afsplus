@@ -526,6 +526,12 @@ coverage is tracked by its [corruption corpus](corruption-corpus.md).
 
 ## Integrated tree-cache profiles
 
+The [family matrix](../crates/afsplus-check/tests/tiny_cache_matrix.md) maps
+executable mutations to profile, fault and recovery oracles. Its
+[added tests](../crates/afsplus-check/tests/tiny_cache_matrix.rs) exercise exact
+live and retained state across 2/4/8/unlimited profiles; the matrix states
+each fixture limit and separates small-tree semantics from actual eviction.
+
 [The runtime policy](../docs/27-rust-implementation-strategy.md#10-transaction-tree-resource-policy)
 applies at mount, including replay, and at every transaction allocator. Run:
 

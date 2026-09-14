@@ -199,9 +199,9 @@ Parent: `a-cache`, roadmap entry `roadmap-31`. Origin:
 | Task | State | Evidence or next observable result |
 |---|---|---|
 | Baseline 2/4/8/unlimited profiles, staged-tree spills and replay policy | Complete | [Integrated cache profiles](../testing/developer-harness.md#integrated-tree-cache-profiles), [cache-bound replay](../testing/developer-harness.md#cache-bound-semantic-bundles) |
-| Map every executable mutation/publication family to cache and fault tests | To do | Named family-to-test matrix identifying exact omissions, rather than treating the existence of a test file as coverage |
-| Fill uncovered family/profile combinations | To do | Exact live/retained bytes, structural checks and resource refusal behavior under each admitted profile |
-| Fill missing spill/failure/recovery combinations | To do | Old-or-new permitted state after cuts; acknowledged state survives refusal; retries preserve ownership |
+| Map every executable mutation/publication family to cache and fault tests | In progress | [26-family source inventory](../crates/afsplus-check/tests/tiny_cache_matrix.md); explicit baseline omissions and added executable coverage; completeness review required |
+| Fill uncovered family/profile combinations | In progress | [Ten-test matrix](../crates/afsplus-check/tests/tiny_cache_matrix.md): 12 namespace/metadata families at 2/4/8/unlimited, 72,220 modeled cuts; integrated target 10 passed / 0 failed / 0 ignored with be97dbe, retained `build/cache-matrix-review-0vur3dno`; clone/shared and other listed families open |
+| Fill missing spill/failure/recovery combinations | In progress | [Matrix oracles and limits](../crates/afsplus-check/tests/tiny_cache_matrix.md): 576 write/barrier faults, 1,384 replay cuts, 12 early spill faults plus bounded reservation refusal/retry; remaining transitions listed in inventory |
 
 Close `a-cache` when the inventory has no uncovered finite host combinations.
 Whole-job memory budgets, aged sustained workloads and native memory pressure
