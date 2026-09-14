@@ -103,6 +103,8 @@ aliases, complete namespace enumeration, archive-wide duplicate/omission checks,
 EOF, destination synchronization and durable job loss reporting belong to the
 enclosing job. A later namespace edit may change timestamps or link counts, so
 that orchestration must finalize and verify affected metadata after such edits.
+[Scoped created-entry lookup](../docs/13-filesystem-api-v2.md#scoped-created-entry-lookup)
+permits revisiting entries without retaining every active object handle.
 No filesystem disk record, feature identity or C ABI changes with this group.
 
 See [regular-file qualification](../testing/backup-archive-qualification.md#bound-regular-file-groups)

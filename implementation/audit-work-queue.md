@@ -7,6 +7,15 @@ Implementation status belongs in [milestones](milestones.md); decisions belong
 in [open questions](open-questions.md). A linked test proves only its stated
 oracle and backend. Snapshot work does not replace the other rows.
 
+<!-- toc -->
+
+- [Resume here](#resume-here)
+- [Complete work queue](#complete-work-queue)
+- [Boundaries to preserve](#boundaries-to-preserve)
+- [Verification and delivery](#verification-and-delivery)
+
+<!-- /toc -->
+
 ## Resume here
 
 Continue Q4 with an integrated ownership/reclaim design, using the
@@ -39,12 +48,13 @@ preserving explicit work limits before
 recovery. Use the [metadata restoration primitive](../testing/book-review-qualification.md#metadata-restoration-primitive)
 and the [checked destination interface](../docs/13-filesystem-api-v2.md#9-destination-scoped-restore-extension).
 Define existing-destination merge/overwrite/resume under Q11 before exposing
-pre-existing destination objects; distinguish partial restoration from completion.
+objects present before the restore job; distinguish partial restoration from completion.
 Use the [sparse content consumer](../spec/backup-sparse.md) for bounded content
 transport and the [allocation-preserving consumer](../spec/backup-allocation.md)
 for reservation binding and verified coverage. Use [bound regular-file groups](../spec/backup-file.md)
 for exact metadata/content/inventory agreement. Integrate directories, symlinks
-and the hard-link graph; finalize metadata after namespace edits. Persist explicit
+and the hard-link graph; use [scoped created-entry lookup](../docs/13-filesystem-api-v2.md#scoped-created-entry-lookup)
+to reopen entries with bounded active handles and finalize metadata after namespace edits. Persist explicit
 content-recovery loss reports and validate every object and archive-wide binding
 before full-job preservation success. Use
 [committed destination allocation readback](../docs/13-filesystem-api-v2.md#committed-destination-allocation-readback)

@@ -52,6 +52,7 @@ struct Mock {
     reservations: Vec<(u64, u64, u64)>,
     reservation_support: bool,
     allocation_reply: Option<AllocationPage>,
+    lookup_support: bool,
 }
 impl Mock {
     fn new() -> Self {
@@ -73,6 +74,7 @@ impl Mock {
             reservations: vec![],
             reservation_support: true,
             allocation_reply: None,
+            lookup_support: true,
         }
     }
     fn create(&mut self, parent: u64, name: &str, kind: NodeKind) -> Result<u64, VfsError> {
@@ -106,6 +108,16 @@ impl RestoreBackend for Mock {
     fn root(&mut self) -> Result<u64, VfsError> {
         self.calls += 1;
         Ok(1)
+    }
+    fn lookup_created(&mut self, parent: &u64, name: &str) -> Result<u64, VfsError> {
+        self.calls += 1;
+        if !self.lookup_support {
+            return Err(VfsError::NotSupported);
+        }
+        self.names
+            .get(&(*parent, name.into()))
+            .copied()
+            .ok_or(VfsError::NotFound)
     }
     fn create_file(&mut self, parent: &u64, name: &str, _: Timespec) -> Result<u64, VfsError> {
         self.create(*parent, name, NodeKind::File)
@@ -1029,4 +1041,213 @@ fn afs_allocation_readback_matches_committed_pages_and_survives_remount() {
             .collect::<Vec<_>>()
     );
     assert_eq!(volume.stat(id).unwrap().unwrap().size_bytes, 4103);
+}
+
+#[test]
+fn created_lookup_obeys_original_grants_scope_and_failed_admission() {
+    let (mut service, authority) = RestoreService::new(Mock::new(), 3).unwrap();
+    let grant = authority.grant();
+    let root = service.root(&grant).unwrap();
+    let file = service.create_file(&root, "file", now(1)).unwrap();
+    let id = service.stat(&file).unwrap().object_id;
+    for name in ["", ".", "..", "a/b", "/file", "a\0b"] {
+        let calls = service.backend_mut().calls;
+        assert!(matches!(
+            service.client().lookup_created(&root, name),
+            Err(RestoreError::Filesystem(VfsError::Invalid))
+        ));
+        assert_eq!(service.backend_mut().calls, calls);
+    }
+    let calls = service.backend_mut().calls;
+    assert!(matches!(
+        service.lookup_created(&file, "child"),
+        Err(RestoreError::Filesystem(VfsError::NotDirectory))
+    ));
+    assert_eq!(service.backend_mut().calls, calls + 1);
+    service.backend_mut().nodes.get_mut(&id).unwrap().stat.kind = NodeKind::Symlink;
+    assert!(matches!(
+        service.lookup_created(&file, "child"),
+        Err(RestoreError::Filesystem(VfsError::NotDirectory))
+    ));
+    service.backend_mut().nodes.get_mut(&id).unwrap().stat.kind = NodeKind::File;
+    service.backend_mut().lookup_support = false;
+    assert!(matches!(
+        service.lookup_created(&root, "file"),
+        Err(RestoreError::Filesystem(VfsError::NotSupported))
+    ));
+    service.backend_mut().lookup_support = true;
+    for _ in 0..20 {
+        assert!(matches!(
+            service.lookup_created(&root, "missing"),
+            Err(RestoreError::Filesystem(VfsError::NotFound))
+        ));
+    }
+    let reopened = service.lookup_created(&root, "file").unwrap();
+    assert_eq!(service.stat(&reopened).unwrap().object_id, id);
+    let calls = service.backend_mut().calls;
+    assert!(matches!(
+        service.lookup_created(&root, "file"),
+        Err(RestoreError::Filesystem(VfsError::Limit(_)))
+    ));
+    assert_eq!(service.backend_mut().calls, calls);
+    drop(reopened);
+    authority.revoke(&grant).unwrap();
+    let calls = service.backend_mut().calls;
+    assert!(matches!(
+        service.lookup_created(&root, "file"),
+        Err(RestoreError::Denied)
+    ));
+    assert_eq!(service.backend_mut().calls, calls);
+    drop(root);
+    let fresh = authority.grant();
+    let root = service.root(&fresh).unwrap();
+    let reopened = service.lookup_created(&root, "file").unwrap();
+    assert_eq!(service.stat(&reopened).unwrap().object_id, id);
+    assert_eq!(service.stat(&file), Err(RestoreError::Denied));
+    let (mut foreign, _) = RestoreService::new(Mock::new(), 3).unwrap();
+    assert!(matches!(
+        foreign.lookup_created(&root, "file"),
+        Err(RestoreError::Denied)
+    ));
+    assert_eq!(foreign.backend_mut().calls, 0);
+}
+#[test]
+fn created_lookup_walks_deep_trees_with_two_active_slots() {
+    let (mut service, authority) = RestoreService::new(Mock::new(), 2).unwrap();
+    let grant = authority.grant();
+    let mut current = service.root(&grant).unwrap();
+    for _ in 0..128 {
+        let child = service.create_directory(&current, "child", now(1)).unwrap();
+        current = child;
+    }
+    let leaf = service.create_file(&current, "leaf", now(2)).unwrap();
+    let id = service.stat(&leaf).unwrap().object_id;
+    drop(leaf);
+    drop(current);
+    current = service.root(&grant).unwrap();
+    for _ in 0..128 {
+        current = service.client().lookup_created(&current, "child").unwrap();
+    }
+    let leaf = service.client().lookup_created(&current, "leaf").unwrap();
+    assert_eq!(service.stat(&leaf).unwrap().object_id, id);
+}
+#[test]
+fn afs_created_lookup_is_read_only_confined_and_supports_final_metadata_after_links() {
+    use afsplus_block::{BlockDevice, BlockError, MemoryBackend};
+    use std::{cell::Cell, rc::Rc};
+    struct Observed {
+        inner: MemoryBackend,
+        counts: Rc<Cell<[u64; 3]>>,
+    }
+    impl BlockDevice for Observed {
+        fn block_size(&self) -> usize {
+            self.inner.block_size()
+        }
+        fn total_blocks(&self) -> u64 {
+            self.inner.total_blocks()
+        }
+        fn read_block(&mut self, lba: u64, b: &mut [u8]) -> Result<(), BlockError> {
+            let mut c = self.counts.get();
+            c[0] += 1;
+            self.counts.set(c);
+            self.inner.read_block(lba, b)
+        }
+        fn write_block(&mut self, lba: u64, b: &[u8]) -> Result<(), BlockError> {
+            let mut c = self.counts.get();
+            c[1] += 1;
+            self.counts.set(c);
+            self.inner.write_block(lba, b)
+        }
+        fn flush(&mut self) -> Result<(), BlockError> {
+            let mut c = self.counts.get();
+            c[2] += 1;
+            self.counts.set(c);
+            self.inner.flush()
+        }
+    }
+    let mut volume = afs_volume();
+    let outside = volume
+        .create_file_in_root("outside", b"untouched", now(2))
+        .unwrap();
+    let selected = volume.create_directory_in_root("selected", now(3)).unwrap();
+    let counts = Rc::new(Cell::new([0; 3]));
+    let volume = afsplus_core::mount_with_snapshot_limits(
+        Observed {
+            inner: volume.into_device(),
+            counts: counts.clone(),
+        },
+        afsplus_core::MountOptions::default(),
+        limits(),
+    )
+    .unwrap();
+    let (mut service, authority) =
+        RestoreService::new(AfsRestoreDestination::new(volume, selected).unwrap(), 3).unwrap();
+    let grant = authority.grant();
+    let mut current = service.root(&grant).unwrap();
+    let mut dirs = vec![selected];
+    for _ in 0..8 {
+        let child = service.create_directory(&current, "child", now(4)).unwrap();
+        dirs.push(service.stat(&child).unwrap().object_id);
+        current = child;
+    }
+    let file = service.create_file(&current, "file", now(5)).unwrap();
+    service.write(&file, 0, b"restored", now(6)).unwrap();
+    let id = service.stat(&file).unwrap().object_id;
+    drop(current);
+    let root = service.root(&grant).unwrap();
+    service.link(&file, &root, "alias", now(7)).unwrap();
+    drop(root);
+    drop(file);
+    current = service.root(&grant).unwrap();
+    counts.set([0; 3]);
+    assert!(matches!(
+        service.lookup_created(&current, "outside"),
+        Err(RestoreError::Filesystem(VfsError::NotFound))
+    ));
+    assert_eq!(&counts.get()[1..], &[0, 0]);
+    for _ in 0..8 {
+        counts.set([0; 3]);
+        current = service.client().lookup_created(&current, "child").unwrap();
+        let [reads, writes, flushes] = counts.get();
+        assert!(reads > 0 && reads < 128);
+        assert_eq!((writes, flushes), (0, 0));
+    }
+    counts.set([0; 3]);
+    let file = service.lookup_created(&current, "file").unwrap();
+    assert_eq!(&counts.get()[1..], &[0, 0]);
+    assert_eq!(service.stat(&file).unwrap().object_id, id);
+    service.metadata(&file, metadata()).unwrap();
+    drop(file);
+    drop(current);
+    current = service.root(&grant).unwrap();
+    let alias = service.lookup_created(&current, "alias").unwrap();
+    assert_eq!(service.stat(&alias).unwrap().object_id, id);
+    assert_eq!(service.stat(&alias).unwrap().links, 2);
+    assert_metadata(&service.stat(&alias).unwrap());
+    drop(alias);
+    // Finalize directories only after all namespace mutations, with bounded handles.
+    service.metadata(&current, metadata()).unwrap();
+    for _ in 0..8 {
+        current = service.lookup_created(&current, "child").unwrap();
+        service.metadata(&current, metadata()).unwrap();
+    }
+    service.sync(&grant).unwrap();
+    let device = service.into_backend().into_volume().into_device().inner;
+    let mut volume = afsplus_core::mount_with_snapshot_limits(
+        device,
+        afsplus_core::MountOptions::default(),
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(volume.read_file(outside).unwrap(), b"untouched");
+    assert_eq!(volume.read_file(id).unwrap(), b"restored");
+    assert_eq!(
+        volume.lookup_in_directory(selected, "alias").unwrap(),
+        Some(id)
+    );
+    for id in dirs.into_iter().chain([id]) {
+        assert_metadata(&afsplus_vfs::Stat::from(
+            afsplus_core::volume::ObjectMetadata::from(volume.stat(id).unwrap().unwrap()),
+        ));
+    }
 }

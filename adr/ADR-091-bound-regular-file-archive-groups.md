@@ -1,6 +1,7 @@
 # ADR-091: Bind regular-file metadata, allocation and opaque inventory groups
 
 Status: Accepted under the owner's delegated recommended-option authority; namespace/job and native qualification required
+Amended by: ADR-092
 Amends: ADR-078, ADR-082, ADR-084, ADR-086, ADR-090
 
 ## Context

@@ -53,6 +53,15 @@ impl RestoreMetadata {
 pub trait RestoreBackend {
     type Object;
     fn root(&mut self) -> Result<Self::Object, VfsError>;
+    /// Resolve one entry in the exclusively owned, initially empty restore tree.
+    /// Never follow a symlink or resolve a path outside the supplied directory.
+    fn lookup_created(
+        &mut self,
+        _parent: &Self::Object,
+        _name: &str,
+    ) -> Result<Self::Object, VfsError> {
+        Err(VfsError::NotSupported)
+    }
     fn create_file(
         &mut self,
         parent: &Self::Object,
@@ -263,6 +272,21 @@ impl<P: RestoreBackend> RestoreService<P> {
         let _permit = self.admit(grant)?;
         let budget = self.reserve_handle()?;
         Ok(Self::wrap(self.backend.root()?, grant.clone(), budget))
+    }
+    /// Reopen a created entry without retaining every restore object handle.
+    pub fn lookup_created(
+        &mut self,
+        parent: &RestoreObject<P::Object>,
+        name: &str,
+    ) -> Result<RestoreObject<P::Object>, RestoreError> {
+        let _permit = self.admit(&parent.0.grant)?;
+        component(name)?;
+        let budget = self.reserve_handle()?;
+        if self.backend.stat(&parent.0.object)?.kind != crate::NodeKind::Directory {
+            return Err(VfsError::NotDirectory.into());
+        }
+        let object = self.backend.lookup_created(&parent.0.object, name)?;
+        Ok(Self::wrap(object, parent.0.grant.clone(), budget))
     }
     fn create(
         &mut self,
@@ -535,6 +559,13 @@ impl<P: RestoreBackend> RestoreClient<'_, P> {
     pub fn root(&mut self, grant: &RestoreGrant) -> Result<RestoreObject<P::Object>, RestoreError> {
         self.0.root(grant)
     }
+    pub fn lookup_created(
+        &mut self,
+        parent: &RestoreObject<P::Object>,
+        name: &str,
+    ) -> Result<RestoreObject<P::Object>, RestoreError> {
+        self.0.lookup_created(parent, name)
+    }
     pub fn create_file(
         &mut self,
         parent: &RestoreObject<P::Object>,
@@ -646,6 +677,11 @@ impl<D: afsplus_block::BlockDevice> RestoreBackend for AfsRestoreDestination<D> 
     type Object = u64;
     fn root(&mut self) -> Result<u64, VfsError> {
         Ok(self.root)
+    }
+    fn lookup_created(&mut self, parent: &u64, name: &str) -> Result<u64, VfsError> {
+        self.volume
+            .lookup_in_directory(*parent, name)?
+            .ok_or(VfsError::NotFound)
     }
     fn create_file(&mut self, parent: &u64, name: &str, now: Timespec) -> Result<u64, VfsError> {
         Ok(self
@@ -840,7 +876,23 @@ mod authority_tests {
             })
         }
         fn stat(&mut self, _: &()) -> Result<Stat, VfsError> {
-            unreachable!()
+            self.check();
+            Ok(Stat {
+                object_id: 1,
+                kind: crate::NodeKind::Directory,
+                size: 0,
+                allocated_size: 0,
+                links: 1,
+                protection: 0,
+                created: Timespec::default(),
+                modified: Timespec::default(),
+                changed: Timespec::default(),
+                content_generation: 1,
+            })
+        }
+        fn lookup_created(&mut self, _: &(), _: &str) -> Result<(), VfsError> {
+            self.check();
+            Ok(())
         }
         fn read(&mut self, _: &(), _: u64, _: &mut [u8]) -> Result<usize, VfsError> {
             unreachable!()
@@ -868,6 +920,23 @@ mod authority_tests {
             self.check();
             Ok(())
         }
+    }
+    #[test]
+    fn created_lookup_holds_operation_permit_across_stat_and_lookup() {
+        let (mut service, authority) = RestoreService::new(
+            Probe {
+                grants: vec![],
+                calls: 0,
+            },
+            2,
+        )
+        .unwrap();
+        let grant = authority.grant();
+        let root = service.root(&grant).unwrap();
+        service.backend_mut().grants = vec![grant];
+        let child = service.client().lookup_created(&root, "child").unwrap();
+        assert_eq!(service.backend_mut().calls, 2);
+        drop(child);
     }
     #[test]
     fn allocation_readback_holds_operation_permit() {

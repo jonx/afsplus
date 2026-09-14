@@ -28,6 +28,7 @@
 - [9. Destination-scoped restore extension](#9-destination-scoped-restore-extension)
   - [Committed destination allocation readback](#committed-destination-allocation-readback)
   - [Staged opaque metadata restoration](#staged-opaque-metadata-restoration)
+  - [Scoped created-entry lookup](#scoped-created-entry-lookup)
 
 <!-- /toc -->
 
@@ -412,10 +413,11 @@ escape within its selected destination.
 `AfsRestoreDestination` owns a writable `Volume` and a host-selected empty
 directory. Construction checks emptiness with a bounded directory page. It
 creates fresh files/directories and hard links without overwriting existing
-names; the consumer has no lookup or import operation for pre-existing objects.
-An unrelated namespace outside the selected directory receives no authority.
-Existing-destination merge, overwrite and resume require an explicit Q11 design
-and failure oracle before adding operations that expose existing objects.
+names. [Scoped created-entry lookup](#scoped-created-entry-lookup) reopens entries
+inside that exclusively owned restore tree. It exposes no arbitrary object import
+or authority over an unrelated namespace outside the selected directory.
+Existing-destination merge, overwrite and persistent resume require an explicit
+Q11 design and failure oracle before admitting objects present before the job.
 
 `RestoreMetadata` carries protection and the three timestamps independently of
 destination identities and storage layout. AFS+ refuses protection values that
@@ -549,3 +551,41 @@ AFS+ mapping explicitly refuses opaque upload until its storage implementation
 qualifies this contract. Constrained providers may spool staging and accept small
 chunks; whole-value allocation is not required by the interface. Actual native
 staging, cleanup, durability and memory limits need provider evidence.
+
+
+### Scoped created-entry lookup
+
+[ADR-092](../adr/ADR-092-scoped-restore-namespace-lookup.md) adds optional
+`lookup_created(parent, name)` to the restore provider and checked facade. The
+provider resolves exactly one literal component within the given directory,
+without following symlink targets. Missing support returns `NotSupported`.
+Validate the original parent grant, component syntax and a free active-handle
+slot before provider calls. Hold the admission permit while checking that the
+parent is a directory, resolving the entry and constructing its handle. Invalid
+or symlink parents return `NotDirectory`; a missing entry returns `NotFound`.
+Failures release the reserved slot.
+
+The returned handle owns an independent provider object and carries the parent's
+original grant. Closing the parent does not close the child. Revoking that grant
+blocks both handles and their clones on subsequent operations. A valid new grant
+can obtain a new root and reopen entries inside the same authorized scope, but
+cannot change or reactivate an old handle's grant. Foreign-service parents fail
+before provider calls. Lookup performs no filesystem writes or implicit barrier.
+
+The host maintains an initially empty destination and exclusive namespace
+ownership for the restore service lifetime. Consumers cannot insert external
+objects, rename/delete entries out of scope, traverse symlinks or pass raw IDs.
+AFS+ maps this operation to a directory-entry lookup in the exclusively owned
+Volume. Native providers must qualify their own isolation and no-follow behavior.
+This operation does not establish merge, overwrite or persistent-resume semantics.
+
+Walking a path can use two active handles by dropping each previous parent after
+opening its child. Holding a primary file while walking to an alias parent needs
+another slot. Reopening trades repeated lookup work for bounded active resources;
+it does not bound archive indexes, path storage or metadata manifests. Those need
+separate caller budgets or spooling. Enclosing restore orchestration must verify
+hard-link identity and finalize metadata after all namespace mutations.
+
+Run the [created-entry lookup gate](../testing/security-model-conformance.md#21-scoped-created-entry-lookup).
+The additive Rust trait default preserves provider compilation; no C ABI, feature
+identity or filesystem disk record is changed.

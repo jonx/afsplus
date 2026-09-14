@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Reopen created restore entries with bounded active handles](#2026-09-14---reopen-created-restore-entries-with-bounded-active-handles)
 - [2026-09-14 - Bind exact regular-file metadata to allocation and opaque inventories](#2026-09-14---bind-exact-regular-file-metadata-to-allocation-and-opaque-inventories)
 - [2026-09-14 - Bind archive allocation records to verified sparse restoration](#2026-09-14---bind-archive-allocation-records-to-verified-sparse-restoration)
 - [2026-09-14 - Add scoped allocation readback for full restore verification](#2026-09-14---add-scoped-allocation-readback-for-full-restore-verification)
@@ -99,6 +100,38 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Reopen created restore entries with bounded active handles
+
+ADR-092 used delegated recommended-option authority to add scoped
+`lookup_created`. Namespace restoration needs to revisit files for aliases and
+metadata finalization; requiring every handle to stay open would tie active
+resource usage to the full object count. The new operation resolves one literal
+component in the initially empty, exclusively owned restore destination, holds
+the original grant through parent validation and lookup, and uses the existing
+handle budget. It neither follows symlinks nor imports arbitrary object IDs.
+
+The semantic fixture walked and reopened 128 levels with two active slots.
+Invalid names, exhausted slots and foreign or revoked grants prevented provider
+calls. Non-directory and symlink parents stopped before lookup; failed lookups
+released their slot. A fresh authorized grant reopened an in-scope entry without
+reactivating old revoked handles. The operation-permit probe covered both parent
+stat and the actual provider lookup.
+
+The real AFS+ fixture reopened eight nested directories and hard-linked names,
+finalized exact file/directory metadata after namespace edits and verified bytes,
+identity and metadata after remount. The outside file was untouched and could
+not be reached from the restore root. Each measured lookup issued zero writes
+and barriers and fewer than 128 reads in this fixture.
+
+The full workspace all-features gate passed 445 tests with zero failures and
+10 explicitly ignored qualification probes. Formatting, strict Clippy,
+documentation, three checker fixtures and whitespace validation passed.
+
+This is a live isolated-job operation, not pre-existing-destination merge,
+overwrite or persistent resume. Native providers must independently qualify
+exclusive ownership and no-follow behavior. Archive indexes/path storage and
+complete namespace/job orchestration remain separate bounded-resource work.
 
 ## 2026-09-14 - Bind exact regular-file metadata to allocation and opaque inventories
 

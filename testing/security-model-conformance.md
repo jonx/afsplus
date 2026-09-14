@@ -28,6 +28,7 @@
 - [18. Opaque captured metadata transport](#18-opaque-captured-metadata-transport)
 - [19. Staged opaque destination metadata](#19-staged-opaque-destination-metadata)
 - [20. Destination allocation readback](#20-destination-allocation-readback)
+- [21. Scoped created-entry lookup](#21-scoped-created-entry-lookup)
 
 <!-- /toc -->
 
@@ -390,3 +391,34 @@ The consumer must bind archive allocation to sparse data, restore reservations,
 compare byte coverage independently of extent segmentation, and refuse
 unsupported or mismatched destinations. Native ownership, concurrency and
 resource evidence retain separate gates.
+
+## 21. Scoped created-entry lookup
+
+Run `cargo test -p afsplus-vfs --all-features` for
+[ADR-092](../adr/ADR-092-scoped-restore-namespace-lookup.md) and
+[created-entry lookup](../docs/13-filesystem-api-v2.md#scoped-created-entry-lookup).
+
+The semantic-provider fixture must traverse 128 nested directories, close all
+handles and reopen the leaf with only two active slots. Reject invalid components
+before provider calls. Reject non-directory and symlink parents before the actual
+lookup. Repeated missing-entry and unsupported-provider errors must release their
+reserved slot; exhausted slots must prevent provider calls. Hold the original
+grant permit during both parent stat and entry lookup.
+
+Revoked parent handles must fail with no backend effects. A valid new grant can
+reopen the same scoped object, but old handles stay revoked. Foreign-service
+parents must fail before provider calls. No constructor exposes raw destination
+IDs to the consumer.
+
+The real AFS+ fixture uses a selected empty subtree and an outside file. Create
+eight nested directories, restore data and a hard-link alias, close handles and
+reopen both names. Confirm equal object identity and a link count of two. Finalize
+file and directory metadata after namespace mutations; synchronize and remount,
+then compare exact bytes and all metadata. The outside file must be unchanged
+and unreachable by lookup from the selected root. Instrument each scoped lookup:
+require zero writes/flushes and fewer than 128 block reads for this fixture.
+This fixture bound is not a general indexed-directory performance guarantee.
+
+These hosted gates do not qualify native provider race exclusion, OS symlink
+handling, persistent resume, archive namespace indexes or complete backup jobs.
+Those requirements belong to the corresponding provider and archive gates.
