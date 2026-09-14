@@ -1088,7 +1088,8 @@ on return. During Rust unwinding it emits `ApiUnwound` and restores the parent
 context. Process abort cannot run that guard. Success describes a returned
 result; durability follows the operation's contract and independent recovery
 checks. Failure or unwinding does not imply rollback. The remount flag samples
-the volume's known publication-uncertainty state at each event.
+the volume's known remount-required state at each event, including unsafe
+window mutation or publication failures.
 
 `Category::Api` selects admission after identity assignment, so filtered API
 events leave detectable sequence gaps and commit events retain their context.

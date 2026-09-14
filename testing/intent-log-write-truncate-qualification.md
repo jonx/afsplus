@@ -18,6 +18,17 @@ format. Portable C now validates the complete data/namespace view and can
 append a namespace-only no-replace rename; it does not yet allocate or emit
 version-3 data updates.
 
+<!-- toc -->
+
+- [Durability oracle](#durability-oracle)
+- [Window ownership on preflight refusal](#window-ownership-on-preflight-refusal)
+- [Compatibility oracle](#compatibility-oracle)
+- [Reproduction](#reproduction)
+- [Crash matrix](#crash-matrix)
+- [Remaining boundary](#remaining-boundary)
+
+<!-- /toc -->
+
 ## Durability oracle
 
 An existing-file update in an open window follows this order:
@@ -39,6 +50,31 @@ within the resulting logical file size and protected by a CRC over every
 complete replacement block. A partial shrinking truncate may name exactly one
 zero-tailed block; sparse growth, aligned shrink and a shrink whose retained
 tail is a hole carry no data.
+
+## Window ownership on preflight refusal
+
+Cancellation lookup for a delete or replacing rename precedes mutation. A
+failed name check, absent/non-directory parent, or failed device read at that
+point must preserve the entire open window, including every logged group and
+unlogged operation. It performs no writes or barriers. A later valid operation
+and fsync must preserve the same bytes as execution without the refused request.
+
+After mutation, failure to construct the corresponding log record requires
+remount before further mutation; a writable window cannot discard that mutated
+operation's bookkeeping. This follows the existing uncertain-window rule and
+changes no intent-log encoding or filesystem API v2 ABI.
+
+The `cancellation_preflight` tests in
+[intent_log.rs](../crates/afsplus-check/tests/intent_log.rs) cover all four tree
+cache profiles, with and without an acknowledged fsync prefix. They check
+unchanged pending counts and write/flush counts for `NotDirectory`, `NotFound`,
+invalid replacement names and an injected transient read error. Successful retry,
+fsync and remount must recover the exact file contents with a clean checker.
+Run the focused gate with:
+
+```text
+cargo test -p afsplus-check --test intent_log cancellation_preflight
+```
 
 ## Compatibility oracle
 

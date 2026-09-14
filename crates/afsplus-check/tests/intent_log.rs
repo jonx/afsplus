@@ -714,3 +714,191 @@ fn successive_existing_writes_recover_only_monotone_prefixes() {
     }
     assert_eq!(seen, std::collections::BTreeSet::from([0, 1, 2, 3]));
 }
+
+#[test]
+fn cancellation_preflight_refusals_preserve_the_pending_window() {
+    use std::num::NonZeroUsize;
+    for pages in [2, 4, 8, usize::MAX] {
+        for logged_prefix in [false, true] {
+            let mut vol = mount_with_options(
+                TraceBackend::new(formatted(4096, 8)),
+                MountOptions {
+                    tree_cache_pages: NonZeroUsize::new(pages),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let file = vol
+                .window_op(&create("kept", b"keep this"), ts(1))
+                .unwrap()
+                .unwrap();
+            if logged_prefix {
+                vol.window_fsync().unwrap();
+            }
+            vol.window_op(&create("pending", b"pending bytes"), ts(2))
+                .unwrap();
+            let pending = vol.window_unlogged_ops();
+            let before = vol.device_mut().stats();
+            assert!(matches!(
+                vol.window_op(
+                    &BatchOp::DeleteFile {
+                        parent_id: file,
+                        name: "child"
+                    },
+                    ts(3)
+                ),
+                Err(CoreError::NotDirectory)
+            ));
+            assert_eq!(
+                vol.window_unlogged_ops(),
+                pending,
+                "validation lost the pending window"
+            );
+            assert!(matches!(
+                vol.window_op(
+                    &BatchOp::DeleteFile {
+                        parent_id: u64::MAX,
+                        name: "child"
+                    },
+                    ts(3)
+                ),
+                Err(CoreError::NotFound)
+            ));
+            assert_eq!(vol.window_unlogged_ops(), pending);
+            assert!(matches!(
+                vol.window_op(
+                    &BatchOp::Rename {
+                        source_parent_id: OBJECT_ROOT,
+                        source_name: "",
+                        target_parent_id: OBJECT_ROOT,
+                        target_name: "kept",
+                        replace: true,
+                    },
+                    ts(3)
+                ),
+                Err(CoreError::InvalidName(_))
+            ));
+            assert_eq!(vol.window_unlogged_ops(), pending);
+            let after = vol.device_mut().stats();
+            assert_eq!(
+                (after.writes, after.flushes),
+                (before.writes, before.flushes)
+            );
+            vol.window_fsync().unwrap();
+            let mut recovered = mount_with_options(
+                vol.into_device(),
+                MountOptions {
+                    tree_cache_pages: NonZeroUsize::new(pages),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for (name, expected) in [
+                ("kept", b"keep this".as_slice()),
+                ("pending", b"pending bytes".as_slice()),
+            ] {
+                let id = recovered
+                    .lookup_root(name)
+                    .unwrap()
+                    .expect("durable file survives");
+                assert_eq!(recovered.read_file(id).unwrap(), expected);
+            }
+            let mut dev = recovered.into_device();
+            assert!(check_device(&mut dev).is_clean());
+        }
+    }
+}
+
+#[test]
+fn cancellation_preflight_read_failure_keeps_the_window_retryable() {
+    use afsplus_block::{BlockDevice, BlockError};
+    use std::num::NonZeroUsize;
+    struct FailRead {
+        inner: TraceBackend<MemoryBackend>,
+        fail_next_read: bool,
+    }
+    impl BlockDevice for FailRead {
+        fn block_size(&self) -> usize {
+            self.inner.block_size()
+        }
+        fn total_blocks(&self) -> u64 {
+            self.inner.total_blocks()
+        }
+        fn read_block(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+            if std::mem::take(&mut self.fail_next_read) {
+                return Err(BlockError::Injected("cancellation preflight read"));
+            }
+            self.inner.read_block(lba, buf)
+        }
+        fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+            self.inner.write_block(lba, data)
+        }
+        fn flush(&mut self) -> Result<(), BlockError> {
+            self.inner.flush()
+        }
+    }
+    for pages in [2, 4, 8, usize::MAX] {
+        for logged in [false, true] {
+            let mut vol = mount_with_options(
+                FailRead {
+                    inner: TraceBackend::new(formatted(4096, 8)),
+                    fail_next_read: false,
+                },
+                MountOptions {
+                    tree_cache_pages: NonZeroUsize::new(pages),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            vol.window_op(&create("kept", b"first"), ts(1)).unwrap();
+            if logged {
+                vol.window_fsync().unwrap();
+            }
+            vol.window_op(&create("pending", b"second"), ts(2)).unwrap();
+            let pending = vol.window_unlogged_ops();
+            let before = vol.device_mut().inner.stats();
+            vol.device_mut().fail_next_read = true;
+            assert!(matches!(
+                vol.window_op(
+                    &BatchOp::DeleteFile {
+                        parent_id: OBJECT_ROOT,
+                        name: "absent",
+                    },
+                    ts(3)
+                ),
+                Err(CoreError::Block(BlockError::Injected(
+                    "cancellation preflight read"
+                )))
+            ));
+            assert_eq!(vol.window_unlogged_ops(), pending);
+            let after = vol.device_mut().inner.stats();
+            assert_eq!(
+                (after.writes, after.flushes),
+                (before.writes, before.flushes)
+            );
+            assert!(matches!(
+                vol.window_op(
+                    &BatchOp::DeleteFile {
+                        parent_id: OBJECT_ROOT,
+                        name: "absent",
+                    },
+                    ts(3)
+                ),
+                Err(CoreError::NotFound)
+            ));
+            vol.window_op(&create("retry", b"third"), ts(4)).unwrap();
+            vol.window_fsync().unwrap();
+            let mut recovered = mount(vol.into_device().inner.into_inner()).unwrap();
+            for (name, data) in [
+                ("kept", b"first".as_slice()),
+                ("pending", b"second".as_slice()),
+                ("retry", b"third".as_slice()),
+            ] {
+                let id = recovered.lookup_root(name).unwrap().unwrap();
+                assert_eq!(recovered.read_file(id).unwrap(), data);
+            }
+            assert_eq!(recovered.list_root().unwrap().len(), 3);
+            assert!(check_device(&mut recovered.into_device()).is_clean());
+        }
+    }
+}

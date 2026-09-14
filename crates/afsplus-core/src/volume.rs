@@ -5665,7 +5665,16 @@ impl<D: BlockDevice> Volume<D> {
         // A delete (or replacing rename) whose victim is a window create not
         // yet covered by a log record cancels to nothing: the create is
         // scrubbed from the unlogged group so the record never mentions it.
-        let cancels_unlogged = self.window_cancel_target(&window.pending, op)?;
+        let cancels_unlogged = match self.window_cancel_target(&window.pending, op) {
+            Ok(cancelled) => cancelled,
+            Err(error) => {
+                // This preflight only reads the overlay/committed namespace.
+                // Preserve every staged operation, including fsynced groups,
+                // when lookup or name validation refuses the new request.
+                self.window = Some(window);
+                return Err(error);
+            }
+        };
         let result = self.apply_batch_op(
             &mut window.tx,
             &mut window.pending,
@@ -5676,6 +5685,21 @@ impl<D: BlockDevice> Volume<D> {
         );
         match result {
             Ok(created) => {
+                // Build the log record before editing the unlogged sequence.
+                // An internal bookkeeping error follows a successful mutation,
+                // so retaining a writable window would promise unsafe retry.
+                let logged =
+                    if cancels_unlogged.is_some() && matches!(op, BatchOp::DeleteFile { .. }) {
+                        None
+                    } else {
+                        match Self::log_op_for(op, created, &window.pending, now) {
+                            Ok(logged) => Some(logged),
+                            Err(error) => {
+                                self.window_poisoned = true;
+                                return Err(error);
+                            }
+                        }
+                    };
                 if let Some(cancelled) = cancels_unlogged {
                     window.unlogged.retain(|logged| {
                         !matches!(
@@ -5684,15 +5708,9 @@ impl<D: BlockDevice> Volume<D> {
                                 if *expected_object_id == cancelled
                         )
                     });
-                    if !matches!(op, BatchOp::DeleteFile { .. }) {
-                        window
-                            .unlogged
-                            .push(Self::log_op_for(op, created, &window.pending, now)?);
-                    }
-                } else {
-                    window
-                        .unlogged
-                        .push(Self::log_op_for(op, created, &window.pending, now)?);
+                }
+                if let Some(logged) = logged {
+                    window.unlogged.push(logged);
                 }
                 self.window = Some(window);
                 Ok(created)

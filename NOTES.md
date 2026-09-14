@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Preserve open transaction windows after preflight refusals](#2026-09-14---preserve-open-transaction-windows-after-preflight-refusals)
 - [2026-09-14 - Compute stage progress from scoped acceptance gates](#2026-09-14---compute-stage-progress-from-scoped-acceptance-gates)
 - [2026-09-14 - Correlate core API calls with checkpoint attempts](#2026-09-14---correlate-core-api-calls-with-checkpoint-attempts)
 - [2026-09-14 — Replay selected diagnostics and bounded consumer delivery](#2026-09-14--replay-selected-diagnostics-and-bounded-consumer-delivery)
@@ -137,6 +138,30 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-14 - Preserve open transaction windows after preflight refusals
+
+While reviewing deferred-operation correlation, reproduced a window ownership
+bug: cancellation preflight took the open window out of Volume, then propagated
+an error before restoring it. Deleting through a file as parent returned
+NotDirectory and changed two pending operations to zero. The same path could
+lose ownership of an acknowledged prefix alongside later unlogged work.
+
+The preflight error path restores its read-only window. After an operation
+mutates state, an internal failure to construct its log record requires remount
+before another mutation. Log construction precedes unlogged-list edits. Neither
+fix changes the wire format or public filesystem ABI.
+
+Two focused regressions cover 16 cache/prefix/error-path combinations. Invalid
+parents, invalid replacement names and injected read failure preserve pending
+counts without writes or barriers; retry, fsync and remount recover exact bytes
+with a clean checker. The original failing run is retained alongside the fixed
+runs. Format, strict all-feature Clippy and seven fuzz targets at 4,096 cases
+each pass. The full workspace reports 548 passed, zero failures, 10 explicitly
+ignored tests and 89 result groups. Eighteen documentation fixtures and the
+read-only checker pass. Thirty-nine retained replay cases match six artifacts
+each, including full images, block traces and flight events. The sealed local
+evidence is `build/window-preflight-arqm209s`.
 
 ## 2026-09-14 - Compute stage progress from scoped acceptance gates
 

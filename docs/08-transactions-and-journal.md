@@ -273,6 +273,10 @@ a universal cross-implementation cheap-file-`fsync` claim.
 AFS+ does not build a second redo-journal transaction engine: the log is a
 bounded durability layer over checkpoint COW.
 
+Read-only cancellation preflight preserves the open window on refusal or failed
+lookup. The [window-ownership gate](../testing/intent-log-write-truncate-qualification.md#window-ownership-on-preflight-refusal)
+checks staged and acknowledged work through retry, fsync and recovery.
+
 ## 9. NO_CHANGES mode
 
 `NO_CHANGES` never writes media.
