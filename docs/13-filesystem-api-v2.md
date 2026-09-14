@@ -22,6 +22,7 @@
 - [7. Zed](#7-zed)
 - [8. Trusted snapshot backup extension](#8-trusted-snapshot-backup-extension)
   - [Versioning and compatibility](#versioning-and-compatibility)
+- [9. Destination-scoped restore extension](#9-destination-scoped-restore-extension)
 
 <!-- /toc -->
 
@@ -283,3 +284,68 @@ backend types cannot be used to teach the consumer a disk layout. Exact archive
 and restoration additionally require sparse-range enumeration, attributes,
 security-container transport and metadata restoration operations. This reader
 interface alone does not establish a complete backup format or restore contract.
+
+
+## 9. Destination-scoped restore extension
+
+[ADR-077](../adr/ADR-077-separate-restore-authority.md) defines separate backup
+and restore authority. The experimental Rust mapping is
+[`afsplus_vfs::restore`](../crates/afsplus-vfs/src/restore.rs): a trusted host
+owns `RestoreService`, selects its provider and destination, and retains
+`RestoreAuthority`. The consumer receives `RestoreClient` and an opaque
+`RestoreGrant`. Backup and restore grants are distinct public types; a job
+requiring both roles receives both explicitly.
+
+Every root, create, write, resize, hard-link, metadata, stat, read and sync
+operation checks destination scope and revocation before calling the backend.
+Object handles retain their original grant; a fresh grant cannot reactivate
+revoked handles. Two-object linking checks both grants and holds admission
+through the backend call. Identical grants use a single admission lock, avoiding
+recursive read-lock acquisition while a revoker waits. Revocation drains
+admitted calls; completed writes are durable partial work and are not undone.
+
+The host supplies a positive logical-handle limit. Reserve a handle before a
+provider root/open or create call; exhaustion must not create an unreachable
+file. Clones share one logical handle. Final close drops the provider object
+before returning its budget, including after revocation. Host disconnect
+cleanup, cancellation and authentication need separate adapter qualification.
+No lock fairness or revocation latency bound is implied.
+
+Names are exact UTF-8 components. Reject empty names, dot, dot-dot, slash and
+NUL before provider invocation. A provider must preserve accepted names as
+literal components or refuse them; host path syntax cannot expand authority.
+Opaque handles expose no constructor for importing arbitrary destination IDs.
+Privileged backend hooks belong to the trusted host and must not enter consumer
+IPC. A native bridge must also prevent external namespace races and symlink
+escape within its selected destination.
+
+`AfsRestoreDestination` owns a writable `Volume` and a host-selected empty
+directory. Construction checks emptiness with a bounded directory page. It
+creates fresh files/directories and hard links without overwriting existing
+names; the consumer has no lookup or import operation for pre-existing objects.
+An unrelated namespace outside the selected directory receives no authority.
+Existing-destination merge, overwrite and resume require an explicit Q11 design
+and failure oracle before adding operations that expose existing objects.
+
+`RestoreMetadata` carries protection and the three timestamps independently of
+destination identities and storage layout. AFS+ refuses protection values that
+cannot fit its 32-bit field and invalid nanoseconds before metadata writes.
+Restore directory metadata after restoring children because namespace mutations
+change timestamps. Logical zero gaps and hard-link identity have separate
+preservation checks. Attributes, security containers, data policy and a complete
+sparse-range transport require additional operations with explicit refusal for
+unsupported required metadata.
+
+`sync` reports filesystem durability; it does not certify a complete archive
+restore. The PAX consumer must separately verify its preservation profile,
+integrity, completion and interrupted/partial-work outcome under
+[ADR-076](../adr/ADR-076-pax-backup-interchange.md). Authorization alone cannot
+satisfy those checks.
+
+This additive experimental Rust interface follows the version 0.0.1 source-only
+compatibility boundary in section 8. It changes no disk encoding, API-v2 C
+layout, capability number, legacy DOS behavior or native advertisement.
+A native C/IPC extension requires version negotiation, server-owned opaque
+handles, denial translation and destination/authentication qualification.
+The [restore harness](../testing/security-model-conformance.md#14-destination-restore-authority)
+runs the same consumer against an independent provider and AFS+.

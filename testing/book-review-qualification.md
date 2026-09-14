@@ -429,8 +429,9 @@ Report metadata, byte and flush costs separately from file-data writes.
 
 The backup API fixture must change actual AFS+ live protection metadata while
 preserving the captured view. These core/harness tests do not establish native
-permission evaluation, the checked destination restore interface, full archive
-preservation or ACL mapping.
+permission evaluation, full archive preservation or ACL mapping. The
+[checked destination restore interface](security-model-conformance.md#14-destination-restore-authority)
+has a separate filesystem-neutral and AFS+ provider gate.
 
 
 Run `cargo test -p afsplus-format --test roundtrip object_and_log_encoders`.

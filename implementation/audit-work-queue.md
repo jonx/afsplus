@@ -34,7 +34,9 @@ as component baselines. Integrate the [trusted backup extension](../docs/13-file
 with the [PAX archive/restore direction](../adr/ADR-076-pax-backup-interchange.md),
 preserving explicit work limits before
 recovery. Use the [metadata restoration primitive](../testing/book-review-qualification.md#metadata-restoration-primitive)
-and implement [separate destination authority](../adr/ADR-077-separate-restore-authority.md).
+and the [checked destination interface](../docs/13-filesystem-api-v2.md#9-destination-scoped-restore-extension).
+Define existing-destination merge/overwrite/resume under Q11 before exposing
+pre-existing destination objects; distinguish partial restoration from completion.
 Add sparse/attribute/security transport
 with explicit unsupported-state refusal; qualify native host grant issuance. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
 with both-slot crash oracles, generation-aware quarantine and measured

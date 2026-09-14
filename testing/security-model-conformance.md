@@ -21,6 +21,7 @@
 - [11. Failure injection](#11-failure-injection)
 - [12. Benchmark reporting](#12-benchmark-reporting)
 - [13. Trusted snapshot backup authority](#13-trusted-snapshot-backup-authority)
+- [14. Destination restore authority](#14-destination-restore-authority)
 
 <!-- /toc -->
 
@@ -225,3 +226,34 @@ A direct absent-object lookup can return not-found, but directory enumeration
 must report corruption because it follows an existing authoritative reference.
 The inspecting mount and reader must issue zero writes/flushes; the exhaustive
 checker must independently reject the damaged image.
+
+
+## 14. Destination restore authority
+
+Run `cargo test -p afsplus-vfs --all-features` for
+[restore integration tests](../crates/afsplus-vfs/tests/restore.rs), compile-fail
+role/facade checks and in-backend admission probes. Follow the
+[restore contract](../docs/13-filesystem-api-v2.md#9-destination-scoped-restore-extension).
+Require every denied operation to leave provider counters and caller buffers
+unchanged. Cover foreign grants/handles, both grants on hard links, duplicated
+handles, fresh grants without handle resurrection, cleanup after revocation,
+and budget reservation before creation. Rejected names must have no backend
+effects; provider errors must release reserved capacity.
+
+An in-backend probe must observe every applicable permit held during writes
+and links. A concurrent admitted-write/revoke trace must drain the write and
+deny subsequent writes. Compile-fail cases must reject cross-role grants and
+consumer access to privileged backend hooks.
+
+Run one restoration job on an independent provider and AFS+: nested names,
+streamed bytes, zero gaps, a hard-link alias, protection and all three timestamps.
+On AFS+, remount and compare exact restored values, sparse allocation and link
+identity. Verify an outside sentinel and an older snapshot independently;
+require the exhaustive checker to report no errors or warnings. Reject a
+nonempty destination, unrepresentable protection and invalid timestamps;
+metadata refusal must issue zero device writes and flushes.
+
+These tests exercise a host library with memory devices. Native authentication,
+namespace races, IPC cleanup/cancellation, archive integrity, complete metadata
+transport and crash-safe archive completion need their own provider/consumer
+gates under Q5 and Q11.

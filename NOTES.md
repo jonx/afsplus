@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Enforce separate destination restore grants](#2026-09-14--enforce-separate-destination-restore-grants)
 - [2026-09-14 — Restore existing metadata through the common COW tail](#2026-09-14--restore-existing-metadata-through-the-common-cow-tail)
 - [2026-09-14 — Enforce revocable authority on the backup interface](#2026-09-14--enforce-revocable-authority-on-the-backup-interface)
 - [2026-09-14 — Configure snapshot limits before writable mount recovery](#2026-09-14--configure-snapshot-limits-before-writable-mount-recovery)
@@ -64,6 +65,36 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Enforce separate destination restore grants
+
+Implemented the owner's ADR-077 choice in a filesystem-neutral checked restore
+service. Backup and restore use separate opaque public grant types and share
+private admission machinery. Every operation checks the original handle grant;
+revocation drains admitted calls. Linking checks both grants and avoids taking
+the same read lock twice. Handle limits are reserved before creation, shared by
+clones, and released after the provider handle drops even following revocation.
+
+The AFS+ provider owns a writable volume and a selected empty directory. It
+creates fresh entries without importing existing outside objects. One consumer
+runs on an independent provider and AFS+, restoring nested names, file bytes,
+sparse gaps, hard links, protection and three timestamps. The AFS+ test remounts,
+checks exact values and sparse allocation, preserves an outside sentinel and
+an older snapshot, and runs the exhaustive checker. Denial, malformed names,
+metadata refusal, capacity cleanup and concurrent revocation have regression
+coverage. In-backend probes check held write/link permits; compile-fail cases
+reject cross-role grants and consumer backend access.
+
+The API and qualification docs define the source-only compatibility boundary,
+create-only destination and partial-work semantics. Q11 explicitly owns merge,
+overwrite, resume and completion publication. This library test does not qualify
+native host authentication, IPC, security-container/attribute transport or a
+complete PAX archive. Those remain in the queue.
+
+Validation: full workspace/all-features suite passed with 337 tests, zero
+failures and 10 ignored tests. Formatting, Clippy with warnings denied,
+documentation checks, all three checker fixtures and whitespace checks passed.
+
 
 ## 2026-09-14 — Restore existing metadata through the common COW tail
 

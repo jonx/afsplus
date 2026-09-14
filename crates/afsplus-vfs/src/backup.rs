@@ -5,9 +5,10 @@
 //! This in-process primitive is not itself an operating-system security boundary.
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, RwLock, RwLockReadGuard,
+    Arc, RwLockReadGuard,
 };
 
+use crate::authority::{Grant, Issuer, Scope};
 use crate::{DirectoryEntry, ObjectId, Stat, VfsError};
 use afsplus_format::Timespec;
 
@@ -75,35 +76,21 @@ pub trait SnapshotBackend {
     ) -> Result<ViewDirectoryPage<Self::Cursor>, VfsError>;
 }
 
-struct GrantState {
-    scope: Arc<()>,
-    active: RwLock<bool>,
-}
 /// Opaque authority delegated by the host. Copies share revocation state.
 #[derive(Clone)]
-pub struct BackupGrant(Arc<GrantState>);
+pub struct BackupGrant(Grant);
 /// Keep this issuer in the trusted host. Creating a new grant never reactivates
 /// an old grant or a reader opened under it.
 #[derive(Clone)]
-pub struct BackupAuthority {
-    scope: Arc<()>,
-}
+pub struct BackupAuthority(Issuer);
 impl BackupAuthority {
     pub fn grant(&self) -> BackupGrant {
-        BackupGrant(Arc::new(GrantState {
-            scope: self.scope.clone(),
-            active: RwLock::new(true),
-        }))
+        BackupGrant(self.0.grant())
     }
-    /// Wait for operations admitted under this grant to finish, then revoke.
-    /// Never call synchronously from inside a backend operation using it.
+    /// Wait for admitted operations to finish, then revoke. Do not invoke
+    /// synchronously from an operation using this grant.
     pub fn revoke(&self, grant: &BackupGrant) -> Result<(), BackupError> {
-        if !Arc::ptr_eq(&self.scope, &grant.0.scope) {
-            return Err(BackupError::Denied);
-        }
-        let mut active = grant.0.active.write().map_err(|_| BackupError::Denied)?;
-        *active = false;
-        Ok(())
+        self.0.revoke(&grant.0).map_err(|_| BackupError::Denied)
     }
 }
 
@@ -137,7 +124,7 @@ impl<V> BackupReader<V> {
 
 pub struct BackupService<P: SnapshotBackend> {
     backend: P,
-    scope: Arc<()>,
+    scope: Scope,
     active: Arc<AtomicUsize>,
     max_readers: usize,
 }
@@ -147,10 +134,8 @@ impl<P: SnapshotBackend> BackupService<P> {
         if max_readers == 0 {
             return Err(VfsError::Limit("backup reader budget must be positive").into());
         }
-        let scope = Arc::new(());
-        let authority = BackupAuthority {
-            scope: scope.clone(),
-        };
+        let (scope, issuer) = Scope::new();
+        let authority = BackupAuthority(issuer);
         Ok((
             Self {
                 backend,
@@ -173,15 +158,9 @@ impl<P: SnapshotBackend> BackupService<P> {
         self.backend
     }
     fn admit<'a>(&self, grant: &'a BackupGrant) -> Result<RwLockReadGuard<'a, bool>, BackupError> {
-        if !Arc::ptr_eq(&self.scope, &grant.0.scope) {
-            return Err(BackupError::Denied);
-        }
-        let permit = grant.0.active.read().map_err(|_| BackupError::Denied)?;
-        if !*permit {
-            return Err(BackupError::Denied);
-        }
-        Ok(permit)
+        self.scope.admit(&grant.0).map_err(|_| BackupError::Denied)
     }
+
     fn reader_permit<'a>(
         &self,
         reader: &'a BackupReader<P::View>,
@@ -441,7 +420,7 @@ mod authority_tests {
             // A check followed by an immediately dropped guard fails here:
             // revocation must remain excluded during the actual backend call.
             assert!(matches!(
-                self.grant.as_ref().unwrap().0.active.try_write(),
+                self.grant.as_ref().unwrap().0 .0.active.try_write(),
                 Err(std::sync::TryLockError::WouldBlock)
             ));
             Ok(0)
