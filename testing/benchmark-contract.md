@@ -24,6 +24,7 @@ AFS+ must measure performance and resource use continuously. A new filesystem ha
 - [7. Benchmark reproducibility](#7-benchmark-reproducibility)
 - [8. Regression gates](#8-regression-gates)
 - [9. Benchmark philosophy](#9-benchmark-philosophy)
+- [Per-command host accounting](#per-command-host-accounting)
 
 <!-- /toc -->
 
@@ -265,3 +266,32 @@ AFS+ should aim for a strong Pareto position:
 - strong developer-facing capabilities
 
 If a feature makes the filesystem impressive in a matrix but consistently damages these fundamentals, the feature should be redesigned or removed.
+
+## Per-command host accounting
+
+Use [measure-command.py](../tools/measure-command.py) on macOS or Linux:
+
+```sh
+python3 tools/measure-command.py --output /tmp/afsplus-command-run.json -- command argument
+```
+
+The report path must be new and its parent must exist. The wrapper reserves it
+before launching the command, passes arguments without shell interpretation,
+disables interactive standard input and inherits standard output/error. It stores
+argv, working directory, platform identity, monotonic wall duration, per-child
+user/system CPU time, raw peak RSS and normalized bytes in schema version 1 JSON.
+It does not collect environment values. Command arguments belong to the private
+benchmark artifact and must follow the same confidentiality rules as test logs.
+
+macOS reports raw RSS in bytes; Linux reports KiB. Other platforms refuse before
+launch until their units and accounting semantics are qualified. CPU and RSS are
+the OS wait4 child-accounting values; they do not establish simultaneous peak RAM
+across a process tree, allocator/cache ownership, steady-state memory or physical
+block traffic. Combine the record with component-owned I/O counters and workload
+operation/byte denominators. Run the built workload executable to separate build
+cost from runtime cost when reporting filesystem performance.
+
+A nonzero exit or signal retains its status and makes the wrapper fail. Launch or
+measurement errors produce an explicit error outcome with no invented metrics.
+An absent, incomplete or malformed report cannot certify measurement completion.
+Run `python3 tools/test-measure-command.py` for private temporary-fixture tests.

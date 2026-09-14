@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Measure host commands with per-child CPU and RSS](#2026-09-14---measure-host-commands-with-per-child-cpu-and-rss)
 - [2026-09-14 - Prioritize usable stage outcomes across the complete queue](#2026-09-14---prioritize-usable-stage-outcomes-across-the-complete-queue)
 - [2026-09-14 - Add bounded block-device partition views](#2026-09-14---add-bounded-block-device-partition-views)
 - [2026-09-14 - Audit finite executable-core stage requirements](#2026-09-14---audit-finite-executable-core-stage-requirements)
@@ -114,6 +115,22 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Measure host commands with per-child CPU and RSS
+
+Added a shell-free measurement wrapper with exclusive report creation, explicit
+exit/signal/error outcomes and normalized macOS/Linux peak-RSS units. It records
+per-child CPU and monotonic wall time without collecting the environment. Four
+fixture tests cover literal arguments, accounting, failures/signals, spawn errors
+and refusal to overwrite an existing report.
+
+Ran the built fsync smoke workload through it and paired the JSON report with
+the workload's existing operation, I/O, flush and metadata-amplification tables.
+The debug run completed successfully while another suite was running, so this
+is collection-path evidence, not a performance baseline. Process CPU/RSS totals
+span all workload variants; they are not per-variant attribution or simultaneous
+process-tree peak RAM. Full allocator/cache and steady-state accounting remain
+open. Documentation checks, seven checker fixtures and whitespace checks pass.
 
 ## 2026-09-14 - Prioritize usable stage outcomes across the complete queue
 

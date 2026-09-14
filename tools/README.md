@@ -15,6 +15,8 @@ enforces that.
 
 | File | What it does | Owned by |
 |---|---|---|
+| [measure-command.py](measure-command.py) | Record per-child CPU, wall time and normalized peak RSS without a shell or report overwrite | [benchmark contract](../testing/benchmark-contract.md) |
+| [test-measure-command.py](test-measure-command.py) | Temporary-fixture accounting, failure, signal and overwrite-refusal checks | [benchmark contract](../testing/benchmark-contract.md) |
 | [tools-spec.md](tools-spec.md) | Specification of the official CLI tools | [docs/README.md](../docs/README.md) |
 | [progress-markers.py](progress-markers.py) | Generate and verify milestone/stage navigation labels from the milestone table | [documentation rules](../docs/DOCUMENTATION.md) |
 | [check-docs.py](check-docs.py) | Documentation contract checker: links, anchors, TOCs, ADR index, navigation blocks, index rows, status rules | [docs/DOCUMENTATION.md](../docs/DOCUMENTATION.md) |
