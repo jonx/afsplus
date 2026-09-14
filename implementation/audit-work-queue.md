@@ -140,7 +140,10 @@ Stage completion must be supported by the stage's own usable outcome.
    bounded slice wrapper, isolated overlay with explicit durability semantics,
    artifact replay and CPU/RAM accounting. These feed the existing publication,
    mixed-I/O, resource-pressure and sustained-qualification rows below.
-5. Select subsequent implementation units by the missing prerequisite for a usable
+5. Extend [seeded semantic properties](../testing/fuzzing.md#seeded-semantic-properties)
+   to ungenerated operation families and uncovered codec surfaces; preserve exact
+   oracles, prefix checks, cache policy and complete failure artifacts.
+6. Select subsequent implementation units by the missing prerequisite for a usable
    stage outcome; retain whole-job backup/restore and every other queue item.
 
 ## Complete work queue

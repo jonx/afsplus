@@ -30,6 +30,7 @@ AFS+ must measure performance and resource use continuously. A new filesystem ha
 - [Phase-boundary resident memory and repeated reads](#phase-boundary-resident-memory-and-repeated-reads)
 - [Allocation origins and instrumentation cost](#allocation-origins-and-instrumentation-cost)
 - [Borrowed payloads in atomic batches](#borrowed-payloads-in-atomic-batches)
+- [Stage A accounting acceptance](#stage-a-accounting-acceptance)
 
 <!-- /toc -->
 
@@ -566,3 +567,28 @@ peak below 1 MiB for this particular fixture across 2/4/8/unlimited profiles;
 this regression budget includes its pending metadata and does not apply to
 arbitrary batches. Broader metadata scaling and constrained-platform budgets
 remain requirements of the complete resource-accounting gate.
+
+
+## Stage A accounting acceptance
+
+The finite executable-core accounting gate requires a working measurement
+harness and qualified image workloads. It does not require every later application
+workload, platform adapter or production memory limit to be qualified. Preserve
+those requirements under the full benchmark contract and M12/M13/M14.
+
+| Required dimension | Measurement and acceptance evidence |
+|---|---|
+| CPU | [Per-command accounting](#per-command-host-accounting) records child user/system CPU and elapsed time, preserving exit/failure information; its temporary-fixture gate checks failures and units. |
+| Process RAM | Per-command peak RSS plus [phase-boundary RSS and repeated reads](#phase-boundary-resident-memory-and-repeated-reads), with explicit observer timing and no unsupported plateau claim. |
+| Requested heap | [Phased workload](#phased-requested-heap-workload) and [origin accounting](#allocation-origins-and-instrumentation-cost) report entry/exit/peak/acquire/release balance, checker costs, fixed fixture storage and instrumentation overhead; allocator-internal overhead, stack and direct C allocation are not mislabeled as Rust payload. |
+| Cache/resource policy | [Batch profiles](#tree-cache-batch-measurements) bind 2/4/8/unlimited settings, spills/reloads and resident staged-node limits; an image-page cap is distinguished from a whole-heap cap. |
+| I/O and flushes | Phase counters and commit accounting agree on logical bytes, operations, spill writes and barriers. |
+| Amplification | Explicit application read/write payload denominators accompany physical block-byte counts; zero denominators remain undefined rather than becoming invented ratios. |
+| Correctness and repeatability | Exact workload namespace/content verification and clean raw/recovered checkers precede success; independent repetitions retain matching image CRCs and I/O. Tagged/ordinary comparisons and a [memory-budget negative control](#borrowed-payloads-in-atomic-batches) detect the relevant regression. |
+
+The [ordinary workload tests](../tools/test-measure-workload.py),
+[origin tests](../tools/test-allocation-origins.py) and
+[command-accounting tests](../tools/test-measure-command.py) own these checks.
+Resource optimization, current ownership after object transfer, arbitrary mixed
+workload duration and native hardware budgets remain separate requirements.
+Completion of this harness item cannot close their milestone gates.

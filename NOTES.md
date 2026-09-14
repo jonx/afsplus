@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Qualify seeded semantic properties and reconcile Stage A accounting](#2026-09-14--qualify-seeded-semantic-properties-and-reconcile-stage-a-accounting)
 - [2026-09-14 — Avoid copying caller payloads into atomic batch staging](#2026-09-14--avoid-copying-caller-payloads-into-atomic-batch-staging)
 - [2026-09-14 — Attribute requested allocations to their original context](#2026-09-14--attribute-requested-allocations-to-their-original-context)
 - [2026-09-14 - Measure resident memory around workload phases](#2026-09-14---measure-resident-memory-around-workload-phases)
@@ -138,6 +139,46 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Qualify seeded semantic properties and reconcile Stage A accounting
+
+The Stage A audit separated a completed measurement harness from later resource
+optimization and platform/application qualification. The harness has CPU, RSS,
+requested-heap/origin, cache-policy, I/O, barrier and amplification-denominator
+proofs, including independent repetitions and negative controls. Its individual
+roadmap entry is therefore complete. Stage A itself remains partial; no global
+milestone or hardware gate was closed. The stage-label generator also aggregates
+whole milestones spanning later stages, so a future stage closure must reconcile
+that mapping against its own finite requirements rather than simply completing
+all cross-stage milestones.
+
+A deterministic semantic generator now supplies a flat object-graph/byte-array
+oracle, independent of filesystem codecs. It covers all nine operation families
+of the initial scenario profile, nested setup, long names, block-boundary writes,
+truncate growth/shrink, cancellation and cross-directory moves. The same semantic
+prefix is run with 2/4/8/unlimited cache profiles. Each case retains its exact
+scenario before execution and a complete verified replay bundle afterward, with
+bounded aggregate bundle payload and explicit incomplete/error handling.
+
+The campaign in `build/semantic-properties-c_l1936i` passed 24 cases: seeds 1, 7
+and 42, prefixes of 48 and 96 operations, and all four profiles. Fresh processes
+replayed all 24 exactly; all 266 original campaign files stayed unchanged. Bundle
+role payload totaled 172,012,824 bytes. A deliberately changed expected byte was
+rejected, and a fresh replay reproduced the semantic failure. The source companion
+binds revision `325bbf1605e0d987aea252b844eefa65c56e5a83` and working-tree digest
+`ec6e200cb8ae1e5e211d8ade382b6bc49b172a2ac3e0f10bb97c82186fa0f583`; the executed
+runner is retained separately. A restored checkout also reproduced one passing
+case and the intentional failure after the active documentation changed. This records source availability and exact host
+replay, not an independent rebuild or native-device qualification.
+
+Eleven temporary-fixture tests cover independent model examples, a golden seed,
+generator bounds, refused source overlap, overwrite refusal, source/runner changes,
+execution/publication failures, late completion failure and bundle budget refusal.
+Ungenerated API families, allocation/other missing codec targets and the broader
+fault matrix remain explicit work; this corpus does not stand for all fuzzing.
+The eleven model/publication tests, four command-accounting tests, thirteen
+documentation-checker tests and documentation/whitespace gates passed. Rust sources
+were unchanged from the preceding 524-test workspace qualification.
 
 ## 2026-09-14 — Avoid copying caller payloads into atomic batch staging
 

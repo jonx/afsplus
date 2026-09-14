@@ -85,3 +85,59 @@ The target exports `LLVMFuzzerTestOneInput`, and the gate additionally runs
 native libFuzzer when the compiler installation provides its runtime. Missing
 libFuzzer support is not a waiver: the deterministic sanitizer engine is the
 portable baseline.
+
+
+## Seeded semantic properties
+
+[The semantic generator](../tools/fuzz-semantic.py) drives the actual memory-image
+runner with an independent object graph and byte-array oracle. Its versioned
+xorshift64 generator produces reproducible seeds without depending on Python's
+random implementation. Every sequence contains create, mkdir, cross-directory
+file rename, unlink, empty-directory removal, sparse write, truncate, sync and
+remount. Long names produce multi-leaf directories; random suffixes vary content,
+block-boundary writes, shrink/grow, parent directories and object lifetime.
+Directory rename, hard links, clones, snapshots and fault injection have separate
+mutation-family gates and are not claimed by this scenario profile.
+
+```sh
+cargo build --offline -p afsplus-check --bin afsplus-scenario
+python3 tools/test-fuzz-semantic.py
+python3 tools/fuzz-semantic.py build/semantic-properties --seeds 1 7 42 --steps 96
+python3 tools/afsptest.py replay build/semantic-properties/seed-7-prefix-96-cache-2
+```
+
+The driver probes the half-length and full sequence, each followed by a remount,
+on 2/4/8/unlimited tree-cache profiles. The expected namespace and bytes are
+computed before executing the filesystem, and identical semantic prefixes must
+have identical expected states under every cache policy. Each case requires the
+runner's exact-content comparison and raw/recovered checker evidence. The driver
+rereads every published bundle to verify its retained bytes.
+
+Admission bounds are 1–16 distinct unsigned 64-bit seeds, 64–256 operations per
+sequence, 40 live files, eight live directories including root, depth at most two
+below root, and 8,224 bytes per generated file. Each case uses a fixed 2 MiB image.
+The existing scenario admission additionally checks aggregate bytes, geometry and
+wire bounds. `--bundle-payload-mib` bounds the sum of retained bundle role bytes
+(default 512 MiB, maximum 4 GiB); manifests, recipes and duplicate scenario JSON
+are separate bounded overhead. On exhaustion the exact case input and incomplete
+error record remain, but a complete runner bundle is not claimed. Runner timeout
+or execution failure similarly leaves its input and recipe; it is not a passing
+filesystem result. Resource limits are fixture admission, not OS memory guarantees.
+
+Publication creates a fresh output directory, rejects non-ignored source overlap
+and refuses overwrite. A recipe binds generator version/digest, seeds, prefixes,
+cache profiles, source identity and executable digest. Each scenario is durable
+before execution. Semantic failures retain a complete failing bundle and stop the
+campaign; infrastructure/publication errors produce an incomplete record. Success
+requires every case, and its completion record binds the recipe and case manifests.
+Late barrier failure is an error even if a completion file is readable. Replay
+uses the existing strict source/executable identity contract; retained source and
+binary companions support later reconstruction.
+
+The unit gate checks hand-written sparse/shrink/grow/rename examples, rejected
+model operations, a golden generated scenario, all generator bounds/profiles,
+source/output admission, failed execution, publication errors, payload exhaustion
+and overwrite refusal. Qualification additionally replays retained cases in fresh
+processes and requires an intentionally incorrect expected byte sequence to fail.
+This state-machine corpus complements codec mutation and fault matrices; it does
+not qualify ungenerated API families or arbitrary-length workloads.

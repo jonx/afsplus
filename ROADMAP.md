@@ -94,7 +94,7 @@ Build first:
 - ~~first create-object transaction~~ <!-- progress: roadmap-15 -->
 - ~~remount/invariant checker~~ <!-- progress: roadmap-16 -->
 - ~~deterministic crash matrix after every write/flush~~ <!-- progress: roadmap-17 -->
-- benchmark harness with CPU/RAM/I/O/flush/write-amplification accounting <!-- progress: roadmap-29 -->
+- ~~benchmark harness with CPU/RAM/I/O/flush/write-amplification accounting~~ <!-- progress: roadmap-29 -->
 
 Then add:
 
