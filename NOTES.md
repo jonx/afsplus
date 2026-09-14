@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Initialize private unwritten reservations without replacement data allocation](#2026-09-14--initialize-private-unwritten-reservations-without-replacement-data-allocation)
 - [2026-09-14 — Add checked destination reservation restoration](#2026-09-14--add-checked-destination-reservation-restoration)
 - [2026-09-14 — Delegate decisions while the owner is away](#2026-09-14--delegate-decisions-while-the-owner-is-away)
 - [2026-09-14 — Enumerate captured allocation and decide preservation modes](#2026-09-14--enumerate-captured-allocation-and-decide-preservation-modes)
@@ -68,6 +69,34 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Initialize private unwritten reservations without replacement data allocation
+
+Under the owner's delegated design authority, ADR-079 selects initialization
+of proven-private unwritten blocks followed by COW publication of their written
+mappings. The baseline regression reproduced replacement allocation (physical
+block 25 became block 33). The implementation preserves eligible physical
+addresses and lifetime birth, checks the live reference tree, and keeps shared
+or stale-marked reservations on fresh storage. A mixed write copies written
+portions while initializing eligible reservations. Commit counters distinguish
+initialization from the opted-in written-data in-place policy.
+
+Six targeted tests passed: physical reuse in mixed writes, shared/stale-marker
+fallback, low-space progress, 362 crash states (358 old and 4 complete new),
+false-private shared-reference refusal, and completed-write/three-barrier I/O
+failures. The low-space fixture initialized 32 data blocks with 24 blocks
+available for new allocation, writing 5 metadata blocks and 163,840 bytes with
+3 flushes while the snapshot retained zeros. Both checkpoints passed ownership
+checking. These are host fixtures; portable C cross-reading, bounded fragmented
+layout traversal, sustained pressure and older-target resource evidence remain
+explicit work.
+Also corrected a stale runtime-only qualification sentence in files/extents;
+ADR-065 and the implemented persistent policy remain the authority.
+
+Validation: the workspace/all-features suite passed 350 tests, zero failures
+and 10 ignored tests. Formatting, Clippy with warnings denied, documentation,
+three checker fixtures and whitespace checks passed.
+
 
 ## 2026-09-14 — Add checked destination reservation restoration
 

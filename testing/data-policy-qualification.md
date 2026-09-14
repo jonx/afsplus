@@ -80,3 +80,33 @@ reduces write amplification, allocations/retirements and fragmentation on
 random and database workloads without changing the shared-range rules. It
 cannot justify automatic policy selection, a universal old-generation byte
 guarantee, or a hardware-performance claim.
+
+
+## Private unwritten reservation initialization
+
+[ADR-079](../adr/ADR-079-initialize-private-unwritten-reservations.md) requires
+`cargo test -p afsplus-core reservation_write --all-features -- --nocapture`.
+Compare actual physical addresses before and after a mixed written/unwritten
+write. Private unwritten blocks must keep their address; written, shared and
+stale-marked portions must preserve their required COW behavior. Verify exact
+bytes, partial-block zeros, captured snapshots, remount and exhaustive ownership
+for both checkpoints. A valid-CRC false-private marker over shared references
+must be refused before any data write or flush.
+
+Use a low-space image with less free data capacity than the reserved write
+requires. Require successful initialization using the existing reservation,
+exact snapshot zeros, and separate initialized-block, metadata, byte and flush
+counters. Metadata headroom is a prerequisite; this test does not promise
+success with no publication space.
+
+Enumerate every modeled write-publication cut and require exact old zeros or
+complete new bytes, with historical zeros and both-slot ownership unchanged.
+Inject a completed data write followed by an error and failures at each data,
+metadata and checkpoint barrier. Before publication, old logical bytes must
+survive despite changed unwritten physical payload. Uncertain checkpoint
+publication must reject subsequent mutation until reconciliation/remount.
+
+Portable C cross-reading of initialized and fallback images, older-target
+resource profiles, bounded fragmented-layout traversal and sustained near-full
+reservation workloads require separate evidence before their qualification.
+Existing record encoding compatibility alone cannot establish those results.

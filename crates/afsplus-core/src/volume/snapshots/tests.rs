@@ -1296,3 +1296,266 @@ fn snapshot_preallocation_publication_is_atomic_and_preserves_captured_layout() 
         counts[0], counts[1]
     );
 }
+
+#[test]
+fn reservation_write_reuses_private_unwritten_blocks_in_a_mixed_write() {
+    let mut volume = open(formatted(1024, 0), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("reserved", &[], now(2)).unwrap();
+    volume.preallocate_file(file, 0, 4 * 4096, now(3)).unwrap();
+    volume.truncate_file(file, 4 * 4096, now(4)).unwrap();
+    volume.write_file_at(file, 0, &[7; 4096], now(5)).unwrap();
+    let id = volume.snapshot_create(now(6)).unwrap();
+    let before_record = volume.stat(file).unwrap().unwrap();
+    let (before, _) = volume.load_file_layout(&before_record).unwrap();
+    let expected_old = volume.read_file(file).unwrap();
+    let mut expected = expected_old.clone();
+    let offset = 4096 - 7;
+    let data = vec![0x5a; 4096 + 18];
+    expected[offset..offset + data.len()].copy_from_slice(&data);
+    volume
+        .write_file_at(file, offset as u64, &data, now(7))
+        .unwrap();
+    assert_eq!(
+        volume
+            .last_commit_stats()
+            .unwrap()
+            .data_blocks_initialized_from_reservation,
+        2
+    );
+    let record = volume.stat(file).unwrap().unwrap();
+    let (after, _) = volume.load_file_layout(&record).unwrap();
+    for logical in [1, 2] {
+        let old = extent_at(&before, logical).unwrap();
+        let new = extent_at(&after, logical).unwrap();
+        assert_eq!(
+            old.physical_start + logical - old.logical_start,
+            new.physical_start + logical - new.logical_start
+        );
+        assert_eq!(new.flags, 0);
+    }
+    assert_ne!(
+        extent_at(&before, 0).unwrap().physical_start,
+        extent_at(&after, 0).unwrap().physical_start
+    );
+    assert_eq!(volume.read_file(file).unwrap(), expected);
+    let view = volume.snapshot_open(id).unwrap();
+    assert_eq!(bytes(&mut volume, &view, file), expected_old);
+    verify(&mut volume);
+    let mut volume = open(volume.into_device(), MountMode::ReadOnly);
+    assert_eq!(volume.read_file(file).unwrap(), expected);
+    let view = volume.snapshot_open(id).unwrap();
+    assert_eq!(bytes(&mut volume, &view, file), expected_old);
+}
+
+#[test]
+fn reservation_write_keeps_shared_and_stale_marked_ranges_cow() {
+    let mut volume = open(formatted(1024, 0), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("file", &[], now(2)).unwrap();
+    volume.preallocate_file(file, 0, 4 * 4096, now(3)).unwrap();
+    volume.truncate_file(file, 4 * 4096, now(4)).unwrap();
+    let clone = volume
+        .clone_file(file, OBJECT_ROOT, "clone", now(5))
+        .unwrap();
+    let snapshot = volume.snapshot_create(now(6)).unwrap();
+    volume.write_file_at(file, 0, b"first", now(7)).unwrap();
+    assert_eq!(
+        volume
+            .last_commit_stats()
+            .unwrap()
+            .data_blocks_initialized_from_reservation,
+        0
+    );
+    assert_eq!(volume.read_file(clone).unwrap(), vec![0; 4 * 4096]);
+    volume.delete_file_in_root("clone", now(8)).unwrap();
+    volume
+        .write_file_at(file, 3 * 4096, b"last", now(9))
+        .unwrap();
+    assert_eq!(
+        volume
+            .last_commit_stats()
+            .unwrap()
+            .data_blocks_initialized_from_reservation,
+        0
+    );
+    let view = volume.snapshot_open(snapshot).unwrap();
+    assert_eq!(bytes(&mut volume, &view, file), vec![0; 4 * 4096]);
+    assert_eq!(bytes(&mut volume, &view, clone), vec![0; 4 * 4096]);
+    verify(&mut volume);
+}
+
+#[test]
+fn reservation_write_progresses_without_replacement_data_capacity() {
+    let mut volume = open(formatted(256, 0), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("reserved", &[], now(2)).unwrap();
+    volume.preallocate_file(file, 0, 32 * 4096, now(3)).unwrap();
+    volume.truncate_file(file, 32 * 4096, now(4)).unwrap();
+    let snapshot = volume.snapshot_create(now(5)).unwrap();
+    let filler = volume.create_file_in_root("pressure", &[], now(6)).unwrap();
+    let fill = volume.available_blocks().saturating_sub(24);
+    volume
+        .preallocate_file(filler, 0, fill * 4096, now(7))
+        .unwrap();
+    let available = volume.available_blocks();
+    assert!(available < 32);
+    volume
+        .write_file_at(file, 0, &vec![0x5a; 32 * 4096], now(8))
+        .unwrap();
+    let stats = volume.last_commit_stats().unwrap();
+    assert_eq!(stats.data_blocks_initialized_from_reservation, 32);
+    assert_eq!(stats.data_blocks_overwritten_in_place, 0);
+    let view = volume.snapshot_open(snapshot).unwrap();
+    assert_eq!(bytes(&mut volume, &view, file), vec![0; 32 * 4096]);
+    assert_eq!(volume.read_file(file).unwrap(), vec![0x5a; 32 * 4096]);
+    verify(&mut volume);
+    println!("reservation_low_space available_before={available} initialized={} metadata={} bytes={} flushes={}",
+        stats.data_blocks_initialized_from_reservation,stats.metadata_blocks_written,stats.bytes_written,stats.flushes);
+}
+
+#[test]
+fn reservation_write_crashes_preserve_old_zeros_or_complete_new_bytes() {
+    let mut volume = open(formatted(512, 0), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("reserved", &[], now(2)).unwrap();
+    volume.preallocate_file(file, 0, 8192, now(3)).unwrap();
+    volume.truncate_file(file, 8192, now(4)).unwrap();
+    let id = volume.snapshot_create(now(5)).unwrap();
+    let base = volume.into_device();
+    let mut expected = vec![0; 8192];
+    expected[7..5007].fill(0x5a);
+    let mut recording = open(RecordingBackend::new(base.clone()), MountMode::ReadWrite);
+    recording
+        .write_file_at(file, 7, &vec![0x5a; 5000], now(6))
+        .unwrap();
+    assert_eq!(
+        recording
+            .last_commit_stats()
+            .unwrap()
+            .data_blocks_initialized_from_reservation,
+        2
+    );
+    let (_, log) = recording.into_device().into_parts();
+    let mut counts = [0, 0];
+    for cut in 0..=log.len() {
+        for_each_crash_state(&base, &log, cut, |state| {
+            let mut volume = open(state.image, MountMode::ReadOnly);
+            let actual = volume.read_file(file).unwrap();
+            assert!(actual == vec![0; 8192] || actual == expected);
+            counts[usize::from(actual == expected)] += 1;
+            let view = volume.snapshot_open(id).unwrap();
+            assert_eq!(bytes(&mut volume, &view, file), vec![0; 8192]);
+        });
+    }
+    assert!(counts.iter().all(|n| *n > 0));
+    println!(
+        "reservation_initialization_cuts old={} new={}",
+        counts[0], counts[1]
+    );
+}
+
+#[test]
+fn reservation_write_refuses_false_private_markers_before_data_writes() {
+    use afsplus_block::TraceBackend;
+    let mut volume = open(formatted(512, 0), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("file", &[], now(2)).unwrap();
+    volume.preallocate_file(file, 0, 8192, now(3)).unwrap();
+    volume.truncate_file(file, 8192, now(4)).unwrap();
+    volume
+        .clone_file(file, OBJECT_ROOT, "peer", now(5))
+        .unwrap();
+    let root = volume.stat(file).unwrap().unwrap().data_root;
+    let mut dev = volume.into_device();
+    let (mut node, generation) = afsplus_format::tree::TreeNode::decode(&dev.peek(root)).unwrap();
+    assert!(node.is_leaf());
+    for item in &mut node.items {
+        item.value[16..20].copy_from_slice(&EXTENT_UNWRITTEN.to_le_bytes());
+    }
+    dev.write_block(root, &node.encode(4096, generation).unwrap())
+        .unwrap();
+    let mut volume = crate::mount_with_snapshot_limits(
+        TraceBackend::new(dev),
+        crate::MountOptions::default(),
+        limits(),
+    )
+    .unwrap();
+    let error = volume
+        .write_file_at(file, 0, b"denied", now(6))
+        .unwrap_err();
+    assert!(error.to_string().contains("overlaps shared references"));
+    assert_eq!(volume.dev.stats().writes, 0);
+    assert_eq!(volume.dev.stats().flushes, 0);
+}
+
+#[test]
+fn reservation_write_io_errors_preserve_old_logical_zeros_and_require_reconciliation() {
+    use afsplus_block::BlockError;
+    struct Fault {
+        inner: MemoryBackend,
+        fail_write: bool,
+        fail_flush: Option<u64>,
+        flushes: u64,
+    }
+    impl BlockDevice for Fault {
+        fn block_size(&self) -> usize {
+            self.inner.block_size()
+        }
+        fn total_blocks(&self) -> u64 {
+            self.inner.total_blocks()
+        }
+        fn read_block(&mut self, lba: u64, out: &mut [u8]) -> Result<(), BlockError> {
+            self.inner.read_block(lba, out)
+        }
+        fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+            self.inner.write_block(lba, data)?;
+            if std::mem::take(&mut self.fail_write) {
+                return Err(BlockError::Injected("completed initialization write"));
+            }
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<(), BlockError> {
+            self.inner.flush()?;
+            let index = self.flushes;
+            self.flushes += 1;
+            if self.fail_flush == Some(index) {
+                self.fail_flush = None;
+                return Err(BlockError::Injected("initialization barrier"));
+            }
+            Ok(())
+        }
+    }
+    let mut volume = open(formatted(512, 0), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("reserved", &[], now(2)).unwrap();
+    volume.preallocate_file(file, 0, 8192, now(3)).unwrap();
+    volume.truncate_file(file, 8192, now(4)).unwrap();
+    let id = volume.snapshot_create(now(5)).unwrap();
+    let base = volume.into_device();
+    for phase in 0..4 {
+        let dev = Fault {
+            inner: base.clone(),
+            fail_write: phase == 0,
+            fail_flush: if phase == 0 { None } else { Some(phase - 1) },
+            flushes: 0,
+        };
+        let mut volume = open(dev, MountMode::ReadWrite);
+        assert!(volume
+            .write_file_at(file, 0, &[0x5a; 8192], now(6))
+            .is_err());
+        if phase == 3 {
+            assert!(matches!(
+                volume.write_file_at(file, 0, b"retry", now(7)),
+                Err(CoreError::WindowPoisoned)
+            ));
+        } else {
+            assert_eq!(volume.read_file(file).unwrap(), vec![0; 8192]);
+        }
+        let mut volume = open(volume.into_device().inner, MountMode::ReadOnly);
+        assert_eq!(
+            volume.read_file(file).unwrap(),
+            if phase == 3 {
+                vec![0x5a; 8192]
+            } else {
+                vec![0; 8192]
+            }
+        );
+        let view = volume.snapshot_open(id).unwrap();
+        assert_eq!(bytes(&mut volume, &view, file), vec![0; 8192]);
+    }
+}

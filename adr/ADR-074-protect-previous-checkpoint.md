@@ -1,6 +1,7 @@
 # ADR-074: Preserve the previous checkpoint and its registered snapshots
 
 Status: Accepted by the owner; implementation and resource qualification required
+Amended by: ADR-079
 Amends: ADR-036, ADR-071
 
 ## Context

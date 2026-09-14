@@ -39,8 +39,9 @@ Define existing-destination merge/overwrite/resume under Q11 before exposing
 pre-existing destination objects; distinguish partial restoration from completion.
 Use [captured allocation enumeration](../docs/13-filesystem-api-v2.md#captured-allocation-enumeration)
 for source ranges and the [destination reservation gate](../testing/security-model-conformance.md#16-destination-reservation-restoration)
-for restoration. Qualify consumption of reservations near full capacity and
-bounded traversal of fragmented existing layouts; add attribute/security transport
+for restoration. Use [private reservation initialization](../testing/data-policy-qualification.md#private-unwritten-reservation-initialization)
+as the consumption baseline; qualify sustained near-full workloads, metadata
+headroom and bounded traversal of fragmented existing layouts; add attribute/security transport
 with explicit unsupported-state refusal under [ADR-078](../adr/ADR-078-backup-preservation-modes.md); qualify native host grant issuance. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
 with both-slot crash oracles, generation-aware quarantine and measured
 low-space progress. Implement [ADR-075](../adr/ADR-075-revocable-backup-capability.md)

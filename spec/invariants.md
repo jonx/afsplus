@@ -68,8 +68,12 @@ per-file contracts:
 - private in-place update is an opt-in policy and may apply only to a
   non-extending write whose complete touched range is materialized and proven
   private
-- a hole, unwritten mapping, shared marker, unresolved shared-reference state,
-  or extension makes the complete operation COW
+- a hole, shared marker, unresolved shared-reference state or extension keeps
+  the exact-state COW content contract; private unwritten initialization follows
+  [ADR-079](../adr/ADR-079-initialize-private-unwritten-reservations.md)
+- initialization of proven-private unwritten storage preserves old logical zeros,
+  keeps allocation/lifetime ownership and publishes written mappings after data
+  durability; it never authorizes modifying a retained written mapping
 - no physical block with two or more live mappings is overwritten in place
 - metadata remains COW regardless of the user-data policy
 - a generation exposed after in-place overwrite may not be advertised as an
@@ -160,7 +164,8 @@ For the experimental persistent snapshot feature,
   intersects its lifetime
 - registry, ledger, cursor, retained total and quarantine changes publish at one
   checkpoint boundary; housekeeping never recursively enters the lifetime ledger
-- registered snapshots force data COW; historical reads use the captured roots
+- registered snapshots require exact historical bytes; private unwritten
+  initialization preserves captured zeros under ADR-079; historical reads use the captured roots
   and do not consult the live shared-reference count as their ownership authority
 - snapshot creation resolves the intent window; deletion refuses active reader
   handles, and handle identity cannot cross a remount

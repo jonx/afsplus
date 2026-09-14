@@ -4,6 +4,21 @@
 > [ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md) · **Spec:** [invariants](../spec/invariants.md) ·
 > **Tests:** [crash-testing](../testing/crash-testing.md), [data-policy qualification](../testing/data-policy-qualification.md) · **Milestones:** M03
 
+<!-- toc -->
+
+- [1. Extent model](#1-extent-model)
+- [2. Inline extents](#2-inline-extents)
+  - [Executable Core Scale-1 representation](#executable-core-scale-1-representation)
+- [3. Sparse files](#3-sparse-files)
+- [4. Preallocation](#4-preallocation)
+- [5. Truncation](#5-truncation)
+- [6. Shared extents/reflinks](#6-shared-extentsreflinks)
+- [7. Reserved optional user-data checksum association](#7-reserved-optional-user-data-checksum-association)
+- [8. Optional tiny-file storage](#8-optional-tiny-file-storage)
+- [9. Maximum file size](#9-maximum-file-size)
+
+<!-- /toc -->
+
 ## 1. Extent model
 
 Regular-file data is represented as mappings:
@@ -45,17 +60,18 @@ Reads from holes return zero.
 
 Writing into a hole allocates storage transactionally.
 
-Writing into a hole uses data COW: every touched logical block is reconstructed
-in fresh storage, user data is made durable before the new extent root, and
-the old mapping, if any, is quarantined. A write beyond EOF therefore creates
+Writing into a hole allocates fresh storage for its touched blocks. User data
+is made durable before the new extent root, and replaced written mappings
+are quarantined. Eligible unwritten portions of a mixed write follow section 4. A write beyond EOF therefore creates
 a real missing logical range rather than materializing zero-filled blocks.
 
 For already materialized private data, [ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md)
 selects an explicit per-file hybrid. Full COW is the default. An opted-in file
 may overwrite a non-extending range in place only when every touched block is
-proven private; otherwise the complete operation falls back to COW. The
-shipping policy is persistent per file, although the executable qualification
-switch remains runtime-only until its format/API gate is complete.
+proven private; other operations retain exact-state publication, including
+section 4 initialization. The policy persists per file under
+[ADR-065](../adr/ADR-065-persistent-data-update-policy.md); the runtime harness
+override does not rewrite that persistent choice.
 
 ## 4. Preallocation
 
@@ -63,12 +79,30 @@ The API may request space reservation without immediately increasing visible log
 
 This is useful for databases, large downloads, and reducing fragmentation.
 
-The prototype marks reserved mappings `EXTENT_UNWRITTEN`. Such mappings count
-as allocated storage but read as zeros and do not change logical size. A later
-write replaces only the touched unwritten blocks with ordinary written COW
-extents. Because preallocation does not change visible bytes, it advances the
-metadata-change timestamp but preserves modification time and content
-generation; content scanners therefore do not rescan an unchanged file.
+Reserved mappings carry `EXTENT_UNWRITTEN`. They count as allocated storage,
+read as logical zeros and preserve file size. Reservation changes ctime while
+preserving modification time and content generation.
+
+[ADR-079](../adr/ADR-079-initialize-private-unwritten-reservations.md) amends the
+fresh-allocation rule for private unwritten storage. A write initializes touched
+reserved blocks at their existing addresses, reconstructing complete blocks
+from zeros and caller bytes. The common data barrier precedes COW publication of
+written mappings. Old checkpoints and snapshots keep their unwritten mappings
+and continue reading zeros regardless of physical payload. Initialized blocks
+keep their bitmap ownership and lifetime birth; they are not retired.
+
+Eligibility requires an unwritten mapping without a shared marker, plus a
+reference-tree check showing no overlapping live shared record. A false-private
+marker is corruption. Shared and stale-marked reservations use fresh blocks;
+written ranges retain their existing policy. A mixed operation initializes its
+eligible portions and copies the other portions. No operation may convert an
+existing written mapping back to unwritten without releasing its allocation
+through the ordinary retention rules.
+
+Commit counters report initialized reservations separately from opted-in
+written-data overwrites. Metadata publication needs headroom; bounded fragmented
+layout traversal and native/portable qualification have separate gates. See
+[reservation initialization qualification](../testing/data-policy-qualification.md#private-unwritten-reservation-initialization).
 
 ## 5. Truncation
 

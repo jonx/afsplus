@@ -57,10 +57,12 @@ use crate::CoreError;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CommitStats {
     pub data_blocks_written: u64,
-    /// Data blocks overwritten at their committed physical address. This is
+    /// Previously written data overwritten at its committed physical address. This is
     /// a subset of `data_blocks_written` and is zero under the default full
     /// COW policy.
     pub data_blocks_overwritten_in_place: u64,
+    /// Previously unwritten private blocks initialized before COW publication.
+    pub data_blocks_initialized_from_reservation: u64,
     /// COW metadata blocks (records, directories, object map, retired list).
     pub metadata_blocks_written: u64,
     pub bitmap_pages_written: u64,
@@ -316,6 +318,7 @@ pub struct Volume<D: BlockDevice> {
     data_update_policy: DataUpdatePolicy,
     /// Transaction-scoped count consumed by `commit_transaction`.
     pending_in_place_data_blocks: u64,
+    pending_reservation_initializations: u64,
     pending_prewritten_data_blocks: u64,
     snapshot_limits: Option<SnapshotWorkLimits>,
     snapshot_handles: BTreeMap<u64, Weak<()>>,
@@ -350,6 +353,7 @@ impl<D: BlockDevice> Volume<D> {
             pending_layout_promotions: 0,
             data_update_policy: DataUpdatePolicy::FullCow,
             pending_in_place_data_blocks: 0,
+            pending_reservation_initializations: 0,
             pending_prewritten_data_blocks: 0,
             snapshot_limits: None,
             snapshot_handles: BTreeMap::new(),
@@ -802,7 +806,9 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     /// Replaces `content.len()` bytes at `offset` and publishes the metadata
-    /// atomically. The default policy uses fresh data blocks. The experimental
+    /// atomically. Written data uses fresh blocks by default; eligible private
+    /// unwritten reservations are initialized before COW publication (ADR-079).
+    /// The experimental
     /// private-in-place policy may reuse proven-private physical blocks for a
     /// non-extending write; see [`DataUpdatePolicy`]. Writing beyond EOF
     /// creates a hole; the file is converted from its cheap direct extent to
@@ -906,14 +912,52 @@ impl<D: BlockDevice> Volume<D> {
                 data_writes,
             );
         }
-        let additions = allocate_extent_runs(
-            &mut tx,
-            &mut self.dev,
-            &self.ident.geometry(),
-            first_block,
-            write_block_count,
-            0,
-        )?;
+        let mut additions = Vec::new();
+        let mut logical = first_block;
+        while logical < end_block {
+            if let Some(extent) =
+                extent_at(&old_extents, logical).filter(|extent| extent.flags == EXTENT_UNWRITTEN)
+            {
+                let count = extent.logical_end()?.min(end_block) - logical;
+                let physical = extent.physical_start + logical - extent.logical_start;
+                // A false-private marker cannot authorize initialization of a
+                // block another live object maps. Keep the lookup local.
+                self.shared_prefetch(generation, physical, count)?;
+                if self
+                    .shared_refs_edit(generation)?
+                    .resolve(physical, count)?
+                    .iter()
+                    .any(|run| run.reference_count.is_some())
+                {
+                    return Err(CoreError::Corrupt(
+                        "private unwritten extent overlaps shared references".into(),
+                    ));
+                }
+                additions.push(Extent {
+                    logical_start: logical,
+                    physical_start: physical,
+                    block_count: count,
+                    flags: 0,
+                });
+                self.pending_reservation_initializations += count;
+                logical += count;
+            } else {
+                let after = old_extents.partition_point(|extent| extent.logical_start <= logical);
+                let stop = old_extents[after..]
+                    .iter()
+                    .find(|extent| extent.flags == EXTENT_UNWRITTEN)
+                    .map_or(end_block, |extent| extent.logical_start.min(end_block));
+                additions.extend(allocate_extent_runs(
+                    &mut tx,
+                    &mut self.dev,
+                    &self.ident.geometry(),
+                    logical,
+                    stop - logical,
+                    0,
+                )?);
+                logical = stop;
+            }
+        }
         let mut block_iter = blocks.into_iter();
         let mut data_writes = Vec::with_capacity(write_block_count as usize);
         for extent in &additions {
@@ -929,8 +973,10 @@ impl<D: BlockDevice> Volume<D> {
                 "write extent/data block count mismatch".into(),
             ));
         }
-        let (mut new_extents, removed_extents) =
+        let (mut new_extents, mut removed_extents) =
             replace_logical_range(&old_extents, first_block, end_block, None)?;
+        // Initialized reservations keep their allocation and lifetime birth.
+        removed_extents.retain(|extent| extent.flags != EXTENT_UNWRITTEN);
         new_extents.extend(additions);
         let new_extents = coalesce_extents(new_extents)?;
 
@@ -5435,6 +5481,7 @@ impl<D: BlockDevice> Volume<D> {
         self.shared_refs = None;
         self.pending_layout_promotions = 0;
         self.pending_in_place_data_blocks = 0;
+        self.pending_reservation_initializations = 0;
         self.pending_prewritten_data_blocks = 0;
         self.checkpoint
             .generation
@@ -5698,6 +5745,8 @@ impl<D: BlockDevice> Volume<D> {
         }
         let layout_promotions = std::mem::take(&mut self.pending_layout_promotions);
         let in_place_data_blocks = std::mem::take(&mut self.pending_in_place_data_blocks);
+        let initialized_reservations =
+            std::mem::take(&mut self.pending_reservation_initializations);
         let prewritten_data_blocks = std::mem::take(&mut self.pending_prewritten_data_blocks);
 
         let mut snapshot_stats = self.prepare_snapshot_lifetimes(&mut tx)?;
@@ -5717,6 +5766,7 @@ impl<D: BlockDevice> Volume<D> {
         let mut stats = CommitStats {
             data_blocks_written: data_writes.len() as u64 + prewritten_data_blocks,
             data_blocks_overwritten_in_place: in_place_data_blocks,
+            data_blocks_initialized_from_reservation: initialized_reservations,
             metadata_blocks_written: meta_writes.len() as u64,
             bitmap_pages_written: finished.bitmap_writes.len() as u64,
             region_descriptors_written: finished.descriptor_writes.len() as u64,
