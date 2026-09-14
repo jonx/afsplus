@@ -68,6 +68,17 @@ pub trait RestoreBackend {
         bytes: &[u8],
         now: Timespec,
     ) -> Result<(), VfsError>;
+    /// Reserve exactly the requested byte coverage without extending size or
+    /// modifying written contents. Refuse unsupported alignment/semantics.
+    fn reserve(
+        &mut self,
+        _object: &Self::Object,
+        _offset: u64,
+        _length: u64,
+        _now: Timespec,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::NotSupported)
+    }
     fn resize(&mut self, object: &Self::Object, size: u64, now: Timespec) -> Result<(), VfsError>;
     fn link(
         &mut self,
@@ -133,6 +144,7 @@ pub struct RestoreService<P: RestoreBackend> {
     scope: Scope,
     active: Arc<AtomicUsize>,
     max_handles: usize,
+    max_reservation_bytes: u64,
 }
 impl<P: RestoreBackend> RestoreService<P> {
     pub fn new(backend: P, max_handles: usize) -> Result<(Self, RestoreAuthority), RestoreError> {
@@ -146,9 +158,15 @@ impl<P: RestoreBackend> RestoreService<P> {
                 scope,
                 active: Arc::new(AtomicUsize::new(0)),
                 max_handles,
+                max_reservation_bytes: 0,
             },
             RestoreAuthority(issuer),
         ))
+    }
+    /// Host-owned per-operation admission limit. Zero disables reservation.
+    /// Consumers cannot raise it through the checked facade.
+    pub fn set_reservation_limit(&mut self, bytes: u64) {
+        self.max_reservation_bytes = bytes;
     }
     pub fn client(&mut self) -> RestoreClient<'_, P> {
         RestoreClient(self)
@@ -166,7 +184,7 @@ impl<P: RestoreBackend> RestoreService<P> {
     ) -> Result<RwLockReadGuard<'a, bool>, RestoreError> {
         self.scope.admit(&grant.0).map_err(|_| RestoreError::Denied)
     }
-    fn reserve(&self) -> Result<Budget, RestoreError> {
+    fn reserve_handle(&self) -> Result<Budget, RestoreError> {
         if self.active.load(Ordering::Acquire) >= self.max_handles {
             return Err(VfsError::Limit("restore handle budget exhausted").into());
         }
@@ -182,7 +200,7 @@ impl<P: RestoreBackend> RestoreService<P> {
     }
     pub fn root(&mut self, grant: &RestoreGrant) -> Result<RestoreObject<P::Object>, RestoreError> {
         let _permit = self.admit(grant)?;
-        let budget = self.reserve()?;
+        let budget = self.reserve_handle()?;
         Ok(Self::wrap(self.backend.root()?, grant.clone(), budget))
     }
     fn create(
@@ -195,7 +213,7 @@ impl<P: RestoreBackend> RestoreService<P> {
         let _permit = self.admit(&parent.0.grant)?;
         component(name)?;
         timestamp(now)?;
-        let budget = self.reserve()?;
+        let budget = self.reserve_handle()?;
         let object = if directory {
             self.backend.create_directory(&parent.0.object, name, now)?
         } else {
@@ -229,6 +247,25 @@ impl<P: RestoreBackend> RestoreService<P> {
         let _permit = self.admit(&object.0.grant)?;
         timestamp(now)?;
         Ok(self.backend.write(&object.0.object, offset, bytes, now)?)
+    }
+    pub fn reserve(
+        &mut self,
+        object: &RestoreObject<P::Object>,
+        offset: u64,
+        length: u64,
+        now: Timespec,
+    ) -> Result<(), RestoreError> {
+        let _permit = self.admit(&object.0.grant)?;
+        timestamp(now)?;
+        if length == 0 || offset as u128 + length as u128 > (1u128 << 64) {
+            return Err(VfsError::Invalid.into());
+        }
+        if length > self.max_reservation_bytes {
+            return Err(VfsError::Limit("restore reservation byte budget exhausted").into());
+        }
+        Ok(self
+            .backend
+            .reserve(&object.0.object, offset, length, now)?)
     }
     pub fn resize(
         &mut self,
@@ -347,6 +384,15 @@ impl<P: RestoreBackend> RestoreClient<'_, P> {
     ) -> Result<(), RestoreError> {
         self.0.write(object, offset, bytes, now)
     }
+    pub fn reserve(
+        &mut self,
+        object: &RestoreObject<P::Object>,
+        offset: u64,
+        length: u64,
+        now: Timespec,
+    ) -> Result<(), RestoreError> {
+        self.0.reserve(object, offset, length, now)
+    }
     pub fn resize(
         &mut self,
         object: &RestoreObject<P::Object>,
@@ -435,6 +481,31 @@ impl<D: afsplus_block::BlockDevice> RestoreBackend for AfsRestoreDestination<D> 
     ) -> Result<(), VfsError> {
         Ok(self.volume.write_file_at(*object, offset, bytes, now)?)
     }
+    fn reserve(
+        &mut self,
+        object: &u64,
+        offset: u64,
+        length: u64,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        let alignment = self.volume.ident().geometry().block_size as u64;
+        if length == 0 || offset as u128 + length as u128 > (1u128 << 64) {
+            return Err(VfsError::Invalid);
+        }
+        if !offset.is_multiple_of(alignment) || !length.is_multiple_of(alignment) {
+            return Err(VfsError::NotSupported);
+        }
+        // Core preallocation accepts an exclusive end representable in u64;
+        // requesting one byte less reserves the same final rounded block.
+        let request = if offset.checked_add(length).is_none() {
+            length - 1
+        } else {
+            length
+        };
+        Ok(self
+            .volume
+            .preallocate_file(*object, offset, request, now)?)
+    }
     fn resize(&mut self, object: &u64, size: u64, now: Timespec) -> Result<(), VfsError> {
         Ok(self.volume.truncate_file(*object, size, now)?)
     }
@@ -508,6 +579,10 @@ mod authority_tests {
             self.check();
             Ok(())
         }
+        fn reserve(&mut self, _: &(), _: u64, _: u64, _: Timespec) -> Result<(), VfsError> {
+            self.check();
+            Ok(())
+        }
         fn resize(&mut self, _: &(), _: u64, _: Timespec) -> Result<(), VfsError> {
             unreachable!()
         }
@@ -549,6 +624,8 @@ mod authority_tests {
         let other_root = service.root(&other).unwrap();
         service.backend_mut().grants = vec![grant.clone()];
         service.write(&file, 0, b"data", now).unwrap();
+        service.set_reservation_limit(4096);
+        service.reserve(&file, 0, 4096, now).unwrap();
         service.link(&file, &root, "same", now).unwrap();
         service.backend_mut().grants.push(other.clone());
         service.link(&file, &other_root, "other", now).unwrap();
@@ -562,6 +639,6 @@ mod authority_tests {
             service.write(&file, 0, b"denied", now),
             Err(RestoreError::Denied)
         );
-        assert_eq!(service.backend_mut().calls, 3);
+        assert_eq!(service.backend_mut().calls, 4);
     }
 }

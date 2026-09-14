@@ -41,6 +41,8 @@ struct Mock {
     next: u64,
     calls: usize,
     blocked_write: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    reservations: Vec<(u64, u64, u64)>,
+    reservation_support: bool,
 }
 impl Mock {
     fn new() -> Self {
@@ -56,6 +58,8 @@ impl Mock {
             next: 2,
             calls: 0,
             blocked_write: None,
+            reservations: vec![],
+            reservation_support: true,
         }
     }
     fn create(&mut self, parent: u64, name: &str, kind: NodeKind) -> Result<u64, VfsError> {
@@ -109,6 +113,24 @@ impl RestoreBackend for Mock {
         node.data.resize(node.data.len().max(end), 0);
         node.data[offset..end].copy_from_slice(bytes);
         node.stat.size = node.data.len() as u64;
+        Ok(())
+    }
+    fn reserve(
+        &mut self,
+        object: &u64,
+        offset: u64,
+        length: u64,
+        _: Timespec,
+    ) -> Result<(), VfsError> {
+        self.calls += 1;
+        if !self.reservation_support {
+            return Err(VfsError::NotSupported);
+        }
+        let node = self.nodes.get_mut(object).ok_or(VfsError::NotFound)?;
+        if node.stat.kind != NodeKind::File {
+            return Err(VfsError::IsDirectory);
+        }
+        self.reservations.push((*object, offset, length));
         Ok(())
     }
     fn resize(&mut self, object: &u64, size: u64, _: Timespec) -> Result<(), VfsError> {
@@ -189,6 +211,8 @@ fn restore_job<P: RestoreBackend>(
     client.write(&file, 0, b"head", now(3)).unwrap();
     client.write(&file, 8192, b"tail", now(4)).unwrap();
     client.resize(&file, 12288, now(5)).unwrap();
+    client.reserve(&file, 4096, 4096, now(5)).unwrap();
+    client.reserve(&file, 16384, 8192, now(5)).unwrap();
     client.link(&file, &root, "alias", now(6)).unwrap();
     for object in [&file, &dir, &root] {
         client.metadata(object, metadata()).unwrap();
@@ -214,6 +238,7 @@ fn restore_job<P: RestoreBackend>(
 fn neutral_restore_preserves_content_links_and_metadata() {
     let (mut service, authority) = RestoreService::new(Mock::new(), 3).unwrap();
     let grant = authority.grant();
+    service.set_reservation_limit(8192);
     restore_job(&mut service.client(), &grant);
     assert_eq!(service.backend_mut().names.len(), 3);
 }
@@ -412,6 +437,7 @@ fn afs_restore_is_confined_preserves_snapshot_and_survives_remount() {
     let backend = AfsRestoreDestination::new(volume, destination).unwrap();
     let (mut service, authority) = RestoreService::new(backend, 3).unwrap();
     let grant = authority.grant();
+    service.set_reservation_limit(8192);
     let (file, dir) = restore_job(&mut service.client(), &grant);
     let volume = service.into_backend().into_volume();
     let mut volume = afsplus_core::mount_with_snapshot_limits(
@@ -431,7 +457,7 @@ fn afs_restore_is_confined_preserves_snapshot_and_survives_remount() {
             afsplus_core::volume::ObjectMetadata::from(volume.stat(object).unwrap().unwrap()),
         ));
     }
-    assert_eq!(volume.stat(file).unwrap().unwrap().allocated_bytes, 8192);
+    assert_eq!(volume.stat(file).unwrap().unwrap().allocated_bytes, 20480);
     let view = volume.snapshot_open(old_snapshot).unwrap();
     assert!(volume
         .snapshot_read_directory_page(&view, destination, None, 1)
@@ -499,7 +525,103 @@ fn afs_rejects_existing_destination_and_unrepresentable_metadata_without_writes(
         service.metadata(&root, invalid),
         Err(RestoreError::Filesystem(VfsError::Invalid))
     );
+    service.set_reservation_limit(4096);
+    assert_eq!(
+        service.reserve(&root, 1, 4096, now(4)),
+        Err(RestoreError::Filesystem(VfsError::NotSupported))
+    );
+    assert_eq!(
+        service.reserve(&root, 0, 4095, now(4)),
+        Err(RestoreError::Filesystem(VfsError::NotSupported))
+    );
     let trace = service.into_backend().into_volume().into_device();
     assert_eq!(trace.stats().writes, 0);
     assert_eq!(trace.stats().flushes, 0);
+}
+
+#[test]
+fn reservation_admission_is_bounded_revocable_and_reports_unsupported_providers() {
+    let (mut service, authority) = RestoreService::new(Mock::new(), 2).unwrap();
+    let grant = authority.grant();
+    let root = service.root(&grant).unwrap();
+    let file = service.create_file(&root, "file", now(1)).unwrap();
+    let before = service.backend_mut().calls;
+    assert!(matches!(
+        service.reserve(&file, 0, 4096, now(2)),
+        Err(RestoreError::Filesystem(VfsError::Limit(_)))
+    ));
+    service.set_reservation_limit(8192);
+    for (offset, length) in [(0, 0), (u64::MAX, 2), (0, 12288)] {
+        assert!(service.reserve(&file, offset, length, now(2)).is_err());
+    }
+    assert_eq!(service.backend_mut().calls, before);
+    service
+        .client()
+        .reserve(&file, 16384, 8192, now(2))
+        .unwrap();
+    assert_eq!(service.stat(&file).unwrap().size, 0);
+    assert_eq!(service.backend_mut().reservations, vec![(2, 16384, 8192)]);
+    service.backend_mut().reservation_support = false;
+    assert_eq!(
+        service.reserve(&file, 0, 4096, now(2)),
+        Err(RestoreError::Filesystem(VfsError::NotSupported))
+    );
+    authority.revoke(&grant).unwrap();
+    let before = service.backend_mut().calls;
+    assert_eq!(
+        service.reserve(&file, 0, 4096, now(2)),
+        Err(RestoreError::Denied)
+    );
+    assert_eq!(service.backend_mut().calls, before);
+}
+
+#[test]
+fn afs_restore_reservations_preserve_size_written_bytes_and_final_address_block() {
+    let (mut service, authority) = RestoreService::new(
+        AfsRestoreDestination::new(afs_volume(), afsplus_format::OBJECT_ROOT).unwrap(),
+        2,
+    )
+    .unwrap();
+    service.set_reservation_limit(8192);
+    let grant = authority.grant();
+    let root = service.root(&grant).unwrap();
+    let file = service.create_file(&root, "reserved", now(2)).unwrap();
+    service.write(&file, 0, b"keep", now(3)).unwrap();
+    service.reserve(&file, 0, 8192, now(4)).unwrap();
+    service.reserve(&file, 16384, 8192, now(4)).unwrap();
+    service
+        .reserve(&file, u64::MAX - 4095, 4096, now(4))
+        .unwrap();
+    let id = service.stat(&file).unwrap().object_id;
+    assert_eq!(service.stat(&file).unwrap().size, 4);
+    let mut volume = service.into_backend().into_volume();
+    let snapshot = volume.snapshot_create(now(5)).unwrap();
+    let mut volume = afsplus_core::mount_with_snapshot_limits(
+        volume.into_device(),
+        afsplus_core::MountOptions::default(),
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(volume.read_file(id).unwrap(), b"keep");
+    assert_eq!(volume.stat(id).unwrap().unwrap().size_bytes, 4);
+    let view = volume.snapshot_open(snapshot).unwrap();
+    let page = volume.snapshot_allocation_page(&view, id, 0, 64).unwrap();
+    assert!(page.eof);
+    let actual: Vec<_> = page
+        .ranges
+        .iter()
+        .map(|r| (r.offset, r.length, r.unwritten))
+        .collect();
+    assert_eq!(
+        actual,
+        vec![
+            (0, 4096, false),
+            (4096, 4096, true),
+            (16384, 8192, true),
+            (u64::MAX - 4095, 4096, true)
+        ]
+    );
+    let report = afsplus_check::check_device(&mut volume.into_device());
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(report.warnings.is_empty());
 }

@@ -23,6 +23,7 @@
 - [13. Trusted snapshot backup authority](#13-trusted-snapshot-backup-authority)
 - [14. Destination restore authority](#14-destination-restore-authority)
 - [15. Captured allocation enumeration](#15-captured-allocation-enumeration)
+- [16. Destination reservation restoration](#16-destination-reservation-restoration)
 
 <!-- /toc -->
 
@@ -281,3 +282,27 @@ an in-backend probe must observe authority held throughout enumeration.
 These checks qualify source enumeration. Destination reservations and the two
 [archive modes](../adr/ADR-078-backup-preservation-modes.md) require their own
 restoration, unsupported-provider and completion oracles.
+
+
+## 16. Destination reservation restoration
+
+Run `cargo test -p afsplus-vfs --all-features` for checked reservation admission,
+unsupported-provider refusal and exact AFS+ restore fixtures. Require explicit
+host byte limits, zero/overflow/excessive-request refusal before provider calls,
+revocation, in-backend exclusion, unchanged logical size and written bytes.
+The same restore job on independent and AFS+ providers must reserve unwritten
+coverage within a hole and beyond EOF. AFS+ remount must preserve exact coverage,
+including the final rounded 64-bit block; unsupported alignment must issue zero
+device writes and flushes. Require a clean exhaustive checker verdict.
+
+Run `cargo test -p afsplus-core snapshot_preallocation_publication --all-features -- --nocapture`
+for every modeled preallocation publication cut with a retained snapshot.
+Each recovered record must equal the complete old or new record, with exact
+written bytes and unchanged captured allocation. Check both selectable slots.
+Report old/new outcome counts. This is a host crash model, with its ordinary
+subset/torn-write limits; actual devices require separate qualification.
+
+Qualify later writes into reservations under near-full COW and snapshot pressure,
+plus bounded traversal of fragmented existing layouts, before claiming capacity
+reservation guarantees for constrained profiles. The per-operation byte limit
+alone cannot prove either property.

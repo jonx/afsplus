@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Add checked destination reservation restoration](#2026-09-14--add-checked-destination-reservation-restoration)
 - [2026-09-14 — Delegate decisions while the owner is away](#2026-09-14--delegate-decisions-while-the-owner-is-away)
 - [2026-09-14 — Enumerate captured allocation and decide preservation modes](#2026-09-14--enumerate-captured-allocation-and-decide-preservation-modes)
 - [2026-09-14 — Enforce separate destination restore grants](#2026-09-14--enforce-separate-destination-restore-grants)
@@ -67,6 +68,35 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Add checked destination reservation restoration
+
+Added exact reservation operations to the restore provider/service/client. The
+host configures a per-operation byte cap; its default is disabled. Checked
+operations reject invalid/excessive requests before provider calls and retain
+the original handle grant through admission. Providers explicitly refuse missing
+support. AFS+ requires block alignment, preserves written data and logical size,
+and supports the final rounded block ending at 2^64.
+
+Extended the independent and AFS+ restore job with reservations in a hole and
+beyond EOF. Added refusal, budget, revocation, final-address and remount checks;
+the existing zero-write fixture covers alignment refusal and the in-backend
+probe covers reservation admission. Added exact old/new object-record crash
+oracles for preallocation while retaining an earlier snapshot, checking both
+checkpoint slots and captured bytes/allocation.
+The targeted crash run enumerated 626 states: 622 old and 4 complete new states.
+
+Review identified two remaining qualification requirements: the existing core
+loads full extent layouts for preallocation, and later COW writes allocate new
+data blocks. The API cap alone cannot establish constrained-memory behavior or
+near-full consumption of reservations. Recorded these explicitly in the queue
+and test plan; they are implementation work before a complete reservation
+capacity promise, not a reason to downgrade the full-preservation contract.
+
+Validation: full workspace/all-features suite passed 344 tests, with zero
+failures and 10 ignored tests. Formatting, Clippy with warnings denied,
+documentation checks, three checker fixtures and whitespace checks passed.
+
 
 ## 2026-09-14 — Delegate decisions while the owner is away
 

@@ -368,6 +368,30 @@ preservation checks. Attributes, security containers, data policy and a complete
 sparse-range transport require additional operations with explicit refusal for
 unsupported required metadata.
 
+`reserve(object, offset, length, time)` preserves exact reservation coverage
+without extending logical size or altering written contents. Providers return
+`NotSupported` for unavailable semantics or unrepresentable alignment. Requests
+have positive length and a mathematical end no greater than 2^64. The AFS+
+provider accepts block-aligned ranges, including the final rounded block; it
+refuses silent outward rounding. Reserve before final metadata restoration
+because reservation changes ctime. Existing written coverage stays written.
+
+Reservation admission is disabled until the trusted host configures a positive
+per-operation byte limit using `set_reservation_limit`. The checked consumer
+cannot raise it. Zero length, range overflow, excessive requests and revoked
+handles are rejected before provider invocation. Admitted reservations hold
+revocation exclusion throughout the backend call. This additive source API
+changes no disk layout, C ABI or native capability advertisement.
+
+The byte limit bounds requested allocation per operation. It does not bound
+all core memory: preallocation loads the existing extent layout. Constrained
+qualification must replace or bound that traversal and measure metadata
+headroom on fragmented files. The COW write path also needs qualification for
+consuming reservations near full capacity; preserving allocation alone does
+not establish future-write admission. Full archive preservation needs both
+reservation-consumption and destination alignment/capacity evidence under
+[ADR-078](../adr/ADR-078-backup-preservation-modes.md).
+
 `sync` reports filesystem durability; it does not certify a complete archive
 restore. The PAX consumer must separately verify its preservation profile,
 integrity, completion and interrupted/partial-work outcome under

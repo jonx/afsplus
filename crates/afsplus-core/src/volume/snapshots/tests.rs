@@ -1254,3 +1254,45 @@ fn snapshot_allocation_preserves_the_final_rounded_u64_block() {
         0
     );
 }
+
+#[test]
+fn snapshot_preallocation_publication_is_atomic_and_preserves_captured_layout() {
+    let mut volume = open(formatted(512, 0), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("file", b"keep", now(2)).unwrap();
+    let snapshot = volume.snapshot_create(now(3)).unwrap();
+    let before = volume.stat(file).unwrap().unwrap();
+    let base = volume.into_device();
+    let mut recording = open(RecordingBackend::new(base.clone()), MountMode::ReadWrite);
+    recording
+        .preallocate_file(file, 4096, 8192, now(4))
+        .unwrap();
+    let after = recording.stat(file).unwrap().unwrap();
+    let (_, log) = recording.into_device().into_parts();
+    let mut counts = [0, 0];
+    for cut in 0..=log.len() {
+        for_each_crash_state(&base, &log, cut, |state| {
+            let mut volume = open(state.image, MountMode::ReadOnly);
+            let record = volume.stat(file).unwrap().unwrap();
+            assert!(record == before || record == after);
+            counts[usize::from(record == after)] += 1;
+            assert_eq!(volume.read_file(file).unwrap(), b"keep");
+            let view = volume.snapshot_open(snapshot).unwrap();
+            let page = volume.snapshot_allocation_page(&view, file, 0, 64).unwrap();
+            assert!(page.eof);
+            assert_eq!(
+                page.ranges,
+                vec![SnapshotAllocationRange {
+                    offset: 0,
+                    length: 4096,
+                    unwritten: false
+                }]
+            );
+            assert_eq!(bytes(&mut volume, &view, file), b"keep");
+        });
+    }
+    assert!(counts.iter().all(|n| *n > 0));
+    println!(
+        "snapshot_preallocation_cuts old={} new={}",
+        counts[0], counts[1]
+    );
+}
