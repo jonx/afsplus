@@ -804,7 +804,7 @@ impl<D: BlockDevice> Volume<D> {
             }
             let block_start = logical_block * block_size;
             let copy_start = offset.max(block_start);
-            let copy_end = end.min(block_start + block_size);
+            let copy_end = end.min(block_start.saturating_add(block_size));
             let source = (copy_start - block_start) as usize..(copy_end - block_start) as usize;
             let target = (copy_start - offset) as usize..(copy_end - offset) as usize;
             destination[target].copy_from_slice(&block[source]);
@@ -1127,6 +1127,38 @@ impl<D: BlockDevice> Volume<D> {
         let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
             CoreError::Corrupt(format!("file {object_id} missing from object map"))
         })?;
+        if new_size > record.size_bytes && record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
+            let generation = self.next_generation()?;
+            let mut tx = TxAllocator::begin(
+                &mut self.dev,
+                &self.ident.geometry(),
+                &self.checkpoint,
+                self.other_checkpoint.as_ref(),
+                generation,
+                self.reclaim_batch_blocks,
+                self.alloc_rover_region,
+            )?;
+            self.protect_emergency_headroom(&mut tx);
+            let staged = self.stage_extent_delta(
+                &mut tx,
+                record,
+                record_lba,
+                &[],
+                &[],
+                new_size,
+                true,
+                now,
+                generation,
+            )?;
+            return self.commit_staged_file_layout(
+                record,
+                staged,
+                Vec::new(),
+                generation,
+                tx,
+                Vec::new(),
+            );
+        }
         let block_size = self.dev.block_size() as u64;
         let (old_extents, old_tree_blocks) = self.load_file_layout(&record)?;
         let mut new_extents = old_extents.clone();

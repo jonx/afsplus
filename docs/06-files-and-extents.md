@@ -137,6 +137,18 @@ Shrinking a file must:
 3. zero or define the newly exposed tail behavior when the file is re-extended
 4. send discard only after blocks are no longer reachable by any state that may legally reference them
 
+Growing an extent-tree file preserves its exact root, mappings and allocation
+count, including reservations beyond EOF. It publishes the object size,
+modification/change times and content generation through the common transaction
+tail without enumerating extents. Empty/direct files use their fixed-size
+layout and promote to a tree when sparse growth requires it. Growth retains
+metadata headroom admission and selectable-checkpoint protection.
+
+Logical sizes up to `u64::MAX` require saturating block-end calculations when
+clipping reads to EOF: the rounded final block boundary can be 2^64. Reads at
+or beyond EOF return zero bytes; holes and unwritten ranges return zero data.
+See [sparse growth qualification](../testing/data-policy-qualification.md#sparse-growth).
+
 The prototype's `Volume::truncate_file` supports sparse growth and shrinking.
 A partial written tail block is copied and zeroed past the new EOF before the
 new size is published, preventing stale tail bytes from reappearing after a

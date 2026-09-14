@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Grow sparse files without enumerating mappings](#2026-09-14---grow-sparse-files-without-enumerating-mappings)
 - [2026-09-14 - Bound atomic writes for restore consumers](#2026-09-14---bound-atomic-writes-for-restore-consumers)
 - [2026-09-14 - Bound reservation edits in fragmented files](#2026-09-14---bound-reservation-edits-in-fragmented-files)
 - [2026-09-14 — Cross-read initialized reservations through the portable C reader](#2026-09-14--cross-read-initialized-reservations-through-the-portable-c-reader)
@@ -74,6 +75,26 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+
+## 2026-09-14 - Grow sparse files without enumerating mappings
+
+Extent-tree growth retains the exact root and allocation accounting while
+publishing size, times and content generation through the existing COW tail.
+The fixed-size direct path retains its promotion rules. A 300-record file
+required 51 device reads to grow to the maximum logical size, preserving its
+captured view and final-block zero reads through remount.
+
+The maximum-size regression exposed an overflowing read block-end addition.
+Saturating the boundary before EOF clipping fixes it; restoring the former
+expression reproduced the overflow as a negative control. Growth publication
+passed 346 modeled crash states (342 old, four new), checking exact object
+records, complete bytes, reservation accounting and snapshot contents.
+
+The targeted tests, formatting, Clippy, documentation checks, three checker
+fixtures and whitespace validation passed. Full workspace regression passed
+359 tests with zero failures and ten ignored. Bounded shrinking, total RAM and native/constrained runtime
+gates remain separate requirements in the queue.
 
 ## 2026-09-14 - Bound atomic writes for restore consumers
 

@@ -1983,3 +1983,97 @@ fn bounded_writes_initialize_direct_files_and_keep_opted_in_private_tree_blocks(
     assert_eq!(volume.read_file(file).unwrap(), expected);
     verify(&mut volume);
 }
+
+#[test]
+fn sparse_growth_preserves_fragmented_root_and_final_address_zeros() {
+    use afsplus_block::TraceBackend;
+    let mut volume = open(formatted(4096, 0), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("grow", b"keep", now(2)).unwrap();
+    for block in 1..300 {
+        volume
+            .preallocate_file(file, block * 3 * 4096, 4096, now(3))
+            .unwrap();
+    }
+    let snapshot = volume.snapshot_create(now(4)).unwrap();
+    let before = volume.stat(file).unwrap().unwrap();
+    let mut volume = open(
+        TraceBackend::new(volume.into_device()),
+        MountMode::ReadWrite,
+    );
+    let io = volume.dev.stats();
+    volume.truncate_file(file, u64::MAX, now(5)).unwrap();
+    let reads = volume.dev.stats().reads - io.reads;
+    assert!(reads < 100, "sparse growth used {reads} reads");
+    let after = volume.stat(file).unwrap().unwrap();
+    assert_eq!(after.data_root, before.data_root);
+    assert_eq!(after.data_blocks, before.data_blocks);
+    assert_eq!(after.allocated_bytes, before.allocated_bytes);
+    assert_eq!(after.size_bytes, u64::MAX);
+    assert!(after.content_generation > before.content_generation);
+    let mut tail = [1; 16];
+    assert_eq!(
+        volume.read_file_at(file, u64::MAX - 16, &mut tail).unwrap(),
+        16
+    );
+    assert_eq!(tail, [0; 16]);
+    let view = volume.snapshot_open(snapshot).unwrap();
+    assert_eq!(bytes(&mut volume, &view, file), b"keep");
+    verify(&mut volume);
+    let mut volume = open(volume.into_device().into_inner(), MountMode::ReadOnly);
+    assert_eq!(
+        volume.read_file_at(file, u64::MAX - 16, &mut tail).unwrap(),
+        16
+    );
+    assert_eq!(tail, [0; 16]);
+    println!("sparse_growth records=300 reads={reads}");
+}
+
+#[test]
+fn sparse_growth_publication_is_atomic_with_retained_reservations() {
+    let mut volume = open(formatted(512, 0), MountMode::ReadWrite);
+    let file = volume
+        .create_file_in_root("growth-cuts", b"keep", now(2))
+        .unwrap();
+    volume.preallocate_file(file, 8192, 4096, now(3)).unwrap();
+    let snapshot = volume.snapshot_create(now(4)).unwrap();
+    let before = volume.stat(file).unwrap().unwrap();
+    let base = volume.into_device();
+    let mut recording = open(RecordingBackend::new(base.clone()), MountMode::ReadWrite);
+    recording.truncate_file(file, 16384, now(5)).unwrap();
+    let after = recording.stat(file).unwrap().unwrap();
+    let mut expanded = b"keep".to_vec();
+    expanded.resize(16384, 0);
+    let (_, log) = recording.into_device().into_parts();
+    let mut counts = [0, 0];
+    for cut in 0..=log.len() {
+        for_each_crash_state(&base, &log, cut, |state| {
+            let mut volume = open(state.image, MountMode::ReadOnly);
+            let record = volume.stat(file).unwrap().unwrap();
+            assert!(record == before || record == after);
+            let published = record == after;
+            counts[usize::from(published)] += 1;
+            assert_eq!(
+                volume.read_file(file).unwrap(),
+                if published {
+                    expanded.clone()
+                } else {
+                    b"keep".to_vec()
+                }
+            );
+            assert_eq!(record.data_root, before.data_root);
+            assert_eq!(record.data_blocks, before.data_blocks);
+            let view = volume.snapshot_open(snapshot).unwrap();
+            assert_eq!(bytes(&mut volume, &view, file), b"keep");
+            assert_eq!(
+                volume
+                    .snapshot_stat(&view, file)
+                    .unwrap()
+                    .unwrap()
+                    .allocated_bytes,
+                before.allocated_bytes
+            );
+        });
+    }
+    assert!(counts.iter().all(|n| *n > 0));
+    println!("sparse_growth_cuts old={} new={}", counts[0], counts[1]);
+}

@@ -23,6 +23,7 @@ switch.
 - [Private unwritten reservation initialization](#private-unwritten-reservation-initialization)
 - [Bounded reservation edits](#bounded-reservation-edits)
 - [Bounded writes](#bounded-writes)
+- [Sparse growth](#sparse-growth)
 
 <!-- /toc -->
 
@@ -175,3 +176,18 @@ Also verify shared-peer isolation under requested private-in-place policy, and
 an eligible private tree on a volume without snapshot support. The eligible
 case must retain physical mappings and report the exact in-place counter.
 Exercise empty/direct promotion through the bounded entry point.
+
+## Sparse growth
+
+Run `cargo test -p afsplus-core sparse_growth --all-features -- --nocapture`.
+Grow a 300-record fragmented file to `u64::MAX`, requiring fewer than 100
+device reads and the identical extent root, block count and allocated byte
+count. Verify logical zeros in the final address block before and after
+remount, and preserve the snapshot's original bytes. The former overflowing
+block-end expression must fail this case as a negative control.
+
+Enumerate growth publication cuts with a retained snapshot and unwritten
+reservations. Require the exact old or new object, corresponding full bytes,
+unchanged extent root and captured allocation. Full graph checking covers
+both selectable checkpoints. This gate covers growth; bounded shrinking and
+total allocator/retention RAM have separate resource requirements.
