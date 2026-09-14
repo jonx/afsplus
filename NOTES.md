@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Bound atomic writes for restore consumers](#2026-09-14---bound-atomic-writes-for-restore-consumers)
 - [2026-09-14 - Bound reservation edits in fragmented files](#2026-09-14---bound-reservation-edits-in-fragmented-files)
 - [2026-09-14 — Cross-read initialized reservations through the portable C reader](#2026-09-14--cross-read-initialized-reservations-through-the-portable-c-reader)
 - [2026-09-14 — Initialize private unwritten reservations without replacement data allocation](#2026-09-14--initialize-private-unwritten-reservations-without-replacement-data-allocation)
@@ -72,6 +73,29 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+
+
+## 2026-09-14 - Bound atomic writes for restore consumers
+
+Added the host Rust bounded-write entry point, using local extent windows and
+the generalized changed-key publication helper. It admits touched blocks and
+local records, preserves existing tree representation, and shares the data,
+reference and checkpoint publication machinery. The restore provider uses
+64-block and 64-record limits; larger transfers require smaller independently
+durable requests. Ordinary unrestricted writes retain their admission behavior.
+No disk encoding, C ABI or native capability advertisement changed.
+
+Four targeted tests passed: a 130-record fragmented byte oracle with snapshot
+and remount checks; block/record refusal before writes; shared-peer isolation;
+empty/direct promotion; eligible private tree overwrites with unchanged physical
+mappings; and 642 publication crash states (638 old, four new) preserving
+captured zeros. The full workspace suite passed 357 tests with zero failures
+and ten ignored. Formatting, Clippy, documentation checks, three checker
+fixtures and whitespace validation passed.
+
+Total peak RAM, allocator/retention bounds, truncation memory, sustained
+near-full operation and native/constrained runtime qualification need further
+work. The local-vector and data-buffer limits do not close those queue gates.
 
 ## 2026-09-14 - Bound reservation edits in fragmented files
 

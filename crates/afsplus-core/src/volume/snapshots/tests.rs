@@ -1768,3 +1768,218 @@ fn bounded_reservation_tree_publication_preserves_snapshot_at_every_cut() {
         counts[0], counts[1]
     );
 }
+
+#[test]
+fn bounded_writes_preserve_fragmented_layout_and_reject_before_io() {
+    use afsplus_block::TraceBackend;
+    let mut volume = open(formatted(2048, 0), MountMode::ReadWrite);
+    let file = volume
+        .create_file_in_root("bounded-write", &[], now(2))
+        .unwrap();
+    for block in 0..130 {
+        volume
+            .preallocate_file(file, block * 3 * 4096, 4096, now(3))
+            .unwrap();
+    }
+    volume.truncate_file(file, 390 * 4096, now(4)).unwrap();
+    let snapshot = volume.snapshot_create(now(5)).unwrap();
+    let mut volume = open(
+        TraceBackend::new(volume.into_device()),
+        MountMode::ReadWrite,
+    );
+    let before = volume.stat(file).unwrap().unwrap();
+    let io = volume.dev.stats();
+    assert!(matches!(
+        volume.write_file_at_bounded(
+            file,
+            0,
+            &[7; 8192],
+            now(6),
+            FileEditLimits {
+                max_blocks: 1,
+                max_records: 8
+            }
+        ),
+        Err(CoreError::PrototypeLimit(_))
+    ));
+    assert!(matches!(
+        volume.write_file_at_bounded(
+            file,
+            0,
+            &[7; 4096],
+            now(6),
+            FileEditLimits {
+                max_blocks: 1,
+                max_records: 1
+            }
+        ),
+        Err(CoreError::PrototypeLimit(_))
+    ));
+    assert_eq!(volume.dev.stats().writes, io.writes);
+    assert_eq!(volume.stat(file).unwrap().unwrap(), before);
+    let mut expected = vec![0; 390 * 4096];
+    for (offset, length, value) in [
+        (195 * 4096 + 7, 5000, 0x53),
+        (195 * 4096 + 10, 50, 0x71),
+        (389 * 4096, 4096, 0x33),
+    ] {
+        let io = volume.dev.stats();
+        volume
+            .write_file_at_bounded(
+                file,
+                offset as u64,
+                &vec![value; length],
+                now(7),
+                FileEditLimits {
+                    max_blocks: 2,
+                    max_records: 8,
+                },
+            )
+            .unwrap();
+        let reads = volume.dev.stats().reads - io.reads;
+        assert!(reads < 180, "bounded write used {reads} reads");
+        expected[offset..offset + length].fill(value);
+        assert_eq!(volume.read_file(file).unwrap(), expected);
+    }
+    let view = volume.snapshot_open(snapshot).unwrap();
+    assert_eq!(bytes(&mut volume, &view, file), vec![0; 390 * 4096]);
+    verify(&mut volume);
+    let mut volume = open(volume.into_device().into_inner(), MountMode::ReadOnly);
+    assert_eq!(volume.read_file(file).unwrap(), expected);
+}
+
+#[test]
+fn bounded_writes_crash_to_exact_bytes_and_preserve_captured_zeros() {
+    let mut volume = open(formatted(512, 0), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("cuts", &[], now(2)).unwrap();
+    for block in [0, 3, 6] {
+        volume
+            .preallocate_file(file, block * 4096, 4096, now(3))
+            .unwrap();
+    }
+    volume.truncate_file(file, 8 * 4096, now(4)).unwrap();
+    let snapshot = volume.snapshot_create(now(5)).unwrap();
+    let base = volume.into_device();
+    let old = vec![0; 8 * 4096];
+    let mut new = old.clone();
+    new[7..5007].fill(0x5a);
+    let mut recording = open(RecordingBackend::new(base.clone()), MountMode::ReadWrite);
+    recording
+        .write_file_at_bounded(
+            file,
+            7,
+            &[0x5a; 5000],
+            now(6),
+            FileEditLimits {
+                max_blocks: 2,
+                max_records: 8,
+            },
+        )
+        .unwrap();
+    let (_, log) = recording.into_device().into_parts();
+    let mut counts = [0, 0];
+    for cut in 0..=log.len() {
+        for_each_crash_state(&base, &log, cut, |state| {
+            let mut volume = open(state.image, MountMode::ReadOnly);
+            let actual = volume.read_file(file).unwrap();
+            assert!(actual == old || actual == new);
+            counts[usize::from(actual == new)] += 1;
+            let view = volume.snapshot_open(snapshot).unwrap();
+            assert_eq!(bytes(&mut volume, &view, file), old);
+        });
+    }
+    assert!(counts.iter().all(|n| *n > 0));
+    println!("bounded_write_cuts old={} new={}", counts[0], counts[1]);
+}
+
+#[test]
+fn bounded_writes_keep_shared_peers_and_private_policy_semantics() {
+    let mut volume = open(formatted(1024, 0), MountMode::ReadWrite);
+    let file = volume
+        .create_file_in_root("source", &[0x11; 8192], now(2))
+        .unwrap();
+    let peer = volume
+        .clone_file(file, OBJECT_ROOT, "peer", now(3))
+        .unwrap();
+    volume.set_data_update_policy(DataUpdatePolicy::InPlacePrivate);
+    volume
+        .write_file_at_bounded(
+            file,
+            7,
+            &[0x33; 5000],
+            now(4),
+            FileEditLimits {
+                max_blocks: 2,
+                max_records: 8,
+            },
+        )
+        .unwrap();
+    assert_eq!(volume.read_file(peer).unwrap(), vec![0x11; 8192]);
+    let mut expected = vec![0x11; 8192];
+    expected[7..5007].fill(0x33);
+    assert_eq!(volume.read_file(file).unwrap(), expected);
+    assert_eq!(
+        volume
+            .last_commit_stats()
+            .unwrap()
+            .data_blocks_overwritten_in_place,
+        0
+    );
+    verify(&mut volume);
+}
+
+#[test]
+fn bounded_writes_initialize_direct_files_and_keep_opted_in_private_tree_blocks() {
+    let mut dev = MemoryBackend::new(4096, 512);
+    crate::mkfs_with_options(
+        &mut dev,
+        &MkfsParams {
+            uuid: [81; 16],
+            label: "BoundedPrivate".into(),
+            region_size: 512,
+            reclaim_caps: Default::default(),
+            log_slots: 0,
+            shared_extents: true,
+            data_policy: true,
+            name_policy: NamePolicy::Sensitive,
+            timestamp: now(1),
+        },
+        crate::MkfsOptions {
+            persistent_snapshots: false,
+        },
+    )
+    .unwrap();
+    let mut volume = open(dev, MountMode::ReadWrite);
+    let file = volume.create_file_in_root("private", &[], now(2)).unwrap();
+    let limits = FileEditLimits {
+        max_blocks: 1,
+        max_records: 8,
+    };
+    volume
+        .write_file_at_bounded(file, 0, &[0x11; 4096], now(3), limits)
+        .unwrap();
+    volume
+        .write_file_at_bounded(file, 8192, &[0x22; 4096], now(4), limits)
+        .unwrap();
+    let record = volume.stat(file).unwrap().unwrap();
+    let before = volume.load_file_layout(&record).unwrap().0;
+    volume.set_data_update_policy(DataUpdatePolicy::InPlacePrivate);
+    volume
+        .write_file_at_bounded(file, 7, b"private", now(5), limits)
+        .unwrap();
+    assert_eq!(
+        volume
+            .last_commit_stats()
+            .unwrap()
+            .data_blocks_overwritten_in_place,
+        1
+    );
+    let record = volume.stat(file).unwrap().unwrap();
+    assert_eq!(volume.load_file_layout(&record).unwrap().0, before);
+    let mut expected = vec![0x11; 4096];
+    expected.extend(vec![0; 4096]);
+    expected.extend(vec![0x22; 4096]);
+    expected[7..14].copy_from_slice(b"private");
+    assert_eq!(volume.read_file(file).unwrap(), expected);
+    verify(&mut volume);
+}

@@ -383,6 +383,14 @@ handles are rejected before provider invocation. Admitted reservations hold
 revocation exclusion throughout the backend call. This additive source API
 changes no disk layout, C ABI or native capability advertisement.
 
+The AFS+ restore provider admits writes touching at most 64 filesystem blocks
+and 64 local extent records, including boundary neighbors and result mappings.
+It uses `write_file_at_bounded`; callers split larger transfers into separately
+durable requests. Unaligned writes count every touched block. Exceeding the
+provider budget reports a limit error without a partial write. These limits
+bound data buffers and local extent vectors; total allocator and retention
+memory require independent qualification.
+
 The byte limit bounds requested allocation per operation. The AFS+ provider
 uses the [bounded local extent editor](06-files-and-extents.md#4-preallocation)
 with a 64-record limit, including boundary neighbors, allocated runs and the

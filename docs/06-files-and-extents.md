@@ -92,6 +92,15 @@ Existing trees receive changed-key COW edits, preserving unrelated mappings
 and the common checkpoint publication protocol. Empty/direct layouts use the
 fixed-size direct representation before any necessary promotion.
 
+The host Rust `write_file_at_bounded` entry point applies the same explicit
+block and record limits to atomic writes. Its data buffers scale with admitted
+touched blocks. Existing extent trees receive local COW edits and retain their
+tree representation, including when a complete layout might fit directly.
+Written-data policy, private reservation initialization, shared-reference
+accounting and checkpoint publication use the common transaction machinery.
+A limit error precedes device writes. `write_file_at` retains its existing
+request admission and complete-layout staging behavior.
+
 The convenience `preallocate_file` entry point preserves unrestricted request
 admission. Constrained callers use explicit limits and may split reservations
 into separately durable requests. These bounds cover extent-edit working sets;

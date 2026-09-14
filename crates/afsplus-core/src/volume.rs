@@ -828,6 +828,32 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<(), CoreError> {
+        self.write_file_at_with_limits(object_id, offset, content, now, None)
+    }
+
+    /// Atomic write with explicit touched-block and local extent-record budgets.
+    pub fn write_file_at_bounded(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        content: &[u8],
+        now: Timespec,
+        limits: FileEditLimits,
+    ) -> Result<(), CoreError> {
+        if limits.max_blocks == 0 || limits.max_records == 0 || limits.max_records == usize::MAX {
+            return Err(CoreError::PrototypeLimit("file edit limits invalid"));
+        }
+        self.write_file_at_with_limits(object_id, offset, content, now, Some(limits))
+    }
+
+    fn write_file_at_with_limits(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        content: &[u8],
+        now: Timespec,
+        limits: Option<FileEditLimits>,
+    ) -> Result<(), CoreError> {
         metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         if content.is_empty() {
@@ -849,7 +875,29 @@ impl<D: BlockDevice> Volume<D> {
         let first_block = offset / block_size;
         let end_block = end_offset.div_ceil(block_size);
         let write_block_count = end_block - first_block;
-        let (old_extents, old_tree_blocks) = self.load_file_layout(&record)?;
+        if limits.is_some_and(|limit| write_block_count > limit.max_blocks) {
+            return Err(CoreError::PrototypeLimit(
+                "file edit block budget exhausted",
+            ));
+        }
+        let local_tree = limits.is_some() && record.flags & OBJECT_FLAG_EXTENT_TREE != 0;
+        let (old_extents, old_tree_blocks) = if let Some(limit) = limits.filter(|_| local_tree) {
+            (
+                extent_map::read_window(
+                    &mut self.dev,
+                    &self.ident.geometry(),
+                    record.data_root,
+                    object_id,
+                    self.checkpoint.generation,
+                    first_block,
+                    end_block,
+                    limit.max_records,
+                )?,
+                Vec::new(),
+            )
+        } else {
+            self.load_file_layout(&record)?
+        };
         let overwrite_in_place = (self.data_update_policy == DataUpdatePolicy::InPlacePrivate
             || record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0)
             && !self.snapshots_require_cow()
@@ -904,6 +952,27 @@ impl<D: BlockDevice> Volume<D> {
                 data_writes.push((physical, block));
             }
             self.pending_in_place_data_blocks = write_block_count;
+            if local_tree {
+                let staged = self.stage_extent_delta(
+                    &mut tx,
+                    record,
+                    record_lba,
+                    &old_extents,
+                    &old_extents,
+                    record.size_bytes,
+                    true,
+                    now,
+                    generation,
+                )?;
+                return self.commit_staged_file_layout(
+                    record,
+                    staged,
+                    Vec::new(),
+                    generation,
+                    tx,
+                    data_writes,
+                );
+            }
             return self.commit_file_layout(
                 record,
                 record_lba,
@@ -946,6 +1015,11 @@ impl<D: BlockDevice> Volume<D> {
                     block_count: count,
                     flags: 0,
                 });
+                if limits.is_some_and(|limit| additions.len() > limit.max_records) {
+                    return Err(CoreError::PrototypeLimit(
+                        "file edit allocation record budget exhausted",
+                    ));
+                }
                 self.pending_reservation_initializations += count;
                 logical += count;
             } else {
@@ -954,13 +1028,16 @@ impl<D: BlockDevice> Volume<D> {
                     .iter()
                     .find(|extent| extent.flags == EXTENT_UNWRITTEN)
                     .map_or(end_block, |extent| extent.logical_start.min(end_block));
-                additions.extend(allocate_extent_runs(
+                additions.extend(allocate_extent_runs_bounded(
                     &mut tx,
                     &mut self.dev,
                     &self.ident.geometry(),
                     logical,
                     stop - logical,
                     0,
+                    limits.map_or(usize::MAX, |limit| {
+                        limit.max_records.saturating_sub(additions.len())
+                    }),
                 )?);
                 logical = stop;
             }
@@ -987,6 +1064,32 @@ impl<D: BlockDevice> Volume<D> {
         new_extents.extend(additions);
         let new_extents = coalesce_extents(new_extents)?;
 
+        if limits.is_some_and(|limit| new_extents.len() > limit.max_records) {
+            return Err(CoreError::PrototypeLimit(
+                "file edit result record budget exhausted",
+            ));
+        }
+        if local_tree {
+            let staged = self.stage_extent_delta(
+                &mut tx,
+                record,
+                record_lba,
+                &old_extents,
+                &new_extents,
+                record.size_bytes.max(end_offset),
+                true,
+                now,
+                generation,
+            )?;
+            return self.commit_staged_file_layout(
+                record,
+                staged,
+                removed_extents,
+                generation,
+                tx,
+                data_writes,
+            );
+        }
         self.commit_file_layout(
             record,
             record_lba,
@@ -1218,12 +1321,14 @@ impl<D: BlockDevice> Volume<D> {
                 generation,
             )?
         } else {
-            self.stage_reservation_delta(
+            self.stage_extent_delta(
                 &mut tx,
                 record,
                 record_lba,
                 &old_extents,
                 &new_extents,
+                record.size_bytes,
+                false,
                 now,
                 generation,
             )?
@@ -3360,13 +3465,15 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn stage_reservation_delta(
+    fn stage_extent_delta(
         &mut self,
         tx: &mut TxAllocator,
         record: ObjectRecord,
         record_lba: u64,
         old: &[Extent],
         new: &[Extent],
+        new_size: u64,
+        content_changed: bool,
         now: Timespec,
         generation: u64,
     ) -> Result<StagedFileLayout, CoreError> {
@@ -3398,12 +3505,13 @@ impl<D: BlockDevice> Volume<D> {
                     .ok_or_else(|| CoreError::Corrupt("extent allocation sum overflow".into()))
             })
         };
-        let added = sum(new)?
-            .checked_sub(sum(old)?)
-            .ok_or_else(|| CoreError::Corrupt("reservation removed allocation".into()))?;
         let blocks = record
             .data_blocks
-            .checked_add(added)
+            .checked_sub(sum(old)?)
+            .ok_or_else(|| {
+                CoreError::Corrupt("local extent count exceeds object allocation".into())
+            })?
+            .checked_add(sum(new)?)
             .ok_or(CoreError::PrototypeLimit("allocated blocks overflow"))?;
         let mutation = mutate_many(
             &mut self.dev,
@@ -3423,6 +3531,17 @@ impl<D: BlockDevice> Volume<D> {
             allocated_bytes: blocks
                 .checked_mul(self.dev.block_size() as u64)
                 .ok_or(CoreError::PrototypeLimit("allocated bytes overflow"))?,
+            size_bytes: new_size,
+            modified: if content_changed {
+                now
+            } else {
+                record.modified
+            },
+            content_generation: if content_changed {
+                generation
+            } else {
+                record.content_generation
+            },
             changed: now,
             ..record
         };

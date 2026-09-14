@@ -14,6 +14,18 @@ flagged file still take COW, a flagged record on a volume without the
 the power-cut contract holds through the persistent flag rather than the
 switch.
 
+<!-- toc -->
+
+- [Reproduction](#reproduction)
+- [Workloads and metrics](#workloads-and-metrics)
+- [Crash oracles](#crash-oracles)
+- [Acceptance boundary](#acceptance-boundary)
+- [Private unwritten reservation initialization](#private-unwritten-reservation-initialization)
+- [Bounded reservation edits](#bounded-reservation-edits)
+- [Bounded writes](#bounded-writes)
+
+<!-- /toc -->
+
 ## Reproduction
 
 Run the correctness and crash-contract smoke suite in the normal workspace
@@ -147,3 +159,19 @@ The model limitations in [crash-testing](crash-testing.md) apply.
 The record budget bounds local extent vectors. Peak process RAM, allocator
 working sets, ordinary writes/truncation, and constrained native execution need
 separate measurements before a complete memory profile can be qualified.
+
+## Bounded writes
+
+Run `cargo test -p afsplus-core bounded_writes --all-features -- --nocapture`.
+Exercise a 130-record fragmented file with mixed reservation/hole writes,
+subsequent written-data replacement and an end-of-file write. Each admitted
+small write must use fewer than 180 device reads; compare full live bytes,
+captured zeros and remounted bytes. Block and record refusals must issue zero
+writes and preserve the object record. Enumerate publication crash cuts for a
+mixed reservation/hole write and require exact old or new live bytes with the
+captured view unchanged. Full checker validation covers both checkpoint slots.
+
+Also verify shared-peer isolation under requested private-in-place policy, and
+an eligible private tree on a volume without snapshot support. The eligible
+case must retain physical mappings and report the exact in-place counter.
+Exercise empty/direct promotion through the bounded entry point.

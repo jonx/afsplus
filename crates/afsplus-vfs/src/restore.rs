@@ -479,7 +479,16 @@ impl<D: afsplus_block::BlockDevice> RestoreBackend for AfsRestoreDestination<D> 
         bytes: &[u8],
         now: Timespec,
     ) -> Result<(), VfsError> {
-        Ok(self.volume.write_file_at(*object, offset, bytes, now)?)
+        Ok(self.volume.write_file_at_bounded(
+            *object,
+            offset,
+            bytes,
+            now,
+            afsplus_core::volume::FileEditLimits {
+                max_blocks: 64,
+                max_records: 64,
+            },
+        )?)
     }
     fn reserve(
         &mut self,
