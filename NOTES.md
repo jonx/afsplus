@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Map Stage A acceptance gates to visible roadmap entries](#2026-09-14---map-stage-a-acceptance-gates-to-visible-roadmap-entries)
 - [2026-09-14 - Correlate deferred windows and qualify the real FSKit boundary](#2026-09-14---correlate-deferred-windows-and-qualify-the-real-fskit-boundary)
 - [2026-09-14 - Preserve open transaction windows after preflight refusals](#2026-09-14---preserve-open-transaction-windows-after-preflight-refusals)
 - [2026-09-14 - Compute stage progress from scoped acceptance gates](#2026-09-14---compute-stage-progress-from-scoped-acceptance-gates)
@@ -139,6 +140,15 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-14 - Map Stage A acceptance gates to visible roadmap entries
+
+The owner pointed out that the eight-gate status report was not understandable
+from Stage A's visible list. The roadmap now maps each scoped acceptance gate
+to those entries and explains the broader scope of the milestone links. The
+namespace-independence rule stays visible in an explicitly ongoing section,
+excluded from finite completion. This changes presentation, not requirements
+or completion verdicts.
 
 ## 2026-09-14 - Correlate deferred windows and qualify the real FSKit boundary
 

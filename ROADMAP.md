@@ -67,6 +67,26 @@ See [`implementation/peer-review-prototype-plan.md`](implementation/peer-review-
 
 Milestones: [\[M01\]](implementation/milestones.md), [~~M02~~](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md), [\[M05\]](implementation/milestones.md).
 
+
+The milestone links above cover work across several stages; their labels are
+not a completion count for Stage A. Finite acceptance is grouped into the eight
+[scoped gates and their evidence](implementation/milestones.md#scoped-stage-acceptance):
+
+| Acceptance gate | Corresponding items below |
+|---|---|
+| `a-core` — executable core | Rust workspace and the four core crates |
+| `a-devices` — test devices | File/memory backends, trace/fault/power-cut wrappers, SliceBackend and OverlayBackend |
+| `a-checkpoint` — transactions and recovery | Format/checkpoint descriptors, slots, root/metadata, first transaction, remount checker and crash matrix |
+| `a-accounting` — resource accounting | Benchmark harness with CPU/RAM/I/O/flush/write-amplification accounting |
+| `a-replay` — reproducible operations | Operation record/replay, retained artifacts and reconstruction |
+| `a-flight` — internal diagnostics | Structured flight recorder: API/window/subsystem correlation and bounded export/replay |
+| `a-cache` — constrained caches | Tiny-cache test matrix across mutation/publication families, faults and recovery |
+| `a-fuzz` — malformed and generated inputs | Fuzzing/property tests across executable codecs and operation families |
+
+Strikethrough marks completed individual deliverables. It does not claim that
+an entire crate, cross-stage milestone or ongoing architectural constraint is
+finished. The linked gate table owns completion status.
+
 Primary goal:
 
 ```text
@@ -85,7 +105,6 @@ Build first:
 - ~~`afsplus-block`~~ <!-- progress: roadmap-03 -->
 - ~~`afsplus-core`~~ <!-- progress: roadmap-04 -->
 - ~~`afsplus-check`~~ <!-- progress: roadmap-05 -->
-- keep core disk semantics independent from host namespaces <!-- progress: roadmap-33 -->
 - ~~sparse raw host-file backend~~ <!-- progress: roadmap-06 -->
 - ~~memory block backend~~ <!-- progress: roadmap-07 -->
 - ~~trace wrapper~~ <!-- progress: roadmap-08 -->
@@ -108,6 +127,10 @@ Then add:
 - ~~operation record/replay~~ <!-- progress: roadmap-20 -->
 - tiny-cache test matrix <!-- progress: roadmap-31 -->
 - fuzzing/property tests <!-- progress: roadmap-32 -->
+
+Ongoing constraint (kept visible, excluded from finite completion):
+
+- keep core disk semantics independent from host namespaces <!-- progress: roadmap-33 -->
 
 Do not block this stage on:
 
