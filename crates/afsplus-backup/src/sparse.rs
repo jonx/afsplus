@@ -335,7 +335,7 @@ pub mod consumer {
     use crate::attachment::Captured;
     use afsplus_format::Timespec;
     use afsplus_vfs::{
-        backup::SnapshotBackend,
+        backup::{AllocationRange, SnapshotBackend},
         restore::{RestoreBackend, RestoreClient, RestoreObject},
         NodeKind,
     };
@@ -372,6 +372,13 @@ pub mod consumer {
         }
         result
     }
+    pub(crate) struct Plan {
+        pub stat: afsplus_vfs::Stat,
+        pub allocations: Vec<AllocationRange>,
+        pub map: Map,
+        omitted_unwritten_ranges: u64,
+        omitted_unwritten_bytes: u128,
+    }
     fn export_inner<P: SnapshotBackend, W: Write>(
         source: &mut Captured<'_, '_, P>,
         writer: &mut envelope::Writer<W>,
@@ -381,6 +388,25 @@ pub mod consumer {
         options: Options,
     ) -> Result<Report, Error> {
         if scratch.is_empty() || options.page_entries == 0 || options.page_entries > 64 {
+            return Err(Error::Limit);
+        }
+        let plan = prepare_source(source, options, false)?;
+        emit_source(
+            source,
+            writer,
+            ordinal,
+            path,
+            scratch,
+            options.records,
+            &plan,
+        )
+    }
+    pub(crate) fn prepare_source<P: SnapshotBackend>(
+        source: &mut Captured<'_, '_, P>,
+        options: Options,
+        retain_allocations: bool,
+    ) -> Result<Plan, Error> {
+        if options.page_entries == 0 || options.page_entries > 64 {
             return Err(Error::Limit);
         }
         let stat = source
@@ -394,6 +420,7 @@ pub mod consumer {
             return Err(Error::Limit);
         }
         let mut ranges = Vec::new();
+        let mut allocations = Vec::new();
         let mut count = 0usize;
         let mut cursor = 0u64;
         let mut end = 0u128;
@@ -424,6 +451,10 @@ pub mod consumer {
                 end = range.offset as u128 + range.length as u128;
                 if end > u64::MAX as u128 + 1 {
                     return Err(Error::Invalid);
+                }
+                if retain_allocations {
+                    allocations.try_reserve(1).map_err(|_| Error::Limit)?;
+                    allocations.push(range);
                 }
                 if range.unwritten {
                     omitted_unwritten_ranges += 1;
@@ -464,6 +495,33 @@ pub mod consumer {
             map_bytes,
             data_bytes,
         };
+        Ok(Plan {
+            stat,
+            allocations,
+            map,
+            omitted_unwritten_ranges,
+            omitted_unwritten_bytes,
+        })
+    }
+    pub(crate) fn emit_source<P: SnapshotBackend, W: Write>(
+        source: &mut Captured<'_, '_, P>,
+        writer: &mut envelope::Writer<W>,
+        ordinal: u64,
+        path: &str,
+        scratch: &mut [u8],
+        records: pax::Limits,
+        plan: &Plan,
+    ) -> Result<Report, Error> {
+        if scratch.is_empty() {
+            return Err(Error::Limit);
+        }
+        let Plan {
+            stat,
+            map,
+            omitted_unwritten_ranges,
+            omitted_unwritten_bytes,
+            ..
+        } = plan;
         start(
             writer,
             &Entry {
@@ -474,8 +532,8 @@ pub mod consumer {
                     nanos: stat.modified.nanoseconds,
                 },
             },
-            &map,
-            options.records,
+            map,
+            records,
         )?;
         for range in map.ranges() {
             let mut offset = range.offset;
@@ -500,16 +558,16 @@ pub mod consumer {
             .client
             .stat(source.reader, source.object)
             .map_err(Error::Source)?
-            != stat
+            != *stat
         {
             return Err(Error::Invalid);
         }
         Ok(Report {
             logical_bytes: stat.size,
-            written_bytes: data_bytes,
+            written_bytes: map.data_bytes(),
             stored_bytes: map.stored_bytes(),
-            omitted_unwritten_ranges,
-            omitted_unwritten_bytes,
+            omitted_unwritten_ranges: *omitted_unwritten_ranges,
+            omitted_unwritten_bytes: *omitted_unwritten_bytes,
         })
     }
     /// Restore contents only. The enclosing job owns metadata, loss reporting,
@@ -536,11 +594,21 @@ pub mod consumer {
         limits: Limits,
         now: Timespec,
     ) -> Result<Map, Error> {
-        if !reader.can_publish() {
-            return Err(Error::NeedsVerifiedReplay);
-        }
         if scratch.is_empty() {
             return Err(Error::Limit);
+        }
+        let map = prepare_restore(reader, client, target, limits)?;
+        write_contents(reader, client, target, scratch, &map, now)?;
+        Ok(map)
+    }
+    pub(crate) fn prepare_restore<R: Read, P: RestoreBackend>(
+        reader: &mut stream::Reader<R>,
+        client: &mut RestoreClient<'_, P>,
+        target: &Target<'_, P::Object>,
+        limits: Limits,
+    ) -> Result<Map, Error> {
+        if !reader.can_publish() {
+            return Err(Error::NeedsVerifiedReplay);
         }
         let stat = client.stat(target.object).map_err(Error::Destination)?;
         if stat.kind != NodeKind::File
@@ -559,7 +627,22 @@ pub mod consumer {
         }
         let logical = m.sparse_size.ok_or(Error::Invalid)?;
         let stored = m.size;
-        let map = read_map(reader, logical, stored, limits)?;
+        read_map(reader, logical, stored, limits)
+    }
+    pub(crate) fn write_contents<R: Read, P: RestoreBackend>(
+        reader: &mut stream::Reader<R>,
+        client: &mut RestoreClient<'_, P>,
+        target: &Target<'_, P::Object>,
+        scratch: &mut [u8],
+        map: &Map,
+        now: Timespec,
+    ) -> Result<(), Error> {
+        if scratch.is_empty() {
+            return Err(Error::Limit);
+        }
+        if !reader.can_publish() {
+            return Err(Error::NeedsVerifiedReplay);
+        }
         for range in map.ranges() {
             let mut offset = range.offset;
             let mut left = range.length;
@@ -579,9 +662,9 @@ pub mod consumer {
             }
         }
         client
-            .resize(target.object, logical, now)
+            .resize(target.object, map.logical_size(), now)
             .map_err(Error::Destination)?;
-        Ok(map)
+        Ok(())
     }
 }
 

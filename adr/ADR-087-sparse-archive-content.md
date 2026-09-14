@@ -1,7 +1,7 @@
 # ADR-087: Transport sparse file contents with explicit GNU PAX 1.0 admission
 
 Status: Accepted under the owner's delegated recommended-option authority; complete preservation and native qualification required
-Amended by: ADR-088
+Amended by: ADR-088, ADR-090
 Amends: ADR-076, ADR-078, ADR-081, ADR-085
 
 ## Context

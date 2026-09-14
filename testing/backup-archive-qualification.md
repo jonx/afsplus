@@ -16,6 +16,7 @@
 - [Verified scratch replay](#verified-scratch-replay)
 - [Complete object inventory groups](#complete-object-inventory-groups)
 - [Sparse content consumer](#sparse-content-consumer)
+- [Allocation-preserving consumer](#allocation-preserving-consumer)
 
 <!-- /toc -->
 
@@ -292,3 +293,42 @@ raw headers at the octal boundary and unsigned 64-bit maximum. Keep conflicting
 PAX `size` as a parser refusal regression. Header tests do not qualify a giant
 stored payload. Independent generic extraction is content recovery only; full
 metadata, reservation and complete-job oracles retain separate gates.
+
+## Allocation-preserving consumer
+
+Run `cargo test -p afsplus-backup --all-features` for
+[allocation preservation](../spec/backup-allocation.md) and
+[ADR-090](../adr/ADR-090-archive-allocation-preservation.md).
+
+Export remounted captured files of logical length zero, 1 TiB plus 23 bytes and
+u64 maximum, with written data/zeros and unwritten reservations inside/beyond
+EOF and in the final address block. Mutate the live source after capture. Use
+one-entry pages and 4 KiB transfers/reservation calls; require an archive below
+16 KiB, exact reservation-loss counts and exhausted ordinal reporting at the
+final member. Restore each archive in both modes, synchronize and remount.
+Compare logical size, bytes, sampled holes and a separately constructed logical
+block/state oracle, including the final block. Recovery must omit precisely the
+reported reservation capacity.
+
+Construct a second archive independently of the source planner with written
+allocation rounded past EOF. Wrong source path, logical size, written state,
+sparse map or raw ordinal must fail before content/reservation writes. Exercise
+revoked grants, ordinal exhaustion and zero/insufficient reservation, page and
+readback budgets. Failure poisons further archive use. Destination providers
+with unsupported readback or reservations must fail preservation before content
+writes while permitting explicitly selected recovery with a loss report. Move
+a reservation without changing its size and require verification failure after
+the partial writes. Split each destination extent into equivalent adjacent byte
+ranges and require success. Exhaust a nonzero readback budget after writes and
+withhold success.
+
+Codec tests cover empty and final-address records, every truncated prefix,
+unknown/missing/duplicate fields, noncanonical numbers, invalid states,
+ordering/overlap/end overflow and byte/count/logical limits. Compare interval
+coverage across splitting/merging and the `2^64` endpoint; changed holes, flags,
+missing and excess coverage must fail.
+
+This component gate does not certify complete object/namespace preservation,
+AFS+ opaque metadata storage, job-level loss-report persistence, sustained large
+payloads, spooled maps, older-machine peak memory or native durability. Preserve
+those gates in the enclosing backup and platform qualification.

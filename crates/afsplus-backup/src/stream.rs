@@ -162,6 +162,11 @@ impl<R: Read> Reader<R> {
         self.poisoned = true;
     }
 
+    #[cfg(feature = "consumer")]
+    pub(crate) fn raw_path_is(&self, path: &str) -> bool {
+        !self.poisoned && self.header.as_ref().is_some_and(|h| h.path == path)
+    }
+
     pub fn receipt(&self) -> Option<&envelope::Receipt> {
         if self.complete && !self.poisoned {
             self.inner.receipt()

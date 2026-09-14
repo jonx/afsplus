@@ -69,8 +69,8 @@ so a changed captured descriptor or revoked grant prevents a successful result.
 
 The content report carries logical, written and stored byte counts, plus omitted
 unwritten range/byte counts. The enclosing content-recovery job must persist
-these losses. Full preservation requires the separate allocation/reservation
-metadata and qualified destination operations; it cannot reinterpret this
+these losses. Full preservation requires the [allocation record and restore contract](backup-allocation.md)
+and qualified destination operations; it cannot reinterpret this
 content report as preservation success.
 
 Restore requires verified replay and a scoped fresh empty single-link regular

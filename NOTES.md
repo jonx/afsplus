@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Bind archive allocation records to verified sparse restoration](#2026-09-14---bind-archive-allocation-records-to-verified-sparse-restoration)
 - [2026-09-14 - Add scoped allocation readback for full restore verification](#2026-09-14---add-scoped-allocation-readback-for-full-restore-verification)
 - [2026-09-14 - Transport captured sparse contents through the archive consumer](#2026-09-14---transport-captured-sparse-contents-through-the-archive-consumer)
 - [2026-09-14 - Exercise repeated low-space reclamation with retained snapshots](#2026-09-14---exercise-repeated-low-space-reclamation-with-retained-snapshots)
@@ -97,6 +98,38 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Bind archive allocation records to verified sparse restoration
+
+ADR-090 used the owner's delegated recommended-option authority to bind a
+versioned allocation record to its sparse file. The exporter derives both from
+one captured plan. Restore validates path, size, ordinal and clipped written
+coverage before writes, then reserves in bounded calls and compares committed
+destination coverage. Equivalent extent splitting is accepted; changed holes or
+written/unwritten state is refused. Explicit recovery skips reservations and
+returns their discarded range count and byte sum. The simpler content-only
+export path avoids retaining the additional allocation list.
+
+Targeted tests passed captured-source remounts and both restore modes at zero,
+1 TiB-plus and maximum-u64 logical lengths, with reservations inside/beyond EOF
+and in the final address block. A separate hand-constructed archive exercised
+rounded written tails. Unsupported providers, changed reservation locations,
+conflicting records/maps, revoked grants and budget exhaustion withheld success;
+errors poisoned further archive use. The remount oracle compared independent
+logical block/state maps and captured bytes. Codec tests rejected every
+truncation, malformed fields/ranges and admitted-limit violations.
+
+The full workspace all-features gate passed 437 tests with zero failures and
+10 explicitly ignored qualification probes. Formatting, strict workspace Clippy,
+documentation, three checker fixtures and whitespace validation passed.
+
+Python and libarchive sparse extraction passed, including hole preservation and
+independent wide-header decoding. Those generic-tool checks establish content
+recovery, not reservation preservation. Whole-object metadata/identity binding,
+job completion/loss-report persistence, native durability and actual older-system
+peak-memory qualification remain separate work. Explicit quotas, small pages and
+bounded transfers provide the constrained implementation path without silently
+weakening preservation semantics.
 
 ## 2026-09-14 - Add scoped allocation readback for full restore verification
 

@@ -81,6 +81,7 @@ format-change procedure in [CONTRIBUTING.md](../CONTRIBUTING.md).
 | [Verified archive scratch replay](../spec/backup-spool.md) | Chunk integrity, bounded replay and incremental publication |
 | [Object inventory manifests](../spec/backup-inventory.md) | Complete counted descriptor groups and bounded preservation |
 | [Sparse archive contents](../spec/backup-sparse.md) | Explicit GNU sparse admission, bounded maps and authorized content transport |
+| [Archive allocation preservation](../spec/backup-allocation.md) | Bound allocation records, explicit recovery and semantic destination verification |
 | [snapshot-records.md](../spec/snapshot-records.md) | Experimental persistent registry and lifetime leaf encoding |
 | [invariants.md](../spec/invariants.md) | Core invariants a conforming implementation enforces |
 | [compatibility-rules.md](../spec/compatibility-rules.md) | Mount decision algorithm and feature compatibility classes |
