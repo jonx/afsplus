@@ -167,8 +167,9 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
             return report;
         }
     };
-    let unknown_incompat =
-        ident.features.incompat & !afsplus_core::mount::SUPPORTED_INCOMPAT_FEATURES;
+    let unknown_incompat = ident.features.incompat
+        & !(afsplus_core::mount::SUPPORTED_INCOMPAT_FEATURES
+            | afsplus_format::ident::INCOMPAT_PERSISTENT_SNAPSHOTS);
     if unknown_incompat != 0 {
         report.errors.push(format!(
             "unsupported incompatible filesystem features: {unknown_incompat:#018x}"

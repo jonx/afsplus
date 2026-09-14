@@ -99,6 +99,8 @@ per-file contracts:
 - every directory key is correctly normalized for that directory's case policy
 - directory tree keys are ordered
 - no directory entry points to an invalid object
+- every mapped object is reachable from the ordinary or internal orphan root;
+  directory cycles and multiple directory parents are corruption
 - `.` and `..` are namespace conveniences, not required disk entries
 
 ## Journal
@@ -142,6 +144,10 @@ per-file contracts:
   result; retention duration is governed by Q4 in
   [open questions](../implementation/open-questions.md)
 - shared-reference counts and retained-checkpoint protection are independent
+- [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md) protects the previous
+  structurally valid checkpoint and its registered snapshots until slot
+  replacement; promotion at R requires R no greater than the oldest protected
+  generation
 - growth preserves the configured emergency metadata headroom; destructive
   operations and bounded reclaim may consume it to restore forward progress
 

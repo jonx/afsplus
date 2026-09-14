@@ -33,12 +33,21 @@ fn open<D: BlockDevice>(mut dev: D, mode: MountMode) -> Volume<D> {
     } else {
         volume.inspect_intent_log().unwrap();
     }
+    verify(&mut volume);
     volume
+}
+
+fn verify<D: BlockDevice>(volume: &mut Volume<D>) {
+    let state =
+        crate::verify::load_committed_state(&mut volume.dev, &volume.ident, &volume.checkpoint)
+            .unwrap();
+    let findings = crate::verify::full_sweep(&state, &volume.ident.geometry(), &volume.checkpoint);
+    assert!(findings.is_empty(), "{findings:?}");
 }
 
 fn formatted(blocks: u64, log_slots: u16) -> MemoryBackend {
     let mut dev = MemoryBackend::new(4096, blocks);
-    crate::mkfs::mkfs_snapshots(
+    crate::mkfs_with_options(
         &mut dev,
         &MkfsParams {
             uuid: [73; 16],
@@ -50,6 +59,9 @@ fn formatted(blocks: u64, log_slots: u16) -> MemoryBackend {
             data_policy: true,
             name_policy: NamePolicy::Sensitive,
             timestamp: now(1),
+        },
+        crate::MkfsOptions {
+            persistent_snapshots: true,
         },
     )
     .unwrap();
@@ -273,6 +285,7 @@ fn an_old_view_does_not_retain_unrelated_churn_and_release_makes_progress() {
             .delete_file_in_root("temporary", now(5 + cycle))
             .unwrap();
         assert_eq!(bytes(&mut volume, &handle, keep), vec![0x71; 4096]);
+        verify(&mut volume);
         minimum_free = minimum_free.min(volume.free_blocks());
         maximum_retired =
             maximum_retired.max(volume.snapshot_state().unwrap().ledger.retained_blocks);
@@ -492,4 +505,270 @@ fn exhausted_snapshot_ids_do_not_publish_a_pending_namespace_window() {
     assert_eq!(volume.generation(), before);
     assert!(volume.window.is_some());
     assert!(initial.lookup_root("pending").unwrap().is_none());
+}
+
+#[test]
+fn snapshot_checker_rejects_resealed_ownership_and_historical_namespace_corruption() {
+    use afsplus_format::snapshot::{LedgerState, LifetimeRecord, RegistryState};
+    use afsplus_format::tree::{key_u64, TreeItem, TreeNode};
+    let mut volume = open(formatted(512, 0), MountMode::ReadWrite);
+    let file = volume
+        .create_file_in_root("file", &[0x61; 4096], now(2))
+        .unwrap();
+    let id = volume.snapshot_create(now(3)).unwrap();
+    let view = volume.snapshot_record(id).unwrap();
+    let old_record = object_map::lookup_lba(
+        &mut volume.dev,
+        &volume.ident.geometry(),
+        view.object_map_root,
+        view.generation,
+        file,
+    )
+    .unwrap()
+    .unwrap();
+    volume
+        .write_file_at(file, 0, &[0x62; 4096], now(4))
+        .unwrap();
+    verify(&mut volume);
+    let ident = volume.ident.clone();
+    let cp = volume.checkpoint.clone();
+    let roots = cp.snapshot_roots.unwrap();
+    let base = volume.into_device();
+    let decode_tree = |dev: &mut MemoryBackend, lba| {
+        let mut buf = vec![0; 4096];
+        dev.read_block(lba, &mut buf).unwrap();
+        let (tree, generation) = TreeNode::decode(&buf).unwrap();
+        assert!(tree.is_leaf());
+        (tree, generation)
+    };
+    let reject = |mut dev: MemoryBackend, expected: &str| {
+        let error = match crate::verify::load_committed_state(&mut dev, &ident, &cp) {
+            Ok(state) => crate::verify::full_sweep(&state, &ident.geometry(), &cp).join("; "),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains(expected),
+            "expected {expected:?}, got {error:?}"
+        );
+    };
+    let mutate_ledger = |mutate: &dyn Fn(&mut TreeNode)| {
+        let mut dev = base.clone();
+        let (mut tree, generation) = decode_tree(&mut dev, roots.lifetimes);
+        mutate(&mut tree);
+        // Preserve canonical adjacent-run packing so each fixture isolates its
+        // intended ownership violation rather than failing an earlier check.
+        let mut index = 1;
+        while index + 1 < tree.items.len() {
+            let start = afsplus_format::snapshot::decode_key(&tree.items[index].key).unwrap();
+            let next = afsplus_format::snapshot::decode_key(&tree.items[index + 1].key).unwrap();
+            let mut left =
+                LifetimeRecord::decode(&tree.items[index].value, start, cp.generation, 512)
+                    .unwrap();
+            let right =
+                LifetimeRecord::decode(&tree.items[index + 1].value, next, cp.generation, 512)
+                    .unwrap();
+            if start + left.blocks == next
+                && left.birth == right.birth
+                && left.retirement == right.retirement
+            {
+                left.blocks += right.blocks;
+                tree.items[index].value = left.encode(start, cp.generation, 512).unwrap().to_vec();
+                tree.items.remove(index + 1);
+            } else {
+                index += 1;
+            }
+        }
+        tree.subtree_items = tree.items.len() as u64;
+        dev.write_block(roots.lifetimes, &tree.encode(4096, generation).unwrap())
+            .unwrap();
+        dev
+    };
+    reject(
+        mutate_ledger(&|tree| {
+            let mut control = LedgerState::decode(&tree.items[0].value, 512).unwrap();
+            control.retained_blocks += 1;
+            tree.items[0].value = control.encode(512).unwrap().to_vec();
+        }),
+        "retained total",
+    );
+    reject(
+        mutate_ledger(&|tree| {
+            let index = tree
+                .items
+                .iter()
+                .position(|item| {
+                    let start = afsplus_format::snapshot::decode_key(&item.key).unwrap();
+                    start != 0
+                        && LifetimeRecord::decode(&item.value, start, cp.generation, 512)
+                            .unwrap()
+                            .retirement
+                            == 0
+                })
+                .unwrap();
+            tree.items.remove(index);
+        }),
+        "has no snapshot lifetime",
+    );
+    reject(
+        mutate_ledger(&|tree| {
+            tree.items.push(TreeItem {
+                key: key_u64(roots.registry).to_vec(),
+                value: LifetimeRecord {
+                    blocks: 1,
+                    birth: 1,
+                    retirement: cp.generation,
+                }
+                .encode(roots.registry, cp.generation, 512)
+                .unwrap()
+                .to_vec(),
+            });
+            let mut control = LedgerState::decode(&tree.items[0].value, 512).unwrap();
+            control.retained_blocks += 1;
+            tree.items[0].value = control.encode(512).unwrap().to_vec();
+            tree.items.sort_by(|a, b| a.key.cmp(&b.key));
+        }),
+        "aliases housekeeping or quarantine",
+    );
+    reject(
+        mutate_ledger(&|tree| {
+            let item = tree
+                .items
+                .iter_mut()
+                .find(|item| {
+                    let start = afsplus_format::snapshot::decode_key(&item.key).unwrap();
+                    start != 0
+                        && LifetimeRecord::decode(&item.value, start, cp.generation, 512)
+                            .unwrap()
+                            .retirement
+                            != 0
+                })
+                .unwrap();
+            let start = afsplus_format::snapshot::decode_key(&item.key).unwrap();
+            let mut run = LifetimeRecord::decode(&item.value, start, cp.generation, 512).unwrap();
+            let blocks = run.blocks;
+            run.retirement = 0;
+            item.value = run.encode(start, cp.generation, 512).unwrap().to_vec();
+            let mut control = LedgerState::decode(&tree.items[0].value, 512).unwrap();
+            control.retained_blocks -= blocks;
+            tree.items[0].value = control.encode(512).unwrap().to_vec();
+        }),
+        "inconsistent live ownership",
+    );
+    reject(
+        mutate_ledger(&|tree| {
+            let item = tree
+                .items
+                .iter_mut()
+                .find(|item| {
+                    let start = afsplus_format::snapshot::decode_key(&item.key).unwrap();
+                    start != 0 && {
+                        let run =
+                            LifetimeRecord::decode(&item.value, start, cp.generation, 512).unwrap();
+                        start <= cp.object_map_block && cp.object_map_block < start + run.blocks
+                    }
+                })
+                .unwrap();
+            let start = afsplus_format::snapshot::decode_key(&item.key).unwrap();
+            let mut run = LifetimeRecord::decode(&item.value, start, cp.generation, 512).unwrap();
+            assert!(run.birth > 1);
+            run.birth = 1;
+            item.value = run.encode(start, cp.generation, 512).unwrap().to_vec();
+        }),
+        "birth disagrees with header",
+    );
+    let mut dev = base.clone();
+    let (mut tree, generation) = decode_tree(&mut dev, roots.registry);
+    tree.items[0].value = RegistryState { next_id: id }.encode().unwrap().to_vec();
+    dev.write_block(roots.registry, &tree.encode(4096, generation).unwrap())
+        .unwrap();
+    reject(dev, "snapshot ID outside");
+    let mut dev = base.clone();
+    let mut buf = vec![0; 4096];
+    dev.read_block(old_record, &mut buf).unwrap();
+    let (mut object, generation) = ObjectRecord::decode_with_generation(&buf).unwrap();
+    object.link_count += 1;
+    dev.write_block(old_record, &object.encode(4096, generation).unwrap())
+        .unwrap();
+    reject(
+        dev,
+        &format!("historical object {file} link count mismatch"),
+    );
+    let mut dev = base.clone();
+    let (mut tree, generation) = decode_tree(&mut dev, roots.registry);
+    let mut bad_view = view;
+    bad_view.generation = 1;
+    bad_view.committed_tx_id = 1;
+    tree.items[1].value = bad_view.encode(cp.generation, 512).unwrap().to_vec();
+    dev.write_block(roots.registry, &tree.encode(4096, generation).unwrap())
+        .unwrap();
+    reject(dev, "generation");
+    let mut dev = base;
+    let mut state = crate::verify::load_committed_state(&mut dev, &ident, &cp).unwrap();
+    assert!(state.snapshot_owned_blocks.contains(&old_record));
+    state.bitmaps.pages[0][0].set_allocated(old_record as u32, false);
+    let findings = crate::verify::full_sweep(&state, &ident.geometry(), &cp);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains(&format!("block {old_record} is marked FREE"))),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn checker_rejects_disconnected_directory_cycles_with_matching_link_counts() {
+    use afsplus_format::tree::{TreeItem, TreeNode};
+    let mut volume = open(formatted(512, 0), MountMode::ReadWrite);
+    let child = volume.create_directory_in_root("child", now(2)).unwrap();
+    let id = volume.snapshot_create(now(3)).unwrap();
+    let view = volume.snapshot_record(id).unwrap();
+    let root = snapshot::view::object(&mut volume.dev, &volume.ident, view, OBJECT_ROOT)
+        .unwrap()
+        .unwrap();
+    let dir = snapshot::view::object(&mut volume.dev, &volume.ident, view, child)
+        .unwrap()
+        .unwrap();
+    // Give the live namespace independent root/child directory blocks.
+    volume.create_directory_in_root("later", now(4)).unwrap();
+    volume.create_directory(child, "nested", now(5)).unwrap();
+    verify(&mut volume);
+    let mut buf = vec![0; 4096];
+    volume.dev.read_block(root.data_root, &mut buf).unwrap();
+    let (mut root_node, generation) = TreeNode::decode(&buf).unwrap();
+    root_node.items.clear();
+    root_node.subtree_items = 0;
+    volume
+        .dev
+        .write_block(root.data_root, &root_node.encode(4096, generation).unwrap())
+        .unwrap();
+    volume.dev.read_block(dir.data_root, &mut buf).unwrap();
+    let (mut dir_node, generation) = TreeNode::decode(&buf).unwrap();
+    let (key, value) = directory::encode_entry(
+        &volume.ident,
+        &DirEntry {
+            name: b"self".to_vec(),
+            key: b"self".to_vec(),
+            child_id: child,
+            child_type_hint: 2,
+        },
+    )
+    .unwrap();
+    dir_node.items.push(TreeItem { key, value });
+    dir_node.subtree_items = 1;
+    volume
+        .dev
+        .write_block(dir.data_root, &dir_node.encode(4096, generation).unwrap())
+        .unwrap();
+    let error = match crate::verify::load_committed_state(
+        &mut volume.dev,
+        &volume.ident,
+        &volume.checkpoint,
+    ) {
+        Ok(_) => panic!("disconnected cycle passed ownership verification"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("snapshot 1") && error.contains("unreachable from namespace roots"),
+        "{error}"
+    );
 }

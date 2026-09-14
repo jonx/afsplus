@@ -46,7 +46,7 @@ use std::fmt;
 use afsplus_block::BlockError;
 use afsplus_format::FormatError;
 
-pub use mkfs::{mkfs, MkfsParams, NamePolicy};
+pub use mkfs::{mkfs, mkfs_with_options, MkfsOptions, MkfsParams, NamePolicy};
 pub use mount::{mount, mount_with_options, MountMode, MountOptions};
 pub use volume::Volume;
 

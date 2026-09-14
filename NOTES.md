@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Verify snapshot ownership and select stronger recovery retention](#2026-09-14--verify-snapshot-ownership-and-select-stronger-recovery-retention)
 - [2026-09-14 — Integrate persistent snapshot lifecycle into Volume](#2026-09-14--integrate-persistent-snapshot-lifecycle-into-volume)
 - [2026-09-14 - Bind lifetime accounting to allocator transactions](#2026-09-14---bind-lifetime-accounting-to-allocator-transactions)
 - [2026-09-14 - Prepare transactional lifetime edits](#2026-09-14---prepare-transactional-lifetime-edits)
@@ -59,6 +60,34 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Verify snapshot ownership and select stronger recovery retention
+
+Added exhaustive registry/ledger and captured-namespace validation to the core
+checker and enabled read-only snapshot inspection in afsplus-check. New-image
+formatting has an explicit snapshot option; writable mount negotiation stays
+closed. The checker reconciles lifetimes, namespace/housekeeping/quarantine,
+metadata birth headers and bitmap accounting. Historical sharing does not use
+the live reference tree. Physical blocks shared between views count once.
+
+The full workspace all-features gate passed: 302 tests, zero failures and ten
+explicitly ignored qualification tests. Formatting, all-target/all-feature
+Clippy with warnings denied, documentation and whitespace checks passed.
+
+The targeted gate passed ten core tests and one checker-facing test, including
+resealed corruption cases and ownership sweeps across the existing create/delete
+cuts and 160 churn cycles. A real checker gap was fixed: a disconnected directory
+cycle could satisfy all incoming-link counts. Both live and historical graph
+validation require reachability from namespace roots.
+
+A post-deletion write experiment also clarified ADR-036: older shadow registry
+storage could be reclaimed before its checkpoint slot was replaced. The newest
+selected state stayed protected, so an additional COW check alone was not a
+complete remedy. The owner explicitly selected stronger previous-checkpoint
+protection. ADR-074 records the generation boundary, snapshot COW obligation,
+pre-release compatibility limits and required low-space/crash qualification.
+The handoff prioritizes that implementation before writable snapshot exposure.
+
 
 ## 2026-09-14 — Integrate persistent snapshot lifecycle into Volume
 

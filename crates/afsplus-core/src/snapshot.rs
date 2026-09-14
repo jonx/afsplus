@@ -87,7 +87,7 @@ pub fn read_ledger_state<D: BlockDevice>(
 /// Validates geometry and permanent allocator-pool exclusion. Cross-tree
 /// aliasing, bitmap ownership and intent-log exclusion need enclosing-volume
 /// validation; this helper has no identification or allocation state.
-fn namespace_range(geo: &Geometry, start: u64, blocks: u64) -> Result<(), CoreError> {
+pub(crate) fn namespace_range(geo: &Geometry, start: u64, blocks: u64) -> Result<(), CoreError> {
     let end = start
         .checked_add(blocks)
         .ok_or_else(|| CoreError::Corrupt("snapshot range overflow".into()))?;
@@ -176,7 +176,7 @@ pub struct LifetimeRun {
     pub record: LifetimeRecord,
 }
 
-fn lifetime(
+pub(crate) fn lifetime(
     key: &[u8],
     value: &[u8],
     geo: &Geometry,
@@ -188,7 +188,7 @@ fn lifetime(
     Ok(LifetimeRun { start, record })
 }
 
-fn adjacent(left: LifetimeRun, right: LifetimeRun) -> Result<(), CoreError> {
+pub(crate) fn adjacent(left: LifetimeRun, right: LifetimeRun) -> Result<(), CoreError> {
     let end = left.start + left.record.blocks; // decoded ranges cannot overflow
     if end > right.start {
         return Err(CoreError::Corrupt("snapshot lifetimes overlap".into()));

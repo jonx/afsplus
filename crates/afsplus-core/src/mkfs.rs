@@ -68,16 +68,26 @@ pub struct MkfsParams {
     pub timestamp: Timespec,
 }
 
-pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), CoreError> {
-    mkfs_impl(dev, params, false)
+/// Explicit format choices beyond the baseline parameters. Defaults preserve
+/// feature-absent images; persistent snapshots use the ADR-071 experiment.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MkfsOptions {
+    pub persistent_snapshots: bool,
 }
 
-#[cfg(test)]
-pub(crate) fn mkfs_snapshots<D: BlockDevice>(
+pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), CoreError> {
+    mkfs_with_options(dev, params, MkfsOptions::default())
+}
+
+/// Format a new image with explicit options. This is not an in-place conversion.
+/// Snapshot ownership is checker-readable; writable mount qualification is
+/// separate and normal mount negotiation can still reject the feature.
+pub fn mkfs_with_options<D: BlockDevice>(
     dev: &mut D,
     params: &MkfsParams,
+    options: MkfsOptions,
 ) -> Result<(), CoreError> {
-    mkfs_impl(dev, params, true)
+    mkfs_impl(dev, params, options.persistent_snapshots)
 }
 
 fn mkfs_impl<D: BlockDevice>(

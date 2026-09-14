@@ -19,6 +19,7 @@ source, chapter coverage and architectural rationale. Results belong in
 - [Lifetime transaction preparation](#lifetime-transaction-preparation)
 - [Snapshot allocator and quarantine binding](#snapshot-allocator-and-quarantine-binding)
 - [Volume snapshot orchestration](#volume-snapshot-orchestration)
+- [Exhaustive snapshot checker](#exhaustive-snapshot-checker)
 - [Existing complementary gates](#existing-complementary-gates)
 - [Required future experiments](#required-future-experiments)
 - [Normative coverage map](#normative-coverage-map)
@@ -233,7 +234,7 @@ registry transactions, read handles or native devices.
 ## Volume snapshot orchestration
 
 Run `cargo test -p afsplus-core volume::snapshots::tests --all-features -- --nocapture`.
-The fixtures use a test-only formatter and mount constructor; ordinary mount
+The fixtures use an explicit snapshot formatter option and a test-only mount constructor; ordinary mount
 must reject INCOMPAT bit 2 until the complete feature qualification authorizes
 support. Explicit work limits belong to the fixture, not shipping defaults.
 
@@ -260,6 +261,37 @@ These memory-backend tests do not qualify the full snapshot ownership checker,
 host authorization/API, a backup/restore consumer, portable C, production resource
 limits or native durability. The crash model covers full-write subsets and
 representative tears, not every physical reordering.
+
+## Exhaustive snapshot checker
+
+Run `cargo test -p afsplus-core volume::snapshots::tests --all-features` and
+`cargo test -p afsplus-check --test snapshots --all-features`.
+
+Apply full ownership loading and bitmap sweeps to snapshot remounts, modeled
+create/delete cuts and every churn cycle. Validate each historical namespace
+without consulting live shared-reference counts. Require physical lifetime
+coverage, live/retired separation, exact retained totals, no housekeeping or
+quarantine aliases, and matching metadata births. Count shared physical storage
+once while preserving per-view directory/link/extent checks.
+
+Reseal malformed controls, missing lifetimes, housekeeping aliases, retired
+storage marked live, incorrect metadata birth, out-of-range registry IDs,
+historical link counts and future-view metadata. Each case must fail at its
+intended boundary, not merely through a checksum error. A disconnected historical
+directory cycle with matching incoming counts must fail root reachability.
+A retained block marked free in the decoded bitmap must fail the full sweep.
+
+The checker-facing fixture independently inserts an initial view, verifies it
+through `check_device`, and records zero writes/flushes. The same image must be
+refused by ordinary mount until writable support is qualified. Report corrupt
+ledger control as an error. No checker operation repairs or removes a view.
+
+Memory scales with physical ownership sets and traversed namespaces, not a
+fixed mount budget. Raw data has no independent allocation-birth header; tests
+of byte preservation and writer lifetime transitions remain necessary. Previous
+checkpoint preservation follows the distinct
+[ADR-074](../adr/ADR-074-protect-previous-checkpoint.md) two-slot crash and
+low-space qualification, not the older selected-checkpoint-only oracle.
 
 ## Existing complementary gates
 

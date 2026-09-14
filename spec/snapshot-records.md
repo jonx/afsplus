@@ -14,6 +14,7 @@ The [milestone table](../implementation/milestones.md) owns implementation state
 - [Lifetime control and entries](#lifetime-control-and-entries)
 - [Transactional lifetime edits](#transactional-lifetime-edits)
 - [Volume lifecycle and read views](#volume-lifecycle-and-read-views)
+- [Exhaustive ownership checking](#exhaustive-ownership-checking)
 - [Failure and resource contract](#failure-and-resource-contract)
 
 <!-- /toc -->
@@ -139,6 +140,9 @@ opened handle. A cursor alone does not retain a snapshot.
 Reads resolve objects, directories and extents through the captured object-map
 root and generation, independently of live caches or an open intent window.
 Registered views force COW even for files with persistent in-place opt-in.
+[ADR-074](../adr/ADR-074-protect-previous-checkpoint.md) extends protection to
+views registered in the previous structurally valid checkpoint until its slot
+is replaced, together with the corresponding quarantine boundary.
 Historical reflinks do not use the live shared-reference count to decide whether
 their bytes exist. No rollback or historical-to-live clone is implied.
 
@@ -157,8 +161,34 @@ shipping limits requires measured admission and resource qualification under
 historical-read access/revocation policy require the
 [Q5](../implementation/open-questions.md) security gate before exposure through
 filesystem-neutral host capabilities. Core read handles do not establish that
-policy. Full checker ownership, supported mount/formatter negotiation and a
-real backup consumer are separate integration gates.
+policy. Full checker ownership, supported writable-mount negotiation and a real backup
+consumer are separate integration gates. `mkfs_with_options` accepts an explicit
+`MkfsOptions::persistent_snapshots` choice for new images; baseline `mkfs`
+keeps the feature absent. This is not an in-place conversion.
+
+## Exhaustive ownership checking
+
+The read-only checker validates all registry/ledger nodes, ID bounds, canonical
+lifetimes and the exact retained sum. Each captured namespace receives its own
+object, directory, link, topology and extent checks, bounded by its captured
+generation. Historical shared mappings require negotiated sharing markers;
+the live reference-count tree cannot validate their historical multiplicities.
+
+Every live namespace block has a live lifetime. Every captured block intersects
+its lifetime; every retired ledger block is absent from live ownership.
+Housekeeping, quarantine and namespace ownership cannot alias. Reachable
+metadata cannot overlap data across views. Compare immutable metadata header
+generations with allocation births; raw file data has no embedded birth witness.
+Bitmap accounting includes retired ledger runs even when no view intersects
+them, because a bounded reclaim scan can legitimately leave eligible work.
+Count physical metadata/data sharing across views once in checker summaries.
+
+Exhaustive checking can materialize physical-block sets and one historical
+namespace at a time. Its memory and work scale with ledger coverage, distinct
+reachable blocks and the sum of traversed view sizes; this is not normal mount
+behavior or a constrained-profile resource guarantee. Corrupt snapshot state
+is reported, never discarded as repair. Ordinary mount support is negotiated
+independently of read-only checker support.
 
 ## Failure and resource contract
 

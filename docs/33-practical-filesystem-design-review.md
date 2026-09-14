@@ -140,9 +140,9 @@ pretending current state reconstructs old events.
 
 ## Transactions, lifetime and recovery
 
-The code already has checkpoint COW, exact crash-state checks, intent replay,
-shared-owner accounting and a bounded orphan directory. The
-`write_and_truncate_replay_is_restartable_after_every_cut` test already covers
+Checkpoint COW, exact crash-state checks, intent replay, shared-owner accounting
+and a bounded orphan directory provide the transaction baseline. The
+`write_and_truncate_replay_is_restartable_after_every_cut` test covers
 recovery interrupted by another crash. Extend these mechanisms when a new
 operation is added; a fresh journaling implementation is unnecessary.
 
@@ -154,6 +154,14 @@ Deletion of highly fragmented objects must continue through bounded orphan
 cleanup. A failed ordinary call and a failed commit with uncertain device
 completion need distinct caller contracts; remount/recovery decides the
 latter's allowed durable state.
+
+Reference counts alone cannot prove namespace connectivity: a disconnected
+directory cycle can have matching incoming counts. Checker traversal must prove
+reachability from the ordinary and internal orphan roots for every retained
+view. A structurally decoded older checkpoint also does not prove its storage
+was retained. [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md) requires
+preserving previous-checkpoint metadata and registered snapshots through slot
+replacement; qualify both-slot crash outcomes and the added quarantine pressure.
 
 Open identity, directory-entry identity and descriptor state are separate.
 Adapters must distinguish closing one handle from releasing the last handle

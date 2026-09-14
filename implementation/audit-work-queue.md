@@ -24,14 +24,16 @@ metadata separate from allocation/reclaim machinery governed by selectable
 checkpoints. Use [ADR-072](../adr/ADR-072-snapshot-record-codecs.md) for leaf codecs and
 [ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md) for checkpoint root binding.
 Use [typed tree access](../testing/book-review-qualification.md#typed-snapshot-tree-access),
-[lifetime transaction preparation](../testing/book-review-qualification.md#lifetime-transaction-preparation)
-and [allocator/quarantine binding](../testing/book-review-qualification.md#snapshot-allocator-and-quarantine-binding)
-and [Volume orchestration](../testing/book-review-qualification.md#volume-snapshot-orchestration)
-as component baselines. Extend the full checker to reconcile captured namespaces,
-ledger lifetimes, housekeeping, quarantine and allocation bits before enabling
-supported mounts. Qualify explicit mount/formatter configuration, resource
-admission and the filesystem-neutral backup consumer. Keep historical-read and
-management authorization under Q5.
+[lifetime transaction preparation](../testing/book-review-qualification.md#lifetime-transaction-preparation),
+[allocator/quarantine binding](../testing/book-review-qualification.md#snapshot-allocator-and-quarantine-binding),
+[Volume orchestration](../testing/book-review-qualification.md#volume-snapshot-orchestration)
+and [exhaustive ownership checking](../testing/book-review-qualification.md#exhaustive-snapshot-checker)
+as component baselines. Implement the owner's [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
+decision: protect previous-checkpoint metadata and registered snapshots through
+slot replacement, with generation-aware quarantine and COW eligibility. Exercise
+both-slot crash oracles and measured low-space progress. Then qualify writable
+mount configuration, resource admission and the filesystem-neutral backup
+consumer. Keep historical-read and management authorization under Q5.
 Use `tree::read_key_page` for bounded inclusive-key seeking; persist the next
 physical key and make scan wrap explicit.
 

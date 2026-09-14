@@ -12,6 +12,8 @@
 //!   orphaned objects, bitmap-versus-reachability equality, retired-list
 //!   quarantine invariants, reserved-bit checks.
 
+mod snapshots;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use afsplus_block::BlockDevice;
@@ -37,6 +39,8 @@ use crate::CoreError;
 
 /// Everything reachable from one committed checkpoint, fully decoded.
 pub struct CommittedState {
+    /// Physical lifetime ownership, including retired runs awaiting transfer.
+    pub snapshot_owned_blocks: Vec<u64>,
     pub object_map: LoadedObjectMap,
     pub allocation_records: Vec<afsplus_format::checkpoint::RegionRecord>,
     pub allocation_pool_blocks: Vec<u64>,
@@ -50,9 +54,10 @@ pub struct CommittedState {
     pub reclaim_pending_blocks: u64,
     pub bitmaps: Bitmaps,
     /// Every reachable metadata block (object map, records, directory trees,
-    /// reclaim-queue structure) — excludes reserved blocks and file data.
+    /// reclaim-queue structure and registered views) — excludes reserved blocks
+    /// and file data. Physical sharing across views is counted once.
     pub metadata_blocks: Vec<u64>,
-    /// Every reachable file-data block.
+    /// Every distinct file-data block reachable from live or registered views.
     pub data_blocks: Vec<u64>,
     /// The canonical shared-run records (ADR-061), already cross-checked:
     /// every record's reference count equals the live mappings found over
@@ -303,6 +308,7 @@ pub fn load_committed_state<D: BlockDevice>(
     let shared_enabled = ident.features.ro_compat & RO_COMPAT_SHARED_EXTENTS != 0;
     let orphan_directory_enabled = ident.features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0;
 
+    let namespace_metadata_start = metadata_blocks.len();
     let object_map = object_map::load_all(
         dev,
         &geo,
@@ -522,6 +528,64 @@ pub fn load_committed_state<D: BlockDevice>(
         }
     }
 
+    validate_namespace_graph(&objects, &directories)?;
+    let namespace_metadata = metadata_blocks[namespace_metadata_start..].to_vec();
+
+    // Exhaustive reclaim-queue walk: every structure block is reachable
+    // metadata; every unconsumed run must be disjoint from reachable state.
+    let reclaim = crate::reclaim::load_all(
+        dev,
+        &geo,
+        checkpoint.reclaim_root_block,
+        checkpoint.generation,
+    )?;
+    for lba in &reclaim.structure_blocks {
+        claim(*lba, &mut claimed)?;
+        metadata_blocks.push(*lba);
+    }
+    for run in &reclaim.runs {
+        for lba in run.start..run.end().map_err(CoreError::Format)? {
+            if claimed.contains(&lba) {
+                return Err(CoreError::Corrupt(format!(
+                    "quarantined block {lba} is still reachable"
+                )));
+            }
+        }
+        if run.retire_generation > checkpoint.generation {
+            return Err(CoreError::Corrupt(format!(
+                "quarantined run {} from future generation {}",
+                run.start, run.retire_generation
+            )));
+        }
+    }
+
+    let bitmaps = Bitmaps::load(dev, &geo, checkpoint)?;
+    let log_area_blocks = crate::intent_log::log_slot_lbas(&geo, ident.log_slots)?;
+
+    let mut state = CommittedState {
+        snapshot_owned_blocks: Vec::new(),
+        object_map,
+        allocation_records: allocation.records,
+        allocation_pool_blocks: allocation_layout.pool_lbas,
+        log_area_blocks,
+        objects,
+        directories,
+        reclaim_runs: reclaim.runs,
+        reclaim_pending_blocks: reclaim.pending_blocks,
+        bitmaps,
+        metadata_blocks,
+        data_blocks,
+        shared_records,
+        shared_tree_blocks,
+    };
+    snapshots::load(dev, ident, checkpoint, &mut state, &namespace_metadata)?;
+    Ok(state)
+}
+
+fn validate_namespace_graph(
+    objects: &BTreeMap<u64, ObjectRecord>,
+    directories: &BTreeMap<u64, LoadedDirectory>,
+) -> Result<(), CoreError> {
     let root = objects
         .get(&OBJECT_ROOT)
         .ok_or_else(|| CoreError::Corrupt("root object missing from object map".into()))?;
@@ -529,7 +593,7 @@ pub fn load_committed_state<D: BlockDevice>(
         return Err(CoreError::Corrupt("root object is not a directory".into()));
     }
 
-    for (dir_id, dir) in &directories {
+    for (dir_id, dir) in directories {
         for entry in &dir.entries {
             let child = objects.get(&entry.child_id).ok_or_else(|| {
                 CoreError::Corrupt(format!(
@@ -566,52 +630,36 @@ pub fn load_committed_state<D: BlockDevice>(
         }
     }
 
-    // Exhaustive reclaim-queue walk: every structure block is reachable
-    // metadata; every unconsumed run must be disjoint from reachable state.
-    let reclaim = crate::reclaim::load_all(
-        dev,
-        &geo,
-        checkpoint.reclaim_root_block,
-        checkpoint.generation,
-    )?;
-    for lba in &reclaim.structure_blocks {
-        claim(*lba, &mut claimed)?;
-        metadata_blocks.push(*lba);
+    // Reference counts alone cannot detect a disconnected directory cycle:
+    // every object in that cycle can have exactly one incoming reference.
+    let mut pending = vec![OBJECT_ROOT];
+    if objects.contains_key(&OBJECT_ORPHAN_DIRECTORY) {
+        pending.push(OBJECT_ORPHAN_DIRECTORY);
     }
-    for run in &reclaim.runs {
-        for lba in run.start..run.end().map_err(CoreError::Format)? {
-            if claimed.contains(&lba) {
-                return Err(CoreError::Corrupt(format!(
-                    "quarantined block {lba} is still reachable"
-                )));
-            }
-        }
-        if run.retire_generation > checkpoint.generation {
+    let mut reached = BTreeSet::new();
+    let mut visited_directories = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !visited_directories.insert(id) {
             return Err(CoreError::Corrupt(format!(
-                "quarantined run {} from future generation {}",
-                run.start, run.retire_generation
+                "directory {id} has a cycle or multiple parents"
             )));
         }
+        reached.insert(id);
+        if let Some(directory) = directories.get(&id) {
+            for entry in &directory.entries {
+                reached.insert(entry.child_id);
+                if objects[&entry.child_id].object_type == ObjectType::Directory {
+                    pending.push(entry.child_id);
+                }
+            }
+        }
     }
-
-    let bitmaps = Bitmaps::load(dev, &geo, checkpoint)?;
-    let log_area_blocks = crate::intent_log::log_slot_lbas(&geo, ident.log_slots)?;
-
-    Ok(CommittedState {
-        object_map,
-        allocation_records: allocation.records,
-        allocation_pool_blocks: allocation_layout.pool_lbas,
-        log_area_blocks,
-        objects,
-        directories,
-        reclaim_runs: reclaim.runs,
-        reclaim_pending_blocks: reclaim.pending_blocks,
-        bitmaps,
-        metadata_blocks,
-        data_blocks,
-        shared_records,
-        shared_tree_blocks,
-    })
+    if let Some(id) = objects.keys().find(|id| !reached.contains(id)) {
+        return Err(CoreError::Corrupt(format!(
+            "object {id} is unreachable from namespace roots"
+        )));
+    }
+    Ok(())
 }
 
 /// Full invariant sweep over a loaded state (`spec/invariants.md`).
@@ -653,7 +701,10 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
             if !state.bitmaps.is_allocated(lba) {
                 findings.push(format!("quarantined block {lba} is marked free"));
             }
-            if state.metadata_blocks.contains(&lba) || state.data_blocks.contains(&lba) {
+            if state.metadata_blocks.contains(&lba)
+                || state.data_blocks.contains(&lba)
+                || state.snapshot_owned_blocks.contains(&lba)
+            {
                 findings.push(format!("quarantined block {lba} is still reachable"));
             }
             if state.allocation_pool_blocks.contains(&lba) {
@@ -686,6 +737,7 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
     }
     accounted.extend(state.metadata_blocks.iter().copied());
     accounted.extend(state.data_blocks.iter().copied());
+    accounted.extend(state.snapshot_owned_blocks.iter().copied());
     accounted.extend(state.allocation_pool_blocks.iter().copied());
     accounted.extend(state.log_area_blocks.iter().copied());
     for run in &state.reclaim_runs {
