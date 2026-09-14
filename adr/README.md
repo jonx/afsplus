@@ -127,6 +127,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-096](ADR-096-bounded-block-slices.md) | Expose bounded block-device slices | Accepted | — |
 | [ADR-097](ADR-097-bounded-memory-overlay-branches.md) | Share immutable bases across bounded memory overlay branches | Accepted | — |
 | [ADR-098](ADR-098-bound-block-replay-traces.md) | Bind persistent block replay traces to their base image | Accepted | — |
+| [ADR-099](ADR-099-semantic-replay-bundles.md) | Bind semantic scenarios and replay results in complete bundles | Proposed | — |
 
 <!-- /adr-index -->
 

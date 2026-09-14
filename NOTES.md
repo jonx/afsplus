@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Add bounded semantic runner and bundle admission components](#2026-09-14--add-bounded-semantic-runner-and-bundle-admission-components)
 - [2026-09-14 - Preserve bounded block-operation replay traces](#2026-09-14---preserve-bounded-block-operation-replay-traces)
 - [2026-09-14 - Add bounded memory overlay branches and cut-state replay](#2026-09-14---add-bounded-memory-overlay-branches-and-cut-state-replay)
 - [2026-09-14 - Measure host commands with per-child CPU and RSS](#2026-09-14---measure-host-commands-with-per-child-cpu-and-rss)
@@ -117,6 +118,26 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Add bounded semantic runner and bundle admission components
+
+Connected the admitted operation protocol to real in-memory filesystem operations:
+create, write, truncate, rename, unlink, directories, sync and remount. Five Rust
+regressions check exact namespace/content, reconstruction from every recorded
+write, bounded recording refusal, retained failures and observation admission.
+Recording limits apply across remounts and reject before mutation; a mount failure
+no longer discards the captured fixture. Plan construction goes through admission.
+
+Added Python scenario validation/compiler fixtures and exclusive bundle
+publication/integrity fixtures. Publication tests inject each write/sync failure
+and preserve existing paths. The proposed ADR-099 retains the full replay contract.
+These are components of Stage A, not closure of its replay gate: integrated
+fresh-process semantic replay, revision/fault binding, flight-record export and
+failure-preserving minimization are the next work. Resource caps here describe
+captured records and inspection output, not complete core RAM accounting.
+Validation: workspace tests passed (493 passed, 10 ignored), workspace Clippy
+and formatting passed, all eleven Python replay fixtures and seven documentation
+checker fixtures passed, and documentation/whitespace validation passed.
 
 ## 2026-09-14 - Preserve bounded block-operation replay traces
 

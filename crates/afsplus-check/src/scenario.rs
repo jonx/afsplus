@@ -1,0 +1,465 @@
+//! Experimental Stage A semantic runner (ADR-099), confined to memory images.
+use afsplus_block::{BlockDevice, BlockError, MemoryBackend, RecordedOp};
+use afsplus_core::{mkfs, mount, MkfsParams, NamePolicy};
+use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+
+#[derive(Debug)]
+pub enum Operation {
+    Create {
+        label: String,
+        parent: String,
+        name: String,
+        data: Vec<u8>,
+        directory: bool,
+    },
+    Write {
+        label: String,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    Truncate {
+        label: String,
+        size: u64,
+    },
+    Rename {
+        label: String,
+        parent: String,
+        name: String,
+    },
+    Remove {
+        label: String,
+        directory: bool,
+    },
+    Sync,
+    Remount,
+}
+pub struct Plan {
+    blocks: u64,
+    region: u32,
+    log_slots: u16,
+    operations: Vec<Operation>,
+}
+pub struct Run {
+    pub base: MemoryBackend,
+    pub result: MemoryBackend,
+    pub log: Vec<RecordedOp>,
+    pub failure: Option<(usize, String)>,
+}
+/// Admission caps for captured block operations across all remounts.
+/// These bound retained log payload and count, not the filesystem's total RAM.
+#[derive(Clone, Copy)]
+pub struct RecordingLimits {
+    pub operations: usize,
+    pub payload_bytes: usize,
+}
+impl Default for RecordingLimits {
+    fn default() -> Self {
+        Self {
+            operations: 65536,
+            payload_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+struct Capture {
+    image: MemoryBackend,
+    log: Vec<RecordedOp>,
+    bytes: usize,
+    limits: RecordingLimits,
+}
+#[derive(Clone)]
+struct Recorder(Rc<RefCell<Capture>>);
+impl Capture {
+    fn reserve(&mut self, bytes: usize) -> Result<(), BlockError> {
+        if self.log.len() >= self.limits.operations
+            || bytes > self.limits.payload_bytes.saturating_sub(self.bytes)
+        {
+            return Err(BlockError::Injected("scenario recording limit"));
+        }
+        self.log
+            .try_reserve(1)
+            .map_err(|_| BlockError::Injected("scenario log allocation"))
+    }
+}
+impl BlockDevice for Recorder {
+    fn block_size(&self) -> usize {
+        self.0.borrow().image.block_size()
+    }
+    fn total_blocks(&self) -> u64 {
+        self.0.borrow().image.total_blocks()
+    }
+    fn read_block(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        self.0.borrow_mut().image.read_block(lba, buf)
+    }
+    fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        let mut state = self.0.borrow_mut();
+        state.reserve(data.len())?;
+        let mut copy = Vec::new();
+        copy.try_reserve_exact(data.len())
+            .map_err(|_| BlockError::Injected("scenario payload allocation"))?;
+        copy.extend_from_slice(data);
+        state.image.write_block(lba, data)?;
+        state.bytes += data.len();
+        state.log.push(RecordedOp::Write { lba, data: copy });
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<(), BlockError> {
+        let mut state = self.0.borrow_mut();
+        state.reserve(0)?;
+        state.image.flush()?;
+        state.log.push(RecordedOp::Flush);
+        Ok(())
+    }
+}
+fn finish(base: MemoryBackend, recorder: Recorder, failure: Option<(usize, String)>) -> Run {
+    let state = Rc::try_unwrap(recorder.0)
+        .ok()
+        .expect("volume released recorder")
+        .into_inner();
+    Run {
+        base,
+        result: state.image,
+        log: state.log,
+        failure,
+    }
+}
+fn integer(s: &str, maximum: u64) -> Result<u64, String> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) || (s.len() > 1 && s.starts_with('0'))
+    {
+        return Err("noncanonical scenario integer".into());
+    }
+    let n = s.parse::<u64>().map_err(|_| "scenario integer overflow")?;
+    if n > maximum {
+        return Err("scenario integer limit".into());
+    }
+    Ok(n)
+}
+fn label(s: &str) -> Result<String, String> {
+    if s.is_empty()
+        || s.len() > 64
+        || !s
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
+    {
+        return Err("invalid scenario label".into());
+    }
+    Ok(s.into())
+}
+fn hex(s: &str) -> Result<Vec<u8>, String> {
+    if s == "-" {
+        return Ok(Vec::new());
+    }
+    if s.is_empty()
+        || !s.len().is_multiple_of(2)
+        || s.len() > 2 * 1024 * 1024
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err("invalid scenario hex data".into());
+    }
+    let mut data = Vec::new();
+    data.try_reserve_exact(s.len() / 2)
+        .map_err(|_| "scenario data allocation")?;
+    for pair in s.as_bytes().as_chunks::<2>().0 {
+        let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
+        data.push(digit(pair[0]) * 16 + digit(pair[1]));
+    }
+    Ok(data)
+}
+fn name(s: &str) -> Result<String, String> {
+    let bytes = hex(s)?;
+    validate_name(&bytes).map_err(|e| e.to_string())?;
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+impl Plan {
+    pub fn parse(wire: &[u8]) -> Result<Self, String> {
+        if wire.len() > 4 * 1024 * 1024 || !wire.ends_with(b"\n") {
+            return Err("scenario wire admission".into());
+        }
+        let input = std::str::from_utf8(wire).map_err(|_| "scenario wire UTF-8")?;
+        let mut lines = input.lines();
+        if lines.next() != Some("AFSPSC01") {
+            return Err("scenario protocol version".into());
+        }
+        let header: Vec<_> = lines.next().ok_or("missing geometry")?.split(' ').collect();
+        let ["format", "4096", blocks, region, log] = header.as_slice() else {
+            return Err("scenario format profile".into());
+        };
+        let blocks = integer(blocks, 65536)?;
+        let region = integer(region, 16384)? as u32;
+        let log_slots = integer(log, 64)? as u16;
+        if blocks < 64
+            || region < 64
+            || !region.is_power_of_two()
+            || u64::from(region) > blocks
+            || log_slots < 8
+        {
+            return Err("scenario geometry admission".into());
+        }
+        let mut operations = Vec::new();
+        let mut payload = 0usize;
+        for line in lines {
+            if operations.len() >= 1024 {
+                return Err("scenario operation limit".into());
+            }
+            let args: Vec<_> = line.split(' ').collect();
+            let op = match args.as_slice() {
+                ["mkdir", l, p, n] => Operation::Create {
+                    label: label(l)?,
+                    parent: label(p)?,
+                    name: name(n)?,
+                    data: Vec::new(),
+                    directory: true,
+                },
+                ["create", l, p, n, d] => Operation::Create {
+                    label: label(l)?,
+                    parent: label(p)?,
+                    name: name(n)?,
+                    data: hex(d)?,
+                    directory: false,
+                },
+                ["write", l, o, d] => Operation::Write {
+                    label: label(l)?,
+                    offset: integer(o, 16 * 1024 * 1024)?,
+                    data: hex(d)?,
+                },
+                ["truncate", l, s] => Operation::Truncate {
+                    label: label(l)?,
+                    size: integer(s, 16 * 1024 * 1024)?,
+                },
+                ["rename", l, p, n] => Operation::Rename {
+                    label: label(l)?,
+                    parent: label(p)?,
+                    name: name(n)?,
+                },
+                ["unlink", l] => Operation::Remove {
+                    label: label(l)?,
+                    directory: false,
+                },
+                ["rmdir", l] => Operation::Remove {
+                    label: label(l)?,
+                    directory: true,
+                },
+                ["sync"] => Operation::Sync,
+                ["remount"] => Operation::Remount,
+                _ => return Err("unknown scenario command or arity".into()),
+            };
+            match &op {
+                Operation::Create { data, .. } => payload += data.len(),
+                Operation::Write { offset, data, .. } => {
+                    payload += data.len();
+                    if *offset + data.len() as u64 > 16 * 1024 * 1024 {
+                        return Err("scenario write range".into());
+                    }
+                }
+                _ => (),
+            }
+            if payload > 1024 * 1024 {
+                return Err("scenario aggregate payload".into());
+            }
+            operations.push(op);
+        }
+        Ok(Self {
+            blocks,
+            region,
+            log_slots,
+            operations,
+        })
+    }
+    pub fn run(&self) -> Result<Run, String> {
+        self.run_with_limits(RecordingLimits::default())
+    }
+    pub fn run_with_limits(&self, limits: RecordingLimits) -> Result<Run, String> {
+        let mut base = MemoryBackend::new(4096, self.blocks);
+        mkfs(
+            &mut base,
+            &MkfsParams {
+                uuid: [0x53; 16],
+                label: "Scenario".into(),
+                region_size: self.region,
+                reclaim_caps: Default::default(),
+                log_slots: self.log_slots,
+                shared_extents: true,
+                data_policy: false,
+                name_policy: NamePolicy::Sensitive,
+                timestamp: Timespec::default(),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let recorder = Recorder(Rc::new(RefCell::new(Capture {
+            image: base.clone(),
+            log: Vec::new(),
+            bytes: 0,
+            limits,
+        })));
+        let mut volume = match mount(recorder.clone()) {
+            Ok(volume) => volume,
+            Err(error) => return Ok(finish(base, recorder, Some((0, error.to_string())))),
+        };
+        // id, parent id, original name, directory kind; labels never select host paths.
+        let mut labels = BTreeMap::from([(
+            "root".to_owned(),
+            (OBJECT_ROOT, OBJECT_ROOT, String::new(), true),
+        )]);
+        let mut used = std::collections::BTreeSet::from(["root".to_owned()]);
+        let mut failure = None;
+        for (index, op) in self.operations.iter().enumerate() {
+            let now = Timespec {
+                seconds: index as i64 + 1,
+                nanoseconds: 0,
+            };
+            if matches!(op, Operation::Remount) {
+                drop(volume);
+                volume = match mount(recorder.clone()) {
+                    Ok(volume) => volume,
+                    Err(error) => {
+                        return Ok(finish(base, recorder, Some((index, error.to_string()))))
+                    }
+                };
+                continue;
+            }
+            let result = (|| -> Result<(), String> {
+                let get = |l: &str| {
+                    labels
+                        .get(l)
+                        .cloned()
+                        .ok_or_else(|| format!("unknown label {l}"))
+                };
+                match op {
+                    Operation::Create {
+                        label,
+                        parent,
+                        name,
+                        data,
+                        directory,
+                    } => {
+                        if used.contains(label) {
+                            return Err("reused scenario label".into());
+                        }
+                        let p = get(parent)?;
+                        if !p.3 {
+                            return Err("parent is not a directory".into());
+                        }
+                        let id = if *directory {
+                            volume.create_directory(p.0, name, now)
+                        } else {
+                            volume.create_file_in_directory(p.0, name, data, now)
+                        }
+                        .map_err(|e| e.to_string())?;
+                        labels.insert(label.clone(), (id, p.0, name.clone(), *directory));
+                        used.insert(label.clone());
+                    }
+                    Operation::Write {
+                        label,
+                        offset,
+                        data,
+                    } => {
+                        volume
+                            .write_file_at(get(label)?.0, *offset, data, now)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Operation::Truncate { label, size } => {
+                        volume
+                            .truncate_file(get(label)?.0, *size, now)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Operation::Rename {
+                        label,
+                        parent,
+                        name,
+                    } => {
+                        if label == "root" {
+                            return Err("reserved root label".into());
+                        }
+                        let old = get(label)?;
+                        let p = get(parent)?;
+                        volume
+                            .rename(old.1, &old.2, p.0, name, now)
+                            .map_err(|e| e.to_string())?;
+                        labels.insert(label.clone(), (old.0, p.0, name.clone(), old.3));
+                    }
+                    Operation::Remove { label, directory } => {
+                        if label == "root" {
+                            return Err("reserved root label".into());
+                        }
+                        let old = get(label)?;
+                        if old.3 != *directory {
+                            return Err("removal kind mismatch".into());
+                        }
+                        if *directory {
+                            volume.remove_directory(old.1, &old.2, now)
+                        } else {
+                            volume.delete_file(old.1, &old.2, now)
+                        }
+                        .map_err(|e| e.to_string())?;
+                        labels.remove(label);
+                    }
+                    Operation::Sync => volume.sync().map_err(|e| e.to_string())?,
+                    Operation::Remount => unreachable!(),
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                failure = Some((index, error));
+                break;
+            }
+        }
+        drop(volume);
+        Ok(finish(base, recorder, failure))
+    }
+}
+
+/// Exact namespace/content observation for the admitted file/directory profile.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub path: Vec<String>,
+    pub data: Option<Vec<u8>>,
+}
+
+/// Inspect a private image copy, with explicit aggregate output limits.
+/// Unsupported object kinds and cycles are errors, never omitted entries.
+pub fn inspect(image: MemoryBackend, max_bytes: usize) -> Result<Vec<Entry>, String> {
+    use afsplus_format::object::ObjectType;
+    let mut volume = mount(image).map_err(|e| e.to_string())?;
+    let mut queue = std::collections::VecDeque::from([(OBJECT_ROOT, Vec::<String>::new())]);
+    let mut visited = std::collections::BTreeSet::from([OBJECT_ROOT]);
+    let mut entries = Vec::new();
+    let mut bytes = 0usize;
+    while let Some((directory, path)) = queue.pop_front() {
+        let children = volume
+            .list_directory(directory)
+            .map_err(|e| e.to_string())?;
+        for (name, id) in children {
+            if entries.len() >= 1024 || path.len() >= 64 || !visited.insert(id) {
+                return Err("scenario namespace admission or repeated object".into());
+            }
+            let mut child = path.clone();
+            child.push(name);
+            let record = volume
+                .stat(id)
+                .map_err(|e| e.to_string())?
+                .ok_or("scenario missing object")?;
+            let data = match record.object_type {
+                ObjectType::Directory => {
+                    queue.push_back((id, child.clone()));
+                    None
+                }
+                ObjectType::File => {
+                    let size =
+                        usize::try_from(record.size_bytes).map_err(|_| "scenario file size")?;
+                    if size > max_bytes.saturating_sub(bytes) {
+                        return Err("scenario observation byte limit".into());
+                    }
+                    bytes += size;
+                    Some(volume.read_file(id).map_err(|e| e.to_string())?)
+                }
+                _ => return Err("unsupported scenario object kind".into()),
+            };
+            entries.push(Entry { path: child, data });
+        }
+    }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(entries)
+}

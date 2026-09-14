@@ -19,6 +19,8 @@
 - [Bounded partition views](#bounded-partition-views)
 - [Bounded overlay branches](#bounded-overlay-branches)
 - [Persistent block-operation traces](#persistent-block-operation-traces)
+- [Bundle integrity and publication](#bundle-integrity-and-publication)
+- [Bounded semantic scenario execution](#bounded-semantic-scenario-execution)
 
 <!-- /toc -->
 
@@ -257,3 +259,56 @@ bind the source revision, semantic scenario, fault selection and expected/actual
 state, and publish a completion record only after all artifacts are durable.
 Serialization alone does not close semantic replay, minimization or the complete
 failure-artifact gate.
+
+## Bundle integrity and publication
+
+[replay-bundle.py](../tools/replay-bundle.py) publishes the fixed artifact roles
+from this harness with size/digest descriptors in a versioned completion manifest.
+Run `python3 tools/test-replay-bundle.py` for deterministic publication and a fresh
+verification process, every artifact-write and synchronization failure boundary,
+existing-name collision, corrupt/missing/oversized/symlink artifact refusal and
+manifest role/version/size admission. These inject I/O errors and do not simulate
+physical host-storage power loss.
+
+The output directory is created exclusively. Files are synchronized before
+completion publication, followed by the bundle directory and its parent. The
+completion link cannot replace an existing name. Late synchronization failure
+returns an error even when a complete manifest is readable. Verification captures
+all admitted artifact bytes and validates their digests without executing their
+contents or modifying original files. It establishes integrity/completeness only;
+source identity, scenario execution and expected-state comparison belong to the
+semantic runner described in [ADR-099](../adr/ADR-099-semantic-replay-bundles.md).
+
+## Bounded semantic scenario execution
+
+[replay-scenario.py](../tools/replay-scenario.py) admits a version-1 JSON scenario
+and compiles its operation list to the fixed ASCII `AFSPSC01` protocol consumed
+by [the memory runner](../crates/afsplus-check/src/scenario.rs). Names and data are
+hex fields; object labels resolve only inside the fixture. JSON admission checks
+label dependencies and kinds before compilation. The Rust parser independently
+checks syntax, geometry, operation count and payload/range limits; direct protocol
+label errors are execution failures with retained evidence.
+
+The profile admits 4 KiB blocks, at most 65,536 blocks, 1,024 operations, 1 MiB
+of operation payload and 16 MiB logical file ranges. JSON admission additionally
+counts expected file contents in its 1 MiB aggregate. These are harness admission
+limits, not filesystem format limits. The default captured block log admits
+65,536 operations and 64 MiB of payload across all remounts. Lower caller caps
+exercise explicit refusal. Admission and fallible log/payload reservation precede
+each device mutation; successful operations form an exact replayable prefix.
+
+A failed filesystem operation or remount returns its operation index and error
+with the base, result and captured block log. Formatting failures return an error
+before a run exists. Exact namespace inspection checks file/directory paths and
+contents, rejects unsupported kinds or repeated objects, and admits at most 1,024
+entries, depth 64 and a caller-selected aggregate content budget. Inspection runs
+on an owned memory image; callers preserve the original result by passing a copy.
+
+Run `python3 tools/test-replay-scenario.py` and
+`cargo test -p afsplus-check --test scenario`. Require exact create/write/truncate/
+rename/unlink/directory/sync/remount results, full block-log reconstruction,
+retained failure prefixes, malformed-input refusal and observation-budget refusal.
+These checks cover runner and codec components. Complete bundle replay additionally
+requires source/fault binding, flight-record export, fresh-process semantic
+comparison and failure-preserving minimization from
+[ADR-099](../adr/ADR-099-semantic-replay-bundles.md).

@@ -17,6 +17,7 @@
 //! stricter than normal mounts; this prototype checker is verify-only).
 
 pub mod replay_trace;
+pub mod scenario;
 
 use afsplus_block::BlockDevice;
 use afsplus_core::mount::select_checkpoint;
