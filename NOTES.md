@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Rebuild replay with retained dependencies and an empty Cargo cache](#2026-09-14---rebuild-replay-with-retained-dependencies-and-an-empty-cargo-cache)
 - [2026-09-14 - Preserve working sources for independent replay reconstruction](#2026-09-14---preserve-working-sources-for-independent-replay-reconstruction)
 - [2026-09-14 - Compare reconstructed runners without weakening strict replay](#2026-09-14---compare-reconstructed-runners-without-weakening-strict-replay)
 - [2026-09-14 - Reconstruct the semantic runner in an isolated checkout](#2026-09-14---reconstruct-the-semantic-runner-in-an-isolated-checkout)
@@ -130,6 +131,39 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Rebuild replay with retained dependencies and an empty Cargo cache
+
+Added source-bound offline dependency capture and verification. The package binds
+all vendored file paths, sizes, modes and hashes to the observed source and lockfile,
+with observed Cargo/rustc executable identities. Cargo's tree is synchronized
+before manifest publication; missing or altered files, input changes and partial
+output are refused. The shared source helper supplies bounded command output and
+timeouts for the fixed Git and Cargo commands.
+
+The prepared host cache initially lacked `redox_syscall 0.5.18`, which is locked
+but not needed for this Mac's build. The exact missing public locked packages
+were fetched through Cargo without changing the source lockfile or publishing
+project content. The new capture command itself is always offline. The complete
+registry set contains 5,696 files and 135,866,715 bytes, including other-platform
+dependencies; their availability is not other-platform build qualification.
+
+The real source-package checkout of `ae5edbd` compiled with `--frozen --offline`,
+an initially empty Cargo home, a fresh external target and only the retained
+registry directory. The resulting Cargo home contained bookkeeping and a registry
+cache tag, no downloaded dependency source or archive. A second fresh build with
+an empty replacement directory failed because `caseless` was absent, proving the
+negative control reached dependency resolution. The new runner reproduced all
+eight non-metadata roles for all four retained cache profiles; the originals and
+dependency inventory were unchanged. Build inputs, logs, negative control,
+comparisons and `qualification.json` are retained privately in
+`/private/tmp/afsplus-deps-qualified-ns5gdy06`.
+
+The dependency protocol has 13 focused regressions; the source helper's existing
+12 regressions cover its shared process path. The cold build used the existing
+host toolchain and SDK. Preserving their bytes and the explicit build environment
+is the next reconstruction gate; neither their observed hashes nor an empty Cargo
+cache closes that requirement. No Rust core or filesystem format changed.
 
 ## 2026-09-14 - Preserve working sources for independent replay reconstruction
 

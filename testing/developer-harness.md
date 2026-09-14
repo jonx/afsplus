@@ -28,6 +28,7 @@
 - [Cache-bound semantic bundles](#cache-bound-semantic-bundles)
 - [Comparing a rebuilt runner](#comparing-a-rebuilt-runner)
 - [Preserving and restoring working sources](#preserving-and-restoring-working-sources)
+- [Retaining registry dependencies for a cold build](#retaining-registry-dependencies-for-a-cold-build)
 
 <!-- /toc -->
 
@@ -705,3 +706,80 @@ Run `python3 tools/test-replay-source.py` for dirty/staged/conflicted index
 round-trips, missing and untracked files, permissions, Unicode/control-character
 names, symlinks, original preservation, path and artifact refusal, independent
 expanded-size limits, capture races and publication failure boundaries.
+
+
+## Retaining registry dependencies for a cold build
+
+[replay-dependencies.py](../tools/replay-dependencies.py) captures the locked
+crates.io dependency tree for a selected source checkout using caller-selected
+Cargo, rustc and Cargo-cache paths. Capture always invokes `cargo vendor --locked
+--offline`; missing cached packages cause a refusal, not an implicit download or
+lockfile update. Acquire exact public locked packages separately when preparing
+the cache. Local path dependencies, including the patched fuser tree, belong to
+the [source package](#preserving-and-restoring-working-sources).
+
+```sh
+python3 tools/replay-dependencies.py capture /private/restored-source \
+  /private/evidence/dependencies \
+  --cargo /private/toolchain/bin/cargo \
+  --rustc /private/toolchain/bin/rustc \
+  --cargo-home /private/prepared-cargo-cache
+python3 tools/replay-dependencies.py verify /private/evidence/dependencies \
+  --source-root /private/restored-source
+```
+
+The version-1 `cargo-registry-dependencies-v1` manifest binds the complete observed
+source identity, `Cargo.lock` digest, observed Cargo/rustc executable digests and
+sorted relative paths, sizes, modes and SHA-256 hashes of all vendored files.
+Each crate requires its Cargo manifest and registry checksum map. The profile
+accepts only the ordinary crates.io replacement emitted by Cargo; additional
+registries and Git source replacements require an explicit profile extension.
+Verification establishes retained-file integrity and source binding. Cargo checks
+registry checksums against the lockfile when resolving and building the retained
+sources.
+
+The package contains `vendor/` and a completion manifest. Files and directories
+are synchronized before completion publication; source/compiler identity and
+vendor inventory changes during capture are refused. Late barrier failure is an
+error even if the manifest is readable. Existing or partial output is never
+overwritten. Verification only reads the source checkout and package, refusing
+missing, extra, modified or mode-changed files, symlinks and special files. Package
+paths are relative; a copied package can be verified at another location.
+
+Admission covers 32,768 files and directories each, 64 MiB per regular file,
+256 MiB of expanded file data and an 8 MiB manifest. Vendoring has a 120-second
+command deadline and 64 KiB limits on both configuration output and diagnostics.
+The file limits are checked on Cargo's generated output before manifest
+publication; they are not a live quota on Cargo's internal memory or temporary
+copying work. The source tree and prepared Cargo cache cannot contain the output.
+
+For a cold build, start with an empty, separately created `CARGO_HOME` and a fresh
+external target directory. Use the selected toolchain and explicit environment
+inputs. Resolve crates.io exclusively through the retained directory with these
+Cargo options, then build the runner with `--frozen --offline`:
+
+```text
+--config 'source.crates-io.replace-with="afsplus-retained"'
+--config 'source.afsplus-retained.directory="/private/evidence/dependencies/vendor"'
+build --frozen --offline -p afsplus-check --bin afsplus-scenario
+```
+
+[`cargo_config()`](../tools/replay-dependencies.py) produces this fixed argument
+list for the selected package path; package metadata cannot supply commands or
+URLs. Verify the package before and after the build. Require an independent
+negative control with another empty Cargo home, fresh target directory and an
+empty replacement source: it must fail because a locked dependency is absent.
+Then run the [rebuilt comparison](#comparing-a-rebuilt-runner) for every retained
+cache profile and preserve both outcome and artifact-equality evidence.
+
+Run `python3 tools/test-replay-dependencies.py` for fresh-process capture/verify,
+relocation, source/lock binding, file and metadata admission, capture changes,
+partial-output refusal and publication-failure boundaries. These protocol tests
+use a fixed fake vendor command; the cold build and empty-source negative control
+are separate real-Cargo integration evidence. Run `python3 tools/test-replay-source.py`
+for the shared bounded-process helper and source-package regressions.
+
+A cold Cargo cache removes dependency-cache reuse from the build evidence. It does
+not preserve or qualify the selected compiler's sysroot, linker, platform SDK or
+host libraries. Their bytes and build-environment inputs require a separate
+retained toolchain/platform profile before claiming self-contained reconstruction.

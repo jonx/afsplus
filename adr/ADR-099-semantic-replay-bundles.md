@@ -79,6 +79,23 @@ preservation of dependencies, toolchains and build environment. The source
 companion is a reconstruction input, not a general repository backup or build
 provenance certificate.
 
+## Registry-dependency companion
+
+Preserve the locked registry dependency tree separately from local path sources.
+Bind its complete relative-file inventory to the observed source and lockfile
+identities. Capture through offline locked vendoring; absent prepared dependencies
+cause refusal. A profile supports only explicitly recognized source replacements.
+Validate file kinds, paths, sizes, modes, digests and crate metadata, synchronize
+the generated tree, then publish a distinct completion manifest. Preserve partial
+output and report late barrier failures.
+
+A dependency reconstruction gate requires a frozen offline build with an initially
+empty Cargo home and fresh target, an empty replacement-source negative control,
+and independent semantic comparisons against retained bundles. Matching dependency
+files or a warm-cache build alone cannot satisfy that gate. Compiler, sysroot,
+linker, SDK and environment preservation are separate inputs; observed executable
+digests are not copies of those inputs or a build-provenance certificate.
+
 ## Qualification
 
 Require fresh-process export/read/replay equivalence, exact expected-state checks,

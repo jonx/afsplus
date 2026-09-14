@@ -39,6 +39,11 @@ def git(root, *args, data=None, limit=MANIFEST_BYTES, isolated=False):
         env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
     command = ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
                "-c", "protocol.allow=never", "-c", "protocol.file.allow=always", *args]
+    return run_command(root, command, data=data, limit=limit, env=env, label="Git")
+
+
+def run_command(root, command, *, data=None, limit=MANIFEST_BYTES, env=None, label="Command", timeout=120):
+    """Bound output and wall time for a fixed caller-owned command, without a shell."""
     with tempfile.TemporaryFile() as inputs:
         if data is not None:
             inputs.write(data)
@@ -49,14 +54,14 @@ def git(root, *args, data=None, limit=MANIFEST_BYTES, isolated=False):
             size = 0
             error_chunks = []
             error_size = 0
-            deadline = time.monotonic() + 120
+            deadline = time.monotonic() + timeout
             try:
                 with selectors.DefaultSelector() as selector:
                     selector.register(process.stdout, selectors.EVENT_READ, "output")
                     selector.register(process.stderr, selectors.EVENT_READ, "errors")
                     while selector.get_map():
                         if time.monotonic() >= deadline:
-                            raise ValueError("Git operation timed out")
+                            raise ValueError(label + " operation timed out")
                         ready = selector.select(min(1, max(0, deadline - time.monotonic())))
                         for key, _ in ready:
                             chunk = os.read(key.fileobj.fileno(), 65536)
@@ -66,16 +71,16 @@ def git(root, *args, data=None, limit=MANIFEST_BYTES, isolated=False):
                             if key.data == "output":
                                 size += len(chunk)
                                 if size > limit:
-                                    raise ValueError("Git output exceeds source-package bound")
+                                    raise ValueError(label + " output exceeds source-package bound")
                                 chunks.append(chunk)
                             else:
                                 error_size += len(chunk)
                                 if error_size > 65536:
-                                    raise ValueError("Git diagnostics exceed source-package bound")
+                                    raise ValueError(label + " diagnostics exceed source-package bound")
                                 error_chunks.append(chunk)
                 result = process.wait(timeout=max(0.01, deadline - time.monotonic()))
                 if result:
-                    raise ValueError("Git operation failed: " + b"".join(error_chunks)[:4096].decode(errors="replace"))
+                    raise ValueError(label + " operation failed: " + b"".join(error_chunks)[:4096].decode(errors="replace"))
                 return b"".join(chunks)
             except BaseException:
                 try:
