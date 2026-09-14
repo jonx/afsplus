@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import struct
 import sys
 import tempfile
 import unittest
@@ -70,6 +71,34 @@ class RebuiltComparisonTests(unittest.TestCase):
             self.assertEqual(before, {p.name: p.read_bytes() for p in path.iterdir()})
             self.assertEqual(os.stat(output).st_mode & 0o777, 0o700)
             self.assertEqual(os.stat(output / "report.json").st_mode & 0o777, 0o600)
+
+    def test_internal_flight_is_compared_with_distinct_runner_identity(self):
+        for pages in (2, 4, 8, "unlimited"):
+            value = fixtures.fixture()
+            value.update(version=3, flight_capacity=1)
+            value["volume"]["tree_cache_pages"] = pages
+            path, records, success = self.original(value, name=f"internal-{pages}")
+            self.assertTrue(success)
+            report, success = self.compare(path, output=f"paired-{pages}")
+            self.assertTrue(success)
+            self.assertTrue(report["semantic_artifacts_equal"])
+            self.assertFalse(report["runner_identical"])
+            # Structurally valid re-sealed diagnostic alteration must still
+            # fail exact artifact comparison, despite unchanged recovered files.
+            changed = dict(records)
+            flight = bytearray(records["flight-recorder.bin"])
+            generation_offset = 16 + 29 + 12 + 16
+            generation = struct.unpack_from("<Q", flight, generation_offset)[0]
+            struct.pack_into("<Q", flight, generation_offset, generation + 1)
+            changed["flight-recorder.bin"] = bytes(flight)
+            edited = self.root / f"altered-{pages}"
+            tool.bundle.publish(edited, changed)
+            report, success = self.compare(edited, output=f"different-{pages}")
+            self.assertTrue(success)  # Recovered filesystem semantics still pass.
+            self.assertFalse(report["semantic_artifacts_equal"])
+            self.assertEqual(report["differing_roles"], ["flight-recorder.bin"])
+            result = self.cli(edited, self.root / f"different-cli-{pages}")
+            self.assertEqual(result.returncode, 2, result.stderr.decode())
 
     def test_semantic_failures_are_equal_but_never_reported_as_success(self):
         for operation_failure in (False, True):

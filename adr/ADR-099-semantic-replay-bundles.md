@@ -37,12 +37,25 @@ manifest is readable; integrity verification cannot prove that barrier completed
 accept a partial bundle. Keep failure and successful-qualification bundles distinct
 through explicit outcome fields; integrity alone cannot imply test success.
 
+## Internal diagnostic profile
+
+An opt-in versioned scenario profile retains bounded internal commit-tail events
+inside each semantic operation record. Bind ring capacity, event kinds, runtime
+attempt/sequence identities and cumulative loss to the artifact contract. Drain
+between operations so previously captured records do not become reported losses.
+Carry recorder identity through explicit remounts without claiming coverage of
+uninstrumented mount recovery. Validate counts, loss/sequence consistency and
+scenario-policy agreement before replay. Existing operation-only profiles retain
+their original format. A selected cut preserves the full recording as context;
+post-cut events are not claimed to have occurred on the cut device.
+
 ## Minimization contract
 
 A minimizer starts from a reproducing failure and tests deletion of semantic
 operation ranges under the same deterministic settings and fault model. Invalid
 label dependencies are rejected candidates. Retain a reduction only when the
-same observable failure signature, including any explicit cache profile, recurs; an unrelated parser error, resource
+same observable failure signature, including any explicit cache and diagnostic
+capacity profile, recurs; an unrelated parser error, resource
 refusal or missing prerequisite cannot replace the original failure. Preserve the
 original bundle and publish a new complete bundle for the reduced reproducer.
 

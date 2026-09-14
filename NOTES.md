@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Bind internal commit diagnostics to semantic replay](#2026-09-14---bind-internal-commit-diagnostics-to-semantic-replay)
 - [2026-09-14 - Observe the common checkpoint publication tail](#2026-09-14---observe-the-common-checkpoint-publication-tail)
 - [2026-09-14 - Automate retained-host replay reconstruction](#2026-09-14---automate-retained-host-replay-reconstruction)
 - [2026-09-14 - Reconstruct replay with copied tools and SDK](#2026-09-14---reconstruct-replay-with-copied-tools-and-sdk)
@@ -134,6 +135,30 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Bind internal commit diagnostics to semantic replay
+
+Added optional bounded per-operation capture to the semantic runner, carrying the
+same ring through explicit remounts and draining it between operations. A one-record
+ring reports exact overwrites; already exported records never inflate loss counts.
+Scenario version 3 binds cache policy and a 1..256 event capacity, exporting
+AFSFLT02 internal records alongside semantic identities and block ranges. Older
+profiles preserve their operation-only bytes. Admission checks capacity, bounded
+records, identities, sequence/loss consistency and malformed/trailing input.
+Minimization binds diagnostic capacity; selected-cut traces remain full recording
+context rather than a claim about post-cut execution.
+
+The 12 Rust scenario tests and 16 Python semantic tests pass, including four-profile
+byte/I/O equality, failed commits, fresh-process replay, overwritten records,
+resealed corruption, minimized failure and selected cuts. Seven scenario-admission
+Python tests and ten rebuilt-comparison tests pass, including a distinct runner
+identity and a changed internal event that leaves semantic results passing but
+fails artifact comparison and returns CLI status 2. These wrapper-based tests do
+not attest an independent compilation. Formatting and all-target/all-feature
+Clippy pass; full offline workspace validation passes with 516 tests passed,
+10 ignored and none failed. Documentation validation and its 13 tests pass. API-wide
+identities, category masks, callbacks and other internal subsystem/recovery coverage
+remain in the Stage A queue; no on-disk or hardware claim changes.
 
 ## 2026-09-14 - Observe the common checkpoint publication tail
 

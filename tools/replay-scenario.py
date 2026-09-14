@@ -49,11 +49,15 @@ def validate(encoded):
     if not isinstance(encoded, bytes) or len(encoded) > MAX_INPUT:
         raise ValueError("scenario input limit")
     scenario = json.loads(encoded, object_pairs_hook=unique)
-    fields(scenario, "version volume operations expected")
-    version = integer(scenario["version"], 1, 2)
+    if not isinstance(scenario, dict):
+        raise ValueError("scenario must be an object")
+    version = integer(scenario.get("version"), 1, 3)
+    fields(scenario, "version volume operations expected" + (" flight_capacity" if version == 3 else ""))
+    if version == 3:
+        integer(scenario["flight_capacity"], 1, 256)
     volume = scenario["volume"]
-    fields(volume, "block_size blocks region_size log_slots" + (" tree_cache_pages" if version == 2 else ""))
-    if version == 2:
+    fields(volume, "block_size blocks region_size log_slots" + (" tree_cache_pages" if version >= 2 else ""))
+    if version >= 2:
         pages = volume["tree_cache_pages"]
         if not ((type(pages) is int and pages in (2, 4, 8)) or pages == "unlimited"):
             raise ValueError("unsupported scenario tree cache profile")
@@ -137,9 +141,12 @@ def compile_commands(encoded):
     volume = scenario["volume"]
     lines = ["AFSPSC01", "format {} {} {} {}".format(
         volume["block_size"], volume["blocks"], volume["region_size"], volume["log_slots"])]
-    if scenario["version"] == 2:
+    if scenario["version"] >= 2:
         lines[0] = "AFSPSC02"
         lines[1] += " " + str(volume["tree_cache_pages"])
+    if scenario["version"] == 3:
+        lines[0] = "AFSPSC03"
+        lines[1] += " " + str(scenario["flight_capacity"])
     for operation in scenario["operations"]:
         kind = operation["op"]
         if kind in ("mkdir", "create"):

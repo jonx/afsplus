@@ -90,6 +90,13 @@ impl FlightRecorder {
         self.events.iter()
     }
 
+    /// Remove retained events without releasing storage or resetting identities
+    /// and the cumulative dropped count. Consumed events cannot later count as
+    /// overwritten records when a consumer captures the next operation.
+    pub fn drain(&mut self) -> impl ExactSizeIterator<Item = Event> + '_ {
+        self.events.drain(..)
+    }
+
     pub fn capacity(&self) -> usize {
         self.limit
     }

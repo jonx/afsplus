@@ -37,6 +37,7 @@ pub enum Operation {
 pub struct Plan {
     // None identifies the original version-1 default profile.
     cache_profile: Option<usize>,
+    flight_capacity: Option<usize>,
     blocks: u64,
     region: u32,
     log_slots: u16,
@@ -49,6 +50,26 @@ pub struct Event {
     pub end_block_operation: usize,
     pub object_id: u64,
     pub success: bool,
+    pub flight: Option<FlightBatch>,
+}
+
+/// Common commit-tail events for this semantic operation. Mount recovery is
+/// outside this first diagnostic scope; an empty batch is not coverage proof.
+#[derive(Debug)]
+pub struct FlightBatch {
+    pub events: Vec<afsplus_core::flight::Event>,
+    pub dropped_total: u64,
+}
+
+fn capture_flight<D: BlockDevice>(volume: &mut afsplus_core::Volume<D>) -> Option<FlightBatch> {
+    let mut ring = volume.replace_flight_recorder(None)?;
+    let events = ring.drain().collect();
+    let dropped_total = ring.dropped();
+    volume.replace_flight_recorder(Some(ring));
+    Some(FlightBatch {
+        events,
+        dropped_total,
+    })
 }
 pub struct Run {
     pub events: Vec<Event>,
@@ -198,11 +219,20 @@ impl Plan {
         let input = std::str::from_utf8(wire).map_err(|_| "scenario wire UTF-8")?;
         let mut lines = input.lines();
         let version = lines.next();
-        if !matches!(version, Some("AFSPSC01" | "AFSPSC02")) {
+        if !matches!(version, Some("AFSPSC01" | "AFSPSC02" | "AFSPSC03")) {
             return Err("scenario protocol version".into());
         }
         let mut header: Vec<_> = lines.next().ok_or("missing geometry")?.split(' ').collect();
-        let cache_profile = if version == Some("AFSPSC02") {
+        let flight_capacity = if version == Some("AFSPSC03") {
+            let capacity = integer(header.pop().ok_or("missing flight capacity")?, 256)? as usize;
+            if capacity == 0 {
+                return Err("zero flight capacity".into());
+            }
+            Some(capacity)
+        } else {
+            None
+        };
+        let cache_profile = if matches!(version, Some("AFSPSC02" | "AFSPSC03")) {
             Some(match header.pop() {
                 Some("2") => 2,
                 Some("4") => 4,
@@ -292,6 +322,7 @@ impl Plan {
         }
         Ok(Self {
             cache_profile,
+            flight_capacity,
             blocks,
             region,
             log_slots,
@@ -302,6 +333,10 @@ impl Plan {
         self.run_with_limits(RecordingLimits::default())
     }
     /// Explicit v2 resource profile; v1 keeps its original unlimited contract.
+    pub fn flight_capacity(&self) -> Option<usize> {
+        self.flight_capacity
+    }
+
     pub fn cache_profile(&self) -> Option<usize> {
         self.cache_profile
     }
@@ -318,6 +353,31 @@ impl Plan {
         inspect_checked_with_options(image, max_bytes, self.mount_options())
     }
     pub fn run_with_limits(&self, limits: RecordingLimits) -> Result<Run, String> {
+        match self.flight_capacity {
+            Some(capacity) => self.run_with_flight(limits, capacity),
+            None => self.run_observed(limits, None),
+        }
+    }
+
+    /// Retain at most 256 internal events per operation (1024 operations max).
+    /// The recorder is carried across remounts, but mount-time recovery events
+    /// are not yet instrumented. Existing run methods keep diagnostics disabled.
+    pub fn run_with_flight(&self, limits: RecordingLimits, capacity: usize) -> Result<Run, String> {
+        if !(1..=256).contains(&capacity) {
+            return Err("scenario flight capacity must be 1..=256".into());
+        }
+        let ring = afsplus_core::flight::FlightRecorder::new(
+            std::num::NonZeroUsize::new(capacity).unwrap(),
+        )
+        .map_err(|e| e.to_string())?;
+        self.run_observed(limits, Some(ring))
+    }
+
+    fn run_observed(
+        &self,
+        limits: RecordingLimits,
+        flight: Option<afsplus_core::flight::FlightRecorder>,
+    ) -> Result<Run, String> {
         let mut base = MemoryBackend::new(4096, self.blocks);
         mkfs(
             &mut base,
@@ -351,6 +411,7 @@ impl Plan {
                 ))
             }
         };
+        volume.replace_flight_recorder(flight);
         // id, parent id, original name, directory kind; labels never select host paths.
         let mut labels = BTreeMap::from([(
             "root".to_owned(),
@@ -378,6 +439,7 @@ impl Plan {
                 .map(|v| v.0)
                 .unwrap_or(0);
             if matches!(op, Operation::Remount) {
+                let mut flight = volume.replace_flight_recorder(None);
                 drop(volume);
                 volume = match mount_with_options(recorder.clone(), self.mount_options()) {
                     Ok(volume) => volume,
@@ -388,6 +450,10 @@ impl Plan {
                             end_block_operation: recorder.0.borrow().log.len(),
                             object_id: 0,
                             success: false,
+                            flight: flight.as_mut().map(|ring| FlightBatch {
+                                events: ring.drain().collect(),
+                                dropped_total: ring.dropped(),
+                            }),
                         });
                         return Ok(finish(
                             base,
@@ -397,12 +463,14 @@ impl Plan {
                         ));
                     }
                 };
+                volume.replace_flight_recorder(flight);
                 events.push(Event {
                     operation: index,
                     first_block_operation,
                     end_block_operation: recorder.0.borrow().log.len(),
                     object_id: 0,
                     success: true,
+                    flight: capture_flight(&mut volume),
                 });
                 continue;
             }
@@ -496,6 +564,7 @@ impl Plan {
                     .map(|v| v.0)
                     .unwrap_or(previous_id),
                 success: result.is_ok(),
+                flight: capture_flight(&mut volume),
             });
             if let Err(error) = result {
                 failure = Some((index, error));

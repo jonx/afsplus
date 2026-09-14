@@ -172,10 +172,10 @@ def bind_cache_profile(value, actual):
     """Admitted configuration and observed policy must agree before replay."""
     if not isinstance(actual, dict):
         raise ValueError("observation object")
-    expected_version = 3 if value["version"] == 2 else 2
+    expected_version = 3 if value["version"] >= 2 else 2
     if type(actual.get("version")) is not int or actual["version"] != expected_version:
         raise ValueError("scenario/observation profile version binding")
-    if value["version"] == 2:
+    if value["version"] >= 2:
         expected = value["volume"]["tree_cache_pages"]
         observed = actual.get("cache_pages")
         if type(observed) is not type(expected) or observed != expected:
@@ -281,21 +281,57 @@ def validate_trace(records):
     if offset != len(wire) - 32:
         raise ValueError("block trace trailing records")
     flight = records["flight-recorder.bin"]
-    if len(flight) < 12 or flight[:8] != b"AFSFLT01":
+    internal = scenario_value["version"] == 3
+    magic = b"AFSFLT02" if internal else b"AFSFLT01"
+    if len(flight) < 12 or flight[:8] != magic:
         raise ValueError("flight version")
     events = struct.unpack("<I", flight[8:12])[0]
-    if events > 1024 or len(flight) != 12 + 29 * events:
+    if events > 1024 or events > len(scenario_value["operations"]):
         raise ValueError("flight event admission")
+    offset = 12
+    capacity = None
+    if internal:
+        if len(flight) < 16:
+            raise ValueError("flight capacity header")
+        capacity = struct.unpack("<I", flight[12:16])[0]
+        if capacity != scenario_value["flight_capacity"]:
+            raise ValueError("flight capacity differs from scenario")
+        offset = 16
     end = 0
     ranges = []
+    sequence = attempt = dropped = 0
     for index in range(events):
-        operation, first, last, _, success = struct.unpack("<IQQQB", flight[12 + 29 * index:41 + 29 * index])
+        if len(flight) - offset < 29:
+            raise ValueError("flight truncated operation")
+        operation, first, last, _, success = struct.unpack("<IQQQB", flight[offset:offset + 29])
+        offset += 29
         if operation != index or not end <= first <= last <= count or success not in (0, 1):
             raise ValueError("flight block range")
         if not success and index != events - 1:
             raise ValueError("flight continued past failure")
         end = last
         ranges.append((first, last))
+        if internal:
+            if len(flight) - offset < 12:
+                raise ValueError("flight truncated batch")
+            lost, retained = struct.unpack("<QI", flight[offset:offset + 12])
+            offset += 12
+            if retained > capacity or lost < dropped or (lost > dropped and retained != capacity):
+                raise ValueError("flight loss accounting")
+            if len(flight) - offset < retained * 26:
+                raise ValueError("flight truncated internal event")
+            sequence += lost - dropped
+            dropped = lost
+            for _ in range(retained):
+                seq, tx, generation, kind, remount = struct.unpack("<QQQBB", flight[offset:offset + 26])
+                offset += 26
+                if (seq != sequence + 1 or tx < attempt or tx == 0 or tx > seq
+                        or generation == 0 or kind not in range(1, 8) or remount not in (0, 1)
+                        or (kind == 6 and remount)):
+                    raise ValueError("flight internal identity or event")
+                sequence, attempt = seq, tx
+    if offset != len(flight):
+        raise ValueError("flight trailing records")
     fault = admit_fault(json.loads(records["fault-model.json"], object_pairs_hook=bundle._unique),
                         scenario_value)
     selection = None
@@ -467,8 +503,10 @@ def failure_signature(records):
     value = scenario.validate(records["operations.afstrace"])
     bind_cache_profile(value, actual)
     def pack(signature):
-        if value["version"] == 2:
+        if value["version"] >= 2:
             signature["tree_cache_pages"] = value["volume"]["tree_cache_pages"]
+        if value["version"] == 3:
+            signature["flight_capacity"] = value["flight_capacity"]
         return encoded(signature)
     if actual["failure"] is not None:
         failure = actual["failure"]

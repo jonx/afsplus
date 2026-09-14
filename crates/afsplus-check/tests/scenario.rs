@@ -6,6 +6,87 @@ use afsplus_core::mount;
 const LADDER: &[u8] = b"AFSPSC01\nformat 4096 256 64 8\nmkdir d root 737263\ncreate f d 636166c3a9 00ff\nwrite f 4 42\ntruncate f 2\nrename f root 6f7574\nrmdir d\ncreate spare root 74656d70 -\nunlink spare\nsync\nremount\n";
 
 #[test]
+fn internal_flight_correlates_operations_without_changing_profile_results() {
+    use afsplus_core::flight::EventKind;
+    for profile in ["2", "4", "8", "unlimited"] {
+        let wire = format!("AFSPSC02\nformat 4096 256 64 8 {profile}\ncreate a root 61 01\nremount\ncreate b root 62 02\n");
+        let plan = Plan::parse(wire.as_bytes()).unwrap();
+        let plain = plan.run().unwrap();
+        assert!(plain.events.iter().all(|e| e.flight.is_none()));
+        for capacity in [1, 6, 256] {
+            let observed = plan
+                .run_with_flight(RecordingLimits::default(), capacity)
+                .unwrap();
+            assert!(observed.failure.is_none());
+            assert_eq!(plain.log.len(), observed.log.len());
+            for (a, b) in plain.log.iter().zip(&observed.log) {
+                match (a, b) {
+                    (RecordedOp::Flush, RecordedOp::Flush) => (),
+                    (
+                        RecordedOp::Write { lba: a, data: x },
+                        RecordedOp::Write { lba: b, data: y },
+                    ) => {
+                        assert_eq!(a, b);
+                        assert_eq!(x, y);
+                    }
+                    _ => panic!("diagnostics changed block operations"),
+                }
+            }
+            for lba in 0..256 {
+                assert_eq!(plain.result.peek(lba), observed.result.peek(lba));
+            }
+            let batches: Vec<_> = observed
+                .events
+                .iter()
+                .map(|e| e.flight.as_ref().unwrap())
+                .collect();
+            assert!(
+                batches[1].events.is_empty(),
+                "remount does not invent coverage"
+            );
+            let first = batches[0].events.last().unwrap();
+            let last = batches[2].events.last().unwrap();
+            assert_eq!((first.sequence, first.attempt), (6, 1));
+            assert_eq!((last.sequence, last.attempt), (12, 2));
+            assert_eq!(last.kind, EventKind::Adopted);
+            assert_eq!(batches[2].dropped_total, if capacity == 1 { 10 } else { 0 });
+            assert_eq!(batches[0].events.len(), capacity.min(6));
+            assert_eq!(batches[2].events.len(), capacity.min(6));
+        }
+        for capacity in [0, 257, usize::MAX] {
+            assert!(plan
+                .run_with_flight(RecordingLimits::default(), capacity)
+                .is_err());
+        }
+    }
+}
+
+#[test]
+fn diagnostic_capture_preserves_failed_commit_evidence() {
+    use afsplus_core::flight::EventKind;
+    let plan = Plan::parse(b"AFSPSC01\nformat 4096 256 64 8\ncreate a root 61 01\n").unwrap();
+    let run = plan
+        .run_with_flight(
+            RecordingLimits {
+                operations: 0,
+                payload_bytes: 0,
+            },
+            8,
+        )
+        .unwrap();
+    assert!(run.failure.is_some());
+    assert!(!run.events[0].success);
+    let trace = run.events[0].flight.as_ref().unwrap();
+    assert_eq!(trace.events.first().unwrap().kind, EventKind::Begin);
+    assert_eq!(trace.events.last().unwrap().kind, EventKind::Failed);
+    assert!(!trace.events.last().unwrap().requires_remount);
+    assert_eq!(trace.dropped_total, 0);
+    for lba in 0..256 {
+        assert_eq!(run.base.peek(lba), run.result.peek(lba));
+    }
+}
+
+#[test]
 fn version_two_ladder_and_checked_observation_preserve_every_cache_profile() {
     for (profile, pages) in [("2", 2), ("4", 4), ("8", 8), ("unlimited", usize::MAX)] {
         let wire = std::str::from_utf8(LADDER).unwrap().replacen(

@@ -32,6 +32,7 @@
 - [Copied host toolchain and SDK qualification](#copied-host-toolchain-and-sdk-qualification)
 - [Automated host reconstruction](#automated-host-reconstruction)
 - [Common checkpoint-tail flight recorder](#common-checkpoint-tail-flight-recorder)
+- [Internal diagnostic bundles](#internal-diagnostic-bundles)
 
 <!-- /toc -->
 
@@ -959,9 +960,10 @@ started; they do not claim which state survived a real power loss.
 The recorder defaults to disabled, performs no clock reads, stores no names or
 payloads and adds no on-disk fields. The ring capacity bounds its event storage,
 not total filesystem or process memory. The first scope does not yet provide
-API-wide identities, category masks, live callbacks, a serialized binary export,
-or allocator/tree/cache/intent-log/recovery events. The semantic runner's existing
-`flight-recorder.bin` is still its operation trace, not this internal ring.
+API-wide identities, category masks, live callbacks,
+or allocator/tree/cache/intent-log/recovery events. Internal export is provided by
+the opt-in [version-3 bundle profile](#internal-diagnostic-bundles); older semantic
+profiles retain their original operation-only flight artifact.
 Those integration requirements remain open under [ADR-023](../adr/ADR-023-developer-observability.md)
 and [observability](../docs/26-debug-observability.md).
 
@@ -971,3 +973,53 @@ retry after a metadata barrier fault, checkpoint-write and final-barrier failure
 and failed adoption after a successful barrier. The recorder unit test exercises
 fixed allocation capacity and identifier exhaustion. These are host observations;
 they neither qualify a physical provider nor close all publication-family gates.
+
+## Internal diagnostic bundles
+
+Semantic JSON version 3 requires the version-2 `volume.tree_cache_pages` policy
+and a top-level integer `flight_capacity` from 1 through 256. Its `AFSPSC03`
+wire header adds that capacity after the cache profile. Version 1 and 2 scenarios
+keep their previous bytes and disabled internal recording. Version 3 execution
+uses `Plan::run_with_flight`; the in-process API also permits diagnostic capture
+for earlier scenario plans without changing their serialized contracts.
+
+The core ring is drained after each semantic operation while retaining its
+sequence, attempt identity and cumulative dropped count. It is transferred across
+explicit remounts. Initial mount, remount-time recovery and final inspection are
+not yet internally instrumented; an empty batch cannot establish their coverage.
+The operation index, resolved object and block-log range in the enclosing semantic
+record correlate retained commit events with the initiating operation. Internal
+attempt IDs are not yet API-wide filesystem transaction identities.
+
+`flight-recorder.bin` uses `AFSFLT02`: eight magic bytes, a little-endian u32
+operation count and a u32 ring capacity. Each operation retains its original
+29-byte `(operation:u32, first:u64, end:u64, object:u64, success:u8)` record,
+followed by cumulative dropped events (u64), retained count (u32), and that many
+26-byte `(sequence:u64, attempt:u64, generation:u64, kind:u8, requires_remount:u8)`
+records. Kind codes 1 through 7 denote begin, queued-data completion, metadata
+barrier completion, publication begin, checkpoint barrier completion, adoption
+and failure. The integer encoding is little-endian; booleans are exactly 0 or 1.
+At most 1024 operations and 256 retained internal events per operation are admitted.
+This bounds captured diagnostics separately from image, block-log and core memory.
+
+Bundle admission binds the capacity to the scenario and rejects unknown versions,
+truncation, trailing bytes, invalid kinds/booleans/identities, nonmonotonic loss,
+oversized batches and sequences inconsistent with reported overwrites. Draining
+prevents already exported events from being counted as subsequently lost. Exact
+replay and rebuilt comparison include the internal artifact bytes; minimization
+binds the diagnostic capacity as well as cache policy in its failure signature.
+
+A selected crash bundle retains the full original recording and its selected
+block-log cut. Events after that cut describe the original recording, not actions
+observed on the simulated cut device. The independent recovered-state checks
+remain the crash verdict; neither a trace nor its manifest proves durability.
+
+The [scenario tests](../crates/afsplus-check/tests/scenario.rs) verify operation
+correlation across remount, failed commits, loss reporting and unchanged block
+operations/image bytes at all four cache profiles. The [Python integration tests](../tools/test-afsptest.py)
+exercise fresh-process private replay, preserved input bundles, resealed malformed
+records, minimized failures and selected cuts. [Rebuilt-comparison tests](../tools/test-rebuilt-comparison.py)
+verify distinct runner identity and refusal of changed internal events despite
+passing recovered semantics; a delegating runner tests the comparison contract,
+not independent build provenance. Category selection, callbacks and
+other internal subsystems retain their [queue gate](../implementation/audit-work-queue.md#complete-work-queue).

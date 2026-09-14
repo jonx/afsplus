@@ -172,15 +172,45 @@ fn run() -> Result<(), String> {
         }
     }
     // Semantic flight records bind operation indices and resolved object IDs to
-    // half-open successful block-log ranges. They are not transaction-internal events.
-    let mut flight = b"AFSFLT01".to_vec();
+    // half-open successful block-log ranges. V2 additionally carries internal
+    // commit-tail batches, including explicit ring-loss accounting.
+    let mut flight = if plan.flight_capacity().is_some() {
+        b"AFSFLT02"
+    } else {
+        b"AFSFLT01"
+    }
+    .to_vec();
     flight.extend_from_slice(&(run.events.len() as u32).to_le_bytes());
+    if let Some(capacity) = plan.flight_capacity() {
+        flight.extend_from_slice(&(capacity as u32).to_le_bytes());
+    }
     for event in run.events {
         flight.extend_from_slice(&(event.operation as u32).to_le_bytes());
         flight.extend_from_slice(&(event.first_block_operation as u64).to_le_bytes());
         flight.extend_from_slice(&(event.end_block_operation as u64).to_le_bytes());
         flight.extend_from_slice(&event.object_id.to_le_bytes());
         flight.push(u8::from(event.success));
+        if plan.flight_capacity().is_some() {
+            use afsplus_core::flight::EventKind;
+            let batch = event.flight.ok_or("missing internal flight batch")?;
+            flight.extend_from_slice(&batch.dropped_total.to_le_bytes());
+            flight.extend_from_slice(&(batch.events.len() as u32).to_le_bytes());
+            for internal in batch.events {
+                flight.extend_from_slice(&internal.sequence.to_le_bytes());
+                flight.extend_from_slice(&internal.attempt.to_le_bytes());
+                flight.extend_from_slice(&internal.generation.to_le_bytes());
+                flight.push(match internal.kind {
+                    EventKind::Begin => 1,
+                    EventKind::DataWritesComplete => 2,
+                    EventKind::MetadataDurable => 3,
+                    EventKind::PublicationBegin => 4,
+                    EventKind::CheckpointDurable => 5,
+                    EventKind::Adopted => 6,
+                    EventKind::Failed => 7,
+                });
+                flight.push(u8::from(internal.requires_remount));
+            }
+        }
     }
     let mut out = io::BufWriter::new(io::stdout().lock());
     out.write_all(b"AFSRUN01").map_err(|e| e.to_string())?;
