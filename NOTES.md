@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Explain each completion-table entry](#2026-09-14--explain-each-completion-table-entry)
 - [2026-09-14 — Require checker evidence in replay verdicts](#2026-09-14--require-checker-evidence-in-replay-verdicts)
 - [2026-09-14 — Show completion on individual stage and phase entries](#2026-09-14--show-completion-on-individual-stage-and-phase-entries)
 - [2026-09-14 — Bind selected crash states to replay bundles](#2026-09-14--bind-selected-crash-states-to-replay-bundles)
@@ -122,6 +123,15 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Explain each completion-table entry
+
+Added readable Task and Stage / phase columns beside the stable item IDs.
+Descriptions come from the actual list entries and link directly to their
+containing stage or implementation phase. Navigation generation updates them
+when source wording changes, preserves completion status and evidence, and
+rebases source links for the milestone document. Added a regression covering
+nested stage headings, implementation phases, renamed tasks and idempotence.
 
 ## 2026-09-14 — Require checker evidence in replay verdicts
 

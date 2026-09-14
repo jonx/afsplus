@@ -158,7 +158,9 @@ deliverable/acceptance lists must also be struck through. Record each marked
 item's status and evidence in
 [the item table](../implementation/milestones.md#individual-list-item-completion).
 A stable hidden progress marker binds the list entry to that record; the
-navigation generator adds or removes strikethrough. Mark an item complete only
+navigation generator adds or removes strikethrough and fills the item table's
+Task and Stage / phase columns from the source list and heading. These readable
+descriptions and navigation links must stay synchronized with the lists. Mark an item complete only
 when its own stated scope is satisfied. Partial, unverified and ongoing entries
 stay unstruck, even if a related component is implemented. A frozen-format item
 requires the freeze decision; an implementation alone does not close it.

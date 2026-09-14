@@ -128,6 +128,30 @@ class ItemProgressTests(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def test_item_descriptions_follow_task_and_containing_stage(self):
+        module = self.module()
+        text = ("## \[Stage B\]: architecture\n"
+                "### B4. Core structures\n"
+                "- ~~[directory tree](crates/tree.rs)~~ <!-- progress: tree -->\n")
+        descriptions = module.item_descriptions(text, "ROADMAP.md")
+        self.assertEqual(descriptions["tree"], (
+            "[directory tree](../crates/tree.rs)",
+            "[Stage B / B4. Core structures](../ROADMAP.md#b4-core-structures)"))
+        old = "| Item | Status | Evidence |\n|---|---|---|\n| tree | Complete | [proof](proof.md) |\n"
+        rendered = module.describe_item_table(old, descriptions)
+        self.assertIn("| Task | Stage / phase |", rendered)
+        self.assertEqual(module.item_states(rendered), {"tree": 2})
+        self.assertEqual(module.describe_item_table(rendered, descriptions), rendered)
+        changed = module.item_descriptions(text.replace("directory tree", "bounded directories"), "ROADMAP.md")
+        refreshed = module.describe_item_table(rendered, changed)
+        self.assertIn("[bounded directories]", refreshed)
+        self.assertNotIn("[directory tree]", refreshed)
+        phase = module.item_descriptions(
+            "## Phase 1: portable reader\n- object read <!-- progress: read -->\n",
+            "implementation/implementation-plan.md")
+        self.assertEqual(phase["read"][1],
+                         "[Phase 1: portable reader](implementation-plan.md#phase-1-portable-reader)")
+
     def test_item_completion_reopens_and_ongoing_stays_unstruck(self):
         module = self.module()
         text = "- [component](code.rs) <!-- progress: component -->\n"
