@@ -63,6 +63,22 @@ pub struct AllocationPage {
     pub eof: bool,
 }
 
+/// Knowledge about one captured metadata inventory, not transport completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryKnowledge {
+    /// The provider inspected the complete inventory and found no entries.
+    Empty,
+    /// Entries exist; their complete lossless transport is required separately.
+    Present,
+    /// The provider cannot establish whether entries exist or are complete.
+    Uninspected,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetadataInventory {
+    pub attributes: InventoryKnowledge,
+    pub security: InventoryKnowledge,
+}
+
 /// Trusted provider contract. Implementations expose semantic objects, never
 /// allocation addresses. Hosts must not expose this unchecked interface to
 /// untrusted backup clients. A cursor alone must not retain a view.
@@ -75,6 +91,19 @@ pub trait SnapshotBackend {
     fn open(&mut self, id: u64) -> Result<Self::View, VfsError>;
     fn info(&mut self, view: &Self::View) -> Result<ViewInfo, VfsError>;
     fn stat(&mut self, view: &Self::View, object: ObjectId) -> Result<Stat, VfsError>;
+    /// Inspect the captured object's inventory knowledge. Missing enumeration
+    /// never implies absence. The fallback validates object/view through stat.
+    fn metadata_inventory(
+        &mut self,
+        view: &Self::View,
+        object: ObjectId,
+    ) -> Result<MetadataInventory, VfsError> {
+        self.stat(view, object)?;
+        Ok(MetadataInventory {
+            attributes: InventoryKnowledge::Uninspected,
+            security: InventoryKnowledge::Uninspected,
+        })
+    }
     fn read(
         &mut self,
         view: &Self::View,
@@ -242,6 +271,14 @@ impl<P: SnapshotBackend> BackupService<P> {
     ) -> Result<Stat, BackupError> {
         let _permit = self.reader_permit(reader)?;
         Ok(self.backend.stat(&reader.0.view, object)?)
+    }
+    pub fn metadata_inventory(
+        &mut self,
+        reader: &BackupReader<P::View>,
+        object: ObjectId,
+    ) -> Result<MetadataInventory, BackupError> {
+        let _permit = self.reader_permit(reader)?;
+        Ok(self.backend.metadata_inventory(&reader.0.view, object)?)
     }
     pub fn read(
         &mut self,
@@ -430,6 +467,13 @@ impl<P: SnapshotBackend> BackupClient<'_, P> {
     ) -> Result<Stat, BackupError> {
         self.0.stat(reader, object)
     }
+    pub fn metadata_inventory(
+        &mut self,
+        reader: &BackupReader<P::View>,
+        object: ObjectId,
+    ) -> Result<MetadataInventory, BackupError> {
+        self.0.metadata_inventory(reader, object)
+    }
     pub fn read(
         &mut self,
         reader: &BackupReader<P::View>,
@@ -483,8 +527,35 @@ mod authority_tests {
         fn info(&mut self, _: &()) -> Result<ViewInfo, VfsError> {
             unreachable!()
         }
-        fn stat(&mut self, _: &(), _: ObjectId) -> Result<Stat, VfsError> {
-            unreachable!()
+        fn stat(&mut self, _: &(), object: ObjectId) -> Result<Stat, VfsError> {
+            assert!(matches!(
+                self.grant.as_ref().unwrap().0 .0.active.try_write(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            if object != 1 {
+                return Err(VfsError::NotFound);
+            }
+            Ok(Stat {
+                object_id: object,
+                kind: crate::NodeKind::File,
+                size: 0,
+                allocated_size: 0,
+                links: 1,
+                protection: 0,
+                created: Timespec {
+                    seconds: 0,
+                    nanoseconds: 0,
+                },
+                modified: Timespec {
+                    seconds: 0,
+                    nanoseconds: 0,
+                },
+                changed: Timespec {
+                    seconds: 0,
+                    nanoseconds: 0,
+                },
+                content_generation: 1,
+            })
         }
         fn allocations(
             &mut self,
@@ -535,5 +606,41 @@ mod authority_tests {
             service.read(&reader, 1, 0, &mut []),
             Err(BackupError::Denied)
         );
+    }
+    #[test]
+    fn missing_inventory_support_is_unknown_and_admission_covers_fallback() {
+        let (mut service, authority) = BackupService::new(Probe { grant: None }, 1).unwrap();
+        let grant = authority.grant();
+        service.backend_mut().grant = Some(grant.clone());
+        let reader = service.client().open(&grant, 1).unwrap();
+        let unknown = MetadataInventory {
+            attributes: InventoryKnowledge::Uninspected,
+            security: InventoryKnowledge::Uninspected,
+        };
+        assert_eq!(service.client().metadata_inventory(&reader, 1), Ok(unknown));
+        assert_eq!(
+            service.client().metadata_inventory(&reader, 2),
+            Err(BackupError::Filesystem(VfsError::NotFound))
+        );
+        let (mut other, _) = BackupService::new(Probe { grant: None }, 1).unwrap();
+        // Its provider would panic if wrong-service admission reached stat.
+        assert_eq!(
+            other.client().metadata_inventory(&reader, 1),
+            Err(BackupError::Denied)
+        );
+        authority.revoke(&grant).unwrap();
+        assert_eq!(
+            service.client().metadata_inventory(&reader, 1),
+            Err(BackupError::Denied)
+        );
+        let fresh = authority.grant();
+        assert_eq!(
+            service.client().metadata_inventory(&reader, 1),
+            Err(BackupError::Denied)
+        );
+        service.backend_mut().grant = Some(fresh.clone());
+        reader.close();
+        let reader = service.client().open(&fresh, 1).unwrap();
+        assert_eq!(service.client().metadata_inventory(&reader, 1), Ok(unknown));
     }
 }

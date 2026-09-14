@@ -24,6 +24,7 @@
 - [14. Destination restore authority](#14-destination-restore-authority)
 - [15. Captured allocation enumeration](#15-captured-allocation-enumeration)
 - [16. Destination reservation restoration](#16-destination-reservation-restoration)
+- [17. Captured metadata inventory knowledge](#17-captured-metadata-inventory-knowledge)
 
 <!-- /toc -->
 
@@ -306,3 +307,16 @@ Qualify later writes into reservations under near-full COW and snapshot pressure
 plus bounded traversal of fragmented existing layouts, before claiming capacity
 reservation guarantees for constrained profiles. The per-operation byte limit
 alone cannot prove either property.
+
+## 17. Captured metadata inventory knowledge
+
+Run `cargo test -p afsplus-vfs --all-features` for the default-provider and
+independent-provider inventory oracles. Missing enumeration support must validate
+the captured object and report both inventories uninspected. Missing objects
+must preserve their error category. A provider with inventory support must use
+captured values despite live changes. Wrong-service and revoked readers must
+fail before provider calls; a fresh grant cannot reactivate an old reader. The
+in-backend probe must observe the admission lock held during the fallback's stat.
+The AFS+ remount fixture must report uninspected inventories and issue zero
+writes/flushes, with a clean checker result. These gates qualify knowledge and
+authority, not lossless inventory transport or actual host authentication.

@@ -26,6 +26,7 @@ fn metadata(id: u64, kind: NodeKind, size: u64) -> Stat {
 }
 #[derive(Clone)]
 struct Captured {
+    inventory: MetadataInventory,
     file: Stat,
     data: Vec<u8>,
 }
@@ -40,6 +41,10 @@ impl MockFs {
     fn new() -> Self {
         Self {
             live: Captured {
+                inventory: MetadataInventory {
+                    attributes: InventoryKnowledge::Present,
+                    security: InventoryKnowledge::Empty,
+                },
                 file: metadata(2, NodeKind::File, 6),
                 data: b"before".to_vec(),
             },
@@ -103,6 +108,17 @@ impl SnapshotBackend for MockFs {
             2 => Ok(view.1.file.clone()),
             _ => Err(VfsError::NotFound),
         }
+    }
+    fn metadata_inventory(
+        &mut self,
+        view: &Self::View,
+        object: ObjectId,
+    ) -> Result<MetadataInventory, VfsError> {
+        self.calls += 1;
+        if object != 2 {
+            return Err(VfsError::NotFound);
+        }
+        Ok(view.1.inventory)
     }
     fn read(
         &mut self,
@@ -456,7 +472,19 @@ fn afsplus_uses_the_same_consumer_and_retains_history_through_remount() {
     assert_eq!(collect(&mut service.client(), &grant, id), expected);
     assert_eq!(service.backend_mut().lookup_root("file").unwrap(), None);
     let reader = service.open(&grant, id).unwrap();
+    // Missing inventory enumeration must not certify empty metadata after remount.
+    assert_eq!(
+        service.client().metadata_inventory(&reader, file),
+        Ok(MetadataInventory {
+            attributes: InventoryKnowledge::Uninspected,
+            security: InventoryKnowledge::Uninspected,
+        })
+    );
     authority.revoke(&grant).unwrap();
+    assert_eq!(
+        service.client().metadata_inventory(&reader, file),
+        Err(BackupError::Denied)
+    );
     assert_eq!(service.stat(&reader, file), Err(BackupError::Denied));
     reader.close();
     let mut traced = service.into_backend().into_device();
@@ -559,6 +587,41 @@ fn allocation_enumeration_is_neutral_bounded_and_revocable() {
     authority.revoke(&grant).unwrap();
     assert_eq!(
         service.allocations(&reader, 2, 0, 1),
+        Err(BackupError::Denied)
+    );
+    assert_eq!(service.backend_mut().calls, calls);
+}
+
+#[test]
+fn inventory_knowledge_is_captured_and_denial_never_reaches_provider() {
+    let (mut service, authority) = BackupService::new(MockFs::new(), 2).unwrap();
+    let grant = authority.grant();
+    let id = service.client().create(&grant, now(1)).unwrap();
+    let reader = service.client().open(&grant, id).unwrap();
+    let captured = MetadataInventory {
+        attributes: InventoryKnowledge::Present,
+        security: InventoryKnowledge::Empty,
+    };
+    assert_eq!(
+        service.client().metadata_inventory(&reader, 2),
+        Ok(captured)
+    );
+    service.backend_mut().live.inventory = MetadataInventory {
+        attributes: InventoryKnowledge::Empty,
+        security: InventoryKnowledge::Present,
+    };
+    assert_eq!(
+        service.client().metadata_inventory(&reader, 2),
+        Ok(captured)
+    );
+    assert_eq!(
+        service.client().metadata_inventory(&reader, 99),
+        Err(BackupError::Filesystem(VfsError::NotFound))
+    );
+    let calls = service.backend_mut().calls;
+    authority.revoke(&grant).unwrap();
+    assert_eq!(
+        service.client().metadata_inventory(&reader, 2),
         Err(BackupError::Denied)
     );
     assert_eq!(service.backend_mut().calls, calls);

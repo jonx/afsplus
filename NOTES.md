@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Inspect captured metadata knowledge through backup authority](#2026-09-14---inspect-captured-metadata-knowledge-through-backup-authority)
 - [2026-09-14 - Preserve exact object metadata and inventory knowledge](#2026-09-14---preserve-exact-object-metadata-and-inventory-knowledge)
 - [2026-09-14 - Bind local PAX records to streamed ordinary members](#2026-09-14---bind-local-pax-records-to-streamed-ordinary-members)
 - [2026-09-14 - Validate effective PAX member fields before restoration](#2026-09-14---validate-effective-pax-member-fields-before-restoration)
@@ -88,6 +89,25 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Inspect captured metadata knowledge through backup authority
+
+Added a filesystem-neutral fixed-size inventory-knowledge operation to the
+trusted provider, service and consumer facade. The conservative default validates
+the captured object through stat and reports uninspected attribute/security
+inventories. A complete provider may report empty or present from its captured
+view. Admission holds the original reader grant throughout inspection, with
+wrong-service and revocation rejection before backend access. Documented additive
+Rust compatibility and explicit C/native qualification boundaries.
+
+The independent provider test preserves captured inventory knowledge after live
+changes. Default-provider tests verify held authority, missing-object errors,
+revocation and fresh-grant isolation. The AFS+ remount fixture verifies
+uninspected results with zero writes/flushes and a clean checker. Validation
+passed: 392 workspace tests, zero failures, ten ignored tests; all 37 VFS tests
+including doctests; formatting, workspace Clippy, documentation checks, three
+checker fixtures and whitespace validation. Actual attribute/security enumeration
+and transport remain queue work; this result does not certify full preservation.
 
 ## 2026-09-14 - Preserve exact object metadata and inventory knowledge
 

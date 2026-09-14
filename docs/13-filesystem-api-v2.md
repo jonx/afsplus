@@ -21,6 +21,7 @@
 - [6. Rust](#6-rust)
 - [7. Zed](#7-zed)
 - [8. Trusted snapshot backup extension](#8-trusted-snapshot-backup-extension)
+  - [Captured metadata inventory knowledge](#captured-metadata-inventory-knowledge)
   - [Captured allocation enumeration](#captured-allocation-enumeration)
   - [Versioning and compatibility](#versioning-and-compatibility)
 - [9. Destination-scoped restore extension](#9-destination-scoped-restore-extension)
@@ -246,8 +247,8 @@ a volume UUID, snapshot ID or reader ID confers no authority. A support feature
 bit must never be treated as a grant. The host backend hook is privileged and
 must not be exposed through the consumer facade or an IPC request.
 
-Every create, delete, list, open, view-info, stat, directory-page and data-read
-operation checks authority before invoking the backend. Readers carry the grant
+Every create, delete, list, open, view-info, stat, inventory-inspection,
+allocation-page, directory-page and data-read operation checks authority before invoking the backend. Readers carry the grant
 under which they opened; a fresh grant does not reactivate an old reader. Cloned
 grants share revocation, and cloned readers share their original grant and lease.
 Wrong-service and revoked authority return `BackupError::Denied` without data
@@ -268,6 +269,29 @@ releases the provider view before returning its budget; cleanup does not require
 authorization. Deletion stays busy while any provider reader lease remains,
 including revoked readers. The host must clean up handles on client disconnect.
 Cursors alone confer no authority and do not pin views.
+
+### Captured metadata inventory knowledge
+
+`metadata_inventory(reader, object)` reports independent attribute and security
+inventory knowledge under [ADR-082](../adr/ADR-082-backup-object-metadata.md).
+`Empty` requires complete provider inspection; `Present` requires separate
+lossless enumeration and transport; `Uninspected` explicitly withholds a
+completeness assertion. Absence of enumeration support must never return empty.
+The default provider validates the captured object through `stat` and returns
+both inventories uninspected. Missing objects and provider errors propagate.
+
+The operation uses the original reader grant, with admission held throughout
+provider execution. Live metadata changes must not alter captured inventory
+knowledge. This fixed-size result allocates no inventory list and exposes no
+storage addresses. Attribute values and security descriptors require separately
+bounded enumeration/read operations before a consumer can preserve them.
+
+This additive Rust trait method has a conservative default for existing
+providers. It changes no C structure, native capability advertisement, disk
+record or classic DOS interface. A foreign or legacy adapter without inspection
+support reports uninspected; it must not claim full preservation on that basis.
+Actual provider completeness and constrained/native integration require their
+own qualification. Consumer-facing methods do not expose backend or issuer.
 
 ### Captured allocation enumeration
 
