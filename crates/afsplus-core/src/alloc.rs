@@ -325,6 +325,9 @@ impl TxAllocator {
             current.reclaim_root_block,
             current.generation,
             new_generation,
+            other.map_or(current.generation, |older| {
+                older.generation.min(current.generation)
+            }),
             batch_blocks,
         )?;
         let mut tx = TxAllocator {

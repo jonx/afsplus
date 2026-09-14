@@ -28,12 +28,12 @@ Use [typed tree access](../testing/book-review-qualification.md#typed-snapshot-t
 [allocator/quarantine binding](../testing/book-review-qualification.md#snapshot-allocator-and-quarantine-binding),
 [Volume orchestration](../testing/book-review-qualification.md#volume-snapshot-orchestration)
 and [exhaustive ownership checking](../testing/book-review-qualification.md#exhaustive-snapshot-checker)
-as component baselines. Implement the owner's [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
-decision: protect previous-checkpoint metadata and registered snapshots through
-slot replacement, with generation-aware quarantine and COW eligibility. Exercise
-both-slot crash oracles and measured low-space progress. Then qualify writable
-mount configuration, resource admission and the filesystem-neutral backup
-consumer. Keep historical-read and management authorization under Q5.
+and [previous-checkpoint retention](../testing/book-review-qualification.md#previous-checkpoint-retention)
+as component baselines. Qualify writable snapshot mount configuration with
+explicit work limits before recovery, then add a filesystem-neutral host API
+and real backup consumer. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
+with both-slot crash oracles, generation-aware quarantine and measured
+low-space progress. Keep historical-read and management authorization under Q5.
 Use `tree::read_key_page` for bounded inclusive-key seeking; persist the next
 physical key and make scan wrap explicit.
 

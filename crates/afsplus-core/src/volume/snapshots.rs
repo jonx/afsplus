@@ -28,6 +28,7 @@ pub struct SnapshotCommitStats {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SnapshotMaintenance {
+    pub blocked_by_checkpoint: bool,
     pub records_scanned: u64,
     pub blocks_transferred: u64,
     pub blocks_promoted: u64,
@@ -102,6 +103,32 @@ pub(super) enum SnapshotRegistryChange {
 }
 
 impl<D: BlockDevice> Volume<D> {
+    /// Preserve registered snapshots in either checkpoint (ADR-074). An
+    /// unreadable older registry cannot authorize optional in-place writes.
+    pub(super) fn snapshots_require_cow(&mut self) -> bool {
+        if self.state.snapshots.is_none() {
+            return false;
+        }
+        if self.state.snapshots.is_some_and(|state| state.views != 0) {
+            return true;
+        }
+        let Some(older) = self.other_checkpoint.as_ref() else {
+            return false;
+        };
+        let Some(roots) = older.snapshot_roots else {
+            // The immutable snapshot feature requires roots in every valid
+            // slot. Missing roots are uncertainty, not an empty registry.
+            return true;
+        };
+        snapshot::read_registry_state(
+            &mut self.dev,
+            &self.ident.geometry(),
+            roots.registry,
+            older.generation,
+        )
+        .map_or(true, |(_, count, _)| count != 0)
+    }
+
     fn snapshot_state(&self) -> Result<SnapshotMountState, CoreError> {
         self.state
             .snapshots
@@ -419,6 +446,7 @@ impl<D: BlockDevice> Volume<D> {
         }
         let stats = self.last_commit.expect("maintenance committed");
         Ok(SnapshotMaintenance {
+            blocked_by_checkpoint: stats.alloc.reclaim.blocked_by_checkpoint,
             records_scanned: stats.snapshots.records_scanned,
             blocks_transferred: stats.snapshots.blocks_transferred,
             blocks_promoted: stats.alloc.blocks_promoted,

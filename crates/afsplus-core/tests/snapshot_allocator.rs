@@ -402,10 +402,19 @@ fn retired_snapshot_storage_reaches_free_only_after_committed_quarantine_transfe
     assert!(h.bit(block));
     assert_eq!(h.queued(block), Some(5));
     let mut tx = h.begin(u64::MAX);
+    assert!(tx.allocate_exact_run(&mut h.dev, block, 1).is_err());
+    // G4 remains protected while G6 is prepared. Advance the checkpoint
+    // boundary without claiming storage queued at G5.
+    let mut tx = h.begin(u64::MAX);
+    seal(&mut h, &mut tx, vec![]);
+    h.commit(tx);
+    assert!(h.bit(block));
+    assert_eq!(h.queued(block), Some(5));
+    let mut tx = h.begin(u64::MAX);
     tx.allocate_exact_run(&mut h.dev, block, 1).unwrap();
     seal(&mut h, &mut tx, vec![]);
     h.commit(tx);
-    assert_eq!(h.tracked(block).unwrap().record.birth, 6);
+    assert_eq!(h.tracked(block).unwrap().record.birth, 7);
     assert!(h.bit(block));
     assert!(h.queued(block).is_none());
 }
@@ -502,4 +511,23 @@ fn every_transfer_publication_cut_preserves_ledger_or_quarantine_ownership() {
     println!(
         "snapshot_transfer_cut cases={cases} generations=4,5 missing_barrier_detected={detected}"
     );
+}
+
+#[test]
+fn missing_older_slot_adds_no_extra_quarantine_generation() {
+    let (mut h, block, run) = retire_one();
+    let mut tx = h.begin(u64::MAX);
+    seal(&mut h, &mut tx, vec![run]);
+    h.commit(tx);
+    h.dev
+        .write_block(h.ident.checkpoint_slots[1 - h.slot], &[0; 4096])
+        .unwrap();
+    let selected = select_checkpoint(&mut h.dev, &h.ident).unwrap();
+    assert!(selected.other.is_none());
+    h.older = selected.other;
+    let mut tx = h.begin(u64::MAX);
+    tx.allocate_exact_run(&mut h.dev, block, 1).unwrap();
+    seal(&mut h, &mut tx, vec![]);
+    h.commit(tx);
+    assert_eq!(h.tracked(block).unwrap().record.birth, 6);
 }

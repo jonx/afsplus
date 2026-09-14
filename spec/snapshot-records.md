@@ -152,7 +152,8 @@ previously retired run whose retirement is at most G. Consulting the original
 registry during creation is therefore safe; consulting it during deletion can
 conservatively delay release by a subsequent transaction. Transfer validation
 rechecks exact lifetimes and all views before sealing ownership changes.
-Report scanned records, scan wrap, transfers and physical promotions separately;
+Report scanned records, scan wrap, transfers, observed checkpoint blocking and
+physical promotions separately;
 zero net ordinary-queue reduction does not mean the retained scan is finished.
 
 The core experiment requires explicit edit, view and reclaim budgets. Selecting

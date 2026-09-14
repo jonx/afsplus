@@ -159,17 +159,19 @@ mandatory once the allocator recycles storage. Construct:
 ```text
 G1: create A -> physical block X
 G2: delete A -> X becomes retired, not free
-G3: after safe checkpoint retirement, X may become reusable; create B reuses X
+G3: publish maintenance while the G1 checkpoint still protects X
+G4: the oldest valid slot is G2; B transaction can reuse X for data or metadata
 ```
 
-Inject power loss after every relevant write and flush during G2 and G3.
+Inject power loss after every relevant write and flush during G2, G3 and G4.
 
 Allowed mounted states:
 
 ```text
 G1: A exists and its bytes are correct
 G2: A absent and X not unsafely reused
-G3: B exists and its bytes are correct
+G3: A absent, X quarantined, previous-checkpoint storage intact
+G4: B exists and its bytes are correct
 ```
 
 Forbidden:
@@ -181,6 +183,7 @@ same non-shared physical block owned by two live objects
 reuse before every checkpoint that can reach old contents is retired
 ```
 
-The executable form is the G1/G2/G3 quarantine matrix in
+The executable form is the G1/G2/G3/G4 quarantine matrix under
+[ADR-074](../adr/ADR-074-protect-previous-checkpoint.md) in
 [`crates/afsplus-check/tests/alloc_crash.rs`](../crates/afsplus-check/tests/alloc_crash.rs); the allocator design it exercises
 is [docs/07](../docs/07-allocation.md).

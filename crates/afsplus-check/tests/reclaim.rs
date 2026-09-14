@@ -50,12 +50,12 @@ fn format_volume(total: u64, region: u32, caps: ReclaimCaps) -> MemoryBackend {
     dev
 }
 
-/// Runs reclaim steps until the queue stops shrinking; returns steps taken.
-/// The queue never reaches zero: each step retires the previous root, so the
-/// steady state keeps one block cycling in quarantine.
+/// Drain this fixture's backlog to the two-root ADR-074 steady state.
+/// Zero net shrinkage can advance the protected generation; it is not EOF.
 fn drain(vol: &mut Volume<MemoryBackend>) -> u64 {
     let mut steps = 0;
-    while vol.reclaim_step(ts(1_000 + steps as i64)).unwrap() > 0 {
+    while vol.reclaim_pending_blocks() > 2 {
+        vol.reclaim_step(ts(1_000 + steps as i64)).unwrap();
         steps += 1;
         assert!(steps < 10_000, "reclaim failed to converge");
     }
@@ -101,9 +101,9 @@ fn tiny_caps_seal_segments_and_tables_and_drain_to_steady_state() {
         "draining a large backlog must take multiple bounded steps"
     );
     // Steady state: the empty namespace occupies the same four metadata
-    // blocks as after mkfs, plus one quarantined previous reclaim root.
-    assert_eq!(vol.reclaim_pending_blocks(), 1);
-    assert_eq!(vol.free_blocks(), initial_free - 1);
+    // blocks as after mkfs, plus two generations of quarantined reclaim roots.
+    assert_eq!(vol.reclaim_pending_blocks(), 2);
+    assert_eq!(vol.free_blocks(), initial_free - 2);
 
     let mut dev = vol.into_device();
     assert_clean(&mut dev, "drained");
@@ -130,7 +130,7 @@ fn reclaim_survives_remount_and_resumes_from_the_cursor() {
     assert_eq!(vol.reclaim_pending_blocks(), backlog - 1);
     vol.set_reclaim_batch_blocks(7);
     drain(&mut vol);
-    assert_eq!(vol.reclaim_pending_blocks(), 1);
+    assert_eq!(vol.reclaim_pending_blocks(), 2);
     let mut dev = vol.into_device();
     assert_clean(&mut dev, "resumed drain");
 }
@@ -276,10 +276,10 @@ fn crash_matrix_over_a_mid_run_cursor_advance() {
         |what, vol| {
             // Whatever the outcome, the volume must be able to finish draining.
             vol.set_reclaim_batch_blocks(64);
-            while vol.reclaim_step(ts(500)).unwrap() > 0 {}
+            drain(vol);
             assert_eq!(
                 vol.reclaim_pending_blocks(),
-                1,
+                2,
                 "{what}: drain after recovery"
             );
         },
@@ -315,7 +315,7 @@ fn large_cow_rewrite_exceeds_the_legacy_253_entry_limit() {
         steps >= 5,
         "600 blocks at 128 per step need multiple bounded steps"
     );
-    assert_eq!(vol.reclaim_pending_blocks(), 1);
+    assert_eq!(vol.reclaim_pending_blocks(), 2);
     let mut dev = vol.into_device();
     assert_clean(&mut dev, "after drain");
 }
@@ -343,10 +343,10 @@ fn massive_truncate_and_bulk_unlink_quarantine_and_drain() {
     let mut vol = mount(dev).unwrap();
     vol.set_reclaim_batch_blocks(256);
     drain(&mut vol);
-    assert_eq!(vol.reclaim_pending_blocks(), 1);
-    // Everything except the empty file's record and the cycling root block
+    assert_eq!(vol.reclaim_pending_blocks(), 2);
+    // Everything except the empty file's record and two cycling root blocks
     // is free again.
-    assert!(vol.free_blocks() >= initial_free - 3);
+    assert!(vol.free_blocks() >= initial_free - 4);
     let mut dev = vol.into_device();
     assert_clean(&mut dev, "after drain");
 }
@@ -371,7 +371,8 @@ fn millions_of_blocks_drain_in_bounded_steps() {
 
     vol.set_reclaim_batch_blocks(100_000);
     let mut steps = 0u64;
-    while vol.reclaim_step(ts(10 + steps as i64)).unwrap() > 0 {
+    while vol.reclaim_pending_blocks() > 2 {
+        vol.reclaim_step(ts(10 + steps as i64)).unwrap();
         steps += 1;
         let stats = vol.last_commit_stats().unwrap();
         assert!(stats.alloc.blocks_promoted <= 100_000);
@@ -385,7 +386,7 @@ fn millions_of_blocks_drain_in_bounded_steps() {
         steps >= 19,
         "1.9M blocks at 100k per step need many steps, got {steps}"
     );
-    assert_eq!(vol.reclaim_pending_blocks(), 1);
+    assert_eq!(vol.reclaim_pending_blocks(), 2);
     let mut dev = vol.into_device();
     assert_clean(&mut dev, "millions drained");
 }

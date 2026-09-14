@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Protect both checkpoint generations during reclamation](#2026-09-14--protect-both-checkpoint-generations-during-reclamation)
 - [2026-09-14 — Verify snapshot ownership and select stronger recovery retention](#2026-09-14--verify-snapshot-ownership-and-select-stronger-recovery-retention)
 - [2026-09-14 — Integrate persistent snapshot lifecycle into Volume](#2026-09-14--integrate-persistent-snapshot-lifecycle-into-volume)
 - [2026-09-14 - Bind lifetime accounting to allocator transactions](#2026-09-14---bind-lifetime-accounting-to-allocator-transactions)
@@ -60,6 +61,44 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Protect both checkpoint generations during reclamation
+
+Implemented ADR-074's R <= P promotion boundary in all reclaim tiers, where P
+is the oldest structurally valid checkpoint generation. Protected heads stop
+consumption without moving their cursor. COW eligibility also consults the
+previous snapshot registry; missing roots or unreadable older registry state
+disable the optional optimization. Full-COW requests avoid that optional lookup. Runtime statistics report checkpoint blocking.
+
+The post-deletion data-write oracle covered 352 modeled states: 347 retained
+a registered view in a valid slot and preserved its exact bytes; five replaced
+that registration. Both-slot full ownership checks accompany snapshot remounts,
+create/delete cuts and churn. On the 512-block, 160-cycle fixture, minimum free
+space was 472 blocks versus 475 under the former boundary; maximum ledger-retired
+count was ten and final release transferred five protected blocks. TxAllocator
+inline size on aarch64 rose from 936 to 960 bytes; heap state is additional.
+
+Reclaim qualification exposed older tests' one-generation assumptions. The
+fixtures require a protected maintenance generation before reuse and a two-root
+steady state. Existing low-space recovery passed. The tiny-volume admission
+oracle preserves its actual committed prefix rather than promising the same
+capacity after adding retention. The original 64-block accounting workload
+completes with two explicit maintenance publications: four additional flushes
+and 64 KiB issued by those two steps, with final allocator bitmap residency of
+four bytes. These are fixture costs, not a shipping resource profile. Previous-checkpoint preservation does not
+change the ordinary non-snapshot opt-in in-place byte-failure contract.
+
+Validation also exposed a documentation-checker race with Cargo deleting target
+subdirectories. Discovery prunes excluded trees before traversal and propagates
+errors in included source directories; temporary fixtures cover both behaviors
+and deterministic output. The command-line interface and read-only default are
+unchanged.
+
+Validation: the full workspace all-features suite passed 306 tests with zero
+failures and ten ignored tests. Workspace formatting, Clippy with warnings
+denied, documentation checks, all three documentation-checker fixtures and
+whitespace validation passed. These are host-side results; native hardware
+and portable-C snapshot qualification remain separate gates.
 
 ## 2026-09-14 — Verify snapshot ownership and select stronger recovery retention
 

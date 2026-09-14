@@ -45,8 +45,19 @@ fn per_transaction_resource_accounting() {
 
     let mut rows: Vec<(String, CommitStats)> = Vec::new();
     for i in 0..3 {
-        vol.create_file_in_root(&format!("file-{i}"), &[i as u8; 6000], ts(i as i64 + 1))
-            .unwrap();
+        let result =
+            vol.create_file_in_root(&format!("file-{i}"), &[i as u8; 6000], ts(i as i64 + 1));
+        if matches!(result, Err(afsplus_core::CoreError::NoSpace)) {
+            vol.reclaim_step(ts(i as i64 + 1)).unwrap();
+            rows.push((
+                "advance retention boundary".into(),
+                vol.last_commit_stats().unwrap(),
+            ));
+            vol.create_file_in_root(&format!("file-{i}"), &[i as u8; 6000], ts(i as i64 + 1))
+                .unwrap();
+        } else {
+            result.unwrap();
+        }
         rows.push((
             format!("create file-{i} (2 data blocks)"),
             vol.last_commit_stats().unwrap(),
@@ -54,6 +65,11 @@ fn per_transaction_resource_accounting() {
     }
     vol.delete_file_in_root("file-1", ts(10)).unwrap();
     rows.push(("delete file-1".into(), vol.last_commit_stats().unwrap()));
+    vol.reclaim_step(ts(11)).unwrap();
+    rows.push((
+        "advance post-delete retention".into(),
+        vol.last_commit_stats().unwrap(),
+    ));
     vol.create_file_in_root("file-3", &[9u8; 6000], ts(11))
         .unwrap();
     rows.push((
@@ -131,17 +147,15 @@ fn per_transaction_resource_accounting() {
             "{label}: descriptor write amplification"
         );
         assert!(s.flushes <= 3, "{label}");
-        // Reclaim latency: exactly one generation per promoted block.
-        assert_eq!(
-            s.alloc.reclaim_latency_generations, s.alloc.blocks_promoted,
+        // Reclaim latency is at least two generations with both slots protected.
+        assert!(
+            s.alloc.reclaim_latency_generations >= 2 * s.alloc.blocks_promoted,
             "{label}"
         );
     }
-    // The last transaction (a reclaim step) touched three of the four
-    // 2-byte region pages — promotion targets plus the rebuilt queue root,
-    // shifted by the intent-log area — while still avoiding retention of
-    // the full 8-byte bitmap.
-    assert_eq!(vol.allocator_ram_bytes(), 3 * 2);
+    // The final step retains only the two touched 2-byte region pages,
+    // rather than the complete four-region bitmap.
+    assert_eq!(vol.allocator_ram_bytes(), 2 * 2);
 
     let mut dev = vol.into_device();
     let report = check_device(&mut dev);

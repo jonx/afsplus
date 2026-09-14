@@ -142,3 +142,8 @@ of section 3 (`Status:` lines only in ADRs, five README status rows, one-line
 milestone status cells). It exits non-zero with one problem per line after a
 single summary line. It ignores `crates/`, `native/`, `vendor/`, `target/`
 and `build/`.
+
+Document discovery prunes excluded trees before traversal, so concurrent Cargo
+cleanup inside the build tree is not an input error. Errors in included
+source directories are reported. Run `python3 tools/test-check-docs.py` for the
+temporary-fixture discovery regressions.

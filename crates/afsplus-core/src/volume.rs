@@ -413,7 +413,8 @@ impl<D: BlockDevice> Volume<D> {
     /// Runs one maintenance transaction that only advances reclamation:
     /// promotes up to the configured budget from the queue head and commits.
     /// Returns the net reduction in ordinary queued blocks. Zero can accompany
-    /// committed metadata or snapshot-scan progress; use
+    /// committed checkpoint-retention or snapshot-scan progress; inspect
+    /// `last_commit_stats().alloc.reclaim.blocked_by_checkpoint` or use
     /// [`Self::snapshot_maintenance_step`] for separate lifetime progress.
     pub fn reclaim_step(&mut self, _now: Timespec) -> Result<u64, CoreError> {
         self.ensure_window_closed()?;
@@ -873,9 +874,9 @@ impl<D: BlockDevice> Volume<D> {
         let end_block = end_offset.div_ceil(block_size);
         let write_block_count = end_block - first_block;
         let (old_extents, old_tree_blocks) = self.load_file_layout(&record)?;
-        let overwrite_in_place = self.state.snapshots.is_none_or(|s| s.views == 0)
-            && (self.data_update_policy == DataUpdatePolicy::InPlacePrivate
-                || record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0)
+        let overwrite_in_place = (self.data_update_policy == DataUpdatePolicy::InPlacePrivate
+            || record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0)
+            && !self.snapshots_require_cow()
             && end_offset <= record.size_bytes
             && (first_block..end_block).all(|logical_block| {
                 extent_at(&old_extents, logical_block).is_some_and(|extent| extent.flags == 0)

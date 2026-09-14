@@ -38,11 +38,16 @@ fn open<D: BlockDevice>(mut dev: D, mode: MountMode) -> Volume<D> {
 }
 
 fn verify<D: BlockDevice>(volume: &mut Volume<D>) {
-    let state =
-        crate::verify::load_committed_state(&mut volume.dev, &volume.ident, &volume.checkpoint)
-            .unwrap();
-    let findings = crate::verify::full_sweep(&state, &volume.ident.geometry(), &volume.checkpoint);
-    assert!(findings.is_empty(), "{findings:?}");
+    for cp in std::iter::once(&volume.checkpoint).chain(volume.other_checkpoint.iter()) {
+        let state =
+            crate::verify::load_committed_state(&mut volume.dev, &volume.ident, cp).unwrap();
+        let findings = crate::verify::full_sweep(&state, &volume.ident.geometry(), cp);
+        assert!(
+            findings.is_empty(),
+            "generation {}: {findings:?}",
+            cp.generation
+        );
+    }
 }
 
 fn formatted(blocks: u64, log_slots: u16) -> MemoryBackend {
@@ -216,6 +221,14 @@ fn registered_views_force_cow_for_private_and_shared_files() {
     volume.snapshot_delete(id, now(10)).unwrap();
     volume.snapshot_delete(second_id, now(11)).unwrap();
     volume.write_file_at(clone, 0, &[5; 9000], now(12)).unwrap();
+    assert_eq!(
+        volume
+            .last_commit_stats()
+            .unwrap()
+            .data_blocks_overwritten_in_place,
+        0
+    );
+    volume.write_file_at(clone, 0, &[6; 9000], now(13)).unwrap();
     assert!(
         volume
             .last_commit_stats()
@@ -771,4 +784,108 @@ fn checker_rejects_disconnected_directory_cycles_with_matching_link_counts() {
         error.contains("snapshot 1") && error.contains("unreachable from namespace roots"),
         "{error}"
     );
+}
+
+#[test]
+fn last_snapshot_deletion_preserves_older_selectable_view_during_the_next_write() {
+    let mut volume = open(formatted(512, 0), MountMode::ReadWrite);
+    let file = volume
+        .create_file_in_root("file", b"before", now(2))
+        .unwrap();
+    volume
+        .set_file_data_policy(file, DataUpdatePolicy::InPlacePrivate, now(3))
+        .unwrap();
+    let id = volume.snapshot_create(now(4)).unwrap();
+    let view = volume.snapshot_record(id).unwrap();
+    volume.snapshot_delete(id, now(5)).unwrap();
+    let ident = volume.ident.clone();
+    let base = volume.into_device();
+    let mut recording = open(RecordingBackend::new(base.clone()), MountMode::ReadWrite);
+    recording.write_file_at(file, 0, b"after!", now(6)).unwrap();
+    assert_eq!(
+        recording
+            .last_commit_stats()
+            .unwrap()
+            .data_blocks_overwritten_in_place,
+        0
+    );
+    let (_, log) = recording.into_device().into_parts();
+    let mut protected = 0;
+    let mut released = 0;
+    for cut in 0..=log.len() {
+        for_each_crash_state(&base, &log, cut, |mut state| {
+            let selection = select_checkpoint(&mut state.image, &ident).unwrap();
+            let mut reachable = false;
+            for cp in std::iter::once(&selection.chosen).chain(selection.other.iter()) {
+                let loaded =
+                    crate::verify::load_committed_state(&mut state.image, &ident, cp).unwrap();
+                assert!(crate::verify::full_sweep(&loaded, &ident.geometry(), cp).is_empty());
+                let roots = cp.snapshot_roots.unwrap();
+                let page = snapshot::read_registry_page(
+                    &mut state.image,
+                    &ident.geometry(),
+                    roots.registry,
+                    cp.generation,
+                    id,
+                    1,
+                )
+                .unwrap();
+                reachable |= page.records.iter().any(|(found, _)| *found == id);
+            }
+            if reachable {
+                let mut bytes = [0; 6];
+                snapshot::view::read_at(&mut state.image, &ident, view, file, 0, &mut bytes)
+                    .unwrap();
+                assert_eq!(&bytes, b"before");
+                protected += 1;
+            } else {
+                released += 1;
+            }
+        });
+    }
+    assert!(protected > 0 && released > 0);
+    println!("snapshot_post_delete_write protected={protected} released={released}");
+}
+
+#[test]
+fn missing_or_unreadable_older_snapshot_roots_cannot_authorize_in_place_writes() {
+    for missing in [false, true] {
+        let mut volume = open(formatted(512, 0), MountMode::ReadWrite);
+        let file = volume
+            .create_file_in_root("file", b"before", now(2))
+            .unwrap();
+        volume
+            .set_file_data_policy(file, DataUpdatePolicy::InPlacePrivate, now(3))
+            .unwrap();
+        let id = volume.snapshot_create(now(4)).unwrap();
+        volume.snapshot_delete(id, now(5)).unwrap();
+        let older = volume.other_checkpoint.as_mut().unwrap();
+        if missing {
+            older.snapshot_roots = None;
+            volume
+                .dev
+                .write_block(
+                    volume.ident.checkpoint_slots[1 - volume.current_slot],
+                    &older.encode(4096).unwrap(),
+                )
+                .unwrap();
+        } else {
+            volume
+                .dev
+                .write_block(older.snapshot_roots.unwrap().registry, &[0; 4096])
+                .unwrap();
+        }
+        // The chosen checkpoint remains readable. Damage in the other slot
+        // cannot grant permission to weaken the current write's byte contract.
+        volume.write_file_at(file, 0, b"after!", now(6)).unwrap();
+        assert_eq!(
+            volume
+                .last_commit_stats()
+                .unwrap()
+                .data_blocks_overwritten_in_place,
+            0
+        );
+        assert_eq!(volume.read_file(file).unwrap(), b"after!");
+        verify(&mut volume);
+    }
 }

@@ -156,7 +156,17 @@ The exact user-data semantics after a crash are determined by the selected data-
 
 A block that becomes unreachable in the new state is not necessarily safe to reuse immediately because an older retained checkpoint may still reference it.
 
-AFS+ therefore tracks retired storage until it is older than every recovery state that may still be selected.
+[ADR-074](../adr/ADR-074-protect-previous-checkpoint.md) protects both structurally
+valid checkpoint slots through replacement. A run retired at R is promotable
+only when R is no greater than the minimum generation P of those slots. With
+consecutive valid checkpoints, retirement requires an extra publication before
+reuse; an invalid older slot adds no retention beyond the newest valid slot.
+Snapshot registration in either protected checkpoint disables in-place updates.
+
+Bounded maintenance can publish without reducing queue length when it advances
+this retention boundary. Report observed checkpoint blocking separately from
+promoted blocks; zero net reduction is not a global end-of-work signal. An idle
+queue can keep two generations of reclaim roots cycling without a storage leak.
 
 On uncertainty the allocator must quarantine/leak space rather than reuse it early.
 

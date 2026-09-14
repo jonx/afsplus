@@ -20,6 +20,7 @@ source, chapter coverage and architectural rationale. Results belong in
 - [Snapshot allocator and quarantine binding](#snapshot-allocator-and-quarantine-binding)
 - [Volume snapshot orchestration](#volume-snapshot-orchestration)
 - [Exhaustive snapshot checker](#exhaustive-snapshot-checker)
+- [Previous-checkpoint retention](#previous-checkpoint-retention)
 - [Existing complementary gates](#existing-complementary-gates)
 - [Required future experiments](#required-future-experiments)
 - [Normative coverage map](#normative-coverage-map)
@@ -292,6 +293,32 @@ of byte preservation and writer lifetime transitions remain necessary. Previous
 checkpoint preservation follows the distinct
 [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md) two-slot crash and
 low-space qualification, not the older selected-checkpoint-only oracle.
+
+## Previous-checkpoint retention
+
+Run the core snapshot suite, `cargo test -p afsplus-core retention_tests`,
+`cargo test -p afsplus-core --test snapshot_allocator` and
+`cargo test -p afsplus-check --test alloc_crash --test reclaim --test allocation_pressure`.
+
+Under [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md), require R <= P
+before promotion, where P is the minimum structurally valid slot generation.
+Inline, segmented and tabled queues must stop before protected runs and resume
+from the persisted cursor after P advances. A negative control using the former
+newest-only boundary must expose an unsafe promotion. A missing older slot must
+not impose a fictitious extra generation.
+
+After deleting the last snapshot, cut the next opted-in data write at every
+modeled publication boundary. Fully check both valid slots and require exact
+bytes for any snapshot registered in either. In-place optimization may resume
+only when neither slot registers a view. Missing or unreadable older snapshot
+roots must disable the optional in-place path. Include busy handles, remounts,
+retention-blocked maintenance and the existing repeated low-space workload.
+
+Report fixture free-space minima and allocator inline size with its architecture;
+additional heap state is separate. Reclaim drain fixtures must reach their
+known two-root steady state within bounded steps; zero net queue reduction is
+not an EOF predicate. Full writer interoperability, native durability and
+shipping resource profiles are separate qualification obligations.
 
 ## Existing complementary gates
 

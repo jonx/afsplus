@@ -138,10 +138,11 @@ so the COW self-reference stays broken.
 The host tests format the full 262,144-block region geometry sparsely, force a
 single allocation run across a bitmap-page boundary, and verify that exactly
 two pages plus one descriptor are dirtied. Ordinary small transactions dirty
-one page plus one descriptor. The G1/G2/G3 quarantine crash matrix passes with
-the descriptor write included before the metadata barrier, and separate
-corruption tests prove that descriptor/page damage is found by the checker or
-the first allocator access without turning normal mount into a bitmap scan.
+one page plus one descriptor. The G1/G2/G3/G4 quarantine crash matrix checks descriptor ordering before
+the metadata barrier and previous-checkpoint preservation under
+[ADR-074](../adr/ADR-074-protect-previous-checkpoint.md). Corruption tests require
+descriptor/page damage to be reported by the checker or first allocator access
+without turning normal mount into a bitmap scan.
 
 The formatter no longer loops over every logical block merely to seal reserved
 bits; it touches reserved ranges and bitmap pages directly. An explicit host

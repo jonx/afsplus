@@ -30,6 +30,8 @@ pub const DEFAULT_RECLAIM_BATCH_BLOCKS: u64 = 4096;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReclaimStats {
+    /// Consumption stopped before storage protected by the older checkpoint.
+    pub blocked_by_checkpoint: bool,
     pub entries_appended: u64,
     pub segments_sealed: u64,
     pub tables_sealed: u64,
@@ -56,6 +58,7 @@ pub struct ReclaimBuild {
 }
 
 pub struct ReclaimTx {
+    oldest_protected_generation: u64,
     committed_root_lba: u64,
     new_generation: u64,
     /// Working root: consumption already applied to its arrays and cursor.
@@ -198,10 +201,17 @@ impl ReclaimTx {
         committed_root_lba: u64,
         committed_generation: u64,
         new_generation: u64,
+        oldest_protected_generation: u64,
         batch_blocks: u64,
     ) -> Result<ReclaimTx, CoreError> {
+        if oldest_protected_generation == 0 || oldest_protected_generation > committed_generation {
+            return Err(CoreError::Corrupt(
+                "invalid protected checkpoint generation".into(),
+            ));
+        }
         let root = read_root(dev, geo, committed_root_lba, committed_generation)?;
         let mut tx = ReclaimTx {
+            oldest_protected_generation,
             committed_root_lba,
             new_generation,
             root,
@@ -245,6 +255,8 @@ impl ReclaimTx {
                         self.root.table_refs.remove(0);
                         self.root.head_segment_offset = 0;
                     }
+                } else {
+                    break;
                 }
             } else if let Some(segment_ref) = self.root.segment_refs.first().copied() {
                 let finished_segment =
@@ -254,8 +266,14 @@ impl ReclaimTx {
                     self.root.segment_refs.remove(0);
                     self.root.head_entry_offset = 0;
                     self.root.head_block_offset = 0;
+                } else {
+                    break;
                 }
             } else if let Some(entry) = self.root.inline_entries.first_mut() {
+                if entry.retire_generation > self.oldest_protected_generation {
+                    self.stats.blocked_by_checkpoint = true;
+                    break;
+                }
                 let take = (entry.blocks as u64).min(budget) as u32;
                 self.promoted.push(PromotedRun {
                     start: entry.start,
@@ -298,6 +316,10 @@ impl ReclaimTx {
                 return Err(CoreError::Corrupt(
                     "reclaim cursor beyond the head run".into(),
                 ));
+            }
+            if entry.retire_generation > self.oldest_protected_generation {
+                self.stats.blocked_by_checkpoint = true;
+                break;
             }
             let remaining = entry.blocks - self.root.head_block_offset;
             let take = (remaining as u64).min(*budget) as u32;
@@ -580,4 +602,97 @@ pub fn contains<D: BlockDevice>(
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use afsplus_block::MemoryBackend;
+    use afsplus_format::reclaim::ReclaimCaps;
+
+    #[test]
+    fn every_queue_tier_stops_at_the_protected_generation_and_resumes() {
+        let geo = Geometry {
+            block_size: 4096,
+            total_blocks: 512,
+            region_size: 512,
+        };
+        for tier in 0..3 {
+            let mut dev = MemoryBackend::new(4096, 512);
+            let entries = vec![
+                ReclaimEntry {
+                    start: 100,
+                    blocks: 2,
+                    retire_generation: 7,
+                },
+                ReclaimEntry {
+                    start: 110,
+                    blocks: 3,
+                    retire_generation: 8,
+                },
+            ];
+            let mut root = ReclaimRoot::empty(ReclaimCaps::default());
+            root.pending_blocks = 5;
+            root.appended_blocks_total = 5;
+            if tier == 0 {
+                root.inline_entries = entries;
+            } else {
+                let segment = ReclaimSegment { entries };
+                dev.write_block(21, &segment.encode(4096, 8).unwrap())
+                    .unwrap();
+                let reference = SegmentRef {
+                    lba: 21,
+                    entry_count: 2,
+                };
+                if tier == 1 {
+                    root.segment_refs.push(reference);
+                } else {
+                    let table = ReclaimTable {
+                        refs: vec![reference],
+                    };
+                    dev.write_block(22, &table.encode(4096, 8).unwrap())
+                        .unwrap();
+                    root.table_refs.push(TableRef {
+                        lba: 22,
+                        ref_count: 1,
+                    });
+                }
+            }
+            dev.write_block(20, &root.encode(4096, 8).unwrap()).unwrap();
+            let mut tx = ReclaimTx::begin(&mut dev, &geo, 20, 8, 9, 7, 100).unwrap();
+            assert_eq!(
+                tx.promoted_runs().iter().map(|run| run.blocks).sum::<u32>(),
+                2,
+                "tier {tier}"
+            );
+            assert!(tx.stats.blocked_by_checkpoint);
+            assert!(tx.consumed_structure.is_empty());
+            if tier != 0 {
+                assert_eq!(tx.root.head_entry_offset, 1);
+                assert_eq!(tx.root.head_block_offset, 0);
+            }
+            // Negative control: the ADR-036 boundary would release R=8 while
+            // the previous checkpoint is G=7. The new oracle detects it.
+            let old_rule = ReclaimTx::begin(&mut dev, &geo, 20, 8, 9, 8, 100).unwrap();
+            assert!(old_rule
+                .promoted_runs()
+                .iter()
+                .any(|run| run.retire_generation > 7));
+            let count = tx.plan().unwrap();
+            let built = tx.build(&geo, (40..40 + count as u64).collect()).unwrap();
+            for (lba, bytes) in &built.writes {
+                dev.write_block(*lba, bytes).unwrap();
+            }
+            let resumed = ReclaimTx::begin(&mut dev, &geo, built.root_lba, 9, 10, 8, 100).unwrap();
+            assert!(resumed
+                .promoted_runs()
+                .iter()
+                .any(|run| run.start == 110 && run.blocks == 3));
+            assert!(resumed
+                .promoted_runs()
+                .iter()
+                .all(|run| run.retire_generation <= 8));
+            assert!(resumed.stats.blocked_by_checkpoint);
+        }
+    }
 }

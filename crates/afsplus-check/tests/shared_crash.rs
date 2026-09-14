@@ -648,6 +648,7 @@ fn shared_storage_is_reused_only_after_the_last_owner_disappears() {
         setup.quarantine_contains(shared_start).unwrap(),
         "the last owner must retire the formerly shared storage"
     );
+    let retirement_generation = setup.generation();
     let mut base = setup.into_device();
     let mut reuse_case = None;
     for index in 0..32 {
@@ -655,14 +656,22 @@ fn shared_storage_is_reused_only_after_the_last_owner_disappears() {
         let new_bytes = vec![0xf1u8.wrapping_add(index as u8); BS];
         let pre_generation = mount(base.clone()).unwrap().generation();
         let mut replacement = 0;
-        let mut replacement_start = 0;
+        let mut reused = false;
         let operations = record_transaction(&base, |volume| {
             replacement = volume
                 .create_file_in_root(&name, &new_bytes, ts(6 + index))
                 .unwrap();
-            replacement_start = volume.stat(replacement).unwrap().unwrap().data_root;
+            let ident = volume.ident().clone();
+            let cp = volume.checkpoint().clone();
+            let state = load_committed_state(volume.device_mut(), &ident, &cp).unwrap();
+            reused = state.data_blocks.contains(&shared_start)
+                || state.metadata_blocks.contains(&shared_start);
         });
-        if replacement_start == shared_start {
+        if reused {
+            assert!(
+                pre_generation > retirement_generation,
+                "reuse crossed the protected slot boundary early"
+            );
             reuse_case = Some((
                 base.clone(),
                 pre_generation,

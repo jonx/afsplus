@@ -87,7 +87,7 @@ The encoding is eligible for freeze only when all of these are true:
   checker;
 - the maximum-region and multi-node cases retain bounded allocator memory and
   have recorded metadata/write amplification;
-- the G1/G2/G3 quarantine matrix, bitmap-page boundary cases, 145-region
+- the G1/G2/G3/G4 quarantine matrix, bitmap-page boundary cases, 145-region
   allocation-root crash matrix and sparse 1-TiB mount qualification remain
   green.
 

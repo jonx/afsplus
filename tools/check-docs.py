@@ -38,6 +38,7 @@ per line after a single summary line.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import re
 import sys
@@ -97,12 +98,16 @@ def github_slug(text: str) -> str:
 
 
 def markdown_files(root: Path) -> list[Path]:
-    return sorted(
-        path for path in root.rglob("*.md")
-        if not any(
-            part in EXCLUDED_TREES for part in path.relative_to(root).parts
-        )
-    )
+    def failed_scan(error: OSError) -> None:
+        raise error
+
+    files = []
+    for directory, children, names in os.walk(root, onerror=failed_scan):
+        # Prune before traversal: build tools can delete excluded subtrees
+        # concurrently, and their contents are not documentation inputs.
+        children[:] = [name for name in children if name not in EXCLUDED_TREES]
+        files.extend(Path(directory) / name for name in names if name.endswith(".md"))
+    return sorted(files)
 
 
 def read_lines(path: Path) -> list[str]:

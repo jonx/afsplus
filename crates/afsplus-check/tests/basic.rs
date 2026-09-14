@@ -657,10 +657,8 @@ fn insensitive_names_fold_unicode_preserve_spelling_and_survive_remount() {
 
 #[test]
 fn out_of_space_is_reported_and_state_survives() {
-    // 28 blocks in two tiny regions: the allocation-root pool consumes three
-    // permanently reserved blocks. An empty-file transaction needs 5 fresh
-    // blocks; quarantine recycling keeps two
-    // transactions viable, the third must fail cleanly.
+    // Deliberately tiny geometry: discover admission capacity rather than
+    // assuming a number of files independent of checkpoint retention.
     let mut dev = MemoryBackend::new(BS, 28);
     mkfs(
         &mut dev,
@@ -678,16 +676,32 @@ fn out_of_space_is_reported_and_state_survives() {
     )
     .unwrap();
     let mut vol = mount(dev).unwrap();
-    vol.create_file_in_root("first.txt", b"", ts(0)).unwrap();
-    vol.create_file_in_root("second.txt", b"", ts(1)).unwrap();
-    assert!(matches!(
-        vol.create_file_in_root("third.txt", b"", ts(2)),
-        Err(CoreError::NoSpace)
-    ));
-
-    let mut vol = mount(vol.into_device()).unwrap();
-    assert_eq!(vol.generation(), 3);
-    assert_eq!(vol.list_root().unwrap().len(), 2);
+    let mut committed = Vec::new();
+    let mut rejected = false;
+    for index in 0..16 {
+        let name = format!("file-{index}");
+        let generation = vol.generation();
+        match vol.create_file_in_root(&name, b"", ts(index)) {
+            Ok(id) => committed.push((name, id)),
+            Err(CoreError::NoSpace) => {
+                assert_eq!(vol.generation(), generation);
+                rejected = true;
+                break;
+            }
+            Err(error) => panic!("unexpected error: {error}"),
+        }
+    }
+    assert!(rejected && !committed.is_empty());
+    let generation = vol.generation();
+    let mut image = vol.into_device();
+    assert!(check_device(&mut image).is_clean());
+    let mut vol = mount(image).unwrap();
+    assert_eq!(vol.generation(), generation);
+    assert_eq!(vol.list_root().unwrap().len(), committed.len());
+    for (name, id) in committed {
+        assert_eq!(vol.lookup_root(&name).unwrap(), Some(id));
+        assert!(vol.read_file(id).unwrap().is_empty());
+    }
 }
 
 #[test]
