@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Avoid copying caller payloads into atomic batch staging](#2026-09-14--avoid-copying-caller-payloads-into-atomic-batch-staging)
 - [2026-09-14 — Attribute requested allocations to their original context](#2026-09-14--attribute-requested-allocations-to-their-original-context)
 - [2026-09-14 - Measure resident memory around workload phases](#2026-09-14---measure-resident-memory-around-workload-phases)
 - [2026-09-14 - Bind internal commit diagnostics to semantic replay](#2026-09-14---bind-internal-commit-diagnostics-to-semantic-replay)
@@ -137,6 +138,44 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Avoid copying caller payloads into atomic batch staging
+
+Allocation-origin measurements identified an unnecessary overlap: plain batches
+kept complete padded copies of caller data while encoding their metadata. The
+synchronous API already borrows the caller's contents for the entire operation.
+The batch now selects surviving creates by object identity after validation and
+passes their payload references to the common commit tail. Full blocks are written
+directly and one reusable block zero-pads partial tails. Cancelled creates are
+excluded even when their name or allocation is reused. Intent-log windows retain
+their existing write-through behavior. Public signatures, disk semantics and
+publication barriers did not change, so no format/API decision was superseded.
+
+Measurements retained in `build/borrowed-batch-8zf2vy7j` compare the new tagged
+executable against the prior retained source/binary profile. Batch-origin peak
+for the fixed 192-file creation fell from 1,665,784 to 877,304 bytes for the
+2/4/8-page profiles and from 1,668,344 to 879,864 bytes unlimited. Two-page total
+requested-heap peak fell from 18,561,936 to 17,770,672 bytes, including the fixed
+16 MiB image. All five workload images and per-phase I/O/payload denominators
+matched the earlier measurement. Three alternating-order process measurements per
+profile also retained CPU/RSS results. With two pages, tagged-process RSS fell from
+23,904,256–24,297,472 to 23,248,896–23,314,432 bytes. CPU ranges overlapped
+(0.864–0.907 versus 0.859–0.910 seconds); concurrent workspace testing prevents
+an isolated performance claim. These are fixture measurements, not a general
+memory ceiling; encoded metadata and other transaction state remain in the
+[resource queue](implementation/audit-work-queue.md).
+
+The new regression checks direct use of caller full-block addresses, exact bytes,
+zeroed tails, cancellation/name reuse, all four cache profiles and retry without
+remount after each data-write or first-barrier failure. A mixed-payload cut matrix
+requires exact old or complete new state and a clean raw checker at every modeled
+cut. Invalid and fully cancelled small batches issue no writes or flushes.
+The retained previous tagged executable fails the new 1 MiB fixture budget
+(1,665,784 bytes), providing a negative control for the memory regression.
+The full all-features workspace passed 524 tests with zero failures and ten
+explicitly ignored tests across 88 suites. Formatting, Clippy, seven ordinary
+workload tests, two origin integration tests and thirteen documentation-checker
+tests passed.
 
 ## 2026-09-14 — Attribute requested allocations to their original context
 

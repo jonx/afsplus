@@ -29,6 +29,7 @@ AFS+ must measure performance and resource use continuously. A new filesystem ha
 - [Tree-cache batch measurements](#tree-cache-batch-measurements)
 - [Phase-boundary resident memory and repeated reads](#phase-boundary-resident-memory-and-repeated-reads)
 - [Allocation origins and instrumentation cost](#allocation-origins-and-instrumentation-cost)
+- [Borrowed payloads in atomic batches](#borrowed-payloads-in-atomic-batches)
 
 <!-- /toc -->
 
@@ -525,3 +526,43 @@ The integration test checks unchanged image CRCs and I/O, per-origin balance,
 fixture separation, release of mutation/verifier state and oracle lifetime across
 repeated reads. Broader ownership accounting, sustained mixed workloads and native
 resource qualification remain separate acceptance requirements.
+
+
+## Borrowed payloads in atomic batches
+
+`Volume::run_batch` validates its operations and retains references to the
+surviving creates' caller-owned bytes until the synchronous commit returns.
+Object identity selects surviving creates after cancellation or replacement,
+including reuse of a cancelled allocation or name. The operation limit bounds
+the descriptor count; it is not a limit on all transaction memory. Plain batches
+do not retain a second heap block image for each payload block. Full blocks pass
+directly to the device; one reusable zero-padded block handles partial tails.
+The existing common commit tail issues the same data writes and data barrier
+before metadata publication. Intent-log windows retain their separate operation-time
+write-through behavior and retention rules.
+
+The caller must keep input bytes alive for the synchronous call, as expressed by
+the existing borrowed API. Caller storage is part of process memory and is not
+eliminated by avoiding internal copies. Pending namespace state, encoded object
+records, tree operations, allocator state and other mutation families have their
+own resource costs. This path is not a whole-transaction memory cap or a native
+low-memory qualification.
+
+Run `cargo test --offline -p afsplus-check --test batch_payloads` for full-block
+borrowing, mixed aligned/partial/empty files, tail zeroing, cancelled-name reuse,
+write/data-barrier refusal and same-mount retry. The four cache profiles must
+retain exact namespace and bytes after remount. A complete full-write-subset and
+representative-tear matrix checks every recorded boundary for a small mixed-payload
+batch, requiring both exact old and exact new outcomes. Invalid and fully cancelled
+small batches must issue no payload writes or flushes.
+
+Compare the tagged meter's fixed 192-file batch with a retained pre-change
+executable. Require unchanged image CRC, per-phase I/O and payload denominators.
+Record allocation-origin and total requested-heap peaks separately. Retain
+per-child CPU and RSS observations for both variants, with repetition count,
+variant order and concurrent host load stated. The
+[origin integration test](../tools/test-allocation-origins.py) bounds batch-origin
+peak below 1 MiB for this particular fixture across 2/4/8/unlimited profiles;
+this regression budget includes its pending metadata and does not apply to
+arbitrary batches. Broader metadata scaling and constrained-platform budgets
+remain requirements of the complete resource-accounting gate.

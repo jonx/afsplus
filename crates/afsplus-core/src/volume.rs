@@ -244,6 +244,56 @@ pub enum BatchOp<'a> {
     },
 }
 
+/// User data passed to the common commit tail. Plain batches borrow surviving
+/// caller payloads; other mutation paths own their prepared block images.
+/// Neither variant changes the data-before-metadata durability barriers.
+enum CommitData<'a> {
+    Prepared(Vec<(u64, Vec<u8>)>),
+    Borrowed(Vec<(u64, &'a [u8])>),
+}
+
+impl CommitData<'_> {
+    fn blocks(&self, block_size: usize) -> u64 {
+        match self {
+            Self::Prepared(writes) => writes.len() as u64,
+            Self::Borrowed(runs) => runs
+                .iter()
+                .map(|(_, bytes)| (bytes.len() as u64).div_ceil(block_size as u64))
+                .sum(),
+        }
+    }
+
+    fn write_to<D: BlockDevice>(self, dev: &mut D) -> Result<(), CoreError> {
+        match self {
+            Self::Prepared(writes) => {
+                for (lba, block) in writes {
+                    dev.write_block(lba, &block)?;
+                }
+            }
+            Self::Borrowed(runs) => {
+                let block_size = dev.block_size();
+                // Full blocks use the caller's bytes directly. Allocate at most
+                // one block for zero-padded tails and reuse it across files.
+                let mut tail = Vec::new();
+                for (start, bytes) in runs {
+                    let mut chunks = bytes.chunks_exact(block_size);
+                    for (offset, chunk) in chunks.by_ref().enumerate() {
+                        dev.write_block(start + offset as u64, chunk)?;
+                    }
+                    let remainder = chunks.remainder();
+                    if !remainder.is_empty() {
+                        tail.resize(block_size, 0);
+                        tail.fill(0);
+                        tail[..remainder.len()].copy_from_slice(remainder);
+                        dev.write_block(start + (bytes.len() / block_size) as u64, &tail)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Logical read-your-writes overlay of one in-flight batch.
 struct PendingBatch {
     /// Per-directory entry changes: Some = upsert, None = delete.
@@ -266,13 +316,12 @@ struct PendingBatch {
     /// removed by a later operation is quarantined because an earlier
     /// record in the window may continue to reference its bytes.
     window_allocations: Vec<WindowAllocation>,
-    data_writes: Vec<(u64, Vec<u8>)>,
     /// User-data blocks already issued by this write-through window. They
     /// are included in the eventual checkpoint's accounting even though the
     /// commit tail must not write them a second time.
     prewritten_data_blocks: u64,
     /// Windowed batches write data blocks at operation time (covered by the
-    /// fsync or metadata barrier); plain batches stage them for commit.
+    /// fsync or metadata barrier); plain batches borrow caller bytes for commit.
     write_through: bool,
     /// Window creates already covered by a durable log record: cancelling
     /// one must not release its blocks (an earlier record's content CRC
@@ -4006,7 +4055,6 @@ impl<D: BlockDevice> Volume<D> {
             created_directories: BTreeSet::new(),
             file_layouts: BTreeMap::new(),
             window_allocations: Vec::new(),
-            data_writes: Vec::new(),
             prewritten_data_blocks: 0,
             write_through: false,
             logged_created: BTreeSet::new(),
@@ -4025,7 +4073,29 @@ impl<D: BlockDevice> Volume<D> {
                 orphan_final_unlinks,
             )?);
         }
-        self.materialize_batch(tx, pending, now, generation, false)?;
+        // Resolve surviving creates only after every operation has validated.
+        // IDs distinguish cancelled/replaced creates even when their data LBAs
+        // are reused by a later create in this same batch.
+        let payloads = ops
+            .iter()
+            .zip(&results)
+            .filter_map(|(op, result)| match (op, result) {
+                (BatchOp::CreateFile { content, .. }, Some(id)) => pending
+                    .created_data
+                    .get(id)
+                    .filter(|(_, blocks)| *blocks != 0)
+                    .map(|(start, _)| (*start, *content)),
+                _ => None,
+            })
+            .collect();
+        self.materialize_batch(
+            tx,
+            pending,
+            now,
+            generation,
+            false,
+            CommitData::Borrowed(payloads),
+        )?;
         Ok(results)
     }
 
@@ -4545,18 +4615,14 @@ impl<D: BlockDevice> Volume<D> {
                 let data_block_count = (content.len() as u64).div_ceil(block_size as u64);
                 let data_start = if data_block_count > 0 {
                     let start = tx.allocate_run(&mut self.dev, data_block_count)?;
-                    for i in 0..data_block_count as usize {
-                        let mut block = vec![0u8; block_size];
-                        let from = i * block_size;
-                        let to = content.len().min(from + block_size);
-                        block[..to - from].copy_from_slice(&content[from..to]);
-                        if pending.write_through {
-                            self.dev.write_block(start + i as u64, &block)?;
-                        } else {
-                            pending.data_writes.push((start + i as u64, block));
-                        }
-                    }
                     if pending.write_through {
+                        for i in 0..data_block_count as usize {
+                            let mut block = vec![0u8; block_size];
+                            let from = i * block_size;
+                            let to = content.len().min(from + block_size);
+                            block[..to - from].copy_from_slice(&content[from..to]);
+                            self.dev.write_block(start + i as u64, &block)?;
+                        }
                         pending.prewritten_data_blocks = pending
                             .prewritten_data_blocks
                             .checked_add(data_block_count)
@@ -4744,14 +4810,12 @@ impl<D: BlockDevice> Volume<D> {
                 }
                 return Ok(());
             }
-            // Same-batch creation, never logged: nothing on disk or in the
-            // log references it. Release the staged data and writes.
+            // Same-batch creation, never logged: no published state or log
+            // references it. Release the reserved run; ordinary batch payloads
+            // are selected by surviving object identity after validation.
             for lba in data_start..data_start + data_blocks {
                 tx.release_uncommitted(&mut self.dev, lba)?;
             }
-            pending
-                .data_writes
-                .retain(|(lba, _)| *lba < data_start || *lba >= data_start + data_blocks);
             return Ok(());
         }
         if victim.link_count > 1 {
@@ -5054,7 +5118,6 @@ impl<D: BlockDevice> Volume<D> {
                 created_directories: BTreeSet::new(),
                 file_layouts: BTreeMap::new(),
                 window_allocations: Vec::new(),
-                data_writes: Vec::new(),
                 prewritten_data_blocks: 0,
                 write_through: true,
                 logged_created: BTreeSet::new(),
@@ -5549,8 +5612,14 @@ impl<D: BlockDevice> Volume<D> {
             return Ok(());
         };
         let force = window.logged_records > 0;
-        let result =
-            self.materialize_batch(window.tx, window.pending, now, window.generation, force);
+        let result = self.materialize_batch(
+            window.tx,
+            window.pending,
+            now,
+            window.generation,
+            force,
+            CommitData::Prepared(Vec::new()),
+        );
         if result.is_err() {
             self.window_poisoned = true;
         }
@@ -5600,7 +5669,6 @@ impl<D: BlockDevice> Volume<D> {
             created_directories: BTreeSet::new(),
             file_layouts: BTreeMap::new(),
             window_allocations: Vec::new(),
-            data_writes: Vec::new(),
             prewritten_data_blocks: 0,
             write_through: true,
             logged_created: BTreeSet::new(),
@@ -5628,7 +5696,14 @@ impl<D: BlockDevice> Volume<D> {
                 self.apply_log_op(&mut tx, &mut pending, &op, generation)?;
             }
         }
-        self.materialize_batch(tx, pending, last_timestamp, generation, true)?;
+        self.materialize_batch(
+            tx,
+            pending,
+            last_timestamp,
+            generation,
+            true,
+            CommitData::Prepared(Vec::new()),
+        )?;
         self.pending_intent_records = 0;
         Ok(replayed)
     }
@@ -5860,6 +5935,7 @@ impl<D: BlockDevice> Volume<D> {
         now: Timespec,
         generation: u64,
         force_commit: bool,
+        data: CommitData<'_>,
     ) -> Result<(), CoreError> {
         let block_size = self.dev.block_size();
         let mut meta_writes: Vec<(u64, Vec<u8>)> = Vec::new();
@@ -6061,13 +6137,14 @@ impl<D: BlockDevice> Volume<D> {
         meta_writes.extend(omap_mutation.writes);
 
         self.pending_prewritten_data_blocks = pending.prewritten_data_blocks;
-        self.commit_transaction(
+        self.commit_transaction_inner(
             generation,
             pending.next_object_id,
             tx,
-            std::mem::take(&mut pending.data_writes),
+            data,
             meta_writes,
             omap_root,
+            None,
         )
     }
 
@@ -6316,7 +6393,7 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             next_object_id,
             tx,
-            data_writes,
+            CommitData::Prepared(data_writes),
             meta_writes,
             new_object_map_block,
             None,
@@ -6329,7 +6406,7 @@ impl<D: BlockDevice> Volume<D> {
         generation: u64,
         next_object_id: u64,
         tx: TxAllocator,
-        data_writes: Vec<(u64, Vec<u8>)>,
+        data_writes: CommitData<'_>,
         meta_writes: Vec<(u64, Vec<u8>)>,
         new_object_map_block: u64,
         snapshot_change: Option<SnapshotRegistryChange>,
@@ -6361,7 +6438,7 @@ impl<D: BlockDevice> Volume<D> {
         generation: u64,
         next_object_id: u64,
         mut tx: TxAllocator,
-        data_writes: Vec<(u64, Vec<u8>)>,
+        data_writes: CommitData<'_>,
         mut meta_writes: Vec<(u64, Vec<u8>)>,
         new_object_map_block: u64,
         snapshot_change: Option<SnapshotRegistryChange>,
@@ -6453,9 +6530,10 @@ impl<D: BlockDevice> Volume<D> {
         meta_writes.extend(allocation_root.writes);
         meta_writes.extend(finished.reclaim_writes);
 
+        let data_blocks = data_writes.blocks(block_size);
         let mut stats = CommitStats {
             tree_mutations,
-            data_blocks_written: data_writes.len() as u64 + prewritten_data_blocks,
+            data_blocks_written: data_blocks + prewritten_data_blocks,
             data_blocks_overwritten_in_place: in_place_data_blocks,
             data_blocks_initialized_from_reservation: initialized_reservations,
             metadata_blocks_written: meta_writes.len() as u64 + tree_mutations.staged_spill_writes,
@@ -6473,10 +6551,8 @@ impl<D: BlockDevice> Volume<D> {
         };
 
         // 1. User data, then barrier — only when the transaction has data.
-        for (lba, block) in &data_writes {
-            self.dev.write_block(*lba, block)?;
-        }
-        if !data_writes.is_empty() {
+        data_writes.write_to(&mut self.dev)?;
+        if data_blocks != 0 {
             self.dev.flush()?;
             stats.flushes += 1;
         }

@@ -43,6 +43,9 @@ class OriginTests(unittest.TestCase):
                 self.assertGreater(mutation["allocation_origins"][origin]["acquired_bytes"], 0)
             if pages is not None:
                 self.assertGreater(mutation["allocation_origins"]["batch"]["acquired_bytes"], 0)
+                # This fixed 192-file fixture must not retain a second block
+                # image per caller payload. Metadata and descriptors remain.
+                self.assertLess(mutation["allocation_origins"]["batch"]["peak_bytes"], 1024 * 1024)
             final = tagged["phases"][-1]
             self.assertEqual(tagged["phases"][0]["heap_start_bytes"], final["heap_end_bytes"])
             for origin in ("tree", "batch", "allocator", "verifier", "oracle"):

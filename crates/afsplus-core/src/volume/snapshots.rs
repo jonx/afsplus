@@ -237,7 +237,7 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             self.checkpoint.next_object_id,
             tx,
-            vec![],
+            CommitData::Prepared(vec![]),
             vec![],
             self.checkpoint.object_map_block,
             Some(change),
