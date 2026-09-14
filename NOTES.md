@@ -9,6 +9,8 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Delegate decisions while the owner is away](#2026-09-14--delegate-decisions-while-the-owner-is-away)
+- [2026-09-14 — Enumerate captured allocation and decide preservation modes](#2026-09-14--enumerate-captured-allocation-and-decide-preservation-modes)
 - [2026-09-14 — Enforce separate destination restore grants](#2026-09-14--enforce-separate-destination-restore-grants)
 - [2026-09-14 — Restore existing metadata through the common COW tail](#2026-09-14--restore-existing-metadata-through-the-common-cow-tail)
 - [2026-09-14 — Enforce revocable authority on the backup interface](#2026-09-14--enforce-revocable-authority-on-the-backup-interface)
@@ -65,6 +67,57 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Delegate decisions while the owner is away
+
+The owner authorized choosing recommended design options without further
+questions until the full queue is handled. Decisions must retain their rationale
+and alternatives; public communication and hardware-write restrictions continue
+to apply. Completion must include correctness and platform-interest review and
+older-system degraded operation under resource constraints. Added those gates
+to the queue so host success cannot substitute for constrained/native evidence.
+
+
+## 2026-09-14 — Enumerate captured allocation and decide preservation modes
+
+The owner chose separate full-preservation and content-recovery modes after
+reviewing preallocation's capacity guarantee and restoration costs. ADR-078
+records preservation/refusal for the full mode and explicit reservation-loss
+reporting for content recovery. The precise PAX profile and destination
+reservation qualification remain work.
+
+Added bounded snapshot allocation pages, exposing semantic byte ranges and
+unwritten state, including rounded tails and reservations beyond EOF. The VFS
+backup facade checks authority and page bounds; unsupported providers explicitly
+refuse. The extent reader checks a predecessor at page boundaries. No physical
+addresses or sharing layout enter the consumer interface, and no disk or C ABI
+changes were made.
+
+The core fixture enumerates 140 fragmented written/unwritten records plus a
+reservation at a 1 TiB offset after live truncation and remount. Page sizes 1,
+7 and 64 preserve captured coverage with at most 32 device reads per page and
+zero writes/flushes. Direct, empty, rounded-tail, bad-limit, directory,
+out-of-range and stale-handle cases are covered. A valid-CRC overlapping extent
+fixture exercises the cross-page check. The same VFS consumer reconstructs bytes
+from allocation coverage and ordinary reads on independent and AFS+ providers;
+revocation and in-backend authority exclusion have regression coverage.
+
+Review found that the final rounded allocation can end at 2^64. Changed byte
+conversion to multiply offset and length separately, then added an actual
+preallocation/snapshot/remount regression at that boundary. Stopped the first
+full-suite run to fix this before validation; its interrupted result is not a pass.
+
+For the next archive unit, an exploratory GNU sparse 1.0 fixture recovered
+12,288 exact logical bytes, including gaps and a trailing hole, through Python
+3.9.6 tarfile and bsdtar 3.5.3/libarchive 3.7.4. The layout followed the
+[GNU tar sparse 1.0 specification](https://www.gnu.org/software/tar/manual/html_node/PAX-1.html),
+checked on 2026-09-14. This temporary-fixture experiment is an encoding input,
+not archive, reservation or metadata-preservation qualification.
+
+Validation: the final workspace/all-features run passed 341 tests with zero
+failures and 10 ignored tests. Formatting, Clippy with warnings denied,
+documentation checks, all three checker fixtures and whitespace checks passed.
+
 
 ## 2026-09-14 — Enforce separate destination restore grants
 

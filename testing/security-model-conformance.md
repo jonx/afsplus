@@ -22,6 +22,7 @@
 - [12. Benchmark reporting](#12-benchmark-reporting)
 - [13. Trusted snapshot backup authority](#13-trusted-snapshot-backup-authority)
 - [14. Destination restore authority](#14-destination-restore-authority)
+- [15. Captured allocation enumeration](#15-captured-allocation-enumeration)
 
 <!-- /toc -->
 
@@ -257,3 +258,26 @@ These tests exercise a host library with memory devices. Native authentication,
 namespace races, IPC cleanup/cancellation, archive integrity, complete metadata
 transport and crash-safe archive completion need their own provider/consumer
 gates under Q5 and Q11.
+
+
+## 15. Captured allocation enumeration
+
+Run `cargo test -p afsplus-core snapshot_allocation_pages --all-features` and
+`cargo test -p afsplus-core ordinal_page_checks --all-features` for captured
+allocation and cross-page corruption checks. Enumerate a fragmented extent tree
+with page sizes 1, 7 and 64, written and unwritten records, a 1 TiB gap,
+reservations beyond EOF, direct files, rounded tails and empty files. Preserve
+a final rounded allocation ending at 2^64 through actual preallocation, snapshot
+creation and remount without classifying its representable offset/length as corruption. After live
+truncation and remount, require exact captured coverage, bounded device reads,
+zero writes/flushes and stale-handle refusal. Reject zero/excessive limits,
+out-of-range ordinals and directory objects. An independently encoded valid-CRC
+overlapping map must fail when the overlap straddles a page boundary.
+
+The VFS backup harness must reconstruct the same bytes through allocation
+coverage and ordinary reads on both independent and AFS+ providers. Clip rounded
+ranges to logical EOF. Invalid limits and revoked grants must not call providers;
+an in-backend probe must observe authority held throughout enumeration.
+These checks qualify source enumeration. Destination reservations and the two
+[archive modes](../adr/ADR-078-backup-preservation-modes.md) require their own
+restoration, unsupported-provider and completion oracles.

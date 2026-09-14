@@ -37,8 +37,9 @@ recovery. Use the [metadata restoration primitive](../testing/book-review-qualif
 and the [checked destination interface](../docs/13-filesystem-api-v2.md#9-destination-scoped-restore-extension).
 Define existing-destination merge/overwrite/resume under Q11 before exposing
 pre-existing destination objects; distinguish partial restoration from completion.
-Add sparse/attribute/security transport
-with explicit unsupported-state refusal; qualify native host grant issuance. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
+Use [captured allocation enumeration](../docs/13-filesystem-api-v2.md#captured-allocation-enumeration)
+for source ranges; add destination reservation and attribute/security transport
+with explicit unsupported-state refusal under [ADR-078](../adr/ADR-078-backup-preservation-modes.md); qualify native host grant issuance. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
 with both-slot crash oracles, generation-aware quarantine and measured
 low-space progress. Implement [ADR-075](../adr/ADR-075-revocable-backup-capability.md)
 for revocable trusted-backup authority; keep ordinary-user historical access
@@ -90,8 +91,16 @@ adapter work can proceed while a format question is discussed.
 - Keep on-disk encoding independent of Rust and application APIs filesystem-neutral.
 - Missing platform support becomes owned implementation work. Native evidence,
   long stress and optional facilities must not be inferred from host test success.
-- Discuss unresolved choices, record decisions, then amend the roadmap/question
-  owner. Do not silently turn a convenient prototype into a frozen format.
+- Under the owner's delegated design authority, choose the recommended option
+  for unresolved questions, record alternatives and rationale in the decision
+  and question owner, and continue implementation. Preserve explicit public
+  communication and hardware-write boundaries.
+- Qualify constrained/older-system profiles with bounded memory, bounded work
+  and explicit admission limits. Degraded operation may reduce optional features
+  or throughput; preserve filesystem invariants and report unsupported semantics
+  or preservation losses. Verify actual target behavior separately from host models.
+- Completion requires a requirement-by-requirement correctness and platform-fit
+  review, including constrained profiles. Record missing evidence explicitly.
 
 ## Verification and delivery
 

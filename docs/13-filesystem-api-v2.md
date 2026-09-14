@@ -21,6 +21,7 @@
 - [6. Rust](#6-rust)
 - [7. Zed](#7-zed)
 - [8. Trusted snapshot backup extension](#8-trusted-snapshot-backup-extension)
+  - [Captured allocation enumeration](#captured-allocation-enumeration)
   - [Versioning and compatibility](#versioning-and-compatibility)
 - [9. Destination-scoped restore extension](#9-destination-scoped-restore-extension)
 
@@ -268,6 +269,37 @@ authorization. Deletion stays busy while any provider reader lease remains,
 including revoked readers. The host must clean up handles on client disconnect.
 Cursors alone confer no authority and do not pin views.
 
+### Captured allocation enumeration
+
+`allocations(reader, object, start, limit)` enumerates the captured file's
+allocation records by ordinal. A positive limit of at most 64 is checked before
+provider invocation. Each record exposes byte offset, length and an unwritten
+flag; the page returns the next ordinal and explicit end-of-enumeration.
+Resumption uses the same retained snapshot and object. Providers without this
+operation return `NotSupported`; an empty map cannot stand in for missing support.
+Grant admission covers the complete provider call under the reader's original
+authority, including after live mutation and remount through a new service.
+
+Gaps are holes. Ranges include allocation-rounded tails and unwritten
+reservations beyond EOF; logical size comes from `stat`. Consumers must clip
+content reads to logical size and treat unwritten regions as zeros. The final
+rounded allocation can end at 2^64: use wider arithmetic for offset plus length,
+or clip length to `size - offset` after checking offset against logical size. Range
+segmentation can vary with physical fragmentation; preservation compares
+semantic coverage, never record counts or physical addresses. No sharing hint,
+physical block number or allocator state crosses the interface.
+
+The AFS+ mapping uses `snapshot_allocation_page`, captured object roots and a
+bounded ordinal extent-tree traversal. It validates the preceding extent at a
+page boundary to reject overlapping mappings across pages. Memory and traversal
+are bounded by page size and tree height; a large logical hole is skipped.
+The ordinary full checker retains ownership and whole-tree validation duties.
+
+[ADR-078](../adr/ADR-078-backup-preservation-modes.md) distinguishes full
+preservation of reservations from explicit content recovery with a loss report.
+The exact archive profile and destination reservation operations must define
+alignment, rounding and completion before claiming full restoration.
+
 ### Versioning and compatibility
 
 This additive Rust module is an experimental source interface within version
@@ -281,8 +313,8 @@ The existing C header is not a wire encoding of these Rust types.
 The provider mapping uses existing `Stat`, `DirectoryEntry` and 64-bit offsets.
 The same consumer must run against an independent provider and AFS+; grants and
 backend types cannot be used to teach the consumer a disk layout. Exact archive
-and restoration additionally require sparse-range enumeration, attributes,
-security-container transport and metadata restoration operations. This reader
+and restoration additionally require attributes, security-container transport, destination
+reservation operations and a qualified preservation profile. This reader
 interface alone does not establish a complete backup format or restore contract.
 
 

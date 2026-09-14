@@ -364,6 +364,48 @@ pub fn lookup_extent<D: BlockDevice>(
     Ok((logical_block < extent.logical_end()?).then_some(extent))
 }
 
+/// Reads a bounded ordinal page, including a predecessor check across pages.
+/// The caller supplies a bounded limit before this allocation.
+pub fn read_page<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    owner: u64,
+    max_generation: u64,
+    start: u64,
+    limit: usize,
+) -> Result<ExtentTail, CoreError> {
+    let predecessor = usize::from(start != 0);
+    let count = limit
+        .checked_add(predecessor)
+        .ok_or(CoreError::PrototypeLimit("extent page limit overflows"))?;
+    let page = read_range(
+        dev,
+        geo,
+        root_lba,
+        spec(owner, max_generation),
+        start.saturating_sub(1),
+        count,
+    )?;
+    let mut extents = page
+        .items
+        .into_iter()
+        .map(|(key, value)| decode_extent(&key, &value, geo))
+        .collect::<Result<Vec<_>, _>>()?;
+    for pair in extents.windows(2) {
+        if pair[0].logical_end()? > pair[1].logical_start {
+            return Err(CoreError::Corrupt("logical extents overlap".into()));
+        }
+    }
+    if predecessor != 0 && !extents.is_empty() {
+        extents.remove(0);
+    }
+    Ok(ExtentTail {
+        extents,
+        total_extents: page.total_items,
+    })
+}
+
 /// Reads at most `limit` logical extent records from the end of the map.
 /// Subtree item counters skip all preceding leaves, keeping cleanup work
 /// proportional to tree height plus the requested tail rather than file
@@ -564,6 +606,41 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn ordinal_page_checks_overlap_with_the_preceding_record() {
+        let geo = Geometry {
+            block_size: 4096,
+            total_blocks: 8192,
+            region_size: 8192,
+        };
+        let mut dev = MemoryBackend::new(4096, 8192);
+        let mut leaf = empty_leaf(17);
+        for extent in [
+            Extent {
+                logical_start: 0,
+                physical_start: 1000,
+                block_count: 4,
+                flags: 0,
+            },
+            Extent {
+                logical_start: 3,
+                physical_start: 2000,
+                block_count: 2,
+                flags: 0,
+            },
+        ] {
+            let (key, value) = encode_extent(extent).unwrap();
+            leaf.items.push(afsplus_format::tree::TreeItem {
+                key: key.to_vec(),
+                value: value.to_vec(),
+            });
+        }
+        leaf.subtree_items = leaf.items.len() as u64;
+        dev.write_block(100, &leaf.encode(4096, 1).unwrap())
+            .unwrap();
+        assert!(super::read_page(&mut dev, &geo, 100, 17, 1, 1, 1).is_err());
     }
 
     #[test]

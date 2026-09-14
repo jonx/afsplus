@@ -48,6 +48,21 @@ pub struct ViewDirectoryPage<C> {
     pub eof: bool,
 }
 
+/// Semantic allocation ranges; gaps are holes. Reservations and rounded tails
+/// may extend beyond the logical size reported by stat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllocationRange {
+    pub offset: u64,
+    pub length: u64,
+    pub unwritten: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllocationPage {
+    pub ranges: Vec<AllocationRange>,
+    pub next: u64,
+    pub eof: bool,
+}
+
 /// Trusted provider contract. Implementations expose semantic objects, never
 /// allocation addresses. Hosts must not expose this unchecked interface to
 /// untrusted backup clients. A cursor alone must not retain a view.
@@ -67,6 +82,15 @@ pub trait SnapshotBackend {
         offset: u64,
         out: &mut [u8],
     ) -> Result<usize, VfsError>;
+    fn allocations(
+        &mut self,
+        _view: &Self::View,
+        _object: ObjectId,
+        _start: u64,
+        _limit: usize,
+    ) -> Result<AllocationPage, VfsError> {
+        Err(VfsError::NotSupported)
+    }
     fn directory(
         &mut self,
         view: &Self::View,
@@ -229,6 +253,21 @@ impl<P: SnapshotBackend> BackupService<P> {
         let _permit = self.reader_permit(reader)?;
         Ok(self.backend.read(&reader.0.view, object, offset, out)?)
     }
+    pub fn allocations(
+        &mut self,
+        reader: &BackupReader<P::View>,
+        object: ObjectId,
+        start: u64,
+        limit: usize,
+    ) -> Result<AllocationPage, BackupError> {
+        let _permit = self.reader_permit(reader)?;
+        if limit == 0 || limit > 64 {
+            return Err(VfsError::Limit("allocation page limit out of range").into());
+        }
+        Ok(self
+            .backend
+            .allocations(&reader.0.view, object, start, limit)?)
+    }
     pub fn directory(
         &mut self,
         reader: &BackupReader<P::View>,
@@ -295,6 +334,28 @@ impl<D: afsplus_block::BlockDevice> SnapshotBackend for afsplus_core::Volume<D> 
         out: &mut [u8],
     ) -> Result<usize, VfsError> {
         Ok(self.snapshot_read_file_at(view, object, offset, out)?)
+    }
+    fn allocations(
+        &mut self,
+        view: &Self::View,
+        object: ObjectId,
+        start: u64,
+        limit: usize,
+    ) -> Result<AllocationPage, VfsError> {
+        let page = self.snapshot_allocation_page(view, object, start, limit)?;
+        Ok(AllocationPage {
+            ranges: page
+                .ranges
+                .into_iter()
+                .map(|r| AllocationRange {
+                    offset: r.offset,
+                    length: r.length,
+                    unwritten: r.unwritten,
+                })
+                .collect(),
+            next: page.next,
+            eof: page.eof,
+        })
     }
     fn directory(
         &mut self,
@@ -378,6 +439,15 @@ impl<P: SnapshotBackend> BackupClient<'_, P> {
     ) -> Result<usize, BackupError> {
         self.0.read(reader, object, offset, out)
     }
+    pub fn allocations(
+        &mut self,
+        reader: &BackupReader<P::View>,
+        object: ObjectId,
+        start: u64,
+        limit: usize,
+    ) -> Result<AllocationPage, BackupError> {
+        self.0.allocations(reader, object, start, limit)
+    }
     pub fn directory(
         &mut self,
         reader: &BackupReader<P::View>,
@@ -416,6 +486,23 @@ mod authority_tests {
         fn stat(&mut self, _: &(), _: ObjectId) -> Result<Stat, VfsError> {
             unreachable!()
         }
+        fn allocations(
+            &mut self,
+            _: &(),
+            _: ObjectId,
+            _: u64,
+            _: usize,
+        ) -> Result<AllocationPage, VfsError> {
+            assert!(matches!(
+                self.grant.as_ref().unwrap().0 .0.active.try_write(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            Ok(AllocationPage {
+                ranges: vec![],
+                next: 0,
+                eof: true,
+            })
+        }
         fn read(&mut self, _: &(), _: ObjectId, _: u64, _: &mut [u8]) -> Result<usize, VfsError> {
             // A check followed by an immediately dropped guard fails here:
             // revocation must remain excluded during the actual backend call.
@@ -442,6 +529,7 @@ mod authority_tests {
         service.backend_mut().grant = Some(grant.clone());
         let reader = service.open(&grant, 1).unwrap();
         assert_eq!(service.read(&reader, 1, 0, &mut []), Ok(0));
+        assert!(service.allocations(&reader, 1, 0, 1).unwrap().eof);
         authority.revoke(&grant).unwrap();
         assert_eq!(
             service.read(&reader, 1, 0, &mut []),

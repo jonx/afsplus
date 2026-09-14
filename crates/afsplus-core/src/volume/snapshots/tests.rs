@@ -1120,3 +1120,137 @@ fn public_snapshot_mount_recovery_cuts_preserve_acknowledged_live_and_historical
     eprintln!("snapshot-aware recovery crash states: {states}");
     assert!(states > log.len());
 }
+
+#[test]
+fn snapshot_allocation_pages_preserve_sparse_and_unwritten_ranges_after_remount() {
+    use afsplus_block::TraceBackend;
+    let mut volume = open(formatted(4096, 0), MountMode::ReadWrite);
+    let file = volume.create_file_in_root("ranges", &[], now(2)).unwrap();
+    let direct = volume
+        .create_file_in_root("direct", &[7; 5000], now(2))
+        .unwrap();
+    let empty = volume.create_file_in_root("empty", &[], now(2)).unwrap();
+    let mut expected = Vec::new();
+    for i in 0..140u64 {
+        let offset = i * 3 * 4096;
+        if i % 2 == 0 {
+            volume
+                .write_file_at(file, offset, &[3; 4096], now(3))
+                .unwrap();
+        } else {
+            volume.preallocate_file(file, offset, 4096, now(3)).unwrap();
+        }
+        expected.push(SnapshotAllocationRange {
+            offset,
+            length: 4096,
+            unwritten: i % 2 != 0,
+        });
+    }
+    let distant = 1u64 << 40;
+    volume
+        .preallocate_file(file, distant, 8192, now(4))
+        .unwrap();
+    // Physical allocation may split a reservation into multiple semantic records.
+    let id = volume.snapshot_create(now(5)).unwrap();
+    volume.truncate_file(file, 0, now(6)).unwrap();
+    let mut volume = open(TraceBackend::new(volume.into_device()), MountMode::ReadOnly);
+    let handle = volume.snapshot_open(id).unwrap();
+    let baseline = volume.dev.stats();
+    for limit in [1, 7, 64] {
+        let mut cursor = 0;
+        let mut collected = Vec::new();
+        loop {
+            let before = volume.dev.stats().reads;
+            let page = volume
+                .snapshot_allocation_page(&handle, file, cursor, limit)
+                .unwrap();
+            assert!(
+                volume.dev.stats().reads - before <= 32,
+                "page must seek past huge holes"
+            );
+            assert!(page.ranges.len() <= limit);
+            assert_eq!(page.next, cursor + page.ranges.len() as u64);
+            collected.extend(page.ranges);
+            if page.eof {
+                break;
+            }
+            assert!(page.next > cursor);
+            cursor = page.next;
+        }
+        assert_eq!(&collected[..140], &expected);
+        let tail = &collected[140..];
+        assert_eq!(tail[0].offset, distant);
+        assert!(tail.iter().all(|r| r.unwritten));
+        assert_eq!(tail.iter().map(|r| r.length).sum::<u64>(), 8192);
+    }
+    let page = volume
+        .snapshot_allocation_page(&handle, direct, 0, 1)
+        .unwrap();
+    assert_eq!(
+        page.ranges,
+        vec![SnapshotAllocationRange {
+            offset: 0,
+            length: 8192,
+            unwritten: false
+        }]
+    );
+    assert!(page.eof);
+    assert!(volume
+        .snapshot_allocation_page(&handle, empty, 0, 1)
+        .unwrap()
+        .ranges
+        .is_empty());
+    assert!(volume
+        .snapshot_allocation_page(&handle, file, 0, 0)
+        .is_err());
+    assert!(volume
+        .snapshot_allocation_page(&handle, file, 0, 65)
+        .is_err());
+    assert!(volume
+        .snapshot_allocation_page(&handle, file, u64::MAX, 1)
+        .is_err());
+    assert!(volume
+        .snapshot_allocation_page(&handle, OBJECT_ROOT, 0, 1)
+        .is_err());
+    assert_eq!(volume.dev.stats().writes, baseline.writes);
+    assert_eq!(volume.dev.stats().flushes, baseline.flushes);
+    let mut remounted = open(volume.into_device(), MountMode::ReadOnly);
+    assert!(remounted
+        .snapshot_allocation_page(&handle, file, 0, 1)
+        .is_err());
+}
+
+#[test]
+fn snapshot_allocation_preserves_the_final_rounded_u64_block() {
+    let mut volume = open(formatted(1024, 0), MountMode::ReadWrite);
+    let file = volume
+        .create_file_in_root("last-block", &[], now(2))
+        .unwrap();
+    let offset = u64::MAX - 4095;
+    volume.preallocate_file(file, offset, 4095, now(3)).unwrap();
+    let id = volume.snapshot_create(now(4)).unwrap();
+    let mut volume = open(volume.into_device(), MountMode::ReadOnly);
+    let view = volume.snapshot_open(id).unwrap();
+    let page = volume.snapshot_allocation_page(&view, file, 0, 1).unwrap();
+    assert_eq!(
+        page.ranges,
+        vec![SnapshotAllocationRange {
+            offset,
+            length: 4096,
+            unwritten: true
+        }]
+    );
+    assert!(page.eof);
+    assert_eq!(
+        page.ranges[0].offset as u128 + page.ranges[0].length as u128,
+        1u128 << 64
+    );
+    assert_eq!(
+        volume
+            .snapshot_stat(&view, file)
+            .unwrap()
+            .unwrap()
+            .size_bytes,
+        0
+    );
+}

@@ -1,6 +1,6 @@
 use afsplus_format::Timespec;
 use afsplus_vfs::backup::*;
-use afsplus_vfs::{DirectoryEntry, NodeKind, Stat, VfsError};
+use afsplus_vfs::{DirectoryEntry, NodeKind, ObjectId, Stat, VfsError};
 use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
 
@@ -126,6 +126,34 @@ impl SnapshotBackend for MockFs {
         out[..n].copy_from_slice(&view.1.data[offset..offset + n]);
         Ok(n)
     }
+    fn allocations(
+        &mut self,
+        view: &Self::View,
+        object: ObjectId,
+        start: u64,
+        _limit: usize,
+    ) -> Result<AllocationPage, VfsError> {
+        self.calls += 1;
+        if object != 2 {
+            return Err(VfsError::NotFound);
+        }
+        if start > 1 {
+            return Err(VfsError::Invalid);
+        }
+        Ok(AllocationPage {
+            ranges: if start == 0 {
+                vec![AllocationRange {
+                    offset: 0,
+                    length: view.1.data.len() as u64,
+                    unwritten: false,
+                }]
+            } else {
+                vec![]
+            },
+            next: 1,
+            eof: true,
+        })
+    }
     fn directory(
         &mut self,
         _: &Self::View,
@@ -179,6 +207,37 @@ fn collect<P: SnapshotBackend>(
                 }
                 data.extend_from_slice(&chunk[..n]);
             }
+            let mut sparse = vec![0; stat.size as usize];
+            let mut ordinal = 0;
+            loop {
+                let allocations = client
+                    .allocations(&reader, entry.object_id, ordinal, 1)
+                    .unwrap();
+                for range in allocations.ranges {
+                    if range.unwritten || range.offset >= stat.size {
+                        continue;
+                    }
+                    let end = (range.offset + range.length.min(stat.size - range.offset)) as usize;
+                    let begin = range.offset as usize;
+                    assert_eq!(
+                        client
+                            .read(
+                                &reader,
+                                entry.object_id,
+                                range.offset,
+                                &mut sparse[begin..end]
+                            )
+                            .unwrap(),
+                        end - begin
+                    );
+                }
+                if allocations.eof {
+                    break;
+                }
+                assert!(allocations.next > ordinal);
+                ordinal = allocations.next;
+            }
+            assert_eq!(sparse, data);
             result.push((entry.name, stat, data));
         }
         if page.eof {
@@ -476,4 +535,31 @@ fn missing_captured_directory_child_is_corruption_not_an_absent_lookup() {
     assert_eq!(traced.stats().writes, 0);
     assert_eq!(traced.stats().flushes, 0);
     assert!(!afsplus_check::check_device(&mut traced).is_clean());
+}
+
+#[test]
+fn allocation_enumeration_is_neutral_bounded_and_revocable() {
+    let (mut service, authority) = BackupService::new(MockFs::new(), 1).unwrap();
+    let grant = authority.grant();
+    let id = service.create(&grant, now(1)).unwrap();
+    let reader = service.open(&grant, id).unwrap();
+    let page = service.client().allocations(&reader, 2, 0, 1).unwrap();
+    assert_eq!(
+        page.ranges,
+        vec![AllocationRange {
+            offset: 0,
+            length: 6,
+            unwritten: false
+        }]
+    );
+    let calls = service.backend_mut().calls;
+    for limit in [0, 65, usize::MAX] {
+        assert!(service.allocations(&reader, 2, 0, limit).is_err());
+    }
+    authority.revoke(&grant).unwrap();
+    assert_eq!(
+        service.allocations(&reader, 2, 0, 1),
+        Err(BackupError::Denied)
+    );
+    assert_eq!(service.backend_mut().calls, calls);
 }
