@@ -191,3 +191,81 @@ pub fn for_each_crash_state(
         }
     }
 }
+
+/// Stream the existing cut model into bounded overlay forks.
+/// An error means enumeration is incomplete, even if earlier callbacks succeeded.
+/// Retaining callback branches consumes the same family budget as the caller.
+pub fn for_each_overlay_crash_state<D: BlockDevice>(
+    base: &crate::OverlayBackend<D>,
+    log: &[RecordedOp],
+    crash_point: usize,
+    mut visit: impl FnMut(crate::OverlayBackend<D>, String) -> Result<(), BlockError>,
+) -> Result<(), BlockError> {
+    let prefix = log
+        .get(..crash_point)
+        .ok_or(BlockError::Injected("invalid crash point"))?;
+    let last_flush = prefix
+        .iter()
+        .rposition(|op| matches!(op, RecordedOp::Flush))
+        .map_or(0, |index| index + 1);
+    let tail: Vec<_> = prefix[last_flush..]
+        .iter()
+        .filter_map(|op| match op {
+            RecordedOp::Write { lba, data } => Some((*lba, data)),
+            RecordedOp::Flush => None,
+        })
+        .take(MAX_ENUMERATED_TAIL + 1)
+        .collect();
+    if tail.len() > MAX_ENUMERATED_TAIL {
+        return Err(BlockError::Injected(
+            "unflushed tail exceeds full enumeration budget",
+        ));
+    }
+    let mut durable = base.fork()?;
+    for op in &prefix[..last_flush] {
+        if let RecordedOp::Write { lba, data } = op {
+            durable.write_block(*lba, data)?;
+        }
+    }
+    for subset in 0u64..(1u64 << tail.len()) {
+        let mut image = durable.fork()?;
+        for (i, (lba, data)) in tail.iter().enumerate() {
+            if subset & (1 << i) != 0 {
+                image.write_block(*lba, data)?;
+            }
+        }
+        visit(
+            image,
+            format!(
+                "crash at op {crash_point}: unflushed subset {subset:#b} of {} writes",
+                tail.len()
+            ),
+        )?;
+    }
+    for (i, (lba, data)) in tail.iter().enumerate() {
+        for &tear in TEAR_OFFSETS {
+            if tear >= data.len() {
+                continue;
+            }
+            let mut image = durable.fork()?;
+            for (earlier_lba, earlier_data) in &tail[..i] {
+                image.write_block(*earlier_lba, earlier_data)?;
+            }
+            let mut torn = Vec::new();
+            torn.try_reserve_exact(image.block_size())
+                .map_err(|_| BlockError::Io(std::io::Error::other("torn block allocation")))?;
+            torn.resize(image.block_size(), 0);
+            image.read_block(*lba, &mut torn)?;
+            if data.len() != torn.len() {
+                return Err(BlockError::WrongBufferSize {
+                    expected: torn.len(),
+                    actual: data.len(),
+                });
+            }
+            torn[..tear].copy_from_slice(&data[..tear]);
+            image.write_block(*lba, &torn)?;
+            visit(image, format!("crash at op {crash_point}: unflushed write {i} (lba {lba}) torn at byte {tear}"))?;
+        }
+    }
+    Ok(())
+}

@@ -17,6 +17,7 @@
 - [Remote AROS target mode](#remote-aros-target-mode)
 - [Rule](#rule)
 - [Bounded partition views](#bounded-partition-views)
+- [Bounded overlay branches](#bounded-overlay-branches)
 
 <!-- /toc -->
 
@@ -197,3 +198,33 @@ views, invalid ranges/buffers and forwarded failure checks. Run
 rename, truncate, sync, remount and exhaustive checking within a populated parent
 image. Every surrounding block must retain its sentinel contents. These tests
 use memory images and establish no physical partition or device qualification.
+
+## Bounded overlay branches
+
+[ADR-097](../adr/ADR-097-bounded-memory-overlay-branches.md) defines memory-only
+forks over a stable shared base. Caller-selected limits cover live branches and
+aggregate replacement entries, including copied fork indexes. Payloads are shared
+until rewritten. Base reads propagate errors; branch writes and flushes never
+write or flush the base. Host-process loss is outside this memory provider's
+storage scope.
+
+Run `cargo test -p afsplus-block` and
+`cargo test -p afsplus-check --test overlay_volume`. Require:
+
+- Exact fork isolation and immutable base contents through filesystem namespace
+  changes, sparse writes, truncates, checker passes and remount.
+- Full fork admission before index allocation, rollback on failed admission,
+  rewriting existing entries at capacity, and capacity return on branch drop.
+- Refusal without base I/O for invalid bounds/buffers; base-read error propagation.
+- Fork index/payload measurements equal across small and large logical images
+  for the same sparse edits, with shared base/payload identity and no full-image copy.
+- Overlay cut states equal the independent memory-image oracle byte for byte,
+  including repeated-block writes, completed barriers, write-loss subsets and
+  sampled tears. Every publication cut preserves exact old/new namespace contents.
+- Exhaustion and callback errors return incomplete enumeration explicitly and
+  release unretained branches. Retaining callback branches consumes family limits.
+
+Payload/index measurements exclude allocator overhead, shared-base memory and
+total process RAM. Full resource accounting and persistent replay artifacts keep
+separate stage gates. A persistent scratch provider needs crash-safe payload/index
+publication before it can replace the memory provider for larger workloads.

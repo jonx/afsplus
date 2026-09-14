@@ -13,6 +13,7 @@ pub mod activity;
 pub mod fault;
 pub mod file;
 pub mod memory;
+pub mod overlay;
 pub mod powercut;
 pub mod slice;
 pub mod trace;
@@ -25,6 +26,7 @@ pub use activity::{
 pub use fault::{FaultBackend, FaultPlan};
 pub use file::FileBackend;
 pub use memory::MemoryBackend;
+pub use overlay::{OverlayBackend, OverlayLimits};
 pub use powercut::{crash_states, for_each_crash_state, CrashState, RecordedOp, RecordingBackend};
 pub use slice::SliceBackend;
 pub use trace::{IoStats, TraceBackend, TraceEvent};

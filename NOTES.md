@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Add bounded memory overlay branches and cut-state replay](#2026-09-14---add-bounded-memory-overlay-branches-and-cut-state-replay)
 - [2026-09-14 - Measure host commands with per-child CPU and RSS](#2026-09-14---measure-host-commands-with-per-child-cpu-and-rss)
 - [2026-09-14 - Prioritize usable stage outcomes across the complete queue](#2026-09-14---prioritize-usable-stage-outcomes-across-the-complete-queue)
 - [2026-09-14 - Add bounded block-device partition views](#2026-09-14---add-bounded-block-device-partition-views)
@@ -115,6 +116,29 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Add bounded memory overlay branches and cut-state replay
+
+[ADR-097](adr/ADR-097-bounded-memory-overlay-branches.md) defines shared immutable
+bases and payloads with independent branch indexes. Admission limits live branches
+and aggregate entries across forks; failure rolls back charges and branch drop
+returns capacity. Exact filesystem tests preserve base images and diverging branch
+names/bytes through remount, and budget exhaustion preserves acknowledged contents.
+
+The overlay cut enumerator matches the existing memory-image oracle byte for byte
+and description for description across completed barriers, lost-write subsets,
+repeated block writes and sampled tears. Publication cuts recover exact old/new
+namespace states. Budget/callback failures explicitly report incomplete enumeration.
+A one-edit fork over both 512-KiB and 512-GiB logical bases copied a 32-byte index
+entry, shared its 512-byte payload and copied zero payload bytes on this host.
+These are index/payload measurements, not total process memory.
+
+The all-feature workspace suite passed 483 tests with zero failures and ten
+ignored qualification tests across 80 suites. Clippy with warnings denied,
+formatting, documentation, seven checker fixtures and whitespace checks passed.
+This closes the finite Stage A memory-overlay requirement. Persistent replay
+packages, minimization, broader cache-profile coverage and full resource accounting
+remain open. No persistent-overlay or physical-device durability is claimed.
 
 ## 2026-09-14 - Measure host commands with per-child CPU and RSS
 
