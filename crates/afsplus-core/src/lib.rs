@@ -91,6 +91,8 @@ pub enum CoreError {
     DirectoryNotEmpty,
     /// A namespace move would create a cycle or otherwise violate topology.
     InvalidMove(&'static str),
+    /// Caller-supplied metadata cannot be represented by the operation.
+    InvalidMetadata(&'static str),
     /// Component name rejected by format rules.
     InvalidName(FormatError),
     /// The volume ran out of blocks (the bootstrap allocator never reuses).
@@ -143,6 +145,7 @@ impl fmt::Display for CoreError {
             CoreError::IsDirectory => write!(f, "object is a directory"),
             CoreError::DirectoryNotEmpty => write!(f, "directory is not empty"),
             CoreError::InvalidMove(what) => write!(f, "invalid namespace move: {what}"),
+            CoreError::InvalidMetadata(what) => write!(f, "invalid metadata: {what}"),
             CoreError::InvalidName(e) => write!(f, "invalid name: {e}"),
             CoreError::NoSpace => write!(f, "no space left on volume"),
             CoreError::PrototypeLimit(what) => write!(f, "prototype limit: {what}"),

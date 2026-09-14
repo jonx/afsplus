@@ -170,6 +170,9 @@ impl ObjectRecord {
     }
 
     fn validate(&self, block_size: usize) -> Result<(), FormatError> {
+        self.created.validate()?;
+        self.modified.validate()?;
+        self.changed.validate()?;
         if self.object_id == OBJECT_INVALID {
             return Err(FormatError::Invalid("object ID zero is invalid"));
         }

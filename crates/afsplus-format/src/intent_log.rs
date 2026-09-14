@@ -159,6 +159,7 @@ impl LogOp {
     }
 
     fn validate(&self) -> Result<(), FormatError> {
+        self.timestamp().validate()?;
         match self {
             LogOp::Create {
                 name,

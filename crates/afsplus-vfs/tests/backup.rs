@@ -368,7 +368,21 @@ fn afsplus_uses_the_same_consumer_and_retains_history_through_remount() {
     assert_eq!(service.backend_mut().read_file(file).unwrap(), b"after!");
     service
         .backend_mut()
-        .delete_file_in_root("file", now(5))
+        .set_object_protection(file, 0xffff_ffff, now(5))
+        .unwrap();
+    assert_eq!(
+        service
+            .backend_mut()
+            .stat(file)
+            .unwrap()
+            .unwrap()
+            .protection,
+        0xffff_ffff
+    );
+    assert_eq!(collect(&mut service.client(), &grant, id), expected);
+    service
+        .backend_mut()
+        .delete_file_in_root("file", now(6))
         .unwrap();
     let old_reader = service.open(&grant, id).unwrap();
     let dev = service.into_backend().into_device();

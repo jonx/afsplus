@@ -137,6 +137,14 @@ pub struct Timespec {
 impl Timespec {
     pub const WIRE_SIZE: usize = 12;
 
+    pub fn validate(&self) -> Result<(), FormatError> {
+        if self.nanoseconds >= 1_000_000_000 {
+            Err(FormatError::Invalid("timestamp nanoseconds out of range"))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn write(&self, buf: &mut [u8]) {
         le::put_i64(&mut buf[0..8], self.seconds);
         le::put_u32(&mut buf[8..12], self.nanoseconds);
@@ -151,13 +159,12 @@ impl Timespec {
         }
         let seconds = le::get_i64(&buf[0..8]);
         let nanoseconds = le::get_u32(&buf[8..12]);
-        if nanoseconds >= 1_000_000_000 {
-            return Err(FormatError::Invalid("timestamp nanoseconds out of range"));
-        }
-        Ok(Timespec {
+        let time = Timespec {
             seconds,
             nanoseconds,
-        })
+        };
+        time.validate()?;
+        Ok(time)
     }
 }
 

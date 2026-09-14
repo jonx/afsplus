@@ -212,10 +212,12 @@ unchecked backend hook.
 
 Use one consumer for an independent provider and AFS+. Compare original names,
 metadata and streamed bytes after live content changes, deletion and remount;
-old-service grants/readers must fail on the remounted service. The independent
-provider additionally changes live protection metadata. AFS+ protection mutation,
-rich ACL transport and actual OS authentication require their own integration
-tests; the independent provider does not qualify those missing bridges.
+old-service grants/readers must fail on the remounted service. Both providers
+change live protection metadata while historical reads retain the captured value.
+Rich ACL transport and actual OS permission evaluation/authentication require
+their own integration tests; raw protection preservation does not qualify those
+bridges. Separate destination authority follows
+[ADR-077](../adr/ADR-077-separate-restore-authority.md).
 
 
 Plant a valid-CRC captured object-map leaf that omits a directory's child.

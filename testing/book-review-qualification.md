@@ -26,6 +26,7 @@ source, chapter coverage and architectural rationale. Results belong in
 - [Normative coverage map](#normative-coverage-map)
 - [Repeated low-space and reclamation gate](#repeated-low-space-and-reclamation-gate)
 - [Explicit snapshot mount and recovery](#explicit-snapshot-mount-and-recovery)
+- [Metadata restoration primitive](#metadata-restoration-primitive)
 
 <!-- /toc -->
 
@@ -409,3 +410,32 @@ including a registry split. Require bounded root/control-path growth rather
 than per-view namespace traversal, then open every view and verify its bytes.
 This fixture does not choose shipping limits, qualify host authorization or
 establish native resource and durability guarantees.
+
+## Metadata restoration primitive
+
+Run `cargo test -p afsplus-check --test metadata --all-features -- --nocapture`.
+Require exact restoration of existing protection and three timestamps on files,
+directories and the root, including signed-second extremes and nanosecond bounds.
+Compare every other object-record field unchanged: identity, links, layout,
+allocation size, policy flags and content generation. Exercise sparse shared
+files, hard links and clone isolation with snapshots enabled and disabled.
+
+Check no-op and invalid-input zero-write behavior, hidden-object refusal,
+read-only modes, open-window rejection and remount-required mutation refusal
+after uncertain publication. Interrupt every metadata publication boundary and
+require the complete old or complete new metadata tuple, exact file bytes and
+unchanged historical metadata, with full checking of both checkpoint slots.
+Report metadata, byte and flush costs separately from file-data writes.
+
+The backup API fixture must change actual AFS+ live protection metadata while
+preserving the captured view. These core/harness tests do not establish native
+permission evaluation, the checked destination restore interface, full archive
+preservation or ACL mapping.
+
+
+Run `cargo test -p afsplus-format --test roundtrip object_and_log_encoders`.
+Object timestamp fields and every intent-log operation kind must reject values
+at or above one billion nanoseconds on encode, matching reader validation.
+The metadata operation-time fixture must reject bad times before namespace or
+log-window staging, preserve the original generation and bytes with zero writes,
+and permit a subsequent valid mutation after remount.

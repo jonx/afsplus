@@ -1105,3 +1105,37 @@ fn snapshot_checkpoint_extension_matches_independent_block_images() {
         .validate_structural(&sample_ident().geometry())
         .is_err());
 }
+
+#[test]
+fn object_and_log_encoders_reject_timestamps_their_readers_cannot_decode() {
+    for nanos in [1_000_000_000, u32::MAX] {
+        for field in 0..3 {
+            let mut object = sample_record();
+            let time = match field {
+                0 => &mut object.created,
+                1 => &mut object.modified,
+                _ => &mut object.changed,
+            };
+            time.nanoseconds = nanos;
+            assert!(matches!(
+                object.encode(BS, 5),
+                Err(FormatError::Invalid("timestamp nanoseconds out of range"))
+            ));
+        }
+        for index in 0..sample_log_record().ops.len() {
+            let mut record = sample_log_record();
+            let time = match &mut record.ops[index] {
+                LogOp::Create { timestamp, .. }
+                | LogOp::Delete { timestamp, .. }
+                | LogOp::Rename { timestamp, .. }
+                | LogOp::Write { timestamp, .. }
+                | LogOp::Truncate { timestamp, .. } => timestamp,
+            };
+            time.nanoseconds = nanos;
+            assert!(matches!(
+                record.encode(BS),
+                Err(FormatError::Invalid("timestamp nanoseconds out of range"))
+            ));
+        }
+    }
+}

@@ -33,7 +33,9 @@ and [explicit mount/recovery](../testing/book-review-qualification.md#explicit-s
 as component baselines. Integrate the [trusted backup extension](../docs/13-filesystem-api-v2.md#8-trusted-snapshot-backup-extension)
 with the [PAX archive/restore direction](../adr/ADR-076-pax-backup-interchange.md),
 preserving explicit work limits before
-recovery. Add exact metadata restoration and sparse/attribute/security transport
+recovery. Use the [metadata restoration primitive](../testing/book-review-qualification.md#metadata-restoration-primitive)
+and implement [separate destination authority](../adr/ADR-077-separate-restore-authority.md).
+Add sparse/attribute/security transport
 with explicit unsupported-state refusal; qualify native host grant issuance. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
 with both-slot crash oracles, generation-aware quarantine and measured
 low-space progress. Implement [ADR-075](../adr/ADR-075-revocable-backup-capability.md)

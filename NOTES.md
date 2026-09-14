@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Restore existing metadata through the common COW tail](#2026-09-14--restore-existing-metadata-through-the-common-cow-tail)
 - [2026-09-14 — Enforce revocable authority on the backup interface](#2026-09-14--enforce-revocable-authority-on-the-backup-interface)
 - [2026-09-14 — Configure snapshot limits before writable mount recovery](#2026-09-14--configure-snapshot-limits-before-writable-mount-recovery)
 - [2026-09-14 — Protect both checkpoint generations during reclamation](#2026-09-14--protect-both-checkpoint-generations-during-reclamation)
@@ -63,6 +64,41 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-14 — Restore existing metadata through the common COW tail
+
+Added protection mutation and exact restoration of protection plus creation,
+modification and change timestamps. Other object fields remain destination-owned.
+The existing file data-policy setter shares the same metadata transaction helper;
+it also rejects invalid timestamps before publication. Invalid caller metadata
+has a distinct core error mapped to the existing VFS invalid-argument category.
+No disk encoding, C ABI, feature identity or protection interpretation changed.
+
+The timestamp audit found object and intent-log encoders accepting nanoseconds
+that their readers reject. Shared validation closes that mismatch. Mutation
+entry points validate supplied times before staging work, with a zero-write
+namespace/log-window regression and encoder tests across all log operation kinds.
+Valid encoded records retain their existing representation.
+
+Tests cover files, directories and root, signed timestamp extremes, nanosecond
+bounds, sparse shared storage, hard links, policy flags, no-ops, hidden targets,
+read-only modes, open windows and uncertain publication. The crash oracle checked
+346 states (342 old tuples, four new), preserving file bytes and snapshot metadata
+with both-slot full checks. The sparse/shared fixture issued 28 KiB without
+snapshots and 32 KiB with snapshots, four versus five metadata blocks and two
+flushes in each case; neither wrote file data. These are fixture costs, not a
+shipping resource profile. The AFS+ backup fixture changes live protection bits
+before verifying the unchanged captured metadata and bytes.
+
+The owner selected separate destination-scoped restore grants; ADR-077 records
+that decision. The checked restore facade, native host authorization and full
+PAX archive/restore preservation remain separate follow-up gates.
+
+Validation: the final workspace all-features suite passed 326 tests, zero failed
+and ten were ignored. Formatting, workspace Clippy with warnings denied,
+documentation, all three checker fixtures and whitespace validation passed.
+Portable C source already enforces the timestamp bound; no new native or
+portable-C restore qualification is claimed.
 
 ## 2026-09-14 — Enforce revocable authority on the backup interface
 

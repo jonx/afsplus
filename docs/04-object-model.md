@@ -103,3 +103,36 @@ after the fixed object-record fields, under the same whole-block checksum.
 The target has no allocation extents and is returned byte-for-byte; OS path
 layers, rather than the object codec, interpret its namespace syntax. This
 remains unimplemented until ADR-068 is accepted.
+
+## Metadata mutation and restoration
+
+The core `set_object_protection` operation changes the existing 32-bit protection
+field and change timestamp. It preserves creation and modification timestamps,
+object identity, content generation, link count, layout and file policy flags.
+An unchanged protection value is a no-op. These bits are the prototype's existing
+protection representation; this operation does not reinterpret them as a POSIX
+mode or a canonical rich ACL.
+
+`restore_object_metadata` restores the exact `PreservedMetadata` tuple:
+protection plus creation, modification and change timestamps. Archived change
+time may precede the destination transaction; metadata restoration deliberately
+preserves it. Destination object identities, link counts, data layouts and
+content generations are established by destination operations, not supplied
+through this tuple. Set directory timestamps after restoring their children.
+
+Both operations reject hidden/internal objects, invalid timestamp nanoseconds,
+read-only modes, open mutation windows and uncertain-publication state. All
+signed timestamp seconds are representable; nanoseconds must be below one
+billion. Object and intent-log encoders enforce the same timestamp constraint
+as their readers. Mutation entry points validate caller-supplied times before
+staging work. Invalid input is rejected before allocation or writes. Identical
+restoration is a no-op, but still requires a writable, unpoisoned volume and a
+valid target. Protection changes and exact restoration are immediate durable
+metadata-COW transactions using the common commit and snapshot-lifetime tail.
+They write no file data and leave registered historical metadata unchanged.
+
+[ADR-077](../adr/ADR-077-separate-restore-authority.md) requires separate host
+restore authority before exposing restoration to consumers. The trusted core
+mutation does not perform OS authentication. The existing fields and encodings
+are unchanged; this tuple is not a complete attribute/security transport or a
+full-volume restore format. See [ADR-076](../adr/ADR-076-pax-backup-interchange.md).

@@ -169,6 +169,7 @@ impl<D: BlockDevice> Volume<D> {
     /// Commit any open intent window, then durably register its consistent
     /// namespace. An uncertain publication poisons the Volume as usual.
     pub fn snapshot_create(&mut self, now: Timespec) -> Result<u64, CoreError> {
+        metadata::validate_time(now)?;
         self.snapshot_state()?;
         if !self.mount_mode.allows_user_writes() {
             return Err(CoreError::ReadOnly);
@@ -192,6 +193,7 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     pub fn snapshot_delete(&mut self, id: u64, now: Timespec) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         self.snapshot_state()?;
         if !self.mount_mode.allows_user_writes() {
             return Err(CoreError::ReadOnly);
@@ -434,6 +436,7 @@ impl<D: BlockDevice> Volume<D> {
         &mut self,
         now: Timespec,
     ) -> Result<SnapshotMaintenance, CoreError> {
+        metadata::validate_time(now)?;
         self.snapshot_state()?;
         self.snapshot_limits()?;
         let before = self.generation();

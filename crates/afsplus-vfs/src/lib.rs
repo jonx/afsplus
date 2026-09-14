@@ -208,7 +208,9 @@ impl From<CoreError> for VfsError {
             CoreError::NotDirectory => VfsError::NotDirectory,
             CoreError::IsDirectory => VfsError::IsDirectory,
             CoreError::DirectoryNotEmpty => VfsError::DirectoryNotEmpty,
-            CoreError::InvalidMove(_) | CoreError::InvalidName(_) => VfsError::Invalid,
+            CoreError::InvalidMove(_)
+            | CoreError::InvalidName(_)
+            | CoreError::InvalidMetadata(_) => VfsError::Invalid,
             CoreError::NoSpace => VfsError::NoSpace,
             CoreError::ReadOnly => VfsError::ReadOnly,
             CoreError::Stale => VfsError::Stale,

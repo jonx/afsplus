@@ -15,6 +15,8 @@
 //! ([`CommitStats`]) — metadata bytes, bitmap pages, region descriptors,
 //! flushes, retired and promoted blocks, reclaim latency, allocator RAM.
 
+mod metadata;
+pub use metadata::PreservedMetadata;
 mod snapshots;
 use snapshots::SnapshotRegistryChange;
 pub use snapshots::{
@@ -416,7 +418,8 @@ impl<D: BlockDevice> Volume<D> {
     /// committed checkpoint-retention or snapshot-scan progress; inspect
     /// `last_commit_stats().alloc.reclaim.blocked_by_checkpoint` or use
     /// [`Self::snapshot_maintenance_step`] for separate lifetime progress.
-    pub fn reclaim_step(&mut self, _now: Timespec) -> Result<u64, CoreError> {
+    pub fn reclaim_step(&mut self, now: Timespec) -> Result<u64, CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         if self.state.reclaim_root.pending_blocks == 0
             && self
@@ -519,6 +522,7 @@ impl<D: BlockDevice> Volume<D> {
         policy: DataUpdatePolicy,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         if !self.data_policy_enabled() {
             return Err(CoreError::FeatureDisabled(
@@ -536,53 +540,11 @@ impl<D: BlockDevice> Volume<D> {
         if new_flags == record.flags {
             return Ok(());
         }
-        let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
-            CoreError::Corrupt(format!("object {object_id} missing from object map"))
-        })?;
-
-        let block_size = self.dev.block_size();
-        let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin(
-            &mut self.dev,
-            &self.ident.geometry(),
-            &self.checkpoint,
-            self.other_checkpoint.as_ref(),
-            generation,
-            self.reclaim_batch_blocks,
-            self.alloc_rover_region,
-        )?;
-        self.protect_emergency_headroom(&mut tx);
-        let new_lba = tx.allocate(&mut self.dev)?;
-        tx.retire(&mut self.dev, record_lba)?;
-        let new_record = ObjectRecord {
+        self.commit_object_metadata(ObjectRecord {
             flags: new_flags,
             changed: now,
             ..record
-        };
-        let map_key = object_map::key(object_id);
-        let map_value = object_map::value(new_lba)?;
-        let object_map_mutation = mutate_many(
-            &mut self.dev,
-            &self.ident.geometry(),
-            &mut tx,
-            self.checkpoint.object_map_block,
-            object_map::spec(self.checkpoint.generation),
-            generation,
-            &[TreeOperation::Upsert {
-                key: &map_key,
-                value: &map_value,
-            }],
-        )?;
-        let mut metadata_writes = vec![(new_lba, new_record.encode(block_size, generation)?)];
-        metadata_writes.extend(object_map_mutation.writes);
-        self.commit_transaction(
-            generation,
-            self.checkpoint.next_object_id,
-            tx,
-            Vec::new(),
-            metadata_writes,
-            object_map_mutation.root_lba,
-        )
+        })
     }
 
     /// Filesystem-wide durability barrier. Successful immediate mutations
@@ -853,6 +815,7 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         if content.is_empty() {
             return Ok(());
@@ -996,6 +959,7 @@ impl<D: BlockDevice> Volume<D> {
         new_size: u64,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
         if record.object_type != ObjectType::File {
@@ -1089,6 +1053,7 @@ impl<D: BlockDevice> Volume<D> {
         length: u64,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         if length == 0 {
             return Ok(());
@@ -1169,6 +1134,7 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        metadata::validate_time(now)?;
         // The feature gate comes before every side effect: refusing a clone
         // must not have committed an open window first (F12).
         if !self.shared_extents_enabled() {
@@ -1433,6 +1399,7 @@ impl<D: BlockDevice> Volume<D> {
         length: u64,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         if !self.shared_extents_enabled() {
             return Err(CoreError::FeatureDisabled(
                 "shared-extents feature is not enabled on this volume",
@@ -1715,6 +1682,7 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        metadata::validate_time(now)?;
         self.create_file_in_directory(OBJECT_ROOT, name, content, now)
     }
 
@@ -1726,6 +1694,7 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         self.ensure_public_object_id(parent_id)?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
@@ -1880,6 +1849,7 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        metadata::validate_time(now)?;
         self.create_directory(OBJECT_ROOT, name, now)
     }
 
@@ -1890,6 +1860,7 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         self.ensure_public_object_id(parent_id)?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
@@ -2026,6 +1997,7 @@ impl<D: BlockDevice> Volume<D> {
     /// retired, not freed: they stay quarantined until no still-selectable
     /// checkpoint can reference them.
     pub fn delete_file_in_root(&mut self, name: &str, now: Timespec) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         self.delete_file(OBJECT_ROOT, name, now)
     }
 
@@ -2036,6 +2008,7 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_public_object_id(parent_id)?;
         self.remove_entry(parent_id, name, now, ObjectType::File)
     }
@@ -2047,6 +2020,7 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_public_object_id(parent_id)?;
         self.remove_entry(parent_id, name, now, ObjectType::Directory)
     }
@@ -2061,6 +2035,7 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         if !self.orphan_directory_enabled() {
             return Err(CoreError::FeatureDisabled(
@@ -2210,6 +2185,7 @@ impl<D: BlockDevice> Volume<D> {
         object_id: u64,
         now: Timespec,
     ) -> Result<OrphanCleanupProgress, CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         if !self.orphan_object(object_id)? {
             return Ok(OrphanCleanupProgress::default());
@@ -2671,6 +2647,7 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         self.ensure_public_object_id(parent_id)?;
         self.ensure_public_object_id(object_id)?;
@@ -2799,6 +2776,7 @@ impl<D: BlockDevice> Volume<D> {
         target_name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_public_object_id(source_parent_id)?;
         self.ensure_public_object_id(target_parent_id)?;
         self.rename_internal(
@@ -3342,6 +3320,7 @@ impl<D: BlockDevice> Volume<D> {
         ops: &[BatchOp<'_>],
         now: Timespec,
     ) -> Result<Vec<Option<u64>>, CoreError> {
+        metadata::validate_time(now)?;
         self.run_batch_internal(ops, now, false)
     }
 
@@ -3420,6 +3399,7 @@ impl<D: BlockDevice> Volume<D> {
         target_name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_public_object_id(source_parent_id)?;
         self.ensure_public_object_id(target_parent_id)?;
         self.run_batch(
@@ -3446,6 +3426,7 @@ impl<D: BlockDevice> Volume<D> {
         target_name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         self.ensure_window_closed()?;
         if !self.orphan_directory_enabled() {
             return Err(CoreError::FeatureDisabled(
@@ -4450,6 +4431,7 @@ impl<D: BlockDevice> Volume<D> {
     /// [`Volume::window_fsync`] and not checkpointed until
     /// [`Volume::window_commit`].
     pub fn window_op(&mut self, op: &BatchOp<'_>, now: Timespec) -> Result<Option<u64>, CoreError> {
+        metadata::validate_time(now)?;
         let mut window = self.take_or_open_window()?;
         let generation = window.generation;
         // A delete (or replacing rename) whose victim is a window create not
@@ -4508,6 +4490,7 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         if content.is_empty() {
             return Ok(());
         }
@@ -4636,6 +4619,7 @@ impl<D: BlockDevice> Volume<D> {
         new_size: u64,
         now: Timespec,
     ) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         if self.ident.features.incompat & INCOMPAT_INTENT_LOG_DATA_UPDATES == 0 {
             return Err(CoreError::FeatureDisabled(
                 "intent-log existing-file data updates",
@@ -4912,6 +4896,7 @@ impl<D: BlockDevice> Volume<D> {
     /// publishes a checkpoint when any record was logged, so stale records
     /// can never be mistaken for live ones.
     pub fn window_commit(&mut self, now: Timespec) -> Result<(), CoreError> {
+        metadata::validate_time(now)?;
         if !self.mount_mode.allows_user_writes() {
             return Err(CoreError::ReadOnly);
         }
