@@ -26,6 +26,8 @@ fn metadata(id: u64, kind: NodeKind, size: u64) -> Stat {
 }
 #[derive(Clone)]
 struct Captured {
+    attributes: BTreeMap<String, (String, Vec<u8>)>,
+    security: BTreeMap<String, (String, Vec<u8>)>,
     inventory: MetadataInventory,
     file: Stat,
     data: Vec<u8>,
@@ -35,12 +37,25 @@ struct MockFs {
     views: BTreeMap<u64, Arc<Captured>>,
     next: u64,
     calls: usize,
+    metadata_page_override: Option<MetadataPage>,
+    oversized_metadata_read: bool,
     block_read: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
 }
 impl MockFs {
     fn new() -> Self {
         Self {
             live: Captured {
+                attributes: BTreeMap::from([
+                    (
+                        "user.comment".into(),
+                        ("text/utf8;v=1".into(), "café".as_bytes().to_vec()),
+                    ),
+                    (
+                        "vendor.unknown".into(),
+                        ("vendor/binary;v=900".into(), vec![0, 255, 1, 0, 128]),
+                    ),
+                ]),
+                security: BTreeMap::new(),
                 inventory: MetadataInventory {
                     attributes: InventoryKnowledge::Present,
                     security: InventoryKnowledge::Empty,
@@ -52,6 +67,8 @@ impl MockFs {
             next: 1,
             calls: 0,
             block_read: None,
+            metadata_page_override: None,
+            oversized_metadata_read: false,
         }
     }
 }
@@ -119,6 +136,71 @@ impl SnapshotBackend for MockFs {
             return Err(VfsError::NotFound);
         }
         Ok(view.1.inventory)
+    }
+    fn metadata_page(
+        &mut self,
+        view: &Self::View,
+        object: ObjectId,
+        class: MetadataClass,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<MetadataPage, VfsError> {
+        self.calls += 1;
+        if let Some(page) = &self.metadata_page_override {
+            return Ok(page.clone());
+        }
+        if object != 2 {
+            return Err(VfsError::NotFound);
+        }
+        let map = match class {
+            MetadataClass::Attribute => &view.1.attributes,
+            MetadataClass::Security => &view.1.security,
+        };
+        let mut iter = map
+            .iter()
+            .filter(|(key, _)| after.is_none_or(|after| key.as_str() > after));
+        let entries = iter
+            .by_ref()
+            .take(limit)
+            .map(|(key, (encoding, bytes))| MetadataEntry {
+                key: key.clone(),
+                encoding: encoding.clone(),
+                size: bytes.len() as u64,
+            })
+            .collect();
+        Ok(MetadataPage {
+            entries,
+            eof: iter.next().is_none(),
+        })
+    }
+    fn metadata_read(
+        &mut self,
+        view: &Self::View,
+        object: ObjectId,
+        class: MetadataClass,
+        key: &str,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<usize, VfsError> {
+        self.calls += 1;
+        if self.oversized_metadata_read {
+            return Ok(out.len() + 1);
+        }
+        if object != 2 {
+            return Err(VfsError::NotFound);
+        }
+        let map = match class {
+            MetadataClass::Attribute => &view.1.attributes,
+            MetadataClass::Security => &view.1.security,
+        };
+        let bytes = &map.get(key).ok_or(VfsError::NotFound)?.1;
+        if offset >= bytes.len() as u64 {
+            return Ok(0);
+        }
+        let offset = offset as usize;
+        let count = out.len().min(bytes.len() - offset);
+        out[..count].copy_from_slice(&bytes[offset..offset + count]);
+        Ok(count)
     }
     fn read(
         &mut self,
@@ -472,6 +554,21 @@ fn afsplus_uses_the_same_consumer_and_retains_history_through_remount() {
     assert_eq!(collect(&mut service.client(), &grant, id), expected);
     assert_eq!(service.backend_mut().lookup_root("file").unwrap(), None);
     let reader = service.open(&grant, id).unwrap();
+    assert_eq!(
+        service.metadata_page(&reader, file, MetadataClass::Attribute, None, 1),
+        Err(BackupError::Filesystem(VfsError::NotSupported))
+    );
+    assert_eq!(
+        service.metadata_read(
+            &reader,
+            file,
+            MetadataClass::Security,
+            "descriptor",
+            0,
+            &mut [0; 1]
+        ),
+        Err(BackupError::Filesystem(VfsError::NotSupported))
+    );
     // Missing inventory enumeration must not certify empty metadata after remount.
     assert_eq!(
         service.client().metadata_inventory(&reader, file),
@@ -625,4 +722,166 @@ fn inventory_knowledge_is_captured_and_denial_never_reaches_provider() {
         Err(BackupError::Denied)
     );
     assert_eq!(service.backend_mut().calls, calls);
+}
+
+#[test]
+fn opaque_values_page_and_stream_without_understanding_their_encoding() {
+    let mut backend = MockFs::new();
+    backend.live.security.insert(
+        "descriptor".into(),
+        ("vendor/acl;v=77".into(), vec![255, 0, 42, 128]),
+    );
+    backend.live.inventory.security = InventoryKnowledge::Present;
+    backend
+        .live
+        .attributes
+        .insert("user.empty".into(), ("vendor/empty;v=1".into(), vec![]));
+    let expected = [
+        backend.live.attributes.clone(),
+        backend.live.security.clone(),
+    ];
+    let (mut service, authority) = BackupService::new(backend, 1).unwrap();
+    let grant = authority.grant();
+    let id = service.create(&grant, now(1)).unwrap();
+    let reader = service.open(&grant, id).unwrap();
+    service.backend_mut().live.attributes.clear();
+    service.backend_mut().live.security.clear();
+    for (class, expected) in [MetadataClass::Attribute, MetadataClass::Security]
+        .into_iter()
+        .zip(expected)
+    {
+        let mut after: Option<String> = None;
+        let mut found = BTreeMap::new();
+        loop {
+            let page = service
+                .client()
+                .metadata_page(&reader, 2, class, after.as_deref(), 1)
+                .unwrap();
+            for entry in page.entries {
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buffer = [0; 2];
+                    let count = service
+                        .client()
+                        .metadata_read(
+                            &reader,
+                            2,
+                            class,
+                            &entry.key,
+                            bytes.len() as u64,
+                            &mut buffer,
+                        )
+                        .unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&buffer[..count]);
+                }
+                assert_eq!(bytes.len() as u64, entry.size);
+                after = Some(entry.key.clone());
+                found.insert(entry.key, (entry.encoding, bytes));
+            }
+            if page.eof {
+                break;
+            }
+        }
+        assert_eq!(found, expected);
+    }
+    let calls = service.backend_mut().calls;
+    authority.revoke(&grant).unwrap();
+    let mut untouched = [99; 3];
+    assert_eq!(
+        service.client().metadata_read(
+            &reader,
+            2,
+            MetadataClass::Security,
+            "descriptor",
+            0,
+            &mut untouched
+        ),
+        Err(BackupError::Denied)
+    );
+    assert_eq!(untouched, [99; 3]);
+    assert_eq!(
+        service
+            .client()
+            .metadata_page(&reader, 2, MetadataClass::Attribute, None, 1),
+        Err(BackupError::Denied)
+    );
+    assert_eq!(service.backend_mut().calls, calls);
+}
+
+#[test]
+fn metadata_admission_rejects_bad_requests_and_provider_responses() {
+    let (mut service, authority) = BackupService::new(MockFs::new(), 1).unwrap();
+    let grant = authority.grant();
+    let id = service.create(&grant, now(1)).unwrap();
+    let reader = service.open(&grant, id).unwrap();
+    let class = MetadataClass::Attribute;
+    let calls = service.backend_mut().calls;
+    for limit in [0, 65] {
+        assert!(service
+            .metadata_page(&reader, 2, class, None, limit)
+            .is_err());
+    }
+    for key in ["".to_owned(), "a\0b".to_owned(), "x".repeat(1025)] {
+        assert!(service
+            .metadata_page(&reader, 2, class, Some(&key), 1)
+            .is_err());
+        assert!(service
+            .metadata_read(&reader, 2, class, &key, 0, &mut [0; 1])
+            .is_err());
+    }
+    assert!(service
+        .metadata_read(&reader, 2, class, "key", u64::MAX, &mut [0; 2])
+        .is_err());
+    assert_eq!(service.backend_mut().calls, calls);
+    let entry = MetadataEntry {
+        key: "a".into(),
+        encoding: "vendor/v1".into(),
+        size: 0,
+    };
+    for page in [
+        MetadataPage {
+            entries: vec![],
+            eof: false,
+        },
+        MetadataPage {
+            entries: vec![entry.clone(), entry.clone()],
+            eof: true,
+        },
+        MetadataPage {
+            entries: vec![MetadataEntry {
+                key: "".into(),
+                ..entry.clone()
+            }],
+            eof: true,
+        },
+        MetadataPage {
+            entries: vec![MetadataEntry {
+                encoding: "x".repeat(129),
+                ..entry.clone()
+            }],
+            eof: true,
+        },
+    ] {
+        service.backend_mut().metadata_page_override = Some(page);
+        assert!(matches!(
+            service.metadata_page(&reader, 2, class, None, 2),
+            Err(BackupError::Filesystem(VfsError::Corrupt(_)))
+        ));
+    }
+    service.backend_mut().metadata_page_override = Some(MetadataPage {
+        entries: vec![entry],
+        eof: true,
+    });
+    assert!(matches!(
+        service.metadata_page(&reader, 2, class, Some("a"), 1),
+        Err(BackupError::Filesystem(VfsError::Corrupt(_)))
+    ));
+    service.backend_mut().oversized_metadata_read = true;
+    assert!(matches!(
+        service.metadata_read(&reader, 2, class, "key", 0, &mut [0; 1]),
+        Err(BackupError::Filesystem(VfsError::Corrupt(_)))
+    ));
 }

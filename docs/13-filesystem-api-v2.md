@@ -22,6 +22,7 @@
 - [7. Zed](#7-zed)
 - [8. Trusted snapshot backup extension](#8-trusted-snapshot-backup-extension)
   - [Captured metadata inventory knowledge](#captured-metadata-inventory-knowledge)
+  - [Opaque captured metadata transport](#opaque-captured-metadata-transport)
   - [Captured allocation enumeration](#captured-allocation-enumeration)
   - [Versioning and compatibility](#versioning-and-compatibility)
 - [9. Destination-scoped restore extension](#9-destination-scoped-restore-extension)
@@ -292,6 +293,37 @@ record or classic DOS interface. A foreign or legacy adapter without inspection
 support reports uninspected; it must not claim full preservation on that basis.
 Actual provider completeness and constrained/native integration require their
 own qualification. Consumer-facing methods do not expose backend or issuer.
+
+### Opaque captured metadata transport
+
+`metadata_page(reader, object, class, after, limit)` enumerates attribute or
+security entries separately. Each entry preserves an exact UTF-8 key, an opaque
+encoding identifier and unsigned 64-bit value size. Keys are not host paths.
+Unknown encoding identifiers are transported without interpretation. Full
+restoration requires an equivalent destination or explicit refusal.
+
+Keys use strict UTF-8 byte ordering. The optional cursor is the last returned
+key, exclusive; it is meaningful only with the same reader, object and class.
+Pages contain at most the requested 1 through 64 entries. An empty nonterminal
+page, duplicate/out-of-order key, or key not after the cursor is corruption.
+Keys contain 1 through 1024 bytes; encoding identifiers contain 1 through 128
+bytes. Neither permits NUL. The service checks request bounds before provider
+calls and validates every returned descriptor. Providers must enforce bounds
+before allocating results. Smaller pages reduce memory without changing values.
+
+`metadata_read(reader, object, class, key, offset, buffer)` streams arbitrary
+binary bytes into caller storage. Reads may be short; zero indicates value EOF.
+Consumers compare accumulated bytes with the captured descriptor size and reject
+premature or excessive data. Requests must fit the unsigned 64-bit byte-address
+space, including a final byte at offset `2^64-1`. Providers must not return a count
+larger than the buffer. The service allocates no value-sized buffer.
+
+Both operations hold the reader's revocable grant throughout provider execution.
+Missing provider implementations return `NotSupported`, never successful empty
+results. These additive Rust methods define no native ABI or filesystem record.
+Inventory/descriptor/value consistency and lossless destination storage require
+provider and consumer qualification; read admission is not ACL evaluation or
+permission to install a descriptor on a destination.
 
 ### Captured allocation enumeration
 

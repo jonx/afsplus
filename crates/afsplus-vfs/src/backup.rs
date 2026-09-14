@@ -79,6 +79,31 @@ pub struct MetadataInventory {
     pub security: InventoryKnowledge,
 }
 
+/// Preservation channel; security values are never treated as user attributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataClass {
+    Attribute,
+    Security,
+}
+/// Exact opaque identity and encoding; neither string is a host pathname.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataEntry {
+    pub key: String,
+    pub encoding: String,
+    pub size: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataPage {
+    pub entries: Vec<MetadataEntry>,
+    pub eof: bool,
+}
+pub const MAX_METADATA_KEY_BYTES: usize = 1024;
+pub const MAX_METADATA_ENCODING_BYTES: usize = 128;
+pub const MAX_METADATA_PAGE_ENTRIES: usize = 64;
+fn valid_metadata_text(text: &str, limit: usize) -> bool {
+    !text.is_empty() && text.len() <= limit && !text.contains('\0')
+}
+
 /// Trusted provider contract. Implementations expose semantic objects, never
 /// allocation addresses. Hosts must not expose this unchecked interface to
 /// untrusted backup clients. A cursor alone must not retain a view.
@@ -103,6 +128,30 @@ pub trait SnapshotBackend {
             attributes: InventoryKnowledge::Uninspected,
             security: InventoryKnowledge::Uninspected,
         })
+    }
+    /// Exact UTF-8 byte ordering, strictly after the supplied key. Unsupported
+    /// enumeration returns NotSupported, never an empty successful page.
+    fn metadata_page(
+        &mut self,
+        _view: &Self::View,
+        _object: ObjectId,
+        _class: MetadataClass,
+        _after: Option<&str>,
+        _limit: usize,
+    ) -> Result<MetadataPage, VfsError> {
+        Err(VfsError::NotSupported)
+    }
+    /// Read exact opaque bytes from the captured value, without interpretation.
+    fn metadata_read(
+        &mut self,
+        _view: &Self::View,
+        _object: ObjectId,
+        _class: MetadataClass,
+        _key: &str,
+        _offset: u64,
+        _out: &mut [u8],
+    ) -> Result<usize, VfsError> {
+        Err(VfsError::NotSupported)
     }
     fn read(
         &mut self,
@@ -279,6 +328,64 @@ impl<P: SnapshotBackend> BackupService<P> {
     ) -> Result<MetadataInventory, BackupError> {
         let _permit = self.reader_permit(reader)?;
         Ok(self.backend.metadata_inventory(&reader.0.view, object)?)
+    }
+    pub fn metadata_page(
+        &mut self,
+        reader: &BackupReader<P::View>,
+        object: ObjectId,
+        class: MetadataClass,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<MetadataPage, BackupError> {
+        let _permit = self.reader_permit(reader)?;
+        if limit == 0 || limit > MAX_METADATA_PAGE_ENTRIES {
+            return Err(VfsError::Limit("metadata page limit out of range").into());
+        }
+        if after.is_some_and(|key| !valid_metadata_text(key, MAX_METADATA_KEY_BYTES)) {
+            return Err(VfsError::Invalid.into());
+        }
+        let page = self
+            .backend
+            .metadata_page(&reader.0.view, object, class, after, limit)?;
+        if page.entries.len() > limit || (page.entries.is_empty() && !page.eof) {
+            return Err(VfsError::Corrupt("invalid metadata page size or progress".into()).into());
+        }
+        let mut previous = after;
+        for entry in &page.entries {
+            if !valid_metadata_text(&entry.key, MAX_METADATA_KEY_BYTES)
+                || !valid_metadata_text(&entry.encoding, MAX_METADATA_ENCODING_BYTES)
+                || previous.is_some_and(|key| entry.key.as_str() <= key)
+            {
+                return Err(
+                    VfsError::Corrupt("invalid metadata identity or ordering".into()).into(),
+                );
+            }
+            previous = Some(&entry.key);
+        }
+        Ok(page)
+    }
+    pub fn metadata_read(
+        &mut self,
+        reader: &BackupReader<P::View>,
+        object: ObjectId,
+        class: MetadataClass,
+        key: &str,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<usize, BackupError> {
+        let _permit = self.reader_permit(reader)?;
+        if !valid_metadata_text(key, MAX_METADATA_KEY_BYTES)
+            || offset as u128 + out.len() as u128 > u64::MAX as u128 + 1
+        {
+            return Err(VfsError::Invalid.into());
+        }
+        let count = self
+            .backend
+            .metadata_read(&reader.0.view, object, class, key, offset, out)?;
+        if count > out.len() {
+            return Err(VfsError::Corrupt("metadata read exceeds caller buffer".into()).into());
+        }
+        Ok(count)
     }
     pub fn read(
         &mut self,
@@ -474,6 +581,28 @@ impl<P: SnapshotBackend> BackupClient<'_, P> {
     ) -> Result<MetadataInventory, BackupError> {
         self.0.metadata_inventory(reader, object)
     }
+    pub fn metadata_page(
+        &mut self,
+        reader: &BackupReader<P::View>,
+        object: ObjectId,
+        class: MetadataClass,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<MetadataPage, BackupError> {
+        self.0.metadata_page(reader, object, class, after, limit)
+    }
+    pub fn metadata_read(
+        &mut self,
+        reader: &BackupReader<P::View>,
+        object: ObjectId,
+        class: MetadataClass,
+        key: &str,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<usize, BackupError> {
+        self.0
+            .metadata_read(reader, object, class, key, offset, out)
+    }
     pub fn read(
         &mut self,
         reader: &BackupReader<P::View>,
@@ -557,6 +686,35 @@ mod authority_tests {
                 content_generation: 1,
             })
         }
+        fn metadata_page(
+            &mut self,
+            _: &(),
+            _: ObjectId,
+            _: MetadataClass,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<MetadataPage, VfsError> {
+            assert!(matches!(
+                self.grant.as_ref().unwrap().0 .0.active.try_write(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            Err(VfsError::NotSupported)
+        }
+        fn metadata_read(
+            &mut self,
+            _: &(),
+            _: ObjectId,
+            _: MetadataClass,
+            _: &str,
+            _: u64,
+            _: &mut [u8],
+        ) -> Result<usize, VfsError> {
+            assert!(matches!(
+                self.grant.as_ref().unwrap().0 .0.active.try_write(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            Err(VfsError::NotSupported)
+        }
         fn allocations(
             &mut self,
             _: &(),
@@ -601,6 +759,21 @@ mod authority_tests {
         let reader = service.open(&grant, 1).unwrap();
         assert_eq!(service.read(&reader, 1, 0, &mut []), Ok(0));
         assert!(service.allocations(&reader, 1, 0, 1).unwrap().eof);
+        assert_eq!(
+            service.metadata_page(&reader, 1, MetadataClass::Attribute, None, 1),
+            Err(BackupError::Filesystem(VfsError::NotSupported))
+        );
+        assert_eq!(
+            service.metadata_read(
+                &reader,
+                1,
+                MetadataClass::Security,
+                "descriptor",
+                0,
+                &mut []
+            ),
+            Err(BackupError::Filesystem(VfsError::NotSupported))
+        );
         authority.revoke(&grant).unwrap();
         assert_eq!(
             service.read(&reader, 1, 0, &mut []),

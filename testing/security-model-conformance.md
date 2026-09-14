@@ -25,6 +25,7 @@
 - [15. Captured allocation enumeration](#15-captured-allocation-enumeration)
 - [16. Destination reservation restoration](#16-destination-reservation-restoration)
 - [17. Captured metadata inventory knowledge](#17-captured-metadata-inventory-knowledge)
+- [18. Opaque captured metadata transport](#18-opaque-captured-metadata-transport)
 
 <!-- /toc -->
 
@@ -320,3 +321,21 @@ in-backend probe must observe the admission lock held during the fallback's stat
 The AFS+ remount fixture must report uninspected inventories and issue zero
 writes/flushes, with a clean checker result. These gates qualify knowledge and
 authority, not lossless inventory transport or actual host authentication.
+
+## 18. Opaque captured metadata transport
+
+Run `cargo test -p afsplus-vfs --all-features`. Enumerate independent-provider
+attribute and security channels one entry per page, preserve exact keys/encoding
+identifiers and stream unknown binary values through two-byte buffers. Include
+empty values and embedded zero/non-UTF-8 bytes; change live inventories after
+capture and require exact captured results. Descriptor size must equal collected
+bytes. Invalid page sizes, cursor/key strings and overflowing read ranges must
+fail before provider calls. Reject duplicate/nonprogressing keys, nonterminal
+empty pages, excessive descriptors and invalid provider read counts.
+
+Verify held operation permits inside provider calls. Revocation must block
+further enumeration/reads with no provider calls or output-buffer changes.
+The AFS+ remount fixture must explicitly return `NotSupported` for absent
+transport methods and perform zero writes/flushes. Inventory knowledge does not
+replace transport. Lossless destination installation and actual native provider
+support require independent gates.

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Stream opaque captured attributes and security metadata](#2026-09-14---stream-opaque-captured-attributes-and-security-metadata)
 - [2026-09-14 - Inspect captured metadata knowledge through backup authority](#2026-09-14---inspect-captured-metadata-knowledge-through-backup-authority)
 - [2026-09-14 - Preserve exact object metadata and inventory knowledge](#2026-09-14---preserve-exact-object-metadata-and-inventory-knowledge)
 - [2026-09-14 - Bind local PAX records to streamed ordinary members](#2026-09-14---bind-local-pax-records-to-streamed-ordinary-members)
@@ -89,6 +90,33 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Stream opaque captured attributes and security metadata
+
+Added checked metadata descriptor pages and caller-buffer value reads to the
+snapshot service and consumer facade. Attribute/security channels stay distinct;
+keys and encoding identifiers remain exact and unknown binary values are not
+interpreted. Requests and returned descriptors have explicit size, ordering and
+progress checks. Missing implementations refuse transport. Operation permits
+cover provider execution, and revoked calls preserve output buffers.
+
+Independent-provider tests enumerate one entry at a time and read in two-byte
+chunks, including empty, UTF-8 and unknown binary values. Captured data survives
+live inventory changes. Malformed requests/results, cursor nonprogress, invalid
+read counts, revocation and unsupported remounted AFS+ behavior are covered.
+The API documentation records additive Rust compatibility and separate native
+and destination requirements.
+
+Review also found that docs/30 described canonical ACL evaluation as settled,
+contradicting Proposed ADR-031 and unresolved Q5. Clarified its candidate scope,
+retained the candidate design for evaluation, and linked the preservation and
+qualification owners. This does not accept rich ACL evaluation semantics.
+
+Validation passed: 394 workspace tests, zero failures, ten ignored tests;
+39 VFS tests including doctests; formatting, workspace Clippy, documentation
+checks, three checker fixtures and whitespace validation. Source transport is
+not complete backup/restore: archive binding, lossless destination installation,
+AFS+ metadata storage and actual native provider support remain queue work.
 
 ## 2026-09-14 - Inspect captured metadata knowledge through backup authority
 

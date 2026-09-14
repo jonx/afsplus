@@ -1,7 +1,7 @@
 # 30. Portable Multi-User Security Model
 
-> **ADRs:** none · **Spec:** none ·
-> **Tests:** none · **Milestones:** none
+> **ADRs:** [ADR-031](../adr/ADR-031-portable-security-acls.md), [ADR-082](../adr/ADR-082-backup-object-metadata.md) · **Spec:** [backup object metadata](../spec/backup-object-metadata.md) ·
+> **Tests:** [security conformance](../testing/security-model-conformance.md) · **Milestones:** M14
 
 <!-- toc -->
 
@@ -34,13 +34,22 @@
 
 ## 1. Goal
 
+This document describes the rich-security candidate evaluated under
+[Q5](../implementation/open-questions.md). [ADR-031](../adr/ADR-031-portable-security-acls.md)
+is Proposed and separates preservation-container work from ACL evaluation.
+The principal, ACL, inheritance and projection rules below are candidate
+requirements, not accepted disk encodings or implemented host guarantees.
+Cross-platform adapters must validate or revise them before adoption.
+[ADR-082](../adr/ADR-082-backup-object-metadata.md) requires explicit backup
+inventory knowledge without selecting this candidate evaluation model.
+
 AFS+ must preserve useful single-user Amiga semantics while also being able to serve as a serious multi-user filesystem on AROS, Linux, BSD, Windows, macOS, or another operating system.
 
 The on-disk format must not assume that one operating system's account identifiers are universal.
 
-The core rule is:
+The candidate rule is:
 
-> AFS+ stores portable principals, ACL semantics, inheritance, and security metadata. Each host operating system maps its local identities and privilege model onto that canonical representation.
+> A portable representation carries principals, ACL semantics, inheritance and security metadata. Each participating host maps its local identities and privilege model onto that representation after its mapping is qualified.
 
 Classic systems may expose a simplified view without destroying richer security metadata.
 
