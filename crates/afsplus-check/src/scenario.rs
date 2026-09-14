@@ -89,10 +89,7 @@ fn drain_flight(ring: &mut afsplus_core::flight::FlightRecorder) -> FlightBatch 
 }
 
 fn capture_flight<D: BlockDevice>(volume: &mut afsplus_core::Volume<D>) -> Option<FlightBatch> {
-    let mut ring = volume.replace_flight_recorder(None)?;
-    let batch = drain_flight(&mut ring);
-    volume.replace_flight_recorder(Some(ring));
-    Some(batch)
+    volume.flight_recorder_mut().map(drain_flight)
 }
 pub struct Run {
     pub events: Vec<Event>,

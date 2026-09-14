@@ -234,8 +234,16 @@ fn run() -> Result<(), String> {
                     EventKind::ApiBegin
                     | EventKind::ApiSucceeded
                     | EventKind::ApiFailed
-                    | EventKind::ApiUnwound => {
-                        return Err("API spans require an extended export profile".into())
+                    | EventKind::ApiUnwound
+                    | EventKind::WindowOpened
+                    | EventKind::WindowAttached
+                    | EventKind::WindowLogBegin
+                    | EventKind::WindowLogDurable
+                    | EventKind::WindowLogFailed
+                    | EventKind::WindowFailed
+                    | EventKind::WindowClosed
+                    | EventKind::WindowDetached => {
+                        return Err("API/window spans require an extended export profile".into())
                     }
                 });
                 flight.push(u8::from(internal.requires_remount));

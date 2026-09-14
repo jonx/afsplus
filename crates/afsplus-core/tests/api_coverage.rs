@@ -22,7 +22,10 @@ fn every_mutable_operational_entry_has_a_registered_outer_guard() {
                 .collect();
             // Recorder configuration and escaped raw-device access are not
             // filesystem operations and cannot own a filesystem call scope.
-            if matches!(name.as_str(), "replace_flight_recorder" | "device_mut") {
+            if matches!(
+                name.as_str(),
+                "replace_flight_recorder" | "flight_recorder_mut" | "device_mut"
+            ) {
                 continue;
             }
             let body = definition[opening + 1..].trim_start();

@@ -425,6 +425,16 @@ impl<D: BlockDevice> Volume<D> {
         method: crate::flight::ApiMethod,
         body: impl FnOnce(&mut Self) -> Result<T, E>,
     ) -> Result<T, E> {
+        // Enabling observation through the control accessor also covers the
+        // next read-only call against an already open (or poisoned) window.
+        if let (Some(window), Some(recorder)) = (&self.window, &mut self.flight) {
+            recorder.observe_window(
+                window.generation,
+                window.logged_records,
+                true,
+                self.window_poisoned,
+            );
+        }
         let generation = self.checkpoint.generation;
         let token = self
             .flight
@@ -499,17 +509,48 @@ impl<D: BlockDevice> Volume<D> {
         }
     }
 
-    /// Replace optional commit-tail diagnostics. Existing records are returned.
+    /// Replace optional diagnostics, recording a window detachment/attachment.
+    /// Existing records are returned; ordinary draining uses flight_recorder_mut.
     /// Installation does not perform I/O or change filesystem policy.
     pub fn replace_flight_recorder(
         &mut self,
         recorder: Option<crate::flight::FlightRecorder>,
     ) -> Option<crate::flight::FlightRecorder> {
-        std::mem::replace(&mut self.flight, recorder)
+        let generation = self
+            .window
+            .as_ref()
+            .map_or(self.checkpoint.generation, |w| w.generation);
+        self.flight_window_event(generation, crate::flight::EventKind::WindowDetached, None);
+        let previous = std::mem::replace(&mut self.flight, recorder);
+        if let (Some(window), Some(recorder)) = (&self.window, &mut self.flight) {
+            recorder.observe_window(
+                window.generation,
+                window.logged_records,
+                true,
+                self.window_poisoned,
+            );
+        }
+        previous
     }
 
     pub fn flight_recorder(&self) -> Option<&crate::flight::FlightRecorder> {
         self.flight.as_ref()
+    }
+
+    /// Drain or configure diagnostics without detaching their window context.
+    pub fn flight_recorder_mut(&mut self) -> Option<&mut crate::flight::FlightRecorder> {
+        self.flight.as_mut()
+    }
+
+    fn flight_window_event(
+        &mut self,
+        generation: u64,
+        kind: crate::flight::EventKind,
+        sequence: Option<u32>,
+    ) {
+        if let Some(recorder) = &mut self.flight {
+            recorder.window_event(generation, kind, sequence, self.window_poisoned);
+        }
     }
 
     fn flight_event(&mut self, generation: u64, kind: crate::flight::EventKind) {
@@ -5603,6 +5644,14 @@ impl<D: BlockDevice> Volume<D> {
             return Err(CoreError::WindowPoisoned);
         }
         if let Some(window) = self.window.take() {
+            if let Some(recorder) = &mut self.flight {
+                recorder.observe_window(
+                    window.generation,
+                    window.logged_records,
+                    true,
+                    self.window_poisoned,
+                );
+            }
             return Ok(window);
         }
         let generation = self.next_generation()?;
@@ -5620,6 +5669,9 @@ impl<D: BlockDevice> Volume<D> {
         )?
         .with_tree_cache_pages(self.tree_cache_pages);
         self.protect_emergency_headroom(&mut tx);
+        if let Some(recorder) = &mut self.flight {
+            recorder.observe_window(generation, 0, false, self.window_poisoned);
+        }
         Ok(OpenWindow {
             tx,
             pending: PendingBatch {
@@ -5696,6 +5748,16 @@ impl<D: BlockDevice> Volume<D> {
                             Ok(logged) => Some(logged),
                             Err(error) => {
                                 self.window_poisoned = true;
+                                self.flight_window_event(
+                                    generation,
+                                    crate::flight::EventKind::WindowFailed,
+                                    None,
+                                );
+                                self.flight_window_event(
+                                    generation,
+                                    crate::flight::EventKind::WindowClosed,
+                                    None,
+                                );
                                 return Err(error);
                             }
                         }
@@ -5721,6 +5783,16 @@ impl<D: BlockDevice> Volume<D> {
             }
             Err(error) => {
                 self.window_poisoned = true;
+                self.flight_window_event(
+                    window.generation,
+                    crate::flight::EventKind::WindowFailed,
+                    None,
+                );
+                self.flight_window_event(
+                    window.generation,
+                    crate::flight::EventKind::WindowClosed,
+                    None,
+                );
                 Err(error)
             }
         }
@@ -5864,6 +5936,16 @@ impl<D: BlockDevice> Volume<D> {
             }
             Err(error) => {
                 self.window_poisoned = true;
+                self.flight_window_event(
+                    window.generation,
+                    crate::flight::EventKind::WindowFailed,
+                    None,
+                );
+                self.flight_window_event(
+                    window.generation,
+                    crate::flight::EventKind::WindowClosed,
+                    None,
+                );
                 Err(error)
             }
         }
@@ -5978,6 +6060,16 @@ impl<D: BlockDevice> Volume<D> {
             }
             Err(error) => {
                 self.window_poisoned = true;
+                self.flight_window_event(
+                    window.generation,
+                    crate::flight::EventKind::WindowFailed,
+                    None,
+                );
+                self.flight_window_event(
+                    window.generation,
+                    crate::flight::EventKind::WindowClosed,
+                    None,
+                );
                 Err(error)
             }
         }
@@ -6096,9 +6188,18 @@ impl<D: BlockDevice> Volume<D> {
         if self.window_poisoned {
             return Err(CoreError::WindowPoisoned);
         }
+        if let (Some(window), Some(recorder)) = (&self.window, &mut self.flight) {
+            recorder.observe_window(
+                window.generation,
+                window.logged_records,
+                true,
+                self.window_poisoned,
+            );
+        }
         let Some(window) = self.window.as_mut() else {
             return Ok(());
         };
+        let generation = window.generation;
         if window.unlogged.is_empty() {
             self.dev.flush()?;
             return Ok(());
@@ -6115,6 +6216,7 @@ impl<D: BlockDevice> Volume<D> {
         if needs_data_barrier {
             if let Err(error) = self.dev.flush() {
                 self.window_poisoned = true;
+                self.flight_window_event(generation, crate::flight::EventKind::WindowFailed, None);
                 return Err(error.into());
             }
         }
@@ -6141,6 +6243,11 @@ impl<D: BlockDevice> Volume<D> {
             }
             Err(error) => return Err(CoreError::Format(error)),
         };
+        self.flight_window_event(
+            generation,
+            crate::flight::EventKind::WindowLogBegin,
+            Some(sequence),
+        );
         let write = self
             .dev
             .write_block(slots[sequence as usize - 1], &encoded)
@@ -6158,10 +6265,20 @@ impl<D: BlockDevice> Volume<D> {
                         window.pending.logged_created.insert(*expected_object_id);
                     }
                 }
+                self.flight_window_event(
+                    generation,
+                    crate::flight::EventKind::WindowLogDurable,
+                    Some(sequence),
+                );
                 Ok(())
             }
             Err(error) => {
                 self.window_poisoned = true;
+                self.flight_window_event(
+                    generation,
+                    crate::flight::EventKind::WindowLogFailed,
+                    Some(sequence),
+                );
                 Err(error.into())
             }
         }
@@ -6187,6 +6304,15 @@ impl<D: BlockDevice> Volume<D> {
         let Some(window) = self.window.take() else {
             return Ok(());
         };
+        let generation = window.generation;
+        if let Some(recorder) = &mut self.flight {
+            recorder.observe_window(
+                generation,
+                window.logged_records,
+                true,
+                self.window_poisoned,
+            );
+        }
         let force = window.logged_records > 0;
         let result = self.materialize_batch(
             window.tx,
@@ -6198,7 +6324,9 @@ impl<D: BlockDevice> Volume<D> {
         );
         if result.is_err() {
             self.window_poisoned = true;
+            self.flight_window_event(generation, crate::flight::EventKind::WindowFailed, None);
         }
+        self.flight_window_event(generation, crate::flight::EventKind::WindowClosed, None);
         result
     }
 

@@ -35,6 +35,7 @@
 - [Common checkpoint-tail flight recorder](#common-checkpoint-tail-flight-recorder)
 - [Category selection and live diagnostics](#category-selection-and-live-diagnostics)
 - [Core API call spans](#core-api-call-spans)
+- [Deferred-window observation](#deferred-window-observation)
 - [Selected-category and live-delivery bundles](#selected-category-and-live-delivery-bundles)
 - [Internal diagnostic bundles](#internal-diagnostic-bundles)
 
@@ -1081,7 +1082,7 @@ IDs; these have no filesystem API v2 ABI meaning. Commit events carry the active
 API context, their existing commit-attempt ID and checkpoint generation. API
 events use attempt zero. One root call can contain several commit attempts.
 Calls which stage work into an operation window and a subsequent commit call
-have separate roots; window/intent linkage requires a separate identity layer.
+have separate roots; the window identity below joins their deferred work.
 
 The guard emits `ApiBegin` before validation and `ApiSucceeded` or `ApiFailed`
 on return. During Rust unwinding it emits `ApiUnwound` and restores the parent
@@ -1093,16 +1094,17 @@ window mutation or publication failures.
 
 `Category::Api` selects admission after identity assignment, so filtered API
 events leave detectable sequence gaps and commit events retain their context.
-The all-category mask includes bit 4; version-4 bundles accept only the original
+The all-category mask includes API bit 4 and window bit 5; version-4 bundles accept only the original
 four category bits. Span exhaustion stops emission with saturating loss
 accounting, preventing identity reuse or attribution to a stale parent.
-Replacing the recorder starts a separate identity domain; callers must retain
-that boundary when combining recordings.
+A fresh recorder starts a separate identity domain; callers must retain
+that boundary when combining recordings. Reattaching the same recorder preserves
+its counters but starts a new observation of an existing window.
 
 Storage is caller-bounded and allocation occurs at ring construction. Emission
 reads no clock and stores no file names or payloads. The macOS AArch64 layout
-probe reports a 64-byte event and a 152-byte recorder or recorder Option.
-At capacity N, requested event storage is `64 * N` bytes, plus allocator rounding;
+probe reports a 72-byte event and a 176-byte recorder or recorder Option.
+At capacity N, requested event storage is `72 * N` bytes, plus allocator rounding;
 optional adapter state and transport storage have separate bounds. A volume
 without a recorder allocates no ring. Small capacities preserve filesystem
 semantics while exposing overwritten or missed diagnostics. Other target layouts
@@ -1118,8 +1120,43 @@ exhaustion and context restoration. The
 mutable entries in the three Volume implementation sources against their outer
 wrappers. Pure getters, raw-device access, recorder control, constructors,
 mount/recovery, handle destruction and platform adapters need their own scope.
-Object/block/view identifiers and deferred-window correlation are owned by the
+Object/block/view identifiers and platform coverage are owned by the
 [internal coverage queue](../implementation/audit-work-queue.md#complete-work-queue).
+
+## Deferred-window observation
+
+API observation also assigns a recorder-local monotonic `window` identity to
+work staged across API calls. Zero means outside an observed window. Window
+lifecycle events use attempt zero and the window's target generation; checkpoint
+events retain their commit attempt and active window context. An empty window
+can close without changing the checkpoint generation, so generation alone is
+not a window identity.
+
+`WindowOpened` observes creation; `WindowAttached` observes an existing window
+when recording begins. `WindowLogBegin` and `WindowLogFailed` identify the
+attempted intent-group sequence. `WindowLogDurable` acknowledges that sequence;
+other events carry the last observed durable group, or zero. `WindowFailed`
+reports a failed mutation or pre-record barrier with that acknowledged sequence.
+The remount flag distinguishes poisoned state from ordinary validation refusal.
+`WindowClosed` ends the context; it does not by itself prove publication,
+rollback or recovery. Snapshot registry publication after a window checkpoint
+has window zero and its own commit attempt.
+
+Drain through `Volume::flight_recorder_mut()` to preserve context across calls.
+Removing a recorder emits `WindowDetached`; reattaching it observes a new window
+identity, because intervening work is unknown. Enabling observation through the
+mutable accessor attaches before the next operational API event. Filtering
+retains context for admitted events. Identity exhaustion stops emission with
+loss accounting rather than reusing an identity. These hooks do not cover mount,
+recovery, process abort or handle destruction.
+
+The [flight tests](../crates/afsplus-core/tests/flight.rs) compare results, full
+block traces and complete images against unobserved execution under all four
+cache profiles. They exercise deferred groups, validation refusals, data-write
+and barrier failures, snapshot publication, draining, reattachment, empty windows
+and late enablement. Unit tests cover filtering and identity exhaustion. Legacy
+profiles 1–4 leave API/window observation disabled; their encoder rejects these
+extended event kinds until a versioned export profile defines their fields.
 
 ## Selected-category and live-delivery bundles
 

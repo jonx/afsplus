@@ -24,6 +24,7 @@ version-3 data updates.
 - [Window ownership on preflight refusal](#window-ownership-on-preflight-refusal)
 - [Compatibility oracle](#compatibility-oracle)
 - [Reproduction](#reproduction)
+  - [macFUSE installation and activation on macOS](#macfuse-installation-and-activation-on-macos)
 - [Crash matrix](#crash-matrix)
 - [Remaining boundary](#remaining-boundary)
 
@@ -110,6 +111,37 @@ AFSPLUS_FUSE_MOUNT_TEST=1 \
   cargo test -p afsplus-fuse --all-features --test host_mount \
   -- --ignored --nocapture
 ```
+
+### macFUSE installation and activation on macOS
+
+Use the signed installer from the [official macFUSE installation guide](https://github.com/macfuse/macfuse/wiki/Getting-Started).
+The FSKit backend requires macOS 15.4 or later. This procedure uses FSKit and
+does not require enabling the kernel backend or changing Recovery security.
+
+1. Download the official macFUSE disk image, open it and run **Install macFUSE**.
+   Approve the installation with an administrator account when macOS asks.
+2. Open **System Settings → General → Login Items & Extensions → File System
+   Extensions** (select **By Category** if necessary). Enable both **macFUSE**
+   and **macFUSE (local)**.
+3. If the first mount fails during extension startup or registration, run the
+   official registration command below. Complete the administrator password
+   dialog it presents; command invocation alone is not evidence of completion.
+4. Run the explicit real-mount test above. Require a passing operation matrix,
+   successful unmount and final image check before calling the setup qualified.
+
+```text
+/Library/Filesystems/macfuse.fs/Contents/Resources/macfuse.app/Contents/MacOS/macfuse install --force
+```
+
+Installation and activation are separate prerequisites. A missing
+`MFMount.framework` is an installation failure; an enabled-module refusal or
+ExtensionKit startup error occurs before the test can qualify filesystem
+operations. Inspect the macFUSE and FSKit system logs to distinguish them.
+
+Record the macOS build, macFUSE version, backend, exact test command and exit
+status with the qualification. A successful installation or registration does
+not replace a successful operation matrix and final image check. This gate
+uses a temporary image and mount point; it is not native-device qualification.
 
 Before any close, rename or unmount can mask the result, this gate opens the
 backing image through a second descriptor after host `fsync` and requires a

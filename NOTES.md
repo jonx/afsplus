@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Correlate deferred windows and qualify the real FSKit boundary](#2026-09-14---correlate-deferred-windows-and-qualify-the-real-fskit-boundary)
 - [2026-09-14 - Preserve open transaction windows after preflight refusals](#2026-09-14---preserve-open-transaction-windows-after-preflight-refusals)
 - [2026-09-14 - Compute stage progress from scoped acceptance gates](#2026-09-14---compute-stage-progress-from-scoped-acceptance-gates)
 - [2026-09-14 - Correlate core API calls with checkpoint attempts](#2026-09-14---correlate-core-api-calls-with-checkpoint-attempts)
@@ -138,6 +139,36 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-14 - Correlate deferred windows and qualify the real FSKit boundary
+
+The optional flight recorder joins staged API calls, intent groups and commit
+attempts with recorder-local window identities. Failed log writes identify the
+attempted group without acknowledging it; closing a window does not assert
+rollback or durability. Draining preserves context, and actual detachment or
+late enablement records an explicit observation boundary. Legacy profiles 1–4
+retain their original recording scope and wire bytes.
+
+Four-cache-profile comparisons cover validation refusals, write/truncate and
+barrier failures, snapshot publication and empty windows. The host layout probe
+measured 72-byte events and a 176-byte recorder/Option, compared with 64/152
+before this change. The 39 retained replay cases matched all six compared
+artifacts exactly; the 20 Python replay tests and 18 documentation fixtures
+passed. Formatting, Clippy and the seven-target 28,672-case codec gate passed;
+the full Rust workspace completed 89 groups with 555 passed, zero failed and
+10 ignored tests. Evidence is retained in `build/window-observation-2kbwudqc`;
+the real FUSE gate below was executed separately from those ignored defaults.
+
+With the owner's authorization, macFUSE 5.3.3 was installed from its signed,
+notarized official package on macOS 26.6.2 (25G83). After the owner enabled both
+FSKit modules, ExtensionKit still refused their identity during startup.
+The official `macfuse install --force` command was then run, and the owner
+entered the administrator password in the authorization dialog. After that
+authorized registration, the startup failure disappeared. The explicit real-mount test passed in 7.62 seconds, including
+host fsync, namespace operations, unmount and final image integrity. Its binary
+hashes and environment are retained in `real-fuse-qualification.json`. No kernel
+security settings were changed. This host result does not qualify native AROS
+hardware or other host versions.
 
 ## 2026-09-14 - Preserve open transaction windows after preflight refusals
 

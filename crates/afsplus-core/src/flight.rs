@@ -16,6 +16,7 @@ pub enum Category {
     Io,
     Error,
     Api,
+    Window,
 }
 
 /// Runtime selection, independent of ring capacity and event identity.
@@ -24,7 +25,7 @@ pub struct Categories(u8);
 
 impl Categories {
     pub const NONE: Self = Self(0);
-    pub const ALL: Self = Self(31);
+    pub const ALL: Self = Self(63);
 
     pub const fn with(self, category: Category) -> Self {
         Self(self.0 | (1 << category as u8))
@@ -50,6 +51,14 @@ pub enum EventKind {
     ApiSucceeded,
     ApiFailed,
     ApiUnwound,
+    WindowOpened,
+    WindowAttached,
+    WindowLogBegin,
+    WindowLogDurable,
+    WindowLogFailed,
+    WindowFailed,
+    WindowClosed,
+    WindowDetached,
 }
 
 impl EventKind {
@@ -64,6 +73,14 @@ impl EventKind {
             Self::ApiBegin | Self::ApiSucceeded | Self::ApiFailed | Self::ApiUnwound => {
                 Category::Api
             }
+            Self::WindowOpened
+            | Self::WindowAttached
+            | Self::WindowLogBegin
+            | Self::WindowLogDurable
+            | Self::WindowLogFailed
+            | Self::WindowFailed
+            | Self::WindowClosed
+            | Self::WindowDetached => Category::Window,
         }
     }
 }
@@ -201,12 +218,17 @@ pub struct Event {
     pub attempt: u64,
     pub generation: u64,
     pub kind: EventKind,
-    /// The volume has marked publication uncertain and requires remount.
+    /// The volume requires remount after unsafe window mutation or publication.
     /// API events sample this flag at entry/exit; it is not a durability verdict
     /// or a claim that unwinding restored all in-memory filesystem state.
     pub requires_remount: bool,
     /// Zero context denotes no observed API (including legacy commit-only scope).
     pub api: ApiContext,
+    /// Recorder-local deferred-window identity, zero outside observed windows.
+    pub window: u64,
+    /// Last observed durable group, except WindowLogBegin/WindowLogFailed
+    /// identify the attempted group. Zero means no group is represented.
+    pub log_sequence: u32,
 }
 
 /// Outcome of a nonblocking live-adapter delivery attempt.
@@ -251,6 +273,10 @@ pub struct FlightRecorder {
     api_next: u64,
     api_context: ApiContext,
     api_exhausted: bool,
+    window_next: u64,
+    window: u64,
+    window_log_sequence: u32,
+    window_exhausted: bool,
 }
 
 impl std::fmt::Debug for FlightRecorder {
@@ -270,6 +296,9 @@ impl std::fmt::Debug for FlightRecorder {
             .field("api_enabled", &self.api_enabled)
             .field("api_context", &self.api_context)
             .field("api_exhausted", &self.api_exhausted)
+            .field("window", &self.window)
+            .field("window_log_sequence", &self.window_log_sequence)
+            .field("window_exhausted", &self.window_exhausted)
             .finish()
     }
 }
@@ -294,6 +323,10 @@ impl FlightRecorder {
             api_next: 0,
             api_context: ApiContext::default(),
             api_exhausted: false,
+            window_next: 0,
+            window: 0,
+            window_log_sequence: 0,
+            window_exhausted: false,
         })
     }
 
@@ -364,7 +397,7 @@ impl FlightRecorder {
         self.missed
     }
 
-    /// Opt in to core API spans. Existing commit-only profiles do not enable
+    /// Opt in to core API and deferred-window spans. Commit-only profiles do not enable
     /// this scope, preserving their event sequences and historical wire bytes.
     pub fn enable_api_observation(&mut self) {
         self.api_enabled = true;
@@ -372,6 +405,72 @@ impl FlightRecorder {
 
     pub fn api_observation_enabled(&self) -> bool {
         self.api_enabled
+    }
+
+    pub(crate) fn observe_window(
+        &mut self,
+        generation: u64,
+        log_sequence: u32,
+        attached: bool,
+        requires_remount: bool,
+    ) {
+        if !self.api_enabled {
+            return;
+        }
+        if self.window != 0 {
+            if attached {
+                return;
+            }
+            // A fresh engine window cannot inherit a prior observation whose
+            // final event was interrupted (for example by provider unwinding).
+            self.window_event(
+                generation,
+                EventKind::WindowDetached,
+                None,
+                requires_remount,
+            );
+        }
+        if self.window_next == u64::MAX || self.window_exhausted {
+            self.window_exhausted = true;
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        self.window_next += 1;
+        self.window = self.window_next;
+        self.window_log_sequence = log_sequence;
+        self.emit(
+            generation,
+            if attached {
+                EventKind::WindowAttached
+            } else {
+                EventKind::WindowOpened
+            },
+            requires_remount,
+        );
+    }
+
+    pub(crate) fn window_event(
+        &mut self,
+        generation: u64,
+        kind: EventKind,
+        attempted_sequence: Option<u32>,
+        requires_remount: bool,
+    ) {
+        if !self.api_enabled || self.window == 0 {
+            return;
+        }
+        let previous_sequence = self.window_log_sequence;
+        if let Some(sequence) = attempted_sequence {
+            self.window_log_sequence = sequence;
+        }
+        self.emit(generation, kind, requires_remount);
+        if kind != EventKind::WindowLogDurable {
+            self.window_log_sequence = previous_sequence;
+        }
+        if matches!(kind, EventKind::WindowClosed | EventKind::WindowDetached) {
+            self.window = 0;
+            self.window_log_sequence = 0;
+        }
     }
 
     pub(crate) fn begin_api(
@@ -434,6 +533,7 @@ impl FlightRecorder {
 
     pub(crate) fn emit(&mut self, generation: u64, kind: EventKind, requires_remount: bool) {
         if self.api_exhausted
+            || self.window_exhausted
             || self.sequence == u64::MAX
             || (kind == EventKind::Begin && self.attempt == u64::MAX)
         {
@@ -456,7 +556,7 @@ impl FlightRecorder {
         }
         let event = Event {
             sequence: self.sequence,
-            attempt: if kind.category() == Category::Api {
+            attempt: if matches!(kind.category(), Category::Api | Category::Window) {
                 0
             } else {
                 self.attempt
@@ -465,6 +565,8 @@ impl FlightRecorder {
             kind,
             requires_remount,
             api: self.api_context,
+            window: self.window,
+            log_sequence: self.window_log_sequence,
         };
         self.events.push_back(event);
         if let Some(sink) = &mut self.sink {
@@ -652,5 +754,52 @@ mod api_tests {
         ring.emit(3, EventKind::Begin, false);
         assert_eq!(*ring.events().last().unwrap(), event);
         assert_eq!(ring.dropped(), 2);
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn window_context_survives_filtering_and_stops_before_identity_reuse() {
+        let mut ring = FlightRecorder::new(NonZeroUsize::new(16).unwrap()).unwrap();
+        ring.observe_window(2, 0, false, false);
+        assert_eq!((ring.window, ring.sequence()), (0, 0));
+        ring.enable_api_observation();
+        ring.set_categories(Categories::NONE.with(Category::Checkpoint));
+        ring.observe_window(2, 0, false, false);
+        ring.window_event(2, EventKind::WindowLogBegin, Some(1), false);
+        assert_eq!(ring.window_log_sequence, 0);
+        ring.window_event(2, EventKind::WindowLogDurable, Some(1), false);
+        ring.emit(2, EventKind::Begin, false);
+        ring.emit(2, EventKind::CheckpointDurable, false);
+        ring.window_event(2, EventKind::WindowClosed, None, false);
+        assert_eq!((ring.window, ring.window_log_sequence), (0, 0));
+        let event = *ring.events().next().unwrap();
+        assert_eq!((event.window, event.log_sequence, event.attempt), (1, 1, 1));
+        assert_eq!((ring.filtered(), ring.dropped()), (5, 0));
+        ring.window_next = u64::MAX;
+        ring.observe_window(3, 0, false, false);
+        ring.emit(3, EventKind::Begin, false);
+        assert_eq!(ring.dropped(), 2);
+        assert_eq!(ring.events().len(), 1);
+        assert_eq!(ring.window, 0);
+    }
+
+    #[test]
+    fn fresh_window_detaches_an_interrupted_context_and_failed_group_is_not_acknowledged() {
+        let mut ring = FlightRecorder::new(NonZeroUsize::new(16).unwrap()).unwrap();
+        ring.enable_api_observation();
+        ring.observe_window(2, 3, true, false);
+        ring.window_event(2, EventKind::WindowLogFailed, Some(4), true);
+        assert_eq!(ring.window_log_sequence, 3);
+        assert_eq!(ring.events().last().unwrap().log_sequence, 4);
+        ring.observe_window(2, 0, false, false);
+        let events: Vec<_> = ring.events().copied().collect();
+        assert_eq!(events[2].kind, EventKind::WindowDetached);
+        assert_eq!((events[2].window, events[2].log_sequence), (1, 3));
+        assert_eq!(events[3].kind, EventKind::WindowOpened);
+        assert_eq!((events[3].window, events[3].log_sequence), (2, 0));
     }
 }

@@ -82,8 +82,9 @@ This makes one logical operation traceable across subsystem boundaries.
 
 The optional Rust [core API span contract](../testing/developer-harness.md#core-api-call-spans)
 defines nested call identities, commit correlation, outcome semantics and bounded
-storage. Deferred-window, object and platform scopes follow their own integration
-requirements.
+storage. The [deferred-window contract](../testing/developer-harness.md#deferred-window-observation)
+joins staged calls, intent groups and checkpoint attempts. Object and platform
+scopes follow their own integration requirements.
 
 ## 3. Binary flight recorder
 
