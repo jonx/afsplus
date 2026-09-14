@@ -13,10 +13,12 @@ check: rust-gate rust-codec-fuzz-gate portable-c-gate portable-c-fuzz-gate check
 
 ## check-docs: documentation contract (links, TOCs, indexes, references)
 check-docs:
+	$(PYTHON) tools/progress-markers.py
 	$(PYTHON) tools/check-docs.py
 
 ## toc: regenerate every table of contents and the ADR index
 toc adr-index:
+	$(PYTHON) tools/progress-markers.py --write
 	$(PYTHON) tools/check-docs.py --write
 
 ## rust-gate: the gate from CONTRIBUTING.md

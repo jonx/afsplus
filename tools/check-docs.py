@@ -65,7 +65,7 @@ ADR_RELATION = re.compile(
     r"^(Supersedes|Superseded by|Amends|Amended by):\s*(.+?)\s*$"
 )
 MILESTONE_REF = re.compile(r"\bM(\d{2})\b")
-MILESTONE_ROW = re.compile(r"^\|\s*M(\d{2})\s*\|")
+MILESTONE_ROW = re.compile(r"^\|\s*(?:~~|\\\[)?M(\d{2})(?:~~|\\\])?\s*\|")
 STATUS_LINE = re.compile(r"^Status:")
 NAV_BLOCK = re.compile(r"^>\s*\*\*ADRs:\*\*")
 NAV_MILESTONES = re.compile(r"\*\*Milestones:\*\*")

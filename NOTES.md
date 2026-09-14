@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 — Generate visible milestone and stage progress](#2026-09-14--generate-visible-milestone-and-stage-progress)
 - [2026-09-14 — Refresh implementation navigation and remaining work](#2026-09-14--refresh-implementation-navigation-and-remaining-work)
 - [2026-09-14 - Preserve symlink targets through core namespace transactions](#2026-09-14---preserve-symlink-targets-through-core-namespace-transactions)
 - [2026-09-14 — Simplify ADR decision statuses](#2026-09-14--simplify-adr-decision-statuses)
@@ -107,6 +108,14 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 — Generate visible milestone and stage progress
+
+Added the requested plain/bracketed/struck notation to planning navigation.
+Milestone status cells drive generation; stages aggregate contributing
+milestones, while the ongoing Stage 0 review is partial. Prototype completion
+with qualification gaps stays partial. The documentation gate detects stale
+markers, and `make toc` regenerates them while preserving links and anchors.
 
 ## 2026-09-14 — Refresh implementation navigation and remaining work
 

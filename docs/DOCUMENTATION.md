@@ -143,6 +143,14 @@ row of the milestone table.
   index or table of contents is easily left dirty, so `git status` must be
   clean once the commit is made.
 
+Progress labels in the start page, roadmap and implementation navigation are
+generated views of milestone status. Use plain IDs for not started, visible
+brackets for partial work and strikethrough for complete. This generated
+navigation is an exception to the single-home status rule; edit the milestone
+status cell and run `make toc`. Stage labels aggregate their contributing
+milestones, with Stage 0 representing ongoing design review. Preserve stable
+heading anchors and clickable links.
+
 ## 8. The checker
 
 ```sh

@@ -1,20 +1,29 @@
 # Roadmap
 
+Progress notation: plain `M01` means not started, `[M01]` means started or
+partial, and ~~M01~~ means complete. Stage labels follow the same convention.
+Links retain the visible brackets or strikethrough. `make toc` refreshes these
+labels from the milestone status cells; `make check-docs` detects stale labels.
+Stage completion requires every contributing milestone to be complete; Stage 0
+tracks ongoing design review separately and is partial. Prototype completion
+with open qualification is partial.
+
+
 <!-- toc -->
 
 - [Stage and milestone map](#stage-and-milestone-map)
-- [Stage 0: Amiga-native design review](#stage-0-amiga-native-design-review)
-- [Stage A: make the core executable](#stage-a-make-the-core-executable)
-- [Stage B: resolve the epoch-1 architecture blockers](#stage-b-resolve-the-epoch-1-architecture-blockers)
+- [\[Stage 0\]: Amiga-native design review](#stage-0-amiga-native-design-review)
+- [\[Stage A\]: make the core executable](#stage-a-make-the-core-executable)
+- [\[Stage B\]: resolve the epoch-1 architecture blockers](#stage-b-resolve-the-epoch-1-architecture-blockers)
   - [B1. Allocation state](#b1-allocation-state)
   - [B2. User-data update policy](#b2-user-data-update-policy)
   - [B3. Checkpoint and fsync](#b3-checkpoint-and-fsync)
   - [B4. Core filesystem structures](#b4-core-filesystem-structures)
   - [B5. Security preservation container](#b5-security-preservation-container)
-- [Stage C: integrate AROS and begin independent C portability](#stage-c-integrate-aros-and-begin-independent-c-portability)
-- [Stage D: portability and host tooling](#stage-d-portability-and-host-tooling)
+- [\[Stage C\]: integrate AROS and begin independent C portability](#stage-c-integrate-aros-and-begin-independent-c-portability)
+- [\[Stage D\]: portability and host tooling](#stage-d-portability-and-host-tooling)
 - [Stage E: developer-contract accelerators and optional features](#stage-e-developer-contract-accelerators-and-optional-features)
-- [Stage F: production qualification](#stage-f-production-qualification)
+- [\[Stage F\]: production qualification](#stage-f-production-qualification)
 - [Epoch 1 freeze gates](#epoch-1-freeze-gates)
 - [Integrated recovery and storage qualification](#integrated-recovery-and-storage-qualification)
 
@@ -28,15 +37,15 @@ is recorded only in [milestones](implementation/milestones.md).
 
 | Stage | Contributing milestones | Intended outcome |
 |---|---|---|
-| [Stage 0](#stage-0-amiga-native-design-review) | Design review, no numbered milestone | Amiga filesystem design references |
-| [Stage A](#stage-a-make-the-core-executable) | [M00](implementation/milestones.md), [M01](implementation/milestones.md), [M02](implementation/milestones.md), [M03](implementation/milestones.md), [M04](implementation/milestones.md), [M05](implementation/milestones.md) | Executable core and reader/format foundations |
-| [Stage B](#stage-b-resolve-the-epoch-1-architecture-blockers) | [M00](implementation/milestones.md), [M03](implementation/milestones.md), [M04](implementation/milestones.md) | Allocation, update and durability architecture |
-| [Stage C](#stage-c-integrate-aros-and-begin-independent-c-portability) | [M06](implementation/milestones.md), [M07](implementation/milestones.md), [M12](implementation/milestones.md) | AROS adapters and independent C integration |
-| [Stage D](#stage-d-portability-and-host-tooling) | [M01](implementation/milestones.md), [M08](implementation/milestones.md), [M12](implementation/milestones.md) | Portable implementations and host tooling |
+| [\[Stage 0\]](#stage-0-amiga-native-design-review) | Design review, no numbered milestone | Amiga filesystem design references |
+| [\[Stage A\]](#stage-a-make-the-core-executable) | [M00](implementation/milestones.md), [\[M01\]](implementation/milestones.md), [~~M02~~](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md), [\[M05\]](implementation/milestones.md) | Executable core and reader/format foundations |
+| [\[Stage B\]](#stage-b-resolve-the-epoch-1-architecture-blockers) | [M00](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md) | Allocation, update and durability architecture |
+| [\[Stage C\]](#stage-c-integrate-aros-and-begin-independent-c-portability) | [\[M06\]](implementation/milestones.md), [\[M07\]](implementation/milestones.md), [\[M12\]](implementation/milestones.md) | AROS adapters and independent C integration |
+| [\[Stage D\]](#stage-d-portability-and-host-tooling) | [\[M01\]](implementation/milestones.md), [~~M08~~](implementation/milestones.md), [\[M12\]](implementation/milestones.md) | Portable implementations and host tooling |
 | [Stage E](#stage-e-developer-contract-accelerators-and-optional-features) | [M09](implementation/milestones.md), [M10](implementation/milestones.md) | Catalog and persistent change services |
-| [Stage F](#stage-f-production-qualification) | [M00](implementation/milestones.md), [M05](implementation/milestones.md), [M11](implementation/milestones.md), [M13](implementation/milestones.md), [M14](implementation/milestones.md) | Maintenance, workload qualification and format freeze |
+| [\[Stage F\]](#stage-f-production-qualification) | [M00](implementation/milestones.md), [\[M05\]](implementation/milestones.md), [M11](implementation/milestones.md), [\[M13\]](implementation/milestones.md), [\[M14\]](implementation/milestones.md) | Maintenance, workload qualification and format freeze |
 
-## Stage 0: Amiga-native design review
+## \[Stage 0\]: Amiga-native design review
 
 Milestones: none — the outcome is [docs/23](docs/23-pfs3-stage0-review.md). Subsystem-by-subsystem source review continues only when implementation reaches that subsystem.
 
@@ -50,9 +59,9 @@ Milestones: none — the outcome is [docs/23](docs/23-pfs3-stage0-review.md). Su
 
 See [`implementation/peer-review-prototype-plan.md`](implementation/peer-review-prototype-plan.md).
 
-## Stage A: make the core executable
+## \[Stage A\]: make the core executable
 
-Milestones: [M00](implementation/milestones.md), [M01](implementation/milestones.md), [M02](implementation/milestones.md), [M03](implementation/milestones.md), [M04](implementation/milestones.md), [M05](implementation/milestones.md).
+Milestones: [M00](implementation/milestones.md), [\[M01\]](implementation/milestones.md), [~~M02~~](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md), [\[M05\]](implementation/milestones.md).
 
 Primary goal:
 
@@ -107,9 +116,9 @@ Do not block this stage on:
 - tiny-file packing
 - LLM-specific tuning
 
-## Stage B: resolve the epoch-1 architecture blockers
+## \[Stage B\]: resolve the epoch-1 architecture blockers
 
-Milestones: [M00](implementation/milestones.md), [M03](implementation/milestones.md), [M04](implementation/milestones.md).
+Milestones: [M00](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md).
 
 ### B1. Allocation state
 
@@ -148,7 +157,7 @@ Qualify namespace and existing-file durability across adapters and portable C,
 including replay interruption, torn writes and real-device barriers. Use the
 [fsync baseline](implementation/fsync-intent-log-baseline.md) and
 [write/truncate qualification](testing/intent-log-write-truncate-qualification.md).
-Wire freeze and hardware acceptance belong to [M14](implementation/milestones.md).
+Wire freeze and hardware acceptance belong to [\[M14\]](implementation/milestones.md).
 
 ### B4. Core filesystem structures
 
@@ -172,9 +181,9 @@ Wire freeze and hardware acceptance belong to [M14](implementation/milestones.md
 
 Do **not** require full canonical NFSv4/Windows ACL evaluation semantics in the base writable milestone.
 
-## Stage C: integrate AROS and begin independent C portability
+## \[Stage C\]: integrate AROS and begin independent C portability
 
-Milestones: [M06](implementation/milestones.md), [M07](implementation/milestones.md), [M12](implementation/milestones.md).
+Milestones: [\[M06\]](implementation/milestones.md), [\[M07\]](implementation/milestones.md), [\[M12\]](implementation/milestones.md).
 
 - AROS handler
 - DOS compatibility
@@ -199,9 +208,9 @@ Portable C work begins from the stable executable spec/conformance corpus:
 - cross-implementation read/validation tests
 - grow toward `classic-rw` after the Rust writable format stops moving rapidly
 
-## Stage D: portability and host tooling
+## \[Stage D\]: portability and host tooling
 
-Milestones: [M01](implementation/milestones.md), [M08](implementation/milestones.md), [M12](implementation/milestones.md).
+Milestones: [\[M01\]](implementation/milestones.md), [~~M08~~](implementation/milestones.md), [\[M12\]](implementation/milestones.md).
 
 - FUSE host mount
 - third-party probe kit
@@ -244,9 +253,9 @@ Candidates:
 
 Features that fail to earn real use may be deprecated/retired. Their IDs remain reserved and existing active volumes require retained support or explicit migration.
 
-## Stage F: production qualification
+## \[Stage F\]: production qualification
 
-Milestones: [M00](implementation/milestones.md), [M05](implementation/milestones.md), [M11](implementation/milestones.md), [M13](implementation/milestones.md), [M14](implementation/milestones.md).
+Milestones: [M00](implementation/milestones.md), [\[M05\]](implementation/milestones.md), [M11](implementation/milestones.md), [\[M13\]](implementation/milestones.md), [\[M14\]](implementation/milestones.md).
 
 - grow resize
 - minimum-size query

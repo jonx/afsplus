@@ -1,5 +1,14 @@
 # Implementation Plan
 
+Progress notation: plain `M01` means not started, `[M01]` means started or
+partial, and ~~M01~~ means complete. Stage labels follow the same convention.
+Links retain the visible brackets or strikethrough. `make toc` refreshes these
+labels from the milestone status cells; `make check-docs` detects stale labels.
+Stage completion requires every contributing milestone to be complete; Stage 0
+tracks ongoing design review separately and is partial. Prototype completion
+with open qualification is partial.
+
+
 The implementation is deliberately staged so the on-disk format is exercised on host files before any AROS disk is at risk.
 
 Stages in the [roadmap](../ROADMAP.md) group related work; phases below name
@@ -30,7 +39,7 @@ in the [audit queue](audit-work-queue.md).
 
 ## Phase 0: specification freeze for reader subset
 
-> **Roadmap:** [Stage A](../ROADMAP.md#stage-a-make-the-core-executable), [Stage B](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers), [Stage F](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [M00](milestones.md)
+> **Roadmap:** [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers), [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [M00](milestones.md)
 
 Deliver:
 
@@ -49,7 +58,7 @@ No read/write handler work begins until a reader can parse reference images.
 
 ## Phase 1: portable reader
 
-> **Roadmap:** [Stage A](../ROADMAP.md#stage-a-make-the-core-executable), [Stage D](../ROADMAP.md#stage-d-portability-and-host-tooling) · **Milestones:** [M01](milestones.md), [M12](milestones.md)
+> **Roadmap:** [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage D\]](../ROADMAP.md#stage-d-portability-and-host-tooling) · **Milestones:** [\[M01\]](milestones.md), [\[M12\]](milestones.md)
 
 Implement:
 
@@ -70,7 +79,7 @@ Acceptance:
 
 ## Phase 2: formatter and image builder
 
-> **Roadmap:** [Stage A](../ROADMAP.md#stage-a-make-the-core-executable) · **Milestones:** [M02](milestones.md)
+> **Roadmap:** [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable) · **Milestones:** [~~M02~~](milestones.md)
 
 Implement `mkafsplus`.
 
@@ -82,7 +91,7 @@ Acceptance:
 
 ## Phase 3: allocator and mutations
 
-> **Roadmap:** [Stage A](../ROADMAP.md#stage-a-make-the-core-executable), [Stage B](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) · **Milestones:** [M03](milestones.md)
+> **Roadmap:** [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) · **Milestones:** [\[M03\]](milestones.md)
 
 Implement:
 
@@ -98,7 +107,7 @@ Initially run only against disposable images.
 
 ## Phase 4: journal
 
-> **Roadmap:** [Stage A](../ROADMAP.md#stage-a-make-the-core-executable), [Stage B](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) · **Milestones:** [M04](milestones.md)
+> **Roadmap:** [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) · **Milestones:** [\[M04\]](milestones.md)
 
 Implement the checkpoint-COW/group-commit/intent-log contract of
 [ADR-063](../adr/ADR-063-intent-log-epoch1.md), with existing-file write/truncate
@@ -111,7 +120,7 @@ Acceptance:
 
 ## Phase 5: checker
 
-> **Roadmap:** [Stage A](../ROADMAP.md#stage-a-make-the-core-executable), [Stage F](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [M05](milestones.md)
+> **Roadmap:** [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [\[M05\]](milestones.md)
 
 Implement `afsplus-check`.
 
@@ -119,7 +128,7 @@ It shares format and invariant code with `libafsplus`.
 
 ## Phase 6: AROS handler
 
-> **Roadmap:** [Stage C](../ROADMAP.md#stage-c-integrate-aros-and-begin-independent-c-portability) · **Milestones:** [M06](milestones.md)
+> **Roadmap:** [\[Stage C\]](../ROADMAP.md#stage-c-integrate-aros-and-begin-independent-c-portability) · **Milestones:** [\[M06\]](milestones.md)
 
 Map DOS operations onto the portable core.
 
@@ -127,7 +136,7 @@ Preserve classic application ABI.
 
 ## Phase 7: Filesystem API v2
 
-> **Roadmap:** [Stage C](../ROADMAP.md#stage-c-integrate-aros-and-begin-independent-c-portability) · **Milestones:** [M07](milestones.md)
+> **Roadmap:** [\[Stage C\]](../ROADMAP.md#stage-c-integrate-aros-and-begin-independent-c-portability) · **Milestones:** [\[M07\]](milestones.md)
 
 Implement capability discovery and 64-bit modern operations.
 
@@ -135,7 +144,7 @@ Build legacy adapter.
 
 ## Phase 8: FUSE
 
-> **Roadmap:** [Stage D](../ROADMAP.md#stage-d-portability-and-host-tooling) · **Milestones:** [M08](milestones.md)
+> **Roadmap:** [\[Stage D\]](../ROADMAP.md#stage-d-portability-and-host-tooling) · **Milestones:** [~~M08~~](milestones.md)
 
 Mount images on macOS/Linux.
 
@@ -155,7 +164,7 @@ Implement persistent sequence log and `RESCAN_REQUIRED` fallback.
 
 ## Phase 11: resize and maintenance
 
-> **Roadmap:** [Stage F](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [M11](milestones.md)
+> **Roadmap:** [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [M11](milestones.md)
 
 Implement grow first.
 
@@ -163,7 +172,7 @@ Shrink follows only after safe relocation and minimum-size analysis are proven.
 
 ## Phase 12: application qualification
 
-> **Roadmap:** [Stage F](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [M13](milestones.md)
+> **Roadmap:** [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [\[M13\]](milestones.md)
 
 Qualify:
 
@@ -177,7 +186,7 @@ Qualify:
 
 ## Snapshot and backup integration across phases
 
-> **Roadmap:** [Stage B](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers), [Stage C](../ROADMAP.md#stage-c-integrate-aros-and-begin-independent-c-portability), [Stage F](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [M03, M04, M07, M13, M14](milestones.md)
+> **Roadmap:** [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers), [\[Stage C\]](../ROADMAP.md#stage-c-integrate-aros-and-begin-independent-c-portability), [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [\[M03\]](milestones.md), [\[M04\]](milestones.md), [\[M07\]](milestones.md), [\[M13\]](milestones.md), [\[M14\]](milestones.md)
 
 This work connects core lifetime management, the capability API and application
 qualification without renumbering phases.
@@ -198,7 +207,7 @@ not establish whole-job or hardware acceptance.
 
 ## Phase 13: epoch 1 freeze
 
-> **Roadmap:** [Stage F](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [M00](milestones.md), [M14](milestones.md)
+> **Roadmap:** [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [M00](milestones.md), [\[M14\]](milestones.md)
 
 Only after:
 

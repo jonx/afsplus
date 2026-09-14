@@ -294,11 +294,11 @@ Detail, exit criteria and per-milestone links are in
 
 | Area | State |
 |---|---|
-| Core format, transactions and checker ([M00](implementation/milestones.md)–[M05](implementation/milestones.md)) | Executable prototype; wire formats experimental, epoch 1 unfrozen |
-| Host mount and portable API ([M07](implementation/milestones.md), [M08](implementation/milestones.md)) | Mountable Alpha-0 complete ([ADR-060](adr/ADR-060-mountable-alpha0-completion-gate.md)) |
-| AROS handler ([M06](implementation/milestones.md)) | Hosted, native-QEMU and m68k-emulator platforms qualified; hardware open |
-| Catalog, change stream, resize, classic reader ([M09](implementation/milestones.md)–[M12](implementation/milestones.md)) | Not started |
-| Application qualification and epoch 1 ([M13](implementation/milestones.md), [M14](implementation/milestones.md)) | Fsync workload harness measured; freeze gates in [ROADMAP.md](ROADMAP.md#epoch-1-freeze-gates) |
+| Core format, transactions and checker ([M00](implementation/milestones.md)–[\[M05\]](implementation/milestones.md)) | Executable prototype; wire formats experimental, epoch 1 unfrozen |
+| Host mount and portable API ([\[M07\]](implementation/milestones.md), [~~M08~~](implementation/milestones.md)) | Mountable Alpha-0 complete ([ADR-060](adr/ADR-060-mountable-alpha0-completion-gate.md)) |
+| AROS handler ([\[M06\]](implementation/milestones.md)) | Hosted, native-QEMU and m68k-emulator platforms qualified; hardware open |
+| Catalog, change stream, resize, classic reader ([M09](implementation/milestones.md)–[\[M12\]](implementation/milestones.md)) | Not started |
+| Application qualification and epoch 1 ([\[M13\]](implementation/milestones.md), [\[M14\]](implementation/milestones.md)) | Fsync workload harness measured; freeze gates in [ROADMAP.md](ROADMAP.md#epoch-1-freeze-gates) |
 
 Fields marked `TBD`, Proposed, experimental, or otherwise unfrozen are not
 format commitments. Incompatible format changes must update the format epoch

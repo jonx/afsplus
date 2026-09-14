@@ -60,5 +60,27 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual({path.name: path.read_text() for path in root.iterdir()}, {name: name for name in ["z.md", "a.md", "ignore.txt"]})
 
 
+class ProgressTests(unittest.TestCase):
+    def test_decorated_ids_remain_valid_milestone_rows(self):
+        for token in ['M01', r'\[M01\]', '~~M01~~']:
+            self.assertEqual(checker.MILESTONE_ROW.match(f'| {token} | Reader | Partial |')[1], '01')
+
+    def test_status_transitions_and_idempotent_generation(self):
+        spec = importlib.util.spec_from_file_location('progress', Path(__file__).with_name('progress-markers.py'))
+        progress = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(progress)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'implementation').mkdir()
+            for name in ['README.md', 'ROADMAP.md', 'implementation/README.md', 'implementation/implementation-plan.md']:
+                (root / name).write_text('[M01](milestones.md) [Stage A](ROADMAP.md)\n')
+            path = root / 'implementation/milestones.md'
+            for status, expected in [('Not started', 'M01'), ('Prototype complete, wire experimental', r'\[M01\]'), ('Complete', '~~M01~~')]:
+                path.write_text('| M01 | Reader | ' + status + ' | ' + ', '.join('Stage ' + s for s in 'ABCDEF') + ' |\n')
+                progress.refresh(root, True)
+                self.assertIn('[' + expected + '](milestones.md)', (root / 'README.md').read_text())
+                self.assertEqual(progress.refresh(root), [])
+
+
 if __name__ == "__main__":
     unittest.main()

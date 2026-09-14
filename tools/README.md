@@ -16,6 +16,7 @@ enforces that.
 | File | What it does | Owned by |
 |---|---|---|
 | [tools-spec.md](tools-spec.md) | Specification of the official CLI tools | [docs/README.md](../docs/README.md) |
+| [progress-markers.py](progress-markers.py) | Generate and verify milestone/stage navigation labels from the milestone table | [documentation rules](../docs/DOCUMENTATION.md) |
 | [check-docs.py](check-docs.py) | Documentation contract checker: links, anchors, TOCs, ADR index, navigation blocks, index rows, status rules | [docs/DOCUMENTATION.md](../docs/DOCUMENTATION.md) |
 | [test-check-docs.py](test-check-docs.py) | Temporary-fixture tests for deterministic discovery and excluded-tree pruning | [docs/DOCUMENTATION.md](../docs/DOCUMENTATION.md) |
 | [check-reservation-portability.sh](check-reservation-portability.sh) | Strict/sanitized portable C reads of original, initialized and fallback reservation images with explicit scratch bounds and optional m68000 compile | [testing/data-policy-qualification.md](../testing/data-policy-qualification.md) |
