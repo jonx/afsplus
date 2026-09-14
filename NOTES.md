@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Add bounded PAX record parsing for the archive consumer](#2026-09-14---add-bounded-pax-record-parsing-for-the-archive-consumer)
 - [2026-09-14 - Bound shrink working sets and retirements](#2026-09-14---bound-shrink-working-sets-and-retirements)
 - [2026-09-14 - Grow sparse files without enumerating mappings](#2026-09-14---grow-sparse-files-without-enumerating-mappings)
 - [2026-09-14 - Bound atomic writes for restore consumers](#2026-09-14---bound-atomic-writes-for-restore-consumers)
@@ -78,6 +79,36 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-14 - Add bounded PAX record parsing for the archive consumer
+
+Added the dependency-free host archive crate and strict unique-key UTF-8 PAX
+record codec. Explicit byte, record, keyword and value limits bound admission;
+decoding borrows payload strings and encoding preflights total output bytes.
+Duplicate keys, malformed lengths, invalid UTF-8 and NUL are rejected. Empty
+values are retained for profile interpretation; general override semantics
+and archive completion belong to the next archive layer.
+
+Research checked the Oracle Solaris pax manual's extended-header section:
+[primary source](https://docs.oracle.com/cd/E88353_01/html/E37839/pax-1.html).
+The current Open Group endpoint returned HTTP 403, and GNU direct-page fetches
+failed, so those fetches supply no new verification. Python 3.9.6 tarfile
+independently generated the retained UTF-8/newline/equal-sign timestamp fixture;
+exact encoder and decoder equality passed. No private project details entered
+public queries.
+
+Five tests passed, covering the golden record block, decimal-width boundaries,
+every nonempty truncated single-record prefix, exact error classes, duplicate
+keys, limits in both directions, and deterministic arbitrary input. Formatting,
+Clippy, documentation checks, three checker fixtures and whitespace validation
+passed. The full workspace suite passed 367 tests, with zero failures and ten
+ignored.
+
+The archive codec does not prove a complete backup. Framing, the versioned
+preservation profile, integrity/completion, attribute/security transport,
+independent archive recovery and real snapshot/restore consumers remain explicit
+integration requirements in the queue and archive qualification plan.
 
 ## 2026-09-14 - Bound shrink working sets and retirements
 

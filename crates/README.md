@@ -51,6 +51,10 @@ as such in the crate docs.
   reclaim/shared state and the durable intent prefix. Stable diagnostic IDs,
   exit statuses and deterministic JSON schemas are specified in
   [`tools-spec.md`](../tools/tools-spec.md).
+- `afsplus-backup`: filesystem-neutral archive primitives. PAX record decoding
+  borrows admitted input and rejects duplicate keys, malformed lengths and
+  exhausted byte/record limits. Profile semantics, integrity and completion
+  validation belong to the archive consumer.
 - `afsplus-vfs` — filesystem-neutral API-v2 subset with stable object IDs,
   handles, caller-buffer 64-bit I/O, bounded generation-checked directory
   pages, stat/statfs, namespace operations, explicit durability, capability

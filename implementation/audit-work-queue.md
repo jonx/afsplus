@@ -31,7 +31,8 @@ and [exhaustive ownership checking](../testing/book-review-qualification.md#exha
 and [previous-checkpoint retention](../testing/book-review-qualification.md#previous-checkpoint-retention)
 and [explicit mount/recovery](../testing/book-review-qualification.md#explicit-snapshot-mount-and-recovery)
 as component baselines. Integrate the [trusted backup extension](../docs/13-filesystem-api-v2.md#8-trusted-snapshot-backup-extension)
-with the [PAX archive/restore direction](../adr/ADR-076-pax-backup-interchange.md),
+with the [PAX archive/restore direction](../adr/ADR-076-pax-backup-interchange.md)
+and [archive qualification](../testing/backup-archive-qualification.md),
 preserving explicit work limits before
 recovery. Use the [metadata restoration primitive](../testing/book-review-qualification.md#metadata-restoration-primitive)
 and the [checked destination interface](../docs/13-filesystem-api-v2.md#9-destination-scoped-restore-extension).
