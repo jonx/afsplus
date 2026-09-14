@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Export and replay API and deferred-window diagnostics](#2026-09-14---export-and-replay-api-and-deferred-window-diagnostics)
 - [2026-09-14 - Map Stage A acceptance gates to visible roadmap entries](#2026-09-14---map-stage-a-acceptance-gates-to-visible-roadmap-entries)
 - [2026-09-14 - Correlate deferred windows and qualify the real FSKit boundary](#2026-09-14---correlate-deferred-windows-and-qualify-the-real-fskit-boundary)
 - [2026-09-14 - Preserve open transaction windows after preflight refusals](#2026-09-14---preserve-open-transaction-windows-after-preflight-refusals)
@@ -140,6 +141,31 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-14 - Export and replay API and deferred-window diagnostics
+
+Semantic profile 5 exports the core API/window context in explicit 64-byte
+wire events. The profile admits deferred write/truncate/fsync/commit steps;
+tests join two acknowledged groups across distinct API roots and verify exact
+old or acknowledged bytes after cuts around the first group's durable boundary.
+The scope remains optional, bounded and separate from mount/recovery coverage.
+
+Evidence in `build/api-window-export-eplft3wz` retains 60 version-5 cases,
+including filtering, ring overwrite, consumer disconnection, cuts and wrong-byte
+negative controls. All 39 historical cases match six artifacts byte for byte.
+The 24-test Python replay run had 23 successes and one source/runner-change
+refusal while Cargo rebuilt the executable; the refused test passed using the
+retained fixed runner. The refusal was preserved, not counted as a semantic
+success. Nine admission tests and 15 Rust scenario tests pass. Formatting,
+Clippy and the seven-target 28,672-case codec gate pass; the full workspace
+reports 556 passed, zero failed and 10 ignored across 89 result groups.
+
+At the owner's request, the three unfinished Stage A roadmap entries link to
+one task-level status owner. Each subtask states its source requirement and
+closure evidence; discovered prerequisites must identify their parent gate
+before becoming work units. This export/replay subtask closes, while the
+broader diagnostic gate retains the explicit subsystem inventory and coverage
+requirements. No native or later-stage requirement was removed.
 
 ## 2026-09-14 - Map Stage A acceptance gates to visible roadmap entries
 

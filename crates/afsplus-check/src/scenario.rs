@@ -14,11 +14,13 @@ pub enum Operation {
         directory: bool,
     },
     Write {
+        deferred: bool,
         label: String,
         offset: u64,
         data: Vec<u8>,
     },
     Truncate {
+        deferred: bool,
         label: String,
         size: u64,
     },
@@ -32,6 +34,8 @@ pub enum Operation {
         directory: bool,
     },
     Sync,
+    WindowFsync,
+    WindowCommit,
     Remount,
 }
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +50,7 @@ pub struct Plan {
     cache_profile: Option<usize>,
     flight_capacity: Option<usize>,
     diagnostic_profile: Option<DiagnosticProfile>,
+    api_observation: bool,
     blocks: u64,
     region: u32,
     log_slots: u16,
@@ -241,19 +246,20 @@ impl Plan {
         let version = lines.next();
         if !matches!(
             version,
-            Some("AFSPSC01" | "AFSPSC02" | "AFSPSC03" | "AFSPSC04")
+            Some("AFSPSC01" | "AFSPSC02" | "AFSPSC03" | "AFSPSC04" | "AFSPSC05")
         ) {
             return Err("scenario protocol version".into());
         }
         let mut header: Vec<_> = lines.next().ok_or("missing geometry")?.split(' ').collect();
-        let diagnostic_profile = if version == Some("AFSPSC04") {
+        let diagnostic_profile = if matches!(version, Some("AFSPSC04" | "AFSPSC05")) {
             let disconnect_before = match header.pop().ok_or("missing disconnect index")? {
                 "none" => None,
                 value => Some(integer(value, 1024)? as usize),
             };
             let sink_capacity =
                 integer(header.pop().ok_or("missing sink capacity")?, 256)? as usize;
-            let categories = integer(header.pop().ok_or("missing category mask")?, 15)? as u8;
+            let maximum = if version == Some("AFSPSC05") { 63 } else { 15 };
+            let categories = integer(header.pop().ok_or("missing category mask")?, maximum)? as u8;
             if sink_capacity == 0 && disconnect_before.is_some() {
                 return Err("disconnect requires an attached sink".into());
             }
@@ -265,7 +271,7 @@ impl Plan {
         } else {
             None
         };
-        let flight_capacity = if matches!(version, Some("AFSPSC03" | "AFSPSC04")) {
+        let flight_capacity = if matches!(version, Some("AFSPSC03" | "AFSPSC04" | "AFSPSC05")) {
             let capacity = integer(header.pop().ok_or("missing flight capacity")?, 256)? as usize;
             if capacity == 0 {
                 return Err("zero flight capacity".into());
@@ -274,7 +280,10 @@ impl Plan {
         } else {
             None
         };
-        let cache_profile = if matches!(version, Some("AFSPSC02" | "AFSPSC03" | "AFSPSC04")) {
+        let cache_profile = if matches!(
+            version,
+            Some("AFSPSC02" | "AFSPSC03" | "AFSPSC04" | "AFSPSC05")
+        ) {
             Some(match header.pop() {
                 Some("2") => 2,
                 Some("4") => 4,
@@ -321,15 +330,25 @@ impl Plan {
                     data: hex(d)?,
                     directory: false,
                 },
-                ["write", l, o, d] => Operation::Write {
-                    label: label(l)?,
-                    offset: integer(o, 16 * 1024 * 1024)?,
-                    data: hex(d)?,
-                },
-                ["truncate", l, s] => Operation::Truncate {
-                    label: label(l)?,
-                    size: integer(s, 16 * 1024 * 1024)?,
-                },
+                [kind @ ("write" | "window_write"), l, o, d]
+                    if *kind == "write" || version == Some("AFSPSC05") =>
+                {
+                    Operation::Write {
+                        deferred: *kind == "window_write",
+                        label: label(l)?,
+                        offset: integer(o, 16 * 1024 * 1024)?,
+                        data: hex(d)?,
+                    }
+                }
+                [kind @ ("truncate" | "window_truncate"), l, s]
+                    if *kind == "truncate" || version == Some("AFSPSC05") =>
+                {
+                    Operation::Truncate {
+                        deferred: *kind == "window_truncate",
+                        label: label(l)?,
+                        size: integer(s, 16 * 1024 * 1024)?,
+                    }
+                }
                 ["rename", l, p, n] => Operation::Rename {
                     label: label(l)?,
                     parent: label(p)?,
@@ -344,6 +363,8 @@ impl Plan {
                     directory: true,
                 },
                 ["sync"] => Operation::Sync,
+                ["window_fsync"] if version == Some("AFSPSC05") => Operation::WindowFsync,
+                ["window_commit"] if version == Some("AFSPSC05") => Operation::WindowCommit,
                 ["remount"] => Operation::Remount,
                 _ => return Err("unknown scenario command or arity".into()),
             };
@@ -366,6 +387,7 @@ impl Plan {
             cache_profile,
             flight_capacity,
             diagnostic_profile,
+            api_observation: version == Some("AFSPSC05"),
             blocks,
             region,
             log_slots,
@@ -378,6 +400,10 @@ impl Plan {
     /// Explicit v2 resource profile; v1 keeps its original unlimited contract.
     pub fn diagnostic_profile(&self) -> Option<DiagnosticProfile> {
         self.diagnostic_profile
+    }
+
+    pub fn api_observation(&self) -> bool {
+        self.api_observation
     }
 
     pub fn flight_capacity(&self) -> Option<usize> {
@@ -408,7 +434,7 @@ impl Plan {
 
     /// Retain at most 256 internal events per operation (1024 operations max).
     /// The recorder is carried across remounts, but mount-time recovery events
-    /// are not yet instrumented. Existing run methods keep diagnostics disabled.
+    /// are not instrumented here. Profiles 1–4 do not enable API/window scope.
     pub fn run_with_flight(&self, limits: RecordingLimits, capacity: usize) -> Result<Run, String> {
         if !(1..=256).contains(&capacity) {
             return Err("scenario flight capacity must be 1..=256".into());
@@ -417,6 +443,9 @@ impl Plan {
             std::num::NonZeroUsize::new(capacity).unwrap(),
         )
         .map_err(|e| e.to_string())?;
+        if self.api_observation {
+            ring.enable_api_observation();
+        }
         let mut receiver = None;
         let mut disconnect_before = None;
         if let Some(profile) = self.diagnostic_profile {
@@ -428,6 +457,8 @@ impl Plan {
                 Category::Checkpoint,
                 Category::Io,
                 Category::Error,
+                Category::Api,
+                Category::Window,
             ]
             .into_iter()
             .enumerate()
@@ -591,18 +622,31 @@ impl Plan {
                         used.insert(label.clone());
                     }
                     Operation::Write {
+                        deferred,
                         label,
                         offset,
                         data,
                     } => {
-                        volume
-                            .write_file_at(get(label)?.0, *offset, data, now)
-                            .map_err(|e| e.to_string())?;
+                        let id = get(label)?.0;
+                        if *deferred {
+                            volume.window_write_file_at(id, *offset, data, now)
+                        } else {
+                            volume.write_file_at(id, *offset, data, now)
+                        }
+                        .map_err(|e| e.to_string())?;
                     }
-                    Operation::Truncate { label, size } => {
-                        volume
-                            .truncate_file(get(label)?.0, *size, now)
-                            .map_err(|e| e.to_string())?;
+                    Operation::Truncate {
+                        deferred,
+                        label,
+                        size,
+                    } => {
+                        let id = get(label)?.0;
+                        if *deferred {
+                            volume.window_truncate_file(id, *size, now)
+                        } else {
+                            volume.truncate_file(id, *size, now)
+                        }
+                        .map_err(|e| e.to_string())?;
                     }
                     Operation::Rename {
                         label,
@@ -634,6 +678,10 @@ impl Plan {
                         }
                         .map_err(|e| e.to_string())?;
                         labels.remove(label);
+                    }
+                    Operation::WindowFsync => volume.window_fsync().map_err(|e| e.to_string())?,
+                    Operation::WindowCommit => {
+                        volume.window_commit(now).map_err(|e| e.to_string())?
                     }
                     Operation::Sync => volume.sync().map_err(|e| e.to_string())?,
                     Operation::Remount => unreachable!(),

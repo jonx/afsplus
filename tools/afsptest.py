@@ -240,6 +240,7 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
 
 
 def selected_batch(flight, offset, previous, capacity, profile, index):
+    extended = profile["version"] == 5
     if len(flight) - offset < 53:
         raise ValueError("flight truncated selected batch")
     lost, filtered, sequence, attempt, delivered, missed, closed, retained = struct.unpack(
@@ -250,7 +251,7 @@ def selected_batch(flight, offset, previous, capacity, profile, index):
             or filtered < old_filtered or delivered < old_delivered or missed < old_missed
             or closed not in (0, 1) or attempt > sequence
             or attempt - old_attempt > sequence - old_sequence
-            or (sequence == 0) != (attempt == 0)):
+            or (not extended and (sequence == 0) != (attempt == 0))):
         raise ValueError("flight selected counters or identities")
     selected = sequence - old_sequence - (filtered - old_filtered)
     if (selected < 0 or retained != min(capacity, selected)
@@ -267,22 +268,49 @@ def selected_batch(flight, offset, previous, capacity, profile, index):
         expected_closed = bool(old_closed or (disconnected and selected))
     if (delivered, missed, closed) != (expected_delivered, expected_missed, expected_closed):
         raise ValueError("flight live delivery differs from deterministic profile")
-    if len(flight) - offset < retained * 26:
+    event_size = 64 if extended else 26
+    if len(flight) - offset < retained * event_size:
         raise ValueError("flight truncated selected event")
     cursor, observed_attempt = old_sequence, old_attempt
     categories = {1: 1, 2: 4, 3: 2, 4: 2, 5: 2, 6: 1, 7: 8}
+    if extended:
+        categories.update({kind: 16 for kind in range(8, 12)})
+        categories.update({kind: 32 for kind in range(12, 20)})
+    contexts = {}
     for ordinal in range(retained):
         seq, tx, generation, kind, remount = struct.unpack("<QQQBB", flight[offset:offset + 26])
         offset += 26
-        if (not cursor < seq <= sequence or not observed_attempt <= tx <= attempt
-                or tx == 0 or tx > seq or generation == 0 or kind not in categories
+        uncommitted_event = extended and kind >= 8 and tx == 0
+        if (not cursor < seq <= sequence
+                or (not uncommitted_event and not observed_attempt <= tx <= attempt)
+                or (tx == 0 and (not extended or kind < 8)) or tx > seq or generation == 0 or kind not in categories
                 or not profile["flight_categories"] & categories.get(kind, 0)
                 or remount not in (0, 1) or (kind == 6 and remount)
                 or (kind == 1 and tx == observed_attempt)):
             raise ValueError("flight selected identity/category/event")
         if ordinal == 0 and seq - old_sequence - 1 < lost - old_lost:
             raise ValueError("flight overwritten events are not a prefix")
-        cursor, observed_attempt = seq, tx
+        if extended:
+            operation, span, parent, method, window, group = struct.unpack(
+                "<QQQHQI", flight[offset:offset + 38])
+            offset += 38
+            if ((span == 0 and (operation or parent or method))
+                    or (span and (not 1 <= method <= 66 or not 0 < operation <= span <= seq
+                                  or parent >= span or (parent == 0 and operation != span)
+                                  or (parent and operation > parent)))
+                    or (8 <= kind <= 11 and span == 0)
+                    or (kind >= 8 and tx != 0)
+                    or window > seq or (window == 0 and group != 0)
+                    or (kind >= 12 and window == 0)
+                    or (kind in (14, 15, 16) and group == 0)):
+                raise ValueError("flight API/window context")
+            if span:
+                context = (operation, parent, method)
+                if span in contexts and contexts[span] != context:
+                    raise ValueError("flight reused span context")
+                contexts[span] = context
+        cursor = seq
+        observed_attempt = max(observed_attempt, tx)
     return offset, (sequence, attempt, lost, filtered, delivered, missed, closed)
 
 
@@ -329,8 +357,8 @@ def validate_trace(records):
         raise ValueError("block trace trailing records")
     flight = records["flight-recorder.bin"]
     internal = scenario_value["version"] >= 3
-    selected = scenario_value["version"] == 4
-    magic = b"AFSFLT03" if selected else b"AFSFLT02" if internal else b"AFSFLT01"
+    selected = scenario_value["version"] >= 4
+    magic = b"AFSFLT04" if scenario_value["version"] == 5 else b"AFSFLT03" if selected else b"AFSFLT02" if internal else b"AFSFLT01"
     if len(flight) < 12 or flight[:8] != magic:
         raise ValueError("flight version")
     events = struct.unpack("<I", flight[8:12])[0]
@@ -569,7 +597,7 @@ def failure_signature(records):
             signature["tree_cache_pages"] = value["volume"]["tree_cache_pages"]
         if value["version"] >= 3:
             signature["flight_capacity"] = value["flight_capacity"]
-        if value["version"] == 4:
+        if value["version"] >= 4:
             signature["flight_categories"] = value["flight_categories"]
             signature["flight_sink"] = value["flight_sink"]
         return encoded(signature)

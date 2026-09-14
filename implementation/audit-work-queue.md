@@ -149,6 +149,12 @@ Stage completion must be supported by the stage's own usable outcome.
 
 ## Complete work queue
 
+The [Stage A task tracker](milestones.md#stage-a-task-tracking) owns the active
+subtasks and their status. Before starting a discovered prerequisite, identify
+its parent roadmap entry, source requirement or failing test, and whether it
+blocks that stage or belongs to a later owner. Progress reports use the same
+roadmap entry names so the work can be followed from the visible plan.
+
 Ordering expresses integration dependencies. Independent failure tests and
 adapter work can proceed while a format question is discussed.
 

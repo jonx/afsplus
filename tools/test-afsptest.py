@@ -26,6 +26,92 @@ def fixture():
 
 
 class ReplayTests(unittest.TestCase):
+    def test_v5_deferred_groups_join_calls_and_survive_replay(self):
+        for pages in (2, 4, 8, "unlimited"):
+            value = fixture()
+            value.update(version=5, flight_capacity=256, flight_categories=63, flight_sink=None)
+            value["volume"]["tree_cache_pages"] = pages
+            value["operations"] = [value["operations"][0],
+                {"op": "window_write", "label": "f", "offset": 1, "data": "42"},
+                {"op": "window_fsync"},
+                {"op": "window_truncate", "label": "f", "size": 1},
+                {"op": "window_fsync"}, {"op": "window_commit"}, {"op": "remount"}]
+            value["expected"][0]["data"] = "00"
+            records, success = tool.execute(tool.encoded(value), BINARY)
+            self.assertTrue(success)
+            wire = records["flight-recorder.bin"]
+            offset, events = 28, []
+            for _ in range(struct.unpack_from("<I", wire, 8)[0]):
+                offset += 29
+                batch = struct.unpack_from("<QQQQQQBI", wire, offset)
+                offset += 53
+                self.assertEqual(batch[0], 0)
+                for _ in range(batch[-1]):
+                    events.append(struct.unpack_from("<QQQBBQQQHQI", wire, offset))
+                    offset += 64
+            durable = [event for event in events if event[3] == 15]
+            self.assertEqual([event[-1] for event in durable], [1, 2])
+            self.assertEqual({event[-2] for event in durable}, {1})
+            roots = {event[5] for event in events if event[-2] == 1 and event[5]}
+            self.assertGreaterEqual(len(roots), 5)
+            with tempfile.TemporaryDirectory(prefix="afsplus-window-replay-") as temporary:
+                path = Path(temporary) / "bundle"
+                tool.bundle.publish(path, records)
+                self.assertTrue(tool.replay(path, BINARY))
+            for cut_offset, expected_data in ((0, "00ff"), (3, "0042")):
+                cut_value = json.loads(json.dumps(value))
+                cut_value["expected"][0]["data"] = expected_data
+                cut_records, cut_success = tool.execute(tool.encoded(cut_value), BINARY,
+                    fault={"version": 1, "kind": "power-cut-v1", "operation": 2,
+                           "offset": cut_offset, "variant": 0})
+                self.assertTrue(cut_success)
+                tool.validate_trace(cut_records)
+                with tempfile.TemporaryDirectory(prefix="afsplus-window-cut-") as temporary:
+                    path = Path(temporary) / "bundle"
+                    tool.bundle.publish(path, cut_records)
+                    self.assertTrue(tool.replay(path, BINARY))
+
+    def test_v5_api_window_profiles_preserve_images_and_replay(self):
+        for pages in (2, 4, 8, "unlimited"):
+            baseline = fixture()
+            baseline.update(version=4, flight_capacity=256, flight_categories=15, flight_sink=None)
+            baseline["volume"]["tree_cache_pages"] = pages
+            plain, success = tool.execute(tool.encoded(baseline), BINARY)
+            self.assertTrue(success)
+            for mask in (0, 2, 16, 32, 48, 63):
+                for capacity in (1, 256):
+                    value = dict(baseline, version=5, flight_capacity=capacity,
+                                 flight_categories=mask,
+                                 flight_sink={"capacity": 2, "disconnect_before": 2})
+                    records, success = tool.execute(tool.encoded(value), BINARY)
+                    self.assertTrue(success)
+                    self.assertEqual(records["flight-recorder.bin"][:8], b"AFSFLT04")
+                    for role in ("start.img", "result.img", "block-io.afstrace", "actual.json"):
+                        self.assertEqual(records[role], plain[role])
+                    with tempfile.TemporaryDirectory(prefix="afsplus-api-flight-") as temporary:
+                        path = Path(temporary) / "bundle"
+                        tool.bundle.publish(path, records)
+                        self.assertTrue(tool.replay(path, BINARY))
+
+    def test_v5_rejects_corrupted_api_context(self):
+        value = fixture()
+        value.update(version=5, flight_capacity=256, flight_categories=63, flight_sink=None)
+        value["volume"]["tree_cache_pages"] = 2
+        records, success = tool.execute(tool.encoded(value), BINARY)
+        self.assertTrue(success)
+        # Header, first operation, batch header, then the first 64-byte event.
+        start = 28 + 29 + 53
+        wire = records["flight-recorder.bin"]
+        self.assertEqual(wire[start + 24], 8)  # ApiBegin
+        for relative, fmt, replacement in ((26, "Q", 0), (34, "Q", 0),
+                                             (42, "Q", 999), (50, "H", 65535),
+                                             (52, "Q", 999), (60, "I", 1)):
+            damaged = bytearray(wire)
+            struct.pack_into("<" + fmt, damaged, start + relative, replacement)
+            bad = dict(records, **{"flight-recorder.bin": bytes(damaged)})
+            with self.assertRaises(ValueError):
+                tool.validate_trace(bad)
+
     def test_v4_filtered_and_live_profiles_replay_without_changing_images(self):
         for pages in (2, 4, 8, "unlimited"):
             baseline = fixture()
@@ -107,8 +193,14 @@ class ReplayTests(unittest.TestCase):
                 tool.scenario.validate(tool.encoded(dict(value, flight_categories=mask, flight_sink=sink)))
 
     def test_v4_minimization_and_cuts_preserve_delivery_policy(self):
+        self.check_minimization_and_cuts(4, 4)
+
+    def test_v5_minimization_and_cuts_preserve_api_window_scope(self):
+        self.check_minimization_and_cuts(5, 63)
+
+    def check_minimization_and_cuts(self, version, mask):
         value = fixture()
-        value.update(version=4, flight_capacity=1, flight_categories=4,
+        value.update(version=version, flight_capacity=1, flight_categories=mask,
                      flight_sink={"capacity": 1, "disconnect_before": 2})
         value["volume"]["tree_cache_pages"] = 2
         value["operations"][:0] = [
@@ -118,7 +210,7 @@ class ReplayTests(unittest.TestCase):
         records, success = tool.execute(tool.encoded(value), BINARY)
         self.assertFalse(success)
         signature = json.loads(tool.failure_signature(records))
-        self.assertEqual(signature["flight_categories"], 4)
+        self.assertEqual(signature["flight_categories"], mask)
         self.assertEqual(signature["flight_sink"], value["flight_sink"])
         with tempfile.TemporaryDirectory(prefix="afsplus-selected-minimize-") as temporary:
             root = Path(temporary)

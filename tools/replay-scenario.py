@@ -51,13 +51,13 @@ def validate(encoded):
     scenario = json.loads(encoded, object_pairs_hook=unique)
     if not isinstance(scenario, dict):
         raise ValueError("scenario must be an object")
-    version = integer(scenario.get("version"), 1, 4)
+    version = integer(scenario.get("version"), 1, 5)
     fields(scenario, "version volume operations expected" + (" flight_capacity" if version >= 3 else "")
-           + (" flight_categories flight_sink" if version == 4 else ""))
+           + (" flight_categories flight_sink" if version >= 4 else ""))
     if version >= 3:
         integer(scenario["flight_capacity"], 1, 256)
-    if version == 4:
-        integer(scenario["flight_categories"], 0, 15)
+    if version >= 4:
+        integer(scenario["flight_categories"], 0, 63 if version == 5 else 15)
         sink = scenario["flight_sink"]
         if sink is not None:
             fields(sink, "capacity disconnect_before")
@@ -89,6 +89,9 @@ def validate(encoded):
         "write": "op label offset data", "truncate": "op label size",
         "rename": "op label parent name", "unlink": "op label", "rmdir": "op label",
         "sync": "op", "remount": "op"}
+    if version == 5:
+        schemas.update(window_write="op label offset data", window_truncate="op label size",
+                       window_fsync="op", window_commit="op")
     for operation in operations:
         if not isinstance(operation, dict) or not isinstance(operation.get("op"), str) or operation["op"] not in schemas:
             raise ValueError("unknown scenario operation")
@@ -109,7 +112,7 @@ def validate(encoded):
                 used.add(label)
             elif label not in labels or label == "root":
                 raise ValueError("unknown or reserved object label")
-            if kind in ("write", "truncate", "unlink") and labels[label] != "file":
+            if kind in ("write", "truncate", "window_write", "window_truncate", "unlink") and labels[label] != "file":
                 raise ValueError("operation requires a file label")
             if kind == "rmdir" and labels[label] != "directory":
                 raise ValueError("operation requires a directory label")
@@ -117,7 +120,7 @@ def validate(encoded):
         if "data" in operation:
             count = data(operation["data"])
             payload += count
-            if kind == "write" and integer(operation["offset"], 0, MAX_FILE) + count > MAX_FILE:
+            if kind in ("write", "window_write") and integer(operation["offset"], 0, MAX_FILE) + count > MAX_FILE:
                 raise ValueError("scenario write range limit")
         if "size" in operation: integer(operation["size"], 0, MAX_FILE)
     expected = scenario["expected"]
@@ -156,8 +159,8 @@ def compile_commands(encoded):
     if scenario["version"] >= 3:
         lines[0] = "AFSPSC03"
         lines[1] += " " + str(scenario["flight_capacity"])
-    if scenario["version"] == 4:
-        lines[0] = "AFSPSC04"
+    if scenario["version"] >= 4:
+        lines[0] = "AFSPSC05" if scenario["version"] == 5 else "AFSPSC04"
         sink = scenario["flight_sink"]
         capacity = 0 if sink is None else sink["capacity"]
         disconnect = None if sink is None else sink["disconnect_before"]
@@ -168,9 +171,9 @@ def compile_commands(encoded):
         if kind in ("mkdir", "create"):
             fields = [kind, operation["label"], operation["parent"], operation["name"].encode().hex()]
             if kind == "create": fields.append(operation["data"] or "-")
-        elif kind == "write":
+        elif kind in ("write", "window_write"):
             fields = [kind, operation["label"], str(operation["offset"]), operation["data"] or "-"]
-        elif kind == "truncate":
+        elif kind in ("truncate", "window_truncate"):
             fields = [kind, operation["label"], str(operation["size"])]
         elif kind == "rename":
             fields = [kind, operation["label"], operation["parent"], operation["name"].encode().hex()]

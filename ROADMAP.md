@@ -128,6 +128,11 @@ Then add:
 - tiny-cache test matrix <!-- progress: roadmap-31 -->
 - fuzzing/property tests <!-- progress: roadmap-32 -->
 
+Task-level status, origin and completion evidence:
+[structured flight recorder](implementation/milestones.md#structured-flight-recorder-tasks),
+[tiny-cache test matrix](implementation/milestones.md#tiny-cache-test-matrix-tasks),
+[fuzzing/property tests](implementation/milestones.md#fuzzing-and-property-test-tasks).
+
 Ongoing constraint (kept visible, excluded from finite completion):
 
 - keep core disk semantics independent from host namespaces <!-- progress: roadmap-33 -->

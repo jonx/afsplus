@@ -174,7 +174,9 @@ fn run() -> Result<(), String> {
     // Semantic flight records bind operation indices and resolved object IDs to
     // half-open successful block-log ranges. V2 additionally carries internal
     // commit-tail batches, including explicit ring-loss accounting.
-    let mut flight = if plan.diagnostic_profile().is_some() {
+    let mut flight = if plan.api_observation() {
+        b"AFSFLT04"
+    } else if plan.diagnostic_profile().is_some() {
         b"AFSFLT03"
     } else if plan.flight_capacity().is_some() {
         b"AFSFLT02"
@@ -231,22 +233,35 @@ fn run() -> Result<(), String> {
                     EventKind::CheckpointDurable => 5,
                     EventKind::Adopted => 6,
                     EventKind::Failed => 7,
-                    EventKind::ApiBegin
-                    | EventKind::ApiSucceeded
-                    | EventKind::ApiFailed
-                    | EventKind::ApiUnwound
-                    | EventKind::WindowOpened
-                    | EventKind::WindowAttached
-                    | EventKind::WindowLogBegin
-                    | EventKind::WindowLogDurable
-                    | EventKind::WindowLogFailed
-                    | EventKind::WindowFailed
-                    | EventKind::WindowClosed
-                    | EventKind::WindowDetached => {
-                        return Err("API/window spans require an extended export profile".into())
-                    }
+                    EventKind::ApiBegin if plan.api_observation() => 8,
+                    EventKind::ApiSucceeded if plan.api_observation() => 9,
+                    EventKind::ApiFailed if plan.api_observation() => 10,
+                    EventKind::ApiUnwound if plan.api_observation() => 11,
+                    EventKind::WindowOpened if plan.api_observation() => 12,
+                    EventKind::WindowAttached if plan.api_observation() => 13,
+                    EventKind::WindowLogBegin if plan.api_observation() => 14,
+                    EventKind::WindowLogDurable if plan.api_observation() => 15,
+                    EventKind::WindowLogFailed if plan.api_observation() => 16,
+                    EventKind::WindowFailed if plan.api_observation() => 17,
+                    EventKind::WindowClosed if plan.api_observation() => 18,
+                    EventKind::WindowDetached if plan.api_observation() => 19,
+                    _ => return Err("API/window spans require an extended export profile".into()),
                 });
                 flight.push(u8::from(internal.requires_remount));
+                if plan.api_observation() {
+                    for value in [
+                        internal.api.operation,
+                        internal.api.span,
+                        internal.api.parent_span,
+                    ] {
+                        flight.extend_from_slice(&value.to_le_bytes());
+                    }
+                    flight.extend_from_slice(
+                        &internal.api.method.map_or(0, |m| m as u16).to_le_bytes(),
+                    );
+                    flight.extend_from_slice(&internal.window.to_le_bytes());
+                    flight.extend_from_slice(&internal.log_sequence.to_le_bytes());
+                }
             }
         }
     }

@@ -63,6 +63,10 @@ exist before that gate can run.
 
 - [Early milestone boundary audit](#early-milestone-boundary-audit)
 - [Scoped stage acceptance](#scoped-stage-acceptance)
+- [Stage A task tracking](#stage-a-task-tracking)
+  - [Structured flight recorder tasks](#structured-flight-recorder-tasks)
+  - [Tiny-cache test matrix tasks](#tiny-cache-test-matrix-tasks)
+  - [Fuzzing and property-test tasks](#fuzzing-and-property-test-tasks)
 - [Stage A executable-core audit](#stage-a-executable-core-audit)
 - [Individual list-item completion](#individual-list-item-completion)
 
@@ -110,6 +114,68 @@ The detailed evidence follows in the executable-core audit.
 | Stage A | a-cache | Cache-profile qualification across executable mutation families | Partial | [Integrated cache profiles](../testing/developer-harness.md#integrated-tree-cache-profiles), [coverage evidence](#stage-a-executable-core-audit) |
 | Stage A | a-fuzz | Executable codec and semantic-property coverage | Partial | [Fuzz/property gates](../testing/fuzzing.md), [coverage evidence](#stage-a-executable-core-audit) |
 
+## Stage A task tracking
+
+This is the task-level status owner for the three unfinished roadmap entries.
+The order is diagnostic export and coverage, then cache/fault coverage, then
+codec/property coverage. A discovered prerequisite must be entered here with
+its originating requirement or failing test before becoming a separate work
+unit. Necessary fixes retain their regression and their parent gate; useful
+later work stays in the full audit queue without enlarging Stage A implicitly.
+
+### Structured flight recorder tasks
+
+Parent: `a-flight`, roadmap entry `roadmap-30`. Origin:
+[finite diagnostic acceptance](../testing/developer-harness.md#stage-a-finite-acceptance)
+and [subsystem trace identities](../docs/26-debug-observability.md).
+
+| Task | State | Evidence or next observable result |
+|---|---|---|
+| Common commit-tail ring, category selection, bounded live delivery and legacy export | Complete | [Commit diagnostics](../testing/developer-harness.md#common-checkpoint-tail-flight-recorder), [selected replay](../testing/developer-harness.md#selected-category-and-live-delivery-bundles) |
+| API call/root/parent identities and refusal/unwind outcomes | Complete | [66-entry API scope and tests](../testing/developer-harness.md#core-api-call-spans) |
+| Deferred-window identities and acknowledged versus attempted intent groups | Complete | [Window observation](../testing/developer-harness.md#deferred-window-observation); commit `9ec9591` |
+| Export and replay API/window context, including explicit deferred scenarios | Complete | [Version-5 contract](../testing/developer-harness.md#api-and-window-replay-bundles); 60 retained cases, 39 legacy comparisons and full workspace qualification |
+| Inventory implemented publication/subsystem paths and their missing event hooks | To do | Enumerated path-to-hook/test matrix; distinguish core mount/recovery from later platform adapters |
+| Correlate object/block/view identities and allocator/tree/cache/reclaim paths | To do | Bounded events join API/window/commit context; cover the preceding inventory with normal/refusal/fault comparisons against unobserved execution |
+| Qualify export and event loss for the added core paths | To do | Retained replay artifacts, malformed-field controls and unchanged image/I/O results for each added path |
+
+Close `a-flight` only when these finite core tasks have evidence. Native adapters,
+external consumer schedules and future unimplemented subsystems retain their
+[full-queue owners](audit-work-queue.md#complete-work-queue).
+
+### Tiny-cache test matrix tasks
+
+Parent: `a-cache`, roadmap entry `roadmap-31`. Origin:
+[finite cache acceptance](../testing/developer-harness.md#stage-a-finite-acceptance).
+
+| Task | State | Evidence or next observable result |
+|---|---|---|
+| Baseline 2/4/8/unlimited profiles, staged-tree spills and replay policy | Complete | [Integrated cache profiles](../testing/developer-harness.md#integrated-tree-cache-profiles), [cache-bound replay](../testing/developer-harness.md#cache-bound-semantic-bundles) |
+| Map every executable mutation/publication family to cache and fault tests | To do | Named family-to-test matrix identifying exact omissions, rather than treating the existence of a test file as coverage |
+| Fill uncovered family/profile combinations | To do | Exact live/retained bytes, structural checks and resource refusal behavior under each admitted profile |
+| Fill missing spill/failure/recovery combinations | To do | Old-or-new permitted state after cuts; acknowledged state survives refusal; retries preserve ownership |
+
+Close `a-cache` when the inventory has no uncovered finite host combinations.
+Whole-job memory budgets, aged sustained workloads and native memory pressure
+belong to M12/M13 and the [cache/VM integration queue](audit-work-queue.md#complete-work-queue).
+
+### Fuzzing and property-test tasks
+
+Parent: `a-fuzz`, roadmap entry `roadmap-32`. Origin:
+[required properties and target matrix](../testing/fuzzing.md).
+
+| Task | State | Evidence or next observable result |
+|---|---|---|
+| Seven codec targets and deterministic mutation/replay controls | Complete | [Rust codec gate](../testing/fuzzing.md#rust-codec-gate) |
+| Baseline generated semantic scenarios with exact byte/prefix oracles | Complete | [Seeded properties](../testing/fuzzing.md#seeded-semantic-properties) |
+| Audit executable wire surfaces against the target matrix | To do | Explicit coverage for snapshot-bearing checkpoints, object types/optional roots, reclaim codecs and multi-record intent sequences; record other implemented omissions |
+| Add missing executable codec targets and semantic operation generators | To do | Deterministic seeds, malformed/resealed inputs, independent accepted-state checks and bounded failure behavior |
+| Retain and replay failure/property cases across cache profiles | To do | Reproducible artifacts and negative controls for each newly covered family |
+
+Close `a-fuzz` when executable host surfaces and operation families have the
+required coverage. Frozen-field decisions, portable C qualification and future
+catalog/change-stream implementations keep their separate stage owners.
+
 ## Stage A executable-core audit
 
 | Requirement | Evidence and scope | Disposition |
@@ -120,7 +186,7 @@ The detailed evidence follows in the executable-core audit.
 | I/O and write-amplification accounting | Trace records successful block reads, writes, bytes and flushes | Implemented counters, [per-command CPU/RSS collection](../testing/benchmark-contract.md#per-command-host-accounting) and [phased requested-heap/I/O workload](../testing/benchmark-contract.md#phased-requested-heap-workload); [per-profile batch heap/I/O and CPU/RSS measurement](../testing/benchmark-contract.md#tree-cache-batch-measurements) passes; [phase-boundary RSS and 16-round read series](../testing/benchmark-contract.md#phase-boundary-resident-memory-and-repeated-reads) pass on macOS for small files and all four cache profiles with unchanged images and explicit observer costs. [Allocation-origin accounting](../testing/benchmark-contract.md#allocation-origins-and-instrumentation-cost) balances across small files and all cache profiles with unchanged image/I/O results; header/padding costs are separate. [Borrowed batch payloads](../testing/benchmark-contract.md#borrowed-payloads-in-atomic-batches) remove per-block copies with four-profile semantic/fault/crash tests and unchanged measured images/I/O. The [finite Stage A harness gate](../testing/benchmark-contract.md#stage-a-accounting-acceptance) is complete; broader steady-state workloads, current ownership and other-platform qualification remain open under the resource/application queue. |
 | SliceBackend | [Bounded slice](../crates/afsplus-block/src/slice.rs) and [sliced-volume test](../crates/afsplus-check/tests/sliced_volume.rs) | Implemented: block isolation/error tests, format/mutate/remount/check cycle and full workspace validation pass. |
 | OverlayBackend | [Bounded branches](../crates/afsplus-block/src/overlay.rs), [oracle comparison](../crates/afsplus-block/tests/overlay_replay.rs) and [filesystem branch/cut tests](../crates/afsplus-check/tests/overlay_volume.rs) | Implemented: isolation, admission, sparse-fork measurement, replay and full workspace gates pass. |
-| Structured flight recorder and operation replay | [Activity events](../crates/afsplus-block/src/activity.rs) and power-cut recording provide component evidence | Deterministic [crash images](../crates/afsplus-check/src/bin/afsplus-crash-fixtures.rs), bounded [semantic runner tests](../crates/afsplus-check/tests/scenario.rs) and [semantic bundle replay/minimization](../testing/developer-harness.md#integrated-semantic-bundles-and-minimization) plus [selected-crash bundles](../testing/developer-harness.md#selected-crash-bundles) and [checker-bound verdicts](../testing/developer-harness.md#checker-bound-replay-verdicts) provide host evidence; [rebuilt-runner comparisons](../testing/developer-harness.md#comparing-a-rebuilt-runner) pass for all four cache profiles with exact artifact equality and explicit binary-identity separation. [Source-package restoration](../testing/developer-harness.md#preserving-and-restoring-working-sources), dirty/conflicted fixtures and an offline rebuilt four-profile comparison pass on the host. [Retained registry dependencies](../testing/developer-harness.md#retaining-registry-dependencies-for-a-cold-build) pass a frozen offline build with an initially empty Cargo cache, empty-source negative control and four-profile artifact comparisons. [Copied toolchain/SDK host qualification](../testing/developer-harness.md#copied-host-toolchain-and-sdk-qualification) passes with selected-linker/empty-SDK negative controls and four-profile equality. [Automated sealing/verification and reconstruction](../testing/developer-harness.md#automated-host-reconstruction) pass with real copied tools, paths containing spaces, three independent controls and four-profile artifact equality. [Common checkpoint-tail diagnostics](../testing/developer-harness.md#common-checkpoint-tail-flight-recorder) provide a bounded optional ring with retry identities and publication/adoption failure distinctions. [Internal diagnostic bundles](../testing/developer-harness.md#internal-diagnostic-bundles) bind commit events and loss to semantic operations, replay and minimization at all four cache profiles. [Category filtering and bounded live delivery](../testing/developer-harness.md#category-selection-and-live-diagnostics) pass four-profile image/I/O/failure comparisons, including saturation and disconnection. [Version-4 category/live bundles](../testing/developer-harness.md#selected-category-and-live-delivery-bundles) pass 640 in-process combinations and fresh-process replay/admission/minimization controls. [Core API spans](../testing/developer-harness.md#core-api-call-spans) cover 66 mutable entries with nested root/span identities, commit correlation, early refusal and unwind restoration; four-profile image/I/O checks include all data/metadata/checkpoint barriers and snapshot/protection operations. [Deferred-window observation](../testing/developer-harness.md#deferred-window-observation) joins staged calls, intent groups and checkpoint attempts with four-profile image/I/O and failure checks. Publication-family coverage, object/view linkage, platform API scope and other internal subsystems remain open; additional host profiles belong to the Stage D portability gates. |
+| Structured flight recorder and operation replay | [Activity events](../crates/afsplus-block/src/activity.rs) and power-cut recording provide component evidence | Deterministic [crash images](../crates/afsplus-check/src/bin/afsplus-crash-fixtures.rs), bounded [semantic runner tests](../crates/afsplus-check/tests/scenario.rs) and [semantic bundle replay/minimization](../testing/developer-harness.md#integrated-semantic-bundles-and-minimization) plus [selected-crash bundles](../testing/developer-harness.md#selected-crash-bundles) and [checker-bound verdicts](../testing/developer-harness.md#checker-bound-replay-verdicts) provide host evidence; [rebuilt-runner comparisons](../testing/developer-harness.md#comparing-a-rebuilt-runner) pass for all four cache profiles with exact artifact equality and explicit binary-identity separation. [Source-package restoration](../testing/developer-harness.md#preserving-and-restoring-working-sources), dirty/conflicted fixtures and an offline rebuilt four-profile comparison pass on the host. [Retained registry dependencies](../testing/developer-harness.md#retaining-registry-dependencies-for-a-cold-build) pass a frozen offline build with an initially empty Cargo cache, empty-source negative control and four-profile artifact comparisons. [Copied toolchain/SDK host qualification](../testing/developer-harness.md#copied-host-toolchain-and-sdk-qualification) passes with selected-linker/empty-SDK negative controls and four-profile equality. [Automated sealing/verification and reconstruction](../testing/developer-harness.md#automated-host-reconstruction) pass with real copied tools, paths containing spaces, three independent controls and four-profile artifact equality. [Common checkpoint-tail diagnostics](../testing/developer-harness.md#common-checkpoint-tail-flight-recorder) provide a bounded optional ring with retry identities and publication/adoption failure distinctions. [Internal diagnostic bundles](../testing/developer-harness.md#internal-diagnostic-bundles) bind commit events and loss to semantic operations, replay and minimization at all four cache profiles. [Category filtering and bounded live delivery](../testing/developer-harness.md#category-selection-and-live-diagnostics) pass four-profile image/I/O/failure comparisons, including saturation and disconnection. [Version-4 category/live bundles](../testing/developer-harness.md#selected-category-and-live-delivery-bundles) pass 640 in-process combinations and fresh-process replay/admission/minimization controls. [Core API spans](../testing/developer-harness.md#core-api-call-spans) cover 66 mutable entries with nested root/span identities, commit correlation, early refusal and unwind restoration; four-profile image/I/O checks include all data/metadata/checkpoint barriers and snapshot/protection operations. [Deferred-window observation](../testing/developer-harness.md#deferred-window-observation) joins staged calls, intent groups and checkpoint attempts with four-profile image/I/O and failure checks. [Version-5 replay](../testing/developer-harness.md#api-and-window-replay-bundles) covers API/window export, deferred groups and selected-cut remount oracles. Publication-family coverage, object/view linkage, platform API scope and other internal subsystems remain open; additional host profiles belong to the Stage D portability gates. |
 | Tiny-cache matrix and fuzz/property tests | [Integrated profile gates](../testing/developer-harness.md#integrated-tree-cache-profiles), [tree spill/reload tests](../crates/afsplus-core/src/cow_tree.rs) and [batch resource measurements](../testing/benchmark-contract.md#tree-cache-batch-measurements) | Partial: 2/4/8/unlimited batch, replay, snapshot/shared-survivor and allocation-cache rotation gates pass; two-page split crash matrix and early-spill retries pass. [Cache-bound ladder/replay/minimization](../testing/developer-harness.md#cache-bound-semantic-bundles) passes for all four profiles. [Seeded semantic properties](../testing/fuzzing.md#seeded-semantic-properties) pass 24 three-seed/prefix/profile cases with fresh replay and a wrong-byte negative control; [Seven codec targets](../testing/fuzzing.md#rust-codec-gate) include allocation bitmaps and region bindings; uncovered codec surfaces and mutation-family fault/artifact coverage remain open. Bulk-builder and whole-heap limits, wider workload families and native resource qualification feed M12/M13 and the complete audit queue. |
 
 Stage A remains partial: API-wide/subsystem diagnostics and wider

@@ -470,3 +470,29 @@ fn selected_diagnostic_header_refuses_invalid_configuration() {
         );
     }
 }
+
+#[test]
+fn extended_diagnostic_commands_are_version_bound_and_range_checked() {
+    for version in ["AFSPSC04", "AFSPSC05"] {
+        let mask = if version == "AFSPSC05" { 63 } else { 15 };
+        for command in [
+            "window_write f 0 42",
+            "window_truncate f 1",
+            "window_fsync",
+            "window_commit",
+        ] {
+            let wire = format!("{version}\nformat 4096 256 64 8 2 256 {mask} 0 none\n{command}\n");
+            assert_eq!(Plan::parse(wire.as_bytes()).is_ok(), version == "AFSPSC05");
+        }
+    }
+    for suffix in ["256 64 0 none", "0 63 0 none", "256 63 0 1"] {
+        assert!(Plan::parse(
+            format!("AFSPSC05\nformat 4096 256 64 8 2 {suffix}\nsync\n").as_bytes()
+        )
+        .is_err());
+    }
+    assert!(Plan::parse(
+        b"AFSPSC05\nformat 4096 256 64 8 2 256 63 0 none\nwindow_write f 16777216 42\n"
+    )
+    .is_err());
+}

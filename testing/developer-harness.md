@@ -36,6 +36,7 @@
 - [Category selection and live diagnostics](#category-selection-and-live-diagnostics)
 - [Core API call spans](#core-api-call-spans)
 - [Deferred-window observation](#deferred-window-observation)
+- [API and window replay bundles](#api-and-window-replay-bundles)
 - [Selected-category and live-delivery bundles](#selected-category-and-live-delivery-bundles)
 - [Internal diagnostic bundles](#internal-diagnostic-bundles)
 
@@ -1072,8 +1073,8 @@ Call `FlightRecorder::enable_api_observation()` before installation to observe
 mutable operational `Volume` entry points, including nested calls and refusals
 before commit. The default scope emits only the common commit-tail events;
 semantic profiles 1 through 4 preserve that scope and their original wire bytes.
-API-span export requires an extended profile. The legacy encoder refuses API
-kinds rather than dropping them from a purportedly complete recording.
+[Version 5](#api-and-window-replay-bundles) exports API and window context.
+Legacy export profiles reject extended kinds rather than dropping them.
 
 Each observed call receives a monotonic span ID, its parent's span ID and the
 root call's operation ID. Top-level calls have parent zero and use their own
@@ -1156,7 +1157,58 @@ cache profiles. They exercise deferred groups, validation refusals, data-write
 and barrier failures, snapshot publication, draining, reattachment, empty windows
 and late enablement. Unit tests cover filtering and identity exhaustion. Legacy
 profiles 1–4 leave API/window observation disabled; their encoder rejects these
-extended event kinds until a versioned export profile defines their fields.
+extended event kinds; [version 5](#api-and-window-replay-bundles) defines their fields.
+
+## API and window replay bundles
+
+Semantic JSON version 5 enables core API/window observation before executing
+operations. Its `AFSPSC05` geometry has the version-4 fields, with category mask
+0 through 63: bits 0–3 retain their meanings, bit 4 selects API events and bit 5
+selects window events. Observation assigns identities before category filtering.
+Profiles 1–4 retain their original recording scope and wire bytes.
+
+Version 5 also admits `window_write` and `window_truncate`, with the same label,
+range and payload limits as `write` and `truncate`, plus argument-free
+`window_fsync` and `window_commit`. These invoke the deferred core APIs on an
+existing file; direct mutations retain their existing behavior. Use explicit
+fsync, commit and remount steps to state which durability boundary is being
+qualified. Ending a scenario is not an implicit commit of staged work.
+
+`AFSFLT04` retains the 28-byte selected-profile header, 29-byte operation records
+and 53-byte batch headers from version 4. Each retained event is 64 bytes:
+
+| Field | Encoding |
+|---|---|
+| Event sequence, commit attempt, generation | Three little-endian u64s |
+| Kind, remount-required flag | Two u8s |
+| Root operation, API span, parent span | Three little-endian u64s |
+| API method | Little-endian u16; zero for no API context |
+| Window identity | Little-endian u64; zero outside observation |
+| Intent-group sequence | Little-endian u32 |
+
+Kind codes 1–7 retain their commit meanings. Codes 8–11 are `ApiBegin`,
+`ApiSucceeded`, `ApiFailed`, `ApiUnwound`. Codes 12–19 are `WindowOpened`,
+`WindowAttached`, `WindowLogBegin`, `WindowLogDurable`, `WindowLogFailed`,
+`WindowFailed`, `WindowClosed`, `WindowDetached`, in that order. Method IDs 1–66
+are the explicit `ApiMethod` assignments in the [core recorder](../crates/afsplus-core/src/flight.rs).
+An extension of the accepted ID set requires coordinated producer/admission
+changes. Wire size is independent of the in-memory Rust event layout.
+
+The [API contract](#core-api-call-spans) and [window contract](#deferred-window-observation)
+define the fields' semantics. API/window events have attempt zero; commit events
+retain a positive, monotonic commit attempt. A sequence can contain API events
+without a commit. Admission preserves version-4 loss and delivery equations,
+checks root/parent ordering, method and kind domains, zero-context consistency,
+window/group bounds and consistent span context within each retained batch.
+Missing events cannot prove a complete call tree or lifecycle; exact replay and
+independent image inspection supply separate evidence. The format does not
+claim mount/recovery instrumentation or native-platform qualification.
+
+[Replay tests](../tools/test-afsptest.py) exercise category selection and ring
+loss on four cache profiles with identical images and block traces, malformed
+API fields, minimization, selected cuts and two durable groups linked across
+separate API roots. Cuts immediately before and after the first group's durable
+boundary require exact old or acknowledged file bytes after remount.
 
 ## Selected-category and live-delivery bundles
 

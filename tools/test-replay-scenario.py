@@ -22,6 +22,32 @@ def fixture():
 
 
 class ScenarioTests(unittest.TestCase):
+    def test_v5_scope_and_category_bounds_are_versioned(self):
+        value = fixture()
+        value.update(version=5, flight_capacity=256, flight_categories=63, flight_sink=None)
+        value["volume"]["tree_cache_pages"] = 2
+        raw = json.dumps(value).encode()
+        self.assertTrue(scenario.compile_commands(raw).startswith(
+            b"AFSPSC05\nformat 4096 256 64 8 2 256 63 0 none\n"))
+        for version, mask in ((4, 16), (4, 63), (5, 64), (5, -1), (5, True)):
+            with self.assertRaises(ValueError):
+                scenario.validate(json.dumps(dict(value, version=version, flight_categories=mask)).encode())
+
+    def test_deferred_commands_require_v5_and_keep_payload_bounds(self):
+        value = fixture()
+        value.update(version=5, flight_capacity=256, flight_categories=63, flight_sink=None)
+        value["volume"]["tree_cache_pages"] = 2
+        value["operations"] = value["operations"][:2] + [
+            {"op": "window_write", "label": "f", "offset": 4, "data": "42"},
+            {"op": "window_truncate", "label": "f", "size": 2},
+            {"op": "window_fsync"}, {"op": "window_commit"}]
+        self.assertIn(b"window_write f 4 42\n", scenario.compile_commands(json.dumps(value).encode()))
+        with self.assertRaises(ValueError):
+            scenario.validate(json.dumps(dict(value, version=4, flight_categories=15)).encode())
+        value["operations"][2]["offset"] = scenario.MAX_FILE
+        with self.assertRaises(ValueError):
+            scenario.validate(json.dumps(value).encode())
+
     def test_v2_cache_profile_is_explicit_and_compiled_canonically(self):
         for pages in (2, 4, 8, "unlimited"):
             value = fixture()
