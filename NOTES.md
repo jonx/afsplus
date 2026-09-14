@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Stage opaque destination metadata before atomic publication](#2026-09-14---stage-opaque-destination-metadata-before-atomic-publication)
 - [2026-09-14 - Stream opaque captured attributes and security metadata](#2026-09-14---stream-opaque-captured-attributes-and-security-metadata)
 - [2026-09-14 - Inspect captured metadata knowledge through backup authority](#2026-09-14---inspect-captured-metadata-knowledge-through-backup-authority)
 - [2026-09-14 - Preserve exact object metadata and inventory knowledge](#2026-09-14---preserve-exact-object-metadata-and-inventory-knowledge)
@@ -90,6 +91,30 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Stage opaque destination metadata before atomic publication
+
+Accepted ADR-083 under delegated recommended-option authority. Added an optional
+provider extension and non-cloneable upload handle bound to the original object
+lease and grant. Host value admission defaults to disabled; each upload also
+consumes a handle-budget unit. Sequential chunks remain in private staging until
+exact-length finish. Staging errors permanently fail the upload; dropping,
+revocation or premature finish releases provider staging without publishing.
+The AFS+ mapping explicitly refuses the extension pending storage qualification.
+
+Independent-provider tests cover exact unknown binary and empty values,
+pre-finish invisibility, object-lease retention, budget recovery, invalid/excessive
+requests, foreign/revoked grants, partial staging-write faults and old/complete-new
+publication-error outcomes. In-backend probes verify held admission for every
+phase. Remounted AFS+ refusal issues zero writes and flushes. Updated API,
+qualification and queue ownership; accepted ADR bodies are unchanged except for
+amendment relations.
+
+Validation passed: 398 workspace tests, zero failures, ten ignored tests;
+43 VFS tests including doctests; formatting, workspace Clippy, documentation
+checks, three checker fixtures and whitespace validation. These are host
+memory-provider tests. Durable AFS+ metadata storage, staging cleanup recovery,
+archive binding and complete constrained/native qualification remain queue work.
 
 ## 2026-09-14 - Stream opaque captured attributes and security metadata
 

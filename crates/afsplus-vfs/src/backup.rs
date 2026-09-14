@@ -100,7 +100,7 @@ pub struct MetadataPage {
 pub const MAX_METADATA_KEY_BYTES: usize = 1024;
 pub const MAX_METADATA_ENCODING_BYTES: usize = 128;
 pub const MAX_METADATA_PAGE_ENTRIES: usize = 64;
-fn valid_metadata_text(text: &str, limit: usize) -> bool {
+pub(crate) fn valid_metadata_text(text: &str, limit: usize) -> bool {
     !text.is_empty() && text.len() <= limit && !text.contains('\0')
 }
 

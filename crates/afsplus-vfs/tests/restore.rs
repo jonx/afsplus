@@ -1,6 +1,11 @@
 use afsplus_format::Timespec;
+use afsplus_vfs::backup::{MetadataClass, MetadataEntry};
 use afsplus_vfs::restore::*;
 use afsplus_vfs::{NodeKind, Stat, VfsError};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::{collections::BTreeMap, sync::mpsc};
 
 fn now(n: i64) -> Timespec {
@@ -36,6 +41,9 @@ struct Node {
     data: Vec<u8>,
 }
 struct Mock {
+    opaque: BTreeMap<(u64, bool, String), (String, Vec<u8>)>,
+    staging_active: Arc<AtomicUsize>,
+    metadata_fault: u8,
     nodes: BTreeMap<u64, Node>,
     names: BTreeMap<(u64, String), u64>,
     next: u64,
@@ -47,6 +55,9 @@ struct Mock {
 impl Mock {
     fn new() -> Self {
         Self {
+            opaque: BTreeMap::new(),
+            staging_active: Arc::new(AtomicUsize::new(0)),
+            metadata_fault: 0,
             nodes: BTreeMap::from([(
                 1,
                 Node {
@@ -190,6 +201,77 @@ impl RestoreBackend for Mock {
     }
     fn sync(&mut self) -> Result<(), VfsError> {
         self.calls += 1;
+        Ok(())
+    }
+}
+struct Upload {
+    object: u64,
+    class: MetadataClass,
+    entry: MetadataEntry,
+    bytes: Vec<u8>,
+    active: Arc<AtomicUsize>,
+}
+impl Drop for Upload {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+impl OpaqueRestoreBackend for Mock {
+    type Upload = Upload;
+    fn begin_opaque(
+        &mut self,
+        object: &u64,
+        class: MetadataClass,
+        entry: &MetadataEntry,
+    ) -> Result<Upload, VfsError> {
+        self.calls += 1;
+        if !self.nodes.contains_key(object) {
+            return Err(VfsError::NotFound);
+        }
+        self.staging_active.fetch_add(1, Ordering::SeqCst);
+        Ok(Upload {
+            object: *object,
+            class,
+            entry: entry.clone(),
+            bytes: vec![],
+            active: self.staging_active.clone(),
+        })
+    }
+    fn write_opaque(
+        &mut self,
+        upload: &mut Upload,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), VfsError> {
+        self.calls += 1;
+        assert_eq!(offset, upload.bytes.len() as u64);
+        if self.metadata_fault == 1 {
+            upload.bytes.extend_from_slice(&bytes[..1]);
+            return Err(VfsError::Invalid);
+        }
+        upload.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn finish_opaque(&mut self, mut upload: Upload) -> Result<(), VfsError> {
+        self.calls += 1;
+        assert_eq!(upload.bytes.len() as u64, upload.entry.size);
+        if self.metadata_fault == 2 {
+            return Err(VfsError::Invalid);
+        }
+        self.opaque.insert(
+            (
+                upload.object,
+                upload.class == MetadataClass::Security,
+                upload.entry.key.clone(),
+            ),
+            (
+                upload.entry.encoding.clone(),
+                std::mem::take(&mut upload.bytes),
+            ),
+        );
+        if self.metadata_fault == 3 {
+            return Err(VfsError::Invalid);
+        }
         Ok(())
     }
 }
@@ -510,7 +592,7 @@ fn afs_rejects_existing_destination_and_unrepresentable_metadata_without_writes(
     )
     .unwrap();
     let (mut service, authority) =
-        RestoreService::new(AfsRestoreDestination::new(volume, dir).unwrap(), 1).unwrap();
+        RestoreService::new(AfsRestoreDestination::new(volume, dir).unwrap(), 2).unwrap();
     let grant = authority.grant();
     let root = service.root(&grant).unwrap();
     let mut too_wide = metadata();
@@ -534,6 +616,11 @@ fn afs_rejects_existing_destination_and_unrepresentable_metadata_without_writes(
         service.reserve(&root, 0, 4095, now(4)),
         Err(RestoreError::Filesystem(VfsError::NotSupported))
     );
+    service.set_metadata_limit(Some(4));
+    assert!(matches!(
+        service.begin_opaque(&root, MetadataClass::Security, &opaque_entry(4)),
+        Err(RestoreError::Filesystem(VfsError::NotSupported))
+    ));
     let trace = service.into_backend().into_volume().into_device();
     assert_eq!(trace.stats().writes, 0);
     assert_eq!(trace.stats().flushes, 0);
@@ -624,4 +711,160 @@ fn afs_restore_reservations_preserve_size_written_bytes_and_final_address_block(
     let report = afsplus_check::check_device(&mut volume.into_device());
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert!(report.warnings.is_empty());
+}
+
+fn opaque_entry(size: u64) -> MetadataEntry {
+    MetadataEntry {
+        key: "descriptor".into(),
+        encoding: "vendor/unknown;v=7".into(),
+        size,
+    }
+}
+#[test]
+fn staged_metadata_is_exact_private_and_releases_resources() {
+    let (mut service, authority) = RestoreService::new(Mock::new(), 2).unwrap();
+    service.set_metadata_limit(Some(4));
+    let grant = authority.grant();
+    let root = service.root(&grant).unwrap();
+    let mut upload = service
+        .client()
+        .begin_opaque(&root, MetadataClass::Security, &opaque_entry(4))
+        .unwrap();
+    root.close(); // Upload retains the object lease and both budget units.
+    assert!(matches!(
+        service.root(&grant),
+        Err(RestoreError::Filesystem(VfsError::Limit(_)))
+    ));
+    service
+        .client()
+        .write_opaque(&mut upload, &[0, 255])
+        .unwrap();
+    assert!(service.backend_mut().opaque.is_empty());
+    service
+        .client()
+        .write_opaque(&mut upload, &[128, 1])
+        .unwrap();
+    assert!(service.backend_mut().opaque.is_empty());
+    service.client().finish_opaque(upload).unwrap();
+    assert_eq!(
+        service.backend_mut().opaque[&(1, true, "descriptor".into())],
+        ("vendor/unknown;v=7".into(), vec![0, 255, 128, 1])
+    );
+    assert_eq!(
+        service.backend_mut().staging_active.load(Ordering::SeqCst),
+        0
+    );
+    let root = service.root(&grant).unwrap();
+    let upload = service
+        .begin_opaque(&root, MetadataClass::Attribute, &opaque_entry(0))
+        .unwrap();
+    service.finish_opaque(upload).unwrap();
+    assert_eq!(
+        service.backend_mut().opaque[&(1, false, "descriptor".into())].1,
+        Vec::<u8>::new()
+    );
+}
+#[test]
+fn staged_metadata_admission_abort_and_revocation_are_explicit() {
+    let (mut service, authority) = RestoreService::new(Mock::new(), 2).unwrap();
+    let grant = authority.grant();
+    let root = service.root(&grant).unwrap();
+    let calls = service.backend_mut().calls;
+    assert!(matches!(
+        service.begin_opaque(&root, MetadataClass::Security, &opaque_entry(0)),
+        Err(RestoreError::Filesystem(VfsError::NotSupported))
+    ));
+    service.set_metadata_limit(Some(4));
+    assert!(service
+        .begin_opaque(&root, MetadataClass::Security, &opaque_entry(5))
+        .is_err());
+    assert!(service
+        .begin_opaque(
+            &root,
+            MetadataClass::Security,
+            &MetadataEntry {
+                key: "".into(),
+                ..opaque_entry(1)
+            }
+        )
+        .is_err());
+    assert_eq!(service.backend_mut().calls, calls);
+    let mut upload = service
+        .begin_opaque(&root, MetadataClass::Security, &opaque_entry(2))
+        .unwrap();
+    let calls = service.backend_mut().calls;
+    assert!(service.write_opaque(&mut upload, &[0; 3]).is_err());
+    assert_eq!(service.backend_mut().calls, calls);
+    service.write_opaque(&mut upload, &[1]).unwrap();
+    assert!(service.finish_opaque(upload).is_err());
+    assert!(service.backend_mut().opaque.is_empty());
+    assert_eq!(
+        service.backend_mut().staging_active.load(Ordering::SeqCst),
+        0
+    );
+    let mut upload = service
+        .begin_opaque(&root, MetadataClass::Security, &opaque_entry(1))
+        .unwrap();
+    let (mut foreign, _) = RestoreService::new(Mock::new(), 2).unwrap();
+    assert_eq!(
+        foreign.write_opaque(&mut upload, &[1]),
+        Err(RestoreError::Denied)
+    );
+    authority.revoke(&grant).unwrap();
+    let calls = service.backend_mut().calls;
+    assert_eq!(
+        service.write_opaque(&mut upload, &[1]),
+        Err(RestoreError::Denied)
+    );
+    assert_eq!(service.finish_opaque(upload), Err(RestoreError::Denied));
+    assert_eq!(service.backend_mut().calls, calls);
+    assert_eq!(
+        service.backend_mut().staging_active.load(Ordering::SeqCst),
+        0
+    );
+    assert!(service.backend_mut().opaque.is_empty());
+}
+#[test]
+fn staging_write_failures_poison_upload_and_finish_errors_never_expose_partial_values() {
+    let (mut service, authority) = RestoreService::new(Mock::new(), 2).unwrap();
+    service.set_metadata_limit(Some(2));
+    let grant = authority.grant();
+    let root = service.root(&grant).unwrap();
+    for fault in 1..=3 {
+        let mut upload = service
+            .begin_opaque(&root, MetadataClass::Security, &opaque_entry(2))
+            .unwrap();
+        service.backend_mut().metadata_fault = fault;
+        if fault == 1 {
+            assert!(service.write_opaque(&mut upload, &[0, 255]).is_err());
+            let calls = service.backend_mut().calls;
+            assert!(service.write_opaque(&mut upload, &[0, 255]).is_err());
+            assert!(service.finish_opaque(upload).is_err());
+            assert_eq!(service.backend_mut().calls, calls);
+        } else {
+            service.write_opaque(&mut upload, &[0, 255]).unwrap();
+            assert!(service.finish_opaque(upload).is_err());
+        }
+        assert_eq!(
+            service.backend_mut().staging_active.load(Ordering::SeqCst),
+            0
+        );
+        if fault < 3 {
+            assert!(service.backend_mut().opaque.is_empty());
+        } else {
+            assert_eq!(
+                service.backend_mut().opaque[&(1, true, "descriptor".into())].1,
+                vec![0, 255]
+            );
+        }
+    }
+    service.backend_mut().metadata_fault = 0;
+    let upload = service
+        .begin_opaque(&root, MetadataClass::Attribute, &opaque_entry(1))
+        .unwrap();
+    upload.abort();
+    assert_eq!(
+        service.backend_mut().staging_active.load(Ordering::SeqCst),
+        0
+    );
 }

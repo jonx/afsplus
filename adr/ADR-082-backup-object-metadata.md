@@ -1,6 +1,7 @@
 # ADR-082: Carry explicit object metadata and inventory knowledge in backups
 
 Status: Accepted under the owner's delegated recommended-option authority; complete preservation consumer qualification required
+Amended by: ADR-083
 Amends: ADR-076
 
 ## Context

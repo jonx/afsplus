@@ -26,6 +26,7 @@
 - [16. Destination reservation restoration](#16-destination-reservation-restoration)
 - [17. Captured metadata inventory knowledge](#17-captured-metadata-inventory-knowledge)
 - [18. Opaque captured metadata transport](#18-opaque-captured-metadata-transport)
+- [19. Staged opaque destination metadata](#19-staged-opaque-destination-metadata)
 
 <!-- /toc -->
 
@@ -339,3 +340,22 @@ The AFS+ remount fixture must explicitly return `NotSupported` for absent
 transport methods and perform zero writes/flushes. Inventory knowledge does not
 replace transport. Lossless destination installation and actual native provider
 support require independent gates.
+
+## 19. Staged opaque destination metadata
+
+Run `cargo test -p afsplus-vfs --all-features` for the
+[staged restore contract](../adr/ADR-083-staged-opaque-metadata-restore.md).
+The independent provider oracle installs exact unknown binary values and empty
+values while keeping active metadata absent until finish. Closing the caller's
+object handle must not release the lease retained by an upload. Abort, premature
+finish, revocation and write failure must return staging and handle budgets.
+Oversized or invalid descriptors and excess chunks must fail before backend
+calls. Foreign services and revoked grants must not write or publish. An
+in-backend probe verifies permits during begin, write and finish.
+
+Inject a partial staging-write error, an error before publication and an error
+after complete publication. Require permanent failure of the damaged upload,
+no success result and exactly the allowed old/complete-new active value.
+The remounted AFS+ refusal fixture must issue zero writes/flushes. These are host
+memory-provider oracles; durable staging requires crash tests, cleanup recovery
+and measured RAM/I/O qualification before advertising native support.

@@ -26,6 +26,7 @@
   - [Captured allocation enumeration](#captured-allocation-enumeration)
   - [Versioning and compatibility](#versioning-and-compatibility)
 - [9. Destination-scoped restore extension](#9-destination-scoped-restore-extension)
+  - [Staged opaque metadata restoration](#staged-opaque-metadata-restoration)
 
 <!-- /toc -->
 
@@ -483,3 +484,37 @@ A native C/IPC extension requires version negotiation, server-owned opaque
 handles, denial translation and destination/authentication qualification.
 The [restore harness](../testing/security-model-conformance.md#14-destination-restore-authority)
 runs the same consumer against an independent provider and AFS+.
+
+### Staged opaque metadata restoration
+
+[ADR-083](../adr/ADR-083-staged-opaque-metadata-restore.md) defines the optional
+`OpaqueRestoreBackend` extension. `begin_opaque(object, class, entry)` binds a
+provider-private upload to the exact destination object, key, encoding and size.
+The host enables a per-value byte limit through `set_metadata_limit`; `None`
+disables uploads and `Some(0)` admits only empty values. Descriptor text limits
+match captured metadata transport. Each upload consumes a separate handle-budget
+unit and retains the original object's lease and restore grant.
+
+`write_opaque(upload, bytes)` accepts sequential chunks, refuses excess bytes
+before provider invocation and permanently fails the upload after an uncertain
+provider write. `finish_opaque(upload)` consumes the upload, requires exactly
+the declared length, rechecks the original grant, and invokes atomic provider
+publication. No caller-supplied offset or replacement grant can change the target.
+A successful finish preserves the exact opaque bytes and encoding; it does not
+certify whole-restore completion or filesystem durability beyond the provider's
+qualified contract. Final synchronization is separate.
+
+Dropping or explicitly aborting an upload releases its private staging before
+returning its budget and destination lease. Cleanup requires no grant and cannot
+change active metadata. Providers implement resource cleanup in their upload
+type. Failed publication permits only old or complete new active metadata and
+requires reconciliation of uncertain state before another mutation. Unsupported
+formats, preservation semantics or staging implementations cause explicit refusal.
+Security installation does not bypass the host's enforcement policy.
+
+The extension adds Rust types and methods without changing existing provider
+implementations, C ABI, classic DOS interface or on-disk representation. The
+AFS+ mapping explicitly refuses opaque upload until its storage implementation
+qualifies this contract. Constrained providers may spool staging and accept small
+chunks; whole-value allocation is not required by the interface. Actual native
+staging, cleanup, durability and memory limits need provider evidence.

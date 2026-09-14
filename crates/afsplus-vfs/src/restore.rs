@@ -1,5 +1,9 @@
 //! Destination-scoped restoration, separately authorized under ADR-077.
 use crate::authority::{Grant, Issuer, Scope};
+use crate::backup::{
+    valid_metadata_text, MetadataClass, MetadataEntry, MAX_METADATA_ENCODING_BYTES,
+    MAX_METADATA_KEY_BYTES,
+};
 use crate::{Stat, VfsError};
 use afsplus_format::Timespec;
 use std::sync::{
@@ -101,6 +105,31 @@ pub trait RestoreBackend {
     ) -> Result<usize, VfsError>;
     fn sync(&mut self) -> Result<(), VfsError>;
 }
+/// Optional provider extension. Upload Drop releases private staging, even
+/// after revocation. Finish publishes an entire value atomically or refuses it.
+pub trait OpaqueRestoreBackend: RestoreBackend {
+    type Upload;
+    fn begin_opaque(
+        &mut self,
+        _object: &Self::Object,
+        _class: MetadataClass,
+        _entry: &MetadataEntry,
+    ) -> Result<Self::Upload, VfsError> {
+        Err(VfsError::NotSupported)
+    }
+    fn write_opaque(
+        &mut self,
+        _upload: &mut Self::Upload,
+        _offset: u64,
+        _bytes: &[u8],
+    ) -> Result<(), VfsError> {
+        Err(VfsError::NotSupported)
+    }
+    fn finish_opaque(&mut self, _upload: Self::Upload) -> Result<(), VfsError> {
+        Err(VfsError::NotSupported)
+    }
+}
+
 #[derive(Clone)]
 pub struct RestoreGrant(Grant);
 #[derive(Clone)]
@@ -139,12 +168,29 @@ impl<O> RestoreObject<O> {
     }
 }
 
+/// Non-cloneable staged value bound to its original destination and grant.
+pub struct RestoreUpload<U, O> {
+    // Release staging before the object lease and its separate budget unit.
+    staging: Option<U>,
+    object: RestoreObject<O>,
+    size: u64,
+    written: u64,
+    failed: bool,
+    _budget: Budget,
+}
+impl<U, O> RestoreUpload<U, O> {
+    pub fn abort(self) {
+        drop(self);
+    }
+}
+
 pub struct RestoreService<P: RestoreBackend> {
     backend: P,
     scope: Scope,
     active: Arc<AtomicUsize>,
     max_handles: usize,
     max_reservation_bytes: u64,
+    max_metadata_bytes: Option<u64>,
 }
 impl<P: RestoreBackend> RestoreService<P> {
     pub fn new(backend: P, max_handles: usize) -> Result<(Self, RestoreAuthority), RestoreError> {
@@ -159,6 +205,7 @@ impl<P: RestoreBackend> RestoreService<P> {
                 active: Arc::new(AtomicUsize::new(0)),
                 max_handles,
                 max_reservation_bytes: 0,
+                max_metadata_bytes: None,
             },
             RestoreAuthority(issuer),
         ))
@@ -167,6 +214,10 @@ impl<P: RestoreBackend> RestoreService<P> {
     /// Consumers cannot raise it through the checked facade.
     pub fn set_reservation_limit(&mut self, bytes: u64) {
         self.max_reservation_bytes = bytes;
+    }
+    /// Host-only value admission. None disables uploads; Some(0) permits empty values.
+    pub fn set_metadata_limit(&mut self, bytes: Option<u64>) {
+        self.max_metadata_bytes = bytes;
     }
     pub fn client(&mut self) -> RestoreClient<'_, P> {
         RestoreClient(self)
@@ -325,6 +376,92 @@ impl<P: RestoreBackend> RestoreService<P> {
         Ok(self.backend.sync()?)
     }
 }
+impl<P: OpaqueRestoreBackend> RestoreService<P> {
+    pub fn begin_opaque(
+        &mut self,
+        object: &RestoreObject<P::Object>,
+        class: MetadataClass,
+        entry: &MetadataEntry,
+    ) -> Result<RestoreUpload<P::Upload, P::Object>, RestoreError> {
+        let _permit = self.admit(&object.0.grant)?;
+        let limit = self.max_metadata_bytes.ok_or(VfsError::NotSupported)?;
+        if entry.size > limit {
+            return Err(VfsError::Limit("metadata value budget exhausted").into());
+        }
+        if !valid_metadata_text(&entry.key, MAX_METADATA_KEY_BYTES)
+            || !valid_metadata_text(&entry.encoding, MAX_METADATA_ENCODING_BYTES)
+        {
+            return Err(VfsError::Invalid.into());
+        }
+        let budget = self.reserve_handle()?;
+        let staging = self.backend.begin_opaque(&object.0.object, class, entry)?;
+        Ok(RestoreUpload {
+            staging: Some(staging),
+            object: object.clone(),
+            size: entry.size,
+            written: 0,
+            failed: false,
+            _budget: budget,
+        })
+    }
+    pub fn write_opaque(
+        &mut self,
+        upload: &mut RestoreUpload<P::Upload, P::Object>,
+        bytes: &[u8],
+    ) -> Result<(), RestoreError> {
+        let _permit = self.admit(&upload.object.0.grant)?;
+        if upload.failed {
+            return Err(VfsError::Invalid.into());
+        }
+        if bytes.len() as u128 > (upload.size - upload.written) as u128 {
+            return Err(VfsError::Invalid.into());
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        upload.failed = true;
+        self.backend
+            .write_opaque(upload.staging.as_mut().unwrap(), upload.written, bytes)?;
+        upload.written += bytes.len() as u64;
+        upload.failed = false;
+        Ok(())
+    }
+    pub fn finish_opaque(
+        &mut self,
+        mut upload: RestoreUpload<P::Upload, P::Object>,
+    ) -> Result<(), RestoreError> {
+        let _permit = self.admit(&upload.object.0.grant)?;
+        if upload.failed || upload.written != upload.size {
+            return Err(VfsError::Invalid.into());
+        }
+        Ok(self.backend.finish_opaque(upload.staging.take().unwrap())?)
+    }
+}
+
+impl<P: OpaqueRestoreBackend> RestoreClient<'_, P> {
+    pub fn begin_opaque(
+        &mut self,
+        object: &RestoreObject<P::Object>,
+        class: MetadataClass,
+        entry: &MetadataEntry,
+    ) -> Result<RestoreUpload<P::Upload, P::Object>, RestoreError> {
+        self.0.begin_opaque(object, class, entry)
+    }
+    pub fn write_opaque(
+        &mut self,
+        upload: &mut RestoreUpload<P::Upload, P::Object>,
+        bytes: &[u8],
+    ) -> Result<(), RestoreError> {
+        self.0.write_opaque(upload, bytes)
+    }
+    pub fn finish_opaque(
+        &mut self,
+        upload: RestoreUpload<P::Upload, P::Object>,
+    ) -> Result<(), RestoreError> {
+        self.0.finish_opaque(upload)
+    }
+}
+
 fn timestamp(now: Timespec) -> Result<(), VfsError> {
     now.validate().map_err(|_| VfsError::Invalid)
 }
@@ -454,6 +591,10 @@ impl<D: afsplus_block::BlockDevice> AfsRestoreDestination<D> {
         self.volume
     }
 }
+impl<D: afsplus_block::BlockDevice> OpaqueRestoreBackend for AfsRestoreDestination<D> {
+    type Upload = ();
+}
+
 impl<D: afsplus_block::BlockDevice> RestoreBackend for AfsRestoreDestination<D> {
     type Object = u64;
     fn root(&mut self) -> Result<u64, VfsError> {
@@ -626,6 +767,55 @@ mod authority_tests {
         fn sync(&mut self) -> Result<(), VfsError> {
             unreachable!()
         }
+    }
+    impl OpaqueRestoreBackend for Probe {
+        type Upload = ();
+        fn begin_opaque(
+            &mut self,
+            _: &(),
+            _: MetadataClass,
+            _: &MetadataEntry,
+        ) -> Result<(), VfsError> {
+            self.check();
+            Ok(())
+        }
+        fn write_opaque(&mut self, _: &mut (), _: u64, _: &[u8]) -> Result<(), VfsError> {
+            self.check();
+            Ok(())
+        }
+        fn finish_opaque(&mut self, _: ()) -> Result<(), VfsError> {
+            self.check();
+            Ok(())
+        }
+    }
+    #[test]
+    fn opaque_upload_holds_admission_during_all_provider_calls() {
+        let (mut service, authority) = RestoreService::new(
+            Probe {
+                grants: vec![],
+                calls: 0,
+            },
+            2,
+        )
+        .unwrap();
+        service.set_metadata_limit(Some(1));
+        let grant = authority.grant();
+        let object = service.root(&grant).unwrap();
+        service.backend_mut().grants = vec![grant];
+        let mut upload = service
+            .begin_opaque(
+                &object,
+                MetadataClass::Security,
+                &MetadataEntry {
+                    key: "key".into(),
+                    encoding: "format-v1".into(),
+                    size: 1,
+                },
+            )
+            .unwrap();
+        service.write_opaque(&mut upload, &[0]).unwrap();
+        service.finish_opaque(upload).unwrap();
+        assert_eq!(service.backend_mut().calls, 3);
     }
     #[test]
     fn write_and_link_hold_all_admission_permits_through_backend_calls() {

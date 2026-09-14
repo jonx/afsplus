@@ -53,7 +53,9 @@ for admitted tail retirement; implement persistent bounded cleanup for arbitrary
 large atomic truncation before qualifying unrestricted constrained resizing.
 Use [explicit object metadata and inventory knowledge](../spec/backup-object-metadata.md)
 for preservation admission; an unavailable enumeration API must not imply an
-empty attribute or security inventory. Add attribute/security transport
+empty attribute or security inventory. Use [opaque captured transport](../docs/13-filesystem-api-v2.md#opaque-captured-metadata-transport)
+and [staged destination publication](../docs/13-filesystem-api-v2.md#staged-opaque-metadata-restoration)
+for the authorized consumer; implement and qualify the AFS+ storage mapping. Add attribute/security archive transport
 with explicit unsupported-state refusal under [ADR-078](../adr/ADR-078-backup-preservation-modes.md); qualify native host grant issuance. Preserve [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md)
 with both-slot crash oracles, generation-aware quarantine and measured
 low-space progress. Implement [ADR-075](../adr/ADR-075-revocable-backup-capability.md)
