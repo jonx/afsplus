@@ -2260,3 +2260,139 @@ fn bounded_shrink_crash_preserves_shared_and_captured_bytes() {
     assert!(counts.iter().all(|n| *n > 0));
     println!("bounded_shrink_cuts old={} new={}", counts[0], counts[1]);
 }
+
+#[test]
+fn repeated_near_full_cycles_preserve_retained_views_and_recover_capacity() {
+    use afsplus_block::TraceBackend;
+    use std::time::Instant;
+    const BS: usize = 4096;
+    for scan_budget in [1, 8] {
+        let mut volume = open(TraceBackend::new(formatted(512, 0)), MountMode::ReadWrite);
+        let work = SnapshotWorkLimits {
+            max_edit_records: 512,
+            max_views: 4,
+            reclaim_records: scan_budget,
+        };
+        volume.set_snapshot_work_limits(work).unwrap();
+        volume.set_reclaim_batch_blocks(1);
+        let original: Vec<u8> = (0..4 * BS).map(|i| (i % 251) as u8).collect();
+        let keeper = volume
+            .create_file_in_root("keeper", &original, now(2))
+            .unwrap();
+        let writer = volume
+            .clone_file(keeper, OBJECT_ROOT, "writer", now(3))
+            .unwrap();
+        let retained = volume.snapshot_create(now(4)).unwrap();
+        let mut expected = original.clone();
+        let mut total_scanned = 0u64;
+        let mut total_promoted = 0u64;
+        let mut total_steps = 0u64;
+        let mut max_allocator = 0u64;
+        let mut admitted_writes = 0;
+        let mut min_free = u64::MAX;
+        let mut reads = 0u64;
+        let mut writes = 0u64;
+        let mut bytes_read = 0u64;
+        let mut bytes_written = 0u64;
+        let mut flushes = 0u64;
+        let mut maintenance_ns = 0u128;
+        for cycle in 0..24 {
+            let t = now(10 + cycle);
+            let rolling_bytes = expected.clone();
+            let rolling = volume.snapshot_create(t).unwrap();
+            let filler = volume.create_file_in_root("pressure", &[], t).unwrap();
+            let reserve = volume.available_blocks().saturating_sub(32);
+            assert!(
+                reserve > 256,
+                "budget={scan_budget} cycle={cycle} reserve={reserve}"
+            );
+            volume
+                .preallocate_file(filler, 0, reserve * BS as u64, t)
+                .unwrap();
+            let free = volume.free_blocks();
+            min_free = min_free.min(free);
+            assert!(free <= volume.emergency_headroom_blocks() + 32);
+            let generation = volume.generation();
+            volume.device_mut().reset();
+            assert!(matches!(
+                volume.preallocate_file(filler, reserve * BS as u64, (free + 1) * BS as u64, t),
+                Err(CoreError::NoSpace)
+            ));
+            let refused_io = volume.device_mut().stats();
+            assert_eq!(refused_io.writes, 0);
+            assert_eq!(refused_io.flushes, 0);
+            assert_eq!(volume.generation(), generation);
+            assert_eq!(volume.free_blocks(), free);
+            let offset = (cycle as usize % 3 + 1) * BS - 7;
+            let data = vec![cycle as u8; 29];
+            match volume.write_file_at(writer, offset as u64, &data, t) {
+                Ok(()) => {
+                    expected[offset..offset + data.len()].copy_from_slice(&data);
+                    admitted_writes += 1;
+                }
+                Err(CoreError::NoSpace) => assert_eq!(volume.generation(), generation),
+                Err(error) => panic!("budget={scan_budget} cycle={cycle}: {error}"),
+            }
+            assert_eq!(volume.read_file(keeper).unwrap(), original);
+            assert_eq!(volume.read_file(writer).unwrap(), expected);
+            let historical = volume.snapshot_open(retained).unwrap();
+            let recent = volume.snapshot_open(rolling).unwrap();
+            assert_eq!(bytes(&mut volume, &historical, writer), original);
+            assert_eq!(bytes(&mut volume, &recent, writer), rolling_bytes);
+            assert!(matches!(
+                volume.snapshot_delete(rolling, t),
+                Err(CoreError::Busy)
+            ));
+            drop(recent);
+            volume.snapshot_delete(rolling, t).unwrap();
+            volume.delete_file_in_root("pressure", t).unwrap();
+            volume.set_reclaim_batch_blocks(64);
+            let mut recovered = false;
+            volume.device_mut().reset();
+            let started = Instant::now();
+            for _ in 0..512 {
+                let progress = volume.snapshot_maintenance_step(t).unwrap();
+                total_steps += 1;
+                total_scanned += progress.records_scanned;
+                total_promoted += progress.blocks_promoted;
+                assert!(progress.records_scanned <= scan_budget as u64);
+                if let Some(stats) = volume.last_commit_stats() {
+                    max_allocator = max_allocator.max(stats.alloc.allocator_ram_bytes);
+                }
+                if volume.available_blocks() > 384 {
+                    recovered = true;
+                    break;
+                }
+            }
+            maintenance_ns += started.elapsed().as_nanos();
+            let io = volume.device_mut().stats();
+            reads += io.reads;
+            writes += io.writes;
+            bytes_read += io.bytes_read;
+            bytes_written += io.bytes_written;
+            flushes += io.flushes;
+            assert!(
+                recovered,
+                "budget={scan_budget} cycle={cycle}: capacity did not recover"
+            );
+            assert_eq!(bytes(&mut volume, &historical, writer), original);
+            drop(historical);
+            verify(&mut volume); // Both selectable checkpoints, including their registries.
+            volume = open(volume.into_device(), MountMode::ReadWrite);
+            volume.set_snapshot_work_limits(work).unwrap();
+            volume.set_reclaim_batch_blocks(1);
+            assert_eq!(volume.read_file(writer).unwrap(), expected);
+            let historical = volume.snapshot_open(retained).unwrap();
+            assert_eq!(bytes(&mut volume, &historical, keeper), original);
+            assert_eq!(bytes(&mut volume, &historical, writer), original);
+            assert!(matches!(
+                volume.snapshot_open(rolling),
+                Err(CoreError::NotFound)
+            ));
+        }
+        assert!(admitted_writes > 0);
+        assert!(total_promoted > 24 * 256);
+        assert!(max_allocator < 64 * 1024);
+        println!("retained_pressure cycles=24 blocks=512 scan_budget={scan_budget} steps={total_steps} scanned={total_scanned} promoted={total_promoted} admitted_writes={admitted_writes} min_free={min_free} maintenance_allocator_bitmap_peak={max_allocator} maintenance_reads={reads} maintenance_writes={writes} maintenance_bytes_read={bytes_read} maintenance_bytes_written={bytes_written} maintenance_flushes={flushes} maintenance_ns={maintenance_ns}");
+    }
+}

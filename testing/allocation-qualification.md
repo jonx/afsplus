@@ -96,3 +96,40 @@ chosen 8-to-64-block rule is deliberately conservative relative to those
 fixtures, and the fragmented VFS workload proves that visible unlink no
 longer scales with the file layout. The rule remains runtime policy: it does
 not turn into a fixed metadata partition or alter bitmap/checkpoint encoding.
+
+## Repeated retained-view pressure
+
+Run the hosted persistent-snapshot fixture:
+
+```text
+cargo test -p afsplus-core repeated_near_full_cycles -- --nocapture
+```
+
+A 512-block memory image with 4096-byte blocks carries a long-lived snapshot,
+shared source/writer files and a rotating snapshot. Each of 24 cycles fills
+ordinary capacity to a 32-block allowance above the emergency floor, refuses an
+oversized reservation without writes, attempts a cross-block COW write, deletes
+the rotating snapshot and filler, and recovers more than 384 available blocks
+within 512 maintenance calls. Open snapshot handles must make deletion busy.
+
+Run lifetime scans with budgets of one and eight records, an edit budget of 512,
+a view budget of four and a reclaim promotion budget of 64 blocks. Each
+maintenance call must respect its record budget. Compare live and historical
+bytes before and after maintenance and remount. Exhaustively validate both
+selectable checkpoints and their registered snapshots after every cycle;
+absence of the deleted registry identity is checked after reboot simulation.
+
+The output records scan/promotion/call totals, admitted writes, minimum free
+space, and maintenance-only device reads/writes/bytes/barriers and elapsed
+nanoseconds. The maintenance bitmap peak excludes descriptors, trees, other
+buffers and the memory backend; it is not process peak RAM. Timed and traced
+maintenance excludes fill, mutation, byte oracles, exhaustive verification and
+mount. Debug memory-backend timing is algorithm evidence, not device latency or
+native resource qualification. Scan budget changes may produce different
+quarantine histories and promotion totals; both profiles must meet the same
+capacity and exact-byte gates.
+
+Aged multi-region workloads, sustained real consumers, full memory accounting
+and authorized hardware lifecycle tests belong to their separate gates. This
+fixture complements the per-boundary crash matrices; it does not enumerate
+power cuts inside every operation of every pressure cycle.

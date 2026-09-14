@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-14 - Exercise repeated low-space reclamation with retained snapshots](#2026-09-14---exercise-repeated-low-space-reclamation-with-retained-snapshots)
 - [2026-09-14 - Bind full object inventories to counted descriptor manifests](#2026-09-14---bind-full-object-inventories-to-counted-descriptor-manifests)
 - [2026-09-14 - Replay verified scratch archives with bounded upload slots](#2026-09-14---replay-verified-scratch-archives-with-bounded-upload-slots)
 - [2026-09-14 - Carry opaque values through an authorized archive consumer](#2026-09-14---carry-opaque-values-through-an-authorized-archive-consumer)
@@ -94,6 +95,35 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-14 - Exercise repeated low-space reclamation with retained snapshots
+
+The 24-cycle near-full fixture was extended to persistent snapshots in the
+core snapshot harness. Both one-record and eight-record lifetime scan profiles
+preserved exact original, rotating-view and live bytes through every remount.
+Both selectable checkpoints and their snapshot registries passed exhaustive
+verification each cycle. Oversized allocations issued zero writes/barriers;
+active reader handles refused snapshot deletion. Every cycle recovered more
+than 384 normally available blocks on a 512-block image within 512 calls.
+
+The full workspace all-features gate passed 416 tests with no failures and
+10 explicitly ignored qualification probes. Formatting, strict Clippy,
+documentation, three checker fixtures and whitespace validation passed.
+
+The targeted debug memory-backend run measured these maintenance-only totals:
+
+| Scan budget | Calls | Records scanned | Blocks promoted | Reads / writes | Bytes read / written | Barriers |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 418 | 418 | 10,156 | 9,132 / 2,508 | 37,404,672 / 10,272,768 | 836 |
+| 8 | 185 | 1,174 | 9,880 | 4,069 / 1,047 | 16,666,624 / 4,288,512 | 370 |
+
+Each profile admitted all 24 cross-block writes and reached a minimum of 44
+free blocks. Maintenance bitmap payload peak was 64 bytes, excluding all other
+memory. Local maintenance elapsed times were about 0.92 and 0.42 seconds; these
+are debug algorithm timings, not storage latency or a performance promise.
+The smaller record budget preserved correctness while increasing calls and I/O.
+No format change or hardware write was involved. Sustained aged workloads,
+full process memory and native durability/resource gates stay explicit.
 
 ## 2026-09-14 - Bind full object inventories to counted descriptor manifests
 
