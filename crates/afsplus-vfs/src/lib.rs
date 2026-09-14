@@ -140,6 +140,7 @@ impl Capabilities {
     /// Open files remain usable after their final visible link is removed;
     /// persistent crash cleanup is provided by ADR-066.
     pub const OPEN_UNLINKED: u64 = 1 << 12;
+    pub const SYMLINKS: u64 = 1 << 13;
 
     pub const BASELINE: Capabilities = Capabilities(
         Self::IO_64BIT
@@ -279,7 +280,7 @@ impl<D: BlockDevice> Vfs<D> {
     }
 
     pub fn capabilities(&self) -> Capabilities {
-        let mut bits = Capabilities::BASELINE.bits();
+        let mut bits = Capabilities::BASELINE.bits() | Capabilities::SYMLINKS;
         if self.volume.ident().features.ro_compat & RO_COMPAT_SHARED_EXTENTS != 0 {
             bits |= Capabilities::CLONE_FILE | Capabilities::CLONE_RANGE;
         }
@@ -530,6 +531,22 @@ impl<D: BlockDevice> Vfs<D> {
             .create_file_in_directory(parent, name, b"", now)?)
     }
 
+    pub fn create_symlink(
+        &mut self,
+        parent: ObjectId,
+        name: &str,
+        target: &str,
+        now: Timespec,
+    ) -> Result<ObjectId, VfsError> {
+        self.checkpoint_data_window(now)?;
+        Ok(self.volume.create_symlink(parent, name, target, now)?)
+    }
+
+    /// Exact opaque target bytes; short buffers are unchanged and return the required count.
+    pub fn read_link(&mut self, object: ObjectId, output: &mut [u8]) -> Result<usize, VfsError> {
+        Ok(self.volume.read_link(object, output)?)
+    }
+
     pub fn create_directory(
         &mut self,
         parent: ObjectId,
@@ -552,6 +569,9 @@ impl<D: BlockDevice> Vfs<D> {
             .volume
             .visible_metadata(object_id)?
             .ok_or(VfsError::NotFound)?;
+        if metadata.object_type == ObjectType::Symlink {
+            return Ok(self.volume.unlink_symlink(parent, name, now)?);
+        }
         if metadata.object_type == ObjectType::File
             && metadata.link_count == 1
             && self.volume.ident().features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0

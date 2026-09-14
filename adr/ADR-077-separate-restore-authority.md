@@ -1,7 +1,7 @@
 # ADR-077: Separate destination restore authority from backup authority
 
 Status: Accepted
-Amended by: ADR-083, ADR-089, ADR-092
+Amended by: ADR-083, ADR-089, ADR-092, ADR-094
 
 ## Context
 

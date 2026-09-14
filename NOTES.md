@@ -10,6 +10,7 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- toc -->
 
 - [2026-09-14 — Generate visible milestone and stage progress](#2026-09-14--generate-visible-milestone-and-stage-progress)
+- [2026-09-14 - Add scoped symlink transport and VFS dispatch](#2026-09-14---add-scoped-symlink-transport-and-vfs-dispatch)
 - [2026-09-14 — Refresh implementation navigation and remaining work](#2026-09-14--refresh-implementation-navigation-and-remaining-work)
 - [2026-09-14 - Preserve symlink targets through core namespace transactions](#2026-09-14---preserve-symlink-targets-through-core-namespace-transactions)
 - [2026-09-14 — Simplify ADR decision statuses](#2026-09-14--simplify-adr-decision-statuses)
@@ -116,6 +117,19 @@ Milestone status cells drive generation; stages aggregate contributing
 milestones, while the ongoing Stage 0 review is partial. Prototype completion
 with qualification gaps stays partial. The documentation gate detects stale
 markers, and `make toc` regenerates them while preserving links and anchors.
+
+## 2026-09-14 - Add scoped symlink transport and VFS dispatch
+
+ADR-094 defines explicit opaque-target operations through the VFS and separate
+backup/restore grants. Added optional provider operations with NotSupported
+fallbacks, held-grant kind checks, bounded target readback and handle admission
+before restore creation. VFS unlink avoids regular-file orphan cleanup and
+namespace creation preserves pending logged writes through the existing barrier.
+
+Targeted tests cover live and captured bytes, short buffers, remount, grant
+revocation, callback lifetime, unsupported providers, foreign handles and handle
+exhaustion. Archive target/profile binding, replacement and native adapters are
+separate work; C capability identities are unchanged.
 
 ## 2026-09-14 — Refresh implementation navigation and remaining work
 

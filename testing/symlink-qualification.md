@@ -90,3 +90,17 @@ occupied names, unsupported symlink hard links, read-only mutations and short
 live/captured target reads. These tests do not qualify atomic replacement,
 provider grants, archive symlink groups or mounted OS adapters. Add those cases
 before their respective capability and preservation claims.
+
+## Scoped transport qualification
+
+Run `cargo test -p afsplus-vfs symlink` for VFS and trusted backup/restore
+transport. Require exact targets beside logged writes, remount, unlink without
+orphans, captured reads after live unlink and revocation through existing handles.
+Callback probes require the original grant to exclude revocation through stat,
+creation and read callbacks. Unsupported-provider tests require explicit refusal,
+unchanged output buffers and foreign-service rejection before provider calls.
+Handle exhaustion refuses restore creation before adding a destination entry.
+
+These tests qualify the Rust interfaces and AFS+ providers on hosted memory
+images. Archive target binding, C/OS adapter exposure, full preservation and
+native performance remain separate gates.

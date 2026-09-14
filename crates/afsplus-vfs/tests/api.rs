@@ -569,3 +569,40 @@ fn data_policy_capability_is_absent_without_the_feature() {
         "the unsupported policy request published the intent window"
     );
 }
+
+#[test]
+fn symlink_vfs_preserves_targets_beside_logged_writes_and_unlinks_without_orphans() {
+    let mut vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    assert!(vfs.capabilities().contains(Capabilities::SYMLINKS));
+    let file = vfs.create_file(OBJECT_ROOT, "ordinary", ts(1)).unwrap();
+    let handle = vfs.open_file(file, AccessMode::ReadWrite).unwrap();
+    vfs.write(handle, 0, b"durable", ts(2)).unwrap();
+    let target = "../outside/./SYS:Tools";
+    let link = vfs
+        .create_symlink(OBJECT_ROOT, "link", target, ts(3))
+        .unwrap();
+    assert_eq!(vfs.stat(link).unwrap().kind, NodeKind::Symlink);
+    assert!(vfs.open_file(link, AccessMode::ReadOnly).is_err());
+    let mut short = [0x55; 2];
+    assert_eq!(vfs.read_link(link, &mut short).unwrap(), target.len());
+    assert_eq!(short, [0x55; 2]);
+    vfs.close(handle).unwrap();
+    let mut vfs = Vfs::mount(vfs.into_volume().into_device(), MountOptions::default()).unwrap();
+    let mut target_bytes = [0; 64];
+    assert_eq!(
+        vfs.read_link(link, &mut target_bytes).unwrap(),
+        target.len()
+    );
+    assert_eq!(&target_bytes[..target.len()], target.as_bytes());
+    let handle = vfs.open_file(file, AccessMode::ReadOnly).unwrap();
+    let mut bytes = [0; 7];
+    assert_eq!(vfs.read(handle, 0, &mut bytes).unwrap(), 7);
+    assert_eq!(&bytes, b"durable");
+    vfs.close(handle).unwrap();
+    vfs.unlink_file(OBJECT_ROOT, "link", ts(4)).unwrap();
+    assert!(matches!(vfs.stat(link), Err(VfsError::NotFound)));
+    let mut dev = vfs.into_volume().into_device();
+    let report = check_device(&mut dev);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+}

@@ -66,6 +66,18 @@ pub trait RestoreBackend {
     fn directory_empty(&mut self, _directory: &Self::Object) -> Result<bool, VfsError> {
         Err(VfsError::NotSupported)
     }
+    fn create_symlink(
+        &mut self,
+        _parent: &Self::Object,
+        _name: &str,
+        _target: &str,
+        _now: Timespec,
+    ) -> Result<Self::Object, VfsError> {
+        Err(VfsError::NotSupported)
+    }
+    fn read_link(&mut self, _object: &Self::Object, _out: &mut [u8]) -> Result<usize, VfsError> {
+        Err(VfsError::NotSupported)
+    }
     fn create_file(
         &mut self,
         parent: &Self::Object,
@@ -319,6 +331,39 @@ impl<P: RestoreBackend> RestoreService<P> {
             self.backend.create_file(&parent.0.object, name, now)?
         };
         Ok(Self::wrap(object, parent.0.grant.clone(), budget))
+    }
+    pub fn create_symlink(
+        &mut self,
+        parent: &RestoreObject<P::Object>,
+        name: &str,
+        target: &str,
+        now: Timespec,
+    ) -> Result<RestoreObject<P::Object>, RestoreError> {
+        let _permit = self.admit(&parent.0.grant)?;
+        component(name)?;
+        timestamp(now)?;
+        if target.is_empty() || target.as_bytes().contains(&0) {
+            return Err(VfsError::Invalid.into());
+        }
+        let budget = self.reserve_handle()?;
+        if self.backend.stat(&parent.0.object)?.kind != crate::NodeKind::Directory {
+            return Err(VfsError::NotDirectory.into());
+        }
+        let object = self
+            .backend
+            .create_symlink(&parent.0.object, name, target, now)?;
+        Ok(Self::wrap(object, parent.0.grant.clone(), budget))
+    }
+    pub fn read_link(
+        &mut self,
+        object: &RestoreObject<P::Object>,
+        out: &mut [u8],
+    ) -> Result<usize, RestoreError> {
+        let _permit = self.admit(&object.0.grant)?;
+        if self.backend.stat(&object.0.object)?.kind != crate::NodeKind::Symlink {
+            return Err(VfsError::Invalid.into());
+        }
+        Ok(self.backend.read_link(&object.0.object, out)?)
     }
     pub fn create_file(
         &mut self,
@@ -586,6 +631,22 @@ impl<P: RestoreBackend> RestoreClient<'_, P> {
     ) -> Result<bool, RestoreError> {
         self.0.directory_empty(directory)
     }
+    pub fn create_symlink(
+        &mut self,
+        parent: &RestoreObject<P::Object>,
+        name: &str,
+        target: &str,
+        now: Timespec,
+    ) -> Result<RestoreObject<P::Object>, RestoreError> {
+        self.0.create_symlink(parent, name, target, now)
+    }
+    pub fn read_link(
+        &mut self,
+        object: &RestoreObject<P::Object>,
+        out: &mut [u8],
+    ) -> Result<usize, RestoreError> {
+        self.0.read_link(object, out)
+    }
     pub fn create_file(
         &mut self,
         parent: &RestoreObject<P::Object>,
@@ -709,6 +770,18 @@ impl<D: afsplus_block::BlockDevice> RestoreBackend for AfsRestoreDestination<D> 
             .read_directory_page(*directory, None, 1)?
             .entries
             .is_empty())
+    }
+    fn create_symlink(
+        &mut self,
+        parent: &u64,
+        name: &str,
+        target: &str,
+        now: Timespec,
+    ) -> Result<u64, VfsError> {
+        Ok(self.volume.create_symlink(*parent, name, target, now)?)
+    }
+    fn read_link(&mut self, object: &u64, out: &mut [u8]) -> Result<usize, VfsError> {
+        Ok(self.volume.read_link(*object, out)?)
     }
     fn create_file(&mut self, parent: &u64, name: &str, now: Timespec) -> Result<u64, VfsError> {
         Ok(self
@@ -848,6 +921,7 @@ mod authority_tests {
     struct Probe {
         grants: Vec<RestoreGrant>,
         calls: usize,
+        symlink: bool,
     }
     impl Probe {
         fn check(&mut self) {
@@ -868,6 +942,24 @@ mod authority_tests {
         fn directory_empty(&mut self, _: &()) -> Result<bool, VfsError> {
             self.check();
             Ok(true)
+        }
+        fn create_symlink(
+            &mut self,
+            _: &(),
+            _: &str,
+            _: &str,
+            _: Timespec,
+        ) -> Result<(), VfsError> {
+            self.check();
+            self.symlink = true;
+            Ok(())
+        }
+        fn read_link(&mut self, _: &(), out: &mut [u8]) -> Result<usize, VfsError> {
+            self.check();
+            if !out.is_empty() {
+                out[0] = b'x';
+            }
+            Ok(1)
         }
         fn create_file(&mut self, _: &(), _: &str, _: Timespec) -> Result<(), VfsError> {
             Ok(())
@@ -910,7 +1002,11 @@ mod authority_tests {
             self.check();
             Ok(Stat {
                 object_id: 1,
-                kind: crate::NodeKind::Directory,
+                kind: if self.symlink {
+                    crate::NodeKind::Symlink
+                } else {
+                    crate::NodeKind::Directory
+                },
                 size: 0,
                 allocated_size: 0,
                 links: 1,
@@ -953,11 +1049,37 @@ mod authority_tests {
         }
     }
     #[test]
+    fn symlink_creation_and_read_hold_original_grant_through_callbacks() {
+        let (mut service, authority) = RestoreService::new(
+            Probe {
+                grants: vec![],
+                calls: 0,
+                symlink: false,
+            },
+            2,
+        )
+        .unwrap();
+        let grant = authority.grant();
+        let root = service.root(&grant).unwrap();
+        service.backend_mut().grants = vec![grant.clone()];
+        let link = service
+            .client()
+            .create_symlink(&root, "link", "x", Timespec::default())
+            .unwrap();
+        assert_eq!(service.backend_mut().calls, 2);
+        assert_eq!(service.client().read_link(&link, &mut []), Ok(1));
+        assert_eq!(service.backend_mut().calls, 4);
+        authority.revoke(&grant).unwrap();
+        assert_eq!(service.read_link(&link, &mut []), Err(RestoreError::Denied));
+        assert_eq!(service.backend_mut().calls, 4);
+    }
+    #[test]
     fn directory_emptiness_holds_original_permit_without_a_new_handle() {
         let (mut service, authority) = RestoreService::new(
             Probe {
                 grants: vec![],
                 calls: 0,
+                symlink: false,
             },
             1,
         )
@@ -977,6 +1099,7 @@ mod authority_tests {
             Probe {
                 grants: vec![],
                 calls: 0,
+                symlink: false,
             },
             2,
         )
@@ -994,6 +1117,7 @@ mod authority_tests {
             Probe {
                 grants: vec![],
                 calls: 0,
+                symlink: false,
             },
             1,
         )
@@ -1010,6 +1134,7 @@ mod authority_tests {
             Probe {
                 grants: vec![],
                 calls: 0,
+                symlink: false,
             },
             2,
         )
@@ -1039,6 +1164,7 @@ mod authority_tests {
             Probe {
                 grants: vec![],
                 calls: 0,
+                symlink: false,
             },
             3,
         )

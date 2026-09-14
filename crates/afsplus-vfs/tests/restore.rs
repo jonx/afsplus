@@ -1298,3 +1298,115 @@ fn directory_emptiness_is_scoped_and_never_defaults_unsupported_to_empty() {
     assert_eq!(service.directory_empty(&root), Err(RestoreError::Denied));
     assert_eq!(service.backend_mut().calls, before);
 }
+
+#[test]
+fn scoped_symlink_transport_preserves_bytes_and_revokes_existing_handles() {
+    use afsplus_vfs::backup::{BackupError, BackupService};
+    let backend = AfsRestoreDestination::new(afs_volume(), afsplus_format::OBJECT_ROOT).unwrap();
+    let (mut service, authority) = RestoreService::new(backend, 2).unwrap();
+    let grant = authority.grant();
+    let root = service.root(&grant).unwrap();
+    let target = "../../outside/SYS:Tools";
+    let link = service
+        .client()
+        .create_symlink(&root, "link", target, now(2))
+        .unwrap();
+    let id = service.stat(&link).unwrap().object_id;
+    assert!(matches!(
+        service.create_symlink(&root, "no-slot", target, now(3)),
+        Err(RestoreError::Filesystem(VfsError::Limit(_)))
+    ));
+    let mut short = [0x55; 1];
+    assert_eq!(
+        service.client().read_link(&link, &mut short).unwrap(),
+        target.len()
+    );
+    assert_eq!(short, [0x55]);
+    let mut bytes = [0; 64];
+    assert_eq!(service.read_link(&link, &mut bytes).unwrap(), target.len());
+    assert_eq!(&bytes[..target.len()], target.as_bytes());
+    authority.revoke(&grant).unwrap();
+    assert_eq!(
+        service.read_link(&link, &mut bytes),
+        Err(RestoreError::Denied)
+    );
+    assert!(matches!(
+        service.create_symlink(&root, "revoked", target, now(4)),
+        Err(RestoreError::Denied)
+    ));
+    drop(link);
+    drop(root);
+    let volume = service.into_backend().into_volume();
+    let mut volume = afsplus_core::mount_with_snapshot_limits(
+        volume.into_device(),
+        afsplus_core::MountOptions::default(),
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(
+        volume
+            .lookup_in_directory(afsplus_format::OBJECT_ROOT, "no-slot")
+            .unwrap(),
+        None
+    );
+    assert_eq!(volume.read_link(id, &mut bytes).unwrap(), target.len());
+    let (mut backup, authority) = BackupService::new(volume, 1).unwrap();
+    let grant = authority.grant();
+    let snapshot = backup.create(&grant, now(5)).unwrap();
+    let reader = backup.open(&grant, snapshot).unwrap();
+    backup
+        .backend_mut()
+        .unlink_symlink(afsplus_format::OBJECT_ROOT, "link", now(6))
+        .unwrap();
+    assert_eq!(
+        backup.client().read_link(&reader, id, &mut short).unwrap(),
+        target.len()
+    );
+    assert_eq!(short, [0x55]);
+    assert_eq!(
+        backup.read_link(&reader, id, &mut bytes).unwrap(),
+        target.len()
+    );
+    assert_eq!(&bytes[..target.len()], target.as_bytes());
+    authority.revoke(&grant).unwrap();
+    assert_eq!(
+        backup.read_link(&reader, id, &mut bytes),
+        Err(BackupError::Denied)
+    );
+}
+
+#[test]
+fn missing_symlink_restore_provider_and_invalid_targets_refuse() {
+    let (mut service, authority) = RestoreService::new(Mock::new(), 3).unwrap();
+    let grant = authority.grant();
+    let root = service.root(&grant).unwrap();
+    for target in ["", "a\0b"] {
+        assert!(matches!(
+            service.create_symlink(&root, "bad", target, now(1)),
+            Err(RestoreError::Filesystem(VfsError::Invalid))
+        ));
+    }
+    assert!(matches!(
+        service.create_symlink(&root, "link", "../opaque", now(1)),
+        Err(RestoreError::Filesystem(VfsError::NotSupported))
+    ));
+    let file = service.create_file(&root, "file", now(1)).unwrap();
+    let id = service.stat(&file).unwrap().object_id;
+    service.backend_mut().nodes.get_mut(&id).unwrap().stat.kind = NodeKind::Symlink;
+    let mut bytes = [0x55; 8];
+    assert_eq!(
+        service.read_link(&file, &mut bytes),
+        Err(RestoreError::Filesystem(VfsError::NotSupported))
+    );
+    assert_eq!(bytes, [0x55; 8]);
+    let (mut foreign, _) = RestoreService::new(Mock::new(), 3).unwrap();
+    assert_eq!(
+        foreign.read_link(&file, &mut bytes),
+        Err(RestoreError::Denied)
+    );
+    assert!(matches!(
+        foreign.create_symlink(&root, "link", "x", now(2)),
+        Err(RestoreError::Denied)
+    ));
+    assert_eq!(foreign.backend_mut().calls, 0);
+}

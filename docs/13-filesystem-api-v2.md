@@ -30,6 +30,7 @@
   - [Staged opaque metadata restoration](#staged-opaque-metadata-restoration)
   - [Scoped created-entry lookup](#scoped-created-entry-lookup)
   - [Scoped directory emptiness](#scoped-directory-emptiness)
+  - [Scoped symlink target transport](#scoped-symlink-target-transport)
 
 <!-- /toc -->
 
@@ -605,3 +606,27 @@ refuse access under the same rules as other restore queries.
 [Directory archive groups](../spec/backup-namespace.md) use this query before
 restoring metadata. It is an observation within the isolated restore namespace,
 not a lock against unrelated actors; destination isolation is a host obligation.
+
+### Scoped symlink target transport
+
+[ADR-094](../adr/ADR-094-scoped-symlink-transport.md) requires explicit `read_link`
+operations for captured backup and scoped restore objects. Validate symlink kind
+under the same original grant held through provider access. Return the required
+byte count and leave a short output buffer unchanged. Bytes are opaque UTF-8;
+no API resolves the target or follows a directory component from it.
+
+Restore `create_symlink` validates the grant, parent directory, component name,
+timestamp and nonempty NUL-free target, and reserves a handle before creation.
+The provider enforces its target-size limit and performs atomic creation without
+overwrite. The returned object retains the same destination grant. Revocation
+blocks further reads and creation even through existing handles. Optional
+providers return NotSupported; unsupported functionality never becomes an empty
+target, an ordinary file or silently truncated content.
+
+Rust VFS symlink creation commits a pending logged-data window through the common
+namespace path. Unlink dispatch retires symlink metadata without regular-file
+orphan handling. Its SYMLINKS capability covers creation/read/unlink; it does not
+extend atomic replacement or advertise unimplemented OS/C adapter operations.
+Published C capability identities are independent and retain their numbers.
+Archive preservation requires a separate target/profile binding and final
+readback; these primitives alone do not establish whole-job completion.

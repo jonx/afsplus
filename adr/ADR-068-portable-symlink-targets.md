@@ -1,6 +1,7 @@
 # ADR-068: Store symbolic-link targets inline as opaque UTF-8
 
 Status: Accepted
+Amended by: ADR-094
 Amends: ADR-039
 
 <!-- toc -->

@@ -885,3 +885,25 @@ fn metadata_admission_rejects_bad_requests_and_provider_responses() {
         Err(BackupError::Filesystem(VfsError::Corrupt(_)))
     ));
 }
+
+#[test]
+fn missing_symlink_provider_refuses_without_inventing_an_empty_target() {
+    let mut backend = MockFs::new();
+    backend.live.file.kind = NodeKind::Symlink;
+    let (mut service, authority) = BackupService::new(backend, 1).unwrap();
+    let grant = authority.grant();
+    let id = service.create(&grant, now(1)).unwrap();
+    let reader = service.open(&grant, id).unwrap();
+    let mut bytes = [0x55; 8];
+    assert_eq!(
+        service.read_link(&reader, 2, &mut bytes),
+        Err(BackupError::Filesystem(VfsError::NotSupported))
+    );
+    assert_eq!(bytes, [0x55; 8]);
+    let (mut foreign, _) = BackupService::new(MockFs::new(), 1).unwrap();
+    assert_eq!(
+        foreign.read_link(&reader, 2, &mut bytes),
+        Err(BackupError::Denied)
+    );
+    assert_eq!(foreign.backend_mut().calls, 0);
+}

@@ -153,6 +153,15 @@ pub trait SnapshotBackend {
     ) -> Result<usize, VfsError> {
         Err(VfsError::NotSupported)
     }
+    /// Return required target bytes without changing a short buffer; never follow it.
+    fn read_link(
+        &mut self,
+        _view: &Self::View,
+        _object: ObjectId,
+        _out: &mut [u8],
+    ) -> Result<usize, VfsError> {
+        Err(VfsError::NotSupported)
+    }
     fn read(
         &mut self,
         view: &Self::View,
@@ -387,6 +396,18 @@ impl<P: SnapshotBackend> BackupService<P> {
         }
         Ok(count)
     }
+    pub fn read_link(
+        &mut self,
+        reader: &BackupReader<P::View>,
+        object: ObjectId,
+        out: &mut [u8],
+    ) -> Result<usize, BackupError> {
+        let _permit = self.reader_permit(reader)?;
+        if self.backend.stat(&reader.0.view, object)?.kind != crate::NodeKind::Symlink {
+            return Err(VfsError::Invalid.into());
+        }
+        Ok(self.backend.read_link(&reader.0.view, object, out)?)
+    }
     pub fn read(
         &mut self,
         reader: &BackupReader<P::View>,
@@ -469,6 +490,14 @@ impl<D: afsplus_block::BlockDevice> SnapshotBackend for afsplus_core::Volume<D> 
             .snapshot_stat(view, object)?
             .ok_or(VfsError::NotFound)?
             .into())
+    }
+    fn read_link(
+        &mut self,
+        view: &Self::View,
+        object: ObjectId,
+        out: &mut [u8],
+    ) -> Result<usize, VfsError> {
+        Ok(self.snapshot_read_link(view, object, out)?)
     }
     fn read(
         &mut self,
@@ -603,6 +632,14 @@ impl<P: SnapshotBackend> BackupClient<'_, P> {
         self.0
             .metadata_read(reader, object, class, key, offset, out)
     }
+    pub fn read_link(
+        &mut self,
+        reader: &BackupReader<P::View>,
+        object: ObjectId,
+        out: &mut [u8],
+    ) -> Result<usize, BackupError> {
+        self.0.read_link(reader, object, out)
+    }
     pub fn read(
         &mut self,
         reader: &BackupReader<P::View>,
@@ -637,6 +674,7 @@ mod authority_tests {
     use super::*;
     struct Probe {
         grant: Option<BackupGrant>,
+        symlink: bool,
     }
     impl SnapshotBackend for Probe {
         type View = ();
@@ -666,7 +704,11 @@ mod authority_tests {
             }
             Ok(Stat {
                 object_id: object,
-                kind: crate::NodeKind::File,
+                kind: if self.symlink {
+                    crate::NodeKind::Symlink
+                } else {
+                    crate::NodeKind::File
+                },
                 size: 0,
                 allocated_size: 0,
                 links: 1,
@@ -732,6 +774,13 @@ mod authority_tests {
                 eof: true,
             })
         }
+        fn read_link(&mut self, _: &(), _: ObjectId, _: &mut [u8]) -> Result<usize, VfsError> {
+            assert!(matches!(
+                self.grant.as_ref().unwrap().0 .0.active.try_write(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            Ok(1)
+        }
         fn read(&mut self, _: &(), _: ObjectId, _: u64, _: &mut [u8]) -> Result<usize, VfsError> {
             // A check followed by an immediately dropped guard fails here:
             // revocation must remain excluded during the actual backend call.
@@ -752,8 +801,35 @@ mod authority_tests {
         }
     }
     #[test]
+    fn symlink_target_read_holds_grant_through_stat_and_read() {
+        let (mut service, authority) = BackupService::new(
+            Probe {
+                grant: None,
+                symlink: true,
+            },
+            1,
+        )
+        .unwrap();
+        let grant = authority.grant();
+        service.backend_mut().grant = Some(grant.clone());
+        let reader = service.open(&grant, 1).unwrap();
+        assert_eq!(service.client().read_link(&reader, 1, &mut []), Ok(1));
+        authority.revoke(&grant).unwrap();
+        assert_eq!(
+            service.read_link(&reader, 1, &mut []),
+            Err(BackupError::Denied)
+        );
+    }
+    #[test]
     fn operation_permit_remains_held_inside_the_backend_call() {
-        let (mut service, authority) = BackupService::new(Probe { grant: None }, 1).unwrap();
+        let (mut service, authority) = BackupService::new(
+            Probe {
+                grant: None,
+                symlink: false,
+            },
+            1,
+        )
+        .unwrap();
         let grant = authority.grant();
         service.backend_mut().grant = Some(grant.clone());
         let reader = service.open(&grant, 1).unwrap();
@@ -782,7 +858,14 @@ mod authority_tests {
     }
     #[test]
     fn missing_inventory_support_is_unknown_and_admission_covers_fallback() {
-        let (mut service, authority) = BackupService::new(Probe { grant: None }, 1).unwrap();
+        let (mut service, authority) = BackupService::new(
+            Probe {
+                grant: None,
+                symlink: false,
+            },
+            1,
+        )
+        .unwrap();
         let grant = authority.grant();
         service.backend_mut().grant = Some(grant.clone());
         let reader = service.client().open(&grant, 1).unwrap();
@@ -795,7 +878,14 @@ mod authority_tests {
             service.client().metadata_inventory(&reader, 2),
             Err(BackupError::Filesystem(VfsError::NotFound))
         );
-        let (mut other, _) = BackupService::new(Probe { grant: None }, 1).unwrap();
+        let (mut other, _) = BackupService::new(
+            Probe {
+                grant: None,
+                symlink: false,
+            },
+            1,
+        )
+        .unwrap();
         // Its provider would panic if wrong-service admission reached stat.
         assert_eq!(
             other.client().metadata_inventory(&reader, 1),
