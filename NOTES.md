@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Review object resolution and preserve returned IDs](#2026-09-15--review-object-resolution-and-preserve-returned-ids)
 - [2026-09-15 — Extend publication-family diagnostic comparisons](#2026-09-15--extend-publication-family-diagnostic-comparisons)
 - [2026-09-14 - Export and replay API and deferred-window diagnostics](#2026-09-14---export-and-replay-api-and-deferred-window-diagnostics)
 - [2026-09-14 - Map Stage A acceptance gates to visible roadmap entries](#2026-09-14---map-stage-a-acceptance-gates-to-visible-roadmap-entries)
@@ -142,6 +143,35 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Review object resolution and preserve returned IDs
+
+The next diagnostic unit adds separately enabled object-map lookup, mapping
+and missing-object events. Their payload contains object ID, metadata-block
+address and live/snapshot view ID; the event generation identifies the viewed
+checkpoint. Captured reads borrow an explicit observer, and live root-cache
+hits identify the cached record block without fetching it again. The first
+four-profile test found equal image/I/O results and distinct live/captured
+metadata addresses. The expanded test covers all six captured-read API entry
+points. Eighteen flight tests and two recorder unit tests passed, including
+read failure/retry, live delivery loss and the ID-preserving family oracle.
+The arm64 layout probe measured Event at 104 bytes versus 72, while recorder
+and optional-recorder layout stayed at 176 bytes. This increases ring storage
+by 32 bytes per requested event; an uninstalled recorder allocates no ring.
+All 99 historical cases matched six artifacts exactly and replayed with the
+new runner. Full workspace qualification completed with 562 passed, zero failed
+and ten ignored tests across 89 groups. Formatting, all-target/all-feature
+Clippy and seven codec targets with 4096 cases each passed. Evidence is retained
+in `build/object-observation-icc3feor`; these are hosted results, not native
+hardware qualification.
+
+Review of `be9b621` found that its directory-create, symlink-create and clone
+branches mapped successful returned IDs to unit values before comparison.
+Thus its evidence supports exact image/I/O and success/error comparisons,
+but the description overstated return-value equality for these three branches.
+The family helper was corrected to preserve IDs, for both legacy and expanded
+observation. The baseline row was reopened for qualification and closed after the corrected
+oracle passed the full gate; the original sealed evidence is preserved unchanged.
 
 ## 2026-09-15 — Extend publication-family diagnostic comparisons
 

@@ -36,6 +36,7 @@
 - [Category selection and live diagnostics](#category-selection-and-live-diagnostics)
 - [Core API call spans](#core-api-call-spans)
   - [Publication-family observation equivalence](#publication-family-observation-equivalence)
+- [Object-map observation](#object-map-observation)
 - [Deferred-window observation](#deferred-window-observation)
 - [API and window replay bundles](#api-and-window-replay-bundles)
 - [Selected-category and live-delivery bundles](#selected-category-and-live-delivery-bundles)
@@ -1096,8 +1097,9 @@ window mutation or publication failures.
 
 `Category::Api` selects admission after identity assignment, so filtered API
 events leave detectable sequence gaps and commit events retain their context.
-The all-category mask includes API bit 4 and window bit 5; version-4 bundles accept only the original
-four category bits. Span exhaustion stops emission with saturating loss
+The runtime all-category mask includes API bit 4, window bit 5 and object bit 6;
+version-4 bundles accept only the original four category bits, and version 5
+accepts bits 0–5. Object observation requires its separate runtime opt-in. Span exhaustion stops emission with saturating loss
 accounting, preventing identity reuse or attribution to a stale parent.
 A fresh recorder starts a separate identity domain; callers must retain
 that boundary when combining recordings. Reattaching the same recorder preserves
@@ -1105,8 +1107,8 @@ its counters but starts a new observation of an existing window.
 
 Storage is caller-bounded and allocation occurs at ring construction. Emission
 reads no clock and stores no file names or payloads. The macOS AArch64 layout
-probe reports a 72-byte event and a 176-byte recorder or recorder Option.
-At capacity N, requested event storage is `72 * N` bytes, plus allocator rounding;
+probe reports a 104-byte event and a 176-byte recorder or recorder Option.
+At capacity N, requested event storage is `104 * N` bytes, plus allocator rounding;
 optional adapter state and transport storage have separate bounds. A volume
 without a recorder allocates no ring. Small capacities preserve filesystem
 semantics while exposing overwritten or missed diagnostics. Other target layouts
@@ -1122,7 +1124,8 @@ exhaustion and context restoration. The
 mutable entries in the three Volume implementation sources against their outer
 wrappers. Pure getters, raw-device access, recorder control, constructors,
 mount/recovery, handle destruction and platform adapters need their own scope.
-Object/block/view identifiers and platform coverage are owned by the
+[Object-map observation](#object-map-observation) supplies record-block/view linkage;
+other block roles, subsystem events and platform coverage retain the
 [internal coverage queue](../implementation/audit-work-queue.md#complete-work-queue).
 
 ### Publication-family observation equivalence
@@ -1146,6 +1149,65 @@ qualification. They cover the two selected flush indices, not every possible
 write, read or barrier failure. Internal object/block/view event coverage has
 its separate owner in the
 [diagnostic inventory](../implementation/milestones.md#core-diagnostic-path-inventory).
+
+## Object-map observation
+
+`FlightRecorder::enable_object_observation` enables object resolution and API
+identities. `Category::Object` (runtime bit 6) controls event admission; filtering
+API records does not disable their identity context. Default recorders do not
+emit object events, preserving the sequence and event vocabulary of replay
+profiles through version 5. Those profiles neither export object payloads nor
+accept the new category bit. Extended object export has its separate task in
+[the diagnostic tracker](../implementation/milestones.md#structured-flight-recorder-tasks).
+
+`ObjectLookup` identifies the requested object before object-map I/O.
+`ObjectMapped` identifies the resolved metadata block; it does not assert that
+subsequent reads, checksums or metadata validation succeeded. `ObjectMissing`
+means a successful lookup returned no entry. A lookup I/O error leaves its
+attempt visible and terminates the enclosing API with failure rather than
+reporting a missing object. A live root-cache hit identifies the cached record
+block without issuing an extra disk read.
+
+The event's optional object context contains object ID, metadata-block address
+and view ID. View zero denotes the live committed map; a positive view ID is
+the persistent snapshot ID. Event generation denotes the map's viewed
+checkpoint, not the metadata block's birth generation. Attempt/missing records
+use block zero; mapped records contain the returned block. Object events have
+commit-attempt zero, since resolution can precede publication. API/root/parent
+and window context provide operation correlation. The object payload belongs
+only to its resolution event and cannot carry over into a sibling or commit
+record. A recording must retain its volume identity externally; identifiers
+are not globally unique across volumes or independent recorders.
+
+Captured stat, allocation enumeration, link reads, file reads, lookup and
+directory enumeration borrow an explicit observer after validating the handle.
+They use the captured object-map root and generation. The observer neither
+allocates storage nor performs a lookup to enrich its event; it uses values
+already obtained by the filesystem. Recorder storage and live-adapter limits
+follow the [API observation bounds](#core-api-call-spans). A constrained host
+can omit the recorder or select a smaller capacity; loss remains explicit and
+filesystem behavior must be unchanged. Measure each native ABI separately.
+
+Run [flight tests](../crates/afsplus-core/tests/flight.rs):
+
+- `object_resolution_links_live_and_captured_blocks_without_extra_io`: all four
+  cache profiles, one/2048-event capacities, exact live/captured bytes, six
+  captured API identities, root-cache hits, missing objects and distinct
+  live/captured record blocks, with whole-image and I/O equality.
+- `object_observation_preserves_publication_family_failures_and_images`: the
+  192 [publication-family pairs](#publication-family-observation-equivalence),
+  retaining returned IDs as well as errors, with object observation enabled.
+- `failed_object_lookup_is_not_reported_as_missing_and_retry_keeps_its_identity`:
+  first post-mount lookup read failure, exact error/I/O/image equality, no false
+  missing/mapped result, successful retry under a new API operation identity.
+
+The recorder unit test `object_filtering_loss_and_scope_do_not_reuse_commit_identity`
+checks opt-in, filtering, one-record loss, commit-attempt separation and absence
+of payload inheritance. `object_payload_reaches_bounded_live_delivery_with_explicit_loss`
+checks the object payload through a one-event live queue, saturation and consumer
+disconnection. Allocation/tree/cache/reclaim transitions, data-block
+roles, mount-time recording and extended export retain their explicit tracker
+requirements; resolving a metadata address does not satisfy them.
 
 ## Deferred-window observation
 

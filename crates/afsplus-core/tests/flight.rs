@@ -1049,6 +1049,15 @@ fn enabling_observation_mid_window_attaches_before_the_next_read_api() {
 
 #[test]
 fn publication_families_preserve_results_images_and_io_with_small_rings() {
+    publication_family_equivalence(false);
+}
+
+#[test]
+fn object_observation_preserves_publication_family_failures_and_images() {
+    publication_family_equivalence(true);
+}
+
+fn publication_family_equivalence(observe_objects: bool) {
     use afsplus_core::flight::ApiMethod;
     use afsplus_core::{mount_with_options, MountOptions};
     use afsplus_format::OBJECT_ROOT;
@@ -1093,23 +1102,28 @@ fn publication_families_preserve_results_images_and_io_with_small_rings() {
                         if observed {
                             let mut ring = recorder(capacity);
                             ring.enable_api_observation();
+                            if observe_objects {
+                                ring.enable_object_observation();
+                            }
                             volume.replace_flight_recorder(Some(ring));
                         }
                         let result = match family {
-                            0 => volume
-                                .create_directory_in_root("directory", now)
-                                .map(|_| ()),
+                            0 => volume.create_directory_in_root("directory", now).map(Some),
                             1 => volume
                                 .create_symlink(OBJECT_ROOT, "symbolic", "source", now)
-                                .map(|_| ()),
-                            2 => volume.link_file(source, OBJECT_ROOT, "hard", now),
-                            3 => volume.rename(OBJECT_ROOT, "source", OBJECT_ROOT, "renamed", now),
+                                .map(Some),
+                            2 => volume
+                                .link_file(source, OBJECT_ROOT, "hard", now)
+                                .map(|()| None),
+                            3 => volume
+                                .rename(OBJECT_ROOT, "source", OBJECT_ROOT, "renamed", now)
+                                .map(|()| None),
                             4 => volume
                                 .clone_file(source, OBJECT_ROOT, "clone", now)
-                                .map(|_| ()),
-                            5 => volume.delete_file_in_root("source", now),
-                            6 => volume.truncate_file(source, 3, now),
-                            7 => volume.set_object_protection(source, 7, now),
+                                .map(Some),
+                            5 => volume.delete_file_in_root("source", now).map(|()| None),
+                            6 => volume.truncate_file(source, 3, now).map(|()| None),
+                            7 => volume.set_object_protection(source, 7, now).map(|()| None),
                             _ => unreachable!(),
                         };
                         assert_eq!(
@@ -1154,6 +1168,279 @@ fn publication_families_preserve_results_images_and_io_with_small_rings() {
                     }
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn object_resolution_links_live_and_captured_blocks_without_extra_io() {
+    use afsplus_core::volume::SnapshotWorkLimits;
+    use afsplus_core::{mount_with_snapshot_limits, MountOptions};
+    use afsplus_format::OBJECT_ROOT;
+    for pages in [2, 4, 8, usize::MAX] {
+        for capacity in [1, 2048] {
+            let original = window_image(true);
+            let mut devices = Vec::new();
+            for observed in [false, true] {
+                let mut volume = mount_with_snapshot_limits(
+                    TraceBackend::new(original.clone()),
+                    MountOptions {
+                        tree_cache_pages: NonZeroUsize::new(pages),
+                        ..Default::default()
+                    },
+                    SnapshotWorkLimits {
+                        max_edit_records: 4096,
+                        max_views: 16,
+                        reclaim_records: 8,
+                    },
+                )
+                .unwrap();
+                if observed {
+                    let mut ring = recorder(capacity);
+                    ring.enable_object_observation();
+                    volume.replace_flight_recorder(Some(ring));
+                }
+                let now = Timespec::default();
+                let file = volume.create_file_in_root("file", b"before", now).unwrap();
+                let link = volume
+                    .create_symlink(OBJECT_ROOT, "link", "file", now)
+                    .unwrap();
+                let snapshot = volume.snapshot_create(now).unwrap();
+                let handle = volume.snapshot_open(snapshot).unwrap();
+                volume.write_file_at(file, 0, b"after!", now).unwrap();
+                assert!(volume.stat(file).unwrap().is_some());
+                assert!(volume.stat(OBJECT_ROOT).unwrap().is_some());
+                assert!(volume.stat(10_000).unwrap().is_none());
+                assert!(volume.snapshot_stat(&handle, file).unwrap().is_some());
+                assert!(volume
+                    .snapshot_stat(&handle, OBJECT_ROOT)
+                    .unwrap()
+                    .is_some());
+                assert!(volume.snapshot_stat(&handle, 10_000).unwrap().is_none());
+                let mut captured = [0; 6];
+                assert_eq!(
+                    volume
+                        .snapshot_read_file_at(&handle, file, 0, &mut captured)
+                        .unwrap(),
+                    6
+                );
+                assert_eq!(&captured, b"before");
+                assert_eq!(volume.read_file(file).unwrap(), b"after!");
+                assert_eq!(
+                    volume
+                        .snapshot_lookup(&handle, OBJECT_ROOT, "file")
+                        .unwrap(),
+                    Some(file)
+                );
+                let page = volume
+                    .snapshot_read_directory_page(&handle, OBJECT_ROOT, None, 8)
+                    .unwrap();
+                assert!(page.eof);
+                assert_eq!(
+                    page.entries
+                        .iter()
+                        .map(|entry| (entry.name.clone(), entry.child_id))
+                        .collect::<Vec<_>>(),
+                    vec![(b"file".to_vec(), file), (b"link".to_vec(), link)]
+                );
+                let allocation = volume
+                    .snapshot_allocation_page(&handle, file, 0, 64)
+                    .unwrap();
+                assert!(allocation.eof);
+                assert_eq!(allocation.ranges.len(), 1);
+                let mut target = [0; 4];
+                assert_eq!(
+                    volume
+                        .snapshot_read_link(&handle, link, &mut target)
+                        .unwrap(),
+                    4
+                );
+                assert_eq!(&target, b"file");
+
+                if observed {
+                    let ring = volume.replace_flight_recorder(None).unwrap();
+                    if capacity == 1 {
+                        assert!(ring.dropped() > 0);
+                    } else {
+                        assert_eq!(ring.dropped(), 0);
+                        let mut live = None;
+                        let mut captured_block = None;
+                        let mut missing_views = std::collections::BTreeSet::new();
+                        let mut captured_methods = std::collections::BTreeSet::new();
+                        for event in ring.events() {
+                            if let Some(context) = event.object {
+                                assert!(event.api.method.is_some());
+                                assert_eq!(event.attempt, 0);
+                                if context.view_id == snapshot {
+                                    captured_methods.insert(event.api.method.unwrap() as u16);
+                                }
+                                match event.kind {
+                                    EventKind::ObjectMapped => {
+                                        assert_ne!(context.record_block, 0);
+                                        if context.object_id == file {
+                                            if context.view_id == 0 {
+                                                live = Some(context.record_block);
+                                            } else {
+                                                assert_eq!(context.view_id, snapshot);
+                                                assert_eq!(
+                                                    event.generation,
+                                                    handle.info().generation
+                                                );
+                                                captured_block = Some(context.record_block);
+                                            }
+                                        }
+                                    }
+                                    EventKind::ObjectLookup | EventKind::ObjectMissing => {
+                                        assert_eq!(context.record_block, 0);
+                                        if event.kind == EventKind::ObjectMissing {
+                                            assert_eq!(context.object_id, 10_000);
+                                            missing_views.insert(context.view_id);
+                                        }
+                                    }
+                                    other => panic!("object context leaked to {other:?}"),
+                                }
+                            } else {
+                                assert!(!matches!(
+                                    event.kind,
+                                    EventKind::ObjectLookup
+                                        | EventKind::ObjectMapped
+                                        | EventKind::ObjectMissing
+                                ));
+                            }
+                        }
+                        assert!(live.is_some() && captured_block.is_some());
+                        assert_ne!(live, captured_block);
+                        assert_eq!(missing_views, [0, snapshot].into_iter().collect());
+                        for method in [
+                            afsplus_core::flight::ApiMethod::SnapshotStat,
+                            afsplus_core::flight::ApiMethod::SnapshotAllocationPage,
+                            afsplus_core::flight::ApiMethod::SnapshotReadFileAt,
+                            afsplus_core::flight::ApiMethod::SnapshotReadLink,
+                            afsplus_core::flight::ApiMethod::SnapshotLookup,
+                            afsplus_core::flight::ApiMethod::SnapshotReadDirectoryPage,
+                        ] {
+                            assert!(
+                                captured_methods.contains(&(method as u16)),
+                                "missing captured context for {method:?}"
+                            );
+                        }
+                    }
+                }
+                devices.push(volume.into_device());
+            }
+            assert_eq!(devices[0].events(), devices[1].events());
+            for lba in 0..original.total_blocks() {
+                assert_eq!(devices[0].inner().peek(lba), devices[1].inner().peek(lba));
+            }
+        }
+    }
+}
+
+struct LookupReadFault {
+    inner: MemoryBackend,
+    fail_read: u64,
+    reads: u64,
+    tripped: bool,
+}
+impl BlockDevice for LookupReadFault {
+    fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+    fn total_blocks(&self) -> u64 {
+        self.inner.total_blocks()
+    }
+    fn read_block(&mut self, lba: u64, bytes: &mut [u8]) -> Result<(), BlockError> {
+        let index = self.reads;
+        self.reads += 1;
+        if index == self.fail_read {
+            self.tripped = true;
+            return Err(BlockError::Injected("object lookup read"));
+        }
+        self.inner.read_block(lba, bytes)
+    }
+    fn write_block(&mut self, lba: u64, bytes: &[u8]) -> Result<(), BlockError> {
+        self.inner.write_block(lba, bytes)
+    }
+    fn flush(&mut self) -> Result<(), BlockError> {
+        self.inner.flush()
+    }
+}
+
+#[test]
+fn failed_object_lookup_is_not_reported_as_missing_and_retry_keeps_its_identity() {
+    use afsplus_core::{mount_with_options, MountOptions};
+    let mut fixture = mount(image()).unwrap();
+    let file = fixture
+        .create_file_in_root("file", b"stable", Timespec::default())
+        .unwrap();
+    let original = fixture.into_device();
+    for pages in [2, 4, 8, usize::MAX] {
+        let options = MountOptions {
+            tree_cache_pages: NonZeroUsize::new(pages),
+            ..Default::default()
+        };
+        let reference = mount_with_options(TraceBackend::new(original.clone()), options).unwrap();
+        let mount_reads = reference.into_device().stats().reads;
+        let mut devices = Vec::new();
+        let mut errors = Vec::new();
+        for observed in [false, true] {
+            let mut volume = mount_with_options(
+                TraceBackend::new(LookupReadFault {
+                    inner: original.clone(),
+                    fail_read: mount_reads,
+                    reads: 0,
+                    tripped: false,
+                }),
+                options,
+            )
+            .unwrap();
+            if observed {
+                let mut ring = recorder(128);
+                ring.enable_object_observation();
+                volume.replace_flight_recorder(Some(ring));
+            }
+            let error = volume.stat(file).unwrap_err();
+            errors.push(format!("{error:?}"));
+            assert!(volume.device_mut().inner().tripped);
+            let failed_root = if observed {
+                let ring = volume.flight_recorder_mut().unwrap();
+                let events: Vec<_> = ring.drain().collect();
+                assert_eq!(events.last().unwrap().kind, EventKind::ApiFailed);
+                let objects: Vec<_> = events
+                    .iter()
+                    .filter(|event| event.object.is_some())
+                    .collect();
+                assert_eq!(objects.len(), 1);
+                assert_eq!(objects[0].kind, EventKind::ObjectLookup);
+                assert_eq!(objects[0].object.unwrap().object_id, file);
+                assert_eq!(objects[0].object.unwrap().record_block, 0);
+                objects[0].api.operation
+            } else {
+                0
+            };
+            assert_eq!(volume.stat(file).unwrap().unwrap().object_id, file);
+            if observed {
+                let ring = volume.replace_flight_recorder(None).unwrap();
+                assert_eq!(ring.dropped(), 0);
+                let mapped = ring
+                    .events()
+                    .find(|event| event.kind == EventKind::ObjectMapped)
+                    .unwrap();
+                assert!(mapped.api.operation > failed_root);
+                assert_eq!(mapped.object.unwrap().object_id, file);
+                assert_ne!(mapped.object.unwrap().record_block, 0);
+                assert_eq!(ring.events().last().unwrap().kind, EventKind::ApiSucceeded);
+            }
+            devices.push(volume.into_device());
+        }
+        assert_eq!(errors[0], errors[1]);
+        assert_eq!(devices[0].events(), devices[1].events());
+        let images: Vec<_> = devices
+            .into_iter()
+            .map(|device| device.into_inner().inner)
+            .collect();
+        for lba in 0..original.total_blocks() {
+            assert_eq!(images[0].peek(lba), images[1].peek(lba));
         }
     }
 }

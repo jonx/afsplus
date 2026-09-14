@@ -811,12 +811,22 @@ fn checker_rejects_disconnected_directory_cycles_with_matching_link_counts() {
     let child = volume.create_directory_in_root("child", now(2)).unwrap();
     let id = volume.snapshot_create(now(3)).unwrap();
     let view = volume.snapshot_record(id).unwrap();
-    let root = snapshot::view::object(&mut volume.dev, &volume.ident, view, OBJECT_ROOT)
-        .unwrap()
-        .unwrap();
-    let dir = snapshot::view::object(&mut volume.dev, &volume.ident, view, child)
-        .unwrap()
-        .unwrap();
+    let root = snapshot::view::object(
+        &mut volume.dev,
+        &volume.ident,
+        &mut snapshot::view::Observation::new(view, 0, None, false),
+        OBJECT_ROOT,
+    )
+    .unwrap()
+    .unwrap();
+    let dir = snapshot::view::object(
+        &mut volume.dev,
+        &volume.ident,
+        &mut snapshot::view::Observation::new(view, 0, None, false),
+        child,
+    )
+    .unwrap()
+    .unwrap();
     // Give the live namespace independent root/child directory blocks.
     volume.create_directory_in_root("later", now(4)).unwrap();
     volume.create_directory(child, "nested", now(5)).unwrap();
@@ -910,8 +920,15 @@ fn last_snapshot_deletion_preserves_older_selectable_view_during_the_next_write(
             }
             if reachable {
                 let mut bytes = [0; 6];
-                snapshot::view::read_at(&mut state.image, &ident, view, file, 0, &mut bytes)
-                    .unwrap();
+                snapshot::view::read_at(
+                    &mut state.image,
+                    &ident,
+                    &mut snapshot::view::Observation::new(view, 0, None, false),
+                    file,
+                    0,
+                    &mut bytes,
+                )
+                .unwrap();
                 assert_eq!(&bytes, b"before");
                 protected += 1;
             } else {

@@ -383,10 +383,18 @@ impl<D: BlockDevice> Volume<D> {
         object_id: u64,
     ) -> Result<Option<ObjectMetadata>, CoreError> {
         let view = self.snapshot_view(handle)?;
-        Ok(
-            snapshot::view::object(&mut self.dev, &self.ident, view, object_id)?
-                .map(ObjectMetadata::from),
-        )
+        Ok(snapshot::view::object(
+            &mut self.dev,
+            &self.ident,
+            &mut snapshot::view::Observation::new(
+                view,
+                handle.info.id,
+                self.flight.as_mut(),
+                self.window_poisoned,
+            ),
+            object_id,
+        )?
+        .map(ObjectMetadata::from))
     }
     /// Enumerate at most 64 captured allocation records by ordinal. The caller
     /// must retain the same snapshot and object when resuming at `next`.
@@ -415,8 +423,18 @@ impl<D: BlockDevice> Volume<D> {
                 "snapshot allocation page limit out of range",
             ));
         }
-        let record = snapshot::view::object(&mut self.dev, &self.ident, view, object_id)?
-            .ok_or(CoreError::NotFound)?;
+        let record = snapshot::view::object(
+            &mut self.dev,
+            &self.ident,
+            &mut snapshot::view::Observation::new(
+                view,
+                handle.info.id,
+                self.flight.as_mut(),
+                self.window_poisoned,
+            ),
+            object_id,
+        )?
+        .ok_or(CoreError::NotFound)?;
         self.read_allocation_page(&record, object_id, view.generation, start, limit)
     }
 
@@ -439,7 +457,18 @@ impl<D: BlockDevice> Volume<D> {
         destination: &mut [u8],
     ) -> Result<usize, CoreError> {
         let view = self.snapshot_view(handle)?;
-        snapshot::view::read_link(&mut self.dev, &self.ident, view, object_id, destination)
+        snapshot::view::read_link(
+            &mut self.dev,
+            &self.ident,
+            &mut snapshot::view::Observation::new(
+                view,
+                handle.info.id,
+                self.flight.as_mut(),
+                self.window_poisoned,
+            ),
+            object_id,
+            destination,
+        )
     }
 
     pub fn snapshot_read_file_at(
@@ -465,7 +494,12 @@ impl<D: BlockDevice> Volume<D> {
         snapshot::view::read_at(
             &mut self.dev,
             &self.ident,
-            view,
+            &mut snapshot::view::Observation::new(
+                view,
+                handle.info.id,
+                self.flight.as_mut(),
+                self.window_poisoned,
+            ),
             object_id,
             offset,
             destination,
@@ -490,8 +524,18 @@ impl<D: BlockDevice> Volume<D> {
     ) -> Result<Option<u64>, CoreError> {
         let view = self.snapshot_view(handle)?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
-        let record = snapshot::view::object(&mut self.dev, &self.ident, view, directory_id)?
-            .ok_or(CoreError::NotFound)?;
+        let record = snapshot::view::object(
+            &mut self.dev,
+            &self.ident,
+            &mut snapshot::view::Observation::new(
+                view,
+                handle.info.id,
+                self.flight.as_mut(),
+                self.window_poisoned,
+            ),
+            directory_id,
+        )?
+        .ok_or(CoreError::NotFound)?;
         if record.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
@@ -549,8 +593,18 @@ impl<D: BlockDevice> Volume<D> {
         {
             return Err(CoreError::Stale);
         }
-        let record = snapshot::view::object(&mut self.dev, &self.ident, view, directory_id)?
-            .ok_or(CoreError::NotFound)?;
+        let record = snapshot::view::object(
+            &mut self.dev,
+            &self.ident,
+            &mut snapshot::view::Observation::new(
+                view,
+                handle.info.id,
+                self.flight.as_mut(),
+                self.window_poisoned,
+            ),
+            directory_id,
+        )?
+        .ok_or(CoreError::NotFound)?;
         if record.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }

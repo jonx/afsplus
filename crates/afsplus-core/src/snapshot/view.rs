@@ -10,20 +10,61 @@ use afsplus_format::object::{
 use afsplus_format::snapshot::SnapshotRecord;
 use afsplus_format::OBJECT_ORPHAN_DIRECTORY;
 
+/// Borrowed observation owner for one captured-view operation. No shared global state.
+pub(crate) struct Observation<'a> {
+    view: SnapshotRecord,
+    snapshot_id: u64,
+    recorder: Option<&'a mut crate::flight::FlightRecorder>,
+    requires_remount: bool,
+}
+impl<'a> Observation<'a> {
+    pub(crate) fn new(
+        view: SnapshotRecord,
+        snapshot_id: u64,
+        recorder: Option<&'a mut crate::flight::FlightRecorder>,
+        requires_remount: bool,
+    ) -> Self {
+        Self {
+            view,
+            snapshot_id,
+            recorder,
+            requires_remount,
+        }
+    }
+    fn event(&mut self, id: u64, kind: crate::flight::EventKind, record_block: u64) {
+        if let Some(recorder) = &mut self.recorder {
+            recorder.object_event(
+                self.view.generation,
+                kind,
+                crate::flight::ObjectContext {
+                    object_id: id,
+                    record_block,
+                    view_id: self.snapshot_id,
+                },
+                self.requires_remount,
+            );
+        }
+    }
+}
+
 pub(crate) fn object<D: BlockDevice>(
     dev: &mut D,
     ident: &Identification,
-    view: SnapshotRecord,
+    observation: &mut Observation<'_>,
     id: u64,
 ) -> Result<Option<ObjectRecord>, CoreError> {
     if id == OBJECT_ORPHAN_DIRECTORY {
         return Err(CoreError::NotFound);
     }
+    let view = observation.view;
+    observation.event(id, crate::flight::EventKind::ObjectLookup, 0);
     let geo = ident.geometry();
     let Some(lba) = object_map::lookup_lba(dev, &geo, view.object_map_root, view.generation, id)?
     else {
+        observation.event(id, crate::flight::EventKind::ObjectMissing, 0);
         return Ok(None);
     };
+    observation.event(id, crate::flight::EventKind::ObjectMapped, lba);
     namespace_range(&geo, lba, 1)?;
     let mut buf = vec![0; geo.block_size];
     dev.read_block(lba, &mut buf)?;
@@ -60,11 +101,12 @@ pub(crate) fn object<D: BlockDevice>(
 pub(crate) fn read_link<D: BlockDevice>(
     dev: &mut D,
     ident: &Identification,
-    view: SnapshotRecord,
+    observation: &mut Observation<'_>,
     id: u64,
     output: &mut [u8],
 ) -> Result<usize, CoreError> {
-    let record = object(dev, ident, view, id)?.ok_or(CoreError::NotFound)?;
+    let view = observation.view;
+    let record = object(dev, ident, observation, id)?.ok_or(CoreError::NotFound)?;
     if record.object_type != ObjectType::Symlink {
         return Err(CoreError::InvalidMetadata("object is not a symlink"));
     }
@@ -90,12 +132,13 @@ pub(crate) fn read_link<D: BlockDevice>(
 pub(crate) fn read_at<D: BlockDevice>(
     dev: &mut D,
     ident: &Identification,
-    view: SnapshotRecord,
+    observation: &mut Observation<'_>,
     id: u64,
     offset: u64,
     destination: &mut [u8],
 ) -> Result<usize, CoreError> {
-    let record = object(dev, ident, view, id)?.ok_or(CoreError::NotFound)?;
+    let view = observation.view;
+    let record = object(dev, ident, observation, id)?.ok_or(CoreError::NotFound)?;
     if record.object_type != ObjectType::File {
         return Err(CoreError::IsDirectory);
     }

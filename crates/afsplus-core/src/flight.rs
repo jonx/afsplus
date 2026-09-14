@@ -1,4 +1,4 @@
-//! Optional bounded diagnostics for core API calls and checkpoint publication.
+//! Optional bounded diagnostics for core API calls, object maps and checkpoint publication.
 //!
 //! These are runtime observations, not on-disk records or a durability oracle.
 //! Ring construction allocates once; ring emission neither allocates nor reads
@@ -17,6 +17,7 @@ pub enum Category {
     Error,
     Api,
     Window,
+    Object,
 }
 
 /// Runtime selection, independent of ring capacity and event identity.
@@ -25,7 +26,7 @@ pub struct Categories(u8);
 
 impl Categories {
     pub const NONE: Self = Self(0);
-    pub const ALL: Self = Self(63);
+    pub const ALL: Self = Self(127);
 
     pub const fn with(self, category: Category) -> Self {
         Self(self.0 | (1 << category as u8))
@@ -59,11 +60,15 @@ pub enum EventKind {
     WindowFailed,
     WindowClosed,
     WindowDetached,
+    ObjectLookup,
+    ObjectMapped,
+    ObjectMissing,
 }
 
 impl EventKind {
     pub const fn category(self) -> Category {
         match self {
+            Self::ObjectLookup | Self::ObjectMapped | Self::ObjectMissing => Category::Object,
             Self::Begin | Self::Adopted => Category::Transaction,
             Self::DataWritesComplete => Category::Io,
             Self::MetadataDurable | Self::PublicationBegin | Self::CheckpointDurable => {
@@ -210,6 +215,16 @@ pub(crate) enum ApiOutcome {
     Unwound,
 }
 
+/// Object-map resolution, not proof of a successful read or validated metadata.
+/// View zero identifies the live committed map; nonzero is a persistent snapshot ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectContext {
+    pub object_id: u64,
+    /// Zero for a lookup attempt or a missing object.
+    pub record_block: u64,
+    pub view_id: u64,
+}
+
 /// An attempt is unique within this recorder, including retries that reuse a
 /// checkpoint generation. It starts at the common commit tail, not API entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +244,8 @@ pub struct Event {
     /// Last observed durable group, except WindowLogBegin/WindowLogFailed
     /// identify the attempted group. Zero means no group is represented.
     pub log_sequence: u32,
+    /// Present only on explicit object resolution events; never inherited by siblings.
+    pub object: Option<ObjectContext>,
 }
 
 /// Outcome of a nonblocking live-adapter delivery attempt.
@@ -270,6 +287,7 @@ pub struct FlightRecorder {
     delivered: u64,
     missed: u64,
     api_enabled: bool,
+    object_enabled: bool,
     api_next: u64,
     api_context: ApiContext,
     api_exhausted: bool,
@@ -294,6 +312,7 @@ impl std::fmt::Debug for FlightRecorder {
             .field("delivered", &self.delivered)
             .field("missed", &self.missed)
             .field("api_enabled", &self.api_enabled)
+            .field("object_enabled", &self.object_enabled)
             .field("api_context", &self.api_context)
             .field("api_exhausted", &self.api_exhausted)
             .field("window", &self.window)
@@ -320,6 +339,7 @@ impl FlightRecorder {
             delivered: 0,
             missed: 0,
             api_enabled: false,
+            object_enabled: false,
             api_next: 0,
             api_context: ApiContext::default(),
             api_exhausted: false,
@@ -531,7 +551,36 @@ impl FlightRecorder {
         self.api_context = token.previous;
     }
 
+    /// Opt in to object resolution and its API identities. No new disk I/O.
+    /// Category selection can suppress API records without losing their identities.
+    pub fn enable_object_observation(&mut self) {
+        self.api_enabled = true;
+        self.object_enabled = true;
+    }
+
+    pub(crate) fn object_event(
+        &mut self,
+        generation: u64,
+        kind: EventKind,
+        context: ObjectContext,
+        requires_remount: bool,
+    ) {
+        if self.object_enabled {
+            self.emit_context(generation, kind, requires_remount, Some(context));
+        }
+    }
+
     pub(crate) fn emit(&mut self, generation: u64, kind: EventKind, requires_remount: bool) {
+        self.emit_context(generation, kind, requires_remount, None);
+    }
+
+    fn emit_context(
+        &mut self,
+        generation: u64,
+        kind: EventKind,
+        requires_remount: bool,
+        object: Option<ObjectContext>,
+    ) {
         if self.api_exhausted
             || self.window_exhausted
             || self.sequence == u64::MAX
@@ -556,7 +605,10 @@ impl FlightRecorder {
         }
         let event = Event {
             sequence: self.sequence,
-            attempt: if matches!(kind.category(), Category::Api | Category::Window) {
+            attempt: if matches!(
+                kind.category(),
+                Category::Api | Category::Window | Category::Object
+            ) {
                 0
             } else {
                 self.attempt
@@ -567,6 +619,7 @@ impl FlightRecorder {
             api: self.api_context,
             window: self.window,
             log_sequence: self.window_log_sequence,
+            object,
         };
         self.events.push_back(event);
         if let Some(sink) = &mut self.sink {
@@ -801,5 +854,78 @@ mod window_tests {
         assert_eq!((events[2].window, events[2].log_sequence), (1, 3));
         assert_eq!(events[3].kind, EventKind::WindowOpened);
         assert_eq!((events[3].window, events[3].log_sequence), (2, 0));
+    }
+}
+
+#[cfg(test)]
+mod object_tests {
+    use super::*;
+
+    #[test]
+    fn object_payload_reaches_bounded_live_delivery_with_explicit_loss() {
+        use std::sync::mpsc::{sync_channel, TrySendError};
+        let (sender, receiver) = sync_channel(1);
+        let mut ring = FlightRecorder::new(NonZeroUsize::new(1).unwrap()).unwrap();
+        ring.enable_object_observation();
+        ring.replace_sink(Some(Box::new(move |event| match sender.try_send(event) {
+            Ok(()) => SinkResult::Accepted,
+            Err(TrySendError::Full(_)) => SinkResult::Busy,
+            Err(TrySendError::Disconnected(_)) => SinkResult::Closed,
+        })));
+        let context = ObjectContext {
+            object_id: 17,
+            record_block: 42,
+            view_id: 3,
+        };
+        ring.object_event(5, EventKind::ObjectMapped, context, false);
+        ring.object_event(5, EventKind::ObjectMapped, context, false);
+        assert_eq!(receiver.try_recv().unwrap().object, Some(context));
+        assert_eq!((ring.delivered(), ring.missed(), ring.dropped()), (1, 1, 1));
+        drop(receiver);
+        ring.object_event(5, EventKind::ObjectMapped, context, false);
+        assert_eq!((ring.delivered(), ring.missed()), (1, 2));
+        assert_eq!(ring.events().next().unwrap().object, Some(context));
+    }
+
+    #[test]
+    fn object_filtering_loss_and_scope_do_not_reuse_commit_identity() {
+        let mut ring = FlightRecorder::new(NonZeroUsize::new(1).unwrap()).unwrap();
+        let context = ObjectContext {
+            object_id: 17,
+            record_block: 0,
+            view_id: 3,
+        };
+        ring.object_event(5, EventKind::ObjectLookup, context, false);
+        assert_eq!(
+            ring.sequence(),
+            0,
+            "disabled observation must preserve legacy sequences"
+        );
+        ring.enable_object_observation();
+        ring.set_categories(Categories::NONE.with(Category::Object));
+        ring.emit(6, EventKind::Begin, false);
+        ring.object_event(5, EventKind::ObjectLookup, context, false);
+        ring.object_event(
+            5,
+            EventKind::ObjectMapped,
+            ObjectContext {
+                record_block: 42,
+                ..context
+            },
+            false,
+        );
+        let event = *ring.events().next().unwrap();
+        assert_eq!(event.sequence, 3);
+        assert_eq!(event.attempt, 0);
+        assert_eq!(event.object.unwrap().record_block, 42);
+        assert_eq!((ring.filtered(), ring.dropped()), (1, 1));
+        ring.set_categories(Categories::ALL);
+        ring.emit(6, EventKind::Adopted, false);
+        let event = ring.events().next().unwrap();
+        assert_eq!(event.attempt, 1);
+        assert!(
+            event.object.is_none(),
+            "object context must not leak into later events"
+        );
     }
 }

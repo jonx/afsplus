@@ -6948,6 +6948,12 @@ impl<D: BlockDevice> Volume<D> {
 
     fn read_object(&mut self, object_id: u64) -> Result<Option<ObjectRecord>, CoreError> {
         if object_id == OBJECT_ROOT {
+            self.observe_object_mapping(object_id, crate::flight::EventKind::ObjectLookup, 0);
+            self.observe_object_mapping(
+                object_id,
+                crate::flight::EventKind::ObjectMapped,
+                self.state.root_record_lba,
+            );
             return Ok(Some(self.state.root_object));
         }
         let Some(lba) = self.lookup_object_lba(object_id)? else {
@@ -7002,18 +7008,55 @@ impl<D: BlockDevice> Volume<D> {
         Ok(Some(record))
     }
 
+    fn observe_object_mapping(
+        &mut self,
+        object_id: u64,
+        kind: crate::flight::EventKind,
+        record_block: u64,
+    ) {
+        if let Some(recorder) = &mut self.flight {
+            recorder.object_event(
+                self.checkpoint.generation,
+                kind,
+                crate::flight::ObjectContext {
+                    object_id,
+                    record_block,
+                    view_id: 0,
+                },
+                self.window_poisoned,
+            );
+        }
+    }
+
     fn lookup_object_lba(&mut self, object_id: u64) -> Result<Option<u64>, CoreError> {
-        object_map::lookup_lba(
+        self.observe_object_mapping(object_id, crate::flight::EventKind::ObjectLookup, 0);
+        let lba = object_map::lookup_lba(
             &mut self.dev,
             &self.ident.geometry(),
             self.checkpoint.object_map_block,
             self.checkpoint.generation,
             object_id,
-        )
+        )?;
+        self.observe_object_mapping(
+            object_id,
+            if lba.is_some() {
+                crate::flight::EventKind::ObjectMapped
+            } else {
+                crate::flight::EventKind::ObjectMissing
+            },
+            lba.unwrap_or(0),
+        );
+        Ok(lba)
     }
 
     fn object_record_lba(&mut self, object_id: u64) -> Result<Option<u64>, CoreError> {
         if object_id == OBJECT_ROOT {
+            self.observe_object_mapping(object_id, crate::flight::EventKind::ObjectLookup, 0);
+            self.observe_object_mapping(
+                object_id,
+                crate::flight::EventKind::ObjectMapped,
+                self.state.root_record_lba,
+            );
             Ok(Some(self.state.root_record_lba))
         } else {
             self.lookup_object_lba(object_id)
