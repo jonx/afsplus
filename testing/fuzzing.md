@@ -10,6 +10,7 @@
 - [Rust codec gate](#rust-codec-gate)
 - [Portable C corpus contract](#portable-c-corpus-contract)
 - [Seeded semantic properties](#seeded-semantic-properties)
+- [Legacy one-block reader oracles](#legacy-one-block-reader-oracles)
 
 <!-- /toc -->
 
@@ -39,6 +40,7 @@ replayable without the original workstation.
 | Allocation-region metadata | Bitmap-page and region-descriptor targets, including a partial final page | None | Add portable repair-walker corpus |
 | Intent-log record and referenced data | One v3 seed containing all five operation types | Rust-built v3 write/truncate/create prefix scan plus final namespace lookup | Add multi-record sequence target |
 | Snapshot registry, captured record, lifetime ledger and keys | Five direct headerless value/key targets with independent admission oracles | None | Add enclosing tree ownership and cross-record semantic properties |
+| Legacy single-block directory, object map and retired list | Three direct targets with independent payload admission and decoded fields | None | Keep volume ownership and negotiated header/extension policy separate |
 | Reclaim queue root, segment and table | Three direct block targets with independent payload predicates | None | Add caller queue/geometry and cross-block consistency properties |
 | Xattr record | None | None | Add when the portable reader exposes xattrs |
 | Catalog record | None | None | Add with catalog implementation |
@@ -47,7 +49,7 @@ replayable without the original workstation.
 ## Rust codec gate
 
 `make rust-codec-fuzz-gate` exercises identification, checkpoint, typed-tree,
-object-record, intent-log, bitmap-page, region-descriptor five snapshot leaf/key, three reclaim block snapshot-bearing checkpoint, inline-symlink and metadata object decoders. Each canonical seed must be accepted,
+object-record, intent-log, bitmap-page, region-descriptor five snapshot leaf/key, three reclaim block snapshot-bearing checkpoint, inline-symlink, metadata object and three legacy one-block decoders. Each canonical seed must be accepted,
 re-encode and decode to byte-stable canonical form. The mandatory engine then
 runs 4,096 stable cases per target using checksum-breaking bit flips,
 CRC-resealed payload changes, short inputs, bounded multi-byte overwrites and
@@ -60,7 +62,7 @@ workspace so constrained builders need not compile qualification tooling.
 The standard `make rust-gate` includes this separate workspace through
 `rust-codec-fuzz-gate`. Its lockfile and seed-schema version keep case identities
 stable: target IDs 1–5 and their seed bytes are unchanged; allocation targets
-append IDs 6–7 and snapshot targets append IDs 8–12; reclaim targets append IDs 13–15 and snapshot-bearing checkpoints append ID 16; inline-symlink and object-metadata append IDs 17–18 under seed schema 1. On failure,
+append IDs 6–7 and snapshot targets append IDs 8–12; reclaim targets append IDs 13–15 and snapshot-bearing checkpoints append ID 16; inline-symlink and object-metadata append IDs 17–18 and legacy directory/object-map/retired-list targets append IDs 19–21 under seed schema 1. On failure,
 the gate writes the last target/case before execution and stores the exact
 input as a bounded `.afrf` artifact. Reproduce it with:
 
@@ -239,3 +241,19 @@ and overwrite refusal. Qualification additionally replays retained cases in fres
 processes and requires an intentionally incorrect expected byte sequence to fail.
 This state-machine corpus complements codec mutation and fault matrices; it does
 not qualify ungenerated API families or arbitrary-length workloads.
+
+## Legacy one-block reader oracles
+
+[legacy.rs](../fuzz/src/legacy.rs) supplies two-entry ordered seeds for the
+legacy directory, object map and retired list. Independent payload extraction
+checks exact counts and lengths, reserved-zero fields, ordering and invalid IDs
+or retirement generations. Directory checks include bounded key/name lengths,
+UTF-8 names, forbidden NUL/slash bytes and entry bounds. Truncation, resealed
+fields/lengths and exact-minimum encoder output complement deterministic mutations.
+
+Common-header verification is shared; no claim is made about an independently
+implemented checksum parser. The directory oracle preserves the executable
+legacy admission contract rather than applying current typed-tree Unicode-key
+rules. Volume geometry, referenced ownership and generic header/tail decisions
+are separate checks. Stable IDs 19–21 append fingerprints without changing
+IDs 1–18; saved case-47 inputs for all three readers are replayed by the gate.

@@ -1,6 +1,7 @@
 //! Deterministic, replayable fuzz targets for the `afsplus-format` codecs.
 
 mod checkpoint_snapshot;
+mod legacy;
 mod object_payload;
 mod reclaim;
 mod snapshot;
@@ -54,10 +55,13 @@ pub enum CodecTarget {
     SnapshotCheckpoint = 16,
     InlineSymlink = 17,
     ObjectMetadata = 18,
+    LegacyDirectory = 19,
+    LegacyObjectMap = 20,
+    LegacyRetired = 21,
 }
 
 impl CodecTarget {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 21] = [
         Self::Identification,
         Self::Checkpoint,
         Self::TreeNode,
@@ -76,6 +80,9 @@ impl CodecTarget {
         Self::SnapshotCheckpoint,
         Self::InlineSymlink,
         Self::ObjectMetadata,
+        Self::LegacyDirectory,
+        Self::LegacyObjectMap,
+        Self::LegacyRetired,
     ];
 
     pub fn name(self) -> &'static str {
@@ -98,6 +105,9 @@ impl CodecTarget {
             Self::SnapshotCheckpoint => "snapshot-checkpoint",
             Self::InlineSymlink => "inline-symlink",
             Self::ObjectMetadata => "object-metadata",
+            Self::LegacyDirectory => "legacy-directory",
+            Self::LegacyObjectMap => "legacy-object-map",
+            Self::LegacyRetired => "legacy-retired",
         }
     }
 
@@ -118,6 +128,9 @@ impl CodecTarget {
             Self::IntentLog => block_type::INTENT_LOG,
             Self::BitmapPage => block_type::BITMAP,
             Self::RegionDescriptor => block_type::REGION_DESCRIPTOR,
+            Self::LegacyDirectory => block_type::DIRECTORY,
+            Self::LegacyObjectMap => block_type::OBJECT_MAP,
+            Self::LegacyRetired => block_type::RETIRED,
             Self::ReclaimRoot => block_type::RECLAIM_ROOT,
             Self::ReclaimSegment => block_type::RECLAIM_SEGMENT,
             Self::ReclaimTable => block_type::RECLAIM_TABLE,
@@ -325,6 +338,9 @@ fn region_seed_descriptor() -> RegionDescriptor {
 }
 
 fn accepts(target: CodecTarget, input: &[u8]) -> bool {
+    if legacy::handles(target) {
+        return legacy::accepts(target, input);
+    }
     if object_payload::handles(target) {
         return object_payload::accepts(target, input);
     }
@@ -359,6 +375,9 @@ fn accepts(target: CodecTarget, input: &[u8]) -> bool {
 }
 
 pub fn canonical_seed(target: CodecTarget) -> Result<Vec<u8>, String> {
+    if legacy::handles(target) {
+        return legacy::seed(target);
+    }
     if object_payload::handles(target) {
         return object_payload::seed(target);
     }
@@ -388,6 +407,9 @@ pub fn canonical_seed(target: CodecTarget) -> Result<Vec<u8>, String> {
 }
 
 fn roundtrip(target: CodecTarget, input: &[u8]) -> Result<(), String> {
+    if legacy::handles(target) {
+        return legacy::exercise(target, input);
+    }
     if object_payload::handles(target) {
         return object_payload::exercise(target, input);
     }
@@ -791,6 +813,9 @@ mod tests {
                 (1_979_058_185, 607_977_437),
                 (4_116_635_091, 3_389_458_638),
                 (1_571_146_886, 2_571_305_043),
+                (2_107_079_709, 3_576_662_424),
+                (1_972_104_977, 266_223_001),
+                (1_111_250_663, 445_173_983),
             ]
         );
     }

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Qualify legacy one-block codec mutation targets](#2026-09-15--qualify-legacy-one-block-codec-mutation-targets)
 - [2026-09-15 — Qualify captured state through clone publication](#2026-09-15--qualify-captured-state-through-clone-publication)
 - [2026-09-15 — Enforce legacy codec reserved-zero fields](#2026-09-15--enforce-legacy-codec-reserved-zero-fields)
 - [2026-09-15 — Add explicit exhaustive power-cut budgets](#2026-09-15--add-explicit-exhaustive-power-cut-budgets)
@@ -159,6 +160,23 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Qualify legacy one-block codec mutation targets
+
+Added stable targets 19–21 for directory, object-map and retired-list readers.
+Independent payload oracles check decoded fields, bounds, ordering, reserved
+bytes, names and ID/generation admission. Explicit truncation, resealed-field
+and length controls supplement mutation; short encoders refuse and minimum
+valid buffers roundtrip. Common-header verification is shared and legacy
+key admission is kept distinct from current typed-tree Unicode rules.
+
+The gate passed 21 × 4096 cases (86,016), sixteen fuzz tests and seventeen
+saved-input replay controls. The first eighteen seed/case fingerprints are
+unchanged. Fuzz formatting/clippy and documentation checks pass; retained
+proof: `build/legacy-codec-yxmcj7yk`. The preceding 45 legacy corruptions and 44 format roundtrip
+tests qualify the reader correction separately. No full-workspace or native
+run is claimed; core cross-record relations and generated operations remain
+Stage A requirements.
 
 ## 2026-09-15 — Qualify captured state through clone publication
 
