@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Integrate data-write cache families and generated operation families](#2026-09-15--integrate-data-write-cache-families-and-generated-operation-families)
 - [2026-09-15 — Qualify reclaim, policy, low-space, shared-fault, orphan and rotation cache profiles](#2026-09-15--qualify-reclaim-policy-low-space-shared-fault-orphan-and-rotation-cache-profiles)
 - [2026-09-15 — Complete typed caller and Unicode admission fixtures](#2026-09-15--complete-typed-caller-and-unicode-admission-fixtures)
 - [2026-09-15 — Integrate subsystem observations and caller-property tests](#2026-09-15--integrate-subsystem-observations-and-caller-property-tests)
@@ -164,6 +165,28 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Integrate data-write cache families and generated operation families
+
+Two lots prepared on isolated branches were reviewed and integrated together.
+The data-write matrix closes the write, reservation, preallocation and
+truncate rows of the tiny-cache inventory at four profiles; its wide fixtures
+force extent-map eviction with measured spills, and its cut oracles were
+reduced to an ownership proof plus exact records after full-byte reads made two
+four-page tests run 22 and 44 minutes. The generator adds window, snapshot and
+linked-namespace families with independent models computed before execution,
+runner version 9 for links, symlinks, clones and protection, fresh-process
+replay and seven negative controls.
+
+The integrated qualification in `build/data-fuzz-qualification-238c25e`
+passed 651 tests with no failures and ten explicit ignores, plus formatting,
+Clippy, codec, nine Python replay/measurement suites, documentation and
+whitespace gates; the three campaigns, their replays, the seven controls and
+the version-1 baseline were rerun on the integrated sources in
+`build/fuzz-campaigns-238c25e`. `test-allocation-origins.py` takes a
+measurement input and stays outside the automatic gate. Operation families
+without a generator are listed in [the milestones](implementation/milestones.md#fuzzing-and-property-test-tasks);
+`a-fuzz` and `a-cache` stay partial.
 
 ## 2026-09-15 — Qualify reclaim, policy, low-space, shared-fault, orphan and rotation cache profiles
 
