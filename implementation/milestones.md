@@ -66,6 +66,7 @@ exist before that gate can run.
 - [Stage A task tracking](#stage-a-task-tracking)
   - [Structured flight recorder tasks](#structured-flight-recorder-tasks)
   - [Core diagnostic path inventory](#core-diagnostic-path-inventory)
+  - [Allocator observation integration prerequisite](#allocator-observation-integration-prerequisite)
   - [Tiny-cache test matrix tasks](#tiny-cache-test-matrix-tasks)
   - [Fuzzing and property-test tasks](#fuzzing-and-property-test-tasks)
   - [Codec surface inventory](#codec-surface-inventory)
@@ -190,6 +191,29 @@ identify formatting, verification and pre-tail gaps; detailed subsystem
 transition coverage and test ownership for every publication caller require
 completion. Platform adapters keep their
 separate qualification owners in the [audit queue](audit-work-queue.md).
+
+### Allocator observation integration prerequisite
+
+Owner: `a-flight`, internal subsystem observation. The recorder is owned by
+[Volume](../crates/afsplus-core/src/volume.rs); [TxAllocator](../crates/afsplus-core/src/alloc.rs)
+is constructed before commit and passed through tree and reclaim operations.
+Its allocation methods receive the device but no recorder. API observation uses
+a scoped mutable volume guard, and the scenario consumer obtains mutable recorder
+access to drain events. Allocation tracing attributes heap costs; it is not an
+ordered stream of allocation decisions.
+
+The integration experiment must connect allocator begin, search/admission,
+allocation, retirement and failure directly to the same ordered recorder as API
+and publication events. Compare explicit observer threading with a bounded shared
+recorder handle, including recorder replacement, unwind and nested API context.
+A handle design must account for its allocation and borrowing behavior; explicit
+threading must cover construction failures as well as successful transactions.
+Buffering observations until commit is insufficient because it reorders events
+and omits failed preparation. Require exact disabled/enabled image and I/O equality,
+fixed emission storage, saturation/loss reporting and failure ordering before
+selecting the mechanism. A borrow/API change must migrate the scenario drain
+consumer and preserve existing artifact versions. This is an open implementation
+prerequisite, not evidence that allocator observation is implemented.
 
 ### Tiny-cache test matrix tasks
 

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Identify allocator recorder ownership prerequisite](#2026-09-15--identify-allocator-recorder-ownership-prerequisite)
 - [2026-09-15 — Qualify legacy one-block codec mutation targets](#2026-09-15--qualify-legacy-one-block-codec-mutation-targets)
 - [2026-09-15 — Qualify captured state through clone publication](#2026-09-15--qualify-captured-state-through-clone-publication)
 - [2026-09-15 — Enforce legacy codec reserved-zero fields](#2026-09-15--enforce-legacy-codec-reserved-zero-fields)
@@ -160,6 +161,18 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Identify allocator recorder ownership prerequisite
+
+Inspected Volume's scoped API guard and recorder accessors, TxAllocator
+construction/allocation methods, and the scenario drain consumer. Recorder
+ownership crosses the allocator's lifetime and commit boundary; buffering events
+until commit would lose chronological and failure evidence. Recorded the
+integration experiment and acceptance requirements under the existing a-flight
+owner, comparing explicit observer threading with a bounded shared handle.
+No allocator event integration or architecture selection is claimed by this
+source audit. It identifies the next implementation prerequisite rather than
+creating a separate feature goal.
 
 ## 2026-09-15 — Qualify legacy one-block codec mutation targets
 
