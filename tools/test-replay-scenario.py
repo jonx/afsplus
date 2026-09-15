@@ -123,6 +123,37 @@ class ScenarioTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             scenario.validate(json.dumps(candidate).encode())
 
+    def test_v8_lifecycle_commands_and_category_mask_are_version_bound(self):
+        value = fixture()
+        value.update(version=8, flight_capacity=256, flight_categories=32767, flight_sink=None,
+                     snapshot_limits={"max_edit_records": 4096, "max_views": 16,
+                                      "reclaim_records": 8},
+                     expected_snapshots=[])
+        value["volume"]["tree_cache_pages"] = 2
+        value["operations"][-1:-1] = [{"op": "verify"}, {"op": "remount_refused"}]
+        compiled = scenario.compile_commands(json.dumps(value).encode())
+        self.assertTrue(compiled.startswith(
+            b"AFSPSC08\nformat 4096 256 64 8 2 256 32767 0 none 4096 16 8\n"))
+        self.assertIn(b"\nverify\n", compiled)
+        self.assertIn(b"\nremount_refused\n", compiled)
+        # Version 8 selects every runtime category bit; version 7 keeps seven.
+        for version, mask in ((8, 32768), (8, -1), (8, True), (7, 128), (9, 128)):
+            with self.assertRaises(ValueError):
+                scenario.validate(json.dumps(dict(value, version=version,
+                                                  flight_categories=mask)).encode())
+        # The two commands belong to version 8 alone.
+        for version in (7, 9):
+            broken = dict(value, version=version, flight_categories=127)
+            if version == 9:
+                broken.update(data_policy=False, orphan_extents=1,
+                              expected_orphans={"count": 0, "bytes": 0})
+            with self.assertRaises(ValueError):
+                scenario.validate(json.dumps(broken).encode())
+        for command in ({"op": "verify", "label": "f"}, {"op": "remount_refused", "label": "f"}):
+            broken = dict(value, operations=value["operations"] + [command])
+            with self.assertRaises(ValueError):
+                scenario.validate(json.dumps(broken).encode())
+
     def test_v7_snapshot_limits_and_labels_are_explicit(self):
         value = fixture()
         value.update(version=7, flight_capacity=256, flight_categories=127, flight_sink=None,
