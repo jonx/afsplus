@@ -1399,3 +1399,206 @@ mod recorder_borrow_tests {
         assert_eq!(cell.into_inner().events().count(), 2);
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    fn mount_context() -> LifecycleContext {
+        LifecycleContext::Mount(MountContext {
+            mode: crate::mount::MountMode::Recovery,
+            stage: MountStage::IntentLog,
+            slot: 1,
+            other_generation: 4,
+            count: 2,
+            damaged_tail: true,
+        })
+    }
+
+    fn format_context() -> LifecycleContext {
+        LifecycleContext::Format(FormatContext {
+            stage: FormatStage::PublicationBarrier,
+            total_blocks: 256,
+            block: 1,
+        })
+    }
+
+    fn verify_context() -> LifecycleContext {
+        LifecycleContext::Verify(VerifyContext {
+            scope: VerifyScope::FullSweep,
+            phase: Some(VerifyPhase::LinkCounts),
+            finding: Some(FindingKind::LinkCount),
+            region: 3,
+            ordinal: 9,
+            object_id: 17,
+            block: 42,
+        })
+    }
+
+    #[test]
+    fn every_lifecycle_kind_is_admitted_by_exactly_its_category() {
+        for (category, kinds) in [
+            (
+                Category::Mount,
+                vec![
+                    EventKind::MountBegin,
+                    EventKind::MountSelected,
+                    EventKind::MountIntentBegin,
+                    EventKind::MountIntentScanned,
+                    EventKind::MountIntentReplayed,
+                    EventKind::MountComplete,
+                    EventKind::MountFailed,
+                ],
+            ),
+            (
+                Category::Format,
+                vec![
+                    EventKind::FormatBegin,
+                    EventKind::FormatMetadataDurable,
+                    EventKind::FormatPublicationBegin,
+                    EventKind::FormatCheckpointDurable,
+                    EventKind::FormatFailed,
+                ],
+            ),
+            (
+                Category::Verify,
+                vec![
+                    EventKind::VerifyBegin,
+                    EventKind::VerifyPhase,
+                    EventKind::VerifyFinding,
+                    EventKind::VerifyComplete,
+                    EventKind::VerifyFailed,
+                ],
+            ),
+        ] {
+            let selected = Categories::NONE.with(category);
+            for kind in kinds {
+                assert_eq!(kind.category(), category);
+                assert!(selected.contains(kind.category()));
+                assert!(Categories::ALL.contains(kind.category()));
+                assert!(!Categories::NONE.contains(kind.category()));
+                for other in [Category::Mount, Category::Format, Category::Verify] {
+                    assert_eq!(
+                        Categories::NONE.with(other).contains(kind.category()),
+                        other == category
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_filtering_loss_and_delivery_keep_identities_and_group_sequences() {
+        use std::sync::mpsc::{sync_channel, TrySendError};
+        let (sender, receiver) = sync_channel(1);
+        let mut ring = FlightRecorder::new(NonZeroUsize::new(1).unwrap()).unwrap();
+        let allocated = ring.events.capacity();
+        ring.replace_sink(Some(Box::new(move |event| match sender.try_send(event) {
+            Ok(()) => SinkResult::Accepted,
+            Err(TrySendError::Full(_)) => SinkResult::Busy,
+            Err(TrySendError::Disconnected(_)) => SinkResult::Closed,
+        })));
+        ring.set_categories(Categories::NONE.with(Category::Format));
+        ring.lifecycle_event(7, EventKind::MountIntentReplayed, false, 3, mount_context());
+        assert_eq!((ring.sequence(), ring.filtered()), (1, 1));
+        assert_eq!(ring.events().len(), 0);
+        ring.lifecycle_event(
+            1,
+            EventKind::FormatCheckpointDurable,
+            false,
+            0,
+            format_context(),
+        );
+        ring.lifecycle_event(1, EventKind::FormatFailed, true, 0, format_context());
+        assert_eq!(
+            (ring.sequence(), ring.filtered(), ring.dropped()),
+            (3, 1, 1)
+        );
+        assert_eq!((ring.delivered(), ring.missed()), (1, 1));
+        let delivered = receiver.try_recv().unwrap();
+        assert_eq!(delivered.kind, EventKind::FormatCheckpointDurable);
+        assert_eq!(delivered.lifecycle, Some(format_context()));
+        assert_eq!((delivered.attempt, delivered.log_sequence), (0, 0));
+        let retained = *ring.events().next().unwrap();
+        assert!(retained.requires_remount);
+        assert_eq!(retained.sequence, 3);
+
+        // The intent-group sequence belongs to its event alone.
+        ring.set_categories(Categories::ALL);
+        ring.lifecycle_event(7, EventKind::MountIntentReplayed, false, 5, mount_context());
+        assert_eq!(ring.events().next().unwrap().log_sequence, 5);
+        assert_eq!(ring.window_log_sequence, 0);
+        ring.lifecycle_event(2, EventKind::VerifyFinding, false, 0, verify_context());
+        let event = *ring.events().next().unwrap();
+        assert_eq!((event.log_sequence, event.attempt), (0, 0));
+        assert_eq!(event.lifecycle, Some(verify_context()));
+        assert_eq!(ring.events.capacity(), allocated);
+    }
+
+    #[test]
+    fn lifecycle_emission_stops_before_reusing_an_identity() {
+        let mut ring = FlightRecorder::new(NonZeroUsize::new(8).unwrap()).unwrap();
+        ring.leave_sequence_identities(1);
+        ring.lifecycle_event(1, EventKind::VerifyBegin, false, 0, verify_context());
+        assert_eq!(ring.sequence(), u64::MAX);
+        assert_eq!((ring.events().len(), ring.dropped()), (1, 0));
+        let last = *ring.events().last().unwrap();
+        for kind in [
+            EventKind::VerifyFinding,
+            EventKind::VerifyComplete,
+            EventKind::MountBegin,
+            EventKind::FormatBegin,
+        ] {
+            ring.lifecycle_event(1, kind, false, 0, verify_context());
+        }
+        assert_eq!(*ring.events().last().unwrap(), last);
+        assert_eq!((ring.events().len(), ring.dropped()), (1, 4));
+        assert_eq!(ring.filtered(), 0);
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// Host layout of the observation types. The ring is the only sized
+    /// allocation; a shared owner and a weak observer are pointer pairs.
+    #[test]
+    fn observation_layout_stays_bounded_and_reports_requested_ring_bytes() {
+        let event = std::mem::size_of::<Event>();
+        let recorder = std::mem::size_of::<FlightRecorder>();
+        println!("size_of Event = {event}");
+        println!("size_of FlightRecorder = {recorder}");
+        println!(
+            "size_of RecorderCell = {}",
+            std::mem::size_of::<RecorderCell>()
+        );
+        println!(
+            "size_of SharedRecorder = {}, AllocationObserver = {}",
+            std::mem::size_of::<SharedRecorder>(),
+            std::mem::size_of::<AllocationObserver>()
+        );
+        println!(
+            "size_of Option<LifecycleContext> = {}, Mount = {}, Format = {}, Verify = {}",
+            std::mem::size_of::<Option<LifecycleContext>>(),
+            std::mem::size_of::<MountContext>(),
+            std::mem::size_of::<FormatContext>(),
+            std::mem::size_of::<VerifyContext>()
+        );
+        for events in [1usize, 256, 4096] {
+            let ring = FlightRecorder::new(NonZeroUsize::new(events).unwrap()).unwrap();
+            assert!(ring.events.capacity() >= events);
+            println!(
+                "ring of {events} events requests {} bytes, capacity {}",
+                events * event,
+                ring.events.capacity()
+            );
+        }
+        assert!(event <= 256, "event layout grew to {event} bytes");
+        assert!(recorder <= 256, "recorder layout grew to {recorder} bytes");
+        assert_eq!(
+            std::mem::size_of::<SharedRecorder>(),
+            std::mem::size_of::<usize>()
+        );
+    }
+}

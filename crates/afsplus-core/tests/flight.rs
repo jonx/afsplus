@@ -1722,3 +1722,861 @@ fn captured_provider_unwind_restores_observer_and_allows_retry() {
         assert_eq!(volume.device_mut().inner.peek(lba), before.peek(lba));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Mount, format and verification observation.
+// ---------------------------------------------------------------------------
+
+/// A device whose block trace and image outlive it, so a refused mount or an
+/// interrupted format can be compared with the run that was not observed.
+/// It injects its own faults, keeping the failing operation in the trace.
+#[derive(Clone)]
+struct SharedDevice {
+    image: std::sync::Arc<std::sync::Mutex<MemoryBackend>>,
+    log: std::sync::Arc<std::sync::Mutex<Vec<(char, u64)>>>,
+    fail_write: Option<usize>,
+    fail_flush: Option<usize>,
+    writes: usize,
+    flushes: usize,
+}
+
+impl SharedDevice {
+    fn new(image: &MemoryBackend) -> Self {
+        SharedDevice {
+            image: std::sync::Arc::new(std::sync::Mutex::new(image.clone())),
+            log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            fail_write: None,
+            fail_flush: None,
+            writes: 0,
+            flushes: 0,
+        }
+    }
+
+    fn failing(
+        image: &MemoryBackend,
+        fail_write: Option<usize>,
+        fail_flush: Option<usize>,
+    ) -> Self {
+        SharedDevice {
+            fail_write,
+            fail_flush,
+            ..SharedDevice::new(image)
+        }
+    }
+
+    /// A second handle on the same image and trace, performing no I/O itself.
+    fn handle(&self) -> Self {
+        SharedDevice {
+            fail_write: None,
+            fail_flush: None,
+            writes: 0,
+            flushes: 0,
+            ..self.clone()
+        }
+    }
+
+    fn trace(&self) -> Vec<(char, u64)> {
+        self.log.lock().unwrap().clone()
+    }
+
+    fn image(&self) -> MemoryBackend {
+        self.image.lock().unwrap().clone()
+    }
+
+    fn blocks(&self) -> Vec<Vec<u8>> {
+        let image = self.image.lock().unwrap();
+        (0..image.total_blocks())
+            .map(|lba| image.peek(lba))
+            .collect()
+    }
+
+    fn record(&self, operation: char, lba: u64) {
+        self.log.lock().unwrap().push((operation, lba));
+    }
+}
+
+impl BlockDevice for SharedDevice {
+    fn block_size(&self) -> usize {
+        self.image.lock().unwrap().block_size()
+    }
+    fn total_blocks(&self) -> u64 {
+        self.image.lock().unwrap().total_blocks()
+    }
+    fn read_block(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        self.record('r', lba);
+        self.image.lock().unwrap().read_block(lba, buf)
+    }
+    fn write_block(&mut self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+        self.record('w', lba);
+        let index = self.writes;
+        self.writes += 1;
+        if self.fail_write == Some(index) {
+            return Err(BlockError::Injected("interrupted format write"));
+        }
+        self.image.lock().unwrap().write_block(lba, buf)
+    }
+    fn flush(&mut self) -> Result<(), BlockError> {
+        self.record('f', 0);
+        let index = self.flushes;
+        self.flushes += 1;
+        if self.fail_flush == Some(index) {
+            return Err(BlockError::Injected("interrupted format barrier"));
+        }
+        self.image.lock().unwrap().flush()
+    }
+}
+
+fn log_image() -> MemoryBackend {
+    let mut dev = MemoryBackend::new(4096, 512);
+    mkfs(
+        &mut dev,
+        &MkfsParams {
+            uuid: [0x41; 16],
+            label: "recovery".into(),
+            region_size: 512,
+            reclaim_caps: Default::default(),
+            log_slots: 8,
+            shared_extents: false,
+            data_policy: false,
+            name_policy: NamePolicy::Sensitive,
+            timestamp: Timespec::default(),
+        },
+    )
+    .unwrap();
+    dev
+}
+
+/// Two durable intent groups with no checkpoint publishing them.
+fn pending_log_image() -> MemoryBackend {
+    use afsplus_core::volume::BatchOp;
+    use afsplus_format::OBJECT_ROOT;
+    let mut volume = mount(log_image()).unwrap();
+    for name in ["first", "second"] {
+        volume
+            .window_op(
+                &BatchOp::CreateFile {
+                    parent_id: OBJECT_ROOT,
+                    name,
+                    content: b"logged",
+                },
+                Timespec::default(),
+            )
+            .unwrap();
+        volume.window_fsync().unwrap();
+    }
+    volume.into_device()
+}
+
+fn log_slot_lbas(image: &MemoryBackend) -> Vec<u64> {
+    use afsplus_core::{mount_with_options, MountMode, MountOptions};
+    let volume = mount_with_options(
+        image.clone(),
+        MountOptions {
+            mode: MountMode::NoChanges,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let ident = volume.ident();
+    afsplus_core::intent_log::log_slot_lbas(&ident.geometry(), ident.log_slots).unwrap()
+}
+
+/// A durable first group followed by a nonzero unreadable second slot.
+fn damaged_log_image() -> MemoryBackend {
+    let mut image = pending_log_image();
+    let slots = log_slot_lbas(&image);
+    image.apply_raw(slots[1], &vec![0x5a; 4096]);
+    image
+}
+
+/// Both slots carry a structurally valid checkpoint of the same generation.
+fn ambiguous_image() -> MemoryBackend {
+    let mut image = image();
+    let slot_a = image.peek(1);
+    image.apply_raw(2, &slot_a);
+    image
+}
+
+fn describe_mount<D: BlockDevice>(
+    result: &Result<afsplus_core::Volume<D>, afsplus_core::CoreError>,
+) -> String {
+    match result {
+        Ok(volume) => format!(
+            "generation {} pending {} mode {:?}",
+            volume.generation(),
+            volume.pending_intent_records(),
+            volume.mount_mode()
+        ),
+        Err(error) => format!("refused {error}"),
+    }
+}
+
+fn mount_context(event: &afsplus_core::flight::Event) -> afsplus_core::flight::MountContext {
+    match event.lifecycle {
+        Some(afsplus_core::flight::LifecycleContext::Mount(context)) => context,
+        other => panic!("expected a mount context, found {other:?}"),
+    }
+}
+
+#[test]
+fn mount_observation_preserves_results_traces_and_images_across_profiles() {
+    use afsplus_core::flight::{Category, MountStage};
+    use afsplus_core::{mount_observed, mount_with_options, MountMode, MountOptions};
+    for pages in [2, 4, 8, usize::MAX] {
+        let cases: Vec<(&str, MemoryBackend, MountMode)> = vec![
+            ("clean", image(), MountMode::ReadWrite),
+            ("replay", pending_log_image(), MountMode::ReadWrite),
+            ("inspect", pending_log_image(), MountMode::NoChanges),
+            ("damaged", damaged_log_image(), MountMode::ReadWrite),
+            ("ambiguous", ambiguous_image(), MountMode::ReadWrite),
+            ("unsupported", window_image(true), MountMode::ReadWrite),
+        ];
+        for (name, base, mode) in cases {
+            let options = MountOptions {
+                mode,
+                tree_cache_pages: NonZeroUsize::new(pages),
+            };
+            let plain_device = SharedDevice::new(&base);
+            let observed_device = SharedDevice::new(&base);
+            let plain_handle = plain_device.handle();
+            let observed_handle = observed_device.handle();
+            let plain = mount_with_options(plain_device, options);
+            let observed = mount_observed(observed_device, options, recorder(512));
+            let (events, actual) = match observed {
+                Ok(mut volume) => {
+                    let ring = volume.replace_flight_recorder(None).unwrap();
+                    let described = describe_mount(&Ok(volume));
+                    assert_eq!(ring.filtered(), 0, "{name}");
+                    assert_eq!(ring.dropped(), 0, "{name}");
+                    (ring.events().copied().collect::<Vec<_>>(), described)
+                }
+                Err(refused) => (
+                    refused.recorder.events().copied().collect(),
+                    describe_mount::<SharedDevice>(&Err(refused.error)),
+                ),
+            };
+            assert_eq!(actual, describe_mount(&plain), "{name} at {pages} pages");
+            assert_eq!(
+                observed_handle.trace(),
+                plain_handle.trace(),
+                "{name} at {pages} pages"
+            );
+            assert_eq!(
+                observed_handle.blocks(),
+                plain_handle.blocks(),
+                "{name} at {pages} pages"
+            );
+
+            let mount_events: Vec<_> = events
+                .iter()
+                .filter(|event| event.kind.category() == Category::Mount)
+                .collect();
+            assert!(
+                mount_events.iter().all(|event| event.attempt == 0),
+                "{name}: mount events carry no commit attempt"
+            );
+            let kinds: Vec<_> = mount_events.iter().map(|event| event.kind).collect();
+            assert_eq!(mount_events[0].kind, EventKind::MountBegin, "{name}");
+            assert_eq!(mount_events[0].generation, 0, "{name}");
+            assert_eq!(
+                mount_context(mount_events[0]).stage,
+                MountStage::Identification,
+                "{name}"
+            );
+            assert!(
+                mount_events
+                    .iter()
+                    .all(|event| mount_context(event).mode == mode),
+                "{name}"
+            );
+            match name {
+                "clean" => {
+                    assert_eq!(
+                        kinds,
+                        [
+                            EventKind::MountBegin,
+                            EventKind::MountSelected,
+                            EventKind::MountComplete
+                        ]
+                    );
+                    let selected = mount_context(mount_events[1]);
+                    assert_eq!(mount_events[1].generation, 1);
+                    assert_eq!((selected.slot, selected.other_generation), (0, 0));
+                    assert_eq!(mount_context(mount_events[2]).count, 0);
+                }
+                "replay" => {
+                    assert_eq!(
+                        kinds,
+                        [
+                            EventKind::MountBegin,
+                            EventKind::MountSelected,
+                            EventKind::MountIntentBegin,
+                            EventKind::MountIntentScanned,
+                            EventKind::MountIntentReplayed,
+                            EventKind::MountIntentReplayed,
+                            EventKind::MountComplete
+                        ]
+                    );
+                    assert_eq!(mount_context(mount_events[2]).count, 8, "log slots");
+                    let scanned = mount_context(mount_events[3]);
+                    assert_eq!((scanned.count, scanned.damaged_tail), (2, false));
+                    assert_eq!(mount_events[3].log_sequence, 2);
+                    let groups: Vec<_> = mount_events[4..6]
+                        .iter()
+                        .map(|event| (event.log_sequence, mount_context(event).count))
+                        .collect();
+                    assert_eq!(groups, [(1, 1), (2, 1)]);
+                    assert_eq!(mount_context(mount_events[6]).count, 2);
+                    assert!(
+                        mount_events[6].generation > mount_events[1].generation,
+                        "replay publishes a checkpoint"
+                    );
+                    assert!(events
+                        .iter()
+                        .any(|event| event.kind == EventKind::CheckpointDurable));
+                }
+                "inspect" => {
+                    assert_eq!(
+                        kinds,
+                        [
+                            EventKind::MountBegin,
+                            EventKind::MountSelected,
+                            EventKind::MountIntentBegin,
+                            EventKind::MountIntentScanned,
+                            EventKind::MountComplete
+                        ]
+                    );
+                    assert_eq!(mount_context(mount_events[4]).count, 2, "pending records");
+                    assert_eq!(
+                        mount_events[4].generation, mount_events[1].generation,
+                        "inspection publishes nothing"
+                    );
+                    assert!(!events
+                        .iter()
+                        .any(|event| event.kind == EventKind::CheckpointDurable));
+                }
+                "damaged" => {
+                    let scanned = mount_context(mount_events[3]);
+                    assert_eq!(mount_events[3].kind, EventKind::MountIntentScanned);
+                    assert_eq!((scanned.count, scanned.damaged_tail), (1, true));
+                    assert_eq!(
+                        kinds
+                            .iter()
+                            .filter(|kind| **kind == EventKind::MountIntentReplayed)
+                            .count(),
+                        1
+                    );
+                    assert_eq!(mount_context(mount_events[5]).count, 1);
+                }
+                "ambiguous" => {
+                    assert_eq!(kinds, [EventKind::MountBegin, EventKind::MountFailed]);
+                    assert_eq!(mount_context(mount_events[1]).stage, MountStage::Selection);
+                }
+                "unsupported" => {
+                    assert_eq!(kinds, [EventKind::MountBegin, EventKind::MountFailed]);
+                    assert_eq!(
+                        mount_context(mount_events[1]).stage,
+                        MountStage::Negotiation
+                    );
+                }
+                other => panic!("unnamed mount case {other}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn small_mount_rings_report_loss_without_changing_recovery() {
+    use afsplus_core::flight::Category;
+    use afsplus_core::{mount_observed, MountOptions};
+    let base = pending_log_image();
+    let full = {
+        let mut volume =
+            mount_observed(base.clone(), MountOptions::default(), recorder(512)).unwrap();
+        let ring = volume.replace_flight_recorder(None).unwrap();
+        assert_eq!((ring.dropped(), ring.filtered()), (0, 0));
+        ring.sequence()
+    };
+    for capacity in [1, 2, 4] {
+        let mut volume =
+            mount_observed(base.clone(), MountOptions::default(), recorder(capacity)).unwrap();
+        assert_eq!(volume.list_root().unwrap().len(), 2);
+        let ring = volume.replace_flight_recorder(None).unwrap();
+        assert_eq!(
+            ring.sequence(),
+            full,
+            "identities are independent of capacity"
+        );
+        assert_eq!(ring.events().len(), capacity);
+        assert_eq!(ring.dropped(), full - capacity as u64);
+        assert_eq!(ring.filtered(), 0);
+        assert!(ring
+            .events()
+            .any(|event| event.kind.category() == Category::Mount));
+    }
+}
+
+#[test]
+fn mount_category_selection_filters_after_identity_assignment() {
+    use afsplus_core::flight::{Categories, Category};
+    use afsplus_core::{mount_observed, MountOptions};
+    let base = pending_log_image();
+    let mut ring = recorder(512);
+    ring.set_categories(Categories::NONE.with(Category::Mount));
+    let mut volume = mount_observed(base.clone(), MountOptions::default(), ring).unwrap();
+    let selected = volume.replace_flight_recorder(None).unwrap();
+
+    let mut volume_all = mount_observed(base, MountOptions::default(), recorder(512)).unwrap();
+    let all = volume_all.replace_flight_recorder(None).unwrap();
+    assert_eq!(selected.sequence(), all.sequence());
+    assert_eq!(selected.dropped(), 0);
+    assert_eq!(
+        selected.filtered(),
+        all.events().len() as u64 - selected.events().len() as u64
+    );
+    let expected: Vec<_> = all
+        .events()
+        .filter(|event| event.kind.category() == Category::Mount)
+        .copied()
+        .collect();
+    assert_eq!(selected.events().copied().collect::<Vec<_>>(), expected);
+    assert_eq!(volume.list_root().unwrap(), volume_all.list_root().unwrap());
+}
+
+fn format_params() -> MkfsParams {
+    MkfsParams {
+        uuid: [0x6d; 16],
+        label: "format".into(),
+        region_size: 64,
+        reclaim_caps: Default::default(),
+        log_slots: 4,
+        shared_extents: true,
+        data_policy: true,
+        name_policy: NamePolicy::Sensitive,
+        timestamp: Timespec::default(),
+    }
+}
+
+fn format_context(event: &afsplus_core::flight::Event) -> afsplus_core::flight::FormatContext {
+    match event.lifecycle {
+        Some(afsplus_core::flight::LifecycleContext::Format(context)) => context,
+        other => panic!("expected a format context, found {other:?}"),
+    }
+}
+
+#[test]
+fn format_observation_preserves_results_traces_and_images_including_interruptions() {
+    use afsplus_core::flight::FormatStage;
+    use afsplus_core::{mkfs_observed, mkfs_with_options, MkfsOptions};
+    let blank = MemoryBackend::new(4096, 256);
+    let params = format_params();
+    let mut probe = SharedDevice::new(&blank);
+    let probe_handle = probe.handle();
+    mkfs_with_options(&mut probe, &params, MkfsOptions::default()).unwrap();
+    let writes = probe_handle
+        .trace()
+        .iter()
+        .filter(|(operation, _)| *operation == 'w')
+        .count();
+    let flushes = probe_handle
+        .trace()
+        .iter()
+        .filter(|(operation, _)| *operation == 'f')
+        .count();
+    assert_eq!(flushes, 2, "metadata barrier then publication barrier");
+
+    let mut plans: Vec<(Option<usize>, Option<usize>)> = vec![(None, None)];
+    plans.extend((0..writes).map(|write| (Some(write), None)));
+    plans.extend((0..flushes).map(|flush| (None, Some(flush))));
+    for (fail_write, fail_flush) in plans {
+        let mut plain = SharedDevice::failing(&blank, fail_write, fail_flush);
+        let plain_handle = plain.handle();
+        let mut observed = SharedDevice::failing(&blank, fail_write, fail_flush);
+        let observed_handle = observed.handle();
+        let mut ring = recorder(64);
+        let expected = mkfs_with_options(&mut plain, &params, MkfsOptions::default());
+        let actual = mkfs_observed(&mut observed, &params, MkfsOptions::default(), &mut ring);
+        let plan = format!("write {fail_write:?} flush {fail_flush:?}");
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "{plan}");
+        assert_eq!(observed_handle.trace(), plain_handle.trace(), "{plan}");
+        assert_eq!(observed_handle.blocks(), plain_handle.blocks(), "{plan}");
+        assert_eq!(
+            describe_mount(&mount(observed_handle.image())),
+            describe_mount(&mount(plain_handle.image())),
+            "{plan}"
+        );
+        assert_eq!((ring.dropped(), ring.filtered()), (0, 0), "{plan}");
+        let events: Vec<_> = ring.events().copied().collect();
+        assert!(events.iter().all(|event| event.generation == 1
+            && event.attempt == 0
+            && format_context(event).total_blocks == 256));
+        let kinds: Vec<_> = events.iter().map(|event| event.kind).collect();
+        if actual.is_ok() {
+            assert_eq!(
+                kinds,
+                [
+                    EventKind::FormatBegin,
+                    EventKind::FormatMetadataDurable,
+                    EventKind::FormatPublicationBegin,
+                    EventKind::FormatCheckpointDurable
+                ],
+                "{plan}"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .map(|event| format_context(event).block)
+                    .collect::<Vec<_>>(),
+                [0, 0, 1, 1]
+            );
+            continue;
+        }
+        assert_eq!(events[0].kind, EventKind::FormatBegin, "{plan}");
+        assert_eq!(*kinds.last().unwrap(), EventKind::FormatFailed, "{plan}");
+        let failure = format_context(events.last().unwrap());
+        let expected_stage = match (fail_write, fail_flush) {
+            (_, Some(0)) => FormatStage::MetadataBarrier,
+            (_, Some(1)) => FormatStage::PublicationBarrier,
+            (Some(write), None) if write + 1 == writes => FormatStage::Publication,
+            _ => FormatStage::Metadata,
+        };
+        assert_eq!(failure.stage, expected_stage, "{plan}");
+        assert_eq!(
+            failure.block,
+            match expected_stage {
+                FormatStage::Publication | FormatStage::PublicationBarrier => 1,
+                _ => 0,
+            },
+            "{plan}"
+        );
+        assert_eq!(
+            kinds.contains(&EventKind::FormatMetadataDurable),
+            !matches!(
+                expected_stage,
+                FormatStage::Metadata | FormatStage::MetadataBarrier
+            ),
+            "{plan}"
+        );
+        assert!(
+            !kinds.contains(&EventKind::FormatCheckpointDurable),
+            "{plan}"
+        );
+    }
+}
+
+#[test]
+fn small_format_rings_report_loss_and_selection_filters_format_events() {
+    use afsplus_core::flight::{Categories, Category};
+    use afsplus_core::{mkfs_observed, MkfsOptions};
+    let params = format_params();
+    let mut device = MemoryBackend::new(4096, 256);
+    let mut ring = recorder(1);
+    mkfs_observed(&mut device, &params, MkfsOptions::default(), &mut ring).unwrap();
+    assert_eq!(ring.events().len(), 1);
+    assert_eq!(ring.dropped(), 3);
+    assert_eq!(ring.sequence(), 4);
+    assert_eq!(
+        ring.events().next().unwrap().kind,
+        EventKind::FormatCheckpointDurable
+    );
+
+    let mut device = MemoryBackend::new(4096, 256);
+    let mut ring = recorder(16);
+    ring.set_categories(Categories::NONE.with(Category::Io));
+    mkfs_observed(&mut device, &params, MkfsOptions::default(), &mut ring).unwrap();
+    assert_eq!(ring.events().len(), 0);
+    assert_eq!(
+        (ring.filtered(), ring.dropped(), ring.sequence()),
+        (4, 0, 4)
+    );
+    assert!(mount(device).is_ok());
+}
+
+fn verify_image() -> MemoryBackend {
+    let mut volume = mount(image()).unwrap();
+    for name in ["alpha", "beta"] {
+        volume
+            .create_file_in_root(name, b"verified content", Timespec::default())
+            .unwrap();
+    }
+    volume.into_device()
+}
+
+fn ident_and_checkpoint<D: BlockDevice>(
+    dev: &mut D,
+) -> (
+    afsplus_format::ident::Identification,
+    afsplus_format::checkpoint::Checkpoint,
+) {
+    let mut buf = vec![0u8; dev.block_size()];
+    dev.read_block(0, &mut buf).unwrap();
+    let ident = afsplus_format::ident::Identification::decode(&buf).unwrap();
+    let selection = afsplus_core::mount::select_checkpoint(dev, &ident).unwrap();
+    (ident, selection.chosen)
+}
+
+/// A checksum-valid object record whose link count contradicts the namespace.
+fn wrong_link_count_image() -> MemoryBackend {
+    use afsplus_format::object::ObjectRecord;
+    use afsplus_format::OBJECT_FIRST_DYNAMIC;
+    let mut image = verify_image();
+    let (ident, checkpoint) = ident_and_checkpoint(&mut image);
+    let state =
+        afsplus_core::verify::load_committed_state(&mut image, &ident, &checkpoint).unwrap();
+    let entry = state
+        .object_map
+        .entries
+        .iter()
+        .find(|entry| entry.object_id >= OBJECT_FIRST_DYNAMIC)
+        .expect("a created file");
+    let buf = image.peek(entry.block);
+    let (mut record, generation) = ObjectRecord::decode_metadata_with_generation(&buf).unwrap();
+    record.link_count = 7;
+    image.apply_raw(entry.block, &record.encode(4096, generation).unwrap());
+    image
+}
+
+/// An unreadable object-map root, refusing every load along that path.
+fn unreadable_object_map_image() -> MemoryBackend {
+    let mut image = verify_image();
+    let (_, checkpoint) = ident_and_checkpoint(&mut image);
+    image.apply_raw(checkpoint.object_map_block, &vec![0u8; 4096]);
+    image
+}
+
+fn describe_mount_state(
+    result: &Result<afsplus_core::verify::MountState, afsplus_core::CoreError>,
+) -> String {
+    match result {
+        Ok(state) => format!(
+            "roots {} {} links {}",
+            state.root_record_lba, state.root_directory_root_lba, state.root_object.link_count
+        ),
+        Err(error) => format!("refused {error}"),
+    }
+}
+
+fn describe_committed_state(
+    result: &Result<afsplus_core::verify::CommittedState, afsplus_core::CoreError>,
+) -> String {
+    match result {
+        Ok(state) => format!(
+            "objects {} metadata {} data {} runs {}",
+            state.objects.len(),
+            state.metadata_blocks.len(),
+            state.data_blocks.len(),
+            state.reclaim_runs.len()
+        ),
+        Err(error) => format!("refused {error}"),
+    }
+}
+
+fn verify_context(event: &afsplus_core::flight::Event) -> afsplus_core::flight::VerifyContext {
+    match event.lifecycle {
+        Some(afsplus_core::flight::LifecycleContext::Verify(context)) => context,
+        other => panic!("expected a verify context, found {other:?}"),
+    }
+}
+
+#[test]
+fn verification_observation_matches_findings_and_io_on_clean_and_corrupted_images() {
+    use afsplus_core::flight::{Category, FindingKind, VerifyPhase, VerifyScope};
+    use afsplus_core::verify::{
+        full_sweep, full_sweep_observed, load_committed_state, load_committed_state_observed,
+        load_mount_state, load_mount_state_observed,
+    };
+    for (name, base) in [
+        ("clean", verify_image()),
+        ("link-count", wrong_link_count_image()),
+        ("unreadable-map", unreadable_object_map_image()),
+    ] {
+        let mut plain = SharedDevice::new(&base);
+        let plain_handle = plain.handle();
+        let mut observed = SharedDevice::new(&base);
+        let observed_handle = observed.handle();
+        let (ident, checkpoint) = ident_and_checkpoint(&mut plain);
+        let (_, observed_checkpoint) = ident_and_checkpoint(&mut observed);
+        assert_eq!(checkpoint.generation, observed_checkpoint.generation);
+        let mut ring = recorder(4096);
+
+        let expected = load_mount_state(&mut plain, &ident, &checkpoint);
+        let actual = load_mount_state_observed(&mut observed, &ident, &checkpoint, &mut ring);
+        assert_eq!(
+            describe_mount_state(&actual),
+            describe_mount_state(&expected),
+            "{name}"
+        );
+
+        let expected_state = load_committed_state(&mut plain, &ident, &checkpoint);
+        let actual_state =
+            load_committed_state_observed(&mut observed, &ident, &checkpoint, &mut ring);
+        assert_eq!(
+            describe_committed_state(&actual_state),
+            describe_committed_state(&expected_state),
+            "{name}"
+        );
+        assert_eq!(observed_handle.trace(), plain_handle.trace(), "{name}");
+        assert_eq!(observed_handle.blocks(), plain_handle.blocks(), "{name}");
+
+        let events: Vec<_> = ring.events().copied().collect();
+        assert_eq!((ring.dropped(), ring.filtered()), (0, 0), "{name}");
+        assert!(events
+            .iter()
+            .all(|event| event.kind.category() == Category::Verify
+                && event.attempt == 0
+                && event.generation == checkpoint.generation));
+        let mount_scope: Vec<_> = events
+            .iter()
+            .filter(|event| verify_context(event).scope == VerifyScope::MountState)
+            .collect();
+        let committed_scope: Vec<_> = events
+            .iter()
+            .filter(|event| verify_context(event).scope == VerifyScope::CommittedState)
+            .collect();
+        for scope in [&mount_scope, &committed_scope] {
+            assert_eq!(scope[0].kind, EventKind::VerifyBegin, "{name}");
+            assert!(verify_context(scope[0]).phase.is_none(), "{name}");
+            assert!(scope[1..scope.len() - 1]
+                .iter()
+                .all(|event| event.kind == EventKind::VerifyPhase));
+        }
+        let phases = |scope: &Vec<&afsplus_core::flight::Event>| -> Vec<VerifyPhase> {
+            scope
+                .iter()
+                .filter(|event| event.kind == EventKind::VerifyPhase)
+                .map(|event| verify_context(event).phase.unwrap())
+                .collect()
+        };
+        if name == "unreadable-map" {
+            for scope in [&mount_scope, &committed_scope] {
+                assert_eq!(
+                    scope.last().unwrap().kind,
+                    EventKind::VerifyFailed,
+                    "{name}"
+                );
+                assert_eq!(
+                    verify_context(scope.last().unwrap()).phase,
+                    Some(VerifyPhase::ObjectMap),
+                    "{name}"
+                );
+            }
+            continue;
+        }
+        for scope in [&mount_scope, &committed_scope] {
+            assert_eq!(
+                scope.last().unwrap().kind,
+                EventKind::VerifyComplete,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            phases(&mount_scope),
+            [
+                VerifyPhase::ObjectMap,
+                VerifyPhase::RootObject,
+                VerifyPhase::RootDirectory,
+                VerifyPhase::ReclaimQueue
+            ],
+            "{name}"
+        );
+        assert_eq!(
+            phases(&committed_scope),
+            [
+                VerifyPhase::AllocationRoot,
+                VerifyPhase::ObjectMap,
+                VerifyPhase::ObjectRecords,
+                VerifyPhase::SharedMappings,
+                VerifyPhase::Namespace,
+                VerifyPhase::ReclaimQueue,
+                VerifyPhase::AllocationBitmaps,
+                VerifyPhase::IntentLogArea,
+                VerifyPhase::Snapshots
+            ],
+            "{name}"
+        );
+        assert_eq!(
+            verify_context(mount_scope[1]).block,
+            checkpoint.object_map_block,
+            "{name}"
+        );
+
+        // Full sweep: identical findings, one event per finding at its ordinal.
+        let state = expected_state.unwrap();
+        let geo = ident.geometry();
+        let expected_findings = full_sweep(&state, &geo, &checkpoint);
+        let mut sweep_ring = recorder(4096);
+        let findings = full_sweep_observed(&state, &geo, &checkpoint, &mut sweep_ring);
+        assert_eq!(findings, expected_findings, "{name}");
+        let sweep: Vec<_> = sweep_ring.events().copied().collect();
+        assert_eq!(sweep[0].kind, EventKind::VerifyBegin, "{name}");
+        let complete = sweep.last().unwrap();
+        assert_eq!(complete.kind, EventKind::VerifyComplete, "{name}");
+        assert_eq!(verify_context(complete).ordinal, findings.len() as u64);
+        assert_eq!(
+            sweep
+                .iter()
+                .filter(|event| event.kind == EventKind::VerifyPhase)
+                .map(|event| verify_context(event).phase.unwrap())
+                .collect::<Vec<_>>(),
+            [
+                VerifyPhase::LinkCounts,
+                VerifyPhase::QuarantinedRuns,
+                VerifyPhase::BitmapAccounting,
+                VerifyPhase::FreeCounts
+            ],
+            "{name}"
+        );
+        let reported: Vec<_> = sweep
+            .iter()
+            .filter(|event| event.kind == EventKind::VerifyFinding)
+            .map(verify_context)
+            .collect();
+        assert_eq!(reported.len(), findings.len(), "{name}");
+        for (ordinal, context) in reported.iter().enumerate() {
+            assert_eq!(context.ordinal, ordinal as u64, "{name}");
+            assert!(context.finding.is_some(), "{name}");
+            assert!(context.phase.is_some(), "{name}");
+            if context.object_id != 0 {
+                assert!(
+                    findings[ordinal].contains(&format!("object {}", context.object_id)),
+                    "{name}: {} does not name object {}",
+                    findings[ordinal],
+                    context.object_id
+                );
+            }
+        }
+        match name {
+            "clean" => assert!(findings.is_empty(), "{findings:?}"),
+            "link-count" => {
+                assert_eq!(findings.len(), 1, "{findings:?}");
+                assert_eq!(reported[0].finding, Some(FindingKind::LinkCount));
+                assert_eq!(reported[0].phase, Some(VerifyPhase::LinkCounts));
+                assert!(reported[0].object_id >= afsplus_format::OBJECT_FIRST_DYNAMIC);
+            }
+            other => panic!("unnamed verification case {other}"),
+        }
+    }
+}
+
+#[test]
+fn small_verification_rings_report_loss_without_changing_findings() {
+    use afsplus_core::verify::{full_sweep, full_sweep_observed, load_committed_state};
+    let mut image = wrong_link_count_image();
+    let (ident, checkpoint) = ident_and_checkpoint(&mut image);
+    let state = load_committed_state(&mut image, &ident, &checkpoint).unwrap();
+    let geo = ident.geometry();
+    let expected = full_sweep(&state, &geo, &checkpoint);
+    let mut full = recorder(4096);
+    full_sweep_observed(&state, &geo, &checkpoint, &mut full);
+    for capacity in [1, 2, 4] {
+        let mut ring = recorder(capacity);
+        assert_eq!(
+            full_sweep_observed(&state, &geo, &checkpoint, &mut ring),
+            expected
+        );
+        assert_eq!(ring.sequence(), full.sequence());
+        assert_eq!(ring.events().len(), capacity);
+        assert_eq!(ring.dropped(), full.sequence() - capacity as u64);
+        assert_eq!(ring.filtered(), 0);
+    }
+}
