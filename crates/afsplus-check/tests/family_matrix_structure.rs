@@ -6,7 +6,7 @@
 
 mod common;
 
-use afsplus_block::{BlockDevice, MemoryBackend};
+use afsplus_block::{BlockDevice, BlockError, MemoryBackend, TraceBackend};
 use afsplus_core::volume::{BatchOp, ObjectMetadata, PreservedMetadata};
 use afsplus_core::{CoreError, Volume};
 use afsplus_format::{Timespec, OBJECT_ROOT};
@@ -1265,6 +1265,158 @@ fn retained_sampled<F: Family>(family: &F, pages: usize, sample: usize, seed: u6
     matrix::sampled_cuts(family, &recording, pages, Variant::Retained, sample, seed);
     matrix::faults(family, &recording, pages, Variant::Retained);
     matrix::ambiguous(family, pages, Variant::Retained);
+}
+
+// ---------------------------------------------------------------------------
+// Read failures while reloading spilled nodes
+// ---------------------------------------------------------------------------
+
+/// Fails one read once the transaction has begun. A bounded cache reloads the
+/// provisional images it spilled earlier in the same transaction, so the
+/// injected read reaches that reload path as well as ordinary node reads.
+struct ReadFault {
+    inner: MemoryBackend,
+    fail_read: u64,
+    reads: u64,
+    armed: bool,
+    tripped: bool,
+}
+
+impl BlockDevice for ReadFault {
+    fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+
+    fn total_blocks(&self) -> u64 {
+        self.inner.total_blocks()
+    }
+
+    fn read_block(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        if self.armed {
+            if self.reads == self.fail_read {
+                self.tripped = true;
+                self.reads += 1;
+                return Err(BlockError::Injected("staged node reload"));
+            }
+            self.reads += 1;
+        }
+        self.inner.read_block(lba, buf)
+    }
+
+    fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.inner.write_block(lba, data)
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        self.inner.flush()
+    }
+}
+
+/// Injected read failures per profile.
+const RELOAD_INJECTIONS: u64 = 16;
+
+/// Fails reads spread through a spilling transaction and requires an allowed
+/// committed state, a clean checker and a successful retry after remount.
+/// Returns the reloads of provisional images the successful run performed.
+fn reload_read_failures<F: Family>(family: &F, pages: usize) -> u64 {
+    let variant = Variant::Eviction;
+    let (base, state, generation, _) = matrix::prepare(family, pages, variant);
+    let publications = family.publications(variant);
+
+    let mut probe = matrix::open(TraceBackend::new(base.clone()), pages);
+    probe.device_mut().reset();
+    family.apply(&mut probe, &state).unwrap();
+    let stats = probe.last_commit_stats().unwrap().tree_mutations;
+    let reads = probe.device_mut().stats().reads;
+    assert!(
+        stats.staged_spill_writes > 0,
+        "{} pages={pages}: the fixture must spill",
+        family.name()
+    );
+
+    let stride = (reads / RELOAD_INJECTIONS).max(1);
+    let (mut injected, mut published_after_fault) = (0u64, 0u64);
+    for fail_read in (0..reads).step_by(stride as usize) {
+        let context = format!("{} pages={pages} read {fail_read}", family.name());
+        let mut volume = matrix::open(
+            ReadFault {
+                inner: base.clone(),
+                fail_read,
+                reads: 0,
+                armed: false,
+                tripped: false,
+            },
+            pages,
+        );
+        volume.device_mut().armed = true;
+        if family.apply(&mut volume, &state).is_ok() {
+            assert!(
+                !volume.device_mut().tripped,
+                "{context}: a failed read was not reported"
+            );
+            continue;
+        }
+        assert!(volume.device_mut().tripped, "{context}");
+        volume.device_mut().armed = false;
+        let mut recovered = matrix::open(volume.into_device().inner, pages);
+        let delta = recovered
+            .generation()
+            .checked_sub(generation)
+            .filter(|delta| *delta <= publications)
+            .unwrap_or_else(|| panic!("{context}: disallowed generation"));
+        published_after_fault += u64::from(delta == publications);
+        family.verify(&mut recovered, &state, variant, delta, &context);
+        matrix::assert_checker_clean(recovered.device_mut(), &context);
+        if delta < publications {
+            family
+                .apply(&mut recovered, &state)
+                .unwrap_or_else(|error| panic!("{context}: retry {error}"));
+        }
+        family.verify(&mut recovered, &state, variant, publications, &context);
+        let mut again = matrix::open(recovered.into_device(), pages);
+        family.verify(&mut again, &state, variant, publications, &context);
+        matrix::assert_checker_clean(again.device_mut(), &context);
+        injected += 1;
+    }
+    assert!(
+        injected > 0,
+        "{} pages={pages}: no read failed",
+        family.name()
+    );
+    eprintln!(
+        "{} pages={pages}: reload read failures reads={reads} stride={stride} refused={injected} already_published={published_after_fault} spills={} reloads={}",
+        family.name(),
+        stats.staged_spill_writes,
+        stats.staged_spill_reloads
+    );
+    stats.staged_spill_reloads
+}
+
+#[test]
+fn spilled_directory_split_survives_reload_read_failures() {
+    let reloads: u64 = [2, 4, 8]
+        .into_iter()
+        .map(|pages| reload_read_failures(&DirectorySplit, pages))
+        .sum();
+    assert!(reloads > 0, "no profile reloaded a provisional image");
+}
+
+#[test]
+fn spilled_directory_collapse_survives_reload_read_failures() {
+    let reloads: u64 = [2, 4, 8]
+        .into_iter()
+        .map(|pages| reload_read_failures(&DirectoryCollapse, pages))
+        .sum();
+    assert!(reloads > 0, "no profile reloaded a provisional image");
+}
+
+#[test]
+fn spilled_batch_create_survives_reload_read_failures() {
+    let reloads: u64 = [2, 4, 8]
+        .into_iter()
+        .map(|pages| reload_read_failures(&BatchCreate, pages))
+        .sum();
+    assert!(reloads > 0, "no profile reloaded a provisional image");
 }
 
 // ---------------------------------------------------------------------------
