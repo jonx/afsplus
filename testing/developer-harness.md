@@ -48,6 +48,7 @@
 - [API and window replay bundles](#api-and-window-replay-bundles)
 - [Object-map replay bundles](#object-map-replay-bundles)
 - [Captured snapshot replay bundles](#captured-snapshot-replay-bundles)
+- [Subsystem and lifecycle replay bundles](#subsystem-and-lifecycle-replay-bundles)
 - [Linked namespace replay bundles](#linked-namespace-replay-bundles)
 - [Selected-category and live-delivery bundles](#selected-category-and-live-delivery-bundles)
 - [Internal diagnostic bundles](#internal-diagnostic-bundles)
@@ -1652,12 +1653,110 @@ Run [replay tests](../tools/test-afsptest.py),
 [admission tests](../tools/test-replay-scenario.py) and
 [captured inspector tests](../crates/afsplus-check/tests/captured_scenario.rs).
 
+## Subsystem and lifecycle replay bundles
+
+Semantic JSON version 8 uses `AFSPSC08`. It inherits the version-7 command set,
+geometry, cache profile, snapshot limits, persistent-snapshot formatting and
+`expected_snapshots` contract, and widens the category mask to 0-32767, one bit
+per runtime category 0 through 14. Version 9 belongs to a separate profile and
+these parsers refuse its fields at version 8.
+
+Version 8 opts the recorder into subsystem, data and view observation before
+the image exists, so the runner formats through `mkfs_observed` and mounts
+through `mount_observed`, carries one recorder across every remount, and drains
+one explicit pre-mount batch holding the format and the first mount. That batch
+precedes the operation records and uses the same counter and event framing.
+Every later operation drains its own batch the way version 3 does.
+
+Two commands make the remaining scopes reachable from a memory image. `verify`
+runs the bounded root load, the exhaustive committed decode and the invariant
+sweep over a second handle on the same image, which reads blocks and writes
+none. `remount_refused` mounts the persistent-snapshot feature without its work
+budgets, so feature negotiation refuses the attempt before the first device
+write and hands the recorder back, and the ordinary remount follows.
+
+`AFSFLT06` retains the selected-profile, operation and batch headers and the
+complete 89-byte version-6 event, then appends a fixed 49-byte payload area.
+Every integer is little endian. Kind codes 1 through 22 keep their version-6
+meaning; codes 23 through 64 follow the declaration order of `EventKind` in
+[flight.rs](../crates/afsplus-core/src/flight.rs): 23-26 allocation, 27-31
+tree, 32-38 reclaim, 39-45 mount, 46-50 format, 51-55 verify, 56-58 staged
+data, 59-60 the two intent-group barriers, 61-64 view descents.
+
+| Offset | Width | Field |
+| --- | --- | --- |
+| 0 | u8 | payload tag: 0 absent, 1 allocation, 2 tree, 3 reclaim, 4 mount, 5 format, 6 verify, 7 data, 8 view |
+| 1 | u8 | mount mode, format stage, verify scope, data scope, view path |
+| 2 | u8 | mount stage, verify phase |
+| 3 | u8 | mount slot, verify finding class |
+| 4 | u8 | mount damaged-tail flag |
+| 5 | u32 | mount record count, verify region, data block count |
+| 9 | u64 | allocation start, tree owner, reclaim root, mount other generation, format block total, verify ordinal, data object, view ID |
+| 17 | u64 | allocation blocks, tree block, reclaim start, format publication block, verify object, data offset, view owner |
+| 25 | u64 | tree resident pages, reclaim blocks, verify block, data length, view block |
+| 33 | u64 | data physical run start |
+| 41 | u64 | reserved |
+
+Every byte a payload class does not name is zero, so a reserved byte carries no
+value and absence is expressed through the tag with the per-kind rules below.
+The tag equals the tag of the event kind's category, so a lifecycle event
+without its payload and a commit-tail event carrying one are both refused.
+
+Admission checks the kind, category and tag domains, then the per-kind rules.
+Mount mode is 0-3, stage 1-6, slot 0-1 and the damaged-tail flag 0-1;
+`MountBegin` carries the identification stage with generation zero and zero
+selection fields, `MountSelected` carries the selection stage, the four
+intent-log kinds carry the intent-log stage, the damaged-tail flag belongs to
+`MountIntentScanned` alone, and a record count belongs to the four intent-log
+kinds alone. Generation zero is admitted for `MountBegin` and `MountFailed`
+alone, and a zero generation forces zero slot, count, flag and other
+generation. Format stage is 1-5 and equals the stage of its kind except on a
+refusal, the device block total is nonzero, and a publication address belongs
+to `FormatPublicationBegin` and `FormatCheckpointDurable`. Verify scope is 1-3,
+phase 0-16 and finding class 0-11; a phase is present on every kind except
+`VerifyBegin` and `VerifyComplete`, a finding class belongs to `VerifyFinding`
+alone, an ordinal belongs to `VerifyFinding` and `VerifyComplete`, and the
+scope-level kinds name no region, object or block. Data scope is 1-3 and view
+path is 1-4, and a view descent names a nonzero owner.
+
+Context and accounting rules follow versions 6 and 7: object presence, API span
+parentage, method identity and window identity keep their checks, and loss,
+filtering and live-delivery equations follow version 4 across the pre-mount
+batch and every operation. The two intent-group barriers belong to the
+commit-tail I/O category and carry the transaction attempt; every other
+extended kind reports attempt zero. A mount observation names its intent-log
+group without a deferred window, which is the one exception to the version-5
+window rule. Truncation is refused before any payload is unpacked, and an event
+byte changed after recording fails admission or exact replay.
+
+Run the [replay tests](../tools/test-afsptest.py) for four cache profiles,
+masks of zero, each scope alone and all bits, one and 256-event rings,
+deterministic consumer disconnection, exact image and block-I/O comparisons,
+a synthetic wire covering one valid record per payload class against malformed
+controls for every new field class, fresh-process replay, a changed event byte
+and a reduction that keeps the diagnostic policy in the failure signature. The
+[scenario admission tests](../tools/test-replay-scenario.py) bind the commands
+and the mask ceiling before the runner starts. The
+[scenario tests](../crates/afsplus-check/tests/scenario.rs) compare a version-8
+run against the same plan with observation disabled, block operation by block
+operation and image block by image block.
+
+Deliberate limits: this profile observes a host memory image, and a native
+adapter has its own qualification. The memory runner injects no device error
+and no allocation exhaustion, so the failure kinds `TreeIoFailed`,
+`ReclaimFailed`, `AllocationFailed`, `FormatFailed`, `DataWriteFailed`,
+`VerifyFinding`, `VerifyFailed`, `ViewReadFailed` and `ViewMaintenanceFailed`
+reach the wire through the synthetic admission controls alone. The category
+mask selects what a batch retains; it makes no claim about which operations
+produce which events.
+
 ## Linked namespace replay bundles
 
 Semantic JSON version 9 uses `AFSPSC09`. It inherits the version-7 command set,
 geometry, cache profile, diagnostic policy (category masks 0–127 and `AFSFLT05`),
 snapshot limits, persistent-snapshot formatting and `expected_snapshots`
-contract. Version 8 belongs to a separate profile and these parsers refuse it.
+contract. [Version 8](#subsystem-and-lifecycle-replay-bundles) belongs to a separate
+profile with its own category ceiling and artifact.
 Earlier versions keep their exact command, observation and bundle bytes.
 
 Labels name directory entries; a hard link receives its own label for the same
