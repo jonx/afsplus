@@ -18,25 +18,25 @@ directory are linked relative to this file; core tests use explicit paths.
 | Staged directory split | [cache_profiles.rs](cache_profiles.rs): `spilled_directory_split_is_atomic_at_every_modeled_cut`, `failed_provisional_spills_leave_the_committed_view_and_allow_retry` | 2: real spill, all modeled split cuts; writes 0/1/7/31 fail then retry | 4/8/unlimited split cuts; 4/8 spill failures and retries |
 | Single create, mkdir, rmdir, hard links | [basic.rs](basic.rs); [crash_matrix.rs](crash_matrix.rs): `every_crash_state_of_a_create_transaction_recovers_to_an_allowed_state` | U: functional namespace/lifetime and create cuts | P named semantic/cut/fault/refusal oracles for each distinct path |
 | Cross-directory rename, root split/collapse | [crash_matrix.rs](crash_matrix.rs): `every_crash_state_of_cross_directory_rename_is_atomic`, `directory_root_split_and_collapse_are_crash_atomic` | U: atomic namespace and checker | P structural transitions, failure/retry and retained views |
-| Replace rename, shared target | [faults.rs](faults.rs): `replacement_write_and_flush_failures_preserve_complete_namespace_and_bytes`; [shared_crash.rs](shared_crash.rs): `rename_replace_of_a_shared_target_is_crash_atomic` | P: shared-target cuts with exact victim/incoming/peer bytes and ownership; U: replacement I/O faults | P errors/retry, retained snapshots, forced eviction and resource refusal |
+| Replace rename, shared target | [faults.rs](faults.rs): `replacement_write_and_flush_failures_preserve_complete_namespace_and_bytes`; [shared_crash.rs](shared_crash.rs): `rename_replace_of_a_shared_target_is_crash_atomic`, `shared_replace_io_failures_preserve_exact_ownership_and_allow_retry_in_all_profiles`, `shared_replace_ambiguous_publication_requires_remount_in_all_profiles` | P: shared-target cuts with exact victim/incoming/peer bytes and ownership; shared-target write/flush faults with pre-retry remount, same-handle retry and ambiguous publication; U: replacement I/O faults | P write/flush faults for unshared replacement; retained snapshots; forced eviction (zero spill writes observed); resource refusal |
 | Symlink create/rename/unlink | [metadata.rs](metadata.rs): `symlink_namespace_preserves_target_through_metadata_rename_and_remount`, `symlink_publication_cuts_preserve_namespace_and_captured_target`, `symlink_refusals_and_short_reads_do_not_write` | U: exact opaque target, retained target, cuts and no-write refusals | P all three publication paths; forced eviction |
 | Protection and preserved metadata | [metadata.rs](metadata.rs): `metadata_publication_cuts_preserve_exact_old_or_new_state_and_snapshot`, `metadata_refuses_open_windows_and_uncertain_publication_requires_remount`; [core tests/flight.rs](../../afsplus-core/tests/flight.rs): `api_snapshot_and_metadata_calls_preserve_captured_state_and_busy_refusals` | U: exact metadata/cuts/poison; P: protection and busy snapshot deletion with observed/unobserved image equality | P metadata restore cuts/faults; protection cuts; exact retained bytes in addition to metadata |
 | Full-COW write, sparse write | [streaming_api.rs](streaming_api.rs): `seeded_mixed_io_preserves_bytes_across_remounts_and_clones`; [crash_matrix.rs](crash_matrix.rs): `every_crash_state_of_a_sparse_write_is_atomic` | U: independent mixed-byte oracle, sparse cuts | P direct/tree layouts, cuts/faults/refusals |
 | Bounded write, reservation initialization | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `bounded_writes_crash_to_exact_bytes_and_preserve_captured_zeros`, `reservation_write_crashes_preserve_old_zeros_or_complete_new_bytes`, `reservation_write_io_errors_preserve_old_logical_zeros_and_require_reconciliation` | U: captured zeros, exact bytes, reconciliation | P admitted and rejected budgets, private-unwritten reuse, shared fallback, spill/recovery |
 | Preallocation / bounded reservation | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `bounded_reservation_refusal_and_boundary_retry_preserve_layout`, `bounded_reservation_tree_publication_preserves_snapshot_at_every_cut` | U: allocation layout, refusal/retry, snapshot cuts | P exact layout/bytes and resource/fault cases |
 | Truncate / sparse growth / bounded shrink | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `sparse_growth_publication_is_atomic_with_retained_reservations`, `bounded_shrink_crash_preserves_shared_and_captured_bytes`; [shared_crash.rs](shared_crash.rs): `truncate_across_private_and_shared_subruns_is_crash_atomic` | P: private/shared truncate cuts with independent survivor bytes; U: sparse growth, bounded shrink and retained-state cuts | P sparse-growth/bounded-shrink cuts, direct/tree transitions, refusals, I/O failures, retained snapshots and eviction |
-| In-place policy flag and private data | [data_policy_persistence.rs](data_policy_persistence.rs): `opt_in_persists_across_remount_and_takes_the_in_place_path`; [data_policy.rs](data_policy.rs): `in_place_crash_matrix_keeps_metadata_clean_but_allows_torn_old_data` | U: persistent flag, actual reuse, explicit weaker data contract | P flag cuts and private-data tear oracle; never apply full-COW old/new bytes to opted-in in-place writes |
+| In-place policy flag and private data | [data_policy_persistence.rs](data_policy_persistence.rs): `opt_in_persists_across_remount_and_takes_the_in_place_path`, `policy_flag_publication_cuts_preserve_exact_choice_and_bytes_in_all_profiles`, `policy_flag_io_failures_preserve_exact_choice_and_retry_in_all_profiles`, `policy_flag_ambiguous_publication_blocks_mutations_until_remount_in_all_profiles`, `policy_flag_applicable_refusals_issue_no_writes_and_preserve_state_in_all_profiles`, `retained_snapshot_forces_cow_for_flagged_private_writes_in_all_profiles`, `in_place_write_after_a_crash_keeps_metadata_clean`; [data_policy.rs](data_policy.rs): `in_place_crash_matrix_keeps_metadata_clean_but_allows_torn_old_data` | P: persistent flag, actual reuse, flag cuts, flag write/flush faults, ambiguous flag publication, no-write refusals, retained-snapshot COW fallback and both private-data tear matrices; opted-in in-place writes use the weaker torn-old oracle and never full-COW old/new bytes | Forced eviction (zero spill writes observed); in-place data write faults beyond the single metadata-write error; ambiguous publication of an in-place data write; cuts of the shared-block and extending-write fallbacks |
 | CloneFile / CloneRange | [shared_crash.rs](shared_crash.rs): first-clone and aligned range-boundary profile tests, `first_clone_io_failures_preserve_ownership_in_all_profiles`; [faults.rs](faults.rs): `completed_checkpoint_write_and_adoption_read_errors_block_mutations`; [tiny_cache_matrix.rs](tiny_cache_matrix.rs): `clone_publication_cuts_preserve_snapshot_namespace_in_all_profiles`; [shared_clone.rs](shared_clone.rs): partial-boundary and refusal tests | P: first CloneFile and aligned CloneRange cuts with exact bytes/refcounts; CloneFile I/O and ambiguous-publication faults; retained-snapshot CloneFile cuts; U: unaligned range boundaries and range refusals | P unaligned CloneRange, range-specific errors/retry and retained snapshots; forced eviction and resource refusals; retained clone mutation |
-| Shared write/delete/final owner reuse | [shared_crash.rs](shared_crash.rs): `shared_write_split_is_crash_atomic`, `unlink_at_count_three_is_crash_atomic`, `unlink_at_count_two_never_reclaims_the_survivor`, `shared_storage_is_reused_only_after_the_last_owner_disappears` | P: shared-write and reference-count cuts, exact survivor bytes, quarantine and final-owner storage reuse | I/O-error retry and ambiguous publication; retained snapshots; forced eviction/reload failures; resource and low-space refusals |
-| Orphan setup/move/open-target replace/cleanup | [orphans.rs](orphans.rs): `every_orphan_lifecycle_checkpoint_cut_recovers_to_an_allowed_state`, `every_open_target_replace_cut_is_old_or_new_namespace`, `fragmented_orphan_cleanup_is_extent_bounded_and_resumes_after_remount` | U: allowed multi-checkpoint lifecycle and bounded cleanup | P lifecycle cuts and retries; preserve preparatory checkpoint as an allowed state |
+| Shared write/delete/final owner reuse | [shared_crash.rs](shared_crash.rs): `shared_write_split_is_crash_atomic`, `unlink_at_count_three_is_crash_atomic`, `unlink_at_count_two_never_reclaims_the_survivor`, `shared_storage_is_reused_only_after_the_last_owner_disappears`, `shared_write_io_failures_preserve_exact_ownership_and_allow_retry_in_all_profiles`, `shared_write_ambiguous_publication_requires_remount_in_all_profiles` | P: shared-write and reference-count cuts, exact survivor bytes, quarantine and final-owner storage reuse; shared-write write/flush faults with retry and ambiguous publication | Unlink and final-owner I/O-error retry and ambiguous publication; retained snapshots during shared transitions; forced eviction/reload failures (zero spill writes observed); deterministic resource and low-space refusal of the shared write itself |
+| Orphan setup/move/open-target replace/cleanup | [orphans.rs](orphans.rs): `every_orphan_lifecycle_checkpoint_cut_recovers_to_an_allowed_state`, `every_open_target_replace_cut_is_old_or_new_namespace`, `fragmented_orphan_cleanup_is_extent_bounded_and_resumes_after_remount` | P: insertion/update/cleanup and open-target replace cuts with the preparatory orphan-directory checkpoint as an allowed state, retry from every cut, extent-bounded cleanup with exact tail-trimmed bytes | Orphan insertion/cleanup I/O-error retry and ambiguous publication; retained snapshots; spill observation and forced eviction; resource refusals |
 | Deferred namespace/write/truncate fsync | [cache_profiles.rs](cache_profiles.rs): `durable_window_recovery_honors_the_mount_profile`; [intent_log.rs](intent_log.rs): `existing_file_write_and_truncate_replay_in_order`, `successive_existing_writes_recover_only_monotone_prefixes` | P create replay, spills and idempotence; U data/truncate ordering | P durable data/truncate cut and replay-restart oracles |
 | Deferred cancellation admission/ownership | [intent_log.rs](intent_log.rs): `cancellation_preflight_refusals_preserve_the_pending_window`, `cancellation_preflight_read_failure_keeps_the_window_retryable` | P: acknowledged/unlogged ownership, no-write refusal and read-failure retry | Other window entry failures; explicit mixed-family cut oracles |
 | Shared deferred replay / orphan replay | [shared_crash.rs](shared_crash.rs): `durable_shared_unlink_replay_is_crash_atomic_and_idempotent`, `logged_write_replay_splits_shared_data_and_survives_replay_crashes`; [intent_replay_orphans.rs](intent_replay_orphans.rs) | P: shared unlink/replacement/write replay cuts, exact survivor/orphan bytes and repeat-remount idempotence; U: other orphan branches | P remaining orphan branches; interrupted fsync; I/O errors/retry, retained snapshots, forced eviction and resource refusals |
 | Snapshot registry create/delete | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `snapshot_create_and_delete_publication_cuts_preserve_exact_membership_and_bytes`, `uncertain_snapshot_publication_blocks_mutation_and_remount_resolves_membership` | U: membership/bytes/cuts/poison; P normal create/delete and busy refusal in flight test | P registry faults/cuts and exhausted/admission limits |
 | Snapshot lifetime / maintenance / selectable older view | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `constrained_tree_profiles_preserve_snapshots_and_shared_survivors`, `last_snapshot_deletion_preserves_older_selectable_view_during_the_next_write` | P: 192-entry spilled batch, exact captured bytes, clone survivor, both checkpoints; U: last-view deletion safety | P maintenance/release cuts and previous-slot protection failures |
 | Snapshot mount/recovery | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `public_snapshot_mount_recovery_cuts_preserve_acknowledged_live_and_historical_bytes`, `public_snapshot_mount_validates_admission_before_pending_recovery_writes` | U: exact acknowledged live/historical state, bounded admission | P recovery interruption/idempotence and no-write refusal |
-| Reclaim queue seal/consume/cursor and allocation rotation | [reclaim.rs](reclaim.rs): `crash_matrix_over_a_sealing_transaction`, `crash_matrix_over_segment_consumption_and_disappearance`, `crash_matrix_over_a_mid_run_cursor_advance`; [core src/volume.rs](../../afsplus-core/src/volume.rs): `allocation_cache_keeps_spilled_nodes_across_checkpoint_rotation` | U: reclaim cuts; 2: cache rotation regression | P queue transitions/cuts; retained/shared bytes across rotation |
-| Low-space refusal and progress | [allocation_pressure.rs](allocation_pressure.rs): `near_full_enospc_publishes_nothing_and_delete_can_recover_space`, `repeated_near_full_cow_and_reclaim_preserve_shared_survivors` | U: ENOSPC and survivor/reclaim cycles | P deterministic ENOSPC and retry after reclaim |
+| Reclaim queue seal/consume/cursor and allocation rotation | [reclaim.rs](reclaim.rs): `crash_matrix_over_a_sealing_transaction`, `crash_matrix_over_segment_consumption_and_disappearance`, `crash_matrix_over_a_mid_run_cursor_advance`; [core src/volume.rs](../../afsplus-core/src/volume.rs): `allocation_cache_keeps_spilled_nodes_across_checkpoint_rotation` | P: sealing/consumption/cursor cuts with literal free/pending accounting and namespace bytes; P: allocation rotation with a retained snapshot and a shared run, exact live/captured/per-checkpoint bytes, spills at 2/4/8 | Forced eviction during reclaim transitions (zero spill writes observed); reclaim-step I/O errors, retry and ambiguous publication; retained snapshots across reclaim transitions; modeled cuts of the spilled rotation batch |
+| Low-space refusal and progress | [allocation_pressure.rs](allocation_pressure.rs): `near_full_enospc_publishes_nothing_and_delete_can_recover_space`, `repeated_near_full_cow_and_reclaim_preserve_shared_survivors`, `near_full_delete_survives_every_modeled_power_cut` | P: deterministic no-write ENOSPC, same-size retry after reclaim, near-full COW/reclaim cycles with shared survivors; U: near-full delete cuts | P near-full delete cuts; forced eviction under low space (zero spill writes observed); ENOSPC during spilled metadata allocation |
 | COW tree spill/reload component | [core src/cow_tree.rs](../../afsplus-core/src/cow_tree.rs) staged-tree tests | 2/4/8 component: staged-node bounds/spill/reload | Not evidence for every mounted publication family or total-heap limits |
 | Common uncertain commit tail | [faults.rs](faults.rs): `uncertain_checkpoint_publication_requires_remount_before_more_writes`, `completed_checkpoint_write_and_adoption_read_errors_block_mutations`; [core tests/flight.rs](../../afsplus-core/tests/flight.rs) | U semantic poisoning/reconciliation; P observed/unobserved failure equality | Family-specific P exact semantic oracle, especially retained state |
 
@@ -155,6 +155,157 @@ acknowledged survivor/orphan bytes and repeat-recovery generation stability.
 Replay begins after successful fsync; interrupted fsync, explicit errors/retry,
 retained snapshots, forced eviction and resource refusals remain separate.
 
+## Reclaim queue profiles
+
+The three crash matrices in [reclaim.rs](reclaim.rs),
+`crash_matrix_over_a_sealing_transaction`,
+`crash_matrix_over_segment_consumption_and_disappearance` and
+`crash_matrix_over_a_mid_run_cursor_advance`, apply 2/4/8/unlimited from the
+first fixture mount through recording and every recovered image, asserting the
+effective profile on each mount. Every image passes the checker with no warning,
+because these fixtures format no intent log, and selects the pre or post
+generation. Free/pending accounting matches literals in the writer and in every
+image: (222, 11) and (216, 14) for sealing, (205, 20) and (213, 13) for
+consumption, (227, 12) and (228, 11) for the cursor step. Namespace entries and
+file bytes are literals; each cursor image also drains to two pending blocks
+and the empty steady-state free count. Both outcomes occur in every profile.
+
+Modeled images per profile: 1,171 sealing, 68 consumption and 68 cursor; 5,228
+in total. The recorded transactions issue zero spill writes and keep resident
+staged nodes within the profile, so these matrices make no eviction claim.
+Negative controls with wrong payload bytes, pending count and free count each
+fail their matrix.
+
+## Allocation-cache rotation with retained and shared bytes
+
+`allocation_cache_keeps_spilled_nodes_across_checkpoint_rotation` in
+[core src/volume.rs](../../afsplus-core/src/volume.rs) keeps the 1,024
+allocation regions and forced rover movement of the original regression and
+adds a persistent snapshot plus one two-block run shared by a source file and
+two clones. Profiles 2/4/8/unlimited apply from fixture creation through every
+remount. Each of three rounds writes 32 literal bytes across the source's first
+block boundary, which moves the source off the run (three references become
+two), then publishes a 256-entry batch with long names that rotates the write
+checkpoint into the older slot.
+
+After each batch and again after a profile remount, both selectable checkpoints
+must match the cached allocation-root block sets when a cache exists, pass the
+verifier's committed-state load and full sweep, hold exactly one two-block
+two-reference run at the fixture's physical start, and expose the literal
+source and peer bytes through that checkpoint's own object-map root and
+generation. Live bytes and the snapshot's captured bytes of all three objects
+stay exact, and every batch entry resolves after remount. Every bounded batch
+spills: 111, 42 and 26 spill writes at 2, 4 and 8 pages over three rounds;
+unlimited records zero. The test runs inside the core crate, so it calls the
+verifier functions on both checkpoints directly; `check_device` lives in
+afsplus-check. Deliberate limits: one shared run, three rounds, and no modeled
+cuts of the spilled batch. A wrong captured-byte expectation fails.
+
+## Data-update policy profiles
+
+Every test in [data_policy.rs](data_policy.rs) and
+[data_policy_persistence.rs](data_policy_persistence.rs) applies
+2/4/8/unlimited from fixture creation to every remount and asserts the
+effective profile. Checker calls reject warnings other than a stopped
+intent-log tail. The looped functional tests cover the full-COW default,
+single- and multi-block reuse, the metadata error after an in-place data write,
+extending and shared fallbacks with literal source and clone bytes, flag
+clearing across remount, feature-off and directory refusals, the planted-flag
+corruption, hard links and clone destinations.
+
+| Test | Oracle | Modeled count | Deliberate limit |
+|---|---|---|---|
+| `policy_flag_publication_cuts_preserve_exact_choice_and_bytes_in_all_profiles` | Enable and clear; each image selects the old or new flag with the full object record apart from flag and change time, literal bytes and one root entry; both outcomes | 197 images per direction and profile; 1,576 | Zero spill writes |
+| `policy_flag_io_failures_preserve_exact_choice_and_retry_in_all_profiles` | Failure at every recorded write and flush; exact old choice before publication; poisoning after a failed checkpoint write or final barrier; exact pre-retry remount state, retry and checker | 72 injected faults; 56 separate same-handle retries | Before-write fault model |
+| `policy_flag_ambiguous_publication_blocks_mutations_until_remount_in_all_profiles` | Completed checkpoint write or adoption-read error; the same and an independent mutation refuse with no writes or flushes; remount exposes the new choice; an idempotent retry keeps the generation | 16 cases | Memory device |
+| `policy_flag_applicable_refusals_issue_no_writes_and_preserve_state_in_all_profiles` | Feature off, directory, symlink, missing object, invalid time, open window, read-only and no-changes mounts; zero writes and flushes, unchanged generation, window and record; opt-in succeeds afterwards where the feature exists | 32 refusals | Explicit refusal list |
+| `retained_snapshot_forces_cow_for_flagged_private_writes_in_all_profiles` | A flagged private write under a retained snapshot overwrites no block in place; exact live bytes; captured metadata and bytes with an EOF sentinel after flag clearing and remount; no checker warning | 4 profiles | One partial-block range |
+| `in_place_write_after_a_crash_keeps_metadata_clean`, `in_place_crash_matrix_keeps_metadata_clean_but_allows_torn_old_data` | Persistent and runtime in-place writes: the new generation holds literal new bytes; the old generation keeps bytes outside the range and only old or new values inside, with a torn-old image required; layout metadata unchanged | 203 images per profile for each test; 1,624 | ADR-062 weaker data contract |
+
+Recorded policy transactions issue zero spill writes, which limits these tests
+to profile coverage. One wrong expectation per new fixture family, seven in
+total, fails its test.
+
+## Low-space refusal and retry profiles
+
+`near_full_enospc_publishes_nothing_and_delete_can_recover_space` and
+`repeated_near_full_cow_and_reclaim_preserve_shared_survivors` in
+[allocation_pressure.rs](allocation_pressure.rs) apply the profile to every
+mount and remount. The first test refuses a headroom-violating and a near-full
+preallocation with zero writes and flushes and unchanged generation, free count
+and metadata. After delete and bounded reclaim it retries a preallocation of
+the refused size, writes literal bytes, and requires the exact namespace and
+bytes after a checker pass and a profile remount.
+
+The second test runs 24 cycles per profile, 96 in total. Each near-full refusal
+issues zero writes and flushes with unchanged generation, free count and size.
+A boundary-crossing write to a clone is admitted or refused under pressure;
+after delete and reclaim the same write is retried, and keeper and clone bytes
+stay exact through the checker and a remount. Zero spill writes are observed.
+`near_full_delete_survives_every_modeled_power_cut` runs at the default
+unlimited profile. Wrong retry bytes and a nonzero refusal write count each
+fail their test.
+
+## Shared write and replacement failures
+
+`shared_write_io_failures_preserve_exact_ownership_and_allow_retry_in_all_profiles`
+and
+`shared_replace_io_failures_preserve_exact_ownership_and_allow_retry_in_all_profiles`
+in [shared_crash.rs](shared_crash.rs) fail every recorded write and flush of a
+shared-extent write and of a replacement over a shared target at
+2/4/8/unlimited: 13 faults per shared-write profile and 12 per replacement
+profile, 100 in total. Before publication the live volume keeps the literal
+source, peer and incoming bytes, one four-block two-reference run and no
+quarantined shared block. A failed checkpoint write or final barrier poisons
+further mutation. The pre-retry remount exposes the exact old state or the
+published state; retry publishes the literal split runs (one block, then two
+blocks after the rewritten block) or removes the shared record when the
+replacement leaves one owner. A separate failure instance qualifies 84
+same-handle retries.
+
+`shared_write_ambiguous_publication_requires_remount_in_all_profiles` and
+`shared_replace_ambiguous_publication_requires_remount_in_all_profiles` cover
+16 completed-write and adoption-read cases: the same and an independent
+mutation refuse without writes or flushes, remount exposes the published state,
+and a later private write preserves every shared survivor. Checker calls reject
+warnings other than a stopped intent-log tail. Zero spill writes are observed,
+and these fixtures hold no retained snapshot. Wrong peer bytes and a wrong
+namespace size fail all four tests.
+
+## Orphan lifecycle profiles
+
+`every_orphan_lifecycle_checkpoint_cut_recovers_to_an_allowed_state`,
+`every_open_target_replace_cut_is_old_or_new_namespace` and
+`fragmented_orphan_cleanup_is_extent_bounded_and_resumes_after_remount` in
+[orphans.rs](orphans.rs) apply 2/4/8/unlimited to setup, recording and each
+recovered image. Orphan insertion and open-target replacement publish two
+checkpoints, and generation +1, the preparatory orphan directory, is an allowed
+state: object 2 is absent from the selected object map at +0 and present at +1,
+with the visible namespace and bytes unchanged at both. At +2 the application
+name is hidden and object 2 owns the literal bytes. Every image retries to the
+final state and passes the checker, which admits only a stopped intent-log tail
+warning. Update cuts expose literal old or new orphan bytes. Cleanup cuts expose
+the old layout, the empty tail-trimmed layout or the removed object, and a
+repeated cleanup of the absent object publishes nothing.
+
+Modeled images per profile: insertion 342/2,218/4, update 199/4, cleanup
+193/345/4 and replacement 342/4,299/4, which is 7,954 per profile and 31,816 in
+total. Negative controls swap the preparatory-directory expectation in the
+lifecycle and replacement matrices; both fail.
+
+The fragmented fixture writes five one-block extents at logical blocks 0, 2, 4,
+6 and 8 with bytes 1 to 5 and cleans with a two-extent budget.
+[ADR-066](../../../adr/ADR-066-bounded-orphan-directory.md) removes whole
+extent records from the logical end and publishes the smaller file; the
+published size is the logical start of the lowest removed extent
+(`cleanup_orphan_data_step` in [core src/volume.rs](../../afsplus-core/src/volume.rs)).
+The literal prefixes are therefore six blocks (1, hole, 2, hole, 3, hole) with
+three allocated blocks, then two blocks (1, hole) with one allocated block, then
+object removal, with a checker pass and a profile remount after each step. A
+five-block first prefix fails. Spill counters are not observed in orphans.rs;
+I/O faults, ambiguous publication, retained snapshots and resource refusals lie
+outside these fixtures.
+
 ## Commands and review boundary
 
 ```sh
@@ -164,6 +315,10 @@ export CARGO_TARGET_DIR=/private/tmp/afsplus-target-codex-cache
 export CARGO_NET_OFFLINE=true
 export PATH="$CARGO_HOME/bin:$PATH"
 cargo test --offline -p afsplus-check --test tiny_cache_matrix -- --nocapture --test-threads=2
+for target in reclaim data_policy data_policy_persistence allocation_pressure shared_crash orphans; do
+  cargo test --offline -p afsplus-check --all-features --test "$target" -- --test-threads=2
+done
+cargo test --offline -p afsplus-core --all-features --lib allocation_cache_keeps_spilled_nodes_across_checkpoint_rotation
 cargo fmt --all -- --check
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -176,9 +331,12 @@ The codec script uses `target/rust-codec-fuzz` inside this separate worktree;
 its output cannot collide with the coordinator's primary worktree.
 Execution results and commit identities belong in the local board handoff.
 The omissions outside explicitly qualified combinations retain their own work:
-clone-range boundary/error cases; shared-family faults, retained views and
-eviction; private/unwritten data policy cuts; remaining orphan replay and
-multi-checkpoint lifecycles; registry and maintenance failures; reclaim
-cursor/sealing; and cache split/collapse/reload failures. Interrupted fsync
-publication and resource/low-space refusals retain family-specific qualification.
+clone-range boundary/error cases; shared unlink and final-owner faults,
+retained views during shared transitions and eviction; unwritten-reservation
+data policy cuts; orphan replay branches and orphan I/O faults; registry and
+maintenance failures; reclaim-step faults and eviction during reclaim; and cache
+split/collapse/reload failures. Interrupted fsync publication and resource or
+low-space refusals beyond preallocation retain family-specific qualification.
+Reclaim cursor/sealing cuts, private data policy cuts, orphan multi-checkpoint
+lifecycles and shared write/replace faults have evidence in the sections above.
 These bounded tests do not close `a-cache` or `roadmap-31`.
