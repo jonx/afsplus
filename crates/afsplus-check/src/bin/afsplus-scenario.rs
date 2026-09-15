@@ -43,9 +43,22 @@ fn metadata(value: &afsplus_core::volume::ObjectMetadata) -> String {
     )
 }
 
+fn coverage(ranges: &[afsplus_core::volume::FileAllocationRange]) -> Result<String, String> {
+    let merged = afsplus_check::scenario::normalize_allocation(ranges)?;
+    if merged.is_empty() {
+        return Ok("-".into());
+    }
+    Ok(merged
+        .iter()
+        .map(|(offset, length, unwritten)| format!("{offset}:{length}:{}", u8::from(*unwritten)))
+        .collect::<Vec<_>>()
+        .join(","))
+}
+
 fn captured_observation(
     result: Result<Vec<afsplus_check::scenario::captured::View>, String>,
-) -> String {
+    normalized: bool,
+) -> Result<String, String> {
     let mut out = String::new();
     match result {
         Err(error) => out.push_str(&format!("snapshots error {}\n", hex(error.as_bytes()))),
@@ -67,6 +80,16 @@ fn captured_observation(
                         .map(|p| hex(p.as_bytes()))
                         .collect::<Vec<_>>()
                         .join(",");
+                    if normalized {
+                        // Version 9 compares layout-independent logical coverage.
+                        out.push_str(&format!(
+                            "entry {path} {} {} {}\n",
+                            metadata(&entry.metadata),
+                            hex(&entry.data),
+                            coverage(&entry.allocation)?
+                        ));
+                        continue;
+                    }
                     out.push_str(&format!(
                         "entry {path} {} {} {}\n",
                         metadata(&entry.metadata),
@@ -85,7 +108,7 @@ fn captured_observation(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 fn header(out: &mut impl Write, name: &str, length: usize) -> io::Result<()> {
@@ -188,7 +211,11 @@ fn run() -> Result<(), String> {
         operations: run.log,
     }
     .encode(limits)?;
-    let inspection = plan.inspect_checked(run.result.clone(), 16 * 1024 * 1024);
+    let inspection = plan.inspect_checked_with_orphans(
+        run.result.clone(),
+        16 * 1024 * 1024,
+        &run.orphan_candidates,
+    );
     let mut observed = if let Some(pages) = plan.cache_profile() {
         if inspection
             .cache_pages
@@ -232,6 +259,12 @@ fn run() -> Result<(), String> {
             .map(|report| hex(report.render_json().as_bytes()))
             .unwrap_or_else(|| "-".into())
     ));
+    if let Some(orphans) = inspection.orphans {
+        observed.push_str(&match orphans {
+            Err(error) => format!("orphans error {}\n", hex(error.as_bytes())),
+            Ok((count, bytes)) => format!("orphans {count} {bytes}\n"),
+        });
+    }
     match (inspection.linked, inspection.entries) {
         (Some(Err(error)), _) | (None, Err(error)) => {
             observed.push_str(&format!("observe error {}\n", hex(error.as_bytes())))
@@ -252,8 +285,21 @@ fn run() -> Result<(), String> {
                     LinkedKind::Directory => format!("directory {path} {links} {protection}\n"),
                     LinkedKind::File => {
                         let alias = *first.entry(entry.object_id).or_insert(index);
+                        let coverage = if entry.allocation.is_empty() {
+                            "-".to_owned()
+                        } else {
+                            entry
+                                .allocation
+                                .iter()
+                                .map(|(offset, length, unwritten)| {
+                                    format!("{offset}:{length}:{}", u8::from(*unwritten))
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        };
                         format!(
-                            "file {path} {links} {protection} {alias} {}\n",
+                            "file {path} {links} {protection} {alias} {} {} {coverage}\n",
+                            u8::from(entry.in_place),
                             hex(&entry.data)
                         )
                     }
@@ -280,7 +326,7 @@ fn run() -> Result<(), String> {
         }
     }
     if let Some(snapshots) = inspection.snapshots {
-        observed.push_str(&captured_observation(snapshots));
+        observed.push_str(&captured_observation(snapshots, plan.linked_observation())?);
     }
     // Semantic flight records bind operation indices and resolved object IDs to
     // half-open successful block-log ranges. V2 additionally carries internal

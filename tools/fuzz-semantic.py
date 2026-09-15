@@ -19,9 +19,15 @@ PROFILES = (2, 4, 8, "unlimited")
 BLOCK = 4096
 MAX_FILE_BYTES = 8224
 # Scenario JSON version selected by each generated operation family.
-FAMILY_VERSIONS = {"window": 5, "snapshot": 7, "namespace": 9}
+FAMILY_VERSIONS = {"window": 5, "snapshot": 7, "namespace": 9, "replace": 9, "orphan": 9,
+                   "space": 9, "batch": 9, "maintenance": 9, "captured": 9}
 CONTROLS = {"window": ("window-byte",), "snapshot": ("snapshot-entry",),
-            "namespace": ("link-count", "symlink-target", "protection", "clone-byte", "directory-rename")}
+            "namespace": ("link-count", "symlink-target", "protection", "clone-byte", "directory-rename"),
+            "replace": ("replaced-byte",), "orphan": ("orphan-count",), "space": ("reservation", "policy-flag"),
+            "batch": ("batch-path",), "maintenance": ("maintenance-entry",), "captured": ("captured-coverage",)}
+# Version-9 volume feature and orphan cleanup budget per family.
+FAMILY_POLICY = {"space": True}
+FAMILY_ORPHAN_EXTENTS = {"orphan": 2}
 SNAPSHOT_LIMITS = {"max_edit_records": 4096, "max_views": 16, "reclaim_records": 8}
 SYMLINK_TARGETS = ("a", "../up", "/absolute/path", "ünïcode/ταξί", "x" * 200, "loop/../loop")
 PROTECTIONS = (0, 1, 5, 0o755, 0xFFFFFFFF)
@@ -213,6 +219,25 @@ def payload(random, count):
     return bytes(random.next() & 255 for _ in range(count)).hex()
 
 
+def coverage(blocks):
+    """Normalized logical allocation: maximal intervals of equal reservation.
+
+    Adjacent blocks merge when their unwritten flag agrees, so the result
+    depends on which logical bytes are reserved and whether they read as
+    zeros, never on extent record boundaries or physical placement.
+    """
+    if blocks is None:
+        return None
+    merged = []
+    for block in sorted(blocks):
+        flag = blocks[block]
+        if merged and merged[-1]["offset"] + merged[-1]["length"] == block * BLOCK and merged[-1]["unwritten"] == flag:
+            merged[-1]["length"] += BLOCK
+        else:
+            merged.append({"offset": block * BLOCK, "length": BLOCK, "unwritten": flag})
+    return merged
+
+
 def node_path(nodes, label):
     path = []
     while label != "root":
@@ -291,7 +316,7 @@ class ObjectModel:
     generation and stamps operation index + 1 seconds. Captured allocation is
     modeled only for files whose data stays in logical block zero.
     """
-    def __init__(self):
+    def __init__(self, single_block=False, orphan_extents=1):
         self.generation = 1
         self.next_object = 16
         self.objects = {1: {"kind": "directory", "links": 1, "protection": 0, "created": [0, 0],
@@ -303,6 +328,17 @@ class ObjectModel:
         self.handles = set()
         self.clones = set()
         self.moved = set()
+        # Version-9 state: reserved-directory members, per-file policy and the
+        # cleanup budget in whole extent records (ADR-066).
+        self.single_block = single_block
+        self.orphan_extents = orphan_extents
+        self.orphaned = {}
+        self.replaced = set()
+        self.batched = set()
+        self.maintained = False
+        # Staged window namespace groups and their acknowledging log records.
+        self.staged = []
+        self.records = 0
 
     def path(self, label):
         path = []
@@ -364,16 +400,38 @@ class ObjectModel:
         identity = self.next_object
         self.next_object += 1
         self.objects[identity] = dict({"kind": kind, "links": 1, "protection": 0, "created": now,
-                                       "modified": now, "changed": now, "generation": self.generation}, **fields)
+                                       "modified": now, "changed": now, "generation": self.generation,
+                                       "policy": False}, **fields)
         return identity
 
     def apply(self, op, index):
         now = [index + 1, 0]
         kind = op["op"]
+        if self.staged and kind not in ("window_batch", "window_fsync", "window_commit", "remount"):
+            raise ValueError("model direct operation while a window is open")
         if kind == "sync":
             return
-        if kind == "remount":
+        if kind == "window_batch":
+            if not op["items"]:
+                raise ValueError("model window batch is empty")
+            self.staged.append([op["items"], False])
+        elif kind == "window_fsync":
+            if any(not acknowledged for _, acknowledged in self.staged):
+                if self.records >= 6:
+                    raise ValueError("model window fsync group exceeds the intent log")
+                for group in self.staged:
+                    group[1] = True
+                self.records += 1
+        elif kind == "window_commit":
+            self._publish(len(self.staged), now)
+        elif kind == "remount":
+            # A remount without a commit keeps exactly the acknowledged prefix.
+            self._publish(sum(1 for _, acknowledged in self.staged if acknowledged), now)
             self.handles.clear()
+        elif kind in ("reclaim_step", "snapshot_maintenance_step"):
+            # Namespace, bytes and captured views are invariant. The volume
+            # generation may advance, so no view is captured after a step.
+            self.maintained = True
         elif kind.startswith("snapshot_"):
             self._snapshot(kind, op["label"])
         elif kind in ("create", "mkdir", "symlink"):
@@ -381,7 +439,7 @@ class ObjectModel:
             extra = {}
             if kind == "create":
                 data = bytearray.fromhex(op["data"])
-                extra = {"data": data, "blocks": set(range(-(-len(data) // BLOCK)))}
+                extra = {"data": data, "blocks": {block: False for block in range(-(-len(data) // BLOCK))}}
             elif kind == "symlink":
                 extra = {"target": op["target"]}
             identity = self._new({"create": "file", "mkdir": "directory", "symlink": "symlink"}[kind], now, **extra)
@@ -398,8 +456,8 @@ class ObjectModel:
             # The executable CloneFile contract copies bytes, size, protection and
             # modification time into a new object with its own link and birth time.
             identity = self._new("file", now, protection=source["protection"], modified=source["modified"],
-                                 data=bytearray(source["data"]),
-                                 blocks=None if source["blocks"] is None else set(source["blocks"]))
+                                 data=bytearray(source["data"]), policy=False,
+                                 blocks=None if source["blocks"] is None else dict(source["blocks"]))
             source["changed"] = now
             self.clones.add(identity)
             self._bind(op, identity, now)
@@ -432,13 +490,21 @@ class ObjectModel:
             else:
                 if op["size"] == len(data):
                     return
+                shrink = op["size"] < len(data)
                 resize(data, op["size"])
                 touched = set()
             self.generation += 1
             node.update(modified=now, changed=now, generation=self.generation)
             if node["blocks"] is not None:
-                retained = -(-len(data) // BLOCK)
-                node["blocks"] = {block for block in node["blocks"] | touched if block < retained}
+                mapped = dict(node["blocks"])
+                # A written block leaves no reservation behind, whole or partial.
+                # A write keeps mappings past the end of file; a truncation
+                # releases every block beyond the retained logical size.
+                mapped.update({block: False for block in touched})
+                # A growing truncation releases nothing.
+                retained = -(-len(data) // BLOCK) if kind == "truncate" and shrink else None
+                node["blocks"] = mapped if retained is None else {
+                    block: flag for block, flag in mapped.items() if block < retained}
         elif kind == "rename":
             node = self._live(op["label"])
             old = self.names[op["label"]]
@@ -468,6 +534,86 @@ class ObjectModel:
             else:
                 del self.objects[self.names[op["label"]]["object"]]
             del self.names[op["label"]]
+        elif kind in ("rename_replace", "rename_replace_orphan"):
+            node = self._live(op["label"], "file")
+            victim = self._live(op["victim"], "file")
+            old, target = self.names[op["label"]], self.names[op["victim"]]
+            self._directory(op["parent"])
+            if (target["parent"], target["name"]) != (op["parent"], op["name"]):
+                raise ValueError("model victim does not name the replaced entry")
+            if old["object"] == target["object"]:
+                raise ValueError("model replacement requires distinct objects")
+            self.generation += 1
+            node["changed"] = now
+            self._touch(old["parent"], now)
+            self._touch(op["parent"], now)
+            del self.names[op["victim"]]
+            old.update(parent=op["parent"], name=op["name"])
+            victim["links"] -= 1
+            if victim["links"]:
+                victim["changed"] = now
+            elif kind == "rename_replace_orphan":
+                # The reserved directory holds the final link (ADR-066).
+                victim.update(links=1, changed=now)
+                self.orphaned[op["victim"]] = target["object"]
+            else:
+                del self.objects[target["object"]]
+            self.replaced.add(op["label"])
+        elif kind == "orphan_file":
+            node = self._live(op["label"], "file")
+            if node["links"] != 1:
+                raise ValueError("model orphan requires a final visible link")
+            self.generation += 1
+            self._touch(self.names[op["label"]]["parent"], now)
+            node["changed"] = now
+            self.orphaned[op["label"]] = self.names[op["label"]]["object"]
+            del self.names[op["label"]]
+        elif kind == "cleanup_orphan":
+            if op["label"] not in self.orphaned:
+                raise ValueError("model orphan label is not registered")
+            node = self.objects[self.orphaned[op["label"]]]
+            if node["blocks"] is None:
+                raise ValueError("model orphan layout is outside the extent model")
+            # A step removes whole extent records from the logical end and,
+            # once the layout is empty, the entry and record in the same call.
+            # The model admits only orphans whose layout fits one budget.
+            if node["blocks"] is not None and len(coverage(node["blocks"])) > self.orphan_extents:
+                raise ValueError("model orphan exceeds one budgeted cleanup step")
+            self.generation += 1
+            del self.objects[self.orphaned[op["label"]]]
+            del self.orphaned[op["label"]]
+        elif kind in ("preallocate", "preallocate_bounded"):
+            node = self._live(op["label"], "file")
+            if node["blocks"] is None:
+                raise ValueError("model preallocation outside the layout model")
+            if not op["length"]:
+                return
+            first = op["offset"] // BLOCK
+            last = -(-(op["offset"] + op["length"]) // BLOCK)
+            if kind == "preallocate_bounded" and last - first > op["max_blocks"]:
+                raise ValueError("model preallocation exceeds its block budget")
+            holes = [block for block in range(first, last) if block not in node["blocks"]]
+            if not holes:
+                return
+            reserved = dict(node["blocks"])
+            reserved.update({block: True for block in holes})
+            self.generation += 1
+            # Size, contents and modification time are untouched by a reservation.
+            node.update(blocks=reserved, changed=now)
+        elif kind == "set_data_policy":
+            node = self._live(op["label"], "file")
+            if node["policy"] != op["policy"]:
+                self.generation += 1
+                node.update(policy=op["policy"], changed=now)
+        elif kind == "restore_metadata":
+            node = self._live(op["label"])
+            wanted = {"protection": op["protection"], "created": [op["created"], 0],
+                      "modified": [op["modified"], 0], "changed": [op["changed"], 0]}
+            if any(node[key] != value for key, value in wanted.items()):
+                self.generation += 1
+                node.update(**wanted)
+        elif kind == "batch":
+            self._batch(op["items"], now)
         elif kind == "set_protection":
             node = self._live(op["label"])
             if node["protection"] != op["protection"]:
@@ -476,9 +622,74 @@ class ObjectModel:
         else:
             raise ValueError("unsupported model operation")
 
+    def _publish(self, count, now):
+        for items, _ in self.staged[:count]:
+            self._batch(items, now)
+        self.staged, self.records = [], 0
+
+    def _batch(self, items, now):
+        """One atomic transaction: every member publishes one generation."""
+        if not items:
+            raise ValueError("model batch is empty")
+        self.generation += 1
+        for item in items:
+            kind = item["op"]
+            if kind == "create":
+                self._insert(item)
+                data = bytearray.fromhex(item["data"])
+                identity = self.next_object
+                self.next_object += 1
+                self.objects[identity] = {"kind": "file", "links": 1, "protection": 0, "policy": False,
+                    "created": now, "modified": now, "changed": now, "generation": self.generation,
+                    "data": data, "blocks": {block: False for block in range(-(-len(data) // BLOCK))}}
+                self.used.add(item["label"])
+                self.batched.add(item["label"])
+                self.names[item["label"]] = {"object": identity, "parent": item["parent"],
+                                             "name": item["name"]}
+                self._touch(item["parent"], now)
+                continue
+            node = self._live(item["label"], "file")
+            entry = self.names[item["label"]]
+            if kind == "delete":
+                self._touch(entry["parent"], now)
+                node["links"] -= 1
+                if node["links"]:
+                    node["changed"] = now
+                else:
+                    del self.objects[entry["object"]]
+                del self.names[item["label"]]
+                continue
+            self._directory(item["parent"])
+            if kind == "rename":
+                self._vacant(item["parent"], item["name"])
+            else:
+                target = self.names[item["victim"]]
+                if (target["parent"], target["name"]) != (item["parent"], item["name"]):
+                    raise ValueError("model victim does not name the replaced entry")
+                if target["object"] == entry["object"]:
+                    raise ValueError("model replacement requires distinct objects")
+                victim = self.objects[target["object"]]
+                victim["links"] -= 1
+                if victim["links"]:
+                    victim["changed"] = now
+                else:
+                    del self.objects[target["object"]]
+                del self.names[item["victim"]]
+            node["changed"] = now
+            self._touch(entry["parent"], now)
+            self._touch(item["parent"], now)
+            entry.update(parent=item["parent"], name=item["name"])
+
+    def orphan_state(self):
+        """Reserved-directory entry count and the sizes it still names."""
+        return {"count": len(self.orphaned),
+                "bytes": sum(len(self.objects[identity]["data"]) for identity in self.orphaned.values())}
+
     def _snapshot(self, kind, label):
         registered = self.views.get(label) is not None
         if kind == "snapshot_create":
+            if self.maintained:
+                raise ValueError("model captures no view after a maintenance step")
             if label in self.snapshot_ids:
                 raise ValueError("model snapshot label reused")
             if sum(view is not None for view in self.views.values()) >= SNAPSHOT_LIMITS["max_views"]:
@@ -515,7 +726,9 @@ class ObjectModel:
         if identity == 1:
             allocated = BLOCK
         elif kind == "file":
-            if node["blocks"] is None or not node["blocks"] <= {0}:
+            if node["blocks"] is None:
+                raise ValueError("captured allocation outside the model")
+            if self.single_block and not set(node["blocks"]) <= {0}:
                 raise ValueError("captured allocation outside the single-block model")
             allocated = BLOCK * len(node["blocks"])
         else:
@@ -534,8 +747,7 @@ class ObjectModel:
             metadata = self.metadata(name["object"])
             data = (node["data"].hex() if node["kind"] == "file"
                     else node["target"].encode().hex() if node["kind"] == "symlink" else "")
-            allocation = ([{"offset": 0, "length": BLOCK, "unwritten": False}]
-                          if node["kind"] == "file" and metadata["allocated"] else [])
+            allocation = coverage(node["blocks"]) if node["kind"] == "file" else []
             entries.append({"path": self.path(label), "metadata": metadata, "data": data, "allocation": allocation})
         return {"id": identity, "generation": self.generation, "committed_tx_id": self.generation,
                 "root": self.metadata(1), "entries": sorted(entries, key=lambda entry: entry["path"])}
@@ -565,7 +777,8 @@ class ObjectModel:
             entry = {"path": self.path(label), "kind": node["kind"], "links": node["links"],
                      "protection": node["protection"]}
             if node["kind"] == "file":
-                entry.update(alias=first.setdefault(identity, index), data=node["data"].hex())
+                entry.update(alias=first.setdefault(identity, index), policy=node["policy"],
+                             data=node["data"].hex(), alloc=coverage(node["blocks"]))
             elif node["kind"] == "symlink":
                 entry["target"] = node["target"]
             result.append(entry)
@@ -875,7 +1088,521 @@ def generate_namespace(seed, steps):
     return operations
 
 
-GENERATORS = {"window": generate_window, "snapshot": generate_snapshot, "namespace": generate_namespace}
+
+
+class Sequence:
+    """Shared version-9 scaffolding: independent model, emitted operations, names."""
+    def __init__(self, family, seed):
+        self.random = Random(seed)
+        self.model = ObjectModel(orphan_extents=FAMILY_ORPHAN_EXTENTS.get(family, 1))
+        self.operations = []
+        self.serial = 0
+
+    def emit(self, **op):
+        self.model.apply(op, len(self.operations))
+        self.operations.append(op)
+
+    def fresh(self, prefix="n"):
+        self.serial += 1
+        return f"{prefix}{self.serial}", f"{self.serial:04d}-{prefix}-" + prefix * 20
+
+    def files(self):
+        return self.model.labels("file")
+
+    def directories(self):
+        return ["root"] + self.model.labels("directory")
+
+    def entry(self, label):
+        return self.model.names[label]["parent"], self.model.names[label]["name"]
+
+
+def replacements(model, files):
+    """Source/victim pairs that name distinct live file objects."""
+    return [(source, victim) for source in files for victim in files
+            if source != victim and model.names[source]["object"] != model.names[victim]["object"]]
+
+
+def orphanable(model, files):
+    """Final links whose layout one budgeted cleanup step can empty."""
+    result = []
+    for label in files:
+        node = model.objects[model.names[label]["object"]]
+        if node["links"] != 1 or node["blocks"] is None:
+            continue
+        if len(coverage(node["blocks"])) > model.orphan_extents:
+            continue
+        result.append(label)
+    return result
+
+
+def generate_replace(seed, steps):
+    sequence = Sequence("replace", seed)
+    model, random, emit = sequence.model, sequence.random, sequence.emit
+    # Ladder: plain replacement, a hard-linked victim that survives, a
+    # cross-directory replacement and a replaced file read after remount.
+    emit(op="mkdir", label="d", parent="root", name="dir")
+    emit(op="create", label="f", parent="root", name="source", data=payload(random, 5000))
+    emit(op="create", label="g", parent="root", name="target", data=payload(random, 33))
+    emit(op="rename_replace", label="f", victim="g", parent="root", name="target")
+    emit(op="create", label="h", parent="d", name="kept", data=payload(random, 7))
+    emit(op="link", label="h2", source="h", parent="root", name="alias")
+    emit(op="create", label="v", parent="d", name="victim", data=payload(random, 1))
+    emit(op="rename_replace", label="v", victim="h2", parent="root", name="alias")
+    emit(op="create", label="p", parent="d", name="moved", data=payload(random, 4097))
+    emit(op="rename_replace", label="p", victim="h", parent="d", name="kept")
+    emit(op="write", label="p", offset=0, data="ff")
+    emit(op="sync")
+    emit(op="remount")
+    for _ in range(4):
+        label, name = sequence.fresh("k")
+        emit(op="create", label=label, parent="root", name=name, data=payload(random, random.pick((0, 1, 33))))
+    while len(sequence.operations) < steps:
+        files, directories = sequence.files(), sequence.directories()
+        empty = [d for d in directories[1:] if not model.children(d)]
+        pairs = replacements(model, files)
+        choices = ["sync", "remount"]
+        if len(model.names) <= 40:
+            choices += ["create", "create"]
+            if len(directories) < 6: choices.append("mkdir")
+            if files: choices.append("link")
+        if files: choices += ["write", "truncate", "rename", "unlink"]
+        if pairs: choices += ["rename_replace"] * 4
+        if empty: choices.append("rmdir")
+        kind = random.pick(choices)
+        if kind in ("create", "mkdir"):
+            label, name = sequence.fresh("k")
+            emit(op=kind, label=label, parent=random.pick(directories), name=name,
+                 **({"data": payload(random, random.pick((0, 1, 33, 5000)))} if kind == "create" else {}))
+        elif kind == "link":
+            label, name = sequence.fresh("k")
+            emit(op=kind, label=label, source=random.pick(files), parent=random.pick(directories), name=name)
+        elif kind == "write":
+            offset = random.pick((0, 1, 4095, 4096))
+            emit(op=kind, label=random.pick(files), offset=offset,
+                 data=payload(random, random.pick(tuple(c for c in (1, 7, 300) if offset + c <= MAX_FILE_BYTES))))
+        elif kind == "truncate":
+            label = random.pick(files)
+            current = len(model.file_data(label))
+            emit(op=kind, label=label,
+                 size=random.pick(tuple(s for s in (0, 1, 4095, 4096, 8193) if s != current)))
+        elif kind == "rename":
+            emit(op=kind, label=random.pick(files), parent=random.pick(directories), name=sequence.fresh("k")[1])
+        elif kind == "rename_replace":
+            source, victim = random.pick(pairs)
+            parent, name = sequence.entry(victim)
+            emit(op=kind, label=source, victim=victim, parent=parent, name=name)
+        elif kind in ("unlink", "rmdir"):
+            emit(op=kind, label=random.pick(files if kind == "unlink" else empty))
+        else:
+            emit(op=kind)
+    return sequence.operations
+
+
+def generate_orphan(seed, steps):
+    sequence = Sequence("orphan", seed)
+    model, random, emit = sequence.model, sequence.random, sequence.emit
+    # Ladder: a data step and an object step, an empty orphan removed in one
+    # step, an orphaned replacement victim and orphan state across a remount.
+    emit(op="mkdir", label="d", parent="root", name="dir")
+    emit(op="create", label="f", parent="d", name="file", data=payload(random, 5000))
+    emit(op="orphan_file", label="f")
+    emit(op="cleanup_orphan", label="f")
+    emit(op="create", label="e", parent="root", name="empty", data="")
+    emit(op="orphan_file", label="e")
+    emit(op="cleanup_orphan", label="e")
+    emit(op="create", label="g", parent="root", name="target", data=payload(random, 33))
+    emit(op="create", label="v", parent="d", name="source", data=payload(random, 7))
+    emit(op="rename_replace_orphan", label="v", victim="g", parent="root", name="target")
+    emit(op="remount")
+    emit(op="cleanup_orphan", label="g")
+    emit(op="create", label="h", parent="root", name="held", data=payload(random, 4096))
+    # A hole gives the orphan two extent records, at the cleanup budget.
+    emit(op="write", label="h", offset=8191, data=payload(random, 7))
+    emit(op="orphan_file", label="h")
+    emit(op="sync")
+    emit(op="remount")
+    emit(op="cleanup_orphan", label="h")
+    emit(op="create", label="r", parent="root", name="retained", data=payload(random, 33))
+    emit(op="orphan_file", label="r")
+    for _ in range(4):
+        label, name = sequence.fresh("k")
+        emit(op="create", label=label, parent="root", name=name, data=payload(random, random.pick((0, 1, 33))))
+    while len(sequence.operations) < steps:
+        files, directories = sequence.files(), sequence.directories()
+        victims = orphanable(model, files)
+        pairs = [(s, v) for s, v in replacements(model, files) if v in victims]
+        pending = sorted(model.orphaned)
+        choices = ["sync", "remount"]
+        if len(model.names) <= 40:
+            choices += ["create", "create"]
+            if len(directories) < 6: choices.append("mkdir")
+        if files: choices += ["write", "truncate", "unlink", "rename"]
+        if victims: choices += ["orphan_file"] * 3
+        if pairs: choices += ["rename_replace_orphan"] * 2
+        if pending: choices += ["cleanup_orphan"] * 4
+        kind = random.pick(choices)
+        if kind in ("create", "mkdir"):
+            label, name = sequence.fresh("k")
+            emit(op=kind, label=label, parent=random.pick(directories), name=name,
+                 **({"data": payload(random, random.pick((0, 1, 33, 5000)))} if kind == "create" else {}))
+        elif kind == "write":
+            # Contiguous growth keeps an orphan inside the budgeted extent model.
+            label = random.pick(files)
+            size = len(model.file_data(label))
+            offset = random.pick(tuple(o for o in (0, 1, size) if o <= size)) if size else 0
+            emit(op=kind, label=label, offset=offset,
+                 data=payload(random, random.pick(tuple(c for c in (1, 7, 300) if offset + c <= MAX_FILE_BYTES))))
+        elif kind == "truncate":
+            label = random.pick(files)
+            current = len(model.file_data(label))
+            emit(op=kind, label=label, size=random.pick(tuple(s for s in (0, 1, 4095, 4096) if s != current)))
+        elif kind == "rename":
+            emit(op=kind, label=random.pick(files), parent=random.pick(directories), name=sequence.fresh("k")[1])
+        elif kind == "rename_replace_orphan":
+            source, victim = random.pick(pairs)
+            parent, name = sequence.entry(victim)
+            emit(op=kind, label=source, victim=victim, parent=parent, name=name)
+        elif kind in ("orphan_file", "cleanup_orphan"):
+            emit(op=kind, label=random.pick(victims if kind == "orphan_file" else pending))
+        elif kind == "unlink":
+            emit(op=kind, label=random.pick(files))
+        else:
+            emit(op=kind)
+    return sequence.operations
+
+
+def generate_space(seed, steps):
+    sequence = Sequence("space", seed)
+    model, random, emit = sequence.model, sequence.random, sequence.emit
+    # Ladder: a reservation past the written blocks, a write that consumes one
+    # reserved block, a tightly bounded reservation, the persistent policy in
+    # both directions and an archived metadata restore.
+    emit(op="mkdir", label="d", parent="root", name="dir")
+    emit(op="create", label="f", parent="d", name="file", data=payload(random, 4097))
+    emit(op="preallocate", label="f", offset=8192, length=8192)
+    emit(op="write", label="f", offset=8192, data=payload(random, 7))
+    emit(op="preallocate_bounded", label="f", offset=0, length=1, max_blocks=1, max_records=4096)
+    emit(op="set_data_policy", label="f", policy=True)
+    emit(op="write", label="f", offset=0, data="ff")
+    emit(op="set_data_policy", label="f", policy=False)
+    emit(op="create", label="g", parent="root", name="kept", data=payload(random, 33))
+    emit(op="set_data_policy", label="g", policy=True)
+    emit(op="restore_metadata", label="g", protection=5, created=1, modified=2, changed=3)
+    emit(op="restore_metadata", label="d", protection=493, created=4, modified=5, changed=6)
+    emit(op="preallocate", label="g", offset=4096, length=4096)
+    emit(op="truncate", label="g", size=1)
+    emit(op="sync")
+    emit(op="remount")
+    for _ in range(4):
+        label, name = sequence.fresh("k")
+        emit(op="create", label=label, parent="root", name=name, data=payload(random, random.pick((0, 1, 33))))
+    while len(sequence.operations) < steps:
+        files, directories = sequence.files(), sequence.directories()
+        mapped = [label for label in files
+                  if model.objects[model.names[label]["object"]]["blocks"] is not None]
+        empty = [d for d in directories[1:] if not model.children(d)]
+        choices = ["sync", "remount"]
+        if len(model.names) <= 40:
+            choices += ["create", "create"]
+            if len(directories) < 6: choices.append("mkdir")
+        if files: choices += ["write", "truncate", "unlink", "rename", "set_protection", "restore_metadata"]
+        if mapped: choices += ["preallocate"] * 3 + ["preallocate_bounded"] * 2 + ["set_data_policy"] * 2
+        if empty: choices.append("rmdir")
+        kind = random.pick(choices)
+        if kind in ("create", "mkdir"):
+            label, name = sequence.fresh("k")
+            emit(op=kind, label=label, parent=random.pick(directories), name=name,
+                 **({"data": payload(random, random.pick((0, 1, 33, 5000)))} if kind == "create" else {}))
+        elif kind == "write":
+            offset = random.pick((0, 1, 4095, 4096, 8191))
+            emit(op=kind, label=random.pick(files), offset=offset,
+                 data=payload(random, random.pick(tuple(c for c in (1, 7, 300) if offset + c <= MAX_FILE_BYTES))))
+        elif kind == "truncate":
+            label = random.pick(files)
+            current = len(model.file_data(label))
+            emit(op=kind, label=label,
+                 size=random.pick(tuple(s for s in (0, 1, 4095, 4096, 8193) if s != current)))
+        elif kind in ("preallocate", "preallocate_bounded"):
+            label = random.pick(mapped)
+            offset = random.pick((0, 4096, 8192, 12288))
+            length = random.pick((1, 4096, 8192))
+            operation = {"op": kind, "label": label, "offset": offset, "length": length}
+            if kind == "preallocate_bounded":
+                # The block budget is exact. A record budget counts stored
+                # extents, whose boundaries follow physical placement, so the
+                # generator uses the admission maximum for it.
+                first, last = offset // BLOCK, -(-(offset + length) // BLOCK)
+                operation.update(max_blocks=last - first, max_records=4096)
+            emit(**operation)
+        elif kind == "set_data_policy":
+            label = random.pick(mapped)
+            emit(op=kind, label=label,
+                 policy=not model.objects[model.names[label]["object"]]["policy"])
+        elif kind == "restore_metadata":
+            label = random.pick(files + directories[1:])
+            emit(op=kind, label=label, protection=random.pick(PROTECTIONS),
+                 created=random.pick((1, 2, 3)), modified=random.pick((4, 5)), changed=random.pick((6, 7)))
+        elif kind == "set_protection":
+            emit(op=kind, label=random.pick(files), protection=random.pick(PROTECTIONS))
+        elif kind == "rename":
+            emit(op=kind, label=random.pick(files), parent=random.pick(directories), name=sequence.fresh("k")[1])
+        elif kind in ("unlink", "rmdir"):
+            emit(op=kind, label=random.pick(files if kind == "unlink" else empty))
+        else:
+            emit(op=kind)
+    return sequence.operations
+
+
+def generate_batch(seed, steps):
+    sequence = Sequence("batch", seed)
+    model, random, emit = sequence.model, sequence.random, sequence.emit
+    # Ladder: a create group, a mixed move/delete group, an atomic replacement
+    # inside a group, a staged window group and its acknowledged prefix.
+    emit(op="mkdir", label="d", parent="root", name="dir")
+    emit(op="batch", items=[{"op": "create", "label": "a", "parent": "root", "name": "a",
+                             "data": payload(random, 4097)},
+                            {"op": "create", "label": "b", "parent": "d", "name": "b",
+                             "data": payload(random, 33)}])
+    emit(op="batch", items=[{"op": "rename", "label": "a", "parent": "d", "name": "moved"},
+                            {"op": "create", "label": "c", "parent": "root", "name": "c",
+                             "data": payload(random, 7)}])
+    emit(op="batch", items=[{"op": "replace", "label": "b", "victim": "a", "parent": "d",
+                             "name": "moved"},
+                            {"op": "delete", "label": "c"}])
+    emit(op="window_batch", items=[{"op": "create", "label": "w", "parent": "root", "name": "w",
+                                    "data": payload(random, 1)}])
+    emit(op="window_fsync")
+    emit(op="window_batch", items=[{"op": "rename", "label": "w", "parent": "d", "name": "w2"}])
+    emit(op="window_commit")
+    emit(op="sync")
+    emit(op="remount")
+    for _ in range(4):
+        label, name = sequence.fresh("k")
+        emit(op="create", label=label, parent="root", name=name, data=payload(random, random.pick((0, 1, 33))))
+    while len(sequence.operations) < steps:
+        files, directories = sequence.files(), sequence.directories()
+        empty = [d for d in directories[1:] if not model.children(d)]
+        choices = ["sync", "remount", "batch", "batch", "batch"]
+        if len(model.names) <= 40:
+            choices.append("create")
+            if len(directories) < 6: choices.append("mkdir")
+        if files: choices += ["write", "truncate", "unlink"]
+        if empty: choices.append("rmdir")
+        kind = random.pick(choices)
+        if kind == "batch":
+            items = []
+            taken = set()
+            for _ in range(1 + random.next() % 4):
+                live = [label for label in sequence.files() if label not in taken]
+                pairs = [(s, v) for s, v in replacements(model, live) if s not in taken and v not in taken]
+                members = ["create"]
+                if live: members += ["rename", "delete"]
+                if pairs: members.append("replace")
+                member = random.pick(members)
+                if member == "create":
+                    label, name = sequence.fresh("k")
+                    items.append({"op": "create", "label": label, "parent": random.pick(directories),
+                                  "name": name, "data": payload(random, random.pick((0, 1, 33)))})
+                    taken.add(label)
+                    continue
+                if member == "replace":
+                    source, victim = random.pick(pairs)
+                    parent, name = sequence.entry(victim)
+                    items.append({"op": "replace", "label": source, "victim": victim,
+                                  "parent": parent, "name": name})
+                    taken.update((source, victim))
+                    continue
+                label = random.pick(live)
+                taken.add(label)
+                if member == "delete":
+                    items.append({"op": "delete", "label": label})
+                else:
+                    items.append({"op": "rename", "label": label, "parent": random.pick(directories),
+                                  "name": sequence.fresh("k")[1]})
+            emit(op="batch", items=items)
+        elif kind in ("create", "mkdir"):
+            label, name = sequence.fresh("k")
+            emit(op=kind, label=label, parent=random.pick(directories), name=name,
+                 **({"data": payload(random, random.pick((0, 1, 33)))} if kind == "create" else {}))
+        elif kind == "write":
+            offset = random.pick((0, 1, 4095, 4096))
+            emit(op=kind, label=random.pick(files), offset=offset,
+                 data=payload(random, random.pick(tuple(c for c in (1, 7, 300) if offset + c <= MAX_FILE_BYTES))))
+        elif kind == "truncate":
+            label = random.pick(files)
+            current = len(model.file_data(label))
+            emit(op=kind, label=label, size=random.pick(tuple(s for s in (0, 1, 4095, 4096) if s != current)))
+        elif kind in ("unlink", "rmdir"):
+            emit(op=kind, label=random.pick(files if kind == "unlink" else empty))
+        else:
+            emit(op=kind)
+    return sequence.operations
+
+
+def generate_maintenance(seed, steps):
+    sequence = Sequence("maintenance", seed)
+    model, random, emit = sequence.model, sequence.random, sequence.emit
+    # Ladder: every view is captured before the first maintenance step, then
+    # namespace churn produces reclaimable capacity and the steps drain it.
+    emit(op="mkdir", label="d", parent="root", name="dir")
+    emit(op="create", label="f", parent="d", name="file", data=payload(random, 5000))
+    emit(op="snapshot_create", label="s1")
+    emit(op="snapshot_open", label="s1")
+    emit(op="write", label="f", offset=0, data=payload(random, 7))
+    emit(op="snapshot_create", label="s2")
+    emit(op="snapshot_inspect", label="s1")
+    emit(op="snapshot_close", label="s1")
+    emit(op="create", label="g", parent="root", name="garbage", data=payload(random, 4097))
+    emit(op="unlink", label="g")
+    emit(op="truncate", label="f", size=1)
+    for _ in range(3):
+        emit(op="reclaim_step")
+    for _ in range(3):
+        emit(op="snapshot_maintenance_step")
+    emit(op="remount")
+    emit(op="reclaim_step")
+    emit(op="snapshot_maintenance_step")
+    emit(op="snapshot_open", label="s2")
+    emit(op="snapshot_inspect", label="s2")
+    emit(op="snapshot_close", label="s2")
+    emit(op="snapshot_delete", label="s1")
+    emit(op="reclaim_step")
+    emit(op="snapshot_maintenance_step")
+    emit(op="sync")
+    emit(op="remount")
+    for _ in range(4):
+        label, name = sequence.fresh("k")
+        emit(op="create", label=label, parent="root", name=name, data=payload(random, random.pick((0, 1, 33))))
+    while len(sequence.operations) < steps:
+        files, directories = sequence.files(), sequence.directories()
+        empty = [d for d in directories[1:] if not model.children(d)]
+        live = sorted(label for label, view in model.views.items() if view is not None)
+        # The ladder view survives every case, so a captured oracle always applies.
+        closed = [label for label in live if label not in model.handles and label != "s2"]
+        opened = sorted(model.handles)
+        choices = ["sync", "remount"] + ["reclaim_step"] * 4 + ["snapshot_maintenance_step"] * 4
+        if len(model.names) <= 24:
+            choices.append("create")
+            if len(directories) < 5: choices.append("mkdir")
+        if files: choices += ["write", "truncate", "unlink"]
+        if empty: choices.append("rmdir")
+        if closed: choices += ["snapshot_open", "snapshot_delete"]
+        if opened: choices += ["snapshot_inspect", "snapshot_close"]
+        kind = random.pick(choices)
+        if kind in ("create", "mkdir"):
+            label, name = sequence.fresh("k")
+            emit(op=kind, label=label, parent=random.pick(directories), name=name,
+                 **({"data": payload(random, random.pick((0, 1, 33, 4097)))} if kind == "create" else {}))
+        elif kind == "write":
+            offset = random.pick((0, 1, 4095, 4096))
+            emit(op=kind, label=random.pick(files), offset=offset,
+                 data=payload(random, random.pick(tuple(c for c in (1, 7, 300) if offset + c <= MAX_FILE_BYTES))))
+        elif kind == "truncate":
+            label = random.pick(files)
+            current = len(model.file_data(label))
+            emit(op=kind, label=label, size=random.pick(tuple(s for s in (0, 1, 4096, 8193) if s != current)))
+        elif kind in ("unlink", "rmdir"):
+            emit(op=kind, label=random.pick(files if kind == "unlink" else empty))
+        elif kind in ("snapshot_open", "snapshot_delete"):
+            emit(op=kind, label=random.pick(closed))
+        elif kind in ("snapshot_inspect", "snapshot_close"):
+            emit(op=kind, label=random.pick(opened))
+        else:
+            emit(op=kind)
+    return sequence.operations
+
+
+def generate_captured(seed, steps):
+    sequence = Sequence("captured", seed)
+    model, random, emit = sequence.model, sequence.random, sequence.emit
+    # Ladder: a view over a multi-block file, a hard link, a symlink, a clone
+    # and a reservation, then independent change of each after the capture.
+    emit(op="mkdir", label="a", parent="root", name="alpha")
+    emit(op="create", label="f", parent="a", name="file", data=payload(random, 5000))
+    emit(op="link", label="l", source="f", parent="root", name="alias")
+    emit(op="symlink", label="s", parent="root", name="sym", target="alpha/file")
+    emit(op="clone_file", label="c", source="f", parent="root", name="clone")
+    emit(op="preallocate", label="f", offset=8192, length=8192)
+    emit(op="snapshot_create", label="v1")
+    emit(op="snapshot_open", label="v1")
+    emit(op="snapshot_inspect", label="v1")
+    emit(op="write", label="c", offset=4096, data=payload(random, 7))
+    emit(op="truncate", label="f", size=4096)
+    emit(op="unlink", label="l")
+    emit(op="set_protection", label="f", protection=5)
+    emit(op="snapshot_create", label="v2")
+    emit(op="snapshot_close", label="v1")
+    emit(op="remount")
+    emit(op="snapshot_open", label="v2")
+    emit(op="snapshot_inspect", label="v2")
+    emit(op="snapshot_close", label="v2")
+    emit(op="snapshot_delete", label="v1")
+    emit(op="sync")
+    emit(op="remount")
+    for _ in range(4):
+        label, name = sequence.fresh("k")
+        emit(op="create", label=label, parent="root", name=name, data=payload(random, random.pick((0, 1, 33))))
+    while len(sequence.operations) < steps:
+        files, directories = sequence.files(), sequence.directories()
+        symlinks = model.labels("symlink")
+        shallow = [d for d in directories if len(model.path(d)) < 2]
+        empty = [d for d in directories[1:] if not model.children(d)]
+        live = sorted(label for label, view in model.views.items() if view is not None)
+        closed = [label for label in live if label not in model.handles]
+        opened = sorted(model.handles)
+        choices = ["sync", "remount"]
+        if len(model.names) <= 24:
+            choices += ["create", "symlink"]
+            if len(directories) < 5: choices.append("mkdir")
+            if files: choices += ["link", "clone_file"]
+        if files: choices += ["write", "truncate", "unlink", "rename", "set_protection", "preallocate"]
+        if symlinks: choices.append("unlink_symlink")
+        if empty: choices.append("rmdir")
+        if len(live) < 6: choices += ["snapshot_create"] * 2
+        if closed: choices += ["snapshot_open", "snapshot_delete"]
+        if opened: choices += ["snapshot_inspect", "snapshot_close"]
+        kind = random.pick(choices)
+        if kind in ("create", "mkdir", "symlink"):
+            label, name = sequence.fresh("k")
+            emit(op=kind, label=label, parent=random.pick(shallow if kind == "mkdir" else directories),
+                 name=name, **({"data": payload(random, random.pick((0, 1, 33, 5000)))} if kind == "create"
+                               else {"target": random.pick(SYMLINK_TARGETS)} if kind == "symlink" else {}))
+        elif kind in ("link", "clone_file"):
+            label, name = sequence.fresh("k")
+            emit(op=kind, label=label, source=random.pick(files), parent=random.pick(directories), name=name)
+        elif kind == "write":
+            offset = random.pick((0, 1, 4095, 4096))
+            emit(op=kind, label=random.pick(files), offset=offset,
+                 data=payload(random, random.pick(tuple(c for c in (1, 7, 300) if offset + c <= MAX_FILE_BYTES))))
+        elif kind == "truncate":
+            label = random.pick(files)
+            current = len(model.file_data(label))
+            emit(op=kind, label=label, size=random.pick(tuple(s for s in (0, 1, 4096, 8193) if s != current)))
+        elif kind == "preallocate":
+            emit(op=kind, label=random.pick(files), offset=random.pick((0, 4096, 8192)),
+                 length=random.pick((1, 4096, 8192)))
+        elif kind == "set_protection":
+            emit(op=kind, label=random.pick(files), protection=random.pick(PROTECTIONS))
+        elif kind == "rename":
+            emit(op=kind, label=random.pick(files), parent=random.pick(directories), name=sequence.fresh("k")[1])
+        elif kind in ("unlink", "unlink_symlink", "rmdir"):
+            emit(op=kind, label=random.pick(files if kind == "unlink"
+                                            else symlinks if kind == "unlink_symlink" else empty))
+        elif kind == "snapshot_create":
+            emit(op=kind, label=sequence.fresh("s")[0])
+        elif kind in ("snapshot_open", "snapshot_delete"):
+            emit(op=kind, label=random.pick(closed))
+        elif kind in ("snapshot_inspect", "snapshot_close"):
+            emit(op=kind, label=random.pick(opened))
+        else:
+            emit(op=kind)
+    return sequence.operations
+
+
+GENERATORS = {"window": generate_window, "snapshot": generate_snapshot, "namespace": generate_namespace,
+              "replace": generate_replace, "orphan": generate_orphan, "space": generate_space,
+              "batch": generate_batch, "maintenance": generate_maintenance,
+              "captured": generate_captured}
 
 
 def generate_family(family, seed, steps):
@@ -889,8 +1616,9 @@ def generate_family(family, seed, steps):
 def family_case(family, seed, steps, prefix, pages):
     """Scenario plus the independent model that computed its exact expected state."""
     runner.scenario.integer(prefix, 1, steps)
+    version = FAMILY_VERSIONS[family]
     operations = generate_family(family, seed, steps)[:prefix] + [{"op": "remount"}]
-    value = {"version": FAMILY_VERSIONS[family],
+    value = {"version": version,
              "volume": {"block_size": 4096, "blocks": 512, "region_size": 64, "log_slots": 8,
                         "tree_cache_pages": pages},
              "flight_capacity": 32, "flight_categories": 63 if family == "window" else 127,
@@ -901,11 +1629,16 @@ def family_case(family, seed, steps, prefix, pages):
             model.apply(op)
         value["expected"] = model.committed.expected()
     else:
-        model = ObjectModel()
+        model = ObjectModel(single_block=family == "snapshot",
+                            orphan_extents=FAMILY_ORPHAN_EXTENTS.get(family, 1))
         for index, op in enumerate(operations):
             model.apply(op, index)
         value.update(expected=model.entries() if family == "snapshot" else model.linked(),
                      snapshot_limits=dict(SNAPSHOT_LIMITS), expected_snapshots=model.snapshots())
+        if version >= 9:
+            value.update(data_policy=FAMILY_POLICY.get(family, False),
+                         orphan_extents=FAMILY_ORPHAN_EXTENTS.get(family, 1),
+                         expected_orphans=model.orphan_state())
     runner.scenario.validate(runner.encoded(value))
     return value, model
 
@@ -930,6 +1663,52 @@ def apply_control(control, value, model):
                 entry["data"] = flip(entry["data"])
                 return [str(view["id"])] + entry["path"]
         return None
+    if control in ("maintenance-entry", "captured-coverage"):
+        for view in value["expected_snapshots"]:
+            if control == "maintenance-entry":
+                entry = first(view["entries"], lambda e: e["metadata"]["kind"] == "file" and e["data"])
+                if entry is not None:
+                    entry["data"] = flip(entry["data"])
+                    return [str(view["id"])] + entry["path"]
+            else:
+                entry = first(view["entries"], lambda e: e["allocation"])
+                if entry is not None:
+                    entry["allocation"][-1]["length"] += BLOCK
+                    return [str(view["id"])] + entry["path"]
+        return None
+    if control == "reservation":
+        entry = first(expected, lambda e: e["kind"] == "file" and e.get("alloc"))
+        if entry is None:
+            return None
+        entry["alloc"][-1]["length"] += BLOCK
+        return entry["path"]
+    if control == "policy-flag":
+        entry = first(expected, lambda e: e["kind"] == "file")
+        if entry is None:
+            return None
+        entry["policy"] = not entry["policy"]
+        return entry["path"]
+    if control == "batch-path":
+        paths = [model.path(label) for label in sorted(model.batched) if label in model.names]
+        entry = first(expected, lambda e: e["path"] in paths)
+        if entry is None:
+            return None
+        location = entry["path"]
+        entry["path"] = location[:-1] + [location[-1] + "~"]
+        return location
+    if control == "orphan-count":
+        orphans = value["expected_orphans"]
+        if not orphans["count"] and not orphans["bytes"]:
+            return None
+        orphans["count"] = orphans["count"] - 1 if orphans["count"] else 1
+        return ["orphans", str(orphans["count"])]
+    if control == "replaced-byte":
+        paths = [model.path(label) for label in sorted(model.replaced) if label in model.names]
+        entry = first(expected, lambda e: e["kind"] == "file" and e["data"] and e["path"] in paths)
+        if entry is None:
+            return None
+        entry["data"] = flip(entry["data"])
+        return entry["path"]
     if control == "window-byte":
         paths = [node_path(model.committed.nodes, label) for label in sorted(model.touched)
                  if label in model.committed.nodes]

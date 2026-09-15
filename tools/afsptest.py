@@ -120,8 +120,12 @@ def structural_success(actual):
             and all(actual[key] is not None and actual[key]["clean"] for key in ("raw_check", "recovered_check")))
 
 
-def captured_observation(lines):
-    """Decode the bounded historical-view section; absence is never an empty view."""
+def captured_observation(lines, normalized=False):
+    """Decode the bounded historical-view section; absence is never an empty view.
+
+    Version 9 carries one normalized coverage field per entry instead of a
+    range count followed by one record per stored extent.
+    """
     cursor = iter(lines)
 
     def take(prefix, count):
@@ -182,13 +186,19 @@ def captured_observation(lines):
                     raise ValueError("captured content budget")
                 remaining_bytes -= len(contents)
                 entry["data"] = contents.hex()
-                count_ranges = number(fields[15], remaining_ranges)
+                if normalized:
+                    entry["allocation"] = allocation(fields[15])
+                    count_ranges = len(entry["allocation"])
+                    if count_ranges > remaining_ranges:
+                        raise ValueError("captured allocation budget")
+                else:
+                    count_ranges = number(fields[15], remaining_ranges)
+                    entry["allocation"] = []
+                    for _ in range(count_ranges):
+                        offset, length, unwritten = take("range", 4)
+                        entry["allocation"].append({"offset": number(offset),
+                            "length": number(length, minimum=1), "unwritten": bool(number(unwritten, 1))})
                 remaining_ranges -= count_ranges
-                entry["allocation"] = []
-                for _ in range(count_ranges):
-                    offset, length, unwritten = take("range", 4)
-                    entry["allocation"].append({"offset": number(offset),
-                        "length": number(length, minimum=1), "unwritten": bool(number(unwritten, 1))})
                 if entry["metadata"]["kind"] == "directory":
                     if contents or count_ranges:
                         raise ValueError("captured directory payload")
@@ -205,9 +215,32 @@ def captured_observation(lines):
     return {"snapshot_inspection_error": error, "snapshots": views}
 
 
+def allocation(field):
+    """Decode normalized logical coverage: ascending, disjoint, maximal."""
+    if field == "-":
+        return []
+    ranges = []
+    end, flag = None, None
+    for item in field.split(","):
+        parts = item.split(":")
+        if len(parts) != 3 or parts[2] not in ("0", "1"):
+            raise ValueError("observed allocation field")
+        offset, length = (int(part) for part in parts[:2])
+        if str(offset) != parts[0] or str(length) != parts[1] or length == 0:
+            raise ValueError("observed allocation integer")
+        unwritten = parts[2] == "1"
+        if end is not None and (offset < end or (offset == end and flag == unwritten)):
+            raise ValueError("observed allocation is not maximal")
+        end, flag = offset + length, unwritten
+        ranges.append({"offset": offset, "length": length, "unwritten": unwritten})
+        if len(ranges) > 4096:
+            raise ValueError("observed allocation budget")
+    return ranges
+
+
 def linked_entry(fields, previous):
     """Decode one AFSOBS05 path; a file alias names the first sorted path of its object."""
-    counts = {"directory": 4, "file": 6, "symlink": 5}
+    counts = {"directory": 4, "file": 8, "symlink": 5}
     if not fields or fields[0] not in counts or len(fields) != counts[fields[0]]:
         raise ValueError("linked observation entry")
 
@@ -224,10 +257,14 @@ def linked_entry(fields, previous):
         raise ValueError("linked observation path ordering")
     if entry["kind"] == "file":
         entry["alias"] = number(fields[4], 0, index)
-        entry["data"] = "" if fields[5] == "-" else bytes.fromhex(fields[5]).hex()
+        if fields[5] not in ("0", "1"):
+            raise ValueError("linked observation data policy")
+        entry["policy"] = fields[5] == "1"
+        entry["data"] = "" if fields[6] == "-" else bytes.fromhex(fields[6]).hex()
+        entry["alloc"] = allocation(fields[7])
         first = previous[entry["alias"]] if entry["alias"] != index else entry
         if first["kind"] != "file" or first["alias"] != entry["alias"] or any(
-                first[key] != entry[key] for key in ("links", "protection", "data")):
+                first[key] != entry[key] for key in ("links", "protection", "data", "policy", "alloc")):
             raise ValueError("linked alias contradicts its first path")
     elif entry["kind"] == "symlink":
         if fields[4] == "-":
@@ -248,7 +285,7 @@ def observation(wire):
         if len(positions) != 1:
             raise ValueError("missing or duplicate captured observation")
         split = positions[0]
-        captured = captured_observation(lines[split:])
+        captured = captured_observation(lines[split:], linked)
         lines = lines[:split]
         lines[0] = "AFSOBS03"
     if lines and lines[0] == "AFSOBS03":
@@ -257,6 +294,20 @@ def observation(wire):
         raw_cache = lines.pop(1).split(" ")[1]
         cache = raw_cache if raw_cache == "unlimited" else int(raw_cache)
         lines[0] = "AFSOBS02"
+    orphans = orphan_error = None
+    if linked:
+        if len(lines) < 6:
+            raise ValueError("missing orphan observation")
+        record = lines.pop(4).split(" ")
+        if len(record) != 3 or record[0] != "orphans":
+            raise ValueError("orphan observation framing")
+        if record[1] == "error":
+            orphan_error = bytes.fromhex(record[2]).decode()
+        else:
+            count, total = (int(field) for field in record[1:])
+            if [str(count), str(total)] != record[1:] or count < 0 or total < 0:
+                raise ValueError("orphan observation integer")
+            orphans = {"count": count, "bytes": total}
     if len(lines) < 5 or lines[0] != "AFSOBS02":
         raise ValueError("observation version")
     run = lines[1].split(" ")
@@ -300,7 +351,7 @@ def observation(wire):
     if captured is not None:
         result.update(version=4, **captured)
     if linked:
-        result["version"] = 5
+        result.update(version=5, orphans=orphans, orphan_error=orphan_error)
     return result
 
 
@@ -318,6 +369,8 @@ def bind_cache_profile(value, actual):
             raise ValueError("scenario/observation cache profile binding")
     elif "cache_pages" in actual:
         raise ValueError("version-1 scenario cannot declare a cache profile")
+    if value["version"] >= 9 and ("orphans" not in actual or "orphan_error" not in actual):
+        raise ValueError("missing reserved-directory state")
     if value["version"] >= 7:
         if "snapshot_inspection_error" not in actual or "snapshots" not in actual:
             raise ValueError("missing captured state")
@@ -330,15 +383,33 @@ def bind_cache_profile(value, actual):
 
 def expected_state(value):
     live = sorted(value["expected"], key=lambda entry: entry["path"])
+    if value["version"] >= 9:
+        return {"entries": live, "snapshots": value["expected_snapshots"],
+                "orphans": value["expected_orphans"]}
     if value["version"] >= 7:
         return {"entries": live, "snapshots": value["expected_snapshots"]}
     return live
 
 
+def modelled(expected, actual):
+    """Mask the layout of files whose campaign declares it unmodelled."""
+    if len(expected) != len(actual):
+        return actual
+    result = []
+    for want, got in zip(expected, actual):
+        if want.get("kind") == "file" and "alloc" in want and want["alloc"] is None and got.get("kind") == "file":
+            got = dict(got, alloc=None)
+        result.append(got)
+    return result
+
+
 def matches_expected(value, actual):
     expected = expected_state(value)
+    if value["version"] >= 9 and (actual.get("orphan_error") is not None
+                                  or actual.get("orphans") != expected["orphans"]):
+        return False
     if value["version"] >= 7:
-        return (actual["entries"] == expected["entries"]
+        return (modelled(expected["entries"], actual["entries"]) == expected["entries"]
                 and actual["snapshot_inspection_error"] is None
                 and actual["snapshots"] == expected["snapshots"])
     return actual["entries"] == expected
@@ -675,7 +746,9 @@ def admit_run(retained):
     bind_cache_profile(value, actual)
     clean = all(isinstance(actual[key], dict) and actual[key].get("clean") is True
                 for key in ("raw_check", "recovered_check"))
-    success = actual["failure"] is None and actual["inspection_error"] is None and clean and actual.get("snapshot_inspection_error") is None and matches_expected(value, actual)
+    success = (actual["failure"] is None and actual["inspection_error"] is None and clean
+               and actual.get("snapshot_inspection_error") is None
+               and matches_expected(value, actual))
     if meta["outcome"] != ("pass" if success else "failure"):
         raise ValueError("run outcome contradicts observation")
     validate_trace(retained)
@@ -784,6 +857,8 @@ def failure_signature(records):
         if not 0 <= index < len(operations):
             raise ValueError("failure has no semantic operation")
         return pack({"kind": "operation", "operation": operations[index], "error": failure["error"]})
+    if actual.get("orphan_error") is not None:
+        return pack({"kind": "orphan-inspection", "error": actual["orphan_error"]})
     if actual.get("snapshot_inspection_error") is not None:
         return pack({"kind": "snapshot-inspection", "error": actual["snapshot_inspection_error"]})
     structural = {key: None if actual[key] is None else actual[key]["errors"]
@@ -793,11 +868,15 @@ def failure_signature(records):
                         "inspection_error": actual["inspection_error"]})
     if actual["inspection_error"] is not None:
         return pack({"kind": "inspection", "error": actual["inspection_error"]})
+    if value["version"] >= 9 and actual["orphans"] != value["expected_orphans"]:
+        return pack({"kind": "orphan-state", "expected": value["expected_orphans"],
+                     "actual": actual["orphans"]})
     if value["version"] >= 7 and actual["snapshots"] != value["expected_snapshots"]:
         return pack({"kind": "snapshot-state", "expected": value["expected_snapshots"],
                      "actual": actual["snapshots"]})
-    expected = {tuple(entry["path"]): entry for entry in value["expected"]}
-    observed = {tuple(entry["path"]): entry for entry in actual["entries"]}
+    live = sorted(value["expected"], key=lambda entry: entry["path"])
+    expected = {tuple(entry["path"]): entry for entry in live}
+    observed = {tuple(entry["path"]): entry for entry in modelled(live, actual["entries"])}
     differences = [{"path": list(path), "expected": expected.get(path), "actual": observed.get(path)}
         for path in sorted(set(expected) | set(observed)) if expected.get(path) != observed.get(path)]
     if not differences:

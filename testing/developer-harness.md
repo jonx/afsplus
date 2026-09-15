@@ -1672,6 +1672,32 @@ independently checks version, arity, hex fields, integers and ranges.
 | `clone_range`: `source`, `source_offset`, `destination`, `destination_offset`, `length` | `clone_range SOURCE OFFSET DESTINATION OFFSET LENGTH` | `clone_range` | File labels; each offset plus length at most 16 MiB |
 | `set_protection`: `label`, `protection` | `set_protection LABEL VALUE` | `set_object_protection` | Live non-root label; unsigned 32-bit value |
 | `unlink_symlink`: `label` | `unlink_symlink LABEL` | `unlink_symlink` | Symlink label |
+| `rename_replace`: `label`, `victim`, `parent`, `name` | `rename_replace LABEL VICTIM PARENT NAME` | `rename_replace` | Two distinct live file labels; the runner checks that the victim label names `parent`/`name` |
+| `rename_replace_orphan`: same fields | `rename_replace_orphan LABEL VICTIM PARENT NAME` | `rename_replace_orphan_target` | As above; the victim label becomes an orphan label |
+| `orphan_file`: `label` | `orphan_file LABEL` | `orphan_file` | Live file label; it leaves the namespace and becomes an orphan label |
+| `cleanup_orphan`: `label` | `cleanup_orphan LABEL` | `cleanup_orphan` | Orphan label |
+| `preallocate`: `label`, `offset`, `length` | `preallocate LABEL OFFSET LENGTH` | `preallocate_file` | File label; offset plus length at most 16 MiB |
+| `preallocate_bounded`: adds `max_blocks`, `max_records` | `preallocate_bounded LABEL OFFSET LENGTH BLOCKS RECORDS` | `preallocate_file_bounded` | Budgets of 1 to 4,096 each |
+| `set_data_policy`: `label`, `policy` | `set_data_policy LABEL VALUE` | `set_file_data_policy` | File label; boolean policy |
+| `restore_metadata`: `label`, `protection`, `created`, `modified`, `changed` | `restore_metadata LABEL PROTECTION CREATED MODIFIED CHANGED` | `restore_object_metadata` | Live non-root label; unsigned 32-bit protection and three second stamps of 0 to 2^31 |
+| `reclaim_step` | `reclaim_step` | `reclaim_step` | None |
+| `snapshot_maintenance_step` | `snapshot_maintenance_step` | `snapshot_maintenance_step` | None |
+| `batch`: `items` | `batch ITEM,ITEM` | `run_batch` | One to sixteen members; no member names a label the same group created |
+| `window_batch`: `items` | `window_batch ITEM,ITEM` | `window_op` | As above, with `create` and `rename` members |
+
+A batch member is one colon-separated field: `create:LABEL:PARENT:NAME:DATA`,
+`delete:LABEL`, `rename:LABEL:PARENT:NAME` or
+`replace:LABEL:VICTIM:PARENT:NAME`. Names and data are hex. A `batch` is one
+atomic transaction and one checkpoint; a `window_batch` stages its members in
+the deferred window, where `window_fsync` acknowledges every staged group and
+`window_commit` publishes them.
+
+The version-9 geometry line ends with two further fields, `DATA_POLICY` and
+`ORPHAN_EXTENTS`: the `COMPAT` data-policy feature of the formatted volume as
+`0` or `1`, and the orphan cleanup budget of 1 to 64 whole extent records, which
+the runner reapplies at every mount. The scenario JSON carries them as
+`data_policy` and `orphan_extents`, and carries `expected_orphans` with `count`
+and `bytes`.
 
 Names and targets are hex on the wire. `rename` moves any non-root label,
 including a directory. The core decides block alignment, same-object CloneRange,
@@ -1685,10 +1711,26 @@ exhausted 1,024-entry, depth-64 or 16 MiB budget. It reads opaque symlink target
 without following them:
 
 ```text
+orphans COUNT BYTES
 directory PATH LINKS PROTECTION
-file PATH LINKS PROTECTION ALIAS DATA
+file PATH LINKS PROTECTION ALIAS POLICY DATA ALLOC
 symlink PATH LINKS PROTECTION TARGET
 ```
+
+The `orphans` record follows `recovered-check`. `COUNT` is the reserved
+directory's entry count from `orphan_count`, and `BYTES` sums the sizes of the
+objects the executed case placed there that the remounted volume names. A
+reserved entry outside that set, or a failed reading, becomes
+`orphans error HEX` and a case failure. `POLICY` is the persistent per-file
+data-update policy as `0` or `1`. `ALLOC` is the normalized coverage described
+in [generated operation families](fuzzing.md#generated-operation-families):
+`-` for a file with no mapped block, otherwise comma-separated
+`OFFSET:LENGTH:UNWRITTEN` intervals. A captured entry of a version-9 bundle
+carries the same coverage field in place of the version-7 range count and its
+`range` records. Actual JSON version 5 adds `orphans`, `orphan_error`, and a
+`policy` and `alloc` field on every file entry; an expected file entry carries
+`policy` and `alloc`, where `alloc` may be `null` to leave that file's layout
+uncompared.
 
 Records are sorted by path. `ALIAS` is the zero-based index of the first record
 naming the same file object, so every hard link of that object repeats the index.
@@ -1706,7 +1748,8 @@ Run [admission tests](../tools/test-replay-scenario.py),
 `cargo test -p afsplus-check --test scenario`. They require version gating,
 admission refusal, four-profile replay of aliases, targets, protection, clone and
 unaligned-range bytes, captured failures for invalid linked operations and
-failure verdicts for a wrong link count, protection, target, byte or alias.
+failure verdicts for a wrong link count, protection, target, byte, alias,
+policy flag, coverage interval or reserved-directory total.
 [Generated operation families](fuzzing.md#generated-operation-families) drive
 these commands with independent oracles.
 

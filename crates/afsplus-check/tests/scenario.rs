@@ -514,7 +514,7 @@ fn object_observation_is_an_explicit_version_six_profile() {
     }
 }
 
-const LINKED_HEADER: &str = "format 4096 256 64 8 2 32 127 0 none 4096 16 8";
+const LINKED_HEADER: &str = "format 4096 256 64 8 2 32 127 0 none 4096 16 8 0 1";
 
 #[test]
 fn linked_commands_are_version_nine_and_admission_bounded() {
@@ -559,7 +559,7 @@ fn linked_observation_reports_aliases_targets_protection_and_clone_bytes() {
     use afsplus_check::scenario::LinkedKind;
     for profile in ["2", "4", "8", "unlimited"] {
         let wire = format!(
-            "AFSPSC09\nformat 4096 512 64 8 {profile} 32 127 0 none 4096 16 8\n\
+            "AFSPSC09\nformat 4096 512 64 8 {profile} 32 127 0 none 4096 16 8 0 1\n\
              mkdir d root 64\ncreate f d 66 000102\nlink l f root 6c\n\
              symlink s d 73 2e2e2fcf84\nset_protection f 7\nclone_file c l root 63\n\
              write f 0 ff\nclone_range l 1 c 4097 2\nrename d root 6532\nunlink f\nremount\n"
@@ -618,5 +618,129 @@ fn linked_observation_reports_aliases_targets_protection_and_clone_bytes() {
         );
         let run = Plan::parse(wire.as_bytes()).unwrap().run().unwrap();
         assert_eq!(run.failure.as_ref().map(|f| f.0), Some(2), "{command}");
+    }
+}
+
+const V7_HEADER: &str = "format 4096 256 64 8 2 32 127 0 none 4096 16 8";
+
+#[test]
+fn version_nine_replacement_orphan_and_reservation_commands_are_admission_bounded() {
+    for command in [
+        "rename_replace f g root 67",
+        "rename_replace_orphan f g root 67",
+        "orphan_file f",
+        "cleanup_orphan f",
+        "preallocate f 0 4096",
+        "preallocate_bounded f 0 4096 1 1",
+        "set_data_policy f 1",
+        "restore_metadata f 7 1 2 3",
+        "reclaim_step",
+        "snapshot_maintenance_step",
+        "batch create:b:root:62:01",
+        "window_batch create:b:root:62:01,rename:f:root:67",
+    ] {
+        for (version, header, valid) in [
+            ("AFSPSC07", V7_HEADER, false),
+            ("AFSPSC09", LINKED_HEADER, true),
+        ] {
+            let wire = format!("{version}\n{header}\n{command}\n");
+            assert_eq!(
+                Plan::parse(wire.as_bytes()).is_ok(),
+                valid,
+                "{version} {command}"
+            );
+        }
+    }
+    for command in [
+        "preallocate f 0 16777217",
+        "preallocate f 16777216 1",
+        "preallocate_bounded f 0 4096 4097 1",
+        "preallocate_bounded f 0 4096 1",
+        "set_data_policy f 2",
+        "restore_metadata f 7 1 2 2147483649",
+        "restore_metadata f 4294967296 1 2 3",
+        "rename_replace f g root",
+        "batch ",
+        "batch unknown:b",
+        "batch create:b:root:62",
+        "batch create:b:root:62:01,,delete:f",
+        "cleanup_orphan 1f",
+    ] {
+        let wire = format!("AFSPSC09\n{LINKED_HEADER}\n{command}\n");
+        assert!(Plan::parse(wire.as_bytes()).is_err(), "{command}");
+    }
+    for header in [
+        "format 4096 256 64 8 2 32 127 0 none 4096 16 8 2 1",
+        "format 4096 256 64 8 2 32 127 0 none 4096 16 8 0 0",
+        "format 4096 256 64 8 2 32 127 0 none 4096 16 8 0 65",
+        "format 4096 256 64 8 2 32 127 0 none 4096 16 8 0",
+    ] {
+        let wire = format!("AFSPSC09\n{header}\nsync\n");
+        assert!(Plan::parse(wire.as_bytes()).is_err(), "{header}");
+    }
+    let wire = "AFSPSC09\nformat 4096 256 64 8 2 32 127 0 none 4096 16 8 1 7\nsync\n";
+    let plan = Plan::parse(wire.as_bytes()).unwrap();
+    assert!(plan.data_policy());
+    assert_eq!(plan.orphan_extents(), 7);
+}
+
+#[test]
+fn version_nine_observes_replacement_reservation_policy_and_reserved_directory() {
+    let wire = "AFSPSC09\nformat 4096 512 64 8 2 32 127 0 none 4096 16 8 1 2\n\
+                create f root 66 0102\ncreate g root 67 03\nrename_replace f g root 67\n\
+                preallocate f 4096 4096\nset_data_policy f 1\n\
+                create h root 68 040506\norphan_file h\n\
+                batch create:b:root:62:07\nbatch rename:b:root:6232\nremount\n";
+    let plan = Plan::parse(wire.as_bytes()).unwrap();
+    let run = plan.run().unwrap();
+    assert!(run.failure.is_none(), "{:?}", run.failure);
+    let candidates = run.orphan_candidates.clone();
+    let observed = plan.inspect_checked_with_orphans(run.result, 1 << 20, &candidates);
+    assert!(observed.is_clean());
+    // The reserved directory names the orphaned object and sums its size.
+    assert_eq!(observed.orphans.unwrap().unwrap(), (1, 3));
+    let linked = observed.linked.unwrap().unwrap();
+    let paths: Vec<_> = linked.iter().map(|e| e.path.join("/")).collect();
+    assert_eq!(paths, vec!["b2".to_owned(), "g".to_owned()]);
+    let replaced = &linked[1];
+    assert!(replaced.in_place);
+    assert_eq!(replaced.data, [1, 2]);
+    // A reservation keeps the size and adds unwritten logical coverage.
+    assert_eq!(
+        replaced.allocation,
+        vec![(0, 4096, false), (4096, 4096, true)]
+    );
+    assert!(!linked[0].in_place);
+}
+
+#[test]
+fn version_nine_refusals_are_captured_operation_failures() {
+    // A base of one file, one directory and one symlink, then one command.
+    let base = "create f root 66 0102\nmkdir d root 64\nsymlink s root 73 2e2e\n";
+    for (policy, command) in [
+        (1, "rename_replace s f root 66"),
+        (1, "rename_replace f d root 64"),
+        (1, "rename_replace_orphan s f root 66"),
+        (1, "orphan_file d"),
+        (1, "cleanup_orphan f"),
+        (1, "preallocate d 0 4096"),
+        (1, "preallocate_bounded f 0 8192 1 4096"),
+        (1, "preallocate_bounded f 0 4096 1 0"),
+        (1, "set_data_policy d 1"),
+        (1, "restore_metadata root 1 1 1 1"),
+        (0, "set_data_policy f 1"),
+        (1, "batch create:x:f:62:01"),
+        (1, "batch replace:f:s:root:73"),
+        (1, "window_batch create:x:root:62:01,delete:x"),
+    ] {
+        let wire = format!(
+            "AFSPSC09\nformat 4096 512 64 8 2 32 127 0 none 4096 16 8 {policy} 2\n{base}{command}\n"
+        );
+        let run = Plan::parse(wire.as_bytes()).unwrap().run().unwrap();
+        assert_eq!(
+            run.failure.as_ref().map(|failure| failure.0),
+            Some(3),
+            "{command}"
+        );
     }
 }

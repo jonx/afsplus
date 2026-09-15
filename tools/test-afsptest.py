@@ -51,10 +51,12 @@ def linked_fixture(pages=2):
     # Hand-computed state: aliases share bytes and protection, the clone keeps
     # its own bytes, and the unaligned range copies the alias bytes 4095..4096.
     shared = "00" * 4095 + "a1ff"
+    cover = [{"offset": 0, "length": 8192, "unwritten": False}]
     return {"version": 9, "volume": {"block_size": 4096, "blocks": 512, "region_size": 64,
             "log_slots": 8, "tree_cache_pages": pages},
         "flight_capacity": 32, "flight_categories": 127, "flight_sink": None,
         "snapshot_limits": {"max_edit_records": 4096, "max_views": 16, "reclaim_records": 8},
+        "data_policy": True, "orphan_extents": 1,
         "operations": [
             {"op": "mkdir", "label": "d", "parent": "root", "name": "dir"},
             {"op": "create", "label": "f", "parent": "d", "name": "file", "data": "00" * 4095 + "a1b2"},
@@ -67,30 +69,41 @@ def linked_fixture(pages=2):
             {"op": "clone_range", "source": "l", "source_offset": 4095, "destination": "c",
              "destination_offset": 4095, "length": 2},
             {"op": "write", "label": "f", "offset": 0, "data": "00"},
+            {"op": "set_data_policy", "label": "c", "policy": True},
             {"op": "rename", "label": "d", "parent": "root", "name": "moved"},
             {"op": "remount"}],
         "expected": [
-            {"path": ["alias"], "kind": "file", "links": 2, "protection": 7, "alias": 0, "data": shared},
+            {"path": ["alias"], "kind": "file", "links": 2, "protection": 7, "alias": 0,
+             "policy": False, "data": shared, "alloc": cover},
             {"path": ["clone"], "kind": "file", "links": 1, "protection": 7, "alias": 1,
-             "data": "42" + "00" * 4094 + "a1ff"},
+             "policy": True, "data": "42" + "00" * 4094 + "a1ff", "alloc": cover},
             {"path": ["moved"], "kind": "directory", "links": 1, "protection": 0},
-            {"path": ["moved", "file"], "kind": "file", "links": 2, "protection": 7, "alias": 0, "data": shared},
+            {"path": ["moved", "file"], "kind": "file", "links": 2, "protection": 7, "alias": 0,
+             "policy": False, "data": shared, "alloc": cover},
             {"path": ["moved", "link"], "kind": "symlink", "links": 1, "protection": 0, "target": "../ταξί"}],
-        "expected_snapshots": []}
+        "expected_snapshots": [], "expected_orphans": {"count": 0, "bytes": 0}}
 
 
 class ReplayTests(unittest.TestCase):
     def test_v9_linked_observation_decodes_aliases_targets_and_protection(self):
-        lines = ["file 616c696173 2 7 0 4142", "file 636c6f6e65 1 7 1 42", "directory 6d6f766564 1 0",
-                 "file 6d6f766564,66696c65 2 7 0 4142", "symlink 6d6f766564,6c696e6b 1 0 2e2e"]
+        lines = ["file 616c696173 2 7 0 0 4142 0:4096:0", "file 636c6f6e65 1 7 1 1 42 -",
+                 "directory 6d6f766564 1 0", "file 6d6f766564,66696c65 2 7 0 0 4142 0:4096:0",
+                 "symlink 6d6f766564,6c696e6b 1 0 2e2e"]
         entries = []
         for line in lines:
             entries.append(tool.linked_entry(line.split(" "), entries))
         self.assertEqual((entries[3]["alias"], entries[4]["target"]), (0, ".."))
-        for index, bad in ((3, "file 6d6f766564,66696c65 2 6 0 4142"), (3, "file 6d6f766564,66696c65 2 7 1 4142"),
-                           (1, "file 636c6f6e65 0 7 1 42"), (1, "file 636c6f6e65 1 7 2 42"),
+        for index, bad in ((3, "file 6d6f766564,66696c65 2 6 0 0 4142 0:4096:0"),
+                           (3, "file 6d6f766564,66696c65 2 7 1 0 4142 0:4096:0"),
+                           (3, "file 6d6f766564,66696c65 2 7 0 1 4142 0:4096:0"),
+                           (3, "file 6d6f766564,66696c65 2 7 0 0 4142 -"),
+                           (1, "file 636c6f6e65 0 7 1 1 42 -"), (1, "file 636c6f6e65 1 7 2 1 42 -"),
+                           (1, "file 636c6f6e65 1 7 1 2 42 -"),
+                           (1, "file 636c6f6e65 1 7 1 1 42 0:4096:0,4096:4096:0"),
+                           (1, "file 636c6f6e65 1 7 1 1 42 4096:4096:0,0:4096:1"),
                            (4, "symlink 6d6f766564,6c696e6b 1 0 -"), (2, "directory 6d6f766564 1 01"),
-                           (1, "file 616c696173 1 7 1 42"), (4, "symlink 6d6f766564,6c696e6b 1 0"),
+                           (1, "file 616c696173 1 7 1 0 42 0:4096:0"),
+                           (4, "symlink 6d6f766564,6c696e6b 1 0"),
                            (0, "fifo 616c696173 1 0")):
             with self.assertRaises(ValueError, msg=bad):
                 tool.linked_entry(bad.split(" "), list(entries[:index]))

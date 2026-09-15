@@ -110,12 +110,14 @@ class FamilyModelTests(unittest.TestCase):
                 {"op": "rename", "label": "b", "parent": "root", "name": "b2"},
                 {"op": "unlink", "label": "f"}, {"op": "unlink_symlink", "label": "s"}]):
             model.apply(op, index)
+        block = [{"offset": 0, "length": 4096, "unwritten": False}]
         self.assertEqual(model.linked(), [
             {"path": ["a"], "kind": "directory", "links": 1, "protection": 0},
             {"path": ["b2"], "kind": "directory", "links": 1, "protection": 0},
-            {"path": ["b2", "l"], "kind": "file", "links": 1, "protection": 9, "alias": 2, "data": "ee0200ff"},
-            {"path": ["c"], "kind": "file", "links": 1, "protection": 9, "alias": 3,
-             "data": "010200ff" + "00" * 4092 + "0102"}])
+            {"path": ["b2", "l"], "kind": "file", "links": 1, "protection": 9, "alias": 2,
+             "policy": False, "data": "ee0200ff", "alloc": block},
+            {"path": ["c"], "kind": "file", "links": 1, "protection": 9, "alias": 3, "policy": False,
+             "data": "010200ff" + "00" * 4092 + "0102", "alloc": None}])
         self.assertEqual(model.generation, 14)
         model.apply({"op": "mkdir", "label": "inner", "parent": "a", "name": "inner"}, 14)
         for op in ({"op": "rename", "label": "a", "parent": "inner", "name": "loop"},
@@ -134,7 +136,7 @@ class FamilyModelTests(unittest.TestCase):
             model.entries()
 
     def test_object_model_captures_generation_time_and_single_block_allocation(self):
-        model = tool.ObjectModel()
+        model = tool.ObjectModel(single_block=True)
         for index, op in enumerate([
                 {"op": "create", "label": "f", "parent": "root", "name": "f", "data": ""},
                 {"op": "truncate", "label": "f", "size": 100},
@@ -166,8 +168,97 @@ class FamilyModelTests(unittest.TestCase):
             model.apply({"op": "snapshot_create", "label": "u"}, 12)
 
 
+class VersionNineModelTests(unittest.TestCase):
+    def test_replacement_orphan_lifecycle_and_reserved_directory_totals(self):
+        model = tool.ObjectModel(orphan_extents=2)
+        for index, op in enumerate([
+                {"op": "create", "label": "f", "parent": "root", "name": "f", "data": "0102"},
+                {"op": "create", "label": "g", "parent": "root", "name": "g", "data": "03"},
+                {"op": "link", "label": "l", "source": "g", "parent": "root", "name": "l"},
+                {"op": "rename_replace", "label": "f", "victim": "g", "parent": "root", "name": "g"},
+                {"op": "create", "label": "h", "parent": "root", "name": "h", "data": "040506"},
+                {"op": "rename_replace_orphan", "label": "h", "victim": "l", "parent": "root", "name": "l"}]):
+            model.apply(op, index)
+        # The hard-linked victim survived the first replacement; the second
+        # replacement moved its final link into the reserved directory.
+        self.assertEqual([entry["path"] for entry in model.linked()], [["g"], ["l"]])
+        self.assertEqual(model.orphan_state(), {"count": 1, "bytes": 1})
+        model.apply({"op": "cleanup_orphan", "label": "l"}, 6)
+        self.assertEqual(model.orphan_state(), {"count": 0, "bytes": 0})
+        model.apply({"op": "orphan_file", "label": "h"}, 7)
+        self.assertEqual(model.orphan_state(), {"count": 1, "bytes": 3})
+        for bad in ({"op": "cleanup_orphan", "label": "f"},
+                    {"op": "rename_replace", "label": "f", "victim": "f", "parent": "root", "name": "g"},
+                    {"op": "orphan_file", "label": "missing"}):
+            with self.assertRaises(ValueError, msg=bad):
+                model.apply(bad, 8)
+
+    def test_reservation_policy_metadata_and_maintenance_invariance(self):
+        model = tool.ObjectModel()
+        for index, op in enumerate([
+                {"op": "create", "label": "f", "parent": "root", "name": "f", "data": "01"},
+                {"op": "preallocate", "label": "f", "offset": 8192, "length": 4096},
+                {"op": "set_data_policy", "label": "f", "policy": True},
+                {"op": "restore_metadata", "label": "f", "protection": 5, "created": 1,
+                 "modified": 2, "changed": 3}]):
+            model.apply(op, index)
+        [entry] = model.linked()
+        self.assertEqual((entry["policy"], entry["protection"], entry["data"]), (True, 5, "01"))
+        self.assertEqual(entry["alloc"], [{"offset": 0, "length": 4096, "unwritten": False},
+                                          {"offset": 8192, "length": 4096, "unwritten": True}])
+        before = model.linked()
+        for op in ({"op": "reclaim_step"}, {"op": "snapshot_maintenance_step"}):
+            model.apply(op, 4)
+        self.assertEqual(model.linked(), before)
+        with self.assertRaisesRegex(ValueError, "maintenance"):
+            model.apply({"op": "snapshot_create", "label": "s"}, 5)
+        # A write consumes the reservation of every block it covers.
+        model.apply({"op": "write", "label": "f", "offset": 8192, "data": "02"}, 6)
+        self.assertEqual(model.linked()[0]["alloc"],
+                         [{"offset": 0, "length": 4096, "unwritten": False},
+                          {"offset": 8192, "length": 4096, "unwritten": False}])
+        with self.assertRaisesRegex(ValueError, "budget"):
+            model.apply({"op": "preallocate_bounded", "label": "f", "offset": 0, "length": 65536,
+                         "max_blocks": 2, "max_records": 8}, 7)
+
+    def test_batch_is_atomic_and_a_window_keeps_the_acknowledged_prefix(self):
+        model = tool.ObjectModel()
+        model.apply({"op": "batch", "items": [
+            {"op": "create", "label": "a", "parent": "root", "name": "a", "data": "01"},
+            {"op": "create", "label": "b", "parent": "root", "name": "b", "data": "02"}]}, 0)
+        model.apply({"op": "batch", "items": [
+            {"op": "replace", "label": "a", "victim": "b", "parent": "root", "name": "b"}]}, 1)
+        self.assertEqual([entry["path"] for entry in model.linked()], [["b"]])
+        model.apply({"op": "window_batch", "items": [
+            {"op": "create", "label": "c", "parent": "root", "name": "c", "data": "03"}]}, 2)
+        with self.assertRaisesRegex(ValueError, "window is open"):
+            model.apply({"op": "sync"}, 3)
+        model.apply({"op": "window_fsync"}, 3)
+        model.apply({"op": "window_batch", "items": [
+            {"op": "create", "label": "d", "parent": "root", "name": "d", "data": "04"}]}, 4)
+        model.apply({"op": "remount"}, 5)
+        self.assertEqual([entry["path"] for entry in model.linked()], [["b"], ["c"]])
+        model.apply({"op": "window_batch", "items": [
+            {"op": "rename", "label": "c", "parent": "root", "name": "c2"}]}, 6)
+        model.apply({"op": "window_commit"}, 7)
+        self.assertEqual([entry["path"] for entry in model.linked()], [["b"], ["c2"]])
+
+
 class FamilyGenerationTests(unittest.TestCase):
     REQUIRED = {
+        "replace": {"create", "mkdir", "write", "link", "sync", "remount", "rename_replace"},
+        "orphan": {"create", "mkdir", "write", "sync", "remount", "orphan_file", "cleanup_orphan",
+                   "rename_replace_orphan"},
+        "space": {"create", "mkdir", "write", "truncate", "sync", "remount", "preallocate",
+                  "preallocate_bounded", "set_data_policy", "restore_metadata"},
+        "batch": {"create", "mkdir", "sync", "remount", "batch", "window_batch", "window_fsync",
+                  "window_commit"},
+        "maintenance": {"create", "write", "truncate", "unlink", "sync", "remount", "snapshot_create",
+                        "snapshot_open", "snapshot_inspect", "snapshot_close", "snapshot_delete",
+                        "reclaim_step", "snapshot_maintenance_step"},
+        "captured": {"create", "mkdir", "write", "truncate", "unlink", "sync", "remount", "link", "symlink",
+                     "clone_file", "preallocate", "snapshot_create", "snapshot_open", "snapshot_inspect",
+                     "snapshot_close", "snapshot_delete"},
         "window": {"create", "mkdir", "sync", "remount", "window_write", "window_truncate", "window_fsync",
                    "window_commit"},
         "snapshot": {"write", "truncate", "rename", "unlink", "rmdir", "remount", "snapshot_create",
@@ -178,7 +269,13 @@ class FamilyGenerationTests(unittest.TestCase):
     def test_golden_family_seeds_bounds_and_profile_independence(self):
         golden = {"window": "a75d79b8c1216ca2f3900c43e5ebcf6be523246d23472ed270473a878efafdfd",
                   "snapshot": "77a0304b4bc903a02c6a702aa9d7bbe9e59d9d7d78263efd4b55d95f99a22e1c",
-                  "namespace": "9f46335a6e060319f4a7de5223b11879753c5658e09ae294babcd1dc6dcd90b1"}
+                  "namespace": "0bead7675af4f2be5b29eac8a61bfebbad667f90731dc263d81f14ed16f5f302",
+                  "replace": "8345e3ec556f75bdc663b793e123846de37d76f480371508c90d3fd82e41f9a3",
+                  "orphan": "8f13dc6544941d1f6bb48f8f851755c1d0a1f63d02fe68ebcafa2532f60fdcea",
+                  "space": "6923da614d6266a351adfb45e1aedb9f40ad4499a00524b64a8e75ee7e8ded7b",
+                  "batch": "98965b514cee6fe4f219e8e5994ae42e66db5e0689b8feb46d0749c95fd7f9a5",
+                  "maintenance": "6908a93d61de329d1f08f1aabfa3f8026de705bd970ebcf3088246417290ebce",
+                  "captured": "084969bcfaae7677f2f4b0a081ad9fdc5d75ca2477f0186275587db874ea7940"}
         for family, digest in golden.items():
             value = tool.family_scenario(family, 7, 96, 96, 2)
             self.assertEqual(tool.runner.digest(tool.runner.encoded(value)), digest, family)

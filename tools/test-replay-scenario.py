@@ -26,7 +26,8 @@ class ScenarioTests(unittest.TestCase):
         value = fixture()
         value.update(version=9, flight_capacity=32, flight_categories=127, flight_sink=None,
                      snapshot_limits={"max_edit_records": 4096, "max_views": 16, "reclaim_records": 8},
-                     expected_snapshots=[])
+                     expected_snapshots=[], data_policy=True, orphan_extents=2,
+                     expected_orphans={"count": 1, "bytes": 3})
         value["volume"]["tree_cache_pages"] = 4
         value["operations"] = [
             {"op": "mkdir", "label": "d", "parent": "root", "name": "dir"},
@@ -38,18 +39,42 @@ class ScenarioTests(unittest.TestCase):
              "destination_offset": 4097, "length": 1},
             {"op": "set_protection", "label": "d", "protection": 4294967295},
             {"op": "rename", "label": "d", "parent": "root", "name": "moved"},
-            {"op": "unlink_symlink", "label": "s"}, {"op": "unlink", "label": "f"}]
+            {"op": "unlink_symlink", "label": "s"}, {"op": "unlink", "label": "f"},
+            {"op": "create", "label": "v", "parent": "root", "name": "v", "data": "03"},
+            {"op": "rename_replace", "label": "c", "victim": "v", "parent": "root", "name": "v"},
+            {"op": "create", "label": "o", "parent": "root", "name": "o", "data": "040506"},
+            {"op": "orphan_file", "label": "o"}, {"op": "cleanup_orphan", "label": "o"},
+            {"op": "preallocate", "label": "l", "offset": 4096, "length": 8192},
+            {"op": "preallocate_bounded", "label": "l", "offset": 0, "length": 1,
+             "max_blocks": 2, "max_records": 4},
+            {"op": "set_data_policy", "label": "l", "policy": True},
+            {"op": "restore_metadata", "label": "l", "protection": 7, "created": 1,
+             "modified": 2, "changed": 3},
+            {"op": "reclaim_step"}, {"op": "snapshot_maintenance_step"},
+            {"op": "batch", "items": [{"op": "create", "label": "b", "parent": "root", "name": "b",
+                                       "data": "07"},
+                                      {"op": "rename", "label": "l", "parent": "root", "name": "moved2"}]},
+            {"op": "window_batch", "items": [{"op": "create", "label": "w", "parent": "root",
+                                              "name": "w", "data": "08"}]},
+            {"op": "window_fsync"}, {"op": "window_commit"}]
         value["expected"] = [
-            {"path": ["alias"], "kind": "file", "links": 1, "protection": 0, "alias": 0, "data": "0102"},
-            {"path": ["c"], "kind": "file", "links": 1, "protection": 0, "alias": 1, "data": "0102"},
+            {"path": ["alias"], "kind": "file", "links": 1, "protection": 0, "alias": 0,
+             "policy": False, "data": "0102", "alloc": None},
+            {"path": ["c"], "kind": "file", "links": 1, "protection": 0, "alias": 1, "policy": True,
+             "data": "0102", "alloc": [{"offset": 0, "length": 4096, "unwritten": False},
+                                       {"offset": 4096, "length": 8192, "unwritten": True}]},
             {"path": ["moved"], "kind": "directory", "links": 1, "protection": 4294967295},
             {"path": ["t"], "kind": "symlink", "links": 1, "protection": 0, "target": "x"}]
         raw = json.dumps(value).encode()
         wire = scenario.compile_commands(raw).decode().splitlines()
-        self.assertEqual(wire[:2], ["AFSPSC09", "format 4096 256 64 8 4 32 127 0 none 4096 16 8"])
+        self.assertEqual(wire[:2], ["AFSPSC09", "format 4096 256 64 8 4 32 127 0 none 4096 16 8 1 2"])
         for line in ("link l f root " + "alias".encode().hex(), "symlink s d 73 " + "../ταξί".encode().hex(),
                      "clone_file c l root 63", "clone_range f 1 c 4097 1", "set_protection d 4294967295",
-                     "unlink_symlink s"):
+                     "unlink_symlink s", "rename_replace c v root 76", "orphan_file o", "cleanup_orphan o",
+                     "preallocate l 4096 8192", "preallocate_bounded l 0 1 2 4", "set_data_policy l 1",
+                     "restore_metadata l 7 1 2 3", "reclaim_step", "snapshot_maintenance_step",
+                     "batch create:b:root:62:07,rename:l:root:6d6f76656432",
+                     "window_batch create:w:root:77:08"):
             self.assertIn(line, wire)
         for version in (7, 8):
             with self.assertRaises(ValueError):
@@ -63,8 +88,32 @@ class ScenarioTests(unittest.TestCase):
             candidate["operations"][index].update(changes)
             with self.assertRaises(ValueError, msg=(index, changes)):
                 scenario.validate(json.dumps(candidate).encode())
+        for index, changes in ((11, {"victim": "c"}), (11, {"victim": "d"}), (14, {"label": "missing"}),
+                               (15, {"offset": 16 * 1024 * 1024}), (16, {"max_blocks": 0}),
+                               (17, {"policy": 1}), (18, {"created": -1})):
+            candidate = json.loads(raw)
+            candidate["operations"][index].update(changes)
+            with self.assertRaises(ValueError, msg=(index, changes)):
+                scenario.validate(json.dumps(candidate).encode())
+        for index, items in ((22, [{"op": "delete", "label": "l"}]),
+                             (22, [{"op": "replace", "label": "l", "victim": "b", "parent": "root",
+                                    "name": "62"}]),
+                             (21, []), (21, [{"op": "rename", "label": "d", "parent": "root", "name": "x"}]),
+                             (21, [{"op": "create", "label": "z", "parent": "root", "name": "z", "data": ""},
+                                   {"op": "delete", "label": "z"}])):
+            candidate = json.loads(raw)
+            candidate["operations"][index]["items"] = items
+            with self.assertRaises(ValueError, msg=(index, items)):
+                scenario.validate(json.dumps(candidate).encode())
+        for key, bad in (("data_policy", 1), ("orphan_extents", 0), ("orphan_extents", 65),
+                         ("expected_orphans", {"count": 1})):
+            with self.assertRaises(ValueError, msg=key):
+                scenario.validate(json.dumps(dict(value, **{key: bad})).encode())
         for index, changes in ((0, {"links": 0}), (0, {"alias": 4}), (2, {"data": "00"}),
-                               (3, {"target": ""}), (3, {"protection": True})):
+                               (3, {"target": ""}), (3, {"protection": True}), (0, {"policy": 1}),
+                               (1, {"alloc": [{"offset": 1, "length": 4096, "unwritten": False}]}),
+                               (1, {"alloc": [{"offset": 0, "length": 4096, "unwritten": False},
+                                              {"offset": 4096, "length": 4096, "unwritten": False}]})):
             candidate = json.loads(raw)
             candidate["expected"][index].update(changes)
             with self.assertRaises(ValueError, msg=(index, changes)):

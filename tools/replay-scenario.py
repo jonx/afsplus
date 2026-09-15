@@ -127,6 +127,77 @@ def captured_views(views, *, observed=False):
     return views
 
 
+def normalized_allocation(ranges):
+    """Admit maximal logical intervals: ascending, disjoint, and never two
+    adjacent intervals carrying the same unwritten flag. None declares the
+    layout unmodelled by the campaign that produced it."""
+    if ranges is None:
+        return None
+    if not isinstance(ranges, list) or len(ranges) > 4096:
+        raise ValueError("expected allocation budget")
+    end, flag = None, None
+    for item in ranges:
+        fields(item, "offset length unwritten")
+        offset = integer(item["offset"], 0, MAX_FILE)
+        length = integer(item["length"], 1, MAX_FILE)
+        if type(item["unwritten"]) is not bool:
+            raise ValueError("expected allocation kind")
+        if offset % 4096 or length % 4096 or offset + length > MAX_FILE:
+            raise ValueError("expected allocation block alignment")
+        if end is not None and (offset < end or (offset == end and flag == item["unwritten"])):
+            raise ValueError("expected allocation is not maximal")
+        end, flag = offset + length, item["unwritten"]
+    return ranges
+
+
+BATCH_SCHEMAS = {"create": "op label parent name data", "delete": "op label",
+                 "rename": "op label parent name", "replace": "op label victim parent name"}
+
+
+def batch_items(operation, labels, used, deferred):
+    """Admit one bounded atomic batch or one staged window namespace group.
+
+    A window stages creates and moves only: a staged final unlink reaches the
+    reserved directory at commit, which these expected-state models leave out.
+    """
+    items = operation["items"]
+    if not isinstance(items, list) or not 1 <= len(items) <= 16:
+        raise ValueError("scenario batch item count")
+    payload = 0
+    fresh = set()
+    for item in items:
+        if not isinstance(item, dict) or item.get("op") not in BATCH_SCHEMAS:
+            raise ValueError("unknown scenario batch item")
+        kind = item["op"]
+        fields(item, BATCH_SCHEMAS[kind])
+        if deferred and kind in ("delete", "replace"):
+            raise ValueError("a staged window batch admits creates and moves only")
+        if "parent" in item and labels.get(item["parent"]) != "directory":
+            raise ValueError("unknown directory label")
+        if "name" in item: name(item["name"])
+        label = item["label"]
+        if not isinstance(label, str) or not label.isascii() or not label.isidentifier() or len(label) > 64:
+            raise ValueError("invalid scenario label")
+        if kind == "create":
+            if label in used: raise ValueError("scenario label reused")
+            payload += data(item["data"])
+            labels[label] = "file"
+            used.add(label)
+            fresh.add(label)
+            continue
+        if label in fresh or item.get("victim") in fresh:
+            raise ValueError("a batch item cannot name a label created by the same batch")
+        if labels.get(label) != "file":
+            raise ValueError("batch item requires a file label")
+        if kind == "delete":
+            del labels[label]
+        elif kind == "replace":
+            if labels.get(item["victim"]) != "file" or item["victim"] == label:
+                raise ValueError("batch replacement requires a distinct file victim")
+            del labels[item["victim"]]
+    return payload
+
+
 def validate(encoded):
     if not isinstance(encoded, bytes) or len(encoded) > MAX_INPUT:
         raise ValueError("scenario input limit")
@@ -138,7 +209,15 @@ def validate(encoded):
         raise ValueError("scenario version 8 is not admitted by this profile set")
     fields(scenario, "version volume operations expected" + (" flight_capacity" if version >= 3 else "")
            + (" flight_categories flight_sink" if version >= 4 else "")
-           + (" snapshot_limits expected_snapshots" if version >= 7 else ""))
+           + (" snapshot_limits expected_snapshots" if version >= 7 else "")
+           + (" data_policy orphan_extents expected_orphans" if version >= 9 else ""))
+    if version >= 9:
+        if type(scenario["data_policy"]) is not bool:
+            raise ValueError("scenario data-policy feature flag")
+        integer(scenario["orphan_extents"], 1, 64)
+        fields(scenario["expected_orphans"], "count bytes")
+        integer(scenario["expected_orphans"]["count"], 0, MAX_OPS)
+        integer(scenario["expected_orphans"]["bytes"], 0, MAX_FILE)
     if version >= 3:
         integer(scenario["flight_capacity"], 1, 256)
     if version >= 4:
@@ -192,12 +271,25 @@ def validate(encoded):
         schemas.update(link="op label source parent name", clone_file="op label source parent name",
                        symlink="op label parent name target", set_protection="op label protection",
                        unlink_symlink="op label",
-                       clone_range="op source source_offset destination destination_offset length")
+                       clone_range="op source source_offset destination destination_offset length",
+                       rename_replace="op label victim parent name",
+                       rename_replace_orphan="op label victim parent name",
+                       orphan_file="op label", cleanup_orphan="op label",
+                       preallocate="op label offset length",
+                       preallocate_bounded="op label offset length max_blocks max_records",
+                       set_data_policy="op label policy",
+                       restore_metadata="op label protection created modified changed",
+                       reclaim_step="op", snapshot_maintenance_step="op",
+                       batch="op items", window_batch="op items")
+    orphan_labels = set()
     for operation in operations:
         if not isinstance(operation, dict) or not isinstance(operation.get("op"), str) or operation["op"] not in schemas:
             raise ValueError("unknown scenario operation")
         kind = operation["op"]
         fields(operation, schemas[kind])
+        if kind in ("batch", "window_batch"):
+            payload += batch_items(operation, labels, used, kind == "window_batch")
+            continue
         if "name" in operation: name(operation["name"])
         if "parent" in operation:
             parent = operation["parent"]
@@ -213,10 +305,35 @@ def validate(encoded):
                     raise ValueError("scenario clone range limit")
         if "target" in operation: payload += symlink_target(operation["target"])
         if "protection" in operation: integer(operation["protection"], 0, (1 << 32) - 1)
+        if kind in ("preallocate", "preallocate_bounded"):
+            if integer(operation["offset"], 0, MAX_FILE) + integer(operation["length"], 0, MAX_FILE) > MAX_FILE:
+                raise ValueError("scenario preallocation range limit")
+            if kind == "preallocate_bounded":
+                integer(operation["max_blocks"], 1, 4096)
+                integer(operation["max_records"], 1, 4096)
+        if kind == "set_data_policy" and type(operation["policy"]) is not bool:
+            raise ValueError("scenario data-policy value")
+        if kind == "restore_metadata":
+            for key in ("created", "modified", "changed"):
+                integer(operation[key], 0, 1 << 31)
+        if kind == "rename_replace" and labels.get(operation["victim"]) != "file":
+            raise ValueError("replacement requires a file victim")
+        if kind == "rename_replace_orphan" and labels.get(operation["victim"]) != "file":
+            raise ValueError("replacement requires a file victim")
+        if kind in ("rename_replace", "rename_replace_orphan"):
+            if operation["victim"] == operation["label"]:
+                raise ValueError("replacement requires a distinct victim")
+            del labels[operation["victim"]]
+            if kind == "rename_replace_orphan":
+                orphan_labels.add(operation["victim"])
         if "label" in operation:
             label = operation["label"]
             if not isinstance(label, str) or not label.isascii() or not label.isidentifier() or len(label) > 64:
                 raise ValueError("invalid scenario label")
+            if kind == "cleanup_orphan":
+                if label not in orphan_labels:
+                    raise ValueError("unknown orphan label")
+                continue
             if kind.startswith("snapshot_"):
                 if kind == "snapshot_create":
                     if label in snapshot_labels: raise ValueError("snapshot label reused")
@@ -236,6 +353,12 @@ def validate(encoded):
                 raise ValueError("operation requires a directory label")
             if kind == "unlink_symlink" and labels[label] != "symlink":
                 raise ValueError("operation requires a symlink label")
+            if kind in ("rename_replace", "rename_replace_orphan", "orphan_file", "preallocate",
+                        "preallocate_bounded", "set_data_policy") and labels[label] != "file":
+                raise ValueError("operation requires a file label")
+            if kind == "orphan_file":
+                orphan_labels.add(label)
+                del labels[label]
             if kind in ("unlink", "rmdir", "unlink_symlink"): del labels[label]
         if "data" in operation:
             count = data(operation["data"])
@@ -247,7 +370,8 @@ def validate(encoded):
     if not isinstance(expected, list) or len(expected) > MAX_OPS:
         raise ValueError("expected-state limit")
     paths = set()
-    linked = {"file": "path kind links protection alias data", "directory": "path kind links protection",
+    linked = {"file": "path kind links protection alias policy data alloc",
+              "directory": "path kind links protection",
               "symlink": "path kind links protection target"}
     for entry in expected:
         if not isinstance(entry, dict) or entry.get("kind") not in (linked if version >= 9 else ("file", "directory")):
@@ -257,7 +381,11 @@ def validate(encoded):
             fields(entry, linked[entry["kind"]])
             integer(entry["links"], 1, (1 << 32) - 1)
             integer(entry["protection"], 0, (1 << 32) - 1)
-            if entry["kind"] == "file": integer(entry["alias"], 0, len(expected) - 1)
+            if entry["kind"] == "file":
+                integer(entry["alias"], 0, len(expected) - 1)
+                if type(entry["policy"]) is not bool:
+                    raise ValueError("expected data-policy flag")
+                normalized_allocation(entry["alloc"])
             if entry["kind"] == "symlink": payload += symlink_target(entry["target"])
         else:
             fields(entry, "path kind data" if entry["kind"] == "file" else "path kind")
@@ -299,6 +427,8 @@ def compile_commands(encoded):
     if scenario["version"] >= 7:
         limits = scenario["snapshot_limits"]
         lines[1] += " {} {} {}".format(limits["max_edit_records"], limits["max_views"], limits["reclaim_records"])
+    if scenario["version"] >= 9:
+        lines[1] += " {} {}".format(int(scenario["data_policy"]), scenario["orphan_extents"])
     for operation in scenario["operations"]:
         kind = operation["op"]
         if kind in ("mkdir", "create"):
@@ -321,7 +451,38 @@ def compile_commands(encoded):
                       str(operation["destination_offset"]), str(operation["length"])]
         elif kind == "set_protection":
             fields = [kind, operation["label"], str(operation["protection"])]
-        elif kind in ("unlink", "rmdir", "unlink_symlink") or kind.startswith("snapshot_"):
+        elif kind in ("rename_replace", "rename_replace_orphan"):
+            fields = [kind, operation["label"], operation["victim"], operation["parent"],
+                      operation["name"].encode().hex()]
+        elif kind in ("preallocate", "preallocate_bounded"):
+            fields = [kind, operation["label"], str(operation["offset"]), str(operation["length"])]
+            if kind == "preallocate_bounded":
+                fields += [str(operation["max_blocks"]), str(operation["max_records"])]
+        elif kind == "set_data_policy":
+            fields = [kind, operation["label"], str(int(operation["policy"]))]
+        elif kind == "restore_metadata":
+            fields = [kind, operation["label"], str(operation["protection"]), str(operation["created"]),
+                      str(operation["modified"]), str(operation["changed"])]
+        elif kind in ("batch", "window_batch"):
+            members = []
+            for item in operation["items"]:
+                member = item["op"]
+                if member == "delete":
+                    members.append("delete:" + item["label"])
+                    continue
+                encoded_name = item["name"].encode().hex()
+                if member == "create":
+                    members.append(":".join(["create", item["label"], item["parent"], encoded_name,
+                                             item["data"] or "-"]))
+                elif member == "rename":
+                    members.append(":".join(["rename", item["label"], item["parent"], encoded_name]))
+                else:
+                    members.append(":".join(["replace", item["label"], item["victim"], item["parent"],
+                                             encoded_name]))
+            fields = [kind, ",".join(members)]
+        elif kind in ("unlink", "rmdir", "unlink_symlink", "orphan_file", "cleanup_orphan") or kind in (
+                "snapshot_create", "snapshot_open", "snapshot_close", "snapshot_delete",
+                "snapshot_inspect"):
             fields = [kind, operation["label"]]
         else:
             fields = [kind]

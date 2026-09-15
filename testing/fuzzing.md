@@ -249,7 +249,7 @@ not qualify ungenerated API families or arbitrary-length workloads.
 ## Generated operation families
 
 Generator version 2 of [the semantic generator](../tools/fuzz-semantic.py) adds
-three families selected with `--family`. Each family uses the version-1
+nine families selected with `--family`. Each family uses the version-1
 xorshift64 sequence, seed and length bounds (1–16 distinct seeds, 64–256
 operations), half and full prefixes followed by a remount, the four cache
 profiles, durable publication and the recipe/result records above. The
@@ -261,6 +261,12 @@ adds `family`, the scenario version and the applied negative control.
 | `window` | version 5 | create, mkdir, write, truncate, rename, unlink, rmdir, sync, remount, `window_write`, `window_truncate`, `window_fsync`, `window_commit` | Committed byte model plus staged work: fsync acknowledges every staged operation, commit publishes all staged work, remount keeps the acknowledged prefix and drops the rest |
 | `snapshot` | version 7 | create, mkdir, write, truncate, file and directory rename, unlink, rmdir, sync, remount, `snapshot_create`, `snapshot_open`, `snapshot_inspect`, `snapshot_close`, `snapshot_delete` | Object graph with generations, object IDs, timestamps, link counts and single-block allocation; each view is copied at creation and compared as complete `expected_snapshots` metadata |
 | `namespace` | [version 9](developer-harness.md#linked-namespace-replay-bundles) | create, mkdir, write, truncate, rename of files, symlinks and directories, `link`, `symlink`, `unlink_symlink`, `clone_file`, `clone_range`, `set_protection`, unlink, rmdir, sync, remount | The same object graph projected to paths, kinds, link counts, protection, hard-link alias ordinals, bytes and opaque symlink targets |
+| `replace` | version 9 | create, mkdir, write, truncate, rename, `link`, `rename_replace`, unlink, rmdir, sync, remount | The linked projection: the source takes the replaced name, a victim with further links keeps them, and a final-link victim leaves the namespace with its storage |
+| `orphan` | version 9 | create, mkdir, write, truncate, rename, `orphan_file`, `rename_replace_orphan`, `cleanup_orphan`, unlink, sync, remount | The linked projection plus the reserved-directory entry count and the byte total of the objects it names |
+| `space` | version 9 | create, mkdir, write, truncate, rename, `preallocate`, `preallocate_bounded`, `set_data_policy`, `restore_metadata`, `set_protection`, unlink, rmdir, sync, remount | The linked projection with the persistent per-file policy flag and the normalized allocation coverage of every file |
+| `batch` | version 9 | create, mkdir, write, truncate, `batch`, `window_batch`, `window_fsync`, `window_commit`, unlink, rmdir, sync, remount | The linked projection after one atomic transaction per group; a window publishes its acknowledged prefix at remount and every staged group at commit |
+| `maintenance` | version 9 | create, write, truncate, unlink, `reclaim_step`, `snapshot_maintenance_step`, `snapshot_create`, `snapshot_open`, `snapshot_inspect`, `snapshot_close`, `snapshot_delete`, sync, remount | The linked projection and every captured view, both invariant across every maintenance step |
+| `captured` | version 9 | create, mkdir, write, truncate, rename, `link`, `symlink`, `clone_file`, `preallocate`, `set_protection`, unlink, rmdir, the five snapshot commands, sync, remount | Captured views of multi-block files, hard links, symlinks, clones and reservations, with exact bytes and metadata and normalized coverage |
 
 Every window sequence starts with a ladder: an acknowledged group survives a
 remount that loses a later write; two acknowledged groups and an unacknowledged
@@ -300,6 +306,60 @@ protection with one link; the oracle follows the executable
 [clone semantics](../docs/32-reflink-clone-semantics.md#3-clonefile) leave
 metadata inheritance to the API contract.
 
+The `replace` ladder replaces a plain file, replaces a hard-linked victim whose
+object survives under its other name, replaces across two directories and reads
+the replacing bytes after a remount. Source and victim always name distinct live
+file objects, and the victim label names the exact entry being replaced.
+
+The `orphan` ladder moves a contiguous file, an empty file and a replacement
+victim into the reserved directory, cleans each one, carries reserved entries
+across a remount and leaves one entry pending. A cleanup step removes whole
+extent records from the logical end and, once the layout is empty, the entry and
+the object record in the same call ([ADR-066](../adr/ADR-066-bounded-orphan-directory.md)).
+The family sets the cleanup budget to two extent records and generates only
+orphans whose complete layout fits one budget, so one call completes each one.
+The observation reports the reserved-directory count from the volume and sums
+the sizes of the objects the executed case placed there; an entry outside that
+set is an observation error.
+
+The `space` ladder reserves capacity past the written blocks, writes into one
+reserved block, reserves under exact block and record budgets, opts a file into
+the persistent policy and back out, and restores archived protection and
+timestamps onto a file and a directory. A reservation keeps the logical size,
+the bytes and the modification time, and it makes its blocks read as zeros. The
+volume carries the `COMPAT` data-policy feature for this family alone.
+
+The `batch` ladder creates a group, moves and deletes in one group, replaces
+inside a group, stages a window group that an fsync acknowledges, loses an
+unacknowledged group at a remount and publishes the acknowledged prefix. A group
+holds one to sixteen members, and a member never names a label its own group
+created. Window groups stage creates and moves.
+
+The `maintenance` ladder captures every view before the first step, produces
+reclaimable capacity, runs reclaim and snapshot-maintenance steps, remounts and
+runs further steps, reopens and inspects a view and deletes another. The model
+captures no view after a step, because a step may publish a checkpoint whose
+generation the model leaves open. Termination is the fixed point that the
+namespace, the bytes and every captured view reach: repeated steps change
+none of them, and the case publishes its verdict after a final remount.
+
+The `captured` ladder builds a multi-block file, a hard link, a symlink, a clone
+and a reservation, captures a view, changes each of them independently, captures
+a second view, remounts and reads both. Captured entries compare exact bytes,
+exact metadata and normalized coverage.
+
+Version 9 compares a normalized logical allocation coverage. Every observed
+range is expressed in logical bytes, and two adjacent ranges merge into one
+interval when their unwritten flag agrees, so the value is the list of maximal
+logical intervals. Coverage depends on which logical bytes hold reserved
+capacity and whether those bytes read as zeros; extent record boundaries and
+physical placement are outside it. Intervals are block aligned, ascending and
+disjoint, and two neighbouring intervals always carry different flags. Both the
+live linked records and the captured view entries carry this form. An `alloc` of
+`null` in an expected entry declares that file's layout outside the campaign's
+model: that one field is admitted without comparison and every other field of
+the entry is compared exactly.
+
 ```sh
 cargo build --offline -p afsplus-check --bin afsplus-scenario
 python3 tools/test-fuzz-semantic.py
@@ -326,19 +386,41 @@ with its failing bundle retained.
 | `protection` | namespace | Lowest protection bit of the first entry with nonzero protection |
 | `clone-byte` | namespace | First byte of a CloneFile or CloneRange destination |
 | `directory-rename` | namespace | Final component of a moved directory |
+| `replaced-byte` | replace | First byte of a file that took a replaced name |
+| `orphan-count` | orphan | Reserved-directory entry count |
+| `reservation` | space | Length of the last allocation interval of the first file with coverage |
+| `policy-flag` | space | Persistent data-update policy of the first file |
+| `batch-path` | batch | Final component of a path a batch created |
+| `maintenance-entry` | maintenance | First byte of the first captured file with data |
+| `captured-coverage` | captured | Length of the last interval of a captured file's coverage |
 
-The unit gate checks window, object and captured-view model examples, golden
-family scenarios, required operations and bounds at seeds 0, 1, 7, 42 and
+The unit gate checks window, object, version-9 and captured-view model examples,
+golden family scenarios, required operations and bounds at seeds 0, 1, 7, 42 and
 2^64 − 1, profile independence, control placement, family recipes, control
 reproduction, fresh-replay binding, and one real-runner pass plus every failing
 control. Generated families run without power cuts or injected I/O errors; the
 existing [crash](crash-testing.md) and [fault](../crates/afsplus-check/tests/faults.rs)
-matrices own those models. Captured views cover single-block files, files and
-directories; hard links, symlinks, clones and window work inside captured views,
-the source change time after CloneRange shares complete blocks, namespace
-operations inside windows and `RenameReplace` are outside these oracles. Each
-verdict compares the remounted state; intermediate reads and concurrent callers
-are separate properties.
+matrices own those models.
+
+Generated sequences contain operations the core admits, so a refusal is a case
+failure. The refusal contract of the version-9 commands belongs to
+[the scenario tests](../crates/afsplus-check/tests/scenario.rs): a symlink source
+or victim of a replacement, a directory victim, a reservation on a directory, a
+policy change on a volume without the feature, a reservation whose block or
+record budget is too small and a batch member whose parent is a file each become
+a captured operation failure at a known index.
+
+Deliberate limits of these oracles: the source change time after a CloneRange
+that shares complete blocks, and the coverage of a CloneRange destination, are
+outside the model, which marks that file's `alloc` as unmodelled; window groups
+carry creates and moves, because a staged final unlink reaches the reserved
+directory at commit; an orphan holds at most the cleanup budget of extent
+records, so multi-step cleanup of a fragmented orphan belongs to
+[orphan qualification](orphan-qualification.md); the per-file policy is observed
+as a flag, and its effect on write placement belongs to
+[data-policy qualification](data-policy-qualification.md). Each verdict compares
+the remounted state; intermediate reads and concurrent callers are separate
+properties.
 
 ## Legacy one-block reader oracles
 
