@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Integrate the family-matrix driver and four more cache families](#2026-09-15--integrate-the-family-matrix-driver-and-four-more-cache-families)
 - [2026-09-15 — Integrate data-write cache families and generated operation families](#2026-09-15--integrate-data-write-cache-families-and-generated-operation-families)
 - [2026-09-15 — Qualify reclaim, policy, low-space, shared-fault, orphan and rotation cache profiles](#2026-09-15--qualify-reclaim-policy-low-space-shared-fault-orphan-and-rotation-cache-profiles)
 - [2026-09-15 — Complete typed caller and Unicode admission fixtures](#2026-09-15--complete-typed-caller-and-unicode-admission-fixtures)
@@ -165,6 +166,23 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Integrate the family-matrix driver and four more cache families
+
+A reusable driver replaces per-family copies of the cut, fault, ambiguous
+publication, retained-snapshot, forced-eviction and resource-refusal runners.
+Transactions whose unflushed tail exceeds the exhaustive budget get a sampled
+campaign: every in-order prefix, representative tears, exhaustive subsets of
+short flush segments and 256 seeded subsets of longer ones, with the same
+exact-state oracle and both outcomes required. The reclaim step under
+eviction has a 137-write tail; the campaign covers 811 images per profile.
+
+Two limits were measured and recorded as such: the in-place private write
+stages two nodes, so no bounded profile evicts it, and orphan insertion
+succeeds after ordinary allocation is exhausted, so that variant qualifies
+cuts and faults under exhaustion. The integrated qualification in
+`build/family-matrix-qualification-16b5c7a` passed 747 tests with no failures
+and ten explicit ignores, plus every other gate, with unchanged sources.
 
 ## 2026-09-15 — Integrate data-write cache families and generated operation families
 
