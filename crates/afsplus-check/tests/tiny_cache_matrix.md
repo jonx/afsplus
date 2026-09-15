@@ -82,6 +82,17 @@ standard stopped intent-log tail diagnostic is admissible as a crash artifact.
 Live content and snapshot bytes have independent literal/slice expectations;
 a readable mount or equality with another writer execution is insufficient.
 
+## CloneFile first-sharing profile gate
+
+In [shared_crash.rs](shared_crash.rs), `first_clone_is_crash_atomic` and
+`first_clone_two_pages`, `first_clone_four_pages`, `first_clone_eight_pages`
+apply explicit cache profiles to setup, recorded CloneFile and recovery.
+Each modeled cut preserves source bytes and exposes either no clone/no sharing
+root, or the complete clone with a two-block run referenced twice. The selected
+generation must match that outcome, and both outcomes must occur.
+The fixture does not force eviction or retain a snapshot; error-return retries
+and those resource combinations require separate qualification.
+
 ## CloneRange reference-boundary profile gate
 
 In [shared_crash.rs](shared_crash.rs),

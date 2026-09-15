@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Qualify first-sharing CloneFile cache profiles](#2026-09-15--qualify-first-sharing-clonefile-cache-profiles)
 - [2026-09-15 — Qualify CloneRange reference boundaries across cache profiles](#2026-09-15--qualify-clonerange-reference-boundaries-across-cache-profiles)
 - [2026-09-15 — Qualify symlink and object metadata codecs](#2026-09-15--qualify-symlink-and-object-metadata-codecs)
 - [2026-09-15 — Reject the reserved object payload byte](#2026-09-15--reject-the-reserved-object-payload-byte)
@@ -153,6 +154,16 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Qualify first-sharing CloneFile cache profiles
+
+Applied 2/4/8/unlimited profiles to first-clone setup, recording and cut-image
+recovery. The oracle checks unchanged source contents, clone visibility and
+contents, exact two-block/two-reference sharing, and old/new generations.
+All four tests passed in 29.06 seconds; targeted clippy, formatting and document
+checks pass. The common matrix is unchanged from the preceding qualified unit;
+this run makes no new full-workspace claim. Eviction, retained views and explicit
+error-return retries remain separate cache-matrix requirements.
 
 ## 2026-09-15 — Qualify CloneRange reference boundaries across cache profiles
 

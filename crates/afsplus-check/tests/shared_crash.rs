@@ -226,24 +226,45 @@ fn run_replay_matrix(
 
 #[test]
 fn first_clone_is_crash_atomic() {
-    let mut setup = mount(formatted("CrashFirstClone", 0)).unwrap();
+    first_clone_profile(usize::MAX);
+}
+#[test]
+fn first_clone_two_pages() {
+    first_clone_profile(2);
+}
+#[test]
+fn first_clone_four_pages() {
+    first_clone_profile(4);
+}
+#[test]
+fn first_clone_eight_pages() {
+    first_clone_profile(8);
+}
+fn first_clone_profile(pages: usize) {
+    let options = MountOptions {
+        tree_cache_pages: NonZeroUsize::new(pages),
+        ..Default::default()
+    };
+    let mut setup = mount_with_options(formatted("CrashFirstClone", 0), options).unwrap();
+    assert_eq!(setup.tree_cache_pages(), pages);
     let content = vec![0x11u8; 2 * BS];
     let source = setup
         .create_file_in_root("source", &content, ts(2))
         .unwrap();
     let base = setup.into_device();
     let pre_generation = mount(base.clone()).unwrap().generation();
-    let mut clone_id = 0;
-    let operations = record_transaction(&base, |volume| {
-        clone_id = volume
-            .clone_file(source, OBJECT_ROOT, "clone", ts(3))
-            .unwrap();
-    });
+    let mut volume = mount_with_options(RecordingBackend::new(base.clone()), options).unwrap();
+    assert_eq!(volume.tree_cache_pages(), pages);
+    let clone_id = volume
+        .clone_file(source, OBJECT_ROOT, "clone", ts(3))
+        .unwrap();
+    let operations = volume.into_device().into_parts().1;
 
-    run_checkpoint_matrix(
+    run_checkpoint_matrix_profile(
         &base,
         &operations,
         pre_generation,
+        pages,
         |context, post, volume| {
             assert_eq!(volume.read_file(source).unwrap(), content, "{context}");
             if post {
@@ -256,6 +277,7 @@ fn first_clone_is_crash_atomic() {
                 let records = shared_records(volume);
                 assert_eq!(records.len(), 1, "{context}: {records:?}");
                 assert_eq!(records[0].reference_count, 2, "{context}");
+                assert_eq!(records[0].block_count, 2, "{context}");
             } else {
                 assert_eq!(volume.lookup_root("clone").unwrap(), None, "{context}");
                 assert_eq!(volume.checkpoint().shared_extent_root_block, 0, "{context}");
