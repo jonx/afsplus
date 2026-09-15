@@ -2580,3 +2580,54 @@ fn small_verification_rings_report_loss_without_changing_findings() {
         assert_eq!(ring.filtered(), 0);
     }
 }
+
+#[test]
+fn observed_snapshot_mount_keeps_its_budgets_results_and_image() {
+    use afsplus_core::flight::{Category, MountStage};
+    use afsplus_core::volume::SnapshotWorkLimits;
+    use afsplus_core::{mount_observed_with_snapshot_limits, mount_with_snapshot_limits};
+    use afsplus_core::{MountMode, MountOptions};
+    let limits = SnapshotWorkLimits {
+        max_edit_records: 4096,
+        max_views: 8,
+        reclaim_records: 8,
+    };
+    let base = window_image(true);
+    for mode in [MountMode::ReadWrite, MountMode::NoChanges] {
+        let options = MountOptions {
+            mode,
+            ..Default::default()
+        };
+        let plain_device = SharedDevice::new(&base);
+        let observed_device = SharedDevice::new(&base);
+        let plain_handle = plain_device.handle();
+        let observed_handle = observed_device.handle();
+        let plain = mount_with_snapshot_limits(plain_device, options, limits);
+        let mut observed =
+            mount_observed_with_snapshot_limits(observed_device, options, limits, recorder(256))
+                .unwrap();
+        let ring = observed.replace_flight_recorder(None).unwrap();
+        assert_eq!(describe_mount(&Ok(observed)), describe_mount(&plain));
+        assert_eq!(observed_handle.trace(), plain_handle.trace());
+        assert_eq!(observed_handle.blocks(), plain_handle.blocks());
+        let kinds: Vec<_> = ring
+            .events()
+            .filter(|event| event.kind.category() == Category::Mount)
+            .map(|event| event.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                EventKind::MountBegin,
+                EventKind::MountSelected,
+                EventKind::MountIntentBegin,
+                EventKind::MountIntentScanned,
+                EventKind::MountComplete
+            ],
+            "{mode:?}"
+        );
+        let last = ring.events().last().unwrap();
+        assert_eq!(mount_context(last).stage, MountStage::IntentLog);
+        assert_eq!(mount_context(last).mode, mode);
+    }
+}
