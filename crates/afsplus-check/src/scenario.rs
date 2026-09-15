@@ -335,13 +335,14 @@ fn finish(
 /// roots, the exhaustive decode and the invariant sweep. Every phase, finding
 /// and outcome reaches the recorder; the sweep reads exactly the blocks an
 /// unobserved sweep reads.
-fn verify_observed(
+fn verify_scenario(
     device: &mut Recorder,
-    ring: &mut afsplus_core::flight::FlightRecorder,
+    ring: Option<&mut afsplus_core::flight::FlightRecorder>,
 ) -> Result<usize, String> {
     use afsplus_core::mount::select_checkpoint;
     use afsplus_core::verify::{
-        full_sweep_observed, load_committed_state_observed, load_mount_state_observed,
+        full_sweep, full_sweep_observed, load_committed_state, load_committed_state_observed,
+        load_mount_state, load_mount_state_observed,
     };
     use afsplus_format::ident::Identification;
     let mut buf = vec![0u8; device.block_size()];
@@ -349,11 +350,20 @@ fn verify_observed(
     let ident = Identification::decode(&buf).map_err(|e| e.to_string())?;
     let geo = ident.geometry();
     let selection = select_checkpoint(device, &ident).map_err(|e| e.to_string())?;
-    load_mount_state_observed(device, &ident, &selection.chosen, ring)
-        .map_err(|e| e.to_string())?;
-    let state = load_committed_state_observed(device, &ident, &selection.chosen, ring)
-        .map_err(|e| e.to_string())?;
-    Ok(full_sweep_observed(&state, &geo, &selection.chosen, ring).len())
+    let chosen = &selection.chosen;
+    match ring {
+        Some(ring) => {
+            load_mount_state_observed(device, &ident, chosen, ring).map_err(|e| e.to_string())?;
+            let state = load_committed_state_observed(device, &ident, chosen, ring)
+                .map_err(|e| e.to_string())?;
+            Ok(full_sweep_observed(&state, &geo, chosen, ring).len())
+        }
+        None => {
+            load_mount_state(device, &ident, chosen).map_err(|e| e.to_string())?;
+            let state = load_committed_state(device, &ident, chosen).map_err(|e| e.to_string())?;
+            Ok(full_sweep(&state, &geo, chosen).len())
+        }
+    }
 }
 
 fn integer(s: &str, maximum: u64) -> Result<u64, String> {
@@ -958,6 +968,12 @@ impl Plan {
             orphan_candidates,
         )
     }
+    /// Execute without any recorder, whatever diagnostic profile the plan
+    /// serializes. Observation-equivalence baselines compare against this run.
+    pub fn run_unobserved(&self, limits: RecordingLimits) -> Result<Run, String> {
+        self.run_observed(limits, None, None, None)
+    }
+
     pub fn run_with_limits(&self, limits: RecordingLimits) -> Result<Run, String> {
         match self.flight_capacity {
             Some(capacity) => self.run_with_flight(limits, capacity),
@@ -1158,7 +1174,14 @@ impl Plan {
                             }
                             Err(refused) => flight = Some(refused.recorder),
                         },
-                        None => refusal = Some("a refused mount requires a recorder".to_owned()),
+                        // Without a recorder the same profile is refused
+                        // through the unobserved entry point, so an
+                        // observation-free baseline reads the same blocks.
+                        None => {
+                            if mount_with_options(recorder.clone(), self.mount_options()).is_ok() {
+                                refusal = Some("refused mount profile was accepted".to_owned());
+                            }
+                        }
                     }
                 }
                 volume = match self.mount_profile_observed(recorder.clone(), flight) {
@@ -1692,12 +1715,8 @@ impl Plan {
                     Operation::Verify => {
                         // Standalone verification over a second handle on the
                         // same image. It reads only; it writes no device block.
-                        let flight = volume.replace_flight_recorder(None);
-                        let mut flight = flight;
-                        let outcome = match &mut flight {
-                            Some(ring) => verify_observed(&mut recorder.clone(), ring),
-                            None => Err("verification requires an attached recorder".to_owned()),
-                        };
+                        let mut flight = volume.replace_flight_recorder(None);
+                        let outcome = verify_scenario(&mut recorder.clone(), flight.as_mut());
                         volume.replace_flight_recorder(flight);
                         outcome?;
                     }

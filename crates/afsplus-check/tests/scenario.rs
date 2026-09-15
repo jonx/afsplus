@@ -744,3 +744,223 @@ fn version_nine_refusals_are_captured_operation_failures() {
         );
     }
 }
+
+const V8_HEADER: &str = "format 4096 1024 64 8 2 256 32767 0 none 64 4 64";
+
+/// One version-8 scenario reaching the allocator, the mutable trees, reclaim,
+/// mount recovery, a refused mount, formatting, verification, staged window
+/// writes and captured-view reads.
+fn version_eight_wire(pages: &str, mask: u32, capacity: usize, sink: &str) -> Vec<u8> {
+    let mut wire = format!(
+        "AFSPSC08\nformat 4096 1024 64 8 {pages} {capacity} {mask} {sink} 64 4 64\n\
+         mkdir d root 646972\n"
+    );
+    for index in 0..24 {
+        wire.push_str(&format!(
+            "create f{index} d {:02x}{:02x} {}\n",
+            0x61 + index / 10,
+            0x30 + index % 10,
+            "5a".repeat(200)
+        ));
+    }
+    wire.push_str("write f0 0 ");
+    wire.push_str(&"ab".repeat(5000));
+    wire.push_str("\nsync\ntruncate f0 100\nwindow_write f1 0 ");
+    wire.push_str(&"cd".repeat(3000));
+    wire.push_str("\nwindow_fsync\nwindow_write f2 0 ");
+    wire.push_str(&"ef".repeat(3000));
+    wire.push_str(
+        "\nremount\nsnapshot_create s\nsnapshot_open s\nsnapshot_inspect s\n\
+         snapshot_close s\nsnapshot_delete s\nsync\nverify\nremount_refused\n",
+    );
+    wire.into_bytes()
+}
+
+#[test]
+fn version_eight_selects_every_category_bit_and_binds_lifecycle_commands() {
+    for (version, header, valid) in [
+        ("AFSPSC07", V7_HEADER, false),
+        ("AFSPSC08", V8_HEADER, true),
+        ("AFSPSC09", LINKED_HEADER, false),
+    ] {
+        for command in ["verify", "remount_refused"] {
+            let wire = format!("{version}\n{header}\n{command}\n");
+            assert_eq!(
+                Plan::parse(wire.as_bytes()).is_ok(),
+                valid,
+                "{version} {command}"
+            );
+        }
+    }
+    for (mask, valid) in [(0, true), (32767, true), (32768, false)] {
+        let wire = format!("AFSPSC08\nformat 4096 256 64 8 2 256 {mask} 0 none 64 4 64\nsync\n");
+        assert_eq!(Plan::parse(wire.as_bytes()).is_ok(), valid, "mask {mask}");
+    }
+    // Version 7 keeps its own ceiling, so version 8 widens nothing behind it.
+    let wire = "AFSPSC07\nformat 4096 256 64 8 2 256 128 0 none 64 4 64\nsync\n";
+    assert!(Plan::parse(wire.as_bytes()).is_err());
+    let plan =
+        Plan::parse(format!("AFSPSC08\n{V8_HEADER}\nsync\n").as_bytes()).expect("version 8 plan");
+    assert!(plan.lifecycle_observation() && plan.object_observation() && plan.api_observation());
+    assert!(!plan.linked_observation() && plan.snapshot_limits().is_some());
+}
+
+#[test]
+fn version_eight_observation_changes_no_image_byte_and_no_block_operation() {
+    for pages in ["2", "4", "8", "unlimited"] {
+        for (mask, capacity) in [(0u32, 1usize), (32767, 1), (32767, 256)] {
+            let plan = Plan::parse(&version_eight_wire(pages, mask, capacity, "0 none"))
+                .expect("version 8 plan");
+            let observed = plan.run_with_limits(RecordingLimits::default()).unwrap();
+            let plain = plan.run_unobserved(RecordingLimits::default()).unwrap();
+            assert!(observed.failure.is_none(), "{pages} {mask} {capacity}");
+            assert_eq!(plain.failure.is_none(), observed.failure.is_none());
+            assert_eq!(plain.log.len(), observed.log.len());
+            for (left, right) in plain.log.iter().zip(&observed.log) {
+                match (left, right) {
+                    (RecordedOp::Flush, RecordedOp::Flush) => (),
+                    (
+                        RecordedOp::Write { lba: a, data: x },
+                        RecordedOp::Write { lba: b, data: y },
+                    ) => assert!(a == b && x == y, "block write differs"),
+                    _ => panic!("block operation differs"),
+                }
+            }
+            let mut left = plain.result.clone();
+            let mut right = observed.result.clone();
+            let mut a = vec![0u8; left.block_size()];
+            let mut b = vec![0u8; right.block_size()];
+            for lba in 0..left.total_blocks() {
+                left.read_block(lba, &mut a).unwrap();
+                right.read_block(lba, &mut b).unwrap();
+                assert_eq!(a, b, "image block {lba} differs");
+            }
+            assert!(plain.pre_mount.is_none());
+            assert!(observed.pre_mount.is_some());
+        }
+    }
+}
+
+#[test]
+fn version_eight_batches_carry_the_format_mount_and_subsystem_scopes() {
+    use afsplus_core::flight::{Category, EventKind, LifecycleContext};
+    let plan = Plan::parse(&version_eight_wire("2", 32767, 256, "0 none")).expect("version 8 plan");
+    let run = plan.run_with_limits(RecordingLimits::default()).unwrap();
+    assert!(run.failure.is_none(), "{:?}", run.failure);
+    let pre_mount = run.pre_mount.as_ref().expect("explicit pre-mount batch");
+    let staged: Vec<_> = pre_mount.events.iter().map(|event| event.kind).collect();
+    assert_eq!(staged.first(), Some(&EventKind::FormatBegin));
+    assert!(staged.contains(&EventKind::FormatCheckpointDurable));
+    assert!(staged.contains(&EventKind::MountBegin));
+    assert!(staged.contains(&EventKind::MountComplete));
+    let mut kinds = std::collections::BTreeSet::new();
+    let mut categories = std::collections::BTreeSet::new();
+    for batch in
+        std::iter::once(pre_mount).chain(run.events.iter().filter_map(|e| e.flight.as_ref()))
+    {
+        for event in &batch.events {
+            kinds.insert(format!("{:?}", event.kind));
+            categories.insert(format!("{:?}", event.kind.category()));
+            // A payload is present exactly when its category names one.
+            let payload = event.allocation.is_some() as u8
+                + event.tree.is_some() as u8
+                + event.reclaim.is_some() as u8
+                + event.lifecycle.is_some() as u8;
+            let expected = matches!(
+                event.kind.category(),
+                Category::Allocator
+                    | Category::Tree
+                    | Category::Reclaim
+                    | Category::Mount
+                    | Category::Format
+                    | Category::Verify
+                    | Category::Data
+                    | Category::View
+            );
+            assert_eq!(payload, u8::from(expected), "{:?}", event.kind);
+            if let Some(LifecycleContext::Mount(context)) = event.lifecycle {
+                assert!(
+                    event.generation != 0
+                        || event.kind == EventKind::MountBegin
+                        || event.kind == EventKind::MountFailed
+                );
+                assert!(context.slot <= 1);
+            }
+        }
+    }
+    for expected in [
+        "AllocationGranted",
+        "AllocationRetired",
+        "TreeReadBegin",
+        "ReclaimPromoted",
+        "MountIntentReplayed",
+        "MountFailed",
+        "FormatBegin",
+        "VerifyBegin",
+        "VerifyPhase",
+        "VerifyComplete",
+        "DataWriteBegin",
+        "DataWriteComplete",
+        "IntentDataDurable",
+        "ViewReadBegin",
+        "ViewReadComplete",
+    ] {
+        assert!(kinds.contains(expected), "missing {expected}: {kinds:?}");
+    }
+    for expected in [
+        "Allocator",
+        "Tree",
+        "Reclaim",
+        "Mount",
+        "Format",
+        "Verify",
+        "Data",
+        "View",
+    ] {
+        assert!(categories.contains(expected), "missing category {expected}");
+    }
+}
+
+#[test]
+fn version_eight_category_mask_selects_each_scope_alone() {
+    for (bit, name) in [
+        (7u32, "Allocation"),
+        (8, "Tree"),
+        (9, "Reclaim"),
+        (10, "Mount"),
+        (11, "Format"),
+        (12, "Verify"),
+        (13, "Data"),
+        (14, "View"),
+    ] {
+        let plan =
+            Plan::parse(&version_eight_wire("2", 1 << bit, 256, "0 none")).expect("version 8 plan");
+        let run = plan.run_with_limits(RecordingLimits::default()).unwrap();
+        assert!(run.failure.is_none(), "{name}");
+        let mut seen = false;
+        for batch in std::iter::once(run.pre_mount.as_ref().unwrap())
+            .chain(run.events.iter().filter_map(|e| e.flight.as_ref()))
+        {
+            for event in &batch.events {
+                let category = format!("{:?}", event.kind.category());
+                assert_eq!(
+                    1u16 << bit,
+                    match category.as_str() {
+                        "Allocator" => 1 << 7,
+                        "Tree" => 1 << 8,
+                        "Reclaim" => 1 << 9,
+                        "Mount" => 1 << 10,
+                        "Format" => 1 << 11,
+                        "Verify" => 1 << 12,
+                        "Data" => 1 << 13,
+                        "View" => 1 << 14,
+                        other => panic!("unselected category {other}"),
+                    },
+                    "{name}"
+                );
+                seen = true;
+            }
+        }
+        assert!(seen, "no {name} record was retained");
+    }
+}
