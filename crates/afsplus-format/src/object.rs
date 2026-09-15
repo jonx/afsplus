@@ -182,6 +182,9 @@ impl ObjectRecord {
         if p.len() < PAYLOAD_LEN {
             return Err(FormatError::Invalid("object record payload too short"));
         }
+        if p[9] != 0 {
+            return Err(FormatError::Invalid("object reserved byte is nonzero"));
+        }
         let record = ObjectRecord {
             object_id: le::get_u64(&p[0..8]),
             object_type: ObjectType::from_wire(p[8])?,

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Reject the reserved object payload byte](#2026-09-15--reject-the-reserved-object-payload-byte)
 - [2026-09-15 — Qualify snapshot-bearing checkpoint admission](#2026-09-15--qualify-snapshot-bearing-checkpoint-admission)
 - [2026-09-15 — Qualify reclaim codec mutation and replay](#2026-09-15--qualify-reclaim-codec-mutation-and-replay)
 - [2026-09-15 — Enforce reclaim reserved-byte admission](#2026-09-15--enforce-reclaim-reserved-byte-admission)
@@ -150,6 +151,22 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Reject the reserved object payload byte
+
+Generic and metadata object readers reject a nonzero byte at payload offset 9,
+as required by the existing wire layout comment. Six CRC-resealed file and
+directory corruptions exercise all three reader entry points and exact byte
+restoration. The focused main regression and formatting pass; the retained
+isolated source campaign passed 575 workspace tests, zero failures and ten
+ignored tests, with clippy and formatting passing. Evidence lives in
+`build/object-codec-integration-ojy8u7x0`; this is composed evidence, not a new
+full main-worktree campaign.
+
+The separate generic header-flags and payload/tail admission ambiguity is
+recorded as Q13, owned by the Stage A codec inventory and the format-freeze
+review. Tightening those fields requires an explicit decision and cross-reader
+experiments; the documented reserved-byte correction does not settle them.
 
 ## 2026-09-15 — Qualify snapshot-bearing checkpoint admission
 
