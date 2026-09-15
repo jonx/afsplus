@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Qualify reclaim, policy, low-space, shared-fault, orphan and rotation cache profiles](#2026-09-15--qualify-reclaim-policy-low-space-shared-fault-orphan-and-rotation-cache-profiles)
 - [2026-09-15 — Complete typed caller and Unicode admission fixtures](#2026-09-15--complete-typed-caller-and-unicode-admission-fixtures)
 - [2026-09-15 — Integrate subsystem observations and caller-property tests](#2026-09-15--integrate-subsystem-observations-and-caller-property-tests)
 - [2026-09-15 — Identify allocator recorder ownership prerequisite](#2026-09-15--identify-allocator-recorder-ownership-prerequisite)
@@ -163,6 +164,30 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Qualify reclaim, policy, low-space, shared-fault, orphan and rotation cache profiles
+
+Four fixture patches prepared in isolated copies were reviewed before
+integration. Review replaced accounting expectations captured from the writer's
+own run with literal free/pending counts, compared complete object records for
+policy-flag cuts, required literal clone bytes, rejected every checker warning
+except the stopped intent-log tail, and added staged-node bounds.
+
+The orphan-profile draft failed its fragmented cleanup test. ADR-066 cleanup
+removes whole extent records from the logical end and publishes a size ending at
+the lowest removed extent, so the draft's expected five-block and one-block files
+were wrong; the filesystem published six and two blocks. The test pins those
+literal prefixes and checks the image after each step. The allocation-rotation
+draft did not compile; the qualified test adds a persistent snapshot and a
+two-block shared run, and uses longer names after an eight-page run showed zero
+spills.
+
+Every new family has a deliberately wrong expectation that fails. The integrated
+qualification in `build/cache-ready-qualification-ee21aa8` passed 627 tests with
+no failures and ten explicit ignores, plus formatting, Clippy, codec,
+documentation and whitespace gates, with unchanged sources. No production code
+changed. Four fixture groups observed no spills, so their eviction combinations
+stay open in [the inventory](crates/afsplus-check/tests/tiny_cache_matrix.md).
 
 ## 2026-09-15 — Complete typed caller and Unicode admission fixtures
 
