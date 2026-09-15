@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Add explicit exhaustive power-cut budgets](#2026-09-15--add-explicit-exhaustive-power-cut-budgets)
 - [2026-09-15 — Qualify ambiguous clone publication across cache profiles](#2026-09-15--qualify-ambiguous-clone-publication-across-cache-profiles)
 - [2026-09-15 — Qualify first-clone I/O failure recovery](#2026-09-15--qualify-first-clone-io-failure-recovery)
 - [2026-09-15 — Qualify first-sharing CloneFile cache profiles](#2026-09-15--qualify-first-sharing-clonefile-cache-profiles)
@@ -156,6 +157,21 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Add explicit exhaustive power-cut budgets
+
+A retained-snapshot clone fixture reached thirteen unflushed writes and correctly
+tripped the simulator's default twelve-write guard. Added an explicit streaming
+budget API, capped at twenty writes, preserving all full-write subsets and the
+existing representative tears. The default and overlay limits are unchanged;
+no workload silently falls back to sampling.
+
+Two focused tests pass: 8,192 distinct full subsets plus 39 tears at thirteen
+writes, and default refusal before any callback. All eighteen other block tests
+pass separately, including memory/overlay parity. Block/check all-target clippy,
+formatting and documentation checks pass. The filesystem consumer campaign is
+separate and still running; these results qualify the simulator only. Retained
+results and source are in `build/snapshot-clone-profiles-daqrolub`.
 
 ## 2026-09-15 — Qualify ambiguous clone publication across cache profiles
 

@@ -21,6 +21,7 @@
 - [Deferred-reclamation tests](#deferred-reclamation-tests)
 - [Validation after every crash](#validation-after-every-crash)
 - [Block reuse across generations](#block-reuse-across-generations)
+- [Explicit full-enumeration budgets](#explicit-full-enumeration-budgets)
 
 <!-- /toc -->
 
@@ -187,3 +188,16 @@ The executable form is the G1/G2/G3/G4 quarantine matrix under
 [ADR-074](../adr/ADR-074-protect-previous-checkpoint.md) in
 [`crates/afsplus-check/tests/alloc_crash.rs`](../crates/afsplus-check/tests/alloc_crash.rs); the allocator design it exercises
 is [docs/07](../docs/07-allocation.md).
+
+## Explicit full-enumeration budgets
+
+The memory-image streaming simulator defaults to twelve unflushed writes per
+cut. `for_each_crash_state_with_budget` in
+[powercut.rs](../crates/afsplus-block/src/powercut.rs) accepts an explicit limit
+up to twenty writes. It enumerates every full-write subset plus the same
+representative prefix tears; it never falls back to sampling. The callback
+receives one image at a time, but total runtime grows exponentially. Exceeding
+the requested limit rejects the cut. Overlay enumeration retains its default
+limit. [Budget tests](../crates/afsplus-block/tests/powercut_budget.rs) verify
+all 8,192 distinct subsets and 39 tears for thirteen writes, and default refusal
+before callbacks at the same size.

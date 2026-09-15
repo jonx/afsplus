@@ -94,9 +94,9 @@ pub struct CrashState {
 /// Prefix-of-block tear offsets exercised for each unflushed write.
 const TEAR_OFFSETS: &[usize] = &[64, 2048, 4064];
 
-/// Full subset enumeration is used up to this tail length (2^n states);
-/// longer tails would need sampling, which the first prototype does not
-/// require. Guarded by an assertion so a silent coverage loss cannot happen.
+/// Default full-subset limit (2^n states). Larger memory-image campaigns
+/// opt into an explicit budget; overlay enumeration retains this limit.
+/// Exceeding a budget is an error, never silent coverage loss.
 const MAX_ENUMERATED_TAIL: usize = 12;
 
 /// Enumerates the modeled durable states (full-write subsets plus
@@ -119,8 +119,25 @@ pub fn for_each_crash_state(
     base: &MemoryBackend,
     log: &[RecordedOp],
     crash_point: usize,
+    visit: impl FnMut(CrashState),
+) {
+    for_each_crash_state_with_budget(base, log, crash_point, MAX_ENUMERATED_TAIL, visit);
+}
+
+/// Streams full subsets and representative tears with an explicit tail budget.
+/// The default API retains its twelve-write limit. This opt-in supports up to
+/// twenty writes (2^20 full subsets per cut) and never silently samples states.
+pub fn for_each_crash_state_with_budget(
+    base: &MemoryBackend,
+    log: &[RecordedOp],
+    crash_point: usize,
+    max_tail_writes: usize,
     mut visit: impl FnMut(CrashState),
 ) {
+    assert!(
+        max_tail_writes <= 20,
+        "enumeration budget exceeds twenty writes"
+    );
     assert!(crash_point <= log.len());
     let prefix = &log[..crash_point];
 
@@ -146,9 +163,9 @@ pub fn for_each_crash_state(
         })
         .collect();
     assert!(
-        tail.len() <= MAX_ENUMERATED_TAIL,
+        tail.len() <= max_tail_writes,
         "unflushed tail of {} writes exceeds full-enumeration budget; \
-         the harness needs a sampling strategy before testing this workload",
+         raise the explicit budget or choose a separately qualified sampling strategy",
         tail.len()
     );
 

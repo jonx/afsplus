@@ -27,7 +27,10 @@ pub use fault::{FaultBackend, FaultPlan};
 pub use file::FileBackend;
 pub use memory::MemoryBackend;
 pub use overlay::{OverlayBackend, OverlayLimits};
-pub use powercut::{crash_states, for_each_crash_state, CrashState, RecordedOp, RecordingBackend};
+pub use powercut::{
+    crash_states, for_each_crash_state, for_each_crash_state_with_budget, CrashState, RecordedOp,
+    RecordingBackend,
+};
 pub use slice::SliceBackend;
 pub use trace::{IoStats, TraceBackend, TraceEvent};
 
