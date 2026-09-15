@@ -50,7 +50,7 @@ fn formatted(label: &str, log_slots: u16) -> MemoryBackend {
     device
 }
 
-fn shared_records(volume: &mut Volume<MemoryBackend>) -> Vec<SharedRun> {
+fn shared_records<D: BlockDevice>(volume: &mut Volume<D>) -> Vec<SharedRun> {
     let root = volume.checkpoint().shared_extent_root_block;
     if root == 0 {
         return Vec::new();
@@ -99,6 +99,21 @@ fn profile_mount<D: BlockDevice>(device: D, pages: usize) -> Volume<D> {
     .unwrap();
     assert_eq!(volume.tree_cache_pages(), pages);
     volume
+}
+
+/// Rejects checker errors and retained-checkpoint warnings. A stopped
+/// intent-log tail is the only admissible crash artifact.
+fn assert_checker_clean<D: BlockDevice>(device: &mut D, context: &str) {
+    let report = check_device(device);
+    assert!(report.is_clean(), "{context}: {:?}", report.errors);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .all(|warning| warning.starts_with("intent log tail:")),
+        "{context}: {:?}",
+        report.warnings
+    );
 }
 
 fn run_checkpoint_matrix_profile(
@@ -1033,4 +1048,403 @@ fn first_clone_io_failures_preserve_ownership_in_all_profiles() {
         }
         eprintln!("first-clone faults pages={pages} writes={writes} flushes={flushes}");
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SharedFaultFamily {
+    Write,
+    Replace,
+}
+
+struct SharedFaultFixture {
+    source: u64,
+    peer: u64,
+    incoming: u64,
+    generation: u64,
+    original: Vec<u8>,
+    incoming_bytes: Vec<u8>,
+    shared: SharedRun,
+}
+
+impl SharedFaultFixture {
+    fn apply<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        family: SharedFaultFamily,
+    ) -> Result<(), afsplus_core::CoreError> {
+        match family {
+            SharedFaultFamily::Write => {
+                volume.write_file_at(self.peer, BS as u64, &vec![0x97; BS], ts(5))
+            }
+            SharedFaultFamily::Replace => {
+                volume.rename_replace(OBJECT_ROOT, "incoming", OBJECT_ROOT, "source", ts(5))
+            }
+        }
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        family: SharedFaultFamily,
+        post: bool,
+        context: &str,
+    ) {
+        let replaced = post && matches!(family, SharedFaultFamily::Replace);
+        assert_eq!(
+            volume.generation(),
+            self.generation + u64::from(post),
+            "{context}"
+        );
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            if replaced { 2 } else { 3 },
+            "{context}"
+        );
+        assert_eq!(
+            volume.lookup_root("source").unwrap(),
+            Some(if replaced { self.incoming } else { self.source }),
+            "{context}"
+        );
+        assert_eq!(
+            volume.lookup_root("peer").unwrap(),
+            Some(self.peer),
+            "{context}"
+        );
+        assert_eq!(
+            volume.lookup_root("incoming").unwrap(),
+            (!replaced).then_some(self.incoming),
+            "{context}"
+        );
+        assert_eq!(
+            volume.read_file(self.incoming).unwrap(),
+            self.incoming_bytes,
+            "{context}"
+        );
+        if replaced {
+            assert!(volume.stat(self.source).unwrap().is_none(), "{context}");
+        } else {
+            assert_eq!(
+                volume.read_file(self.source).unwrap(),
+                self.original,
+                "{context}"
+            );
+        }
+        let mut peer_bytes = self.original.clone();
+        let expected_records = if post && matches!(family, SharedFaultFamily::Write) {
+            peer_bytes[BS..2 * BS].fill(0x97);
+            vec![
+                SharedRun {
+                    block_count: 1,
+                    ..self.shared
+                },
+                SharedRun {
+                    physical_start: self.shared.physical_start + 2,
+                    block_count: 2,
+                    ..self.shared
+                },
+            ]
+        } else if replaced {
+            Vec::new()
+        } else {
+            vec![self.shared]
+        };
+        assert_eq!(
+            volume.read_file(self.peer).unwrap(),
+            peer_bytes,
+            "{context}"
+        );
+        assert_eq!(shared_records(volume), expected_records, "{context}");
+        for offset in 0..self.shared.block_count {
+            assert!(
+                !volume
+                    .quarantine_contains(self.shared.physical_start + offset)
+                    .unwrap(),
+                "{context}: reachable shared storage quarantined"
+            );
+        }
+    }
+}
+
+fn shared_fault_fixture(pages: usize) -> (SharedFaultFixture, MemoryBackend) {
+    let mut setup = profile_mount(formatted("SharedMutationFaults", 0), pages);
+    let original = vec![0x36; 4 * BS];
+    let incoming_bytes = vec![0x71; BS + 29];
+    let source = setup
+        .create_file_in_root("source", &original, ts(2))
+        .unwrap();
+    let peer = setup
+        .clone_file(source, OBJECT_ROOT, "peer", ts(3))
+        .unwrap();
+    let incoming = setup
+        .create_file_in_root("incoming", &incoming_bytes, ts(4))
+        .unwrap();
+    let records = shared_records(&mut setup);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        (
+            records[0].block_count,
+            records[0].reference_count,
+            records[0].flags
+        ),
+        (4, 2, 0)
+    );
+    let fixture = SharedFaultFixture {
+        source,
+        peer,
+        incoming,
+        generation: setup.generation(),
+        original,
+        incoming_bytes,
+        shared: records[0],
+    };
+    (fixture, setup.into_device())
+}
+
+fn shared_mutation_io_failures(family: SharedFaultFamily) {
+    for pages in [2, 4, 8, usize::MAX] {
+        let (fixture, base) = shared_fault_fixture(pages);
+        fixture.verify(
+            &mut profile_mount(base.clone(), pages),
+            family,
+            false,
+            "initial fixture",
+        );
+        let mut reference = profile_mount(RecordingBackend::new(base.clone()), pages);
+        fixture.apply(&mut reference, family).unwrap();
+        fixture.verify(&mut reference, family, true, "successful reference");
+        let staged = reference.last_commit_stats().unwrap().tree_mutations;
+        assert!(
+            staged.max_resident_staged_nodes <= pages as u64,
+            "{family:?} pages={pages}: resident staged nodes exceed the profile"
+        );
+        let checkpoint_slots = reference.ident().checkpoint_slots;
+        let (_, log) = reference.into_device().into_parts();
+        let write_targets: Vec<_> = log
+            .iter()
+            .filter_map(|op| match op {
+                RecordedOp::Write { lba, .. } => Some(*lba),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            checkpoint_slots.contains(write_targets.last().unwrap()),
+            "{family:?} pages={pages}: final write must publish a checkpoint"
+        );
+        assert_eq!(
+            write_targets
+                .iter()
+                .filter(|lba| checkpoint_slots.contains(lba))
+                .count(),
+            1,
+            "{family:?} pages={pages}: fixture must have exactly one checkpoint write"
+        );
+        let writes = log
+            .iter()
+            .filter(|op| matches!(op, RecordedOp::Write { .. }))
+            .count() as u64;
+        let flushes = log
+            .iter()
+            .filter(|op| matches!(op, RecordedOp::Flush))
+            .count() as u64;
+        assert!(writes > 0 && flushes > 0);
+        let plans = (0..writes)
+            .map(|i| FaultPlan {
+                fail_write_index: Some(i),
+                ..Default::default()
+            })
+            .chain((0..flushes).map(|i| FaultPlan {
+                fail_flush_index: Some(i),
+                ..Default::default()
+            }));
+        let mut same_handle_cases = 0;
+        for plan in plans {
+            let context = format!("{family:?} pages={pages} plan={plan:?}");
+            let mut volume = profile_mount(FaultBackend::new(base.clone(), plan), pages);
+            assert!(fixture.apply(&mut volume, family).is_err(), "{context}");
+            assert!(volume.device_mut().tripped(), "{context}");
+            let published = plan.fail_flush_index == Some(flushes - 1);
+            if !published {
+                fixture.verify(&mut volume, family, false, &context);
+            }
+            // The checkpoint is the last recorded write. Its failed write or
+            // barrier leaves publication uncertain to the mounted writer.
+            if published || plan.fail_write_index == Some(writes - 1) {
+                assert!(
+                    matches!(
+                        fixture.apply(&mut volume, family),
+                        Err(afsplus_core::CoreError::WindowPoisoned)
+                    ),
+                    "{context}"
+                );
+            }
+            // Inspect before any retry: before-write failures retain old state;
+            // a failed final barrier follows a complete readable checkpoint.
+            let mut recovered = profile_mount(volume.into_device().into_inner(), pages);
+            fixture.verify(&mut recovered, family, published, &context);
+            assert_checker_clean(recovered.device_mut(), &context);
+            if !published {
+                fixture.apply(&mut recovered, family).unwrap();
+            }
+            fixture.verify(&mut recovered, family, true, &context);
+            let mut again = profile_mount(recovered.into_device(), pages);
+            fixture.verify(&mut again, family, true, &context);
+            assert_checker_clean(again.device_mut(), &context);
+
+            if !published && plan.fail_write_index != Some(writes - 1) {
+                // A separate failure instance preserves the untouched pre-retry
+                // remount oracle above while qualifying retry on the same handle.
+                let mut retry = profile_mount(FaultBackend::new(base.clone(), plan), pages);
+                assert!(
+                    fixture.apply(&mut retry, family).is_err(),
+                    "{context}: retry instance"
+                );
+                assert!(retry.device_mut().tripped(), "{context}: retry instance");
+                fixture.verify(&mut retry, family, false, &context);
+                fixture
+                    .apply(&mut retry, family)
+                    .unwrap_or_else(|error| panic!("{context}: same-handle retry failed: {error}"));
+                fixture.verify(&mut retry, family, true, &context);
+                let mut remounted = profile_mount(retry.into_device().into_inner(), pages);
+                fixture.verify(&mut remounted, family, true, &context);
+                assert_checker_clean(remounted.device_mut(), &context);
+                same_handle_cases += 1;
+            }
+        }
+        assert_eq!(same_handle_cases, writes + flushes - 2);
+        eprintln!(
+            "shared mutation faults family={family:?} pages={pages} writes={writes} flushes={flushes} independent_same_handle_cases={same_handle_cases} spills={} peak_staged={}",
+            staged.staged_spill_writes, staged.max_resident_staged_nodes
+        );
+    }
+}
+
+#[test]
+fn shared_write_io_failures_preserve_exact_ownership_and_allow_retry_in_all_profiles() {
+    shared_mutation_io_failures(SharedFaultFamily::Write);
+}
+
+#[test]
+fn shared_replace_io_failures_preserve_exact_ownership_and_allow_retry_in_all_profiles() {
+    shared_mutation_io_failures(SharedFaultFamily::Replace);
+}
+
+/// Matches the completed-write and adoption-read fault model in faults.rs.
+struct SharedAmbiguousDevice {
+    inner: MemoryBackend,
+    checkpoints: [u64; 2],
+    published: bool,
+    fail_write: bool,
+    tripped: bool,
+    writes: u64,
+    flushes: u64,
+}
+
+impl BlockDevice for SharedAmbiguousDevice {
+    fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+    fn total_blocks(&self) -> u64 {
+        self.inner.total_blocks()
+    }
+    fn read_block(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), afsplus_block::BlockError> {
+        if self.published && !self.fail_write {
+            self.tripped = true;
+            return Err(afsplus_block::BlockError::Injected("post-publication read"));
+        }
+        self.inner.read_block(lba, buf)
+    }
+    fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), afsplus_block::BlockError> {
+        self.writes += 1;
+        self.inner.write_block(lba, data)?;
+        if self.checkpoints.contains(&lba) {
+            self.published = true;
+            if self.fail_write {
+                self.tripped = true;
+                return Err(afsplus_block::BlockError::Injected(
+                    "completed checkpoint write",
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<(), afsplus_block::BlockError> {
+        self.flushes += 1;
+        self.inner.flush()
+    }
+}
+
+fn shared_ambiguous_publication(family: SharedFaultFamily) {
+    for pages in [2, 4, 8, usize::MAX] {
+        for fail_write in [true, false] {
+            let context = format!("{family:?} pages={pages} completed_write={fail_write}");
+            let (mut fixture, base) = shared_fault_fixture(pages);
+            let checkpoints = Identification::decode(&base.peek(0))
+                .unwrap()
+                .checkpoint_slots;
+            let mut volume = profile_mount(
+                SharedAmbiguousDevice {
+                    inner: base,
+                    checkpoints,
+                    published: false,
+                    fail_write,
+                    tripped: false,
+                    writes: 0,
+                    flushes: 0,
+                },
+                pages,
+            );
+            assert!(fixture.apply(&mut volume, family).is_err(), "{context}");
+            assert!(
+                volume.device_mut().published && volume.device_mut().tripped,
+                "{context}"
+            );
+            let io = (volume.device_mut().writes, volume.device_mut().flushes);
+            assert!(
+                matches!(
+                    fixture.apply(&mut volume, family),
+                    Err(afsplus_core::CoreError::WindowPoisoned)
+                ),
+                "{context}: same operation must refuse"
+            );
+            assert!(
+                matches!(
+                    volume.create_file_in_root("blocked", b"must not appear", ts(6)),
+                    Err(afsplus_core::CoreError::WindowPoisoned)
+                ),
+                "{context}: independent mutation must refuse"
+            );
+            assert_eq!(
+                (volume.device_mut().writes, volume.device_mut().flushes),
+                io,
+                "{context}: poisoned mutations performed writes or flushes"
+            );
+            let mut recovered = profile_mount(volume.into_device().inner, pages);
+            fixture.verify(&mut recovered, family, true, &context);
+            assert_eq!(recovered.lookup_root("blocked").unwrap(), None, "{context}");
+            assert_checker_clean(recovered.device_mut(), &context);
+            // Mutate an independent private file after reconciliation, allocating
+            // fresh data while every shared source/survivor remains exact.
+            recovered
+                .write_file_at(fixture.incoming, 17, &[0xa4; 93], ts(7))
+                .unwrap();
+            fixture.incoming_bytes[17..110].fill(0xa4);
+            fixture.generation += 1;
+            fixture.verify(&mut recovered, family, true, &context);
+            let mut again = profile_mount(recovered.into_device(), pages);
+            fixture.verify(&mut again, family, true, &context);
+            assert_eq!(again.lookup_root("blocked").unwrap(), None, "{context}");
+            assert_checker_clean(again.device_mut(), &context);
+            eprintln!("ambiguous shared publication {context}");
+        }
+    }
+}
+
+#[test]
+fn shared_write_ambiguous_publication_requires_remount_in_all_profiles() {
+    shared_ambiguous_publication(SharedFaultFamily::Write);
+}
+
+#[test]
+fn shared_replace_ambiguous_publication_requires_remount_in_all_profiles() {
+    shared_ambiguous_publication(SharedFaultFamily::Replace);
 }
