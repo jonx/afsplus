@@ -187,7 +187,31 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
+    /// Report a failed captured-view change with the view it names.
+    fn flight_view_maintenance_failure(&self, view_id: u64, owner: u64) {
+        self.flight_view_event(
+            crate::flight::EventKind::ViewMaintenanceFailed,
+            crate::flight::ViewReadContext {
+                path: crate::flight::ReadPath::Maintenance,
+                view_id,
+                owner,
+                block: self
+                    .checkpoint
+                    .snapshot_roots
+                    .map_or(0, |roots| roots.registry),
+            },
+        );
+    }
+
     fn snapshot_create_untraced(&mut self, now: Timespec) -> Result<u64, CoreError> {
+        let result = self.snapshot_create_step(now);
+        if result.is_err() {
+            self.flight_view_maintenance_failure(0, 0);
+        }
+        result
+    }
+
+    fn snapshot_create_step(&mut self, now: Timespec) -> Result<u64, CoreError> {
         metadata::validate_time(now)?;
         self.snapshot_state()?;
         if !self.mount_mode.allows_user_writes() {
@@ -218,6 +242,14 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     fn snapshot_delete_untraced(&mut self, id: u64, now: Timespec) -> Result<(), CoreError> {
+        let result = self.snapshot_delete_step(id, now);
+        if result.is_err() {
+            self.flight_view_maintenance_failure(id, 0);
+        }
+        result
+    }
+
+    fn snapshot_delete_step(&mut self, id: u64, now: Timespec) -> Result<(), CoreError> {
         metadata::validate_time(now)?;
         self.snapshot_state()?;
         if !self.mount_mode.allows_user_writes() {
@@ -704,6 +736,22 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     fn snapshot_maintenance_step_untraced(
+        &mut self,
+        now: Timespec,
+    ) -> Result<SnapshotMaintenance, CoreError> {
+        // Maintenance walks the whole ledger, so it names the scan position
+        // it reached; per-view identity belongs to create and delete.
+        let position = self
+            .snapshot_state()
+            .map_or(0, |state| state.ledger.scan_position);
+        let result = self.snapshot_maintenance_step_inner(now);
+        if result.is_err() {
+            self.flight_view_maintenance_failure(0, position);
+        }
+        result
+    }
+
+    fn snapshot_maintenance_step_inner(
         &mut self,
         now: Timespec,
     ) -> Result<SnapshotMaintenance, CoreError> {

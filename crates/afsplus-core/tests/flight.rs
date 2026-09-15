@@ -3,7 +3,7 @@ use afsplus_block::{
 };
 use afsplus_core::flight::{EventKind, FlightRecorder};
 use afsplus_core::{mkfs, mount, MkfsParams, NamePolicy};
-use afsplus_format::Timespec;
+use afsplus_format::{Timespec, OBJECT_ROOT};
 use std::num::NonZeroUsize;
 
 fn image() -> MemoryBackend {
@@ -1765,6 +1765,13 @@ impl SharedDevice {
     }
 
     /// A second handle on the same image and trace, performing no I/O itself.
+    /// Arm a fault at an operation counted from the next one, so preparation
+    /// stays clean and only the observed family meets the fault.
+    fn arm(&mut self, write: Option<usize>, flush: Option<usize>) {
+        self.fail_write = write.map(|index| self.writes + index);
+        self.fail_flush = flush.map(|index| self.flushes + index);
+    }
+
     fn handle(&self) -> Self {
         SharedDevice {
             fail_write: None,
@@ -3274,4 +3281,706 @@ fn every_registered_api_method_executes_under_its_own_guard() {
     );
     assert_eq!(executed, registry);
     assert_eq!(ApiMethod::CleanupOrphan as u16, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Executed publication-family evidence.
+// ---------------------------------------------------------------------------
+
+type FamilyVolume = afsplus_core::Volume<SharedDevice>;
+
+fn family_image(snapshots: bool) -> MemoryBackend {
+    let mut dev = MemoryBackend::new(4096, 2048);
+    afsplus_core::mkfs_with_options(
+        &mut dev,
+        &MkfsParams {
+            uuid: [0x63; 16],
+            label: "families".into(),
+            region_size: 2048,
+            reclaim_caps: Default::default(),
+            log_slots: 8,
+            shared_extents: true,
+            data_policy: true,
+            name_policy: NamePolicy::Sensitive,
+            timestamp: Timespec::default(),
+        },
+        afsplus_core::MkfsOptions {
+            persistent_snapshots: snapshots,
+        },
+    )
+    .unwrap();
+    dev
+}
+
+fn family_recorder(capacity: usize) -> FlightRecorder {
+    let mut ring = recorder(capacity);
+    ring.enable_subsystem_observation();
+    ring.enable_object_observation();
+    ring.enable_data_observation();
+    ring.enable_view_observation();
+    ring
+}
+
+fn mount_family(device: SharedDevice, pages: usize, snapshots: bool) -> FamilyVolume {
+    use afsplus_core::volume::SnapshotWorkLimits;
+    use afsplus_core::{mount_with_options, mount_with_snapshot_limits, MountOptions};
+    let options = MountOptions {
+        tree_cache_pages: NonZeroUsize::new(pages),
+        ..Default::default()
+    };
+    if snapshots {
+        mount_with_snapshot_limits(
+            device,
+            options,
+            SnapshotWorkLimits {
+                max_edit_records: 4096,
+                max_views: 8,
+                reclaim_records: 8,
+            },
+        )
+        .unwrap()
+    } else {
+        mount_with_options(device, options).unwrap()
+    }
+}
+
+/// Ordered correlation oracle: API spans nest, every subsystem and commit
+/// event names the innermost open call, and one commit attempt keeps one
+/// generation and one root operation from its Begin to its outcome.
+fn assert_correlation(ring: &FlightRecorder, family: &str) {
+    use afsplus_core::flight::{ApiContext, Category};
+    use std::collections::BTreeMap;
+    let mut stack: Vec<ApiContext> = Vec::new();
+    let mut attempts: BTreeMap<u64, (u64, u64, bool)> = BTreeMap::new();
+    let mut open_attempt = None;
+    for event in ring.events() {
+        match event.kind.category() {
+            Category::Api => {
+                if event.kind == EventKind::ApiBegin {
+                    if let Some(parent) = stack.last() {
+                        assert_eq!(event.api.parent_span, parent.span, "{family}");
+                        assert_eq!(event.api.operation, parent.operation, "{family}");
+                    } else {
+                        assert_eq!(event.api.parent_span, 0, "{family}");
+                        assert_eq!(event.api.operation, event.api.span, "{family}");
+                    }
+                    stack.push(event.api);
+                } else {
+                    assert_ne!(event.kind, EventKind::ApiUnwound, "{family} unwound");
+                    assert_eq!(stack.pop(), Some(event.api), "{family}");
+                }
+                assert_eq!(event.attempt, 0, "{family}");
+            }
+            Category::Transaction | Category::Checkpoint | Category::Io | Category::Error => {
+                assert!(event.attempt > 0, "{family}: commit events bind an attempt");
+                if event.kind == EventKind::Begin {
+                    assert!(open_attempt.is_none(), "{family}: nested commit attempt");
+                    open_attempt = Some(event.attempt);
+                    attempts.insert(
+                        event.attempt,
+                        (event.generation, event.api.operation, false),
+                    );
+                } else if matches!(
+                    event.kind,
+                    EventKind::IntentDataDurable | EventKind::IntentEmptyFlush
+                ) {
+                    // Intent barriers belong to the window, not to one attempt.
+                    continue;
+                } else {
+                    let entry = attempts
+                        .get_mut(&event.attempt)
+                        .unwrap_or_else(|| panic!("{family}: event before its Begin"));
+                    assert_eq!(entry.0, event.generation, "{family}");
+                    assert_eq!(entry.1, event.api.operation, "{family}");
+                    if matches!(event.kind, EventKind::Adopted | EventKind::Failed) {
+                        entry.2 = true;
+                        open_attempt = None;
+                    }
+                }
+                if !stack.is_empty() {
+                    assert_eq!(event.api, *stack.last().unwrap(), "{family}");
+                }
+            }
+            _ => {
+                assert_eq!(event.attempt, 0, "{family}: subsystem events use attempt 0");
+                if !stack.is_empty() {
+                    assert_eq!(event.api, *stack.last().unwrap(), "{family}");
+                }
+            }
+        }
+    }
+    assert!(stack.is_empty(), "{family}: every call reports an outcome");
+    assert!(
+        attempts.values().all(|(_, _, closed)| *closed),
+        "{family}: every commit attempt reports adoption or failure"
+    );
+}
+
+/// Compare one publication family with its unobserved execution under four
+/// cache profiles, a fault at each of its own barriers and representative
+/// write faults, then repeat the normal case with a one-event ring.
+fn qualify_family(
+    family: &str,
+    snapshots: bool,
+    refuses: bool,
+    prepare: fn(&mut FamilyVolume),
+    exercise: fn(&mut FamilyVolume) -> Vec<String>,
+) {
+    let base = family_image(snapshots);
+    // Probe the family's own device operations, after preparation.
+    let (writes, flushes) = {
+        let device = SharedDevice::new(&base);
+        let handle = device.handle();
+        let mut volume = mount_family(device, usize::MAX, snapshots);
+        prepare(&mut volume);
+        let before = handle.trace().len();
+        exercise(&mut volume);
+        let own = handle.trace()[before..].to_vec();
+        (
+            own.iter().filter(|(op, _)| *op == 'w').count(),
+            own.iter().filter(|(op, _)| *op == 'f').count(),
+        )
+    };
+    assert!(writes > 0, "{family} writes nothing to observe");
+    let mut plans: Vec<(Option<usize>, Option<usize>)> = vec![(None, None)];
+    for write in [0, writes / 2, writes.saturating_sub(1)] {
+        plans.push((Some(write), None));
+    }
+    for flush in 0..flushes.min(3) {
+        plans.push((None, Some(flush)));
+    }
+    for pages in [2, 4, 8, usize::MAX] {
+        for (fail_write, fail_flush) in plans.clone() {
+            let plan =
+                format!("{family}: {pages} pages, write {fail_write:?} flush {fail_flush:?}");
+            let plain_device = SharedDevice::new(&base);
+            let observed_device = SharedDevice::new(&base);
+            let plain_handle = plain_device.handle();
+            let observed_handle = observed_device.handle();
+            let mut plain = mount_family(plain_device, pages, snapshots);
+            let mut observed = mount_family(observed_device, pages, snapshots);
+            prepare(&mut plain);
+            prepare(&mut observed);
+            plain.device_mut().arm(fail_write, fail_flush);
+            observed.device_mut().arm(fail_write, fail_flush);
+            observed.replace_flight_recorder(Some(family_recorder(16384)));
+            let expected = exercise(&mut plain);
+            let actual = exercise(&mut observed);
+            let ring = observed.replace_flight_recorder(None).unwrap();
+            assert_eq!(actual, expected, "{plan}");
+            assert_eq!(observed_handle.trace(), plain_handle.trace(), "{plan}");
+            assert_eq!(observed_handle.blocks(), plain_handle.blocks(), "{plan}");
+            assert_eq!(ring.dropped(), 0, "{plan}");
+            assert_correlation(&ring, &plan);
+            assert!(
+                ring.events().any(|event| event.kind == EventKind::ApiBegin),
+                "{plan}: the family executes at least one guarded call"
+            );
+            if fail_write.is_none() && fail_flush.is_none() {
+                assert!(
+                    ring.events()
+                        .any(|event| event.kind == EventKind::CheckpointDurable),
+                    "{plan}: the family publishes a checkpoint"
+                );
+                assert_eq!(
+                    ring.events()
+                        .any(|event| event.kind == EventKind::ApiFailed),
+                    refuses,
+                    "{plan}: the family's validation refusal reports ApiFailed"
+                );
+            } else {
+                assert!(
+                    ring.events().any(|event| matches!(
+                        event.kind,
+                        EventKind::Failed | EventKind::ApiFailed | EventKind::WindowFailed
+                    )),
+                    "{plan}: an injected fault reports a failure"
+                );
+            }
+        }
+    }
+    // A one-event ring loses records without changing the family's result.
+    let plain_device = SharedDevice::new(&base);
+    let observed_device = SharedDevice::new(&base);
+    let mut plain = mount_family(plain_device, usize::MAX, snapshots);
+    let mut observed = mount_family(observed_device, usize::MAX, snapshots);
+    prepare(&mut plain);
+    prepare(&mut observed);
+    observed.replace_flight_recorder(Some(family_recorder(1)));
+    let expected = exercise(&mut plain);
+    assert_eq!(
+        exercise(&mut observed),
+        expected,
+        "{family} with a tiny ring"
+    );
+    let ring = observed.replace_flight_recorder(None).unwrap();
+    assert_eq!(ring.events().len(), 1, "{family}");
+    assert_eq!(ring.dropped(), ring.sequence() - 1, "{family}");
+    assert_eq!(ring.filtered(), 0, "{family}");
+}
+
+fn now() -> Timespec {
+    Timespec::default()
+}
+
+fn file_in_root(volume: &mut FamilyVolume, name: &str, bytes: usize) -> u64 {
+    volume
+        .create_file_in_root(name, &vec![0x21u8; bytes], now())
+        .unwrap()
+}
+
+#[test]
+fn family_reclaim_step_publishes_promotions_under_observation() {
+    qualify_family(
+        "reclaim_step",
+        false,
+        false,
+        |volume| {
+            let file = file_in_root(volume, "retired", 12000);
+            volume.delete_file_in_root("retired", now()).unwrap();
+            let _ = file;
+        },
+        |volume| {
+            vec![
+                format!("{:?}", volume.reclaim_step(now())),
+                format!("{:?}", volume.reclaim_step(now())),
+                format!("{:?}", volume.quarantine_contains(64)),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_clone_file_publishes_shared_references_and_refuses_duplicates() {
+    qualify_family(
+        "clone_file",
+        false,
+        true,
+        |volume| {
+            file_in_root(volume, "source", 12000);
+        },
+        |volume| {
+            let source = volume.lookup_root("source").unwrap().unwrap();
+            vec![
+                format!(
+                    "{:?}",
+                    volume.clone_file(source, OBJECT_ROOT, "copy", now())
+                ),
+                format!(
+                    "{:?}",
+                    volume.clone_file(source, OBJECT_ROOT, "copy", now())
+                ),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_clone_range_publishes_partial_sharing_and_refuses_directories() {
+    qualify_family(
+        "clone_range",
+        false,
+        true,
+        |volume| {
+            file_in_root(volume, "source", 12000);
+            file_in_root(volume, "target", 12000);
+            volume.create_directory_in_root("dir", now()).unwrap();
+        },
+        |volume| {
+            let source = volume.lookup_root("source").unwrap().unwrap();
+            let target = volume.lookup_root("target").unwrap().unwrap();
+            let directory = volume.lookup_root("dir").unwrap().unwrap();
+            vec![
+                format!(
+                    "{:?}",
+                    volume.clone_range(source, 0, target, 0, 8192, now())
+                ),
+                format!(
+                    "{:?}",
+                    volume.clone_range(source, 0, directory, 0, 4096, now())
+                ),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_create_leaf_in_directory_publishes_and_refuses_duplicates() {
+    qualify_family(
+        "create_leaf_in_directory",
+        false,
+        true,
+        |volume| {
+            volume.create_directory_in_root("dir", now()).unwrap();
+        },
+        |volume| {
+            let directory = volume.lookup_root("dir").unwrap().unwrap();
+            vec![
+                format!(
+                    "{:?}",
+                    volume.create_file_in_directory(directory, "leaf", b"leaf", now())
+                ),
+                format!(
+                    "{:?}",
+                    volume.create_file_in_directory(directory, "leaf", b"leaf", now())
+                ),
+                format!(
+                    "{:?}",
+                    volume.create_symlink(directory, "link", "leaf", now())
+                ),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_create_directory_publishes_and_refuses_duplicates() {
+    qualify_family(
+        "create_directory",
+        false,
+        true,
+        |volume| {
+            volume.create_directory_in_root("dir", now()).unwrap();
+        },
+        |volume| {
+            let directory = volume.lookup_root("dir").unwrap().unwrap();
+            vec![
+                format!("{:?}", volume.create_directory(directory, "child", now())),
+                format!("{:?}", volume.create_directory(directory, "child", now())),
+                format!("{:?}", volume.create_directory_in_root("second", now())),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_cleanup_orphan_data_step_publishes_bounded_progress() {
+    qualify_family(
+        "cleanup_orphan_data_step",
+        false,
+        // Cleanup answers an unknown or non-orphan object with zero progress,
+        // so this family reports no validation refusal.
+        false,
+        |volume| {
+            file_in_root(volume, "orphaned", 40000);
+            volume.orphan_file(OBJECT_ROOT, "orphaned", now()).unwrap();
+        },
+        |volume| {
+            let orphan = volume.first_orphan().ok().flatten().unwrap_or(u64::MAX);
+            let mut results = Vec::new();
+            for _ in 0..3 {
+                results.push(format!("{:?}", volume.cleanup_orphan(orphan, now())));
+            }
+            results.push(format!("{:?}", volume.cleanup_orphan(OBJECT_ROOT, now())));
+            results
+        },
+    );
+}
+
+#[test]
+fn family_ensure_orphan_directory_publishes_the_reserved_directory() {
+    qualify_family(
+        "ensure_orphan_directory",
+        false,
+        true,
+        |volume| {
+            file_in_root(volume, "victim", 8000);
+        },
+        |volume| {
+            vec![
+                format!("{:?}", volume.orphan_file(OBJECT_ROOT, "victim", now())),
+                format!("{:?}", volume.orphan_file(OBJECT_ROOT, "missing", now())),
+                format!("{:?}", volume.orphan_count()),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_remove_entry_publishes_and_refuses_a_populated_directory() {
+    qualify_family(
+        "remove_entry",
+        false,
+        true,
+        |volume| {
+            file_in_root(volume, "gone", 8000);
+            let directory = volume.create_directory_in_root("full", now()).unwrap();
+            volume
+                .create_file_in_directory(directory, "child", b"child", now())
+                .unwrap();
+        },
+        |volume| {
+            vec![
+                format!("{:?}", volume.delete_file_in_root("gone", now())),
+                format!("{:?}", volume.remove_directory(OBJECT_ROOT, "full", now())),
+                format!("{:?}", volume.delete_file_in_root("gone", now())),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_link_file_publishes_and_refuses_an_existing_name() {
+    qualify_family(
+        "link_file",
+        false,
+        true,
+        |volume| {
+            file_in_root(volume, "target", 8000);
+        },
+        |volume| {
+            let target = volume.lookup_root("target").unwrap().unwrap();
+            vec![
+                format!(
+                    "{:?}",
+                    volume.link_file(target, OBJECT_ROOT, "second", now())
+                ),
+                format!(
+                    "{:?}",
+                    volume.link_file(target, OBJECT_ROOT, "second", now())
+                ),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_rename_internal_publishes_moves_replacements_and_refusals() {
+    qualify_family(
+        "rename_internal",
+        false,
+        true,
+        |volume| {
+            file_in_root(volume, "a", 8000);
+            file_in_root(volume, "b", 8000);
+        },
+        |volume| {
+            vec![
+                format!(
+                    "{:?}",
+                    volume.rename(OBJECT_ROOT, "a", OBJECT_ROOT, "moved", now())
+                ),
+                format!(
+                    "{:?}",
+                    volume.rename_replace(OBJECT_ROOT, "moved", OBJECT_ROOT, "b", now())
+                ),
+                format!(
+                    "{:?}",
+                    volume.rename(OBJECT_ROOT, "missing", OBJECT_ROOT, "c", now())
+                ),
+                format!(
+                    "{:?}",
+                    volume.rename_replace_orphan_target(OBJECT_ROOT, "b", OBJECT_ROOT, "c", now())
+                ),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_commit_staged_file_layout_publishes_writes_truncates_and_reservations() {
+    qualify_family(
+        "commit_staged_file_layout",
+        false,
+        true,
+        |volume| {
+            file_in_root(volume, "file", 12000);
+            volume.create_directory_in_root("dir", now()).unwrap();
+        },
+        |volume| {
+            let file = volume.lookup_root("file").unwrap().unwrap();
+            let directory = volume.lookup_root("dir").unwrap().unwrap();
+            vec![
+                format!("{:?}", volume.write_file_at(file, 100, &[3u8; 6000], now())),
+                format!("{:?}", volume.truncate_file(file, 5000, now())),
+                format!("{:?}", volume.preallocate_file(file, 0, 16384, now())),
+                format!("{:?}", volume.write_file_at(directory, 0, b"no", now())),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_materialize_batch_publishes_one_checkpoint_per_batch() {
+    use afsplus_core::volume::BatchOp;
+    qualify_family(
+        "materialize_batch",
+        false,
+        true,
+        |volume| {
+            file_in_root(volume, "kept", 8000);
+        },
+        |volume| {
+            vec![
+                format!(
+                    "{:?}",
+                    volume.run_batch(
+                        &[
+                            BatchOp::CreateFile {
+                                parent_id: OBJECT_ROOT,
+                                name: "one",
+                                content: b"one",
+                            },
+                            BatchOp::CreateFile {
+                                parent_id: OBJECT_ROOT,
+                                name: "two",
+                                content: b"two",
+                            },
+                        ],
+                        now(),
+                    )
+                ),
+                format!(
+                    "{:?}",
+                    volume.run_batch(
+                        &[BatchOp::CreateFile {
+                            parent_id: OBJECT_ROOT,
+                            name: "kept",
+                            content: b"clash",
+                        }],
+                        now(),
+                    )
+                ),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_commit_object_metadata_publishes_protection_and_restoration() {
+    qualify_family(
+        "commit_object_metadata",
+        false,
+        true,
+        |volume| {
+            file_in_root(volume, "file", 8000);
+        },
+        |volume| {
+            let file = volume.lookup_root("file").unwrap().unwrap();
+            let metadata = volume.visible_metadata(file).unwrap().unwrap();
+            vec![
+                format!("{:?}", volume.set_object_protection(file, 0o600, now())),
+                format!(
+                    "{:?}",
+                    volume.restore_object_metadata(file, metadata.into())
+                ),
+                format!("{:?}", volume.set_object_protection(u64::MAX, 0o600, now())),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_commit_snapshot_change_publishes_registry_edits_with_view_identity() {
+    qualify_family(
+        "commit_snapshot_change",
+        true,
+        true,
+        |volume| {
+            file_in_root(volume, "captured", 8000);
+        },
+        |volume| {
+            let created = volume.snapshot_create(now());
+            let id = created.as_ref().copied().unwrap_or(0);
+            vec![
+                format!("{created:?}"),
+                format!("{:?}", volume.snapshot_maintenance_step(now())),
+                format!("{:?}", volume.snapshot_delete(id, now())),
+                format!("{:?}", volume.snapshot_delete(9999, now())),
+            ]
+        },
+    );
+}
+
+#[test]
+fn family_deferred_window_publication_joins_groups_and_one_checkpoint() {
+    use afsplus_core::volume::BatchOp;
+    qualify_family(
+        "deferred_window_publication",
+        false,
+        true,
+        |volume| {
+            file_in_root(volume, "kept", 8000);
+        },
+        |volume| {
+            let mut results = Vec::new();
+            results.push(format!(
+                "{:?}",
+                volume.window_op(
+                    &BatchOp::CreateFile {
+                        parent_id: OBJECT_ROOT,
+                        name: "staged",
+                        content: &[5u8; 9000],
+                    },
+                    now(),
+                )
+            ));
+            results.push(format!("{:?}", volume.window_fsync()));
+            results.push(format!(
+                "{:?}",
+                volume.window_op(
+                    &BatchOp::CreateFile {
+                        parent_id: u64::MAX,
+                        name: "invalid",
+                        content: b"",
+                    },
+                    now(),
+                )
+            ));
+            results.push(format!("{:?}", volume.window_commit(now())));
+            results
+        },
+    );
+}
+
+#[test]
+fn family_snapshot_maintenance_failure_names_its_view() {
+    use afsplus_core::flight::{Category, ReadPath};
+    use afsplus_core::volume::SnapshotWorkLimits;
+    use afsplus_core::{mount_with_snapshot_limits, MountOptions};
+    let base = family_image(true);
+    let device = SharedDevice::new(&base);
+    let mut volume = mount_with_snapshot_limits(
+        device,
+        MountOptions::default(),
+        SnapshotWorkLimits {
+            max_edit_records: 4096,
+            max_views: 1,
+            reclaim_records: 8,
+        },
+    )
+    .unwrap();
+    file_in_root(&mut volume, "captured", 8000);
+    let id = volume.snapshot_create(now()).unwrap();
+    volume.replace_flight_recorder(Some(family_recorder(4096)));
+    // A second view exceeds the admission limit, and an unknown view cannot
+    // be deleted; both failures name the view they were applied to.
+    assert!(volume.snapshot_create(now()).is_err());
+    assert!(volume.snapshot_delete(4242, now()).is_err());
+    let handle = volume.snapshot_open(id).unwrap();
+    assert!(
+        volume.snapshot_delete(id, now()).is_err(),
+        "a held view is busy"
+    );
+    drop(handle);
+    let ring = volume.replace_flight_recorder(None).unwrap();
+    let failures: Vec<_> = ring
+        .events()
+        .filter(|event| event.kind == EventKind::ViewMaintenanceFailed)
+        .map(view_context)
+        .collect();
+    assert_eq!(failures.len(), 3);
+    assert!(failures
+        .iter()
+        .all(|context| context.path == ReadPath::Maintenance && context.block != 0));
+    assert_eq!(
+        failures
+            .iter()
+            .map(|context| context.view_id)
+            .collect::<Vec<_>>(),
+        [0, 4242, id]
+    );
+    assert!(ring
+        .events()
+        .all(|event| event.kind.category() != Category::View || event.attempt == 0));
 }

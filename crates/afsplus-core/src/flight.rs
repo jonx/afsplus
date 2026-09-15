@@ -175,6 +175,9 @@ pub enum EventKind {
     ViewReadComplete,
     /// That descent failed; the view is unchanged.
     ViewReadFailed,
+    /// Snapshot creation, deletion or ledger maintenance failed, naming the
+    /// view it was applied to where the operation names one.
+    ViewMaintenanceFailed,
 }
 
 impl EventKind {
@@ -183,7 +186,10 @@ impl EventKind {
             Self::DataWriteBegin | Self::DataWriteComplete | Self::DataWriteFailed => {
                 Category::Data
             }
-            Self::ViewReadBegin | Self::ViewReadComplete | Self::ViewReadFailed => Category::View,
+            Self::ViewReadBegin
+            | Self::ViewReadComplete
+            | Self::ViewReadFailed
+            | Self::ViewMaintenanceFailed => Category::View,
             Self::MountBegin
             | Self::MountSelected
             | Self::MountIntentBegin
@@ -579,6 +585,8 @@ pub enum ReadPath {
     Enumeration = 2,
     /// File data through its extent mapping or direct layout.
     FileData = 3,
+    /// Snapshot registry or ledger maintenance over the captured views.
+    Maintenance = 4,
 }
 
 /// A read-only tree descent. View zero identifies the live committed view;
