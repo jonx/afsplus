@@ -58,6 +58,7 @@ pub struct ReclaimBuild {
 }
 
 pub struct ReclaimTx {
+    observer: crate::flight::AllocationObserver,
     oldest_protected_generation: u64,
     committed_root_lba: u64,
     new_generation: u64,
@@ -203,7 +204,87 @@ impl ReclaimTx {
         new_generation: u64,
         oldest_protected_generation: u64,
         batch_blocks: u64,
+    ) -> Result<Self, CoreError> {
+        Self::begin_observed(
+            Default::default(),
+            dev,
+            geo,
+            committed_root_lba,
+            committed_generation,
+            new_generation,
+            oldest_protected_generation,
+            batch_blocks,
+        )
+    }
+    pub(crate) fn replace_observer(&mut self, observer: crate::flight::AllocationObserver) {
+        self.observer = observer;
+    }
+    fn observe(&self, kind: crate::flight::EventKind, start: u64, blocks: u64) {
+        self.observer.reclaim(
+            self.new_generation,
+            kind,
+            crate::flight::ReclaimContext {
+                root: self.committed_root_lba,
+                start,
+                blocks,
+            },
+        );
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn begin_observed<D: BlockDevice>(
+        observer: crate::flight::AllocationObserver,
+        dev: &mut D,
+        geo: &Geometry,
+        committed_root_lba: u64,
+        committed_generation: u64,
+        new_generation: u64,
+        oldest_protected_generation: u64,
+        batch_blocks: u64,
     ) -> Result<ReclaimTx, CoreError> {
+        observer.reclaim(
+            new_generation,
+            crate::flight::EventKind::ReclaimBegin,
+            crate::flight::ReclaimContext {
+                root: committed_root_lba,
+                start: 0,
+                blocks: batch_blocks,
+            },
+        );
+        let result = Self::begin_inner(
+            observer.clone(),
+            dev,
+            geo,
+            committed_root_lba,
+            committed_generation,
+            new_generation,
+            oldest_protected_generation,
+            batch_blocks,
+        );
+        if result.is_err() {
+            observer.reclaim(
+                new_generation,
+                crate::flight::EventKind::ReclaimFailed,
+                crate::flight::ReclaimContext {
+                    root: committed_root_lba,
+                    start: 0,
+                    blocks: 0,
+                },
+            );
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_inner<D: BlockDevice>(
+        observer: crate::flight::AllocationObserver,
+        dev: &mut D,
+        geo: &Geometry,
+        committed_root_lba: u64,
+        committed_generation: u64,
+        new_generation: u64,
+        oldest_protected_generation: u64,
+        batch_blocks: u64,
+    ) -> Result<Self, CoreError> {
         if oldest_protected_generation == 0 || oldest_protected_generation > committed_generation {
             return Err(CoreError::Corrupt(
                 "invalid protected checkpoint generation".into(),
@@ -211,6 +292,7 @@ impl ReclaimTx {
         }
         let root = read_root(dev, geo, committed_root_lba, committed_generation)?;
         let mut tx = ReclaimTx {
+            observer,
             oldest_protected_generation,
             committed_root_lba,
             new_generation,
@@ -269,22 +351,33 @@ impl ReclaimTx {
                 } else {
                     break;
                 }
-            } else if let Some(entry) = self.root.inline_entries.first_mut() {
+            } else if let Some(entry) = self.root.inline_entries.first().copied() {
                 if entry.retire_generation > self.oldest_protected_generation {
                     self.stats.blocked_by_checkpoint = true;
+                    self.observe(
+                        crate::flight::EventKind::ReclaimBlocked,
+                        entry.start,
+                        entry.blocks as u64,
+                    );
                     break;
                 }
                 let take = (entry.blocks as u64).min(budget) as u32;
+                self.observe(
+                    crate::flight::EventKind::ReclaimPromoted,
+                    entry.start,
+                    take as u64,
+                );
                 self.promoted.push(PromotedRun {
                     start: entry.start,
                     blocks: take,
                     retire_generation: entry.retire_generation,
                 });
-                entry.start += take as u64;
-                entry.blocks -= take;
+                let remaining = &mut self.root.inline_entries[0];
+                remaining.start += take as u64;
+                remaining.blocks -= take;
                 budget -= take as u64;
                 self.reclaimed_blocks += take as u64;
-                if entry.blocks == 0 {
+                if remaining.blocks == 0 {
                     self.root.inline_entries.remove(0);
                 }
             } else {
@@ -319,10 +412,20 @@ impl ReclaimTx {
             }
             if entry.retire_generation > self.oldest_protected_generation {
                 self.stats.blocked_by_checkpoint = true;
+                self.observe(
+                    crate::flight::EventKind::ReclaimBlocked,
+                    entry.start,
+                    entry.blocks as u64,
+                );
                 break;
             }
             let remaining = entry.blocks - self.root.head_block_offset;
             let take = (remaining as u64).min(*budget) as u32;
+            self.observe(
+                crate::flight::EventKind::ReclaimPromoted,
+                entry.start + self.root.head_block_offset as u64,
+                take as u64,
+            );
             self.promoted.push(PromotedRun {
                 start: entry.start + self.root.head_block_offset as u64,
                 blocks: take,
@@ -346,8 +449,20 @@ impl ReclaimTx {
             blocks,
             retire_generation: self.new_generation,
         };
-        validate_run(geo, &entry)?;
+        if let Err(error) = validate_run(geo, &entry) {
+            self.observe(
+                crate::flight::EventKind::ReclaimFailed,
+                start,
+                blocks as u64,
+            );
+            return Err(error);
+        }
         self.appends.push(entry);
+        self.observe(
+            crate::flight::EventKind::ReclaimAppended,
+            start,
+            blocks as u64,
+        );
         Ok(())
     }
 
@@ -355,6 +470,19 @@ impl ReclaimTx {
     /// append list and returns the number of fresh blocks the rebuild needs
     /// (sealed segments + sealed tables + the new root).
     pub fn plan(&mut self) -> Result<usize, CoreError> {
+        let result = self.plan_inner();
+        self.observe(
+            if result.is_ok() {
+                crate::flight::EventKind::ReclaimPlanned
+            } else {
+                crate::flight::EventKind::ReclaimFailed
+            },
+            0,
+            result.as_ref().copied().unwrap_or(0) as u64,
+        );
+        result
+    }
+    fn plan_inner(&mut self) -> Result<usize, CoreError> {
         if self.planned_allocations.is_some() {
             return Err(CoreError::Corrupt("reclaim rebuild planned twice".into()));
         }
@@ -395,7 +523,27 @@ impl ReclaimTx {
 
     /// Seals and encodes the rebuilt queue, consuming exactly the planned
     /// LBAs in order (segments, then tables, then the new root).
-    pub fn build(mut self, geo: &Geometry, lbas: Vec<u64>) -> Result<ReclaimBuild, CoreError> {
+    pub fn build(self, geo: &Geometry, lbas: Vec<u64>) -> Result<ReclaimBuild, CoreError> {
+        let observer = self.observer.clone();
+        let generation = self.new_generation;
+        let root = self.committed_root_lba;
+        let result = self.build_inner(geo, lbas);
+        observer.reclaim(
+            generation,
+            if result.is_ok() {
+                crate::flight::EventKind::ReclaimBuilt
+            } else {
+                crate::flight::EventKind::ReclaimFailed
+            },
+            crate::flight::ReclaimContext {
+                root,
+                start: result.as_ref().map_or(0, |build| build.root_lba),
+                blocks: result.as_ref().map_or(0, |build| build.pending_blocks),
+            },
+        );
+        result
+    }
+    fn build_inner(mut self, geo: &Geometry, lbas: Vec<u64>) -> Result<ReclaimBuild, CoreError> {
         let planned = self
             .planned_allocations
             .ok_or_else(|| CoreError::Corrupt("reclaim rebuild was not planned".into()))?;
@@ -609,6 +757,67 @@ mod retention_tests {
     use super::*;
     use afsplus_block::MemoryBackend;
     use afsplus_format::reclaim::ReclaimCaps;
+
+    #[test]
+    fn observation_reports_partial_inline_promotion_and_begin_failures() {
+        use crate::flight::{AllocationObserver, EventKind, FlightRecorder};
+        use std::{num::NonZeroUsize, sync::Arc};
+        let geo = Geometry {
+            block_size: 4096,
+            total_blocks: 512,
+            region_size: 512,
+        };
+        let mut dev = MemoryBackend::new(4096, 512);
+        let mut root = ReclaimRoot::empty(ReclaimCaps::default());
+        root.inline_entries.push(ReclaimEntry {
+            start: 100,
+            blocks: 5,
+            retire_generation: 7,
+        });
+        root.pending_blocks = 5;
+        root.appended_blocks_total = 5;
+        dev.write_block(20, &root.encode(4096, 8).unwrap()).unwrap();
+        let mut ring = FlightRecorder::new(NonZeroUsize::new(32).unwrap()).unwrap();
+        ring.enable_subsystem_observation();
+        let shared = Arc::new(crate::flight::RecorderCell::new(ring));
+        let observer = AllocationObserver::new(Some(&shared));
+        let mut tx =
+            ReclaimTx::begin_observed(observer.clone(), &mut dev, &geo, 20, 8, 9, 7, 2).unwrap();
+        tx.consume(&mut dev, &geo, 8, 2).unwrap();
+        let runs: Vec<_> = shared
+            .borrow()
+            .events()
+            .filter(|event| event.kind == EventKind::ReclaimPromoted)
+            .map(|event| {
+                let run = event.reclaim.unwrap();
+                (run.start, run.blocks)
+            })
+            .collect();
+        assert_eq!(runs, [(100, 2), (102, 2)]);
+        assert_eq!(tx.root.inline_entries[0].start, 104);
+        assert_eq!(tx.root.inline_entries[0].blocks, 1);
+        for (root_lba, protected) in [(20, 0), (21, 7)] {
+            let before = shared.borrow().events().count();
+            assert!(ReclaimTx::begin_observed(
+                observer.clone(),
+                &mut dev,
+                &geo,
+                root_lba,
+                8,
+                9,
+                protected,
+                2
+            )
+            .is_err());
+            let kinds: Vec<_> = shared
+                .borrow()
+                .events()
+                .skip(before)
+                .map(|event| event.kind)
+                .collect();
+            assert_eq!(kinds, [EventKind::ReclaimBegin, EventKind::ReclaimFailed]);
+        }
+    }
 
     #[test]
     fn every_queue_tier_stops_at_the_protected_generation_and_resumes() {

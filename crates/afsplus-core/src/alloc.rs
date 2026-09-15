@@ -278,6 +278,7 @@ struct SnapshotAccounting {
 }
 
 pub struct TxAllocator {
+    observer: crate::flight::AllocationObserver,
     pub(crate) tree_cache_pages: std::num::NonZeroUsize,
     pub(crate) tree_mutations: crate::cow_tree::TreeMutationStats,
     geo: Geometry,
@@ -310,10 +311,68 @@ pub struct TxAllocator {
 }
 
 impl TxAllocator {
+    pub(crate) fn observe_tree(
+        &self,
+        generation: u64,
+        kind: crate::flight::EventKind,
+        context: crate::flight::TreeContext,
+    ) {
+        self.observer.tree(generation, kind, context);
+    }
+
     pub(crate) fn with_tree_cache_pages(mut self, pages: std::num::NonZeroUsize) -> Self {
         self.tree_cache_pages = pages;
         self
     }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn begin_observed<D: BlockDevice>(
+        observer: crate::flight::AllocationObserver,
+        dev: &mut D,
+        geo: &Geometry,
+        current: &Checkpoint,
+        other: Option<&Checkpoint>,
+        new_generation: u64,
+        batch_blocks: u64,
+        rover_region: u32,
+    ) -> Result<Self, CoreError> {
+        observer.emit(
+            new_generation,
+            crate::flight::EventKind::AllocationBegin,
+            0,
+            0,
+        );
+        match Self::begin_inner(
+            observer.clone(),
+            dev,
+            geo,
+            current,
+            other,
+            new_generation,
+            batch_blocks,
+            rover_region,
+        ) {
+            Ok(mut tx) => {
+                tx.observer = observer;
+                Ok(tx)
+            }
+            Err(error) => {
+                observer.emit(
+                    new_generation,
+                    crate::flight::EventKind::AllocationFailed,
+                    0,
+                    0,
+                );
+                Err(error)
+            }
+        }
+    }
+    pub(crate) fn replace_observer(&mut self, observer: crate::flight::AllocationObserver) {
+        if let Some(reclaim) = &mut self.reclaim {
+            reclaim.replace_observer(observer.clone());
+        }
+        self.observer = observer;
+    }
+
     /// Starts a transaction: reads the committed reclaim queue and consumes
     /// up to `batch_blocks` from its head, clearing the promoted runs' bits.
     pub fn begin<D: BlockDevice>(
@@ -324,10 +383,33 @@ impl TxAllocator {
         new_generation: u64,
         batch_blocks: u64,
         rover_region: u32,
+    ) -> Result<Self, CoreError> {
+        Self::begin_inner(
+            Default::default(),
+            dev,
+            geo,
+            current,
+            other,
+            new_generation,
+            batch_blocks,
+            rover_region,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn begin_inner<D: BlockDevice>(
+        observer: crate::flight::AllocationObserver,
+        dev: &mut D,
+        geo: &Geometry,
+        current: &Checkpoint,
+        other: Option<&Checkpoint>,
+        new_generation: u64,
+        batch_blocks: u64,
+        rover_region: u32,
     ) -> Result<TxAllocator, CoreError> {
         let _allocation_scope =
             crate::allocation_trace::enter(crate::allocation_trace::Domain::Allocator);
-        let reclaim = ReclaimTx::begin(
+        let reclaim = ReclaimTx::begin_observed(
+            observer.clone(),
             dev,
             geo,
             current.reclaim_root_block,
@@ -339,6 +421,7 @@ impl TxAllocator {
             batch_blocks,
         )?;
         let mut tx = TxAllocator {
+            observer,
             tree_cache_pages: std::num::NonZeroUsize::MAX,
             tree_mutations: Default::default(),
             geo: *geo,
@@ -608,6 +691,20 @@ impl TxAllocator {
         dev: &mut D,
         len: u64,
     ) -> Result<u64, CoreError> {
+        let result = self.allocate_run_inner(dev, len);
+        let (kind, start) = match &result {
+            Ok(start) => (crate::flight::EventKind::AllocationGranted, *start),
+            Err(_) => (crate::flight::EventKind::AllocationFailed, 0),
+        };
+        self.observer.emit(self.new_generation, kind, start, len);
+        result
+    }
+
+    fn allocate_run_inner<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        len: u64,
+    ) -> Result<u64, CoreError> {
         let _allocation_scope =
             crate::allocation_trace::enter(crate::allocation_trace::Domain::Allocator);
         self.check_snapshot_writable()?;
@@ -702,6 +799,26 @@ impl TxAllocator {
         start: u64,
         blocks: u64,
     ) -> Result<(), CoreError> {
+        let result = self.allocate_exact_run_inner(dev, start, blocks);
+        self.observer.emit(
+            self.new_generation,
+            if result.is_ok() {
+                crate::flight::EventKind::AllocationGranted
+            } else {
+                crate::flight::EventKind::AllocationFailed
+            },
+            start,
+            blocks,
+        );
+        result
+    }
+
+    fn allocate_exact_run_inner<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        start: u64,
+        blocks: u64,
+    ) -> Result<(), CoreError> {
         let _allocation_scope =
             crate::allocation_trace::enter(crate::allocation_trace::Domain::Allocator);
         self.check_snapshot_writable()?;
@@ -748,6 +865,26 @@ impl TxAllocator {
     /// transactions send it to quarantine. Allocations from this transaction use
     /// [`TxAllocator::release_uncommitted`] instead.
     pub fn retire_run<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        start: u64,
+        blocks: u64,
+    ) -> Result<(), CoreError> {
+        let result = self.retire_run_inner(dev, start, blocks);
+        self.observer.emit(
+            self.new_generation,
+            if result.is_ok() {
+                crate::flight::EventKind::AllocationRetired
+            } else {
+                crate::flight::EventKind::AllocationFailed
+            },
+            start,
+            blocks,
+        );
+        result
+    }
+
+    fn retire_run_inner<D: BlockDevice>(
         &mut self,
         dev: &mut D,
         start: u64,

@@ -69,6 +69,7 @@ exist before that gate can run.
   - [Allocator observation integration prerequisite](#allocator-observation-integration-prerequisite)
   - [Tiny-cache test matrix tasks](#tiny-cache-test-matrix-tasks)
   - [Fuzzing and property-test tasks](#fuzzing-and-property-test-tasks)
+  - [Caller-property closure evidence](#caller-property-closure-evidence)
   - [Codec surface inventory](#codec-surface-inventory)
 - [Stage A executable-core audit](#stage-a-executable-core-audit)
 - [Individual list-item completion](#individual-list-item-completion)
@@ -120,8 +121,9 @@ The detailed evidence follows in the executable-core audit.
 ## Stage A task tracking
 
 This is the task-level status owner for the three unfinished roadmap entries.
-The order is diagnostic export and coverage, then cache/fault coverage, then
-codec/property coverage. A discovered prerequisite must be entered here with
+Finish the already integrated diagnostic/cache lot, then close codec/property
+coverage, cache/fault coverage and diagnostic coverage in that order. Only one
+closure criterion is the active implementation focus at a time. A discovered prerequisite must be entered here with
 its originating requirement or failing test before becoming a separate work
 unit. Necessary fixes retain their regression and their parent gate; useful
 later work stays in the full audit queue without enlarging Stage A implicitly.
@@ -215,6 +217,25 @@ selecting the mechanism. A borrow/API change must migrate the scenario drain
 consumer and preserve existing artifact versions. This is an open implementation
 prerequisite, not evidence that allocator observation is implemented.
 
+The first shared-handle experiment used `Rc<RefCell<FlightRecorder>>` and
+failed the all-features FUSE build: it removed `Send` from the volume. The revised
+experiment uses an `Arc` owner, weak transaction observers and nonblocking
+read/write-lock borrows. Its compile-time regression requires `Volume<MemoryBackend>: Send + Sync`.
+Read guards preserve simultaneous immutable access; write guards are exclusive.
+Conflicting access fails immediately rather than waiting inside filesystem work.
+The synchronization cost, allocation accounting, unwind behavior and export
+compatibility still require qualification before selecting the mechanism. The
+21 recorder tests and two reclaim tests from the earlier experiment do not
+qualify the revised ownership mechanism.
+
+A macOS AArch64 layout probe of the intermediate mutex experiment measures 192 bytes per
+event (previously 104), 176 for `FlightRecorder`, 192 for its mutex wrapper and
+8 each for shared/weak handles. At 4,096 events, event storage alone grows from
+425,984 to 786,432 bytes. These are Rust type layouts, not measured heap peaks;
+shared allocation counters, allocator rounding and sink storage are additional.
+Qualification must assess this cost and whether mutually exclusive subsystem
+payloads should share storage before selecting the extended runtime layout.
+
 ### Tiny-cache test matrix tasks
 
 Parent: `a-cache`, roadmap entry `roadmap-31`. Origin:
@@ -224,7 +245,7 @@ Parent: `a-cache`, roadmap entry `roadmap-31`. Origin:
 |---|---|---|
 | Baseline 2/4/8/unlimited profiles, staged-tree spills and replay policy | Complete | [Integrated cache profiles](../testing/developer-harness.md#integrated-tree-cache-profiles), [cache-bound replay](../testing/developer-harness.md#cache-bound-semantic-bundles) |
 | Map every executable mutation/publication family to cache and fault tests | In progress | [26-family source inventory](../crates/afsplus-check/tests/tiny_cache_matrix.md); explicit baseline omissions and added executable coverage; completeness review required |
-| Fill uncovered family/profile combinations | In progress | [Ten-test matrix](../crates/afsplus-check/tests/tiny_cache_matrix.md): 12 namespace/metadata families at 2/4/8/unlimited, 72,220 modeled cuts; integrated target 10 passed / 0 failed / 0 ignored with be97dbe, retained `build/cache-matrix-review-0vur3dno`; Aligned CloneRange reference-boundary cuts pass at 2/4/8/unlimited with exact source/destination/peer and refcount oracles ([profile scope](../crates/afsplus-check/tests/tiny_cache_matrix.md)); First-sharing CloneFile cuts also pass in all four profiles with exact source/clone bytes and two-reference run checks; First-clone before-write/flush faults and remount retries also pass: 60 injected failures over four profiles; Create/CloneFile completed-write and adoption-read errors pass 16 profile/fault/family combinations with post-remount mutation and exact survivor checks; Retained-snapshot CloneFile publication passes 66,652 modeled states over four profiles, with exact captured metadata/bytes, namespace EOF and checker results; eviction and other shared-family faults open |
+| Fill uncovered family/profile combinations | In progress | [Ten-test matrix](../crates/afsplus-check/tests/tiny_cache_matrix.md): 12 namespace/metadata families at 2/4/8/unlimited, 72,220 modeled cuts; integrated target 10 passed / 0 failed / 0 ignored with be97dbe, retained `build/cache-matrix-review-0vur3dno`; Aligned CloneRange reference-boundary cuts pass at 2/4/8/unlimited with exact source/destination/peer and refcount oracles ([profile scope](../crates/afsplus-check/tests/tiny_cache_matrix.md)); First-sharing CloneFile cuts also pass in all four profiles with exact source/clone bytes and two-reference run checks; First-clone before-write/flush faults and remount retries also pass: 60 injected failures over four profiles; Create/CloneFile completed-write and adoption-read errors pass 16 profile/fault/family combinations with post-remount mutation and exact survivor checks; Retained-snapshot CloneFile publication passes 66,652 modeled states over four profiles, with exact captured metadata/bytes, namespace EOF and checker results; Nine additional ownership/replay fixtures pass across four profiles, covering 45,808 modeled images; full shared_crash target 18/0/0 and 88,412 images includes prior clone cases. Integrated shared_crash target passes 18/0/0 with recorder hooks (634.21 seconds), retained `build/recorder-rw-qualification-gj8dyh3r/workspace.log`; full workspace passes 606/0/10 across 97 groups with formatting, Clippy, codec and documentation gates. Shared-family errors, retained snapshots, eviction and resource refusals remain open |
 | Fill missing spill/failure/recovery combinations | In progress | [Matrix oracles and limits](../crates/afsplus-check/tests/tiny_cache_matrix.md): 576 write/barrier faults, 1,384 replay cuts, 12 early spill faults plus bounded reservation refusal/retry; remaining transitions listed in inventory |
 
 Close `a-cache` when the inventory has no uncovered finite host combinations.
@@ -241,12 +262,44 @@ Parent: `a-fuzz`, roadmap entry `roadmap-32`. Origin:
 | Twenty-one codec targets and deterministic mutation/replay controls | Complete | [Rust codec gate](../testing/fuzzing.md#rust-codec-gate) |
 | Baseline generated semantic scenarios with exact byte/prefix oracles | Complete | [Seeded properties](../testing/fuzzing.md#seeded-semantic-properties) |
 | Audit executable wire surfaces against the target matrix | In progress | [Codec surface inventory](#codec-surface-inventory) maps direct dispatch omissions and seed-shape gaps; operation generators and caller validation remain to audit |
-| Add missing executable codec targets and semantic operation generators | In progress | Five direct snapshot targets qualified: 12 total targets x 4096 cases, eight fuzz tests, independent fields/length/boundary oracles; retained `build/snapshot-codec-integration-ijm6odz7`. Three reclaim targets also qualified: 15 total targets x 4096 cases, 11 fuzz tests and 11 saved replay controls; retained `build/reclaim-codec-integration-3ugcpze0`. Snapshot-bearing checkpoint target 16 also qualified: 65,536 cases, 13 fuzz tests, 12 saved replay controls; retained `build/snapshot-checkpoint-integration-wjhshbg2`. Object targets 17–18 qualified: 73,728 cases, 15 fuzz tests, 14 saved replays; retained `build/object-codec-integration-ojy8u7x0`. Legacy targets 19–21 qualified: 86,016 cases, 16 fuzz tests and 17 replay controls; retained `build/legacy-codec-yxmcj7yk`. Core payload relations and semantic generators remain open |
+| Add missing executable codec targets and semantic operation generators | In progress | Five direct snapshot targets qualified: 12 total targets x 4096 cases, eight fuzz tests, independent fields/length/boundary oracles; retained `build/snapshot-codec-integration-ijm6odz7`. Three reclaim targets also qualified: 15 total targets x 4096 cases, 11 fuzz tests and 11 saved replay controls; retained `build/reclaim-codec-integration-3ugcpze0`. Snapshot-bearing checkpoint target 16 also qualified: 65,536 cases, 13 fuzz tests, 12 saved replay controls; retained `build/snapshot-checkpoint-integration-wjhshbg2`. Object targets 17–18 qualified: 73,728 cases, 15 fuzz tests, 14 saved replays; retained `build/object-codec-integration-ojy8u7x0`. Legacy targets 19–21 qualified: 86,016 cases, 16 fuzz tests and 17 replay controls; retained `build/legacy-codec-yxmcj7yk`. Caller-property additions are under integrated qualification: [shared-reference model](../crates/afsplus-check/tests/shared_ref_properties.rs) compares per-block counts and publication deltas; [typed-tree model](../crates/afsplus-check/tests/tree_reader_properties.rs) compares traversal with independent maps across seven kinds. These do not cover adapter leaf semantics or new semantic operation generators, which remain open |
 | Retain and replay failure/property cases across cache profiles | To do | Reproducible artifacts and negative controls for each newly covered family |
 
 Close `a-fuzz` when executable host surfaces and operation families have the
 required coverage. Frozen-field decisions, portable C qualification and future
 catalog/change-stream implementations keep their separate stage owners.
+
+### Caller-property closure evidence
+
+Owner: `a-fuzz`. Existing independent tests count toward caller coverage;
+additional generators are not required merely to repeat a stronger existing
+oracle. This mapping does not mark the gate complete.
+
+| Executable requirement | Existing evidence |
+|---|---|
+| Mount selection, negotiation and bounded discovery | [hardening](../crates/afsplus-check/tests/hardening.rs), [mount modes](../crates/afsplus-check/tests/mount_modes.rs): ambiguity, compatibility, selected-state corruption and zero-write inspection |
+| Multi-record recovery and restartability | [intent log](../crates/afsplus-check/tests/intent_log.rs), [orphan replay](../crates/afsplus-check/tests/intent_replay_orphans.rs): exact acknowledged prefixes, ordered updates and repeated recovery cuts |
+| Reclaim retention and cursor progress | [reclaim scenarios](../crates/afsplus-check/tests/reclaim.rs), [protected-generation oracle](../crates/afsplus-core/src/reclaim.rs): all tiers, cursor cuts and incorrect-rule negative control |
+| Shared ownership and malformed references | [shared extents](../crates/afsplus-check/tests/shared_extents.rs), [count model](../crates/afsplus-check/tests/shared_ref_properties.rs): independent counts, overlap, missing/extra records and aliasing |
+| Snapshot cross-record ownership | [snapshot tests](../crates/afsplus-core/src/volume/snapshots/tests.rs): resealed total/lifetime/alias/identity violations, older-view protection and pre-recovery admission |
+| Reproducible checker corruption | [corruption corpus](../crates/afsplus-check/tests/corruption_corpus.rs): twelve classified cases across six surfaces, not every caller invariant |
+
+The concrete missing admission groups identified by this review are:
+
+1. Intent scanner multi-record mutations: stale bindings, middle-record sequence
+   termination, referenced-data reuse/content, exact accepted prefix and no reads
+   beyond termination. Reuse the existing recovery matrices.
+2. Reclaim cross-block malformed relations: reference counts/generations,
+   geometry, loaded cursor bounds and actual pending totals. Direct block-codec
+   tests do not prove these cross-block checks.
+3. Typed object/allocation/extent mapping admission: width, reserved, range and
+   generation relations. Credit existing extent-overlap checks; an earlier bitmap
+   free-count refusal does not prove later ownership validation.
+
+After these groups and the prepared naming properties are integrated, review
+coverage against the full target matrix before changing `a-fuzz` status. Native/C
+interoperability, proposed directory overrides and format freeze retain their
+separate owners; they must not be silently promoted into this finite host gate.
 
 ### Codec surface inventory
 

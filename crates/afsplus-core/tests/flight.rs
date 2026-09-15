@@ -452,37 +452,38 @@ fn api_spans_correlate_nested_calls_refusals_and_commits_without_changing_io() {
     }
 }
 
+struct PanicRead {
+    inner: MemoryBackend,
+    armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl BlockDevice for PanicRead {
+    fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+    fn total_blocks(&self) -> u64 {
+        self.inner.total_blocks()
+    }
+    fn read_block(&mut self, lba: u64, bytes: &mut [u8]) -> Result<(), BlockError> {
+        assert!(
+            !self.armed.swap(false, std::sync::atomic::Ordering::SeqCst),
+            "injected pre-write provider unwind"
+        );
+        self.inner.read_block(lba, bytes)
+    }
+    fn write_block(&mut self, lba: u64, bytes: &[u8]) -> Result<(), BlockError> {
+        self.inner.write_block(lba, bytes)
+    }
+    fn flush(&mut self) -> Result<(), BlockError> {
+        self.inner.flush()
+    }
+}
+
 #[test]
 fn api_guard_restores_context_after_a_provider_unwind_before_writes() {
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     };
-    struct PanicRead {
-        inner: MemoryBackend,
-        armed: Arc<AtomicBool>,
-    }
-    impl BlockDevice for PanicRead {
-        fn block_size(&self) -> usize {
-            self.inner.block_size()
-        }
-        fn total_blocks(&self) -> u64 {
-            self.inner.total_blocks()
-        }
-        fn read_block(&mut self, lba: u64, bytes: &mut [u8]) -> Result<(), BlockError> {
-            assert!(
-                !self.armed.swap(false, Ordering::SeqCst),
-                "injected pre-write provider unwind"
-            );
-            self.inner.read_block(lba, bytes)
-        }
-        fn write_block(&mut self, lba: u64, bytes: &[u8]) -> Result<(), BlockError> {
-            self.inner.write_block(lba, bytes)
-        }
-        fn flush(&mut self) -> Result<(), BlockError> {
-            self.inner.flush()
-        }
-    }
     let original = image();
     let armed = Arc::new(AtomicBool::new(false));
     let mut volume = mount(PanicRead {
@@ -516,7 +517,7 @@ fn api_guard_restores_context_after_a_provider_unwind_before_writes() {
     volume
         .create_file_in_root("second", b"data", Timespec::default())
         .unwrap();
-    let first = volume.flight_recorder().unwrap().events().next().unwrap();
+    let first = *volume.flight_recorder().unwrap().events().next().unwrap();
     assert_eq!(first.kind, EventKind::ApiBegin);
     assert_eq!(first.api.parent_span, 0);
     assert!(first.api.operation > previous_root);
@@ -655,7 +656,7 @@ fn deferred_windows_join_api_calls_groups_and_commits_without_changing_io() {
             ($call:expr) => {{
                 let result = $call;
                 results.push(format!("{result:?}"));
-                if let Some(ring) = v.flight_recorder_mut() {
+                if let Some(mut ring) = v.flight_recorder_mut() {
                     events.extend(ring.drain());
                 }
                 result
@@ -781,6 +782,7 @@ fn deferred_windows_join_api_calls_groups_and_commits_without_changing_io() {
                 ) && e.requires_remount));
             }
             let plain = plain.into_device();
+            drop(ring);
             let observed = observed.into_device();
             assert_eq!(plain.events(), observed.events());
             let plain = plain.into_inner().into_inner();
@@ -1403,7 +1405,7 @@ fn failed_object_lookup_is_not_reported_as_missing_and_retry_keeps_its_identity(
             errors.push(format!("{error:?}"));
             assert!(volume.device_mut().inner().tripped);
             let failed_root = if observed {
-                let ring = volume.flight_recorder_mut().unwrap();
+                let mut ring = volume.flight_recorder_mut().unwrap();
                 let events: Vec<_> = ring.drain().collect();
                 assert_eq!(events.last().unwrap().kind, EventKind::ApiFailed);
                 let objects: Vec<_> = events
@@ -1442,5 +1444,281 @@ fn failed_object_lookup_is_not_reported_as_missing_and_retry_keeps_its_identity(
         for lba in 0..original.total_blocks() {
             assert_eq!(images[0].peek(lba), images[1].peek(lba));
         }
+    }
+}
+
+#[test]
+fn allocator_observation_preserves_four_profile_io_and_orders_preparation() {
+    for pages in [2, 4, 8, usize::MAX] {
+        let options = afsplus_core::MountOptions {
+            tree_cache_pages: NonZeroUsize::new(pages),
+            ..Default::default()
+        };
+        let base = image();
+        let mut devices = Vec::new();
+        for enabled in [false, true] {
+            let mut volume =
+                afsplus_core::mount_with_options(TraceBackend::new(base.clone()), options).unwrap();
+            if enabled {
+                let mut ring = recorder(4096);
+                ring.enable_subsystem_observation();
+                volume.replace_flight_recorder(Some(ring));
+            }
+            let id = volume
+                .create_file_in_root("allocated", b"old bytes", Timespec::default())
+                .unwrap();
+            volume
+                .write_file_at(id, 0, b"new", Timespec::default())
+                .unwrap();
+            assert_eq!(volume.read_file(id).unwrap(), b"new bytes");
+            volume
+                .delete_file_in_root("allocated", Timespec::default())
+                .unwrap();
+            assert!(volume.list_root().unwrap().is_empty());
+            if enabled {
+                let ring = volume.replace_flight_recorder(None).unwrap();
+                assert_eq!(ring.dropped(), 0);
+                let events: Vec<_> = ring.events().copied().collect();
+                let begin = events
+                    .iter()
+                    .position(|e| e.kind == EventKind::AllocationBegin)
+                    .unwrap();
+                let publication = events
+                    .iter()
+                    .position(|e| e.kind == EventKind::Begin)
+                    .unwrap();
+                assert!(begin < publication);
+                assert!(events.iter().any(|e| e.kind == EventKind::AllocationGranted
+                    && e.allocation.is_some_and(|a| a.start != 0 && a.blocks != 0)));
+                assert!(events
+                    .iter()
+                    .any(|e| e.kind == EventKind::AllocationRetired));
+                for event in events.iter().filter(|e| e.allocation.is_some()) {
+                    assert_ne!(event.api.operation, 0);
+                    assert_eq!(event.attempt, 0);
+                }
+            }
+            devices.push(volume.into_device());
+        }
+        assert_eq!(devices[0].events(), devices[1].events());
+        for lba in 0..256 {
+            assert_eq!(devices[0].inner().peek(lba), devices[1].inner().peek(lba));
+        }
+    }
+}
+
+#[test]
+fn allocator_observer_follows_recorder_replacement_in_open_window() {
+    use afsplus_core::volume::BatchOp;
+    use afsplus_format::OBJECT_ROOT;
+    let mut volume = mount(window_image(false)).unwrap();
+    let mut first = recorder(512);
+    first.enable_subsystem_observation();
+    volume.replace_flight_recorder(Some(first));
+    volume
+        .window_op(
+            &BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: "first",
+                content: b"one",
+            },
+            Timespec::default(),
+        )
+        .unwrap();
+    let mut second = recorder(512);
+    second.enable_subsystem_observation();
+    let first = volume.replace_flight_recorder(Some(second)).unwrap();
+    let detached_sequence = first.sequence();
+    volume
+        .window_op(
+            &BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: "second",
+                content: b"two",
+            },
+            Timespec::default(),
+        )
+        .unwrap();
+    volume.window_commit(Timespec::default()).unwrap();
+    let second = volume.replace_flight_recorder(None).unwrap();
+    assert_eq!(first.sequence(), detached_sequence);
+    assert!(second
+        .events()
+        .any(|event| event.kind == EventKind::AllocationGranted));
+    let first_id = volume.lookup_root("first").unwrap().unwrap();
+    let second_id = volume.lookup_root("second").unwrap().unwrap();
+    assert_eq!(volume.read_file(first_id).unwrap(), b"one");
+    assert_eq!(volume.read_file(second_id).unwrap(), b"two");
+}
+
+#[test]
+fn tree_spill_observation_preserves_bounded_cache_io_and_images() {
+    use afsplus_core::flight::{Categories, Category};
+    use afsplus_core::volume::BatchOp;
+    let names: Vec<_> = (0..192)
+        .map(|i| format!("{i:04}-{}", "n".repeat(180)))
+        .collect();
+    let ops: Vec<_> = names
+        .iter()
+        .map(|name| BatchOp::CreateFile {
+            parent_id: 1,
+            name,
+            content: b"payload",
+        })
+        .collect();
+    let mut base = MemoryBackend::new(4096, 4096);
+    mkfs(
+        &mut base,
+        &MkfsParams {
+            uuid: [0x41; 16],
+            label: "tree flight".into(),
+            region_size: 4096,
+            reclaim_caps: Default::default(),
+            log_slots: 0,
+            shared_extents: false,
+            data_policy: false,
+            name_policy: NamePolicy::Sensitive,
+            timestamp: Timespec::default(),
+        },
+    )
+    .unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        let options = afsplus_core::MountOptions {
+            tree_cache_pages: NonZeroUsize::new(pages),
+            ..Default::default()
+        };
+        let mut devices = Vec::new();
+        for enabled in [false, true] {
+            let mut volume =
+                afsplus_core::mount_with_options(TraceBackend::new(base.clone()), options).unwrap();
+            if enabled {
+                let mut ring = recorder(32768);
+                ring.enable_subsystem_observation();
+                ring.set_categories(Categories::NONE.with(Category::Tree));
+                volume.replace_flight_recorder(Some(ring));
+            }
+            volume.run_batch(&ops, Timespec::default()).unwrap();
+            let stats = volume.last_commit_stats().unwrap().tree_mutations;
+            if pages != usize::MAX {
+                assert!(stats.staged_spill_writes > 31);
+                assert!(stats.max_resident_staged_nodes <= pages as u64);
+            }
+            if enabled {
+                let ring = volume.replace_flight_recorder(None).unwrap();
+                assert_eq!(ring.dropped(), 0);
+                let events: Vec<_> = ring.events().copied().collect();
+                assert!(events
+                    .iter()
+                    .all(|e| e.tree.is_some() && e.attempt == 0 && e.api.operation != 0));
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|e| e.kind == EventKind::TreeSpillComplete)
+                        .count() as u64,
+                    stats.staged_spill_writes
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|e| e.kind == EventKind::TreeSpillBegin)
+                        .count() as u64,
+                    stats.staged_spill_writes
+                );
+                assert!(events.iter().any(|e| e.kind == EventKind::TreeReadComplete));
+            }
+            for name in &names {
+                let id = volume.lookup_root(name).unwrap().unwrap();
+                assert_eq!(volume.read_file(id).unwrap(), b"payload");
+            }
+            devices.push(volume.into_device());
+        }
+        assert_eq!(devices[0].events(), devices[1].events());
+        for lba in 0..4096 {
+            assert_eq!(devices[0].inner().peek(lba), devices[1].inner().peek(lba));
+        }
+    }
+}
+
+#[test]
+fn recorder_preserves_transferable_volume() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<afsplus_core::volume::Volume<afsplus_block::MemoryBackend>>();
+}
+
+#[test]
+fn captured_provider_unwind_restores_observer_and_allows_retry() {
+    use afsplus_core::volume::SnapshotWorkLimits;
+    use afsplus_core::{mkfs_with_options, mount_with_snapshot_limits, MkfsOptions, MountOptions};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let mut original = MemoryBackend::new(4096, 2048);
+    mkfs_with_options(
+        &mut original,
+        &MkfsParams {
+            uuid: [93; 16],
+            label: "observer unwind".into(),
+            region_size: 2048,
+            reclaim_caps: Default::default(),
+            log_slots: 0,
+            shared_extents: true,
+            data_policy: true,
+            name_policy: NamePolicy::Sensitive,
+            timestamp: Timespec::default(),
+        },
+        MkfsOptions {
+            persistent_snapshots: true,
+        },
+    )
+    .unwrap();
+    let armed = Arc::new(AtomicBool::new(false));
+    let mut volume = mount_with_snapshot_limits(
+        PanicRead {
+            inner: original,
+            armed: armed.clone(),
+        },
+        MountOptions::default(),
+        SnapshotWorkLimits {
+            max_edit_records: 4096,
+            max_views: 16,
+            reclaim_records: 8,
+        },
+    )
+    .unwrap();
+    let now = Timespec::default();
+    let file = volume
+        .create_file_in_root("captured", b"saved", now)
+        .unwrap();
+    let snapshot = volume.snapshot_create(now).unwrap();
+    let handle = volume.snapshot_open(snapshot).unwrap();
+    let before = volume.device_mut().inner.clone();
+    let mut ring = recorder(128);
+    ring.enable_object_observation();
+    ring.enable_subsystem_observation();
+    volume.replace_flight_recorder(Some(ring));
+    armed.store(true, Ordering::SeqCst);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        volume.snapshot_stat(&handle, file)
+    }))
+    .is_err());
+    let failed_operation = {
+        let ring = volume.flight_recorder().unwrap();
+        let last = ring.events().last().unwrap();
+        assert_eq!(last.kind, EventKind::ApiUnwound);
+        last.api.operation
+    };
+    assert!(volume.snapshot_stat(&handle, file).unwrap().is_some());
+    let ring = volume.replace_flight_recorder(None).unwrap();
+    assert!(ring.events().any(
+        |event| event.kind == EventKind::ApiSucceeded && event.api.operation > failed_operation
+    ));
+    volume.replace_flight_recorder(Some(ring));
+    let a = volume.flight_recorder().unwrap();
+    let b = volume.flight_recorder().unwrap();
+    assert_eq!(a.events().count(), b.events().count());
+    drop((a, b));
+    for lba in 0..2048 {
+        assert_eq!(volume.device_mut().inner.peek(lba), before.peek(lba));
     }
 }

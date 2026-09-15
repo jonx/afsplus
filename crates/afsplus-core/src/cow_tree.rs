@@ -19,6 +19,15 @@ use crate::CoreError;
 /// region transaction allocator; the allocation-root tree uses a permanently
 /// reserved triple-version pool to avoid describing its own allocations.
 pub trait TreeAllocator<D: BlockDevice> {
+    /// Optional synchronous observation, with the same no-allocation/no-I/O contract as the recorder.
+    fn observe_tree(
+        &mut self,
+        _generation: u64,
+        _kind: crate::flight::EventKind,
+        _context: crate::flight::TreeContext,
+    ) {
+    }
+
     /// Runtime staged-image budget for each tree mutation in this transaction.
     fn tree_cache_pages(&self) -> usize {
         usize::MAX
@@ -35,6 +44,15 @@ pub trait TreeAllocator<D: BlockDevice> {
 }
 
 impl<D: BlockDevice> TreeAllocator<D> for TxAllocator {
+    fn observe_tree(
+        &mut self,
+        generation: u64,
+        kind: crate::flight::EventKind,
+        context: crate::flight::TreeContext,
+    ) {
+        TxAllocator::observe_tree(self, generation, kind, context);
+    }
+
     fn tree_cache_pages(&self) -> usize {
         self.tree_cache_pages.get()
     }
@@ -791,7 +809,12 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                 block
             } else {
                 let mut block = vec![0u8; self.geo.block_size];
-                self.dev.read_block(lba, &mut block)?;
+                self.observe(crate::flight::EventKind::TreeReadBegin, lba);
+                if let Err(error) = self.dev.read_block(lba, &mut block) {
+                    self.observe(crate::flight::EventKind::TreeIoFailed, lba);
+                    return Err(error.into());
+                }
+                self.observe(crate::flight::EventKind::TreeReadComplete, lba);
                 self.stats.device_reads += 1;
                 self.stats.staged_spill_reloads += 1;
                 self.writes
@@ -805,7 +828,12 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             }
         } else {
             let mut block = vec![0u8; self.geo.block_size];
-            self.dev.read_block(lba, &mut block)?;
+            self.observe(crate::flight::EventKind::TreeReadBegin, lba);
+            if let Err(error) = self.dev.read_block(lba, &mut block) {
+                self.observe(crate::flight::EventKind::TreeIoFailed, lba);
+                return Err(error.into());
+            }
+            self.observe(crate::flight::EventKind::TreeReadComplete, lba);
             self.stats.device_reads += 1;
             block
         };
@@ -961,6 +989,18 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         Ok(())
     }
 
+    fn observe(&mut self, kind: crate::flight::EventKind, lba: u64) {
+        self.tx.observe_tree(
+            self.new_generation,
+            kind,
+            crate::flight::TreeContext {
+                owner: self.spec.owner,
+                block: lba,
+                resident: self.resident_staged_nodes as u64,
+            },
+        );
+    }
+
     fn enforce_cache_limit(&mut self) -> Result<(), CoreError> {
         self.stats.max_staged_nodes_before_eviction = self
             .stats
@@ -976,7 +1016,12 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                 .get_mut(&lba)
                 .and_then(|image| image.resident.take())
                 .ok_or_else(|| CoreError::Corrupt("staged cache victim has no image".into()))?;
-            self.dev.write_block(lba, &block)?;
+            self.observe(crate::flight::EventKind::TreeSpillBegin, lba);
+            if let Err(error) = self.dev.write_block(lba, &block) {
+                self.observe(crate::flight::EventKind::TreeIoFailed, lba);
+                return Err(error.into());
+            }
+            self.observe(crate::flight::EventKind::TreeSpillComplete, lba);
             self.resident_staged_nodes -= 1;
             self.stats.staged_spill_writes += 1;
         }

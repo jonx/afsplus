@@ -114,7 +114,9 @@ fn drain_flight(ring: &mut afsplus_core::flight::FlightRecorder) -> FlightBatch 
 }
 
 fn capture_flight<D: BlockDevice>(volume: &mut afsplus_core::Volume<D>) -> Option<FlightBatch> {
-    volume.flight_recorder_mut().map(drain_flight)
+    volume
+        .flight_recorder_mut()
+        .map(|mut recorder| drain_flight(&mut recorder))
 }
 pub struct Run {
     pub events: Vec<Event>,

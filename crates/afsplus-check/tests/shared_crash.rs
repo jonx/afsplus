@@ -9,7 +9,8 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
 use afsplus_block::{
-    for_each_crash_state, FaultBackend, FaultPlan, MemoryBackend, RecordedOp, RecordingBackend,
+    for_each_crash_state, BlockDevice, FaultBackend, FaultPlan, MemoryBackend, RecordedOp,
+    RecordingBackend,
 };
 use afsplus_check::check_device;
 use afsplus_core::mount::select_checkpoint;
@@ -87,13 +88,17 @@ fn assert_cow_targets(base: &MemoryBackend, operations: &[RecordedOp]) {
     }
 }
 
-fn run_checkpoint_matrix(
-    base: &MemoryBackend,
-    operations: &[RecordedOp],
-    pre_generation: u64,
-    verify: impl FnMut(&str, bool, &mut Volume<MemoryBackend>),
-) {
-    run_checkpoint_matrix_profile(base, operations, pre_generation, usize::MAX, verify);
+fn profile_mount<D: BlockDevice>(device: D, pages: usize) -> Volume<D> {
+    let volume = mount_with_options(
+        device,
+        MountOptions {
+            tree_cache_pages: NonZeroUsize::new(pages),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(volume.tree_cache_pages(), pages);
+    volume
 }
 
 fn run_checkpoint_matrix_profile(
@@ -108,7 +113,7 @@ fn run_checkpoint_matrix_profile(
     let mut post_outcomes = 0u64;
     for crash_point in 0..=operations.len() {
         for_each_crash_state(base, operations, crash_point, |state| {
-            let context = state.description;
+            let context = format!("pages={pages}: {}", state.description);
             let mut image = state.image;
             let report = check_device(&mut image);
             assert!(
@@ -144,13 +149,15 @@ fn run_checkpoint_matrix_profile(
     }
     assert!(pre_outcomes > 0, "matrix produced no pre-state");
     assert!(post_outcomes > 0, "matrix produced no post-state");
+    eprintln!("checkpoint pages={pages} old={pre_outcomes} new={post_outcomes}");
 }
 
 fn record_transaction(
     base: &MemoryBackend,
+    pages: usize,
     operation: impl FnOnce(&mut Volume<RecordingBackend<MemoryBackend>>),
 ) -> Vec<RecordedOp> {
-    let mut volume = mount(RecordingBackend::new(base.clone())).unwrap();
+    let mut volume = profile_mount(RecordingBackend::new(base.clone()), pages);
     operation(&mut volume);
     volume.into_device().into_parts().1
 }
@@ -158,8 +165,8 @@ fn record_transaction(
 /// Records the automatic recovery transaction produced when a durable intent
 /// record is replayed at mount.  The returned base already contains the
 /// durable record but still exposes the old checkpoint in NoChanges mode.
-fn record_replay(logged: &MemoryBackend) -> Vec<RecordedOp> {
-    let volume = mount(RecordingBackend::new(logged.clone())).unwrap();
+fn record_replay(logged: &MemoryBackend, pages: usize) -> Vec<RecordedOp> {
+    let volume = profile_mount(RecordingBackend::new(logged.clone()), pages);
     volume.into_device().into_parts().1
 }
 
@@ -167,6 +174,7 @@ fn run_replay_matrix(
     logged: &MemoryBackend,
     operations: &[RecordedOp],
     pre_generation: u64,
+    pages: usize,
     mut verify_recovered: impl FnMut(&str, &mut Volume<MemoryBackend>),
 ) {
     assert_cow_targets(logged, operations);
@@ -174,7 +182,7 @@ fn run_replay_matrix(
     let mut post_outcomes = 0u64;
     for crash_point in 0..=operations.len() {
         for_each_crash_state(logged, operations, crash_point, |state| {
-            let context = state.description;
+            let context = format!("pages={pages}: {}", state.description);
             let mut raw_image = state.image.clone();
             let report = check_device(&mut raw_image);
             assert!(
@@ -186,10 +194,11 @@ fn run_replay_matrix(
                 raw_image,
                 MountOptions {
                     mode: MountMode::NoChanges,
-                    ..Default::default()
+                    tree_cache_pages: NonZeroUsize::new(pages),
                 },
             )
             .unwrap_or_else(|error| panic!("{context}: no-changes mount failed: {error}"));
+            assert_eq!(raw.tree_cache_pages(), pages);
             match raw.generation() {
                 generation if generation == pre_generation => {
                     pre_outcomes += 1;
@@ -208,8 +217,7 @@ fn run_replay_matrix(
             // A normal RW mount must either retry the still-pending group or
             // observe the already-published replay.  Both paths converge to
             // the same post-state and make the intent record stale.
-            let mut recovered = mount(state.image)
-                .unwrap_or_else(|error| panic!("{context}: recovery mount failed: {error}"));
+            let mut recovered = profile_mount(state.image, pages);
             assert_eq!(recovered.generation(), pre_generation + 1, "{context}");
             assert_eq!(recovered.pending_intent_records(), 0, "{context}");
             verify_recovered(&context, &mut recovered);
@@ -220,10 +228,15 @@ fn run_replay_matrix(
                 "{context}: post-recovery checker findings {:?}",
                 recovered_report.errors
             );
+            let mut again = profile_mount(recovered_image, pages);
+            assert_eq!(again.generation(), pre_generation + 1, "{context}");
+            assert_eq!(again.pending_intent_records(), 0, "{context}");
+            verify_recovered(&context, &mut again);
         });
     }
     assert!(pre_outcomes > 0, "replay matrix produced no pre-state");
     assert!(post_outcomes > 0, "replay matrix produced no post-state");
+    eprintln!("replay pages={pages} old={pre_outcomes} new={post_outcomes}");
 }
 
 #[test]
@@ -378,7 +391,13 @@ fn clone_range_profile(pages: usize) {
 
 #[test]
 fn shared_write_split_is_crash_atomic() {
-    let mut setup = mount(formatted("CrashSharedWrite", 0)).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        shared_write_split_is_crash_atomic_profile(pages);
+    }
+}
+
+fn shared_write_split_is_crash_atomic_profile(pages: usize) {
+    let mut setup = profile_mount(formatted("CrashSharedWrite", 0), pages);
     let original = vec![0x22u8; 4 * BS];
     let source = setup
         .create_file_in_root("source", &original, ts(2))
@@ -387,9 +406,9 @@ fn shared_write_split_is_crash_atomic() {
         .clone_file(source, OBJECT_ROOT, "clone", ts(3))
         .unwrap();
     let base = setup.into_device();
-    let pre_generation = mount(base.clone()).unwrap().generation();
+    let pre_generation = profile_mount(base.clone(), pages).generation();
     let replacement = vec![0x77u8; BS];
-    let operations = record_transaction(&base, |volume| {
+    let operations = record_transaction(&base, pages, |volume| {
         volume
             .write_file_at(clone, BS as u64, &replacement, ts(4))
             .unwrap();
@@ -397,10 +416,11 @@ fn shared_write_split_is_crash_atomic() {
     let mut changed = original.clone();
     changed[BS..2 * BS].copy_from_slice(&replacement);
 
-    run_checkpoint_matrix(
+    run_checkpoint_matrix_profile(
         &base,
         &operations,
         pre_generation,
+        pages,
         |context, post, volume| {
             assert_eq!(volume.read_file(source).unwrap(), original, "{context}");
             let expected = if post {
@@ -426,7 +446,13 @@ fn shared_write_split_is_crash_atomic() {
 
 #[test]
 fn unlink_at_count_three_is_crash_atomic() {
-    let mut setup = mount(formatted("CrashUnlinkThree", 0)).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        unlink_at_count_three_is_crash_atomic_profile(pages);
+    }
+}
+
+fn unlink_at_count_three_is_crash_atomic_profile(pages: usize) {
+    let mut setup = profile_mount(formatted("CrashUnlinkThree", 0), pages);
     let content = vec![0x33u8; BS];
     let source = setup
         .create_file_in_root("source", &content, ts(2))
@@ -438,21 +464,25 @@ fn unlink_at_count_three_is_crash_atomic() {
         .clone_file(source, OBJECT_ROOT, "second", ts(4))
         .unwrap();
     let base = setup.into_device();
-    let pre_generation = mount(base.clone()).unwrap().generation();
-    let operations = record_transaction(&base, |volume| {
+    let pre_generation = profile_mount(base.clone(), pages).generation();
+    let operations = record_transaction(&base, pages, |volume| {
         volume.delete_file(OBJECT_ROOT, "source", ts(5)).unwrap();
     });
 
-    run_checkpoint_matrix(
+    run_checkpoint_matrix_profile(
         &base,
         &operations,
         pre_generation,
+        pages,
         |context, post, volume| {
             assert_eq!(
                 volume.lookup_root("source").unwrap().is_none(),
                 post,
                 "{context}"
             );
+            if !post {
+                assert_eq!(volume.read_file(source).unwrap(), content, "{context}");
+            }
             assert_eq!(volume.read_file(first).unwrap(), content, "{context}");
             assert_eq!(volume.read_file(second).unwrap(), content, "{context}");
             let records = shared_records(volume);
@@ -464,7 +494,13 @@ fn unlink_at_count_three_is_crash_atomic() {
 
 #[test]
 fn unlink_at_count_two_never_reclaims_the_survivor() {
-    let mut setup = mount(formatted("CrashUnlinkTwo", 0)).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        unlink_at_count_two_never_reclaims_the_survivor_profile(pages);
+    }
+}
+
+fn unlink_at_count_two_never_reclaims_the_survivor_profile(pages: usize) {
+    let mut setup = profile_mount(formatted("CrashUnlinkTwo", 0), pages);
     let content = vec![0x44u8; 2 * BS];
     let source = setup
         .create_file_in_root("source", &content, ts(2))
@@ -474,15 +510,16 @@ fn unlink_at_count_two_never_reclaims_the_survivor() {
         .unwrap();
     let shared_start = shared_records(&mut setup)[0].physical_start;
     let base = setup.into_device();
-    let pre_generation = mount(base.clone()).unwrap().generation();
-    let operations = record_transaction(&base, |volume| {
+    let pre_generation = profile_mount(base.clone(), pages).generation();
+    let operations = record_transaction(&base, pages, |volume| {
         volume.delete_file(OBJECT_ROOT, "source", ts(4)).unwrap();
     });
 
-    run_checkpoint_matrix(
+    run_checkpoint_matrix_profile(
         &base,
         &operations,
         pre_generation,
+        pages,
         |context, post, volume| {
             assert_eq!(volume.read_file(clone).unwrap(), content, "{context}");
             if post {
@@ -498,6 +535,7 @@ fn unlink_at_count_two_never_reclaims_the_survivor() {
                     Some(source),
                     "{context}"
                 );
+                assert_eq!(volume.read_file(source).unwrap(), content, "{context}");
                 assert_eq!(shared_records(volume)[0].reference_count, 2, "{context}");
             }
         },
@@ -506,7 +544,13 @@ fn unlink_at_count_two_never_reclaims_the_survivor() {
 
 #[test]
 fn truncate_across_private_and_shared_subruns_is_crash_atomic() {
-    let mut setup = mount(formatted("CrashSharedTruncate", 0)).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        truncate_across_private_and_shared_subruns_is_crash_atomic_profile(pages);
+    }
+}
+
+fn truncate_across_private_and_shared_subruns_is_crash_atomic_profile(pages: usize) {
+    let mut setup = profile_mount(formatted("CrashSharedTruncate", 0), pages);
     let original = vec![0x55u8; 4 * BS];
     let source = setup
         .create_file_in_root("source", &original, ts(2))
@@ -517,17 +561,20 @@ fn truncate_across_private_and_shared_subruns_is_crash_atomic() {
     setup
         .write_file_at(clone, BS as u64, &vec![0x99u8; BS], ts(4))
         .unwrap();
-    let clone_bytes = setup.read_file(clone).unwrap();
+    let mut clone_bytes = original.clone();
+    clone_bytes[BS..2 * BS].fill(0x99);
+    assert_eq!(setup.read_file(clone).unwrap(), clone_bytes);
     let base = setup.into_device();
-    let pre_generation = mount(base.clone()).unwrap().generation();
-    let operations = record_transaction(&base, |volume| {
+    let pre_generation = profile_mount(base.clone(), pages).generation();
+    let operations = record_transaction(&base, pages, |volume| {
         volume.truncate_file(source, BS as u64, ts(5)).unwrap();
     });
 
-    run_checkpoint_matrix(
+    run_checkpoint_matrix_profile(
         &base,
         &operations,
         pre_generation,
+        pages,
         |context, post, volume| {
             assert_eq!(volume.read_file(clone).unwrap(), clone_bytes, "{context}");
             let expected = if post {
@@ -546,7 +593,13 @@ fn truncate_across_private_and_shared_subruns_is_crash_atomic() {
 
 #[test]
 fn rename_replace_of_a_shared_target_is_crash_atomic() {
-    let mut setup = mount(formatted("CrashSharedReplace", 0)).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        rename_replace_of_a_shared_target_is_crash_atomic_profile(pages);
+    }
+}
+
+fn rename_replace_of_a_shared_target_is_crash_atomic_profile(pages: usize) {
+    let mut setup = profile_mount(formatted("CrashSharedReplace", 0), pages);
     let victim_bytes = vec![0x66u8; BS];
     let incoming_bytes = vec![0xaau8; BS];
     let victim = setup
@@ -559,17 +612,18 @@ fn rename_replace_of_a_shared_target_is_crash_atomic() {
         .create_file_in_root("incoming", &incoming_bytes, ts(4))
         .unwrap();
     let base = setup.into_device();
-    let pre_generation = mount(base.clone()).unwrap().generation();
-    let operations = record_transaction(&base, |volume| {
+    let pre_generation = profile_mount(base.clone(), pages).generation();
+    let operations = record_transaction(&base, pages, |volume| {
         volume
             .rename_replace(OBJECT_ROOT, "incoming", OBJECT_ROOT, "victim", ts(5))
             .unwrap();
     });
 
-    run_checkpoint_matrix(
+    run_checkpoint_matrix_profile(
         &base,
         &operations,
         pre_generation,
+        pages,
         |context, post, volume| {
             assert_eq!(volume.read_file(peer).unwrap(), victim_bytes, "{context}");
             if post {
@@ -597,6 +651,12 @@ fn rename_replace_of_a_shared_target_is_crash_atomic() {
                     Some(incoming),
                     "{context}"
                 );
+                assert_eq!(volume.read_file(victim).unwrap(), victim_bytes, "{context}");
+                assert_eq!(
+                    volume.read_file(incoming).unwrap(),
+                    incoming_bytes,
+                    "{context}"
+                );
                 assert_eq!(shared_records(volume)[0].reference_count, 2, "{context}");
             }
         },
@@ -605,7 +665,13 @@ fn rename_replace_of_a_shared_target_is_crash_atomic() {
 
 #[test]
 fn durable_shared_unlink_replay_is_crash_atomic_and_idempotent() {
-    let mut setup = mount(formatted("ReplaySharedUnlink", 8)).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        durable_shared_unlink_replay_is_crash_atomic_and_idempotent_profile(pages);
+    }
+}
+
+fn durable_shared_unlink_replay_is_crash_atomic_and_idempotent_profile(pages: usize) {
+    let mut setup = profile_mount(formatted("ReplaySharedUnlink", 8), pages);
     let content = vec![0xbbu8; 2 * BS];
     let source = setup
         .create_file_in_root("source", &content, ts(2))
@@ -615,10 +681,10 @@ fn durable_shared_unlink_replay_is_crash_atomic_and_idempotent() {
         .unwrap();
     let shared_start = shared_records(&mut setup)[0].physical_start;
     let base = setup.into_device();
-    let pre_generation = mount(base.clone()).unwrap().generation();
+    let pre_generation = profile_mount(base.clone(), pages).generation();
 
     let logged = {
-        let mut volume = mount(base).unwrap();
+        let mut volume = profile_mount(base, pages);
         volume
             .window_op(
                 &BatchOp::DeleteFile {
@@ -631,23 +697,36 @@ fn durable_shared_unlink_replay_is_crash_atomic_and_idempotent() {
         volume.window_fsync().unwrap();
         volume.into_device()
     };
-    let operations = record_replay(&logged);
+    let operations = record_replay(&logged, pages);
 
-    run_replay_matrix(&logged, &operations, pre_generation, |context, volume| {
-        assert_eq!(volume.lookup_root("source").unwrap(), None, "{context}");
-        assert_eq!(volume.read_file(survivor).unwrap(), content, "{context}");
-        assert!(volume.orphan_object(source).unwrap(), "{context}");
-        assert_eq!(shared_records(volume)[0].reference_count, 2, "{context}");
-        assert!(
-            !volume.quarantine_contains(shared_start).unwrap(),
-            "{context}: replay of rc=2 -> rc=1 reclaimed survivor data"
-        );
-    });
+    run_replay_matrix(
+        &logged,
+        &operations,
+        pre_generation,
+        pages,
+        |context, volume| {
+            assert_eq!(volume.lookup_root("source").unwrap(), None, "{context}");
+            assert_eq!(volume.read_file(survivor).unwrap(), content, "{context}");
+            assert!(volume.orphan_object(source).unwrap(), "{context}");
+            assert_eq!(volume.read_file(source).unwrap(), content, "{context}");
+            assert_eq!(shared_records(volume)[0].reference_count, 2, "{context}");
+            assert!(
+                !volume.quarantine_contains(shared_start).unwrap(),
+                "{context}: replay of rc=2 -> rc=1 reclaimed survivor data"
+            );
+        },
+    );
 }
 
 #[test]
 fn durable_rename_replace_replay_preserves_the_shared_survivor() {
-    let mut setup = mount(formatted("ReplaySharedReplace", 8)).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        durable_rename_replace_replay_preserves_the_shared_survivor_profile(pages);
+    }
+}
+
+fn durable_rename_replace_replay_preserves_the_shared_survivor_profile(pages: usize) {
+    let mut setup = profile_mount(formatted("ReplaySharedReplace", 8), pages);
     let old_bytes = vec![0xccu8; BS];
     let new_bytes = vec![0xddu8; BS];
     let target = setup
@@ -660,10 +739,10 @@ fn durable_rename_replace_replay_preserves_the_shared_survivor() {
         .create_file_in_root("incoming", &new_bytes, ts(4))
         .unwrap();
     let base = setup.into_device();
-    let pre_generation = mount(base.clone()).unwrap().generation();
+    let pre_generation = profile_mount(base.clone(), pages).generation();
 
     let logged = {
-        let mut volume = mount(base).unwrap();
+        let mut volume = profile_mount(base, pages);
         volume
             .window_op(
                 &BatchOp::Rename {
@@ -679,26 +758,38 @@ fn durable_rename_replace_replay_preserves_the_shared_survivor() {
         volume.window_fsync().unwrap();
         volume.into_device()
     };
-    let operations = record_replay(&logged);
+    let operations = record_replay(&logged, pages);
 
-    run_replay_matrix(&logged, &operations, pre_generation, |context, volume| {
-        assert_eq!(
-            volume.lookup_root("target").unwrap(),
-            Some(incoming),
-            "{context}"
-        );
-        assert_eq!(volume.lookup_root("incoming").unwrap(), None, "{context}");
-        assert!(volume.orphan_object(target).unwrap(), "{context}");
-        assert_eq!(volume.read_file(target).unwrap(), old_bytes, "{context}");
-        assert_eq!(volume.read_file(incoming).unwrap(), new_bytes, "{context}");
-        assert_eq!(volume.read_file(survivor).unwrap(), old_bytes, "{context}");
-        assert_eq!(shared_records(volume)[0].reference_count, 2, "{context}");
-    });
+    run_replay_matrix(
+        &logged,
+        &operations,
+        pre_generation,
+        pages,
+        |context, volume| {
+            assert_eq!(
+                volume.lookup_root("target").unwrap(),
+                Some(incoming),
+                "{context}"
+            );
+            assert_eq!(volume.lookup_root("incoming").unwrap(), None, "{context}");
+            assert!(volume.orphan_object(target).unwrap(), "{context}");
+            assert_eq!(volume.read_file(target).unwrap(), old_bytes, "{context}");
+            assert_eq!(volume.read_file(incoming).unwrap(), new_bytes, "{context}");
+            assert_eq!(volume.read_file(survivor).unwrap(), old_bytes, "{context}");
+            assert_eq!(shared_records(volume)[0].reference_count, 2, "{context}");
+        },
+    );
 }
 
 #[test]
 fn shared_storage_is_reused_only_after_the_last_owner_disappears() {
-    let mut setup = mount(formatted("CrashSharedReuse", 0)).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        shared_storage_is_reused_only_after_the_last_owner_disappears_profile(pages);
+    }
+}
+
+fn shared_storage_is_reused_only_after_the_last_owner_disappears_profile(pages: usize) {
+    let mut setup = profile_mount(formatted("CrashSharedReuse", 0), pages);
     let old_bytes = vec![0xeeu8; BS];
     let source = setup
         .create_file_in_root("source", &old_bytes, ts(2))
@@ -727,10 +818,10 @@ fn shared_storage_is_reused_only_after_the_last_owner_disappears() {
     for index in 0..32 {
         let name = format!("replacement-{index}");
         let new_bytes = vec![0xf1u8.wrapping_add(index as u8); BS];
-        let pre_generation = mount(base.clone()).unwrap().generation();
+        let pre_generation = profile_mount(base.clone(), pages).generation();
         let mut replacement = 0;
         let mut reused = false;
-        let operations = record_transaction(&base, |volume| {
+        let operations = record_transaction(&base, pages, |volume| {
             replacement = volume
                 .create_file_in_root(&name, &new_bytes, ts(6 + index))
                 .unwrap();
@@ -756,7 +847,7 @@ fn shared_storage_is_reused_only_after_the_last_owner_disappears() {
             break;
         }
 
-        let mut advance = mount(base).unwrap();
+        let mut advance = profile_mount(base, pages);
         advance
             .create_file_in_root(&name, &new_bytes, ts(6 + index))
             .unwrap();
@@ -765,10 +856,11 @@ fn shared_storage_is_reused_only_after_the_last_owner_disappears() {
     let (base, pre_generation, operations, replacement_name, new_bytes, replacement) = reuse_case
         .expect("allocator did not reach the formerly shared block within 32 transactions");
 
-    run_checkpoint_matrix(
+    run_checkpoint_matrix_profile(
         &base,
         &operations,
         pre_generation,
+        pages,
         |context, post, volume| {
             if post {
                 assert_eq!(
@@ -802,40 +894,52 @@ fn shared_storage_is_reused_only_after_the_last_owner_disappears() {
 
 #[test]
 fn logged_write_replay_splits_shared_data_and_survives_replay_crashes() {
+    for pages in [2, 4, 8, usize::MAX] {
+        logged_write_replay_splits_shared_data_and_survives_replay_crashes_profile(pages);
+    }
+}
+
+fn logged_write_replay_splits_shared_data_and_survives_replay_crashes_profile(pages: usize) {
     let old = vec![0x41u8; 3 * BS];
     let patch = vec![0xD2u8; BS];
-    let mut setup = mount(formatted("LoggedSharedWrite", 8)).unwrap();
+    let mut setup = profile_mount(formatted("LoggedSharedWrite", 8), pages);
     let source = setup.create_file_in_root("source", &old, ts(2)).unwrap();
     let clone = setup
         .clone_file(source, OBJECT_ROOT, "clone", ts(3))
         .unwrap();
     let base = setup.into_device();
-    let pre_generation = mount(base.clone()).unwrap().generation();
+    let pre_generation = profile_mount(base.clone(), pages).generation();
 
-    let mut logger = mount(base).unwrap();
+    let mut logger = profile_mount(base, pages);
     logger
         .window_write_file_at(source, BS as u64, &patch, ts(4))
         .unwrap();
     logger.window_fsync().unwrap();
     let logged = logger.into_device();
-    let replay = record_replay(&logged);
+    let replay = record_replay(&logged, pages);
 
     let mut expected_source = old.clone();
     expected_source[BS..2 * BS].copy_from_slice(&patch);
-    run_replay_matrix(&logged, &replay, pre_generation, |context, volume| {
-        assert_eq!(
-            volume.read_file(source).unwrap(),
-            expected_source,
-            "{context}"
-        );
-        assert_eq!(volume.read_file(clone).unwrap(), old, "{context}");
-        let records = shared_records(volume);
-        assert_eq!(records.len(), 2, "{context}: {records:?}");
-        assert!(
-            records.iter().all(|record| record.reference_count == 2),
-            "{context}"
-        );
-    });
+    run_replay_matrix(
+        &logged,
+        &replay,
+        pre_generation,
+        pages,
+        |context, volume| {
+            assert_eq!(
+                volume.read_file(source).unwrap(),
+                expected_source,
+                "{context}"
+            );
+            assert_eq!(volume.read_file(clone).unwrap(), old, "{context}");
+            let records = shared_records(volume);
+            assert_eq!(records.len(), 2, "{context}: {records:?}");
+            assert!(
+                records.iter().all(|record| record.reference_count == 2),
+                "{context}"
+            );
+        },
+    );
 }
 
 #[test]

@@ -357,7 +357,7 @@ pub struct FileEditLimits {
 }
 
 pub struct Volume<D: BlockDevice> {
-    flight: Option<crate::flight::FlightRecorder>,
+    flight: Option<crate::flight::SharedRecorder>,
     tree_cache_pages: std::num::NonZeroUsize,
     dev: D,
     ident: Identification,
@@ -414,7 +414,12 @@ impl<D: BlockDevice> Drop for ApiTraceGuard<'_, D> {
     fn drop(&mut self) {
         let generation = self.volume.checkpoint.generation;
         if let (Some(recorder), Some(token)) = (&mut self.volume.flight, self.token.take()) {
-            recorder.end_api(token, generation, self.outcome, self.volume.window_poisoned);
+            recorder.borrow_mut().end_api(
+                token,
+                generation,
+                self.outcome,
+                self.volume.window_poisoned,
+            );
         }
     }
 }
@@ -428,7 +433,7 @@ impl<D: BlockDevice> Volume<D> {
         // Enabling observation through the control accessor also covers the
         // next read-only call against an already open (or poisoned) window.
         if let (Some(window), Some(recorder)) = (&self.window, &mut self.flight) {
-            recorder.observe_window(
+            recorder.borrow_mut().observe_window(
                 window.generation,
                 window.logged_records,
                 true,
@@ -436,10 +441,11 @@ impl<D: BlockDevice> Volume<D> {
             );
         }
         let generation = self.checkpoint.generation;
-        let token = self
-            .flight
-            .as_mut()
-            .and_then(|recorder| recorder.begin_api(method, generation, self.window_poisoned));
+        let token = self.flight.as_mut().and_then(|recorder| {
+            recorder
+                .borrow_mut()
+                .begin_api(method, generation, self.window_poisoned)
+        });
         let Some(token) = token else {
             return body(self);
         };
@@ -521,25 +527,39 @@ impl<D: BlockDevice> Volume<D> {
             .as_ref()
             .map_or(self.checkpoint.generation, |w| w.generation);
         self.flight_window_event(generation, crate::flight::EventKind::WindowDetached, None);
-        let previous = std::mem::replace(&mut self.flight, recorder);
+        let shared = recorder.map(|recorder| Arc::new(crate::flight::RecorderCell::new(recorder)));
+        let previous = std::mem::replace(&mut self.flight, shared);
+        if let Some(window) = &mut self.window {
+            window
+                .tx
+                .replace_observer(crate::flight::AllocationObserver::new(self.flight.as_ref()));
+        }
         if let (Some(window), Some(recorder)) = (&self.window, &mut self.flight) {
-            recorder.observe_window(
+            recorder.borrow_mut().observe_window(
                 window.generation,
                 window.logged_records,
                 true,
                 self.window_poisoned,
             );
         }
-        previous
+        previous.map(|recorder| {
+            Arc::try_unwrap(recorder)
+                .expect("only weak transaction observers may escape")
+                .into_inner()
+        })
     }
 
-    pub fn flight_recorder(&self) -> Option<&crate::flight::FlightRecorder> {
-        self.flight.as_ref()
+    pub fn flight_recorder(
+        &self,
+    ) -> Option<std::sync::RwLockReadGuard<'_, crate::flight::FlightRecorder>> {
+        self.flight.as_ref().map(|recorder| recorder.borrow())
     }
 
     /// Drain or configure diagnostics without detaching their window context.
-    pub fn flight_recorder_mut(&mut self) -> Option<&mut crate::flight::FlightRecorder> {
-        self.flight.as_mut()
+    pub fn flight_recorder_mut(
+        &mut self,
+    ) -> Option<std::sync::RwLockWriteGuard<'_, crate::flight::FlightRecorder>> {
+        self.flight.as_ref().map(|recorder| recorder.borrow_mut())
     }
 
     fn flight_window_event(
@@ -549,13 +569,17 @@ impl<D: BlockDevice> Volume<D> {
         sequence: Option<u32>,
     ) {
         if let Some(recorder) = &mut self.flight {
-            recorder.window_event(generation, kind, sequence, self.window_poisoned);
+            recorder
+                .borrow_mut()
+                .window_event(generation, kind, sequence, self.window_poisoned);
         }
     }
 
     fn flight_event(&mut self, generation: u64, kind: crate::flight::EventKind) {
         if let Some(recorder) = &mut self.flight {
-            recorder.emit(generation, kind, self.window_poisoned);
+            recorder
+                .borrow_mut()
+                .emit(generation, kind, self.window_poisoned);
         }
     }
 
@@ -683,7 +707,8 @@ impl<D: BlockDevice> Volume<D> {
         }
         let before = self.state.reclaim_root.pending_blocks;
         let generation = self.next_generation()?;
-        let tx = TxAllocator::begin(
+        let tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -1394,7 +1419,8 @@ impl<D: BlockDevice> Volume<D> {
         }
 
         let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -1644,7 +1670,8 @@ impl<D: BlockDevice> Volume<D> {
         })?;
         if new_size > record.size_bytes && record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
             let generation = self.next_generation()?;
-            let mut tx = TxAllocator::begin(
+            let mut tx = TxAllocator::begin_observed(
+                crate::flight::AllocationObserver::new(self.flight.as_ref()),
                 &mut self.dev,
                 &self.ident.geometry(),
                 &self.checkpoint,
@@ -1730,7 +1757,8 @@ impl<D: BlockDevice> Volume<D> {
             }
         }
         let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -1907,7 +1935,8 @@ impl<D: BlockDevice> Volume<D> {
         }
 
         let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -2035,7 +2064,8 @@ impl<D: BlockDevice> Volume<D> {
             .checked_add(1)
             .ok_or(CoreError::PrototypeLimit("object ID space exhausted"))?;
 
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -2429,7 +2459,8 @@ impl<D: BlockDevice> Volume<D> {
         }
 
         let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -2664,7 +2695,8 @@ impl<D: BlockDevice> Volume<D> {
             .checked_add(1)
             .ok_or(CoreError::PrototypeLimit("object ID space exhausted"))?;
 
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -2865,7 +2897,8 @@ impl<D: BlockDevice> Volume<D> {
             .checked_add(1)
             .ok_or(CoreError::PrototypeLimit("object ID space exhausted"))?;
 
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -3306,7 +3339,8 @@ impl<D: BlockDevice> Volume<D> {
 
         let block_size = self.dev.block_size();
         let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -3418,7 +3452,8 @@ impl<D: BlockDevice> Volume<D> {
 
         let block_size = self.dev.block_size();
         let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -3582,7 +3617,8 @@ impl<D: BlockDevice> Volume<D> {
         let block_size = self.dev.block_size();
         let generation = self.next_generation()?;
 
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -3745,7 +3781,8 @@ impl<D: BlockDevice> Volume<D> {
 
         let block_size = self.dev.block_size();
         let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -3966,7 +4003,8 @@ impl<D: BlockDevice> Volume<D> {
 
         let block_size = self.dev.block_size();
         let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -4543,7 +4581,8 @@ impl<D: BlockDevice> Volume<D> {
         }
         self.ensure_window_closed()?;
         let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -5645,7 +5684,7 @@ impl<D: BlockDevice> Volume<D> {
         }
         if let Some(window) = self.window.take() {
             if let Some(recorder) = &mut self.flight {
-                recorder.observe_window(
+                recorder.borrow_mut().observe_window(
                     window.generation,
                     window.logged_records,
                     true,
@@ -5658,7 +5697,8 @@ impl<D: BlockDevice> Volume<D> {
         // Windowed transactions never promote quarantined blocks: logged
         // data extents must be FREE in the committed bitmaps so replay can
         // claim them deterministically (ADR-037/063).
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -5670,7 +5710,9 @@ impl<D: BlockDevice> Volume<D> {
         .with_tree_cache_pages(self.tree_cache_pages);
         self.protect_emergency_headroom(&mut tx);
         if let Some(recorder) = &mut self.flight {
-            recorder.observe_window(generation, 0, false, self.window_poisoned);
+            recorder
+                .borrow_mut()
+                .observe_window(generation, 0, false, self.window_poisoned);
         }
         Ok(OpenWindow {
             tx,
@@ -6189,7 +6231,7 @@ impl<D: BlockDevice> Volume<D> {
             return Err(CoreError::WindowPoisoned);
         }
         if let (Some(window), Some(recorder)) = (&self.window, &mut self.flight) {
-            recorder.observe_window(
+            recorder.borrow_mut().observe_window(
                 window.generation,
                 window.logged_records,
                 true,
@@ -6306,7 +6348,7 @@ impl<D: BlockDevice> Volume<D> {
         };
         let generation = window.generation;
         if let Some(recorder) = &mut self.flight {
-            recorder.observe_window(
+            recorder.borrow_mut().observe_window(
                 generation,
                 window.logged_records,
                 true,
@@ -6354,7 +6396,8 @@ impl<D: BlockDevice> Volume<D> {
         let generation = self.next_generation()?;
         // Same zero-promotion rule as the live window: the recorded extents
         // are FREE in the committed bitmaps and must claim cleanly.
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -7015,7 +7058,7 @@ impl<D: BlockDevice> Volume<D> {
         record_block: u64,
     ) {
         if let Some(recorder) = &mut self.flight {
-            recorder.object_event(
+            recorder.borrow_mut().object_event(
                 self.checkpoint.generation,
                 kind,
                 crate::flight::ObjectContext {

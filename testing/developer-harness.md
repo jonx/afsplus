@@ -1113,14 +1113,24 @@ A fresh recorder starts a separate identity domain; callers must retain
 that boundary when combining recordings. Reattaching the same recorder preserves
 its counters but starts a new observation of an existing window.
 
-Storage is caller-bounded and allocation occurs at ring construction. Emission
-reads no clock and stores no file names or payloads. The macOS AArch64 layout
-probe reports a 104-byte event and a 176-byte recorder or recorder Option.
-At capacity N, requested event storage is `104 * N` bytes, plus allocator rounding;
-optional adapter state and transport storage have separate bounds. A volume
-without a recorder allocates no ring. Small capacities preserve filesystem
-semantics while exposing overwritten or missed diagnostics. Other target layouts
-and native resource budgets require their own measurements.
+Storage is caller-bounded. Ring construction reserves event storage; installing
+it on a volume separately allocates a shared recorder owner. Emission reads no
+clock and stores no file names or payloads. Requested ring storage is
+`capacity * size_of::<Event>()`, plus allocator rounding. The earlier macOS
+AArch64 probe (104-byte events, 176-byte recorder) predates subsystem payloads
+and shared ownership; those numbers must not be used for the extended recorder.
+Account separately for the shared owner, synchronization and reference counters,
+transaction observer handles, optional adapter state and transport storage.
+A volume without a recorder allocates no ring or shared recorder owner. Small
+capacities preserve filesystem semantics while exposing overwritten or missed
+diagnostics. Every target layout and native resource budget needs measurement.
+
+Recorder access returns a read-only guard; multiple readers may coexist.
+Configuration and emission require an exclusive write guard. Drop guards before
+conflicting access, which fails immediately without waiting. Transaction
+observers hold weak references and cannot retain a detached recorder. Replacing
+a recorder updates observers in an open operation window. These Rust diagnostic
+handles do not change filesystem API v2, capability decisions or disk records.
 
 [Core tests](../crates/afsplus-core/tests/flight.rs) compare observed and plain
 operation results, full device traces and every image block at 2/4/8/unlimited

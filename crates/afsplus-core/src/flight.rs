@@ -7,6 +7,39 @@
 use std::collections::{TryReserveError, VecDeque};
 use std::num::NonZeroUsize;
 
+pub(crate) type SharedRecorder = std::sync::Arc<RecorderCell>;
+
+/// A transferable recorder with nonblocking runtime borrows.
+/// Volume operations already require exclusive access. Contention therefore
+/// means a caller retained a diagnostic guard or a sink reentered diagnostics.
+/// Never wait for such a borrow inside a filesystem operation.
+#[derive(Debug)]
+pub(crate) struct RecorderCell(std::sync::RwLock<FlightRecorder>);
+impl RecorderCell {
+    pub(crate) fn new(recorder: FlightRecorder) -> Self {
+        Self(std::sync::RwLock::new(recorder))
+    }
+    pub(crate) fn borrow(&self) -> std::sync::RwLockReadGuard<'_, FlightRecorder> {
+        match self.0.try_read() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => panic!("flight recorder already borrowed"),
+        }
+    }
+    pub(crate) fn borrow_mut(&self) -> std::sync::RwLockWriteGuard<'_, FlightRecorder> {
+        match self.0.try_write() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => panic!("flight recorder already borrowed"),
+        }
+    }
+    pub(crate) fn into_inner(self) -> FlightRecorder {
+        self.0
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// Categories emitted by API observation and the commit tail. Other coverage has
 /// separate integration gates; a category name alone is not that evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,15 +51,18 @@ pub enum Category {
     Api,
     Window,
     Object,
+    Allocator,
+    Tree,
+    Reclaim,
 }
 
 /// Runtime selection, independent of ring capacity and event identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Categories(u8);
+pub struct Categories(u16);
 
 impl Categories {
     pub const NONE: Self = Self(0);
-    pub const ALL: Self = Self(127);
+    pub const ALL: Self = Self(1023);
 
     pub const fn with(self, category: Category) -> Self {
         Self(self.0 | (1 << category as u8))
@@ -63,11 +99,43 @@ pub enum EventKind {
     ObjectLookup,
     ObjectMapped,
     ObjectMissing,
+    AllocationBegin,
+    AllocationGranted,
+    AllocationRetired,
+    AllocationFailed,
+    TreeReadBegin,
+    TreeReadComplete,
+    TreeSpillBegin,
+    TreeSpillComplete,
+    TreeIoFailed,
+    ReclaimBegin,
+    ReclaimPromoted,
+    ReclaimBlocked,
+    ReclaimAppended,
+    ReclaimPlanned,
+    ReclaimBuilt,
+    ReclaimFailed,
 }
 
 impl EventKind {
     pub const fn category(self) -> Category {
         match self {
+            Self::ReclaimBegin
+            | Self::ReclaimPromoted
+            | Self::ReclaimBlocked
+            | Self::ReclaimAppended
+            | Self::ReclaimPlanned
+            | Self::ReclaimBuilt
+            | Self::ReclaimFailed => Category::Reclaim,
+            Self::TreeReadBegin
+            | Self::TreeReadComplete
+            | Self::TreeSpillBegin
+            | Self::TreeSpillComplete
+            | Self::TreeIoFailed => Category::Tree,
+            Self::AllocationBegin
+            | Self::AllocationGranted
+            | Self::AllocationRetired
+            | Self::AllocationFailed => Category::Allocator,
             Self::ObjectLookup | Self::ObjectMapped | Self::ObjectMissing => Category::Object,
             Self::Begin | Self::Adopted => Category::Transaction,
             Self::DataWritesComplete => Category::Io,
@@ -225,6 +293,69 @@ pub struct ObjectContext {
     pub view_id: u64,
 }
 
+/// Allocation decision context; zero start denotes a request without a chosen run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllocationContext {
+    pub start: u64,
+    pub blocks: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeContext {
+    pub owner: u64,
+    pub block: u64,
+    pub resident: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReclaimContext {
+    pub root: u64,
+    pub start: u64,
+    pub blocks: u64,
+}
+
+/// A transaction may outlive recorder replacement in a deferred window.
+/// Weak ownership prevents that transaction retaining a detached recorder.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AllocationObserver(std::sync::Weak<RecorderCell>);
+impl AllocationObserver {
+    pub(crate) fn new(recorder: Option<&SharedRecorder>) -> Self {
+        Self(recorder.map_or_else(std::sync::Weak::new, std::sync::Arc::downgrade))
+    }
+    pub(crate) fn reclaim(&self, generation: u64, kind: EventKind, context: ReclaimContext) {
+        if let Some(recorder) = self.0.upgrade() {
+            let mut recorder = recorder.borrow_mut();
+            if recorder.subsystem_enabled {
+                recorder.emit_context(generation, kind, false, None, None, None, Some(context));
+            }
+        }
+    }
+    pub(crate) fn tree(&self, generation: u64, kind: EventKind, context: TreeContext) {
+        if let Some(recorder) = self.0.upgrade() {
+            let mut recorder = recorder.borrow_mut();
+            if recorder.subsystem_enabled {
+                recorder.emit_context(generation, kind, false, None, None, Some(context), None);
+            }
+        }
+    }
+    pub(crate) fn emit(&self, generation: u64, kind: EventKind, start: u64, blocks: u64) {
+        if let Some(recorder) = self.0.upgrade() {
+            let mut recorder = recorder.borrow_mut();
+            if recorder.subsystem_enabled {
+                recorder.emit_context(
+                    generation,
+                    kind,
+                    false,
+                    None,
+                    Some(AllocationContext { start, blocks }),
+                    None,
+                    None,
+                );
+            }
+        }
+    }
+}
+
 /// An attempt is unique within this recorder, including retries that reuse a
 /// checkpoint generation. It starts at the common commit tail, not API entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +377,9 @@ pub struct Event {
     pub log_sequence: u32,
     /// Present only on explicit object resolution events; never inherited by siblings.
     pub object: Option<ObjectContext>,
+    pub allocation: Option<AllocationContext>,
+    pub tree: Option<TreeContext>,
+    pub reclaim: Option<ReclaimContext>,
 }
 
 /// Outcome of a nonblocking live-adapter delivery attempt.
@@ -288,6 +422,7 @@ pub struct FlightRecorder {
     missed: u64,
     api_enabled: bool,
     object_enabled: bool,
+    subsystem_enabled: bool,
     api_next: u64,
     api_context: ApiContext,
     api_exhausted: bool,
@@ -340,6 +475,7 @@ impl FlightRecorder {
             missed: 0,
             api_enabled: false,
             object_enabled: false,
+            subsystem_enabled: false,
             api_next: 0,
             api_context: ApiContext::default(),
             api_exhausted: false,
@@ -551,8 +687,15 @@ impl FlightRecorder {
         self.api_context = token.previous;
     }
 
+    /// Observe allocation, mutable-tree I/O and reclaim transitions, including
+    /// their enclosing API identities. Observation adds no disk I/O.
+    /// Category selection independently filters each subsystem's records.
+    pub fn enable_subsystem_observation(&mut self) {
+        self.api_enabled = true;
+        self.subsystem_enabled = true;
+    }
+
     /// Opt in to object resolution and its API identities. No new disk I/O.
-    /// Category selection can suppress API records without losing their identities.
     pub fn enable_object_observation(&mut self) {
         self.api_enabled = true;
         self.object_enabled = true;
@@ -566,20 +709,33 @@ impl FlightRecorder {
         requires_remount: bool,
     ) {
         if self.object_enabled {
-            self.emit_context(generation, kind, requires_remount, Some(context));
+            self.emit_context(
+                generation,
+                kind,
+                requires_remount,
+                Some(context),
+                None,
+                None,
+                None,
+            );
         }
     }
 
     pub(crate) fn emit(&mut self, generation: u64, kind: EventKind, requires_remount: bool) {
-        self.emit_context(generation, kind, requires_remount, None);
+        self.emit_context(generation, kind, requires_remount, None, None, None, None);
     }
 
+    // Keep the typed optional payloads explicit at each emission site.
+    #[allow(clippy::too_many_arguments)]
     fn emit_context(
         &mut self,
         generation: u64,
         kind: EventKind,
         requires_remount: bool,
         object: Option<ObjectContext>,
+        allocation: Option<AllocationContext>,
+        tree: Option<TreeContext>,
+        reclaim: Option<ReclaimContext>,
     ) {
         if self.api_exhausted
             || self.window_exhausted
@@ -607,7 +763,12 @@ impl FlightRecorder {
             sequence: self.sequence,
             attempt: if matches!(
                 kind.category(),
-                Category::Api | Category::Window | Category::Object
+                Category::Api
+                    | Category::Window
+                    | Category::Object
+                    | Category::Allocator
+                    | Category::Tree
+                    | Category::Reclaim
             ) {
                 0
             } else {
@@ -620,6 +781,9 @@ impl FlightRecorder {
             window: self.window,
             log_sequence: self.window_log_sequence,
             object,
+            allocation,
+            tree,
+            reclaim,
         };
         self.events.push_back(event);
         if let Some(sink) = &mut self.sink {
@@ -927,5 +1091,35 @@ mod object_tests {
             event.object.is_none(),
             "object context must not leak into later events"
         );
+    }
+}
+
+#[cfg(test)]
+mod recorder_borrow_tests {
+    use super::*;
+    #[test]
+    fn shared_readers_conflicts_and_unwind_leave_recorder_usable() {
+        let cell = RecorderCell::new(FlightRecorder::new(NonZeroUsize::new(8).unwrap()).unwrap());
+        let a = cell.borrow();
+        let b = cell.borrow();
+        assert_eq!(a.events().count(), b.events().count());
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(cell.borrow_mut());
+        }))
+        .is_err());
+        drop((a, b));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut writer = cell.borrow_mut();
+            writer.emit(1, EventKind::Begin, false);
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drop(cell.borrow());
+            }))
+            .is_err());
+            panic!("provider unwind while observing");
+        }))
+        .is_err());
+        assert_eq!(cell.borrow().events().count(), 1);
+        cell.borrow_mut().emit(1, EventKind::Adopted, false);
+        assert_eq!(cell.into_inner().events().count(), 2);
     }
 }

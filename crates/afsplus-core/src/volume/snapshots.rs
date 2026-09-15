@@ -241,7 +241,8 @@ impl<D: BlockDevice> Volume<D> {
 
     fn commit_snapshot_change(&mut self, change: SnapshotRegistryChange) -> Result<(), CoreError> {
         let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin(
+        let mut tx = TxAllocator::begin_observed(
+            crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
             &self.checkpoint,
@@ -389,7 +390,10 @@ impl<D: BlockDevice> Volume<D> {
             &mut snapshot::view::Observation::new(
                 view,
                 handle.info.id,
-                self.flight.as_mut(),
+                self.flight
+                    .as_ref()
+                    .map(|recorder| recorder.borrow_mut())
+                    .as_deref_mut(),
                 self.window_poisoned,
             ),
             object_id,
@@ -429,7 +433,10 @@ impl<D: BlockDevice> Volume<D> {
             &mut snapshot::view::Observation::new(
                 view,
                 handle.info.id,
-                self.flight.as_mut(),
+                self.flight
+                    .as_ref()
+                    .map(|recorder| recorder.borrow_mut())
+                    .as_deref_mut(),
                 self.window_poisoned,
             ),
             object_id,
@@ -463,7 +470,10 @@ impl<D: BlockDevice> Volume<D> {
             &mut snapshot::view::Observation::new(
                 view,
                 handle.info.id,
-                self.flight.as_mut(),
+                self.flight
+                    .as_ref()
+                    .map(|recorder| recorder.borrow_mut())
+                    .as_deref_mut(),
                 self.window_poisoned,
             ),
             object_id,
@@ -497,7 +507,10 @@ impl<D: BlockDevice> Volume<D> {
             &mut snapshot::view::Observation::new(
                 view,
                 handle.info.id,
-                self.flight.as_mut(),
+                self.flight
+                    .as_ref()
+                    .map(|recorder| recorder.borrow_mut())
+                    .as_deref_mut(),
                 self.window_poisoned,
             ),
             object_id,
@@ -530,7 +543,10 @@ impl<D: BlockDevice> Volume<D> {
             &mut snapshot::view::Observation::new(
                 view,
                 handle.info.id,
-                self.flight.as_mut(),
+                self.flight
+                    .as_ref()
+                    .map(|recorder| recorder.borrow_mut())
+                    .as_deref_mut(),
                 self.window_poisoned,
             ),
             directory_id,
@@ -599,7 +615,10 @@ impl<D: BlockDevice> Volume<D> {
             &mut snapshot::view::Observation::new(
                 view,
                 handle.info.id,
-                self.flight.as_mut(),
+                self.flight
+                    .as_ref()
+                    .map(|recorder| recorder.borrow_mut())
+                    .as_deref_mut(),
                 self.window_poisoned,
             ),
             directory_id,

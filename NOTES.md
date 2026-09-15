@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Integrate subsystem observations and caller-property tests](#2026-09-15--integrate-subsystem-observations-and-caller-property-tests)
 - [2026-09-15 — Identify allocator recorder ownership prerequisite](#2026-09-15--identify-allocator-recorder-ownership-prerequisite)
 - [2026-09-15 — Qualify legacy one-block codec mutation targets](#2026-09-15--qualify-legacy-one-block-codec-mutation-targets)
 - [2026-09-15 — Qualify captured state through clone publication](#2026-09-15--qualify-captured-state-through-clone-publication)
@@ -161,6 +162,43 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Integrate subsystem observations and caller-property tests
+
+We connected allocation, mutable-tree I/O and reclaim transitions to the
+volume recorder through weak transaction observers. Preparation events remain
+ordered with API calls rather than being buffered until checkpoint publication.
+Recorder replacement also updates an open deferred transaction.
+
+The initial `Rc` owner broke the all-features FUSE build. An intermediate mutex
+restored transferability but changed immutable access into exclusive mutable
+access. The revised read/write-lock owner preserves simultaneous read-only
+access, refuses conflicts without waiting, and recovers diagnostic access after
+provider unwinding. The focused suite passed 23 tests, including a captured-read
+panic followed by retry with an unchanged image. A separate borrow test checks
+conflicts and poisoned-lock recovery. Full integration qualification passed
+606 Rust tests with no failures and ten explicit ignores across 97 test groups.
+Formatting, all-features Clippy, the 21-target codec gate (4,096 cases each),
+documentation checks, checker tests and whitespace validation passed. Sources
+and logs are retained in `build/recorder-rw-qualification-gj8dyh3r`. Only
+documentation changed during qualification; production and test source hashes
+remained identical. The ignored gates do not establish native or live-mount
+qualification.
+
+The shared-ownership crash fixtures gained explicit 2/4/8/unlimited profiles,
+independent survivor bytes and repeat-recovery checks. Nine expanded fixtures
+covered 45,808 modeled images in the agent run; the complete target's 88,412
+also includes earlier clone cases. Independent per-block reference-count and
+typed-tree traversal properties accompany these tests. The cache inventory now
+distinguishes this coverage from remaining fault, eviction and retention work.
+
+The measured extended event layout is 192 bytes on this macOS AArch64 host,
+versus 104 previously. The ring's memory cost and shared-owner allocation must
+be included in qualification. Existing replay versions do not opt into the new
+subsystem events; extended export, remaining diagnostic paths and resource
+measurements retain their Stage A gates. No stage completion follows from
+these focused results alone; current state remains in
+[the milestones](implementation/milestones.md).
 
 ## 2026-09-15 — Identify allocator recorder ownership prerequisite
 
