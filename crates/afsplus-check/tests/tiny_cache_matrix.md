@@ -93,6 +93,16 @@ generation must match that outcome, and both outcomes must occur.
 The fixture does not force eviction or retain a snapshot; error-return retries
 and those resource combinations require separate qualification.
 
+`first_clone_io_failures_preserve_ownership_in_all_profiles` injects a
+before-write error at every recorded write and an error at every flush under
+all four profiles. A final-barrier error must poison further mutation. Earlier
+failures preserve the live source, absent clone and old generation. After
+remount, the exact old state must admit retry or the complete new state must
+already be present; the clone and source have identical expected bytes and one
+two-block/two-reference shared run. The checker runs before and after retry.
+This error model does not cover writes completed but reported failed or
+adoption-read errors, and the fixture does not force a tree spill.
+
 ## CloneRange reference-boundary profile gate
 
 In [shared_crash.rs](shared_crash.rs),

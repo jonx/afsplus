@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Qualify first-clone I/O failure recovery](#2026-09-15--qualify-first-clone-io-failure-recovery)
 - [2026-09-15 — Qualify first-sharing CloneFile cache profiles](#2026-09-15--qualify-first-sharing-clonefile-cache-profiles)
 - [2026-09-15 — Qualify CloneRange reference boundaries across cache profiles](#2026-09-15--qualify-clonerange-reference-boundaries-across-cache-profiles)
 - [2026-09-15 — Qualify symlink and object metadata codecs](#2026-09-15--qualify-symlink-and-object-metadata-codecs)
@@ -154,6 +155,19 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Qualify first-clone I/O failure recovery
+
+Injected each of 13 recorded writes and two flushes under each cache profile:
+60 failures in total. Earlier errors preserve the old live namespace and source;
+final-barrier uncertainty blocks further mutation. Remount selects exact old or
+complete new state, and old-state retry produces the expected clone and sharing
+records. The exhaustive checker validates before and after retry.
+
+The focused test passed in 1.23 seconds, with targeted clippy, formatting and
+document checks passing. The fixture qualifies before-write and flush errors,
+not completed-but-reported-failed writes, adoption reads, forced eviction or
+retained snapshots. No full-workspace or native campaign is claimed.
 
 ## 2026-09-15 — Qualify first-sharing CloneFile cache profiles
 

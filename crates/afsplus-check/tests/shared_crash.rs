@@ -8,7 +8,9 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
-use afsplus_block::{for_each_crash_state, MemoryBackend, RecordedOp, RecordingBackend};
+use afsplus_block::{
+    for_each_crash_state, FaultBackend, FaultPlan, MemoryBackend, RecordedOp, RecordingBackend,
+};
 use afsplus_check::check_device;
 use afsplus_core::mount::select_checkpoint;
 use afsplus_core::shared_extents::{self, SharedRun};
@@ -834,4 +836,97 @@ fn logged_write_replay_splits_shared_data_and_survives_replay_crashes() {
             "{context}"
         );
     });
+}
+
+#[test]
+fn first_clone_io_failures_preserve_ownership_in_all_profiles() {
+    for pages in [2, 4, 8, usize::MAX] {
+        let options = MountOptions {
+            tree_cache_pages: NonZeroUsize::new(pages),
+            ..Default::default()
+        };
+        let mut setup = mount_with_options(formatted("CloneFaults", 0), options).unwrap();
+        let content = vec![0x51; 2 * BS];
+        let source = setup
+            .create_file_in_root("source", &content, ts(2))
+            .unwrap();
+        let before = setup.generation();
+        let base = setup.into_device();
+        let mut reference =
+            mount_with_options(RecordingBackend::new(base.clone()), options).unwrap();
+        reference
+            .clone_file(source, OBJECT_ROOT, "clone", ts(3))
+            .unwrap();
+        let (_, log) = reference.into_device().into_parts();
+        let writes = log
+            .iter()
+            .filter(|op| matches!(op, RecordedOp::Write { .. }))
+            .count() as u64;
+        let flushes = log
+            .iter()
+            .filter(|op| matches!(op, RecordedOp::Flush))
+            .count() as u64;
+        assert!(writes > 0 && flushes > 0);
+        let plans = (0..writes)
+            .map(|i| FaultPlan {
+                fail_write_index: Some(i),
+                ..Default::default()
+            })
+            .chain((0..flushes).map(|i| FaultPlan {
+                fail_flush_index: Some(i),
+                ..Default::default()
+            }));
+        for plan in plans {
+            let context = format!("pages={pages} plan={plan:?}");
+            let mut volume =
+                mount_with_options(FaultBackend::new(base.clone(), plan), options).unwrap();
+            assert!(
+                volume
+                    .clone_file(source, OBJECT_ROOT, "clone", ts(3))
+                    .is_err(),
+                "{context}"
+            );
+            assert!(volume.device_mut().tripped(), "{context}");
+            if plan.fail_flush_index == Some(flushes - 1) {
+                assert!(
+                    matches!(
+                        volume.clone_file(source, OBJECT_ROOT, "clone", ts(3)),
+                        Err(afsplus_core::CoreError::WindowPoisoned)
+                    ),
+                    "{context}"
+                );
+            } else {
+                assert_eq!(volume.read_file(source).unwrap(), content, "{context}");
+                assert_eq!(volume.lookup_root("clone").unwrap(), None, "{context}");
+                assert_eq!(volume.generation(), before, "{context}");
+            }
+            let mut image = volume.into_device().into_inner();
+            let report = check_device(&mut image);
+            assert!(report.is_clean(), "{context}: {:?}", report.errors);
+            let mut recovered = mount_with_options(image, options).unwrap();
+            assert_eq!(recovered.tree_cache_pages(), pages);
+            assert_eq!(recovered.read_file(source).unwrap(), content, "{context}");
+            if recovered.generation() == before {
+                assert_eq!(recovered.lookup_root("clone").unwrap(), None, "{context}");
+                assert!(shared_records(&mut recovered).is_empty(), "{context}");
+                recovered
+                    .clone_file(source, OBJECT_ROOT, "clone", ts(3))
+                    .unwrap();
+            }
+            assert_eq!(recovered.generation(), before + 1, "{context}");
+            let clone = recovered.lookup_root("clone").unwrap().unwrap();
+            assert_eq!(recovered.read_file(clone).unwrap(), content, "{context}");
+            assert_eq!(recovered.read_file(source).unwrap(), content, "{context}");
+            let records = shared_records(&mut recovered);
+            assert_eq!(records.len(), 1, "{context}");
+            assert_eq!(
+                (records[0].block_count, records[0].reference_count),
+                (2, 2),
+                "{context}"
+            );
+            let report = check_device(recovered.device_mut());
+            assert!(report.is_clean(), "{context}: {:?}", report.errors);
+        }
+        eprintln!("first-clone faults pages={pages} writes={writes} flushes={flushes}");
+    }
 }
