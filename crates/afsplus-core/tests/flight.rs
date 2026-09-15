@@ -3058,3 +3058,220 @@ fn captured_view_reads_carry_their_snapshot_identity() {
         assert_eq!(traces[0].1, traces[1].1, "{pages} pages");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Executed API guard coverage.
+// ---------------------------------------------------------------------------
+
+/// Every registered method executed once under observation. Results are
+/// deliberately unchecked: the guard owns the call whatever it returns.
+#[test]
+fn every_registered_api_method_executes_under_its_own_guard() {
+    use afsplus_core::flight::{ApiMethod, Category};
+    use afsplus_core::volume::{
+        BatchOp, DataUpdatePolicy, FileEditLimits, PreservedMetadata, SnapshotWorkLimits,
+    };
+    use afsplus_core::{mount_with_snapshot_limits, MkfsOptions, MountOptions};
+    use afsplus_format::OBJECT_ROOT;
+    let mut base = MemoryBackend::new(4096, 4096);
+    afsplus_core::mkfs_with_options(
+        &mut base,
+        &MkfsParams {
+            uuid: [0x2a; 16],
+            label: "api coverage".into(),
+            region_size: 4096,
+            reclaim_caps: Default::default(),
+            log_slots: 8,
+            shared_extents: true,
+            data_policy: true,
+            name_policy: NamePolicy::Sensitive,
+            timestamp: Timespec::default(),
+        },
+        MkfsOptions {
+            persistent_snapshots: true,
+        },
+    )
+    .unwrap();
+    let limits = SnapshotWorkLimits {
+        max_edit_records: 4096,
+        max_views: 8,
+        reclaim_records: 8,
+    };
+    let mut volume =
+        mount_with_snapshot_limits(TraceBackend::new(base), MountOptions::default(), limits)
+            .unwrap();
+    let now = Timespec::default();
+    let file = volume.create_file_in_root("file", b"content", now).unwrap();
+    let directory = volume.create_directory_in_root("dir", now).unwrap();
+    let symlink = volume
+        .create_symlink(OBJECT_ROOT, "link", "file", now)
+        .unwrap();
+    let snapshot_id = volume.snapshot_create(now).unwrap();
+    let handle = volume.snapshot_open(snapshot_id).unwrap();
+    let metadata: PreservedMetadata = volume
+        .visible_metadata(file)
+        .unwrap()
+        .expect("the created file is visible")
+        .into();
+    let edit = FileEditLimits {
+        max_blocks: 64,
+        max_records: 64,
+    };
+
+    let mut ring = recorder(8192);
+    ring.enable_api_observation();
+    volume.replace_flight_recorder(Some(ring));
+    let mut bytes = vec![0u8; 64];
+
+    volume.set_tree_cache_pages(8).ok();
+    volume.set_reclaim_batch_blocks(8);
+    volume.set_orphan_cleanup_extent_budget(8);
+    volume.set_data_update_policy(DataUpdatePolicy::FullCow);
+    volume.set_snapshot_work_limits(limits).ok();
+    volume.quarantine_contains(1).ok();
+    volume.reclaim_step(now).ok();
+    volume.file_data_policy(file).ok();
+    volume
+        .set_file_data_policy(file, DataUpdatePolicy::FullCow, now)
+        .ok();
+    volume.sync().ok();
+    volume.lookup_root("file").ok();
+    volume.lookup_in_directory(OBJECT_ROOT, "file").ok();
+    volume.list_root().ok();
+    volume.list_directory(OBJECT_ROOT).ok();
+    volume.read_directory_page(OBJECT_ROOT, None, 2).ok();
+    volume.stat(file).ok();
+    volume.file_allocation_page(file, 0, 2).ok();
+    volume.visible_metadata(file).ok();
+    volume.read_file(file).ok();
+    volume.read_file_at(file, 0, &mut bytes).ok();
+    volume.write_file_at(file, 0, b"written", now).ok();
+    volume
+        .write_file_at_bounded(file, 0, b"bounded", now, edit)
+        .ok();
+    volume.truncate_file(file, 4, now).ok();
+    volume.truncate_file_bounded(file, 3, now, edit).ok();
+    volume.preallocate_file(file, 0, 4096, now).ok();
+    volume
+        .preallocate_file_bounded(file, 0, 4096, now, edit)
+        .ok();
+    volume.clone_file(file, OBJECT_ROOT, "clone", now).ok();
+    volume.clone_range(file, 0, file, 0, 4096, now).ok();
+    volume.create_file_in_root("second", b"", now).ok();
+    volume
+        .create_file_in_directory(directory, "child", b"", now)
+        .ok();
+    volume
+        .create_symlink(OBJECT_ROOT, "link2", "file", now)
+        .ok();
+    volume.create_directory_in_root("dir2", now).ok();
+    volume.create_directory(directory, "nested", now).ok();
+    volume.delete_file_in_root("second", now).ok();
+    volume.delete_file(directory, "child", now).ok();
+    volume.remove_directory(directory, "nested", now).ok();
+    volume.orphan_file(OBJECT_ROOT, "clone", now).ok();
+    volume.orphan_object(file).ok();
+    volume.orphan_count().ok();
+    let orphan = volume.first_orphan().ok().flatten().unwrap_or(file);
+    volume.cleanup_orphan(orphan, now).ok();
+    volume.link_file(file, OBJECT_ROOT, "hard", now).ok();
+    volume
+        .rename(OBJECT_ROOT, "hard", OBJECT_ROOT, "moved", now)
+        .ok();
+    volume
+        .rename_replace(OBJECT_ROOT, "moved", OBJECT_ROOT, "file", now)
+        .ok();
+    volume
+        .rename_replace_orphan_target(OBJECT_ROOT, "file", OBJECT_ROOT, "dir2", now)
+        .ok();
+    volume
+        .run_batch(
+            &[BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: "batched",
+                content: b"batch",
+            }],
+            now,
+        )
+        .ok();
+    volume.read_link(symlink, &mut bytes).ok();
+    volume.unlink_symlink(OBJECT_ROOT, "link2", now).ok();
+    volume.set_object_protection(file, 0o644, now).ok();
+    volume.restore_object_metadata(file, metadata).ok();
+    volume
+        .window_op(
+            &BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: "windowed",
+                content: b"window",
+            },
+            now,
+        )
+        .ok();
+    volume.window_fsync().ok();
+    volume.window_commit(now).ok();
+    volume.window_write_file_at(file, 0, b"logged", now).ok();
+    volume.window_truncate_file(file, 2, now).ok();
+    volume.window_commit(now).ok();
+    volume.snapshot_stat(&handle, file).ok();
+    volume.snapshot_allocation_page(&handle, file, 0, 2).ok();
+    volume.snapshot_read_link(&handle, symlink, &mut bytes).ok();
+    volume
+        .snapshot_read_file_at(&handle, file, 0, &mut bytes)
+        .ok();
+    volume.snapshot_lookup(&handle, OBJECT_ROOT, "file").ok();
+    volume
+        .snapshot_read_directory_page(&handle, OBJECT_ROOT, None, 2)
+        .ok();
+    volume.snapshot_maintenance_step(now).ok();
+    volume.snapshot_list(0, 4).ok();
+    if let Ok(second) = volume.snapshot_create(now) {
+        drop(volume.snapshot_open(second));
+    }
+    drop(handle);
+    volume.snapshot_delete(snapshot_id, now).ok();
+
+    let ring = volume.replace_flight_recorder(None).unwrap();
+    assert_eq!(ring.dropped(), 0, "the ring must hold every executed call");
+    let mut executed = std::collections::BTreeSet::new();
+    let mut open = Vec::new();
+    for event in ring.events() {
+        if event.kind.category() != Category::Api {
+            continue;
+        }
+        let method = event.api.method.expect("an API event names its method");
+        if event.kind == EventKind::ApiBegin {
+            open.push((event.api.span, method));
+            executed.insert(format!("{method:?}"));
+        } else {
+            assert_ne!(event.kind, EventKind::ApiUnwound, "{method:?} unwound");
+            assert_eq!(
+                open.pop(),
+                Some((event.api.span, method)),
+                "outcome of {method:?} must close its own span"
+            );
+        }
+    }
+    assert!(open.is_empty(), "every executed call reports an outcome");
+
+    // The registry is the source of truth for what a guard must cover.
+    let registry: std::collections::BTreeSet<_> = include_str!("../src/flight.rs")
+        .split("pub enum ApiMethod {")
+        .nth(1)
+        .unwrap()
+        .split('}')
+        .next()
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, _)| name.trim().to_owned())
+        .collect();
+    assert_eq!(registry.len(), 66);
+    let missing: Vec<_> = registry.difference(&executed).cloned().collect();
+    assert!(
+        missing.is_empty(),
+        "registered but never executed: {missing:?}"
+    );
+    assert_eq!(executed, registry);
+    assert_eq!(ApiMethod::CleanupOrphan as u16, 1);
+}
