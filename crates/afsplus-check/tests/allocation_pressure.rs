@@ -3,11 +3,14 @@
 //! failed allocations must publish nothing, while destructive operations and
 //! bounded reclaim must keep making progress close to ENOSPC.
 
-use afsplus_block::{for_each_crash_state, MemoryBackend, RecordingBackend, TraceBackend};
+use afsplus_block::{
+    for_each_crash_state, BlockDevice, MemoryBackend, RecordingBackend, TraceBackend,
+};
 use afsplus_check::check_device;
-use afsplus_core::{mkfs, mount, CoreError, MkfsParams};
+use afsplus_core::{mkfs, mount, mount_with_options, CoreError, MkfsParams, MountOptions, Volume};
 use afsplus_format::geometry::MAX_REGION_BLOCKS;
 use afsplus_format::Timespec;
+use std::num::NonZeroUsize;
 use std::time::Instant;
 
 const BS: usize = 4096;
@@ -39,12 +42,68 @@ fn formatted(total_blocks: u64, region_size: u32) -> MemoryBackend {
     dev
 }
 
+fn profile_mount<D: BlockDevice>(device: D, pages: usize) -> Volume<D> {
+    let volume = mount_with_options(
+        device,
+        MountOptions {
+            tree_cache_pages: NonZeroUsize::new(pages),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(volume.tree_cache_pages(), pages);
+    volume
+}
+
+/// These fixtures format no intent log: any checker warning, including a
+/// retained-checkpoint finding, fails the oracle.
+fn assert_checker_clean<D: BlockDevice>(device: &mut D, context: &str) {
+    let report = check_device(device);
+    assert!(report.is_clean(), "{context}: {:?}", report.errors);
+    assert!(
+        report.warnings.is_empty(),
+        "{context}: {:?}",
+        report.warnings
+    );
+}
+
+#[derive(Default)]
+struct SpillEvidence {
+    generation: u64,
+    spills: u64,
+    peak: u64,
+}
+
+impl SpillEvidence {
+    fn observe<D: BlockDevice>(&mut self, volume: &Volume<D>, pages: usize) {
+        if volume.generation() == self.generation {
+            return;
+        }
+        self.generation = volume.generation();
+        if let Some(stats) = volume.last_commit_stats() {
+            self.spills += stats.tree_mutations.staged_spill_writes;
+            self.peak = self
+                .peak
+                .max(stats.tree_mutations.max_resident_staged_nodes);
+            assert!(stats.tree_mutations.max_resident_staged_nodes <= pages as u64);
+        }
+    }
+}
+
 #[test]
 fn near_full_enospc_publishes_nothing_and_delete_can_recover_space() {
+    for pages in [2, 4, 8, usize::MAX] {
+        near_full_enospc_publishes_nothing_and_delete_can_recover_space_profile(pages);
+    }
+}
+
+fn near_full_enospc_publishes_nothing_and_delete_can_recover_space_profile(pages: usize) {
+    let mut evidence = SpillEvidence::default();
     let dev = formatted(512, 512);
-    let mut vol = mount(TraceBackend::new(dev)).unwrap();
+    let mut vol = profile_mount(TraceBackend::new(dev), pages);
     vol.set_reclaim_batch_blocks(1);
     let file = vol.create_file_in_root("reserve", b"", ts(1)).unwrap();
+    evidence.observe(&vol, pages);
     let before_fill = vol.free_blocks();
     let emergency_headroom = vol.emergency_headroom_blocks();
     assert_eq!(
@@ -70,6 +129,7 @@ fn near_full_enospc_publishes_nothing_and_delete_can_recover_space() {
     vol.device_mut().reset();
     vol.preallocate_file(file, 0, fill_blocks * BS as u64, ts(2))
         .unwrap();
+    evidence.observe(&vol, pages);
     let near_full = vol.free_blocks();
     assert!(near_full <= 24, "fill left {near_full} free blocks");
     assert!(near_full >= emergency_headroom);
@@ -97,6 +157,7 @@ fn near_full_enospc_publishes_nothing_and_delete_can_recover_space() {
     vol.device_mut().reset();
     vol.delete_file_in_root("reserve", ts(4)).unwrap();
     assert_eq!(vol.lookup_root("reserve").unwrap(), None);
+    evidence.observe(&vol, pages);
     let free_after_delete = vol.free_blocks();
     assert!(
         free_after_delete <= near_full,
@@ -109,9 +170,32 @@ fn near_full_enospc_publishes_nothing_and_delete_can_recover_space() {
         vol.free_blocks() > near_full,
         "bounded reclaim did not restore usable space"
     );
+    evidence.observe(&vol, pages);
+    let retry = vol.create_file_in_root("retry", b"", ts(6)).unwrap();
+    evidence.observe(&vol, pages);
+    vol.preallocate_file(
+        retry,
+        fill_blocks * BS as u64,
+        (near_full + 1) * BS as u64,
+        ts(7),
+    )
+    .unwrap();
+    evidence.observe(&vol, pages);
+    vol.write_file_at(retry, 0, b"recovered capacity", ts(8))
+        .unwrap();
+    evidence.observe(&vol, pages);
+    assert_eq!(vol.read_file(retry).unwrap(), b"recovered capacity");
     let mut dev = vol.into_device().into_inner();
-    let report = check_device(&mut dev);
-    assert!(report.is_clean(), "{:?}", report.errors);
+    assert_checker_clean(&mut dev, &format!("pages={pages} retry"));
+    let mut remounted = profile_mount(dev, pages);
+    assert_eq!(remounted.lookup_root("reserve").unwrap(), None);
+    assert_eq!(remounted.lookup_root("retry").unwrap(), Some(retry));
+    assert_eq!(remounted.read_file(retry).unwrap(), b"recovered capacity");
+    assert_checker_clean(remounted.device_mut(), &format!("pages={pages} remount"));
+    eprintln!(
+        "low-space refusal pages={pages} spills={} peak_staged={}",
+        evidence.spills, evidence.peak
+    );
 }
 
 #[test]
@@ -312,29 +396,44 @@ fn q3_low_space_headroom_probe() {
 
 #[test]
 fn repeated_near_full_cow_and_reclaim_preserve_shared_survivors() {
+    for pages in [2, 4, 8, usize::MAX] {
+        repeated_near_full_cow_and_reclaim_preserve_shared_survivors_profile(pages);
+    }
+}
+
+fn repeated_near_full_cow_and_reclaim_preserve_shared_survivors_profile(pages: usize) {
+    let mut evidence = SpillEvidence::default();
     use afsplus_format::OBJECT_ROOT;
-    let mut vol = mount(formatted(512, 512)).unwrap();
+    let mut vol = profile_mount(TraceBackend::new(formatted(512, 512)), pages);
     vol.set_reclaim_batch_blocks(1);
     let original: Vec<u8> = (0..4 * BS).map(|i| (i % 251) as u8).collect();
     let keeper = vol.create_file_in_root("keeper", &original, ts(1)).unwrap();
+    evidence.observe(&vol, pages);
     let writer = vol
         .clone_file(keeper, OBJECT_ROOT, "writer", ts(2))
         .unwrap();
+    evidence.observe(&vol, pages);
     let mut expected = original.clone();
     for cycle in 0..24 {
         let now = ts(10 + cycle);
         let pressure = vol.create_file_in_root("pressure", b"", now).unwrap();
+        evidence.observe(&vol, pages);
         let reserve = vol.available_blocks().saturating_sub(24);
         assert!(reserve > 0, "cycle={cycle}: failed to restore capacity");
         vol.preallocate_file(pressure, 0, reserve * BS as u64, now)
             .unwrap();
+        evidence.observe(&vol, pages);
         let generation = vol.generation();
         let free = vol.free_blocks();
         let too_large = (free + 1) * BS as u64;
+        vol.device_mut().reset();
         assert!(matches!(
             vol.preallocate_file(pressure, reserve * BS as u64, too_large, now),
             Err(CoreError::NoSpace)
         ));
+        let refusal_io = vol.device_mut().stats();
+        assert_eq!(refusal_io.writes, 0, "pages={pages} cycle={cycle}");
+        assert_eq!(refusal_io.flushes, 0, "pages={pages} cycle={cycle}");
         assert_eq!(vol.generation(), generation);
         assert_eq!(vol.free_blocks(), free);
         assert_eq!(vol.stat(pressure).unwrap().unwrap().size_bytes, 0);
@@ -347,24 +446,40 @@ fn repeated_near_full_cow_and_reclaim_preserve_shared_survivors() {
             Err(CoreError::NoSpace) => assert_eq!(vol.generation(), generation),
             Err(error) => panic!("cycle={cycle}: {error}"),
         }
+        evidence.observe(&vol, pages);
         assert_eq!(vol.read_file(keeper).unwrap(), original, "cycle={cycle}");
         assert_eq!(vol.read_file(writer).unwrap(), expected, "cycle={cycle}");
         vol.delete_file_in_root("pressure", now).unwrap();
+        evidence.observe(&vol, pages);
         vol.set_reclaim_batch_blocks(64);
         let mut converged = false;
         for _ in 0..128 {
-            if vol.reclaim_step(now).unwrap() == 0 {
+            let reclaimed = vol.reclaim_step(now).unwrap();
+            evidence.observe(&vol, pages);
+            if reclaimed == 0 {
                 converged = true;
                 break;
             }
         }
         assert!(converged, "cycle={cycle}: reclaim did not converge");
-        let mut image = vol.into_device();
-        let report = check_device(&mut image);
-        assert!(report.is_clean(), "cycle={cycle}: {:?}", report.errors);
-        vol = mount(image).unwrap();
+        // Retry the same write after bounded reclamation, even when the
+        // pressured attempt succeeded; exact survivor bytes remain required.
+        vol.write_file_at(writer, offset as u64, &data, now)
+            .unwrap();
+        expected[offset..offset + data.len()].copy_from_slice(&data);
+        evidence.observe(&vol, pages);
+        assert_eq!(vol.lookup_root("pressure").unwrap(), None);
+        assert_eq!(vol.read_file(keeper).unwrap(), original);
+        assert_eq!(vol.read_file(writer).unwrap(), expected);
+        let mut image = vol.into_device().into_inner();
+        assert_checker_clean(&mut image, &format!("pages={pages} cycle={cycle}"));
+        vol = profile_mount(TraceBackend::new(image), pages);
         vol.set_reclaim_batch_blocks(1);
         assert_eq!(vol.read_file(keeper).unwrap(), original);
         assert_eq!(vol.read_file(writer).unwrap(), expected);
     }
+    eprintln!(
+        "low-space cycles pages={pages} cycles=24 spills={} peak_staged={}",
+        evidence.spills, evidence.peak
+    );
 }
