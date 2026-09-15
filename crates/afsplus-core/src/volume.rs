@@ -7739,77 +7739,289 @@ mod fragmentation_tests {
 
     #[test]
     fn allocation_cache_keeps_spilled_nodes_across_checkpoint_rotation() {
-        let mut dev = MemoryBackend::new(4096, 16 * 1024);
-        mkfs(
-            &mut dev,
-            &MkfsParams {
-                uuid: [0xcc; 16],
-                label: "CacheRotation".into(),
-                region_size: 16,
-                reclaim_caps: Default::default(),
-                log_slots: 0,
-                shared_extents: false,
-                data_policy: false,
-                name_policy: crate::NamePolicy::Sensitive,
-                timestamp: Timespec::default(),
-            },
-        )
-        .unwrap();
-        let mut volume = mount(afsplus_block::TraceBackend::new(dev)).unwrap();
-        volume.set_tree_cache_pages(2).unwrap();
-        for round in 0..3 {
-            // Spread dirty region records across allocation-root leaf boundaries.
-            volume.alloc_rover_region = 120 + round * 120;
-            let names: Vec<_> = (0..256).map(|i| format!("r{round}-{i:04}")).collect();
-            let operations: Vec<_> = names
-                .iter()
-                .map(|name| BatchOp::CreateFile {
-                    parent_id: OBJECT_ROOT,
-                    name,
-                    content: b"",
-                })
-                .collect();
-            volume.dev.reset();
-            volume.run_batch(&operations, Timespec::default()).unwrap();
-            let stats = volume.last_commit_stats().unwrap();
-            assert!(
-                stats.allocation_tree_nodes_written > 2,
-                "fixture must spill allocation-root nodes"
-            );
-            assert!(stats.tree_mutations.staged_spill_writes > 0);
-            assert_eq!(stats.bytes_written, volume.dev.stats().bytes_written);
-            let (cached, older_cached) = volume.allocation_tree_cache.as_ref().unwrap().clone();
-            for (checkpoint, mut expected) in [
-                (volume.checkpoint.clone(), cached),
-                (volume.other_checkpoint.clone().unwrap(), older_cached),
-            ] {
-                let mut actual = allocation_root::load_tree_blocks(
-                    &mut volume.dev,
-                    &volume.ident.geometry(),
-                    checkpoint.allocation_root_block,
-                    checkpoint.generation,
-                )
+        type Device = afsplus_block::TraceBackend<MemoryBackend>;
+        const ORIGINAL: u8 = 0x35;
+        const FILE_BYTES: usize = 6000;
+        // Long names spread each batch over enough directory leaves that
+        // every bounded profile, including eight pages, spills staged nodes.
+        const PADDING: &str = "allocation-rotation-directory-leaf-padding";
+
+        struct Fixture {
+            source: u64,
+            peers: [u64; 2],
+            snapshot: u64,
+            shared_start: u64,
+        }
+
+        fn open(device: Device, pages: usize) -> Volume<Device> {
+            let volume = crate::mount_with_snapshot_limits(
+                device,
+                crate::MountOptions {
+                    tree_cache_pages: std::num::NonZeroUsize::new(pages),
+                    ..Default::default()
+                },
+                SnapshotWorkLimits {
+                    max_edit_records: 4096,
+                    max_views: 128,
+                    reclaim_records: 8,
+                },
+            )
+            .unwrap();
+            assert_eq!(volume.tree_cache_pages(), pages);
+            volume
+        }
+
+        /// Reads one file through an explicit checkpoint root and generation,
+        /// independent of the live caches and of the selected checkpoint.
+        fn checkpoint_file(
+            volume: &mut Volume<Device>,
+            checkpoint: &Checkpoint,
+            id: u64,
+        ) -> Vec<u8> {
+            let view = afsplus_format::snapshot::SnapshotRecord {
+                generation: checkpoint.generation,
+                committed_tx_id: checkpoint.committed_tx_id,
+                object_map_root: checkpoint.object_map_block,
+            };
+            let mut observation = crate::snapshot::view::Observation::new(view, 0, None, false);
+            let mut bytes = vec![0xa5; FILE_BYTES + 1];
+            let count = crate::snapshot::view::read_at(
+                &mut volume.dev,
+                &volume.ident,
+                &mut observation,
+                id,
+                0,
+                &mut bytes,
+            )
+            .unwrap();
+            bytes.truncate(count);
+            bytes
+        }
+
+        fn snapshot_file(volume: &mut Volume<Device>, snapshot: u64, id: u64) -> Vec<u8> {
+            let handle = volume.snapshot_open(snapshot).unwrap();
+            let mut bytes = vec![0xa5; FILE_BYTES + 1];
+            let count = volume
+                .snapshot_read_file_at(&handle, id, 0, &mut bytes)
                 .unwrap();
-                actual.sort_unstable();
-                expected.sort_unstable();
-                assert_eq!(
-                    expected, actual,
-                    "checkpoint {} cache loses spilled nodes",
-                    checkpoint.generation
-                );
+            bytes.truncate(count);
+            bytes
+        }
+
+        /// Both selectable checkpoints: cached allocation-root block sets, the
+        /// verifier sweep, the exact shared run and each file's exact bytes.
+        fn verify(volume: &mut Volume<Device>, fixture: &Fixture, current: &[u8], context: &str) {
+            let original = vec![ORIGINAL; FILE_BYTES];
+            // Three owners share the two-block run until the first source write
+            // copies both blocks; the two peers keep one run with two references.
+            let expected_shared = vec![crate::shared_extents::SharedRun {
+                physical_start: fixture.shared_start,
+                block_count: 2,
+                reference_count: 2,
+                flags: 0,
+            }];
+            let selected = volume.checkpoint.clone();
+            let older = volume.other_checkpoint.clone().unwrap();
+            assert_eq!(older.generation + 1, selected.generation, "{context}");
+            let cache = volume.allocation_tree_cache.clone();
+            for (index, checkpoint) in [selected, older].into_iter().enumerate() {
+                let generation = checkpoint.generation;
+                if let Some((cached, older_cached)) = &cache {
+                    let mut expected = if index == 0 {
+                        cached.clone()
+                    } else {
+                        older_cached.clone()
+                    };
+                    let mut actual = allocation_root::load_tree_blocks(
+                        &mut volume.dev,
+                        &volume.ident.geometry(),
+                        checkpoint.allocation_root_block,
+                        generation,
+                    )
+                    .unwrap();
+                    actual.sort_unstable();
+                    expected.sort_unstable();
+                    assert_eq!(
+                        expected, actual,
+                        "{context}: checkpoint {generation} cache loses spilled nodes"
+                    );
+                }
                 let state = crate::verify::load_committed_state(
                     &mut volume.dev,
                     &volume.ident,
                     &checkpoint,
                 )
                 .unwrap();
+                let findings =
+                    crate::verify::full_sweep(&state, &volume.ident.geometry(), &checkpoint);
                 assert!(
-                    crate::verify::full_sweep(&state, &volume.ident.geometry(), &checkpoint)
-                        .is_empty()
+                    findings.is_empty(),
+                    "{context}: checkpoint {generation}: {findings:?}"
                 );
+                assert_eq!(
+                    state.shared_records, expected_shared,
+                    "{context}: checkpoint {generation} shared run"
+                );
+                assert_eq!(
+                    checkpoint_file(volume, &checkpoint, fixture.source),
+                    current,
+                    "{context}: checkpoint {generation} source"
+                );
+                for peer in fixture.peers {
+                    assert_eq!(
+                        checkpoint_file(volume, &checkpoint, peer),
+                        original,
+                        "{context}: checkpoint {generation} peer {peer}"
+                    );
+                }
+            }
+            assert_eq!(
+                volume.read_file(fixture.source).unwrap(),
+                current,
+                "{context}"
+            );
+            for id in [fixture.source, fixture.peers[0], fixture.peers[1]] {
+                if id != fixture.source {
+                    assert_eq!(
+                        volume.read_file(id).unwrap(),
+                        original,
+                        "{context}: live {id}"
+                    );
+                }
+                let captured = snapshot_file(volume, fixture.snapshot, id);
+                assert_eq!(captured, original, "{context}: captured object {id}");
             }
         }
-        assert_eq!(volume.list_root().unwrap().len(), 768);
+
+        for pages in [2, 4, 8, usize::MAX] {
+            let mut dev = MemoryBackend::new(4096, 16 * 1024);
+            crate::mkfs_with_options(
+                &mut dev,
+                &MkfsParams {
+                    uuid: [0xcc; 16],
+                    label: "CacheRotation".into(),
+                    region_size: 16,
+                    reclaim_caps: Default::default(),
+                    log_slots: 0,
+                    shared_extents: true,
+                    data_policy: false,
+                    name_policy: crate::NamePolicy::Sensitive,
+                    timestamp: Timespec::default(),
+                },
+                crate::MkfsOptions {
+                    persistent_snapshots: true,
+                },
+            )
+            .unwrap();
+            let mut volume = open(afsplus_block::TraceBackend::new(dev), pages);
+            let original = vec![ORIGINAL; FILE_BYTES];
+            let source = volume
+                .create_file_in_root("source", &original, Timespec::default())
+                .unwrap();
+            let peers = [
+                volume
+                    .clone_file(source, OBJECT_ROOT, "peer-a", Timespec::default())
+                    .unwrap(),
+                volume
+                    .clone_file(source, OBJECT_ROOT, "peer-b", Timespec::default())
+                    .unwrap(),
+            ];
+            let snapshot = volume.snapshot_create(Timespec::default()).unwrap();
+            let selected = volume.checkpoint.clone();
+            let shared =
+                crate::verify::load_committed_state(&mut volume.dev, &volume.ident, &selected)
+                    .unwrap()
+                    .shared_records;
+            assert_eq!(shared.len(), 1);
+            assert_eq!(
+                (
+                    shared[0].block_count,
+                    shared[0].reference_count,
+                    shared[0].flags
+                ),
+                (2, 3, 0),
+                "pages={pages}: three owners before rotation"
+            );
+            let fixture = Fixture {
+                source,
+                peers,
+                snapshot,
+                shared_start: shared[0].physical_start,
+            };
+            let mut current = original.clone();
+            let mut spills = 0;
+            for round in 0..3u32 {
+                let context = format!("pages={pages} round={round}");
+                // Cross the first block boundary so the source copies both
+                // shared blocks while peers and the snapshot keep old bytes.
+                let patch = [0x70 + round as u8; 32];
+                volume
+                    .write_file_at(source, 4090, &patch, Timespec::default())
+                    .unwrap();
+                current[4090..4122].copy_from_slice(&patch);
+                // Keep the original regression's 1,024 regions and forced
+                // rover movement across allocation-root leaf boundaries.
+                volume.alloc_rover_region = 120 + round * 120;
+                let names: Vec<_> = (0..256)
+                    .map(|i| format!("r{round}-{i:04}-{PADDING}"))
+                    .collect();
+                let operations: Vec<_> = names
+                    .iter()
+                    .map(|name| BatchOp::CreateFile {
+                        parent_id: OBJECT_ROOT,
+                        name,
+                        content: b"",
+                    })
+                    .collect();
+                let previous = volume.generation();
+                volume.dev.reset();
+                volume.run_batch(&operations, Timespec::default()).unwrap();
+                let stats = volume.last_commit_stats().unwrap();
+                assert!(
+                    stats.allocation_tree_nodes_written > 2,
+                    "{context}: fixture must span allocation-root nodes"
+                );
+                assert!(stats.tree_mutations.max_resident_staged_nodes <= pages as u64);
+                if pages == usize::MAX {
+                    assert_eq!(stats.tree_mutations.staged_spill_writes, 0, "{context}");
+                } else {
+                    assert!(
+                        stats.tree_mutations.staged_spill_writes > 0,
+                        "{context}: bounded profile must spill"
+                    );
+                }
+                spills += stats.tree_mutations.staged_spill_writes;
+                assert_eq!(stats.bytes_written, volume.dev.stats().bytes_written);
+                assert_eq!(
+                    volume.other_checkpoint.as_ref().unwrap().generation,
+                    previous,
+                    "{context}: batch must rotate the write checkpoint into the older slot"
+                );
+                assert!(volume.allocation_tree_cache.is_some(), "{context}");
+                verify(&mut volume, &fixture, &current, &context);
+                let expected_entries = (round as usize + 1) * 256 + 3;
+                assert_eq!(volume.list_root().unwrap().len(), expected_entries);
+
+                volume = open(volume.into_device(), pages);
+                verify(
+                    &mut volume,
+                    &fixture,
+                    &current,
+                    &format!("{context} remounted"),
+                );
+                for completed in 0..=round {
+                    for i in 0..256 {
+                        let id = volume
+                            .lookup_root(&format!("r{completed}-{i:04}-{PADDING}"))
+                            .unwrap()
+                            .unwrap();
+                        assert!(volume.read_file(id).unwrap().is_empty());
+                    }
+                }
+                assert_eq!(volume.list_root().unwrap().len(), expected_entries);
+            }
+            eprintln!("allocation rotation: pages={pages}, rounds=3, batch spills={spills}");
+        }
     }
 
     #[test]
