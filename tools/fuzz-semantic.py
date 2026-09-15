@@ -23,8 +23,10 @@ FAMILY_VERSIONS = {"window": 5, "snapshot": 7, "namespace": 9, "replace": 9, "or
                    "space": 9, "batch": 9, "maintenance": 9, "captured": 9}
 CONTROLS = {"window": ("window-byte",), "snapshot": ("snapshot-entry",),
             "namespace": ("link-count", "symlink-target", "protection", "clone-byte", "directory-rename"),
-            "replace": ("replaced-byte",), "orphan": ("orphan-count",), "space": ("reservation", "policy-flag"),
-            "batch": ("batch-path",), "maintenance": ("maintenance-entry",), "captured": ("captured-coverage",)}
+            "replace": ("replaced-byte",), "orphan": ("orphan-count", "orphan-bytes"),
+            "space": ("reservation", "policy-flag"),
+            "batch": ("batch-path", "orphan-count", "orphan-bytes"),
+            "maintenance": ("maintenance-entry",), "captured": ("captured-coverage",)}
 # Version-9 volume feature and orphan cleanup budget per family.
 FAMILY_POLICY = {"space": True}
 FAMILY_ORPHAN_EXTENTS = {"orphan": 2}
@@ -416,8 +418,9 @@ class ObjectModel:
                 raise ValueError("model window batch is empty")
             self.staged.append([op["items"], False])
         elif kind == "window_fsync":
-            if any(not acknowledged for _, acknowledged in self.staged):
-                if self.records >= 6:
+            unacknowledged = sum(len(items) for items, acknowledged in self.staged if not acknowledged)
+            if unacknowledged:
+                if unacknowledged > 64 or self.records >= 6:
                     raise ValueError("model window fsync group exceeds the intent log")
                 for group in self.staged:
                     group[1] = True
@@ -623,11 +626,24 @@ class ObjectModel:
             raise ValueError("unsupported model operation")
 
     def _publish(self, count, now):
+        # One window owns one pending group of creates. A staged unlink of an
+        # object that same window created cancels the create, so the reserved
+        # directory receives the final unlink of committed objects alone.
+        window_created = set()
         for items, _ in self.staged[:count]:
-            self._batch(items, now)
+            self._batch(items, now, deferred=True, window_created=window_created)
         self.staged, self.records = [], 0
 
-    def _batch(self, items, now):
+    def _final_unlink(self, label, identity, now, deferred, window_created):
+        """Drop the last link of a batch member: a staged one reaches the reserved directory."""
+        if deferred and identity not in window_created:
+            # ADR-066: a window unlinks a committed final link into object 2.
+            self.objects[identity].update(links=1, changed=now)
+            self.orphaned[label] = identity
+        else:
+            del self.objects[identity]
+
+    def _batch(self, items, now, deferred=False, window_created=None):
         """One atomic transaction: every member publishes one generation."""
         if not items:
             raise ValueError("model batch is empty")
@@ -644,6 +660,8 @@ class ObjectModel:
                     "data": data, "blocks": {block: False for block in range(-(-len(data) // BLOCK))}}
                 self.used.add(item["label"])
                 self.batched.add(item["label"])
+                if window_created is not None:
+                    window_created.add(identity)
                 self.names[item["label"]] = {"object": identity, "parent": item["parent"],
                                              "name": item["name"]}
                 self._touch(item["parent"], now)
@@ -656,7 +674,7 @@ class ObjectModel:
                 if node["links"]:
                     node["changed"] = now
                 else:
-                    del self.objects[entry["object"]]
+                    self._final_unlink(item["label"], entry["object"], now, deferred, window_created)
                 del self.names[item["label"]]
                 continue
             self._directory(item["parent"])
@@ -673,7 +691,7 @@ class ObjectModel:
                 if victim["links"]:
                     victim["changed"] = now
                 else:
-                    del self.objects[target["object"]]
+                    self._final_unlink(item["victim"], target["object"], now, deferred, window_created)
                 del self.names[item["victim"]]
             node["changed"] = now
             self._touch(entry["parent"], now)
@@ -1374,52 +1392,97 @@ def generate_batch(seed, steps):
     emit(op="window_fsync")
     emit(op="window_batch", items=[{"op": "rename", "label": "w", "parent": "d", "name": "w2"}])
     emit(op="window_commit")
+    # Staged final unlinks: an acknowledged group publishes its orphan at a
+    # remount, an unacknowledged group leaves its file in the namespace, a
+    # commit publishes the rest, a staged create deleted inside its own window
+    # leaves nothing, and a staged replacement orphans a final-link victim.
+    emit(op="create", label="o", parent="root", name="reserved", data=payload(random, 4097))
+    emit(op="create", label="e", parent="root", name="kept", data=payload(random, 7))
+    emit(op="create", label="g", parent="d", name="gone", data=payload(random, 33))
+    emit(op="window_batch", items=[{"op": "delete", "label": "o"}])
+    emit(op="window_fsync")
+    emit(op="window_batch", items=[{"op": "delete", "label": "e"}])
+    emit(op="remount")
+    emit(op="window_batch", items=[{"op": "delete", "label": "g"}])
+    emit(op="window_commit")
+    emit(op="window_batch", items=[{"op": "create", "label": "t", "parent": "root", "name": "t",
+                                    "data": payload(random, 5)}])
+    emit(op="window_fsync")
+    emit(op="window_batch", items=[{"op": "delete", "label": "t"}])
+    emit(op="window_commit")
+    emit(op="create", label="p", parent="root", name="p", data=payload(random, 9))
+    emit(op="create", label="q", parent="root", name="q", data=payload(random, 11))
+    emit(op="window_batch", items=[{"op": "replace", "label": "p", "victim": "q", "parent": "root",
+                                    "name": "q"}])
+    emit(op="window_commit")
     emit(op="sync")
     emit(op="remount")
     for _ in range(4):
         label, name = sequence.fresh("k")
         emit(op="create", label=label, parent="root", name=name, data=payload(random, random.pick((0, 1, 33))))
-    while len(sequence.operations) < steps:
-        files, directories = sequence.files(), sequence.directories()
-        empty = [d for d in directories[1:] if not model.children(d)]
-        choices = ["sync", "remount", "batch", "batch", "batch"]
-        if len(model.names) <= 40:
-            choices.append("create")
-            if len(directories) < 6: choices.append("mkdir")
-        if files: choices += ["write", "truncate", "unlink"]
-        if empty: choices.append("rmdir")
-        kind = random.pick(choices)
-        if kind == "batch":
-            items = []
-            taken = set()
-            for _ in range(1 + random.next() % 4):
-                live = [label for label in sequence.files() if label not in taken]
-                pairs = [(s, v) for s, v in replacements(model, live) if s not in taken and v not in taken]
-                members = ["create"]
-                if live: members += ["rename", "delete"]
-                if pairs: members.append("replace")
-                member = random.pick(members)
-                if member == "create":
-                    label, name = sequence.fresh("k")
-                    items.append({"op": "create", "label": label, "parent": random.pick(directories),
-                                  "name": name, "data": payload(random, random.pick((0, 1, 33)))})
-                    taken.add(label)
-                    continue
-                if member == "replace":
-                    source, victim = random.pick(pairs)
-                    parent, name = sequence.entry(victim)
-                    items.append({"op": "replace", "label": source, "victim": victim,
-                                  "parent": parent, "name": name})
-                    taken.update((source, victim))
-                    continue
-                label = random.pick(live)
+    # A label a window group names is spent: the acknowledged prefix decides
+    # where its object ends up, so a later operation never names it again.
+    spent = {"w", "o", "e", "g", "t", "p", "q"}
+
+    def group(taken):
+        """One bounded group of members over labels no other member claims."""
+        items = []
+        for _ in range(1 + random.next() % 4):
+            live = [label for label in sequence.files() if label not in taken]
+            pairs = [(s, v) for s, v in replacements(model, live) if s not in taken and v not in taken]
+            members = ["create"]
+            if live: members += ["rename", "delete"]
+            if pairs: members.append("replace")
+            member = random.pick(members)
+            if member == "create":
+                label, name = sequence.fresh("k")
+                items.append({"op": "create", "label": label, "parent": random.pick(directories),
+                              "name": name, "data": payload(random, random.pick((0, 1, 33)))})
                 taken.add(label)
-                if member == "delete":
-                    items.append({"op": "delete", "label": label})
-                else:
-                    items.append({"op": "rename", "label": label, "parent": random.pick(directories),
-                                  "name": sequence.fresh("k")[1]})
-            emit(op="batch", items=items)
+                continue
+            if member == "replace":
+                source, victim = random.pick(pairs)
+                parent, name = sequence.entry(victim)
+                items.append({"op": "replace", "label": source, "victim": victim,
+                              "parent": parent, "name": name})
+                taken.update((source, victim))
+                continue
+            label = random.pick(live)
+            taken.add(label)
+            if member == "delete":
+                items.append({"op": "delete", "label": label})
+            else:
+                items.append({"op": "rename", "label": label, "parent": random.pick(directories),
+                              "name": sequence.fresh("k")[1]})
+        return items
+
+    while len(sequence.operations) < steps:
+        directories = sequence.directories()
+        files = [label for label in sequence.files() if label not in spent]
+        empty = [d for d in directories[1:] if not model.children(d)]
+        unacknowledged = sum(len(items) for items, done in model.staged if not done)
+        if model.staged:
+            # A window admits staged groups, its acknowledging fsync, a commit
+            # and a remount; a direct operation belongs outside it.
+            choices = ["window_commit", "remount"]
+            if len(model.staged) < 6 and unacknowledged < 5: choices += ["window_batch"] * 2
+            if model.records < 6 or not unacknowledged:
+                choices.append("window_fsync")
+            kind = random.pick(choices)
+        else:
+            choices = ["sync", "remount", "batch", "batch", "batch", "window_batch"]
+            if len(model.names) <= 40:
+                choices.append("create")
+                if len(directories) < 6: choices.append("mkdir")
+            if files: choices += ["write", "truncate", "unlink"]
+            if empty: choices.append("rmdir")
+            kind = random.pick(choices)
+        if kind in ("batch", "window_batch"):
+            items = group(set(spent))
+            if kind == "window_batch":
+                spent.update(item["label"] for item in items)
+                spent.update(item["victim"] for item in items if item["op"] == "replace")
+            emit(op=kind, items=items)
         elif kind in ("create", "mkdir"):
             label, name = sequence.fresh("k")
             emit(op=kind, label=label, parent=random.pick(directories), name=name,
@@ -1696,12 +1759,13 @@ def apply_control(control, value, model):
         location = entry["path"]
         entry["path"] = location[:-1] + [location[-1] + "~"]
         return location
-    if control == "orphan-count":
+    if control in ("orphan-count", "orphan-bytes"):
         orphans = value["expected_orphans"]
         if not orphans["count"] and not orphans["bytes"]:
             return None
-        orphans["count"] = orphans["count"] - 1 if orphans["count"] else 1
-        return ["orphans", str(orphans["count"])]
+        key = "count" if control == "orphan-count" else "bytes"
+        orphans[key] = orphans[key] - 1 if orphans[key] else 1
+        return ["orphans", key, str(orphans[key])]
     if control == "replaced-byte":
         paths = [model.path(label) for label in sorted(model.replaced) if label in model.names]
         entry = first(expected, lambda e: e["kind"] == "file" and e["data"] and e["path"] in paths)

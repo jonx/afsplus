@@ -264,7 +264,7 @@ adds `family`, the scenario version and the applied negative control.
 | `replace` | version 9 | create, mkdir, write, truncate, rename, `link`, `rename_replace`, unlink, rmdir, sync, remount | The linked projection: the source takes the replaced name, a victim with further links keeps them, and a final-link victim leaves the namespace with its storage |
 | `orphan` | version 9 | create, mkdir, write, truncate, rename, `orphan_file`, `rename_replace_orphan`, `cleanup_orphan`, unlink, sync, remount | The linked projection plus the reserved-directory entry count and the byte total of the objects it names |
 | `space` | version 9 | create, mkdir, write, truncate, rename, `preallocate`, `preallocate_bounded`, `set_data_policy`, `restore_metadata`, `set_protection`, unlink, rmdir, sync, remount | The linked projection with the persistent per-file policy flag and the normalized allocation coverage of every file |
-| `batch` | version 9 | create, mkdir, write, truncate, `batch`, `window_batch`, `window_fsync`, `window_commit`, unlink, rmdir, sync, remount | The linked projection after one atomic transaction per group; a window publishes its acknowledged prefix at remount and every staged group at commit |
+| `batch` | version 9 | create, mkdir, write, truncate, `batch`, `window_batch`, `window_fsync`, `window_commit`, unlink, rmdir, sync, remount | The linked projection after one atomic transaction per group, plus the reserved-directory entry count and the byte total of the objects it names; a window publishes its acknowledged prefix at remount and every staged group at commit |
 | `maintenance` | version 9 | create, write, truncate, unlink, `reclaim_step`, `snapshot_maintenance_step`, `snapshot_create`, `snapshot_open`, `snapshot_inspect`, `snapshot_close`, `snapshot_delete`, sync, remount | The linked projection and every captured view, both invariant across every maintenance step |
 | `captured` | version 9 | create, mkdir, write, truncate, rename, `link`, `symlink`, `clone_file`, `preallocate`, `set_protection`, unlink, rmdir, the five snapshot commands, sync, remount | Captured views of multi-block files, hard links, symlinks, clones and reservations, with exact bytes and metadata and normalized coverage |
 
@@ -333,7 +333,17 @@ The `batch` ladder creates a group, moves and deletes in one group, replaces
 inside a group, stages a window group that an fsync acknowledges, loses an
 unacknowledged group at a remount and publishes the acknowledged prefix. A group
 holds one to sixteen members, and a member never names a label its own group
-created. Window groups stage creates and moves.
+created. Window groups stage creates, moves, deletes and replacements. The
+ladder continues with three staged final unlinks: an acknowledged group sends
+its object to the reserved directory at a remount that loses the group behind
+it, whose file keeps its name; a commit sends a third object there; a staged
+create that its own window deletes leaves neither a name nor a reserved entry;
+and a staged replacement sends its final-link victim to the reserved directory.
+The model resolves each staged unlink at publication, because the deciding fact
+is whether the same window created the object
+([ADR-066](../adr/ADR-066-bounded-orphan-directory.md)). A window holds at most
+six staged groups and eight unacknowledged member operations, and a label a
+window group names is spent, so a later operation never names it again.
 
 The `maintenance` ladder captures every view before the first step, produces
 reclaimable capacity, runs reclaim and snapshot-maintenance steps, remounts and
@@ -387,7 +397,8 @@ with its failing bundle retained.
 | `clone-byte` | namespace | First byte of a CloneFile or CloneRange destination |
 | `directory-rename` | namespace | Final component of a moved directory |
 | `replaced-byte` | replace | First byte of a file that took a replaced name |
-| `orphan-count` | orphan | Reserved-directory entry count |
+| `orphan-count` | orphan, batch | Reserved-directory entry count |
+| `orphan-bytes` | orphan, batch | Byte total of the objects the reserved directory names |
 | `reservation` | space | Length of the last allocation interval of the first file with coverage |
 | `policy-flag` | space | Persistent data-update policy of the first file |
 | `batch-path` | batch | Final component of a path a batch created |
@@ -412,9 +423,8 @@ a captured operation failure at a known index.
 
 Deliberate limits of these oracles: the source change time after a CloneRange
 that shares complete blocks, and the coverage of a CloneRange destination, are
-outside the model, which marks that file's `alloc` as unmodelled; window groups
-carry creates and moves, because a staged final unlink reaches the reserved
-directory at commit; an orphan holds at most the cleanup budget of extent
+outside the model, which marks that file's `alloc` as unmodelled; an orphan
+holds at most the cleanup budget of extent
 records, so multi-step cleanup of a fragmented orphan belongs to
 [orphan qualification](orphan-qualification.md); the per-file policy is observed
 as a flag, and its effect on write placement belongs to

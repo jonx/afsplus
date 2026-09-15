@@ -1841,14 +1841,18 @@ independently checks version, arity, hex fields, integers and ranges.
 | `reclaim_step` | `reclaim_step` | `reclaim_step` | None |
 | `snapshot_maintenance_step` | `snapshot_maintenance_step` | `snapshot_maintenance_step` | None |
 | `batch`: `items` | `batch ITEM,ITEM` | `run_batch` | One to sixteen members; no member names a label the same group created |
-| `window_batch`: `items` | `window_batch ITEM,ITEM` | `window_op` | As above, with `create` and `rename` members |
+| `window_batch`: `items` | `window_batch ITEM,ITEM` | `window_op` | As above; a staged `delete` or `replace` victim whose object the same window created cancels that create, and any other staged final unlink reaches the reserved directory |
 
 A batch member is one colon-separated field: `create:LABEL:PARENT:NAME:DATA`,
 `delete:LABEL`, `rename:LABEL:PARENT:NAME` or
 `replace:LABEL:VICTIM:PARENT:NAME`. Names and data are hex. A `batch` is one
 atomic transaction and one checkpoint; a `window_batch` stages its members in
 the deferred window, where `window_fsync` acknowledges every staged group and
-`window_commit` publishes them.
+`window_commit` publishes them. A staged final unlink of a committed object
+places that object in the reserved directory, so the runner counts it among the
+orphan candidates the observation binds; the admission layer spends every label
+a staged group names, because the acknowledged prefix decides that object's
+place.
 
 The version-9 geometry line ends with two further fields, `DATA_POLICY` and
 `ORPHAN_EXTENTS`: the `COMPAT` data-policy feature of the formatted volume as

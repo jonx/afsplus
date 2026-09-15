@@ -95,10 +95,15 @@ class ScenarioTests(unittest.TestCase):
             candidate["operations"][index].update(changes)
             with self.assertRaises(ValueError, msg=(index, changes)):
                 scenario.validate(json.dumps(candidate).encode())
-        for index, items in ((22, [{"op": "delete", "label": "l"}]),
-                             (22, [{"op": "replace", "label": "l", "victim": "b", "parent": "root",
-                                    "name": "62"}]),
-                             (21, []), (21, [{"op": "rename", "label": "d", "parent": "root", "name": "x"}]),
+        # A staged group admits deletes and replacements; the reserved directory
+        # receives a staged final unlink of a committed object.
+        for items, line in (([{"op": "delete", "label": "l"}], "window_batch delete:l"),
+                            ([{"op": "replace", "label": "l", "victim": "b", "parent": "root",
+                               "name": "b"}], "window_batch replace:l:b:root:62")):
+            candidate = json.loads(raw)
+            candidate["operations"][22]["items"] = items
+            self.assertIn(line, scenario.compile_commands(json.dumps(candidate).encode()).decode().splitlines())
+        for index, items in ((21, []), (21, [{"op": "rename", "label": "d", "parent": "root", "name": "x"}]),
                              (21, [{"op": "create", "label": "z", "parent": "root", "name": "z", "data": ""},
                                    {"op": "delete", "label": "z"}])):
             candidate = json.loads(raw)

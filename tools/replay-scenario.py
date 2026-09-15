@@ -154,11 +154,15 @@ BATCH_SCHEMAS = {"create": "op label parent name data", "delete": "op label",
                  "rename": "op label parent name", "replace": "op label victim parent name"}
 
 
-def batch_items(operation, labels, used, deferred):
+def batch_items(operation, labels, used):
     """Admit one bounded atomic batch or one staged window namespace group.
 
-    A window stages creates and moves only: a staged final unlink reaches the
-    reserved directory at commit, which these expected-state models leave out.
+    A group stages creates, moves, deletes and replacements. A staged unlink of
+    a committed final link reaches the reserved directory at commit
+    ([ADR-066](../adr/ADR-066-bounded-orphan-directory.md)); a staged unlink of
+    an object the same window created cancels that create. This admission
+    layer spends the label either way, so an operation after the group never
+    names it again.
     """
     items = operation["items"]
     if not isinstance(items, list) or not 1 <= len(items) <= 16:
@@ -170,8 +174,6 @@ def batch_items(operation, labels, used, deferred):
             raise ValueError("unknown scenario batch item")
         kind = item["op"]
         fields(item, BATCH_SCHEMAS[kind])
-        if deferred and kind in ("delete", "replace"):
-            raise ValueError("a staged window batch admits creates and moves only")
         if "parent" in item and labels.get(item["parent"]) != "directory":
             raise ValueError("unknown directory label")
         if "name" in item: name(item["name"])
@@ -311,7 +313,7 @@ def validate(encoded):
         kind = operation["op"]
         fields(operation, schemas[kind])
         if kind in ("batch", "window_batch"):
-            payload += batch_items(operation, labels, used, kind == "window_batch")
+            payload += batch_items(operation, labels, used)
             continue
         if kind in ("fault", "format_fault"):
             classes = ("write", "flush") if kind == "format_fault" else ("write", "flush", "read")

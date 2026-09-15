@@ -243,6 +243,39 @@ class VersionNineModelTests(unittest.TestCase):
         model.apply({"op": "window_commit"}, 7)
         self.assertEqual([entry["path"] for entry in model.linked()], [["b"], ["c2"]])
 
+    def test_a_staged_final_unlink_reaches_the_reserved_directory(self):
+        model = tool.ObjectModel()
+        for index, op in enumerate([
+                {"op": "create", "label": "a", "parent": "root", "name": "a", "data": "0102"},
+                {"op": "create", "label": "b", "parent": "root", "name": "b", "data": "03"},
+                {"op": "create", "label": "c", "parent": "root", "name": "c", "data": "04"}]):
+            model.apply(op, index)
+        # An acknowledged group publishes its orphan; the group behind it is lost.
+        model.apply({"op": "window_batch", "items": [{"op": "delete", "label": "a"}]}, 3)
+        model.apply({"op": "window_fsync"}, 4)
+        model.apply({"op": "window_batch", "items": [{"op": "delete", "label": "b"}]}, 5)
+        model.apply({"op": "remount"}, 6)
+        self.assertEqual([entry["path"] for entry in model.linked()], [["b"], ["c"]])
+        self.assertEqual(model.orphan_state(), {"count": 1, "bytes": 2})
+        # A staged replacement sends its final-link victim to the same place.
+        model.apply({"op": "window_batch", "items": [
+            {"op": "replace", "label": "b", "victim": "c", "parent": "root", "name": "c"}]}, 7)
+        model.apply({"op": "window_commit"}, 8)
+        self.assertEqual([entry["path"] for entry in model.linked()], [["c"]])
+        self.assertEqual(model.orphan_state(), {"count": 2, "bytes": 3})
+        # A staged create its own window deletes leaves neither name nor entry.
+        model.apply({"op": "window_batch", "items": [
+            {"op": "create", "label": "d", "parent": "root", "name": "d", "data": "05"}]}, 9)
+        model.apply({"op": "window_fsync"}, 10)
+        model.apply({"op": "window_batch", "items": [{"op": "delete", "label": "d"}]}, 11)
+        model.apply({"op": "window_commit"}, 12)
+        self.assertEqual([entry["path"] for entry in model.linked()], [["c"]])
+        self.assertEqual(model.orphan_state(), {"count": 2, "bytes": 3})
+        # A direct batch destroys the final link without a reserved entry.
+        model.apply({"op": "batch", "items": [{"op": "delete", "label": "b"}]}, 13)
+        self.assertEqual(model.linked(), [])
+        self.assertEqual(model.orphan_state(), {"count": 2, "bytes": 3})
+
 
 class FamilyGenerationTests(unittest.TestCase):
     REQUIRED = {
@@ -273,7 +306,7 @@ class FamilyGenerationTests(unittest.TestCase):
                   "replace": "8345e3ec556f75bdc663b793e123846de37d76f480371508c90d3fd82e41f9a3",
                   "orphan": "8f13dc6544941d1f6bb48f8f851755c1d0a1f63d02fe68ebcafa2532f60fdcea",
                   "space": "6923da614d6266a351adfb45e1aedb9f40ad4499a00524b64a8e75ee7e8ded7b",
-                  "batch": "98965b514cee6fe4f219e8e5994ae42e66db5e0689b8feb46d0749c95fd7f9a5",
+                  "batch": "60492b2a14c9682957b357c075acf0a98c1a79bfd6cae68591770ba68ab5335f",
                   "maintenance": "6908a93d61de329d1f08f1aabfa3f8026de705bd970ebcf3088246417290ebce",
                   "captured": "084969bcfaae7677f2f4b0a081ad9fdc5d75ca2477f0186275587db874ea7940"}
         for family, digest in golden.items():
