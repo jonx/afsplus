@@ -3984,3 +3984,65 @@ fn family_snapshot_maintenance_failure_names_its_view() {
         .events()
         .all(|event| event.kind.category() != Category::View || event.attempt == 0));
 }
+
+#[test]
+fn replacing_a_recorder_mid_window_keeps_staged_write_and_read_observation() {
+    use afsplus_core::flight::Category;
+    use afsplus_core::volume::BatchOp;
+    let mut volume = mount(window_image(false)).unwrap();
+    let mut first = recorder(4096);
+    first.enable_data_observation();
+    first.enable_view_observation();
+    volume.replace_flight_recorder(Some(first));
+    volume
+        .window_op(
+            &BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: "first",
+                content: &[1u8; 9000],
+            },
+            now(),
+        )
+        .unwrap();
+    let first = volume.replace_flight_recorder(None).unwrap();
+    assert!(first
+        .events()
+        .any(|event| event.kind == EventKind::DataWriteComplete));
+    let window = first
+        .events()
+        .find(|event| event.window != 0)
+        .map(|event| event.window)
+        .expect("the open window has an identity");
+
+    let mut second = recorder(4096);
+    second.enable_data_observation();
+    second.enable_view_observation();
+    volume.replace_flight_recorder(Some(second));
+    volume
+        .window_op(
+            &BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: "second",
+                content: &[2u8; 9000],
+            },
+            now(),
+        )
+        .unwrap();
+    volume.window_commit(now()).unwrap();
+    volume.lookup_root("second").unwrap().unwrap();
+    let second = volume.replace_flight_recorder(None).unwrap();
+    let staged: Vec<_> = second
+        .events()
+        .filter(|event| event.kind.category() == Category::Data)
+        .collect();
+    assert!(!staged.is_empty(), "the replacement observes staged writes");
+    assert_eq!(
+        staged[0].window, 1,
+        "a replacement starts its own window identity"
+    );
+    assert_eq!(window, 1);
+    assert!(second
+        .events()
+        .any(|event| event.kind.category() == Category::View));
+    assert_eq!(volume.list_root().unwrap().len(), 2);
+}

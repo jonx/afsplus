@@ -1866,3 +1866,148 @@ mod layout_tests {
         );
     }
 }
+
+/// Cost qualification for the emission path itself. Heap qualification uses
+/// the counting allocator of the measurement crate, because the filesystem
+/// crates forbid unsafe code.
+#[cfg(test)]
+mod mechanism_tests {
+    use super::*;
+
+    /// Every payload an emission can carry, exercised in one pass.
+    fn emit_every_kind(ring: &mut FlightRecorder, generation: u64) {
+        ring.emit(generation, EventKind::Begin, false);
+        ring.emit(generation, EventKind::DataWritesComplete, false);
+        ring.emit(generation, EventKind::CheckpointDurable, false);
+        ring.emit(generation, EventKind::Adopted, false);
+        ring.object_event(
+            generation,
+            EventKind::ObjectMapped,
+            ObjectContext {
+                object_id: 3,
+                record_block: 9,
+                view_id: 0,
+            },
+            false,
+        );
+        ring.data_event(
+            generation,
+            EventKind::DataWriteComplete,
+            false,
+            DataContext {
+                scope: DataScope::ExistingFileWrite,
+                object_id: 3,
+                offset: 0,
+                length: 4096,
+                start: 40,
+                blocks: 1,
+            },
+        );
+        ring.view_event(
+            generation,
+            EventKind::ViewReadComplete,
+            false,
+            ViewReadContext {
+                path: ReadPath::Lookup,
+                view_id: 0,
+                owner: 2,
+                block: 11,
+            },
+        );
+        ring.lifecycle_event(
+            generation,
+            EventKind::VerifyFinding,
+            false,
+            0,
+            LifecycleContext::Verify(VerifyContext {
+                scope: VerifyScope::FullSweep,
+                phase: Some(VerifyPhase::LinkCounts),
+                finding: Some(FindingKind::LinkCount),
+                region: 0,
+                ordinal: 1,
+                object_id: 3,
+                block: 0,
+            }),
+        );
+        ring.intent_io_event(generation, EventKind::IntentEmptyFlush, false);
+    }
+
+    #[test]
+    fn emission_keeps_its_reserved_storage_with_or_without_a_live_adapter() {
+        let mut ring = FlightRecorder::new(NonZeroUsize::new(256).unwrap()).unwrap();
+        ring.enable_subsystem_observation();
+        ring.enable_object_observation();
+        ring.enable_data_observation();
+        ring.enable_view_observation();
+        let delivered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = delivered.clone();
+        ring.replace_sink(Some(Box::new(move |_event: Event| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            SinkResult::Accepted
+        })));
+        // Warm the ring to its full capacity before measuring.
+        for generation in 0..64 {
+            emit_every_kind(&mut ring, generation);
+        }
+        let capacity = ring.events.capacity();
+        for generation in 0..1024 {
+            emit_every_kind(&mut ring, generation);
+        }
+        assert_eq!(ring.events.capacity(), capacity);
+        assert_eq!(ring.events().len(), 256);
+        assert!(ring.dropped() > 0 && ring.delivered() > 0);
+        assert_eq!(
+            delivered.load(std::sync::atomic::Ordering::Relaxed) as u64,
+            ring.delivered()
+        );
+
+        // Filtering and identity exhaustion keep the same storage.
+        ring.set_categories(Categories::NONE);
+        emit_every_kind(&mut ring, 1);
+        ring.set_categories(Categories::ALL);
+        ring.leave_sequence_identities(0);
+        emit_every_kind(&mut ring, 1);
+        assert_eq!(ring.events.capacity(), capacity);
+    }
+
+    /// Uncontended emission cost on this host. Run with
+    /// `cargo test --release -- --ignored --nocapture flight::mechanism`.
+    #[test]
+    #[ignore = "host cost measurement"]
+    fn measure_uncontended_emission_cost() {
+        const ROUNDS: usize = 200_000;
+        let mut ring = FlightRecorder::new(NonZeroUsize::new(4096).unwrap()).unwrap();
+        ring.enable_subsystem_observation();
+        ring.enable_object_observation();
+        ring.enable_data_observation();
+        ring.enable_view_observation();
+        for generation in 0..64 {
+            emit_every_kind(&mut ring, generation);
+        }
+        let kinds = 9u64;
+        let start = std::time::Instant::now();
+        for generation in 0..ROUNDS as u64 {
+            emit_every_kind(&mut ring, generation);
+        }
+        let elapsed = start.elapsed();
+        let events = ROUNDS as u64 * kinds;
+        println!(
+            "ring only: {events} events in {elapsed:?} ({:.0} events/s, {:.1} ns/event)",
+            events as f64 / elapsed.as_secs_f64(),
+            elapsed.as_nanos() as f64 / events as f64
+        );
+
+        ring.replace_sink(Some(Box::new(|_event: Event| SinkResult::Accepted)));
+        let start = std::time::Instant::now();
+        for generation in 0..ROUNDS as u64 {
+            emit_every_kind(&mut ring, generation);
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "ring and adapter: {events} events in {elapsed:?} ({:.0} events/s, {:.1} ns/event)",
+            events as f64 / elapsed.as_secs_f64(),
+            elapsed.as_nanos() as f64 / events as f64
+        );
+        assert!(ring.delivered() > 0);
+    }
+}

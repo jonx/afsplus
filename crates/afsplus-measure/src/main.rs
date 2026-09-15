@@ -438,3 +438,174 @@ fn allocation_json(before: heap::Details, after: heap::Details) -> String {
     .unwrap();
     result
 }
+
+/// Heap and cost qualification of optional diagnostics. The counting
+/// allocator lives here because the filesystem crates forbid unsafe code.
+#[cfg(test)]
+mod flight_cost_support {
+    use super::*;
+    use afsplus_block::MemoryBackend;
+    use afsplus_core::flight::FlightRecorder;
+    use afsplus_core::Volume;
+
+    pub fn image() -> MemoryBackend {
+        let mut device = MemoryBackend::new(BS, 2048);
+        mkfs(
+            &mut device,
+            &MkfsParams {
+                uuid: [0x4d; 16],
+                label: "flight cost".into(),
+                region_size: 2048,
+                reclaim_caps: Default::default(),
+                log_slots: 8,
+                shared_extents: true,
+                data_policy: true,
+                name_policy: NamePolicy::Sensitive,
+                timestamp: ts(1),
+            },
+        )
+        .unwrap();
+        device
+    }
+
+    /// One deterministic round of work over a mounted volume.
+    pub fn round(volume: &mut Volume<MemoryBackend>, index: usize) -> usize {
+        let mut total = 0;
+        for entry in 0..8 {
+            let name = format!("f{index}-{entry}");
+            let id = volume
+                .create_file_in_root(&name, &[0x33u8; 5000], ts(index as i64 + 2))
+                .unwrap();
+            let mut buffer = [0u8; 512];
+            total += volume.read_file_at(id, 0, &mut buffer).unwrap();
+            total += volume.lookup_root(&name).unwrap().map_or(0, |_| 1);
+        }
+        total += volume.list_root().unwrap().len();
+        total
+    }
+
+    pub fn recorder() -> FlightRecorder {
+        let mut ring = FlightRecorder::new(std::num::NonZeroUsize::new(256).unwrap()).unwrap();
+        ring.enable_subsystem_observation();
+        ring.enable_object_observation();
+        ring.enable_data_observation();
+        ring.enable_view_observation();
+        ring
+    }
+
+    #[test]
+    fn an_attached_recorder_adds_no_requested_heap_bytes() {
+        let mut plain = mount(image()).unwrap();
+        let mut observed = mount(image()).unwrap();
+        observed.replace_flight_recorder(Some(recorder()));
+        // Warm both volumes so lazily built caches exist before measuring.
+        assert_eq!(round(&mut plain, 0), round(&mut observed, 0));
+
+        let before = HEAP.begin();
+        let plain_work = round(&mut plain, 1);
+        let plain_bytes = HEAP.sample().acquired.wrapping_sub(before.acquired);
+
+        let before = HEAP.begin();
+        let observed_work = round(&mut observed, 1);
+        let observed_bytes = HEAP.sample().acquired.wrapping_sub(before.acquired);
+
+        assert_eq!(plain_work, observed_work);
+        let events = observed
+            .flight_recorder()
+            .map(|ring| ring.sequence())
+            .unwrap_or_default();
+        assert!(events > 100, "the measured round emits events: {events}");
+        assert_eq!(
+            observed_bytes,
+            plain_bytes,
+            "observation added {} bytes over {events} events",
+            observed_bytes.wrapping_sub(plain_bytes)
+        );
+        println!(
+            "round heap: {plain_bytes} bytes unobserved, {observed_bytes} bytes observed, \
+             {events} events"
+        );
+    }
+}
+
+#[cfg(test)]
+mod flight_workload_cost {
+    use super::flight_cost_support::*;
+
+    /// Uncontended host cost of an attached recorder over real filesystem
+    /// work. Run with
+    /// `cargo test --release -p afsplus-measure -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "host cost measurement"]
+    fn measure_workload_cost_with_and_without_a_recorder() {
+        use afsplus_core::flight::Categories;
+        const ROUNDS: usize = 60;
+        for mode in ["unobserved", "attached, every kind filtered", "attached"] {
+            let mut volume = super::mount(image()).unwrap();
+            if mode != "unobserved" {
+                let mut ring = recorder();
+                if mode.contains("filtered") {
+                    ring.set_categories(Categories::NONE);
+                }
+                volume.replace_flight_recorder(Some(ring));
+            }
+            round(&mut volume, 0);
+            let start = std::time::Instant::now();
+            let mut work = 0;
+            for index in 1..=ROUNDS {
+                work += round(&mut volume, index);
+            }
+            let elapsed = start.elapsed();
+            let events = volume
+                .flight_recorder()
+                .map(|ring| ring.sequence())
+                .unwrap_or_default();
+            let operations = (ROUNDS * 17) as f64;
+            println!(
+                "{mode}: {ROUNDS} rounds in {elapsed:?} ({:.0} operations/s, {events} identities, work {work})",
+                operations / elapsed.as_secs_f64(),
+            );
+        }
+    }
+
+    /// One read-only call repeated, so the per-event cost through the real
+    /// path is measured without growing filesystem state.
+    #[test]
+    #[ignore = "host cost measurement"]
+    fn measure_lookup_cost_with_and_without_a_recorder() {
+        const CALLS: usize = 200_000;
+        for mode in ["unobserved", "attached, every kind filtered", "attached"] {
+            use afsplus_core::flight::Categories;
+            let mut volume = super::mount(image()).unwrap();
+            round(&mut volume, 0);
+            if mode != "unobserved" {
+                let mut ring = recorder();
+                if mode.contains("filtered") {
+                    ring.set_categories(Categories::NONE);
+                }
+                volume.replace_flight_recorder(Some(ring));
+            }
+            let before = volume
+                .flight_recorder()
+                .map(|ring| ring.sequence())
+                .unwrap_or_default();
+            let start = std::time::Instant::now();
+            let mut found = 0;
+            for _ in 0..CALLS {
+                found += volume.lookup_root("f0-1").unwrap().map_or(0, |_| 1);
+            }
+            let elapsed = start.elapsed();
+            let events = volume
+                .flight_recorder()
+                .map(|ring| ring.sequence())
+                .unwrap_or_default()
+                - before;
+            println!(
+                "{mode}: {CALLS} lookups in {elapsed:?} ({:.0} calls/s, {:.0} ns/call, {} events/call, found {found})",
+                CALLS as f64 / elapsed.as_secs_f64(),
+                elapsed.as_nanos() as f64 / CALLS as f64,
+                events / CALLS as u64,
+            );
+        }
+    }
+}
