@@ -1,6 +1,7 @@
 //! Deterministic, replayable fuzz targets for the `afsplus-format` codecs.
 
 mod checkpoint_snapshot;
+mod object_payload;
 mod reclaim;
 mod snapshot;
 
@@ -51,10 +52,12 @@ pub enum CodecTarget {
     ReclaimSegment = 14,
     ReclaimTable = 15,
     SnapshotCheckpoint = 16,
+    InlineSymlink = 17,
+    ObjectMetadata = 18,
 }
 
 impl CodecTarget {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 18] = [
         Self::Identification,
         Self::Checkpoint,
         Self::TreeNode,
@@ -71,6 +74,8 @@ impl CodecTarget {
         Self::ReclaimSegment,
         Self::ReclaimTable,
         Self::SnapshotCheckpoint,
+        Self::InlineSymlink,
+        Self::ObjectMetadata,
     ];
 
     pub fn name(self) -> &'static str {
@@ -91,6 +96,8 @@ impl CodecTarget {
             Self::ReclaimSegment => "reclaim-segment",
             Self::ReclaimTable => "reclaim-table",
             Self::SnapshotCheckpoint => "snapshot-checkpoint",
+            Self::InlineSymlink => "inline-symlink",
+            Self::ObjectMetadata => "object-metadata",
         }
     }
 
@@ -107,7 +114,7 @@ impl CodecTarget {
             Self::Identification => block_type::IDENTIFICATION,
             Self::Checkpoint | Self::SnapshotCheckpoint => block_type::CHECKPOINT,
             Self::TreeNode => block_type::TREE_NODE,
-            Self::ObjectRecord => block_type::OBJECT,
+            Self::ObjectRecord | Self::InlineSymlink | Self::ObjectMetadata => block_type::OBJECT,
             Self::IntentLog => block_type::INTENT_LOG,
             Self::BitmapPage => block_type::BITMAP,
             Self::RegionDescriptor => block_type::REGION_DESCRIPTOR,
@@ -318,6 +325,9 @@ fn region_seed_descriptor() -> RegionDescriptor {
 }
 
 fn accepts(target: CodecTarget, input: &[u8]) -> bool {
+    if object_payload::handles(target) {
+        return object_payload::accepts(target, input);
+    }
     if target == CodecTarget::SnapshotCheckpoint {
         return checkpoint_snapshot::accepts(input);
     }
@@ -349,6 +359,9 @@ fn accepts(target: CodecTarget, input: &[u8]) -> bool {
 }
 
 pub fn canonical_seed(target: CodecTarget) -> Result<Vec<u8>, String> {
+    if object_payload::handles(target) {
+        return object_payload::seed(target);
+    }
     if target == CodecTarget::SnapshotCheckpoint {
         return checkpoint_snapshot::seed();
     }
@@ -375,6 +388,9 @@ pub fn canonical_seed(target: CodecTarget) -> Result<Vec<u8>, String> {
 }
 
 fn roundtrip(target: CodecTarget, input: &[u8]) -> Result<(), String> {
+    if object_payload::handles(target) {
+        return object_payload::exercise(target, input);
+    }
     if target == CodecTarget::SnapshotCheckpoint {
         return checkpoint_snapshot::exercise(input);
     }
@@ -773,6 +789,8 @@ mod tests {
                 (1_589_963_715, 1_381_077_657),
                 (1_491_793_277, 3_037_729_287),
                 (1_979_058_185, 607_977_437),
+                (4_116_635_091, 3_389_458_638),
+                (1_571_146_886, 2_571_305_043),
             ]
         );
     }

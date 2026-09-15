@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Qualify symlink and object metadata codecs](#2026-09-15--qualify-symlink-and-object-metadata-codecs)
 - [2026-09-15 — Reject the reserved object payload byte](#2026-09-15--reject-the-reserved-object-payload-byte)
 - [2026-09-15 — Qualify snapshot-bearing checkpoint admission](#2026-09-15--qualify-snapshot-bearing-checkpoint-admission)
 - [2026-09-15 — Qualify reclaim codec mutation and replay](#2026-09-15--qualify-reclaim-codec-mutation-and-replay)
@@ -151,6 +152,23 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Qualify symlink and object metadata codecs
+
+Integrated stable targets 17 and 18 with explicit directory, regular-file,
+empty-file, extent-tree, policy and symlink fixtures. Independent payload
+oracles compare fields and admission across generic, metadata and borrowed
+symlink readers, including UTF-8, lengths, short buffers and borrowed pointers.
+Common-header verification is shared; Q13 retains the generic extension-policy
+question separately from symlink rules.
+
+The main gate passed 18 × 4096 cases (73,728), 15 fuzz unit tests and 14 saved
+replay controls. Earlier target fingerprints are preserved. Proof is retained
+in `build/object-codec-integration-ojy8u7x0/integration-fuzz.log`, alongside the
+sealed isolated source campaign (575 workspace passes, zero failures, ten
+ignored). This composes isolated workspace and main integration evidence;
+no new full combined workspace or native run is claimed. Other executable
+codec surfaces and semantic-operation families keep Stage A fuzz closure open.
 
 ## 2026-09-15 — Reject the reserved object payload byte
 

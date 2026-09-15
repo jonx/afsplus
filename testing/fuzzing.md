@@ -33,7 +33,7 @@ replayable without the original workstation.
 | Wire surface | Rust codec target | Portable C path corpus | Remaining work |
 |---|---|---|---|
 | Identification and retained checkpoints | Legacy and snapshot-bearing checkpoint targets plus raw and resealed mutations | Probe seed, header/block mutations | Add frozen reserved-field decisions |
-| Object record and object-map node | File-object and generic tree-node targets | Root lookup plus multi-leaf paths | Add every object type and optional root |
+| Object record and object-map node | File-object, payload-aware metadata, inline-symlink and generic tree-node targets | Root lookup plus multi-leaf paths | Add every object type and optional root |
 | Directory node | Generic tree-node structural target | First/last ordinal in a 303-entry tree | Add complete Unicode comparison-key tables |
 | Extent node and file data | Generic tree-node structural target | Directory-to-file read seed; direct/sparse synthetic coverage remains in conformance | Add committed tree-backed file seed |
 | Allocation-region metadata | Bitmap-page and region-descriptor targets, including a partial final page | None | Add portable repair-walker corpus |
@@ -47,7 +47,7 @@ replayable without the original workstation.
 ## Rust codec gate
 
 `make rust-codec-fuzz-gate` exercises identification, checkpoint, typed-tree,
-object-record, intent-log, bitmap-page, region-descriptor five snapshot leaf/key, three reclaim block and snapshot-bearing checkpoint decoders. Each canonical seed must be accepted,
+object-record, intent-log, bitmap-page, region-descriptor five snapshot leaf/key, three reclaim block snapshot-bearing checkpoint, inline-symlink and metadata object decoders. Each canonical seed must be accepted,
 re-encode and decode to byte-stable canonical form. The mandatory engine then
 runs 4,096 stable cases per target using checksum-breaking bit flips,
 CRC-resealed payload changes, short inputs, bounded multi-byte overwrites and
@@ -60,7 +60,7 @@ workspace so constrained builders need not compile qualification tooling.
 The standard `make rust-gate` includes this separate workspace through
 `rust-codec-fuzz-gate`. Its lockfile and seed-schema version keep case identities
 stable: target IDs 1–5 and their seed bytes are unchanged; allocation targets
-append IDs 6–7 and snapshot targets append IDs 8–12; reclaim targets append IDs 13–15 and snapshot-bearing checkpoints append ID 16 under seed schema 1. On failure,
+append IDs 6–7 and snapshot targets append IDs 8–12; reclaim targets append IDs 13–15 and snapshot-bearing checkpoints append ID 16; inline-symlink and object-metadata append IDs 17–18 under seed schema 1. On failure,
 the gate writes the last target/case before execution and stores the exact
 input as a bounded `.afrf` artifact. Reproduce it with:
 
@@ -129,6 +129,24 @@ The immutable feature bit is not an input to `Checkpoint::decode`.
 between selected shape and feature bit without fallback. This format-only target
 qualifies structural shape, not that caller negotiation or referenced tree
 ownership. Common header verification is shared with other codec targets.
+
+Inline-symlink and object-metadata targets use an explicit non-ASCII target and
+a directory seed. Both exercise metadata-aware decoding, generic decoding and
+borrowed symlink decoding against independent payload fields and predicates.
+Valid file fixtures cover empty/direct/tree-backed and in-place-policy forms;
+internal object type is explicitly rejected by these prototype codecs. Symlink
+controls include UTF-8 continuation/overlong/surrogate/out-of-range forms, NUL,
+empty targets, exact payload lengths, zero allocation fields, flags, reserved
+bytes and unused tails. Borrowed target pointers must reference the input
+payload; minimum and maximum encoder buffers are tested.
+
+Payload byte 9 is documented reserved-zero and rejected by all object readers.
+Generic file/directory header flags and unused-tail rejection have no explicit
+normative rule in the cited object/header specification; symlink strictness does
+not establish that rule for other types. Their admission policy requires a
+separate format review with resealed header-flag, extended-payload and tail
+fixtures, followed by an explicit accept/reject contract. This target does not
+qualify caller geometry, policy-feature congruence or referenced extent trees.
 
 The [format regression suite](../crates/afsplus-format/tests/roundtrip.rs)
 requires undersized bitmap, region, directory, object-map, retired-list,
