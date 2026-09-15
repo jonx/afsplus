@@ -10,13 +10,13 @@
 use std::time::Instant;
 
 use afsplus_block::{
-    for_each_crash_state, FaultBackend, FaultPlan, IoStats, MemoryBackend, RecordedOp,
+    for_each_crash_state, BlockDevice, FaultBackend, FaultPlan, IoStats, MemoryBackend, RecordedOp,
     RecordingBackend, TraceBackend,
 };
 use afsplus_check::check_device;
 use afsplus_core::volume::{CommitStats, DataUpdatePolicy};
 use afsplus_core::{extent_map, Volume};
-use afsplus_core::{mkfs, mount, MkfsParams, NamePolicy};
+use afsplus_core::{mkfs, mount, mount_with_options, MkfsParams, MountOptions, NamePolicy};
 use afsplus_format::{Timespec, OBJECT_ROOT};
 
 const BS: usize = 4096;
@@ -48,9 +48,43 @@ fn formatted() -> MemoryBackend {
     dev
 }
 
+fn profile_mount<D: BlockDevice>(device: D, pages: usize) -> Volume<D> {
+    let volume = mount_with_options(
+        device,
+        MountOptions {
+            tree_cache_pages: std::num::NonZeroUsize::new(pages),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(volume.tree_cache_pages(), pages);
+    volume
+}
+
+/// Rejects checker errors and retained-checkpoint warnings. A stopped
+/// intent-log tail is the only admissible crash artifact.
+fn assert_checker_clean<D: BlockDevice>(device: &mut D, context: &str) {
+    let report = check_device(device);
+    assert!(report.is_clean(), "{context}: {:?}", report.errors);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .all(|warning| warning.starts_with("intent log tail:")),
+        "{context}: {:?}",
+        report.warnings
+    );
+}
+
 #[test]
 fn full_cow_is_the_mount_default() {
-    let mut vol = mount(formatted()).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        full_cow_is_the_mount_default_profile(pages);
+    }
+}
+
+fn full_cow_is_the_mount_default_profile(pages: usize) {
+    let mut vol = profile_mount(formatted(), pages);
     assert_eq!(vol.data_update_policy(), DataUpdatePolicy::FullCow);
     let file = vol
         .create_file_in_root("private.bin", &vec![0x11; BS], ts(1))
@@ -64,7 +98,13 @@ fn full_cow_is_the_mount_default() {
 
 #[test]
 fn private_non_extending_write_reuses_the_physical_block() {
-    let mut vol = mount(formatted()).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        private_non_extending_write_reuses_the_physical_block_profile(pages);
+    }
+}
+
+fn private_non_extending_write_reuses_the_physical_block_profile(pages: usize) {
+    let mut vol = profile_mount(formatted(), pages);
     let mut expected = vec![0x11; BS];
     let file = vol
         .create_file_in_root("private.bin", &expected, ts(1))
@@ -82,8 +122,8 @@ fn private_non_extending_write_reuses_the_physical_block() {
     assert_eq!(vol.read_file(file).unwrap(), expected);
 
     let mut dev = vol.into_device();
-    assert!(check_device(&mut dev).is_clean());
-    let remounted = mount(dev).unwrap();
+    assert_checker_clean(&mut dev, &format!("pages={pages} private write"));
+    let remounted = profile_mount(dev, pages);
     assert_eq!(
         remounted.data_update_policy(),
         DataUpdatePolicy::FullCow,
@@ -93,7 +133,13 @@ fn private_non_extending_write_reuses_the_physical_block() {
 
 #[test]
 fn private_multi_block_write_reuses_every_touched_block() {
-    let mut vol = mount(formatted()).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        private_multi_block_write_reuses_every_touched_block_profile(pages);
+    }
+}
+
+fn private_multi_block_write_reuses_every_touched_block_profile(pages: usize) {
+    let mut vol = profile_mount(formatted(), pages);
     let before = vec![0x19; 4 * BS];
     let file = vol
         .create_file_in_root("private-large.bin", &before, ts(1))
@@ -117,7 +163,17 @@ fn private_multi_block_write_reuses_every_touched_block() {
 
 #[test]
 fn metadata_io_error_after_in_place_data_write_keeps_old_generation_but_not_old_bytes() {
-    let mut initial = mount(formatted()).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        metadata_io_error_after_in_place_data_write_keeps_old_generation_but_not_old_bytes_profile(
+            pages,
+        );
+    }
+}
+
+fn metadata_io_error_after_in_place_data_write_keeps_old_generation_but_not_old_bytes_profile(
+    pages: usize,
+) {
+    let mut initial = profile_mount(formatted(), pages);
     let before = vec![0x21; BS];
     let file = initial
         .create_file_in_root("error.page", &before, ts(1))
@@ -133,7 +189,7 @@ fn metadata_io_error_after_in_place_data_write_keeps_old_generation_but_not_old_
         fail_flush_index: None,
         fail_hard: false,
     };
-    let mut vol = mount(FaultBackend::new(base, plan)).unwrap();
+    let mut vol = profile_mount(FaultBackend::new(base, plan), pages);
     vol.set_data_update_policy(DataUpdatePolicy::InPlacePrivate);
     let error = vol.write_file_at(file, 100, &vec![0x92; 500], ts(2));
     assert!(error.is_err());
@@ -147,16 +203,21 @@ fn metadata_io_error_after_in_place_data_write_keeps_old_generation_but_not_old_
         "a failed in-place transaction cannot promise restoration of old bytes"
     );
     let mut dev = vol.into_device().into_inner();
-    let report = check_device(&mut dev);
-    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
-    let mut remounted = mount(dev).unwrap();
+    assert_checker_clean(&mut dev, &format!("pages={pages} metadata error"));
+    let mut remounted = profile_mount(dev, pages);
     assert_eq!(remounted.generation(), pre_generation);
     assert_eq!(remounted.read_file(file).unwrap(), expected);
 }
 
 #[test]
 fn extending_and_shared_writes_fall_back_to_full_cow() {
-    let mut vol = mount(formatted()).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        extending_and_shared_writes_fall_back_to_full_cow_profile(pages);
+    }
+}
+
+fn extending_and_shared_writes_fall_back_to_full_cow_profile(pages: usize) {
+    let mut vol = profile_mount(formatted(), pages);
     let source_bytes = vec![0x31; BS];
     let source = vol
         .create_file_in_root("source.bin", &source_bytes, ts(1))
@@ -185,17 +246,27 @@ fn extending_and_shared_writes_fall_back_to_full_cow() {
         0,
         "a shared marker must force full COW"
     );
-    assert_eq!(vol.read_file(source).unwrap(), source_before);
-    assert_ne!(vol.read_file(clone).unwrap(), source_before);
+    let mut expected_source = source_bytes.clone();
+    expected_source.extend_from_slice(b"extension");
+    assert_eq!(source_before, expected_source);
+    let mut expected_clone = expected_source.clone();
+    expected_clone[..13].copy_from_slice(b"private clone");
+    assert_eq!(vol.read_file(source).unwrap(), expected_source);
+    assert_eq!(vol.read_file(clone).unwrap(), expected_clone);
 
     let mut dev = vol.into_device();
-    let report = check_device(&mut dev);
-    assert!(report.is_clean(), "checker findings: {:?}", report.errors);
+    assert_checker_clean(&mut dev, &format!("pages={pages} fallback"));
 }
 
 #[test]
 fn in_place_crash_matrix_keeps_metadata_clean_but_allows_torn_old_data() {
-    let mut vol = mount(formatted()).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        in_place_crash_matrix_keeps_metadata_clean_but_allows_torn_old_data_profile(pages);
+    }
+}
+
+fn in_place_crash_matrix_keeps_metadata_clean_but_allows_torn_old_data_profile(pages: usize) {
+    let mut vol = profile_mount(formatted(), pages);
     let before = vec![0x11; BS];
     let file = vol
         .create_file_in_root("database.page", &before, ts(1))
@@ -209,16 +280,13 @@ fn in_place_crash_matrix_keeps_metadata_clean_but_allows_torn_old_data() {
     let mut after = before.clone();
     after[offset..offset + length].fill(0xEE);
 
-    let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
+    let mut vol = profile_mount(RecordingBackend::new(base.clone()), pages);
     vol.set_data_update_policy(DataUpdatePolicy::InPlacePrivate);
     vol.write_file_at(file, offset as u64, &vec![0xEE; length], ts(2))
         .unwrap();
-    assert_eq!(
-        vol.last_commit_stats()
-            .unwrap()
-            .data_blocks_overwritten_in_place,
-        1
-    );
+    let stats = vol.last_commit_stats().unwrap();
+    assert_eq!(stats.data_blocks_overwritten_in_place, 1);
+    assert!(stats.tree_mutations.max_resident_staged_nodes <= pages as u64);
     let (_, operations) = vol.into_device().into_parts();
     assert!(matches!(
         operations.first(),
@@ -230,15 +298,10 @@ fn in_place_crash_matrix_keeps_metadata_clean_but_allows_torn_old_data() {
     let mut mixed_pre_outcomes = 0u64;
     for crash_point in 0..=operations.len() {
         for_each_crash_state(&base, &operations, crash_point, |state| {
-            let context = state.description;
+            let context = format!("pages={pages}: {}", state.description);
             let mut image = state.image;
-            let report = check_device(&mut image);
-            assert!(
-                report.is_clean(),
-                "{context}: checker findings {:?}",
-                report.errors
-            );
-            let mut recovered = mount(image).unwrap();
+            assert_checker_clean(&mut image, &context);
+            let mut recovered = profile_mount(image, pages);
             assert!(
                 recovered.generation() == pre_generation
                     || recovered.generation() == pre_generation + 1,
@@ -276,6 +339,7 @@ fn in_place_crash_matrix_keeps_metadata_clean_but_allows_torn_old_data() {
         mixed_pre_outcomes > 0,
         "the matrix did not exercise the documented torn-data outcome"
     );
+    eprintln!("runtime private cuts pages={pages} old={pre_outcomes} new={post_outcomes} torn_old={mixed_pre_outcomes}");
 }
 
 #[derive(Default)]
