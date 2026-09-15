@@ -20,6 +20,7 @@ use afsplus_format::ident::{
 };
 use afsplus_format::{FormatError, DEFAULT_BLOCK_SIZE};
 
+use crate::flight::{EventKind, FlightRecorder, LifecycleContext, MountContext, MountStage};
 use crate::verify::load_mount_state;
 use crate::volume::{SnapshotWorkLimits, Volume};
 use crate::{layout, CoreError};
@@ -268,7 +269,154 @@ pub fn mount_with_snapshot_limits<D: BlockDevice>(
     mount_configured(dev, options, Some(limits))
 }
 
+/// Observe a mount with a caller-owned recorder. The recorder is attached
+/// before checkpoint selection, moves into the returned volume with its
+/// identities and counters intact, and comes back with the error when the
+/// mount is refused. Attachment adds no device I/O and changes no mount
+/// semantics; `mount_with_options` with the same options gives the same
+/// result, the same block trace and the same image.
+pub fn mount_observed<D: BlockDevice>(
+    dev: D,
+    options: MountOptions,
+    recorder: FlightRecorder,
+) -> Result<Volume<D>, Box<RefusedMount>> {
+    mount_observed_configured(dev, options, None, recorder)
+}
+
+/// Observe a mount of the persistent-snapshot experiment (ADR-071) with the
+/// budgets `mount_with_snapshot_limits` applies.
+pub fn mount_observed_with_snapshot_limits<D: BlockDevice>(
+    dev: D,
+    options: MountOptions,
+    limits: SnapshotWorkLimits,
+    recorder: FlightRecorder,
+) -> Result<Volume<D>, Box<RefusedMount>> {
+    mount_observed_configured(dev, options, Some(limits), recorder)
+}
+
+fn mount_observed_configured<D: BlockDevice>(
+    dev: D,
+    options: MountOptions,
+    snapshot_limits: Option<SnapshotWorkLimits>,
+    mut recorder: FlightRecorder,
+) -> Result<Volume<D>, Box<RefusedMount>> {
+    let mut volume =
+        match mount_before_intent_log(dev, options, snapshot_limits, Some(&mut recorder)) {
+            Ok(volume) => volume,
+            Err(error) => return Err(Box::new(RefusedMount { error, recorder })),
+        };
+    volume.replace_flight_recorder(Some(recorder));
+    match recover_or_inspect_intent_log(&mut volume) {
+        Ok(()) => Ok(volume),
+        Err(error) => {
+            let recorder = volume
+                .replace_flight_recorder(None)
+                .expect("the recorder installed above is still attached");
+            Err(Box::new(RefusedMount { error, recorder }))
+        }
+    }
+}
+
+/// A refused observed mount: the refusal the unobserved entry points report,
+/// and the recorder holding the stages that ran before it. Boxed because a
+/// recorder is larger than a mount refusal.
+#[derive(Debug)]
+pub struct RefusedMount {
+    pub error: CoreError,
+    pub recorder: FlightRecorder,
+}
+
+/// Mount stages holding the observation before a volume exists.
+struct MountObserver<'a> {
+    recorder: Option<&'a mut FlightRecorder>,
+    mode: MountMode,
+    stage: MountStage,
+    generation: u64,
+    slot: u8,
+    other_generation: u64,
+}
+
+impl MountObserver<'_> {
+    fn event(&mut self, kind: EventKind) {
+        let context = MountContext {
+            mode: self.mode,
+            stage: self.stage,
+            slot: self.slot,
+            other_generation: self.other_generation,
+            count: 0,
+            damaged_tail: false,
+        };
+        if let Some(recorder) = &mut self.recorder {
+            recorder.lifecycle_event(
+                self.generation,
+                kind,
+                false,
+                0,
+                LifecycleContext::Mount(context),
+            );
+        }
+    }
+}
+
 fn mount_configured<D: BlockDevice>(
+    dev: D,
+    options: MountOptions,
+    snapshot_limits: Option<SnapshotWorkLimits>,
+) -> Result<Volume<D>, CoreError> {
+    let mut volume = mount_before_intent_log(dev, options, snapshot_limits, None)?;
+    recover_or_inspect_intent_log(&mut volume)?;
+    Ok(volume)
+}
+
+/// Replays (writable modes) or inspects (read-only modes) the intent log and
+/// reports the mounted volume. Only an attached recorder observes the steps.
+fn recover_or_inspect_intent_log<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(), CoreError> {
+    let result = if volume.mount_mode().writes_during_mount() {
+        volume.recover_intent_log()
+    } else {
+        volume.inspect_intent_log()
+    };
+    let generation = volume.generation();
+    match result {
+        Ok(count) => {
+            // Scanned prefixes carry contiguous sequences from one, so the
+            // count of replayed or pending records is the last group.
+            volume.flight_mount_event(EventKind::MountComplete, count, false, count, generation);
+            Ok(())
+        }
+        Err(error) => {
+            volume.flight_mount_event(EventKind::MountFailed, 0, false, 0, generation);
+            Err(error)
+        }
+    }
+}
+
+fn mount_before_intent_log<D: BlockDevice>(
+    dev: D,
+    options: MountOptions,
+    snapshot_limits: Option<SnapshotWorkLimits>,
+    recorder: Option<&mut FlightRecorder>,
+) -> Result<Volume<D>, CoreError> {
+    let mut observer = MountObserver {
+        recorder,
+        mode: options.mode,
+        stage: MountStage::Identification,
+        generation: 0,
+        slot: 0,
+        other_generation: 0,
+    };
+    observer.event(EventKind::MountBegin);
+    match mount_stages(&mut observer, dev, options, snapshot_limits) {
+        Ok(volume) => Ok(volume),
+        Err(error) => {
+            observer.event(EventKind::MountFailed);
+            Err(error)
+        }
+    }
+}
+
+fn mount_stages<D: BlockDevice>(
+    observer: &mut MountObserver<'_>,
     mut dev: D,
     options: MountOptions,
     snapshot_limits: Option<SnapshotWorkLimits>,
@@ -282,6 +430,7 @@ fn mount_configured<D: BlockDevice>(
     let mut buf = vec![0u8; dev.block_size()];
     dev.read_block(layout::IDENT_LBA, &mut buf)?;
     let ident = Identification::decode(&buf)?;
+    observer.stage = MountStage::Negotiation;
     negotiate_features(&ident, options.mode, snapshot_limits)?;
     if ident.total_blocks > dev.total_blocks() {
         return Err(CoreError::Corrupt(format!(
@@ -291,7 +440,16 @@ fn mount_configured<D: BlockDevice>(
         )));
     }
 
+    observer.stage = MountStage::Selection;
     let selection = select_checkpoint(&mut dev, &ident)?;
+    observer.generation = selection.chosen.generation;
+    observer.slot = selection.chosen_slot as u8;
+    observer.other_generation = selection
+        .other
+        .as_ref()
+        .map_or(0, |checkpoint| checkpoint.generation);
+    observer.event(EventKind::MountSelected);
+    observer.stage = MountStage::RootState;
     // Feature/root congruence (ADR-061): the enabled-but-unused state (bit
     // set, root zero) is legal; a root without the feature is not.
     if selection.chosen.shared_extent_root_block != 0
@@ -313,6 +471,7 @@ fn mount_configured<D: BlockDevice>(
     })?;
 
     let mut volume = Volume::new(dev, ident, selection, state, options.mode);
+    observer.stage = MountStage::Configuration;
     volume.set_tree_cache_pages(
         options
             .tree_cache_pages
@@ -321,11 +480,7 @@ fn mount_configured<D: BlockDevice>(
     if let Some(limits) = snapshot_limits {
         volume.set_snapshot_work_limits(limits)?;
     }
-    if options.mode.writes_during_mount() {
-        volume.recover_intent_log()?;
-    } else {
-        volume.inspect_intent_log()?;
-    }
+    observer.stage = MountStage::IntentLog;
     Ok(volume)
 }
 

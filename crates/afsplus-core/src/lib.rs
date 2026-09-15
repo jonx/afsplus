@@ -48,8 +48,11 @@ use std::fmt;
 use afsplus_block::BlockError;
 use afsplus_format::FormatError;
 
-pub use mkfs::{mkfs, mkfs_with_options, MkfsOptions, MkfsParams, NamePolicy};
-pub use mount::{mount, mount_with_options, mount_with_snapshot_limits, MountMode, MountOptions};
+pub use mkfs::{mkfs, mkfs_observed, mkfs_with_options, MkfsOptions, MkfsParams, NamePolicy};
+pub use mount::{
+    mount, mount_observed, mount_observed_with_snapshot_limits, mount_with_options,
+    mount_with_snapshot_limits, MountMode, MountOptions, RefusedMount,
+};
 pub use volume::Volume;
 
 /// Fixed prototype placement (`spec/disk-layout.md` marks exact offsets TBD;

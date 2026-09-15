@@ -33,9 +33,111 @@ use crate::alloc::Bitmaps;
 use crate::allocation_root;
 use crate::directory::{self, LoadedDirectory};
 use crate::extent_map;
+use crate::flight::{
+    EventKind, FindingKind, FlightRecorder, LifecycleContext, VerifyContext, VerifyPhase,
+    VerifyScope,
+};
 use crate::object_map::{self, LoadedObjectMap};
 use crate::shared_extents::{self, SharedRun};
 use crate::CoreError;
+
+/// Verification progress and finding locations for an attached recorder.
+/// A verification entry point without a recorder builds an empty observer,
+/// which emits nothing and holds no state a caller can see. Emission performs
+/// no device I/O and no allocation, so an observed verification reads exactly
+/// the blocks and reports exactly the findings of an unobserved one.
+struct VerifyObserver<'a> {
+    recorder: Option<&'a mut FlightRecorder>,
+    scope: VerifyScope,
+    generation: u64,
+    /// The phase owning the next observation, reported with a failure.
+    phase: Option<VerifyPhase>,
+}
+
+impl<'a> VerifyObserver<'a> {
+    fn new(recorder: Option<&'a mut FlightRecorder>, scope: VerifyScope, generation: u64) -> Self {
+        Self {
+            recorder,
+            scope,
+            generation,
+            phase: None,
+        }
+    }
+
+    fn emit(&mut self, kind: EventKind, context: VerifyContext) {
+        let generation = self.generation;
+        if let Some(recorder) = &mut self.recorder {
+            recorder.lifecycle_event(
+                generation,
+                kind,
+                false,
+                0,
+                LifecycleContext::Verify(context),
+            );
+        }
+    }
+
+    fn context(&self) -> VerifyContext {
+        VerifyContext {
+            scope: self.scope,
+            phase: self.phase,
+            finding: None,
+            region: 0,
+            ordinal: 0,
+            object_id: 0,
+            block: 0,
+        }
+    }
+
+    fn begin(&mut self) {
+        self.phase = None;
+        let context = self.context();
+        self.emit(EventKind::VerifyBegin, context);
+    }
+
+    fn phase(&mut self, phase: VerifyPhase, block: u64) {
+        self.phase = Some(phase);
+        let context = VerifyContext {
+            block,
+            ..self.context()
+        };
+        self.emit(EventKind::VerifyPhase, context);
+    }
+
+    /// Report the finding just appended, at its ordinal in the returned list.
+    fn finding(
+        &mut self,
+        kind: FindingKind,
+        ordinal: usize,
+        region: u32,
+        object_id: u64,
+        block: u64,
+    ) {
+        let context = VerifyContext {
+            finding: Some(kind),
+            ordinal: ordinal as u64,
+            region,
+            object_id,
+            block,
+            ..self.context()
+        };
+        self.emit(EventKind::VerifyFinding, context);
+    }
+
+    fn complete(&mut self, ordinal: u64) {
+        self.phase = None;
+        let context = VerifyContext {
+            ordinal,
+            ..self.context()
+        };
+        self.emit(EventKind::VerifyComplete, context);
+    }
+
+    fn failed(&mut self) {
+        let context = self.context();
+        self.emit(EventKind::VerifyFailed, context);
+    }
+}
 
 /// Everything reachable from one committed checkpoint, fully decoded.
 pub struct CommittedState {
@@ -96,6 +198,48 @@ pub fn load_mount_state<D: BlockDevice>(
     ident: &Identification,
     checkpoint: &Checkpoint,
 ) -> Result<MountState, CoreError> {
+    load_mount_state_inner(
+        dev,
+        ident,
+        checkpoint,
+        &mut VerifyObserver::new(None, VerifyScope::MountState, checkpoint.generation),
+    )
+}
+
+/// Load the bounded roots with a caller-owned recorder attached. Standalone
+/// verification owns this observation; normal mount keeps the unobserved
+/// bounded path, so exhaustive verification stays outside mount.
+pub fn load_mount_state_observed<D: BlockDevice>(
+    dev: &mut D,
+    ident: &Identification,
+    checkpoint: &Checkpoint,
+    recorder: &mut FlightRecorder,
+) -> Result<MountState, CoreError> {
+    let mut observer = VerifyObserver::new(
+        Some(recorder),
+        VerifyScope::MountState,
+        checkpoint.generation,
+    );
+    observer.begin();
+    let result = load_mount_state_inner(dev, ident, checkpoint, &mut observer);
+    match result {
+        Ok(state) => {
+            observer.complete(0);
+            Ok(state)
+        }
+        Err(error) => {
+            observer.failed();
+            Err(error)
+        }
+    }
+}
+
+fn load_mount_state_inner<D: BlockDevice>(
+    dev: &mut D,
+    ident: &Identification,
+    checkpoint: &Checkpoint,
+    observer: &mut VerifyObserver<'_>,
+) -> Result<MountState, CoreError> {
     let _allocation_scope =
         crate::allocation_trace::enter(crate::allocation_trace::Domain::Verifier);
     let geo = ident.geometry();
@@ -115,11 +259,17 @@ pub fn load_mount_state<D: BlockDevice>(
         Ok(())
     };
 
+    observer.phase(VerifyPhase::ObjectMap, checkpoint.object_map_block);
     claim_root(checkpoint.object_map_block, &mut roots)?;
     if checkpoint.shared_extent_root_block != 0 {
         // ADR-061: bounded mount claims the root; kind, owner and generation
         // are checked whenever the tree is actually loaded.
+        observer.phase(
+            VerifyPhase::SharedExtents,
+            checkpoint.shared_extent_root_block,
+        );
         claim_root(checkpoint.shared_extent_root_block, &mut roots)?;
+        observer.phase(VerifyPhase::ObjectMap, checkpoint.object_map_block);
     }
     let root_record_lba = object_map::lookup_lba(
         dev,
@@ -129,6 +279,7 @@ pub fn load_mount_state<D: BlockDevice>(
         OBJECT_ROOT,
     )?
     .ok_or_else(|| CoreError::Corrupt("root object missing from object map".into()))?;
+    observer.phase(VerifyPhase::RootObject, root_record_lba);
     claim_root(root_record_lba, &mut roots)?;
     dev.read_block(root_record_lba, &mut buf)?;
     let (root_object, root_generation) = ObjectRecord::decode_metadata_with_generation(&buf)?;
@@ -143,6 +294,7 @@ pub fn load_mount_state<D: BlockDevice>(
         ));
     }
 
+    observer.phase(VerifyPhase::RootDirectory, root_object.data_root);
     claim_root(root_object.data_root, &mut roots)?;
     directory::validate_root(
         dev,
@@ -154,6 +306,7 @@ pub fn load_mount_state<D: BlockDevice>(
 
     // Bounded reclaim view: decode and validate only the root block. The
     // sealed segments/tables behind it are batch and checker territory.
+    observer.phase(VerifyPhase::ReclaimQueue, checkpoint.reclaim_root_block);
     claim_root(checkpoint.reclaim_root_block, &mut roots)?;
     dev.read_block(checkpoint.reclaim_root_block, &mut buf)?;
     let (reclaim_root, reclaim_generation) =
@@ -179,6 +332,7 @@ pub fn load_mount_state<D: BlockDevice>(
     }
 
     let snapshots = if let Some(snapshot_roots) = checkpoint.snapshot_roots {
+        observer.phase(VerifyPhase::Snapshots, snapshot_roots.registry);
         claim_root(snapshot_roots.registry, &mut roots)?;
         claim_root(snapshot_roots.lifetimes, &mut roots)?;
         let (registry, views, _) = crate::snapshot::read_registry_state(
@@ -238,6 +392,48 @@ pub fn load_committed_state<D: BlockDevice>(
     ident: &Identification,
     checkpoint: &Checkpoint,
 ) -> Result<CommittedState, CoreError> {
+    load_committed_state_inner(
+        dev,
+        ident,
+        checkpoint,
+        &mut VerifyObserver::new(None, VerifyScope::CommittedState, checkpoint.generation),
+    )
+}
+
+/// Decode the committed state with a caller-owned recorder attached. Each
+/// phase event names the structure being decoded and its root block where the
+/// checkpoint holds one; a failure reports the phase that raised it.
+pub fn load_committed_state_observed<D: BlockDevice>(
+    dev: &mut D,
+    ident: &Identification,
+    checkpoint: &Checkpoint,
+    recorder: &mut FlightRecorder,
+) -> Result<CommittedState, CoreError> {
+    let mut observer = VerifyObserver::new(
+        Some(recorder),
+        VerifyScope::CommittedState,
+        checkpoint.generation,
+    );
+    observer.begin();
+    let result = load_committed_state_inner(dev, ident, checkpoint, &mut observer);
+    match result {
+        Ok(state) => {
+            observer.complete(0);
+            Ok(state)
+        }
+        Err(error) => {
+            observer.failed();
+            Err(error)
+        }
+    }
+}
+
+fn load_committed_state_inner<D: BlockDevice>(
+    dev: &mut D,
+    ident: &Identification,
+    checkpoint: &Checkpoint,
+    observer: &mut VerifyObserver<'_>,
+) -> Result<CommittedState, CoreError> {
     let geo = ident.geometry();
     let block_size = geo.block_size;
     let mut buf = vec![0u8; block_size];
@@ -259,6 +455,10 @@ pub fn load_committed_state<D: BlockDevice>(
         Ok(())
     };
 
+    observer.phase(
+        VerifyPhase::AllocationRoot,
+        checkpoint.allocation_root_block,
+    );
     let allocation = if checkpoint.allocation_root_block != 0 {
         allocation_root::load_all(
             dev,
@@ -281,6 +481,10 @@ pub fn load_committed_state<D: BlockDevice>(
     // Its nodes are ordinary reachable metadata; each record's run is
     // claimed once here, then counted per live mapping below.
     let (shared_records, shared_tree_blocks) = if checkpoint.shared_extent_root_block != 0 {
+        observer.phase(
+            VerifyPhase::SharedExtents,
+            checkpoint.shared_extent_root_block,
+        );
         let loaded = shared_extents::load_all(
             dev,
             &geo,
@@ -311,6 +515,7 @@ pub fn load_committed_state<D: BlockDevice>(
     let orphan_directory_enabled = ident.features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0;
 
     let namespace_metadata_start = metadata_blocks.len();
+    observer.phase(VerifyPhase::ObjectMap, checkpoint.object_map_block);
     let object_map = object_map::load_all(
         dev,
         &geo,
@@ -325,6 +530,7 @@ pub fn load_committed_state<D: BlockDevice>(
     let mut objects = BTreeMap::new();
     let mut directories = BTreeMap::new();
 
+    observer.phase(VerifyPhase::ObjectRecords, 0);
     for entry in &object_map.entries {
         validate_mapped_object_id(entry.object_id, checkpoint, orphan_directory_enabled)?;
         claim(entry.block, &mut claimed)?;
@@ -451,6 +657,7 @@ pub fn load_committed_state<D: BlockDevice>(
     // exactly, so a missing record is as detectable as a wrong count, and
     // work is proportional to the number of boundaries.
     {
+        observer.phase(VerifyPhase::SharedMappings, 0);
         let mut events: BTreeMap<u64, i64> = BTreeMap::new();
         for (start, end) in &flagged_intervals {
             *events.entry(*start).or_insert(0) += 1;
@@ -531,11 +738,13 @@ pub fn load_committed_state<D: BlockDevice>(
         }
     }
 
+    observer.phase(VerifyPhase::Namespace, 0);
     validate_namespace_graph(&objects, &directories)?;
     let namespace_metadata = metadata_blocks[namespace_metadata_start..].to_vec();
 
     // Exhaustive reclaim-queue walk: every structure block is reachable
     // metadata; every unconsumed run must be disjoint from reachable state.
+    observer.phase(VerifyPhase::ReclaimQueue, checkpoint.reclaim_root_block);
     let reclaim = crate::reclaim::load_all(
         dev,
         &geo,
@@ -562,7 +771,9 @@ pub fn load_committed_state<D: BlockDevice>(
         }
     }
 
+    observer.phase(VerifyPhase::AllocationBitmaps, 0);
     let bitmaps = Bitmaps::load(dev, &geo, checkpoint)?;
+    observer.phase(VerifyPhase::IntentLogArea, 0);
     let log_area_blocks = crate::intent_log::log_slot_lbas(&geo, ident.log_slots)?;
 
     let mut state = CommittedState {
@@ -581,6 +792,10 @@ pub fn load_committed_state<D: BlockDevice>(
         shared_records,
         shared_tree_blocks,
     };
+    observer.phase(
+        VerifyPhase::Snapshots,
+        checkpoint.snapshot_roots.map_or(0, |roots| roots.registry),
+    );
     snapshots::load(dev, ident, checkpoint, &mut state, &namespace_metadata)?;
     Ok(state)
 }
@@ -669,9 +884,46 @@ fn validate_namespace_graph(
 /// Returns findings instead of failing fast so the checker can report all of
 /// them. Normal mount does not run this.
 pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoint) -> Vec<String> {
+    full_sweep_inner(
+        state,
+        geo,
+        checkpoint,
+        &mut VerifyObserver::new(None, VerifyScope::FullSweep, checkpoint.generation),
+    )
+}
+
+/// Sweep the invariants with a caller-owned recorder attached. Every finding
+/// receives one event at its ordinal in the returned list, carrying the
+/// finding class and the object, block or region it names; the completion
+/// event carries the finding count. The returned findings are those of
+/// `full_sweep` over the same state, in the same order.
+pub fn full_sweep_observed(
+    state: &CommittedState,
+    geo: &Geometry,
+    checkpoint: &Checkpoint,
+    recorder: &mut FlightRecorder,
+) -> Vec<String> {
+    let mut observer = VerifyObserver::new(
+        Some(recorder),
+        VerifyScope::FullSweep,
+        checkpoint.generation,
+    );
+    observer.begin();
+    let findings = full_sweep_inner(state, geo, checkpoint, &mut observer);
+    observer.complete(findings.len() as u64);
+    findings
+}
+
+fn full_sweep_inner(
+    state: &CommittedState,
+    geo: &Geometry,
+    checkpoint: &Checkpoint,
+    observer: &mut VerifyObserver<'_>,
+) -> Vec<String> {
     let mut findings = Vec::new();
 
     // Link counts: live references match, and nothing dangles unreferenced.
+    observer.phase(VerifyPhase::LinkCounts, 0);
     let mut ref_counts: BTreeMap<u64, u32> = BTreeMap::new();
     ref_counts.insert(OBJECT_ROOT, 1);
     if state.objects.contains_key(&OBJECT_ORPHAN_DIRECTORY) {
@@ -689,36 +941,61 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
                 "object {id} link count {} does not match {} reachable references",
                 record.link_count, expected
             ));
+            observer.finding(FindingKind::LinkCount, findings.len() - 1, 0, *id, 0);
         }
         if expected == 0 && *id != OBJECT_ROOT {
             findings.push(format!(
                 "object {id} remains in the object map with no directory reference"
             ));
+            observer.finding(
+                FindingKind::UnreferencedObject,
+                findings.len() - 1,
+                0,
+                *id,
+                0,
+            );
         }
     }
 
     // Quarantined runs: every block allocated, unreachable, and outside the
     // permanent allocation-root pool.
+    observer.phase(VerifyPhase::QuarantinedRuns, 0);
     for run in &state.reclaim_runs {
         for lba in run.start..run.start + run.blocks as u64 {
             if !state.bitmaps.is_allocated(lba) {
                 findings.push(format!("quarantined block {lba} is marked free"));
+                observer.finding(FindingKind::QuarantinedFree, findings.len() - 1, 0, 0, lba);
             }
             if state.metadata_blocks.contains(&lba)
                 || state.data_blocks.contains(&lba)
                 || state.snapshot_owned_blocks.contains(&lba)
             {
                 findings.push(format!("quarantined block {lba} is still reachable"));
+                observer.finding(
+                    FindingKind::QuarantinedReachable,
+                    findings.len() - 1,
+                    0,
+                    0,
+                    lba,
+                );
             }
             if state.allocation_pool_blocks.contains(&lba) {
                 findings.push(format!(
                     "quarantined block {lba} belongs to the permanent allocation-root pool"
                 ));
+                observer.finding(FindingKind::QuarantinedPool, findings.len() - 1, 0, 0, lba);
             }
             if state.log_area_blocks.contains(&lba) {
                 findings.push(format!(
                     "quarantined block {lba} belongs to the intent-log area"
                 ));
+                observer.finding(
+                    FindingKind::QuarantinedLogArea,
+                    findings.len() - 1,
+                    0,
+                    0,
+                    lba,
+                );
             }
         }
     }
@@ -727,6 +1004,7 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
     // Build the sparse expected set, verify every expected block directly,
     // then scan set bits byte-wise. This remains exhaustive without one loop
     // iteration per logical LBA on mostly-free multi-terabyte volumes.
+    observer.phase(VerifyPhase::BitmapAccounting, 0);
     let mut accounted = BTreeSet::new();
     for region in 0..geo.region_count() {
         let reserved = geo.region_reserved_blocks(region)
@@ -751,6 +1029,7 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
             findings.push(format!(
                 "block {lba} is marked FREE but reachable from this checkpoint"
             ));
+            observer.finding(FindingKind::ReachableFree, findings.len() - 1, 0, 0, *lba);
         }
     }
     for (region, pages) in state.bitmaps.pages.iter().enumerate() {
@@ -767,6 +1046,13 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
                             findings.push(format!(
                                 "block {lba} is allocated but owned by nothing (leak)"
                             ));
+                            observer.finding(
+                                FindingKind::Leak,
+                                findings.len() - 1,
+                                region as u32,
+                                0,
+                                lba,
+                            );
                         }
                     }
                     set_bits &= set_bits - 1;
@@ -777,6 +1063,7 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
 
     // Checkpoint free counts must match the pages (already enforced on load;
     // kept here as a cheap cross-check for states built by other writers).
+    observer.phase(VerifyPhase::FreeCounts, 0);
     let mut free_total = 0u64;
     for (r, record) in state.allocation_records.iter().enumerate() {
         let counted: u32 = state.bitmaps.pages[r]
@@ -788,12 +1075,26 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
                 "region {r} free count drift: bitmap {counted}, checkpoint {}",
                 record.free_blocks
             ));
+            observer.finding(
+                FindingKind::RegionFreeCount,
+                findings.len() - 1,
+                r as u32,
+                0,
+                0,
+            );
         }
         if record.descriptor_slot >= DESCRIPTOR_SLOTS {
             findings.push(format!(
                 "region {r} references invalid descriptor slot {}",
                 record.descriptor_slot
             ));
+            observer.finding(
+                FindingKind::DescriptorSlot,
+                findings.len() - 1,
+                r as u32,
+                0,
+                0,
+            );
         }
         free_total += record.free_blocks as u64;
     }
@@ -802,6 +1103,7 @@ pub fn full_sweep(state: &CommittedState, geo: &Geometry, checkpoint: &Checkpoin
             "checkpoint free total {} does not match allocation root {free_total}",
             checkpoint.free_blocks_total
         ));
+        observer.finding(FindingKind::FreeTotal, findings.len() - 1, 0, 0, 0);
     }
 
     findings

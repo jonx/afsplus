@@ -31,10 +31,14 @@ use afsplus_format::{
 
 use crate::allocation_root;
 use crate::directory;
+use crate::flight::{EventKind, FlightRecorder, FormatContext, FormatStage, LifecycleContext};
 use crate::intent_log;
 use crate::layout;
 use crate::object_map;
 use crate::CoreError;
+
+/// The checkpoint generation a formatter publishes.
+const FORMAT_GENERATION: u64 = 1;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum NamePolicy {
@@ -79,6 +83,22 @@ pub fn mkfs<D: BlockDevice>(dev: &mut D, params: &MkfsParams) -> Result<(), Core
     mkfs_with_options(dev, params, MkfsOptions::default())
 }
 
+/// Format a new image with a caller-owned recorder attached. The recorder
+/// observes formatter entry, both durability barriers, publication of the
+/// slot-A checkpoint and the stage of a failure. Observation adds no device
+/// I/O and changes no written byte: the same parameters give the same result
+/// and the same image as `mkfs_with_options`. Formatting keeps its
+/// non-atomic contract, so an interrupted observed format leaves the same
+/// partial device state as an interrupted unobserved one.
+pub fn mkfs_observed<D: BlockDevice>(
+    dev: &mut D,
+    params: &MkfsParams,
+    options: MkfsOptions,
+    recorder: &mut FlightRecorder,
+) -> Result<(), CoreError> {
+    mkfs_observed_impl(dev, params, options.persistent_snapshots, Some(recorder))
+}
+
 /// Format a new image with explicit options. This is not an in-place conversion.
 /// Snapshot ownership is checker-readable; writable mount qualification is
 /// separate and normal mount negotiation can still reject the feature.
@@ -87,13 +107,79 @@ pub fn mkfs_with_options<D: BlockDevice>(
     params: &MkfsParams,
     options: MkfsOptions,
 ) -> Result<(), CoreError> {
-    mkfs_impl(dev, params, options.persistent_snapshots)
+    mkfs_observed_impl(dev, params, options.persistent_snapshots, None)
+}
+
+/// Emit one formatter observation. Only an entry point supplied with a
+/// recorder observes anything; emission performs no I/O and no allocation.
+fn format_event(
+    recorder: Option<&mut FlightRecorder>,
+    kind: EventKind,
+    stage: FormatStage,
+    total_blocks: u64,
+    block: u64,
+) {
+    if let Some(recorder) = recorder {
+        recorder.lifecycle_event(
+            FORMAT_GENERATION,
+            kind,
+            false,
+            0,
+            LifecycleContext::Format(FormatContext {
+                stage,
+                total_blocks,
+                block,
+            }),
+        );
+    }
+}
+
+fn mkfs_observed_impl<D: BlockDevice>(
+    dev: &mut D,
+    params: &MkfsParams,
+    snapshots: bool,
+    mut recorder: Option<&mut FlightRecorder>,
+) -> Result<(), CoreError> {
+    let total_blocks = dev.total_blocks();
+    format_event(
+        recorder.as_deref_mut(),
+        EventKind::FormatBegin,
+        FormatStage::Validation,
+        total_blocks,
+        0,
+    );
+    let mut stage = FormatStage::Validation;
+    let result = mkfs_impl(
+        dev,
+        params,
+        snapshots,
+        recorder.as_deref_mut(),
+        &mut stage,
+        total_blocks,
+    );
+    if result.is_err() {
+        let block = match stage {
+            FormatStage::Publication | FormatStage::PublicationBarrier => layout::CKPT_SLOT_A,
+            _ => 0,
+        };
+        format_event(
+            recorder,
+            EventKind::FormatFailed,
+            stage,
+            total_blocks,
+            block,
+        );
+    }
+    result
 }
 
 fn mkfs_impl<D: BlockDevice>(
     dev: &mut D,
     params: &MkfsParams,
     snapshots: bool,
+    mut recorder: Option<&mut FlightRecorder>,
+    stage: &mut FormatStage,
+    total_blocks: u64,
 ) -> Result<(), CoreError> {
     if dev.block_size() != DEFAULT_BLOCK_SIZE {
         return Err(CoreError::UnsupportedGeometry(
@@ -110,7 +196,8 @@ fn mkfs_impl<D: BlockDevice>(
         return Err(CoreError::UnsupportedGeometry("volume too small"));
     }
     let block_size = geo.block_size;
-    let generation = 1u64;
+    let generation = FORMAT_GENERATION;
+    *stage = FormatStage::Metadata;
 
     // Initial COW metadata right after region 0's reserved head.
     let metadata_start = geo.region0_reserved_blocks();
@@ -331,8 +418,24 @@ fn mkfs_impl<D: BlockDevice>(
     dev.write_block(layout::CKPT_SLOT_B, &vec![0u8; block_size])?;
 
     // Barrier: all referenced state durable before the checkpoint can exist.
+    *stage = FormatStage::MetadataBarrier;
     dev.flush()?;
+    format_event(
+        recorder.as_deref_mut(),
+        EventKind::FormatMetadataDurable,
+        FormatStage::MetadataBarrier,
+        total_blocks,
+        0,
+    );
 
+    *stage = FormatStage::Publication;
+    format_event(
+        recorder.as_deref_mut(),
+        EventKind::FormatPublicationBegin,
+        FormatStage::Publication,
+        total_blocks,
+        layout::CKPT_SLOT_A,
+    );
     let checkpoint = Checkpoint {
         uuid: params.uuid,
         generation,
@@ -348,7 +451,15 @@ fn mkfs_impl<D: BlockDevice>(
         snapshot_roots,
     };
     dev.write_block(layout::CKPT_SLOT_A, &checkpoint.encode(block_size)?)?;
+    *stage = FormatStage::PublicationBarrier;
     dev.flush()?;
+    format_event(
+        recorder,
+        EventKind::FormatCheckpointDurable,
+        FormatStage::PublicationBarrier,
+        total_blocks,
+        layout::CKPT_SLOT_A,
+    );
 
     Ok(())
 }

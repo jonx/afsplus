@@ -583,6 +583,38 @@ impl<D: BlockDevice> Volume<D> {
         }
     }
 
+    /// Observe an intent-log mount step with values the volume already holds.
+    /// Only observed mounts install a recorder before these steps. No I/O.
+    pub(crate) fn flight_mount_event(
+        &self,
+        kind: crate::flight::EventKind,
+        count: u32,
+        damaged_tail: bool,
+        log_sequence: u32,
+        generation: u64,
+    ) {
+        if let Some(recorder) = &self.flight {
+            let context = crate::flight::MountContext {
+                mode: self.mount_mode,
+                stage: crate::flight::MountStage::IntentLog,
+                slot: self.current_slot as u8,
+                other_generation: self
+                    .other_checkpoint
+                    .as_ref()
+                    .map_or(0, |checkpoint| checkpoint.generation),
+                count,
+                damaged_tail,
+            };
+            recorder.borrow_mut().lifecycle_event(
+                generation,
+                kind,
+                self.window_poisoned,
+                log_sequence,
+                crate::flight::LifecycleContext::Mount(context),
+            );
+        }
+    }
+
     pub fn generation(&self) -> u64 {
         self.checkpoint.generation
     }
@@ -6380,6 +6412,14 @@ impl<D: BlockDevice> Volume<D> {
         if self.ident.log_slots == 0 {
             return Ok(0);
         }
+        let generation = self.checkpoint.generation;
+        self.flight_mount_event(
+            crate::flight::EventKind::MountIntentBegin,
+            u32::from(self.ident.log_slots),
+            false,
+            0,
+            generation,
+        );
         let geo = self.ident.geometry();
         let scanned = intent_log::scan(
             &mut self.dev,
@@ -6389,6 +6429,7 @@ impl<D: BlockDevice> Volume<D> {
             self.checkpoint.generation,
             self.ident.features.incompat & INCOMPAT_INTENT_LOG_DATA_UPDATES != 0,
         )?;
+        self.observe_scanned_intent_log(&scanned, generation);
         if scanned.records.is_empty() {
             self.pending_intent_records = 0;
             return Ok(0);
@@ -6438,10 +6479,19 @@ impl<D: BlockDevice> Volume<D> {
         let mut last_timestamp = Timespec::default();
         let replayed = records.len() as u32;
         for record in records {
+            let sequence = record.sequence;
+            let operations = record.ops.len() as u32;
             for op in record.ops {
                 last_timestamp = op.timestamp();
                 self.apply_log_op(&mut tx, &mut pending, &op, generation)?;
             }
+            self.flight_mount_event(
+                crate::flight::EventKind::MountIntentReplayed,
+                operations,
+                false,
+                sequence,
+                generation,
+            );
         }
         self.materialize_batch(
             tx,
@@ -6455,11 +6505,30 @@ impl<D: BlockDevice> Volume<D> {
         Ok(replayed)
     }
 
+    /// Report the scanned prefix and whether it ended at a damaged tail.
+    fn observe_scanned_intent_log(&self, scanned: &intent_log::ScannedLog, generation: u64) {
+        self.flight_mount_event(
+            crate::flight::EventKind::MountIntentScanned,
+            scanned.records.len() as u32,
+            scanned.tail_note.is_some(),
+            scanned.records.last().map_or(0, |record| record.sequence),
+            generation,
+        );
+    }
+
     pub(crate) fn inspect_intent_log(&mut self) -> Result<u32, CoreError> {
         if self.ident.log_slots == 0 {
             self.pending_intent_records = 0;
             return Ok(0);
         }
+        let generation = self.checkpoint.generation;
+        self.flight_mount_event(
+            crate::flight::EventKind::MountIntentBegin,
+            u32::from(self.ident.log_slots),
+            false,
+            0,
+            generation,
+        );
         let scanned = intent_log::scan(
             &mut self.dev,
             &self.ident.geometry(),
@@ -6468,6 +6537,7 @@ impl<D: BlockDevice> Volume<D> {
             self.checkpoint.generation,
             self.ident.features.incompat & INCOMPAT_INTENT_LOG_DATA_UPDATES != 0,
         )?;
+        self.observe_scanned_intent_log(&scanned, generation);
         self.pending_intent_records = scanned.records.len() as u32;
         Ok(self.pending_intent_records)
     }

@@ -54,6 +54,12 @@ pub enum Category {
     Allocator,
     Tree,
     Reclaim,
+    /// Observed mount: selection, intent-log inspection/replay and outcome.
+    Mount,
+    /// Observed formatter barriers and publication.
+    Format,
+    /// Observed standalone verification phases, findings and outcome.
+    Verify,
 }
 
 /// Runtime selection, independent of ring capacity and event identity.
@@ -62,7 +68,7 @@ pub struct Categories(u16);
 
 impl Categories {
     pub const NONE: Self = Self(0);
-    pub const ALL: Self = Self(1023);
+    pub const ALL: Self = Self(8191);
 
     pub const fn with(self, category: Category) -> Self {
         Self(self.0 | (1 << category as u8))
@@ -115,11 +121,62 @@ pub enum EventKind {
     ReclaimPlanned,
     ReclaimBuilt,
     ReclaimFailed,
+    /// Observed mount entry, before identification I/O.
+    MountBegin,
+    /// Structural checkpoint selection chose the event generation.
+    MountSelected,
+    /// Intent-log replay (writable modes) or inspection (read-only modes) begins.
+    MountIntentBegin,
+    /// The valid intent-log prefix was scanned; count is its record total.
+    MountIntentScanned,
+    /// One intent group's operations were applied to the recovery batch.
+    MountIntentReplayed,
+    /// The mounted volume is returned at the event generation.
+    MountComplete,
+    /// Mount refused or failed at the context stage; no volume is returned.
+    MountFailed,
+    /// Observed formatter entry, before validation and device I/O.
+    FormatBegin,
+    /// Metadata, identification and slot-B zeroing completed their barrier.
+    FormatMetadataDurable,
+    /// The slot-A checkpoint write begins.
+    FormatPublicationBegin,
+    /// The slot-A checkpoint barrier completed.
+    FormatCheckpointDurable,
+    /// Formatting failed at the context stage.
+    FormatFailed,
+    /// Observed verification of one checkpoint begins.
+    VerifyBegin,
+    /// A verification phase begins at its root block, when it has one.
+    VerifyPhase,
+    /// One full-sweep finding at its ordinal in the returned findings.
+    VerifyFinding,
+    /// Verification returned its result; full sweeps report their finding count.
+    VerifyComplete,
+    /// Verification returned an error at the context phase and location.
+    VerifyFailed,
 }
 
 impl EventKind {
     pub const fn category(self) -> Category {
         match self {
+            Self::MountBegin
+            | Self::MountSelected
+            | Self::MountIntentBegin
+            | Self::MountIntentScanned
+            | Self::MountIntentReplayed
+            | Self::MountComplete
+            | Self::MountFailed => Category::Mount,
+            Self::FormatBegin
+            | Self::FormatMetadataDurable
+            | Self::FormatPublicationBegin
+            | Self::FormatCheckpointDurable
+            | Self::FormatFailed => Category::Format,
+            Self::VerifyBegin
+            | Self::VerifyPhase
+            | Self::VerifyFinding
+            | Self::VerifyComplete
+            | Self::VerifyFailed => Category::Verify,
             Self::ReclaimBegin
             | Self::ReclaimPromoted
             | Self::ReclaimBlocked
@@ -314,6 +371,157 @@ pub struct ReclaimContext {
     pub blocks: u64,
 }
 
+/// Mount stage owning an observation. Append values; never renumber them.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountStage {
+    /// Device block size, identification read and decode.
+    Identification = 1,
+    /// Feature negotiation and the declared block count.
+    Negotiation = 2,
+    /// Checkpoint slot reads, structural decode and choice.
+    Selection = 3,
+    /// Feature/root congruence and bounded root loading.
+    RootState = 4,
+    /// Cache and snapshot work budgets.
+    Configuration = 5,
+    /// Intent-log scan, replay publication or inspection.
+    IntentLog = 6,
+}
+
+/// Values the mount path already holds. Selection fields are zero before
+/// `MountSelected`; later events describe the volume's selected slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MountContext {
+    pub mode: crate::mount::MountMode,
+    pub stage: MountStage,
+    /// Slot holding the event generation's checkpoint (0 = A, 1 = B).
+    pub slot: u8,
+    /// Generation of the other structurally valid checkpoint, or zero.
+    pub other_generation: u64,
+    /// Log slots at `MountIntentBegin`; valid prefix records at
+    /// `MountIntentScanned`; operations in the group at `MountIntentReplayed`;
+    /// replayed (writable modes) or pending (read-only modes) records at
+    /// `MountComplete`; zero elsewhere.
+    pub count: u32,
+    /// `MountIntentScanned` only: the prefix ended at a nonzero invalid record,
+    /// a sequence gap or unverifiable referenced data.
+    pub damaged_tail: bool,
+}
+
+/// Formatter stage owning an observation. Append values; never renumber them.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatStage {
+    /// Device geometry and parameter checks before the first write.
+    Validation = 1,
+    /// Metadata construction and writes through identification and slot-B zeroing.
+    Metadata = 2,
+    /// The barrier after metadata and identification writes.
+    MetadataBarrier = 3,
+    /// Checkpoint encoding and the slot-A write.
+    Publication = 4,
+    /// The final barrier after the slot-A write.
+    PublicationBarrier = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatContext {
+    pub stage: FormatStage,
+    /// Device block count read at formatter entry.
+    pub total_blocks: u64,
+    /// Slot-A address on publication events, zero on the others.
+    pub block: u64,
+}
+
+/// Verification entry owning an observation. Append values; never renumber them.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyScope {
+    /// Bounded roots loaded by `verify::load_mount_state_observed`.
+    MountState = 1,
+    /// Exhaustive decode by `verify::load_committed_state_observed`.
+    CommittedState = 2,
+    /// Invariant sweep by `verify::full_sweep_observed`.
+    FullSweep = 3,
+}
+
+/// Verification phase. Append values; never renumber them.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyPhase {
+    AllocationRoot = 1,
+    SharedExtents = 2,
+    ObjectMap = 3,
+    ObjectRecords = 4,
+    SharedMappings = 5,
+    Namespace = 6,
+    ReclaimQueue = 7,
+    AllocationBitmaps = 8,
+    IntentLogArea = 9,
+    Snapshots = 10,
+    RootObject = 11,
+    RootDirectory = 12,
+    LinkCounts = 13,
+    QuarantinedRuns = 14,
+    BitmapAccounting = 15,
+    FreeCounts = 16,
+}
+
+/// Full-sweep finding class. Append values; never renumber them.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingKind {
+    /// Object link count differs from reachable references (object).
+    LinkCount = 1,
+    /// Mapped object without a directory reference (object).
+    UnreferencedObject = 2,
+    /// Quarantined block marked free (block).
+    QuarantinedFree = 3,
+    /// Quarantined block reachable from the checkpoint (block).
+    QuarantinedReachable = 4,
+    /// Quarantined block inside the allocation-root pool (block).
+    QuarantinedPool = 5,
+    /// Quarantined block inside the intent-log area (block).
+    QuarantinedLogArea = 6,
+    /// Reachable, reserved or retained block marked free (block).
+    ReachableFree = 7,
+    /// Allocated block owned by nothing (block).
+    Leak = 8,
+    /// Region free count differs from its bitmap pages (region).
+    RegionFreeCount = 9,
+    /// Region record names an invalid descriptor slot (region).
+    DescriptorSlot = 10,
+    /// Checkpoint free total differs from the region records (no location).
+    FreeTotal = 11,
+}
+
+/// Values verification already holds. Location fields are zero when the
+/// phase or finding class has no such location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifyContext {
+    pub scope: VerifyScope,
+    /// Absent on `VerifyBegin` and `VerifyComplete`.
+    pub phase: Option<VerifyPhase>,
+    /// Present only on `VerifyFinding`.
+    pub finding: Option<FindingKind>,
+    pub region: u32,
+    /// Finding index on `VerifyFinding`, finding count on a full sweep's
+    /// `VerifyComplete`, zero elsewhere.
+    pub ordinal: u64,
+    pub object_id: u64,
+    pub block: u64,
+}
+
+/// Mutually exclusive payload of the mount, format and verify categories,
+/// stored in one field to bound the event layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleContext {
+    Mount(MountContext),
+    Format(FormatContext),
+    Verify(VerifyContext),
+}
+
 /// A transaction may outlive recorder replacement in a deferred window.
 /// Weak ownership prevents that transaction retaining a detached recorder.
 #[derive(Debug, Clone, Default)]
@@ -326,7 +534,16 @@ impl AllocationObserver {
         if let Some(recorder) = self.0.upgrade() {
             let mut recorder = recorder.borrow_mut();
             if recorder.subsystem_enabled {
-                recorder.emit_context(generation, kind, false, None, None, None, Some(context));
+                recorder.emit_context(
+                    generation,
+                    kind,
+                    false,
+                    None,
+                    None,
+                    None,
+                    Some(context),
+                    None,
+                );
             }
         }
     }
@@ -334,7 +551,16 @@ impl AllocationObserver {
         if let Some(recorder) = self.0.upgrade() {
             let mut recorder = recorder.borrow_mut();
             if recorder.subsystem_enabled {
-                recorder.emit_context(generation, kind, false, None, None, Some(context), None);
+                recorder.emit_context(
+                    generation,
+                    kind,
+                    false,
+                    None,
+                    None,
+                    Some(context),
+                    None,
+                    None,
+                );
             }
         }
     }
@@ -348,6 +574,7 @@ impl AllocationObserver {
                     false,
                     None,
                     Some(AllocationContext { start, blocks }),
+                    None,
                     None,
                     None,
                 );
@@ -380,6 +607,8 @@ pub struct Event {
     pub allocation: Option<AllocationContext>,
     pub tree: Option<TreeContext>,
     pub reclaim: Option<ReclaimContext>,
+    /// Present exactly on mount, format and verify events.
+    pub lifecycle: Option<LifecycleContext>,
 }
 
 /// Outcome of a nonblocking live-adapter delivery attempt.
@@ -717,12 +946,54 @@ impl FlightRecorder {
                 None,
                 None,
                 None,
+                None,
             );
         }
     }
 
     pub(crate) fn emit(&mut self, generation: u64, kind: EventKind, requires_remount: bool) {
-        self.emit_context(generation, kind, requires_remount, None, None, None, None);
+        self.emit_context(
+            generation,
+            kind,
+            requires_remount,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    /// Emit a mount, format or verify event with its explicit intent-group
+    /// sequence (zero when no group is represented). Entry points supplying a
+    /// recorder are the opt-in; identities, filtering and loss accounting follow
+    /// the common path. Emission performs no I/O and no allocation.
+    pub(crate) fn lifecycle_event(
+        &mut self,
+        generation: u64,
+        kind: EventKind,
+        requires_remount: bool,
+        log_sequence: u32,
+        context: LifecycleContext,
+    ) {
+        let previous = std::mem::replace(&mut self.window_log_sequence, log_sequence);
+        self.emit_context(
+            generation,
+            kind,
+            requires_remount,
+            None,
+            None,
+            None,
+            None,
+            Some(context),
+        );
+        self.window_log_sequence = previous;
+    }
+
+    /// Leave `remaining` assignable sequence identities for exhaustion tests.
+    #[cfg(test)]
+    pub(crate) fn leave_sequence_identities(&mut self, remaining: u64) {
+        self.sequence = u64::MAX - remaining;
     }
 
     // Keep the typed optional payloads explicit at each emission site.
@@ -736,6 +1007,7 @@ impl FlightRecorder {
         allocation: Option<AllocationContext>,
         tree: Option<TreeContext>,
         reclaim: Option<ReclaimContext>,
+        lifecycle: Option<LifecycleContext>,
     ) {
         if self.api_exhausted
             || self.window_exhausted
@@ -769,6 +1041,9 @@ impl FlightRecorder {
                     | Category::Allocator
                     | Category::Tree
                     | Category::Reclaim
+                    | Category::Mount
+                    | Category::Format
+                    | Category::Verify
             ) {
                 0
             } else {
@@ -784,6 +1059,7 @@ impl FlightRecorder {
             allocation,
             tree,
             reclaim,
+            lifecycle,
         };
         self.events.push_back(event);
         if let Some(sink) = &mut self.sink {
