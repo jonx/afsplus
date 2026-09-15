@@ -60,6 +60,10 @@ pub enum Category {
     Format,
     /// Observed standalone verification phases, findings and outcome.
     Verify,
+    /// Observed file data staged before the common commit tail.
+    Data,
+    /// Observed read-only tree descents over a live or captured view.
+    View,
 }
 
 /// Runtime selection, independent of ring capacity and event identity.
@@ -68,7 +72,7 @@ pub struct Categories(u16);
 
 impl Categories {
     pub const NONE: Self = Self(0);
-    pub const ALL: Self = Self(8191);
+    pub const ALL: Self = Self(32767);
 
     pub const fn with(self, category: Category) -> Self {
         Self(self.0 | (1 << category as u8))
@@ -155,11 +159,31 @@ pub enum EventKind {
     VerifyComplete,
     /// Verification returned an error at the context phase and location.
     VerifyFailed,
+    /// One object's file data is about to be written before the commit tail.
+    DataWriteBegin,
+    /// Every block of that logical range reached the device.
+    DataWriteComplete,
+    /// A write in that logical range failed; the range is partly written.
+    DataWriteFailed,
+    /// The barrier covering existing-file data written before a log record.
+    IntentDataDurable,
+    /// The barrier of an fsync whose group carries no record.
+    IntentEmptyFlush,
+    /// A read-only tree descent over a live or captured view begins.
+    ViewReadBegin,
+    /// That descent returned its result.
+    ViewReadComplete,
+    /// That descent failed; the view is unchanged.
+    ViewReadFailed,
 }
 
 impl EventKind {
     pub const fn category(self) -> Category {
         match self {
+            Self::DataWriteBegin | Self::DataWriteComplete | Self::DataWriteFailed => {
+                Category::Data
+            }
+            Self::ViewReadBegin | Self::ViewReadComplete | Self::ViewReadFailed => Category::View,
             Self::MountBegin
             | Self::MountSelected
             | Self::MountIntentBegin
@@ -195,7 +219,9 @@ impl EventKind {
             | Self::AllocationFailed => Category::Allocator,
             Self::ObjectLookup | Self::ObjectMapped | Self::ObjectMissing => Category::Object,
             Self::Begin | Self::Adopted => Category::Transaction,
-            Self::DataWritesComplete => Category::Io,
+            Self::DataWritesComplete | Self::IntentDataDurable | Self::IntentEmptyFlush => {
+                Category::Io
+            }
             Self::MetadataDurable | Self::PublicationBegin | Self::CheckpointDurable => {
                 Category::Checkpoint
             }
@@ -513,13 +539,69 @@ pub struct VerifyContext {
     pub block: u64,
 }
 
-/// Mutually exclusive payload of the mount, format and verify categories,
-/// stored in one field to bound the event layout.
+/// File data staged before the common commit tail. Append values; never
+/// renumber them.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataScope {
+    /// A window create writing its content through to claimed blocks.
+    CreateWriteThrough = 1,
+    /// An existing file's data written in place or to fresh blocks.
+    ExistingFileWrite = 2,
+    /// The partial tail block a truncate zeroes.
+    TruncateTailZero = 3,
+}
+
+/// One object's staged write: the logical range it covers and the physical
+/// run holding it. Values the filesystem already holds; observation adds no
+/// device I/O and no allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataContext {
+    pub scope: DataScope,
+    pub object_id: u64,
+    /// First logical byte the write covers.
+    pub offset: u64,
+    /// Bytes the write covers.
+    pub length: u64,
+    /// First block of the physical run, zero when the range holds no block.
+    pub start: u64,
+    /// Blocks in that run, saturating at `u32::MAX`.
+    pub blocks: u32,
+}
+
+/// Read-only descent path. Append values; never renumber them.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadPath {
+    /// One name resolved in one directory.
+    Lookup = 1,
+    /// A whole directory or one bounded directory page.
+    Enumeration = 2,
+    /// File data through its extent mapping or direct layout.
+    FileData = 3,
+}
+
+/// A read-only tree descent. View zero identifies the live committed view;
+/// nonzero is a persistent snapshot ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewReadContext {
+    pub path: ReadPath,
+    pub view_id: u64,
+    /// Object owning the tree being descended.
+    pub owner: u64,
+    /// Root block of that tree.
+    pub block: u64,
+}
+
+/// Mutually exclusive payload of the mount, format, verify, data and view
+/// categories, stored in one field to bound the event layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleContext {
     Mount(MountContext),
     Format(FormatContext),
     Verify(VerifyContext),
+    Data(DataContext),
+    View(ViewReadContext),
 }
 
 /// A transaction may outlive recorder replacement in a deferred window.
@@ -652,6 +734,8 @@ pub struct FlightRecorder {
     api_enabled: bool,
     object_enabled: bool,
     subsystem_enabled: bool,
+    data_enabled: bool,
+    view_enabled: bool,
     api_next: u64,
     api_context: ApiContext,
     api_exhausted: bool,
@@ -705,6 +789,8 @@ impl FlightRecorder {
             api_enabled: false,
             object_enabled: false,
             subsystem_enabled: false,
+            data_enabled: false,
+            view_enabled: false,
             api_next: 0,
             api_context: ApiContext::default(),
             api_exhausted: false,
@@ -930,6 +1016,77 @@ impl FlightRecorder {
         self.object_enabled = true;
     }
 
+    /// Observe file data staged before the common commit tail, including the
+    /// enclosing API identities. Observation adds no disk I/O.
+    pub fn enable_data_observation(&mut self) {
+        self.api_enabled = true;
+        self.data_enabled = true;
+    }
+
+    /// Observe read-only tree descents over live and captured views,
+    /// including the enclosing API identities. Observation adds no disk I/O.
+    pub fn enable_view_observation(&mut self) {
+        self.api_enabled = true;
+        self.view_enabled = true;
+    }
+
+    /// Staged-write events keep the ambient window identity and intent-group
+    /// sequence, because a window create writes inside its own group.
+    pub(crate) fn data_event(
+        &mut self,
+        generation: u64,
+        kind: EventKind,
+        requires_remount: bool,
+        context: DataContext,
+    ) {
+        if self.data_enabled {
+            self.emit_context(
+                generation,
+                kind,
+                requires_remount,
+                None,
+                None,
+                None,
+                None,
+                Some(LifecycleContext::Data(context)),
+            );
+        }
+    }
+
+    pub(crate) fn view_event(
+        &mut self,
+        generation: u64,
+        kind: EventKind,
+        requires_remount: bool,
+        context: ViewReadContext,
+    ) {
+        if self.view_enabled {
+            self.emit_context(
+                generation,
+                kind,
+                requires_remount,
+                None,
+                None,
+                None,
+                None,
+                Some(LifecycleContext::View(context)),
+            );
+        }
+    }
+
+    /// The two intent-group barriers owned by an fsync: the data barrier a
+    /// record's existing-file updates require, and an empty group's flush.
+    pub(crate) fn intent_io_event(
+        &mut self,
+        generation: u64,
+        kind: EventKind,
+        requires_remount: bool,
+    ) {
+        if self.data_enabled {
+            self.emit(generation, kind, requires_remount);
+        }
+    }
+
     pub(crate) fn object_event(
         &mut self,
         generation: u64,
@@ -1044,6 +1201,8 @@ impl FlightRecorder {
                     | Category::Mount
                     | Category::Format
                     | Category::Verify
+                    | Category::Data
+                    | Category::View
             ) {
                 0
             } else {
@@ -1470,6 +1629,30 @@ mod lifecycle_tests {
                     EventKind::VerifyFailed,
                 ],
             ),
+            (
+                Category::Data,
+                vec![
+                    EventKind::DataWriteBegin,
+                    EventKind::DataWriteComplete,
+                    EventKind::DataWriteFailed,
+                ],
+            ),
+            (
+                Category::View,
+                vec![
+                    EventKind::ViewReadBegin,
+                    EventKind::ViewReadComplete,
+                    EventKind::ViewReadFailed,
+                ],
+            ),
+            (
+                Category::Io,
+                vec![
+                    EventKind::DataWritesComplete,
+                    EventKind::IntentDataDurable,
+                    EventKind::IntentEmptyFlush,
+                ],
+            ),
         ] {
             let selected = Categories::NONE.with(category);
             for kind in kinds {
@@ -1477,7 +1660,14 @@ mod lifecycle_tests {
                 assert!(selected.contains(kind.category()));
                 assert!(Categories::ALL.contains(kind.category()));
                 assert!(!Categories::NONE.contains(kind.category()));
-                for other in [Category::Mount, Category::Format, Category::Verify] {
+                for other in [
+                    Category::Mount,
+                    Category::Format,
+                    Category::Verify,
+                    Category::Data,
+                    Category::View,
+                    Category::Io,
+                ] {
                     assert_eq!(
                         Categories::NONE.with(other).contains(kind.category()),
                         other == category
@@ -1533,6 +1723,72 @@ mod lifecycle_tests {
         assert_eq!((event.log_sequence, event.attempt), (0, 0));
         assert_eq!(event.lifecycle, Some(verify_context()));
         assert_eq!(ring.events.capacity(), allocated);
+    }
+
+    fn data_context() -> DataContext {
+        DataContext {
+            scope: DataScope::ExistingFileWrite,
+            object_id: 21,
+            offset: 4096,
+            length: 8192,
+            start: 900,
+            blocks: 2,
+        }
+    }
+
+    fn view_read_context() -> ViewReadContext {
+        ViewReadContext {
+            path: ReadPath::Enumeration,
+            view_id: 6,
+            owner: 2,
+            block: 77,
+        }
+    }
+
+    #[test]
+    fn staged_write_and_read_path_scopes_are_opt_in_and_lose_records_explicitly() {
+        let mut ring = FlightRecorder::new(NonZeroUsize::new(1).unwrap()).unwrap();
+        ring.data_event(3, EventKind::DataWriteBegin, false, data_context());
+        ring.view_event(3, EventKind::ViewReadBegin, false, view_read_context());
+        ring.intent_io_event(3, EventKind::IntentEmptyFlush, false);
+        assert_eq!(
+            (ring.sequence(), ring.events().len()),
+            (0, 0),
+            "disabled scopes preserve legacy sequences"
+        );
+        assert!(!ring.api_observation_enabled());
+
+        ring.enable_data_observation();
+        ring.enable_view_observation();
+        assert!(ring.api_observation_enabled());
+        ring.set_categories(Categories::NONE.with(Category::View));
+        ring.data_event(3, EventKind::DataWriteBegin, false, data_context());
+        ring.intent_io_event(3, EventKind::IntentDataDurable, false);
+        assert_eq!((ring.sequence(), ring.filtered()), (2, 2));
+        ring.view_event(3, EventKind::ViewReadBegin, false, view_read_context());
+        ring.view_event(3, EventKind::ViewReadComplete, true, view_read_context());
+        assert_eq!((ring.sequence(), ring.dropped()), (4, 1));
+        let event = *ring.events().next().unwrap();
+        assert_eq!(event.kind, EventKind::ViewReadComplete);
+        assert_eq!(
+            event.lifecycle,
+            Some(LifecycleContext::View(view_read_context()))
+        );
+        assert_eq!(event.attempt, 0);
+        assert!(event.requires_remount);
+
+        ring.set_categories(Categories::ALL);
+        ring.data_event(3, EventKind::DataWriteComplete, false, data_context());
+        let event = *ring.events().next().unwrap();
+        assert_eq!(
+            event.lifecycle,
+            Some(LifecycleContext::Data(data_context()))
+        );
+        ring.leave_sequence_identities(0);
+        ring.data_event(3, EventKind::DataWriteFailed, false, data_context());
+        ring.view_event(3, EventKind::ViewReadFailed, false, view_read_context());
+        assert_eq!(*ring.events().next().unwrap(), event);
+        assert_eq!(ring.dropped(), 4);
     }
 
     #[test]

@@ -2631,3 +2631,430 @@ fn observed_snapshot_mount_keeps_its_budgets_results_and_image() {
         assert_eq!(mount_context(last).mode, mode);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pre-tail data writes and read-only view descents.
+// ---------------------------------------------------------------------------
+
+fn data_context(event: &afsplus_core::flight::Event) -> afsplus_core::flight::DataContext {
+    match event.lifecycle {
+        Some(afsplus_core::flight::LifecycleContext::Data(context)) => context,
+        other => panic!("expected a data context, found {other:?}"),
+    }
+}
+
+fn view_context(event: &afsplus_core::flight::Event) -> afsplus_core::flight::ViewReadContext {
+    match event.lifecycle {
+        Some(afsplus_core::flight::LifecycleContext::View(context)) => context,
+        other => panic!("expected a view context, found {other:?}"),
+    }
+}
+
+/// Window create, existing-file write, truncate tail zeroing, an fsync group
+/// which needs the data barrier, and an fsync group with nothing to log.
+fn staged_write_workload<D: BlockDevice>(volume: &mut afsplus_core::Volume<D>) -> Vec<String> {
+    use afsplus_core::volume::BatchOp;
+    use afsplus_format::OBJECT_ROOT;
+    let now = Timespec::default();
+    let mut results = Vec::new();
+    let created = volume.window_op(
+        &BatchOp::CreateFile {
+            parent_id: OBJECT_ROOT,
+            name: "staged",
+            content: &[7u8; 9000],
+        },
+        now,
+    );
+    results.push(format!("{created:?}"));
+    // A refused create leaves the later calls to refuse identically.
+    let file = created.ok().flatten().unwrap_or(0);
+    results.push(format!("{:?}", volume.window_fsync()));
+    results.push(format!("{:?}", volume.window_commit(now)));
+    // Existing-file updates need a committed file, so they follow the create.
+    results.push(format!(
+        "{:?}",
+        volume.window_write_file_at(file, 100, &[9u8; 5000], now)
+    ));
+    results.push(format!(
+        "{:?}",
+        volume.window_truncate_file(file, 4500, now)
+    ));
+    results.push(format!("{:?}", volume.window_fsync()));
+    results.push(format!("{:?}", volume.window_fsync()));
+    results.push(format!("{:?}", volume.window_commit(now)));
+    let mut buffer = vec![0u8; 4500];
+    results.push(format!("{:?}", volume.read_file_at(file, 0, &mut buffer)));
+    results.push(format!("{:?}", &buffer[..200]));
+    results
+}
+
+#[test]
+fn staged_writes_name_each_object_range_and_run_without_changing_io() {
+    use afsplus_core::flight::{Category, DataScope};
+    use afsplus_core::{mount_with_options, MountOptions};
+    for pages in [2, 4, 8, usize::MAX] {
+        for failure in [None, Some(0), Some(2)] {
+            let base = window_image(false);
+            let options = MountOptions {
+                tree_cache_pages: NonZeroUsize::new(pages),
+                ..Default::default()
+            };
+            let plain_device = SharedDevice::failing(&base, failure, None);
+            let observed_device = SharedDevice::failing(&base, failure, None);
+            let plain_handle = plain_device.handle();
+            let observed_handle = observed_device.handle();
+            let mut plain = mount_with_options(plain_device, options).unwrap();
+            let mut observed = mount_with_options(observed_device, options).unwrap();
+            let mut ring = recorder(4096);
+            ring.enable_data_observation();
+            observed.replace_flight_recorder(Some(ring));
+            let expected = staged_write_workload(&mut plain);
+            let actual = staged_write_workload(&mut observed);
+            let ring = observed.replace_flight_recorder(None).unwrap();
+            let plan = format!("{pages} pages, write fault {failure:?}");
+            assert_eq!(actual, expected, "{plan}");
+            assert_eq!(observed_handle.trace(), plain_handle.trace(), "{plan}");
+            assert_eq!(observed_handle.blocks(), plain_handle.blocks(), "{plan}");
+            assert_eq!((ring.dropped(), ring.filtered()), (0, 0), "{plan}");
+
+            let staged: Vec<_> = ring
+                .events()
+                .filter(|event| event.kind.category() == Category::Data)
+                .copied()
+                .collect();
+            assert!(staged
+                .iter()
+                .all(|event| event.attempt == 0 && event.window != 0));
+            if failure.is_some() {
+                let failed = staged
+                    .iter()
+                    .find(|event| event.kind == EventKind::DataWriteFailed)
+                    .unwrap_or_else(|| panic!("{plan}: a staged write must report its failure"));
+                assert_eq!(data_context(failed).blocks, 1);
+                continue;
+            }
+            let scopes: Vec<_> = staged
+                .iter()
+                .map(|event| (event.kind, data_context(event).scope))
+                .collect();
+            assert_eq!(
+                scopes,
+                [
+                    (EventKind::DataWriteBegin, DataScope::CreateWriteThrough),
+                    (EventKind::DataWriteComplete, DataScope::CreateWriteThrough),
+                    (EventKind::DataWriteBegin, DataScope::ExistingFileWrite),
+                    (EventKind::DataWriteComplete, DataScope::ExistingFileWrite),
+                    (EventKind::DataWriteBegin, DataScope::TruncateTailZero),
+                    (EventKind::DataWriteComplete, DataScope::TruncateTailZero),
+                ],
+                "{plan}"
+            );
+            let created = data_context(&staged[0]);
+            assert_eq!((created.offset, created.length), (0, 9000));
+            assert_eq!(created.blocks, 3);
+            assert!(created.start != 0);
+            let written = data_context(&staged[2]);
+            assert_eq!((written.offset, written.length), (100, 5000));
+            assert_eq!(written.blocks, 2);
+            let written_run = data_context(&staged[3]);
+            assert_eq!(written_run.object_id, written.object_id);
+            assert_eq!(written_run.offset % 4096, 0);
+            let zeroed = data_context(&staged[4]);
+            assert_eq!((zeroed.blocks, zeroed.length), (1, 4096));
+            assert_eq!(zeroed.offset, 4096);
+
+            // The two fsync barriers own distinct I/O events.
+            let barriers: Vec<_> = ring
+                .events()
+                .filter(|event| {
+                    matches!(
+                        event.kind,
+                        EventKind::IntentDataDurable | EventKind::IntentEmptyFlush
+                    )
+                })
+                .map(|event| event.kind)
+                .collect();
+            assert_eq!(
+                barriers,
+                [EventKind::IntentDataDurable, EventKind::IntentEmptyFlush],
+                "{plan}"
+            );
+        }
+    }
+}
+
+#[test]
+fn staged_write_selection_and_small_rings_report_loss_without_changing_results() {
+    use afsplus_core::flight::{Categories, Category};
+    use afsplus_core::{mount_with_options, MountOptions};
+    let base = window_image(false);
+    let options = MountOptions::default();
+    let mut full = mount_with_options(base.clone(), options).unwrap();
+    let mut ring = recorder(4096);
+    ring.enable_data_observation();
+    full.replace_flight_recorder(Some(ring));
+    let expected = staged_write_workload(&mut full);
+    let ring = full.replace_flight_recorder(None).unwrap();
+    let total = ring.sequence();
+    let data_events = ring
+        .events()
+        .filter(|event| event.kind.category() == Category::Data)
+        .count();
+    assert!(data_events >= 6);
+
+    let mut volume = mount_with_options(base.clone(), options).unwrap();
+    let mut ring = recorder(1);
+    ring.enable_data_observation();
+    volume.replace_flight_recorder(Some(ring));
+    assert_eq!(staged_write_workload(&mut volume), expected);
+    let ring = volume.replace_flight_recorder(None).unwrap();
+    assert_eq!(ring.sequence(), total);
+    assert_eq!(ring.events().len(), 1);
+    assert_eq!(ring.dropped(), total - 1);
+
+    let mut volume = mount_with_options(base, options).unwrap();
+    let mut ring = recorder(4096);
+    ring.enable_data_observation();
+    ring.set_categories(Categories::NONE.with(Category::Data));
+    volume.replace_flight_recorder(Some(ring));
+    assert_eq!(staged_write_workload(&mut volume), expected);
+    let ring = volume.replace_flight_recorder(None).unwrap();
+    assert_eq!(ring.sequence(), total);
+    assert_eq!(ring.events().len(), data_events);
+    assert_eq!(ring.filtered(), total - data_events as u64);
+    assert_eq!(ring.dropped(), 0);
+}
+
+/// Lookup, enumeration, bounded paging and file reads over one view.
+fn read_workload<D: BlockDevice>(
+    volume: &mut afsplus_core::Volume<D>,
+    handle: Option<&afsplus_core::volume::SnapshotHandle>,
+    file: u64,
+) -> Vec<String> {
+    use afsplus_format::OBJECT_ROOT;
+    let mut results = Vec::new();
+    let mut buffer = vec![0u8; 64];
+    match handle {
+        None => {
+            results.push(format!("{:?}", volume.lookup_root("kept")));
+            results.push(format!(
+                "{:?}",
+                volume.lookup_in_directory(OBJECT_ROOT, "gone")
+            ));
+            results.push(format!("{:?}", volume.list_root()));
+            results.push(format!(
+                "{:?}",
+                volume.read_directory_page(OBJECT_ROOT, None, 1)
+            ));
+            results.push(format!("{:?}", volume.read_file_at(file, 0, &mut buffer)));
+            results.push(format!(
+                "{:?}",
+                volume.read_file_at(u64::MAX, 0, &mut buffer)
+            ));
+        }
+        Some(handle) => {
+            results.push(format!(
+                "{:?}",
+                volume.snapshot_lookup(handle, OBJECT_ROOT, "kept")
+            ));
+            results.push(format!(
+                "{:?}",
+                volume.snapshot_read_directory_page(handle, OBJECT_ROOT, None, 1)
+            ));
+            results.push(format!(
+                "{:?}",
+                volume.snapshot_read_file_at(handle, file, 0, &mut buffer)
+            ));
+            results.push(format!(
+                "{:?}",
+                volume.snapshot_read_file_at(handle, u64::MAX, 0, &mut buffer)
+            ));
+        }
+    }
+    results.push(format!("{:?}", &buffer[..8]));
+    results
+}
+
+#[test]
+fn read_paths_name_view_owner_and_root_without_changing_io() {
+    use afsplus_core::flight::{Category, ReadPath};
+    use afsplus_core::{mount_with_options, MountOptions};
+    for pages in [2, 4, 8, usize::MAX] {
+        let base = {
+            let mut volume = mount(image()).unwrap();
+            volume
+                .create_file_in_root("kept", b"view bytes", Timespec::default())
+                .unwrap();
+            volume.into_device()
+        };
+        let file = mount(base.clone())
+            .unwrap()
+            .lookup_root("kept")
+            .unwrap()
+            .unwrap();
+        let options = MountOptions {
+            tree_cache_pages: NonZeroUsize::new(pages),
+            ..Default::default()
+        };
+        let plain_device = SharedDevice::new(&base);
+        let observed_device = SharedDevice::new(&base);
+        let plain_handle = plain_device.handle();
+        let observed_handle = observed_device.handle();
+        let mut plain = mount_with_options(plain_device, options).unwrap();
+        let mut observed = mount_with_options(observed_device, options).unwrap();
+        let mut ring = recorder(4096);
+        ring.enable_view_observation();
+        observed.replace_flight_recorder(Some(ring));
+        let expected = read_workload(&mut plain, None, file);
+        let actual = read_workload(&mut observed, None, file);
+        let ring = observed.replace_flight_recorder(None).unwrap();
+        assert_eq!(actual, expected, "{pages} pages");
+        assert_eq!(
+            observed_handle.trace(),
+            plain_handle.trace(),
+            "{pages} pages"
+        );
+        assert_eq!(
+            observed_handle.blocks(),
+            plain_handle.blocks(),
+            "{pages} pages"
+        );
+        assert_eq!((ring.dropped(), ring.filtered()), (0, 0));
+
+        let reads: Vec<_> = ring
+            .events()
+            .filter(|event| event.kind.category() == Category::View)
+            .copied()
+            .collect();
+        assert!(reads.iter().all(|event| event.attempt == 0
+            && view_context(event).view_id == 0
+            && event.api.method.is_some()));
+        let paths: Vec<_> = reads
+            .iter()
+            .map(|event| (event.kind, view_context(event).path))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                (EventKind::ViewReadBegin, ReadPath::Lookup),
+                (EventKind::ViewReadComplete, ReadPath::Lookup),
+                (EventKind::ViewReadBegin, ReadPath::Lookup),
+                (EventKind::ViewReadComplete, ReadPath::Lookup),
+                (EventKind::ViewReadBegin, ReadPath::Enumeration),
+                (EventKind::ViewReadComplete, ReadPath::Enumeration),
+                (EventKind::ViewReadBegin, ReadPath::Enumeration),
+                (EventKind::ViewReadComplete, ReadPath::Enumeration),
+                (EventKind::ViewReadBegin, ReadPath::FileData),
+                (EventKind::ViewReadComplete, ReadPath::FileData),
+                (EventKind::ViewReadBegin, ReadPath::FileData),
+                (EventKind::ViewReadFailed, ReadPath::FileData),
+            ],
+            "{pages} pages"
+        );
+        assert!(
+            reads[..8].iter().all(
+                |event| view_context(event).owner == afsplus_format::OBJECT_ROOT
+                    && view_context(event).block != 0
+            ),
+            "directory descents name the root directory and its tree root"
+        );
+        assert_eq!(view_context(&reads[8]).owner, file);
+        assert_eq!(
+            view_context(&reads[8]).block,
+            0,
+            "file data resolves its own root"
+        );
+        // Every read-path event sits inside the API span of its own call.
+        let spans: std::collections::BTreeSet<_> =
+            reads.iter().map(|event| event.api.span).collect();
+        assert_eq!(spans.len(), 6);
+    }
+}
+
+#[test]
+fn captured_view_reads_carry_their_snapshot_identity() {
+    use afsplus_core::flight::{Category, ReadPath};
+    use afsplus_core::mount_with_snapshot_limits;
+    use afsplus_core::volume::SnapshotWorkLimits;
+    use afsplus_core::{MkfsOptions, MountOptions};
+    let limits = SnapshotWorkLimits {
+        max_edit_records: 4096,
+        max_views: 8,
+        reclaim_records: 8,
+    };
+    for pages in [2, 4, 8, usize::MAX] {
+        let mut base = MemoryBackend::new(4096, 2048);
+        afsplus_core::mkfs_with_options(
+            &mut base,
+            &MkfsParams {
+                uuid: [0x5c; 16],
+                label: "captured reads".into(),
+                region_size: 2048,
+                reclaim_caps: Default::default(),
+                log_slots: 0,
+                shared_extents: true,
+                data_policy: true,
+                name_policy: NamePolicy::Sensitive,
+                timestamp: Timespec::default(),
+            },
+            MkfsOptions {
+                persistent_snapshots: true,
+            },
+        )
+        .unwrap();
+        let options = MountOptions {
+            tree_cache_pages: NonZeroUsize::new(pages),
+            ..Default::default()
+        };
+        let mut results = Vec::new();
+        let mut traces = Vec::new();
+        for observed in [false, true] {
+            let device = SharedDevice::new(&base);
+            let handle_device = device.handle();
+            let mut volume = mount_with_snapshot_limits(device, options, limits).unwrap();
+            let file = volume
+                .create_file_in_root("kept", b"captured bytes", Timespec::default())
+                .unwrap();
+            let id = volume.snapshot_create(Timespec::default()).unwrap();
+            let snapshot = volume.snapshot_open(id).unwrap();
+            if observed {
+                let mut ring = recorder(4096);
+                ring.enable_view_observation();
+                volume.replace_flight_recorder(Some(ring));
+            }
+            results.push(read_workload(&mut volume, Some(&snapshot), file));
+            if observed {
+                let ring = volume.replace_flight_recorder(None).unwrap();
+                let reads: Vec<_> = ring
+                    .events()
+                    .filter(|event| event.kind.category() == Category::View)
+                    .copied()
+                    .collect();
+                assert!(reads.iter().all(|event| view_context(event).view_id == id));
+                assert_eq!(
+                    reads
+                        .iter()
+                        .map(|event| (event.kind, view_context(event).path))
+                        .collect::<Vec<_>>(),
+                    [
+                        (EventKind::ViewReadBegin, ReadPath::Lookup),
+                        (EventKind::ViewReadComplete, ReadPath::Lookup),
+                        (EventKind::ViewReadBegin, ReadPath::Enumeration),
+                        (EventKind::ViewReadComplete, ReadPath::Enumeration),
+                        (EventKind::ViewReadBegin, ReadPath::FileData),
+                        (EventKind::ViewReadComplete, ReadPath::FileData),
+                        (EventKind::ViewReadBegin, ReadPath::FileData),
+                        (EventKind::ViewReadFailed, ReadPath::FileData),
+                    ],
+                    "{pages} pages"
+                );
+                assert_eq!(view_context(&reads[4]).owner, file);
+            }
+            drop(volume);
+            traces.push((handle_device.trace(), handle_device.blocks()));
+        }
+        assert_eq!(results[0], results[1], "{pages} pages");
+        assert_eq!(traces[0].0, traces[1].0, "{pages} pages");
+        assert_eq!(traces[0].1, traces[1].1, "{pages} pages");
+    }
+}

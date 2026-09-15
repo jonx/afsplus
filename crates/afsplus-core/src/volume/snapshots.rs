@@ -500,6 +500,32 @@ impl<D: BlockDevice> Volume<D> {
         offset: u64,
         destination: &mut [u8],
     ) -> Result<usize, CoreError> {
+        let context = crate::flight::ViewReadContext {
+            path: crate::flight::ReadPath::FileData,
+            view_id: handle.info.id,
+            owner: object_id,
+            block: 0,
+        };
+        self.flight_view_event(crate::flight::EventKind::ViewReadBegin, context);
+        let result = self.snapshot_read_file_at_mapped(handle, object_id, offset, destination);
+        self.flight_view_event(
+            if result.is_ok() {
+                crate::flight::EventKind::ViewReadComplete
+            } else {
+                crate::flight::EventKind::ViewReadFailed
+            },
+            context,
+        );
+        result
+    }
+
+    fn snapshot_read_file_at_mapped(
+        &mut self,
+        handle: &SnapshotHandle,
+        object_id: u64,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> Result<usize, CoreError> {
         let view = self.snapshot_view(handle)?;
         snapshot::view::read_at(
             &mut self.dev,
@@ -556,16 +582,25 @@ impl<D: BlockDevice> Volume<D> {
             return Err(CoreError::NotDirectory);
         }
         let key = self.comparison_key(name.as_bytes())?;
-        Ok(directory::lookup_entry(
-            &mut self.dev,
-            &self.ident.geometry(),
-            record.data_root,
+        let root = record.data_root;
+        let entry = self.flight_view_scope(
+            crate::flight::ReadPath::Lookup,
+            handle.info.id,
             directory_id,
-            view.generation,
-            &self.ident,
-            &key,
-        )?
-        .map(|entry| entry.child_id))
+            root,
+            |volume| {
+                directory::lookup_entry(
+                    &mut volume.dev,
+                    &volume.ident.geometry(),
+                    root,
+                    directory_id,
+                    view.generation,
+                    &volume.ident,
+                    &key,
+                )
+            },
+        )?;
+        Ok(entry.map(|entry| entry.child_id))
     }
     pub fn snapshot_read_directory_page(
         &mut self,
@@ -627,14 +662,23 @@ impl<D: BlockDevice> Volume<D> {
         if record.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
-        let (entries, total) = directory::read_page(
-            &mut self.dev,
-            &self.ident.geometry(),
-            record.data_root,
-            directory::spec(directory_id, view.generation),
-            &self.ident,
-            cursor.ordinal,
-            limit,
+        let root = record.data_root;
+        let (entries, total) = self.flight_view_scope(
+            crate::flight::ReadPath::Enumeration,
+            handle.info.id,
+            directory_id,
+            root,
+            |volume| {
+                directory::read_page(
+                    &mut volume.dev,
+                    &volume.ident.geometry(),
+                    root,
+                    directory::spec(directory_id, view.generation),
+                    &volume.ident,
+                    cursor.ordinal,
+                    limit,
+                )
+            },
         )?;
         cursor.ordinal = cursor
             .ordinal

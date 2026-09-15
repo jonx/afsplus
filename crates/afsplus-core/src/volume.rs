@@ -615,6 +615,73 @@ impl<D: BlockDevice> Volume<D> {
         }
     }
 
+    /// Observe one staged data write with values the caller already holds.
+    /// Only a recorder with data observation enabled records anything. No I/O.
+    pub(crate) fn flight_data_event(
+        &self,
+        kind: crate::flight::EventKind,
+        context: crate::flight::DataContext,
+        generation: u64,
+    ) {
+        if let Some(recorder) = &self.flight {
+            recorder
+                .borrow_mut()
+                .data_event(generation, kind, self.window_poisoned, context);
+        }
+    }
+
+    fn flight_intent_io_event(&self, kind: crate::flight::EventKind, generation: u64) {
+        if let Some(recorder) = &self.flight {
+            recorder
+                .borrow_mut()
+                .intent_io_event(generation, kind, self.window_poisoned);
+        }
+    }
+
+    /// Observe one read-only descent over a live or captured view.
+    pub(crate) fn flight_view_event(
+        &self,
+        kind: crate::flight::EventKind,
+        context: crate::flight::ViewReadContext,
+    ) {
+        if let Some(recorder) = &self.flight {
+            recorder.borrow_mut().view_event(
+                self.checkpoint.generation,
+                kind,
+                self.window_poisoned,
+                context,
+            );
+        }
+    }
+
+    /// Observe one read-only descent from its begin event to its outcome.
+    fn flight_view_scope<T>(
+        &mut self,
+        path: crate::flight::ReadPath,
+        view_id: u64,
+        owner: u64,
+        block: u64,
+        body: impl FnOnce(&mut Self) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        let context = crate::flight::ViewReadContext {
+            path,
+            view_id,
+            owner,
+            block,
+        };
+        self.flight_view_event(crate::flight::EventKind::ViewReadBegin, context);
+        let result = body(self);
+        self.flight_view_event(
+            if result.is_ok() {
+                crate::flight::EventKind::ViewReadComplete
+            } else {
+                crate::flight::EventKind::ViewReadFailed
+            },
+            context,
+        );
+        result
+    }
+
     pub fn generation(&self) -> u64 {
         self.checkpoint.generation
     }
@@ -932,16 +999,25 @@ impl<D: BlockDevice> Volume<D> {
             return Err(CoreError::NotDirectory);
         }
         let key = self.comparison_key(name.as_bytes())?;
-        Ok(directory::lookup_entry(
-            &mut self.dev,
-            &self.ident.geometry(),
-            directory_record.data_root,
+        let root = directory_record.data_root;
+        let entry = self.flight_view_scope(
+            crate::flight::ReadPath::Lookup,
+            0,
             directory_id,
-            self.checkpoint.generation,
-            &self.ident,
-            &key,
-        )?
-        .map(|entry| entry.child_id))
+            root,
+            |volume| {
+                directory::lookup_entry(
+                    &mut volume.dev,
+                    &volume.ident.geometry(),
+                    root,
+                    directory_id,
+                    volume.checkpoint.generation,
+                    &volume.ident,
+                    &key,
+                )
+            },
+        )?;
+        Ok(entry.map(|entry| entry.child_id))
     }
 
     /// Lists the root directory as (original name, object ID) pairs.
@@ -971,18 +1047,28 @@ impl<D: BlockDevice> Volume<D> {
         if directory_record.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
-        Ok(directory::load_all(
-            &mut self.dev,
-            &self.ident.geometry(),
-            directory_record.data_root,
-            directory_id,
-            self.checkpoint.generation,
-            &self.ident,
-        )?
-        .entries
-        .iter()
-        .map(|e| (String::from_utf8_lossy(&e.name).into_owned(), e.child_id))
-        .collect())
+        let root = directory_record.data_root;
+        Ok(self
+            .flight_view_scope(
+                crate::flight::ReadPath::Enumeration,
+                0,
+                directory_id,
+                root,
+                |volume| {
+                    directory::load_all(
+                        &mut volume.dev,
+                        &volume.ident.geometry(),
+                        root,
+                        directory_id,
+                        volume.checkpoint.generation,
+                        &volume.ident,
+                    )
+                },
+            )?
+            .entries
+            .iter()
+            .map(|e| (String::from_utf8_lossy(&e.name).into_owned(), e.child_id))
+            .collect())
     }
 
     /// Reads a bounded directory page. Cursors bind to the mounted checkpoint
@@ -1021,14 +1107,23 @@ impl<D: BlockDevice> Volume<D> {
         if record.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
-        let (entries, total) = directory::read_page(
-            &mut self.dev,
-            &self.ident.geometry(),
-            record.data_root,
-            directory::spec(directory_id, self.checkpoint.generation),
-            &self.ident,
-            cursor.ordinal,
-            max_entries,
+        let root = record.data_root;
+        let (entries, total) = self.flight_view_scope(
+            crate::flight::ReadPath::Enumeration,
+            0,
+            directory_id,
+            root,
+            |volume| {
+                directory::read_page(
+                    &mut volume.dev,
+                    &volume.ident.geometry(),
+                    root,
+                    directory::spec(directory_id, volume.checkpoint.generation),
+                    &volume.ident,
+                    cursor.ordinal,
+                    max_entries,
+                )
+            },
         )?;
         let next_ordinal = cursor
             .ordinal
@@ -1239,6 +1334,33 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     fn read_file_at_untraced(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> Result<usize, CoreError> {
+        // The mapping descent resolves its own root, so the read-path event
+        // names the object and leaves the tree root block zero.
+        let context = crate::flight::ViewReadContext {
+            path: crate::flight::ReadPath::FileData,
+            view_id: 0,
+            owner: object_id,
+            block: 0,
+        };
+        self.flight_view_event(crate::flight::EventKind::ViewReadBegin, context);
+        let result = self.read_file_at_mapped(object_id, offset, destination);
+        self.flight_view_event(
+            if result.is_ok() {
+                crate::flight::EventKind::ViewReadComplete
+            } else {
+                crate::flight::EventKind::ViewReadFailed
+            },
+            context,
+        );
+        result
+    }
+
+    fn read_file_at_mapped(
         &mut self,
         object_id: u64,
         offset: u64,
@@ -5241,13 +5363,42 @@ impl<D: BlockDevice> Volume<D> {
                 let data_start = if data_block_count > 0 {
                     let start = tx.allocate_run(&mut self.dev, data_block_count)?;
                     if pending.write_through {
+                        let staged = crate::flight::DataContext {
+                            scope: crate::flight::DataScope::CreateWriteThrough,
+                            object_id,
+                            offset: 0,
+                            length: content.len() as u64,
+                            start,
+                            blocks: u32::try_from(data_block_count).unwrap_or(u32::MAX),
+                        };
+                        self.flight_data_event(
+                            crate::flight::EventKind::DataWriteBegin,
+                            staged,
+                            generation,
+                        );
                         for i in 0..data_block_count as usize {
                             let mut block = vec![0u8; block_size];
                             let from = i * block_size;
                             let to = content.len().min(from + block_size);
                             block[..to - from].copy_from_slice(&content[from..to]);
-                            self.dev.write_block(start + i as u64, &block)?;
+                            if let Err(error) = self.dev.write_block(start + i as u64, &block) {
+                                self.flight_data_event(
+                                    crate::flight::EventKind::DataWriteFailed,
+                                    crate::flight::DataContext {
+                                        start: start + i as u64,
+                                        blocks: 1,
+                                        ..staged
+                                    },
+                                    generation,
+                                );
+                                return Err(error.into());
+                            }
                         }
+                        self.flight_data_event(
+                            crate::flight::EventKind::DataWriteComplete,
+                            staged,
+                            generation,
+                        );
                         pending.prewritten_data_blocks = pending
                             .prewritten_data_blocks
                             .checked_add(data_block_count)
@@ -5947,15 +6098,56 @@ impl<D: BlockDevice> Volume<D> {
                 block_count,
                 0,
             )?;
+            let staged = crate::flight::DataContext {
+                scope: crate::flight::DataScope::ExistingFileWrite,
+                object_id,
+                offset,
+                length: content_len,
+                start: additions.first().map_or(0, |extent| extent.physical_start),
+                blocks: u32::try_from(block_count).unwrap_or(u32::MAX),
+            };
+            self.flight_data_event(
+                crate::flight::EventKind::DataWriteBegin,
+                staged,
+                window.generation,
+            );
             let mut block_iter = blocks.iter();
+            let mut logical_block = first_block;
             for extent in &additions {
                 for physical_offset in 0..extent.block_count {
                     let block = block_iter.next().ok_or_else(|| {
                         CoreError::Corrupt("logged write block count mismatch".into())
                     })?;
-                    self.dev
-                        .write_block(extent.physical_start + physical_offset, block)?;
+                    if let Err(error) = self
+                        .dev
+                        .write_block(extent.physical_start + physical_offset, block)
+                    {
+                        self.flight_data_event(
+                            crate::flight::EventKind::DataWriteFailed,
+                            crate::flight::DataContext {
+                                offset: (logical_block + physical_offset) * block_size,
+                                length: block_size,
+                                start: extent.physical_start + physical_offset,
+                                blocks: 1,
+                                ..staged
+                            },
+                            window.generation,
+                        );
+                        return Err(error.into());
+                    }
                 }
+                self.flight_data_event(
+                    crate::flight::EventKind::DataWriteComplete,
+                    crate::flight::DataContext {
+                        offset: logical_block * block_size,
+                        length: extent.block_count * block_size,
+                        start: extent.physical_start,
+                        blocks: u32::try_from(extent.block_count).unwrap_or(u32::MAX),
+                        ..staged
+                    },
+                    window.generation,
+                );
+                logical_block += extent.block_count;
             }
             if block_iter.next().is_some() {
                 return Err(CoreError::Corrupt(
@@ -6094,7 +6286,32 @@ impl<D: BlockDevice> Volume<D> {
                     self.read_layout_block(&current_extents, logical_block, &mut block)?;
                     block[(new_size % block_size) as usize..].fill(0);
                     let physical_start = window.tx.allocate(&mut self.dev)?;
-                    self.dev.write_block(physical_start, &block)?;
+                    let zeroed = crate::flight::DataContext {
+                        scope: crate::flight::DataScope::TruncateTailZero,
+                        object_id,
+                        offset: logical_block * block_size,
+                        length: block_size,
+                        start: physical_start,
+                        blocks: 1,
+                    };
+                    self.flight_data_event(
+                        crate::flight::EventKind::DataWriteBegin,
+                        zeroed,
+                        window.generation,
+                    );
+                    if let Err(error) = self.dev.write_block(physical_start, &block) {
+                        self.flight_data_event(
+                            crate::flight::EventKind::DataWriteFailed,
+                            zeroed,
+                            window.generation,
+                        );
+                        return Err(error.into());
+                    }
+                    self.flight_data_event(
+                        crate::flight::EventKind::DataWriteComplete,
+                        zeroed,
+                        window.generation,
+                    );
                     window.pending.prewritten_data_blocks = window
                         .pending
                         .prewritten_data_blocks
@@ -6276,6 +6493,7 @@ impl<D: BlockDevice> Volume<D> {
         let generation = window.generation;
         if window.unlogged.is_empty() {
             self.dev.flush()?;
+            self.flight_intent_io_event(crate::flight::EventKind::IntentEmptyFlush, generation);
             return Ok(());
         }
         if window.unlogged.len() > MAX_LOG_OPS {
@@ -6292,6 +6510,14 @@ impl<D: BlockDevice> Volume<D> {
                 self.window_poisoned = true;
                 self.flight_window_event(generation, crate::flight::EventKind::WindowFailed, None);
                 return Err(error.into());
+            }
+            // Field-level borrows only: the open window stays borrowed here.
+            if let Some(recorder) = &self.flight {
+                recorder.borrow_mut().intent_io_event(
+                    generation,
+                    crate::flight::EventKind::IntentDataDurable,
+                    self.window_poisoned,
+                );
             }
         }
         let geo = self.ident.geometry();
