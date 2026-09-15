@@ -11,6 +11,7 @@
 - [Portable C corpus contract](#portable-c-corpus-contract)
 - [Seeded semantic properties](#seeded-semantic-properties)
 - [Legacy one-block reader oracles](#legacy-one-block-reader-oracles)
+- [Typed caller and Unicode properties](#typed-caller-and-unicode-properties)
 
 <!-- /toc -->
 
@@ -31,17 +32,17 @@ replayable without the original workstation.
 
 ## Target matrix
 
-| Wire surface | Rust codec target | Portable C path corpus | Remaining work |
+| Wire surface | Rust codec and caller coverage | Portable C path corpus | Remaining scope |
 |---|---|---|---|
 | Identification and retained checkpoints | Legacy and snapshot-bearing checkpoint targets plus raw and resealed mutations | Probe seed, header/block mutations | Add frozen reserved-field decisions |
-| Object record and object-map node | File-object, payload-aware metadata, inline-symlink and generic tree-node targets | Root lookup plus multi-leaf paths | Add every object type and optional root |
-| Directory node | Generic tree-node structural target | First/last ordinal in a 303-entry tree | Add complete Unicode comparison-key tables |
-| Extent node and file data | Generic tree-node structural target | Directory-to-file read seed; direct/sparse synthetic coverage remains in conformance | Add committed tree-backed file seed |
+| Object record and object-map node | File/directory/inline-symlink targets, empty/direct/tree-backed/in-place file variants, typed object-map payloads | Root lookup plus multi-leaf paths | Future object extensions and generic header policy ([Q13](../implementation/open-questions.md)) |
+| Directory node | Generic tree-node target, typed payload admission and Unicode 16 comparison-key corpus | First/last ordinal in a 303-entry tree | Native/C Unicode interoperability and format freeze |
+| Extent node and file data | Generic tree target, typed extent range/overflow checks, mounted sparse/shared-file byte oracles | Directory-to-file read seed; direct/sparse synthetic coverage remains in conformance | Portable C committed tree-backed file seed under reader conformance |
 | Allocation-region metadata | Bitmap-page and region-descriptor targets, including a partial final page | None | Add portable repair-walker corpus |
-| Intent-log record and referenced data | One v3 seed containing all five operation types | Rust-built v3 write/truncate/create prefix scan plus final namespace lookup | Add multi-record sequence target |
-| Snapshot registry, captured record, lifetime ledger and keys | Five direct headerless value/key targets with independent admission oracles | None | Add enclosing tree ownership and cross-record semantic properties |
+| Intent-log record and referenced data | All five v3 operation types; three-record prefix, binding, sequence, data reuse/range/CRC and exact read-termination controls | Rust-built v3 write/truncate/create prefix scan plus final namespace lookup | Broader native recovery qualification |
+| Snapshot registry, captured record, lifetime ledger and keys | Five direct targets; typed-tree ownership, ledger model and resealed cross-record snapshot checks | None | Portable C snapshot qualification |
 | Legacy single-block directory, object map and retired list | Three direct targets with independent payload admission and decoded fields | None | Keep volume ownership and negotiated header/extension policy separate |
-| Reclaim queue root, segment and table | Three direct block targets with independent payload predicates | None | Add caller queue/geometry and cross-block consistency properties |
+| Reclaim queue root, segment and table | Three direct targets; resealed cross-block count, generation, geometry, cursor and pending-total checks | None | Portable C reclaim qualification |
 | Xattr record | None | None | Add when the portable reader exposes xattrs |
 | Catalog record | None | None | Add with catalog implementation |
 | Change-stream record | None | None | Add with change-stream implementation |
@@ -257,3 +258,52 @@ legacy admission contract rather than applying current typed-tree Unicode-key
 rules. Volume geometry, referenced ownership and generic header/tail decisions
 are separate checks. Stable IDs 19–21 append fingerprints without changing
 IDs 1–18; saved case-47 inputs for all three readers are replayed by the gate.
+
+
+## Typed caller and Unicode properties
+
+The [intent scanner](../crates/afsplus-check/tests/intent_scan_properties.rs)
+uses three independently specified records. A valid stream is a positive control;
+mutating only its middle binding, sequence, physical extent or content CRC must
+retain exactly the first record and the expected presence or absence of a
+diagnostic; this fixture does not assert the complete diagnostic text.
+The exact device-read sequence proves that rejected data and later slots are not
+read. Existing recovery matrices separately exercise publication and restart.
+
+The [reclaim caller](../crates/afsplus-check/tests/reclaim_admission_properties.rs)
+uses a root/table/segment chain whose blocks all decode individually. Ten malformed
+relations test future generations, reference counts, region/device boundaries,
+pending totals and a loaded cursor. The caller must reject the expected reason
+within three reads and without writes; a valid chain preserves exact runs and
+structure identities. These are exhaustive-checker properties, not permission to
+walk the whole queue during normal mount.
+
+The [typed mapping tests](../crates/afsplus-check/tests/typed_mapping_properties.rs)
+put literal object, allocation and extent payloads into structurally valid tree
+leaves. Widths, reserved bytes, descriptor slots/generations, physical bounds,
+logical/physical overflow and zero-length extents reach the typed caller. Positive
+controls check decoded fields; rejection uses one read without writes. The
+[generic tree properties](../crates/afsplus-check/tests/tree_reader_properties.rs)
+separately exercise ownership, generation, ordering, traversal bounds and cycles.
+
+The [directory properties](../crates/afsplus-check/tests/directory_name_properties.rs)
+combine literal spelling/key vectors, typed malformed payloads and mounted
+collision/refusal/remount checks at 2/4/8/unlimited cache profiles. The bundled
+[Unicode sources](../crates/afsplus-check/tests/data/unicode-16.0.0/sources.json)
+pin the official Unicode 16.0.0 NormalizationTest and CaseFolding files by URL and
+SHA-256, with their license. Tests run offline. All 19,965 normalization rows
+exercise the five NFC identities through the public name API; names containing
+NUL or slash must instead produce the filesystem's documented name refusal.
+Every other scalar name (1,112,062 values) checks NFC against the corpus's
+single-character inventory and the identity rule for omitted characters.
+Full/default case folding uses the official C/F mappings, including identity
+for absent mappings and exclusion of Turkic-only mappings. Its expected output
+is normalized by the separately corpus-qualified NFC path; it does not use the
+production folding dependency to construct expected folds.
+
+These finite fixtures are deterministic source-controlled reproductions. A
+failure names the mutation, corpus line or scalar; the vendored bytes and source
+identity preserve the input without a network fetch or random generator. They
+complement the codec mutation artifacts and semantic replay bundles, rather than
+claiming all possible Unicode strings, proposed per-directory overrides,
+native/C interoperability or epoch-1 format freeze.

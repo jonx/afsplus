@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Complete typed caller and Unicode admission fixtures](#2026-09-15--complete-typed-caller-and-unicode-admission-fixtures)
 - [2026-09-15 — Integrate subsystem observations and caller-property tests](#2026-09-15--integrate-subsystem-observations-and-caller-property-tests)
 - [2026-09-15 — Identify allocator recorder ownership prerequisite](#2026-09-15--identify-allocator-recorder-ownership-prerequisite)
 - [2026-09-15 — Qualify legacy one-block codec mutation targets](#2026-09-15--qualify-legacy-one-block-codec-mutation-targets)
@@ -162,6 +163,35 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Complete typed caller and Unicode admission fixtures
+
+Added deterministic caller tests for middle-record intent termination, resealed
+reclaim cross-block relations, typed object/allocation/extent payload admission
+and spelling-preserving directory reads. The direct fixtures check exact accepted
+prefixes, decoded values, read bounds and no-write refusals; the reclaim cases
+also require the expected diagnostic reason. They complement existing independent
+reference-count, tree traversal, snapshot ownership and recovery models.
+
+Reviewing the target matrix exposed a remaining Unicode corpus obligation beyond
+the literal naming vectors. Vendored the official Unicode 16.0.0 normalization and
+case-folding data with URL/digest provenance and its license. The public name API
+passes 99,825 normalization checks, including ten required reserved-name refusals,
+and NFC/default full case-folding checks over 1,112,062 admitted scalar names.
+An initial normalization test incorrectly expected reserved slash-containing
+names to succeed; correcting that test preserved the filesystem admission rule.
+No production-code or on-disk-format change was needed.
+
+The twelve new tests passed in the isolated source copy, whose core/format/block
+sources matched the main repository. Integration uses the same test and corpus
+bytes. The integrated qualification in `build/caller-property-qualification-m5dx8kq8`
+passed 618 tests with no failures and ten explicit ignores, plus formatting, Clippy,
+codec, documentation and whitespace gates; its source manifest matches every
+committed code, test and corpus byte. A read-only closure review of the target
+matrix found no further finite caller-admission gap.
+Native/C interoperability, proposed directory overrides and format freeze remain
+separate obligations. The gate verdict and remaining work live in
+[the milestones](implementation/milestones.md#fuzzing-and-property-test-tasks).
 
 ## 2026-09-15 — Integrate subsystem observations and caller-property tests
 
