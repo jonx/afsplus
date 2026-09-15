@@ -523,6 +523,9 @@ def lifecycle_payload(kind, blob, generation):
         zero(enums[1:] + (region,) + words[2:])
         if not 1 <= enums[0] <= 5 or words[0] == 0:
             raise ValueError("flight format payload domain")
+        expected = {46: 1, 47: 3, 48: 4, 49: 5}.get(kind)
+        if expected is not None and enums[0] != expected:
+            raise ValueError("flight format stage differs from event kind")
         if (words[1] != 0) != (kind in (48, 49)):
             raise ValueError("flight format publication address")
     elif tag == 6:

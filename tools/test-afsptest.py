@@ -84,7 +84,234 @@ def linked_fixture(pages=2):
         "expected_snapshots": [], "expected_orphans": {"count": 0, "bytes": 0}}
 
 
+
+def lifecycle_fixture(pages=2, mask=32767, capacity=256, sink=None):
+    """A version-8 scenario reaching the allocator, the mutable trees, reclaim,
+    mount recovery, a refused mount, formatting, standalone verification,
+    staged window writes and read-only view descents."""
+    return {"version": 8, "volume": {"block_size": 4096, "blocks": 512, "region_size": 64,
+            "log_slots": 8, "tree_cache_pages": pages},
+        "flight_capacity": capacity, "flight_categories": mask, "flight_sink": sink,
+        "snapshot_limits": {"max_edit_records": 4096, "max_views": 16, "reclaim_records": 8},
+        "expected_snapshots": [],
+        "operations": [
+            {"op": "mkdir", "label": "d", "parent": "root", "name": "dir"},
+            {"op": "create", "label": "f", "parent": "d", "name": "café", "data": "00ff"},
+            {"op": "window_write", "label": "f", "offset": 1, "data": "42"},
+            {"op": "window_fsync"},
+            {"op": "window_commit"},
+            {"op": "write", "label": "f", "offset": 0, "data": "01"},
+            {"op": "sync"},
+            {"op": "truncate", "label": "f", "size": 1},
+            {"op": "verify"},
+            {"op": "remount_refused"},
+            {"op": "remount"}],
+        "expected": [{"path": ["dir"], "kind": "directory"},
+                     {"path": ["dir", "café"], "kind": "file", "data": "01"}]}
+
+
 class ReplayTests(unittest.TestCase):
+    def test_v8_lifecycle_wire_binds_every_payload_class_to_its_kind(self):
+        profile = {"version": 8, "flight_categories": 32767, "flight_sink": None}
+        previous = (0,) * 7
+        def wire(kind=24, *, tx=0, generation=2, tag=None, enums=(0, 0, 0, 0), region=0,
+                 words=(0, 0, 0, 0, 0), present=0, object_id=0, block=0, view=0,
+                 span=0, method=0, window=0, group=0, operation=0, parent=0):
+            if tag is None:
+                tag = tool.payload_tag(kind)
+            header = struct.pack("<QQQQQQBI", 0, 0, 1, tx, 0, 0, 0, 1)
+            event = (struct.pack("<QQQBB", 1, tx, generation, kind, 0)
+                     + struct.pack("<QQQHQI", operation, span, parent, method, window, group)
+                     + struct.pack("<BQQQ", present, object_id, block, view)
+                     + bytes([tag]) + bytes(enums) + struct.pack("<I", region)
+                     + struct.pack("<QQQQQ", *words))
+            return header + event
+        valid = wire(words=(8, 4, 0, 0, 0))
+        self.assertEqual(tool.selected_batch(valid, 0, previous, 1, profile, 0)[0], len(valid))
+        # Truncation is refused before any payload is unpacked.
+        for length in range(len(valid)):
+            with self.assertRaises(ValueError):
+                tool.selected_batch(valid[:length], 0, previous, 1, profile, 0)
+        admitted = [
+            wire(23),
+            wire(27, words=(9, 5, 3, 0, 0)),
+            wire(35, words=(7, 9, 2, 0, 0)),
+            wire(39, generation=0, enums=(0, 1, 0, 0)),
+            wire(40, enums=(1, 3, 1, 0), words=(6, 0, 0, 0, 0)),
+            wire(42, enums=(0, 6, 1, 1), region=4, group=4),
+            wire(43, enums=(0, 6, 0, 0), region=2, group=2),
+            wire(45, generation=0, enums=(0, 2, 0, 0)),
+            wire(45, enums=(3, 6, 1, 0)),
+            wire(46, enums=(1, 0, 0, 0), words=(512, 0, 0, 0, 0)),
+            wire(48, enums=(4, 0, 0, 0), words=(512, 33, 0, 0, 0)),
+            wire(47, enums=(3, 0, 0, 0), words=(512, 0, 0, 0, 0)),
+            wire(50, enums=(2, 0, 0, 0), words=(512, 0, 0, 0, 0)),
+            wire(51, enums=(3, 0, 0, 0)),
+            wire(52, enums=(3, 16, 0, 0), region=1, words=(0, 0, 40, 0, 0)),
+            wire(53, enums=(3, 13, 8, 0), region=2, words=(5, 16, 40, 0, 0)),
+            wire(54, enums=(3, 0, 0, 0), words=(11, 0, 0, 0, 0)),
+            wire(55, enums=(2, 4, 0, 0), words=(0, 16, 0, 0, 0)),
+            wire(56, enums=(1, 0, 0, 0), region=2, words=(16, 0, 8192, 33, 0), span=1,
+                 operation=1, method=64),
+            wire(59, tx=1),
+            wire(61, enums=(4, 0, 0, 0), words=(3, 16, 40, 0, 0)),
+        ]
+        for value in admitted:
+            tool.selected_batch(value, 0, previous, 1, profile, 0)
+        refused = [
+            # Tag, presence and reserved-byte consistency.
+            wire(24, tag=0), wire(24, tag=2), wire(1, tag=1), wire(59, tx=1, tag=4),
+            wire(24, enums=(1, 0, 0, 0)), wire(24, region=1), wire(24, words=(0, 0, 1, 0, 0)),
+            wire(27, words=(0, 0, 0, 1, 0)), wire(35, words=(0, 0, 0, 0, 1)),
+            # Mount stage, slot, damaged tail, count and generation.
+            wire(39, generation=0, enums=(0, 0, 0, 0)), wire(39, generation=0, enums=(0, 7, 0, 0)),
+            wire(39, generation=0, enums=(4, 1, 0, 0)), wire(39, generation=0, enums=(0, 1, 2, 0)),
+            wire(39, generation=0, enums=(0, 1, 0, 2)), wire(39, enums=(0, 1, 0, 0)),
+            wire(39, generation=0, enums=(0, 3, 0, 0)),
+            wire(40, enums=(0, 6, 0, 0)), wire(41, enums=(0, 3, 0, 0)),
+            wire(43, enums=(0, 6, 0, 1), region=2, group=2),
+            wire(40, enums=(0, 3, 0, 0), region=3),
+            wire(45, generation=0, enums=(0, 2, 1, 0)),
+            wire(45, generation=0, enums=(0, 2, 0, 0), words=(6, 0, 0, 0, 0)),
+            wire(44, generation=0, enums=(0, 6, 0, 0)),
+            wire(40, enums=(0, 3, 0, 0), words=(0, 1, 0, 0, 0)),
+            # Format stage, device size and publication address.
+            wire(46, enums=(0, 0, 0, 0), words=(512, 0, 0, 0, 0)),
+            wire(46, enums=(6, 0, 0, 0), words=(512, 0, 0, 0, 0)),
+            wire(46, enums=(2, 0, 0, 0), words=(512, 0, 0, 0, 0)),
+            wire(49, enums=(4, 0, 0, 0), words=(512, 33, 0, 0, 0)),
+            wire(46, enums=(1, 0, 0, 0), words=(0, 0, 0, 0, 0)),
+            wire(46, enums=(1, 0, 0, 0), words=(512, 33, 0, 0, 0)),
+            wire(48, enums=(4, 0, 0, 0), words=(512, 0, 0, 0, 0)),
+            wire(46, enums=(1, 1, 0, 0), words=(512, 0, 0, 0, 0)),
+            wire(46, enums=(1, 0, 0, 0), region=1, words=(512, 0, 0, 0, 0)),
+            # Verify scope, phase, finding class, ordinal and location.
+            wire(51, enums=(0, 0, 0, 0)), wire(51, enums=(4, 0, 0, 0)),
+            wire(51, enums=(3, 1, 0, 0)), wire(52, enums=(3, 0, 0, 0)),
+            wire(52, enums=(3, 17, 0, 0)), wire(53, enums=(3, 13, 12, 0)),
+            wire(52, enums=(3, 13, 1, 0)), wire(53, enums=(3, 13, 0, 0)),
+            wire(52, enums=(3, 13, 0, 0), words=(1, 0, 0, 0, 0)),
+            wire(51, enums=(3, 0, 0, 0), region=1),
+            wire(54, enums=(3, 0, 0, 0), words=(0, 16, 0, 0, 0)),
+            wire(51, enums=(3, 0, 0, 1)), wire(51, enums=(3, 0, 0, 0), words=(0, 0, 0, 1, 0)),
+            # Staged data and view descent domains.
+            wire(56, enums=(0, 0, 0, 0)), wire(56, enums=(4, 0, 0, 0)),
+            wire(56, enums=(1, 1, 0, 0)), wire(56, words=(0, 0, 0, 0, 1)),
+            wire(61, enums=(0, 0, 0, 0), words=(0, 16, 0, 0, 0)),
+            wire(61, enums=(5, 0, 0, 0), words=(0, 16, 0, 0, 0)),
+            wire(61, enums=(1, 0, 0, 0), words=(0, 0, 0, 0, 0)),
+            wire(61, enums=(1, 1, 0, 0), words=(0, 16, 0, 0, 0)),
+            wire(61, enums=(1, 0, 0, 0), region=1, words=(0, 16, 0, 0, 0)),
+            # Identity rules the extended kinds inherit.
+            wire(24, tx=1), wire(59), wire(65), wire(24, generation=0),
+            wire(24, group=2), wire(61, enums=(1, 0, 0, 0), words=(0, 16, 0, 0, 0), group=1),
+        ]
+        for value in refused:
+            with self.assertRaises(ValueError):
+                tool.selected_batch(value, 0, previous, 1, profile, 0)
+
+    def test_v8_legacy_profiles_and_magics_stay_separate(self):
+        # Versions 1 to 7 and version 9 refuse every extended kind and the
+        # version-8 artifact magic; version 8 refuses the version-6 magic.
+        for version, mask in ((6, 127), (9, 127)):
+            profile = {"version": version, "flight_categories": mask, "flight_sink": None}
+            header = struct.pack("<QQQQQQBI", 0, 0, 1, 0, 0, 0, 0, 1)
+            for kind in (23, 39, 46, 51, 56, 59, 61):
+                event = struct.pack("<QQQBBQQQHQIBQQQ", 1, 0, 2, kind, 0,
+                                    0, 1, 0, 1, 0, 0, 0, 0, 0, 0)
+                with self.assertRaises(ValueError):
+                    tool.selected_batch(header + event, 0, (0,) * 7, 1, profile, 0)
+        records, success = tool.execute(tool.encoded(lifecycle_fixture()), BINARY)
+        self.assertTrue(success)
+        self.assertEqual(records["flight-recorder.bin"][:8], b"AFSFLT06")
+        for magic in (b"AFSFLT05", b"AFSFLT07"):
+            edited = magic + records["flight-recorder.bin"][8:]
+            with self.assertRaisesRegex(ValueError, "flight version"):
+                tool.validate_trace(dict(records, **{"flight-recorder.bin": edited}))
+        legacy, _ = tool.execute(tool.encoded(snapshot_fixture()), BINARY)
+        self.assertEqual(legacy["flight-recorder.bin"][:8], b"AFSFLT05")
+
+    def test_v8_profiles_preserve_images_and_replay_in_a_fresh_process(self):
+        for pages in (2, 4, 8, "unlimited"):
+            plain, success = tool.execute(tool.encoded(lifecycle_fixture(pages, 0, 1)), BINARY)
+            self.assertTrue(success)
+            for mask in (0, 1 << 10, 1 << 12, 1 << 14, 32767):
+                for capacity in (1, 256):
+                    value = lifecycle_fixture(pages, mask, capacity,
+                                              {"capacity": 1, "disconnect_before": 3})
+                    records, success = tool.execute(tool.encoded(value), BINARY)
+                    self.assertTrue(success, (pages, mask, capacity))
+                    self.assertEqual(records["flight-recorder.bin"][:8], b"AFSFLT06")
+                    for role in ("start.img", "result.img", "block-io.afstrace", "actual.json"):
+                        self.assertEqual(records[role], plain[role], (pages, mask, capacity))
+            with tempfile.TemporaryDirectory(prefix="afsplus-lifecycle-replay-") as temporary:
+                path = Path(temporary) / "bundle"
+                tool.bundle.publish(path, records)
+                self.assertTrue(tool.replay(path, BINARY))
+                result = subprocess.run(
+                    [sys.executable, str(tool.ROOT / "tools/afsptest.py"), "--runner", str(BINARY),
+                     "replay", str(path)], capture_output=True, text=True, timeout=600)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_v8_changed_event_byte_fails_exact_replay(self):
+        records, success = tool.execute(tool.encoded(lifecycle_fixture()), BINARY)
+        self.assertTrue(success)
+        wire = records["flight-recorder.bin"]
+        # First event of the explicit pre-mount batch: FormatBegin with its
+        # validation stage and the device block count.
+        first = 28 + 53
+        self.assertEqual(wire[first + 24], 46)
+        self.assertEqual(wire[first + 89], 5)
+        self.assertEqual(wire[first + 90], 1)
+        self.assertEqual(struct.unpack_from("<Q", wire, first + 98)[0], 512)
+        for offset, fmt, number in ((first + 89, "B", 0), (first + 90, "B", 2),
+                                    (first + 98, "Q", 0), (first + 106, "Q", 1),
+                                    (first + 94, "I", 1), (first + 24, "B", 65),
+                                    (first + 90, "B", 2)):
+            edited = bytearray(wire)
+            struct.pack_into("<" + fmt, edited, offset, number)
+            self.assertNotEqual(bytes(edited), wire)
+            with self.assertRaises(ValueError):
+                tool.validate_trace(dict(records, **{"flight-recorder.bin": bytes(edited)}))
+        with tempfile.TemporaryDirectory(prefix="afsplus-lifecycle-edit-") as temporary:
+            path = Path(temporary) / "bundle"
+            edited = bytearray(wire)
+            # A value inside its own domain still differs from the recorded run.
+            struct.pack_into("<Q", edited, first + 98, 511)
+            tool.bundle.publish(path, dict(records, **{"flight-recorder.bin": bytes(edited)}))
+            with self.assertRaisesRegex(ValueError, "semantic replay mismatch"):
+                tool.replay(path, BINARY)
+
+    def test_v8_minimization_and_cuts_keep_the_lifecycle_policy(self):
+        value = lifecycle_fixture(2, 32767, 1, {"capacity": 1, "disconnect_before": 2})
+        value["operations"][:0] = [
+            {"op": "create", "label": "spare", "parent": "root", "name": "temp", "data": ""},
+            {"op": "unlink", "label": "spare"}]
+        value["expected"][1]["data"] = "ffff"
+        records, success = tool.execute(tool.encoded(value), BINARY)
+        self.assertFalse(success)
+        signature = json.loads(tool.failure_signature(records))
+        self.assertEqual(signature["flight_categories"], 32767)
+        self.assertEqual(signature["flight_sink"], value["flight_sink"])
+        self.assertEqual(signature["snapshot_limits"], value["snapshot_limits"])
+        with tempfile.TemporaryDirectory(prefix="afsplus-lifecycle-minimize-") as temporary:
+            root = Path(temporary)
+            tool.bundle.publish(root / "original", records)
+            result = tool.minimize(root / "original", root / "reduced", BINARY, max_runs=32)
+            self.assertLessEqual(result["operations"], len(value["operations"]))
+            reduced = tool.bundle.read_bundle(root / "reduced")
+            self.assertEqual(tool.failure_signature(reduced), tool.failure_signature(records))
+            self.assertFalse(tool.replay(root / "reduced", BINARY))
+        cut = lifecycle_fixture(2, 32767, 256)
+        cut["operations"] = [{"op": "create", "label": "f", "parent": "root", "name": "a", "data": "01"}]
+        cut["expected"] = [{"path": ["a"], "kind": "file", "data": "01"}]
+        for variant in range(5):
+            records, _ = tool.execute(tool.encoded(cut), BINARY,
+                fault={"version": 1, "kind": "power-cut-v1", "operation": 0, "offset": 1,
+                       "variant": variant})
+            tool.validate_trace(records)
+            self.assertEqual(records["flight-recorder.bin"][:8], b"AFSFLT06")
+
     def test_v9_linked_observation_decodes_aliases_targets_and_protection(self):
         lines = ["file 616c696173 2 7 0 0 4142 0:4096:0", "file 636c6f6e65 1 7 1 1 42 -",
                  "directory 6d6f766564 1 0", "file 6d6f766564,66696c65 2 7 0 0 4142 0:4096:0",
