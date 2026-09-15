@@ -7,9 +7,9 @@
 //! ignored millions-scale run drains ~1.9M quarantined blocks in bounded
 //! steps.
 
-use afsplus_block::{crash_states, MemoryBackend, RecordingBackend};
+use afsplus_block::{crash_states, BlockDevice, MemoryBackend, RecordingBackend};
 use afsplus_check::check_device;
-use afsplus_core::{mkfs, mount, MkfsParams, Volume};
+use afsplus_core::{mkfs, mount, mount_with_options, MkfsParams, MountOptions, Volume};
 use afsplus_format::reclaim::ReclaimCaps;
 use afsplus_format::Timespec;
 
@@ -135,10 +135,68 @@ fn reclaim_survives_remount_and_resumes_from_the_cursor() {
     assert_clean(&mut dev, "resumed drain");
 }
 
+fn open_profile<D: BlockDevice>(dev: D, pages: usize) -> Volume<D> {
+    let volume = mount_with_options(
+        dev,
+        MountOptions {
+            tree_cache_pages: std::num::NonZeroUsize::new(pages),
+            ..MountOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(volume.tree_cache_pages(), pages);
+    volume
+}
+
+fn accounting<D: BlockDevice>(volume: &Volume<D>) -> (u64, u64) {
+    (volume.free_blocks(), volume.reclaim_pending_blocks())
+}
+
+/// These fixtures format no intent log, so no checker warning is an
+/// admissible crash artifact; retained-checkpoint findings must fail.
+fn assert_recovered_clean(image: &mut MemoryBackend, context: &str) {
+    let report = check_device(image);
+    assert!(
+        report.is_clean(),
+        "{context}: checker findings {:?}",
+        report.errors
+    );
+    assert!(
+        report.warnings.is_empty(),
+        "{context}: checker warnings {:?}",
+        report.warnings
+    );
+}
+
+/// Staged-tree evidence of the recorded transaction: spill writes and peak
+/// resident staged nodes, which must stay within the mounted profile.
+fn staged_evidence<D: BlockDevice>(volume: &Volume<D>, pages: usize, context: &str) {
+    let stats = volume.last_commit_stats().unwrap().tree_mutations;
+    assert!(
+        stats.max_resident_staged_nodes <= pages as u64,
+        "{context}, pages={pages}: resident staged nodes exceed the profile"
+    );
+    eprintln!(
+        "{context}: pages={pages}, recorded spills={}, peak_staged={}",
+        stats.staged_spill_writes, stats.max_resident_staged_nodes
+    );
+}
+
+fn assert_files(volume: &mut Volume<MemoryBackend>, expected: &[(&str, &[u8])], context: &str) {
+    let entries = volume.list_root().unwrap();
+    assert_eq!(entries.len(), expected.len(), "{context}: namespace size");
+    for (name, bytes) in expected {
+        let id = volume.lookup_root(name).unwrap().expect("expected file");
+        assert_eq!(volume.read_file(id).unwrap(), *bytes, "{context}: {name}");
+    }
+}
+
 fn run_crash_matrix(
     base: &MemoryBackend,
     log: &[afsplus_block::RecordedOp],
     pre_generation: u64,
+    pages: usize,
+    expected_accounting: [(u64, u64); 2],
     context: &str,
     mut verify: impl FnMut(&str, &mut Volume<MemoryBackend>),
 ) {
@@ -146,23 +204,28 @@ fn run_crash_matrix(
     let mut post = 0u64;
     for crash_point in 0..=log.len() {
         for state in crash_states(base, log, crash_point) {
-            let what = format!("{context}: {}", state.description);
+            let what = format!("{context}, pages={pages}: {}", state.description);
             let mut image = state.image;
-            let report = check_device(&mut image);
-            assert!(
-                report.is_clean(),
-                "{what}: checker findings {:?}",
-                report.errors
-            );
-            let mut vol = mount(image).unwrap_or_else(|e| panic!("{what}: mount failed: {e}"));
+            assert_recovered_clean(&mut image, &what);
+            let mut vol = open_profile(image, pages);
             match vol.generation() {
                 g if g == pre_generation => pre += 1,
                 g if g == pre_generation + 1 => post += 1,
                 g => panic!("{what}: recovered to disallowed generation {g}"),
             }
+            let outcome = usize::from(vol.generation() != pre_generation);
+            assert_eq!(
+                accounting(&vol),
+                expected_accounting[outcome],
+                "{what}: free/pending"
+            );
             verify(&what, &mut vol);
         }
     }
+    eprintln!(
+        "{context}: pages={pages}, pre={pre}, post={post}, images={}, accounting={expected_accounting:?}",
+        pre + post
+    );
     assert!(
         pre > 0 && post > 0,
         "{context}: matrix must produce both outcomes"
@@ -171,119 +234,199 @@ fn run_crash_matrix(
 
 #[test]
 fn crash_matrix_over_a_sealing_transaction() {
-    // Tiny caps: this create seals at least one segment while committing.
-    let base = {
-        let dev = format_volume(256, 256, tiny_caps());
-        let mut vol = mount(dev).unwrap();
+    for pages in [2, 4, 8, usize::MAX] {
+        // Tiny caps: this create seals at least one segment while committing.
+        let base = {
+            let dev = format_volume(256, 256, tiny_caps());
+            let mut vol = open_profile(dev, pages);
+            vol.set_reclaim_batch_blocks(1);
+            for i in 0..3 {
+                vol.create_file_in_root(&format!("seed{i}"), b"seed", ts(i))
+                    .unwrap();
+            }
+            vol.into_device()
+        };
+        let before = accounting(&open_profile(base.clone(), pages));
+        let pre_generation = open_profile(base.clone(), pages).generation();
+        let pre_pending = open_profile(base.clone(), pages).reclaim_pending_blocks();
+
+        let mut vol = open_profile(RecordingBackend::new(base.clone()), pages);
         vol.set_reclaim_batch_blocks(1);
-        for i in 0..3 {
-            vol.create_file_in_root(&format!("seed{i}"), b"seed", ts(i))
-                .unwrap();
-        }
-        vol.into_device()
-    };
-    let pre_generation = mount(base.clone()).unwrap().generation();
-    let pre_pending = mount(base.clone()).unwrap().reclaim_pending_blocks();
+        vol.create_file_in_root("sealer", b"payload", ts(50))
+            .unwrap();
+        assert!(
+            vol.last_commit_stats()
+                .unwrap()
+                .alloc
+                .reclaim
+                .segments_sealed
+                > 0,
+            "test precondition: the recorded transaction must seal a segment"
+        );
+        let after = accounting(&vol);
+        // Free/pending literals for the untouched and published states; every
+        // profile's writer and every recovered image must match them exactly.
+        const SEALING_ACCOUNTING: [(u64, u64); 2] = [(222, 11), (216, 14)];
+        assert_eq!(
+            [before, after],
+            SEALING_ACCOUNTING,
+            "sealing, pages={pages}: writer accounting"
+        );
+        staged_evidence(&vol, pages, "sealing");
+        let (_, log) = vol.into_device().into_parts();
 
-    let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
-    vol.set_reclaim_batch_blocks(1);
-    vol.create_file_in_root("sealer", b"payload", ts(50))
-        .unwrap();
-    assert!(
-        vol.last_commit_stats()
-            .unwrap()
-            .alloc
-            .reclaim
-            .segments_sealed
-            > 0,
-        "test precondition: the recorded transaction must seal a segment"
-    );
-    let (_, log) = vol.into_device().into_parts();
-
-    run_crash_matrix(&base, &log, pre_generation, "sealing", |what, vol| {
-        if vol.generation() == pre_generation {
-            assert_eq!(vol.lookup_root("sealer").unwrap(), None, "{what}");
-            assert_eq!(vol.reclaim_pending_blocks(), pre_pending, "{what}");
-        } else {
-            assert!(vol.lookup_root("sealer").unwrap().is_some(), "{what}");
-        }
-    });
+        run_crash_matrix(
+            &base,
+            &log,
+            pre_generation,
+            pages,
+            SEALING_ACCOUNTING,
+            "sealing",
+            |what, vol| {
+                let mut expected: Vec<(&str, &[u8])> =
+                    vec![("seed0", b"seed"), ("seed1", b"seed"), ("seed2", b"seed")];
+                if vol.generation() != pre_generation {
+                    expected.push(("sealer", b"payload"));
+                }
+                assert_files(vol, &expected, what);
+                if vol.generation() == pre_generation {
+                    assert_eq!(vol.lookup_root("sealer").unwrap(), None, "{what}");
+                    assert_eq!(vol.reclaim_pending_blocks(), pre_pending, "{what}");
+                } else {
+                    assert!(vol.lookup_root("sealer").unwrap().is_some(), "{what}");
+                }
+            },
+        );
+    }
 }
 
 #[test]
 fn crash_matrix_over_segment_consumption_and_disappearance() {
-    // Build a backlog with sealed segments, then record a reclaim step whose
-    // batch consumes an entire segment (which therefore leaves the root and
-    // is itself retired).
-    let base = {
-        let dev = format_volume(256, 256, tiny_caps());
-        let mut vol = mount(dev).unwrap();
-        vol.set_reclaim_batch_blocks(1);
-        for i in 0..6 {
-            vol.create_file_in_root(&format!("g{i}"), b"x", ts(i))
-                .unwrap();
-        }
-        vol.into_device()
-    };
-    let pre_generation = mount(base.clone()).unwrap().generation();
-    let pre_pending = mount(base.clone()).unwrap().reclaim_pending_blocks();
+    for pages in [2, 4, 8, usize::MAX] {
+        // Build a backlog with sealed segments, then record a reclaim step whose
+        // batch consumes an entire segment (which therefore leaves the root and
+        // is itself retired).
+        let base = {
+            let dev = format_volume(256, 256, tiny_caps());
+            let mut vol = open_profile(dev, pages);
+            vol.set_reclaim_batch_blocks(1);
+            for i in 0..6 {
+                vol.create_file_in_root(&format!("g{i}"), b"x", ts(i))
+                    .unwrap();
+            }
+            vol.into_device()
+        };
+        let before = accounting(&open_profile(base.clone(), pages));
+        let pre_generation = open_profile(base.clone(), pages).generation();
+        let pre_pending = open_profile(base.clone(), pages).reclaim_pending_blocks();
 
-    let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
-    vol.set_reclaim_batch_blocks(9);
-    let reclaimed = vol.reclaim_step(ts(60)).unwrap();
-    assert!(reclaimed > 0);
-    let step_stats = vol.last_commit_stats().unwrap().alloc.reclaim;
-    assert!(
-        step_stats.structure_blocks_retired > 1,
-        "test precondition: the batch must consume at least one whole segment"
-    );
-    let (_, log) = vol.into_device().into_parts();
+        let mut vol = open_profile(RecordingBackend::new(base.clone()), pages);
+        vol.set_reclaim_batch_blocks(9);
+        let reclaimed = vol.reclaim_step(ts(60)).unwrap();
+        assert!(reclaimed > 0);
+        let step_stats = vol.last_commit_stats().unwrap().alloc.reclaim;
+        assert!(
+            step_stats.structure_blocks_retired > 1,
+            "test precondition: the batch must consume at least one whole segment"
+        );
+        let after = accounting(&vol);
+        const CONSUMPTION_ACCOUNTING: [(u64, u64); 2] = [(205, 20), (213, 13)];
+        assert_eq!(
+            [before, after],
+            CONSUMPTION_ACCOUNTING,
+            "consumption, pages={pages}: writer accounting"
+        );
+        staged_evidence(&vol, pages, "consumption");
+        let (_, log) = vol.into_device().into_parts();
 
-    run_crash_matrix(&base, &log, pre_generation, "consumption", |what, vol| {
-        if vol.generation() == pre_generation {
-            assert_eq!(vol.reclaim_pending_blocks(), pre_pending, "{what}");
-        } else {
-            assert!(vol.reclaim_pending_blocks() < pre_pending, "{what}");
-        }
-    });
+        run_crash_matrix(
+            &base,
+            &log,
+            pre_generation,
+            pages,
+            CONSUMPTION_ACCOUNTING,
+            "consumption",
+            |what, vol| {
+                assert_files(
+                    vol,
+                    &[
+                        ("g0", b"x"),
+                        ("g1", b"x"),
+                        ("g2", b"x"),
+                        ("g3", b"x"),
+                        ("g4", b"x"),
+                        ("g5", b"x"),
+                    ],
+                    what,
+                );
+                if vol.generation() == pre_generation {
+                    assert_eq!(vol.reclaim_pending_blocks(), pre_pending, "{what}");
+                } else {
+                    assert!(vol.reclaim_pending_blocks() < pre_pending, "{what}");
+                }
+            },
+        );
+    }
 }
 
 #[test]
 fn crash_matrix_over_a_mid_run_cursor_advance() {
-    // A 3-block run with a 2-block budget: the recorded step leaves the
-    // persistent cursor inside a run.
-    let base = {
-        let dev = format_volume(256, 256, tiny_caps());
-        let mut vol = mount(dev).unwrap();
-        vol.set_reclaim_batch_blocks(1);
-        vol.create_file_in_root("big", &[0xB7u8; 3 * BS], ts(1))
-            .unwrap();
-        vol.delete_file_in_root("big", ts(2)).unwrap();
-        vol.into_device()
-    };
-    let pre_generation = mount(base.clone()).unwrap().generation();
+    for pages in [2, 4, 8, usize::MAX] {
+        let empty_free = open_profile(format_volume(256, 256, tiny_caps()), pages).free_blocks();
+        // A 3-block run with a 2-block budget: the recorded step leaves the
+        // persistent cursor inside a run.
+        let base = {
+            let dev = format_volume(256, 256, tiny_caps());
+            let mut vol = open_profile(dev, pages);
+            vol.set_reclaim_batch_blocks(1);
+            vol.create_file_in_root("big", &[0xB7u8; 3 * BS], ts(1))
+                .unwrap();
+            vol.delete_file_in_root("big", ts(2)).unwrap();
+            vol.into_device()
+        };
+        let before = accounting(&open_profile(base.clone(), pages));
+        let pre_generation = open_profile(base.clone(), pages).generation();
 
-    let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
-    vol.set_reclaim_batch_blocks(2);
-    assert!(vol.reclaim_step(ts(3)).unwrap() > 0);
-    let (_, log) = vol.into_device().into_parts();
+        let mut vol = open_profile(RecordingBackend::new(base.clone()), pages);
+        vol.set_reclaim_batch_blocks(2);
+        assert_eq!(vol.reclaim_step(ts(3)).unwrap(), 1);
+        let after = accounting(&vol);
+        // Two blocks promoted and one re-appended: net one block reclaimed.
+        const CURSOR_ACCOUNTING: [(u64, u64); 2] = [(227, 12), (228, 11)];
+        assert_eq!(
+            [before, after],
+            CURSOR_ACCOUNTING,
+            "mid-run cursor, pages={pages}: writer accounting"
+        );
+        staged_evidence(&vol, pages, "mid-run cursor");
+        let (_, log) = vol.into_device().into_parts();
 
-    run_crash_matrix(
-        &base,
-        &log,
-        pre_generation,
-        "mid-run cursor",
-        |what, vol| {
-            // Whatever the outcome, the volume must be able to finish draining.
-            vol.set_reclaim_batch_blocks(64);
-            drain(vol);
-            assert_eq!(
-                vol.reclaim_pending_blocks(),
-                2,
-                "{what}: drain after recovery"
-            );
-        },
-    );
+        run_crash_matrix(
+            &base,
+            &log,
+            pre_generation,
+            pages,
+            CURSOR_ACCOUNTING,
+            "mid-run cursor",
+            |what, vol| {
+                assert_files(vol, &[], what);
+                // Whatever the outcome, the volume must be able to finish draining.
+                vol.set_reclaim_batch_blocks(64);
+                drain(vol);
+                assert_eq!(
+                    vol.reclaim_pending_blocks(),
+                    2,
+                    "{what}: drain after recovery"
+                );
+                assert_files(vol, &[], what);
+                assert_eq!(
+                    vol.free_blocks(),
+                    empty_free - 2,
+                    "{what}: exact empty steady-state free blocks"
+                );
+            },
+        );
+    }
 }
 
 #[test]
