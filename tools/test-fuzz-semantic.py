@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -69,6 +70,160 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ValueError): tool.scenario(1, 64, 64, 3)
 
 
+class FamilyModelTests(unittest.TestCase):
+    def test_window_model_encodes_acknowledged_prefix_commit_and_remount_loss(self):
+        model = tool.WindowModel()
+        for op in [{"op": "create", "label": "f", "parent": "root", "name": "f", "data": "0102"},
+                   {"op": "window_write", "label": "f", "offset": 4, "data": "aa"}, {"op": "window_fsync"},
+                   {"op": "window_truncate", "label": "f", "size": 1}, {"op": "remount"}]:
+            model.apply(op)
+        self.assertEqual(model.committed.expected(), [{"path": ["f"], "kind": "file", "data": "01020000aa"}])
+        for op in [{"op": "window_truncate", "label": "f", "size": 1},
+                   {"op": "window_write", "label": "f", "offset": 6, "data": "bb"}, {"op": "window_commit"}]:
+            model.apply(op)
+        self.assertEqual(model.committed.expected()[0]["data"], "010000000000bb")
+        model.apply({"op": "window_write", "label": "f", "offset": 0, "data": "cc"})
+        for bad in ({"op": "sync"}, {"op": "window_truncate", "label": "f", "size": 7},
+                    {"op": "window_write", "label": "f", "offset": 0, "data": ""}):
+            with self.assertRaises(ValueError):
+                model.apply(bad)
+        for _ in range(8):
+            model.apply({"op": "window_fsync"})
+            model.apply({"op": "window_write", "label": "f", "offset": 1, "data": "dd"})
+        with self.assertRaisesRegex(ValueError, "intent log"):
+            model.apply({"op": "window_fsync"})
+
+    def test_object_model_links_symlinks_clones_protection_and_moves(self):
+        model = tool.ObjectModel()
+        for index, op in enumerate([
+                {"op": "mkdir", "label": "a", "parent": "root", "name": "a"},
+                {"op": "mkdir", "label": "b", "parent": "a", "name": "b"},
+                {"op": "create", "label": "f", "parent": "a", "name": "f", "data": "0102"},
+                {"op": "link", "label": "l", "source": "f", "parent": "b", "name": "l"},
+                {"op": "write", "label": "l", "offset": 3, "data": "ff"},
+                {"op": "symlink", "label": "s", "parent": "root", "name": "s", "target": "a/f"},
+                {"op": "set_protection", "label": "f", "protection": 9},
+                {"op": "clone_file", "label": "c", "source": "l", "parent": "root", "name": "c"},
+                {"op": "clone_range", "source": "f", "source_offset": 0, "destination": "c",
+                 "destination_offset": 4096, "length": 2},
+                {"op": "write", "label": "f", "offset": 0, "data": "ee"},
+                {"op": "rename", "label": "b", "parent": "root", "name": "b2"},
+                {"op": "unlink", "label": "f"}, {"op": "unlink_symlink", "label": "s"}]):
+            model.apply(op, index)
+        self.assertEqual(model.linked(), [
+            {"path": ["a"], "kind": "directory", "links": 1, "protection": 0},
+            {"path": ["b2"], "kind": "directory", "links": 1, "protection": 0},
+            {"path": ["b2", "l"], "kind": "file", "links": 1, "protection": 9, "alias": 2, "data": "ee0200ff"},
+            {"path": ["c"], "kind": "file", "links": 1, "protection": 9, "alias": 3,
+             "data": "010200ff" + "00" * 4092 + "0102"}])
+        self.assertEqual(model.generation, 14)
+        model.apply({"op": "mkdir", "label": "inner", "parent": "a", "name": "inner"}, 14)
+        for op in ({"op": "rename", "label": "a", "parent": "inner", "name": "loop"},
+                   {"op": "rename", "label": "a", "parent": "a", "name": "loop"},
+                   {"op": "link", "label": "x", "source": "a", "parent": "root", "name": "x"},
+                   {"op": "clone_range", "source": "l", "source_offset": 0, "destination": "l",
+                    "destination_offset": 0, "length": 1},
+                   {"op": "clone_range", "source": "l", "source_offset": 0, "destination": "c",
+                    "destination_offset": 1, "length": 1},
+                   {"op": "create", "label": "c", "parent": "root", "name": "again", "data": ""},
+                   {"op": "rmdir", "label": "b"}):
+            with self.assertRaises(ValueError, msg=op):
+                model.apply(op, 20)
+        model.apply({"op": "symlink", "label": "t", "parent": "root", "name": "t", "target": "x"}, 21)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            model.entries()
+
+    def test_object_model_captures_generation_time_and_single_block_allocation(self):
+        model = tool.ObjectModel()
+        for index, op in enumerate([
+                {"op": "create", "label": "f", "parent": "root", "name": "f", "data": ""},
+                {"op": "truncate", "label": "f", "size": 100},
+                {"op": "snapshot_create", "label": "s"},
+                {"op": "write", "label": "f", "offset": 50, "data": "63"},
+                {"op": "snapshot_create", "label": "t"}, {"op": "snapshot_delete", "label": "s"},
+                {"op": "mkdir", "label": "d", "parent": "root", "name": "d"},
+                {"op": "rename", "label": "f", "parent": "d", "name": "g"}]):
+            model.apply(op, index)
+        [view] = model.snapshots()
+        self.assertEqual((view["id"], view["generation"], view["committed_tx_id"]), (2, 5, 5))
+        self.assertEqual(view["root"], {"object_id": 1, "kind": "directory", "size": 0, "allocated": 4096,
+            "links": 1, "protection": 0, "created": [0, 0], "modified": [1, 0], "changed": [1, 0],
+            "content_generation": 2})
+        self.assertEqual(view["entries"], [{"path": ["f"], "data": "00" * 50 + "63" + "00" * 49,
+            "allocation": [{"offset": 0, "length": 4096, "unwritten": False}],
+            "metadata": {"object_id": 16, "kind": "file", "size": 100, "allocated": 4096, "links": 1,
+                         "protection": 0, "created": [1, 0], "modified": [4, 0], "changed": [4, 0],
+                         "content_generation": 5}}])
+        for op in ({"op": "snapshot_open", "label": "s"}, {"op": "snapshot_close", "label": "t"},
+                   {"op": "snapshot_create", "label": "t"}):
+            with self.assertRaises(ValueError):
+                model.apply(op, 9)
+        model.apply({"op": "snapshot_open", "label": "t"}, 9)
+        with self.assertRaisesRegex(ValueError, "open"):
+            model.apply({"op": "snapshot_delete", "label": "t"}, 10)
+        model.apply({"op": "write", "label": "f", "offset": 4096, "data": "01"}, 11)
+        with self.assertRaisesRegex(ValueError, "single-block"):
+            model.apply({"op": "snapshot_create", "label": "u"}, 12)
+
+
+class FamilyGenerationTests(unittest.TestCase):
+    REQUIRED = {
+        "window": {"create", "mkdir", "sync", "remount", "window_write", "window_truncate", "window_fsync",
+                   "window_commit"},
+        "snapshot": {"write", "truncate", "rename", "unlink", "rmdir", "remount", "snapshot_create",
+                     "snapshot_open", "snapshot_inspect", "snapshot_close", "snapshot_delete"},
+        "namespace": {"write", "truncate", "rename", "unlink", "sync", "remount", "link", "symlink",
+                      "clone_file", "clone_range", "set_protection", "unlink_symlink"}}
+
+    def test_golden_family_seeds_bounds_and_profile_independence(self):
+        golden = {"window": "a75d79b8c1216ca2f3900c43e5ebcf6be523246d23472ed270473a878efafdfd",
+                  "snapshot": "77a0304b4bc903a02c6a702aa9d7bbe9e59d9d7d78263efd4b55d95f99a22e1c",
+                  "namespace": "9f46335a6e060319f4a7de5223b11879753c5658e09ae294babcd1dc6dcd90b1"}
+        for family, digest in golden.items():
+            value = tool.family_scenario(family, 7, 96, 96, 2)
+            self.assertEqual(tool.runner.digest(tool.runner.encoded(value)), digest, family)
+        for family, required in self.REQUIRED.items():
+            for seed in (0, 1, 7, 42, tool.MASK):
+                for steps in (64, 96, 256):
+                    operations = tool.generate_family(family, seed, steps)
+                    self.assertEqual(len(operations), steps)
+                    self.assertLessEqual(required, {op["op"] for op in operations}, (family, seed, steps))
+                    for prefix in (steps // 2, steps):
+                        cases = [tool.family_scenario(family, seed, steps, prefix, pages) for pages in tool.PROFILES]
+                        for case in cases:
+                            self.assertEqual(case["version"], tool.FAMILY_VERSIONS[family])
+                            self.assertEqual(case["operations"], operations[:prefix] + [{"op": "remount"}])
+                            self.assertEqual(tool.expected_state(case), tool.expected_state(cases[0]))
+
+    def test_invalid_family_inputs_refuse(self):
+        with self.assertRaises(ValueError):
+            tool.generate_family("fault", 1, 64)
+        for seed, steps in [(-1, 64), (tool.MASK + 1, 64), (True, 64), (1, 63), (1, 257)]:
+            with self.assertRaises(ValueError):
+                tool.generate_family("namespace", seed, steps)
+        with self.assertRaises(ValueError):
+            tool.family_scenario("window", 1, 64, 65, 2)
+        with self.assertRaises(ValueError):
+            tool.family_scenario("snapshot", 1, 64, 64, 3)
+
+    def test_negative_controls_change_exactly_one_case_of_their_family(self):
+        for family, controls in tool.CONTROLS.items():
+            original = dict(tool.plan_cases([1], 96, family)[0])
+            for control in controls:
+                cases, applied = tool.plan_cases([1], 96, family, control)
+                self.assertEqual(applied["kind"], control)
+                self.assertEqual([name for name, value in cases if value != original[name]], [applied["case"]])
+
+    def test_real_runner_passes_generated_cases_and_fails_each_control(self):
+        for family, controls in tool.CONTROLS.items():
+            value = tool.family_scenario(family, 42, 64, 64, "unlimited")
+            self.assertTrue(tool.runner.execute(tool.runner.encoded(value), BINARY)[1], family)
+            for control in controls:
+                cases, applied = tool.plan_cases([42], 64, family, control)
+                raw = tool.runner.encoded(dict(cases)[applied["case"]])
+                self.assertFalse(tool.runner.execute(raw, BINARY)[1], control)
+
+
 class PublicationTests(unittest.TestCase):
     def records(self):
         # Opaque bundle bodies isolate orchestration controls. Actual filesystem
@@ -77,6 +232,50 @@ class PublicationTests(unittest.TestCase):
         result["run.json"] = tool.runner.encoded({"source_observed": tool.runner.source_identity(),
             "runner_sha256": tool.runner.executable_digest(BINARY)})
         return result
+
+    def test_family_campaign_binds_family_and_reproduces_only_its_control(self):
+        cases, applied = tool.plan_cases([1], 64, "namespace", "protection")
+        controlled = tool.runner.encoded(dict(cases)[applied["case"]])
+        for failing in (True, False):
+            with tempfile.TemporaryDirectory(prefix="afsplus-properties-family-") as temporary:
+                output = Path(temporary) / "result"
+                execute = lambda raw, binary: (self.records(), not (failing and raw == controlled))
+                with patch.object(tool.runner, "execute", side_effect=execute), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(tool.qualify(output, BINARY, [1], 64, family="namespace",
+                                                  control="protection"), not failing)
+                recipe = json.loads((output / "recipe.json").read_text())
+                self.assertEqual((recipe["version"], recipe["family"], recipe["scenario_version"]),
+                                 (2, "namespace", 9))
+                self.assertEqual(recipe["negative_control"], applied)
+                self.assertEqual(tool.control_reproduced(output), failing)
+                tool.runner.bundle.read_bundle(output / applied["case"])
+        with tempfile.TemporaryDirectory(prefix="afsplus-properties-family-refusal-") as temporary:
+            output = Path(temporary) / "result"
+            for family, control in (("window", "link-count"), (None, "window-byte"), ("fault", None)):
+                with self.assertRaises(ValueError):
+                    tool.qualify(output, BINARY, [1], 64, family=family, control=control)
+                self.assertFalse(output.exists())
+
+    def test_fresh_replay_requires_recorded_manifests_and_verdicts(self):
+        with tempfile.TemporaryDirectory(prefix="afsplus-properties-replay-") as temporary:
+            output = Path(temporary) / "result"
+            with patch.object(tool.runner, "execute", return_value=(self.records(), True)), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(tool.qualify(output, BINARY, [1], 64, family="window"))
+            calls = []
+            def run(command, **kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+            with patch.object(tool.subprocess, "run", side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(tool.replay_campaign(output, BINARY), 8)
+            self.assertTrue(all(command[-2] == "replay" for command in calls))
+            with patch.object(tool.subprocess, "run", return_value=subprocess.CompletedProcess([], 2, b"", b"")), \
+                    contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "fresh replay"):
+                tool.replay_campaign(output, BINARY)
+            with patch.object(tool.runner, "executable_digest", return_value="0" * 64), \
+                    self.assertRaisesRegex(ValueError, "manifest"):
+                tool.replay_campaign(output, BINARY)
 
     def test_success_failure_and_overwrite_refusal(self):
         for success in (True, False):

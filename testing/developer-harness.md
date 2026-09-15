@@ -41,6 +41,7 @@
 - [API and window replay bundles](#api-and-window-replay-bundles)
 - [Object-map replay bundles](#object-map-replay-bundles)
 - [Captured snapshot replay bundles](#captured-snapshot-replay-bundles)
+- [Linked namespace replay bundles](#linked-namespace-replay-bundles)
 - [Selected-category and live-delivery bundles](#selected-category-and-live-delivery-bundles)
 - [Internal diagnostic bundles](#internal-diagnostic-bundles)
 
@@ -1401,13 +1402,72 @@ is a failure even when every file's contents match.
 `snapshot_inspect` exercises an open handle and validates traversal/read
 consistency. The complete semantic oracle applies to the final recovered
 registry; it does not claim expected-content comparison of a view deleted
-before final inspection. The generic scenario command set creates files and
+before final inspection. The version-7 command set creates files and
 directories; direct inspector tests additionally cover hard-link aliases and
-symlinks. These host replay tests do not qualify a native handler or hardware.
+symlinks, which [version 9](#linked-namespace-replay-bundles) creates through
+scenario commands. These host replay tests do not qualify a native handler or hardware.
 
 Run [replay tests](../tools/test-afsptest.py),
 [admission tests](../tools/test-replay-scenario.py) and
 [captured inspector tests](../crates/afsplus-check/tests/captured_scenario.rs).
+
+## Linked namespace replay bundles
+
+Semantic JSON version 9 uses `AFSPSC09`. It inherits the version-7 command set,
+geometry, cache profile, diagnostic policy (category masks 0–127 and `AFSFLT05`),
+snapshot limits, persistent-snapshot formatting and `expected_snapshots`
+contract. Version 8 belongs to a separate profile and these parsers refuse it.
+Earlier versions keep their exact command, observation and bundle bytes.
+
+Labels name directory entries; a hard link receives its own label for the same
+object. JSON admission checks label kinds before compilation, and the Rust parser
+independently checks version, arity, hex fields, integers and ranges.
+
+| JSON operation | Wire command | Core call | Admission |
+|---|---|---|---|
+| `link`: `label`, `source`, `parent`, `name` | `link LABEL SOURCE PARENT NAME` | `link_file` | Source is a live file label |
+| `symlink`: `label`, `parent`, `name`, `target` | `symlink LABEL PARENT NAME TARGET` | `create_symlink` | UTF-8 target of 1–1,024 bytes without NUL, counted in the operation payload |
+| `clone_file`: `label`, `source`, `parent`, `name` | `clone_file LABEL SOURCE PARENT NAME` | `clone_file` | Source is a live file label |
+| `clone_range`: `source`, `source_offset`, `destination`, `destination_offset`, `length` | `clone_range SOURCE OFFSET DESTINATION OFFSET LENGTH` | `clone_range` | File labels; each offset plus length at most 16 MiB |
+| `set_protection`: `label`, `protection` | `set_protection LABEL VALUE` | `set_object_protection` | Live non-root label; unsigned 32-bit value |
+| `unlink_symlink`: `label` | `unlink_symlink LABEL` | `unlink_symlink` | Symlink label |
+
+Names and targets are hex on the wire. `rename` moves any non-root label,
+including a directory. The core decides block alignment, same-object CloneRange,
+directory cycles and name collisions; its refusal is a captured operation failure
+with retained evidence.
+
+`AFSOBS05` keeps the `AFSOBS04` cache, run, checker and captured records and
+replaces the file/directory records with a linked namespace. Recovered inspection
+lists each path once and refuses a repeated directory, an internal object or an
+exhausted 1,024-entry, depth-64 or 16 MiB budget. It reads opaque symlink targets
+without following them:
+
+```text
+directory PATH LINKS PROTECTION
+file PATH LINKS PROTECTION ALIAS DATA
+symlink PATH LINKS PROTECTION TARGET
+```
+
+Records are sorted by path. `ALIAS` is the zero-based index of the first record
+naming the same file object, so every hard link of that object repeats the index.
+Data and targets are hex; empty file data is `-`. Actual JSON version 5 carries
+these records as `entries`; expected version-9 entries use the same fields.
+Directories have `path`, `kind`, `links` and `protection`; files add `alias` and
+hex `data`; symlinks add a text `target`. The decoder refuses unordered paths,
+zero link counts, noncanonical integers, forward aliases and an alias whose first
+record differs in link count, protection or bytes. Success requires the exact
+linked namespace, the captured registry and clean structural checks. Replay,
+reduction signatures and cache binding follow version 7.
+
+Run [admission tests](../tools/test-replay-scenario.py),
+[replay tests](../tools/test-afsptest.py) and
+`cargo test -p afsplus-check --test scenario`. They require version gating,
+admission refusal, four-profile replay of aliases, targets, protection, clone and
+unaligned-range bytes, captured failures for invalid linked operations and
+failure verdicts for a wrong link count, protection, target, byte or alias.
+[Generated operation families](fuzzing.md#generated-operation-families) drive
+these commands with independent oracles.
 
 ## Selected-category and live-delivery bundles
 

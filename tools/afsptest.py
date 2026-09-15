@@ -205,10 +205,44 @@ def captured_observation(lines):
     return {"snapshot_inspection_error": error, "snapshots": views}
 
 
+def linked_entry(fields, previous):
+    """Decode one AFSOBS05 path; a file alias names the first sorted path of its object."""
+    counts = {"directory": 4, "file": 6, "symlink": 5}
+    if not fields or fields[0] not in counts or len(fields) != counts[fields[0]]:
+        raise ValueError("linked observation entry")
+
+    def number(raw, minimum, maximum):
+        value = int(raw)
+        if str(value) != raw or not minimum <= value <= maximum:
+            raise ValueError("linked observation integer")
+        return value
+
+    index = len(previous)
+    entry = {"kind": fields[0], "path": [bytes.fromhex(p).decode() for p in fields[1].split(",")],
+             "links": number(fields[2], 1, (1 << 32) - 1), "protection": number(fields[3], 0, (1 << 32) - 1)}
+    if previous and entry["path"] <= previous[-1]["path"]:
+        raise ValueError("linked observation path ordering")
+    if entry["kind"] == "file":
+        entry["alias"] = number(fields[4], 0, index)
+        entry["data"] = "" if fields[5] == "-" else bytes.fromhex(fields[5]).hex()
+        first = previous[entry["alias"]] if entry["alias"] != index else entry
+        if first["kind"] != "file" or first["alias"] != entry["alias"] or any(
+                first[key] != entry[key] for key in ("links", "protection", "data")):
+            raise ValueError("linked alias contradicts its first path")
+    elif entry["kind"] == "symlink":
+        if fields[4] == "-":
+            raise ValueError("empty linked symlink target")
+        entry["target"] = bytes.fromhex(fields[4]).decode()
+    return entry
+
+
 def observation(wire):
     lines = wire.decode("ascii").splitlines()
     cache = None
     captured = None
+    linked = bool(lines) and lines[0] == "AFSOBS05"
+    if linked:
+        lines[0] = "AFSOBS04"
     if lines and lines[0] == "AFSOBS04":
         positions = [i for i, line in enumerate(lines) if line.startswith("snapshots ")]
         if len(positions) != 1:
@@ -246,6 +280,9 @@ def observation(wire):
     entries = []
     for line in lines[5:]:
         fields = line.split(" ")
+        if linked:
+            entries.append(linked_entry(fields, entries))
+            continue
         if len(fields) not in (2, 3) or fields[0] not in ("file", "directory"):
             raise ValueError("observation entry")
         entry = {"kind": fields[0], "path": [bytes.fromhex(p).decode() for p in fields[1].split(",")]}
@@ -262,6 +299,8 @@ def observation(wire):
         result.update(version=3, cache_pages=cache)
     if captured is not None:
         result.update(version=4, **captured)
+    if linked:
+        result["version"] = 5
     return result
 
 
@@ -269,7 +308,7 @@ def bind_cache_profile(value, actual):
     """Admitted configuration and observed policy must agree before replay."""
     if not isinstance(actual, dict):
         raise ValueError("observation object")
-    expected_version = 4 if value["version"] >= 7 else 3 if value["version"] >= 2 else 2
+    expected_version = 5 if value["version"] >= 9 else 4 if value["version"] >= 7 else 3 if value["version"] >= 2 else 2
     if type(actual.get("version")) is not int or actual["version"] != expected_version:
         raise ValueError("scenario/observation profile version binding")
     if value["version"] >= 2:

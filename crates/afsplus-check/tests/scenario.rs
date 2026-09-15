@@ -513,3 +513,110 @@ fn object_observation_is_an_explicit_version_six_profile() {
         }
     }
 }
+
+const LINKED_HEADER: &str = "format 4096 256 64 8 2 32 127 0 none 4096 16 8";
+
+#[test]
+fn linked_commands_are_version_nine_and_admission_bounded() {
+    for command in [
+        "link l f root 61",
+        "symlink s root 73 2e2e",
+        "clone_file c f root 63",
+        "clone_range f 0 g 0 1",
+        "set_protection f 7",
+        "unlink_symlink s",
+    ] {
+        for (version, valid) in [("AFSPSC07", false), ("AFSPSC08", false), ("AFSPSC09", true)] {
+            let wire = format!("{version}\n{LINKED_HEADER}\n{command}\n");
+            assert_eq!(
+                Plan::parse(wire.as_bytes()).is_ok(),
+                valid,
+                "{version} {command}"
+            );
+        }
+    }
+    let long_target = format!("symlink s root 73 {}", "61".repeat(1025));
+    for command in [
+        "symlink s root 73 -",
+        "symlink s root 73 610062",
+        "symlink s root 73 ff",
+        long_target.as_str(),
+        "set_protection f 4294967296",
+        "clone_range f 16777216 g 0 1",
+        "clone_range f 0 g 1 16777216",
+        "link l f root",
+    ] {
+        let wire = format!("AFSPSC09\n{LINKED_HEADER}\n{command}\n");
+        assert!(Plan::parse(wire.as_bytes()).is_err(), "{command}");
+    }
+    let plan = Plan::parse(format!("AFSPSC09\n{LINKED_HEADER}\nsync\n").as_bytes()).unwrap();
+    assert!(plan.linked_observation() && plan.object_observation());
+    assert!(plan.snapshot_limits().is_some());
+}
+
+#[test]
+fn linked_observation_reports_aliases_targets_protection_and_clone_bytes() {
+    use afsplus_check::scenario::LinkedKind;
+    for profile in ["2", "4", "8", "unlimited"] {
+        let wire = format!(
+            "AFSPSC09\nformat 4096 512 64 8 {profile} 32 127 0 none 4096 16 8\n\
+             mkdir d root 64\ncreate f d 66 000102\nlink l f root 6c\n\
+             symlink s d 73 2e2e2fcf84\nset_protection f 7\nclone_file c l root 63\n\
+             write f 0 ff\nclone_range l 1 c 4097 2\nrename d root 6532\nunlink f\nremount\n"
+        );
+        let plan = Plan::parse(wire.as_bytes()).unwrap();
+        let run = plan.run().unwrap();
+        assert!(run.failure.is_none(), "{:?}", run.failure);
+        let observed = plan.inspect_checked(run.result, 1 << 20);
+        assert!(observed.is_clean());
+        assert!(observed.entries.is_err());
+        let linked = observed.linked.unwrap().unwrap();
+        let summary: Vec<_> = linked
+            .iter()
+            .map(|e| (e.path.join("/"), e.kind, e.link_count, e.protection))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("c".to_owned(), LinkedKind::File, 1, 7),
+                ("e2".to_owned(), LinkedKind::Directory, 1, 0),
+                ("e2/s".to_owned(), LinkedKind::Symlink, 1, 0),
+                ("l".to_owned(), LinkedKind::File, 1, 7),
+            ]
+        );
+        let mut clone = vec![0, 1, 2];
+        clone.resize(4097, 0);
+        clone.extend([1, 2]);
+        assert_eq!(linked[0].data, clone);
+        assert_eq!(linked[2].data, "../τ".as_bytes());
+        assert_eq!(linked[3].data, [0xff, 1, 2]);
+        assert_ne!(linked[0].object_id, linked[3].object_id);
+    }
+    let plan = Plan::parse(
+        format!("AFSPSC09\n{LINKED_HEADER}\ncreate f root 66 01\nlink l f root 6c\n").as_bytes(),
+    )
+    .unwrap();
+    let run = plan.run().unwrap();
+    let linked = plan
+        .inspect_checked(run.result, 1024)
+        .linked
+        .unwrap()
+        .unwrap();
+    assert_eq!(linked.len(), 2);
+    assert_eq!(linked[0].object_id, linked[1].object_id);
+    assert!(linked.iter().all(|e| e.link_count == 2 && e.data == [1]));
+    // Invalid linked operations are captured failures, never repaired sequences.
+    for command in [
+        "unlink_symlink f",
+        "clone_range f 0 f 0 1",
+        "clone_range f 0 g 1 1",
+        "set_protection root 1",
+        "link x root root 78",
+    ] {
+        let wire = format!(
+            "AFSPSC09\n{LINKED_HEADER}\ncreate f root 66 01\ncreate g root 67 02\n{command}\n"
+        );
+        let run = Plan::parse(wire.as_bytes()).unwrap().run().unwrap();
+        assert_eq!(run.failure.as_ref().map(|f| f.0), Some(2), "{command}");
+    }
+}

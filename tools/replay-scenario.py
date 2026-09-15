@@ -45,6 +45,13 @@ def data(value):
     return len(value) // 2
 
 
+def symlink_target(value):
+    """Opaque version-9 target: admitted text, never resolved as a path."""
+    if not isinstance(value, str) or value == "" or "\0" in value or len(value.encode("utf-8")) > 1024:
+        raise ValueError("invalid scenario symlink target")
+    return len(value.encode("utf-8"))
+
+
 def captured_views(views, *, observed=False):
     """Admit explicit expected history independently of the filesystem runner."""
     if not isinstance(views, list) or len(views) > 16:
@@ -126,7 +133,9 @@ def validate(encoded):
     scenario = json.loads(encoded, object_pairs_hook=unique)
     if not isinstance(scenario, dict):
         raise ValueError("scenario must be an object")
-    version = integer(scenario.get("version"), 1, 7)
+    version = integer(scenario.get("version"), 1, 9)
+    if version == 8:
+        raise ValueError("scenario version 8 is not admitted by this profile set")
     fields(scenario, "version volume operations expected" + (" flight_capacity" if version >= 3 else "")
            + (" flight_categories flight_sink" if version >= 4 else "")
            + (" snapshot_limits expected_snapshots" if version >= 7 else ""))
@@ -179,6 +188,11 @@ def validate(encoded):
     if version >= 7:
         schemas.update({"snapshot_" + action: "op label"
                         for action in ("create", "open", "close", "delete", "inspect")})
+    if version >= 9:
+        schemas.update(link="op label source parent name", clone_file="op label source parent name",
+                       symlink="op label parent name target", set_protection="op label protection",
+                       unlink_symlink="op label",
+                       clone_range="op source source_offset destination destination_offset length")
     for operation in operations:
         if not isinstance(operation, dict) or not isinstance(operation.get("op"), str) or operation["op"] not in schemas:
             raise ValueError("unknown scenario operation")
@@ -189,6 +203,16 @@ def validate(encoded):
             parent = operation["parent"]
             if not isinstance(parent, str) or labels.get(parent) != "directory":
                 raise ValueError("unknown directory label")
+        for key in ("source", "destination"):
+            if key in operation and (not isinstance(operation[key], str) or labels.get(operation[key]) != "file"):
+                raise ValueError("operation requires a file label")
+        if kind == "clone_range":
+            length = integer(operation["length"], 0, MAX_FILE)
+            for key in ("source_offset", "destination_offset"):
+                if integer(operation[key], 0, MAX_FILE) + length > MAX_FILE:
+                    raise ValueError("scenario clone range limit")
+        if "target" in operation: payload += symlink_target(operation["target"])
+        if "protection" in operation: integer(operation["protection"], 0, (1 << 32) - 1)
         if "label" in operation:
             label = operation["label"]
             if not isinstance(label, str) or not label.isascii() or not label.isidentifier() or len(label) > 64:
@@ -200,9 +224,9 @@ def validate(encoded):
                 elif label not in snapshot_labels:
                     raise ValueError("unknown snapshot label")
                 continue
-            if kind in ("mkdir", "create"):
+            if kind in ("mkdir", "create", "link", "symlink", "clone_file"):
                 if label in used: raise ValueError("scenario label reused")
-                labels[label] = "directory" if kind == "mkdir" else "file"
+                labels[label] = {"mkdir": "directory", "symlink": "symlink"}.get(kind, "file")
                 used.add(label)
             elif label not in labels or label == "root":
                 raise ValueError("unknown or reserved object label")
@@ -210,7 +234,9 @@ def validate(encoded):
                 raise ValueError("operation requires a file label")
             if kind == "rmdir" and labels[label] != "directory":
                 raise ValueError("operation requires a directory label")
-            if kind in ("unlink", "rmdir"): del labels[label]
+            if kind == "unlink_symlink" and labels[label] != "symlink":
+                raise ValueError("operation requires a symlink label")
+            if kind in ("unlink", "rmdir", "unlink_symlink"): del labels[label]
         if "data" in operation:
             count = data(operation["data"])
             payload += count
@@ -221,10 +247,20 @@ def validate(encoded):
     if not isinstance(expected, list) or len(expected) > MAX_OPS:
         raise ValueError("expected-state limit")
     paths = set()
+    linked = {"file": "path kind links protection alias data", "directory": "path kind links protection",
+              "symlink": "path kind links protection target"}
     for entry in expected:
-        if not isinstance(entry, dict) or entry.get("kind") not in ("file", "directory"):
+        if not isinstance(entry, dict) or entry.get("kind") not in (linked if version >= 9 else ("file", "directory")):
             raise ValueError("unknown expected kind")
-        fields(entry, "path kind data" if entry["kind"] == "file" else "path kind")
+        if version >= 9:
+            # Linked entries carry link count, protection, alias ordinal and opaque target.
+            fields(entry, linked[entry["kind"]])
+            integer(entry["links"], 1, (1 << 32) - 1)
+            integer(entry["protection"], 0, (1 << 32) - 1)
+            if entry["kind"] == "file": integer(entry["alias"], 0, len(expected) - 1)
+            if entry["kind"] == "symlink": payload += symlink_target(entry["target"])
+        else:
+            fields(entry, "path kind data" if entry["kind"] == "file" else "path kind")
         path = entry["path"]
         if not isinstance(path, list) or not 1 <= len(path) <= 64:
             raise ValueError("expected path depth limit")
@@ -254,7 +290,7 @@ def compile_commands(encoded):
         lines[0] = "AFSPSC03"
         lines[1] += " " + str(scenario["flight_capacity"])
     if scenario["version"] >= 4:
-        lines[0] = "AFSPSC07" if scenario["version"] >= 7 else "AFSPSC06" if scenario["version"] == 6 else "AFSPSC05" if scenario["version"] == 5 else "AFSPSC04"
+        lines[0] = "AFSPSC09" if scenario["version"] == 9 else "AFSPSC07" if scenario["version"] >= 7 else "AFSPSC06" if scenario["version"] == 6 else "AFSPSC05" if scenario["version"] == 5 else "AFSPSC04"
         sink = scenario["flight_sink"]
         capacity = 0 if sink is None else sink["capacity"]
         disconnect = None if sink is None else sink["disconnect_before"]
@@ -274,7 +310,18 @@ def compile_commands(encoded):
             fields = [kind, operation["label"], str(operation["size"])]
         elif kind == "rename":
             fields = [kind, operation["label"], operation["parent"], operation["name"].encode().hex()]
-        elif kind in ("unlink", "rmdir") or kind.startswith("snapshot_"):
+        elif kind in ("link", "clone_file"):
+            fields = [kind, operation["label"], operation["source"], operation["parent"],
+                      operation["name"].encode().hex()]
+        elif kind == "symlink":
+            fields = [kind, operation["label"], operation["parent"], operation["name"].encode().hex(),
+                      operation["target"].encode().hex()]
+        elif kind == "clone_range":
+            fields = [kind, operation["source"], str(operation["source_offset"]), operation["destination"],
+                      str(operation["destination_offset"]), str(operation["length"])]
+        elif kind == "set_protection":
+            fields = [kind, operation["label"], str(operation["protection"])]
+        elif kind in ("unlink", "rmdir", "unlink_symlink") or kind.startswith("snapshot_"):
             fields = [kind, operation["label"]]
         else:
             fields = [kind]

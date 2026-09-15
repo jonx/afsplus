@@ -51,6 +51,40 @@ pub enum Operation {
         label: String,
         directory: bool,
     },
+    /// Version 9: another directory link to an existing regular file.
+    Link {
+        label: String,
+        source: String,
+        parent: String,
+        name: String,
+    },
+    /// Version 9: an opaque UTF-8 target, never resolved by the runner.
+    Symlink {
+        label: String,
+        parent: String,
+        name: String,
+        target: String,
+    },
+    CloneFile {
+        label: String,
+        source: String,
+        parent: String,
+        name: String,
+    },
+    CloneRange {
+        source: String,
+        source_offset: u64,
+        destination: String,
+        destination_offset: u64,
+        length: u64,
+    },
+    SetProtection {
+        label: String,
+        protection: u32,
+    },
+    UnlinkSymlink {
+        label: String,
+    },
     Sync,
     WindowFsync,
     WindowCommit,
@@ -70,6 +104,7 @@ pub struct Plan {
     diagnostic_profile: Option<DiagnosticProfile>,
     api_observation: bool,
     object_observation: bool,
+    linked_observation: bool,
     snapshot_limits: Option<SnapshotWorkLimits>,
     blocks: u64,
     region: u32,
@@ -258,6 +293,21 @@ fn name(s: &str) -> Result<String, String> {
     validate_name(&bytes).map_err(|e| e.to_string())?;
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
+/// Harness admission for an opaque target; the core applies its own record limit.
+fn symlink_target(s: &str) -> Result<String, String> {
+    let bytes = hex(s)?;
+    if bytes.is_empty() || bytes.len() > 1024 || bytes.contains(&0) {
+        return Err("invalid scenario symlink target".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "scenario symlink target UTF-8".into())
+}
+fn file_range(offset: &str, length: u64) -> Result<u64, String> {
+    let offset = integer(offset, 16 * 1024 * 1024)?;
+    if offset + length > 16 * 1024 * 1024 {
+        return Err("scenario clone range".into());
+    }
+    Ok(offset)
+}
 impl Plan {
     pub fn parse(wire: &[u8]) -> Result<Self, String> {
         if wire.len() > 4 * 1024 * 1024 || !wire.ends_with(b"\n") {
@@ -276,12 +326,15 @@ impl Plan {
                     | "AFSPSC05"
                     | "AFSPSC06"
                     | "AFSPSC07"
+                    | "AFSPSC09"
             )
         ) {
             return Err("scenario protocol version".into());
         }
+        // Version 9 inherits the version-7 profile and adds linked namespace commands.
+        let linked = version == Some("AFSPSC09");
         let mut header: Vec<_> = lines.next().ok_or("missing geometry")?.split(' ').collect();
-        let snapshot_limits = if version == Some("AFSPSC07") {
+        let snapshot_limits = if matches!(version, Some("AFSPSC07" | "AFSPSC09")) {
             let reclaim_records =
                 integer(header.pop().ok_or("missing snapshot reclaim limit")?, 4096)? as usize;
             let max_views =
@@ -301,7 +354,7 @@ impl Plan {
         };
         let diagnostic_profile = if matches!(
             version,
-            Some("AFSPSC04" | "AFSPSC05" | "AFSPSC06" | "AFSPSC07")
+            Some("AFSPSC04" | "AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
         ) {
             let disconnect_before = match header.pop().ok_or("missing disconnect index")? {
                 "none" => None,
@@ -310,7 +363,7 @@ impl Plan {
             let sink_capacity =
                 integer(header.pop().ok_or("missing sink capacity")?, 256)? as usize;
             let maximum = match version {
-                Some("AFSPSC06" | "AFSPSC07") => 127,
+                Some("AFSPSC06" | "AFSPSC07" | "AFSPSC09") => 127,
                 Some("AFSPSC05") => 63,
                 _ => 15,
             };
@@ -328,7 +381,7 @@ impl Plan {
         };
         let flight_capacity = if matches!(
             version,
-            Some("AFSPSC03" | "AFSPSC04" | "AFSPSC05" | "AFSPSC06" | "AFSPSC07")
+            Some("AFSPSC03" | "AFSPSC04" | "AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
         ) {
             let capacity = integer(header.pop().ok_or("missing flight capacity")?, 256)? as usize;
             if capacity == 0 {
@@ -340,7 +393,15 @@ impl Plan {
         };
         let cache_profile = if matches!(
             version,
-            Some("AFSPSC02" | "AFSPSC03" | "AFSPSC04" | "AFSPSC05" | "AFSPSC06" | "AFSPSC07")
+            Some(
+                "AFSPSC02"
+                    | "AFSPSC03"
+                    | "AFSPSC04"
+                    | "AFSPSC05"
+                    | "AFSPSC06"
+                    | "AFSPSC07"
+                    | "AFSPSC09"
+            )
         ) {
             Some(match header.pop() {
                 Some("2") => 2,
@@ -390,7 +451,10 @@ impl Plan {
                 },
                 [kind @ ("write" | "window_write"), l, o, d]
                     if *kind == "write"
-                        || matches!(version, Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07")) =>
+                        || matches!(
+                            version,
+                            Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
+                        ) =>
                 {
                     Operation::Write {
                         deferred: *kind == "window_write",
@@ -401,7 +465,10 @@ impl Plan {
                 }
                 [kind @ ("truncate" | "window_truncate"), l, s]
                     if *kind == "truncate"
-                        || matches!(version, Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07")) =>
+                        || matches!(
+                            version,
+                            Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
+                        ) =>
                 {
                     Operation::Truncate {
                         deferred: *kind == "window_truncate",
@@ -424,7 +491,7 @@ impl Plan {
                 },
                 [kind @ ("snapshot_create" | "snapshot_open" | "snapshot_close"
                 | "snapshot_delete" | "snapshot_inspect"), name]
-                    if version == Some("AFSPSC07") =>
+                    if matches!(version, Some("AFSPSC07" | "AFSPSC09")) =>
                 {
                     Operation::Snapshot {
                         action: match *kind {
@@ -437,14 +504,53 @@ impl Plan {
                         label: label(name)?,
                     }
                 }
+                ["link", l, s, p, n] if linked => Operation::Link {
+                    label: label(l)?,
+                    source: label(s)?,
+                    parent: label(p)?,
+                    name: name(n)?,
+                },
+                ["symlink", l, p, n, t] if linked => Operation::Symlink {
+                    label: label(l)?,
+                    parent: label(p)?,
+                    name: name(n)?,
+                    target: symlink_target(t)?,
+                },
+                ["clone_file", l, s, p, n] if linked => Operation::CloneFile {
+                    label: label(l)?,
+                    source: label(s)?,
+                    parent: label(p)?,
+                    name: name(n)?,
+                },
+                ["clone_range", s, so, d, dof, len] if linked => {
+                    let length = integer(len, 16 * 1024 * 1024)?;
+                    Operation::CloneRange {
+                        source: label(s)?,
+                        source_offset: file_range(so, length)?,
+                        destination: label(d)?,
+                        destination_offset: file_range(dof, length)?,
+                        length,
+                    }
+                }
+                ["set_protection", l, value] if linked => Operation::SetProtection {
+                    label: label(l)?,
+                    protection: integer(value, u64::from(u32::MAX))? as u32,
+                },
+                ["unlink_symlink", l] if linked => Operation::UnlinkSymlink { label: label(l)? },
                 ["sync"] => Operation::Sync,
                 ["window_fsync"]
-                    if matches!(version, Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07")) =>
+                    if matches!(
+                        version,
+                        Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
+                    ) =>
                 {
                     Operation::WindowFsync
                 }
                 ["window_commit"]
-                    if matches!(version, Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07")) =>
+                    if matches!(
+                        version,
+                        Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
+                    ) =>
                 {
                     Operation::WindowCommit
                 }
@@ -453,6 +559,7 @@ impl Plan {
             };
             match &op {
                 Operation::Create { data, .. } => payload += data.len(),
+                Operation::Symlink { target, .. } => payload += target.len(),
                 Operation::Write { offset, data, .. } => {
                     payload += data.len();
                     if *offset + data.len() as u64 > 16 * 1024 * 1024 {
@@ -470,8 +577,12 @@ impl Plan {
             cache_profile,
             flight_capacity,
             diagnostic_profile,
-            api_observation: matches!(version, Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07")),
-            object_observation: matches!(version, Some("AFSPSC06" | "AFSPSC07")),
+            api_observation: matches!(
+                version,
+                Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
+            ),
+            object_observation: matches!(version, Some("AFSPSC06" | "AFSPSC07" | "AFSPSC09")),
+            linked_observation: linked,
             snapshot_limits,
             blocks,
             region,
@@ -493,6 +604,11 @@ impl Plan {
 
     pub fn api_observation(&self) -> bool {
         self.api_observation
+    }
+
+    /// Version 9 observes link counts, protection and symlink targets.
+    pub fn linked_observation(&self) -> bool {
+        self.linked_observation
     }
 
     pub fn flight_capacity(&self) -> Option<usize> {
@@ -526,7 +642,13 @@ impl Plan {
 
     /// Observe/recover a selected result under the same policy as execution.
     pub fn inspect_checked(&self, image: MemoryBackend, max_bytes: usize) -> Inspection {
-        inspect_checked_with_options(image, max_bytes, self.mount_options(), self.snapshot_limits)
+        inspect_checked_with_options(
+            image,
+            max_bytes,
+            self.mount_options(),
+            self.snapshot_limits,
+            self.linked_observation,
+        )
     }
     pub fn run_with_limits(&self, limits: RecordingLimits) -> Result<Run, String> {
         match self.flight_capacity {
@@ -662,7 +784,15 @@ impl Plan {
                 | Operation::Write { label, .. }
                 | Operation::Truncate { label, .. }
                 | Operation::Rename { label, .. }
-                | Operation::Remove { label, .. } => Some(label),
+                | Operation::Remove { label, .. }
+                | Operation::Link { label, .. }
+                | Operation::Symlink { label, .. }
+                | Operation::CloneFile { label, .. }
+                | Operation::SetProtection { label, .. }
+                | Operation::UnlinkSymlink { label }
+                | Operation::CloneRange {
+                    destination: label, ..
+                } => Some(label),
                 _ => None,
             };
             let previous_id = object_label
@@ -835,6 +965,106 @@ impl Plan {
                         .map_err(|e| e.to_string())?;
                         labels.remove(label);
                     }
+                    Operation::Link {
+                        label,
+                        source,
+                        parent,
+                        name,
+                    } => {
+                        if used.contains(label) {
+                            return Err("reused scenario label".into());
+                        }
+                        let file = get(source)?;
+                        let p = get(parent)?;
+                        if !p.3 {
+                            return Err("parent is not a directory".into());
+                        }
+                        volume
+                            .link_file(file.0, p.0, name, now)
+                            .map_err(|e| e.to_string())?;
+                        labels.insert(label.clone(), (file.0, p.0, name.clone(), false));
+                        used.insert(label.clone());
+                    }
+                    Operation::Symlink {
+                        label,
+                        parent,
+                        name,
+                        target,
+                    } => {
+                        if used.contains(label) {
+                            return Err("reused scenario label".into());
+                        }
+                        let p = get(parent)?;
+                        if !p.3 {
+                            return Err("parent is not a directory".into());
+                        }
+                        let id = volume
+                            .create_symlink(p.0, name, target, now)
+                            .map_err(|e| e.to_string())?;
+                        labels.insert(label.clone(), (id, p.0, name.clone(), false));
+                        used.insert(label.clone());
+                    }
+                    Operation::CloneFile {
+                        label,
+                        source,
+                        parent,
+                        name,
+                    } => {
+                        if used.contains(label) {
+                            return Err("reused scenario label".into());
+                        }
+                        let file = get(source)?;
+                        let p = get(parent)?;
+                        if !p.3 {
+                            return Err("parent is not a directory".into());
+                        }
+                        let id = volume
+                            .clone_file(file.0, p.0, name, now)
+                            .map_err(|e| e.to_string())?;
+                        labels.insert(label.clone(), (id, p.0, name.clone(), false));
+                        used.insert(label.clone());
+                    }
+                    Operation::CloneRange {
+                        source,
+                        source_offset,
+                        destination,
+                        destination_offset,
+                        length,
+                    } => {
+                        let source = get(source)?.0;
+                        let destination = get(destination)?.0;
+                        volume
+                            .clone_range(
+                                source,
+                                *source_offset,
+                                destination,
+                                *destination_offset,
+                                *length,
+                                now,
+                            )
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Operation::SetProtection { label, protection } => {
+                        if label == "root" {
+                            return Err("reserved root label".into());
+                        }
+                        volume
+                            .set_object_protection(get(label)?.0, *protection, now)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Operation::UnlinkSymlink { label } => {
+                        if label == "root" {
+                            return Err("reserved root label".into());
+                        }
+                        let old = get(label)?;
+                        if old.3 {
+                            return Err("removal kind mismatch".into());
+                        }
+                        volume
+                            .unlink_symlink(old.1, &old.2, now)
+                            .map_err(|e| e.to_string())?;
+                        labels.remove(label);
+                    }
                     Operation::WindowFsync => volume.window_fsync().map_err(|e| e.to_string())?,
                     Operation::WindowCommit => {
                         volume.window_commit(now).map_err(|e| e.to_string())?
@@ -879,12 +1109,35 @@ pub fn inspect(image: MemoryBackend, max_bytes: usize) -> Result<Vec<Entry>, Str
     inspect_volume(&mut volume, max_bytes)
 }
 
+/// Object kinds admitted by the version-9 linked namespace observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkedKind {
+    File,
+    Directory,
+    Symlink,
+}
+
+/// One path of the linked profile. Several paths may name one file object.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LinkedEntry {
+    pub path: Vec<String>,
+    pub kind: LinkedKind,
+    pub object_id: u64,
+    pub link_count: u64,
+    pub protection: u32,
+    /// File contents or opaque symlink target; empty for a directory.
+    pub data: Vec<u8>,
+}
+
 pub struct Inspection {
     /// Effective policy of the successfully mounted observation volume.
     pub cache_pages: Option<usize>,
     pub raw: crate::CheckReport,
     pub recovered: Option<crate::CheckReport>,
+    /// File/directory projection. The linked profile refuses this projection
+    /// explicitly and reports its namespace through `linked`.
     pub entries: Result<Vec<Entry>, String>,
+    pub linked: Option<Result<Vec<LinkedEntry>, String>>,
     pub snapshots: Option<Result<Vec<captured::View>, String>>,
 }
 impl Inspection {
@@ -894,7 +1147,10 @@ impl Inspection {
                 .recovered
                 .as_ref()
                 .is_some_and(crate::CheckReport::is_clean)
-            && self.entries.is_ok()
+            && match &self.linked {
+                Some(linked) => linked.is_ok(),
+                None => self.entries.is_ok(),
+            }
             && self.snapshots.as_ref().is_none_or(|views| views.is_ok())
     }
 }
@@ -902,7 +1158,7 @@ impl Inspection {
 /// Full offline checks before and after recovery of an owned memory image.
 /// The recovered checker covers the exact volume used for namespace observation.
 pub fn inspect_checked(image: MemoryBackend, max_bytes: usize) -> Inspection {
-    inspect_checked_with_options(image, max_bytes, MountOptions::default(), None)
+    inspect_checked_with_options(image, max_bytes, MountOptions::default(), None, false)
 }
 
 fn inspect_checked_with_options(
@@ -910,6 +1166,7 @@ fn inspect_checked_with_options(
     max_bytes: usize,
     options: MountOptions,
     snapshot_limits: Option<SnapshotWorkLimits>,
+    linked_profile: bool,
 ) -> Inspection {
     let raw = crate::check_device(&mut image);
     let mounted = match snapshot_limits {
@@ -922,11 +1179,19 @@ fn inspect_checked_with_options(
             raw,
             recovered: None,
             entries: Err(error.to_string()),
+            linked: linked_profile.then(|| Err(error.to_string())),
             snapshots: snapshot_limits.map(|_| Err(error.to_string())),
         },
         Ok(mut volume) => {
             let cache_pages = Some(volume.tree_cache_pages());
-            let entries = inspect_volume(&mut volume, max_bytes);
+            let (entries, linked) = if linked_profile {
+                (
+                    Err("linked namespace observation profile".into()),
+                    Some(inspect_linked(&mut volume, max_bytes)),
+                )
+            } else {
+                (inspect_volume(&mut volume, max_bytes), None)
+            };
             let snapshots = snapshot_limits.map(|limits| {
                 captured::inspect_all(
                     &mut volume,
@@ -945,10 +1210,81 @@ fn inspect_checked_with_options(
                 raw,
                 recovered,
                 entries,
+                linked,
                 snapshots,
             }
         }
     }
+}
+
+/// Linked observation: repeated file objects are hard-link aliases; a repeated
+/// directory, an internal object or an exhausted budget is an error.
+fn inspect_linked(
+    volume: &mut afsplus_core::Volume<MemoryBackend>,
+    max_bytes: usize,
+) -> Result<Vec<LinkedEntry>, String> {
+    use afsplus_format::object::ObjectType;
+    let mut queue = std::collections::VecDeque::from([(OBJECT_ROOT, Vec::<String>::new())]);
+    let mut directories = std::collections::BTreeSet::from([OBJECT_ROOT]);
+    let mut entries = Vec::new();
+    let mut bytes = 0usize;
+    while let Some((directory, path)) = queue.pop_front() {
+        let children = volume
+            .list_directory(directory)
+            .map_err(|e| e.to_string())?;
+        for (name, id) in children {
+            if entries.len() >= 1024 || path.len() >= 64 {
+                return Err("scenario namespace admission".into());
+            }
+            let mut child = path.clone();
+            child.push(name);
+            let record = volume
+                .stat(id)
+                .map_err(|e| e.to_string())?
+                .ok_or("scenario missing object")?;
+            let size = usize::try_from(record.size_bytes).map_err(|_| "scenario object size")?;
+            let (kind, data) = match record.object_type {
+                ObjectType::Directory => {
+                    if !directories.insert(id) {
+                        return Err("scenario repeated directory".into());
+                    }
+                    queue.push_back((id, child.clone()));
+                    (LinkedKind::Directory, Vec::new())
+                }
+                ObjectType::File | ObjectType::Symlink => {
+                    if size > max_bytes.saturating_sub(bytes) {
+                        return Err("scenario observation byte limit".into());
+                    }
+                    bytes += size;
+                    if record.object_type == ObjectType::File {
+                        let data = volume.read_file(id).map_err(|e| e.to_string())?;
+                        (LinkedKind::File, data)
+                    } else {
+                        let mut target = vec![0; size];
+                        if volume
+                            .read_link(id, &mut target)
+                            .map_err(|e| e.to_string())?
+                            != size
+                        {
+                            return Err("scenario symlink length".into());
+                        }
+                        (LinkedKind::Symlink, target)
+                    }
+                }
+                _ => return Err("unsupported scenario object kind".into()),
+            };
+            entries.push(LinkedEntry {
+                path: child,
+                kind,
+                object_id: id,
+                link_count: u64::from(record.link_count),
+                protection: record.protection,
+                data,
+            });
+        }
+    }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(entries)
 }
 
 fn inspect_volume(

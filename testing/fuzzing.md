@@ -10,6 +10,7 @@
 - [Rust codec gate](#rust-codec-gate)
 - [Portable C corpus contract](#portable-c-corpus-contract)
 - [Seeded semantic properties](#seeded-semantic-properties)
+- [Generated operation families](#generated-operation-families)
 - [Legacy one-block reader oracles](#legacy-one-block-reader-oracles)
 - [Typed caller and Unicode properties](#typed-caller-and-unicode-properties)
 
@@ -197,8 +198,10 @@ random implementation. Every sequence contains create, mkdir, cross-directory
 file rename, unlink, empty-directory removal, sparse write, truncate, sync and
 remount. Long names produce multi-leaf directories; random suffixes vary content,
 block-boundary writes, shrink/grow, parent directories and object lifetime.
-Directory rename, hard links, clones, snapshots and fault injection have separate
-mutation-family gates and are not claimed by this scenario profile.
+This version-1 profile moves files only. [Generated operation families](#generated-operation-families)
+cover deferred windows, persistent snapshots, hard links, symlinks, directory
+rename, clones and protection. Fault injection belongs to the separate
+mutation-family gates of [crash testing](crash-testing.md).
 
 ```sh
 cargo build --offline -p afsplus-check --bin afsplus-scenario
@@ -242,6 +245,100 @@ and overwrite refusal. Qualification additionally replays retained cases in fres
 processes and requires an intentionally incorrect expected byte sequence to fail.
 This state-machine corpus complements codec mutation and fault matrices; it does
 not qualify ungenerated API families or arbitrary-length workloads.
+
+## Generated operation families
+
+Generator version 2 of [the semantic generator](../tools/fuzz-semantic.py) adds
+three families selected with `--family`. Each family uses the version-1
+xorshift64 sequence, seed and length bounds (1–16 distinct seeds, 64–256
+operations), half and full prefixes followed by a remount, the four cache
+profiles, durable publication and the recipe/result records above. The
+version-1 generator and its golden scenario keep their bytes. A family recipe
+adds `family`, the scenario version and the applied negative control.
+
+| Family | Scenario | Generated operations | Independent oracle |
+|---|---|---|---|
+| `window` | version 5 | create, mkdir, write, truncate, rename, unlink, rmdir, sync, remount, `window_write`, `window_truncate`, `window_fsync`, `window_commit` | Committed byte model plus staged work: fsync acknowledges every staged operation, commit publishes all staged work, remount keeps the acknowledged prefix and drops the rest |
+| `snapshot` | version 7 | create, mkdir, write, truncate, file and directory rename, unlink, rmdir, sync, remount, `snapshot_create`, `snapshot_open`, `snapshot_inspect`, `snapshot_close`, `snapshot_delete` | Object graph with generations, object IDs, timestamps, link counts and single-block allocation; each view is copied at creation and compared as complete `expected_snapshots` metadata |
+| `namespace` | [version 9](developer-harness.md#linked-namespace-replay-bundles) | create, mkdir, write, truncate, rename of files, symlinks and directories, `link`, `symlink`, `unlink_symlink`, `clone_file`, `clone_range`, `set_protection`, unlink, rmdir, sync, remount | The same object graph projected to paths, kinds, link counts, protection, hard-link alias ordinals, bytes and opaque symlink targets |
+
+Every window sequence starts with a ladder: an acknowledged group survives a
+remount that loses a later write; two acknowledged groups and an unacknowledged
+write are published by commit; an unacknowledged truncate is lost at remount.
+Direct mutations and `sync` never run while a window is open. Window truncates
+change the visible size and window writes carry data, so every staged call opens
+or extends the window. A window holds at most 24 staged operations, eight
+unacknowledged operations per group and six log records of the eight-slot
+fixture; fsync and commit without a window are admitted no-ops. At most 16 files
+of 8,224 bytes and four directories are live.
+
+The snapshot ladder keeps a handle open across a write and a file move, inspects
+and closes it, moves a directory across parents, captures sparse growth of a
+file that is unlinked later, remounts, reopens the second view, deletes the first
+and removes a directory. Snapshot labels are unique; inspect and close use open
+handles; delete requires a closed handle; remount closes every handle. At most six
+views, twelve files and six directories are live, at depth two with short names.
+File data stays in logical block zero, so allocation is exact: one 4 KiB range
+once that block is written and none before. The model publishes one generation
+per mutation (a same-size truncate, an empty write or unchanged protection
+publishes none), captures the current generation before the registry commit of
+`snapshot_create`, assigns snapshot IDs from 1 without reuse and object IDs from
+16, stamps operation index i with i + 1 seconds, and reports 4,096 allocated bytes
+for the root and zero for other directories.
+
+The namespace ladder writes through a hard link in another directory, creates a
+symlink, sets protection, clones the file, clones the unaligned range at source
+offset 1 to destination offset 4,097, rewrites the source, moves a directory and
+a symlink across parents, unlinks one link and the symlink, truncates the clone,
+links it again and creates a non-ASCII target. The random suffix keeps at most 48
+names, eight directories at depth three and files of 8,224 bytes. CloneRange uses
+distinct objects, matching block residues and source offsets 0, 1, 4,095, 4,096
+or 4,097 inside the source. Directory moves stay outside the moved subtree and
+names are fresh. CloneFile gives the new object the source bytes, size and
+protection with one link; the oracle follows the executable
+[CloneFile](../crates/afsplus-core/src/volume.rs) behavior, because
+[clone semantics](../docs/32-reflink-clone-semantics.md#3-clonefile) leave
+metadata inheritance to the API contract.
+
+```sh
+cargo build --offline -p afsplus-check --bin afsplus-scenario
+python3 tools/test-fuzz-semantic.py
+python3 tools/fuzz-semantic.py build/window-properties --family window --seeds 1 7 42 --steps 96
+python3 tools/fuzz-semantic.py build/window-properties --replay
+python3 tools/fuzz-semantic.py build/window-control --family window --negative-control window-byte
+```
+
+The driver computes every case before creating the output directory and refuses
+a campaign whose `expected` or `expected_snapshots` differ between cache profiles
+for one seed and prefix. Each case publishes a complete runner bundle. `--replay`
+reruns every retained case of a campaign in a fresh `afsptest.py replay` process
+and requires the recorded manifest digest and verdict. `--negative-control`
+changes exactly one expected value in the first case where it applies, records
+that case in the recipe and exits zero only when the campaign stops at that case
+with its failing bundle retained.
+
+| Control | Family | Wrong expected value |
+|---|---|---|
+| `window-byte` | window | First byte of a file published by window commit or replay |
+| `snapshot-entry` | snapshot | First byte of the first captured file with data |
+| `link-count` | namespace | Link count of a multiply linked file, minus one |
+| `symlink-target` | namespace | Symlink target with one appended character |
+| `protection` | namespace | Lowest protection bit of the first entry with nonzero protection |
+| `clone-byte` | namespace | First byte of a CloneFile or CloneRange destination |
+| `directory-rename` | namespace | Final component of a moved directory |
+
+The unit gate checks window, object and captured-view model examples, golden
+family scenarios, required operations and bounds at seeds 0, 1, 7, 42 and
+2^64 − 1, profile independence, control placement, family recipes, control
+reproduction, fresh-replay binding, and one real-runner pass plus every failing
+control. Generated families run without power cuts or injected I/O errors; the
+existing [crash](crash-testing.md) and [fault](../crates/afsplus-check/tests/faults.rs)
+matrices own those models. Captured views cover single-block files, files and
+directories; hard links, symlinks, clones and window work inside captured views,
+the source change time after CloneRange shares complete blocks, namespace
+operations inside windows and `RenameReplace` are outside these oracles. Each
+verdict compares the remounted state; intermediate reads and concurrent callers
+are separate properties.
 
 ## Legacy one-block reader oracles
 

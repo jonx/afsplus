@@ -22,6 +22,58 @@ def fixture():
 
 
 class ScenarioTests(unittest.TestCase):
+    def test_v9_linked_commands_labels_and_entries_are_version_bound(self):
+        value = fixture()
+        value.update(version=9, flight_capacity=32, flight_categories=127, flight_sink=None,
+                     snapshot_limits={"max_edit_records": 4096, "max_views": 16, "reclaim_records": 8},
+                     expected_snapshots=[])
+        value["volume"]["tree_cache_pages"] = 4
+        value["operations"] = [
+            {"op": "mkdir", "label": "d", "parent": "root", "name": "dir"},
+            {"op": "create", "label": "f", "parent": "d", "name": "f", "data": "0102"},
+            {"op": "link", "label": "l", "source": "f", "parent": "root", "name": "alias"},
+            {"op": "symlink", "label": "s", "parent": "d", "name": "s", "target": "../ταξί"},
+            {"op": "clone_file", "label": "c", "source": "l", "parent": "root", "name": "c"},
+            {"op": "clone_range", "source": "f", "source_offset": 1, "destination": "c",
+             "destination_offset": 4097, "length": 1},
+            {"op": "set_protection", "label": "d", "protection": 4294967295},
+            {"op": "rename", "label": "d", "parent": "root", "name": "moved"},
+            {"op": "unlink_symlink", "label": "s"}, {"op": "unlink", "label": "f"}]
+        value["expected"] = [
+            {"path": ["alias"], "kind": "file", "links": 1, "protection": 0, "alias": 0, "data": "0102"},
+            {"path": ["c"], "kind": "file", "links": 1, "protection": 0, "alias": 1, "data": "0102"},
+            {"path": ["moved"], "kind": "directory", "links": 1, "protection": 4294967295},
+            {"path": ["t"], "kind": "symlink", "links": 1, "protection": 0, "target": "x"}]
+        raw = json.dumps(value).encode()
+        wire = scenario.compile_commands(raw).decode().splitlines()
+        self.assertEqual(wire[:2], ["AFSPSC09", "format 4096 256 64 8 4 32 127 0 none 4096 16 8"])
+        for line in ("link l f root " + "alias".encode().hex(), "symlink s d 73 " + "../ταξί".encode().hex(),
+                     "clone_file c l root 63", "clone_range f 1 c 4097 1", "set_protection d 4294967295",
+                     "unlink_symlink s"):
+            self.assertIn(line, wire)
+        for version in (7, 8):
+            with self.assertRaises(ValueError):
+                scenario.validate(json.dumps(dict(value, version=version)).encode())
+        for index, changes in ((2, {"source": "d"}), (2, {"source": "missing"}), (3, {"target": ""}),
+                               (3, {"target": "a\0b"}), (3, {"target": "x" * 1025}), (4, {"label": "f"}),
+                               (5, {"source_offset": True}), (5, {"length": 16 * 1024 * 1024}),
+                               (5, {"destination": "s"}), (6, {"protection": 1 << 32}),
+                               (6, {"protection": -1}), (8, {"label": "f"}), (9, {"label": "s"})):
+            candidate = json.loads(raw)
+            candidate["operations"][index].update(changes)
+            with self.assertRaises(ValueError, msg=(index, changes)):
+                scenario.validate(json.dumps(candidate).encode())
+        for index, changes in ((0, {"links": 0}), (0, {"alias": 4}), (2, {"data": "00"}),
+                               (3, {"target": ""}), (3, {"protection": True})):
+            candidate = json.loads(raw)
+            candidate["expected"][index].update(changes)
+            with self.assertRaises(ValueError, msg=(index, changes)):
+                scenario.validate(json.dumps(candidate).encode())
+        candidate = json.loads(raw)
+        del candidate["expected"][0]["alias"]
+        with self.assertRaises(ValueError):
+            scenario.validate(json.dumps(candidate).encode())
+
     def test_v7_snapshot_limits_and_labels_are_explicit(self):
         value = fixture()
         value.update(version=7, flight_capacity=256, flight_categories=127, flight_sink=None,

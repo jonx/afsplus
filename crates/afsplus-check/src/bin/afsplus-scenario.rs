@@ -2,7 +2,7 @@
 use afsplus_block::{BlockDevice, MemoryBackend};
 use afsplus_check::{
     replay_trace::{base_digest, Limits, Trace},
-    scenario::Plan,
+    scenario::{LinkedKind, Plan},
 };
 use std::io::{self, Read, Write};
 
@@ -203,7 +203,9 @@ fn run() -> Result<(), String> {
         };
         format!(
             "{}\ncache-pages {profile}\n",
-            if plan.snapshot_limits().is_some() {
+            if plan.linked_observation() {
+                "AFSOBS05"
+            } else if plan.snapshot_limits().is_some() {
                 "AFSOBS04"
             } else {
                 "AFSOBS03"
@@ -230,9 +232,38 @@ fn run() -> Result<(), String> {
             .map(|report| hex(report.render_json().as_bytes()))
             .unwrap_or_else(|| "-".into())
     ));
-    match inspection.entries {
-        Err(error) => observed.push_str(&format!("observe error {}\n", hex(error.as_bytes()))),
-        Ok(entries) => {
+    match (inspection.linked, inspection.entries) {
+        (Some(Err(error)), _) | (None, Err(error)) => {
+            observed.push_str(&format!("observe error {}\n", hex(error.as_bytes())))
+        }
+        (Some(Ok(entries)), _) => {
+            observed.push_str("observe ok\n");
+            // A file alias is the sorted index of the first path naming its object.
+            let mut first = std::collections::BTreeMap::new();
+            for (index, entry) in entries.iter().enumerate() {
+                let path = entry
+                    .path
+                    .iter()
+                    .map(|s| hex(s.as_bytes()))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let (links, protection) = (entry.link_count, entry.protection);
+                observed.push_str(&match entry.kind {
+                    LinkedKind::Directory => format!("directory {path} {links} {protection}\n"),
+                    LinkedKind::File => {
+                        let alias = *first.entry(entry.object_id).or_insert(index);
+                        format!(
+                            "file {path} {links} {protection} {alias} {}\n",
+                            hex(&entry.data)
+                        )
+                    }
+                    LinkedKind::Symlink => {
+                        format!("symlink {path} {links} {protection} {}\n", hex(&entry.data))
+                    }
+                });
+            }
+        }
+        (None, Ok(entries)) => {
             observed.push_str("observe ok\n");
             for entry in entries {
                 let path = entry

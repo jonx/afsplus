@@ -47,7 +47,79 @@ def snapshot_fixture(pages=2):
                          "allocation": [{"offset": 0, "length": 4096, "unwritten": False}]}]}]}
 
 
+def linked_fixture(pages=2):
+    # Hand-computed state: aliases share bytes and protection, the clone keeps
+    # its own bytes, and the unaligned range copies the alias bytes 4095..4096.
+    shared = "00" * 4095 + "a1ff"
+    return {"version": 9, "volume": {"block_size": 4096, "blocks": 512, "region_size": 64,
+            "log_slots": 8, "tree_cache_pages": pages},
+        "flight_capacity": 32, "flight_categories": 127, "flight_sink": None,
+        "snapshot_limits": {"max_edit_records": 4096, "max_views": 16, "reclaim_records": 8},
+        "operations": [
+            {"op": "mkdir", "label": "d", "parent": "root", "name": "dir"},
+            {"op": "create", "label": "f", "parent": "d", "name": "file", "data": "00" * 4095 + "a1b2"},
+            {"op": "link", "label": "l", "source": "f", "parent": "root", "name": "alias"},
+            {"op": "write", "label": "l", "offset": 0, "data": "42"},
+            {"op": "symlink", "label": "s", "parent": "d", "name": "link", "target": "../ταξί"},
+            {"op": "set_protection", "label": "f", "protection": 7},
+            {"op": "clone_file", "label": "c", "source": "f", "parent": "root", "name": "clone"},
+            {"op": "write", "label": "f", "offset": 4096, "data": "ff"},
+            {"op": "clone_range", "source": "l", "source_offset": 4095, "destination": "c",
+             "destination_offset": 4095, "length": 2},
+            {"op": "write", "label": "f", "offset": 0, "data": "00"},
+            {"op": "rename", "label": "d", "parent": "root", "name": "moved"},
+            {"op": "remount"}],
+        "expected": [
+            {"path": ["alias"], "kind": "file", "links": 2, "protection": 7, "alias": 0, "data": shared},
+            {"path": ["clone"], "kind": "file", "links": 1, "protection": 7, "alias": 1,
+             "data": "42" + "00" * 4094 + "a1ff"},
+            {"path": ["moved"], "kind": "directory", "links": 1, "protection": 0},
+            {"path": ["moved", "file"], "kind": "file", "links": 2, "protection": 7, "alias": 0, "data": shared},
+            {"path": ["moved", "link"], "kind": "symlink", "links": 1, "protection": 0, "target": "../ταξί"}],
+        "expected_snapshots": []}
+
+
 class ReplayTests(unittest.TestCase):
+    def test_v9_linked_observation_decodes_aliases_targets_and_protection(self):
+        lines = ["file 616c696173 2 7 0 4142", "file 636c6f6e65 1 7 1 42", "directory 6d6f766564 1 0",
+                 "file 6d6f766564,66696c65 2 7 0 4142", "symlink 6d6f766564,6c696e6b 1 0 2e2e"]
+        entries = []
+        for line in lines:
+            entries.append(tool.linked_entry(line.split(" "), entries))
+        self.assertEqual((entries[3]["alias"], entries[4]["target"]), (0, ".."))
+        for index, bad in ((3, "file 6d6f766564,66696c65 2 6 0 4142"), (3, "file 6d6f766564,66696c65 2 7 1 4142"),
+                           (1, "file 636c6f6e65 0 7 1 42"), (1, "file 636c6f6e65 1 7 2 42"),
+                           (4, "symlink 6d6f766564,6c696e6b 1 0 -"), (2, "directory 6d6f766564 1 01"),
+                           (1, "file 616c696173 1 7 1 42"), (4, "symlink 6d6f766564,6c696e6b 1 0"),
+                           (0, "fifo 616c696173 1 0")):
+            with self.assertRaises(ValueError, msg=bad):
+                tool.linked_entry(bad.split(" "), list(entries[:index]))
+
+    def test_v9_linked_bundles_replay_and_wrong_link_values_fail(self):
+        for pages in (2, 4, 8, "unlimited"):
+            value = linked_fixture(pages)
+            records, success = tool.execute(tool.encoded(value), BINARY)
+            actual = json.loads(records["actual.json"])
+            self.assertTrue(success, actual["entries"])
+            self.assertEqual((actual["version"], actual["cache_pages"]), (5, pages))
+            self.assertTrue(records["flight-recorder.bin"].startswith(b"AFSFLT05"))
+            with self.assertRaises(ValueError):
+                tool.bind_cache_profile(value, dict(actual, version=4))
+            with tempfile.TemporaryDirectory(prefix="afsplus-linked-replay-") as temporary:
+                path = Path(temporary) / "bundle"
+                tool.bundle.publish(path, records)
+                self.assertTrue(tool.replay(path, BINARY))
+        for index, field, wrong in ((0, "links", 1), (1, "protection", 6), (4, "target", "../other"),
+                                    (1, "data", "43" + "00" * 4094 + "a1ff"), (3, "alias", 1)):
+            value = linked_fixture()
+            value["expected"][index][field] = wrong
+            records, success = tool.execute(tool.encoded(value), BINARY)
+            self.assertFalse(success, field)
+            self.assertEqual(tool.admit_run(records)[0]["outcome"], "failure")
+            self.assertEqual(json.loads(tool.failure_signature(records))["kind"], "state")
+            self.assertFalse(tool.verify_replay(records, BINARY, tool.bundle.DEFAULT_FILE_BYTES,
+                                               tool.bundle.DEFAULT_TOTAL_BYTES))
+
     def test_captured_observation_distinguishes_empty_error_and_history(self):
         root = "1 directory 0 0 1 0 0 0 0 0 0 0 0"
         file = "2 file 1 4096 1 0 0 0 0 0 0 0 1"
