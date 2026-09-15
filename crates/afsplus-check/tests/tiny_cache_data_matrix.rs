@@ -1040,6 +1040,7 @@ struct WideFixture {
     snapshot: u64,
     generation: u64,
     records: [ObjectRecord; 2],
+    extents: [Vec<Extent>; 2],
 }
 fn value(i: u64) -> u8 {
     (i % 200 + 16) as u8
@@ -1091,6 +1092,7 @@ fn wide_fixture(pages: usize, n: u64) -> (MemoryBackend, WideFixture) {
             v.stat(wide).unwrap().unwrap(),
             v.stat(resv).unwrap().unwrap(),
         ],
+        extents: [load_extents(&mut v, wide), load_extents(&mut v, resv)],
     };
     f.records = [
         check_file(&mut v, wide, &f.old(wide)),
@@ -1195,6 +1197,120 @@ fn wide_retried<D: BlockDevice>(v: &mut Volume<D>, f: &WideFixture, op: Wide) {
     );
 }
 
+/// Byte window each operation changes, checked literally in every cut image.
+fn wide_window(f: &WideFixture, op: Wide) -> (u64, std::ops::Range<usize>) {
+    let (n, m) = (f.n as usize, (f.n / 2) as usize);
+    match op {
+        Wide::CowWrite | Wide::BoundedWrite => (f.wide, 2 * m * BS..(2 * m + 1) * BS),
+        Wide::ReservationWrite | Wide::BoundedReservationWrite => {
+            (f.resv, 3 * m * BS..(3 * m + 1) * BS)
+        }
+        Wide::ReserveHoles => (f.wide, 0..3 * BS),
+        Wide::Shrink | Wide::BoundedShrink => (f.wide, (n - 1) * BS..(n + 2) * BS),
+        Wide::Growth => (f.wide, (2 * n - 2) * BS..(2 * n + 1) * BS),
+    }
+}
+fn check_window<D: BlockDevice>(
+    v: &mut Volume<D>,
+    snapshot: Option<u64>,
+    id: u64,
+    window: &std::ops::Range<usize>,
+    e: &Expect,
+) {
+    let (start, end) = (
+        window.start.min(e.bytes.len()),
+        window.end.min(e.bytes.len()),
+    );
+    // A sentinel byte past the window proves EOF only when the window reaches it.
+    let eof = end == e.bytes.len();
+    let mut bytes = vec![0xa5; end - start + usize::from(eof)];
+    let count = match snapshot {
+        None => v.read_file_at(id, start as u64, &mut bytes).unwrap(),
+        Some(snapshot) => {
+            let view = v.snapshot_open(snapshot).unwrap();
+            v.snapshot_read_file_at(&view, id, start as u64, &mut bytes)
+                .unwrap()
+        }
+    };
+    assert_eq!(count, end - start);
+    assert!(bytes[..count] == e.bytes[start..end], "object {id} window");
+    if eof {
+        assert_eq!(bytes[count], 0xa5);
+    }
+}
+/// Per-transaction ownership proof: no recorded write lands on a block the old
+/// state maps as written data, and only reservation initialization writes a
+/// reserved block, namely the one it initializes. Every cut image is the base
+/// plus recorded writes, so exact old extent records then imply exact old
+/// live and captured bytes outside the literal window.
+fn assert_old_data_untouched(f: &WideFixture, op: Wide, log: &[RecordedOp]) {
+    let m = f.n / 2;
+    let initialized =
+        matches!(op, Wide::ReservationWrite | Wide::BoundedReservationWrite).then(|| {
+            let extent = f.extents[1][m as usize];
+            assert_eq!((extent.logical_start, extent.block_count), (3 * m, 1));
+            extent.physical_start
+        });
+    let mut data_writes = 0;
+    for entry in log {
+        let RecordedOp::Write { lba, .. } = entry else {
+            continue;
+        };
+        for extent in f.extents.iter().flatten() {
+            if (extent.physical_start..extent.physical_start + extent.block_count).contains(lba) {
+                assert!(
+                    extent.flags & EXTENT_UNWRITTEN != 0 && initialized == Some(*lba),
+                    "{op:?} writes old mapped block {lba}"
+                );
+                data_writes += 1;
+            }
+        }
+    }
+    assert_eq!(data_writes, usize::from(initialized.is_some()));
+}
+/// Exact old-outcome image oracle without full byte reads (see ownership proof).
+fn wide_old_image<D: BlockDevice>(v: &mut Volume<D>, f: &WideFixture, op: Wide) {
+    assert_eq!(v.generation(), f.generation);
+    let (window_id, window) = wide_window(f, op);
+    for (index, id) in [f.wide, f.resv].into_iter().enumerate() {
+        let e = f.old(id);
+        assert_eq!(v.stat(id).unwrap(), Some(f.records[index]));
+        assert_eq!(live_ranges(v, id), e.ranges);
+        assert_eq!(load_extents(v, id), f.extents[index]);
+        let view = v.snapshot_open(f.snapshot).unwrap();
+        let metadata = ObjectMetadata::from(f.records[index]);
+        assert_eq!(v.snapshot_stat(&view, id).unwrap(), Some(metadata));
+        let mut captured = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let page = v.snapshot_allocation_page(&view, id, cursor, 64).unwrap();
+            captured.extend(
+                page.ranges
+                    .iter()
+                    .map(|r| (r.offset, r.length, r.unwritten)),
+            );
+            if page.eof {
+                break;
+            }
+            cursor = page.next;
+        }
+        drop(view);
+        assert_eq!(captured, e.ranges);
+        if id == window_id {
+            check_window(v, None, id, &window, &e);
+            check_window(v, Some(f.snapshot), id, &window, &e);
+        }
+    }
+    clean(v.device_mut());
+}
+fn tail_at(log: &[RecordedOp], cut: usize) -> usize {
+    log[..cut]
+        .iter()
+        .rev()
+        .take_while(|op| !matches!(op, RecordedOp::Flush))
+        .count()
+}
+
 struct EvictionPlan {
     pages: usize,
     records: u64,
@@ -1263,17 +1379,29 @@ fn eviction_profile(plan: EvictionPlan) {
         );
         if plan.cuts.contains(&op) {
             assert!(longest_tail(&log) <= CUT_BUDGET, "{summary} {detail}");
+            assert_old_data_untouched(&f, op, &log);
             let mut outcomes = [0usize; 2];
+            let mut full = 0usize;
             for cut in 0..=log.len() {
+                // Full byte reads: every committed image, and the empty and
+                // complete unflushed subsets of every cut point.
+                let complete = (1usize << tail_at(&log, cut)) - 1;
+                let mut index = 0usize;
                 for_each_crash_state_with_budget(&base, &log, cut, CUT_BUDGET, |state| {
                     let mut recovered = open(state.image, pages);
                     let committed = recovered.generation() == f.generation + 1;
-                    wide_verify(&mut recovered, &f, op, committed);
+                    if committed || index == 0 || index == complete {
+                        wide_verify(&mut recovered, &f, op, committed);
+                        full += 1;
+                    } else {
+                        wide_old_image(&mut recovered, &f, op);
+                    }
+                    index += 1;
                     outcomes[usize::from(committed)] += 1;
                 });
             }
             assert!(outcomes.iter().all(|&n| n > 0), "{summary} {outcomes:?}");
-            detail += &format!(" cuts old/new={outcomes:?}");
+            detail += &format!(" cuts old/new={outcomes:?} full_byte_images={full}");
         }
         if plan.faults.contains(&op) {
             let injected = fault_matrix(
@@ -1371,6 +1499,30 @@ fn data_eviction_cuts_four_pages_bounded_write() {
         ops: &[Wide::BoundedWrite],
         spilling: &FOUR_PAGE_SPILLS,
         cuts: &[Wide::BoundedWrite],
+        faults: &[],
+    });
+}
+
+#[test]
+fn data_eviction_cuts_four_pages_shrink() {
+    eviction_profile(EvictionPlan {
+        pages: 4,
+        records: 120,
+        ops: &[Wide::Shrink],
+        spilling: &FOUR_PAGE_SPILLS,
+        cuts: &[Wide::Shrink],
+        faults: &[],
+    });
+}
+
+#[test]
+fn data_eviction_cuts_four_pages_growth() {
+    eviction_profile(EvictionPlan {
+        pages: 4,
+        records: 120,
+        ops: &[Wide::Growth],
+        spilling: &FOUR_PAGE_SPILLS,
+        cuts: &[Wide::Growth],
         faults: &[],
     });
 }
