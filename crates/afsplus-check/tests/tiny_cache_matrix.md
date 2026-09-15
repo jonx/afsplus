@@ -387,14 +387,14 @@ tail, and growth to four times the size. Expected live and captured bytes and
 ranges derive from the record index.
 
 Wide-fixture cut images apply three checks. Each recorded transaction first
-passes an ownership proof: no recorded write lands on a physical block the old
+must satisfy an ownership proof: no recorded write lands on a physical block the old
 state maps as written data, and only reservation initialization writes a
 reserved block, the one it initializes. Every image of an old outcome then has
 exact records, extent records, live and captured ranges, captured metadata,
-literal live and captured bytes of the changed window and a checker pass.
+literal live and captured bytes of the changed window and a clean checker report.
 Because each image is the base plus recorded writes, unchanged extent records
 and untouched data blocks fix the remaining bytes. Full live and captured byte
-reads run on every committed image and on the empty and complete unflushed
+reads run on every committed image and on the empty and full unflushed
 subsets of every cut point; faults, remounts and recorded results always use
 full byte reads.
 
