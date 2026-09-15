@@ -103,6 +103,15 @@ two-block/two-reference shared run. The checker runs before and after retry.
 This error model does not cover writes completed but reported failed or
 adoption-read errors, and the fixture does not force a tree spill.
 
+In [faults.rs](faults.rs),
+`completed_checkpoint_write_and_adoption_read_errors_block_mutations` crosses
+create/CloneFile, all four cache profiles and two ambiguous-publication faults:
+a completed checkpoint write returning an error, or reads failing after
+publication. Further mutation must return `WindowPoisoned`; remount must expose
+the complete new file and unchanged source. Clones require one shared run with
+two references. A subsequent independent mutation must preserve both files and
+pass the checker. This uses a memory device, not native durability evidence.
+
 ## CloneRange reference-boundary profile gate
 
 In [shared_crash.rs](shared_crash.rs),

@@ -194,28 +194,82 @@ fn completed_checkpoint_write_and_adoption_read_errors_block_mutations() {
             self.inner.flush()
         }
     }
-    for fail_write in [true, false] {
-        let vol = mount(formatted()).unwrap();
-        let checkpoints = vol.ident().checkpoint_slots;
-        let mut vol = mount(AmbiguousDevice {
-            inner: vol.into_device(),
-            checkpoints,
-            published: false,
-            fail_write,
-        })
-        .unwrap();
-        assert!(vol.create_file_in_root("first", b"intact", ts()).is_err());
-        assert!(vol.device_mut().published);
-        assert!(matches!(
-            vol.create_file_in_root("second", b"unsafe", ts()),
-            Err(afsplus_core::CoreError::WindowPoisoned)
-        ));
-        let mut image = vol.into_device().inner;
-        assert!(check_device(&mut image).is_clean());
-        let mut recovered = mount(image).unwrap();
-        let id = recovered.lookup_root("first").unwrap().unwrap();
-        assert_eq!(recovered.read_file(id).unwrap(), b"intact");
-        assert_eq!(recovered.lookup_root("second").unwrap(), None);
+    for pages in [2, 4, 8, usize::MAX] {
+        for clone in [false, true] {
+            for fail_write in [true, false] {
+                let options = afsplus_core::MountOptions {
+                    tree_cache_pages: std::num::NonZeroUsize::new(pages),
+                    ..Default::default()
+                };
+                let mut setup = afsplus_core::mount_with_options(formatted(), options).unwrap();
+                let source = setup
+                    .create_file_in_root("source", b"intact", ts())
+                    .unwrap();
+                let generation = setup.generation();
+                let checkpoints = setup.ident().checkpoint_slots;
+                let mut vol = afsplus_core::mount_with_options(
+                    AmbiguousDevice {
+                        inner: setup.into_device(),
+                        checkpoints,
+                        published: false,
+                        fail_write,
+                    },
+                    options,
+                )
+                .unwrap();
+                assert_eq!(vol.tree_cache_pages(), pages);
+                let result = if clone {
+                    vol.clone_file(source, afsplus_format::OBJECT_ROOT, "first", ts())
+                } else {
+                    vol.create_file_in_root("first", b"intact", ts())
+                };
+                assert!(
+                    result.is_err(),
+                    "pages={pages} clone={clone} write={fail_write}"
+                );
+                assert!(vol.device_mut().published);
+                assert!(matches!(
+                    vol.create_file_in_root("second", b"unsafe", ts()),
+                    Err(afsplus_core::CoreError::WindowPoisoned)
+                ));
+                let mut image = vol.into_device().inner;
+                assert!(check_device(&mut image).is_clean());
+                let mut recovered = afsplus_core::mount_with_options(image, options).unwrap();
+                assert_eq!(recovered.tree_cache_pages(), pages);
+                assert_eq!(recovered.generation(), generation + 1);
+                let id = recovered.lookup_root("first").unwrap().unwrap();
+                assert_eq!(recovered.read_file(id).unwrap(), b"intact");
+                assert_eq!(recovered.read_file(source).unwrap(), b"intact");
+                assert_eq!(recovered.lookup_root("second").unwrap(), None);
+                if clone {
+                    let root = recovered.checkpoint().shared_extent_root_block;
+                    assert_ne!(root, 0);
+                    let geometry = recovered.ident().geometry();
+                    let generation = recovered.generation();
+                    let shared = afsplus_core::shared_extents::load_all(
+                        recovered.device_mut(),
+                        &geometry,
+                        root,
+                        generation,
+                    )
+                    .unwrap();
+                    assert_eq!(shared.records.len(), 1);
+                    assert_eq!(
+                        (
+                            shared.records[0].block_count,
+                            shared.records[0].reference_count
+                        ),
+                        (1, 2)
+                    );
+                }
+                recovered
+                    .create_file_in_root("after-remount", b"safe", ts())
+                    .unwrap();
+                assert_eq!(recovered.read_file(source).unwrap(), b"intact");
+                assert_eq!(recovered.read_file(id).unwrap(), b"intact");
+                assert!(check_device(recovered.device_mut()).is_clean());
+            }
+        }
     }
 }
 

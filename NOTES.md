@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Qualify ambiguous clone publication across cache profiles](#2026-09-15--qualify-ambiguous-clone-publication-across-cache-profiles)
 - [2026-09-15 — Qualify first-clone I/O failure recovery](#2026-09-15--qualify-first-clone-io-failure-recovery)
 - [2026-09-15 — Qualify first-sharing CloneFile cache profiles](#2026-09-15--qualify-first-sharing-clonefile-cache-profiles)
 - [2026-09-15 — Qualify CloneRange reference boundaries across cache profiles](#2026-09-15--qualify-clonerange-reference-boundaries-across-cache-profiles)
@@ -155,6 +156,20 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Qualify ambiguous clone publication across cache profiles
+
+Extended the completed-checkpoint-write/adoption-read regression to create and
+CloneFile at 2/4/8/unlimited pages. Sixteen combinations require mutation
+poisoning, the complete published state after remount, unchanged source bytes,
+exact clone sharing, and safe subsequent mutation. The checker validates before
+remount and after the follow-up mutation.
+
+The focused test passed in 0.29 seconds; targeted clippy, formatting and document
+checks pass. This deliberately models a completed write returning an error and
+post-publication read failure on a memory device. It does not qualify native
+flush behavior, eviction or retained snapshots; those requirements remain in
+the matrix. No new full-workspace run is claimed.
 
 ## 2026-09-15 — Qualify first-clone I/O failure recovery
 
