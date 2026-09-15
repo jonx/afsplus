@@ -6,8 +6,8 @@ use afsplus_core::volume::{
     SnapshotWorkLimits,
 };
 use afsplus_core::{
-    mkfs_with_options, mount, mount_with_options, mount_with_snapshot_limits, MkfsOptions,
-    MkfsParams, MountOptions, NamePolicy,
+    mkfs_observed, mkfs_with_options, mount, mount_with_options, mount_with_snapshot_limits,
+    MkfsOptions, MkfsParams, MountOptions, NamePolicy,
 };
 use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
@@ -158,11 +158,16 @@ pub enum Operation {
     Sync,
     WindowFsync,
     WindowCommit,
+    /// Version 8: one standalone observed verification of the committed state.
+    Verify,
+    /// Version 8: one observed mount that feature negotiation refuses, followed
+    /// by the ordinary remount. The refused attempt writes no device block.
+    RemountRefused,
     Remount,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct DiagnosticProfile {
-    pub categories: u8,
+    pub categories: u16,
     pub sink_capacity: usize,
     pub disconnect_before: Option<usize>,
 }
@@ -175,6 +180,8 @@ pub struct Plan {
     api_observation: bool,
     object_observation: bool,
     linked_observation: bool,
+    /// Version 8: subsystem, mount, format, verify, data and view observation.
+    lifecycle_observation: bool,
     snapshot_limits: Option<SnapshotWorkLimits>,
     /// Version 9: volume data-policy feature and orphan cleanup extent budget.
     data_policy: bool,
@@ -232,6 +239,8 @@ pub struct Run {
     pub result: MemoryBackend,
     pub log: Vec<RecordedOp>,
     pub failure: Option<(usize, String)>,
+    /// Version 8: the observed format and mount that precede operation zero.
+    pub pre_mount: Option<FlightBatch>,
     /// Objects this run placed in the reserved orphan directory. Observation
     /// sums the sizes of those the remounted volume still names.
     pub orphan_candidates: Vec<u64>,
@@ -318,9 +327,35 @@ fn finish(
         result: state.image,
         log: state.log,
         failure,
+        pre_mount: None,
         orphan_candidates,
     }
 }
+/// One standalone observed verification of the committed state: the bounded
+/// roots, the exhaustive decode and the invariant sweep. Every phase, finding
+/// and outcome reaches the recorder; the sweep reads exactly the blocks an
+/// unobserved sweep reads.
+fn verify_observed(
+    device: &mut Recorder,
+    ring: &mut afsplus_core::flight::FlightRecorder,
+) -> Result<usize, String> {
+    use afsplus_core::mount::select_checkpoint;
+    use afsplus_core::verify::{
+        full_sweep_observed, load_committed_state_observed, load_mount_state_observed,
+    };
+    use afsplus_format::ident::Identification;
+    let mut buf = vec![0u8; device.block_size()];
+    device.read_block(0, &mut buf).map_err(|e| e.to_string())?;
+    let ident = Identification::decode(&buf).map_err(|e| e.to_string())?;
+    let geo = ident.geometry();
+    let selection = select_checkpoint(device, &ident).map_err(|e| e.to_string())?;
+    load_mount_state_observed(device, &ident, &selection.chosen, ring)
+        .map_err(|e| e.to_string())?;
+    let state = load_committed_state_observed(device, &ident, &selection.chosen, ring)
+        .map_err(|e| e.to_string())?;
+    Ok(full_sweep_observed(&state, &geo, &selection.chosen, ring).len())
+}
+
 fn integer(s: &str, maximum: u64) -> Result<u64, String> {
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) || (s.len() > 1 && s.starts_with('0'))
     {
@@ -438,6 +473,7 @@ impl Plan {
                     | "AFSPSC05"
                     | "AFSPSC06"
                     | "AFSPSC07"
+                    | "AFSPSC08"
                     | "AFSPSC09"
             )
         ) {
@@ -445,6 +481,8 @@ impl Plan {
         }
         // Version 9 inherits the version-7 profile and adds linked namespace commands.
         let linked = version == Some("AFSPSC09");
+        // Version 8 inherits the version-7 profile and adds lifecycle observation.
+        let lifecycle = version == Some("AFSPSC08");
         let mut header: Vec<_> = lines.next().ok_or("missing geometry")?.split(' ').collect();
         // Version 9 appends its volume feature and maintenance budgets last, so
         // the reverse-order header scan reads them before the version-7 fields.
@@ -459,7 +497,7 @@ impl Plan {
         } else {
             (false, 1)
         };
-        let snapshot_limits = if matches!(version, Some("AFSPSC07" | "AFSPSC09")) {
+        let snapshot_limits = if matches!(version, Some("AFSPSC07" | "AFSPSC08" | "AFSPSC09")) {
             let reclaim_records =
                 integer(header.pop().ok_or("missing snapshot reclaim limit")?, 4096)? as usize;
             let max_views =
@@ -479,7 +517,7 @@ impl Plan {
         };
         let diagnostic_profile = if matches!(
             version,
-            Some("AFSPSC04" | "AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
+            Some("AFSPSC04" | "AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC08" | "AFSPSC09")
         ) {
             let disconnect_before = match header.pop().ok_or("missing disconnect index")? {
                 "none" => None,
@@ -488,11 +526,13 @@ impl Plan {
             let sink_capacity =
                 integer(header.pop().ok_or("missing sink capacity")?, 256)? as usize;
             let maximum = match version {
+                // Version 8 selects every runtime category bit, 0 through 14.
+                Some("AFSPSC08") => 32767,
                 Some("AFSPSC06" | "AFSPSC07" | "AFSPSC09") => 127,
                 Some("AFSPSC05") => 63,
                 _ => 15,
             };
-            let categories = integer(header.pop().ok_or("missing category mask")?, maximum)? as u8;
+            let categories = integer(header.pop().ok_or("missing category mask")?, maximum)? as u16;
             if sink_capacity == 0 && disconnect_before.is_some() {
                 return Err("disconnect requires an attached sink".into());
             }
@@ -506,7 +546,15 @@ impl Plan {
         };
         let flight_capacity = if matches!(
             version,
-            Some("AFSPSC03" | "AFSPSC04" | "AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
+            Some(
+                "AFSPSC03"
+                    | "AFSPSC04"
+                    | "AFSPSC05"
+                    | "AFSPSC06"
+                    | "AFSPSC07"
+                    | "AFSPSC08"
+                    | "AFSPSC09"
+            )
         ) {
             let capacity = integer(header.pop().ok_or("missing flight capacity")?, 256)? as usize;
             if capacity == 0 {
@@ -525,6 +573,7 @@ impl Plan {
                     | "AFSPSC05"
                     | "AFSPSC06"
                     | "AFSPSC07"
+                    | "AFSPSC08"
                     | "AFSPSC09"
             )
         ) {
@@ -578,7 +627,7 @@ impl Plan {
                     if *kind == "write"
                         || matches!(
                             version,
-                            Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
+                            Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC08" | "AFSPSC09")
                         ) =>
                 {
                     Operation::Write {
@@ -592,7 +641,7 @@ impl Plan {
                     if *kind == "truncate"
                         || matches!(
                             version,
-                            Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
+                            Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC08" | "AFSPSC09")
                         ) =>
                 {
                     Operation::Truncate {
@@ -616,7 +665,7 @@ impl Plan {
                 },
                 [kind @ ("snapshot_create" | "snapshot_open" | "snapshot_close"
                 | "snapshot_delete" | "snapshot_inspect"), name]
-                    if matches!(version, Some("AFSPSC07" | "AFSPSC09")) =>
+                    if matches!(version, Some("AFSPSC07" | "AFSPSC08" | "AFSPSC09")) =>
                 {
                     Operation::Snapshot {
                         action: match *kind {
@@ -706,7 +755,7 @@ impl Plan {
                 ["window_fsync"]
                     if matches!(
                         version,
-                        Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
+                        Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC08" | "AFSPSC09")
                     ) =>
                 {
                     Operation::WindowFsync
@@ -714,11 +763,13 @@ impl Plan {
                 ["window_commit"]
                     if matches!(
                         version,
-                        Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
+                        Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC08" | "AFSPSC09")
                     ) =>
                 {
                     Operation::WindowCommit
                 }
+                ["verify"] if lifecycle => Operation::Verify,
+                ["remount_refused"] if lifecycle => Operation::RemountRefused,
                 ["remount"] => Operation::Remount,
                 _ => return Err("unknown scenario command or arity".into()),
             };
@@ -751,10 +802,14 @@ impl Plan {
             diagnostic_profile,
             api_observation: matches!(
                 version,
-                Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC09")
+                Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07" | "AFSPSC08" | "AFSPSC09")
             ),
-            object_observation: matches!(version, Some("AFSPSC06" | "AFSPSC07" | "AFSPSC09")),
+            object_observation: matches!(
+                version,
+                Some("AFSPSC06" | "AFSPSC07" | "AFSPSC08" | "AFSPSC09")
+            ),
             linked_observation: linked,
+            lifecycle_observation: lifecycle,
             snapshot_limits,
             data_policy,
             orphan_extents,
@@ -774,6 +829,12 @@ impl Plan {
 
     pub fn object_observation(&self) -> bool {
         self.object_observation
+    }
+
+    /// Version 8 observes the allocator, the mutable trees, reclaim, mount,
+    /// formatting, verification, staged file data and read-only view descents.
+    pub fn lifecycle_observation(&self) -> bool {
+        self.lifecycle_observation
     }
 
     pub fn api_observation(&self) -> bool {
@@ -817,6 +878,54 @@ impl Plan {
         // Runtime-only budget, reapplied at every mount. The call happens
         // before the flight recorder is attached, so it records no event.
         volume.set_orphan_cleanup_extent_budget(self.orphan_extents);
+        Ok(volume)
+    }
+
+    /// Mount under the plan's profile, observing the mount itself when the plan
+    /// opts in. A refusal returns the recorder holding the stages that ran.
+    #[allow(clippy::type_complexity)]
+    fn mount_profile_observed(
+        &self,
+        device: Recorder,
+        flight: Option<afsplus_core::flight::FlightRecorder>,
+    ) -> Result<
+        afsplus_core::Volume<Recorder>,
+        Box<(String, Option<afsplus_core::flight::FlightRecorder>)>,
+    > {
+        let mut volume = match (flight, self.lifecycle_observation) {
+            (Some(ring), true) => {
+                let mounted = match self.snapshot_limits {
+                    Some(limits) => afsplus_core::mount::mount_observed_with_snapshot_limits(
+                        device,
+                        self.mount_options(),
+                        limits,
+                        ring,
+                    ),
+                    None => afsplus_core::mount::mount_observed(device, self.mount_options(), ring),
+                };
+                match mounted {
+                    Ok(volume) => volume,
+                    Err(refused) => {
+                        return Err(Box::new((
+                            refused.error.to_string(),
+                            Some(refused.recorder),
+                        )))
+                    }
+                }
+            }
+            (other, _) => match self.mount_profile(device) {
+                Ok(mut volume) => {
+                    volume.replace_flight_recorder(other);
+                    return Ok(volume);
+                }
+                Err(error) => return Err(Box::new((error.to_string(), other))),
+            },
+        };
+        // Runtime-only budget, reapplied at every mount. The recorder is
+        // detached across the call, so an observed mount records no event for it.
+        let flight = volume.replace_flight_recorder(None);
+        volume.set_orphan_cleanup_extent_budget(self.orphan_extents);
+        volume.replace_flight_recorder(flight);
         Ok(volume)
     }
 
@@ -873,6 +982,13 @@ impl Plan {
         if self.object_observation {
             ring.enable_object_observation();
         }
+        if self.lifecycle_observation {
+            // Enabled before formatting and mounting, so the format-time and
+            // mount-time observations reach the explicit pre-mount batch.
+            ring.enable_subsystem_observation();
+            ring.enable_data_observation();
+            ring.enable_view_observation();
+        }
         let mut receiver = None;
         let mut disconnect_before = None;
         if let Some(profile) = self.diagnostic_profile {
@@ -887,6 +1003,14 @@ impl Plan {
                 Category::Api,
                 Category::Window,
                 Category::Object,
+                Category::Allocator,
+                Category::Tree,
+                Category::Reclaim,
+                Category::Mount,
+                Category::Format,
+                Category::Verify,
+                Category::Data,
+                Category::View,
             ]
             .into_iter()
             .enumerate()
@@ -918,23 +1042,26 @@ impl Plan {
         disconnect_before: Option<usize>,
     ) -> Result<Run, String> {
         let mut base = MemoryBackend::new(4096, self.blocks);
-        mkfs_with_options(
-            &mut base,
-            &MkfsParams {
-                uuid: [0x53; 16],
-                label: "Scenario".into(),
-                region_size: self.region,
-                reclaim_caps: Default::default(),
-                log_slots: self.log_slots,
-                shared_extents: true,
-                data_policy: self.data_policy,
-                name_policy: NamePolicy::Sensitive,
-                timestamp: Timespec::default(),
-            },
-            MkfsOptions {
-                persistent_snapshots: self.snapshot_limits.is_some(),
-            },
-        )
+        let mut flight = flight;
+        let params = MkfsParams {
+            uuid: [0x53; 16],
+            label: "Scenario".into(),
+            region_size: self.region,
+            reclaim_caps: Default::default(),
+            log_slots: self.log_slots,
+            shared_extents: true,
+            data_policy: self.data_policy,
+            name_policy: NamePolicy::Sensitive,
+            timestamp: Timespec::default(),
+        };
+        let options = MkfsOptions {
+            persistent_snapshots: self.snapshot_limits.is_some(),
+        };
+        // An observed format writes exactly the bytes an unobserved one writes.
+        match (&mut flight, self.lifecycle_observation) {
+            (Some(ring), true) => mkfs_observed(&mut base, &params, options, ring),
+            _ => mkfs_with_options(&mut base, &params, options),
+        }
         .map_err(|e| e.to_string())?;
         let recorder = Recorder(Rc::new(RefCell::new(Capture {
             image: base.clone(),
@@ -942,19 +1069,21 @@ impl Plan {
             bytes: 0,
             limits,
         })));
-        let mut volume = match self.mount_profile(recorder.clone()) {
+        let mut volume = match self.mount_profile_observed(recorder.clone(), flight) {
             Ok(volume) => volume,
-            Err(error) => {
-                return Ok(finish(
-                    base,
-                    recorder,
-                    Some((0, error.to_string())),
-                    Vec::new(),
-                    Vec::new(),
-                ))
+            Err(refused) => {
+                let (error, mut flight) = *refused;
+                let batch = flight.as_mut().map(drain_flight);
+                let mut run = finish(base, recorder, Some((0, error)), Vec::new(), Vec::new());
+                run.pre_mount = self.lifecycle_observation.then_some(batch).flatten();
+                return Ok(run);
             }
         };
-        volume.replace_flight_recorder(flight);
+        // The explicit pre-mount batch carries formatting and the first mount.
+        let pre_mount = self
+            .lifecycle_observation
+            .then(|| capture_flight(&mut volume))
+            .flatten();
         // id, parent id, original name, directory kind; labels never select host paths.
         let mut labels = BTreeMap::from([(
             "root".to_owned(),
@@ -1008,13 +1137,34 @@ impl Plan {
                 .and_then(|label| labels.get(label))
                 .map(|v| v.0)
                 .unwrap_or(0);
-            if matches!(op, Operation::Remount) {
+            if matches!(op, Operation::Remount | Operation::RemountRefused) {
                 let mut flight = volume.replace_flight_recorder(None);
                 snapshot_handles.clear();
                 drop(volume);
-                volume = match self.mount_profile(recorder.clone()) {
+                // A refused attempt first: mounting the persistent-snapshot
+                // feature without its work budgets stops at negotiation, before
+                // the first device write, and hands the recorder back.
+                let mut refusal = None;
+                if matches!(op, Operation::RemountRefused) {
+                    match flight.take() {
+                        Some(ring) => match afsplus_core::mount::mount_observed(
+                            recorder.clone(),
+                            self.mount_options(),
+                            ring,
+                        ) {
+                            Ok(mut accepted) => {
+                                flight = accepted.replace_flight_recorder(None);
+                                refusal = Some("refused mount profile was accepted".to_owned());
+                            }
+                            Err(refused) => flight = Some(refused.recorder),
+                        },
+                        None => refusal = Some("a refused mount requires a recorder".to_owned()),
+                    }
+                }
+                volume = match self.mount_profile_observed(recorder.clone(), flight) {
                     Ok(volume) => volume,
-                    Err(error) => {
+                    Err(refused) => {
+                        let (error, mut flight) = *refused;
                         events.push(Event {
                             operation: index,
                             first_block_operation,
@@ -1023,24 +1173,36 @@ impl Plan {
                             success: false,
                             flight: flight.as_mut().map(drain_flight),
                         });
-                        return Ok(finish(
+                        let mut run = finish(
                             base,
                             recorder,
-                            Some((index, error.to_string())),
+                            Some((index, error)),
                             events,
                             orphan_candidates,
-                        ));
+                        );
+                        run.pre_mount = pre_mount;
+                        return Ok(run);
                     }
                 };
-                volume.replace_flight_recorder(flight);
                 events.push(Event {
                     operation: index,
                     first_block_operation,
                     end_block_operation: recorder.0.borrow().log.len(),
                     object_id: 0,
-                    success: true,
+                    success: refusal.is_none(),
                     flight: capture_flight(&mut volume),
                 });
+                if let Some(error) = refusal {
+                    let mut run = finish(
+                        base,
+                        recorder,
+                        Some((index, error)),
+                        events,
+                        orphan_candidates,
+                    );
+                    run.pre_mount = pre_mount;
+                    return Ok(run);
+                }
                 continue;
             }
             let result = (|| -> Result<(), String> {
@@ -1527,7 +1689,19 @@ impl Plan {
                         volume.window_commit(now).map_err(|e| e.to_string())?
                     }
                     Operation::Sync => volume.sync().map_err(|e| e.to_string())?,
-                    Operation::Remount => unreachable!(),
+                    Operation::Verify => {
+                        // Standalone verification over a second handle on the
+                        // same image. It reads only; it writes no device block.
+                        let flight = volume.replace_flight_recorder(None);
+                        let mut flight = flight;
+                        let outcome = match &mut flight {
+                            Some(ring) => verify_observed(&mut recorder.clone(), ring),
+                            None => Err("verification requires an attached recorder".to_owned()),
+                        };
+                        volume.replace_flight_recorder(flight);
+                        outcome?;
+                    }
+                    Operation::Remount | Operation::RemountRefused => unreachable!(),
                 }
                 Ok(())
             })();
@@ -1548,7 +1722,9 @@ impl Plan {
             }
         }
         drop(volume);
-        Ok(finish(base, recorder, failure, events, orphan_candidates))
+        let mut run = finish(base, recorder, failure, events, orphan_candidates);
+        run.pre_mount = pre_mount;
+        Ok(run)
     }
 }
 

@@ -470,9 +470,88 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
     return records, success
 
 
+# Version-8 fixed payload area: a presence tag, four enumeration bytes, one
+# 32-bit field and five 64-bit fields, every integer little endian. Bytes a
+# payload class does not name are zero, so a reserved byte is never a value.
+PAYLOAD_BYTES = 49
+PAYLOAD_TAGS = ((23, 26, 1), (27, 31, 2), (32, 38, 3), (39, 45, 4), (46, 50, 5),
+                (51, 55, 6), (56, 58, 7), (61, 64, 8))
+# Kinds carrying the commit-tail transaction attempt; every other kind reports
+# zero because it belongs to a scope outside one checkpoint attempt.
+COMMIT_TAIL_KINDS = frozenset(range(1, 8)) | {59, 60}
+
+
+def payload_tag(kind):
+    for first, last, tag in PAYLOAD_TAGS:
+        if first <= kind <= last:
+            return tag
+    return 0
+
+
+def lifecycle_payload(kind, blob, generation):
+    """Admit one fixed payload area against the kind that carries it."""
+    tag = blob[0]
+    enums = tuple(blob[1:5])
+    region = struct.unpack("<I", blob[5:9])[0]
+    words = struct.unpack("<QQQQQ", blob[9:PAYLOAD_BYTES])
+    if tag != payload_tag(kind):
+        raise ValueError("flight payload tag differs from event kind")
+    def zero(values):
+        if any(values):
+            raise ValueError("flight payload reserved or absent field is not zero")
+    if tag == 0:
+        zero(enums + (region,) + words)
+    elif tag == 1:
+        zero(enums + (region,) + words[2:])
+    elif tag in (2, 3):
+        zero(enums + (region,) + words[3:])
+    elif tag == 4:
+        mode, stage, slot, damaged = enums
+        zero(words[1:])
+        if mode > 3 or not 1 <= stage <= 6 or slot > 1 or damaged > 1:
+            raise ValueError("flight mount payload domain")
+        expected = {39: 1, 40: 3}.get(kind, 6 if 41 <= kind <= 44 else None)
+        if expected is not None and stage != expected:
+            raise ValueError("flight mount stage differs from event kind")
+        if damaged and kind != 42:
+            raise ValueError("flight damaged tail outside the scanned prefix")
+        if region and not 41 <= kind <= 44:
+            raise ValueError("flight mount count outside the intent log")
+        if generation == 0 and (slot or damaged or region or words[0]):
+            raise ValueError("flight mount selection precedes its checkpoint")
+    elif tag == 5:
+        zero(enums[1:] + (region,) + words[2:])
+        if not 1 <= enums[0] <= 5 or words[0] == 0:
+            raise ValueError("flight format payload domain")
+        if (words[1] != 0) != (kind in (48, 49)):
+            raise ValueError("flight format publication address")
+    elif tag == 6:
+        scope, phase, finding, reserved = enums
+        zero((reserved,) + words[3:])
+        if not 1 <= scope <= 3 or phase > 16 or finding > 11:
+            raise ValueError("flight verify payload domain")
+        if (phase != 0) != (kind in (52, 53, 55)):
+            raise ValueError("flight verify phase presence")
+        if (finding != 0) != (kind == 53):
+            raise ValueError("flight verify finding presence")
+        if words[0] and kind not in (53, 54):
+            raise ValueError("flight verify ordinal outside its findings")
+        if kind in (51, 54) and (region or words[1] or words[2]):
+            raise ValueError("flight verify location outside a phase")
+    elif tag == 7:
+        zero(enums[1:] + words[4:])
+        if not 1 <= enums[0] <= 3:
+            raise ValueError("flight data payload domain")
+    else:
+        zero(enums[1:] + (region,) + words[3:])
+        if not 1 <= enums[0] <= 4 or words[1] == 0:
+            raise ValueError("flight view payload domain")
+
+
 def selected_batch(flight, offset, previous, capacity, profile, index):
     extended = profile["version"] >= 5
     objects = profile["version"] >= 6
+    lifecycle = profile["version"] == 8
     if len(flight) - offset < 53:
         raise ValueError("flight truncated selected batch")
     lost, filtered, sequence, attempt, delivered, missed, closed, retained = struct.unpack(
@@ -500,7 +579,7 @@ def selected_batch(flight, offset, previous, capacity, profile, index):
         expected_closed = bool(old_closed or (disconnected and selected))
     if (delivered, missed, closed) != (expected_delivered, expected_missed, expected_closed):
         raise ValueError("flight live delivery differs from deterministic profile")
-    event_size = 89 if objects else 64 if extended else 26
+    event_size = 89 + PAYLOAD_BYTES if lifecycle else 89 if objects else 64 if extended else 26
     if len(flight) - offset < retained * event_size:
         raise ValueError("flight truncated selected event")
     cursor, observed_attempt = old_sequence, old_attempt
@@ -510,14 +589,25 @@ def selected_batch(flight, offset, previous, capacity, profile, index):
         categories.update({kind: 32 for kind in range(12, 20)})
     if objects:
         categories.update({kind: 64 for kind in range(20, 23)})
+    if lifecycle:
+        for first, last, bit in ((23, 26, 128), (27, 31, 256), (32, 38, 512), (39, 45, 1024),
+                                 (46, 50, 2048), (51, 55, 4096), (56, 58, 8192), (61, 64, 16384)):
+            categories.update({kind: bit for kind in range(first, last + 1)})
+        # The two intent-group barriers belong to the commit-tail I/O category.
+        categories.update({59: 4, 60: 4})
     contexts = {}
     for ordinal in range(retained):
         seq, tx, generation, kind, remount = struct.unpack("<QQQBB", flight[offset:offset + 26])
         offset += 26
-        uncommitted_event = extended and kind >= 8 and tx == 0
+        commit_tail = kind in COMMIT_TAIL_KINDS
+        uncommitted_event = extended and not commit_tail and tx == 0
+        # Mount entry and a refusal before checkpoint selection carry no generation.
+        generationless = lifecycle and kind in (39, 45)
         if (not cursor < seq <= sequence
                 or (not uncommitted_event and not observed_attempt <= tx <= attempt)
-                or (tx == 0 and (not extended or kind < 8)) or tx > seq or generation == 0 or kind not in categories
+                or (tx == 0 and (not extended or commit_tail)) or tx > seq
+                or (generation == 0 and not generationless) or (kind == 39 and generation != 0)
+                or kind not in categories
                 or not profile["flight_categories"] & categories.get(kind, 0)
                 or remount not in (0, 1) or (kind == 6 and remount)
                 or (kind == 1 and tx == observed_attempt)):
@@ -533,8 +623,11 @@ def selected_batch(flight, offset, previous, capacity, profile, index):
                                   or parent >= span or (parent == 0 and operation != span)
                                   or (parent and operation > parent)))
                     or (8 <= kind <= 11 and span == 0)
-                    or (kind >= 8 and tx != 0)
-                    or window > seq or (window == 0 and group != 0)
+                    or (not commit_tail and tx != 0)
+                    or window > seq
+                    # Mount observations name their intent-log group without a
+                    # deferred window; every other scope inherits the window rule.
+                    or (window == 0 and group != 0 and not (lifecycle and 39 <= kind <= 45))
                     or (12 <= kind <= 19 and window == 0)
                     or (kind in (14, 15, 16) and group == 0)):
                 raise ValueError("flight API/window context")
@@ -551,6 +644,9 @@ def selected_batch(flight, offset, previous, capacity, profile, index):
                     or (not present and (object_id or block or view))
                     or (kind in (20, 22) and block != 0)):
                 raise ValueError("flight object context")
+            if lifecycle:
+                lifecycle_payload(kind, flight[offset:offset + PAYLOAD_BYTES], generation)
+                offset += PAYLOAD_BYTES
             # A resolved address may itself be corrupt. Mapping is observed before
             # metadata range/checksum validation, so it is not an integrity verdict.
         cursor = seq
@@ -602,7 +698,7 @@ def validate_trace(records):
     flight = records["flight-recorder.bin"]
     internal = scenario_value["version"] >= 3
     selected = scenario_value["version"] >= 4
-    magic = b"AFSFLT05" if scenario_value["version"] >= 6 else b"AFSFLT04" if scenario_value["version"] == 5 else b"AFSFLT03" if selected else b"AFSFLT02" if internal else b"AFSFLT01"
+    magic = b"AFSFLT06" if scenario_value["version"] == 8 else b"AFSFLT05" if scenario_value["version"] >= 6 else b"AFSFLT04" if scenario_value["version"] == 5 else b"AFSFLT03" if selected else b"AFSFLT02" if internal else b"AFSFLT01"
     if len(flight) < 12 or flight[:8] != magic:
         raise ValueError("flight version")
     events = struct.unpack("<I", flight[8:12])[0]
@@ -632,6 +728,11 @@ def validate_trace(records):
     ranges = []
     selected_state = (0, 0, 0, 0, 0, 0, 0)
     sequence = attempt = dropped = 0
+    if scenario_value["version"] == 8:
+        # The explicit pre-mount batch: the observed format and the first mount,
+        # drained before operation zero, so no disconnection precedes it.
+        offset, selected_state = selected_batch(flight, offset, selected_state, capacity,
+                                                scenario_value, -1)
     for index in range(events):
         if len(flight) - offset < 29:
             raise ValueError("flight truncated operation")

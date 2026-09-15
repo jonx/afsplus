@@ -205,8 +205,6 @@ def validate(encoded):
     if not isinstance(scenario, dict):
         raise ValueError("scenario must be an object")
     version = integer(scenario.get("version"), 1, 9)
-    if version == 8:
-        raise ValueError("scenario version 8 is not admitted by this profile set")
     fields(scenario, "version volume operations expected" + (" flight_capacity" if version >= 3 else "")
            + (" flight_categories flight_sink" if version >= 4 else "")
            + (" snapshot_limits expected_snapshots" if version >= 7 else "")
@@ -221,7 +219,9 @@ def validate(encoded):
     if version >= 3:
         integer(scenario["flight_capacity"], 1, 256)
     if version >= 4:
-        integer(scenario["flight_categories"], 0, 127 if version >= 6 else 63 if version == 5 else 15)
+        # Version 8 selects every runtime category bit, 0 through 14.
+        integer(scenario["flight_categories"], 0,
+                32767 if version == 8 else 127 if version >= 6 else 63 if version == 5 else 15)
         sink = scenario["flight_sink"]
         if sink is not None:
             fields(sink, "capacity disconnect_before")
@@ -267,6 +267,10 @@ def validate(encoded):
     if version >= 7:
         schemas.update({"snapshot_" + action: "op label"
                         for action in ("create", "open", "close", "delete", "inspect")})
+    if version == 8:
+        # Standalone observed verification, and one mount feature negotiation
+        # refuses before any device write.
+        schemas.update(verify="op", remount_refused="op")
     if version >= 9:
         schemas.update(link="op label source parent name", clone_file="op label source parent name",
                        symlink="op label parent name target", set_protection="op label protection",
@@ -418,7 +422,7 @@ def compile_commands(encoded):
         lines[0] = "AFSPSC03"
         lines[1] += " " + str(scenario["flight_capacity"])
     if scenario["version"] >= 4:
-        lines[0] = "AFSPSC09" if scenario["version"] == 9 else "AFSPSC07" if scenario["version"] >= 7 else "AFSPSC06" if scenario["version"] == 6 else "AFSPSC05" if scenario["version"] == 5 else "AFSPSC04"
+        lines[0] = "AFSPSC09" if scenario["version"] == 9 else "AFSPSC08" if scenario["version"] == 8 else "AFSPSC07" if scenario["version"] >= 7 else "AFSPSC06" if scenario["version"] == 6 else "AFSPSC05" if scenario["version"] == 5 else "AFSPSC04"
         sink = scenario["flight_sink"]
         capacity = 0 if sink is None else sink["capacity"]
         disconnect = None if sink is None else sink["disconnect_before"]
