@@ -661,3 +661,65 @@ fn acknowledged_write_truncate_recovery_is_restartable_in_all_profiles() {
         eprintln!("pages={pages} write/truncate replay pre/post={outcomes:?}");
     }
 }
+
+#[test]
+fn clone_publication_cuts_preserve_snapshot_namespace_in_all_profiles() {
+    for pages in PROFILES {
+        let mut setup = open(formatted(512), pages);
+        let bytes = vec![0x6d; 2 * 4096];
+        let source = setup
+            .create_file_in_root("source", &bytes, time(1))
+            .unwrap();
+        let captured_metadata = ObjectMetadata::from(setup.stat(source).unwrap().unwrap());
+        let snapshot = setup.snapshot_create(time(2)).unwrap();
+        let generation = setup.generation();
+        let base = setup.into_device();
+        let mut recorded = open(RecordingBackend::new(base.clone()), pages);
+        let clone = recorded
+            .clone_file(source, OBJECT_ROOT, "clone", time(3))
+            .unwrap();
+        let (_, log) = recorded.into_device().into_parts();
+        let mut outcomes = [0usize; 2];
+        for cut in 0..=log.len() {
+            afsplus_block::for_each_crash_state_with_budget(&base, &log, cut, 16, |state| {
+                let mut recovered = open(state.image, pages);
+                let committed = match recovered.generation() {
+                    n if n == generation => false,
+                    n if n == generation + 1 => true,
+                    n => panic!("unexpected generation {n}"),
+                };
+                assert_eq!(recovered.read_file(source).unwrap(), bytes);
+                assert_eq!(
+                    recovered.lookup_root("clone").unwrap(),
+                    committed.then_some(clone)
+                );
+                if committed {
+                    assert_eq!(recovered.read_file(clone).unwrap(), bytes);
+                }
+                let view = recovered.snapshot_open(snapshot).unwrap();
+                assert_eq!(
+                    recovered.snapshot_stat(&view, source).unwrap(),
+                    Some(captured_metadata)
+                );
+                assert!(recovered.snapshot_stat(&view, clone).unwrap().is_none());
+                let page = recovered
+                    .snapshot_read_directory_page(&view, OBJECT_ROOT, None, 2)
+                    .unwrap();
+                assert_eq!(page.entries.len(), 1);
+                assert_eq!(page.entries[0].name, b"source");
+                assert_eq!(page.entries[0].child_id, source);
+                assert!(page.eof);
+                let end = recovered
+                    .snapshot_read_directory_page(&view, OBJECT_ROOT, Some(page.next), 2)
+                    .unwrap();
+                assert!(end.eof && end.entries.is_empty());
+                drop(view);
+                captured_bytes(&mut recovered, snapshot, source, &bytes);
+                clean(recovered.device_mut());
+                outcomes[usize::from(committed)] += 1;
+            });
+        }
+        assert!(outcomes.iter().all(|&n| n > 0));
+        eprintln!("captured clone pages={pages} cuts old/new={outcomes:?}");
+    }
+}

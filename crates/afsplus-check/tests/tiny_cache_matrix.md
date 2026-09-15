@@ -128,6 +128,19 @@ boundaries. It does not establish eviction, unaligned boundary copying,
 retained snapshots, explicit I/O-error retry or CloneFile profile coverage.
 Those combinations retain their separate requirements in the baseline matrix.
 
+## Retained snapshot during CloneFile publication
+
+`clone_publication_cuts_preserve_snapshot_namespace_in_all_profiles` in
+[tiny_cache_matrix.rs](tiny_cache_matrix.rs) creates a persistent snapshot before
+cloning, then enumerates modeled publication cuts under 2/4/8/unlimited caches
+with an explicit sixteen-write full-subset budget.
+The live namespace must match the selected old/new generation, source bytes
+remain exact and a published clone has identical contents. The captured source
+metadata and bytes remain exact, the historical root lists only the source,
+and the clone object is absent from the snapshot. The checker also rejects
+older-checkpoint warnings. This fixture does not force eviction or test mutation
+of the clone after publication.
+
 ## Commands and review boundary
 
 ```sh

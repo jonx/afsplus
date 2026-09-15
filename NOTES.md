@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Qualify captured state through clone publication](#2026-09-15--qualify-captured-state-through-clone-publication)
 - [2026-09-15 — Enforce legacy codec reserved-zero fields](#2026-09-15--enforce-legacy-codec-reserved-zero-fields)
 - [2026-09-15 — Add explicit exhaustive power-cut budgets](#2026-09-15--add-explicit-exhaustive-power-cut-budgets)
 - [2026-09-15 — Qualify ambiguous clone publication across cache profiles](#2026-09-15--qualify-ambiguous-clone-publication-across-cache-profiles)
@@ -158,6 +159,23 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Qualify captured state through clone publication
+
+The retained-snapshot clone campaign passed 66,652 modeled states across
+2/4/8/unlimited page caches (16,659 old and four new states per profile), in
+408.97 seconds. Each state checks exact live source/clone contents and
+old/new generation, captured source metadata and bytes, absence of the clone
+from historical metadata, and complete historical root enumeration with EOF.
+The checker rejects errors and older-checkpoint warnings.
+
+The fixture explicitly opts into a sixteen-write exhaustive budget after the
+initial twelve-write limit correctly refused its larger tail. No sampling was
+introduced. Block/check all-target clippy and documentation checks pass.
+Retained evidence is in `build/snapshot-clone-profiles-daqrolub`. This campaign
+used the source captured there before the independent legacy-codec correction;
+no full combined workspace or native claim follows. Forced eviction and
+post-clone mutation of retained/shared data require their separate matrices.
 
 ## 2026-09-15 — Enforce legacy codec reserved-zero fields
 
