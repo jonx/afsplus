@@ -38,6 +38,9 @@
   - [Publication-family observation equivalence](#publication-family-observation-equivalence)
 - [Object-map observation](#object-map-observation)
 - [Deferred-window observation](#deferred-window-observation)
+- [Mount and recovery observation](#mount-and-recovery-observation)
+- [Format observation](#format-observation)
+- [Verification observation](#verification-observation)
 - [API and window replay bundles](#api-and-window-replay-bundles)
 - [Object-map replay bundles](#object-map-replay-bundles)
 - [Captured snapshot replay bundles](#captured-snapshot-replay-bundles)
@@ -1009,13 +1012,16 @@ started; they do not claim which state survived a real power loss.
 The recorder defaults to disabled, performs no clock reads, stores no names or
 payloads and adds no on-disk fields. The ring capacity bounds its event storage,
 not total filesystem or process memory. [Core API spans](#core-api-call-spans)
-provide opt-in call correlation. Allocator/tree/cache/intent-log/recovery events
+provide opt-in call correlation. [Mount and recovery](#mount-and-recovery-observation),
+[format](#format-observation) and [verification](#verification-observation)
+observation have their own opt-in entry points. Allocator, tree and cache events
 have separate integration gates.
 Category selection and live adapters follow the contract below. Internal export is provided by
 the opt-in [version-3 bundle profile](#internal-diagnostic-bundles); older semantic
 profiles retain their original operation-only flight artifact.
-Those integration requirements remain open under [ADR-023](../adr/ADR-023-developer-observability.md)
-and [observability](../docs/26-debug-observability.md).
+[ADR-023](../adr/ADR-023-developer-observability.md) and
+[observability](../docs/26-debug-observability.md) govern those integration
+requirements.
 
 [Integration tests](../crates/afsplus-core/tests/flight.rs) compare enabled and
 disabled device traces and every image block, exercise three-record overwrite,
@@ -1252,8 +1258,10 @@ Removing a recorder emits `WindowDetached`; reattaching it observes a new window
 identity, because intervening work is unknown. Enabling observation through the
 mutable accessor attaches before the next operational API event. Filtering
 retains context for admitted events. Identity exhaustion stops emission with
-loss accounting rather than reusing an identity. These hooks do not cover mount,
-recovery, process abort or handle destruction.
+loss accounting and never reuses an identity. These window hooks cover staged
+work inside a mounted volume; the mount path has its own entry points under
+[mount and recovery observation](#mount-and-recovery-observation), and process
+abort and handle destruction have separate owners.
 
 The [flight tests](../crates/afsplus-core/tests/flight.rs) compare results, full
 block traces and complete images against unobserved execution under all four
@@ -1262,6 +1270,119 @@ and barrier failures, snapshot publication, draining, reattachment, empty window
 and late enablement. Unit tests cover filtering and identity exhaustion. Legacy
 profiles 1–4 leave API/window observation disabled; their encoder rejects these
 extended event kinds; [version 5](#api-and-window-replay-bundles) defines their fields.
+
+## Mount and recovery observation
+
+`afsplus_core::mount_observed(device, options, recorder)` and
+`mount_observed_with_snapshot_limits(device, options, limits, recorder)` attach a
+caller-owned recorder before checkpoint selection. A mount which returns a volume
+moves the recorder into it with sequence, attempt and cumulative counters intact,
+so `Volume::flight_recorder()` and `Volume::replace_flight_recorder(None)` read
+the mount observations together with every later operation. A refused mount
+returns `Box<RefusedMount>`, holding the `CoreError` the unobserved entry points
+report and the recorder with the stages which ran. `mount`, `mount_with_options`
+and `mount_with_snapshot_limits` keep their signatures and their unobserved path.
+
+`MountBegin` opens the observation at generation zero, before identification I/O.
+`MountSelected` carries the chosen generation, its slot (0 for A, 1 for B) and the
+other structurally valid checkpoint's generation, or zero. `MountIntentBegin`
+reports the intent-log slot count, `MountIntentScanned` the valid prefix record
+total with that prefix's last group sequence and a damaged-tail flag,
+`MountIntentReplayed` one group's operation count at its sequence, and
+`MountComplete` the replayed (writable modes) or pending (read-only modes) record
+count at the volume's final generation. `MountFailed` names the stage which
+refused: identification, feature negotiation, checkpoint selection, bounded root
+state, budget configuration or intent log. Every mount event carries the mount
+mode and uses attempt zero; replay publication emits the ordinary commit-tail
+events with their own commit attempt. Scan events carry the committed generation
+the records bind to, and replay events the generation the recovery batch
+publishes.
+
+Attachment changes no mount semantics, reads no additional block and writes none:
+observed and unobserved mounts of one image produce the same result, the same
+block trace and the same image. Mount keeps its bounded root loading, so
+exhaustive checking has its own entry points under
+[verification observation](#verification-observation). Cache and snapshot budgets
+applied during mount carry no API span, because the recorder enters the volume
+after those budgets are set. Category selection, live delivery, ring loss and
+identity exhaustion follow the
+[common contract](#category-selection-and-live-diagnostics). Host observation is
+the scope here; the native handler, the FUSE and FSKit adapters and physical
+media have separate owners.
+
+The [flight tests](../crates/afsplus-core/tests/flight.rs) compare an observed
+mount with an unobserved one at 2/4/8/unlimited tree-cache pages over six images:
+a clean volume, a volume with two durable intent groups replayed, the same volume
+inspected under NO_CHANGES, a volume whose second log slot holds an unreadable
+nonzero record, an ambiguous volume whose slots carry one generation, and a
+persistent-snapshot volume refused by feature negotiation. Each case compares the
+mount result, the full block trace and every image block, and asserts the exact
+event sequence, stage, group sequences and counts. Ring capacities 1, 2 and 4
+report every overwritten record with identities equal to those of an unbounded
+ring, and a mount-only category mask reproduces exactly the mount events of an
+unfiltered run with the intentional exclusions counted as filtered. Recorder unit
+tests cover identity exhaustion, which stops emission and counts the refusal.
+
+## Format observation
+
+`afsplus_core::mkfs_observed(device, params, options, recorder)` formats with a
+borrowed recorder, because a formatter owns no volume. `mkfs` and
+`mkfs_with_options` keep their signatures and their unobserved path.
+
+`FormatBegin` opens the observation at the device block count read on entry.
+`FormatMetadataDurable` reports the barrier after the metadata, identification
+and slot-B zeroing writes. `FormatPublicationBegin` precedes the slot-A
+checkpoint write and carries that slot address, and `FormatCheckpointDurable`
+reports the final barrier. `FormatFailed` names the stage which failed:
+parameter validation, metadata writes, the metadata barrier, publication or the
+publication barrier. Every format event carries the generation a formatter
+publishes and uses attempt zero.
+
+Formatting keeps its documented non-atomic contract: an interrupted format
+leaves a device with no valid AFS+ volume, and observation preserves that
+outcome byte for byte. The [flight tests](../crates/afsplus-core/tests/flight.rs)
+inject a fault at each write and at each of the two barriers of a 256-block
+format, comparing observed and unobserved runs for the returned error, the full
+block trace, every image block and the outcome of mounting what survived. The
+successful case asserts the four-event sequence and its slot addresses, each
+failure asserts the failing stage and that no checkpoint durability is claimed.
+A one-event ring reports the three overwritten records, and a mask without the
+format category records nothing while counting four intentional exclusions and
+producing a mountable image.
+
+## Verification observation
+
+`afsplus_core::verify::load_mount_state_observed`,
+`load_committed_state_observed` and `full_sweep_observed` take a borrowed
+recorder alongside the arguments of `load_mount_state`, `load_committed_state`
+and `full_sweep`, which keep their signatures and their unobserved path. Normal
+mount uses the unobserved bounded loader, so exhaustive verification is a
+separate caller decision.
+
+`VerifyBegin` opens one verification, carrying its scope: bounded mount state,
+committed state or full sweep. `VerifyPhase` names the structure being decoded
+or swept, with its root block where the checkpoint holds one: allocation root,
+shared extents, object map, object records, shared mappings, namespace, reclaim
+queue, allocation bitmaps, intent-log area, snapshots, root object, root
+directory, link counts, quarantined runs, bitmap accounting and free counts.
+`VerifyFinding` reports one full-sweep finding at its ordinal in the returned
+list, with the finding class and the object, block or region the finding names.
+`VerifyComplete` closes a verification and carries the finding count of a full
+sweep. `VerifyFailed` reports the phase which raised an error. Verification
+events use attempt zero and the verified checkpoint's generation.
+
+Observation adds no device read and no allocation, so an observed verification
+reads the same blocks and returns the same findings in the same order as an
+unobserved one. The [flight tests](../crates/afsplus-core/tests/flight.rs) run
+all three entry points over a clean image, an image whose checksum-valid object
+record contradicts its namespace link count, and an image with an unreadable
+object-map root, comparing loaded state, findings and the full block trace with
+unobserved execution. They assert the phase sequence of each scope, the failing
+phase of the refused loads, and one event per finding at its ordinal naming the
+same object the finding text names. Small rings report every overwritten record
+with identities equal to those of an unbounded ring while returning identical
+findings. These are host observations over deterministic images; physical media
+and adapter integration have separate gates.
 
 ## API and window replay bundles
 
