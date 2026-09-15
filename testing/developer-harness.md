@@ -40,6 +40,7 @@
 - [Deferred-window observation](#deferred-window-observation)
 - [API and window replay bundles](#api-and-window-replay-bundles)
 - [Object-map replay bundles](#object-map-replay-bundles)
+- [Captured snapshot replay bundles](#captured-snapshot-replay-bundles)
 - [Selected-category and live-delivery bundles](#selected-category-and-live-delivery-bundles)
 - [Internal diagnostic bundles](#internal-diagnostic-bundles)
 
@@ -1323,15 +1324,80 @@ the wire reader must not mistake it for an integrity verdict. The presence
 flag, kind, unused fields, category, API context and loss/delivery accounting
 are independently checked. Truncation is refused before unpacking payloads.
 Replay compares the exact emitted artifact in addition to filesystem state.
-The scenario command set exercises live-view resolution (view zero); captured
-view execution has its own core tests and needs scenario commands before it
-can claim end-to-end historical-view replay coverage.
+The version-6 command set exercises live-view resolution (view zero).
+[Version 7](#captured-snapshot-replay-bundles) adds retained-view operations.
 
 Run the [replay tests](../tools/test-afsptest.py) for four cache profiles,
 zero/object/all category masks, one/256-event rings, deterministic consumer
 disconnection, exact image/I/O comparisons and malformed object controls.
 The [scenario admission tests](../tools/test-replay-scenario.py) enforce
 version and category bounds before invoking the runner.
+
+## Captured snapshot replay bundles
+
+Semantic JSON version 7 uses `AFSPSC07` and the version-6 diagnostic policy.
+It requires `snapshot_limits` with positive `max_edit_records` (at most 4096),
+`max_views` (at most 16), and `reclaim_records` (at most 4096). The three decimal
+values follow the version-6 format fields in that order. Formatting explicitly
+enables persistent snapshots; initial mount, explicit remount and recovered
+inspection all receive the same limits before recovery. These are harness
+admission bounds, not filesystem scalability limits.
+
+`snapshot_create`, `snapshot_open`, `snapshot_close`, `snapshot_delete` and
+`snapshot_inspect` take a scenario-local `label`. Snapshot labels occupy their
+own namespace, remain associated with their persistent ID after deletion and
+cannot be reused. A remount closes every runtime handle. Opening again resolves
+the persistent ID on the new mount. Deletion with an open reader reports the
+core refusal. Invalid handle operations produce captured operation failures,
+not silently repaired sequences.
+
+Recovered observation enumerates every registered snapshot independently of
+live object labels. It checks lookup against directory enumeration, reads file
+contents and opaque symlink targets, and records metadata and allocation ranges
+(including unwritten ranges). It traverses nested directories with paginated
+reads and refuses cycles, repeated paths, missing objects, incomplete reads,
+non-progressing pages and exhausted budgets. Four cache profiles use this same
+inspector. Aggregate limits across all views are 1024 entries, 16 MiB of content
+and 4096 allocation ranges, with depth at most 64; direct inspector callers may
+choose smaller budgets. An inspection failure never becomes an empty registry.
+
+`AFSOBS04` preserves the cache, run, checker and live namespace records of
+`AFSOBS03`, then adds a mandatory captured section. `snapshots error HEX` records
+failure; `snapshots ok COUNT` precedes that many views. Each view begins with
+`snapshot ID GENERATION TRANSACTION ENTRY_COUNT`, then `root METADATA` and its
+sorted entries. Each `entry PATH METADATA DATA RANGE_COUNT` is followed by
+`range OFFSET LENGTH UNWRITTEN` records. Paths are comma-separated hex UTF-8
+components; data and errors are hex, with `-` for empty data. Metadata fields are
+object ID, kind, size, allocated bytes, link count, protection, created seconds
+and nanoseconds, modified seconds and nanoseconds, changed seconds and
+nanoseconds, and content generation. Unwritten is exactly zero or one.
+`AFSFLT05` retains its version-6 layout; captured object events carry nonzero
+persistent view IDs.
+
+The scenario supplies `expected_snapshots` explicitly, independent of observed
+output. Each view contains `id`, `generation`, `committed_tx_id`, `root` and
+`entries`; each entry contains `path`, `metadata`, `data` and `allocation`.
+Metadata uses `object_id`, `kind`, `size`, `allocated`, `links`, `protection`,
+`created`, `modified`, `changed` and `content_generation`; timestamps are
+`[seconds, nanoseconds]`. Ranges contain `offset`, `length` and boolean
+`unwritten`. Views and paths must be sorted without duplicates. Version-7
+`expected.json` binds both `entries` and `snapshots`; earlier versions retain
+their original bytes. Success requires exact equality of the complete expected
+history and live namespace, successful operation/inspection outcomes and clean
+structural checks. Replay and reduction retain these requirements and snapshot
+resource policy. Wrong historical metadata, allocation or registry membership
+is a failure even when every file's contents match.
+
+`snapshot_inspect` exercises an open handle and validates traversal/read
+consistency. The complete semantic oracle applies to the final recovered
+registry; it does not claim expected-content comparison of a view deleted
+before final inspection. The generic scenario command set creates files and
+directories; direct inspector tests additionally cover hard-link aliases and
+symlinks. These host replay tests do not qualify a native handler or hardware.
+
+Run [replay tests](../tools/test-afsptest.py),
+[admission tests](../tools/test-replay-scenario.py) and
+[captured inspector tests](../crates/afsplus-check/tests/captured_scenario.rs).
 
 ## Selected-category and live-delivery bundles
 

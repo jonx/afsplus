@@ -25,7 +25,170 @@ def fixture():
         "expected": [{"path": ["café"], "kind": "file", "data": "0042"}]}
 
 
+def snapshot_fixture(pages=2):
+    # mkfs starts at generation/transaction 1 and object ID 16. Creating
+    # one file publishes generation 2; snapshot_create captures that checkpoint.
+    root = {"object_id": 1, "kind": "directory", "size": 0, "allocated": 4096,
+            "links": 1, "protection": 0, "created": [0, 0], "modified": [1, 0],
+            "changed": [1, 0], "content_generation": 2}
+    file = dict(root, object_id=16, kind="file", size=1, created=[1, 0])
+    return {"version": 7, "volume": {"block_size": 4096, "blocks": 512,
+            "region_size": 64, "log_slots": 8, "tree_cache_pages": pages},
+        "flight_capacity": 256, "flight_categories": 127, "flight_sink": None,
+        "snapshot_limits": {"max_edit_records": 4096, "max_views": 16, "reclaim_records": 8},
+        "operations": [{"op": "create", "label": "f", "parent": "root", "name": "file", "data": "61"},
+            {"op": "snapshot_create", "label": "s"}, {"op": "snapshot_open", "label": "s"},
+            {"op": "write", "label": "f", "offset": 0, "data": "62"},
+            {"op": "snapshot_inspect", "label": "s"}, {"op": "remount"},
+            {"op": "snapshot_open", "label": "s"}, {"op": "snapshot_inspect", "label": "s"}],
+        "expected": [{"path": ["file"], "kind": "file", "data": "62"}],
+        "expected_snapshots": [{"id": 1, "generation": 2, "committed_tx_id": 2, "root": root,
+            "entries": [{"path": ["file"], "metadata": file, "data": "61",
+                         "allocation": [{"offset": 0, "length": 4096, "unwritten": False}]}]}]}
+
+
 class ReplayTests(unittest.TestCase):
+    def test_captured_observation_distinguishes_empty_error_and_history(self):
+        root = "1 directory 0 0 1 0 0 0 0 0 0 0 0"
+        file = "2 file 1 4096 1 0 0 0 0 0 0 0 1"
+        lines = ["snapshots ok 1", "snapshot 1 2 2 1", "root " + root,
+                 "entry 66696c65 " + file + " 61 1", "range 0 4096 0"]
+        actual = tool.captured_observation(lines)
+        self.assertIsNone(actual["snapshot_inspection_error"])
+        self.assertEqual(actual["snapshots"][0]["entries"][0]["data"], "61")
+        self.assertEqual(tool.captured_observation(["snapshots ok 0"])["snapshots"], [])
+        error = tool.captured_observation(["snapshots error 626164"])
+        self.assertIsNone(error["snapshots"])
+        self.assertEqual(error["snapshot_inspection_error"], "bad")
+        for cut in range(len(lines)):
+            with self.assertRaises(ValueError):
+                tool.captured_observation(lines[:cut])
+        for bad in (lines + ["extra"], ["snapshots ok 17"],
+                    ["snapshots error 626164", "extra"],
+                    lines[:-1] + ["range 0 4096 2"],
+                    lines[:3] + ["entry 66696c65 " + file + " - 0"],
+                    lines[:3] + ["entry 2f " + file + " 61 1", lines[-1]]):
+            with self.assertRaises(ValueError):
+                tool.captured_observation(bad)
+
+    def test_captured_runner_exports_history_after_live_mutation(self):
+        for pages in (2, 4, 8, "unlimited"):
+            commands = (f"AFSPSC07\nformat 4096 512 64 8 {pages} 256 127 0 none 4096 16 8\n"
+                        "create f root 66696c65 61\nsnapshot_create first\n"
+                        "write f 0 62\nsnapshot_create second\n"
+                        "write f 0 63\nremount\n").encode()
+            run = subprocess.run([str(BINARY)], input=commands, capture_output=True, check=True)
+            records = tool.unframe(io.BytesIO(run.stdout), tool.bundle.DEFAULT_FILE_BYTES, tool.bundle.DEFAULT_TOTAL_BYTES)
+            actual = tool.observation(records["actual.wire"])
+            self.assertEqual(actual["version"], 4)
+            self.assertEqual(actual["cache_pages"], pages)
+            self.assertIsNone(actual["failure"])
+            self.assertTrue(tool.structural_success(actual))
+            self.assertEqual(actual["entries"], [{"path": ["file"], "kind": "file", "data": "63"}])
+            self.assertEqual([view["id"] for view in actual["snapshots"]], [1, 2])
+            self.assertEqual([view["entries"][0]["data"] for view in actual["snapshots"]], ["61", "62"])
+
+    def test_v7_bundles_bind_full_expected_history_and_replay(self):
+        for pages in (2, 4, 8, "unlimited"):
+            value = snapshot_fixture(pages)
+            records, success = tool.execute(tool.encoded(value), BINARY)
+            self.assertTrue(success)
+            self.assertEqual(json.loads(records["expected.json"]),
+                             {"entries": value["expected"], "snapshots": value["expected_snapshots"]})
+            self.assertEqual(tool.admit_run(records)[0]["outcome"], "pass")
+            self.assertTrue(tool.verify_replay(records, BINARY, tool.bundle.DEFAULT_FILE_BYTES,
+                                              tool.bundle.DEFAULT_TOTAL_BYTES))
+        for change in ("contents", "metadata", "allocation", "registry"):
+            value = snapshot_fixture()
+            view = value["expected_snapshots"][0]
+            if change == "contents": view["entries"][0]["data"] = "63"
+            elif change == "metadata": view["entries"][0]["metadata"]["protection"] = 1
+            elif change == "allocation": view["entries"][0]["allocation"][0]["unwritten"] = True
+            else: value["expected_snapshots"] = []
+            records, success = tool.execute(tool.encoded(value), BINARY)
+            self.assertFalse(success, change)
+            self.assertEqual(tool.admit_run(records)[0]["outcome"], "failure")
+            self.assertEqual(json.loads(tool.failure_signature(records))["kind"], "snapshot-state")
+            self.assertFalse(tool.verify_replay(records, BINARY, tool.bundle.DEFAULT_FILE_BYTES,
+                                               tool.bundle.DEFAULT_TOTAL_BYTES))
+
+    def test_v7_snapshot_handle_lifecycle_and_deletion(self):
+        for action in ("busy", "stale", "closed", "reopen_deleted"):
+            value = snapshot_fixture()
+            value["operations"] = value["operations"][:3]
+            value["expected"][0]["data"] = "61"
+            if action == "busy":
+                value["operations"].append({"op": "snapshot_delete", "label": "s"})
+            elif action == "stale":
+                value["operations"] += [{"op": "remount"}, {"op": "snapshot_inspect", "label": "s"}]
+            else:
+                value["operations"] += [{"op": "snapshot_close", "label": "s"},
+                                          {"op": "snapshot_delete", "label": "s"}]
+                value["expected_snapshots"] = []
+                if action == "reopen_deleted":
+                    value["operations"].append({"op": "snapshot_open", "label": "s"})
+            records, success = tool.execute(tool.encoded(value), BINARY)
+            self.assertEqual(success, action == "closed")
+            actual = json.loads(records["actual.json"])
+            self.assertEqual(actual["snapshots"], value["expected_snapshots"])
+            if action == "stale":
+                self.assertEqual(actual["failure"]["error"], "snapshot handle not open")
+            elif action != "closed":
+                self.assertIsNotNone(actual["failure"])
+            self.assertEqual(tool.verify_replay(records, BINARY, tool.bundle.DEFAULT_FILE_BYTES,
+                                                tool.bundle.DEFAULT_TOTAL_BYTES), success)
+
+    def test_v7_snapshot_publication_boundaries_replay_exact_registry(self):
+        for pages in (2, 4, 8, "unlimited"):
+            for deleting in (False, True):
+                value = snapshot_fixture(pages)
+                value["operations"] = value["operations"][:2]
+                value["expected"][0]["data"] = "61"
+                historical = value["expected_snapshots"]
+                if deleting:
+                    value["operations"].append({"op": "snapshot_delete", "label": "s"})
+                    value["expected_snapshots"] = []
+                records, success = tool.execute(tool.encoded(value), BINARY)
+                self.assertTrue(success)
+                wire, offset, previous = records["flight-recorder.bin"], 28, (0,) * 7
+                bounds = []
+                for index in range(len(value["operations"])):
+                    _, first, last, _, _ = struct.unpack("<IQQQB", wire[offset:offset + 29])
+                    bounds.append((first, last))
+                    offset, previous = tool.selected_batch(wire, offset + 29, previous, 256, value, index)
+                target = len(bounds) - 1
+                for after in (False, True):
+                    candidate = dict(value, expected_snapshots=([] if after == deleting else historical))
+                    first, last = bounds[target]
+                    fault = {"version": 1, "kind": "power-cut-v1", "operation": target,
+                             "offset": last - first if after else 0, "variant": 0}
+                    cut, passed = tool.execute(tool.encoded(candidate), BINARY, fault=fault)
+                    self.assertTrue(passed, (pages, deleting, after))
+                    self.assertTrue(tool.verify_replay(cut, BINARY, tool.bundle.DEFAULT_FILE_BYTES,
+                                                       tool.bundle.DEFAULT_TOTAL_BYTES))
+
+    def test_v7_large_observed_sparse_snapshot_records_a_semantic_failure(self):
+        value = snapshot_fixture()
+        value["operations"] = [value["operations"][0],
+            {"op": "truncate", "label": "f", "size": 2 * 1024 * 1024},
+            {"op": "snapshot_create", "label": "s"}, {"op": "unlink", "label": "f"}]
+        value["expected"], value["expected_snapshots"] = [], []
+        records, success = tool.execute(tool.encoded(value), BINARY)
+        self.assertFalse(success)
+        actual = json.loads(records["actual.json"])
+        self.assertIsNone(actual["snapshot_inspection_error"])
+        self.assertEqual(actual["entries"], [])
+        entry = actual["snapshots"][0]["entries"][0]
+        self.assertEqual(entry["data"], "61" + "00" * (2 * 1024 * 1024 - 1))
+        self.assertEqual(entry["metadata"]["size"], 2 * 1024 * 1024)
+        self.assertEqual(tool.admit_run(records)[0]["outcome"], "failure")
+        self.assertEqual(json.loads(tool.failure_signature(records))["kind"], "snapshot-state")
+        self.assertFalse(tool.verify_replay(records, BINARY, tool.bundle.DEFAULT_FILE_BYTES,
+                                           tool.bundle.DEFAULT_TOTAL_BYTES))
+        with self.assertRaises(ValueError):
+            tool.scenario.captured_views(actual["snapshots"])
+        tool.scenario.captured_views(actual["snapshots"], observed=True)
+
     def test_v6_object_wire_rejects_truncation_and_inconsistent_presence(self):
         profile = {"version": 6, "flight_categories": 127, "flight_sink": None}
         previous = (0,) * 7

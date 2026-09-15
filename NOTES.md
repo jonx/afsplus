@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Preserve and replay captured snapshot state](#2026-09-15--preserve-and-replay-captured-snapshot-state)
 - [2026-09-15 — Qualify snapshot leaf and key codecs](#2026-09-15--qualify-snapshot-leaf-and-key-codecs)
 - [2026-09-15 — Export and replay object-map diagnostics](#2026-09-15--export-and-replay-object-map-diagnostics)
 - [2026-09-15 — Integrate the first cache-family qualification matrix](#2026-09-15--integrate-the-first-cache-family-qualification-matrix)
@@ -146,6 +147,37 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Preserve and replay captured snapshot state
+
+The [version-7 replay profile](testing/developer-harness.md#captured-snapshot-replay-bundles)
+adds persistent snapshot lifecycle operations and explicit limits on formatting,
+mount, remount and recovered inspection. Its final-state oracle compares the
+complete supplied snapshot registry, metadata, file contents, symlink targets
+and allocation ranges independently of live labels. Open readers prevent deletion;
+remount closes handles and persistent IDs can be opened again.
+
+Qualification retained 48 version-7 bundles, a minimized negative and a separate
+2 MiB sparse-snapshot failure. Wrong expected contents, metadata, allocation and
+registry membership all fail and replay as failures. Six artifacts match across
+142 historical cases, with originals unchanged. Four cache profiles cover
+create/delete publication boundaries and snapshots surviving live unlink.
+Direct inspector tests also cover aliases, symlinks and aggregate output budgets.
+
+The source-stable Rust campaign passed 576 tests, failed none and ignored ten
+in 91 groups; fmt, Clippy, codec fuzz, documentation and checker fixtures passed.
+A separate reviewed Python correction stopped applying the 1 MiB scenario-input
+limit to observed contents: observations retain the 16 MiB aggregate budget.
+All 34 Python tests passed on the corrected files, whose exact hashes were checked
+on integration; Rust sources were unchanged. The corrected source capsule restores
+the exact revision/worktree identity and reproduces the retained large sparse
+failure using the preserved runner. This is not an independent compiler rebuild.
+
+Evidence is retained in `build/captured-replay-k_2r6p2h`, including original
+qualification sources, corrected-source capsule, logs and composed evidence.
+The semantic oracle covers the final recovered registry; an intermediate view
+deleted before inspection has no separate expected-content claim. Other subsystem
+diagnostics and native qualification remain open; this does not close Stage A.
 
 ## 2026-09-15 — Qualify snapshot leaf and key codecs
 

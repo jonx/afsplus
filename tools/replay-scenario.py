@@ -45,25 +45,108 @@ def data(value):
     return len(value) // 2
 
 
+def captured_views(views, *, observed=False):
+    """Admit explicit expected history independently of the filesystem runner."""
+    if not isinstance(views, list) or len(views) > 16:
+        raise ValueError("expected snapshot count")
+    remaining_entries, remaining_bytes, remaining_ranges = 1024, 16 * 1024 * 1024, 4096
+    previous = 0
+    def metadata(value):
+        fields(value, "object_id kind size allocated links protection created modified changed content_generation")
+        for key in ("object_id", "size", "allocated", "content_generation"):
+            integer(value[key], 1 if key == "object_id" else 0, (1 << 64) - 1)
+        for key in ("links", "protection"):
+            integer(value[key], 0, (1 << 32) - 1)
+        if value["kind"] not in ("file", "directory", "symlink"):
+            raise ValueError("expected snapshot object kind")
+        for key in ("created", "modified", "changed"):
+            stamp = value[key]
+            if not isinstance(stamp, list) or len(stamp) != 2:
+                raise ValueError("expected snapshot timestamp")
+            integer(stamp[0], -(1 << 63), (1 << 63) - 1)
+            integer(stamp[1], 0, 999999999)
+    for view in views:
+        fields(view, "id generation committed_tx_id root entries")
+        previous = integer(view["id"], previous + 1, (1 << 64) - 1)
+        for key in ("generation", "committed_tx_id"):
+            integer(view[key], 0, (1 << 64) - 1)
+        metadata(view["root"])
+        if view["root"]["kind"] != "directory" or view["root"]["object_id"] != 1:
+            raise ValueError("expected snapshot root")
+        entries = view["entries"]
+        if not isinstance(entries, list) or len(entries) > remaining_entries:
+            raise ValueError("expected snapshot entries")
+        remaining_entries -= len(entries)
+        previous_path = None
+        for entry in entries:
+            fields(entry, "path metadata data allocation")
+            path = entry["path"]
+            if not isinstance(path, list) or not 1 <= len(path) <= 64:
+                raise ValueError("expected snapshot path depth")
+            for component in path: name(component)
+            if previous_path is not None and path <= previous_path:
+                raise ValueError("expected snapshot path ordering")
+            previous_path = path
+            metadata(entry["metadata"])
+            if observed:
+                payload = entry["data"]
+                if (not isinstance(payload, str) or len(payload) % 2
+                        or len(payload) > remaining_bytes * 2
+                        or any(c not in "0123456789abcdef" for c in payload)):
+                    raise ValueError("observed snapshot content budget or encoding")
+                size = len(payload) // 2
+            else:
+                size = data(entry["data"])
+            if size > remaining_bytes:
+                raise ValueError("expected snapshot content budget")
+            remaining_bytes -= size
+            ranges = entry["allocation"]
+            if not isinstance(ranges, list) or len(ranges) > remaining_ranges:
+                raise ValueError("expected snapshot allocation budget")
+            remaining_ranges -= len(ranges)
+            for item in ranges:
+                fields(item, "offset length unwritten")
+                integer(item["offset"], 0, (1 << 64) - 1)
+                integer(item["length"], 1, (1 << 64) - 1)
+                if type(item["unwritten"]) is not bool:
+                    raise ValueError("expected snapshot allocation kind")
+            kind = entry["metadata"]["kind"]
+            if kind == "directory":
+                if size or ranges: raise ValueError("expected snapshot directory payload")
+            elif size != entry["metadata"]["size"]:
+                raise ValueError("expected snapshot content length")
+            if kind == "symlink" and ranges:
+                raise ValueError("expected snapshot symlink allocation")
+    return views
+
+
 def validate(encoded):
     if not isinstance(encoded, bytes) or len(encoded) > MAX_INPUT:
         raise ValueError("scenario input limit")
     scenario = json.loads(encoded, object_pairs_hook=unique)
     if not isinstance(scenario, dict):
         raise ValueError("scenario must be an object")
-    version = integer(scenario.get("version"), 1, 6)
+    version = integer(scenario.get("version"), 1, 7)
     fields(scenario, "version volume operations expected" + (" flight_capacity" if version >= 3 else "")
-           + (" flight_categories flight_sink" if version >= 4 else ""))
+           + (" flight_categories flight_sink" if version >= 4 else "")
+           + (" snapshot_limits expected_snapshots" if version >= 7 else ""))
     if version >= 3:
         integer(scenario["flight_capacity"], 1, 256)
     if version >= 4:
-        integer(scenario["flight_categories"], 0, 127 if version == 6 else 63 if version == 5 else 15)
+        integer(scenario["flight_categories"], 0, 127 if version >= 6 else 63 if version == 5 else 15)
         sink = scenario["flight_sink"]
         if sink is not None:
             fields(sink, "capacity disconnect_before")
             integer(sink["capacity"], 1, 256)
             if sink["disconnect_before"] is not None:
                 integer(sink["disconnect_before"], 0, MAX_OPS)
+    if version >= 7:
+        limits = scenario["snapshot_limits"]
+        fields(limits, "max_edit_records max_views reclaim_records")
+        integer(limits["max_edit_records"], 1, 4096)
+        integer(limits["max_views"], 1, 16)
+        integer(limits["reclaim_records"], 1, 4096)
+        captured_views(scenario["expected_snapshots"])
     volume = scenario["volume"]
     fields(volume, "block_size blocks region_size log_slots" + (" tree_cache_pages" if version >= 2 else ""))
     if version >= 2:
@@ -84,6 +167,7 @@ def validate(encoded):
         raise ValueError("scenario operation limit")
     labels = {"root": "directory"}
     used = {"root"}
+    snapshot_labels = set()
     payload = 0
     schemas = {"mkdir": "op label parent name", "create": "op label parent name data",
         "write": "op label offset data", "truncate": "op label size",
@@ -92,6 +176,9 @@ def validate(encoded):
     if version >= 5:
         schemas.update(window_write="op label offset data", window_truncate="op label size",
                        window_fsync="op", window_commit="op")
+    if version >= 7:
+        schemas.update({"snapshot_" + action: "op label"
+                        for action in ("create", "open", "close", "delete", "inspect")})
     for operation in operations:
         if not isinstance(operation, dict) or not isinstance(operation.get("op"), str) or operation["op"] not in schemas:
             raise ValueError("unknown scenario operation")
@@ -106,6 +193,13 @@ def validate(encoded):
             label = operation["label"]
             if not isinstance(label, str) or not label.isascii() or not label.isidentifier() or len(label) > 64:
                 raise ValueError("invalid scenario label")
+            if kind.startswith("snapshot_"):
+                if kind == "snapshot_create":
+                    if label in snapshot_labels: raise ValueError("snapshot label reused")
+                    snapshot_labels.add(label)
+                elif label not in snapshot_labels:
+                    raise ValueError("unknown snapshot label")
+                continue
             if kind in ("mkdir", "create"):
                 if label in used: raise ValueError("scenario label reused")
                 labels[label] = "directory" if kind == "mkdir" else "file"
@@ -160,12 +254,15 @@ def compile_commands(encoded):
         lines[0] = "AFSPSC03"
         lines[1] += " " + str(scenario["flight_capacity"])
     if scenario["version"] >= 4:
-        lines[0] = "AFSPSC06" if scenario["version"] == 6 else "AFSPSC05" if scenario["version"] == 5 else "AFSPSC04"
+        lines[0] = "AFSPSC07" if scenario["version"] >= 7 else "AFSPSC06" if scenario["version"] == 6 else "AFSPSC05" if scenario["version"] == 5 else "AFSPSC04"
         sink = scenario["flight_sink"]
         capacity = 0 if sink is None else sink["capacity"]
         disconnect = None if sink is None else sink["disconnect_before"]
         lines[1] += " {} {} {}".format(scenario["flight_categories"], capacity,
                                       "none" if disconnect is None else disconnect)
+    if scenario["version"] >= 7:
+        limits = scenario["snapshot_limits"]
+        lines[1] += " {} {} {}".format(limits["max_edit_records"], limits["max_views"], limits["reclaim_records"])
     for operation in scenario["operations"]:
         kind = operation["op"]
         if kind in ("mkdir", "create"):
@@ -177,7 +274,7 @@ def compile_commands(encoded):
             fields = [kind, operation["label"], str(operation["size"])]
         elif kind == "rename":
             fields = [kind, operation["label"], operation["parent"], operation["name"].encode().hex()]
-        elif kind in ("unlink", "rmdir"):
+        elif kind in ("unlink", "rmdir") or kind.startswith("snapshot_"):
             fields = [kind, operation["label"]]
         else:
             fields = [kind]

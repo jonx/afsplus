@@ -18,6 +18,76 @@ fn hex(data: &[u8]) -> String {
         out
     }
 }
+fn metadata(value: &afsplus_core::volume::ObjectMetadata) -> String {
+    use afsplus_format::object::ObjectType;
+    let kind = match value.object_type {
+        ObjectType::File => "file",
+        ObjectType::Directory => "directory",
+        ObjectType::Symlink => "symlink",
+        ObjectType::Internal => "internal",
+    };
+    format!(
+        "{} {kind} {} {} {} {} {} {} {} {} {} {} {}",
+        value.object_id,
+        value.size_bytes,
+        value.allocated_bytes,
+        value.link_count,
+        value.protection,
+        value.created.seconds,
+        value.created.nanoseconds,
+        value.modified.seconds,
+        value.modified.nanoseconds,
+        value.changed.seconds,
+        value.changed.nanoseconds,
+        value.content_generation
+    )
+}
+
+fn captured_observation(
+    result: Result<Vec<afsplus_check::scenario::captured::View>, String>,
+) -> String {
+    let mut out = String::new();
+    match result {
+        Err(error) => out.push_str(&format!("snapshots error {}\n", hex(error.as_bytes()))),
+        Ok(views) => {
+            out.push_str(&format!("snapshots ok {}\n", views.len()));
+            for view in views {
+                out.push_str(&format!(
+                    "snapshot {} {} {} {}\n",
+                    view.info.id,
+                    view.info.generation,
+                    view.info.committed_tx_id,
+                    view.entries.len()
+                ));
+                out.push_str(&format!("root {}\n", metadata(&view.root)));
+                for entry in view.entries {
+                    let path = entry
+                        .path
+                        .iter()
+                        .map(|p| hex(p.as_bytes()))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    out.push_str(&format!(
+                        "entry {path} {} {} {}\n",
+                        metadata(&entry.metadata),
+                        hex(&entry.data),
+                        entry.allocation.len()
+                    ));
+                    for range in entry.allocation {
+                        out.push_str(&format!(
+                            "range {} {} {}\n",
+                            range.offset,
+                            range.length,
+                            u8::from(range.unwritten)
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 fn header(out: &mut impl Write, name: &str, length: usize) -> io::Result<()> {
     out.write_all(&(name.len() as u16).to_le_bytes())?;
     out.write_all(name.as_bytes())?;
@@ -131,7 +201,14 @@ fn run() -> Result<(), String> {
         } else {
             pages.to_string()
         };
-        format!("AFSOBS03\ncache-pages {profile}\n")
+        format!(
+            "{}\ncache-pages {profile}\n",
+            if plan.snapshot_limits().is_some() {
+                "AFSOBS04"
+            } else {
+                "AFSOBS03"
+            }
+        )
     } else {
         String::from("AFSOBS02\n")
     };
@@ -170,6 +247,9 @@ fn run() -> Result<(), String> {
                 }
             }
         }
+    }
+    if let Some(snapshots) = inspection.snapshots {
+        observed.push_str(&captured_observation(snapshots));
     }
     // Semantic flight records bind operation indices and resolved object IDs to
     // half-open successful block-log ranges. V2 additionally carries internal

@@ -1,11 +1,29 @@
 //! Experimental Stage A semantic runner (ADR-099), confined to memory images.
+pub mod captured;
 use afsplus_block::{BlockDevice, BlockError, MemoryBackend, RecordedOp};
-use afsplus_core::{mkfs, mount, mount_with_options, MkfsParams, MountOptions, NamePolicy};
+use afsplus_core::volume::{SnapshotHandle, SnapshotWorkLimits};
+use afsplus_core::{
+    mkfs_with_options, mount, mount_with_options, mount_with_snapshot_limits, MkfsOptions,
+    MkfsParams, MountOptions, NamePolicy,
+};
 use afsplus_format::{validate_name, Timespec, OBJECT_ROOT};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 #[derive(Debug)]
+pub enum SnapshotAction {
+    Create,
+    Open,
+    Close,
+    Delete,
+    Inspect,
+}
+
+#[derive(Debug)]
 pub enum Operation {
+    Snapshot {
+        action: SnapshotAction,
+        label: String,
+    },
     Create {
         label: String,
         parent: String,
@@ -52,6 +70,7 @@ pub struct Plan {
     diagnostic_profile: Option<DiagnosticProfile>,
     api_observation: bool,
     object_observation: bool,
+    snapshot_limits: Option<SnapshotWorkLimits>,
     blocks: u64,
     region: u32,
     log_slots: u16,
@@ -247,12 +266,41 @@ impl Plan {
         let version = lines.next();
         if !matches!(
             version,
-            Some("AFSPSC01" | "AFSPSC02" | "AFSPSC03" | "AFSPSC04" | "AFSPSC05" | "AFSPSC06")
+            Some(
+                "AFSPSC01"
+                    | "AFSPSC02"
+                    | "AFSPSC03"
+                    | "AFSPSC04"
+                    | "AFSPSC05"
+                    | "AFSPSC06"
+                    | "AFSPSC07"
+            )
         ) {
             return Err("scenario protocol version".into());
         }
         let mut header: Vec<_> = lines.next().ok_or("missing geometry")?.split(' ').collect();
-        let diagnostic_profile = if matches!(version, Some("AFSPSC04" | "AFSPSC05" | "AFSPSC06")) {
+        let snapshot_limits = if version == Some("AFSPSC07") {
+            let reclaim_records =
+                integer(header.pop().ok_or("missing snapshot reclaim limit")?, 4096)? as usize;
+            let max_views =
+                integer(header.pop().ok_or("missing snapshot view limit")?, 16)? as usize;
+            let max_edit_records =
+                integer(header.pop().ok_or("missing snapshot edit limit")?, 4096)? as usize;
+            if reclaim_records == 0 || max_views == 0 || max_edit_records == 0 {
+                return Err("zero snapshot limit".into());
+            }
+            Some(SnapshotWorkLimits {
+                max_edit_records,
+                max_views,
+                reclaim_records,
+            })
+        } else {
+            None
+        };
+        let diagnostic_profile = if matches!(
+            version,
+            Some("AFSPSC04" | "AFSPSC05" | "AFSPSC06" | "AFSPSC07")
+        ) {
             let disconnect_before = match header.pop().ok_or("missing disconnect index")? {
                 "none" => None,
                 value => Some(integer(value, 1024)? as usize),
@@ -260,7 +308,7 @@ impl Plan {
             let sink_capacity =
                 integer(header.pop().ok_or("missing sink capacity")?, 256)? as usize;
             let maximum = match version {
-                Some("AFSPSC06") => 127,
+                Some("AFSPSC06" | "AFSPSC07") => 127,
                 Some("AFSPSC05") => 63,
                 _ => 15,
             };
@@ -278,7 +326,7 @@ impl Plan {
         };
         let flight_capacity = if matches!(
             version,
-            Some("AFSPSC03" | "AFSPSC04" | "AFSPSC05" | "AFSPSC06")
+            Some("AFSPSC03" | "AFSPSC04" | "AFSPSC05" | "AFSPSC06" | "AFSPSC07")
         ) {
             let capacity = integer(header.pop().ok_or("missing flight capacity")?, 256)? as usize;
             if capacity == 0 {
@@ -290,7 +338,7 @@ impl Plan {
         };
         let cache_profile = if matches!(
             version,
-            Some("AFSPSC02" | "AFSPSC03" | "AFSPSC04" | "AFSPSC05" | "AFSPSC06")
+            Some("AFSPSC02" | "AFSPSC03" | "AFSPSC04" | "AFSPSC05" | "AFSPSC06" | "AFSPSC07")
         ) {
             Some(match header.pop() {
                 Some("2") => 2,
@@ -339,7 +387,8 @@ impl Plan {
                     directory: false,
                 },
                 [kind @ ("write" | "window_write"), l, o, d]
-                    if *kind == "write" || matches!(version, Some("AFSPSC05" | "AFSPSC06")) =>
+                    if *kind == "write"
+                        || matches!(version, Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07")) =>
                 {
                     Operation::Write {
                         deferred: *kind == "window_write",
@@ -349,7 +398,8 @@ impl Plan {
                     }
                 }
                 [kind @ ("truncate" | "window_truncate"), l, s]
-                    if *kind == "truncate" || matches!(version, Some("AFSPSC05" | "AFSPSC06")) =>
+                    if *kind == "truncate"
+                        || matches!(version, Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07")) =>
                 {
                     Operation::Truncate {
                         deferred: *kind == "window_truncate",
@@ -370,11 +420,30 @@ impl Plan {
                     label: label(l)?,
                     directory: true,
                 },
+                [kind @ ("snapshot_create" | "snapshot_open" | "snapshot_close"
+                | "snapshot_delete" | "snapshot_inspect"), name]
+                    if version == Some("AFSPSC07") =>
+                {
+                    Operation::Snapshot {
+                        action: match *kind {
+                            "snapshot_create" => SnapshotAction::Create,
+                            "snapshot_open" => SnapshotAction::Open,
+                            "snapshot_close" => SnapshotAction::Close,
+                            "snapshot_delete" => SnapshotAction::Delete,
+                            _ => SnapshotAction::Inspect,
+                        },
+                        label: label(name)?,
+                    }
+                }
                 ["sync"] => Operation::Sync,
-                ["window_fsync"] if matches!(version, Some("AFSPSC05" | "AFSPSC06")) => {
+                ["window_fsync"]
+                    if matches!(version, Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07")) =>
+                {
                     Operation::WindowFsync
                 }
-                ["window_commit"] if matches!(version, Some("AFSPSC05" | "AFSPSC06")) => {
+                ["window_commit"]
+                    if matches!(version, Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07")) =>
+                {
                     Operation::WindowCommit
                 }
                 ["remount"] => Operation::Remount,
@@ -399,8 +468,9 @@ impl Plan {
             cache_profile,
             flight_capacity,
             diagnostic_profile,
-            api_observation: matches!(version, Some("AFSPSC05" | "AFSPSC06")),
-            object_observation: version == Some("AFSPSC06"),
+            api_observation: matches!(version, Some("AFSPSC05" | "AFSPSC06" | "AFSPSC07")),
+            object_observation: matches!(version, Some("AFSPSC06" | "AFSPSC07")),
+            snapshot_limits,
             blocks,
             region,
             log_slots,
@@ -431,6 +501,20 @@ impl Plan {
         self.cache_profile
     }
 
+    pub fn snapshot_limits(&self) -> Option<SnapshotWorkLimits> {
+        self.snapshot_limits
+    }
+
+    fn mount_profile<D: BlockDevice>(
+        &self,
+        device: D,
+    ) -> Result<afsplus_core::Volume<D>, afsplus_core::CoreError> {
+        match self.snapshot_limits {
+            Some(limits) => mount_with_snapshot_limits(device, self.mount_options(), limits),
+            None => mount_with_options(device, self.mount_options()),
+        }
+    }
+
     fn mount_options(&self) -> MountOptions {
         MountOptions {
             tree_cache_pages: self.cache_profile.and_then(std::num::NonZeroUsize::new),
@@ -440,7 +524,7 @@ impl Plan {
 
     /// Observe/recover a selected result under the same policy as execution.
     pub fn inspect_checked(&self, image: MemoryBackend, max_bytes: usize) -> Inspection {
-        inspect_checked_with_options(image, max_bytes, self.mount_options())
+        inspect_checked_with_options(image, max_bytes, self.mount_options(), self.snapshot_limits)
     }
     pub fn run_with_limits(&self, limits: RecordingLimits) -> Result<Run, String> {
         match self.flight_capacity {
@@ -511,7 +595,7 @@ impl Plan {
         disconnect_before: Option<usize>,
     ) -> Result<Run, String> {
         let mut base = MemoryBackend::new(4096, self.blocks);
-        mkfs(
+        mkfs_with_options(
             &mut base,
             &MkfsParams {
                 uuid: [0x53; 16],
@@ -524,6 +608,9 @@ impl Plan {
                 name_policy: NamePolicy::Sensitive,
                 timestamp: Timespec::default(),
             },
+            MkfsOptions {
+                persistent_snapshots: self.snapshot_limits.is_some(),
+            },
         )
         .map_err(|e| e.to_string())?;
         let recorder = Recorder(Rc::new(RefCell::new(Capture {
@@ -532,7 +619,7 @@ impl Plan {
             bytes: 0,
             limits,
         })));
-        let mut volume = match mount_with_options(recorder.clone(), self.mount_options()) {
+        let mut volume = match self.mount_profile(recorder.clone()) {
             Ok(volume) => volume,
             Err(error) => {
                 return Ok(finish(
@@ -550,6 +637,8 @@ impl Plan {
             (OBJECT_ROOT, OBJECT_ROOT, String::new(), true),
         )]);
         let mut used = std::collections::BTreeSet::from(["root".to_owned()]);
+        let mut snapshot_ids = BTreeMap::<String, u64>::new();
+        let mut snapshot_handles = BTreeMap::<String, SnapshotHandle>::new();
         let mut failure = None;
         let mut events = Vec::with_capacity(self.operations.len());
         for (index, op) in self.operations.iter().enumerate() {
@@ -580,8 +669,9 @@ impl Plan {
                 .unwrap_or(0);
             if matches!(op, Operation::Remount) {
                 let mut flight = volume.replace_flight_recorder(None);
+                snapshot_handles.clear();
                 drop(volume);
-                volume = match mount_with_options(recorder.clone(), self.mount_options()) {
+                volume = match self.mount_profile(recorder.clone()) {
                     Ok(volume) => volume,
                     Err(error) => {
                         events.push(Event {
@@ -619,6 +709,49 @@ impl Plan {
                         .ok_or_else(|| format!("unknown label {l}"))
                 };
                 match op {
+                    Operation::Snapshot { action, label } => match action {
+                        SnapshotAction::Create => {
+                            if snapshot_ids.contains_key(label) {
+                                return Err("reused snapshot label".into());
+                            }
+                            let id = volume.snapshot_create(now).map_err(|e| e.to_string())?;
+                            snapshot_ids.insert(label.clone(), id);
+                        }
+                        SnapshotAction::Open => {
+                            if snapshot_handles.contains_key(label) {
+                                return Err("snapshot handle already open".into());
+                            }
+                            let id = *snapshot_ids.get(label).ok_or("unknown snapshot label")?;
+                            snapshot_handles.insert(
+                                label.clone(),
+                                volume.snapshot_open(id).map_err(|e| e.to_string())?,
+                            );
+                        }
+                        SnapshotAction::Close => {
+                            snapshot_handles
+                                .remove(label)
+                                .ok_or("snapshot handle not open")?;
+                        }
+                        SnapshotAction::Delete => {
+                            let id = *snapshot_ids.get(label).ok_or("unknown snapshot label")?;
+                            volume.snapshot_delete(id, now).map_err(|e| e.to_string())?;
+                        }
+                        SnapshotAction::Inspect => {
+                            let handle = snapshot_handles
+                                .get(label)
+                                .ok_or("snapshot handle not open")?;
+                            captured::inspect(
+                                &mut volume,
+                                handle,
+                                captured::Limits {
+                                    entries: 1024,
+                                    bytes: 16 * 1024 * 1024,
+                                    ranges: 4096,
+                                    page_entries: 2,
+                                },
+                            )?;
+                        }
+                    },
                     Operation::Create {
                         label,
                         parent,
@@ -750,6 +883,7 @@ pub struct Inspection {
     pub raw: crate::CheckReport,
     pub recovered: Option<crate::CheckReport>,
     pub entries: Result<Vec<Entry>, String>,
+    pub snapshots: Option<Result<Vec<captured::View>, String>>,
 }
 impl Inspection {
     pub fn is_clean(&self) -> bool {
@@ -759,37 +893,57 @@ impl Inspection {
                 .as_ref()
                 .is_some_and(crate::CheckReport::is_clean)
             && self.entries.is_ok()
+            && self.snapshots.as_ref().is_none_or(|views| views.is_ok())
     }
 }
 
 /// Full offline checks before and after recovery of an owned memory image.
 /// The recovered checker covers the exact volume used for namespace observation.
 pub fn inspect_checked(image: MemoryBackend, max_bytes: usize) -> Inspection {
-    inspect_checked_with_options(image, max_bytes, MountOptions::default())
+    inspect_checked_with_options(image, max_bytes, MountOptions::default(), None)
 }
 
 fn inspect_checked_with_options(
     mut image: MemoryBackend,
     max_bytes: usize,
     options: MountOptions,
+    snapshot_limits: Option<SnapshotWorkLimits>,
 ) -> Inspection {
     let raw = crate::check_device(&mut image);
-    match mount_with_options(image, options) {
+    let mounted = match snapshot_limits {
+        Some(limits) => mount_with_snapshot_limits(image, options, limits),
+        None => mount_with_options(image, options),
+    };
+    match mounted {
         Err(error) => Inspection {
             cache_pages: None,
             raw,
             recovered: None,
             entries: Err(error.to_string()),
+            snapshots: snapshot_limits.map(|_| Err(error.to_string())),
         },
         Ok(mut volume) => {
             let cache_pages = Some(volume.tree_cache_pages());
             let entries = inspect_volume(&mut volume, max_bytes);
+            let snapshots = snapshot_limits.map(|limits| {
+                captured::inspect_all(
+                    &mut volume,
+                    limits.max_views,
+                    captured::Limits {
+                        entries: 1024,
+                        bytes: max_bytes,
+                        ranges: 4096,
+                        page_entries: 2,
+                    },
+                )
+            });
             let recovered = Some(crate::check_device(&mut volume.into_device()));
             Inspection {
                 cache_pages,
                 raw,
                 recovered,
                 entries,
+                snapshots,
             }
         }
     }

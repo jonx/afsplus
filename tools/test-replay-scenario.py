@@ -22,6 +22,27 @@ def fixture():
 
 
 class ScenarioTests(unittest.TestCase):
+    def test_v7_snapshot_limits_and_labels_are_explicit(self):
+        value = fixture()
+        value.update(version=7, flight_capacity=256, flight_categories=127, flight_sink=None,
+                     snapshot_limits={"max_edit_records": 4096, "max_views": 16, "reclaim_records": 8},
+                     expected_snapshots=[])
+        value["volume"]["tree_cache_pages"] = 2
+        value["operations"] = [{"op": "snapshot_create", "label": "s"},
+                               {"op": "snapshot_open", "label": "s"}]
+        self.assertTrue(scenario.compile_commands(json.dumps(value).encode()).startswith(
+            b"AFSPSC07\nformat 4096 256 64 8 2 256 127 0 none 4096 16 8\n"))
+        for key in value["snapshot_limits"]:
+            for bad in (0, True, -1, 4097):
+                candidate = dict(value, snapshot_limits=dict(value["snapshot_limits"], **{key: bad}))
+                with self.assertRaises(ValueError): scenario.validate(json.dumps(candidate).encode())
+        for operations in ([{"op": "snapshot_open", "label": "missing"}],
+                           [value["operations"][0], value["operations"][0]]):
+            with self.assertRaises(ValueError):
+                scenario.validate(json.dumps(dict(value, operations=operations)).encode())
+        with self.assertRaises(ValueError):
+            scenario.validate(json.dumps(dict(value, version=6)).encode())
+
     def test_v6_object_category_is_version_bound(self):
         value = fixture()
         value.update(version=6, flight_capacity=256, flight_categories=127, flight_sink=None)

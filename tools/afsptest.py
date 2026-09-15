@@ -116,12 +116,107 @@ def checker_report(field, optional=False):
 
 
 def structural_success(actual):
-    return all(actual[key] is not None and actual[key]["clean"] for key in ("raw_check", "recovered_check"))
+    return (actual.get("snapshot_inspection_error") is None
+            and all(actual[key] is not None and actual[key]["clean"] for key in ("raw_check", "recovered_check")))
+
+
+def captured_observation(lines):
+    """Decode the bounded historical-view section; absence is never an empty view."""
+    cursor = iter(lines)
+
+    def take(prefix, count):
+        fields = next(cursor, "").split(" ")
+        if len(fields) != count or fields[0] != prefix:
+            raise ValueError("captured observation framing")
+        return fields[1:]
+
+    def number(raw, maximum=(1 << 64) - 1, minimum=0):
+        value = int(raw)
+        if str(value) != raw or not minimum <= value <= maximum:
+            raise ValueError("captured observation integer")
+        return value
+
+    def metadata(fields):
+        if len(fields) != 13 or fields[1] not in ("file", "directory", "symlink"):
+            raise ValueError("captured metadata")
+        result = dict(zip(("object_id", "kind", "size", "allocated", "links", "protection"),
+                          [number(fields[0]), fields[1], number(fields[2]), number(fields[3]),
+                           number(fields[4], (1 << 32) - 1), number(fields[5], (1 << 32) - 1)]))
+        for index, key in ((6, "created"), (8, "modified"), (10, "changed")):
+            result[key] = [number(fields[index], (1 << 63) - 1, -(1 << 63)),
+                           number(fields[index + 1], 999999999)]
+        result["content_generation"] = number(fields[12])
+        return result
+
+    status, payload = take("snapshots", 3)
+    if status == "error":
+        error = bytes.fromhex(payload).decode()
+        views = None
+    elif status == "ok":
+        error, views = None, []
+        remaining_entries, remaining_bytes, remaining_ranges = 1024, 16 * 1024 * 1024, 4096
+        previous = 0
+        for _ in range(number(payload, 16)):
+            identity, generation, transaction, count = take("snapshot", 5)
+            identity = number(identity, minimum=previous + 1)
+            previous = identity
+            view = {"id": identity, "generation": number(generation),
+                    "committed_tx_id": number(transaction), "root": metadata(take("root", 14)),
+                    "entries": []}
+            if view["root"]["kind"] != "directory":
+                raise ValueError("captured root kind")
+            count = number(count, remaining_entries)
+            remaining_entries -= count
+            previous_path = None
+            for _ in range(count):
+                fields = take("entry", 17)
+                path = [bytes.fromhex(component).decode() for component in fields[0].split(",")]
+                if not 1 <= len(path) <= 64 or any(not part or "/" in part or "\0" in part for part in path):
+                    raise ValueError("captured path")
+                if previous_path is not None and path <= previous_path:
+                    raise ValueError("captured path ordering")
+                previous_path = path
+                entry = {"path": path, "metadata": metadata(fields[1:14])}
+                contents = b"" if fields[14] == "-" else bytes.fromhex(fields[14])
+                if len(contents) > remaining_bytes:
+                    raise ValueError("captured content budget")
+                remaining_bytes -= len(contents)
+                entry["data"] = contents.hex()
+                count_ranges = number(fields[15], remaining_ranges)
+                remaining_ranges -= count_ranges
+                entry["allocation"] = []
+                for _ in range(count_ranges):
+                    offset, length, unwritten = take("range", 4)
+                    entry["allocation"].append({"offset": number(offset),
+                        "length": number(length, minimum=1), "unwritten": bool(number(unwritten, 1))})
+                if entry["metadata"]["kind"] == "directory":
+                    if contents or count_ranges:
+                        raise ValueError("captured directory payload")
+                elif len(contents) != entry["metadata"]["size"]:
+                    raise ValueError("captured content size")
+                if entry["metadata"]["kind"] == "symlink" and count_ranges:
+                    raise ValueError("captured symlink allocation")
+                view["entries"].append(entry)
+            views.append(view)
+    else:
+        raise ValueError("captured observation outcome")
+    if next(cursor, None) is not None:
+        raise ValueError("trailing captured observation")
+    return {"snapshot_inspection_error": error, "snapshots": views}
 
 
 def observation(wire):
     lines = wire.decode("ascii").splitlines()
     cache = None
+    captured = None
+    if lines and lines[0] == "AFSOBS04":
+        positions = [i for i, line in enumerate(lines) if line.startswith("snapshots ")]
+        if len(positions) != 1:
+            raise ValueError("missing or duplicate captured observation")
+        split = positions[0]
+        captured = captured_observation(lines[split:])
+        lines = lines[:split]
+        lines[0] = "AFSOBS03"
     if lines and lines[0] == "AFSOBS03":
         if len(lines) < 6 or lines[1] not in ("cache-pages 2", "cache-pages 4", "cache-pages 8", "cache-pages unlimited"):
             raise ValueError("observation cache profile")
@@ -165,6 +260,8 @@ def observation(wire):
         "raw_check": raw_check, "recovered_check": recovered_check, "entries": entries}
     if cache is not None:
         result.update(version=3, cache_pages=cache)
+    if captured is not None:
+        result.update(version=4, **captured)
     return result
 
 
@@ -172,7 +269,7 @@ def bind_cache_profile(value, actual):
     """Admitted configuration and observed policy must agree before replay."""
     if not isinstance(actual, dict):
         raise ValueError("observation object")
-    expected_version = 3 if value["version"] >= 2 else 2
+    expected_version = 4 if value["version"] >= 7 else 3 if value["version"] >= 2 else 2
     if type(actual.get("version")) is not int or actual["version"] != expected_version:
         raise ValueError("scenario/observation profile version binding")
     if value["version"] >= 2:
@@ -182,6 +279,30 @@ def bind_cache_profile(value, actual):
             raise ValueError("scenario/observation cache profile binding")
     elif "cache_pages" in actual:
         raise ValueError("version-1 scenario cannot declare a cache profile")
+    if value["version"] >= 7:
+        if "snapshot_inspection_error" not in actual or "snapshots" not in actual:
+            raise ValueError("missing captured state")
+        error = actual["snapshot_inspection_error"]
+        if error is None:
+            scenario.captured_views(actual["snapshots"], observed=True)
+        elif not isinstance(error, str) or actual["snapshots"] is not None:
+            raise ValueError("captured error state")
+
+
+def expected_state(value):
+    live = sorted(value["expected"], key=lambda entry: entry["path"])
+    if value["version"] >= 7:
+        return {"entries": live, "snapshots": value["expected_snapshots"]}
+    return live
+
+
+def matches_expected(value, actual):
+    expected = expected_state(value)
+    if value["version"] >= 7:
+        return (actual["entries"] == expected["entries"]
+                and actual["snapshot_inspection_error"] is None
+                and actual["snapshots"] == expected["snapshots"])
+    return actual["entries"] == expected
 
 
 def admit_fault(fault, value):
@@ -224,9 +345,9 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
         raise ValueError("source or runner changed during execution")
     actual = observation(records.pop("actual.wire"))
     bind_cache_profile(value, actual)
-    expected = sorted(value["expected"], key=lambda entry: entry["path"])
+    expected = expected_state(value)
     success = (actual["failure"] is None and actual["inspection_error"] is None
-               and structural_success(actual) and actual["entries"] == expected)
+               and structural_success(actual) and matches_expected(value, actual))
     records.update({
         "operations.afstrace": raw,
         "run.json": encoded({"version": 1, "profile": "semantic-no-cut-v1" if fault["kind"] == "no-cut" else "semantic-power-cut-v1",
@@ -241,7 +362,7 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
 
 def selected_batch(flight, offset, previous, capacity, profile, index):
     extended = profile["version"] >= 5
-    objects = profile["version"] == 6
+    objects = profile["version"] >= 6
     if len(flight) - offset < 53:
         raise ValueError("flight truncated selected batch")
     lost, filtered, sequence, attempt, delivered, missed, closed, retained = struct.unpack(
@@ -371,7 +492,7 @@ def validate_trace(records):
     flight = records["flight-recorder.bin"]
     internal = scenario_value["version"] >= 3
     selected = scenario_value["version"] >= 4
-    magic = b"AFSFLT05" if scenario_value["version"] == 6 else b"AFSFLT04" if scenario_value["version"] == 5 else b"AFSFLT03" if selected else b"AFSFLT02" if internal else b"AFSFLT01"
+    magic = b"AFSFLT05" if scenario_value["version"] >= 6 else b"AFSFLT04" if scenario_value["version"] == 5 else b"AFSFLT03" if selected else b"AFSFLT02" if internal else b"AFSFLT01"
     if len(flight) < 12 or flight[:8] != magic:
         raise ValueError("flight version")
     events = struct.unpack("<I", flight[8:12])[0]
@@ -506,15 +627,16 @@ def admit_run(retained):
             or not hex_digest(meta["runner_sha256"], (64,))):
         raise ValueError("run source or runner identity schema")
     value = scenario.validate(retained["operations.afstrace"])
-    expected = sorted(value["expected"], key=lambda entry: entry["path"])
+    expected = expected_state(value)
     if retained["expected.json"] != encoded(expected):
         raise ValueError("scenario/expected state binding")
     actual = json.loads(retained["actual.json"], object_pairs_hook=bundle._unique)
     if not isinstance(actual, dict) or not {"failure", "inspection_error", "raw_check", "recovered_check", "entries"} <= set(actual):
         raise ValueError("run observation fields")
+    bind_cache_profile(value, actual)
     clean = all(isinstance(actual[key], dict) and actual[key].get("clean") is True
                 for key in ("raw_check", "recovered_check"))
-    success = actual["failure"] is None and actual["inspection_error"] is None and clean and actual["entries"] == expected
+    success = actual["failure"] is None and actual["inspection_error"] is None and clean and actual.get("snapshot_inspection_error") is None and matches_expected(value, actual)
     if meta["outcome"] != ("pass" if success else "failure"):
         raise ValueError("run outcome contradicts observation")
     validate_trace(retained)
@@ -613,6 +735,8 @@ def failure_signature(records):
         if value["version"] >= 4:
             signature["flight_categories"] = value["flight_categories"]
             signature["flight_sink"] = value["flight_sink"]
+        if value["version"] >= 7:
+            signature["snapshot_limits"] = value["snapshot_limits"]
         return encoded(signature)
     if actual["failure"] is not None:
         failure = actual["failure"]
@@ -621,6 +745,8 @@ def failure_signature(records):
         if not 0 <= index < len(operations):
             raise ValueError("failure has no semantic operation")
         return pack({"kind": "operation", "operation": operations[index], "error": failure["error"]})
+    if actual.get("snapshot_inspection_error") is not None:
+        return pack({"kind": "snapshot-inspection", "error": actual["snapshot_inspection_error"]})
     structural = {key: None if actual[key] is None else actual[key]["errors"]
                   for key in ("raw_check", "recovered_check")}
     if not structural_success(actual):
@@ -628,7 +754,10 @@ def failure_signature(records):
                         "inspection_error": actual["inspection_error"]})
     if actual["inspection_error"] is not None:
         return pack({"kind": "inspection", "error": actual["inspection_error"]})
-    expected = {tuple(entry["path"]): entry for entry in json.loads(records["expected.json"])}
+    if value["version"] >= 7 and actual["snapshots"] != value["expected_snapshots"]:
+        return pack({"kind": "snapshot-state", "expected": value["expected_snapshots"],
+                     "actual": actual["snapshots"]})
+    expected = {tuple(entry["path"]): entry for entry in value["expected"]}
     observed = {tuple(entry["path"]): entry for entry in actual["entries"]}
     differences = [{"path": list(path), "expected": expected.get(path), "actual": observed.get(path)}
         for path in sorted(set(expected) | set(observed)) if expected.get(path) != observed.get(path)]
