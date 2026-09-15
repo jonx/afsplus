@@ -306,6 +306,38 @@ five-block first prefix fails. Spill counters are not observed in orphans.rs;
 I/O faults, ambiguous publication, retained snapshots and resource refusals lie
 outside these fixtures.
 
+## Family matrix driver
+
+[common/family_matrix.rs](common/family_matrix.rs) serves the
+`family_matrix_*.rs` tests through `mod common;`. A family implements the
+`Family` trait: the image format, fixture setup per variant, the operation,
+the number of checkpoints the operation publishes, and `verify`, which asserts
+the exact state after a given number of publications with literal names,
+bytes and accounting. A family may add success assertions, a literal
+staged-node demand, a refusal predicate and a corrective step before retry.
+`profile_tests!` generates `two_pages`, `four_pages`, `eight_pages` and
+`unlimited` tests inside one module per family part.
+
+Every image is formatted with persistent snapshots. The explicit profile
+applies from fixture setup through recording and every recovered mount, and
+each mount asserts the effective profile. The checker wrapper rejects errors
+and every warning except a stopped intent-log tail.
+
+| Part | Driver behavior |
+|---|---|
+| Recording | Applies the operation to the verified fixture, requires the generation to advance by the declared publications, bounds resident staged nodes by the profile, verifies the live state, the remounted state and the checker, and reports writes, flushes, longest unflushed tail and spill counters |
+| Cuts | Enumerates every modeled cut within an explicit tail budget; each image passes the checker, selects a generation between the fixture and the final publication and matches `verify` for that delta; intermediate publications retry to the final state; the fixture and final outcomes must both occur |
+| Faults | A before-write fault at every recorded write and a failure at every flush. A fault on a checkpoint-slot write or on the flush that follows it must poison the handle with `WindowPoisoned`; any other fault leaves the exact published state on the live handle. Remount exposes exactly the publications that reached media before the fault, passes the checker and retries to the final state; a separate instance retries on the same handle after every certain fault |
+| Ambiguous publication | The first checkpoint write completes and returns an error, or reads fail after it. The operation reports an error; the same operation and an independent create return `WindowPoisoned` with no writes or flushes; remount exposes exactly one publication, and multi-publication operations retry to the final state |
+| Retained snapshot | A snapshot taken before the operation, by the driver after setup or by the family inside setup, holds literal bytes; its captured metadata and bytes, read with an EOF sentinel, are compared through recording, every cut, every fault case and both ambiguous modes |
+| Forced eviction | A pre-populated fixture whose final commit has a literal staged-node demand, asserted at the unlimited profile with zero spills. A bounded profile below the demand must report nonzero spill writes, and a profile at or above it reports zero. Faults cover every write, spill images included; cuts run when the family declares a budget |
+| Resource refusal | The refusal fixture must return the family's error with no flush and no write to a block reachable from either selectable checkpoint, and with no write at all unless the family admits provisional spill images. The fixture state holds on the live handle and after remount; the family's corrective step then admits the retry, verified live, after remount and through the checker |
+
+The runners are `plain` (recording, cuts and faults), `retained` (recording,
+cuts, faults and ambiguous publication), `eviction`, `ambiguous` and
+`refusal`. Every cut budget is explicit, and an unflushed tail beyond it fails
+the test.
+
 ## Commands and review boundary
 
 ```sh
