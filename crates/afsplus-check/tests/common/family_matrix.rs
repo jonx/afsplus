@@ -430,6 +430,171 @@ pub fn cuts<F: Family>(
     );
 }
 
+/// Representative tear offsets of the power-cut model.
+const TEAR_OFFSETS: [usize; 3] = [64, 2048, 4064];
+/// Flush segments up to this many writes enumerate every full-write subset.
+const EXHAUSTIVE_SEGMENT: usize = 12;
+
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut value = *state;
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+/// Visits full-write subsets of one flush segment applied over `durable`:
+/// all of them up to `EXHAUSTIVE_SEGMENT` writes, otherwise `sample` seeded
+/// subsets. Returns (exhaustive, sampled) image counts.
+fn segment_subsets(
+    durable: &MemoryBackend,
+    segment: &[(u64, &Vec<u8>)],
+    sample: usize,
+    rng: &mut u64,
+    visit: &mut dyn FnMut(MemoryBackend, String),
+) -> (u64, u64) {
+    if segment.is_empty() {
+        return (0, 0);
+    }
+    let exhaustive = segment.len() <= EXHAUSTIVE_SEGMENT;
+    let masks: Vec<Vec<bool>> = if exhaustive {
+        (0u64..1 << segment.len())
+            .map(|mask| {
+                (0..segment.len())
+                    .map(|bit| mask & (1 << bit) != 0)
+                    .collect()
+            })
+            .collect()
+    } else {
+        (0..sample)
+            .map(|_| {
+                (0..segment.len())
+                    .map(|_| splitmix64(rng) & 1 == 1)
+                    .collect()
+            })
+            .collect()
+    };
+    for (number, mask) in masks.iter().enumerate() {
+        let mut image = durable.clone();
+        for ((lba, data), keep) in segment.iter().zip(mask) {
+            if *keep {
+                image.apply_raw(*lba, data);
+            }
+        }
+        let kind = if exhaustive {
+            "subset"
+        } else {
+            "sampled subset"
+        };
+        visit(
+            image,
+            format!("{kind} {number} of a {}-write segment", segment.len()),
+        );
+    }
+    let count = masks.len() as u64;
+    if exhaustive {
+        (count, 0)
+    } else {
+        (0, count)
+    }
+}
+
+/// Sampled cut campaign for a transaction whose unflushed tail exceeds the
+/// exhaustive budget. Images: every in-order write prefix of the log, each
+/// write torn at the representative offsets after its in-order prefix, every
+/// full-write subset of each flush segment of at most twelve writes, and
+/// `sample` subsets drawn with a SplitMix64 generator seeded by `seed` for
+/// each longer segment. Every image uses the `cuts` oracle, and the fixture
+/// and final publication must both occur.
+pub fn sampled_cuts<F: Family>(
+    family: &F,
+    recording: &Recording<F::State>,
+    pages: usize,
+    variant: Variant,
+    sample: usize,
+    seed: u64,
+) {
+    let publications = family.publications(variant);
+    let mut outcomes = vec![0u64; publications as usize + 1];
+    let mut check = |image: MemoryBackend, description: String| {
+        let context = format!("{} {variant:?} pages={pages}: {description}", family.name());
+        let mut image = image;
+        assert_checker_clean(&mut image, &context);
+        let mut volume = open(image, pages);
+        let generation = volume.generation();
+        let delta = generation
+            .checked_sub(recording.generation)
+            .filter(|delta| *delta <= publications)
+            .unwrap_or_else(|| panic!("{context}: disallowed generation {generation}"));
+        family.verify(&mut volume, &recording.state, variant, delta, &context);
+        verify_captured(&mut volume, &recording.captured, &context);
+        if delta > 0 && delta < publications {
+            family
+                .apply(&mut volume, &recording.state)
+                .unwrap_or_else(|error| panic!("{context}: retry {error}"));
+            family.verify(
+                &mut volume,
+                &recording.state,
+                variant,
+                publications,
+                &context,
+            );
+        }
+        outcomes[delta as usize] += 1;
+    };
+    let mut rng = seed;
+    let (mut prefixes, mut tears, mut exhaustive, mut sampled) = (1u64, 0u64, 0u64, 0u64);
+    let mut prefix = recording.base.clone();
+    let mut durable = recording.base.clone();
+    let mut segment: Vec<(u64, &Vec<u8>)> = Vec::new();
+    check(prefix.clone(), "in-order prefix of 0 operations".into());
+    for (index, operation) in recording.log.iter().enumerate() {
+        match operation {
+            RecordedOp::Write { lba, data } => {
+                for tear in TEAR_OFFSETS.iter().filter(|tear| **tear < data.len()) {
+                    let mut image = prefix.clone();
+                    let mut torn = image.peek(*lba);
+                    torn[..*tear].copy_from_slice(&data[..*tear]);
+                    image.apply_raw(*lba, &torn);
+                    check(
+                        image,
+                        format!("write {index} (lba {lba}) torn at byte {tear}"),
+                    );
+                    tears += 1;
+                }
+                prefix.apply_raw(*lba, data);
+                segment.push((*lba, data));
+                check(
+                    prefix.clone(),
+                    format!("in-order prefix through operation {index}"),
+                );
+                prefixes += 1;
+            }
+            RecordedOp::Flush => {
+                let (full, drawn) =
+                    segment_subsets(&durable, &segment, sample, &mut rng, &mut check);
+                exhaustive += full;
+                sampled += drawn;
+                durable = prefix.clone();
+                segment.clear();
+            }
+        }
+    }
+    let (full, drawn) = segment_subsets(&durable, &segment, sample, &mut rng, &mut check);
+    exhaustive += full;
+    sampled += drawn;
+    assert!(
+        outcomes[0] > 0 && outcomes[publications as usize] > 0,
+        "{} {variant:?} pages={pages}: both outcomes required {outcomes:?}",
+        family.name()
+    );
+    eprintln!(
+        "{} {variant:?} pages={pages}: sampled cut campaign seed={seed:#x} sample={sample} prefixes={prefixes} tears={tears} exhaustive_subsets={exhaustive} sampled_subsets={sampled} outcomes={outcomes:?} images={}",
+        family.name(),
+        outcomes.iter().sum::<u64>()
+    );
+}
+
 /// A before-write fault at every recorded write and a failure at every flush.
 /// A failed checkpoint write or its publication barrier must poison mutation;
 /// any other fault leaves the handle retryable. Remount must expose exactly
@@ -801,6 +966,14 @@ pub fn eviction<F: Family>(family: &F, pages: usize, budget: Option<usize>) {
     if let Some(budget) = budget {
         cuts(family, &recording, pages, Variant::Eviction, budget);
     }
+}
+
+/// Forced eviction whose unflushed tail exceeds the exhaustive budget: spill
+/// evidence, faults at every write and the seeded sampled cut campaign.
+pub fn eviction_sampled<F: Family>(family: &F, pages: usize, sample: usize, seed: u64) {
+    let recording = record(family, pages, Variant::Eviction);
+    faults(family, &recording, pages, Variant::Eviction);
+    sampled_cuts(family, &recording, pages, Variant::Eviction, sample, seed);
 }
 
 /// Generates one test per explicit profile inside a named module.
