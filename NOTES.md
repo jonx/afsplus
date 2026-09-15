@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Enforce legacy codec reserved-zero fields](#2026-09-15--enforce-legacy-codec-reserved-zero-fields)
 - [2026-09-15 — Add explicit exhaustive power-cut budgets](#2026-09-15--add-explicit-exhaustive-power-cut-budgets)
 - [2026-09-15 — Qualify ambiguous clone publication across cache profiles](#2026-09-15--qualify-ambiguous-clone-publication-across-cache-profiles)
 - [2026-09-15 — Qualify first-clone I/O failure recovery](#2026-09-15--qualify-first-clone-io-failure-recovery)
@@ -157,6 +158,20 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Enforce legacy codec reserved-zero fields
+
+The executable legacy directory, object-map and retired-list readers accepted
+nonzero bytes documented as reserved-zero in their wire layouts. A CRC-resealed
+regression failed before the fix on the directory header's first reserved byte.
+All three readers now reject their reserved payload fields; directory entries
+also reject nonzero reserved bytes after the type hint. Bounds checks precede
+all new reads. Generic header/tail policy is not changed by this correction.
+
+The 45-corruption regression passes, along with 44 roundtrip/hostile-input tests
+and format all-target clippy, formatting and document checks. This is focused
+legacy-codec evidence, not new native or full-workspace qualification. Direct
+fuzz targets for these executable readers remain in the Stage A inventory.
 
 ## 2026-09-15 — Add explicit exhaustive power-cut budgets
 

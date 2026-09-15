@@ -156,6 +156,9 @@ impl DirBlock {
         if p.len() < 8 {
             return Err(FormatError::Invalid("directory payload too short"));
         }
+        if p[4..8].iter().any(|&byte| byte != 0) {
+            return Err(FormatError::Invalid("legacy reserved bytes are nonzero"));
+        }
         let count = le::get_u32(&p[0..4]) as usize;
         // Bounds-first: each entry needs at least its fixed part.
         if count > (p.len() - 8) / ENTRY_FIXED {
@@ -168,6 +171,11 @@ impl DirBlock {
         for _ in 0..count {
             if p.len() - offset < ENTRY_FIXED {
                 return Err(FormatError::Invalid("truncated directory entry"));
+            }
+            if p[offset + 5..offset + 8].iter().any(|&byte| byte != 0) {
+                return Err(FormatError::Invalid(
+                    "directory entry reserved bytes are nonzero",
+                ));
             }
             let key_len = le::get_u16(&p[offset..offset + 2]) as usize;
             let name_len = le::get_u16(&p[offset + 2..offset + 4]) as usize;

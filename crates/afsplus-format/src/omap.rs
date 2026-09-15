@@ -102,6 +102,9 @@ impl ObjectMap {
         if p.len() < 8 {
             return Err(FormatError::Invalid("object map payload too short"));
         }
+        if p[4..8].iter().any(|&byte| byte != 0) {
+            return Err(FormatError::Invalid("legacy reserved bytes are nonzero"));
+        }
         let count = le::get_u32(&p[0..4]) as usize;
         if count > (p.len() - 8) / ENTRY_SIZE {
             return Err(FormatError::Invalid(
