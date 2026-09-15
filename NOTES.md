@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Qualify snapshot-bearing checkpoint admission](#2026-09-15--qualify-snapshot-bearing-checkpoint-admission)
 - [2026-09-15 — Qualify reclaim codec mutation and replay](#2026-09-15--qualify-reclaim-codec-mutation-and-replay)
 - [2026-09-15 — Enforce reclaim reserved-byte admission](#2026-09-15--enforce-reclaim-reserved-byte-admission)
 - [2026-09-15 — Preserve and replay captured snapshot state](#2026-09-15--preserve-and-replay-captured-snapshot-state)
@@ -149,6 +150,20 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Qualify snapshot-bearing checkpoint admission
+
+Integrated target 16 with an explicit 112-byte checkpoint payload containing
+snapshot registry and lifetime roots. Its independent payload oracle checks
+fields, UUID/generation binding and structural bounds for the fixture geometry;
+common-header verification is shared. Volume feature negotiation and referenced
+root ownership require separate caller tests and are not claimed by this gate.
+
+The main integration gate passed 16 × 4096 cases (65,536), 13 fuzz tests and
+12 saved replay controls, preserving earlier target identities. Retained proof:
+`build/snapshot-checkpoint-integration-wjhshbg2`. The isolated qualification
+reuses 574 passed / 0 failed / 10 ignored workspace evidence after comparing
+581 unchanged inputs; no new full workspace or native run is claimed.
 
 ## 2026-09-15 — Qualify reclaim codec mutation and replay
 
