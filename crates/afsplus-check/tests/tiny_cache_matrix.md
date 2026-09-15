@@ -82,6 +82,22 @@ standard stopped intent-log tail diagnostic is admissible as a crash artifact.
 Live content and snapshot bytes have independent literal/slice expectations;
 a readable mount or equality with another writer execution is insufficient.
 
+## CloneRange reference-boundary profile gate
+
+In [shared_crash.rs](shared_crash.rs),
+`clone_range_with_multiple_reference_boundaries_is_crash_atomic` and
+`clone_range_boundaries_two_pages`, `clone_range_boundaries_four_pages`,
+`clone_range_boundaries_eight_pages` apply the selected cache profile to fixture
+creation, transaction recording and every recovered image. Each modeled cut
+must expose exactly the old or new generation and destination contents, retain
+source and peer contents, and match the expected shared-run counts and lengths.
+Both outcomes must occur; the exhaustive checker validates each cut image.
+
+This fixture covers aligned range cloning across multiple reference-count
+boundaries. It does not establish eviction, unaligned boundary copying,
+retained snapshots, explicit I/O-error retry or CloneFile profile coverage.
+Those combinations retain their separate requirements in the baseline matrix.
+
 ## Commands and review boundary
 
 ```sh

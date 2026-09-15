@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Qualify CloneRange reference boundaries across cache profiles](#2026-09-15--qualify-clonerange-reference-boundaries-across-cache-profiles)
 - [2026-09-15 — Qualify symlink and object metadata codecs](#2026-09-15--qualify-symlink-and-object-metadata-codecs)
 - [2026-09-15 — Reject the reserved object payload byte](#2026-09-15--reject-the-reserved-object-payload-byte)
 - [2026-09-15 — Qualify snapshot-bearing checkpoint admission](#2026-09-15--qualify-snapshot-bearing-checkpoint-admission)
@@ -152,6 +153,23 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Qualify CloneRange reference boundaries across cache profiles
+
+Extended the shared-range crash matrix to explicit 2/4/8/unlimited page
+profiles during fixture construction, transaction recording and recovery.
+Every modeled cut checks old/new generation and destination bytes, unchanged
+source and peer bytes, and exact reference-count transitions. The checker
+validates every cut image; both old and new outcomes must occur.
+
+All four range-profile tests passed (13.95 seconds). The ten other shared-crash
+tests passed separately (66.71 seconds), qualifying the refactored common
+matrix without rerunning those four tests. Targeted clippy, formatting and
+document checks pass. Retained source and result summaries are in
+`build/clone-range-profiles-gn6rezpx`. This is host test qualification, not a
+new full-workspace or native campaign. Eviction, unaligned boundary copying,
+retained snapshots and explicit I/O-error retry remain separate combinations;
+the Stage A cache gate stays open.
 
 ## 2026-09-15 — Qualify symlink and object metadata codecs
 

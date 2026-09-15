@@ -6,6 +6,7 @@
 //! and keep reference records synchronized with the selected namespace.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
 
 use afsplus_block::{for_each_crash_state, MemoryBackend, RecordedOp, RecordingBackend};
 use afsplus_check::check_device;
@@ -88,6 +89,16 @@ fn run_checkpoint_matrix(
     base: &MemoryBackend,
     operations: &[RecordedOp],
     pre_generation: u64,
+    verify: impl FnMut(&str, bool, &mut Volume<MemoryBackend>),
+) {
+    run_checkpoint_matrix_profile(base, operations, pre_generation, usize::MAX, verify);
+}
+
+fn run_checkpoint_matrix_profile(
+    base: &MemoryBackend,
+    operations: &[RecordedOp],
+    pre_generation: u64,
+    pages: usize,
     mut verify: impl FnMut(&str, bool, &mut Volume<MemoryBackend>),
 ) {
     assert_cow_targets(base, operations);
@@ -103,8 +114,15 @@ fn run_checkpoint_matrix(
                 "{context}: checker findings {:?}",
                 report.errors
             );
-            let mut volume =
-                mount(image).unwrap_or_else(|error| panic!("{context}: mount failed: {error}"));
+            let mut volume = mount_with_options(
+                image,
+                MountOptions {
+                    tree_cache_pages: NonZeroUsize::new(pages),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("{context}: mount failed: {error}"));
+            assert_eq!(volume.tree_cache_pages(), pages);
             let post = match volume.generation() {
                 generation if generation == pre_generation => {
                     pre_outcomes += 1;
@@ -248,7 +266,27 @@ fn first_clone_is_crash_atomic() {
 
 #[test]
 fn clone_range_with_multiple_reference_boundaries_is_crash_atomic() {
-    let mut setup = mount(formatted("CrashCloneRange", 0)).unwrap();
+    clone_range_profile(usize::MAX);
+}
+#[test]
+fn clone_range_boundaries_two_pages() {
+    clone_range_profile(2);
+}
+#[test]
+fn clone_range_boundaries_four_pages() {
+    clone_range_profile(4);
+}
+#[test]
+fn clone_range_boundaries_eight_pages() {
+    clone_range_profile(8);
+}
+fn clone_range_profile(pages: usize) {
+    let options = MountOptions {
+        tree_cache_pages: NonZeroUsize::new(pages),
+        ..Default::default()
+    };
+    let mut setup = mount_with_options(formatted("CrashCloneRange", 0), options).unwrap();
+    assert_eq!(setup.tree_cache_pages(), pages);
     let source_bytes: Vec<u8> = (0..4 * BS).map(|index| (index / BS) as u8 + 1).collect();
     let old_destination = vec![0x92u8; 4 * BS];
     let source = setup
@@ -267,16 +305,21 @@ fn clone_range_with_multiple_reference_boundaries_is_crash_atomic() {
     assert_eq!(pre_records[0].reference_count, 2);
     let base = setup.into_device();
     let pre_generation = mount(base.clone()).unwrap().generation();
-    let operations = record_transaction(&base, |volume| {
+    let mut recorded = mount_with_options(RecordingBackend::new(base.clone()), options).unwrap();
+    assert_eq!(recorded.tree_cache_pages(), pages);
+    {
+        let volume = &mut recorded;
         volume
             .clone_range(source, 0, destination, 0, (4 * BS) as u64, ts(6))
             .unwrap();
-    });
+    }
+    let operations = recorded.into_device().into_parts().1;
 
-    run_checkpoint_matrix(
+    run_checkpoint_matrix_profile(
         &base,
         &operations,
         pre_generation,
+        pages,
         |context, post, volume| {
             assert_eq!(volume.read_file(source).unwrap(), source_bytes, "{context}");
             assert_eq!(
@@ -287,6 +330,11 @@ fn clone_range_with_multiple_reference_boundaries_is_crash_atomic() {
                     old_destination.as_slice()
                 },
                 "{context}"
+            );
+            assert_eq!(
+                volume.read_file(peer).unwrap(),
+                source_bytes[BS..3 * BS],
+                "{context}: peer"
             );
             let records = shared_records(volume);
             if post {
