@@ -1,5 +1,6 @@
 //! Deterministic, replayable fuzz targets for the `afsplus-format` codecs.
 
+mod reclaim;
 mod snapshot;
 
 use std::fmt;
@@ -45,10 +46,13 @@ pub enum CodecTarget {
     SnapshotLifetime = 10,
     SnapshotLedger = 11,
     SnapshotKey = 12,
+    ReclaimRoot = 13,
+    ReclaimSegment = 14,
+    ReclaimTable = 15,
 }
 
 impl CodecTarget {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 15] = [
         Self::Identification,
         Self::Checkpoint,
         Self::TreeNode,
@@ -61,6 +65,9 @@ impl CodecTarget {
         Self::SnapshotLifetime,
         Self::SnapshotLedger,
         Self::SnapshotKey,
+        Self::ReclaimRoot,
+        Self::ReclaimSegment,
+        Self::ReclaimTable,
     ];
 
     pub fn name(self) -> &'static str {
@@ -77,6 +84,9 @@ impl CodecTarget {
             Self::SnapshotLifetime => "snapshot-lifetime",
             Self::SnapshotLedger => "snapshot-ledger",
             Self::SnapshotKey => "snapshot-key",
+            Self::ReclaimRoot => "reclaim-root",
+            Self::ReclaimSegment => "reclaim-segment",
+            Self::ReclaimTable => "reclaim-table",
         }
     }
 
@@ -97,6 +107,9 @@ impl CodecTarget {
             Self::IntentLog => block_type::INTENT_LOG,
             Self::BitmapPage => block_type::BITMAP,
             Self::RegionDescriptor => block_type::REGION_DESCRIPTOR,
+            Self::ReclaimRoot => block_type::RECLAIM_ROOT,
+            Self::ReclaimSegment => block_type::RECLAIM_SEGMENT,
+            Self::ReclaimTable => block_type::RECLAIM_TABLE,
             _ => unreachable!("snapshot leaf values have no block header"),
         }
     }
@@ -301,6 +314,9 @@ fn region_seed_descriptor() -> RegionDescriptor {
 }
 
 fn accepts(target: CodecTarget, input: &[u8]) -> bool {
+    if reclaim::handles(target) {
+        return reclaim::accepts(target, input);
+    }
     if snapshot::handles(target) {
         return snapshot::accepts(target, input);
     }
@@ -326,6 +342,9 @@ fn accepts(target: CodecTarget, input: &[u8]) -> bool {
 }
 
 pub fn canonical_seed(target: CodecTarget) -> Result<Vec<u8>, String> {
+    if reclaim::handles(target) {
+        return reclaim::seed(target);
+    }
     if snapshot::handles(target) {
         return snapshot::seed(target);
     }
@@ -346,6 +365,9 @@ pub fn canonical_seed(target: CodecTarget) -> Result<Vec<u8>, String> {
 }
 
 fn roundtrip(target: CodecTarget, input: &[u8]) -> Result<(), String> {
+    if reclaim::handles(target) {
+        return reclaim::exercise(target, input);
+    }
     if snapshot::handles(target) {
         return snapshot::exercise(target, input);
     }
@@ -734,6 +756,9 @@ mod tests {
                 (1_278_262_154, 32_389_227),
                 (533_851_047, 67_109_637),
                 (3_346_469_996, 389_921_249),
+                (3_977_748_295, 1_732_764_413),
+                (1_589_963_715, 1_381_077_657),
+                (1_491_793_277, 3_037_729_287),
             ]
         );
     }

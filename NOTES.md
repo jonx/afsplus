@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Qualify reclaim codec mutation and replay](#2026-09-15--qualify-reclaim-codec-mutation-and-replay)
 - [2026-09-15 — Enforce reclaim reserved-byte admission](#2026-09-15--enforce-reclaim-reserved-byte-admission)
 - [2026-09-15 — Preserve and replay captured snapshot state](#2026-09-15--preserve-and-replay-captured-snapshot-state)
 - [2026-09-15 — Qualify snapshot leaf and key codecs](#2026-09-15--qualify-snapshot-leaf-and-key-codecs)
@@ -148,6 +149,22 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Qualify reclaim codec mutation and replay
+
+Integrated direct root, segment and table targets with independent payload
+admission and field checks. Existing target identities and fingerprints are
+preserved; shared common-header verification is an explicit oracle limitation.
+The main-worktree gate passed 15 × 4096 mutations (61,440 cases), 11 fuzz
+unit tests and 11 saved replay controls. Evidence is retained in
+`build/reclaim-codec-integration-3ugcpze0/integration-fuzz.log` alongside the
+reviewed isolated source and full-workspace evidence.
+
+This fuzz-only integration reuses the isolated full-workspace result
+(574 passed, 0 failed, 10 ignored) and the preceding correction's affected
+main tests; it does not claim a new full combined workspace run. Stage A's
+codec gate stays partial: other wire surfaces, caller invariants and semantic
+operation coverage require their own evidence. No native qualification is implied.
 
 ## 2026-09-15 — Enforce reclaim reserved-byte admission
 

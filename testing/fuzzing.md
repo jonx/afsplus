@@ -39,6 +39,7 @@ replayable without the original workstation.
 | Allocation-region metadata | Bitmap-page and region-descriptor targets, including a partial final page | None | Add portable repair-walker corpus |
 | Intent-log record and referenced data | One v3 seed containing all five operation types | Rust-built v3 write/truncate/create prefix scan plus final namespace lookup | Add multi-record sequence target |
 | Snapshot registry, captured record, lifetime ledger and keys | Five direct headerless value/key targets with independent admission oracles | None | Add enclosing tree ownership and cross-record semantic properties |
+| Reclaim queue root, segment and table | Three direct block targets with independent payload predicates | None | Add caller queue/geometry and cross-block consistency properties |
 | Xattr record | None | None | Add when the portable reader exposes xattrs |
 | Catalog record | None | None | Add with catalog implementation |
 | Change-stream record | None | None | Add with change-stream implementation |
@@ -46,7 +47,7 @@ replayable without the original workstation.
 ## Rust codec gate
 
 `make rust-codec-fuzz-gate` exercises identification, checkpoint, typed-tree,
-object-record, intent-log, bitmap-page, region-descriptor and five snapshot leaf/key decoders. Each canonical seed must be accepted,
+object-record, intent-log, bitmap-page, region-descriptor five snapshot leaf/key and three reclaim block decoders. Each canonical seed must be accepted,
 re-encode and decode to byte-stable canonical form. The mandatory engine then
 runs 4,096 stable cases per target using checksum-breaking bit flips,
 CRC-resealed payload changes, short inputs, bounded multi-byte overwrites and
@@ -59,7 +60,7 @@ workspace so constrained builders need not compile qualification tooling.
 The standard `make rust-gate` includes this separate workspace through
 `rust-codec-fuzz-gate`. Its lockfile and seed-schema version keep case identities
 stable: target IDs 1–5 and their seed bytes are unchanged; allocation targets
-append IDs 6–7 and snapshot targets append IDs 8–12 under seed schema 1. On failure,
+append IDs 6–7 and snapshot targets append IDs 8–12; reclaim targets append IDs 13–15 under seed schema 1. On failure,
 the gate writes the last target/case before execution and stores the exact
 input as a bounded `.afrf` artifact. Reproduce it with:
 
@@ -96,6 +97,23 @@ and numeric boundary controls complement 4,096 cases per target. Saved artifacts
 for all five targets are replayed by the gate. This scope does not validate tree
 ownership, snapshot visibility, cross-record accounting or crash consistency.
 
+Reclaim targets use structured root, segment and table seeds. The root has
+nonempty table, segment and inline areas, spare capacities and a nonzero cursor.
+Independent payload predicates and field extraction check area bounds, counts,
+run-end overflow, positive generations, totals and the cursor relationships
+resolvable within one block. Resealed controls reach payload checks after CRC
+admission; truncation covers every length of the canonical block. Additional
+root variants exercise segment-only and inline-only heads. Common header
+verification is shared infrastructure, not an independent checksum oracle.
+
+These codecs reject nonzero payload reserved fields. They accept arbitrary
+reference LBAs and header owner/flags; canonical re-encoding clears nonsemantic
+header fields. Root totals are
+checked arithmetically, not against referenced entries. Cursor bounds that require
+loading a table or segment, physical geometry, ordering and queue ownership are
+caller obligations, outside these direct targets. Reserved-field controls use CRC-resealed corruption so checksum failure cannot
+mask payload rejection.
+
 The [format regression suite](../crates/afsplus-format/tests/roundtrip.rs)
 requires undersized bitmap, region, directory, object-map, retired-list,
 intent-log, reclaim-root, reclaim-segment and reclaim-table encoder outputs to return errors without panicking.
@@ -103,7 +121,7 @@ Bitmap, region, reclaim-segment and reclaim-table tests also check the exact
 minimum successful buffer size.
 These are encoder admission checks; they do not change valid on-disk bytes.
 Snapshot-bearing checkpoint seeds, additional object types and optional roots,
-reclaim codecs and the other unassigned matrix surfaces require separate coverage.
+the other unassigned matrix surfaces require separate coverage.
 
 ## Portable C corpus contract
 
