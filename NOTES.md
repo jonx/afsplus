@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-15 — Enforce reclaim reserved-byte admission](#2026-09-15--enforce-reclaim-reserved-byte-admission)
 - [2026-09-15 — Preserve and replay captured snapshot state](#2026-09-15--preserve-and-replay-captured-snapshot-state)
 - [2026-09-15 — Qualify snapshot leaf and key codecs](#2026-09-15--qualify-snapshot-leaf-and-key-codecs)
 - [2026-09-15 — Export and replay object-map diagnostics](#2026-09-15--export-and-replay-object-map-diagnostics)
@@ -147,6 +148,22 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-15 — Enforce reclaim reserved-byte admission
+
+The reclaim readers reject nonzero documented reserved fields after validating
+minimum lengths: root payload bytes 4–7 and 50–51, and segment/table bytes 4–7.
+The regression reseals checksums for 42 corruptions and restores the exact valid
+encoding. Physical address and cross-block ownership checks stay with callers.
+
+The reviewed correction originated as `384b4d3`. Its isolated combined
+qualification passed 574 workspace tests, failed none and ignored ten; the
+sealed proof is copied unchanged to
+`build/reclaim-codec-integration-3ugcpze0/agent-proof`. Main integration additionally
+passed the format regression and 12 checker/captured-snapshot tests, with one
+explicit scale qualification ignored. This composes the isolated format evidence
+with the independently qualified captured-replay implementation; it does not
+claim another full combined workspace run. Reclaim fuzz targets follow separately.
 
 ## 2026-09-15 — Preserve and replay captured snapshot state
 

@@ -262,6 +262,9 @@ impl ReclaimRoot {
         if le::get_u32(&p[0..4]) != 1 {
             return Err(FormatError::Invalid("unsupported reclaim root version"));
         }
+        if p[4..8].iter().chain(&p[50..52]).any(|&byte| byte != 0) {
+            return Err(FormatError::Invalid("reclaim root reserved bytes"));
+        }
         let caps = ReclaimCaps {
             inline_entries: le::get_u16(&p[44..46]),
             segment_refs: le::get_u16(&p[46..48]),
@@ -427,6 +430,9 @@ impl ReclaimSegment {
         if p.len() < 8 {
             return Err(FormatError::Invalid("reclaim segment payload too short"));
         }
+        if p[4..8].iter().any(|&byte| byte != 0) {
+            return Err(FormatError::Invalid("reclaim sealed block reserved bytes"));
+        }
         let count = le::get_u32(&p[0..4]) as usize;
         if count == 0 || count > SEGMENT_ENTRY_CAP || count > (p.len() - 8) / ENTRY_WIRE_SIZE {
             return Err(FormatError::Invalid(
@@ -496,6 +502,9 @@ impl ReclaimTable {
         let p = header.payload(block);
         if p.len() < 8 {
             return Err(FormatError::Invalid("reclaim table payload too short"));
+        }
+        if p[4..8].iter().any(|&byte| byte != 0) {
+            return Err(FormatError::Invalid("reclaim sealed block reserved bytes"));
         }
         let count = le::get_u32(&p[0..4]) as usize;
         if count == 0 || count > TABLE_REF_CAP || count > (p.len() - 8) / REF_WIRE_SIZE {
