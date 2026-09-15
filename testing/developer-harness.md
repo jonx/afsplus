@@ -41,6 +41,10 @@
 - [Mount and recovery observation](#mount-and-recovery-observation)
 - [Format observation](#format-observation)
 - [Verification observation](#verification-observation)
+- [Pre-tail and read-path observation](#pre-tail-and-read-path-observation)
+- [Publication-family execution evidence](#publication-family-execution-evidence)
+- [API guard execution](#api-guard-execution)
+- [Diagnostic mechanism qualification](#diagnostic-mechanism-qualification)
 - [API and window replay bundles](#api-and-window-replay-bundles)
 - [Object-map replay bundles](#object-map-replay-bundles)
 - [Captured snapshot replay bundles](#captured-snapshot-replay-bundles)
@@ -1383,6 +1387,122 @@ same object the finding text names. Small rings report every overwritten record
 with identities equal to those of an unbounded ring while returning identical
 findings. These are host observations over deterministic images; physical media
 and adapter integration have separate gates.
+
+## Pre-tail and read-path observation
+
+`FlightRecorder::enable_data_observation()` observes file data staged before
+the common commit tail, and `enable_view_observation()` observes read-only tree
+descents. Both imply the [core API scope](#core-api-call-spans), so their events
+carry the enclosing call and window identities, and both default to disabled.
+
+A window create writing its content through, an existing-file write and the
+partial tail block a truncate zeroes each emit `DataWriteBegin` with the object,
+the logical byte range of the request and the physical run holding it, one
+`DataWriteComplete` per physical run with that run's block-aligned range, and
+`DataWriteFailed` naming the single block a failed write reached. The scope
+field separates the three sites. Block counts saturate at `u32::MAX`, matching
+the on-disk extent bound. An fsync owns two further I/O events: `IntentDataDurable`
+for the barrier a record's existing-file updates require before log publication,
+and `IntentEmptyFlush` for the flush of a group with nothing to log. Both are
+distinct from the commit tail's `DataWritesComplete`, which covers the queued
+writes of one publication.
+
+Lookup, enumeration and file reads emit `ViewReadBegin` and either
+`ViewReadComplete` or `ViewReadFailed`, carrying the read path, the view
+identity (zero for the live committed view, a snapshot ID for a captured view),
+the owning object and the tree root block. A file-data descent resolves its own
+root, so it names the object and leaves the root block zero. Snapshot creation,
+deletion and ledger maintenance report `ViewMaintenanceFailed` with the view the
+operation names; a maintenance pass covers every view, so it carries the ledger
+scan position it reached. Object-map resolution keeps its separate
+[object events](#object-map-observation).
+
+Events use attempt zero, are admitted by the Data, View and I/O categories,
+follow the common filtering, loss and live-delivery contract, and add no device
+I/O and no allocation.
+
+The [flight tests](../crates/afsplus-core/tests/flight.rs) run a window create,
+an existing-file write, a truncate, a group needing the data barrier and an
+empty group at 2/4/8/unlimited cache profiles, with and without a fault on a
+staged write, comparing results, the full block trace and every image block with
+unobserved execution, then assert the event sequence, scopes, byte ranges and
+physical runs. The read-path tests do the same for four live-view calls and four
+captured-view calls, assert the view identity, owner and root of each descent,
+and require one API span per observed call. Small rings report their loss and a
+single-category mask reproduces exactly the selected events.
+
+## Publication-family execution evidence
+
+Each direct publication caller in [Volume](../crates/afsplus-core/src/volume.rs)
+has a named test in the [flight tests](../crates/afsplus-core/tests/flight.rs):
+`reclaim_step`, `clone_file`, `clone_range`, `create_leaf_in_directory`,
+`create_directory`, `cleanup_orphan_data_step`, `ensure_orphan_directory`,
+`remove_entry`, `link_file`, `rename_internal`, `commit_staged_file_layout`,
+`materialize_batch`, `commit_object_metadata`, `commit_snapshot_change` and
+deferred-window publication.
+
+One harness runs each family over 2/4/8/unlimited cache profiles with its normal
+case, its validation refusal where it has one, a fault at its first, middle and
+last own write, and a fault at each of its own barriers. Preparation runs before
+the recorder is attached and before a fault is armed, so a fault meets the family
+itself. Every run compares the observed execution with an unobserved one on the
+returned results, the full block trace and every image block, and closes with a
+one-event ring which loses records while returning the same results.
+
+Retained events are checked by one correlation oracle: API spans nest with a
+matching outcome per span, every subsystem, object, staged-write and read-path
+event names the innermost open call, commit events bind a nonzero attempt while
+every other kind uses attempt zero, and one attempt keeps one generation and one
+root operation from its begin through adoption or failure. A fault-free run
+reports a checkpoint barrier; an injected fault reports a failure. Cleanup of an
+unknown or non-orphan object answers with zero progress, so that family declares
+no validation refusal.
+
+## API guard execution
+
+[Source registration](../crates/afsplus-core/tests/api_coverage.rs) proves that
+each guarded entry names its own `ApiMethod`. The execution test in the flight
+tests runs all 66 registered methods against one volume with persistent
+snapshots, shared extents, the data policy and an intent log, then requires each
+to appear as `ApiBegin` with its own identity and a matching outcome closing that
+span. A registered method which never executes fails the test, and so does an
+unwound span. Results are deliberately unchecked: the guard owns the call
+whatever the filesystem answers.
+
+## Diagnostic mechanism qualification
+
+Emission keeps the storage reserved at construction across every payload, an
+attached live adapter, category filtering and identity exhaustion. Heap
+qualification lives in the [measurement crate](../crates/afsplus-measure/src/main.rs),
+which already owns a counting allocator, because the filesystem crates forbid
+unsafe code: an identical filesystem round with and without an attached recorder
+requests the same heap bytes, so an emitted event costs no allocation. Replacing
+a recorder inside an open window keeps staged-write and read-path observation and
+assigns a fresh window identity. Unwinding, nested API context, saturation and
+failure ordering are covered by the API, window and family tests above.
+
+Host cost on a macOS AArch64 host, release build, uncontended:
+
+| Measurement | Unobserved | Attached |
+|---|---|---|
+| Ring emission of every payload | none | 26.6 ns per event, 37.6 M events/s |
+| Ring emission with an accepting adapter | none | 27.2 ns per event, 36.8 M events/s |
+| One repeated `lookup_root` call | 29.98 us per call | 31.61 us per call, 8 events per call |
+| Sixty rounds of create, read, lookup and list | 1.79 k operations/s | 1.44 k operations/s, 38 events per operation |
+
+Layout on the same host: one event occupies 232 bytes, of which 40 bytes are
+the mutually exclusive mount, format, verify, staged-write and read-path
+payload; a recorder occupies 176 bytes, its shared cell 192 bytes, and a shared
+owner or a weak subsystem observer one pointer each. A ring therefore requests
+232 bytes for one event, 58 KiB for 256 and 928 KiB for 4096, reserved once at
+construction.
+
+Both cost measurements are `#[ignore]`d and run with
+`cargo test --release -- --ignored --nocapture`. A call path costs about 205 ns
+per event, of which about 155 ns is spent before category admission: the
+recorder is locked and the payload is built at the call site, so a narrow
+category mask saves little against a detached recorder. These are host numbers
+for one machine; adapters, physical media and other hosts have separate owners.
 
 ## API and window replay bundles
 
