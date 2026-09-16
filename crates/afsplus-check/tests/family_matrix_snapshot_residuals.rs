@@ -510,6 +510,204 @@ fn exhausted_identity_space(pages: usize) {
     );
 }
 
+// ------------------------------------------------------- wrapping ledger scan
+
+/// Captured files whose single block the ledger retires. A live neighbour
+/// between two of them keeps the retired runs from coalescing.
+const RUNS: usize = 3;
+/// Lifetime records one bounded scan admits, from the mount admission the
+/// family-matrix driver applies.
+const RECLAIM_RECORDS: u64 = 8;
+/// Bounded steps the fixture runs before the recorded wrapping step.
+const STEPS_BEFORE_WRAP: usize = 1;
+
+struct WrapState {
+    captured: Vec<(u64, Vec<u8>)>,
+    keepers: Vec<u64>,
+    snapshot: u64,
+}
+
+/// Builds a ledger of non-adjacent retired runs and returns the captured
+/// objects: every deleted one-block file sits between two live ones.
+fn fill_ledger(volume: &mut Volume<MemoryBackend>) -> WrapState {
+    let mut captured = Vec::new();
+    let mut keepers = Vec::new();
+    for index in 0..RUNS {
+        keepers.push(
+            volume
+                .create_file_in_root(
+                    &format!("keep-{index:02}"),
+                    &[0x40 + index as u8; BS],
+                    ts(1),
+                )
+                .unwrap(),
+        );
+        let id = volume
+            .create_file_in_root(&format!("run-{index:02}"), &[0xb0 + index as u8; BS], ts(2))
+            .unwrap();
+        captured.push((id, vec![0xb0 + index as u8; BS]));
+    }
+    let snapshot = volume.snapshot_create(ts(5)).unwrap();
+    for index in 0..RUNS {
+        volume
+            .delete_file_in_root(&format!("run-{index:02}"), ts(6))
+            .unwrap();
+    }
+    WrapState {
+        captured,
+        keepers,
+        snapshot,
+    }
+}
+
+fn verify_wrap_state<D: BlockDevice>(volume: &mut Volume<D>, state: &WrapState, context: &str) {
+    assert_eq!(
+        registry(volume),
+        vec![state.snapshot],
+        "{context}: registry membership"
+    );
+    for index in 0..RUNS {
+        assert_eq!(
+            volume.lookup_root(&format!("run-{index:02}")).unwrap(),
+            None,
+            "{context}: deleted entry {index}"
+        );
+        let keeper = state.keepers[index];
+        assert_eq!(
+            volume.lookup_root(&format!("keep-{index:02}")).unwrap(),
+            Some(keeper),
+            "{context}: live entry {index}"
+        );
+        file_bytes(volume, keeper, &[0x40 + index as u8; BS], context);
+        captured_bytes(
+            volume,
+            state.snapshot,
+            keeper,
+            &[0x40 + index as u8; BS],
+            context,
+        );
+    }
+    for (index, (id, _)) in state.captured.iter().enumerate() {
+        captured_bytes(
+            volume,
+            state.snapshot,
+            *id,
+            &[0xb0 + index as u8; BS],
+            context,
+        );
+    }
+    assert_eq!(
+        volume.list_root().unwrap().len(),
+        RUNS,
+        "{context}: root entries"
+    );
+}
+
+/// The bounded ledger scan stops after its record budget and resumes at the
+/// recorded position until one pass wraps.
+fn ledger_scan_resumes(pages: usize) {
+    let mut volume = matrix::open(Format::new(1024, 256).device(), pages);
+    volume.set_reclaim_batch_blocks(1);
+    let state = fill_ledger(&mut volume);
+    volume.set_reclaim_batch_blocks(2);
+    let mut steps = Vec::new();
+    let mut wrapped = 0;
+    for _ in 0..16 {
+        let report = volume.snapshot_maintenance_step(ts(30)).unwrap();
+        steps.push((report.records_scanned, report.scan_wrapped));
+        if report.scan_wrapped {
+            wrapped += 1;
+            break;
+        }
+        assert_eq!(
+            report.records_scanned, RECLAIM_RECORDS,
+            "a bounded step that does not wrap fills its budget: {steps:?}"
+        );
+    }
+    assert_eq!(wrapped, 1, "the scan must wrap exactly once: {steps:?}");
+    assert_eq!(
+        steps.len(),
+        STEPS_BEFORE_WRAP + 1,
+        "bounded steps before the wrap: {steps:?}"
+    );
+    verify_wrap_state(&mut volume, &state, "wrapped ledger scan");
+    let mut device = volume.into_device();
+    matrix::assert_checker_clean(&mut device, "wrapped ledger scan");
+    let mut remounted = matrix::open(device, pages);
+    verify_wrap_state(&mut remounted, &state, "remounted wrapped ledger scan");
+    eprintln!("ledger scan pages={pages} steps={steps:?}");
+}
+
+/// The maintenance pass that wraps the ledger scan, qualified through the
+/// family-matrix driver: the fixture runs every earlier bounded step, so the
+/// recorded commit is the one that crosses the resume boundary.
+struct WrappingMaintenance;
+
+impl Family for WrappingMaintenance {
+    type State = WrapState;
+
+    fn name(&self) -> &'static str {
+        "snapshot wrapping ledger scan"
+    }
+
+    fn format(&self, _variant: Variant) -> Format {
+        Format::new(1024, 256)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) -> WrapState {
+        volume.set_reclaim_batch_blocks(1);
+        let state = fill_ledger(volume);
+        volume.set_reclaim_batch_blocks(2);
+        for _ in 0..STEPS_BEFORE_WRAP {
+            let report = volume.snapshot_maintenance_step(ts(20)).unwrap();
+            assert!(
+                !report.scan_wrapped,
+                "the fixture must stop before the scan wraps"
+            );
+            assert_eq!(report.records_scanned, RECLAIM_RECORDS, "fixture step");
+        }
+        state
+    }
+
+    fn snapshot(&self, state: &WrapState) -> Option<u64> {
+        Some(state.snapshot)
+    }
+
+    fn captured(&self, state: &WrapState) -> Vec<(u64, Vec<u8>)> {
+        state.captured.clone()
+    }
+
+    fn apply<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &WrapState,
+    ) -> Result<(), CoreError> {
+        volume.set_reclaim_batch_blocks(2);
+        volume.snapshot_maintenance_step(ts(30)).map(|_| ())
+    }
+
+    fn after_success<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &WrapState,
+        _variant: Variant,
+    ) {
+        let stats = volume.last_commit_stats().unwrap().snapshots;
+        assert!(stats.scan_wrapped, "the recorded step must wrap the scan");
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &WrapState,
+        _variant: Variant,
+        _delta: u64,
+        context: &str,
+    ) {
+        verify_wrap_state(volume, state, context);
+    }
+}
+
 // -------------------------------- measured staged-node demands of the commits
 
 const MAINTENANCE_DEMAND: u64 = 2;
@@ -531,3 +729,9 @@ crate::profile_tests!(mount_recovery_eviction, |pages| matrix::replay_eviction(
     pages
 ));
 crate::profile_tests!(identity_exhaustion, |pages| exhausted_identity_space(pages));
+crate::profile_tests!(ledger_scan, |pages| ledger_scan_resumes(pages));
+crate::profile_tests!(wrapping_maintenance, |pages| matrix::plain(
+    &WrappingMaintenance,
+    pages,
+    12
+));
