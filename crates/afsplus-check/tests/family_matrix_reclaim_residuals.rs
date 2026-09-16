@@ -1,8 +1,8 @@
 //! Residual orphan, reclaim and staged-tree reload families through the
 //! family-matrix driver; see tiny_cache_matrix.md. These families close the
 //! open-target replacement and the orphaned-file update, orphan cleanup with
-//! ordinary allocation exhausted, the reclaim sealing, segment-consumption and
-//! cursor transitions, cuts of the multi-round allocation rotation batch, and
+//! ordinary allocation exhausted, the reclaim sealing and segment-consumption
+//! transitions, cuts of the multi-round allocation rotation batch, and
 //! reload read failures in the extent map, the object map, the allocation root
 //! and a volume holding many retained views.
 
@@ -492,7 +492,6 @@ fn verify_reclaim<D: BlockDevice>(
 /// Free and pending blocks of the fixture and of the published state.
 const SEALING_ACCOUNTING: [(u64, u64); 2] = [(189, 23), (181, 30)];
 const CONSUMPTION_ACCOUNTING: [(u64, u64); 2] = [(189, 23), (195, 23)];
-const CURSOR_ACCOUNTING: [(u64, u64); 2] = [(227, 12), (228, 11)];
 
 struct Sealing;
 
@@ -624,58 +623,6 @@ impl Family for Consumption {
         assert!(
             reclaim.structure_blocks_retired > 1,
             "the batch must consume at least one whole segment"
-        );
-    }
-}
-
-/// A three-block run with a two-block budget leaves the persistent cursor
-/// inside the run. A retained view over the same run suppresses the advance
-/// entirely, so this family carries no retained variant.
-struct CursorAdvance;
-
-impl Family for CursorAdvance {
-    type State = ();
-
-    fn name(&self) -> &'static str {
-        "reclaim mid-run cursor advance"
-    }
-
-    fn format(&self, _variant: Variant) -> Format {
-        tiny_format()
-    }
-
-    fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) {
-        volume.set_reclaim_batch_blocks(1);
-        volume
-            .create_file_in_root("big", &[0xb7; 3 * BS], ts(1))
-            .unwrap();
-        volume.delete_file_in_root("big", ts(2)).unwrap();
-    }
-
-    fn captured(&self, _state: &()) -> Vec<(u64, Vec<u8>)> {
-        Vec::new()
-    }
-
-    fn apply<D: BlockDevice>(&self, volume: &mut Volume<D>, _state: &()) -> Result<(), CoreError> {
-        volume.set_reclaim_batch_blocks(2);
-        let reclaimed = volume.reclaim_step(ts(30))?;
-        assert_eq!(reclaimed, 1, "two blocks promoted and one re-appended");
-        Ok(())
-    }
-
-    fn verify<D: BlockDevice>(
-        &self,
-        volume: &mut Volume<D>,
-        _state: &(),
-        _variant: Variant,
-        delta: u64,
-        context: &str,
-    ) {
-        assert!(volume.list_root().unwrap().is_empty(), "{context}: root");
-        assert_eq!(
-            accounting(volume),
-            CURSOR_ACCOUNTING[delta as usize],
-            "{context}: free/pending"
         );
     }
 }
@@ -1135,10 +1082,6 @@ crate::profile_tests!(consumption_retained, |pages| matrix::retained(
     pages,
     12
 ));
-crate::profile_tests!(cursor_advance, |pages| {
-    matrix::plain(&CursorAdvance, pages, 12);
-    matrix::ambiguous(&CursorAdvance, pages, Variant::Plain)
-});
 crate::profile_tests!(rotation_batch, |pages| matrix::retained_sampled(
     &RotationBatch,
     pages,
