@@ -29,12 +29,12 @@ directory are linked relative to this file; core tests use explicit paths.
 | CloneFile / CloneRange | [shared_crash.rs](shared_crash.rs): first-clone and aligned range-boundary profile tests, `first_clone_io_failures_preserve_ownership_in_all_profiles`; [faults.rs](faults.rs): `completed_checkpoint_write_and_adoption_read_errors_block_mutations`; [tiny_cache_matrix.rs](tiny_cache_matrix.rs): `clone_publication_cuts_preserve_snapshot_namespace_in_all_profiles`; [shared_clone.rs](shared_clone.rs): partial-boundary and refusal tests | P: first CloneFile and aligned CloneRange cuts with exact bytes/refcounts; CloneFile I/O and ambiguous-publication faults; retained-snapshot CloneFile cuts; U: unaligned range boundaries and range refusals | Forced eviction of CloneRange and of a write into a published clone, where the measured staged demand is one node, and of CloneFile above two pages, where it is three |
 | Shared write/delete/final owner reuse | [shared_crash.rs](shared_crash.rs): `shared_write_split_is_crash_atomic`, `unlink_at_count_three_is_crash_atomic`, `unlink_at_count_two_never_reclaims_the_survivor`, `shared_storage_is_reused_only_after_the_last_owner_disappears`, `shared_write_io_failures_preserve_exact_ownership_and_allow_retry_in_all_profiles`, `shared_write_ambiguous_publication_requires_remount_in_all_profiles` | P: shared-write and reference-count cuts, exact survivor bytes, quarantine and final-owner storage reuse; shared-write write/flush faults with retry and ambiguous publication | A bounded-budget refusal of the shared write; eviction above two pages, where the measured staged demand is one node for the write and three for the unlinks |
 | Orphan setup/move/open-target replace/cleanup | [orphans.rs](orphans.rs): `every_orphan_lifecycle_checkpoint_cut_recovers_to_an_allowed_state`, `every_open_target_replace_cut_is_old_or_new_namespace`, `fragmented_orphan_cleanup_is_extent_bounded_and_resumes_after_remount` | P: insertion/update/cleanup and open-target replace cuts with the preparatory orphan-directory checkpoint as an allowed state, retry from every cut, extent-bounded cleanup with exact tail-trimmed bytes; [family_matrix_orphans.rs](family_matrix_orphans.rs): insertion and cleanup faults with same-handle retry, ambiguous publication, retained snapshots, forced eviction with sampled cuts, insertion under exhausted ordinary allocation | Open-target replace and orphaned-file update faults, ambiguous publication, retained snapshots and eviction; cleanup under exhausted ordinary allocation; a `NoSpace` refusal of insertion is unreachable |
-| Deferred namespace/write/truncate fsync | [cache_profiles.rs](cache_profiles.rs): `durable_window_recovery_honors_the_mount_profile`; [intent_log.rs](intent_log.rs): `existing_file_write_and_truncate_replay_in_order`, `successive_existing_writes_recover_only_monotone_prefixes` | P create replay, spills and idempotence; U data/truncate ordering | P durable data/truncate cut and replay-restart oracles |
-| Deferred cancellation admission/ownership | [intent_log.rs](intent_log.rs): `cancellation_preflight_refusals_preserve_the_pending_window`, `cancellation_preflight_read_failure_keeps_the_window_retryable` | P: acknowledged/unlogged ownership, no-write refusal and read-failure retry | Other window entry failures; explicit mixed-family cut oracles |
-| Shared deferred replay / orphan replay | [shared_crash.rs](shared_crash.rs): `durable_shared_unlink_replay_is_crash_atomic_and_idempotent`, `logged_write_replay_splits_shared_data_and_survives_replay_crashes`; [intent_replay_orphans.rs](intent_replay_orphans.rs) | P: shared unlink/replacement/write replay cuts, exact survivor/orphan bytes and repeat-remount idempotence; U: other orphan branches | P remaining orphan branches; interrupted fsync; I/O errors/retry, retained snapshots, forced eviction and resource refusals |
-| Snapshot registry create/delete | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `snapshot_create_and_delete_publication_cuts_preserve_exact_membership_and_bytes`, `uncertain_snapshot_publication_blocks_mutation_and_remount_resolves_membership` | U: membership/bytes/cuts/poison; P normal create/delete and busy refusal in flight test | P registry faults/cuts and exhausted/admission limits |
-| Snapshot lifetime / maintenance / selectable older view | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `constrained_tree_profiles_preserve_snapshots_and_shared_survivors`, `last_snapshot_deletion_preserves_older_selectable_view_during_the_next_write` | P: 192-entry spilled batch, exact captured bytes, clone survivor, both checkpoints; U: last-view deletion safety | P maintenance/release cuts and previous-slot protection failures |
-| Snapshot mount/recovery | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `public_snapshot_mount_recovery_cuts_preserve_acknowledged_live_and_historical_bytes`, `public_snapshot_mount_validates_admission_before_pending_recovery_writes` | U: exact acknowledged live/historical state, bounded admission | P recovery interruption/idempotence and no-write refusal |
+| Deferred namespace/write/truncate fsync | [cache_profiles.rs](cache_profiles.rs): `durable_window_recovery_honors_the_mount_profile`; [intent_log.rs](intent_log.rs): `existing_file_write_and_truncate_replay_in_order`, `successive_existing_writes_recover_only_monotone_prefixes`; [family_matrix_deferred.rs](family_matrix_deferred.rs): three-group namespace, write and truncate families | P create replay, spills and idempotence; U data/truncate ordering; P acknowledged-prefix oracles over three durable groups per family, cuts inside and after every intent-group publication, exhaustive or seeded recovery cuts with a second recovery, the recovery fault matrix and retained snapshots | Forced eviction of the deferred namespace, write and truncate recovery commits; a resource refusal of `window_write_file_at` and of `window_truncate_file` |
+| Deferred cancellation admission/ownership | [intent_log.rs](intent_log.rs): `cancellation_preflight_refusals_preserve_the_pending_window`, `cancellation_preflight_read_failure_keeps_the_window_retryable`; [family_matrix_deferred.rs](family_matrix_deferred.rs): `window_refusals`, `window_group_limit`, mixed-window family | P: acknowledged/unlogged ownership, no-write refusal and read-failure retry; P: 21 refusal and read-failure paths of the four mutating entry points and of a no-changes mount with zero writes and flushes, the full-log `window_fsync` refusal, and cut oracles over windows that mix namespace, write and truncate work | Read failures inside `window_fsync` and `window_commit`; forced eviction of a mixed window's recovery commit |
+| Shared deferred replay / orphan replay | [shared_crash.rs](shared_crash.rs): `durable_shared_unlink_replay_is_crash_atomic_and_idempotent`, `logged_write_replay_splits_shared_data_and_survives_replay_crashes`; [intent_replay_orphans.rs](intent_replay_orphans.rs); [family_matrix_replay.rs](family_matrix_replay.rs): six replay families, `deferred_refusal`, `repeated_recovery` | P: shared unlink/replacement/write replay cuts, exact survivor/orphan bytes and repeat-remount idempotence; U: other orphan branches; P: the final-link delete, that delete under consumed ordinary allocation and over a wide root with spills, a write paired with a final delete, a replacing rename, a sixteen-file group, the shared unlink and the shared write, each with logging cuts, seeded recovery campaigns, the recovery fault matrix, retained snapshots and a no-write `NoSpace` refusal with its corrective step | Faults injected during the logging phase; forced eviction of the shared replay and replacing-rename families |
+| Snapshot registry create/delete | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `snapshot_create_and_delete_publication_cuts_preserve_exact_membership_and_bytes`, `uncertain_snapshot_publication_blocks_mutation_and_remount_resolves_membership`; [family_matrix_snapshot.rs](family_matrix_snapshot.rs): registry create and delete families, `admission_limits` | U: membership/bytes/cuts/poison; P normal create/delete and busy refusal in flight test; P: membership, live and captured bytes at every modeled cut, a fault at every recorded write and flush with same-handle retries, both ambiguous modes, a wide-root create whose measured demand is two nodes, and the admission-limit, busy and missing-identity refusals with zero writes and flushes | An exhausted registry identity space, which needs a planted allocator record |
+| Snapshot lifetime / maintenance / selectable older view | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `constrained_tree_profiles_preserve_snapshots_and_shared_survivors`, `last_snapshot_deletion_preserves_older_selectable_view_during_the_next_write`; [family_matrix_snapshot.rs](family_matrix_snapshot.rs): maintenance and release families, `previous_slot_protection` | P: 192-entry spilled batch, exact captured bytes, clone survivor, both checkpoints; U: last-view deletion safety; P: maintenance-step and last-view release cuts, faults at every write and flush, both ambiguous modes, and the unreadable previous-slot registry refusing an optional in-place write with the exact old bytes preserved | Forced eviction of the maintenance and release commits; a maintenance pass whose ledger scan wraps |
+| Snapshot mount/recovery | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `public_snapshot_mount_recovery_cuts_preserve_acknowledged_live_and_historical_bytes`, `public_snapshot_mount_validates_admission_before_pending_recovery_writes`; [family_matrix_snapshot.rs](family_matrix_snapshot.rs): `mount_recovery`, `admission_before_recovery` | U: exact acknowledged live/historical state, bounded admission; P: two durable groups over a captured file with logging cuts, exhaustive recovery cuts, a second recovery of every image, the recovery fault matrix, and 20 invalid-admission refusals across the four mount modes behind a device that refuses every write and flush | Forced eviction of the snapshot-aware recovery commit |
 | Reclaim queue seal/consume/cursor and allocation rotation | [reclaim.rs](reclaim.rs): `crash_matrix_over_a_sealing_transaction`, `crash_matrix_over_segment_consumption_and_disappearance`, `crash_matrix_over_a_mid_run_cursor_advance`; [core src/volume.rs](../../afsplus-core/src/volume.rs): `allocation_cache_keeps_spilled_nodes_across_checkpoint_rotation` | P: sealing/consumption/cursor cuts with literal free/pending accounting and namespace bytes; P: allocation rotation with a retained snapshot and a shared run, exact live/captured/per-checkpoint bytes, spills at 2/4/8; [family_matrix_reclaim.rs](family_matrix_reclaim.rs): reclaim-step faults with same-handle retry, ambiguous publication and retained snapshot, promotion across eight allocation-root leaves with spills at 2/4/8 and sampled cuts, spilled create batch with two allocation-root nodes and sampled cuts | Faults, ambiguous publication and retained snapshots for the sealing, segment-consumption and cursor transitions; cuts of the multi-round rotation batch beyond its checkpoint-set comparison |
 | Low-space refusal and progress | [allocation_pressure.rs](allocation_pressure.rs): `near_full_enospc_publishes_nothing_and_delete_can_recover_space`, `repeated_near_full_cow_and_reclaim_preserve_shared_survivors`, `near_full_delete_survives_every_modeled_power_cut` | P: deterministic no-write ENOSPC, same-size retry after reclaim, near-full COW/reclaim cycles with shared survivors; U: near-full delete cuts; [family_matrix_low_space.rs](family_matrix_low_space.rs): P near-full delete cuts, faults and ambiguous publication, forced eviction with two-page spills, ENOSPC of a spilled 64-file batch with unreachable provisional writes and a reclaim-drained retry | Eviction at four and eight pages, above the three-node demand; retained snapshots under low space; a data-block ENOSPC inside a spilled batch |
 | COW tree spill/reload component | [core src/cow_tree.rs](../../afsplus-core/src/cow_tree.rs) staged-tree tests | 2/4/8 component: staged-node bounds/spill/reload | Reload read failures outside the directory and batch transactions; total-heap limits |
@@ -337,6 +337,34 @@ The runners are `plain` (recording, cuts and faults), `retained` (recording,
 cuts, faults and ambiguous publication), `eviction`, `ambiguous` and
 `refusal`. Every cut budget is explicit, and an unflushed tail beyond it fails
 the test.
+
+## Replay runner of the family matrix
+
+A `ReplayFamily` in [common/family_matrix.rs](common/family_matrix.rs) makes
+its work durable through intent-log fsync groups, and the recovery transaction
+of the next mount publishes it. The family supplies the image (with log slots),
+the fixture per variant, the number of groups, how it logs one group, and
+`verify`, which asserts the exact state after a given number of acknowledged
+groups. The profile applies from formatting through logging, every inspection
+mount and every recovery mount, and each mount asserts the effective profile.
+
+| Part | Driver behavior |
+|---|---|
+| Logging | Logs every group on a recording backend, requires each group to leave no unlogged operation and to publish no checkpoint, and requires a no-changes mount of the logged image to report exactly the family's group count |
+| Recording | Records the recovery transaction of the logged image, requires one published checkpoint and zero pending records, verifies the recovered state, the captured objects, the remount and the checker, and reports writes, flushes, the unflushed recovery tail and the spill counters |
+| Logging cuts | Every modeled cut of the logging phase within an explicit budget, including cuts inside an intent-group publication. The acknowledged record count of the image names the allowed state: the image keeps the fixture generation, and a recovery and a second recovery reach exactly `verify` for that count. The zero-group and all-group outcomes must both occur |
+| Recovery cuts | Every modeled cut of the recovery transaction within an explicit budget, or the seeded campaign of `recovery_sampled_cuts` for a longer tail. Each image selects the pre- or post-publication checkpoint with the matching pending-record count, and a recovery and a second recovery reach the complete acknowledged state with a stable generation |
+| Recovery faults | A before-write fault at every recovery write and a failure at every recovery flush. The interrupted mount must report the error; the media then holds the writes recorded before the fault, and a later recovery and a second recovery reach the complete acknowledged state |
+| Eviction | A pre-populated fixture whose recovery commit has a literal staged-node demand, asserted at the unlimited profile with zero spills; a profile below the demand must report spill writes |
+
+The runners are `replay` (logging cuts and recovery cuts), `replay_with_faults`
+and `replay_sampled` (logging cuts, the seeded recovery campaign and the fault
+matrix). `recovery_sampled_cuts` visits every in-order write prefix of the
+recovery log, each write torn at bytes 64, 2,048 and 4,064 after its in-order
+prefix, and, per flush segment, every full-write subset when the segment has at
+most `sample` of them and otherwise `sample` subsets drawn by a SplitMix64
+generator from the seed named in the test. A sampled campaign qualifies the
+drawn subsets together with the complete prefix and tear sets.
 
 ## In-place data policy family matrix
 
@@ -644,6 +672,130 @@ export PATH="$CARGO_HOME/bin:$PATH"
 for target in family_matrix_structure family_matrix_clone family_matrix_shared; do
   cargo test --offline -p afsplus-check --all-features --test "$target" -- --test-threads=2
 done
+cargo fmt --all -- --check
+cargo clippy --offline -p afsplus-check --all-features --tests -- -D warnings
+make check-docs
+```
+
+## Deferred window family matrix
+
+[family_matrix_deferred.rs](family_matrix_deferred.rs) drives four deferred
+families through the replay runner at 2/4/8/unlimited; 40 tests pass. Every
+fixture formats eight log slots and persistent snapshots on a 1,024-block
+volume, and the profile applies from formatting through logging, every
+no-changes inspection and every recovery mount. The acknowledged record count
+of each image names the allowed state, so an image keeps the acknowledged
+groups, may drop later staged work, and admits nothing else. Recorded
+transactions report zero spill writes and one resident staged node, which
+limits these fixtures to profile coverage.
+
+| Family and part | Oracle | Modeled count per profile | Deliberate limit |
+|---|---|---|---|
+| Namespace, three groups | A create, a rename, and a create paired with a delete inside one group: exact root listing, literal payload bytes of the anchor and of the group's own entry, and the absence of every name the count does not admit | 5 log writes and 3 log flushes; 10 recovery writes, 2 recovery flushes and a 9-write recovery tail; 39 logging-cut images with acknowledged counts 13/6/16/4; 1,165 exhaustive recovery-cut images (1,161 pre and 4 post); 12 recovery faults (10 writes, 2 flushes) | Three groups over one anchor |
+| Namespace, retained snapshot | The snapshot taken before logging keeps the anchor's captured metadata and bytes through every logging cut and every recovery cut | 39 logging-cut and 1,165 recovery-cut images | Faults belong to the plain part |
+| Existing-file write, three groups | Three writes at 73, 4,106 and 2, the last extending past one block: the byte image after a given number of acknowledged writes, with the file's other bytes literal | 7 log writes and 6 log flushes; 9 recovery writes and an 8-write tail; 47 logging-cut images with counts 9/12/22/4; sampled recovery campaign of 167 images (10 prefixes, 27 tears, 130 subsets, 163 pre and 4 post); 11 recovery faults | Seeds `0x5eedde110001` and `0x5eedde110002`, sample 128 |
+| Truncate, three groups | A partial shrink to 4,307, a sparse growth to 12,338 and an aligned shrink to 4,096: exact bytes, including the zeros the growth exposes, and the exact size | 4 log writes and 4 log flushes; 8 recovery writes and a 7-write tail; 25 logging-cut images with counts 9/6/6/4; campaign of 163 images (9 prefixes, 24 tears, 130 subsets, 159 pre and 4 post); 10 recovery faults | Seeds `0x5eedde110003` and `0x5eedde110004` |
+| Mixed window, two groups | One group with a create, a write and a truncate, and a second with a rename and a write: root listing, created payload, exact bytes and size of the subject after each count | 6 log writes and 4 log flushes; 12 recovery writes and an 11-write tail; 52 logging-cut images with counts 36/12/4; campaign of 179 images (13 prefixes, 36 tears, 130 subsets, 175 pre and 4 post); 14 recovery faults | Seeds `0x5eedde110005` and `0x5eedde110006` |
+
+`window_refusals` enumerates the refusal and read-failure paths of the window
+entry points of [core src/volume.rs](../../afsplus-core/src/volume.rs) over a
+window that holds one acknowledged group and one staged group: an invalid time,
+a duplicate name, a missing parent, a parent that is a file, an invalid name
+and a preflight read failure for `window_op`; an invalid time, an offset
+overflow, a missing object, a directory target and a layout read failure for
+`window_write_file_at`; an invalid time, a missing object, a directory target
+and a record read failure for `window_truncate_file`; an invalid time for
+`window_commit`; and all five entry points on a no-changes mount. The 21
+refusals per profile issue no write and no flush, keep the pending operation
+count and the generation, and the two admitted no-ops (an empty write and an
+unchanged truncate) behave the same way. The staged group then becomes durable
+and recovery exposes both groups with literal bytes. `window_group_limit`
+fills a one-slot log, so the second `window_fsync` refuses with
+`PrototypeLimit` and no I/O while `window_commit` publishes both groups.
+
+Negative controls: a shifted namespace payload byte, a wrong write patch value,
+a wrong truncate size and a wrong mixed-window size each fail their test.
+
+## Deferred replay family matrix
+
+[family_matrix_replay.rs](family_matrix_replay.rs) drives six replay families
+at 2/4/8/unlimited through the replay runner; 56 tests pass. The plain,
+retained and refusal fixtures use a 4,096-block volume with eight log slots,
+and the eviction fixture uses 16,384 blocks in 16-block regions with 300 long
+root names. Every recovery cut uses the seeded campaign, because the recovery
+tails run from 9 to 26 writes.
+
+| Family and part | Oracle | Modeled count per profile | Deliberate limit |
+|---|---|---|---|
+| Final-link delete of a fragmented file | Three one-block extents at logical blocks 0, 2 and 4: below the acknowledged group the name resolves and the orphan count is zero; at the group the name is absent, the object carries the orphan flag, the orphan count is one, and the payload and allocated bytes are literal | 1 log write and 1 log flush; 12 recovery writes and an 11-write tail; 7 logging-cut images (3 and 4 per outcome); campaign of 179 images (13 prefixes, 36 tears, 130 subsets, 175 pre and 4 post); 14 recovery faults | Seeds `0x5eedde1e0001` (plain) and `0x5eedde1e0002` (retained) |
+| The same delete with ordinary allocation consumed | A preallocated filler leaves at most 32 blocks, so recovery publishes the orphan transition through the emergency headroom | Same counts as above; seed `0x5eedde1e0003` | Replay is privileged maintenance |
+| The same delete over a wide root | 300 long root names: the replay commit stages three nodes at unlimited with zero spills, and two pages reports 2 spill writes with a peak of 2 | 25 recovery writes and a 24-write tail; campaign of 231 images (26 prefixes, 75 tears, 130 subsets, 227 pre and 4 post); 27 recovery faults; seed `0x5eedde1e0004` | Four and eight pages exceed the three-node demand and report zero spills |
+| A durable write and a durable final delete | The orphan carries the replayed bytes: the patch at 4,079 appears at the first acknowledged group and the name disappears at the second | 4 log writes and 3 log flushes; 12 recovery writes; 29 logging-cut images (19/6/4); campaign of 179 images; 14 recovery faults; seed `0x5eedde1e0005` | Two groups |
+| A durable replacing rename | The target name resolves to the victim before the group and to the incoming object at the group, the replaced object carries the orphan flag, and both payloads are literal | 13 recovery writes and a 12-write tail; 7 logging-cut images; campaign of 183 images (14 prefixes, 39 tears, 130 subsets); 15 recovery faults; seeds `0x5eedde1e0006` and `0x5eedde1e0007` | One victim |
+| One group deleting sixteen files | Every name disappears together, every object carries the orphan flag with its literal byte, and the orphan count is sixteen | 27 recovery writes and a 26-write tail; campaign of 239 images (28 prefixes, 81 tears, 130 subsets, 235 pre and 4 post); 29 recovery faults; seed `0x5eedde1e000c` | Sixteen orphans |
+| Durable unlink of one of three owners | The victim leaves the namespace and enters orphan state, so the two-block run keeps three references through every image, and all three objects read their exact bytes | 12 recovery writes; 7 logging-cut images; campaign of 179 images; 14 recovery faults; seeds `0x5eedde1e0008` and `0x5eedde1e0009` | One run of two blocks |
+| Durable write into a shared run | The origin moves off the first block: one two-block two-reference run before the group and one one-block two-reference run at it, with the peer's bytes exact | 2 log writes and 2 log flushes; 10 recovery writes and a 9-write tail; 13 logging-cut images (9 and 4); campaign of 171 images (11 prefixes, 30 tears, 130 subsets); 12 recovery faults; seeds `0x5eedde1e000a` and `0x5eedde1e000b` | One partial-block range |
+
+`deferred_refusal` fills a 256-block volume to at most 32 available blocks,
+logs one group and stages a second, and asks for a 40-block payload: the window
+reports `NoSpace` with zero writes and zero flushes, keeps the pending
+operation count and the generation, and the corrective step of a commit, a
+delete and reclaim rounds (5 commits) admits the same call, whose recovery
+exposes all three entries with literal bytes. `repeated_recovery` recovers a
+published image three times and requires the generation and the state to hold.
+
+Negative controls: a wrong orphan-payload byte and a wrong reference-record
+shape each fail their test.
+
+## Persistent snapshot family matrix
+
+[family_matrix_snapshot.rs](family_matrix_snapshot.rs) drives five snapshot
+families and three refusal tests at 2/4/8/unlimited; 52 tests pass. Membership
+is read back through `snapshot_list` on the selected checkpoint, live and
+captured bytes carry a sentinel past the end, and a deleted identity must be
+unreachable through `snapshot_open`.
+
+| Family and part | Oracle | Modeled count per profile | Deliberate limit |
+|---|---|---|---|
+| Registry create, cuts and faults | The registry gains exactly one identity, the subject's bytes and the root listing hold, and the published view captures the subject | 7 writes, 2 flushes and a 6-write tail; 197 cut images (193 and 4); 9 faults (7 writes, 2 flushes) and 7 same-handle retries | One subject file |
+| Registry create, retained snapshot and ambiguous publication | An older view taken in setup keeps its captured metadata and bytes through every image; both ambiguous modes poison with no I/O | 115 cut images; 8 faults, 6 same-handle retries, 2 ambiguous cases | Memory device |
+| Registry create, forced eviction | 300 long root names: the registry commit stages two nodes at unlimited with zero spills, which is the measured demand and the limit of this fixture | 14 writes and a 13-write tail; 16 faults, 14 same-handle retries; sampled campaign of 187 images (15 prefixes, 42 tears, 2 exhaustive subsets, 128 sampled subsets), seed `0x5eed50a00001` | A two-node demand fits every bounded profile, so no profile evicts |
+| Registry delete, cuts, faults and ambiguous publication | The identity leaves the registry and its view becomes unreachable, while an older retained view keeps its captured bytes | 6 writes and a 5-write tail; 115 cut images; 8 faults and 6 same-handle retries; 2 ambiguous cases | One deletion |
+| Maintenance step | A captured delete fills the ledger, a two-block reclaim batch runs one step: registry membership, the deleted name's absence, the keeper's bytes and both captured objects hold at every image | 5 writes and a 4-write tail; 68 cut images (64 and 4); 7 faults and 5 same-handle retries; 2 ambiguous cases | One ledger step |
+| Release of the last view | Deleting the last view releases its ledger: membership empties, the view becomes unreachable and the keeper's bytes hold | 6 writes; 115 cut images; 8 faults and 6 same-handle retries; 2 ambiguous cases | One view |
+| Snapshot-aware mount recovery | Two durable groups (a write and a truncate) over a file whose pre-write bytes a snapshot captures: every image reads the live bytes of its acknowledged prefix and the captured historical bytes | 4 log writes and 4 log flushes; 8 recovery writes and a 7-write tail; 25 logging-cut images (9/12/4); 346 exhaustive recovery-cut images (342 pre and 4 post); 10 recovery faults | One captured file |
+
+`admission_limits` sets a two-view budget: the third creation refuses with
+`PrototypeLimit`, a busy view refuses with `Busy` and a missing identity with
+`NotFound`, each with zero writes and flushes and an unchanged generation and
+membership; a deletion then admits the creation, whose captured bytes and
+membership survive a profile remount and the checker.
+`admission_before_recovery` mounts an image that holds two views and one
+durable group behind a device that refuses every write and flush: five invalid
+budgets in each of the four mount modes give 20 refusals with `PrototypeLimit`,
+and the valid admission recovers the group.
+`previous_slot_protection` makes the previous checkpoint slot hold an empty
+registry and fails every read of that block: the optional in-place write
+reports the injected error, publishes nothing, keeps the exact old bytes live
+and after remount, and the readable registry admits the same write in place
+(2 blocked reads per profile).
+
+Negative controls: a wrong registry membership and wrong captured bytes each
+fail their test.
+
+```sh
+export CARGO_HOME=/private/tmp/afsplus-cargo
+export RUSTUP_HOME=/private/tmp/afsplus-rustup
+export CARGO_TARGET_DIR=/private/tmp/afsplus-wt-cache-deferred-snapshots/target
+export CARGO_NET_OFFLINE=true
+export PATH="$CARGO_HOME/bin:$PATH"
+for target in family_matrix_deferred family_matrix_replay family_matrix_snapshot; do
+  cargo test --offline -p afsplus-check --all-features --test "$target" -- --test-threads=2
+done
+for target in intent_log intent_replay_orphans shared_crash orphans tiny_cache_matrix; do
+  cargo test --offline -p afsplus-check --all-features --test "$target" -- --test-threads=2
+done
+cargo test --offline -p afsplus-core --all-features --lib volume::snapshots
 cargo fmt --all -- --check
 cargo clippy --offline -p afsplus-check --all-features --tests -- -D warnings
 make check-docs
