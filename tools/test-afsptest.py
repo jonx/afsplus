@@ -93,7 +93,7 @@ def lifecycle_fixture(pages=2, mask=32767, capacity=256, sink=None):
             "log_slots": 8, "tree_cache_pages": pages},
         "flight_capacity": capacity, "flight_categories": mask, "flight_sink": sink,
         "snapshot_limits": {"max_edit_records": 4096, "max_views": 16, "reclaim_records": 8},
-        "expected_snapshots": [],
+        "expected_snapshots": [], "expected_findings": [],
         "operations": [
             {"op": "mkdir", "label": "d", "parent": "root", "name": "dir"},
             {"op": "create", "label": "f", "parent": "d", "name": "café", "data": "00ff"},
@@ -110,7 +110,200 @@ def lifecycle_fixture(pages=2, mask=32767, capacity=256, sink=None):
                      {"path": ["dir", "café"], "kind": "file", "data": "01"}]}
 
 
+
+def lifecycle_value(ops, *, blocks=256, region=64, pages=2, capacity=256, mask=32767,
+                    expected=None, findings=None):
+    return {"version": 8, "volume": {"block_size": 4096, "blocks": blocks,
+            "region_size": region, "log_slots": 8, "tree_cache_pages": pages},
+        "flight_capacity": capacity, "flight_categories": mask, "flight_sink": None,
+        "snapshot_limits": {"max_edit_records": 4096, "max_views": 16, "reclaim_records": 8},
+        "expected_snapshots": [], "expected_findings": findings or [],
+        "operations": ops, "expected": expected or []}
+
+
+def lifecycle_scenarios():
+    """One version-8 scenario per group of diagnostic kinds.
+
+    The block addresses of the image edits belong to this exact geometry and
+    operation prefix; the runner formats the same image for the same input.
+    """
+    big = "ab" * 3000
+    seeded = [{"op": "create", "label": "f", "parent": "root", "name": "a", "data": big},
+              {"op": "sync"}]
+    window = [{"op": "create", "label": "f", "parent": "root", "name": "a", "data": "0102"},
+              {"op": "window_write", "label": "f", "offset": 0, "data": "ab" * 2000}]
+    return {
+        "namespace": lifecycle_value([
+            {"op": "mkdir", "label": "d", "parent": "root", "name": "dir"},
+            {"op": "create", "label": "f", "parent": "d", "name": "café", "data": "00ff"},
+            {"op": "window_write", "label": "f", "offset": 1, "data": "42"},
+            {"op": "window_fsync"}, {"op": "window_fsync"},
+            {"op": "verify"}, {"op": "window_commit"},
+            {"op": "write", "label": "f", "offset": 0, "data": "01"}, {"op": "sync"},
+            {"op": "truncate", "label": "f", "size": 1},
+            {"op": "remount_refused"}, {"op": "remount"}], blocks=512),
+        "mount-replay": lifecycle_value([
+            {"op": "create", "label": "f", "parent": "root", "name": "a", "data": "0102"},
+            {"op": "window_write", "label": "f", "offset": 0, "data": "ab" * 2000},
+            {"op": "window_fsync"},
+            {"op": "window_write", "label": "f", "offset": 0, "data": "cd" * 2000},
+            {"op": "remount"}, {"op": "verify"}], blocks=512),
+        "format-fault": lifecycle_value([
+            {"op": "format_fault", "class": "write", "index": 0},
+            {"op": "create", "label": "f", "parent": "root", "name": "a", "data": "01"},
+            {"op": "sync"}], blocks=512),
+        "spill": lifecycle_value([
+            {"op": "create", "label": "f%d" % i, "parent": "root",
+             "name": "%04d-%s" % (i, "n" * 180), "data": "01"} for i in range(60)],
+            blocks=1024, region=256),
+        "nospace": lifecycle_value([
+            {"op": "create", "label": "g%d" % i, "parent": "root", "name": "g%d" % i,
+             "data": "cd" * 4000} for i in range(40)], blocks=64),
+        "reclaim-fail": lifecycle_value(seeded + [
+            {"op": "fault", "class": "read", "index": 0},
+            {"op": "snapshot_create", "label": "s"}, {"op": "sync"}]),
+        "view-maintenance": lifecycle_value(seeded + [
+            {"op": "fault", "class": "write", "index": 0},
+            {"op": "snapshot_create", "label": "s"}, {"op": "sync"}]),
+        "tree-io": lifecycle_value(seeded + [
+            {"op": "fault", "class": "read", "index": 2},
+            {"op": "snapshot_create", "label": "s"}, {"op": "sync"}]),
+        "view-read": lifecycle_value(seeded + [
+            {"op": "snapshot_create", "label": "s"}, {"op": "snapshot_open", "label": "s"},
+            {"op": "fault", "class": "read", "index": 6},
+            {"op": "snapshot_inspect", "label": "s"}, {"op": "sync"}]),
+        "window-log": lifecycle_value(window + [
+            {"op": "fault", "class": "write", "index": 0},
+            {"op": "window_fsync"}, {"op": "window_commit"}]),
+        "window-fail": lifecycle_value(window + [
+            {"op": "fault", "class": "write", "index": 1},
+            {"op": "window_fsync"}, {"op": "window_commit"}]),
+        "data-write": lifecycle_value(seeded + [
+            {"op": "fault", "class": "write", "index": 0},
+            {"op": "window_write", "label": "f", "offset": 0, "data": "cd" * 3000},
+            {"op": "window_fsync"}, {"op": "window_commit"}]),
+        "verify-failed": lifecycle_value(seeded + [
+            {"op": "corrupt", "lba": 4, "offset": 0, "byte": 255}, {"op": "verify"}]),
+        "verify-finding": lifecycle_value(seeded + [
+            {"op": "reseal", "lba": 27, "offset": 44, "byte": 2}, {"op": "verify"}],
+            findings=[{"scope": 3, "phase": 13, "kind": 1, "region": 0, "ordinal": 0,
+                       "object": 16, "block": 0}]),
+        "object-missing": lifecycle_value(seeded + [
+            {"op": "reseal", "lba": 30, "offset": 96, "byte": 255}, {"op": "remount"},
+            {"op": "write", "label": "f", "offset": 0, "data": "cd"}, {"op": "sync"}]),
+    }
+
+
+# Scenarios whose run and checker are clean once their expected state is settled.
+LIFECYCLE_CLEAN = ("namespace", "mount-replay", "format-fault", "spill")
+
+
+def lifecycle_kinds(records):
+    flight = records["flight-recorder.bin"]
+    events = struct.unpack_from("<I", flight, 8)[0]
+    offset, seen, size = 28, set(), 89 + tool.PAYLOAD_BYTES
+    def batch(offset):
+        retained = struct.unpack_from("<QQQQQQBI", flight, offset)[7]
+        offset += 53
+        for _ in range(retained):
+            seen.add(flight[offset + 24])
+            offset += size
+        return offset
+    offset = batch(offset)
+    for _ in range(events):
+        offset += 29
+        offset = batch(offset)
+    assert offset == len(flight)
+    return seen
+
+
 class ReplayTests(unittest.TestCase):
+    def settle(self, value):
+        records, _ = tool.execute(tool.encoded(value), BINARY)
+        actual = json.loads(records["actual.json"])
+        self.assertIsNone(actual["failure"])
+        value = dict(value)
+        value["expected"] = sorted(actual["entries"], key=lambda entry: entry["path"])
+        value["expected_snapshots"] = actual["snapshots"]
+        return value
+
+    def test_v8_faults_and_image_edits_produce_every_reachable_kind(self):
+        union = set()
+        for name, value in lifecycle_scenarios().items():
+            if name in LIFECYCLE_CLEAN:
+                value = self.settle(value)
+            records, success = tool.execute(tool.encoded(value), BINARY)
+            self.assertEqual(records["flight-recorder.bin"][:8], b"AFSFLT06")
+            union |= lifecycle_kinds(records)
+            # A clean scenario passes; a fault or an edited image is a recorded
+            # failure, and replay reproduces that failure byte for byte.
+            self.assertEqual(success, name in LIFECYCLE_CLEAN, name)
+            with tempfile.TemporaryDirectory(prefix="afsplus-lifecycle-kind-") as temporary:
+                path = Path(temporary) / name
+                tool.bundle.publish(path, records)
+                self.assertEqual(tool.replay(path, BINARY), name in LIFECYCLE_CLEAN, name)
+        # ApiUnwound alone has no host scenario: the API guard reports it only
+        # when a panic unwinds through it.
+        self.assertEqual(sorted(set(range(1, 65)) - union), [11])
+
+    def test_v8_expected_findings_are_compared_exactly(self):
+        value = lifecycle_scenarios()["verify-finding"]
+        records, success = tool.execute(tool.encoded(value), BINARY)
+        self.assertFalse(success)
+        self.assertEqual(tool.flight_findings(records), value["expected_findings"])
+        # The invariant sweep reports the resealed link count, so the checker
+        # rejects the image and the bundle records that rejection.
+        actual = json.loads(records["actual.json"])
+        self.assertIsNone(actual["failure"])
+        self.assertFalse(actual["raw_check"]["clean"])
+        self.assertTrue(any("link count" in error for error in actual["raw_check"]["errors"]))
+        # A wrong declaration is a reduction signature of its own.
+        wrong = dict(value, expected_findings=[dict(value["expected_findings"][0], object=17)])
+        records, success = tool.execute(tool.encoded(wrong), BINARY)
+        self.assertFalse(success)
+        self.assertEqual(json.loads(tool.failure_signature(records))["kind"], "structure")
+        empty = dict(value, expected_findings=[])
+        records, success = tool.execute(tool.encoded(empty), BINARY)
+        self.assertFalse(success)
+        # Declaring findings without the category or the ring that retains them
+        # is refused before the runner starts.
+        for broken in (dict(value, flight_categories=32767 ^ (1 << 12)),
+                       dict(value, flight_capacity=1)):
+            with self.assertRaisesRegex(ValueError, "expected findings"):
+                tool.scenario.validate(tool.encoded(broken))
+
+    def test_v8_fault_commands_are_admission_bounded(self):
+        value = lifecycle_scenarios()["window-log"]
+        for broken in ({"op": "fault", "class": "read", "index": -1},
+                       {"op": "fault", "class": "read", "index": 65536},
+                       {"op": "fault", "class": "sync", "index": 0},
+                       {"op": "fault", "class": "read"},
+                       {"op": "format_fault", "class": "read", "index": 0},
+                       {"op": "corrupt", "lba": 4, "offset": 4096, "byte": 0},
+                       {"op": "corrupt", "lba": 4, "offset": 0, "byte": 256},
+                       {"op": "reseal", "lba": 4, "offset": 31, "byte": 0}):
+            with self.assertRaises(ValueError):
+                tool.scenario.validate(tool.encoded(
+                    dict(value, operations=value["operations"] + [broken])))
+        # A format fault belongs to the first operation alone.
+        with self.assertRaisesRegex(ValueError, "first operation"):
+            tool.scenario.validate(tool.encoded(dict(value, operations=(
+                value["operations"] + [{"op": "format_fault", "class": "write", "index": 0}]))))
+        # An armed fault no device operation reaches proves nothing.
+        never = lifecycle_value([{"op": "fault", "class": "flush", "index": 60000},
+                                 {"op": "create", "label": "f", "parent": "root",
+                                  "name": "a", "data": "01"}])
+        with self.assertRaisesRegex(ValueError, "never tripped"):
+            tool.execute(tool.encoded(never), BINARY)
+        # The commands belong to version 8 alone.
+        legacy = snapshot_fixture()
+        for command in ({"op": "fault", "class": "read", "index": 0},
+                        {"op": "corrupt", "lba": 4, "offset": 0, "byte": 1},
+                        {"op": "reseal", "lba": 4, "offset": 64, "byte": 1}):
+            with self.assertRaises(ValueError):
+                tool.scenario.validate(tool.encoded(
+                    dict(legacy, operations=legacy["operations"] + [command])))
+
     def test_v8_lifecycle_wire_binds_every_payload_class_to_its_kind(self):
         profile = {"version": 8, "flight_categories": 32767, "flight_sink": None}
         previous = (0,) * 7
@@ -155,6 +348,7 @@ class ReplayTests(unittest.TestCase):
                  operation=1, method=64),
             wire(59, tx=1),
             wire(61, enums=(4, 0, 0, 0), words=(3, 16, 40, 0, 0)),
+            wire(64, enums=(4, 0, 0, 0), words=(0, 0, 24, 0, 0)),
         ]
         for value in admitted:
             tool.selected_batch(value, 0, previous, 1, profile, 0)

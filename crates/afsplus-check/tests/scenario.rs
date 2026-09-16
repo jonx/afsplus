@@ -753,7 +753,7 @@ const V8_HEADER: &str = "format 4096 1024 64 8 2 256 32767 0 none 64 4 64";
 fn version_eight_wire(pages: &str, mask: u32, capacity: usize, sink: &str) -> Vec<u8> {
     let mut wire = format!(
         "AFSPSC08\nformat 4096 1024 64 8 {pages} {capacity} {mask} {sink} 64 4 64\n\
-         mkdir d root 646972\n"
+         format_fault write 0\nmkdir d root 646972\n"
     );
     for index in 0..24 {
         wire.push_str(&format!(
@@ -842,6 +842,49 @@ fn version_eight_observation_changes_no_image_byte_and_no_block_operation() {
 }
 
 #[test]
+fn version_eight_injected_faults_reproduce_without_observation() {
+    // A fault is a scenario input, so an observed run and an observation-free
+    // run must fail at the same operation with the same error and the same I/O.
+    for command in [
+        "fault write 0\nwindow_fsync\nwindow_commit\n",
+        "fault read 0\nsnapshot_create s\nsync\n",
+        "fault flush 0\nwindow_fsync\nwindow_commit\n",
+    ] {
+        let wire = format!(
+            "AFSPSC08\n{V8_HEADER}\ncreate f root 61 {}\nsync\nwindow_write f 0 {}\n{command}",
+            "ab".repeat(3000),
+            "cd".repeat(2000)
+        );
+        let plan = Plan::parse(wire.as_bytes()).expect("version 8 plan");
+        let observed = plan.run_with_limits(RecordingLimits::default()).unwrap();
+        let plain = plan.run_unobserved(RecordingLimits::default()).unwrap();
+        let failure = observed.failure.as_ref().expect("the armed fault trips");
+        assert!(failure.1.contains("injected"), "{failure:?}");
+        assert_eq!(
+            plain.failure.as_ref().map(|f| (f.0, f.1.clone())),
+            Some(failure.clone())
+        );
+        assert_eq!(plain.log.len(), observed.log.len());
+        let mut left = plain.result.clone();
+        let mut right = observed.result.clone();
+        let mut a = vec![0u8; left.block_size()];
+        let mut b = vec![0u8; right.block_size()];
+        for lba in 0..left.total_blocks() {
+            left.read_block(lba, &mut a).unwrap();
+            right.read_block(lba, &mut b).unwrap();
+            assert_eq!(a, b, "image block {lba} differs");
+        }
+    }
+    // An armed fault no device operation reaches is refused.
+    let wire = format!("AFSPSC08\n{V8_HEADER}\nfault flush 60000\nsync\n");
+    let plan = Plan::parse(wire.as_bytes()).expect("version 8 plan");
+    assert!(plan.run().is_err());
+    // A format fault belongs to the first operation alone.
+    let wire = format!("AFSPSC08\n{V8_HEADER}\nsync\nformat_fault write 0\n");
+    assert!(Plan::parse(wire.as_bytes()).is_err());
+}
+
+#[test]
 fn version_eight_batches_carry_the_format_mount_and_subsystem_scopes() {
     use afsplus_core::flight::{Category, EventKind, LifecycleContext};
     let plan = Plan::parse(&version_eight_wire("2", 32767, 256, "0 none")).expect("version 8 plan");
@@ -850,6 +893,8 @@ fn version_eight_batches_carry_the_format_mount_and_subsystem_scopes() {
     let pre_mount = run.pre_mount.as_ref().expect("explicit pre-mount batch");
     let staged: Vec<_> = pre_mount.events.iter().map(|event| event.kind).collect();
     assert_eq!(staged.first(), Some(&EventKind::FormatBegin));
+    // The refused first format precedes the fresh one in the same batch.
+    assert!(staged.contains(&EventKind::FormatFailed));
     assert!(staged.contains(&EventKind::FormatCheckpointDurable));
     assert!(staged.contains(&EventKind::MountBegin));
     assert!(staged.contains(&EventKind::MountComplete));
@@ -896,6 +941,7 @@ fn version_eight_batches_carry_the_format_mount_and_subsystem_scopes() {
         "MountIntentReplayed",
         "MountFailed",
         "FormatBegin",
+        "FormatFailed",
         "VerifyBegin",
         "VerifyPhase",
         "VerifyComplete",

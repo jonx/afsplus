@@ -208,6 +208,7 @@ def validate(encoded):
     fields(scenario, "version volume operations expected" + (" flight_capacity" if version >= 3 else "")
            + (" flight_categories flight_sink" if version >= 4 else "")
            + (" snapshot_limits expected_snapshots" if version >= 7 else "")
+           + (" expected_findings" if version == 8 else "")
            + (" data_policy orphan_extents expected_orphans" if version >= 9 else ""))
     if version >= 9:
         if type(scenario["data_policy"]) is not bool:
@@ -228,6 +229,21 @@ def validate(encoded):
             integer(sink["capacity"], 1, 256)
             if sink["disconnect_before"] is not None:
                 integer(sink["disconnect_before"], 0, MAX_OPS)
+    if version == 8:
+        findings = scenario["expected_findings"]
+        if not isinstance(findings, list) or len(findings) > MAX_OPS:
+            raise ValueError("expected finding count")
+        for finding in findings:
+            fields(finding, "scope phase kind region ordinal object block")
+            integer(finding["scope"], 1, 3)
+            integer(finding["phase"], 1, 16)
+            integer(finding["kind"], 1, 11)
+            integer(finding["region"], 0, (1 << 32) - 1)
+            for key in ("ordinal", "object", "block"):
+                integer(finding[key], 0, (1 << 64) - 1)
+        if findings and not (scenario["flight_categories"] & (1 << 12)
+                             and scenario["flight_capacity"] == 256):
+            raise ValueError("expected findings require the verify category and a full ring")
     if version >= 7:
         limits = scenario["snapshot_limits"]
         fields(limits, "max_edit_records max_views reclaim_records")
@@ -268,9 +284,12 @@ def validate(encoded):
         schemas.update({"snapshot_" + action: "op label"
                         for action in ("create", "open", "close", "delete", "inspect")})
     if version == 8:
-        # Standalone observed verification, and one mount feature negotiation
-        # refuses before any device write.
-        schemas.update(verify="op", remount_refused="op")
+        # Standalone observed verification, one mount feature negotiation
+        # refuses before any device write, deterministic device faults, and
+        # byte edits to the image beneath the mount.
+        schemas.update(verify="op", remount_refused="op", fault="op class index",
+                       format_fault="op class index", corrupt="op lba offset byte",
+                       reseal="op lba offset byte")
     if version >= 9:
         schemas.update(link="op label source parent name", clone_file="op label source parent name",
                        symlink="op label parent name target", set_protection="op label protection",
@@ -286,13 +305,26 @@ def validate(encoded):
                        reclaim_step="op", snapshot_maintenance_step="op",
                        batch="op items", window_batch="op items")
     orphan_labels = set()
-    for operation in operations:
+    for index, operation in enumerate(operations):
         if not isinstance(operation, dict) or not isinstance(operation.get("op"), str) or operation["op"] not in schemas:
             raise ValueError("unknown scenario operation")
         kind = operation["op"]
         fields(operation, schemas[kind])
         if kind in ("batch", "window_batch"):
             payload += batch_items(operation, labels, used, kind == "window_batch")
+            continue
+        if kind in ("fault", "format_fault"):
+            classes = ("write", "flush") if kind == "format_fault" else ("write", "flush", "read")
+            if operation["class"] not in classes:
+                raise ValueError("scenario fault class")
+            integer(operation["index"], 0, 65535)
+            if kind == "format_fault" and index != 0:
+                raise ValueError("a format fault must be the first operation")
+            continue
+        if kind in ("corrupt", "reseal"):
+            integer(operation["lba"], 0, 65535)
+            integer(operation["offset"], 32 if kind == "reseal" else 0, 4095)
+            integer(operation["byte"], 0, 255)
             continue
         if "name" in operation: name(operation["name"])
         if "parent" in operation:
@@ -484,6 +516,10 @@ def compile_commands(encoded):
                     members.append(":".join(["replace", item["label"], item["victim"], item["parent"],
                                              encoded_name]))
             fields = [kind, ",".join(members)]
+        elif kind in ("fault", "format_fault"):
+            fields = [kind, operation["class"], str(operation["index"])]
+        elif kind in ("corrupt", "reseal"):
+            fields = [kind, str(operation["lba"]), str(operation["offset"]), str(operation["byte"])]
         elif kind in ("unlink", "rmdir", "unlink_symlink", "orphan_file", "cleanup_orphan") or kind in (
                 "snapshot_create", "snapshot_open", "snapshot_close", "snapshot_delete",
                 "snapshot_inspect"):

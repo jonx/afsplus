@@ -383,6 +383,9 @@ def bind_cache_profile(value, actual):
 
 def expected_state(value):
     live = sorted(value["expected"], key=lambda entry: entry["path"])
+    if value["version"] == 8:
+        return {"entries": live, "snapshots": value["expected_snapshots"],
+                "findings": value["expected_findings"]}
     if value["version"] >= 9:
         return {"entries": live, "snapshots": value["expected_snapshots"],
                 "orphans": value["expected_orphans"]}
@@ -457,7 +460,9 @@ def execute(raw, binary, file_bytes=bundle.DEFAULT_FILE_BYTES, total_bytes=bundl
     bind_cache_profile(value, actual)
     expected = expected_state(value)
     success = (actual["failure"] is None and actual["inspection_error"] is None
-               and structural_success(actual) and matches_expected(value, actual))
+               and structural_success(actual) and matches_expected(value, actual)
+               and (value["version"] != 8
+                    or flight_findings(records) == value["expected_findings"]))
     records.update({
         "operations.afstrace": raw,
         "run.json": encoded({"version": 1, "profile": "semantic-no-cut-v1" if fault["kind"] == "no-cut" else "semantic-power-cut-v1",
@@ -547,8 +552,45 @@ def lifecycle_payload(kind, blob, generation):
             raise ValueError("flight data payload domain")
     else:
         zero(enums[1:] + (region,) + words[3:])
-        if not 1 <= enums[0] <= 4 or words[1] == 0:
+        # Maintenance descends the registry and the ledger, which own no object.
+        if not 1 <= enums[0] <= 4 or (enums[0] != 4 and words[1] == 0):
             raise ValueError("flight view payload domain")
+
+
+def flight_findings(records):
+    """Every full-sweep finding the version-8 artifact carries, in event order.
+
+    The scenario declares these explicitly; a scenario declaring any of them
+    selects the verify category and a full ring, so the comparison never
+    depends on what a narrow profile happened to retain.
+    """
+    flight = records["flight-recorder.bin"]
+    if flight[:8] != b"AFSFLT06":
+        raise ValueError("findings require the version-8 artifact")
+    events = struct.unpack_from("<I", flight, 8)[0]
+    offset = 28
+    found = []
+    def batch(offset):
+        if len(flight) - offset < 53:
+            raise ValueError("flight truncated selected batch")
+        retained = struct.unpack_from("<QQQQQQBI", flight, offset)[7]
+        offset += 53
+        for _ in range(retained):
+            if len(flight) - offset < 89 + PAYLOAD_BYTES:
+                raise ValueError("flight truncated selected event")
+            if flight[offset + 24] == 53:
+                blob = flight[offset + 89:offset + 89 + PAYLOAD_BYTES]
+                ordinal, object_id, block = struct.unpack("<QQQ", blob[9:33])
+                found.append({"scope": blob[1], "phase": blob[2], "kind": blob[3],
+                              "region": struct.unpack("<I", blob[5:9])[0],
+                              "ordinal": ordinal, "object": object_id, "block": block})
+            offset += 89 + PAYLOAD_BYTES
+        return offset
+    offset = batch(offset)
+    for _ in range(events):
+        offset += 29
+        offset = batch(offset)
+    return found
 
 
 def selected_batch(flight, offset, previous, capacity, profile, index):
@@ -852,7 +894,9 @@ def admit_run(retained):
                 for key in ("raw_check", "recovered_check"))
     success = (actual["failure"] is None and actual["inspection_error"] is None and clean
                and actual.get("snapshot_inspection_error") is None
-               and matches_expected(value, actual))
+               and matches_expected(value, actual)
+               and (value["version"] != 8
+                    or flight_findings(retained) == value["expected_findings"]))
     if meta["outcome"] != ("pass" if success else "failure"):
         raise ValueError("run outcome contradicts observation")
     validate_trace(retained)
@@ -975,6 +1019,11 @@ def failure_signature(records):
     if value["version"] >= 9 and actual["orphans"] != value["expected_orphans"]:
         return pack({"kind": "orphan-state", "expected": value["expected_orphans"],
                      "actual": actual["orphans"]})
+    if value["version"] == 8:
+        found = flight_findings(records)
+        if found != value["expected_findings"]:
+            return pack({"kind": "verify-findings", "expected": value["expected_findings"],
+                         "actual": found})
     if value["version"] >= 7 and actual["snapshots"] != value["expected_snapshots"]:
         return pack({"kind": "snapshot-state", "expected": value["expected_snapshots"],
                      "actual": actual["snapshots"]})

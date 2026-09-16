@@ -1717,7 +1717,8 @@ phase 0-16 and finding class 0-11; a phase is present on every kind except
 `VerifyBegin` and `VerifyComplete`, a finding class belongs to `VerifyFinding`
 alone, an ordinal belongs to `VerifyFinding` and `VerifyComplete`, and the
 scope-level kinds name no region, object or block. Data scope is 1-3 and view
-path is 1-4, and a view descent names a nonzero owner.
+path is 1-4; a lookup, enumeration or file-data descent names a nonzero owner,
+and maintenance over the captured views owns no object.
 
 Context and accounting rules follow versions 6 and 7: object presence, API span
 parentage, method identity and window identity keep their checks, and loss,

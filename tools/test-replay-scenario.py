@@ -128,7 +128,7 @@ class ScenarioTests(unittest.TestCase):
         value.update(version=8, flight_capacity=256, flight_categories=32767, flight_sink=None,
                      snapshot_limits={"max_edit_records": 4096, "max_views": 16,
                                       "reclaim_records": 8},
-                     expected_snapshots=[])
+                     expected_snapshots=[], expected_findings=[])
         value["volume"]["tree_cache_pages"] = 2
         value["operations"][-1:-1] = [{"op": "verify"}, {"op": "remount_refused"}]
         compiled = scenario.compile_commands(json.dumps(value).encode())
@@ -144,6 +144,7 @@ class ScenarioTests(unittest.TestCase):
         # The two commands belong to version 8 alone.
         for version in (7, 9):
             broken = dict(value, version=version, flight_categories=127)
+            broken.pop("expected_findings")
             if version == 9:
                 broken.update(data_policy=False, orphan_extents=1,
                               expected_orphans={"count": 0, "bytes": 0})
