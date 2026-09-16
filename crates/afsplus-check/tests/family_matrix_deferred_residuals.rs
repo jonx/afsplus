@@ -897,6 +897,93 @@ impl ReplayFamily for OrphanReplacingRename {
     }
 }
 
+// ------------------------------------------------------- orphan final delete
+
+/// One durable group whose delete removes a fragmented file's final link.
+struct OrphanFinalDelete;
+
+struct VictimState {
+    victim: u64,
+    background: usize,
+}
+
+impl ReplayFamily for OrphanFinalDelete {
+    type State = VictimState;
+
+    fn name(&self) -> &'static str {
+        "orphan replay delete residual"
+    }
+
+    fn format(&self, variant: Variant) -> Format {
+        image(variant)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, variant: Variant) -> VictimState {
+        setup_background(volume, variant);
+        let (victim, _) = fragmented(volume, "victim");
+        VictimState {
+            victim,
+            background: background(variant),
+        }
+    }
+
+    fn captured(&self, state: &VictimState) -> Vec<(u64, Vec<u8>)> {
+        vec![(state.victim, expected_fragmented())]
+    }
+
+    fn groups(&self) -> usize {
+        1
+    }
+
+    fn log_group<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &VictimState,
+        _index: usize,
+    ) -> Result<(), CoreError> {
+        volume.window_op(
+            &BatchOp::DeleteFile {
+                parent_id: OBJECT_ROOT,
+                name: "victim",
+            },
+            ts(50),
+        )?;
+        volume.window_fsync()
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &VictimState,
+        _variant: Variant,
+        acknowledged: usize,
+        context: &str,
+    ) {
+        let named = acknowledged == 0;
+        assert_eq!(
+            volume.lookup_root("victim").unwrap(),
+            named.then_some(state.victim),
+            "{context}: victim entry"
+        );
+        assert_eq!(
+            volume.orphan_object(state.victim).unwrap(),
+            !named,
+            "{context}: orphan flag"
+        );
+        assert_eq!(
+            volume.orphan_count().unwrap(),
+            u64::from(!named),
+            "{context}: orphan count"
+        );
+        file_bytes(volume, state.victim, &expected_fragmented(), context);
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            state.background + usize::from(named),
+            "{context}: root entries"
+        );
+    }
+}
+
 // ------------------------------------- resource refusals of the update paths
 
 /// Ordinary capacity the window leaves for its own later work.
@@ -1415,7 +1502,27 @@ crate::profile_tests!(replace_replay_eviction, |pages| matrix::replay_eviction(
     &OrphanReplacingRename,
     pages
 ));
+
 crate::profile_tests!(update_refusals, |pages| window_update_refusals(pages));
 crate::profile_tests!(publication_read_failures, |pages| {
     window_publication_read_failures(pages)
 });
+
+crate::profile_tests!(
+    shared_unlink_logging_faults,
+    |pages| matrix::replay_logging(&SharedUnlinkReplay, pages, Variant::Plain)
+);
+crate::profile_tests!(shared_write_logging_faults, |pages| matrix::replay_logging(
+    &SharedWriteReplay,
+    pages,
+    Variant::Plain
+));
+crate::profile_tests!(replace_logging_faults, |pages| matrix::replay_logging(
+    &OrphanReplacingRename,
+    pages,
+    Variant::Plain
+));
+crate::profile_tests!(
+    orphan_delete_logging_faults,
+    |pages| matrix::replay_logging(&OrphanFinalDelete, pages, Variant::Plain)
+);
