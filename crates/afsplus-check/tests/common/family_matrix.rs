@@ -954,6 +954,14 @@ pub fn eviction<F: Family>(family: &F, pages: usize, budget: Option<usize>) {
     }
 }
 
+/// Forced eviction whose recorded write count puts the fault matrix and every
+/// cut campaign beyond the per-test time budget: the spill evidence, the
+/// staged demand and the published state verified live, after remount and
+/// through the checker.
+pub fn eviction_recorded<F: Family>(family: &F, pages: usize) {
+    record(family, pages, Variant::Eviction);
+}
+
 /// Forced eviction whose unflushed tail exceeds the exhaustive budget: spill
 /// evidence, faults at every write and the seeded sampled cut campaign.
 pub fn eviction_sampled<F: Family>(family: &F, pages: usize, sample: usize, seed: u64) {

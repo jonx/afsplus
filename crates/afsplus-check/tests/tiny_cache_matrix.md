@@ -334,8 +334,10 @@ and every warning except a stopped intent-log tail.
 | Resource refusal | The refusal fixture must return the family's error with no flush and no write to a block reachable from either selectable checkpoint, and with no write at all unless the family admits provisional spill images. The fixture state holds on the live handle and after remount; the family's corrective step then admits the retry, verified live, after remount and through the checker |
 
 The runners are `plain` (recording, cuts and faults), `retained` (recording,
-cuts, faults and ambiguous publication), `eviction`, `ambiguous` and
-`refusal`. Every cut budget is explicit, and an unflushed tail beyond it fails
+cuts, faults and ambiguous publication), `eviction`, `eviction_recorded`
+(spill evidence and the verified published state alone, for a transaction
+whose write count puts the fault matrix beyond the per-test time budget),
+`ambiguous` and `refusal`. Every cut budget is explicit, and an unflushed tail beyond it fails
 the test.
 
 ## Replay runner of the family matrix
