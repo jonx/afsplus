@@ -640,6 +640,25 @@ expected leaf splits in the deep fixture, a link count of one after the hard
 link, and a 3,967-byte expected symlink target. All five fail their test, and
 the sources are restored from the commit afterwards.
 
+## Residual shared-ownership family matrix
+
+[family_matrix_shared_residuals.rs](family_matrix_shared_residuals.rs) closes
+the replace rename whose target is shared and the bounded-budget refusal of a
+write that splits a shared run. The victim holds two blocks with one byte value
+each and one clone as its peer, so the reference records hold one two-block
+two-reference run before the operation. Reference records are read from the
+selected checkpoint through `shared_extents::load_all`.
+
+| Test | Profiles | Oracle and modeled counts | Deliberate limit |
+|---|---|---|---|
+| `replace_shared`, `replace_shared_retained` | P | The target name always resolves: to the shared victim with its bytes before publication and to the incoming object with its bytes after, the replaced object absent from the object map, the peer unchanged, and the reference record gone once the peer is the only owner; the captured victim, peer and incoming bytes through the retained view; 11 writes and 2 flushes with a 10-write tail, 2,219 cut images with a 12-write budget (outcomes 2,215/4), 13 faults and 11 same-handle retries per profile; two ambiguous cases per retained profile | One run of two blocks and one peer |
+| `replace_shared_eviction` | P | 150 long root names; the replacement stages three nodes at the unlimited profile with zero spills, two pages report 3 spill writes with a peak of 2, and four and eight pages exceed the demand with zero spills and a peak of 3; 15, 13, 13 and 13 writes; 17 faults with 15 same-handle retries at two pages and 15 faults with 13 retries elsewhere; sampled campaigns of 95 images at two pages (16 prefixes, 45 tears, 2 exhaustive subsets, 32 sampled subsets, outcomes 91/4) and 4,151 images elsewhere (14 prefixes, 39 tears, 4,098 exhaustive subsets, outcomes 4,147/4) | Measured staged demand of three nodes; seed `0x5eed5a7e2001`, sample 32 |
+| `shared_write_budget_refusal` | P | A one-record budget refuses the split of the shared run with `PrototypeLimit`, zero writes and zero flushes, an unchanged generation and unchanged origin, peer and run shape live and after remount; the specified retry is the same edit under an admitted eight-record budget, so the corrective step publishes no checkpoint; the published write moves the origin off the first block and leaves one one-block two-reference run | The budget is the only refusal cause; the low-space refusal of the same write keeps its own fixture |
+
+Negative controls, one per fixture family: a two-block expected run after the
+replacement and an unchanged origin byte after the admitted bounded write. Both
+fail their test, and the sources are restored from the commit afterwards.
+
 ## Reload failures during spilled transactions
 
 `spilled_directory_split_survives_reload_read_failures`,
