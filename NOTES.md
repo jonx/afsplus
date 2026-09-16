@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-16 — Integrate lifecycle observation, six generated families and the structure matrix](#2026-09-16--integrate-lifecycle-observation-six-generated-families-and-the-structure-matrix)
 - [2026-09-15 — Integrate the family-matrix driver and four more cache families](#2026-09-15--integrate-the-family-matrix-driver-and-four-more-cache-families)
 - [2026-09-15 — Integrate data-write cache families and generated operation families](#2026-09-15--integrate-data-write-cache-families-and-generated-operation-families)
 - [2026-09-15 — Qualify reclaim, policy, low-space, shared-fault, orphan and rotation cache profiles](#2026-09-15--qualify-reclaim-policy-low-space-shared-fault-orphan-and-rotation-cache-profiles)
@@ -166,6 +167,28 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-16 — Integrate lifecycle observation, six generated families and the structure matrix
+
+Three lots landed together. The recorder observes mount selection and intent
+recovery, formatting and standalone verification through opt-in entry points,
+plus staged data writes, intent barriers and read-only view descents; every
+direct publication caller and all 66 API methods run under observation with
+observed/unobserved equality of results, traces and images, and the emission
+mechanism is measured (zero heap bytes per event, 26.6 ns per ring emission,
+232-byte events on this host). Six more operation families are generated under
+runner version 9 with independent models and negative controls. The batch,
+directory-structure, clone and shared-ownership cache families run through the
+driver, including read failures while reloading spilled nodes.
+
+Two documentary findings: no normative text decides CloneFile metadata
+inheritance ([Q14](implementation/open-questions.md)), and a recorder call
+path spends most of its cost before category admission because scope flags
+live inside the locked recorder; publishing the masks as atomics is a cheap
+later change. The integrated qualification in
+`build/stage-a-qualification-58fee08` passed 982/0/13 with every other gate,
+and all nine generated families, fourteen controls and the version-1 baseline
+were rerun on the integrated sources in `build/fuzz-campaigns-58fee08`.
 
 ## 2026-09-15 — Integrate the family-matrix driver and four more cache families
 
