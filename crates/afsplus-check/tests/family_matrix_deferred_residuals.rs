@@ -6,10 +6,10 @@
 
 mod common;
 
-use afsplus_block::{BlockDevice, MemoryBackend};
+use afsplus_block::{BlockDevice, MemoryBackend, TraceBackend};
 use afsplus_core::shared_extents;
 use afsplus_core::volume::BatchOp;
-use afsplus_core::{CoreError, Volume};
+use afsplus_core::{CoreError, MountMode, Volume};
 use afsplus_format::OBJECT_ROOT;
 
 use common::family_matrix::{self as matrix, ts, Format, ReplayFamily, Variant, BS};
@@ -897,6 +897,210 @@ impl ReplayFamily for OrphanReplacingRename {
     }
 }
 
+// ------------------------------------- resource refusals of the update paths
+
+/// Ordinary capacity the window leaves for its own later work.
+const RESERVE_BLOCKS: u64 = 24;
+/// Blocks the refused write asks for.
+const REFUSED_BLOCKS: usize = 40;
+/// Size the refused truncate asks for; its tail needs one fresh block.
+const REFUSED_SIZE: u64 = BS as u64 + 11;
+/// Independent expectation of the retried write value and of the size the
+/// retried truncate publishes.
+const RETRY_VALUE: u8 = 0x2c;
+const EXPECTED_RETRY_SIZE: usize = 4107;
+
+/// `window_write_file_at` and `window_truncate_file` refuse for lack of
+/// ordinary space with no write and no flush, keep the staged window and the
+/// acknowledged group, and admit the same calls after the specified
+/// corrective step.
+fn window_update_refusals(pages: usize) {
+    let format = Format {
+        log_slots: SLOTS,
+        ..Format::new(256, 256)
+    };
+    let mut volume = matrix::open(TraceBackend::new(format.device()), pages);
+    let anchor = volume
+        .create_file_in_root("anchor", &vec![BASE_BYTE; 2 * BS], ts(1))
+        .unwrap();
+    // Ordinary capacity is consumed before the window opens.
+    let filler = volume.create_file_in_root("filler", b"", ts(2)).unwrap();
+    let fill = volume.available_blocks().saturating_sub(RESERVE_BLOCKS);
+    volume
+        .preallocate_file(filler, 0, fill * BS as u64, ts(3))
+        .unwrap();
+    assert!(volume.available_blocks() <= 32, "the filler left capacity");
+    let generation = volume.generation();
+    volume
+        .window_op(
+            &BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: "durable",
+                content: b"",
+            },
+            ts(4),
+        )
+        .unwrap();
+    volume.window_fsync().unwrap();
+    volume
+        .window_op(
+            &BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: "staged",
+                content: b"",
+            },
+            ts(4),
+        )
+        .unwrap();
+    // One-block creates consume the remainder of the window allocator;
+    // `window_op` keeps the window when the last of them is refused.
+    let mut pads = 0;
+    loop {
+        let name = format!("pad-{pads:02}");
+        match volume.window_op(
+            &BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: &name,
+                content: &[0x5a; BS],
+            },
+            ts(4),
+        ) {
+            Ok(_) => pads += 1,
+            Err(CoreError::NoSpace) => break,
+            Err(error) => panic!("padding the window: {error:?}"),
+        }
+        assert!(pads < 64, "the window never runs out of ordinary space");
+    }
+    let pending = volume.window_unlogged_ops();
+    let original = vec![BASE_BYTE; 2 * BS];
+
+    let mut refusals = 0;
+    for (label, call) in [("write", 0usize), ("truncate", 1usize)] {
+        volume.device_mut().reset();
+        let error = match call {
+            0 => volume
+                .window_write_file_at(anchor, 0, &vec![RETRY_VALUE; REFUSED_BLOCKS * BS], ts(5))
+                .expect_err("no ordinary space remains"),
+            _ => volume
+                .window_truncate_file(anchor, REFUSED_SIZE, ts(5))
+                .expect_err("no ordinary space remains"),
+        };
+        assert!(matches!(error, CoreError::NoSpace), "{label}: {error:?}");
+        let stats = volume.device_mut().stats();
+        assert_eq!(
+            (stats.writes, stats.flushes),
+            (0, 0),
+            "{label}: refusal issued I/O"
+        );
+        assert_eq!(
+            volume.window_unlogged_ops(),
+            pending,
+            "{label}: the staged window was lost"
+        );
+        assert_eq!(
+            volume.generation(),
+            generation,
+            "{label}: refusal published"
+        );
+        file_bytes(&mut volume, anchor, &original, label);
+        refusals += 1;
+    }
+    eprintln!("window update refusals pages={pages} refusals={refusals} pads={pads}");
+
+    // The window that both refusals preserved holds exactly one acknowledged
+    // group, so the specified corrective step is a remount that keeps that
+    // group and frees the filler.
+    let image = volume.into_device().into_inner();
+    let raw = matrix::open_mode(image.clone(), pages, MountMode::NoChanges);
+    assert_eq!(raw.generation(), generation, "the refusals published");
+    assert_eq!(raw.pending_intent_records(), 1, "acknowledged groups");
+    drop(raw);
+    let mut volume = matrix::open_mode(image, pages, MountMode::Recovery);
+    assert_eq!(
+        volume.generation(),
+        generation + 1,
+        "recovery publishes one checkpoint"
+    );
+    file_bytes(&mut volume, anchor, &original, "recovered fixture");
+    let durable = volume.lookup_root("durable").unwrap().unwrap();
+    file_bytes(&mut volume, durable, b"", "recovered fixture");
+    assert_eq!(
+        volume.lookup_root("staged").unwrap(),
+        None,
+        "an unlogged operation survived the remount"
+    );
+    for index in 0..pads {
+        assert_eq!(
+            volume.lookup_root(&format!("pad-{index:02}")).unwrap(),
+            None,
+            "an unlogged pad survived the remount"
+        );
+    }
+    assert_eq!(
+        volume.list_root().unwrap().len(),
+        3,
+        "recovered root entries"
+    );
+    matrix::assert_checker_clean(volume.device_mut(), "recovered fixture");
+
+    // Freeing the filler and reclaiming its blocks admits the same two calls.
+    let mut volume = matrix::open(volume.into_device(), pages);
+    volume.delete_file_in_root("filler", ts(6)).unwrap();
+    volume.set_reclaim_batch_blocks(1024);
+    let mut commits = 2;
+    while volume.available_blocks() < 128 {
+        volume.reclaim_step(ts(7)).unwrap();
+        volume.create_file_in_root("scratch", b"", ts(7)).unwrap();
+        volume.delete_file_in_root("scratch", ts(7)).unwrap();
+        commits += 3;
+    }
+    volume
+        .window_write_file_at(anchor, 0, &vec![RETRY_VALUE; REFUSED_BLOCKS * BS], ts(8))
+        .unwrap();
+    volume
+        .window_truncate_file(anchor, REFUSED_SIZE, ts(8))
+        .unwrap();
+    volume.window_fsync().unwrap();
+    let logged = volume.into_device();
+    let raw = matrix::open_mode(logged.clone(), pages, MountMode::NoChanges);
+    assert_eq!(raw.pending_intent_records(), 1, "retried group");
+    drop(raw);
+    let mut recovered = matrix::open_mode(logged, pages, MountMode::Recovery);
+    file_bytes(
+        &mut recovered,
+        anchor,
+        &vec![RETRY_VALUE; EXPECTED_RETRY_SIZE],
+        "window update retry",
+    );
+    assert_eq!(
+        recovered.stat(anchor).unwrap().unwrap().size_bytes,
+        EXPECTED_RETRY_SIZE as u64,
+        "retried size"
+    );
+    let durable = recovered.lookup_root("durable").unwrap().unwrap();
+    file_bytes(&mut recovered, durable, b"", "window update retry");
+    assert_eq!(
+        recovered.list_root().unwrap().len(),
+        2,
+        "root entries after the corrective step"
+    );
+    assert_eq!(
+        recovered.lookup_root("filler").unwrap(),
+        None,
+        "the corrective step removed the filler"
+    );
+    matrix::assert_checker_clean(recovered.device_mut(), "window update retry");
+    let mut again = matrix::open(recovered.into_device(), pages);
+    file_bytes(
+        &mut again,
+        anchor,
+        &vec![RETRY_VALUE; EXPECTED_RETRY_SIZE],
+        "window update remount",
+    );
+    matrix::assert_checker_clean(again.device_mut(), "window update remount");
+    eprintln!("window update refusals pages={pages} corrective_commits={commits}");
+}
+
 // -------------------------------- measured staged-node demands of the commits
 
 /// Root directory, object map and allocation root of the replay commit.
@@ -940,3 +1144,4 @@ crate::profile_tests!(replace_replay_eviction, |pages| matrix::replay_eviction(
     &OrphanReplacingRename,
     pages
 ));
+crate::profile_tests!(update_refusals, |pages| window_update_refusals(pages));

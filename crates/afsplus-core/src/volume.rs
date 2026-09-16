@@ -6071,6 +6071,11 @@ impl<D: BlockDevice> Volume<D> {
         let end_block = end_offset.div_ceil(block_size);
         let block_count = end_block - first_block;
 
+        // Set before the first replacement-block write: until then the call
+        // has changed no staged operation and issued no write, so a refusal
+        // is a preflight refusal that keeps the whole window (ADR-037 and
+        // testing/intent-log-write-truncate-qualification.md).
+        let mut mutated = false;
         let result = (|| {
             let mut blocks = Vec::with_capacity(block_count as usize);
             for logical_block in first_block..end_block {
@@ -6118,6 +6123,7 @@ impl<D: BlockDevice> Volume<D> {
                     let block = block_iter.next().ok_or_else(|| {
                         CoreError::Corrupt("logged write block count mismatch".into())
                     })?;
+                    mutated = true;
                     if let Err(error) = self
                         .dev
                         .write_block(extent.physical_start + physical_offset, block)
@@ -6200,6 +6206,10 @@ impl<D: BlockDevice> Volume<D> {
                 self.window = Some(window);
                 Ok(())
             }
+            Err(error) if !mutated => {
+                self.window = Some(window);
+                Err(error)
+            }
             Err(error) => {
                 self.window_poisoned = true;
                 self.flight_window_event(
@@ -6273,6 +6283,9 @@ impl<D: BlockDevice> Volume<D> {
         }
         let current_extents = window.pending.file_layouts[&object_id].extents.clone();
         let block_size = self.dev.block_size() as u64;
+        // Set before the replacement tail block is written; see
+        // `window_write_file_at_untraced` for the preflight-refusal rule.
+        let mut mutated = false;
         let result = (|| {
             let mut logical_start = 0;
             let mut extents = Vec::new();
@@ -6299,6 +6312,7 @@ impl<D: BlockDevice> Volume<D> {
                         zeroed,
                         window.generation,
                     );
+                    mutated = true;
                     if let Err(error) = self.dev.write_block(physical_start, &block) {
                         self.flight_data_event(
                             crate::flight::EventKind::DataWriteFailed,
@@ -6348,6 +6362,10 @@ impl<D: BlockDevice> Volume<D> {
             Ok(()) => {
                 self.window = Some(window);
                 Ok(())
+            }
+            Err(error) if !mutated => {
+                self.window = Some(window);
+                Err(error)
             }
             Err(error) => {
                 self.window_poisoned = true;

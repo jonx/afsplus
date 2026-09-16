@@ -60,6 +60,13 @@ point must preserve the entire open window, including every logged group and
 unlogged operation. It performs no writes or barriers. A later valid operation
 and fsync must preserve the same bytes as execution without the refused request.
 
+`window_write_file_at` and `window_truncate_file` share that boundary. Each
+builds its complete replacement blocks and allocates fresh physical extents
+before it writes anything, so a refusal that reaches neither the first
+replacement-block write nor the staged bookkeeping preserves the entire open
+window and performs no write and no barrier. A resource refusal of either call
+belongs to this class.
+
 After mutation, failure to construct the corresponding log record requires
 remount before further mutation; a writable window cannot discard that mutated
 operation's bookkeeping. This follows the existing uncertain-window rule and
