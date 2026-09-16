@@ -35,10 +35,10 @@ directory are linked relative to this file; core tests use explicit paths.
 | Snapshot registry create/delete | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `snapshot_create_and_delete_publication_cuts_preserve_exact_membership_and_bytes`, `uncertain_snapshot_publication_blocks_mutation_and_remount_resolves_membership`; [family_matrix_snapshot.rs](family_matrix_snapshot.rs): registry create and delete families, `admission_limits` | U: membership/bytes/cuts/poison; P normal create/delete and busy refusal in flight test; P: membership, live and captured bytes at every modeled cut, a fault at every recorded write and flush with same-handle retries, both ambiguous modes, a wide-root create whose measured demand is two nodes, and the admission-limit, busy and missing-identity refusals with zero writes and flushes | None beyond the measured limits stated in [Residual persistent snapshot combinations](#residual-persistent-snapshot-combinations) |
 | Snapshot lifetime / maintenance / selectable older view | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `constrained_tree_profiles_preserve_snapshots_and_shared_survivors`, `last_snapshot_deletion_preserves_older_selectable_view_during_the_next_write`; [family_matrix_snapshot.rs](family_matrix_snapshot.rs): maintenance and release families, `previous_slot_protection` | P: 192-entry spilled batch, exact captured bytes, clone survivor, both checkpoints; U: last-view deletion safety; P: maintenance-step and last-view release cuts, faults at every write and flush, both ambiguous modes, and the unreadable previous-slot registry refusing an optional in-place write with the exact old bytes preserved | None beyond the measured limits stated in [Residual persistent snapshot combinations](#residual-persistent-snapshot-combinations) |
 | Snapshot mount/recovery | [core src/volume/snapshots/tests.rs](../../afsplus-core/src/volume/snapshots/tests.rs): `public_snapshot_mount_recovery_cuts_preserve_acknowledged_live_and_historical_bytes`, `public_snapshot_mount_validates_admission_before_pending_recovery_writes`; [family_matrix_snapshot.rs](family_matrix_snapshot.rs): `mount_recovery`, `admission_before_recovery` | U: exact acknowledged live/historical state, bounded admission; P: two durable groups over a captured file with logging cuts, exhaustive recovery cuts, a second recovery of every image, the recovery fault matrix, and 20 invalid-admission refusals across the four mount modes behind a device that refuses every write and flush | None beyond the measured limits stated in [Residual persistent snapshot combinations](#residual-persistent-snapshot-combinations) |
-| Reclaim queue seal/consume/cursor and allocation rotation | [reclaim.rs](reclaim.rs): `crash_matrix_over_a_sealing_transaction`, `crash_matrix_over_segment_consumption_and_disappearance`, `crash_matrix_over_a_mid_run_cursor_advance`; [core src/volume.rs](../../afsplus-core/src/volume.rs): `allocation_cache_keeps_spilled_nodes_across_checkpoint_rotation` | P: sealing/consumption/cursor cuts with literal free/pending accounting and namespace bytes; P: allocation rotation with a retained snapshot and a shared run, exact live/captured/per-checkpoint bytes, spills at 2/4/8; [family_matrix_reclaim.rs](family_matrix_reclaim.rs): reclaim-step faults with same-handle retry, ambiguous publication and retained snapshot, promotion across eight allocation-root leaves with spills at 2/4/8 and sampled cuts, spilled create batch with two allocation-root nodes and sampled cuts | The mid-run cursor transition, whose fixture shape is outside the family driver's persistent-snapshot format, where the recorded step promotes no block; cuts of the multi-round rotation batch, whose allocation-rover control belongs to the core crate |
+| Reclaim queue seal/consume/cursor and allocation rotation | [reclaim.rs](reclaim.rs): `crash_matrix_over_a_sealing_transaction`, `crash_matrix_over_segment_consumption_and_disappearance`, `crash_matrix_over_a_mid_run_cursor_advance`; [core src/volume.rs](../../afsplus-core/src/volume.rs): `allocation_cache_keeps_spilled_nodes_across_checkpoint_rotation` | P: sealing/consumption/cursor cuts with literal free/pending accounting and namespace bytes; P: allocation rotation with a retained snapshot and a shared run, exact live/captured/per-checkpoint bytes, spills at 2/4/8; [family_matrix_reclaim.rs](family_matrix_reclaim.rs): reclaim-step faults with same-handle retry, ambiguous publication and retained snapshot, promotion across eight allocation-root leaves with spills at 2/4/8 and sampled cuts, spilled create batch with two allocation-root nodes and sampled cuts | None beyond the seeded subsets the rotation cut campaign draws for each flush segment above twelve writes |
 | Low-space refusal and progress | [allocation_pressure.rs](allocation_pressure.rs): `near_full_enospc_publishes_nothing_and_delete_can_recover_space`, `repeated_near_full_cow_and_reclaim_preserve_shared_survivors`, `near_full_delete_survives_every_modeled_power_cut` | P: deterministic no-write ENOSPC, same-size retry after reclaim, near-full COW/reclaim cycles with shared survivors; U: near-full delete cuts; [family_matrix_low_space.rs](family_matrix_low_space.rs): P near-full delete cuts, faults and ambiguous publication, forced eviction with two-page spills, ENOSPC of a spilled 64-file batch with unreachable provisional writes and a reclaim-drained retry | Eviction at four and eight pages, above the three-node demand |
-| COW tree spill/reload component | [core src/cow_tree.rs](../../afsplus-core/src/cow_tree.rs) staged-tree tests | 2/4/8 component: staged-node bounds/spill/reload | Reload read failures in the snapshot registry; total-heap limits |
-| Common uncertain commit tail | [faults.rs](faults.rs): `uncertain_checkpoint_publication_requires_remount_before_more_writes`, `completed_checkpoint_write_and_adoption_read_errors_block_mutations`; [core tests/flight.rs](../../afsplus-core/tests/flight.rs) | U semantic poisoning/reconciliation; P observed/unobserved failure equality; P family-matrix ambiguous modes for the in-place write, orphan insertion and cleanup, reclaim step and near-full delete with exact live, remounted and captured state | The staged directory delete, the three baseline symlink publication paths, the deep split, the deep cross-directory rename, the single create, mkdir and rmdir paths, the three symlink paths at the maximum target length, orphan cleanup with ordinary allocation exhausted, and the three reload-failure fixtures |
+| COW tree spill/reload component | [core src/cow_tree.rs](../../afsplus-core/src/cow_tree.rs) staged-tree tests | 2/4/8 component: staged-node bounds/spill/reload | Total-heap limits, above the measured staged demand of three nodes of the largest snapshot-registry mutation the API admits |
+| Common uncertain commit tail | [faults.rs](faults.rs): `uncertain_checkpoint_publication_requires_remount_before_more_writes`, `completed_checkpoint_write_and_adoption_read_errors_block_mutations`; [core tests/flight.rs](../../afsplus-core/tests/flight.rs) | U semantic poisoning/reconciliation; P observed/unobserved failure equality; P family-matrix ambiguous modes for the in-place write, orphan insertion and cleanup, reclaim step and near-full delete with exact live, remounted and captured state | None |
 
 ## Scope and interpretation
 
@@ -1072,3 +1072,55 @@ cargo fmt --all -- --check
 cargo clippy --offline -p afsplus-check --all-features --tests -- -D warnings
 make check-docs
 ```
+
+## Residual cursor, registry and uncertain-tail family matrix
+
+[family_matrix_tail_residuals.rs](family_matrix_tail_residuals.rs) closes the
+mid-run reclaim cursor transition, the snapshot-registry reload read failures
+and the ambiguous commit tail of the fifteen families the uncertain-tail row
+names; 74 tests pass.
+
+The cursor fixture takes its snapshot ahead of every block the transition
+reclaims and puts one filler commit behind a three-block run, so a recorded
+step with a batch of three blocks promotes into that run and stops inside it.
+Each image reads the consumed-block offset of the queue head out of the
+selected checkpoint's reclaim root, which is the literal that distinguishes
+the two allowed states as sharply as the free and pending counts do.
+
+| Family and part | Oracle | Modeled count per profile | Deliberate limit |
+|---|---|---|---|
+| Mid-run reclaim cursor, cuts and faults | 256-block image with four inline entries, three segment and eight table references; the complete root enumeration of `anchor` and `filler`, the literal anchor bytes with an EOF sentinel, free and pending accounting of (208, 18) before and (209, 20) after, and a consumed-block offset of 0 before and 2 after | 6 writes and 2 flushes with a 5-write tail; 115 cut images (111/4) with a 12-write budget; 8 faults (6 writes, 2 flushes) and 6 same-handle retries | Single-region fixture with one three-block run |
+| Mid-run reclaim cursor, retained view and ambiguous publication | The snapshot taken ahead of the reclaimed blocks keeps the anchor's captured metadata and bytes through every image; both ambiguous modes poison with no I/O and remount to exactly one publication | 115 cut images, 8 faults, 6 same-handle retries, 2 ambiguous cases | Memory device |
+| Snapshot registry deletion at the admission limit | A registry of 128 identities, which is the view admission limit the API enforces, over one captured subject file; the deletion of the middle identity leaves the exact ascending membership, the literal subject bytes, one root entry and an unreachable removed view exactly at delta 1 | Staged demand of 3 nodes with zero spills at 4, 8 and unlimited pages; two pages report one spill write with a peak of 2 | Three nodes is the ceiling of the largest registry mutation the API admits |
+| Snapshot registry deletion, reload read failures | Sixteen of the 32 reads of the spilling deletion fail one at a time; every refused attempt selects an allowed committed state with the exact membership and captured bytes, passes the checker and publishes the complete new state on a retry after remount | Two pages: 32 reads, stride 2, 16 refusals, 3 of them past the publication barrier, 1 spill write and 0 reloads | The deletion reads no provisional image back, so this fixture qualifies read failures over the spill writes it performs |
+
+The uncertain-tail families run the driver's ambiguous-publication matrix at
+2/4/8/unlimited: a completed checkpoint write that reports an error, and reads
+that fail after publication. The operation reports the error, the same
+operation and an independent create return `WindowPoisoned` with no further
+write or flush, the remount exposes exactly one publication, and a
+two-checkpoint operation retries to its final state. Each family is
+re-declared beside its home file, so its own fixture, operation and literal
+oracle apply unchanged.
+
+| Family | Home | Fixture variant | Ambiguous cases |
+|---|---|---|---|
+| Staged directory delete | [family_matrix_structure.rs](family_matrix_structure.rs) | Plain | 8 |
+| Symlink create, rename and unlink | [family_matrix_structure.rs](family_matrix_structure.rs) | Plain | 24 |
+| Deep split | [family_matrix_structure_residuals.rs](family_matrix_structure_residuals.rs) | Plain | 8 |
+| Deep cross-directory rename | [family_matrix_structure_residuals.rs](family_matrix_structure_residuals.rs) | Plain | 8 |
+| Single create, mkdir and rmdir | [family_matrix_structure_residuals.rs](family_matrix_structure_residuals.rs) | Plain | 24 |
+| Symlink create, rename and unlink at the maximum target length | [family_matrix_structure_residuals.rs](family_matrix_structure_residuals.rs) | Plain | 24 |
+| Orphan cleanup with ordinary allocation exhausted | [family_matrix_reclaim_residuals.rs](family_matrix_reclaim_residuals.rs) | Exhausted | 8 |
+| Extent-map write reload fixture | [family_matrix_reclaim_residuals.rs](family_matrix_reclaim_residuals.rs) | Plain | 8 |
+| Object-map replacement reload fixture | [family_matrix_reclaim_residuals.rs](family_matrix_reclaim_residuals.rs) | Eviction | 8 |
+| Allocation-root promotion reload fixture | [family_matrix_reclaim_residuals.rs](family_matrix_reclaim_residuals.rs) | Plain | 8 |
+
+The deep cross-directory rename, the orphan cleanup and the object-map
+replacement publish two checkpoints, so their ambiguous images retry to the
+final state; the other twelve publish one.
+
+Negative controls, one per fixture family: a wrong free-block literal in the
+cursor fixture, a shifted registry membership in the registry fixture, and a
+root-entry count one too high in the re-declared symlink create. All three
+fail their test, and the sources are restored from the commit afterwards.
