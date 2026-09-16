@@ -96,21 +96,7 @@ impl Format {
 
 /// Mounts read-write with the explicit profile and asserts it took effect.
 pub fn open<D: BlockDevice>(device: D, pages: usize) -> Volume<D> {
-    let volume = mount_with_snapshot_limits(
-        device,
-        MountOptions {
-            mode: MountMode::ReadWrite,
-            tree_cache_pages: NonZeroUsize::new(pages),
-        },
-        SnapshotWorkLimits {
-            max_edit_records: 4096,
-            max_views: 128,
-            reclaim_records: 8,
-        },
-    )
-    .unwrap();
-    assert_eq!(volume.tree_cache_pages(), pages);
-    volume
+    open_mode(device, pages, MountMode::ReadWrite)
 }
 
 /// Rejects checker errors and every warning except a stopped intent-log tail,
@@ -1009,4 +995,616 @@ macro_rules! profile_tests {
             }
         }
     };
+}
+
+/// Mounts with an explicit mount mode and profile and asserts the profile.
+pub fn open_mode<D: BlockDevice>(device: D, pages: usize, mode: MountMode) -> Volume<D> {
+    try_open_mode(device, pages, mode).unwrap()
+}
+
+/// Mount attempt that reports its error, for recovery under injected faults.
+pub fn try_open_mode<D: BlockDevice>(
+    device: D,
+    pages: usize,
+    mode: MountMode,
+) -> Result<Volume<D>, CoreError> {
+    let volume = mount_with_snapshot_limits(
+        device,
+        MountOptions {
+            mode,
+            tree_cache_pages: NonZeroUsize::new(pages),
+        },
+        SnapshotWorkLimits {
+            max_edit_records: 4096,
+            max_views: 128,
+            reclaim_records: 8,
+        },
+    )?;
+    assert_eq!(volume.tree_cache_pages(), pages);
+    Ok(volume)
+}
+
+/// One family whose work is acknowledged by intent-log fsync groups and
+/// published by the recovery transaction of the next mount. The oracle is the
+/// acknowledged-prefix protocol: the groups whose records reached media
+/// survive, later staged work may be absent, and nothing else is admissible.
+pub trait ReplayFamily {
+    type State;
+
+    fn name(&self) -> &'static str;
+    /// The image; `log_slots` must be nonzero for a family of this kind.
+    fn format(&self, variant: Variant) -> Format;
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, variant: Variant) -> Self::State;
+    /// A snapshot taken inside `setup`; otherwise the driver takes one after it.
+    fn snapshot(&self, _state: &Self::State) -> Option<u64> {
+        None
+    }
+    fn captured(&self, state: &Self::State) -> Vec<(u64, Vec<u8>)>;
+    /// Number of fsync groups the family makes durable.
+    fn groups(&self) -> usize;
+    /// Stages group `index` and makes it durable; publishes no checkpoint.
+    fn log_group<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &Self::State,
+        index: usize,
+    ) -> Result<(), CoreError>;
+    /// Asserts the exact state once `acknowledged` groups are recovered.
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &Self::State,
+        variant: Variant,
+        acknowledged: usize,
+        context: &str,
+    );
+    /// Literal resident staged-node demand of the recovery commit, observed
+    /// at the unlimited profile.
+    fn eviction_demand(&self) -> u64 {
+        panic!("{} declares no eviction variant", self.name())
+    }
+}
+
+pub struct ReplayRecording<S> {
+    /// Committed fixture before any group is logged.
+    pub base: MemoryBackend,
+    pub state: S,
+    pub generation: u64,
+    pub captured: Option<Captured>,
+    /// Device operations of the logging phase.
+    pub log: Vec<RecordedOp>,
+    /// Image in which every group is acknowledged and none is published.
+    pub logged: MemoryBackend,
+    /// Device operations of the recovery transaction over `logged`.
+    pub recovery: Vec<RecordedOp>,
+    pub spills: u64,
+    pub peak: u64,
+}
+
+fn replay_prepare<F: ReplayFamily>(
+    family: &F,
+    pages: usize,
+    variant: Variant,
+) -> (MemoryBackend, F::State, u64, Option<Captured>) {
+    let context = format!("{} {variant:?} pages={pages} fixture", family.name());
+    let format = family.format(variant);
+    assert!(format.log_slots > 0, "{context}: replay needs log slots");
+    let mut volume = open(format.device(), pages);
+    let state = family.setup(&mut volume, variant);
+    let captured = (variant == Variant::Retained).then(|| {
+        let snapshot = family
+            .snapshot(&state)
+            .unwrap_or_else(|| volume.snapshot_create(ts(900)).unwrap());
+        let view = volume.snapshot_open(snapshot).unwrap();
+        let objects = family
+            .captured(&state)
+            .into_iter()
+            .map(|(id, bytes)| {
+                let metadata = volume
+                    .snapshot_stat(&view, id)
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{context}: object {id} is not captured"));
+                (id, metadata, bytes)
+            })
+            .collect();
+        Captured { snapshot, objects }
+    });
+    let generation = volume.generation();
+    family.verify(&mut volume, &state, variant, 0, &context);
+    verify_captured(&mut volume, &captured, &context);
+    let mut base = volume.into_device();
+    assert_checker_clean(&mut base, &context);
+    (base, state, generation, captured)
+}
+
+/// Logs every group, checks that logging publishes no checkpoint, and records
+/// the recovery transaction that publishes them all.
+pub fn record_replay<F: ReplayFamily>(
+    family: &F,
+    pages: usize,
+    variant: Variant,
+) -> ReplayRecording<F::State> {
+    let (base, state, generation, captured) = replay_prepare(family, pages, variant);
+    let context = format!("{} {variant:?} pages={pages} logging", family.name());
+    let groups = family.groups();
+    let mut volume = open(RecordingBackend::new(base.clone()), pages);
+    for index in 0..groups {
+        family
+            .log_group(&mut volume, &state, index)
+            .unwrap_or_else(|error| panic!("{context}: group {index}: {error}"));
+        assert_eq!(
+            volume.window_unlogged_ops(),
+            0,
+            "{context}: group {index} is not durable"
+        );
+        assert_eq!(
+            volume.generation(),
+            generation,
+            "{context}: logging published a checkpoint"
+        );
+    }
+    let (logged, log) = volume.into_device().into_parts();
+    let writes = log
+        .iter()
+        .filter(|operation| matches!(operation, RecordedOp::Write { .. }))
+        .count();
+    let raw = open_mode(logged.clone(), pages, MountMode::NoChanges);
+    assert_eq!(raw.generation(), generation, "{context}: raw generation");
+    assert_eq!(
+        raw.pending_intent_records() as usize,
+        groups,
+        "{context}: acknowledged records"
+    );
+    drop(raw);
+    let context = format!("{} {variant:?} pages={pages} recovery", family.name());
+    let mut recovered = open_mode(
+        RecordingBackend::new(logged.clone()),
+        pages,
+        MountMode::Recovery,
+    );
+    assert_eq!(
+        recovered.generation(),
+        generation + 1,
+        "{context}: recovery publishes one checkpoint"
+    );
+    assert_eq!(recovered.pending_intent_records(), 0, "{context}");
+    let stats = recovered.last_commit_stats().unwrap().tree_mutations;
+    let (spills, peak) = (stats.staged_spill_writes, stats.max_resident_staged_nodes);
+    family.verify(&mut recovered, &state, variant, groups, &context);
+    verify_captured(&mut recovered, &captured, &context);
+    let (after, recovery) = recovered.into_device().into_parts();
+    let recovery_writes = recovery
+        .iter()
+        .filter(|operation| matches!(operation, RecordedOp::Write { .. }))
+        .count();
+    eprintln!(
+        "{context}: groups={groups} log_writes={writes} log_flushes={} recovery_writes={recovery_writes} recovery_flushes={} recovery_tail={} spills={spills} peak_staged={peak}",
+        log.len() - writes,
+        recovery.len() - recovery_writes,
+        longest_unflushed_tail(&recovery)
+    );
+    assert!(peak <= pages as u64, "{context}: staged nodes {peak}");
+    if variant == Variant::Eviction {
+        let demand = family.eviction_demand();
+        if pages == usize::MAX {
+            assert_eq!((spills, peak), (0, demand), "{context}: unlimited demand");
+        } else if demand > pages as u64 {
+            assert!(spills > 0, "{context}: demand {demand} must spill");
+        } else {
+            assert_eq!(spills, 0, "{context}: demand {demand} fits the profile");
+        }
+    }
+    let mut remounted = open(after, pages);
+    assert_eq!(remounted.generation(), generation + 1, "{context}: remount");
+    family.verify(&mut remounted, &state, variant, groups, &context);
+    verify_captured(&mut remounted, &captured, &context);
+    assert_checker_clean(remounted.device_mut(), &context);
+    ReplayRecording {
+        base,
+        state,
+        generation,
+        captured,
+        log,
+        logged,
+        recovery,
+        spills,
+        peak,
+    }
+}
+
+/// Recovers `image`, recovers the result again, and requires both mounts to
+/// expose exactly `acknowledged` groups with a stable generation.
+fn recover_twice<F: ReplayFamily>(
+    family: &F,
+    recording: &ReplayRecording<F::State>,
+    pages: usize,
+    variant: Variant,
+    image: MemoryBackend,
+    acknowledged: usize,
+    context: &str,
+) {
+    let published = u64::from(acknowledged > 0);
+    let mut recovered = open_mode(image, pages, MountMode::Recovery);
+    assert_eq!(
+        recovered.generation(),
+        recording.generation + published,
+        "{context}: recovered generation"
+    );
+    assert_eq!(recovered.pending_intent_records(), 0, "{context}: pending");
+    family.verify(
+        &mut recovered,
+        &recording.state,
+        variant,
+        acknowledged,
+        context,
+    );
+    verify_captured(&mut recovered, &recording.captured, context);
+    assert_checker_clean(recovered.device_mut(), context);
+    let mut again = open_mode(recovered.into_device(), pages, MountMode::Recovery);
+    assert_eq!(
+        again.generation(),
+        recording.generation + published,
+        "{context}: repeated recovery generation"
+    );
+    assert_eq!(again.pending_intent_records(), 0, "{context}: repeated");
+    family.verify(&mut again, &recording.state, variant, acknowledged, context);
+    verify_captured(&mut again, &recording.captured, context);
+    assert_checker_clean(again.device_mut(), context);
+}
+
+/// Every modeled cut of the logging phase, including cuts inside an
+/// intent-group publication. The acknowledged record count of the image names
+/// the allowed state; recovery and a second recovery must reach exactly it.
+pub fn replay_cuts<F: ReplayFamily>(
+    family: &F,
+    recording: &ReplayRecording<F::State>,
+    pages: usize,
+    variant: Variant,
+    budget: usize,
+) {
+    let groups = family.groups();
+    let mut outcomes = vec![0u64; groups + 1];
+    for cut in 0..=recording.log.len() {
+        for_each_crash_state_with_budget(&recording.base, &recording.log, cut, budget, |state| {
+            let context = format!(
+                "{} {variant:?} pages={pages} logging: {}",
+                family.name(),
+                state.description
+            );
+            let mut image = state.image;
+            assert_checker_clean(&mut image, &context);
+            let raw = open_mode(image, pages, MountMode::NoChanges);
+            assert_eq!(
+                raw.generation(),
+                recording.generation,
+                "{context}: logging published a checkpoint"
+            );
+            let acknowledged = raw.pending_intent_records() as usize;
+            assert!(acknowledged <= groups, "{context}: {acknowledged} records");
+            outcomes[acknowledged] += 1;
+            recover_twice(
+                family,
+                recording,
+                pages,
+                variant,
+                raw.into_device(),
+                acknowledged,
+                &context,
+            );
+        });
+    }
+    assert!(
+        outcomes[0] > 0 && outcomes[groups] > 0,
+        "{} {variant:?} pages={pages}: both outcomes required {outcomes:?}",
+        family.name()
+    );
+    eprintln!(
+        "{} {variant:?} pages={pages}: logging cuts budget={budget} acknowledged={outcomes:?} images={}",
+        family.name(),
+        outcomes.iter().sum::<u64>()
+    );
+}
+
+/// Every modeled cut of the recovery transaction over the fully acknowledged
+/// image. Each cut exposes the pre- or post-publication checkpoint, and a
+/// recovery and a second recovery reach the complete acknowledged state.
+pub fn recovery_cuts<F: ReplayFamily>(
+    family: &F,
+    recording: &ReplayRecording<F::State>,
+    pages: usize,
+    variant: Variant,
+    budget: usize,
+) {
+    let groups = family.groups();
+    let mut outcomes = [0u64; 2];
+    for cut in 0..=recording.recovery.len() {
+        for_each_crash_state_with_budget(
+            &recording.logged,
+            &recording.recovery,
+            cut,
+            budget,
+            |state| {
+                let context = format!(
+                    "{} {variant:?} pages={pages} recovery: {}",
+                    family.name(),
+                    state.description
+                );
+                let mut image = state.image;
+                assert_checker_clean(&mut image, &context);
+                let raw = open_mode(image, pages, MountMode::NoChanges);
+                let published = match raw.generation() {
+                    generation if generation == recording.generation => false,
+                    generation if generation == recording.generation + 1 => true,
+                    generation => panic!("{context}: disallowed generation {generation}"),
+                };
+                assert_eq!(
+                    raw.pending_intent_records() as usize,
+                    if published { 0 } else { groups },
+                    "{context}: pending records"
+                );
+                outcomes[usize::from(published)] += 1;
+                recover_twice(
+                    family,
+                    recording,
+                    pages,
+                    variant,
+                    raw.into_device(),
+                    groups,
+                    &context,
+                );
+            },
+        );
+    }
+    assert!(
+        outcomes[0] > 0 && outcomes[1] > 0,
+        "{} {variant:?} pages={pages}: both outcomes required {outcomes:?}",
+        family.name()
+    );
+    eprintln!(
+        "{} {variant:?} pages={pages}: recovery cuts budget={budget} pre/post={outcomes:?} images={}",
+        family.name(),
+        outcomes.iter().sum::<u64>()
+    );
+}
+
+/// Seeded cut campaign over the recovery transaction, for a replay whose
+/// unflushed tail exceeds the exhaustive budget. Images: every in-order write
+/// prefix, each write torn at the representative offsets after its in-order
+/// prefix, and `sample` full-write subsets of each flush segment drawn with a
+/// SplitMix64 generator seeded by `seed` (every subset when the segment has
+/// fewer than `sample` of them). Each image recovers and recovers again to the
+/// complete acknowledged state.
+pub fn recovery_sampled_cuts<F: ReplayFamily>(
+    family: &F,
+    recording: &ReplayRecording<F::State>,
+    pages: usize,
+    variant: Variant,
+    sample: usize,
+    seed: u64,
+) {
+    let groups = family.groups();
+    let mut outcomes = [0u64; 2];
+    let mut check = |image: MemoryBackend, description: String| {
+        let context = format!(
+            "{} {variant:?} pages={pages} recovery: {description}",
+            family.name()
+        );
+        let mut image = image;
+        assert_checker_clean(&mut image, &context);
+        let raw = open_mode(image, pages, MountMode::NoChanges);
+        let published = match raw.generation() {
+            generation if generation == recording.generation => false,
+            generation if generation == recording.generation + 1 => true,
+            generation => panic!("{context}: disallowed generation {generation}"),
+        };
+        assert_eq!(
+            raw.pending_intent_records() as usize,
+            if published { 0 } else { groups },
+            "{context}: pending records"
+        );
+        outcomes[usize::from(published)] += 1;
+        recover_twice(
+            family,
+            recording,
+            pages,
+            variant,
+            raw.into_device(),
+            groups,
+            &context,
+        );
+    };
+    let mut rng = seed;
+    let (mut prefixes, mut tears, mut subsets) = (1u64, 0u64, 0u64);
+    let mut prefix = recording.logged.clone();
+    let mut durable = recording.logged.clone();
+    let mut segment: Vec<(u64, &Vec<u8>)> = Vec::new();
+    check(prefix.clone(), "in-order prefix of 0 operations".into());
+    let draw = |durable: &MemoryBackend,
+                    segment: &mut Vec<(u64, &Vec<u8>)>,
+                    rng: &mut u64,
+                    check: &mut dyn FnMut(MemoryBackend, String)|
+     -> u64 {
+        if segment.is_empty() {
+            return 0;
+        }
+        let total = 1u128 << segment.len();
+        let masks: Vec<Vec<bool>> = if total <= sample as u128 {
+            (0u128..total)
+                .map(|mask| (0..segment.len()).map(|bit| mask & (1 << bit) != 0).collect())
+                .collect()
+        } else {
+            (0..sample)
+                .map(|_| (0..segment.len()).map(|_| splitmix64(rng) & 1 == 1).collect())
+                .collect()
+        };
+        for (number, mask) in masks.iter().enumerate() {
+            let mut image = durable.clone();
+            for ((lba, data), keep) in segment.iter().zip(mask) {
+                if *keep {
+                    image.apply_raw(*lba, data);
+                }
+            }
+            check(
+                image,
+                format!("subset {number} of a {}-write segment", segment.len()),
+            );
+        }
+        masks.len() as u64
+    };
+    for (index, operation) in recording.recovery.iter().enumerate() {
+        match operation {
+            RecordedOp::Write { lba, data } => {
+                for tear in TEAR_OFFSETS.iter().filter(|tear| **tear < data.len()) {
+                    let mut image = prefix.clone();
+                    let mut torn = image.peek(*lba);
+                    torn[..*tear].copy_from_slice(&data[..*tear]);
+                    image.apply_raw(*lba, &torn);
+                    check(
+                        image,
+                        format!("write {index} (lba {lba}) torn at byte {tear}"),
+                    );
+                    tears += 1;
+                }
+                prefix.apply_raw(*lba, data);
+                segment.push((*lba, data));
+                check(
+                    prefix.clone(),
+                    format!("in-order prefix through operation {index}"),
+                );
+                prefixes += 1;
+            }
+            RecordedOp::Flush => {
+                subsets += draw(&durable, &mut segment, &mut rng, &mut check);
+                durable = prefix.clone();
+                segment.clear();
+            }
+        }
+    }
+    subsets += draw(&durable, &mut segment, &mut rng, &mut check);
+    assert!(
+        outcomes[0] > 0 && outcomes[1] > 0,
+        "{} {variant:?} pages={pages}: both outcomes required {outcomes:?}",
+        family.name()
+    );
+    eprintln!(
+        "{} {variant:?} pages={pages}: sampled recovery campaign seed={seed:#x} sample={sample} prefixes={prefixes} tears={tears} subsets={subsets} pre/post={outcomes:?} images={}",
+        family.name(),
+        outcomes.iter().sum::<u64>()
+    );
+}
+
+/// A before-write fault at every recovery write and a failure at every
+/// recovery flush. The interrupted recovery must report the error; the media
+/// then holds the writes that preceded the fault, and a later mount recovers
+/// the complete acknowledged state and keeps it stable across a second
+/// recovery.
+pub fn replay_faults<F: ReplayFamily>(
+    family: &F,
+    recording: &ReplayRecording<F::State>,
+    pages: usize,
+    variant: Variant,
+) {
+    let groups = family.groups();
+    let mut plans = Vec::new();
+    let (mut writes, mut flushes) = (0u64, 0u64);
+    let mut image = recording.logged.clone();
+    for operation in &recording.recovery {
+        match operation {
+            RecordedOp::Write { lba, data } => {
+                // The fault precedes its write, so the media holds exactly the
+                // writes recorded before this one.
+                plans.push((
+                    FaultPlan {
+                        fail_write_index: Some(writes),
+                        ..Default::default()
+                    },
+                    image.clone(),
+                ));
+                image.apply_raw(*lba, data);
+                writes += 1;
+            }
+            RecordedOp::Flush => {
+                plans.push((
+                    FaultPlan {
+                        fail_flush_index: Some(flushes),
+                        ..Default::default()
+                    },
+                    image.clone(),
+                ));
+                flushes += 1;
+            }
+        }
+    }
+    for (plan, interrupted) in &plans {
+        let context = format!("{} {variant:?} pages={pages} {plan:?}", family.name());
+        let attempt = try_open_mode(
+            FaultBackend::new(recording.logged.clone(), *plan),
+            pages,
+            MountMode::Recovery,
+        );
+        assert!(
+            attempt.is_err(),
+            "{context}: interrupted recovery must report the fault"
+        );
+        let mut image = interrupted.clone();
+        assert_checker_clean(&mut image, &context);
+        let raw = open_mode(image, pages, MountMode::NoChanges);
+        assert!(
+            raw.generation() == recording.generation
+                || raw.generation() == recording.generation + 1,
+            "{context}: disallowed generation {}",
+            raw.generation()
+        );
+        recover_twice(
+            family,
+            recording,
+            pages,
+            variant,
+            raw.into_device(),
+            groups,
+            &context,
+        );
+    }
+    eprintln!(
+        "{} {variant:?} pages={pages}: recovery faults={} writes={writes} flushes={flushes}",
+        family.name(),
+        plans.len()
+    );
+}
+
+/// Log durable groups, cut inside and after intent-group publication, recover
+/// and recover again, and compare every image against the acknowledged prefix.
+pub fn replay<F: ReplayFamily>(family: &F, pages: usize, variant: Variant, budget: usize) {
+    let recording = record_replay(family, pages, variant);
+    replay_cuts(family, &recording, pages, variant, budget);
+    recovery_cuts(family, &recording, pages, variant, budget);
+}
+
+/// Replay whose recovery tail exceeds the exhaustive budget: logging cuts,
+/// the seeded recovery campaign and the recovery fault matrix.
+pub fn replay_sampled<F: ReplayFamily>(
+    family: &F,
+    pages: usize,
+    variant: Variant,
+    budget: usize,
+    sample: usize,
+    seed: u64,
+) {
+    let recording = record_replay(family, pages, variant);
+    replay_cuts(family, &recording, pages, variant, budget);
+    recovery_sampled_cuts(family, &recording, pages, variant, sample, seed);
+    replay_faults(family, &recording, pages, variant);
+}
+
+/// Replay with the recovery fault matrix added.
+pub fn replay_with_faults<F: ReplayFamily>(
+    family: &F,
+    pages: usize,
+    variant: Variant,
+    budget: usize,
+) {
+    let recording = record_replay(family, pages, variant);
+    replay_cuts(family, &recording, pages, variant, budget);
+    recovery_cuts(family, &recording, pages, variant, budget);
+    replay_faults(family, &recording, pages, variant);
 }
