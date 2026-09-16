@@ -5,8 +5,9 @@
 
 mod common;
 
-use afsplus_block::{BlockDevice, MemoryBackend};
+use afsplus_block::{BlockDevice, MemoryBackend, TraceBackend};
 use afsplus_core::{CoreError, Volume};
+use afsplus_format::tree::{key_u64, TreeNode};
 
 use common::family_matrix::{self as matrix, ts, Family, Format, ReplayFamily, Variant, BS};
 
@@ -389,6 +390,126 @@ impl ReplayFamily for SnapshotRecovery {
     }
 }
 
+// --------------------------------------------- exhausted identity space
+
+/// Rewrites the registry control record so the identity space is exhausted:
+/// the value of key zero becomes the largest representable next identity and
+/// the tree node is resealed with its own generation.
+fn plant_exhausted_registry(image: &mut MemoryBackend, registry_block: u64) -> u64 {
+    let block = image.peek(registry_block);
+    let (mut node, generation) = TreeNode::decode(&block).expect("registry root is a tree node");
+    assert!(node.is_leaf(), "the planted registry root must be a leaf");
+    let control = node
+        .items
+        .iter_mut()
+        .find(|item| item.key == key_u64(0))
+        .expect("the registry holds a control record");
+    assert_eq!(control.value.len(), 32, "registry control value length");
+    let planted = u64::MAX;
+    control.value[..8].copy_from_slice(&planted.to_le_bytes());
+    let resealed = node
+        .encode(image.block_size(), generation)
+        .expect("resealed registry node");
+    image.apply_raw(registry_block, &resealed);
+    planted
+}
+
+/// An exhausted registry identity space refuses every further creation with
+/// no write and no flush, live and after a remount, while the registered view
+/// keeps its captured bytes and the image passes the checker.
+fn exhausted_identity_space(pages: usize) {
+    let mut volume = matrix::open(Format::new(1024, 256).device(), pages);
+    let subject = volume.create_file_in_root("subject", LIVE, ts(1)).unwrap();
+    let kept = volume.snapshot_create(ts(2)).unwrap();
+    let registry_block = volume
+        .checkpoint()
+        .snapshot_roots
+        .expect("the snapshot feature keeps roots")
+        .registry;
+    let generation = volume.generation();
+    let mut base = volume.into_device();
+    let planted = plant_exhausted_registry(&mut base, registry_block);
+    assert_eq!(planted, u64::MAX, "planted next identity");
+    matrix::assert_checker_clean(&mut base, "planted identity space");
+
+    let mut volume = matrix::open(TraceBackend::new(base.clone()), pages);
+    assert_eq!(volume.generation(), generation, "mount published");
+    assert_eq!(registry(&mut volume), vec![kept], "planted membership");
+    volume.device_mut().reset();
+    let error = volume
+        .snapshot_create(ts(3))
+        .expect_err("an exhausted identity space admits no creation");
+    assert_eq!(
+        format!("{error:?}"),
+        "Format(Overflow(\"snapshot ID exhausted\"))",
+        "refusal error"
+    );
+    let stats = volume.device_mut().stats();
+    assert_eq!((stats.writes, stats.flushes), (0, 0), "refusal issued I/O");
+    assert_eq!(volume.generation(), generation, "refusal published");
+    assert_eq!(
+        registry(&mut volume),
+        vec![kept],
+        "membership after refusal"
+    );
+    file_bytes(&mut volume, subject, EXPECTED_LIVE, "refusal");
+    captured_bytes(&mut volume, kept, subject, EXPECTED_LIVE, "refusal");
+
+    // Releasing the registered identity frees a slot but not an identity.
+    volume.snapshot_delete(kept, ts(4)).unwrap();
+    assert!(registry(&mut volume).is_empty(), "membership after release");
+    volume.device_mut().reset();
+    let error = volume
+        .snapshot_create(ts(5))
+        .expect_err("releasing a view returns no identity");
+    assert_eq!(
+        format!("{error:?}"),
+        "Format(Overflow(\"snapshot ID exhausted\"))",
+        "refusal after release"
+    );
+    let stats = volume.device_mut().stats();
+    assert_eq!(
+        (stats.writes, stats.flushes),
+        (0, 0),
+        "refusal after release issued I/O"
+    );
+    let released = volume.generation();
+    let mut after = volume.into_device().into_inner();
+    matrix::assert_checker_clean(&mut after, "after release");
+
+    // The remounted image refuses the same call with the same state.
+    let mut remounted = matrix::open(TraceBackend::new(base), pages);
+    assert_eq!(remounted.generation(), generation, "remounted generation");
+    assert_eq!(registry(&mut remounted), vec![kept], "remounted membership");
+    remounted.device_mut().reset();
+    let error = remounted
+        .snapshot_create(ts(6))
+        .expect_err("the remounted image admits no creation");
+    assert_eq!(
+        format!("{error:?}"),
+        "Format(Overflow(\"snapshot ID exhausted\"))",
+        "remounted refusal"
+    );
+    let stats = remounted.device_mut().stats();
+    assert_eq!(
+        (stats.writes, stats.flushes),
+        (0, 0),
+        "remounted refusal issued I/O"
+    );
+    file_bytes(&mut remounted, subject, EXPECTED_LIVE, "remounted refusal");
+    captured_bytes(&mut remounted, kept, subject, EXPECTED_LIVE, "remounted");
+    // Ordinary namespace work is unaffected by the exhausted identity space.
+    remounted
+        .create_file_in_root("later", b"later-bytes", ts(7))
+        .unwrap();
+    assert_eq!(remounted.generation(), generation + 1, "ordinary work");
+    let mut worked = remounted.into_device().into_inner();
+    matrix::assert_checker_clean(&mut worked, "ordinary work");
+    eprintln!(
+        "exhausted identity space pages={pages} planted_next_id={planted} released_generation={released} refusals=3"
+    );
+}
+
 // -------------------------------- measured staged-node demands of the commits
 
 const MAINTENANCE_DEMAND: u64 = 2;
@@ -409,3 +530,4 @@ crate::profile_tests!(mount_recovery_eviction, |pages| matrix::replay_eviction(
     &SnapshotRecovery,
     pages
 ));
+crate::profile_tests!(identity_exhaustion, |pages| exhausted_identity_space(pages));
