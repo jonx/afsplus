@@ -59,7 +59,8 @@ class ScenarioTests(unittest.TestCase):
             {"op": "window_fsync"}, {"op": "window_commit"}]
         value["expected"] = [
             {"path": ["alias"], "kind": "file", "links": 1, "protection": 0, "alias": 0,
-             "policy": False, "data": "0102", "alloc": None},
+             "policy": False, "data": "0102",
+             "alloc": [{"offset": 0, "length": 4096, "unwritten": False}]},
             {"path": ["c"], "kind": "file", "links": 1, "protection": 0, "alias": 1, "policy": True,
              "data": "0102", "alloc": [{"offset": 0, "length": 4096, "unwritten": False},
                                        {"offset": 4096, "length": 8192, "unwritten": True}]},
@@ -115,6 +116,7 @@ class ScenarioTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=key):
                 scenario.validate(json.dumps(dict(value, **{key: bad})).encode())
         for index, changes in ((0, {"links": 0}), (0, {"alias": 4}), (2, {"data": "00"}),
+                               (0, {"alloc": None}),
                                (3, {"target": ""}), (3, {"protection": True}), (0, {"policy": 1}),
                                (1, {"alloc": [{"offset": 1, "length": 4096, "unwritten": False}]}),
                                (1, {"alloc": [{"offset": 0, "length": 4096, "unwritten": False},

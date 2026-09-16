@@ -26,7 +26,8 @@ CONTROLS = {"window": ("window-byte",), "snapshot": ("snapshot-entry",),
             "replace": ("replaced-byte",), "orphan": ("orphan-count", "orphan-bytes"),
             "space": ("reservation", "policy-flag"),
             "batch": ("batch-path", "orphan-count", "orphan-bytes"),
-            "maintenance": ("maintenance-entry",), "captured": ("captured-coverage",)}
+            "maintenance": ("maintenance-entry",),
+            "captured": ("captured-coverage", "clone-changed")}
 # Version-9 volume feature and orphan cleanup budget per family.
 FAMILY_POLICY = {"space": True}
 FAMILY_ORPHAN_EXTENTS = {"orphan": 2}
@@ -228,8 +229,6 @@ def coverage(blocks):
     depends on which logical bytes are reserved and whether they read as
     zeros, never on extent record boundaries or physical placement.
     """
-    if blocks is None:
-        return None
     merged = []
     for block in sorted(blocks):
         flag = blocks[block]
@@ -329,6 +328,9 @@ class ObjectModel:
         self.views = {}
         self.handles = set()
         self.clones = set()
+        # Sources whose layout a CloneRange marked, and whose change time
+        # therefore moved with that call.
+        self.clone_sources = set()
         self.moved = set()
         # Version-9 state: reserved-directory members, per-file policy and the
         # cleanup budget in whole extent records (ADR-066).
@@ -442,7 +444,8 @@ class ObjectModel:
             extra = {}
             if kind == "create":
                 data = bytearray.fromhex(op["data"])
-                extra = {"data": data, "blocks": {block: False for block in range(-(-len(data) // BLOCK))}}
+                extra = {"data": data, "shared": set(),
+                         "blocks": {block: False for block in range(-(-len(data) // BLOCK))}}
             elif kind == "symlink":
                 extra = {"target": op["target"]}
             identity = self._new({"create": "file", "mkdir": "directory", "symlink": "symlink"}[kind], now, **extra)
@@ -460,7 +463,10 @@ class ObjectModel:
             # modification time into a new object with its own link and birth time.
             identity = self._new("file", now, protection=source["protection"], modified=source["modified"],
                                  data=bytearray(source["data"]), policy=False,
-                                 blocks=None if source["blocks"] is None else dict(source["blocks"]))
+                                 blocks=dict(source["blocks"]), shared=set(source["blocks"]))
+            # CloneFile flags every source run shared and rewrites the source
+            # record, so the source change time moves with every call.
+            source["shared"] = set(source["blocks"])
             source["changed"] = now
             self.clones.add(identity)
             self._bind(op, identity, now)
@@ -473,13 +479,39 @@ class ObjectModel:
                 raise ValueError("model clone range alignment or source bound")
             if length:
                 self.generation += 1
-                overwrite(destination["data"], target, bytes(source["data"][start:start + length]))
-                destination.update(modified=now, changed=now, generation=self.generation, blocks=None)
                 end = target + length
-                if min(-(-target // BLOCK) * BLOCK, end) < end - end % BLOCK:
-                    # Sharing complete blocks may rewrite the source layout; that
-                    # change time depends on the source layout and is not modeled.
-                    source["changed"] = None
+                first, last = target // BLOCK, -(-end // BLOCK)
+                # Complete destination blocks share the corresponding source
+                # blocks, so a source hole stays a hole. The at most two partial
+                # boundary blocks are copied into private storage, whatever the
+                # destination held there before.
+                full_start = min(target + -target % BLOCK, end)
+                full_end = end - end % BLOCK
+                whole = range(full_start // BLOCK, full_end // BLOCK) if full_start < full_end else range(0)
+                origin = (start + (full_start - target)) // BLOCK
+                blocks = {block: flag for block, flag in destination["blocks"].items()
+                          if block < first or block >= last}
+                shared = {block for block in destination["shared"] if block < first or block >= last}
+                for block in range(first, last):
+                    if block not in whole:
+                        blocks[block] = False
+                        continue
+                    origin_block = origin + block - whole.start
+                    if origin_block in source["blocks"]:
+                        blocks[block] = source["blocks"][origin_block]
+                        shared.add(block)
+                # The source layout is rewritten exactly when a mapped block of
+                # the shared range gains the flag, and that rewrite carries the
+                # source change time without touching its modification time.
+                marked = {block for block in range(origin, origin + len(whole))
+                          if block in source["blocks"] and block not in source["shared"]}
+                if marked:
+                    source["shared"] |= marked
+                    source["changed"] = now
+                    self.clone_sources.add(self.names[op["source"]]["object"])
+                overwrite(destination["data"], target, bytes(source["data"][start:start + length]))
+                destination.update(modified=now, changed=now, generation=self.generation,
+                                   blocks=blocks, shared=shared)
                 self.clones.add(self.names[op["destination"]]["object"])
         elif kind in ("write", "truncate"):
             node = self._live(op["label"], "file")
@@ -498,16 +530,23 @@ class ObjectModel:
                 touched = set()
             self.generation += 1
             node.update(modified=now, changed=now, generation=self.generation)
-            if node["blocks"] is not None:
-                mapped = dict(node["blocks"])
-                # A written block leaves no reservation behind, whole or partial.
-                # A write keeps mappings past the end of file; a truncation
-                # releases every block beyond the retained logical size.
-                mapped.update({block: False for block in touched})
-                # A growing truncation releases nothing.
-                retained = -(-len(data) // BLOCK) if kind == "truncate" and shrink else None
-                node["blocks"] = mapped if retained is None else {
-                    block: flag for block, flag in mapped.items() if block < retained}
+            mapped = dict(node["blocks"])
+            # A written block leaves no reservation behind, whole or partial,
+            # and its replacement storage is private. A write keeps mappings
+            # past the end of file; a truncation releases every block beyond
+            # the retained logical size.
+            mapped.update({block: False for block in touched})
+            shared = node["shared"] - touched
+            # A growing truncation releases nothing.
+            retained = -(-len(data) // BLOCK) if kind == "truncate" and shrink else None
+            if retained is not None:
+                mapped = {block: flag for block, flag in mapped.items() if block < retained}
+                shared = {block for block in shared if block < retained}
+                # A shrink to a partial block rewrites that written block with a
+                # zeroed tail into private storage; a reservation is left alone.
+                if len(data) % BLOCK and mapped.get(retained - 1) is False:
+                    shared.discard(retained - 1)
+            node["blocks"], node["shared"] = mapped, shared
         elif kind == "rename":
             node = self._live(op["label"])
             old = self.names[op["label"]]
@@ -575,20 +614,16 @@ class ObjectModel:
             if op["label"] not in self.orphaned:
                 raise ValueError("model orphan label is not registered")
             node = self.objects[self.orphaned[op["label"]]]
-            if node["blocks"] is None:
-                raise ValueError("model orphan layout is outside the extent model")
             # A step removes whole extent records from the logical end and,
             # once the layout is empty, the entry and record in the same call.
             # The model admits only orphans whose layout fits one budget.
-            if node["blocks"] is not None and len(coverage(node["blocks"])) > self.orphan_extents:
+            if len(coverage(node["blocks"])) > self.orphan_extents:
                 raise ValueError("model orphan exceeds one budgeted cleanup step")
             self.generation += 1
             del self.objects[self.orphaned[op["label"]]]
             del self.orphaned[op["label"]]
         elif kind in ("preallocate", "preallocate_bounded"):
             node = self._live(op["label"], "file")
-            if node["blocks"] is None:
-                raise ValueError("model preallocation outside the layout model")
             if not op["length"]:
                 return
             first = op["offset"] // BLOCK
@@ -657,7 +692,8 @@ class ObjectModel:
                 self.next_object += 1
                 self.objects[identity] = {"kind": "file", "links": 1, "protection": 0, "policy": False,
                     "created": now, "modified": now, "changed": now, "generation": self.generation,
-                    "data": data, "blocks": {block: False for block in range(-(-len(data) // BLOCK))}}
+                    "data": data, "shared": set(),
+                    "blocks": {block: False for block in range(-(-len(data) // BLOCK))}}
                 self.used.add(item["label"])
                 self.batched.add(item["label"])
                 if window_created is not None:
@@ -737,15 +773,11 @@ class ObjectModel:
 
     def metadata(self, identity):
         node = self.objects[identity]
-        if node["changed"] is None:
-            raise ValueError("captured metadata outside the model")
         kind = node["kind"]
         size = len(node["data"]) if kind == "file" else len(node["target"].encode()) if kind == "symlink" else 0
         if identity == 1:
             allocated = BLOCK
         elif kind == "file":
-            if node["blocks"] is None:
-                raise ValueError("captured allocation outside the model")
             if self.single_block and not set(node["blocks"]) <= {0}:
                 raise ValueError("captured allocation outside the single-block model")
             allocated = BLOCK * len(node["blocks"])
@@ -1145,7 +1177,7 @@ def orphanable(model, files):
     result = []
     for label in files:
         node = model.objects[model.names[label]["object"]]
-        if node["links"] != 1 or node["blocks"] is None:
+        if node["links"] != 1:
             continue
         if len(coverage(node["blocks"])) > model.orphan_extents:
             continue
@@ -1316,15 +1348,13 @@ def generate_space(seed, steps):
         emit(op="create", label=label, parent="root", name=name, data=payload(random, random.pick((0, 1, 33))))
     while len(sequence.operations) < steps:
         files, directories = sequence.files(), sequence.directories()
-        mapped = [label for label in files
-                  if model.objects[model.names[label]["object"]]["blocks"] is not None]
         empty = [d for d in directories[1:] if not model.children(d)]
         choices = ["sync", "remount"]
         if len(model.names) <= 40:
             choices += ["create", "create"]
             if len(directories) < 6: choices.append("mkdir")
         if files: choices += ["write", "truncate", "unlink", "rename", "set_protection", "restore_metadata"]
-        if mapped: choices += ["preallocate"] * 3 + ["preallocate_bounded"] * 2 + ["set_data_policy"] * 2
+        if files: choices += ["preallocate"] * 3 + ["preallocate_bounded"] * 2 + ["set_data_policy"] * 2
         if empty: choices.append("rmdir")
         kind = random.pick(choices)
         if kind in ("create", "mkdir"):
@@ -1341,7 +1371,7 @@ def generate_space(seed, steps):
             emit(op=kind, label=label,
                  size=random.pick(tuple(s for s in (0, 1, 4095, 4096, 8193) if s != current)))
         elif kind in ("preallocate", "preallocate_bounded"):
-            label = random.pick(mapped)
+            label = random.pick(files)
             offset = random.pick((0, 4096, 8192, 12288))
             length = random.pick((1, 4096, 8192))
             operation = {"op": kind, "label": label, "offset": offset, "length": length}
@@ -1353,7 +1383,7 @@ def generate_space(seed, steps):
                 operation.update(max_blocks=last - first, max_records=4096)
             emit(**operation)
         elif kind == "set_data_policy":
-            label = random.pick(mapped)
+            label = random.pick(files)
             emit(op=kind, label=label,
                  policy=not model.objects[model.names[label]["object"]]["policy"])
         elif kind == "restore_metadata":
@@ -1586,6 +1616,12 @@ def generate_captured(seed, steps):
     emit(op="symlink", label="s", parent="root", name="sym", target="alpha/file")
     emit(op="clone_file", label="c", source="f", parent="root", name="clone")
     emit(op="preallocate", label="f", offset=8192, length=8192)
+    # A whole-block CloneRange marks the source layout and carries the source
+    # change time; the destination takes the shared blocks and a private copy
+    # of each partial boundary block.
+    emit(op="create", label="g", parent="a", name="range", data=payload(random, 8200))
+    emit(op="clone_range", source="g", source_offset=0, destination="f", destination_offset=0,
+         length=8192)
     emit(op="snapshot_create", label="v1")
     emit(op="snapshot_open", label="v1")
     emit(op="snapshot_inspect", label="v1")
@@ -1593,6 +1629,13 @@ def generate_captured(seed, steps):
     emit(op="truncate", label="f", size=4096)
     emit(op="unlink", label="l")
     emit(op="set_protection", label="f", protection=5)
+    # A second call over an already shared range leaves the source layout and
+    # its change time alone; a boundary-only call shares no complete block.
+    emit(op="create", label="h", parent="root", name="range2", data=payload(random, 1))
+    emit(op="clone_range", source="g", source_offset=0, destination="h", destination_offset=0,
+         length=8192)
+    emit(op="clone_range", source="g", source_offset=1, destination="h", destination_offset=4097,
+         length=100)
     emit(op="snapshot_create", label="v2")
     emit(op="snapshot_close", label="v1")
     emit(op="remount")
@@ -1613,11 +1656,15 @@ def generate_captured(seed, steps):
         live = sorted(label for label, view in model.views.items() if view is not None)
         closed = [label for label in live if label not in model.handles]
         opened = sorted(model.handles)
+        pairs = [(source, destination) for source in files for destination in files
+                 if model.names[source]["object"] != model.names[destination]["object"]
+                 and model.file_data(source)]
         choices = ["sync", "remount"]
         if len(model.names) <= 24:
             choices += ["create", "symlink"]
             if len(directories) < 5: choices.append("mkdir")
             if files: choices += ["link", "clone_file"]
+        if pairs: choices += ["clone_range"] * 2
         if files: choices += ["write", "truncate", "unlink", "rename", "set_protection", "preallocate"]
         if symlinks: choices.append("unlink_symlink")
         if empty: choices.append("rmdir")
@@ -1641,6 +1688,15 @@ def generate_captured(seed, steps):
             label = random.pick(files)
             current = len(model.file_data(label))
             emit(op=kind, label=label, size=random.pick(tuple(s for s in (0, 1, 4096, 8193) if s != current)))
+        elif kind == "clone_range":
+            source, destination = random.pick(pairs)
+            size = len(model.file_data(source))
+            start = random.pick(tuple(o for o in (0, 1, 4095, 4096, 4097) if o < size))
+            target = random.pick((start % BLOCK, start % BLOCK + BLOCK))
+            lengths = tuple(n for n in (1, 7, 100, 4096, 5000) if start + n <= size and target + n <= MAX_FILE_BYTES)
+            emit(op=kind, source=source, source_offset=start, destination=destination,
+                 destination_offset=target,
+                 length=random.pick(lengths) if lengths else min(size - start, MAX_FILE_BYTES - target))
         elif kind == "preallocate":
             emit(op=kind, label=random.pick(files), offset=random.pick((0, 4096, 8192)),
                  length=random.pick((1, 4096, 8192)))
@@ -1738,6 +1794,14 @@ def apply_control(control, value, model):
                 if entry is not None:
                     entry["allocation"][-1]["length"] += BLOCK
                     return [str(view["id"])] + entry["path"]
+        return None
+    if control == "clone-changed":
+        for view in value["expected_snapshots"]:
+            entry = first(view["entries"],
+                          lambda e: e["metadata"]["object_id"] in model.clone_sources)
+            if entry is not None:
+                entry["metadata"]["changed"] = [entry["metadata"]["changed"][0] + 1, 0]
+                return [str(view["id"])] + entry["path"]
         return None
     if control == "reservation":
         entry = first(expected, lambda e: e["kind"] == "file" and e.get("alloc"))

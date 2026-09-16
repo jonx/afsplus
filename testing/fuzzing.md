@@ -266,7 +266,7 @@ adds `family`, the scenario version and the applied negative control.
 | `space` | version 9 | create, mkdir, write, truncate, rename, `preallocate`, `preallocate_bounded`, `set_data_policy`, `restore_metadata`, `set_protection`, unlink, rmdir, sync, remount | The linked projection with the persistent per-file policy flag and the normalized allocation coverage of every file |
 | `batch` | version 9 | create, mkdir, write, truncate, `batch`, `window_batch`, `window_fsync`, `window_commit`, unlink, rmdir, sync, remount | The linked projection after one atomic transaction per group, plus the reserved-directory entry count and the byte total of the objects it names; a window publishes its acknowledged prefix at remount and every staged group at commit |
 | `maintenance` | version 9 | create, write, truncate, unlink, `reclaim_step`, `snapshot_maintenance_step`, `snapshot_create`, `snapshot_open`, `snapshot_inspect`, `snapshot_close`, `snapshot_delete`, sync, remount | The linked projection and every captured view, both invariant across every maintenance step |
-| `captured` | version 9 | create, mkdir, write, truncate, rename, `link`, `symlink`, `clone_file`, `preallocate`, `set_protection`, unlink, rmdir, the five snapshot commands, sync, remount | Captured views of multi-block files, hard links, symlinks, clones and reservations, with exact bytes and metadata and normalized coverage |
+| `captured` | version 9 | create, mkdir, write, truncate, rename, `link`, `symlink`, `clone_file`, `clone_range`, `preallocate`, `set_protection`, unlink, rmdir, the five snapshot commands, sync, remount | Captured views of multi-block files, hard links, symlinks, clones, cloned ranges and reservations, with exact bytes and metadata and normalized coverage |
 
 Every window sequence starts with a ladder: an acknowledged group survives a
 remount that loses a later write; two acknowledged groups and an unacknowledged
@@ -299,7 +299,16 @@ a symlink across parents, unlinks one link and the symlink, truncates the clone,
 links it again and creates a non-ASCII target. The random suffix keeps at most 48
 names, eight directories at depth three and files of 8,224 bytes. CloneRange uses
 distinct objects, matching block residues and source offsets 0, 1, 4,095, 4,096
-or 4,097 inside the source. Directory moves stay outside the moved subtree and
+or 4,097 inside the source. A CloneRange destination takes the source blocks of
+every complete block of the requested range, so a source hole stays a hole and a
+source reservation stays a reservation, and its at most two partial boundary
+blocks are copied into private storage whatever the destination held there. The
+source keeps its logical bytes and its modification time, and its change time
+moves exactly when a mapped block of the shared range gains the shared flag: a
+call that shares no complete block, or one over a range every block of which
+carries the flag already, leaves the source record alone. A block a write
+replaces, and the partial tail a shrinking truncation rewrites, return to
+private storage. Directory moves stay outside the moved subtree and
 names are fresh. CloneFile gives the new object the source bytes, size and
 protection with one link; the oracle follows the executable
 [CloneFile](../crates/afsplus-core/src/volume.rs) behavior, because
@@ -354,9 +363,12 @@ namespace, the bytes and every captured view reach: repeated steps change
 none of them, and the case publishes its verdict after a final remount.
 
 The `captured` ladder builds a multi-block file, a hard link, a symlink, a clone
-and a reservation, captures a view, changes each of them independently, captures
-a second view, remounts and reads both. Captured entries compare exact bytes,
-exact metadata and normalized coverage.
+and a reservation, clones two complete blocks of a second file into the first,
+captures a view, changes each of them independently, clones the same source
+range again and clones a boundary-only range, captures a second view, remounts
+and reads both. Captured entries compare exact bytes, exact metadata and
+normalized coverage, so the captured metadata of a CloneRange source compares
+its change time.
 
 Version 9 compares a normalized logical allocation coverage. Every observed
 range is expressed in logical bytes, and two adjacent ranges merge into one
@@ -365,10 +377,9 @@ logical intervals. Coverage depends on which logical bytes hold reserved
 capacity and whether those bytes read as zeros; extent record boundaries and
 physical placement are outside it. Intervals are block aligned, ascending and
 disjoint, and two neighbouring intervals always carry different flags. Both the
-live linked records and the captured view entries carry this form. An `alloc` of
-`null` in an expected entry declares that file's layout outside the campaign's
-model: that one field is admitted without comparison and every other field of
-the entry is compared exactly.
+live linked records and the captured view entries carry this form, and every
+expected file entry carries it, so the admission layer refuses an absent
+coverage.
 
 ```sh
 cargo build --offline -p afsplus-check --bin afsplus-scenario
@@ -404,6 +415,7 @@ with its failing bundle retained.
 | `batch-path` | batch | Final component of a path a batch created |
 | `maintenance-entry` | maintenance | First byte of the first captured file with data |
 | `captured-coverage` | captured | Length of the last interval of a captured file's coverage |
+| `clone-changed` | captured | Captured change time of a CloneRange source whose layout the call marked, plus one second |
 
 The unit gate checks window, object, version-9 and captured-view model examples,
 golden family scenarios, required operations and bounds at seeds 0, 1, 7, 42 and
@@ -421,9 +433,7 @@ policy change on a volume without the feature, a reservation whose block or
 record budget is too small and a batch member whose parent is a file each become
 a captured operation failure at a known index.
 
-Deliberate limits of these oracles: the source change time after a CloneRange
-that shares complete blocks, and the coverage of a CloneRange destination, are
-outside the model, which marks that file's `alloc` as unmodelled; an orphan
+Deliberate limits of these oracles: an orphan
 holds at most the cleanup budget of extent
 records, so multi-step cleanup of a fragmented orphan belongs to
 [orphan qualification](orphan-qualification.md); the per-file policy is observed

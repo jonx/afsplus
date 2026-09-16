@@ -129,10 +129,7 @@ def captured_views(views, *, observed=False):
 
 def normalized_allocation(ranges):
     """Admit maximal logical intervals: ascending, disjoint, and never two
-    adjacent intervals carrying the same unwritten flag. None declares the
-    layout unmodelled by the campaign that produced it."""
-    if ranges is None:
-        return None
+    adjacent intervals carrying the same unwritten flag."""
     if not isinstance(ranges, list) or len(ranges) > 4096:
         raise ValueError("expected allocation budget")
     end, flag = None, None

@@ -1891,8 +1891,8 @@ in [generated operation families](fuzzing.md#generated-operation-families):
 carries the same coverage field in place of the version-7 range count and its
 `range` records. Actual JSON version 5 adds `orphans`, `orphan_error`, and a
 `policy` and `alloc` field on every file entry; an expected file entry carries
-`policy` and `alloc`, where `alloc` may be `null` to leave that file's layout
-uncompared.
+`policy` and `alloc`, and the admission layer refuses an expected file entry
+without a coverage.
 
 Records are sorted by path. `ALIAS` is the zero-based index of the first record
 naming the same file object, so every hard link of that object repeats the index.

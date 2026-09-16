@@ -394,25 +394,13 @@ def expected_state(value):
     return live
 
 
-def modelled(expected, actual):
-    """Mask the layout of files whose campaign declares it unmodelled."""
-    if len(expected) != len(actual):
-        return actual
-    result = []
-    for want, got in zip(expected, actual):
-        if want.get("kind") == "file" and "alloc" in want and want["alloc"] is None and got.get("kind") == "file":
-            got = dict(got, alloc=None)
-        result.append(got)
-    return result
-
-
 def matches_expected(value, actual):
     expected = expected_state(value)
     if value["version"] >= 9 and (actual.get("orphan_error") is not None
                                   or actual.get("orphans") != expected["orphans"]):
         return False
     if value["version"] >= 7:
-        return (modelled(expected["entries"], actual["entries"]) == expected["entries"]
+        return (actual["entries"] == expected["entries"]
                 and actual["snapshot_inspection_error"] is None
                 and actual["snapshots"] == expected["snapshots"])
     return actual["entries"] == expected
@@ -1029,7 +1017,7 @@ def failure_signature(records):
                      "actual": actual["snapshots"]})
     live = sorted(value["expected"], key=lambda entry: entry["path"])
     expected = {tuple(entry["path"]): entry for entry in live}
-    observed = {tuple(entry["path"]): entry for entry in modelled(live, actual["entries"])}
+    observed = {tuple(entry["path"]): entry for entry in actual["entries"]}
     differences = [{"path": list(path), "expected": expected.get(path), "actual": observed.get(path)}
         for path in sorted(set(expected) | set(observed)) if expected.get(path) != observed.get(path)]
     if not differences:

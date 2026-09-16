@@ -117,7 +117,8 @@ class FamilyModelTests(unittest.TestCase):
             {"path": ["b2", "l"], "kind": "file", "links": 1, "protection": 9, "alias": 2,
              "policy": False, "data": "ee0200ff", "alloc": block},
             {"path": ["c"], "kind": "file", "links": 1, "protection": 9, "alias": 3, "policy": False,
-             "data": "010200ff" + "00" * 4092 + "0102", "alloc": None}])
+             "data": "010200ff" + "00" * 4092 + "0102",
+             "alloc": [{"offset": 0, "length": 8192, "unwritten": False}]}])
         self.assertEqual(model.generation, 14)
         model.apply({"op": "mkdir", "label": "inner", "parent": "a", "name": "inner"}, 14)
         for op in ({"op": "rename", "label": "a", "parent": "inner", "name": "loop"},
@@ -221,6 +222,43 @@ class VersionNineModelTests(unittest.TestCase):
             model.apply({"op": "preallocate_bounded", "label": "f", "offset": 0, "length": 65536,
                          "max_blocks": 2, "max_records": 8}, 7)
 
+    def test_clone_range_covers_its_destination_and_dates_a_marked_source(self):
+        model = tool.ObjectModel()
+        for index, op in enumerate([
+                {"op": "create", "label": "s", "parent": "root", "name": "s", "data": "ab" * 8200},
+                {"op": "create", "label": "d", "parent": "root", "name": "d", "data": "cd"},
+                {"op": "create", "label": "e", "parent": "root", "name": "e", "data": "ef"}]):
+            model.apply(op, index)
+        source = model.objects[model.names["s"]["object"]]
+        before = list(source["changed"])
+        # Two whole shared blocks plus one private boundary copy.
+        model.apply({"op": "clone_range", "source": "s", "source_offset": 1, "destination": "d",
+                     "destination_offset": 1, "length": 8191}, 3)
+        [destination] = [entry for entry in model.linked() if entry["path"] == ["d"]]
+        self.assertEqual(destination["alloc"], [{"offset": 0, "length": 8192, "unwritten": False}])
+        self.assertEqual(source["changed"], [4, 0])
+        self.assertNotEqual(source["changed"], before)
+        # The same range shares blocks that already carry the flag, so the
+        # source layout and its change time stay where they are.
+        model.apply({"op": "clone_range", "source": "s", "source_offset": 1, "destination": "e",
+                     "destination_offset": 1, "length": 8191}, 4)
+        self.assertEqual(source["changed"], [4, 0])
+        # A boundary-only range shares no complete block at all.
+        model.apply({"op": "create", "label": "t", "parent": "root", "name": "t", "data": "01"}, 5)
+        model.apply({"op": "create", "label": "u", "parent": "root", "name": "u", "data": "02"}, 6)
+        other = model.objects[model.names["t"]["object"]]
+        model.apply({"op": "clone_range", "source": "t", "source_offset": 0, "destination": "u",
+                     "destination_offset": 0, "length": 1}, 7)
+        self.assertEqual(other["changed"], [6, 0])
+        # A source hole inside the shared range stays a hole in the destination.
+        model.apply({"op": "create", "label": "h", "parent": "root", "name": "h", "data": ""}, 8)
+        model.apply({"op": "write", "label": "h", "offset": 8192, "data": "07"}, 9)
+        model.apply({"op": "create", "label": "k", "parent": "root", "name": "k", "data": "08"}, 10)
+        model.apply({"op": "clone_range", "source": "h", "source_offset": 0, "destination": "k",
+                     "destination_offset": 0, "length": 8193}, 11)
+        [entry] = [entry for entry in model.linked() if entry["path"] == ["k"]]
+        self.assertEqual(entry["alloc"], [{"offset": 8192, "length": 4096, "unwritten": False}])
+
     def test_batch_is_atomic_and_a_window_keeps_the_acknowledged_prefix(self):
         model = tool.ObjectModel()
         model.apply({"op": "batch", "items": [
@@ -290,8 +328,8 @@ class FamilyGenerationTests(unittest.TestCase):
                         "snapshot_open", "snapshot_inspect", "snapshot_close", "snapshot_delete",
                         "reclaim_step", "snapshot_maintenance_step"},
         "captured": {"create", "mkdir", "write", "truncate", "unlink", "sync", "remount", "link", "symlink",
-                     "clone_file", "preallocate", "snapshot_create", "snapshot_open", "snapshot_inspect",
-                     "snapshot_close", "snapshot_delete"},
+                     "clone_file", "clone_range", "preallocate", "snapshot_create", "snapshot_open",
+                     "snapshot_inspect", "snapshot_close", "snapshot_delete"},
         "window": {"create", "mkdir", "sync", "remount", "window_write", "window_truncate", "window_fsync",
                    "window_commit"},
         "snapshot": {"write", "truncate", "rename", "unlink", "rmdir", "remount", "snapshot_create",
@@ -302,13 +340,13 @@ class FamilyGenerationTests(unittest.TestCase):
     def test_golden_family_seeds_bounds_and_profile_independence(self):
         golden = {"window": "a75d79b8c1216ca2f3900c43e5ebcf6be523246d23472ed270473a878efafdfd",
                   "snapshot": "77a0304b4bc903a02c6a702aa9d7bbe9e59d9d7d78263efd4b55d95f99a22e1c",
-                  "namespace": "0bead7675af4f2be5b29eac8a61bfebbad667f90731dc263d81f14ed16f5f302",
+                  "namespace": "519918e7b88bc0ff2d0ef17e02cc0ac950db5432182a2f0741a00835e3216938",
                   "replace": "8345e3ec556f75bdc663b793e123846de37d76f480371508c90d3fd82e41f9a3",
                   "orphan": "8f13dc6544941d1f6bb48f8f851755c1d0a1f63d02fe68ebcafa2532f60fdcea",
                   "space": "6923da614d6266a351adfb45e1aedb9f40ad4499a00524b64a8e75ee7e8ded7b",
                   "batch": "60492b2a14c9682957b357c075acf0a98c1a79bfd6cae68591770ba68ab5335f",
                   "maintenance": "6908a93d61de329d1f08f1aabfa3f8026de705bd970ebcf3088246417290ebce",
-                  "captured": "084969bcfaae7677f2f4b0a081ad9fdc5d75ca2477f0186275587db874ea7940"}
+                  "captured": "a8e81039e683360dfe3deebcba3cd89384e7f61454c37b31503beb6e4dca0914"}
         for family, digest in golden.items():
             value = tool.family_scenario(family, 7, 96, 96, 2)
             self.assertEqual(tool.runner.digest(tool.runner.encoded(value)), digest, family)
