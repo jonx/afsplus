@@ -713,8 +713,11 @@ and recovery exposes both groups with literal bytes. `window_group_limit`
 fills a one-slot log, so the second `window_fsync` refuses with
 `PrototypeLimit` and no I/O while `window_commit` publishes both groups.
 
-Negative controls: a shifted namespace payload byte, a wrong write patch value,
-a wrong truncate size and a wrong mixed-window size each fail their test.
+Every oracle constant of this file is spelled out separately from the value the
+operation supplies, so a changed expectation fails the test. Negative controls:
+a shifted namespace payload byte, a wrong write patch value, a wrong truncate
+size and a wrong mixed-window size each fail their test, and the source is
+restored from the commit afterwards with a matching hash.
 
 ## Deferred replay family matrix
 
@@ -745,7 +748,7 @@ exposes all three entries with literal bytes. `repeated_recovery` recovers a
 published image three times and requires the generation and the state to hold.
 
 Negative controls: a wrong orphan-payload byte and a wrong reference-record
-shape each fail their test.
+shape each fail their test, and the source is restored with a matching hash.
 
 ## Persistent snapshot family matrix
 
@@ -781,7 +784,7 @@ and after remount, and the readable registry admits the same write in place
 (2 blocked reads per profile).
 
 Negative controls: a wrong registry membership and wrong captured bytes each
-fail their test.
+fail their test, and the source is restored with a matching hash.
 
 ```sh
 export CARGO_HOME=/private/tmp/afsplus-cargo

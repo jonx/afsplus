@@ -100,6 +100,11 @@ struct NamespaceState {
 const ANCHOR: &[u8] = b"anchor-bytes-kept-through-every-group";
 const ALPHA: &[u8] = b"alpha-bytes";
 const GAMMA: &[u8] = b"gamma-bytes";
+/// Independent spellings the oracle expects, so a changed operation input
+/// fails the test.
+const EXPECTED_ANCHOR: &[u8] = b"anchor-bytes-kept-through-every-group";
+const EXPECTED_ALPHA: &[u8] = b"alpha-bytes";
+const EXPECTED_GAMMA: &[u8] = b"gamma-bytes";
 
 impl ReplayFamily for DeferredNamespace {
     type State = NamespaceState;
@@ -184,7 +189,7 @@ impl ReplayFamily for DeferredNamespace {
         acknowledged: usize,
         context: &str,
     ) {
-        assert_bytes(volume, state.anchor, ANCHOR, context);
+        assert_bytes(volume, state.anchor, EXPECTED_ANCHOR, context);
         let names: &[&str] = match acknowledged {
             0 => &[],
             1 => &["alpha"],
@@ -194,7 +199,11 @@ impl ReplayFamily for DeferredNamespace {
         assert_root(volume, variant, "anchor", names, context);
         for name in names {
             let id = volume.lookup_root(name).unwrap().unwrap();
-            let expected = if *name == "gamma" { GAMMA } else { ALPHA };
+            let expected = if *name == "gamma" {
+                EXPECTED_GAMMA
+            } else {
+                EXPECTED_ALPHA
+            };
             assert_bytes(volume, id, expected, context);
         }
     }
@@ -216,10 +225,15 @@ struct WriteState {
 
 const BASE_BYTE: u8 = 0x18;
 const PATCHES: [(u64, u8, usize); 3] = [(73, 0xc7, 211), (4096 + 10, 0x5a, 300), (2, 0x3e, 4100)];
+/// Independent expectation of the three patched windows.
+const EXPECTED_PATCHES: [(u64, u8, usize); 3] =
+    [(73, 0xc7, 211), (4096 + 10, 0x5a, 300), (2, 0x3e, 4100)];
+/// Independent expectation of the untouched byte value.
+const EXPECTED_BASE: u8 = 0x18;
 
 fn patched(count: usize) -> Vec<u8> {
-    let mut bytes = vec![BASE_BYTE; 3 * BS];
-    for (offset, value, length) in PATCHES.iter().take(count) {
+    let mut bytes = vec![EXPECTED_BASE; 3 * BS];
+    for (offset, value, length) in EXPECTED_PATCHES.iter().take(count) {
         let start = *offset as usize;
         bytes[start..start + length].fill(*value);
     }
@@ -294,10 +308,12 @@ impl ReplayFamily for DeferredWrite {
 struct DeferredTruncate;
 
 const SIZES: [u64; 3] = [BS as u64 + 211, 3 * BS as u64 + 50, BS as u64];
+/// Independent expectation of the three published sizes.
+const EXPECTED_SIZES: [u64; 3] = [4307, 12338, 4096];
 
 fn resized(count: usize) -> Vec<u8> {
-    let mut bytes = vec![BASE_BYTE; 3 * BS];
-    for size in SIZES.iter().take(count) {
+    let mut bytes = vec![EXPECTED_BASE; 3 * BS];
+    for size in EXPECTED_SIZES.iter().take(count) {
         let size = *size as usize;
         if size <= bytes.len() {
             bytes.truncate(size);
@@ -381,16 +397,20 @@ struct MixedState {
 const MIXED_PATCH: (u64, u8, usize) = (100, 0x9b, 500);
 const MIXED_SECOND: (u64, u8, usize) = (BS as u64 + 7, 0x4d, 64);
 const MIXED_SIZE: u64 = 2 * BS as u64 - 90;
+/// Independent expectations of both windows and of the published size.
+const EXPECTED_MIXED_PATCH: (u64, u8, usize) = (100, 0x9b, 500);
+const EXPECTED_MIXED_SECOND: (u64, u8, usize) = (4103, 0x4d, 64);
+const EXPECTED_MIXED_SIZE: u64 = 8102;
 
 fn mixed_bytes(acknowledged: usize) -> Vec<u8> {
-    let mut bytes = vec![BASE_BYTE; 2 * BS];
+    let mut bytes = vec![EXPECTED_BASE; 2 * BS];
     if acknowledged >= 1 {
-        let (offset, value, length) = MIXED_PATCH;
+        let (offset, value, length) = EXPECTED_MIXED_PATCH;
         bytes[offset as usize..offset as usize + length].fill(value);
-        bytes.truncate(MIXED_SIZE as usize);
+        bytes.truncate(EXPECTED_MIXED_SIZE as usize);
     }
     if acknowledged >= 2 {
-        let (offset, value, length) = MIXED_SECOND;
+        let (offset, value, length) = EXPECTED_MIXED_SECOND;
         bytes[offset as usize..offset as usize + length].fill(value);
     }
     bytes
