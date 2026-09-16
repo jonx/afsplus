@@ -2341,3 +2341,189 @@ crate::profile_tests!(allocation_root_promotion_ambiguous, |pages| {
         Variant::Plain,
     )
 });
+
+// ---------------------------------------------------------------------------
+// Reload read failures in the snapshot registry
+//
+// A registry holding many retained views spans several staged nodes, so a
+// deletion inside it spills provisional images at the bounded profiles and
+// reloads them again. `reload_failures` fails one read per injection point,
+// and every refused attempt keeps the exact registry membership, the subject
+// bytes and the captured bytes of every retained view, then retries.
+// ---------------------------------------------------------------------------
+
+/// Retained views the registry fixture holds before the recorded deletion.
+const REGISTRY_VIEWS: u64 = 128;
+const REGISTRY_SUBJECT: &[u8] = b"registry subject bytes that every view captures";
+
+struct RegistryState {
+    subject: u64,
+    /// Every registered identity of the fixture, ascending.
+    views: Vec<u64>,
+    /// Identity the recorded deletion removes.
+    removed: u64,
+}
+
+/// Every registered identity of the selected checkpoint, ascending.
+fn registry<D: BlockDevice>(volume: &mut Volume<D>) -> Vec<u64> {
+    let mut identities = Vec::new();
+    let mut low = 0;
+    loop {
+        let page = volume.snapshot_list(low, 32).unwrap();
+        identities.extend(page.entries.into_iter().map(|entry| entry.id));
+        match page.next_id {
+            Some(next) => low = next,
+            None => break,
+        }
+    }
+    identities
+}
+
+struct RegistryReload;
+
+impl Family for RegistryReload {
+    type State = RegistryState;
+
+    fn name(&self) -> &'static str {
+        "snapshot registry reload"
+    }
+
+    fn format(&self, _variant: Variant) -> Format {
+        Format::new(2048, 256)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) -> RegistryState {
+        let subject = volume
+            .create_file_in_root("subject", REGISTRY_SUBJECT, ts(1))
+            .unwrap();
+        let views: Vec<u64> = (0..REGISTRY_VIEWS)
+            .map(|index| volume.snapshot_create(ts(2 + index as i64)).unwrap())
+            .collect();
+        let removed = views[views.len() / 2];
+        RegistryState {
+            subject,
+            views,
+            removed,
+        }
+    }
+
+    fn snapshot(&self, state: &RegistryState) -> Option<u64> {
+        state.views.first().copied()
+    }
+
+    fn captured(&self, state: &RegistryState) -> Vec<(u64, Vec<u8>)> {
+        vec![(state.subject, REGISTRY_SUBJECT.to_vec())]
+    }
+
+    fn apply<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &RegistryState,
+    ) -> Result<(), CoreError> {
+        volume.snapshot_delete(state.removed, ts(500))
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &RegistryState,
+        _variant: Variant,
+        delta: u64,
+        context: &str,
+    ) {
+        let expected: Vec<u64> = state
+            .views
+            .iter()
+            .copied()
+            .filter(|id| delta == 0 || *id != state.removed)
+            .collect();
+        assert_eq!(registry(volume), expected, "{context}: registry membership");
+        let mut read = vec![0xa5; REGISTRY_SUBJECT.len() + 1];
+        assert_eq!(
+            volume.read_file_at(state.subject, 0, &mut read).unwrap(),
+            REGISTRY_SUBJECT.len(),
+            "{context}: subject length"
+        );
+        assert_eq!(
+            &read[..REGISTRY_SUBJECT.len()],
+            REGISTRY_SUBJECT,
+            "{context}: subject bytes"
+        );
+        assert_eq!(read[REGISTRY_SUBJECT.len()], 0xa5, "{context}: subject EOF");
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            1,
+            "{context}: root entries"
+        );
+        // The removed view is unreachable exactly once the delete publishes.
+        assert_eq!(
+            matches!(
+                volume.snapshot_open(state.removed),
+                Err(CoreError::NotFound)
+            ),
+            delta == 1,
+            "{context}: removed view reachability"
+        );
+    }
+}
+
+/// Measured resident staged-node demand of the largest registry mutation the
+/// API admits: a deletion inside a registry at the view admission limit.
+const REGISTRY_DEMAND: u64 = 3;
+
+/// The registry holds exactly `REGISTRY_VIEWS` identities and refuses one
+/// more, so the recorded deletion is the largest registry mutation the API
+/// admits, and its literal demand is the limit of this family.
+#[test]
+fn the_registry_admission_limit_bounds_the_staged_demand() {
+    let mut volume = matrix::open(
+        RegistryReload.format(Variant::Retained).device(),
+        usize::MAX,
+    );
+    let state = RegistryReload.setup(&mut volume, Variant::Retained);
+    assert_eq!(state.views.len() as u64, REGISTRY_VIEWS);
+    assert!(
+        matches!(
+            volume.snapshot_create(ts(400)),
+            Err(CoreError::PrototypeLimit(_))
+        ),
+        "the registry must refuse an identity above the admission limit"
+    );
+    RegistryReload.apply(&mut volume, &state).unwrap();
+    let stats = volume.last_commit_stats().unwrap().tree_mutations;
+    assert_eq!(
+        (stats.max_resident_staged_nodes, stats.staged_spill_writes),
+        (REGISTRY_DEMAND, 0),
+        "unlimited demand of the registry deletion"
+    );
+    for pages in [4usize, 8] {
+        let recording = matrix::record(&RegistryReload, pages, Variant::Retained);
+        assert_eq!(
+            (recording.peak, recording.spills),
+            (REGISTRY_DEMAND, 0),
+            "pages={pages}: a profile at or above the demand evicts nothing"
+        );
+    }
+    let recording = matrix::record(&RegistryReload, 2, Variant::Retained);
+    assert_eq!(
+        (recording.peak, recording.spills),
+        (2, 1),
+        "two pages must spill below the demand"
+    );
+}
+
+/// Two pages is the one profile below the registry demand. Sixteen reads
+/// spread through the spilling deletion fail one at a time; each refused
+/// attempt keeps an allowed committed state with the exact registry
+/// membership and the captured bytes, passes the checker, and retries to the
+/// complete new state. The transaction reads no provisional image back, so
+/// this fixture qualifies the read failures over the spill writes it performs.
+#[test]
+fn registry_deletion_survives_reload_read_failures() {
+    let (spills, reloads) = matrix::reload_failures(&RegistryReload, 2, Variant::Retained);
+    assert_eq!(
+        (spills, reloads),
+        (1, 0),
+        "two pages spill one provisional registry image and reload none"
+    );
+}
