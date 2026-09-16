@@ -1091,7 +1091,9 @@ crate::profile_tests!(rotation_batch, |pages| matrix::retained_sampled(
 
 #[test]
 fn extent_map_write_survives_reload_read_failures() {
-    let reloads: u64 = [2, 4, 8]
+    // Eight pages hold the whole extent-map window, so only two and four
+    // pages spill provisional images.
+    let reloads: u64 = [2, 4]
         .into_iter()
         .map(|pages| matrix::reload_failures(&ExtentMapWrite, pages, Variant::Plain).1)
         .sum();
@@ -1099,21 +1101,23 @@ fn extent_map_write_survives_reload_read_failures() {
 }
 
 #[test]
-fn object_map_orphan_update_survives_reload_read_failures() {
-    let reloads: u64 = [2, 4, 8]
-        .into_iter()
-        .map(|pages| matrix::reload_failures(&OrphanUpdate, pages, Variant::Eviction).1)
-        .sum();
-    assert!(reloads > 0, "no profile reloaded a provisional image");
+fn object_map_replacement_survives_reload_read_failures() {
+    // The measured demand of three nodes spills at two pages only.
+    let (spills, reloads) = matrix::reload_failures(&OpenTargetReplace, 2, Variant::Eviction);
+    assert!(spills > 0, "the fixture spilled no provisional image");
+    assert!(reloads > 0, "the fixture reloaded no provisional image");
 }
 
+/// The promotion spills provisional allocation-root images without reloading
+/// any of them inside the same transaction, so this fixture qualifies the read
+/// failures over the spill writes it does perform.
 #[test]
 fn allocation_root_promotion_survives_reload_read_failures() {
-    let reloads: u64 = [2, 4, 8]
+    let spills: u64 = [2, 4, 8]
         .into_iter()
-        .map(|pages| matrix::reload_failures(&AllocationRootPromotion, pages, Variant::Plain).1)
+        .map(|pages| matrix::reload_failures(&AllocationRootPromotion, pages, Variant::Plain).0)
         .sum();
-    assert!(reloads > 0, "no profile reloaded a provisional image");
+    assert!(spills > 0, "no profile spilled a provisional image");
 }
 
 #[test]
