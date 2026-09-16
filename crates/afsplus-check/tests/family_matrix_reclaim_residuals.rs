@@ -1,0 +1,1183 @@
+//! Residual orphan, reclaim and staged-tree reload families through the
+//! family-matrix driver; see tiny_cache_matrix.md. These families close the
+//! open-target replacement and the orphaned-file update, orphan cleanup with
+//! ordinary allocation exhausted, the reclaim sealing, segment-consumption and
+//! cursor transitions, cuts of the multi-round allocation rotation batch, and
+//! reload read failures in the extent map, the object map, the allocation root
+//! and a volume holding many retained views.
+
+mod common;
+
+use afsplus_block::{BlockDevice, MemoryBackend};
+use afsplus_core::volume::BatchOp;
+use afsplus_core::{object_map, CoreError, Volume};
+use afsplus_format::reclaim::ReclaimCaps;
+use afsplus_format::{OBJECT_ORPHAN_DIRECTORY, OBJECT_ROOT};
+use common::family_matrix::{self as matrix, padded_name, ts, Family, Format, Variant, BS};
+
+/// Seeded full-write subsets drawn per oversized flush segment.
+const SAMPLE: usize = 32;
+/// Long names used to force staged-node eviction.
+const NAME_LENGTH: usize = 240;
+/// Entries the orphan eviction fixtures hold in the root directory.
+const ORPHAN_POPULATION: usize = 400;
+
+fn accounting<D: BlockDevice>(volume: &Volume<D>) -> (u64, u64) {
+    (volume.free_blocks(), volume.reclaim_pending_blocks())
+}
+
+/// Whether the selected checkpoint's object map holds internal object 2.
+fn orphan_directory_present<D: BlockDevice>(volume: &mut Volume<D>) -> bool {
+    let checkpoint = volume.checkpoint().clone();
+    let geometry = volume.ident().geometry();
+    object_map::lookup_lba(
+        volume.device_mut(),
+        &geometry,
+        checkpoint.object_map_block,
+        checkpoint.generation,
+        OBJECT_ORPHAN_DIRECTORY,
+    )
+    .unwrap()
+    .is_some()
+}
+
+/// Reads the whole file with a sentinel past the end, so a longer file fails.
+fn file_bytes<D: BlockDevice>(volume: &mut Volume<D>, id: u64, expected: &[u8], context: &str) {
+    let mut read = vec![0xa5; expected.len() + 1];
+    assert_eq!(
+        volume.read_file_at(id, 0, &mut read).unwrap(),
+        expected.len(),
+        "{context}: length of {id}"
+    );
+    assert_eq!(
+        &read[..expected.len()],
+        expected,
+        "{context}: bytes of {id}"
+    );
+    assert_eq!(read[expected.len()], 0xa5, "{context}: EOF of {id}");
+}
+
+fn orphan_format(variant: Variant) -> Format {
+    let blocks = if variant == Variant::Eviction {
+        4096
+    } else {
+        512
+    };
+    Format {
+        log_slots: 8,
+        ..Format::new(blocks, blocks as u32)
+    }
+}
+
+fn orphan_population(volume: &mut Volume<MemoryBackend>, variant: Variant) -> usize {
+    if variant == Variant::Eviction {
+        matrix::populate(volume, "tree", ORPHAN_POPULATION, NAME_LENGTH);
+        ORPHAN_POPULATION
+    } else {
+        0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Replacement of an open target
+// ---------------------------------------------------------------------------
+
+const TARGET_BYTES: &[u8] = b"open target bytes that survive as an orphan";
+const SOURCE_BYTES: &[u8] = b"source bytes that take the target name";
+
+struct OpenTargetState {
+    target: u64,
+    source: u64,
+    populated: usize,
+}
+
+struct OpenTargetReplace;
+
+impl Family for OpenTargetReplace {
+    type State = OpenTargetState;
+
+    fn name(&self) -> &'static str {
+        "open-target replacement"
+    }
+
+    fn format(&self, variant: Variant) -> Format {
+        orphan_format(variant)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, variant: Variant) -> OpenTargetState {
+        let populated = orphan_population(volume, variant);
+        let target = volume
+            .create_file_in_root("target", TARGET_BYTES, ts(2))
+            .unwrap();
+        let source = volume
+            .create_file_in_root("source", SOURCE_BYTES, ts(3))
+            .unwrap();
+        OpenTargetState {
+            target,
+            source,
+            populated,
+        }
+    }
+
+    fn captured(&self, state: &OpenTargetState) -> Vec<(u64, Vec<u8>)> {
+        vec![
+            (state.target, TARGET_BYTES.to_vec()),
+            (state.source, SOURCE_BYTES.to_vec()),
+        ]
+    }
+
+    fn apply<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &OpenTargetState,
+    ) -> Result<(), CoreError> {
+        volume.rename_replace_orphan_target(OBJECT_ROOT, "source", OBJECT_ROOT, "target", ts(30))
+    }
+
+    /// The lazy orphan directory is a preparatory checkpoint of its own.
+    fn publications(&self, _variant: Variant) -> u64 {
+        2
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &OpenTargetState,
+        _variant: Variant,
+        delta: u64,
+        context: &str,
+    ) {
+        let replaced = delta == 2;
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            state.populated + 1 + usize::from(!replaced),
+            "{context}: root entries"
+        );
+        assert_eq!(
+            volume.lookup_root("source").unwrap(),
+            (!replaced).then_some(state.source),
+            "{context}: source entry"
+        );
+        let at_target = volume
+            .lookup_root("target")
+            .unwrap()
+            .unwrap_or_else(|| panic!("{context}: the target name must always resolve"));
+        if replaced {
+            assert_eq!(at_target, state.source, "{context}: replacement identity");
+        } else {
+            assert_eq!(at_target, state.target, "{context}: target identity");
+        }
+        file_bytes(volume, state.source, SOURCE_BYTES, context);
+        file_bytes(volume, state.target, TARGET_BYTES, context);
+        assert_eq!(
+            orphan_directory_present(volume),
+            delta >= 1,
+            "{context}: preparatory orphan directory"
+        );
+        assert_eq!(
+            volume.orphan_object(state.target).unwrap(),
+            replaced,
+            "{context}: orphan entry"
+        );
+        assert_eq!(
+            volume.orphan_count().unwrap(),
+            u64::from(replaced),
+            "{context}: orphan count"
+        );
+    }
+
+    /// Root-directory, object-map and orphan-directory paths over 400 long
+    /// names.
+    fn eviction_demand(&self) -> u64 {
+        OPEN_TARGET_DEMAND
+    }
+}
+
+/// Measured resident staged-node demand of the open-target replacement.
+const OPEN_TARGET_DEMAND: u64 = 3;
+
+// ---------------------------------------------------------------------------
+// Update of an orphaned file
+// ---------------------------------------------------------------------------
+
+const ORPHAN_OLD: [u8; BS] = [0x41; BS];
+
+fn orphan_new() -> Vec<u8> {
+    let mut bytes = ORPHAN_OLD.to_vec();
+    bytes[100..300].fill(0x5e);
+    bytes
+}
+
+struct OrphanUpdateState {
+    object: u64,
+    populated: usize,
+}
+
+struct OrphanUpdate;
+
+impl Family for OrphanUpdate {
+    type State = OrphanUpdateState;
+
+    fn name(&self) -> &'static str {
+        "orphaned-file update"
+    }
+
+    fn format(&self, variant: Variant) -> Format {
+        orphan_format(variant)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, variant: Variant) -> OrphanUpdateState {
+        let populated = orphan_population(volume, variant);
+        let object = volume
+            .create_file_in_root("open", &ORPHAN_OLD, ts(2))
+            .unwrap();
+        volume.orphan_file(OBJECT_ROOT, "open", ts(3)).unwrap();
+        OrphanUpdateState { object, populated }
+    }
+
+    fn captured(&self, state: &OrphanUpdateState) -> Vec<(u64, Vec<u8>)> {
+        vec![(state.object, ORPHAN_OLD.to_vec())]
+    }
+
+    fn apply<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &OrphanUpdateState,
+    ) -> Result<(), CoreError> {
+        volume.write_file_at(state.object, 100, &[0x5e; 200], ts(30))
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &OrphanUpdateState,
+        _variant: Variant,
+        delta: u64,
+        context: &str,
+    ) {
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            state.populated,
+            "{context}: root entries"
+        );
+        assert_eq!(volume.lookup_root("open").unwrap(), None, "{context}");
+        assert!(orphan_directory_present(volume), "{context}");
+        assert!(
+            volume.orphan_object(state.object).unwrap(),
+            "{context}: orphan entry"
+        );
+        assert_eq!(volume.orphan_count().unwrap(), 1, "{context}: orphan count");
+        let expected = if delta == 1 {
+            orphan_new()
+        } else {
+            ORPHAN_OLD.to_vec()
+        };
+        file_bytes(volume, state.object, &expected, context);
+    }
+
+    /// Extent-map and object-map paths over 400 long names.
+    fn eviction_demand(&self) -> u64 {
+        ORPHAN_UPDATE_DEMAND
+    }
+}
+
+/// Measured resident staged-node demand of the orphaned-file update.
+const ORPHAN_UPDATE_DEMAND: u64 = 2;
+
+// ---------------------------------------------------------------------------
+// Orphan cleanup with ordinary allocation exhausted
+// ---------------------------------------------------------------------------
+
+fn fragmented_bytes() -> Vec<u8> {
+    let mut bytes = vec![0; 3 * BS];
+    bytes[..BS].fill(0x41);
+    bytes[2 * BS..].fill(0x42);
+    bytes
+}
+
+struct CleanupState {
+    object: u64,
+    pressure: bool,
+}
+
+struct ExhaustedCleanup;
+
+impl Family for ExhaustedCleanup {
+    type State = CleanupState;
+
+    fn name(&self) -> &'static str {
+        "orphan cleanup with ordinary allocation exhausted"
+    }
+
+    fn format(&self, _variant: Variant) -> Format {
+        Format {
+            log_slots: 8,
+            ..Format::new(512, 512)
+        }
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, variant: Variant) -> CleanupState {
+        volume.set_reclaim_batch_blocks(1);
+        let object = volume.create_file_in_root("frag", b"", ts(2)).unwrap();
+        volume.write_file_at(object, 0, &[0x41; BS], ts(3)).unwrap();
+        volume
+            .write_file_at(object, 2 * BS as u64, &[0x42; BS], ts(4))
+            .unwrap();
+        volume.orphan_file(OBJECT_ROOT, "frag", ts(5)).unwrap();
+        let pressure = variant == Variant::Exhausted;
+        if pressure {
+            let id = volume.create_file_in_root("pressure", b"", ts(6)).unwrap();
+            // Reserve the largest range ordinary allocation admits.
+            let mut reserve = volume.available_blocks();
+            while volume
+                .preallocate_file(id, 0, reserve * BS as u64, ts(7))
+                .is_err()
+            {
+                reserve -= 1;
+            }
+            assert!(
+                matches!(
+                    volume.create_file_in_root("ordinary-probe", &[1; BS], ts(8)),
+                    Err(CoreError::NoSpace)
+                ),
+                "ordinary allocation must be exhausted"
+            );
+        }
+        CleanupState { object, pressure }
+    }
+
+    fn captured(&self, state: &CleanupState) -> Vec<(u64, Vec<u8>)> {
+        vec![(state.object, fragmented_bytes())]
+    }
+
+    fn apply<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &CleanupState,
+    ) -> Result<(), CoreError> {
+        volume.set_orphan_cleanup_extent_budget(2);
+        volume.cleanup_orphan(state.object, ts(50)).map(|_| ())
+    }
+
+    fn publications(&self, _variant: Variant) -> u64 {
+        2
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &CleanupState,
+        _variant: Variant,
+        delta: u64,
+        context: &str,
+    ) {
+        assert_eq!(volume.lookup_root("frag").unwrap(), None, "{context}");
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            usize::from(state.pressure),
+            "{context}: root entries"
+        );
+        assert_eq!(
+            volume.lookup_root("pressure").unwrap().is_some(),
+            state.pressure,
+            "{context}: pressure file"
+        );
+        assert!(orphan_directory_present(volume), "{context}");
+        let pending = delta < 2;
+        assert_eq!(
+            volume.orphan_object(state.object).unwrap(),
+            pending,
+            "{context}: orphan entry"
+        );
+        assert_eq!(
+            volume.orphan_count().unwrap(),
+            u64::from(pending),
+            "{context}: orphan count"
+        );
+        let metadata = volume.visible_metadata(state.object).unwrap();
+        match delta {
+            0 => {
+                file_bytes(volume, state.object, &fragmented_bytes(), context);
+                assert_eq!(
+                    metadata.unwrap().allocated_bytes,
+                    2 * BS as u64,
+                    "{context}: allocated bytes"
+                );
+            }
+            1 => {
+                assert!(
+                    volume.read_file(state.object).unwrap().is_empty(),
+                    "{context}: tail-trimmed file"
+                );
+                assert_eq!(
+                    metadata.unwrap().allocated_bytes,
+                    0,
+                    "{context}: allocated bytes"
+                );
+            }
+            _ => assert!(metadata.is_none(), "{context}: removed object"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reclaim sealing, segment consumption and cursor transitions
+// ---------------------------------------------------------------------------
+
+fn tiny_format() -> Format {
+    Format {
+        reclaim_caps: ReclaimCaps {
+            inline_entries: 4,
+            segment_refs: 3,
+            table_refs: 8,
+        },
+        ..Format::new(256, 256)
+    }
+}
+
+const ANCHOR: &[u8] = b"anchor bytes the reclaim transition must keep";
+/// Seed entries each queue-growing fixture creates behind the snapshot.
+const RECLAIM_SEEDS: usize = 6;
+
+struct ReclaimState {
+    anchor: u64,
+    snapshot: u64,
+    names: Vec<String>,
+}
+
+/// Creates the captured anchor and the snapshot that precedes every block the
+/// transition reclaims.
+fn reclaim_fixture(volume: &mut Volume<MemoryBackend>, prefix: &str) -> ReclaimState {
+    volume.set_reclaim_batch_blocks(1);
+    let anchor = volume.create_file_in_root("anchor", ANCHOR, ts(1)).unwrap();
+    let snapshot = volume.snapshot_create(ts(2)).unwrap();
+    let names: Vec<String> = (0..RECLAIM_SEEDS)
+        .map(|index| format!("{prefix}{index}"))
+        .collect();
+    for name in &names {
+        volume.create_file_in_root(name, b"seed", ts(3)).unwrap();
+    }
+    ReclaimState {
+        anchor,
+        snapshot,
+        names,
+    }
+}
+
+fn verify_reclaim<D: BlockDevice>(
+    volume: &mut Volume<D>,
+    state: &ReclaimState,
+    extra: Option<&str>,
+    expected: (u64, u64),
+    context: &str,
+) {
+    let mut listed: Vec<String> = volume
+        .list_root()
+        .unwrap()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    listed.sort();
+    let mut wanted: Vec<String> = state.names.clone();
+    wanted.push("anchor".to_string());
+    if let Some(extra) = extra {
+        wanted.push(extra.to_string());
+    }
+    wanted.sort();
+    assert_eq!(listed, wanted, "{context}: root entries");
+    file_bytes(volume, state.anchor, ANCHOR, context);
+    assert_eq!(accounting(volume), expected, "{context}: free/pending");
+}
+
+/// Free and pending blocks of the fixture and of the published state.
+const SEALING_ACCOUNTING: [(u64, u64); 2] = [(189, 23), (181, 30)];
+const CONSUMPTION_ACCOUNTING: [(u64, u64); 2] = [(189, 23), (195, 23)];
+const CURSOR_ACCOUNTING: [(u64, u64); 2] = [(227, 12), (228, 11)];
+
+struct Sealing;
+
+impl Family for Sealing {
+    type State = ReclaimState;
+
+    fn name(&self) -> &'static str {
+        "reclaim queue sealing"
+    }
+
+    fn format(&self, _variant: Variant) -> Format {
+        tiny_format()
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) -> ReclaimState {
+        reclaim_fixture(volume, "seed")
+    }
+
+    fn snapshot(&self, state: &ReclaimState) -> Option<u64> {
+        Some(state.snapshot)
+    }
+
+    fn captured(&self, state: &ReclaimState) -> Vec<(u64, Vec<u8>)> {
+        vec![(state.anchor, ANCHOR.to_vec())]
+    }
+
+    fn apply<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &ReclaimState,
+    ) -> Result<(), CoreError> {
+        volume.set_reclaim_batch_blocks(1);
+        volume
+            .create_file_in_root("sealer", b"payload", ts(50))
+            .map(|_| ())
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &ReclaimState,
+        _variant: Variant,
+        delta: u64,
+        context: &str,
+    ) {
+        verify_reclaim(
+            volume,
+            state,
+            (delta == 1).then_some("sealer"),
+            SEALING_ACCOUNTING[delta as usize],
+            context,
+        );
+    }
+
+    /// The tiny caps force the recorded transaction to seal a segment.
+    fn after_success<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &ReclaimState,
+        _variant: Variant,
+    ) {
+        let reclaim = volume.last_commit_stats().unwrap().alloc.reclaim;
+        assert_eq!(
+            reclaim.segments_sealed, 1,
+            "the recorded transaction must seal one segment"
+        );
+    }
+}
+
+struct Consumption;
+
+impl Family for Consumption {
+    type State = ReclaimState;
+
+    fn name(&self) -> &'static str {
+        "reclaim segment consumption"
+    }
+
+    fn format(&self, _variant: Variant) -> Format {
+        tiny_format()
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) -> ReclaimState {
+        reclaim_fixture(volume, "g")
+    }
+
+    fn snapshot(&self, state: &ReclaimState) -> Option<u64> {
+        Some(state.snapshot)
+    }
+
+    fn captured(&self, state: &ReclaimState) -> Vec<(u64, Vec<u8>)> {
+        vec![(state.anchor, ANCHOR.to_vec())]
+    }
+
+    fn apply<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &ReclaimState,
+    ) -> Result<(), CoreError> {
+        volume.set_reclaim_batch_blocks(9);
+        volume.reclaim_step(ts(60)).map(|_| ())
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &ReclaimState,
+        _variant: Variant,
+        delta: u64,
+        context: &str,
+    ) {
+        verify_reclaim(
+            volume,
+            state,
+            None,
+            CONSUMPTION_ACCOUNTING[delta as usize],
+            context,
+        );
+    }
+
+    /// The batch consumes at least one whole segment, which itself retires.
+    fn after_success<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &ReclaimState,
+        _variant: Variant,
+    ) {
+        let reclaim = volume.last_commit_stats().unwrap().alloc.reclaim;
+        assert!(
+            reclaim.structure_blocks_retired > 1,
+            "the batch must consume at least one whole segment"
+        );
+    }
+}
+
+/// A three-block run with a two-block budget leaves the persistent cursor
+/// inside the run. A retained view over the same run suppresses the advance
+/// entirely, so this family carries no retained variant.
+struct CursorAdvance;
+
+impl Family for CursorAdvance {
+    type State = ();
+
+    fn name(&self) -> &'static str {
+        "reclaim mid-run cursor advance"
+    }
+
+    fn format(&self, _variant: Variant) -> Format {
+        tiny_format()
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) {
+        volume.set_reclaim_batch_blocks(1);
+        volume
+            .create_file_in_root("big", &[0xb7; 3 * BS], ts(1))
+            .unwrap();
+        volume.delete_file_in_root("big", ts(2)).unwrap();
+    }
+
+    fn captured(&self, _state: &()) -> Vec<(u64, Vec<u8>)> {
+        Vec::new()
+    }
+
+    fn apply<D: BlockDevice>(&self, volume: &mut Volume<D>, _state: &()) -> Result<(), CoreError> {
+        volume.set_reclaim_batch_blocks(2);
+        let reclaimed = volume.reclaim_step(ts(30))?;
+        assert_eq!(reclaimed, 1, "two blocks promoted and one re-appended");
+        Ok(())
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &(),
+        _variant: Variant,
+        delta: u64,
+        context: &str,
+    ) {
+        assert!(volume.list_root().unwrap().is_empty(), "{context}: root");
+        assert_eq!(
+            accounting(volume),
+            CURSOR_ACCOUNTING[delta as usize],
+            "{context}: free/pending"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-round allocation-cache rotation batch
+// ---------------------------------------------------------------------------
+
+/// Bytes of the rotation source file.
+const ROTATION_BYTES: usize = 3 * BS;
+/// Entries created per rotation round.
+const ROTATION_ENTRIES: usize = 64;
+/// Rounds the fixture performs before the recorded round.
+const ROTATION_ROUNDS: u32 = 2;
+/// Original byte of the rotation source and of both peers.
+const ROTATION_ORIGINAL: u8 = 0x35;
+
+struct RotationState {
+    source: u64,
+    peers: [u64; 2],
+    snapshot: u64,
+    /// Entries the fixture rounds already created.
+    created: usize,
+}
+
+fn rotation_patch(round: u32) -> [u8; 32] {
+    [0x70 + round as u8; 32]
+}
+
+/// Live bytes of the source after `rounds` completed rounds.
+fn rotation_source_bytes(rounds: u32) -> Vec<u8> {
+    let mut bytes = vec![ROTATION_ORIGINAL; ROTATION_BYTES];
+    for round in 0..rounds {
+        bytes[BS - 6..BS + 26].copy_from_slice(&rotation_patch(round));
+    }
+    bytes
+}
+
+fn rotation_names(round: u32) -> Vec<String> {
+    (0..ROTATION_ENTRIES)
+        .map(|index| padded_name(&format!("r{round}"), index, NAME_LENGTH))
+        .collect()
+}
+
+/// One rotation round: a source write that copies both shared blocks, then a
+/// wide create batch that spans several allocation-root leaves.
+fn rotation_round<D: BlockDevice>(
+    volume: &mut Volume<D>,
+    state: &RotationState,
+    round: u32,
+) -> Result<(), CoreError> {
+    volume.write_file_at(state.source, BS as u64 - 6, &rotation_patch(round), ts(30))?;
+    let names = rotation_names(round);
+    let operations: Vec<BatchOp<'_>> = names
+        .iter()
+        .map(|name| BatchOp::CreateFile {
+            parent_id: OBJECT_ROOT,
+            name,
+            content: b"",
+        })
+        .collect();
+    volume.run_batch(&operations, ts(31)).map(|_| ())
+}
+
+struct RotationBatch;
+
+impl Family for RotationBatch {
+    type State = RotationState;
+
+    fn name(&self) -> &'static str {
+        "multi-round allocation rotation batch"
+    }
+
+    fn format(&self, _variant: Variant) -> Format {
+        // 1,024 regions span eight allocation-root leaves.
+        Format::new(16 * 1024, 16)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) -> RotationState {
+        let original = vec![ROTATION_ORIGINAL; ROTATION_BYTES];
+        let source = volume
+            .create_file_in_root("source", &original, ts(1))
+            .unwrap();
+        let peers = [
+            volume
+                .clone_file(source, OBJECT_ROOT, "peer-a", ts(2))
+                .unwrap(),
+            volume
+                .clone_file(source, OBJECT_ROOT, "peer-b", ts(3))
+                .unwrap(),
+        ];
+        let snapshot = volume.snapshot_create(ts(4)).unwrap();
+        let mut state = RotationState {
+            source,
+            peers,
+            snapshot,
+            created: 0,
+        };
+        for round in 0..ROTATION_ROUNDS {
+            rotation_round(volume, &state, round).unwrap();
+            state.created += ROTATION_ENTRIES;
+        }
+        state
+    }
+
+    fn snapshot(&self, state: &RotationState) -> Option<u64> {
+        Some(state.snapshot)
+    }
+
+    fn captured(&self, state: &RotationState) -> Vec<(u64, Vec<u8>)> {
+        let original = vec![ROTATION_ORIGINAL; ROTATION_BYTES];
+        vec![
+            (state.source, original.clone()),
+            (state.peers[0], original.clone()),
+            (state.peers[1], original),
+        ]
+    }
+
+    fn apply<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &RotationState,
+    ) -> Result<(), CoreError> {
+        rotation_round(volume, state, ROTATION_ROUNDS)
+    }
+
+    /// The write and the wide create batch publish one checkpoint each.
+    fn publications(&self, _variant: Variant) -> u64 {
+        2
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &RotationState,
+        _variant: Variant,
+        delta: u64,
+        context: &str,
+    ) {
+        let rounds = ROTATION_ROUNDS + u32::from(delta >= 1);
+        file_bytes(
+            volume,
+            state.source,
+            &rotation_source_bytes(rounds),
+            context,
+        );
+        let original = vec![ROTATION_ORIGINAL; ROTATION_BYTES];
+        for peer in state.peers {
+            file_bytes(volume, peer, &original, context);
+        }
+        let entries = state.created + if delta == 2 { ROTATION_ENTRIES } else { 0 };
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            entries + 3,
+            "{context}: root entries"
+        );
+        for name in &rotation_names(ROTATION_ROUNDS) {
+            assert_eq!(
+                volume.lookup_root(name).unwrap().is_some(),
+                delta == 2,
+                "{context}: {name}"
+            );
+        }
+    }
+
+    fn after_success<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &RotationState,
+        _variant: Variant,
+    ) {
+        let stats = volume.last_commit_stats().unwrap();
+        assert!(
+            stats.allocation_tree_nodes_written > 2,
+            "the rotation batch must span allocation-root nodes"
+        );
+        eprintln!(
+            "rotation pages={} allocation_nodes={} spills={} peak={}",
+            volume.tree_cache_pages(),
+            stats.allocation_tree_nodes_written,
+            stats.tree_mutations.staged_spill_writes,
+            stats.tree_mutations.max_resident_staged_nodes
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reload read failures outside the directory and batch transactions
+// ---------------------------------------------------------------------------
+
+/// Logical blocks the fragmented extent-map fixture writes.
+const EXTENT_FIXTURE_BLOCKS: u64 = 160;
+/// Logical blocks the recorded extent-map write covers.
+const EXTENT_WRITE_BLOCKS: u64 = 48;
+
+struct ExtentState {
+    file: u64,
+}
+
+fn extent_expected(published: bool) -> Vec<u8> {
+    let span = (EXTENT_FIXTURE_BLOCKS * 2 - 1) * BS as u64;
+    let mut bytes = vec![0u8; span as usize];
+    for index in 0..EXTENT_FIXTURE_BLOCKS {
+        let start = (index * 2 * BS as u64) as usize;
+        bytes[start..start + BS].fill(0x41);
+    }
+    if published {
+        let end = (EXTENT_WRITE_BLOCKS * 2 * BS as u64) as usize;
+        bytes[..end].fill(0x5e);
+    }
+    bytes
+}
+
+struct ExtentMapWrite;
+
+impl Family for ExtentMapWrite {
+    type State = ExtentState;
+
+    fn name(&self) -> &'static str {
+        "extent-map write"
+    }
+
+    fn format(&self, _variant: Variant) -> Format {
+        Format::new(4096, 4096)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) -> ExtentState {
+        let file = volume.create_file_in_root("frag", b"", ts(1)).unwrap();
+        // Every other logical block is written, so the extent map holds one
+        // record per block and spans several leaves.
+        for index in 0..EXTENT_FIXTURE_BLOCKS {
+            volume
+                .write_file_at(file, index * 2 * BS as u64, &[0x41; BS], ts(2))
+                .unwrap();
+        }
+        ExtentState { file }
+    }
+
+    fn captured(&self, _state: &ExtentState) -> Vec<(u64, Vec<u8>)> {
+        Vec::new()
+    }
+
+    fn apply<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &ExtentState,
+    ) -> Result<(), CoreError> {
+        let length = (EXTENT_WRITE_BLOCKS * 2 * BS as u64) as usize;
+        volume.write_file_at(state.file, 0, &vec![0x5e; length], ts(30))
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &ExtentState,
+        _variant: Variant,
+        delta: u64,
+        context: &str,
+    ) {
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            1,
+            "{context}: root entries"
+        );
+        file_bytes(volume, state.file, &extent_expected(delta == 1), context);
+    }
+}
+
+/// Promotion across eight allocation-root leaves, as in the reclaim family
+/// matrix, used here for reload read failures in the allocation tree.
+struct AllocationRootPromotion;
+
+const PROMOTION_SPANS: u64 = 8;
+const PROMOTION_ACCOUNTING: [(u64, u64); 2] = [(969, 600), (1478, 172)];
+
+impl Family for AllocationRootPromotion {
+    type State = ();
+
+    fn name(&self) -> &'static str {
+        "allocation-root promotion"
+    }
+
+    fn format(&self, _variant: Variant) -> Format {
+        Format::new(16 * 1024, 16)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) {
+        volume.set_reclaim_batch_blocks(1);
+        let span = volume.available_blocks() / (PROMOTION_SPANS + 1);
+        for index in 0..PROMOTION_SPANS {
+            let name = format!("span-{index}");
+            let id = volume.create_file_in_root(&name, b"", ts(1)).unwrap();
+            volume
+                .preallocate_file(id, 0, span * BS as u64, ts(2))
+                .unwrap();
+        }
+        for index in 0..PROMOTION_SPANS {
+            volume
+                .delete_file_in_root(&format!("span-{index}"), ts(3))
+                .unwrap();
+        }
+    }
+
+    fn captured(&self, _state: &()) -> Vec<(u64, Vec<u8>)> {
+        Vec::new()
+    }
+
+    fn apply<D: BlockDevice>(&self, volume: &mut Volume<D>, _state: &()) -> Result<(), CoreError> {
+        volume.set_reclaim_batch_blocks(1 << 16);
+        volume.reclaim_step(ts(30)).map(|_| ())
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &(),
+        _variant: Variant,
+        delta: u64,
+        context: &str,
+    ) {
+        assert!(volume.list_root().unwrap().is_empty(), "{context}: root");
+        assert_eq!(
+            accounting(volume),
+            PROMOTION_ACCOUNTING[delta as usize],
+            "{context}: free/pending"
+        );
+    }
+}
+
+/// Retained views the snapshot fixture holds before the recorded write.
+const REGISTRY_SNAPSHOTS: usize = 96;
+/// Logical blocks of the snapshot fixture's subject file.
+const REGISTRY_BLOCKS: u64 = 96;
+
+struct RegistryState {
+    file: u64,
+    snapshots: usize,
+}
+
+fn registry_expected(published: bool) -> Vec<u8> {
+    let mut bytes = vec![0x41; (REGISTRY_BLOCKS * BS as u64) as usize];
+    if published {
+        bytes[..(REGISTRY_BLOCKS / 2 * BS as u64) as usize].fill(0x5e);
+    }
+    bytes
+}
+
+struct SnapshotRegistryWrite;
+
+impl Family for SnapshotRegistryWrite {
+    type State = RegistryState;
+
+    fn name(&self) -> &'static str {
+        "write under many retained views"
+    }
+
+    fn format(&self, _variant: Variant) -> Format {
+        Format::new(4096, 4096)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) -> RegistryState {
+        let length = (REGISTRY_BLOCKS * BS as u64) as usize;
+        let file = volume
+            .create_file_in_root("subject", &vec![0x41; length], ts(1))
+            .unwrap();
+        for index in 0..REGISTRY_SNAPSHOTS {
+            volume.snapshot_create(ts(2 + index as i64)).unwrap();
+        }
+        RegistryState {
+            file,
+            snapshots: REGISTRY_SNAPSHOTS,
+        }
+    }
+
+    fn captured(&self, _state: &RegistryState) -> Vec<(u64, Vec<u8>)> {
+        Vec::new()
+    }
+
+    fn apply<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &RegistryState,
+    ) -> Result<(), CoreError> {
+        let length = (REGISTRY_BLOCKS / 2 * BS as u64) as usize;
+        volume.write_file_at(state.file, 0, &vec![0x5e; length], ts(500))
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &RegistryState,
+        _variant: Variant,
+        delta: u64,
+        context: &str,
+    ) {
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            1,
+            "{context}: root entries"
+        );
+        file_bytes(volume, state.file, &registry_expected(delta == 1), context);
+        assert_eq!(
+            volume.snapshot_list(u64::MAX, 256).unwrap().entries.len(),
+            state.snapshots,
+            "{context}: registry membership"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generated tests
+// ---------------------------------------------------------------------------
+
+const OPEN_TARGET_SEED: u64 = 0x5eed_0f3a_2001;
+const ORPHAN_UPDATE_SEED: u64 = 0x5eed_0f3a_2002;
+const ROTATION_SEED: u64 = 0x5eed_0f3a_2003;
+
+crate::profile_tests!(open_target_replace, |pages| matrix::plain(
+    &OpenTargetReplace,
+    pages,
+    12
+));
+crate::profile_tests!(open_target_replace_retained, |pages| matrix::retained(
+    &OpenTargetReplace,
+    pages,
+    12
+));
+crate::profile_tests!(open_target_replace_eviction, |pages| {
+    matrix::eviction_sampled(&OpenTargetReplace, pages, SAMPLE, OPEN_TARGET_SEED)
+});
+crate::profile_tests!(orphan_update, |pages| matrix::plain(
+    &OrphanUpdate,
+    pages,
+    12
+));
+crate::profile_tests!(orphan_update_retained, |pages| matrix::retained(
+    &OrphanUpdate,
+    pages,
+    12
+));
+crate::profile_tests!(orphan_update_eviction, |pages| matrix::eviction_sampled(
+    &OrphanUpdate,
+    pages,
+    SAMPLE,
+    ORPHAN_UPDATE_SEED
+));
+crate::profile_tests!(cleanup_with_allocation_exhausted, |pages| {
+    let recording = matrix::record(&ExhaustedCleanup, pages, Variant::Exhausted);
+    matrix::cuts(&ExhaustedCleanup, &recording, pages, Variant::Exhausted, 12);
+    matrix::faults(&ExhaustedCleanup, &recording, pages, Variant::Exhausted);
+});
+crate::profile_tests!(sealing_retained, |pages| matrix::retained(
+    &Sealing, pages, 12
+));
+crate::profile_tests!(consumption_retained, |pages| matrix::retained(
+    &Consumption,
+    pages,
+    12
+));
+crate::profile_tests!(cursor_advance, |pages| {
+    matrix::plain(&CursorAdvance, pages, 12);
+    matrix::ambiguous(&CursorAdvance, pages, Variant::Plain)
+});
+crate::profile_tests!(rotation_batch, |pages| matrix::retained_sampled(
+    &RotationBatch,
+    pages,
+    SAMPLE,
+    ROTATION_SEED
+));
+
+#[test]
+fn extent_map_write_survives_reload_read_failures() {
+    let reloads: u64 = [2, 4, 8]
+        .into_iter()
+        .map(|pages| matrix::reload_failures(&ExtentMapWrite, pages, Variant::Plain).1)
+        .sum();
+    assert!(reloads > 0, "no profile reloaded a provisional image");
+}
+
+#[test]
+fn object_map_orphan_update_survives_reload_read_failures() {
+    let reloads: u64 = [2, 4, 8]
+        .into_iter()
+        .map(|pages| matrix::reload_failures(&OrphanUpdate, pages, Variant::Eviction).1)
+        .sum();
+    assert!(reloads > 0, "no profile reloaded a provisional image");
+}
+
+#[test]
+fn allocation_root_promotion_survives_reload_read_failures() {
+    let reloads: u64 = [2, 4, 8]
+        .into_iter()
+        .map(|pages| matrix::reload_failures(&AllocationRootPromotion, pages, Variant::Plain).1)
+        .sum();
+    assert!(reloads > 0, "no profile reloaded a provisional image");
+}
+
+#[test]
+fn retained_view_write_survives_reload_read_failures() {
+    let reloads: u64 = [2, 4, 8]
+        .into_iter()
+        .map(|pages| matrix::reload_failures(&SnapshotRegistryWrite, pages, Variant::Plain).1)
+        .sum();
+    assert!(reloads > 0, "no profile reloaded a provisional image");
+}
