@@ -56,7 +56,10 @@ class ScenarioTests(unittest.TestCase):
                                       {"op": "rename", "label": "l", "parent": "root", "name": "moved2"}]},
             {"op": "window_batch", "items": [{"op": "create", "label": "w", "parent": "root",
                                               "name": "w", "data": "08"}]},
-            {"op": "window_fsync"}, {"op": "window_commit"}]
+            {"op": "window_fsync"}, {"op": "window_commit"},
+            {"op": "write_bounded", "label": "c", "offset": 0, "data": "09", "max_blocks": 1,
+             "max_records": 4},
+            {"op": "truncate_bounded", "label": "c", "size": 1, "max_blocks": 3, "max_records": 4}]
         value["expected"] = [
             {"path": ["alias"], "kind": "file", "links": 1, "protection": 0, "alias": 0,
              "policy": False, "data": "0102",
@@ -72,7 +75,8 @@ class ScenarioTests(unittest.TestCase):
         for line in ("link l f root " + "alias".encode().hex(), "symlink s d 73 " + "../ταξί".encode().hex(),
                      "clone_file c l root 63", "clone_range f 1 c 4097 1", "set_protection d 4294967295",
                      "unlink_symlink s", "rename_replace c v root 76", "orphan_file o", "cleanup_orphan o",
-                     "preallocate l 4096 8192", "preallocate_bounded l 0 1 2 4", "set_data_policy l 1",
+                     "preallocate l 4096 8192", "preallocate_bounded l 0 1 2 4",
+                     "write_bounded c 0 09 1 4", "truncate_bounded c 1 3 4", "set_data_policy l 1",
                      "restore_metadata l 7 1 2 3", "reclaim_step", "snapshot_maintenance_step",
                      "batch create:b:root:62:07,rename:l:root:6d6f76656432",
                      "window_batch create:w:root:77:08"):

@@ -1836,6 +1836,8 @@ independently checks version, arity, hex fields, integers and ranges.
 | `cleanup_orphan`: `label` | `cleanup_orphan LABEL` | `cleanup_orphan` | Orphan label |
 | `preallocate`: `label`, `offset`, `length` | `preallocate LABEL OFFSET LENGTH` | `preallocate_file` | File label; offset plus length at most 16 MiB |
 | `preallocate_bounded`: adds `max_blocks`, `max_records` | `preallocate_bounded LABEL OFFSET LENGTH BLOCKS RECORDS` | `preallocate_file_bounded` | Budgets of 1 to 4,096 each |
+| `write_bounded`: `label`, `offset`, `data`, `max_blocks`, `max_records` | `write_bounded LABEL OFFSET DATA BLOCKS RECORDS` | `write_file_at_bounded` | File label; `max_blocks` budgets the touched logical blocks |
+| `truncate_bounded`: `label`, `size`, `max_blocks`, `max_records` | `truncate_bounded LABEL SIZE BLOCKS RECORDS` | `truncate_file_bounded` | File label; `max_blocks` budgets the retired blocks, including a rewritten partial tail |
 | `set_data_policy`: `label`, `policy` | `set_data_policy LABEL VALUE` | `set_file_data_policy` | File label; boolean policy |
 | `restore_metadata`: `label`, `protection`, `created`, `modified`, `changed` | `restore_metadata LABEL PROTECTION CREATED MODIFIED CHANGED` | `restore_object_metadata` | Live non-root label; unsigned 32-bit protection and three second stamps of 0 to 2^31 |
 | `reclaim_step` | `reclaim_step` | `reclaim_step` | None |

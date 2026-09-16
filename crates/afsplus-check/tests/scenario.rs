@@ -638,6 +638,8 @@ fn version_nine_replacement_orphan_and_reservation_commands_are_admission_bounde
         "snapshot_maintenance_step",
         "batch create:b:root:62:01",
         "window_batch create:b:root:62:01,rename:f:root:67",
+        "write_bounded f 0 01 1 4096",
+        "truncate_bounded f 0 1 4096",
     ] {
         for (version, header, valid) in [
             ("AFSPSC07", V7_HEADER, false),
@@ -665,6 +667,10 @@ fn version_nine_replacement_orphan_and_reservation_commands_are_admission_bounde
         "batch create:b:root:62",
         "batch create:b:root:62:01,,delete:f",
         "cleanup_orphan 1f",
+        "write_bounded f 0 01 4097 4096",
+        "write_bounded f 0 01 4096",
+        "truncate_bounded f 0 4096 4097",
+        "truncate_bounded f 0 4096",
     ] {
         let wire = format!("AFSPSC09\n{LINKED_HEADER}\n{command}\n");
         assert!(Plan::parse(wire.as_bytes()).is_err(), "{command}");
@@ -729,6 +735,10 @@ fn version_nine_refusals_are_captured_operation_failures() {
         (1, "set_data_policy d 1"),
         (1, "restore_metadata root 1 1 1 1"),
         (0, "set_data_policy f 1"),
+        (1, "write_bounded f 4095 0102 1 4096"),
+        (1, "write_bounded f 0 01 1 0"),
+        (1, "truncate_bounded d 0 1 4096"),
+        (1, "truncate_bounded f 0 1 0"),
         (1, "batch create:x:f:62:01"),
         (1, "batch replace:f:s:root:73"),
         (1, "window_batch create:x:root:62:01,delete:x"),

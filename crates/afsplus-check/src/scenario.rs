@@ -60,11 +60,15 @@ pub enum Operation {
         label: String,
         offset: u64,
         data: Vec<u8>,
+        /// Version 9: explicit touched-block and local extent-record budgets.
+        limits: Option<(u64, usize)>,
     },
     Truncate {
         deferred: bool,
         label: String,
         size: u64,
+        /// Version 9: explicit retirement-block and extent-record budgets.
+        limits: Option<(u64, usize)>,
     },
     Rename {
         label: String,
@@ -775,8 +779,16 @@ impl Plan {
                         label: label(l)?,
                         offset: integer(o, 16 * 1024 * 1024)?,
                         data: hex(d)?,
+                        limits: None,
                     }
                 }
+                ["write_bounded", l, o, d, b, r] if linked => Operation::Write {
+                    deferred: false,
+                    label: label(l)?,
+                    offset: integer(o, 16 * 1024 * 1024)?,
+                    data: hex(d)?,
+                    limits: Some((integer(b, 4096)?, integer(r, 4096)? as usize)),
+                },
                 [kind @ ("truncate" | "window_truncate"), l, s]
                     if *kind == "truncate"
                         || matches!(
@@ -788,8 +800,15 @@ impl Plan {
                         deferred: *kind == "window_truncate",
                         label: label(l)?,
                         size: integer(s, 16 * 1024 * 1024)?,
+                        limits: None,
                     }
                 }
+                ["truncate_bounded", l, s, b, r] if linked => Operation::Truncate {
+                    deferred: false,
+                    label: label(l)?,
+                    size: integer(s, 16 * 1024 * 1024)?,
+                    limits: Some((integer(b, 4096)?, integer(r, 4096)? as usize)),
+                },
                 ["rename", l, p, n] => Operation::Rename {
                     label: label(l)?,
                     parent: label(p)?,
@@ -1495,12 +1514,23 @@ impl Plan {
                         label,
                         offset,
                         data,
+                        limits,
                     } => {
                         let id = get(label)?.0;
-                        if *deferred {
-                            volume.window_write_file_at(id, *offset, data, now)
-                        } else {
-                            volume.write_file_at(id, *offset, data, now)
+                        match (deferred, limits) {
+                            (true, _) => volume.window_write_file_at(id, *offset, data, now),
+                            (false, None) => volume.write_file_at(id, *offset, data, now),
+                            (false, Some((max_blocks, max_records))) => volume
+                                .write_file_at_bounded(
+                                    id,
+                                    *offset,
+                                    data,
+                                    now,
+                                    FileEditLimits {
+                                        max_blocks: *max_blocks,
+                                        max_records: *max_records,
+                                    },
+                                ),
                         }
                         .map_err(|e| e.to_string())?;
                     }
@@ -1508,12 +1538,22 @@ impl Plan {
                         deferred,
                         label,
                         size,
+                        limits,
                     } => {
                         let id = get(label)?.0;
-                        if *deferred {
-                            volume.window_truncate_file(id, *size, now)
-                        } else {
-                            volume.truncate_file(id, *size, now)
+                        match (deferred, limits) {
+                            (true, _) => volume.window_truncate_file(id, *size, now),
+                            (false, None) => volume.truncate_file(id, *size, now),
+                            (false, Some((max_blocks, max_records))) => volume
+                                .truncate_file_bounded(
+                                    id,
+                                    *size,
+                                    now,
+                                    FileEditLimits {
+                                        max_blocks: *max_blocks,
+                                        max_records: *max_records,
+                                    },
+                                ),
                         }
                         .map_err(|e| e.to_string())?;
                     }

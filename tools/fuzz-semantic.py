@@ -24,7 +24,7 @@ FAMILY_VERSIONS = {"window": 5, "snapshot": 7, "namespace": 9, "replace": 9, "or
 CONTROLS = {"window": ("window-byte",), "snapshot": ("snapshot-entry",),
             "namespace": ("link-count", "symlink-target", "protection", "clone-byte", "directory-rename"),
             "replace": ("replaced-byte",), "orphan": ("orphan-count", "orphan-bytes"),
-            "space": ("reservation", "policy-flag"),
+            "space": ("reservation", "policy-flag", "bounded-byte"),
             "batch": ("batch-path", "orphan-count", "orphan-bytes"),
             "maintenance": ("maintenance-entry",),
             "captured": ("captured-coverage", "clone-changed")}
@@ -339,6 +339,8 @@ class ObjectModel:
         self.orphaned = {}
         self.replaced = set()
         self.batched = set()
+        # Labels a budgeted write or truncation edited.
+        self.bounded = set()
         self.maintained = False
         # Staged window namespace groups and their acknowledging log records.
         self.staged = []
@@ -513,22 +515,37 @@ class ObjectModel:
                 destination.update(modified=now, changed=now, generation=self.generation,
                                    blocks=blocks, shared=shared)
                 self.clones.add(self.names[op["destination"]]["object"])
-        elif kind in ("write", "truncate"):
+        elif kind in ("write", "truncate", "write_bounded", "truncate_bounded"):
             node = self._live(op["label"], "file")
             data = node["data"]
-            if kind == "write":
+            bounded = kind.endswith("_bounded")
+            if kind in ("write", "write_bounded"):
                 incoming = bytes.fromhex(op["data"])
                 if not incoming:
                     return
-                overwrite(data, op["offset"], incoming)
                 touched = set(range(op["offset"] // BLOCK, -(-(op["offset"] + len(incoming)) // BLOCK)))
+                # A bounded write budgets the logical blocks it touches.
+                if bounded and len(touched) > op["max_blocks"]:
+                    raise ValueError("model write exceeds its block budget")
+                overwrite(data, op["offset"], incoming)
             else:
                 if op["size"] == len(data):
                     return
                 shrink = op["size"] < len(data)
+                if bounded and shrink:
+                    # A bounded shrink budgets the blocks it retires, including
+                    # the private rewrite of a written partial tail.
+                    keep = -(-op["size"] // BLOCK)
+                    retired = sum(1 for block in node["blocks"] if block >= keep)
+                    if op["size"] % BLOCK and node["blocks"].get(keep - 1) is False:
+                        retired += 1
+                    if retired > op["max_blocks"]:
+                        raise ValueError("model truncation exceeds its retirement budget")
                 resize(data, op["size"])
                 touched = set()
             self.generation += 1
+            if bounded:
+                self.bounded.add(op["label"])
             node.update(modified=now, changed=now, generation=self.generation)
             mapped = dict(node["blocks"])
             # A written block leaves no reservation behind, whole or partial,
@@ -538,7 +555,7 @@ class ObjectModel:
             mapped.update({block: False for block in touched})
             shared = node["shared"] - touched
             # A growing truncation releases nothing.
-            retained = -(-len(data) // BLOCK) if kind == "truncate" and shrink else None
+            retained = -(-len(data) // BLOCK) if kind.startswith("truncate") and shrink else None
             if retained is not None:
                 mapped = {block: flag for block, flag in mapped.items() if block < retained}
                 shared = {block for block in shared if block < retained}
@@ -1341,6 +1358,15 @@ def generate_space(seed, steps):
     emit(op="restore_metadata", label="d", protection=493, created=4, modified=5, changed=6)
     emit(op="preallocate", label="g", offset=4096, length=4096)
     emit(op="truncate", label="g", size=1)
+    # Bounded edits: a write across a block boundary under its exact touched
+    # block budget, a bounded shrink that retires a reservation and rewrites
+    # the written partial tail, and a bounded growth that retires nothing.
+    emit(op="write_bounded", label="f", offset=4095, data=payload(random, 7), max_blocks=2,
+         max_records=4096)
+    emit(op="write_bounded", label="g", offset=4096, data=payload(random, 33), max_blocks=1,
+         max_records=4096)
+    emit(op="truncate_bounded", label="f", size=4097, max_blocks=3, max_records=4096)
+    emit(op="truncate_bounded", label="g", size=8193, max_blocks=1, max_records=4096)
     emit(op="sync")
     emit(op="remount")
     for _ in range(4):
@@ -1355,21 +1381,37 @@ def generate_space(seed, steps):
             if len(directories) < 6: choices.append("mkdir")
         if files: choices += ["write", "truncate", "unlink", "rename", "set_protection", "restore_metadata"]
         if files: choices += ["preallocate"] * 3 + ["preallocate_bounded"] * 2 + ["set_data_policy"] * 2
+        if files: choices += ["write_bounded"] * 2 + ["truncate_bounded"] * 2
         if empty: choices.append("rmdir")
         kind = random.pick(choices)
         if kind in ("create", "mkdir"):
             label, name = sequence.fresh("k")
             emit(op=kind, label=label, parent=random.pick(directories), name=name,
                  **({"data": payload(random, random.pick((0, 1, 33, 5000)))} if kind == "create" else {}))
-        elif kind == "write":
+        elif kind in ("write", "write_bounded"):
             offset = random.pick((0, 1, 4095, 4096, 8191))
-            emit(op=kind, label=random.pick(files), offset=offset,
-                 data=payload(random, random.pick(tuple(c for c in (1, 7, 300) if offset + c <= MAX_FILE_BYTES))))
-        elif kind == "truncate":
+            data = payload(random, random.pick(tuple(c for c in (1, 7, 300) if offset + c <= MAX_FILE_BYTES)))
+            operation = {"op": kind, "label": random.pick(files), "offset": offset, "data": data}
+            if kind == "write_bounded":
+                # The touched-block budget is exact; the record budget counts
+                # stored extents, whose boundaries follow physical placement.
+                first, last = offset // BLOCK, -(-(offset + len(data) // 2) // BLOCK)
+                operation.update(max_blocks=last - first, max_records=4096)
+            emit(**operation)
+        elif kind in ("truncate", "truncate_bounded"):
             label = random.pick(files)
-            current = len(model.file_data(label))
-            emit(op=kind, label=label,
-                 size=random.pick(tuple(s for s in (0, 1, 4095, 4096, 8193) if s != current)))
+            node = model.objects[model.names[label]["object"]]
+            current = len(node["data"])
+            size = random.pick(tuple(s for s in (0, 1, 4095, 4096, 8193) if s != current))
+            operation = {"op": kind, "label": label, "size": size}
+            if kind == "truncate_bounded":
+                # A growth retires nothing, so its budget is the admitted floor.
+                keep = -(-size // BLOCK)
+                retired = sum(1 for block in node["blocks"] if block >= keep) if size < current else 0
+                if size < current and size % BLOCK and node["blocks"].get(keep - 1) is False:
+                    retired += 1
+                operation.update(max_blocks=max(1, retired), max_records=4096)
+            emit(**operation)
         elif kind in ("preallocate", "preallocate_bounded"):
             label = random.pick(files)
             offset = random.pick((0, 4096, 8192, 12288))
@@ -1808,6 +1850,13 @@ def apply_control(control, value, model):
         if entry is None:
             return None
         entry["alloc"][-1]["length"] += BLOCK
+        return entry["path"]
+    if control == "bounded-byte":
+        paths = [model.path(label) for label in sorted(model.bounded) if label in model.names]
+        entry = first(expected, lambda e: e["kind"] == "file" and e["data"] and e["path"] in paths)
+        if entry is None:
+            return None
+        entry["data"] = flip(entry["data"])
         return entry["path"]
     if control == "policy-flag":
         entry = first(expected, lambda e: e["kind"] == "file")

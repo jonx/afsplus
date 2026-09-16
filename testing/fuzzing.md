@@ -263,7 +263,7 @@ adds `family`, the scenario version and the applied negative control.
 | `namespace` | [version 9](developer-harness.md#linked-namespace-replay-bundles) | create, mkdir, write, truncate, rename of files, symlinks and directories, `link`, `symlink`, `unlink_symlink`, `clone_file`, `clone_range`, `set_protection`, unlink, rmdir, sync, remount | The same object graph projected to paths, kinds, link counts, protection, hard-link alias ordinals, bytes and opaque symlink targets |
 | `replace` | version 9 | create, mkdir, write, truncate, rename, `link`, `rename_replace`, unlink, rmdir, sync, remount | The linked projection: the source takes the replaced name, a victim with further links keeps them, and a final-link victim leaves the namespace with its storage |
 | `orphan` | version 9 | create, mkdir, write, truncate, rename, `orphan_file`, `rename_replace_orphan`, `cleanup_orphan`, unlink, sync, remount | The linked projection plus the reserved-directory entry count and the byte total of the objects it names |
-| `space` | version 9 | create, mkdir, write, truncate, rename, `preallocate`, `preallocate_bounded`, `set_data_policy`, `restore_metadata`, `set_protection`, unlink, rmdir, sync, remount | The linked projection with the persistent per-file policy flag and the normalized allocation coverage of every file |
+| `space` | version 9 | create, mkdir, write, truncate, rename, `preallocate`, `preallocate_bounded`, `write_bounded`, `truncate_bounded`, `set_data_policy`, `restore_metadata`, `set_protection`, unlink, rmdir, sync, remount | The linked projection with the persistent per-file policy flag and the normalized allocation coverage of every file |
 | `batch` | version 9 | create, mkdir, write, truncate, `batch`, `window_batch`, `window_fsync`, `window_commit`, unlink, rmdir, sync, remount | The linked projection after one atomic transaction per group, plus the reserved-directory entry count and the byte total of the objects it names; a window publishes its acknowledged prefix at remount and every staged group at commit |
 | `maintenance` | version 9 | create, write, truncate, unlink, `reclaim_step`, `snapshot_maintenance_step`, `snapshot_create`, `snapshot_open`, `snapshot_inspect`, `snapshot_close`, `snapshot_delete`, sync, remount | The linked projection and every captured view, both invariant across every maintenance step |
 | `captured` | version 9 | create, mkdir, write, truncate, rename, `link`, `symlink`, `clone_file`, `clone_range`, `preallocate`, `set_protection`, unlink, rmdir, the five snapshot commands, sync, remount | Captured views of multi-block files, hard links, symlinks, clones, cloned ranges and reservations, with exact bytes and metadata and normalized coverage |
@@ -333,10 +333,17 @@ set is an observation error.
 
 The `space` ladder reserves capacity past the written blocks, writes into one
 reserved block, reserves under exact block and record budgets, opts a file into
-the persistent policy and back out, and restores archived protection and
-timestamps onto a file and a directory. A reservation keeps the logical size,
-the bytes and the modification time, and it makes its blocks read as zeros. The
-volume carries the `COMPAT` data-policy feature for this family alone.
+the persistent policy and back out, restores archived protection and
+timestamps onto a file and a directory, writes across a block boundary under its
+exact touched-block budget, shrinks under the budget of the blocks it retires
+and grows under the admitted budget floor. A reservation keeps the logical size,
+the bytes and the modification time, and it makes its blocks read as zeros. A
+budgeted edit reaches the same bytes, size and coverage as its unbudgeted form:
+a write budgets the logical blocks it touches, and a shrink budgets the blocks
+it releases plus the private rewrite of a written partial tail. A record budget
+counts stored extents, whose boundaries follow physical placement, so the
+generator uses the admission maximum for it. The volume carries the `COMPAT`
+data-policy feature for this family alone.
 
 The `batch` ladder creates a group, moves and deletes in one group, replaces
 inside a group, stages a window group that an fsync acknowledges, loses an
@@ -412,6 +419,7 @@ with its failing bundle retained.
 | `orphan-bytes` | orphan, batch | Byte total of the objects the reserved directory names |
 | `reservation` | space | Length of the last allocation interval of the first file with coverage |
 | `policy-flag` | space | Persistent data-update policy of the first file |
+| `bounded-byte` | space | First byte of a file a budgeted write or truncation edited |
 | `batch-path` | batch | Final component of a path a batch created |
 | `maintenance-entry` | maintenance | First byte of the first captured file with data |
 | `captured-coverage` | captured | Length of the last interval of a captured file's coverage |
@@ -429,9 +437,10 @@ Generated sequences contain operations the core admits, so a refusal is a case
 failure. The refusal contract of the version-9 commands belongs to
 [the scenario tests](../crates/afsplus-check/tests/scenario.rs): a symlink source
 or victim of a replacement, a directory victim, a reservation on a directory, a
-policy change on a volume without the feature, a reservation whose block or
-record budget is too small and a batch member whose parent is a file each become
-a captured operation failure at a known index.
+policy change on a volume without the feature, a reservation, write or
+truncation whose block or record budget is too small, a budgeted truncation of a
+directory and a batch member whose parent is a file each become a captured
+operation failure at a known index.
 
 Deliberate limits of these oracles: an orphan
 holds at most the cleanup budget of extent

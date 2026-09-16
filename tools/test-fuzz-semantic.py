@@ -321,7 +321,8 @@ class FamilyGenerationTests(unittest.TestCase):
         "orphan": {"create", "mkdir", "write", "sync", "remount", "orphan_file", "cleanup_orphan",
                    "rename_replace_orphan"},
         "space": {"create", "mkdir", "write", "truncate", "sync", "remount", "preallocate",
-                  "preallocate_bounded", "set_data_policy", "restore_metadata"},
+                  "preallocate_bounded", "write_bounded", "truncate_bounded", "set_data_policy",
+                  "restore_metadata"},
         "batch": {"create", "mkdir", "sync", "remount", "batch", "window_batch", "window_fsync",
                   "window_commit"},
         "maintenance": {"create", "write", "truncate", "unlink", "sync", "remount", "snapshot_create",
@@ -343,7 +344,7 @@ class FamilyGenerationTests(unittest.TestCase):
                   "namespace": "519918e7b88bc0ff2d0ef17e02cc0ac950db5432182a2f0741a00835e3216938",
                   "replace": "8345e3ec556f75bdc663b793e123846de37d76f480371508c90d3fd82e41f9a3",
                   "orphan": "8f13dc6544941d1f6bb48f8f851755c1d0a1f63d02fe68ebcafa2532f60fdcea",
-                  "space": "6923da614d6266a351adfb45e1aedb9f40ad4499a00524b64a8e75ee7e8ded7b",
+                  "space": "67e986748cd51612dde88f68bf94817d5089e2589c3b6d3801151e187bc09832",
                   "batch": "60492b2a14c9682957b357c075acf0a98c1a79bfd6cae68591770ba68ab5335f",
                   "maintenance": "6908a93d61de329d1f08f1aabfa3f8026de705bd970ebcf3088246417290ebce",
                   "captured": "a8e81039e683360dfe3deebcba3cd89384e7f61454c37b31503beb6e4dca0914"}

@@ -299,6 +299,8 @@ def validate(encoded):
                        orphan_file="op label", cleanup_orphan="op label",
                        preallocate="op label offset length",
                        preallocate_bounded="op label offset length max_blocks max_records",
+                       write_bounded="op label offset data max_blocks max_records",
+                       truncate_bounded="op label size max_blocks max_records",
                        set_data_policy="op label policy",
                        restore_metadata="op label protection created modified changed",
                        reclaim_step="op", snapshot_maintenance_step="op",
@@ -346,6 +348,9 @@ def validate(encoded):
             if kind == "preallocate_bounded":
                 integer(operation["max_blocks"], 1, 4096)
                 integer(operation["max_records"], 1, 4096)
+        if kind in ("write_bounded", "truncate_bounded"):
+            integer(operation["max_blocks"], 1, 4096)
+            integer(operation["max_records"], 1, 4096)
         if kind == "set_data_policy" and type(operation["policy"]) is not bool:
             raise ValueError("scenario data-policy value")
         if kind == "restore_metadata":
@@ -382,7 +387,8 @@ def validate(encoded):
                 used.add(label)
             elif label not in labels or label == "root":
                 raise ValueError("unknown or reserved object label")
-            if kind in ("write", "truncate", "window_write", "window_truncate", "unlink") and labels[label] != "file":
+            if kind in ("write", "truncate", "window_write", "window_truncate", "unlink",
+                        "write_bounded", "truncate_bounded") and labels[label] != "file":
                 raise ValueError("operation requires a file label")
             if kind == "rmdir" and labels[label] != "directory":
                 raise ValueError("operation requires a directory label")
@@ -398,7 +404,7 @@ def validate(encoded):
         if "data" in operation:
             count = data(operation["data"])
             payload += count
-            if kind in ("write", "window_write") and integer(operation["offset"], 0, MAX_FILE) + count > MAX_FILE:
+            if kind in ("write", "window_write", "write_bounded") and integer(operation["offset"], 0, MAX_FILE) + count > MAX_FILE:
                 raise ValueError("scenario write range limit")
         if "size" in operation: integer(operation["size"], 0, MAX_FILE)
     expected = scenario["expected"]
@@ -469,10 +475,14 @@ def compile_commands(encoded):
         if kind in ("mkdir", "create"):
             fields = [kind, operation["label"], operation["parent"], operation["name"].encode().hex()]
             if kind == "create": fields.append(operation["data"] or "-")
-        elif kind in ("write", "window_write"):
+        elif kind in ("write", "window_write", "write_bounded"):
             fields = [kind, operation["label"], str(operation["offset"]), operation["data"] or "-"]
-        elif kind in ("truncate", "window_truncate"):
+            if kind == "write_bounded":
+                fields += [str(operation["max_blocks"]), str(operation["max_records"])]
+        elif kind in ("truncate", "window_truncate", "truncate_bounded"):
             fields = [kind, operation["label"], str(operation["size"])]
+            if kind == "truncate_bounded":
+                fields += [str(operation["max_blocks"]), str(operation["max_records"])]
         elif kind == "rename":
             fields = [kind, operation["label"], operation["parent"], operation["name"].encode().hex()]
         elif kind in ("link", "clone_file"):
