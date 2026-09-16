@@ -634,8 +634,8 @@ size.
 | `max_symlink_rename`, `max_symlink_unlink` | P | The retained 3,968-byte target through the move and the removal, exact root and directory entries; 12 and 9 writes, 4,300 and 626 cut images, 14 and 11 faults | Bounded fixtures |
 | `over_long_symlink_target` | P | A target of 3,969 bytes refuses with `InvalidMetadata`, zero writes, zero flushes and an unchanged generation; the maximum-length target then publishes, survives a remount and passes the checker | One length above the limit |
 
-Negative controls, one per fixture family: a shifted created payload byte in the
-mixed batch, an orphan count of zero after the deferred-window delete, three
+Negative controls, one per fixture family: a shifted expected payload byte in
+the mixed batch, an orphan count of zero after the deferred-window delete, three
 expected leaf splits in the deep fixture, a link count of one after the hard
 link, and a 3,967-byte expected symlink target. All five fail their test, and
 the sources are restored from the commit afterwards.
