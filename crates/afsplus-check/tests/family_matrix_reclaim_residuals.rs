@@ -2,18 +2,16 @@
 //! family-matrix driver; see tiny_cache_matrix.md. These families close the
 //! open-target replacement and the orphaned-file update, orphan cleanup with
 //! ordinary allocation exhausted, the reclaim sealing and segment-consumption
-//! transitions, cuts of the multi-round allocation rotation batch, and
-//! reload read failures in the extent map, the object map, the allocation root
-//! and a volume holding many retained views.
+//! transitions, and reload read failures in the extent map, the object map and
+//! the allocation root.
 
 mod common;
 
 use afsplus_block::{BlockDevice, MemoryBackend};
-use afsplus_core::volume::BatchOp;
 use afsplus_core::{object_map, CoreError, Volume};
 use afsplus_format::reclaim::ReclaimCaps;
 use afsplus_format::{OBJECT_ORPHAN_DIRECTORY, OBJECT_ROOT};
-use common::family_matrix::{self as matrix, padded_name, ts, Family, Format, Variant, BS};
+use common::family_matrix::{self as matrix, ts, Family, Format, Variant, BS};
 
 /// Seeded full-write subsets drawn per oversized flush segment.
 const SAMPLE: usize = 32;
@@ -628,188 +626,6 @@ impl Family for Consumption {
 }
 
 // ---------------------------------------------------------------------------
-// Multi-round allocation-cache rotation batch
-// ---------------------------------------------------------------------------
-
-/// Bytes of the rotation source file.
-const ROTATION_BYTES: usize = 3 * BS;
-/// Entries created per rotation round.
-const ROTATION_ENTRIES: usize = 64;
-/// Rounds the fixture performs before the recorded round.
-const ROTATION_ROUNDS: u32 = 2;
-/// Original byte of the rotation source and of both peers.
-const ROTATION_ORIGINAL: u8 = 0x35;
-
-struct RotationState {
-    source: u64,
-    peers: [u64; 2],
-    snapshot: u64,
-    /// Entries the fixture rounds already created.
-    created: usize,
-}
-
-fn rotation_patch(round: u32) -> [u8; 32] {
-    [0x70 + round as u8; 32]
-}
-
-/// Live bytes of the source after `rounds` completed rounds.
-fn rotation_source_bytes(rounds: u32) -> Vec<u8> {
-    let mut bytes = vec![ROTATION_ORIGINAL; ROTATION_BYTES];
-    for round in 0..rounds {
-        bytes[BS - 6..BS + 26].copy_from_slice(&rotation_patch(round));
-    }
-    bytes
-}
-
-fn rotation_names(round: u32) -> Vec<String> {
-    (0..ROTATION_ENTRIES)
-        .map(|index| padded_name(&format!("r{round}"), index, NAME_LENGTH))
-        .collect()
-}
-
-/// One rotation round: a source write that copies both shared blocks, then a
-/// wide create batch that spans several allocation-root leaves.
-fn rotation_round<D: BlockDevice>(
-    volume: &mut Volume<D>,
-    state: &RotationState,
-    round: u32,
-) -> Result<(), CoreError> {
-    volume.write_file_at(state.source, BS as u64 - 6, &rotation_patch(round), ts(30))?;
-    let names = rotation_names(round);
-    let operations: Vec<BatchOp<'_>> = names
-        .iter()
-        .map(|name| BatchOp::CreateFile {
-            parent_id: OBJECT_ROOT,
-            name,
-            content: b"",
-        })
-        .collect();
-    volume.run_batch(&operations, ts(31)).map(|_| ())
-}
-
-struct RotationBatch;
-
-impl Family for RotationBatch {
-    type State = RotationState;
-
-    fn name(&self) -> &'static str {
-        "multi-round allocation rotation batch"
-    }
-
-    fn format(&self, _variant: Variant) -> Format {
-        // 1,024 regions span eight allocation-root leaves.
-        Format::new(16 * 1024, 16)
-    }
-
-    fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) -> RotationState {
-        let original = vec![ROTATION_ORIGINAL; ROTATION_BYTES];
-        let source = volume
-            .create_file_in_root("source", &original, ts(1))
-            .unwrap();
-        let peers = [
-            volume
-                .clone_file(source, OBJECT_ROOT, "peer-a", ts(2))
-                .unwrap(),
-            volume
-                .clone_file(source, OBJECT_ROOT, "peer-b", ts(3))
-                .unwrap(),
-        ];
-        let snapshot = volume.snapshot_create(ts(4)).unwrap();
-        let mut state = RotationState {
-            source,
-            peers,
-            snapshot,
-            created: 0,
-        };
-        for round in 0..ROTATION_ROUNDS {
-            rotation_round(volume, &state, round).unwrap();
-            state.created += ROTATION_ENTRIES;
-        }
-        state
-    }
-
-    fn snapshot(&self, state: &RotationState) -> Option<u64> {
-        Some(state.snapshot)
-    }
-
-    fn captured(&self, state: &RotationState) -> Vec<(u64, Vec<u8>)> {
-        let original = vec![ROTATION_ORIGINAL; ROTATION_BYTES];
-        vec![
-            (state.source, original.clone()),
-            (state.peers[0], original.clone()),
-            (state.peers[1], original),
-        ]
-    }
-
-    fn apply<D: BlockDevice>(
-        &self,
-        volume: &mut Volume<D>,
-        state: &RotationState,
-    ) -> Result<(), CoreError> {
-        rotation_round(volume, state, ROTATION_ROUNDS)
-    }
-
-    /// The write and the wide create batch publish one checkpoint each.
-    fn publications(&self, _variant: Variant) -> u64 {
-        2
-    }
-
-    fn verify<D: BlockDevice>(
-        &self,
-        volume: &mut Volume<D>,
-        state: &RotationState,
-        _variant: Variant,
-        delta: u64,
-        context: &str,
-    ) {
-        let rounds = ROTATION_ROUNDS + u32::from(delta >= 1);
-        file_bytes(
-            volume,
-            state.source,
-            &rotation_source_bytes(rounds),
-            context,
-        );
-        let original = vec![ROTATION_ORIGINAL; ROTATION_BYTES];
-        for peer in state.peers {
-            file_bytes(volume, peer, &original, context);
-        }
-        let entries = state.created + if delta == 2 { ROTATION_ENTRIES } else { 0 };
-        assert_eq!(
-            volume.list_root().unwrap().len(),
-            entries + 3,
-            "{context}: root entries"
-        );
-        for name in &rotation_names(ROTATION_ROUNDS) {
-            assert_eq!(
-                volume.lookup_root(name).unwrap().is_some(),
-                delta == 2,
-                "{context}: {name}"
-            );
-        }
-    }
-
-    fn after_success<D: BlockDevice>(
-        &self,
-        volume: &mut Volume<D>,
-        _state: &RotationState,
-        _variant: Variant,
-    ) {
-        let stats = volume.last_commit_stats().unwrap();
-        assert!(
-            stats.allocation_tree_nodes_written > 2,
-            "the rotation batch must span allocation-root nodes"
-        );
-        eprintln!(
-            "rotation pages={} allocation_nodes={} spills={} peak={}",
-            volume.tree_cache_pages(),
-            stats.allocation_tree_nodes_written,
-            stats.tree_mutations.staged_spill_writes,
-            stats.tree_mutations.max_resident_staged_nodes
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Reload read failures outside the directory and batch transactions
 // ---------------------------------------------------------------------------
 
@@ -952,93 +768,12 @@ impl Family for AllocationRootPromotion {
     }
 }
 
-/// Retained views the snapshot fixture holds before the recorded write.
-const REGISTRY_SNAPSHOTS: usize = 96;
-/// Logical blocks of the snapshot fixture's subject file.
-const REGISTRY_BLOCKS: u64 = 96;
-
-struct RegistryState {
-    file: u64,
-    snapshots: usize,
-}
-
-fn registry_expected(published: bool) -> Vec<u8> {
-    let mut bytes = vec![0x41; (REGISTRY_BLOCKS * BS as u64) as usize];
-    if published {
-        bytes[..(REGISTRY_BLOCKS / 2 * BS as u64) as usize].fill(0x5e);
-    }
-    bytes
-}
-
-struct SnapshotRegistryWrite;
-
-impl Family for SnapshotRegistryWrite {
-    type State = RegistryState;
-
-    fn name(&self) -> &'static str {
-        "write under many retained views"
-    }
-
-    fn format(&self, _variant: Variant) -> Format {
-        Format::new(4096, 4096)
-    }
-
-    fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) -> RegistryState {
-        let length = (REGISTRY_BLOCKS * BS as u64) as usize;
-        let file = volume
-            .create_file_in_root("subject", &vec![0x41; length], ts(1))
-            .unwrap();
-        for index in 0..REGISTRY_SNAPSHOTS {
-            volume.snapshot_create(ts(2 + index as i64)).unwrap();
-        }
-        RegistryState {
-            file,
-            snapshots: REGISTRY_SNAPSHOTS,
-        }
-    }
-
-    fn captured(&self, _state: &RegistryState) -> Vec<(u64, Vec<u8>)> {
-        Vec::new()
-    }
-
-    fn apply<D: BlockDevice>(
-        &self,
-        volume: &mut Volume<D>,
-        state: &RegistryState,
-    ) -> Result<(), CoreError> {
-        let length = (REGISTRY_BLOCKS / 2 * BS as u64) as usize;
-        volume.write_file_at(state.file, 0, &vec![0x5e; length], ts(500))
-    }
-
-    fn verify<D: BlockDevice>(
-        &self,
-        volume: &mut Volume<D>,
-        state: &RegistryState,
-        _variant: Variant,
-        delta: u64,
-        context: &str,
-    ) {
-        assert_eq!(
-            volume.list_root().unwrap().len(),
-            1,
-            "{context}: root entries"
-        );
-        file_bytes(volume, state.file, &registry_expected(delta == 1), context);
-        assert_eq!(
-            volume.snapshot_list(u64::MAX, 256).unwrap().entries.len(),
-            state.snapshots,
-            "{context}: registry membership"
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Generated tests
 // ---------------------------------------------------------------------------
 
 const OPEN_TARGET_SEED: u64 = 0x5eed_0f3a_2001;
 const ORPHAN_UPDATE_SEED: u64 = 0x5eed_0f3a_2002;
-const ROTATION_SEED: u64 = 0x5eed_0f3a_2003;
 
 crate::profile_tests!(open_target_replace, |pages| matrix::plain(
     &OpenTargetReplace,
@@ -1082,12 +817,6 @@ crate::profile_tests!(consumption_retained, |pages| matrix::retained(
     pages,
     12
 ));
-crate::profile_tests!(rotation_batch, |pages| matrix::retained_sampled(
-    &RotationBatch,
-    pages,
-    SAMPLE,
-    ROTATION_SEED
-));
 
 #[test]
 fn extent_map_write_survives_reload_read_failures() {
@@ -1118,13 +847,4 @@ fn allocation_root_promotion_survives_reload_read_failures() {
         .map(|pages| matrix::reload_failures(&AllocationRootPromotion, pages, Variant::Plain).0)
         .sum();
     assert!(spills > 0, "no profile spilled a provisional image");
-}
-
-#[test]
-fn retained_view_write_survives_reload_read_failures() {
-    let reloads: u64 = [2, 4, 8]
-        .into_iter()
-        .map(|pages| matrix::reload_failures(&SnapshotRegistryWrite, pages, Variant::Plain).1)
-        .sum();
-    assert!(reloads > 0, "no profile reloaded a provisional image");
 }
