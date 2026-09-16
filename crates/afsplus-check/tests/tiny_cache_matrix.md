@@ -801,6 +801,72 @@ for target in intent_log intent_replay_orphans shared_crash orphans tiny_cache_m
   cargo test --offline -p afsplus-check --all-features --test "$target" -- --test-threads=2
 done
 cargo test --offline -p afsplus-core --all-features --lib volume::snapshots
+
+## Residual data family matrix
+
+[family_matrix_data_residuals.rs](family_matrix_data_residuals.rs) drives the
+spilled data cuts beyond the exhaustive budget, the ambiguous publication of
+each of those operations and shared-run truncate at 2/4/8/unlimited; 61 tests
+pass. [family_matrix_space_residuals.rs](family_matrix_space_residuals.rs)
+drives the in-place resource refusal and the two low-space residuals; 12 tests
+pass.
+
+The forced-eviction fixture holds one written sparse tree, with a written block
+at every second logical block, and one unwritten reservation tree, with a
+one-block reservation at every third. The record count per file follows the
+profile: 40 at two pages, 120 at four pages, 500 at eight pages and unlimited.
+The reservation-initializing write takes 500 records from four pages up,
+because four staged nodes at 120 and at 160 records fit the four-page profile.
+The plain and ambiguous fixtures hold four records per file.
+
+Every image checks both objects: the logical size, the direct/extent-tree flag,
+the complete allocation enumeration, and literal bytes over the first block,
+the window the operation changes and the block at end of file read with a
+sentinel past it, live and through the snapshot with its exact captured
+metadata and captured enumeration. The complete allocation enumeration is
+exact, so the extent records the operation leaves alone fix every byte outside
+those windows. Each recording adds the complete literal bytes of every object,
+live and captured, and asserts zero in-place overwrites. The driver's checker
+wrapper and effective-profile assertion apply from formatting through every
+recovered mount. Counts below run 2/4/8/unlimited.
+
+| Family and part | Oracle | Modeled count per profile | Deliberate limit |
+|---|---|---|---|
+| Spilled full-COW write, spill evidence and faults | 100 bytes at offset 7 of the middle written block; staged demand 3, 6, 10 and 10 with 1, 2, 3 and 0 spill writes and peaks of 2, 4, 8 and 10; 12, 17, 27 and 27 writes over 3 flushes with 9-, 13-, 22- and 25-write tails | 15, 20, 30 and 30 faults; 13, 18, 28 and 28 same-handle retries | Memory device |
+| Spilled full-COW write, sampled cut campaign | Seed `0xc00d17e001`, sample 64: 13, 18, 28 and 28 prefixes, 36, 51, 81 and 81 tears, 518, 10, 18 and 4 exhaustive subsets, 0, 64, 64 and 64 sampled subsets | 567, 143, 191 and 177 images | Reorderings of a segment longer than twelve writes stay outside the evidence |
+| Spilled reservation initialization, spill evidence and faults | 100 bytes at offset 7 of the middle reservation, which the initialization clears to written; demand 3, 10, 10 and 10 with 1, 11, 3 and 0 spill writes; 12, 27, 27 and 27 writes with 9-, 14-, 22- and 25-write tails | 15, 30, 30 and 30 faults; 13, 28, 28 and 28 same-handle retries | Reservation trees of 120 and 160 records stage four nodes, so `reservation_initialization_stages_four_nodes_at_120_and_160_records` records that measured limit |
+| Spilled reservation initialization, sampled cut campaign | Seed `0xc00d17e002`, sample 64: 518, 4,098, 18 and 4 exhaustive subsets and 0, 64, 64 and 64 sampled subsets | 567, 4,271, 191 and 177 images | As above |
+| Bounded write over eight extent leaves | One leaf holds 100 extent records, so the window covers 1,600 logical blocks of an 1,100-record tree and publishes one 1,600-block extent with the sparse tail behind it; demand 24 with 24, 22, 18 and 0 spill writes; 1,635, 1,635, 1,635 and 1,633 writes with 1,624-, 1,622-, 1,618- and 1,600-write tails | Four recordings through `eviction_recorded` | Nine staged nodes need a window of at least six leaves, so the fault matrix and every cut campaign of this transaction fall outside the per-test time budget |
+| Spilled hole reservation, spill evidence and faults | Every hole of the written tree reserved, giving 2*n alternating written and unwritten one-block ranges with unchanged bytes, modification time and content generation; demand 3, 5, 12 and 12 with 1, 1, 5 and 0 spill writes; 11, 16, 28 and 28 writes with 10-, 15-, 27- and 27-write tails | 13, 18, 30 and 30 faults; 11, 16, 28 and 28 same-handle retries | Memory device |
+| Spilled hole reservation, sampled cut campaign | Seed `0xc00d17e003`, sample 64: 1,026, 2, 2 and 2 exhaustive subsets and 0, 64, 64 and 64 sampled subsets | 1,071, 131, 179 and 179 images | As the full-COW campaign |
+| Spilled shrink and bounded shrink, spill evidence and faults | Half the tree with a nine-byte tail: the truncated byte literal, the truncated enumeration and the retained full captured view; demand 3, 7, 15 and 15 for both, with 3, 3, 7 and 0 spill writes; the shrink records 14, 16, 29 and 29 writes with 9-, 11-, 20- and 27-write tails and the bounded shrink 14, 16, 25 and 25 with 9-, 11-, 16- and 23-write tails | Shrink 17, 19, 32 and 32 faults with 15, 17, 30 and 30 retries; bounded shrink 17, 19, 28 and 28 faults with 15, 17, 26 and 26 retries | Memory device |
+| Spilled shrink and bounded shrink, sampled cut campaigns | Seeds `0xc00d17e004` and `0xc00d17e005`, sample 64 | Shrink 587, 2,131, 439 and 185 images; bounded shrink 587, 2,131, 423 and 169 images | As the full-COW campaign |
+| Sparse growth, exhaustive cuts and faults | Growth to four times the size with the enumeration held and the tail zeros literal; demand 3, 5, 4 and 4 with 1, 1, 0 and 0 spill writes; 10, 12, 11 and 11 writes with 9-, 11-, 10- and 10-write tails | 1,165, 4,300, 2,219 and 2,219 cut images with a 12-write budget; 12, 14, 13 and 13 faults with 10, 12, 11 and 11 retries | The staged demand of 3, 5 and 4 at 40, 120 and 500 records holds below five, so profiles of four pages and above report zero spills |
+| Ambiguous publication of the full-COW write, the reservation initialization, the hole reservation, the shrink and the growth | Completed checkpoint write reported failed and adoption reads failing after it; the same operation and an independent create return `WindowPoisoned` with no writes or flushes; remount exposes exactly one publication | 2 cases per family per profile, 40 cases | Four-record fixtures |
+| Shared-run truncate, cuts, faults and retained snapshot | A four-block file cloned to a peer whose rewrite of block 1 splits the run; the source truncated to two blocks and nine bytes publishes a two-block and a one-block range, the peer keeps its three ranges and exact bytes, and the snapshot keeps both captured objects | 1,171 cut images with a 12-write budget; 14 faults (11 writes, 3 flushes) and 12 same-handle retries per profile; 2 ambiguous cases | One private peer block |
+| Shared-run truncate, retirement budget refusal | A one-block retirement budget refuses the truncate, which retires the removed tail block and the rewrite of the partial block; zero writes and zero flushes, the fixture holds live and after remount, and the budget of two admits the retry | 4 refusals, one per profile | The corrective step raises the budget and publishes nothing |
+| In-place write resource refusal | A flagged two-block file and a pressure file reserving the largest admitted range; an extending write of 128 blocks falls back to full COW and returns `NoSpace` with zero writes and zero flushes; deleting the pressure file and draining reclaim admits the retry, which overwrites zero blocks in place | 4 refusals with 4 corrective commits and zero retry spills | The block and record budgets refuse before the policy decision, so the fallback's ENOSPC carries this refusal |
+| Near-full delete under a retained snapshot | A 512-block image with a two-block survivor, a one-block victim and a pressure file; the snapshot captures both files, accounting moves from (16, 14) to (12, 17), and every image keeps the survivor's bytes, the reserved layout and both captured objects | 626 images (622/4); 11 faults (9 writes, 2 flushes) and 9 same-handle retries; 2 ambiguous cases | Memory device |
+| Data-block ENOSPC inside a spilled batch | A 2,048-block image with 300 long root names; a batch of 64 long-name entries without content measures a metadata demand of 89 blocks, the pressure file leaves 115 blocks of capacity, and the same batch with two-block payloads returns `NoSpace` for its 128 data blocks with zero flushes and writes only to blocks unreachable from either selectable checkpoint | Refused writes 158, 16, 11 and 0, all to unreachable targets; 9 corrective commits; retry spill writes 164, 19, 13 and 0 | The measured 115 blocks exceed the metadata demand and fall short of the data demand |
+
+Negative controls, one per fixture family: a shifted full-COW byte, a shifted
+reservation byte, a shifted window byte, an inverted reservation parity, a
+one-byte longer shrink tail, a growth to five times the size, one merged range
+after the shared-run truncate, a shifted extension byte, one extra pending
+block after the near-full delete and a metadata demand of 90 blocks. All ten
+fail their test, and the sources are restored from the commit and hash-checked
+afterwards.
+
+```sh
+export CARGO_HOME=$HOME/.cargo
+export RUSTUP_HOME=$HOME/.rustup
+export CARGO_TARGET_DIR=/private/tmp/afsplus-wt-cache-residual-data/target
+export CARGO_NET_OFFLINE=true
+export CARGO_BUILD_JOBS=2
+export PATH="$CARGO_HOME/bin:$PATH"
+for target in family_matrix_data_residuals family_matrix_space_residuals; do
+  cargo test --offline -p afsplus-check --all-features --test "$target" -- --test-threads=2
+done
 cargo fmt --all -- --check
 cargo clippy --offline -p afsplus-check --all-features --tests -- -D warnings
 make check-docs
