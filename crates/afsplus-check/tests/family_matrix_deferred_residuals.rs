@@ -1,0 +1,942 @@
+//! Residual deferred-window combinations of the tiny-cache matrix: forced
+//! eviction of the deferred and replay recovery commits, the resource
+//! refusals of the two existing-file window entry points, read failures
+//! inside `window_fsync` and `window_commit`, and faults at every write and
+//! flush of the intent-record publication. See tiny_cache_matrix.md.
+
+mod common;
+
+use afsplus_block::{BlockDevice, MemoryBackend};
+use afsplus_core::shared_extents;
+use afsplus_core::volume::BatchOp;
+use afsplus_core::{CoreError, Volume};
+use afsplus_format::OBJECT_ROOT;
+
+use common::family_matrix::{self as matrix, ts, Format, ReplayFamily, Variant, BS};
+
+/// Log slots of every fixture in this file.
+const SLOTS: u16 = 8;
+/// Long root names of the eviction fixtures.
+const POPULATION: usize = 128;
+const NAME_LENGTH: usize = 240;
+
+fn image(variant: Variant) -> Format {
+    match variant {
+        Variant::Eviction => Format {
+            log_slots: SLOTS,
+            ..Format::new(4096, 16)
+        },
+        _ => Format {
+            log_slots: SLOTS,
+            ..Format::new(4096, 4096)
+        },
+    }
+}
+
+/// Root entries beyond the family's own names.
+fn background(variant: Variant) -> usize {
+    if variant == Variant::Eviction {
+        POPULATION
+    } else {
+        0
+    }
+}
+
+fn setup_background(volume: &mut Volume<MemoryBackend>, variant: Variant) {
+    if variant == Variant::Eviction {
+        matrix::populate(volume, "wide", POPULATION, NAME_LENGTH);
+    }
+}
+
+/// Reads the whole file with a sentinel past the end.
+fn file_bytes<D: BlockDevice>(volume: &mut Volume<D>, id: u64, expected: &[u8], context: &str) {
+    let mut read = vec![0xa5; expected.len() + 1];
+    assert_eq!(
+        volume.read_file_at(id, 0, &mut read).unwrap(),
+        expected.len(),
+        "{context}: length of {id}"
+    );
+    assert_eq!(
+        &read[..expected.len()],
+        expected,
+        "{context}: bytes of {id}"
+    );
+    assert_eq!(read[expected.len()], 0xa5, "{context}: EOF of {id}");
+}
+
+/// Exact root listing: the anchor, the background names and `names`.
+fn assert_root<D: BlockDevice>(
+    volume: &mut Volume<D>,
+    variant: Variant,
+    anchor: &str,
+    names: &[&str],
+    context: &str,
+) {
+    let entries = volume.list_root().unwrap();
+    assert_eq!(
+        entries.len(),
+        background(variant) + 1 + names.len(),
+        "{context}: root entry count"
+    );
+    let present: std::collections::BTreeSet<String> =
+        entries.into_iter().map(|(name, _)| name).collect();
+    assert!(present.contains(anchor), "{context}: anchor entry");
+    for name in names {
+        assert!(present.contains(*name), "{context}: entry {name}");
+    }
+    for name in ["alpha", "beta", "gamma", "note", "renamed"] {
+        if !names.contains(&name) {
+            assert!(
+                !present.contains(name),
+                "{context}: unexpected entry {name}"
+            );
+        }
+    }
+}
+
+fn assert_bytes<D: BlockDevice>(volume: &mut Volume<D>, id: u64, expected: &[u8], context: &str) {
+    assert_eq!(volume.read_file(id).unwrap(), expected, "{context}: bytes");
+}
+
+// ---------------------------------------------------------------- namespace
+
+/// Three durable namespace groups over a wide root: a create, a rename, and a
+/// create paired with a delete inside one group.
+struct DeferredNamespace;
+
+struct NamespaceState {
+    anchor: u64,
+}
+
+const ANCHOR: &[u8] = b"anchor-bytes-kept-through-every-group";
+const ALPHA: &[u8] = b"alpha-bytes";
+const GAMMA: &[u8] = b"gamma-bytes";
+/// Independent spellings the oracle expects, so a changed operation input
+/// fails the test.
+const EXPECTED_ANCHOR: &[u8] = b"anchor-bytes-kept-through-every-group";
+const EXPECTED_ALPHA: &[u8] = b"alpha-bytes";
+const EXPECTED_GAMMA: &[u8] = b"gamma-bytes";
+
+impl ReplayFamily for DeferredNamespace {
+    type State = NamespaceState;
+
+    fn name(&self) -> &'static str {
+        "deferred namespace residual"
+    }
+
+    fn format(&self, variant: Variant) -> Format {
+        image(variant)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, variant: Variant) -> NamespaceState {
+        setup_background(volume, variant);
+        let anchor = volume.create_file_in_root("anchor", ANCHOR, ts(1)).unwrap();
+        NamespaceState { anchor }
+    }
+
+    fn captured(&self, state: &NamespaceState) -> Vec<(u64, Vec<u8>)> {
+        vec![(state.anchor, ANCHOR.to_vec())]
+    }
+
+    fn groups(&self) -> usize {
+        3
+    }
+
+    fn log_group<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &NamespaceState,
+        index: usize,
+    ) -> Result<(), CoreError> {
+        match index {
+            0 => {
+                volume.window_op(
+                    &BatchOp::CreateFile {
+                        parent_id: OBJECT_ROOT,
+                        name: "alpha",
+                        content: ALPHA,
+                    },
+                    ts(10),
+                )?;
+            }
+            1 => {
+                volume.window_op(
+                    &BatchOp::Rename {
+                        source_parent_id: OBJECT_ROOT,
+                        source_name: "alpha",
+                        target_parent_id: OBJECT_ROOT,
+                        target_name: "beta",
+                        replace: false,
+                    },
+                    ts(11),
+                )?;
+            }
+            _ => {
+                volume.window_op(
+                    &BatchOp::CreateFile {
+                        parent_id: OBJECT_ROOT,
+                        name: "gamma",
+                        content: GAMMA,
+                    },
+                    ts(12),
+                )?;
+                volume.window_op(
+                    &BatchOp::DeleteFile {
+                        parent_id: OBJECT_ROOT,
+                        name: "beta",
+                    },
+                    ts(13),
+                )?;
+            }
+        }
+        volume.window_fsync()
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &NamespaceState,
+        variant: Variant,
+        acknowledged: usize,
+        context: &str,
+    ) {
+        assert_bytes(volume, state.anchor, EXPECTED_ANCHOR, context);
+        let names: &[&str] = match acknowledged {
+            0 => &[],
+            1 => &["alpha"],
+            2 => &["beta"],
+            _ => &["gamma"],
+        };
+        assert_root(volume, variant, "anchor", names, context);
+        for name in names {
+            let id = volume.lookup_root(name).unwrap().unwrap();
+            let expected = if *name == "gamma" {
+                EXPECTED_GAMMA
+            } else {
+                EXPECTED_ALPHA
+            };
+            assert_bytes(volume, id, expected, context);
+        }
+    }
+
+    fn eviction_demand(&self) -> u64 {
+        NAMESPACE_DEMAND
+    }
+}
+
+// -------------------------------------------------------------------- write
+
+/// Three durable existing-file writes at distinct offsets.
+struct DeferredWrite;
+
+struct WriteState {
+    file: u64,
+}
+
+const BASE_BYTE: u8 = 0x18;
+const PATCHES: [(u64, u8, usize); 3] = [(73, 0xc7, 211), (4096 + 10, 0x5a, 300), (2, 0x3e, 4100)];
+/// Independent expectation of the three patched windows.
+const EXPECTED_PATCHES: [(u64, u8, usize); 3] =
+    [(73, 0xc7, 211), (4096 + 10, 0x5a, 300), (2, 0x3e, 4100)];
+/// Independent expectation of the untouched byte value.
+const EXPECTED_BASE: u8 = 0x18;
+
+fn patched(count: usize) -> Vec<u8> {
+    let mut bytes = vec![EXPECTED_BASE; 3 * BS];
+    for (offset, value, length) in EXPECTED_PATCHES.iter().take(count) {
+        let start = *offset as usize;
+        bytes[start..start + length].fill(*value);
+    }
+    bytes
+}
+
+impl ReplayFamily for DeferredWrite {
+    type State = WriteState;
+
+    fn name(&self) -> &'static str {
+        "deferred write residual"
+    }
+
+    fn format(&self, variant: Variant) -> Format {
+        image(variant)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, variant: Variant) -> WriteState {
+        setup_background(volume, variant);
+        let file = volume
+            .create_file_in_root("anchor", &vec![BASE_BYTE; 3 * BS], ts(1))
+            .unwrap();
+        WriteState { file }
+    }
+
+    fn captured(&self, state: &WriteState) -> Vec<(u64, Vec<u8>)> {
+        vec![(state.file, vec![BASE_BYTE; 3 * BS])]
+    }
+
+    fn groups(&self) -> usize {
+        3
+    }
+
+    fn log_group<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &WriteState,
+        index: usize,
+    ) -> Result<(), CoreError> {
+        let (offset, value, length) = PATCHES[index];
+        volume.window_write_file_at(
+            state.file,
+            offset,
+            &vec![value; length],
+            ts(20 + index as i64),
+        )?;
+        volume.window_fsync()
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &WriteState,
+        variant: Variant,
+        acknowledged: usize,
+        context: &str,
+    ) {
+        assert_bytes(volume, state.file, &patched(acknowledged), context);
+        assert_root(volume, variant, "anchor", &[], context);
+    }
+
+    fn eviction_demand(&self) -> u64 {
+        WRITE_DEMAND
+    }
+}
+
+// ----------------------------------------------------------------- truncate
+
+/// Three durable truncates: a partial shrink, a sparse growth and an aligned
+/// shrink.
+struct DeferredTruncate;
+
+const SIZES: [u64; 3] = [BS as u64 + 211, 3 * BS as u64 + 50, BS as u64];
+/// Independent expectation of the three published sizes.
+const EXPECTED_SIZES: [u64; 3] = [4307, 12338, 4096];
+
+fn resized(count: usize) -> Vec<u8> {
+    let mut bytes = vec![EXPECTED_BASE; 3 * BS];
+    for size in EXPECTED_SIZES.iter().take(count) {
+        let size = *size as usize;
+        if size <= bytes.len() {
+            bytes.truncate(size);
+        } else {
+            bytes.resize(size, 0);
+        }
+    }
+    bytes
+}
+
+impl ReplayFamily for DeferredTruncate {
+    type State = WriteState;
+
+    fn name(&self) -> &'static str {
+        "deferred truncate residual"
+    }
+
+    fn format(&self, variant: Variant) -> Format {
+        image(variant)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, variant: Variant) -> WriteState {
+        setup_background(volume, variant);
+        let file = volume
+            .create_file_in_root("anchor", &vec![BASE_BYTE; 3 * BS], ts(1))
+            .unwrap();
+        WriteState { file }
+    }
+
+    fn captured(&self, state: &WriteState) -> Vec<(u64, Vec<u8>)> {
+        vec![(state.file, vec![BASE_BYTE; 3 * BS])]
+    }
+
+    fn groups(&self) -> usize {
+        3
+    }
+
+    fn log_group<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &WriteState,
+        index: usize,
+    ) -> Result<(), CoreError> {
+        volume.window_truncate_file(state.file, SIZES[index], ts(30 + index as i64))?;
+        volume.window_fsync()
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &WriteState,
+        variant: Variant,
+        acknowledged: usize,
+        context: &str,
+    ) {
+        let expected = resized(acknowledged);
+        assert_bytes(volume, state.file, &expected, context);
+        assert_eq!(
+            volume.stat(state.file).unwrap().unwrap().size_bytes,
+            expected.len() as u64,
+            "{context}: size"
+        );
+        assert_root(volume, variant, "anchor", &[], context);
+    }
+
+    fn eviction_demand(&self) -> u64 {
+        TRUNCATE_DEMAND
+    }
+}
+
+// -------------------------------------------------------------------- mixed
+
+/// Windows that combine namespace, write and truncate work in one group.
+struct DeferredMixed;
+
+struct MixedState {
+    file: u64,
+}
+
+const MIXED_PATCH: (u64, u8, usize) = (100, 0x9b, 500);
+const MIXED_SECOND: (u64, u8, usize) = (BS as u64 + 7, 0x4d, 64);
+const MIXED_SIZE: u64 = 2 * BS as u64 - 90;
+/// Independent expectations of both windows and of the published size.
+const EXPECTED_MIXED_PATCH: (u64, u8, usize) = (100, 0x9b, 500);
+const EXPECTED_MIXED_SECOND: (u64, u8, usize) = (4103, 0x4d, 64);
+const EXPECTED_MIXED_SIZE: u64 = 8102;
+
+fn mixed_bytes(acknowledged: usize) -> Vec<u8> {
+    let mut bytes = vec![EXPECTED_BASE; 2 * BS];
+    if acknowledged >= 1 {
+        let (offset, value, length) = EXPECTED_MIXED_PATCH;
+        bytes[offset as usize..offset as usize + length].fill(value);
+        bytes.truncate(EXPECTED_MIXED_SIZE as usize);
+    }
+    if acknowledged >= 2 {
+        let (offset, value, length) = EXPECTED_MIXED_SECOND;
+        bytes[offset as usize..offset as usize + length].fill(value);
+    }
+    bytes
+}
+
+impl ReplayFamily for DeferredMixed {
+    type State = MixedState;
+
+    fn name(&self) -> &'static str {
+        "deferred mixed window residual"
+    }
+
+    fn format(&self, variant: Variant) -> Format {
+        image(variant)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, variant: Variant) -> MixedState {
+        setup_background(volume, variant);
+        let file = volume
+            .create_file_in_root("anchor", &vec![BASE_BYTE; 2 * BS], ts(1))
+            .unwrap();
+        MixedState { file }
+    }
+
+    fn captured(&self, state: &MixedState) -> Vec<(u64, Vec<u8>)> {
+        vec![(state.file, vec![BASE_BYTE; 2 * BS])]
+    }
+
+    fn groups(&self) -> usize {
+        2
+    }
+
+    fn log_group<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &MixedState,
+        index: usize,
+    ) -> Result<(), CoreError> {
+        if index == 0 {
+            volume.window_op(
+                &BatchOp::CreateFile {
+                    parent_id: OBJECT_ROOT,
+                    name: "note",
+                    content: GAMMA,
+                },
+                ts(40),
+            )?;
+            let (offset, value, length) = MIXED_PATCH;
+            volume.window_write_file_at(state.file, offset, &vec![value; length], ts(41))?;
+            volume.window_truncate_file(state.file, MIXED_SIZE, ts(42))?;
+        } else {
+            volume.window_op(
+                &BatchOp::Rename {
+                    source_parent_id: OBJECT_ROOT,
+                    source_name: "note",
+                    target_parent_id: OBJECT_ROOT,
+                    target_name: "renamed",
+                    replace: false,
+                },
+                ts(43),
+            )?;
+            let (offset, value, length) = MIXED_SECOND;
+            volume.window_write_file_at(state.file, offset, &vec![value; length], ts(44))?;
+        }
+        volume.window_fsync()
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &MixedState,
+        variant: Variant,
+        acknowledged: usize,
+        context: &str,
+    ) {
+        let expected = mixed_bytes(acknowledged);
+        assert_bytes(volume, state.file, &expected, context);
+        assert_eq!(
+            volume.stat(state.file).unwrap().unwrap().size_bytes,
+            expected.len() as u64,
+            "{context}: size"
+        );
+        let names: &[&str] = match acknowledged {
+            0 => &[],
+            1 => &["note"],
+            _ => &["renamed"],
+        };
+        assert_root(volume, variant, "anchor", names, context);
+        for name in names {
+            let id = volume.lookup_root(name).unwrap().unwrap();
+            assert_bytes(volume, id, EXPECTED_GAMMA, context);
+        }
+    }
+
+    fn eviction_demand(&self) -> u64 {
+        MIXED_DEMAND
+    }
+}
+
+// ------------------------------------------------------------ shared replay
+
+/// Block counts and reference counts of every reference record.
+fn run_shape<D: BlockDevice>(volume: &mut Volume<D>) -> Vec<(u64, u32)> {
+    let root = volume.checkpoint().shared_extent_root_block;
+    if root == 0 {
+        return Vec::new();
+    }
+    let geometry = volume.ident().geometry();
+    let generation = volume.generation();
+    shared_extents::load_all(volume.device_mut(), &geometry, root, generation)
+        .unwrap()
+        .records
+        .into_iter()
+        .map(|run| (run.block_count, run.reference_count))
+        .collect()
+}
+
+struct SharedState {
+    origin: u64,
+    peer: u64,
+    victim: u64,
+    bytes: Vec<u8>,
+    background: usize,
+}
+
+fn shared_bytes() -> Vec<u8> {
+    let mut bytes = vec![0x71; BS];
+    bytes.extend_from_slice(&[0x72; BS]);
+    bytes
+}
+
+/// Independent expectation of the two shared block values.
+const EXPECTED_SHARED: [u8; 2] = [0x71, 0x72];
+
+fn expected_shared_bytes() -> Vec<u8> {
+    let mut bytes = vec![EXPECTED_SHARED[0]; BS];
+    bytes.extend_from_slice(&[EXPECTED_SHARED[1]; BS]);
+    bytes
+}
+
+/// A durable unlink of one of three owners of a two-block run.
+struct SharedUnlinkReplay;
+
+impl ReplayFamily for SharedUnlinkReplay {
+    type State = SharedState;
+
+    fn name(&self) -> &'static str {
+        "shared replay unlink residual"
+    }
+
+    fn format(&self, variant: Variant) -> Format {
+        image(variant)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, variant: Variant) -> SharedState {
+        setup_background(volume, variant);
+        let bytes = shared_bytes();
+        let origin = volume.create_file_in_root("origin", &bytes, ts(1)).unwrap();
+        let peer = volume
+            .clone_file(origin, OBJECT_ROOT, "peer", ts(2))
+            .unwrap();
+        let victim = volume
+            .clone_file(origin, OBJECT_ROOT, "victim", ts(3))
+            .unwrap();
+        SharedState {
+            origin,
+            peer,
+            victim,
+            bytes,
+            background: background(variant),
+        }
+    }
+
+    fn captured(&self, state: &SharedState) -> Vec<(u64, Vec<u8>)> {
+        vec![
+            (state.origin, state.bytes.clone()),
+            (state.peer, state.bytes.clone()),
+            (state.victim, state.bytes.clone()),
+        ]
+    }
+
+    fn groups(&self) -> usize {
+        1
+    }
+
+    fn log_group<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &SharedState,
+        _index: usize,
+    ) -> Result<(), CoreError> {
+        volume.window_op(
+            &BatchOp::DeleteFile {
+                parent_id: OBJECT_ROOT,
+                name: "victim",
+            },
+            ts(50),
+        )?;
+        volume.window_fsync()
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &SharedState,
+        _variant: Variant,
+        acknowledged: usize,
+        context: &str,
+    ) {
+        let removed = acknowledged == 1;
+        assert_eq!(
+            volume.lookup_root("victim").unwrap(),
+            (!removed).then_some(state.victim),
+            "{context}: victim entry"
+        );
+        assert_eq!(
+            volume.orphan_object(state.victim).unwrap(),
+            removed,
+            "{context}: orphan flag"
+        );
+        let expected = expected_shared_bytes();
+        file_bytes(volume, state.origin, &expected, context);
+        file_bytes(volume, state.peer, &expected, context);
+        file_bytes(volume, state.victim, &expected, context);
+        assert_eq!(
+            run_shape(volume),
+            vec![(2, 3)],
+            "{context}: reference records"
+        );
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            state.background + if removed { 2 } else { 3 },
+            "{context}: root entries"
+        );
+    }
+
+    fn eviction_demand(&self) -> u64 {
+        SHARED_UNLINK_DEMAND
+    }
+}
+
+/// A durable existing-file write that moves one owner off a shared block.
+struct SharedWriteReplay;
+
+const SPLIT: (u64, u8, usize) = (40, 0x8c, 64);
+/// Independent expectation of the split window.
+const EXPECTED_SPLIT: (u64, u8, usize) = (40, 0x8c, 64);
+
+impl ReplayFamily for SharedWriteReplay {
+    type State = SharedState;
+
+    fn name(&self) -> &'static str {
+        "shared replay write residual"
+    }
+
+    fn format(&self, variant: Variant) -> Format {
+        image(variant)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, variant: Variant) -> SharedState {
+        setup_background(volume, variant);
+        let bytes = shared_bytes();
+        let origin = volume.create_file_in_root("origin", &bytes, ts(1)).unwrap();
+        let peer = volume
+            .clone_file(origin, OBJECT_ROOT, "peer", ts(2))
+            .unwrap();
+        SharedState {
+            origin,
+            peer,
+            victim: origin,
+            bytes,
+            background: background(variant),
+        }
+    }
+
+    fn captured(&self, state: &SharedState) -> Vec<(u64, Vec<u8>)> {
+        vec![
+            (state.origin, state.bytes.clone()),
+            (state.peer, state.bytes.clone()),
+        ]
+    }
+
+    fn groups(&self) -> usize {
+        1
+    }
+
+    fn log_group<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &SharedState,
+        _index: usize,
+    ) -> Result<(), CoreError> {
+        let (offset, value, length) = SPLIT;
+        volume.window_write_file_at(state.origin, offset, &vec![value; length], ts(50))?;
+        volume.window_fsync()
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &SharedState,
+        _variant: Variant,
+        acknowledged: usize,
+        context: &str,
+    ) {
+        let mut expected = expected_shared_bytes();
+        if acknowledged == 1 {
+            let (offset, value, length) = EXPECTED_SPLIT;
+            expected[offset as usize..offset as usize + length].fill(value);
+        }
+        file_bytes(volume, state.origin, &expected, context);
+        file_bytes(volume, state.peer, &expected_shared_bytes(), context);
+        assert_eq!(
+            run_shape(volume),
+            if acknowledged == 1 {
+                vec![(1, 2)]
+            } else {
+                vec![(2, 2)]
+            },
+            "{context}: reference records"
+        );
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            state.background + 2,
+            "{context}: root entries"
+        );
+    }
+
+    fn eviction_demand(&self) -> u64 {
+        SHARED_WRITE_DEMAND
+    }
+}
+
+// --------------------------------------------------------- replacing rename
+
+/// A durable replacing rename: recovery exposes the incoming object under the
+/// target name and orphans the replaced victim with its exact bytes.
+struct OrphanReplacingRename;
+
+struct ReplaceState {
+    victim: u64,
+    victim_bytes: Vec<u8>,
+    incoming: u64,
+    background: usize,
+}
+
+const INCOMING: &[u8] = b"incoming-content";
+/// Independent expectation of the incoming payload.
+const EXPECTED_INCOMING: &[u8] = b"incoming-content";
+/// A fragmented victim: one written block at every second logical block.
+const EXTENTS: u64 = 3;
+
+fn fragmented(volume: &mut Volume<MemoryBackend>, name: &str) -> (u64, Vec<u8>) {
+    let id = volume.create_file_in_root(name, b"", ts(1)).unwrap();
+    for extent in 0..EXTENTS {
+        volume
+            .write_file_at(
+                id,
+                extent * 2 * BS as u64,
+                &[0xd0 + extent as u8; BS],
+                ts(2 + extent as i64),
+            )
+            .unwrap();
+    }
+    let bytes = volume.read_file(id).unwrap();
+    (id, bytes)
+}
+
+/// Independent expectation of the fragmented victim: three written blocks at
+/// logical blocks 0, 2 and 4 with one hole between each pair.
+fn expected_fragmented() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for extent in 0..3u8 {
+        bytes.extend_from_slice(&[0xd0 + extent; BS]);
+        if extent < 2 {
+            bytes.extend_from_slice(&[0u8; BS]);
+        }
+    }
+    bytes
+}
+
+impl ReplayFamily for OrphanReplacingRename {
+    type State = ReplaceState;
+
+    fn name(&self) -> &'static str {
+        "orphan replay replacing rename residual"
+    }
+
+    fn format(&self, variant: Variant) -> Format {
+        image(variant)
+    }
+
+    fn setup(&self, volume: &mut Volume<MemoryBackend>, variant: Variant) -> ReplaceState {
+        setup_background(volume, variant);
+        let (victim, victim_bytes) = fragmented(volume, "target");
+        let incoming = volume
+            .create_file_in_root("incoming", INCOMING, ts(7))
+            .unwrap();
+        ReplaceState {
+            victim,
+            victim_bytes,
+            incoming,
+            background: background(variant),
+        }
+    }
+
+    fn captured(&self, state: &ReplaceState) -> Vec<(u64, Vec<u8>)> {
+        vec![
+            (state.victim, state.victim_bytes.clone()),
+            (state.incoming, INCOMING.to_vec()),
+        ]
+    }
+
+    fn groups(&self) -> usize {
+        1
+    }
+
+    fn log_group<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        _state: &ReplaceState,
+        _index: usize,
+    ) -> Result<(), CoreError> {
+        volume.window_op(
+            &BatchOp::Rename {
+                source_parent_id: OBJECT_ROOT,
+                source_name: "incoming",
+                target_parent_id: OBJECT_ROOT,
+                target_name: "target",
+                replace: true,
+            },
+            ts(50),
+        )?;
+        volume.window_fsync()
+    }
+
+    fn verify<D: BlockDevice>(
+        &self,
+        volume: &mut Volume<D>,
+        state: &ReplaceState,
+        _variant: Variant,
+        acknowledged: usize,
+        context: &str,
+    ) {
+        let replaced = acknowledged == 1;
+        assert_eq!(
+            volume.lookup_root("target").unwrap(),
+            Some(if replaced {
+                state.incoming
+            } else {
+                state.victim
+            }),
+            "{context}: target entry"
+        );
+        assert_eq!(
+            volume.lookup_root("incoming").unwrap(),
+            (!replaced).then_some(state.incoming),
+            "{context}: incoming entry"
+        );
+        assert_eq!(
+            volume.orphan_object(state.victim).unwrap(),
+            replaced,
+            "{context}: orphan flag"
+        );
+        file_bytes(volume, state.victim, &expected_fragmented(), context);
+        file_bytes(volume, state.incoming, EXPECTED_INCOMING, context);
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            state.background + if replaced { 1 } else { 2 },
+            "{context}: root entries"
+        );
+    }
+
+    fn eviction_demand(&self) -> u64 {
+        REPLACE_DEMAND
+    }
+}
+
+// -------------------------------- measured staged-node demands of the commits
+
+/// Root directory, object map and allocation root of the replay commit.
+const NAMESPACE_DEMAND: u64 = 3;
+/// Extent map and allocation root of the replay commit.
+const WRITE_DEMAND: u64 = 2;
+/// Extent map and allocation root of the replay commit.
+const TRUNCATE_DEMAND: u64 = 2;
+/// Extent map, directory and allocation root of the replay commit.
+const MIXED_DEMAND: u64 = 3;
+/// Root directory, orphan directory and allocation root.
+const SHARED_UNLINK_DEMAND: u64 = 3;
+/// Extent map and allocation root of the replay commit.
+const SHARED_WRITE_DEMAND: u64 = 2;
+/// Root directory, orphan directory and allocation root.
+const REPLACE_DEMAND: u64 = 3;
+
+crate::profile_tests!(namespace_replay_eviction, |pages| matrix::replay_eviction(
+    &DeferredNamespace,
+    pages
+));
+crate::profile_tests!(write_replay_eviction, |pages| matrix::replay_eviction(
+    &DeferredWrite,
+    pages
+));
+crate::profile_tests!(truncate_replay_eviction, |pages| matrix::replay_eviction(
+    &DeferredTruncate,
+    pages
+));
+crate::profile_tests!(mixed_replay_eviction, |pages| matrix::replay_eviction(
+    &DeferredMixed,
+    pages
+));
+crate::profile_tests!(shared_unlink_replay_eviction, |pages| {
+    matrix::replay_eviction(&SharedUnlinkReplay, pages)
+});
+crate::profile_tests!(shared_write_replay_eviction, |pages| {
+    matrix::replay_eviction(&SharedWriteReplay, pages)
+});
+crate::profile_tests!(replace_replay_eviction, |pages| matrix::replay_eviction(
+    &OrphanReplacingRename,
+    pages
+));
