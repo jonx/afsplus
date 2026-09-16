@@ -1624,3 +1624,145 @@ pub fn replay_with_faults<F: ReplayFamily>(
     recovery_cuts(family, &recording, pages, variant, budget);
     replay_faults(family, &recording, pages, variant);
 }
+
+/// A plain fixture whose unflushed tail exceeds the exhaustive budget: the
+/// recording, the seeded sampled cut campaign and the full fault matrix.
+pub fn plain_sampled<F: Family>(family: &F, pages: usize, sample: usize, seed: u64) {
+    let recording = record(family, pages, Variant::Plain);
+    sampled_cuts(family, &recording, pages, Variant::Plain, sample, seed);
+    faults(family, &recording, pages, Variant::Plain);
+}
+
+/// The same for a retained-snapshot fixture, with ambiguous publication.
+pub fn retained_sampled<F: Family>(family: &F, pages: usize, sample: usize, seed: u64) {
+    let recording = record(family, pages, Variant::Retained);
+    sampled_cuts(family, &recording, pages, Variant::Retained, sample, seed);
+    faults(family, &recording, pages, Variant::Retained);
+    ambiguous(family, pages, Variant::Retained);
+}
+
+/// Fails one read once the transaction has begun. A bounded cache reloads the
+/// provisional images it spilled earlier in the same transaction, so the
+/// injected read reaches that reload path as well as ordinary node reads.
+pub struct ReadFault {
+    pub inner: MemoryBackend,
+    fail_read: u64,
+    reads: u64,
+    armed: bool,
+    tripped: bool,
+}
+
+impl BlockDevice for ReadFault {
+    fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+
+    fn total_blocks(&self) -> u64 {
+        self.inner.total_blocks()
+    }
+
+    fn read_block(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        if self.armed {
+            if self.reads == self.fail_read {
+                self.tripped = true;
+                self.reads += 1;
+                return Err(BlockError::Injected("staged node reload"));
+            }
+            self.reads += 1;
+        }
+        self.inner.read_block(lba, buf)
+    }
+
+    fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.inner.write_block(lba, data)
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        self.inner.flush()
+    }
+}
+
+/// Injected read failures per profile.
+const RELOAD_INJECTIONS: u64 = 16;
+
+/// Fails reads spread through a spilling transaction of `variant` and requires
+/// an allowed committed state, a clean checker and a successful retry after
+/// remount. Returns the spill writes and the reloads of provisional images the
+/// successful run performed.
+pub fn reload_failures<F: Family>(family: &F, pages: usize, variant: Variant) -> (u64, u64) {
+    let (base, state, generation, captured) = prepare(family, pages, variant);
+    let publications = family.publications(variant);
+
+    let mut probe = open(TraceBackend::new(base.clone()), pages);
+    probe.device_mut().reset();
+    family.apply(&mut probe, &state).unwrap();
+    let stats = probe.last_commit_stats().unwrap().tree_mutations;
+    let reads = probe.device_mut().stats().reads;
+    assert!(
+        stats.staged_spill_writes > 0,
+        "{} pages={pages}: the fixture must spill",
+        family.name()
+    );
+
+    let stride = (reads / RELOAD_INJECTIONS).max(1);
+    let (mut injected, mut published_after_fault) = (0u64, 0u64);
+    for fail_read in (0..reads).step_by(stride as usize) {
+        let context = format!(
+            "{} {variant:?} pages={pages} read {fail_read}",
+            family.name()
+        );
+        let mut volume = open(
+            ReadFault {
+                inner: base.clone(),
+                fail_read,
+                reads: 0,
+                armed: false,
+                tripped: false,
+            },
+            pages,
+        );
+        volume.device_mut().armed = true;
+        if family.apply(&mut volume, &state).is_ok() {
+            assert!(
+                !volume.device_mut().tripped,
+                "{context}: a failed read was not reported"
+            );
+            continue;
+        }
+        assert!(volume.device_mut().tripped, "{context}");
+        volume.device_mut().armed = false;
+        let mut recovered = open(volume.into_device().inner, pages);
+        let delta = recovered
+            .generation()
+            .checked_sub(generation)
+            .filter(|delta| *delta <= publications)
+            .unwrap_or_else(|| panic!("{context}: disallowed generation"));
+        published_after_fault += u64::from(delta == publications);
+        family.verify(&mut recovered, &state, variant, delta, &context);
+        verify_captured(&mut recovered, &captured, &context);
+        assert_checker_clean(recovered.device_mut(), &context);
+        if delta < publications {
+            family
+                .apply(&mut recovered, &state)
+                .unwrap_or_else(|error| panic!("{context}: retry {error}"));
+        }
+        family.verify(&mut recovered, &state, variant, publications, &context);
+        let mut again = open(recovered.into_device(), pages);
+        family.verify(&mut again, &state, variant, publications, &context);
+        verify_captured(&mut again, &captured, &context);
+        assert_checker_clean(again.device_mut(), &context);
+        injected += 1;
+    }
+    assert!(
+        injected > 0,
+        "{} {variant:?} pages={pages}: no read failed",
+        family.name()
+    );
+    eprintln!(
+        "{} {variant:?} pages={pages}: reload read failures reads={reads} stride={stride} refused={injected} already_published={published_after_fault} spills={} reloads={}",
+        family.name(),
+        stats.staged_spill_writes,
+        stats.staged_spill_reloads
+    );
+    (stats.staged_spill_writes, stats.staged_spill_reloads)
+}
