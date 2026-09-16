@@ -8344,6 +8344,503 @@ mod fragmentation_tests {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Modeled cuts of the multi-round allocation rotation batch
+    //
+    // `allocation_cache_keeps_spilled_nodes_across_checkpoint_rotation`
+    // above qualifies the rotation itself. This block records the third
+    // round's 256-entry batch on a recording device and replays the seeded
+    // cut campaign of the family-matrix driver over it: every in-order write
+    // prefix, each write torn at the representative offsets after its
+    // in-order prefix, every full-write subset of a flush segment of at most
+    // twelve writes and `ROTATION_SAMPLE` seeded subsets of each longer
+    // segment. The rover control this fixture needs lives in this crate, so
+    // the oracle uses the verifier entry points directly.
+    // -----------------------------------------------------------------
+
+    /// Seeded full-write subsets drawn per oversized flush segment.
+    const ROTATION_SAMPLE: usize = 32;
+    /// SplitMix64 seed of the rotation cut campaign.
+    const ROTATION_SEED: u64 = 0x5eed_0a11_0cae;
+    /// Representative tear offsets of the power-cut model.
+    const ROTATION_TEARS: [usize; 3] = [64, 2048, 4064];
+    /// Flush segments up to this many writes enumerate every full-write subset.
+    const ROTATION_EXHAUSTIVE_SEGMENT: usize = 12;
+
+    const ROTATION_ORIGINAL: u8 = 0x35;
+    const ROTATION_FILE_BYTES: usize = 6000;
+    const ROTATION_PADDING: &str = "allocation-rotation-directory-leaf-padding";
+    /// Entries each round behind the recorded one adds to the root directory.
+    const ROTATION_POPULATION: usize = 64;
+    /// Entries the recorded batch adds. This bounded width keeps the campaign
+    /// inside the per-test time budget while the batch writes three
+    /// allocation-root nodes and spills at every bounded profile.
+    const ROTATION_BATCH: usize = 96;
+    /// Rounds the fixture completes before the recorded batch.
+    const ROTATION_ROUNDS: u32 = 1;
+
+    /// Spill writes the recorded batch performs per profile. Eight pages hold
+    /// its staged window, so two and four pages are the profiles that evict.
+    fn rotation_spills(pages: usize) -> u64 {
+        match pages {
+            2 => 12,
+            4 => 4,
+            _ => 0,
+        }
+    }
+
+    struct RotationFixture {
+        source: u64,
+        peers: [u64; 2],
+        snapshot: u64,
+        shared_start: u64,
+    }
+
+    fn rotation_open<D: BlockDevice>(device: D, pages: usize) -> Volume<D> {
+        let volume = crate::mount_with_snapshot_limits(
+            device,
+            crate::MountOptions {
+                tree_cache_pages: std::num::NonZeroUsize::new(pages),
+                ..Default::default()
+            },
+            SnapshotWorkLimits {
+                max_edit_records: 4096,
+                max_views: 128,
+                reclaim_records: 8,
+            },
+        )
+        .unwrap();
+        assert_eq!(volume.tree_cache_pages(), pages);
+        volume
+    }
+
+    /// Reads one file through an explicit checkpoint root and generation,
+    /// independent of the live caches and of the selected checkpoint.
+    fn rotation_checkpoint_file<D: BlockDevice>(
+        volume: &mut Volume<D>,
+        checkpoint: &Checkpoint,
+        id: u64,
+    ) -> Vec<u8> {
+        let view = afsplus_format::snapshot::SnapshotRecord {
+            generation: checkpoint.generation,
+            committed_tx_id: checkpoint.committed_tx_id,
+            object_map_root: checkpoint.object_map_block,
+        };
+        let mut observation = crate::snapshot::view::Observation::new(view, 0, None, false);
+        let mut bytes = vec![0xa5; ROTATION_FILE_BYTES + 1];
+        let count = crate::snapshot::view::read_at(
+            &mut volume.dev,
+            &volume.ident,
+            &mut observation,
+            id,
+            0,
+            &mut bytes,
+        )
+        .unwrap();
+        bytes.truncate(count);
+        bytes
+    }
+
+    fn rotation_snapshot_file<D: BlockDevice>(
+        volume: &mut Volume<D>,
+        snapshot: u64,
+        id: u64,
+    ) -> Vec<u8> {
+        let handle = volume.snapshot_open(snapshot).unwrap();
+        let mut bytes = vec![0xa5; ROTATION_FILE_BYTES + 1];
+        let count = volume
+            .snapshot_read_file_at(&handle, id, 0, &mut bytes)
+            .unwrap();
+        bytes.truncate(count);
+        bytes
+    }
+
+    /// Both selectable checkpoints: the cached allocation-root block sets when
+    /// a cache exists, the verifier's committed-state load and full sweep, the
+    /// exact shared run, and the literal bytes of the three objects through
+    /// each checkpoint's own object-map root, live and through the snapshot.
+    fn rotation_verify<D: BlockDevice>(
+        volume: &mut Volume<D>,
+        fixture: &RotationFixture,
+        current: &[u8],
+        entries: usize,
+        context: &str,
+    ) {
+        let original = vec![ROTATION_ORIGINAL; ROTATION_FILE_BYTES];
+        let expected_shared = vec![crate::shared_extents::SharedRun {
+            physical_start: fixture.shared_start,
+            block_count: 2,
+            reference_count: 2,
+            flags: 0,
+        }];
+        let selected = volume.checkpoint.clone();
+        // A cut inside the write to the older slot leaves one selectable
+        // checkpoint, which the oracle checks alone.
+        let older = volume.other_checkpoint.clone();
+        if let Some(older) = &older {
+            assert_eq!(older.generation + 1, selected.generation, "{context}");
+        }
+        let cache = volume.allocation_tree_cache.clone();
+        for (index, checkpoint) in [Some(selected), older].into_iter().flatten().enumerate() {
+            let generation = checkpoint.generation;
+            if let Some((cached, older_cached)) = &cache {
+                let mut expected = if index == 0 {
+                    cached.clone()
+                } else {
+                    older_cached.clone()
+                };
+                let mut actual = allocation_root::load_tree_blocks(
+                    &mut volume.dev,
+                    &volume.ident.geometry(),
+                    checkpoint.allocation_root_block,
+                    generation,
+                )
+                .unwrap();
+                actual.sort_unstable();
+                expected.sort_unstable();
+                assert_eq!(
+                    expected, actual,
+                    "{context}: checkpoint {generation} cache loses spilled nodes"
+                );
+            }
+            let state =
+                crate::verify::load_committed_state(&mut volume.dev, &volume.ident, &checkpoint)
+                    .unwrap();
+            let findings = crate::verify::full_sweep(&state, &volume.ident.geometry(), &checkpoint);
+            assert!(
+                findings.is_empty(),
+                "{context}: checkpoint {generation}: {findings:?}"
+            );
+            assert_eq!(
+                state.shared_records, expected_shared,
+                "{context}: checkpoint {generation} shared run"
+            );
+            assert_eq!(
+                rotation_checkpoint_file(volume, &checkpoint, fixture.source),
+                current,
+                "{context}: checkpoint {generation} source"
+            );
+            for peer in fixture.peers {
+                assert_eq!(
+                    rotation_checkpoint_file(volume, &checkpoint, peer),
+                    original,
+                    "{context}: checkpoint {generation} peer {peer}"
+                );
+            }
+        }
+        assert_eq!(
+            volume.read_file(fixture.source).unwrap(),
+            current,
+            "{context}"
+        );
+        for peer in fixture.peers {
+            assert_eq!(
+                volume.read_file(peer).unwrap(),
+                original,
+                "{context}: live {peer}"
+            );
+        }
+        for id in [fixture.source, fixture.peers[0], fixture.peers[1]] {
+            assert_eq!(
+                rotation_snapshot_file(volume, fixture.snapshot, id),
+                original,
+                "{context}: captured object {id}"
+            );
+        }
+        assert_eq!(
+            volume.list_root().unwrap().len(),
+            entries,
+            "{context}: root entries"
+        );
+    }
+
+    fn rotation_names(round: u32, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|i| format!("r{round}-{i:04}-{ROTATION_PADDING}"))
+            .collect()
+    }
+
+    fn rotation_batch<D: BlockDevice>(volume: &mut Volume<D>, names: &[String]) {
+        let operations: Vec<_> = names
+            .iter()
+            .map(|name| BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name,
+                content: b"",
+            })
+            .collect();
+        volume.run_batch(&operations, Timespec::default()).unwrap();
+    }
+
+    fn rotation_splitmix64(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut value = *state;
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+
+    fn rotation_segment_subsets(
+        durable: &MemoryBackend,
+        segment: &[(u64, &Vec<u8>)],
+        rng: &mut u64,
+        visit: &mut dyn FnMut(MemoryBackend, String),
+    ) -> (u64, u64) {
+        if segment.is_empty() {
+            return (0, 0);
+        }
+        let exhaustive = segment.len() <= ROTATION_EXHAUSTIVE_SEGMENT;
+        let masks: Vec<Vec<bool>> = if exhaustive {
+            (0u64..1 << segment.len())
+                .map(|mask| {
+                    (0..segment.len())
+                        .map(|bit| mask & (1 << bit) != 0)
+                        .collect()
+                })
+                .collect()
+        } else {
+            (0..ROTATION_SAMPLE)
+                .map(|_| {
+                    (0..segment.len())
+                        .map(|_| rotation_splitmix64(rng) & 1 == 1)
+                        .collect()
+                })
+                .collect()
+        };
+        for (number, mask) in masks.iter().enumerate() {
+            let mut image = durable.clone();
+            for ((lba, data), keep) in segment.iter().zip(mask) {
+                if *keep {
+                    image.apply_raw(*lba, data);
+                }
+            }
+            let kind = if exhaustive {
+                "subset"
+            } else {
+                "sampled subset"
+            };
+            visit(
+                image,
+                format!("{kind} {number} of a {}-write segment", segment.len()),
+            );
+        }
+        let count = masks.len() as u64;
+        if exhaustive {
+            (count, 0)
+        } else {
+            (0, count)
+        }
+    }
+
+    /// Builds the rotation fixture, records the batch that rotates the write
+    /// checkpoint into the older slot, and runs the seeded cut campaign.
+    fn rotation_cut_campaign(pages: usize) {
+        let mut dev = MemoryBackend::new(4096, 16 * 1024);
+        crate::mkfs_with_options(
+            &mut dev,
+            &MkfsParams {
+                uuid: [0xcc; 16],
+                label: "CacheRotation".into(),
+                region_size: 16,
+                reclaim_caps: Default::default(),
+                log_slots: 0,
+                shared_extents: true,
+                data_policy: false,
+                name_policy: crate::NamePolicy::Sensitive,
+                timestamp: Timespec::default(),
+            },
+            crate::MkfsOptions {
+                persistent_snapshots: true,
+            },
+        )
+        .unwrap();
+        let mut volume = rotation_open(dev, pages);
+        let original = vec![ROTATION_ORIGINAL; ROTATION_FILE_BYTES];
+        let source = volume
+            .create_file_in_root("source", &original, Timespec::default())
+            .unwrap();
+        let peers = [
+            volume
+                .clone_file(source, OBJECT_ROOT, "peer-a", Timespec::default())
+                .unwrap(),
+            volume
+                .clone_file(source, OBJECT_ROOT, "peer-b", Timespec::default())
+                .unwrap(),
+        ];
+        let snapshot = volume.snapshot_create(Timespec::default()).unwrap();
+        let selected = volume.checkpoint.clone();
+        let shared = crate::verify::load_committed_state(&mut volume.dev, &volume.ident, &selected)
+            .unwrap()
+            .shared_records;
+        assert_eq!(shared.len(), 1);
+        assert_eq!(
+            (
+                shared[0].block_count,
+                shared[0].reference_count,
+                shared[0].flags
+            ),
+            (2, 3, 0),
+            "pages={pages}: three owners before rotation"
+        );
+        let fixture = RotationFixture {
+            source,
+            peers,
+            snapshot,
+            shared_start: shared[0].physical_start,
+        };
+        let mut current = original.clone();
+        // Rounds behind the recorded one leave two populated allocation-root
+        // leaf ranges and the rotated checkpoint pair the campaign starts from.
+        for round in 0..ROTATION_ROUNDS {
+            let patch = [0x70 + round as u8; 32];
+            volume
+                .write_file_at(source, 4090, &patch, Timespec::default())
+                .unwrap();
+            current[4090..4122].copy_from_slice(&patch);
+            volume.alloc_rover_region = 120 + round * 120;
+            rotation_batch(&mut volume, &rotation_names(round, ROTATION_POPULATION));
+        }
+        let patch = [0x70 + ROTATION_ROUNDS as u8; 32];
+        volume
+            .write_file_at(source, 4090, &patch, Timespec::default())
+            .unwrap();
+        current[4090..4122].copy_from_slice(&patch);
+        // One filler commit behind the data write puts the patched bytes in
+        // both selectable checkpoints, so the recorded window holds exactly
+        // the rotating batch commit.
+        volume
+            .create_file_in_root("rotation-filler", b"", Timespec::default())
+            .unwrap();
+        volume.alloc_rover_region = 120 + ROTATION_ROUNDS * 120;
+        let rover = volume.alloc_rover_region;
+        let before = ROTATION_ROUNDS as usize * ROTATION_POPULATION + 4;
+        let after = before + ROTATION_BATCH;
+        let base = volume.into_device();
+        let fixture_generation = {
+            let mut volume = rotation_open(base.clone(), pages);
+            rotation_verify(&mut volume, &fixture, &current, before, "fixture");
+            volume.generation()
+        };
+
+        let names = rotation_names(ROTATION_ROUNDS, ROTATION_BATCH);
+        let mut volume = rotation_open(afsplus_block::RecordingBackend::new(base.clone()), pages);
+        volume.alloc_rover_region = rover;
+        rotation_batch(&mut volume, &names);
+        let stats = volume.last_commit_stats().unwrap();
+        assert!(
+            stats.allocation_tree_nodes_written > 2,
+            "pages={pages}: fixture must span allocation-root nodes"
+        );
+        assert!(stats.tree_mutations.max_resident_staged_nodes <= pages as u64);
+        let spills = stats.tree_mutations.staged_spill_writes;
+        assert_eq!(
+            spills,
+            rotation_spills(pages),
+            "pages={pages}: spill writes of the recorded batch"
+        );
+        assert_eq!(
+            volume.other_checkpoint.as_ref().unwrap().generation,
+            fixture_generation,
+            "pages={pages}: the batch must rotate the write checkpoint into the older slot"
+        );
+        assert!(volume.allocation_tree_cache.is_some());
+        rotation_verify(&mut volume, &fixture, &current, after, "recorded");
+        let (_, log) = volume.into_device().into_parts();
+
+        let mut outcomes = [0u64; 2];
+        let mut check = |image: MemoryBackend, description: String| {
+            let context = format!("pages={pages}: {description}");
+            let mut volume = rotation_open(image, pages);
+            let generation = volume.generation();
+            let delta = generation
+                .checked_sub(fixture_generation)
+                .filter(|delta| *delta <= 1)
+                .unwrap_or_else(|| panic!("{context}: disallowed generation {generation}"));
+            let entries = if delta == 0 { before } else { after };
+            rotation_verify(&mut volume, &fixture, &current, entries, &context);
+            outcomes[delta as usize] += 1;
+        };
+
+        let mut rng = ROTATION_SEED;
+        let (mut prefixes, mut tears, mut exhaustive, mut sampled) = (1u64, 0u64, 0u64, 0u64);
+        let mut prefix = base.clone();
+        let mut durable = base.clone();
+        let mut segment: Vec<(u64, &Vec<u8>)> = Vec::new();
+        check(prefix.clone(), "in-order prefix of 0 operations".into());
+        for (index, operation) in log.iter().enumerate() {
+            match operation {
+                afsplus_block::RecordedOp::Write { lba, data } => {
+                    for tear in ROTATION_TEARS.iter().filter(|tear| **tear < data.len()) {
+                        let mut image = prefix.clone();
+                        let mut torn = image.peek(*lba);
+                        torn[..*tear].copy_from_slice(&data[..*tear]);
+                        image.apply_raw(*lba, &torn);
+                        check(
+                            image,
+                            format!("write {index} (lba {lba}) torn at byte {tear}"),
+                        );
+                        tears += 1;
+                    }
+                    prefix.apply_raw(*lba, data);
+                    segment.push((*lba, data));
+                    check(
+                        prefix.clone(),
+                        format!("in-order prefix through operation {index}"),
+                    );
+                    prefixes += 1;
+                }
+                afsplus_block::RecordedOp::Flush => {
+                    let (full, drawn) =
+                        rotation_segment_subsets(&durable, &segment, &mut rng, &mut check);
+                    exhaustive += full;
+                    sampled += drawn;
+                    durable = prefix.clone();
+                    segment.clear();
+                }
+            }
+        }
+        let (full, drawn) = rotation_segment_subsets(&durable, &segment, &mut rng, &mut check);
+        exhaustive += full;
+        sampled += drawn;
+        assert!(
+            outcomes[0] > 0 && outcomes[1] > 0,
+            "pages={pages}: both outcomes required {outcomes:?}"
+        );
+
+        // The fixture generation admits the batch again, and the retry
+        // restores the cached allocation-root block sets of both checkpoints.
+        let mut retried = rotation_open(base, pages);
+        retried.alloc_rover_region = rover;
+        rotation_batch(&mut retried, &names);
+        assert!(retried.allocation_tree_cache.is_some());
+        rotation_verify(&mut retried, &fixture, &current, after, "retry");
+
+        eprintln!(
+            "allocation rotation cuts: pages={pages}, spills={spills}, seed={ROTATION_SEED:#x}, sample={ROTATION_SAMPLE}, prefixes={prefixes}, tears={tears}, exhaustive_subsets={exhaustive}, sampled_subsets={sampled}, outcomes={outcomes:?}, images={}",
+            outcomes.iter().sum::<u64>()
+        );
+    }
+
+    #[test]
+    fn allocation_rotation_batch_cuts_are_atomic_at_two_pages() {
+        rotation_cut_campaign(2);
+    }
+
+    #[test]
+    fn allocation_rotation_batch_cuts_are_atomic_at_four_pages() {
+        rotation_cut_campaign(4);
+    }
+
+    #[test]
+    fn allocation_rotation_batch_cuts_are_atomic_at_eight_pages() {
+        rotation_cut_campaign(8);
+    }
+
+    #[test]
+    fn allocation_rotation_batch_cuts_are_atomic_at_unlimited_pages() {
+        rotation_cut_campaign(usize::MAX);
+    }
+
     #[test]
     fn fragmented_allocation_does_not_repeat_oversized_searches() {
         let mut dev = MemoryBackend::new(4096, 512);
