@@ -141,15 +141,16 @@ impl Family for MixedBatch {
     ) -> Result<(), CoreError> {
         let payloads: Vec<Vec<u8>> = (0..state.created.len()).map(created_payload).collect();
         let mut operations: Vec<BatchOp<'_>> = Vec::new();
-        for slot in 0..state.created.len() {
+        for ((name, content), (gone, _)) in state.created.iter().zip(&payloads).zip(&state.removed)
+        {
             operations.push(BatchOp::CreateFile {
                 parent_id: OBJECT_ROOT,
-                name: &state.created[slot],
-                content: &payloads[slot],
+                name,
+                content,
             });
             operations.push(BatchOp::DeleteFile {
                 parent_id: OBJECT_ROOT,
-                name: &state.removed[slot].0,
+                name: gone,
             });
         }
         volume.run_batch(&operations, ts(30)).map(|_| ())
