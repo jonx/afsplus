@@ -255,6 +255,12 @@ impl<D: BlockDevice> Volume<D> {
         if !self.mount_mode.allows_user_writes() {
             return Err(CoreError::ReadOnly);
         }
+        // An ambiguous publication makes every later mutation unsafe, so the
+        // refusal precedes the registry read the deletion would otherwise
+        // issue (the same rule the window entry points follow).
+        if self.window_poisoned {
+            return Err(CoreError::WindowPoisoned);
+        }
         self.snapshot_limits()?;
         if self
             .snapshot_handles

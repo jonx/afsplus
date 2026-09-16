@@ -6937,6 +6937,12 @@ impl<D: BlockDevice> Volume<D> {
         pending
             .created_data
             .insert(object_id, (data_start, data_blocks));
+        // The record that named this create is durable and its content CRC
+        // still covers the run. A later record in the same replayed prefix
+        // that cancels the create must quarantine the run, because reusing it
+        // before the replay checkpoint publishes would break the record the
+        // next recovery still has to read.
+        pending.logged_created.insert(object_id);
         pending.records.insert(
             object_id,
             Some(ObjectRecord {
