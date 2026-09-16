@@ -1124,3 +1124,59 @@ Negative controls, one per fixture family: a wrong free-block literal in the
 cursor fixture, a shifted registry membership in the registry fixture, and a
 root-entry count one too high in the re-declared symlink create. All three
 fail their test, and the sources are restored from the commit afterwards.
+
+## Modeled cuts of the allocation rotation batch
+
+`allocation_rotation_batch_cuts_are_atomic_at_two_pages`,
+`..._at_four_pages`, `..._at_eight_pages` and `..._at_unlimited_pages` in
+[core src/volume.rs](../../afsplus-core/src/volume.rs) sit beside
+`allocation_cache_keeps_spilled_nodes_across_checkpoint_rotation` and model the
+cuts of the batch that rotates the write checkpoint into the older slot. The
+allocation rover this fixture drives lives in the core crate, so the oracle
+calls the verifier entry points directly and the checker of `afsplus-check`
+takes no part.
+
+The fixture keeps the 16,384-block image in 16-block regions, the persistent
+snapshot and the two-block run shared by a source file and two clones. One
+round of 64 long root names moves the rover across allocation-root leaf
+boundaries, the source write across the first block boundary moves the source
+off the run, and one filler commit puts the patched bytes in both selectable
+checkpoints. The recorded window then holds exactly one batch of 96 long
+names, which writes three allocation-root nodes.
+
+Every image checks both selectable checkpoints, or the single one a cut inside
+the write to the older slot leaves: the cached allocation-root block sets when
+a cache exists, the verifier's committed-state load and full sweep, one
+two-block two-reference run at the fixture's physical start, the literal
+source and peer bytes through each checkpoint's own object-map root, the live
+bytes, the snapshot's captured bytes of all three objects, and the exact root
+entry count of the selected generation. A retry of the batch from the fixture
+generation restores the cached block sets of both checkpoints.
+
+| Profile | Spill writes | Campaign | Images |
+|---|---|---|---|
+| Two pages | 12 | 144 prefixes, 429 tears, 2 exhaustive subsets, 32 sampled subsets | 607 (603/4) |
+| Four pages | 4 | 139 prefixes, 414 tears, 2 exhaustive subsets, 32 sampled subsets | 587 (583/4) |
+| Eight pages | 0 | 139 prefixes, 414 tears, 2 exhaustive subsets, 32 sampled subsets | 587 (583/4) |
+| Unlimited | 0 | 139 prefixes, 414 tears, 2 exhaustive subsets, 32 sampled subsets | 587 (583/4) |
+
+Seed `0x5eed0a110cae`, sample 32. Eight pages hold the batch's staged window,
+so two and four pages are the profiles that evict. Deliberate limits: one
+recorded rotation, a batch of 96 entries, and the drawn subsets of the two
+flush segments above twelve writes, whose prefix and tear sets are complete.
+A wrong captured-byte expectation fails the test.
+
+```sh
+export CARGO_HOME=$HOME/.cargo
+export RUSTUP_HOME=$HOME/.rustup
+export CARGO_TARGET_DIR=/private/tmp/afsplus-wt-cache-tail-residuals/target
+export CARGO_NET_OFFLINE=true
+export CARGO_BUILD_JOBS=2
+export PATH="$CARGO_HOME/bin:$PATH"
+cargo test --offline -p afsplus-check --all-features --test family_matrix_tail_residuals -- --test-threads=2
+cargo test --offline -p afsplus-core --all-features --lib allocation_rotation_batch_cuts -- --test-threads=2
+cargo fmt --all -- --check
+cargo clippy --offline -p afsplus-check --all-features --tests -- -D warnings
+cargo clippy --offline -p afsplus-core --all-features --lib --tests -- -D warnings
+make check-docs
+```
