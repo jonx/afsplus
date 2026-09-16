@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-16 — Fix intent-log replay reusing a logged data run](#2026-09-16--fix-intent-log-replay-reusing-a-logged-data-run)
 - [2026-09-16 — Integrate lifecycle observation, six generated families and the structure matrix](#2026-09-16--integrate-lifecycle-observation-six-generated-families-and-the-structure-matrix)
 - [2026-09-15 — Integrate the family-matrix driver and four more cache families](#2026-09-15--integrate-the-family-matrix-driver-and-four-more-cache-families)
 - [2026-09-15 — Integrate data-write cache families and generated operation families](#2026-09-15--integrate-data-write-cache-families-and-generated-operation-families)
@@ -167,6 +168,30 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-16 — Fix intent-log replay reusing a logged data run
+
+The deferred-window cache families exposed a crash-safety defect in
+recovery. Replay rebuilt its pending batch with an empty `logged_created`
+set, so a replayed prefix that created a file and later deleted it took the
+"never logged" branch, released the create's data run inside the replay
+transaction, and allocated replay metadata over blocks a durable record's
+content CRC still covered. A power cut during that recovery left the record
+invalid, and the next mount dropped every acknowledged group. One durable
+create with content followed by one durable delete reproduces it: the first
+recovery write lands on the create's data block.
+
+ADR-037 makes a record's referenced data claimable only while its fsync has
+not completed, ADR-063 requires replay to stay idempotent when recovery itself
+crashes, and the live window already kept logged runs out of reuse through
+`unlink_in_batch`. The fix marks every replayed create as logged, so a
+cancelling delete in the same prefix quarantines the run until the replay
+checkpoint publishes; one line in `apply_replay_create`, no on-disk or API
+change. The same commit refuses `snapshot_delete` after an ambiguous
+publication before it reads the registry, the rule the other entry points
+follow. The deferred, replay and snapshot family matrices (148 tests) and the
+intent-log, orphan and shared crash suites pass on the fix; the family that
+found it keeps the reproducer.
 
 ## 2026-09-16 — Integrate lifecycle observation, six generated families and the structure matrix
 
