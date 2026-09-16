@@ -1,6 +1,6 @@
 //! Experimental Stage A semantic runner (ADR-099), confined to memory images.
 pub mod captured;
-use afsplus_block::{BlockDevice, BlockError, MemoryBackend, RecordedOp};
+use afsplus_block::{BlockDevice, BlockError, FaultBackend, FaultPlan, MemoryBackend, RecordedOp};
 use afsplus_core::volume::{
     BatchOp, DataUpdatePolicy, FileEditLimits, PreservedMetadata, SnapshotHandle,
     SnapshotWorkLimits,
@@ -160,6 +160,31 @@ pub enum Operation {
     WindowCommit,
     /// Version 8: one standalone observed verification of the committed state.
     Verify,
+    /// Version 8: arm one single-shot device fault for the operations that
+    /// follow. The index counts device operations of that class from here.
+    Fault {
+        kind: FaultKind,
+        index: u64,
+    },
+    /// Version 8: the first format attempt fails at this device operation.
+    /// Only the first scenario operation may carry it.
+    FormatFault {
+        kind: FaultKind,
+        index: u64,
+    },
+    /// Version 8: write one byte into the image beneath the mount.
+    Corrupt {
+        lba: u64,
+        offset: usize,
+        byte: u8,
+    },
+    /// Version 8: write one payload byte and reseal the block checksum, so
+    /// the edit survives integrity checks and reaches the invariant sweep.
+    Reseal {
+        lba: u64,
+        offset: usize,
+        byte: u8,
+    },
     /// Version 8: one observed mount that feature negotiation refuses, followed
     /// by the ordinary remount. The refused attempt writes no device block.
     RemountRefused,
@@ -260,11 +285,59 @@ impl Default for RecordingLimits {
         }
     }
 }
+/// The device operation class a version-8 fault command arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultKind {
+    Write,
+    Flush,
+    Read,
+}
+
+/// One armed single-shot device fault, counted from the moment it is armed.
+/// This is the `FaultBackend` contract of `afsplus-block` applied inside the
+/// recording device, because a scenario arms it between operations and also
+/// selects a read index, which that shared wrapper does not carry.
+#[derive(Debug, Default, Clone, Copy)]
+struct FaultState {
+    kind: Option<FaultKind>,
+    index: u64,
+    writes: u64,
+    flushes: u64,
+    reads: u64,
+    tripped: bool,
+}
+impl FaultState {
+    fn arm(&mut self, kind: FaultKind, index: u64) {
+        *self = Self {
+            kind: Some(kind),
+            index,
+            ..Self::default()
+        };
+    }
+    /// Consume one device operation of `kind`, reporting whether it fails.
+    fn trips(&mut self, kind: FaultKind) -> bool {
+        let seen = match kind {
+            FaultKind::Write => &mut self.writes,
+            FaultKind::Flush => &mut self.flushes,
+            FaultKind::Read => &mut self.reads,
+        };
+        let index = *seen;
+        *seen += 1;
+        if self.kind != Some(kind) || index != self.index {
+            return false;
+        }
+        self.kind = None;
+        self.tripped = true;
+        true
+    }
+}
+
 struct Capture {
     image: MemoryBackend,
     log: Vec<RecordedOp>,
     bytes: usize,
     limits: RecordingLimits,
+    fault: FaultState,
 }
 #[derive(Clone)]
 struct Recorder(Rc<RefCell<Capture>>);
@@ -280,6 +353,53 @@ impl Capture {
             .map_err(|_| BlockError::Injected("scenario log allocation"))
     }
 }
+impl Recorder {
+    fn arm(&self, kind: FaultKind, index: u64) {
+        self.0.borrow_mut().fault.arm(kind, index);
+    }
+    /// A fault the scenario armed and no device operation reached.
+    fn armed(&self) -> bool {
+        self.0.borrow().fault.kind.is_some()
+    }
+    /// Write one byte into the image beneath any mounted volume, the way the
+    /// corruption corpus edits a captured image. No filesystem code performs
+    /// this write, and the recorded log reproduces it exactly on replay.
+    /// `reseal` additionally recomputes the block checksum over its own header
+    /// type, so the edit survives integrity checks and reaches the invariant
+    /// sweep, the way the corpus generator's sealed mutations do.
+    fn corrupt(&self, lba: u64, offset: usize, byte: u8, reseal: bool) -> Result<(), String> {
+        use afsplus_format::header::{BlockHeader, HEADER_SIZE};
+        let mut state = self.0.borrow_mut();
+        let size = state.image.block_size();
+        if lba >= state.image.total_blocks() || offset >= size {
+            return Err("corruption address outside the image".into());
+        }
+        let mut block = vec![0u8; size];
+        state
+            .image
+            .read_block(lba, &mut block)
+            .map_err(|e| e.to_string())?;
+        if reseal {
+            if offset < HEADER_SIZE {
+                return Err("a resealed edit must land in the block payload".into());
+            }
+            let kind = u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
+            let header = BlockHeader::verify(&block, kind).map_err(|e| e.to_string())?;
+            block[offset] = byte;
+            header.seal(&mut block);
+        } else {
+            block[offset] = byte;
+        }
+        state.reserve(size).map_err(|e| e.to_string())?;
+        state
+            .image
+            .write_block(lba, &block)
+            .map_err(|e| e.to_string())?;
+        state.bytes += size;
+        state.log.push(RecordedOp::Write { lba, data: block });
+        Ok(())
+    }
+}
 impl BlockDevice for Recorder {
     fn block_size(&self) -> usize {
         self.0.borrow().image.block_size()
@@ -288,10 +408,17 @@ impl BlockDevice for Recorder {
         self.0.borrow().image.total_blocks()
     }
     fn read_block(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-        self.0.borrow_mut().image.read_block(lba, buf)
+        let mut state = self.0.borrow_mut();
+        if state.fault.trips(FaultKind::Read) {
+            return Err(BlockError::Injected("scenario read fault"));
+        }
+        state.image.read_block(lba, buf)
     }
     fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
         let mut state = self.0.borrow_mut();
+        if state.fault.trips(FaultKind::Write) {
+            return Err(BlockError::Injected("scenario write fault"));
+        }
         state.reserve(data.len())?;
         let mut copy = Vec::new();
         copy.try_reserve_exact(data.len())
@@ -304,6 +431,9 @@ impl BlockDevice for Recorder {
     }
     fn flush(&mut self) -> Result<(), BlockError> {
         let mut state = self.0.borrow_mut();
+        if state.fault.trips(FaultKind::Flush) {
+            return Err(BlockError::Injected("scenario flush fault"));
+        }
         state.reserve(0)?;
         state.image.flush()?;
         state.log.push(RecordedOp::Flush);
@@ -779,6 +909,35 @@ impl Plan {
                     Operation::WindowCommit
                 }
                 ["verify"] if lifecycle => Operation::Verify,
+                [kind @ ("fault" | "format_fault"), class, index] if lifecycle => {
+                    let class = match *class {
+                        "write" => FaultKind::Write,
+                        "flush" => FaultKind::Flush,
+                        "read" => FaultKind::Read,
+                        _ => return Err("scenario fault class".into()),
+                    };
+                    let index = integer(index, 65535)?;
+                    if *kind == "fault" {
+                        Operation::Fault { kind: class, index }
+                    } else {
+                        if !operations.is_empty() {
+                            return Err("a format fault must be the first operation".into());
+                        }
+                        Operation::FormatFault { kind: class, index }
+                    }
+                }
+                [kind @ ("corrupt" | "reseal"), lba, offset, byte] if lifecycle => {
+                    let (lba, offset, byte) = (
+                        integer(lba, 65535)?,
+                        integer(offset, 4095)? as usize,
+                        integer(byte, 255)? as u8,
+                    );
+                    if *kind == "corrupt" {
+                        Operation::Corrupt { lba, offset, byte }
+                    } else {
+                        Operation::Reseal { lba, offset, byte }
+                    }
+                }
                 ["remount_refused"] if lifecycle => Operation::RemountRefused,
                 ["remount"] => Operation::Remount,
                 _ => return Err("unknown scenario command or arity".into()),
@@ -845,6 +1004,15 @@ impl Plan {
     /// formatting, verification, staged file data and read-only view descents.
     pub fn lifecycle_observation(&self) -> bool {
         self.lifecycle_observation
+    }
+
+    /// The fault the first format attempt carries, when the scenario opens
+    /// with `format_fault`. The observed refusal precedes a fresh format.
+    fn format_fault(&self) -> Option<(FaultKind, u64)> {
+        match self.operations.first() {
+            Some(Operation::FormatFault { kind, index }) => Some((*kind, *index)),
+            _ => None,
+        }
     }
 
     pub fn api_observation(&self) -> bool {
@@ -1073,6 +1241,25 @@ impl Plan {
         let options = MkfsOptions {
             persistent_snapshots: self.snapshot_limits.is_some(),
         };
+        // A scenario opening with `format_fault` observes one refused format
+        // first. Formatting is not atomic, so the partially written device is
+        // discarded and a fresh image is formatted without the fault; the
+        // pre-mount batch carries both attempts.
+        if let Some((kind, index)) = self.format_fault() {
+            let plan = FaultPlan {
+                fail_write_index: (kind == FaultKind::Write).then_some(index),
+                fail_flush_index: (kind == FaultKind::Flush).then_some(index),
+                fail_hard: false,
+            };
+            let mut attempt = FaultBackend::new(MemoryBackend::new(4096, self.blocks), plan);
+            let refused = match (&mut flight, self.lifecycle_observation) {
+                (Some(ring), true) => mkfs_observed(&mut attempt, &params, options, ring),
+                _ => mkfs_with_options(&mut attempt, &params, options),
+            };
+            if refused.is_ok() || !attempt.tripped() {
+                return Err("format fault index outside the format".into());
+            }
+        }
         // An observed format writes exactly the bytes an unobserved one writes.
         match (&mut flight, self.lifecycle_observation) {
             (Some(ring), true) => mkfs_observed(&mut base, &params, options, ring),
@@ -1084,6 +1271,7 @@ impl Plan {
             log: Vec::new(),
             bytes: 0,
             limits,
+            fault: FaultState::default(),
         })));
         let mut volume = match self.mount_profile_observed(recorder.clone(), flight) {
             Ok(volume) => volume,
@@ -1720,6 +1908,15 @@ impl Plan {
                         volume.replace_flight_recorder(flight);
                         outcome?;
                     }
+                    Operation::Fault { kind, index } => recorder.arm(*kind, *index),
+                    // Applied at format time; the operation records its place.
+                    Operation::FormatFault { .. } => (),
+                    Operation::Corrupt { lba, offset, byte } => {
+                        recorder.corrupt(*lba, *offset, *byte, false)?
+                    }
+                    Operation::Reseal { lba, offset, byte } => {
+                        recorder.corrupt(*lba, *offset, *byte, true)?
+                    }
                     Operation::Remount | Operation::RemountRefused => unreachable!(),
                 }
                 Ok(())
@@ -1741,6 +1938,11 @@ impl Plan {
             }
         }
         drop(volume);
+        // An index outside the operation it arms would pass silently and prove
+        // nothing, so a scenario keeping a fault armed is refused.
+        if recorder.armed() {
+            return Err("armed device fault never tripped".into());
+        }
         let mut run = finish(base, recorder, failure, events, orphan_candidates);
         run.pre_mount = pre_mount;
         Ok(run)
