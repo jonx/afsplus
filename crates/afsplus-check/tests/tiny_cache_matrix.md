@@ -659,6 +659,64 @@ Negative controls, one per fixture family: a two-block expected run after the
 replacement and an unchanged origin byte after the admitted bounded write. Both
 fail their test, and the sources are restored from the commit afterwards.
 
+## Residual orphan, reclaim and reload family matrix
+
+[family_matrix_reclaim_residuals.rs](family_matrix_reclaim_residuals.rs) closes
+the open-target replacement, the orphaned-file update, orphan cleanup with
+ordinary allocation exhausted, the reclaim sealing and segment-consumption
+transitions, and reload read failures outside the directory and batch paths;
+39 tests pass. The open-target replacement and the cleanup publish two
+checkpoints, so every image selects delta 0, 1 or 2 and intermediate images
+retry to the final state.
+
+The sealing and consumption fixtures take their snapshot ahead of every block
+the transition reclaims, so the transition proceeds as it does without a
+retained view. Six seed entries behind that snapshot grow the queue far enough
+for the tiny caps to seal a segment.
+
+| Family and part | Oracle | Modeled count per profile | Deliberate limit |
+|---|---|---|---|
+| Open-target replacement, cuts, faults, retained view and ambiguous publication | The target name always resolves; the replaced object keeps its literal bytes as an orphan with a count of one at delta 2, the preparatory orphan directory is present from delta 1, and the source object keeps its literal bytes throughout; captured target and source bytes through the retained view | 22 writes and 4 flushes with a 12-write tail; 9,057 cut images (622/8,431/4) with a 12-write budget; 26 faults (22 writes, 4 flushes) and 22 same-handle retries; two ambiguous cases | Plain 512-block fixture |
+| Open-target replacement, forced eviction | 400 long root names; the root-directory, object-map and orphan-directory paths stage three nodes at the unlimited profile with zero spills, and two pages report 4 spill writes with a peak of 2 | 29, 27, 27 and 27 writes; spill writes 4/0/0/0 and peaks 2/3/3/3; 33 faults at two pages and 31 elsewhere; sampled campaigns of 665 images at two pages (30 prefixes, 87 tears, 516 exhaustive subsets, 32 sampled subsets, outcomes 551/110/4) and 657 elsewhere (28 prefixes, 81 tears, 516 exhaustive subsets, 32 sampled subsets, outcomes 551/102/4) | Seed `0x5eed0f3a2001`, sample 32; four and eight pages exceed the three-node demand |
+| Orphaned-file update, cuts, faults, retained view and ambiguous publication | The orphan keeps its application name hidden, an orphan count of one and the preparatory directory at every image; the block holds the literal old bytes below delta 1 and the literal patched bytes at delta 1; captured old bytes through the retained view | 9 writes and 3 flushes; 352 cut images (348/4); 12 faults (9 writes, 3 flushes) and 10 same-handle retries; two ambiguous cases | One partial-block range inside one block |
+| Orphaned-file update, forced eviction | 400 long root names; the extent-map and object-map paths stage two nodes at every profile | 10 writes; spill writes 0 and a peak of 2 at 2/4/8/unlimited; 13 faults and 11 same-handle retries; sampled campaigns of 301 images (11 prefixes, 30 tears, 260 exhaustive subsets, outcomes 297/4) | The measured demand of two nodes fits every bounded profile, so this variant records the demand and zero spills |
+| Cleanup with ordinary allocation exhausted | A pressure file reserves the largest range ordinary allocation admits and a one-block create returns `NoSpace`; the three-block fragmented orphan then cleans with an extent budget of 2, exposing exact bytes and two allocated blocks at delta 0, the empty tail-trimmed file with zero allocated bytes at delta 1 and the removed object at delta 2, with the pressure file present throughout | 18 writes and 4 flushes; 1,251 cut images (622/625/4); 22 faults (18 writes, 4 flushes) and 18 same-handle retries | Emergency metadata headroom carries the cleanup |
+| Reclaim queue sealing, cuts, faults, retained view and ambiguous publication | The recorded create seals exactly one segment; literal free and pending accounting of (189, 23) before and (181, 30) after, the complete root enumeration and the captured anchor bytes | 13 writes and 3 flushes; 4,306 cut images (4,302/4); 16 faults (13 writes, 3 flushes) and 14 same-handle retries; two ambiguous cases | Single-region 256-block fixture with four inline entries, three segment and eight table references |
+| Reclaim segment consumption, cuts, faults, retained view and ambiguous publication | The batch consumes at least one whole segment, which itself retires; accounting of (189, 23) before and (195, 23) after, the complete root enumeration and the captured anchor bytes | 7 writes and 2 flushes; 197 cut images (193/4); 9 faults (7 writes, 2 flushes) and 7 same-handle retries; two ambiguous cases | Single-region fixture |
+
+Reload read failures spread 17 injected reads through one spilling transaction
+per profile. Each failed call leaves a mount that selects an allowed committed
+state, passes the checker and publishes the complete new state on a retry after
+remount.
+
+| Test | Profiles | Spills and reloads the successful run reports |
+|---|---|---|
+| `extent_map_write_survives_reload_read_failures` | 2/4 | 26 spills with 17 reloads at two pages and 2 spills with 1 reload at four pages over a 160-record extent map; eight pages hold the window, so they spill nothing |
+| `object_map_replacement_survives_reload_read_failures` | 2 | 4 spills with 2 reloads over the object map, root directory and orphan directory of 400 long names; the measured demand of three nodes spills at two pages only |
+| `allocation_root_promotion_survives_reload_read_failures` | 2/4/8 | 8, 5 and 1 spill writes across eight allocation-root leaves with zero reloads, so this fixture qualifies read failures over the spill writes it performs |
+
+Negative controls, one per fixture family: a wrong orphan count after the
+open-target replacement, a shifted patched byte in the orphaned-file update, a
+wrong allocated-byte literal in the exhausted cleanup, and a wrong free-block
+literal in the sealing fixture. All four fail their test, and the sources are
+restored from the commit afterwards.
+
+```sh
+export CARGO_HOME=$HOME/.cargo
+export RUSTUP_HOME=$HOME/.rustup
+export CARGO_TARGET_DIR=/private/tmp/afsplus-wt-cache-residual-structure/target
+export CARGO_NET_OFFLINE=true
+export CARGO_BUILD_JOBS=2
+export PATH="$CARGO_HOME/bin:$PATH"
+for target in family_matrix_structure_residuals family_matrix_shared_residuals \
+    family_matrix_reclaim_residuals; do
+  cargo test --offline -p afsplus-check --all-features --test "$target" -- --test-threads=2
+done
+cargo fmt --all -- --check
+cargo clippy --offline -p afsplus-check --all-features --tests -- -D warnings
+make check-docs
+```
+
 ## Reload failures during spilled transactions
 
 `spilled_directory_split_survives_reload_read_failures`,
