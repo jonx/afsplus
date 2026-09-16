@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Fix window refusals that poisoned an open deferred window](#2026-09-17--fix-window-refusals-that-poisoned-an-open-deferred-window)
 - [2026-09-16 — Fix intent-log replay reusing a logged data run](#2026-09-16--fix-intent-log-replay-reusing-a-logged-data-run)
 - [2026-09-16 — Integrate lifecycle observation, six generated families and the structure matrix](#2026-09-16--integrate-lifecycle-observation-six-generated-families-and-the-structure-matrix)
 - [2026-09-15 — Integrate the family-matrix driver and four more cache families](#2026-09-15--integrate-the-family-matrix-driver-and-four-more-cache-families)
@@ -168,6 +169,24 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-17 — Fix window refusals that poisoned an open deferred window
+
+The deferred-window residual families exposed a second defect. Any error
+returned by `window_write_file_at` or `window_truncate_file` poisoned the whole
+open window, including a `NoSpace` refusal that had reached neither a device
+write nor the staged bookkeeping; a window holding one acknowledged group and
+22 staged operations lost all of them, while `window_op` preserved the window
+for the same error class. That contradicts the ownership rule of
+[the intent-log qualification](testing/intent-log-write-truncate-qualification.md)
+for preflight refusals.
+
+Both calls build their replacement blocks and allocate their extents before
+the first device write, so that write is the mutation boundary: each records
+whether it crossed it and restores the window when it did not, and failures
+after it keep the remount requirement. Eighteen lines in `volume.rs`, no
+on-disk or API change; the qualification document states the boundary. The
+`update_refusals` family reproduces the loss before the fix at every profile.
 
 ## 2026-09-16 — Fix intent-log replay reusing a logged data run
 
