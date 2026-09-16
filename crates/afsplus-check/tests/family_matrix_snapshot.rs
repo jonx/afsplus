@@ -9,7 +9,6 @@ use afsplus_block::{BlockDevice, BlockError, MemoryBackend, TraceBackend};
 use afsplus_core::volume::{DataUpdatePolicy, SnapshotWorkLimits};
 use afsplus_core::{CoreError, MountMode, MountOptions, Volume};
 
-
 use common::family_matrix::{self as matrix, ts, Family, Format, ReplayFamily, Variant, BS};
 
 /// Long root names of the eviction fixtures.
@@ -50,7 +49,11 @@ fn file_bytes<D: BlockDevice>(volume: &mut Volume<D>, id: u64, expected: &[u8], 
         expected.len(),
         "{context}: length of {id}"
     );
-    assert_eq!(&read[..expected.len()], expected, "{context}: bytes of {id}");
+    assert_eq!(
+        &read[..expected.len()],
+        expected,
+        "{context}: bytes of {id}"
+    );
     assert_eq!(read[expected.len()], 0xa5, "{context}: EOF of {id}");
 }
 
@@ -65,7 +68,9 @@ fn captured_bytes<D: BlockDevice>(
     let view = volume.snapshot_open(snapshot).unwrap();
     let mut read = vec![0xa5; expected.len() + 1];
     assert_eq!(
-        volume.snapshot_read_file_at(&view, id, 0, &mut read).unwrap(),
+        volume
+            .snapshot_read_file_at(&view, id, 0, &mut read)
+            .unwrap(),
         expected.len(),
         "{context}: captured length of {id}"
     );
@@ -403,7 +408,11 @@ impl Family for SnapshotRelease {
         let held = delta == 0;
         assert_eq!(
             registry(volume),
-            if held { vec![state.snapshot] } else { Vec::new() },
+            if held {
+                vec![state.snapshot]
+            } else {
+                Vec::new()
+            },
             "{context}: registry membership"
         );
         file_bytes(volume, state.keeper, LIVE, context);
@@ -463,9 +472,7 @@ impl ReplayFamily for SnapshotRecovery {
     }
 
     fn setup(&self, volume: &mut Volume<MemoryBackend>, _variant: Variant) -> RecoveryState {
-        let file = volume
-            .create_file_in_root("file", HISTORIC, ts(1))
-            .unwrap();
+        let file = volume.create_file_in_root("file", HISTORIC, ts(1)).unwrap();
         let snapshot = volume.snapshot_create(ts(2)).unwrap();
         RecoveryState { file, snapshot }
     }
@@ -545,10 +552,7 @@ fn admission_limit_refusal(pages: usize) {
     let error = volume
         .snapshot_create(ts(4))
         .expect_err("the admission limit refuses a third view");
-    assert!(
-        matches!(error, CoreError::PrototypeLimit(_)),
-        "{error:?}"
-    );
+    assert!(matches!(error, CoreError::PrototypeLimit(_)), "{error:?}");
     let stats = volume.device_mut().stats();
     assert_eq!((stats.writes, stats.flushes), (0, 0), "refusal issued I/O");
     assert_eq!(volume.generation(), generation, "refusal published");
@@ -613,9 +617,7 @@ fn admission_precedes_recovery_writes(pages: usize) {
         ..Format::new(1024, 256)
     };
     let mut volume = matrix::open(format.device(), pages);
-    let file = volume
-        .create_file_in_root("file", HISTORIC, ts(1))
-        .unwrap();
+    let file = volume.create_file_in_root("file", HISTORIC, ts(1)).unwrap();
     volume.snapshot_create(ts(2)).unwrap();
     volume.snapshot_create(ts(3)).unwrap();
     volume
@@ -763,10 +765,7 @@ fn previous_slot_protection_failure(pages: usize) {
         "a readable empty previous registry must admit the in-place write"
     );
     file_bytes(&mut plain, file, &expected, "admitted in-place write");
-    matrix::assert_checker_clean(
-        &mut plain.into_device().inner,
-        "admitted in-place write",
-    );
+    matrix::assert_checker_clean(&mut plain.into_device().inner, "admitted in-place write");
 
     // An unreadable one protects it: the write falls back to copy on write.
     let mut guarded = matrix::open(

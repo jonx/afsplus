@@ -29,7 +29,11 @@ fn image(variant: Variant) -> Format {
             } else {
                 1024
             },
-            if variant == Variant::Eviction { 16 } else { 256 },
+            if variant == Variant::Eviction {
+                16
+            } else {
+                256
+            },
         )
     }
 }
@@ -71,7 +75,10 @@ fn assert_root<D: BlockDevice>(
     }
     for name in ["alpha", "beta", "gamma", "note", "renamed"] {
         if !names.contains(&name) {
-            assert!(!present.contains(name), "{context}: unexpected entry {name}");
+            assert!(
+                !present.contains(name),
+                "{context}: unexpected entry {name}"
+            );
         }
     }
 }
@@ -742,7 +749,11 @@ fn window_entry_refusals(pages: usize) {
         let error = call(&mut volume).expect_err(label);
         assert_eq!(format!("{error:?}"), expected, "{label}");
         assert!(!volume.device_mut().armed, "{label}: no preflight read");
-        assert_eq!(volume.window_unlogged_ops(), pending, "{label}: window lost");
+        assert_eq!(
+            volume.window_unlogged_ops(),
+            pending,
+            "{label}: window lost"
+        );
         let stats = volume.device_mut().inner.stats();
         assert_eq!(
             (stats.writes, stats.flushes),
@@ -790,7 +801,9 @@ fn window_entry_refusals(pages: usize) {
     let mut read_only =
         matrix::open_mode(TraceBackend::new(base.clone()), pages, MountMode::NoChanges);
     read_only.device_mut().reset();
-    let denied: Vec<(&str, Box<dyn FnOnce(&mut Volume<TraceBackend<MemoryBackend>>) -> Result<(), CoreError>>)> = vec![
+    type Denied =
+        Box<dyn FnOnce(&mut Volume<TraceBackend<MemoryBackend>>) -> Result<(), CoreError>>;
+    let denied: Vec<(&str, Denied)> = vec![
         (
             "read-only op",
             Box::new(|volume| {

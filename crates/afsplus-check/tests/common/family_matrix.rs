@@ -1420,9 +1420,9 @@ pub fn recovery_sampled_cuts<F: ReplayFamily>(
     let mut segment: Vec<(u64, &Vec<u8>)> = Vec::new();
     check(prefix.clone(), "in-order prefix of 0 operations".into());
     let draw = |durable: &MemoryBackend,
-                    segment: &mut Vec<(u64, &Vec<u8>)>,
-                    rng: &mut u64,
-                    check: &mut dyn FnMut(MemoryBackend, String)|
+                segment: &mut Vec<(u64, &Vec<u8>)>,
+                rng: &mut u64,
+                check: &mut dyn FnMut(MemoryBackend, String)|
      -> u64 {
         if segment.is_empty() {
             return 0;
@@ -1430,11 +1430,19 @@ pub fn recovery_sampled_cuts<F: ReplayFamily>(
         let total = 1u128 << segment.len();
         let masks: Vec<Vec<bool>> = if total <= sample as u128 {
             (0u128..total)
-                .map(|mask| (0..segment.len()).map(|bit| mask & (1 << bit) != 0).collect())
+                .map(|mask| {
+                    (0..segment.len())
+                        .map(|bit| mask & (1 << bit) != 0)
+                        .collect()
+                })
                 .collect()
         } else {
             (0..sample)
-                .map(|_| (0..segment.len()).map(|_| splitmix64(rng) & 1 == 1).collect())
+                .map(|_| {
+                    (0..segment.len())
+                        .map(|_| splitmix64(rng) & 1 == 1)
+                        .collect()
+                })
                 .collect()
         };
         for (number, mask) in masks.iter().enumerate() {

@@ -61,7 +61,11 @@ fn file_bytes<D: BlockDevice>(volume: &mut Volume<D>, id: u64, expected: &[u8], 
         expected.len(),
         "{context}: length of {id}"
     );
-    assert_eq!(&read[..expected.len()], expected, "{context}: bytes of {id}");
+    assert_eq!(
+        &read[..expected.len()],
+        expected,
+        "{context}: bytes of {id}"
+    );
     assert_eq!(read[expected.len()], 0xa5, "{context}: EOF of {id}");
 }
 
@@ -404,7 +408,11 @@ impl ReplayFamily for OrphanReplacingRename {
         let replaced = acknowledged == 1;
         assert_eq!(
             volume.lookup_root("target").unwrap(),
-            Some(if replaced { state.incoming } else { state.victim }),
+            Some(if replaced {
+                state.incoming
+            } else {
+                state.victim
+            }),
             "{context}: target entry"
         );
         assert_eq!(
@@ -813,7 +821,10 @@ fn deferred_window_refusal(pages: usize) {
     assert_eq!(volume.window_unlogged_ops(), pending, "window lost");
     assert_eq!(volume.generation(), generation, "refusal published");
     assert_eq!(volume.lookup_root("refused").unwrap(), None);
-    eprintln!("deferred refusal pages={pages} writes={} flushes=0", stats.writes);
+    eprintln!(
+        "deferred refusal pages={pages} writes={} flushes=0",
+        stats.writes
+    );
 
     // The corrective step frees the filler; the same call then succeeds.
     volume.window_commit(ts(7)).unwrap();
@@ -908,14 +919,16 @@ crate::profile_tests!(orphan_delete_replay, |pages| matrix::replay_sampled(
     SAMPLE,
     0x5eed_de1e_0001
 ));
-crate::profile_tests!(orphan_delete_replay_retained, |pages| matrix::replay_sampled(
-    &OrphanFinalDelete,
-    pages,
-    Variant::Retained,
-    12,
-    SAMPLE,
-    0x5eed_de1e_0002
-));
+crate::profile_tests!(orphan_delete_replay_retained, |pages| {
+    matrix::replay_sampled(
+        &OrphanFinalDelete,
+        pages,
+        Variant::Retained,
+        12,
+        SAMPLE,
+        0x5eed_de1e_0002,
+    )
+});
 crate::profile_tests!(orphan_delete_replay_exhausted, |pages| {
     matrix::replay_sampled(
         &OrphanFinalDelete,
@@ -1007,4 +1020,6 @@ crate::profile_tests!(many_orphans_replay, |pages| matrix::replay_sampled(
     0x5eed_de1e_000c
 ));
 crate::profile_tests!(deferred_refusal, |pages| deferred_window_refusal(pages));
-crate::profile_tests!(repeated_recovery, |pages| repeated_recovery_is_stable(pages));
+crate::profile_tests!(repeated_recovery, |pages| repeated_recovery_is_stable(
+    pages
+));
