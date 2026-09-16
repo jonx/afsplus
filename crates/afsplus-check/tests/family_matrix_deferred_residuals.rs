@@ -6,7 +6,7 @@
 
 mod common;
 
-use afsplus_block::{BlockDevice, MemoryBackend, TraceBackend};
+use afsplus_block::{BlockDevice, BlockError, MemoryBackend, TraceBackend};
 use afsplus_core::shared_extents;
 use afsplus_core::volume::BatchOp;
 use afsplus_core::{CoreError, MountMode, Volume};
@@ -1101,6 +1101,277 @@ fn window_update_refusals(pages: usize) {
     eprintln!("window update refusals pages={pages} corrective_commits={commits}");
 }
 
+// --------------------------------------- read failures of fsync and commit
+
+/// Fails the `fail_at`th read issued while the device is armed.
+struct FailNthRead {
+    inner: MemoryBackend,
+    reads: u64,
+    fail_at: Option<u64>,
+    armed: bool,
+    tripped: bool,
+}
+
+impl FailNthRead {
+    fn new(inner: MemoryBackend, fail_at: Option<u64>) -> Self {
+        Self {
+            inner,
+            reads: 0,
+            fail_at,
+            armed: false,
+            tripped: false,
+        }
+    }
+}
+
+impl BlockDevice for FailNthRead {
+    fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+    fn total_blocks(&self) -> u64 {
+        self.inner.total_blocks()
+    }
+    fn read_block(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        if self.armed {
+            let index = self.reads;
+            self.reads += 1;
+            if self.fail_at == Some(index) {
+                self.tripped = true;
+                return Err(BlockError::Injected("window publication read"));
+            }
+        }
+        self.inner.read_block(lba, buf)
+    }
+    fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.inner.write_block(lba, data)
+    }
+    fn flush(&mut self) -> Result<(), BlockError> {
+        self.inner.flush()
+    }
+}
+
+const FIRST: &[u8] = b"first-group-bytes";
+const SECOND: &[u8] = b"second-group-bytes";
+/// Independent spellings of the two group payloads.
+const EXPECTED_FIRST: &[u8] = b"first-group-bytes";
+const EXPECTED_SECOND: &[u8] = b"second-group-bytes";
+const FSYNC_PATCH: (u64, u8, usize) = (10, 0x5b, 100);
+const EXPECTED_FSYNC_PATCH: (u64, u8, usize) = (10, 0x5b, 100);
+
+/// The anchor bytes once the acknowledged write group is replayed.
+fn acknowledged_anchor() -> Vec<u8> {
+    let mut bytes = vec![EXPECTED_BASE; BS];
+    let (offset, value, length) = EXPECTED_FSYNC_PATCH;
+    bytes[offset as usize..offset as usize + length].fill(value);
+    bytes
+}
+
+fn read_fault_base(pages: usize) -> (MemoryBackend, u64, u64) {
+    let format = Format {
+        log_slots: SLOTS,
+        ..Format::new(1024, 256)
+    };
+    let mut volume = matrix::open(format.device(), pages);
+    let anchor = volume
+        .create_file_in_root("anchor", &vec![BASE_BYTE; BS], ts(1))
+        .unwrap();
+    let generation = volume.generation();
+    (volume.into_device(), anchor, generation)
+}
+
+/// Stages one acknowledged namespace group, one acknowledged write group and
+/// one unlogged create.
+fn stage_window<D: BlockDevice>(volume: &mut Volume<D>, anchor: u64) {
+    volume
+        .window_op(
+            &BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: "first",
+                content: FIRST,
+            },
+            ts(10),
+        )
+        .unwrap();
+    volume.window_fsync().unwrap();
+    let (offset, value, length) = FSYNC_PATCH;
+    volume
+        .window_write_file_at(anchor, offset, &vec![value; length], ts(11))
+        .unwrap();
+    volume.window_fsync().unwrap();
+    volume
+        .window_op(
+            &BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: "second",
+                content: SECOND,
+            },
+            ts(12),
+        )
+        .unwrap();
+}
+
+/// `window_fsync` issues no read at all, so no read failure can reach it;
+/// every read of `window_commit` fails in turn, publishing nothing and
+/// requiring a remount that recovers exactly the acknowledged groups.
+fn window_publication_read_failures(pages: usize) {
+    let (base, anchor, generation) = read_fault_base(pages);
+
+    // The fsync of a namespace group and the fsync of a data group, each with
+    // the device armed to fail its very first read.
+    let mut volume = matrix::open(FailNthRead::new(base.clone(), Some(0)), pages);
+    let mut fsync_reads = Vec::new();
+    volume
+        .window_op(
+            &BatchOp::CreateFile {
+                parent_id: OBJECT_ROOT,
+                name: "first",
+                content: FIRST,
+            },
+            ts(10),
+        )
+        .unwrap();
+    volume.device_mut().reads = 0;
+    volume.device_mut().armed = true;
+    volume.window_fsync().expect("fsync reads nothing");
+    volume.device_mut().armed = false;
+    fsync_reads.push(volume.device_mut().reads);
+    let (offset, value, length) = FSYNC_PATCH;
+    volume
+        .window_write_file_at(anchor, offset, &vec![value; length], ts(11))
+        .unwrap();
+    volume.device_mut().reads = 0;
+    volume.device_mut().armed = true;
+    volume.window_fsync().expect("a data fsync reads nothing");
+    volume.device_mut().armed = false;
+    fsync_reads.push(volume.device_mut().reads);
+    assert_eq!(fsync_reads, vec![0, 0], "window_fsync issued a read");
+    assert!(
+        !volume.device_mut().tripped,
+        "window_fsync tripped the fault"
+    );
+    drop(volume);
+
+    // Every read of the publication itself.
+    let commit_reads = {
+        let mut volume = matrix::open(FailNthRead::new(base.clone(), None), pages);
+        stage_window(&mut volume, anchor);
+        volume.device_mut().reads = 0;
+        volume.device_mut().armed = true;
+        volume.window_commit(ts(20)).unwrap();
+        volume.device_mut().reads
+    };
+    assert!(commit_reads > 0, "window_commit issued no read");
+
+    let mut outcomes = [0u64; 2];
+    for index in 0..commit_reads {
+        let context = format!("window_commit read {index} of {commit_reads} pages={pages}");
+        let mut volume = matrix::open(FailNthRead::new(base.clone(), Some(index)), pages);
+        stage_window(&mut volume, anchor);
+        volume.device_mut().reads = 0;
+        volume.device_mut().armed = true;
+        let error = volume
+            .window_commit(ts(20))
+            .expect_err("the injected read failure is reported");
+        volume.device_mut().armed = false;
+        assert!(
+            matches!(error, CoreError::Block(BlockError::Injected(_))),
+            "{context}: {error:?}"
+        );
+        assert!(volume.device_mut().tripped, "{context}: no fault injected");
+        assert_eq!(volume.generation(), generation, "{context}: published");
+        // Remount-required semantics: no further mutation is admitted.
+        assert!(
+            matches!(
+                volume.create_file_in_root("probe", b"", ts(21)),
+                Err(CoreError::WindowPoisoned)
+            ),
+            "{context}: an independent mutation was admitted"
+        );
+        assert!(
+            matches!(volume.window_commit(ts(21)), Err(CoreError::WindowPoisoned)),
+            "{context}: the same publication was admitted"
+        );
+        let image = volume.into_device().inner;
+        let mut probe = image.clone();
+        matrix::assert_checker_clean(&mut probe, &context);
+        let raw = matrix::open_mode(probe, pages, MountMode::NoChanges);
+        // A read that fails before the checkpoint slot leaves the acknowledged
+        // groups pending; one that fails after it leaves the whole window
+        // published, which is the ambiguous publication of the same rule.
+        let published = raw
+            .generation()
+            .checked_sub(generation)
+            .filter(|delta| *delta <= 1)
+            .unwrap_or_else(|| panic!("{context}: disallowed generation {}", raw.generation()));
+        assert_eq!(
+            raw.pending_intent_records(),
+            if published == 1 { 0 } else { 2 },
+            "{context}: acknowledged records"
+        );
+        drop(raw);
+        outcomes[published as usize] += 1;
+        let mut recovered = matrix::open_mode(image, pages, MountMode::Recovery);
+        assert_eq!(
+            recovered.generation(),
+            generation + 1,
+            "{context}: recovery publishes one checkpoint"
+        );
+        file_bytes(&mut recovered, anchor, &acknowledged_anchor(), &context);
+        let first = recovered.lookup_root("first").unwrap().unwrap();
+        file_bytes(&mut recovered, first, EXPECTED_FIRST, &context);
+        assert_eq!(
+            recovered.lookup_root("second").unwrap().is_some(),
+            published == 1,
+            "{context}: the unlogged create"
+        );
+        assert_eq!(
+            recovered.lookup_root("probe").unwrap(),
+            None,
+            "{context}: the refused probe survived"
+        );
+        assert_eq!(
+            recovered.list_root().unwrap().len(),
+            2 + published as usize,
+            "{context}: root entries"
+        );
+        matrix::assert_checker_clean(recovered.device_mut(), &context);
+        // The retry of the lost operation reaches the complete state.
+        let mut recovered = matrix::open(recovered.into_device(), pages);
+        if published == 0 {
+            recovered
+                .window_op(
+                    &BatchOp::CreateFile {
+                        parent_id: OBJECT_ROOT,
+                        name: "second",
+                        content: SECOND,
+                    },
+                    ts(22),
+                )
+                .unwrap();
+            recovered.window_commit(ts(22)).unwrap();
+        }
+        let second = recovered.lookup_root("second").unwrap().unwrap();
+        file_bytes(&mut recovered, second, EXPECTED_SECOND, &context);
+        let mut again = matrix::open(recovered.into_device(), pages);
+        file_bytes(&mut again, anchor, &acknowledged_anchor(), &context);
+        let second = again.lookup_root("second").unwrap().unwrap();
+        file_bytes(&mut again, second, EXPECTED_SECOND, &context);
+        assert_eq!(
+            again.list_root().unwrap().len(),
+            3,
+            "{context}: root entries"
+        );
+        matrix::assert_checker_clean(again.device_mut(), &context);
+    }
+    assert!(
+        outcomes[0] > 0,
+        "a read failure before publication is required: {outcomes:?}"
+    );
+    eprintln!(
+        "window publication read failures pages={pages} fsync_reads=0 commit_reads={commit_reads} published={outcomes:?}"
+    );
+}
+
 // -------------------------------- measured staged-node demands of the commits
 
 /// Root directory, object map and allocation root of the replay commit.
@@ -1145,3 +1416,6 @@ crate::profile_tests!(replace_replay_eviction, |pages| matrix::replay_eviction(
     pages
 ));
 crate::profile_tests!(update_refusals, |pages| window_update_refusals(pages));
+crate::profile_tests!(publication_read_failures, |pages| {
+    window_publication_read_failures(pages)
+});
