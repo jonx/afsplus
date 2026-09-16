@@ -158,6 +158,50 @@ class ReplayTests(unittest.TestCase):
         ]
         for value in admitted:
             tool.selected_batch(value, 0, previous, 1, profile, 0)
+        # Every extended kind the core can emit is admitted at its own code.
+        def canonical(kind):
+            if 23 <= kind <= 26:
+                return dict(words=(8, 4, 0, 0, 0))
+            if 27 <= kind <= 31:
+                return dict(words=(9, 5, 3, 0, 0))
+            if 32 <= kind <= 38:
+                return dict(words=(7, 9, 2, 0, 0))
+            if kind == 39:
+                return dict(generation=0, enums=(0, 1, 0, 0))
+            if kind == 40:
+                return dict(enums=(1, 3, 1, 0), words=(6, 0, 0, 0, 0))
+            if 41 <= kind <= 44:
+                return dict(enums=(0, 6, 0, 0), region=2, group=2)
+            if kind == 45:
+                return dict(enums=(2, 4, 1, 0), words=(6, 0, 0, 0, 0))
+            if 46 <= kind <= 50:
+                stage = {46: 1, 47: 3, 48: 4, 49: 5, 50: 2}[kind]
+                block = 33 if kind in (48, 49) else 0
+                return dict(enums=(stage, 0, 0, 0), words=(512, block, 0, 0, 0))
+            if kind in (51, 54):
+                ordinal = 11 if kind == 54 else 0
+                return dict(enums=(3, 0, 0, 0), words=(ordinal, 0, 0, 0, 0))
+            if kind == 52:
+                return dict(enums=(3, 13, 0, 0), region=1, words=(0, 0, 40, 0, 0))
+            if kind == 53:
+                return dict(enums=(3, 13, 8, 0), region=2, words=(5, 16, 40, 0, 0))
+            if kind == 55:
+                return dict(enums=(2, 4, 0, 0), words=(0, 16, 0, 0, 0))
+            if 56 <= kind <= 58:
+                return dict(enums=(1, 0, 0, 0), region=2, words=(16, 0, 8192, 33, 0),
+                            span=1, operation=1, method=64)
+            if kind in (59, 60):
+                return dict(tx=1)
+            return dict(enums=(1, 0, 0, 0), words=(3, 16, 40, 0, 0))
+        for kind in range(23, 65):
+            tool.selected_batch(wire(kind, **canonical(kind)), 0, previous, 1, profile, 0)
+            # An empty mask refuses the same record, whatever its kind.
+            with self.assertRaises(ValueError):
+                tool.selected_batch(wire(kind, **canonical(kind)), 0, previous, 1,
+                                    dict(profile, flight_categories=0), 0)
+        for kind in (0, 65, 200, 255):
+            with self.assertRaises(ValueError):
+                tool.selected_batch(wire(kind), 0, previous, 1, profile, 0)
         refused = [
             # Tag, presence and reserved-byte consistency.
             wire(24, tag=0), wire(24, tag=2), wire(1, tag=1), wire(59, tx=1, tag=4),

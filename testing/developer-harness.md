@@ -1741,14 +1741,22 @@ and the mask ceiling before the runner starts. The
 run against the same plan with observation disabled, block operation by block
 operation and image block by image block.
 
+Admission covers every code 23 through 64: the synthetic wire admits one
+canonical record per kind and refuses it under an empty mask, so a kind the
+host scenarios leave unproduced has an enforced wire contract. Scenario
+production covers the allocator, the mutable trees, reclaim, mount recovery
+with intent-log replay, a refused mount, formatting, verification phases,
+staged window writes, the intent-group data barrier and read-only view
+descents.
+
 Deliberate limits: this profile observes a host memory image, and a native
 adapter has its own qualification. The memory runner injects no device error
-and no allocation exhaustion, so the failure kinds `TreeIoFailed`,
-`ReclaimFailed`, `AllocationFailed`, `FormatFailed`, `DataWriteFailed`,
-`VerifyFinding`, `VerifyFailed`, `ViewReadFailed` and `ViewMaintenanceFailed`
-reach the wire through the synthetic admission controls alone. The category
-mask selects what a batch retains; it makes no claim about which operations
-produce which events.
+and no provider unwinding, so `TreeIoFailed`, `ReclaimFailed`, `FormatFailed`,
+`DataWriteFailed`, `VerifyFailed`, `ViewReadFailed` and
+`ViewMaintenanceFailed` reach the wire through the synthetic controls alone.
+A healthy image reports no invariant violation, so `VerifyFinding` belongs to
+the same set. The category mask selects what a batch retains; it makes no
+claim about which operations produce which events.
 
 ## Linked namespace replay bundles
 
