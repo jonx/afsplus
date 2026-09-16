@@ -11,6 +11,7 @@
 - [Portable C corpus contract](#portable-c-corpus-contract)
 - [Seeded semantic properties](#seeded-semantic-properties)
 - [Generated operation families](#generated-operation-families)
+- [Executable surface audit](#executable-surface-audit)
 - [Legacy one-block reader oracles](#legacy-one-block-reader-oracles)
 - [Typed caller and Unicode properties](#typed-caller-and-unicode-properties)
 
@@ -450,6 +451,86 @@ as a flag, and its effect on write placement belongs to
 [data-policy qualification](data-policy-qualification.md). Each verdict compares
 the remounted state; intermediate reads and concurrent callers are separate
 properties.
+
+## Executable surface audit
+
+Every entry of `ApiMethod` in
+[the flight recorder](../crates/afsplus-core/src/flight.rs) names one executable
+host surface, and each one belongs to exactly one line below.
+
+| Mutable method | Wire command | Families |
+|---|---|---|
+| `CleanupOrphan` | `cleanup_orphan` | orphan |
+| `CloneFile` | `clone_file` | namespace, captured |
+| `CloneRange` | `clone_range` | namespace, captured |
+| `CreateDirectory` | `mkdir` | every family |
+| `CreateFileInDirectory` | `create` | every family |
+| `CreateSymlink` | `symlink` | namespace, captured |
+| `DeleteFile` | `unlink`, the `delete` batch member | every family |
+| `LinkFile` | `link` | namespace, replace, captured |
+| `OrphanFile` | `orphan_file` | orphan |
+| `PreallocateFile` | `preallocate` | space, captured |
+| `PreallocateFileBounded` | `preallocate_bounded` | space |
+| `ReclaimStep` | `reclaim_step` | maintenance |
+| `RemoveDirectory` | `rmdir` | every family |
+| `Rename` | `rename`, the `rename` batch member | every family |
+| `RenameReplace` | `rename_replace`, the `replace` batch member | replace, batch |
+| `RenameReplaceOrphanTarget` | `rename_replace_orphan` | orphan |
+| `RestoreObjectMetadata` | `restore_metadata` | space |
+| `RunBatch` | `batch` | batch |
+| `SetFileDataPolicy` | `set_data_policy` | space |
+| `SetObjectProtection` | `set_protection` | namespace, space, captured |
+| `SnapshotCreate` | `snapshot_create` | snapshot, maintenance, captured |
+| `SnapshotDelete` | `snapshot_delete` | snapshot, maintenance, captured |
+| `SnapshotMaintenanceStep` | `snapshot_maintenance_step` | maintenance |
+| `SnapshotOpen` | `snapshot_open` | snapshot, maintenance, captured |
+| `Sync` | `sync` | every family |
+| `TruncateFile` | `truncate` | every family |
+| `TruncateFileBounded` | `truncate_bounded` | space |
+| `UnlinkSymlink` | `unlink_symlink` | namespace, captured |
+| `WindowCommit` | `window_commit` | window, batch |
+| `WindowFsync` | `window_fsync` | window, batch |
+| `WindowOp` | `window_batch` | batch |
+| `WindowTruncateFile` | `window_truncate` | window |
+| `WindowWriteFileAt` | `window_write` | window |
+| `WriteFileAt` | `write` | every family |
+| `WriteFileAtBounded` | `write_bounded` | space |
+
+Three mutable methods have no generator of their own.
+`CreateDirectoryInRoot`, `CreateFileInRoot` and `DeleteFileInRoot` validate the
+timestamp and delegate to `CreateDirectory`, `CreateFileInDirectory` and
+`DeleteFile` with the parent fixed to the root object, so a generated sequence
+covers their semantics through the delegate. Their own span identity belongs to
+[the flight tests](../crates/afsplus-core/tests/flight.rs), and the
+[crash](crash-testing.md) and family matrices call them directly.
+
+Five methods set a mount-lifetime budget or policy with no on-disk state.
+`SetOrphanCleanupExtentBudget`, `SetSnapshotWorkLimits` and `SetTreeCachePages`
+carry the orphan extent budget, the snapshot work limits and the tree cache
+profile of the scenario header, so every generated case applies all three at
+every mount. The volume-wide `SetDataUpdatePolicy` belongs to
+[data-policy qualification](data-policy-qualification.md) and
+`SetReclaimBatchBlocks` to the reclaim batch of
+[ADR-036](../adr/ADR-036-reclaim-queue.md) and its crate tests;
+the persistent per-file policy of [ADR-065](../adr/ADR-065-persistent-data-update-policy.md)
+is the generated one.
+
+The remaining twenty-three methods read: `FileAllocationPage`,
+`FileDataPolicy`, `FirstOrphan`, `ListDirectory`, `ListRoot`,
+`LookupInDirectory`, `LookupRoot`, `OrphanCount`, `OrphanObject`,
+`QuarantineContains`, `ReadDirectoryPage`, `ReadFile`, `ReadFileAt`, `ReadLink`,
+`SnapshotAllocationPage`, `SnapshotList`, `SnapshotLookup`,
+`SnapshotReadDirectoryPage`, `SnapshotReadFileAt`, `SnapshotReadLink`,
+`SnapshotStat`, `Stat` and `VisibleMetadata`. The observation of every generated
+case reads through `ListDirectory`, `Stat`, `ReadFile`, `ReadLink`,
+`FileAllocationPage`, `FileDataPolicy`, `OrphanCount` and `OrphanObject`, and a
+captured view reads through the five snapshot readers and
+`SnapshotAllocationPage`. `ListRoot`, `LookupRoot`, `LookupInDirectory`,
+`ReadFileAt`, `ReadDirectoryPage`, `SnapshotList`, `SnapshotLookup`,
+`FirstOrphan`, `QuarantineContains` and `VisibleMetadata` are paging and lookup
+accessors of [the developer harness](developer-harness.md), whose bounds the
+[typed caller properties](#typed-caller-and-unicode-properties) and the crate
+tests own.
 
 ## Legacy one-block reader oracles
 
