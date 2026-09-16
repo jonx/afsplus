@@ -1766,3 +1766,161 @@ pub fn reload_failures<F: Family>(family: &F, pages: usize, variant: Variant) ->
     );
     (stats.staged_spill_writes, stats.staged_spill_reloads)
 }
+
+/// A before-write fault at every write and a failure at every flush of the
+/// logging phase, so the intent-record publication itself is interrupted. The
+/// acknowledged record count of the interrupted media names the allowed
+/// state: a recovery and a second recovery reach exactly it. A separate
+/// instance retries the interrupted group on the same handle and must either
+/// acknowledge every group or refuse with `WindowPoisoned`.
+pub fn replay_logging_faults<F: ReplayFamily>(
+    family: &F,
+    recording: &ReplayRecording<F::State>,
+    pages: usize,
+    variant: Variant,
+) {
+    let groups = family.groups();
+    let (mut writes, mut flushes) = (0u64, 0u64);
+    let mut plans = Vec::new();
+    for operation in &recording.log {
+        match operation {
+            RecordedOp::Write { .. } => {
+                plans.push(FaultPlan {
+                    fail_write_index: Some(writes),
+                    ..Default::default()
+                });
+                writes += 1;
+            }
+            RecordedOp::Flush => {
+                plans.push(FaultPlan {
+                    fail_flush_index: Some(flushes),
+                    ..Default::default()
+                });
+                flushes += 1;
+            }
+        }
+    }
+    let mut outcomes = vec![0u64; groups + 1];
+    let (mut retried, mut poisoned) = (0u64, 0u64);
+    for plan in &plans {
+        let context = format!(
+            "{} {variant:?} pages={pages} logging {plan:?}",
+            family.name()
+        );
+        let mut volume = open(FaultBackend::new(recording.base.clone(), *plan), pages);
+        let mut reported = false;
+        for index in 0..groups {
+            if family
+                .log_group(&mut volume, &recording.state, index)
+                .is_err()
+            {
+                reported = true;
+                break;
+            }
+        }
+        assert!(reported, "{context}: fault not reported");
+        assert!(
+            volume.device_mut().tripped(),
+            "{context}: fault not injected"
+        );
+        assert_eq!(
+            volume.generation(),
+            recording.generation,
+            "{context}: logging published a checkpoint"
+        );
+        let mut image = volume.into_device().into_inner();
+        assert_checker_clean(&mut image, &context);
+        let raw = open_mode(image, pages, MountMode::NoChanges);
+        assert_eq!(
+            raw.generation(),
+            recording.generation,
+            "{context}: interrupted generation"
+        );
+        let acknowledged = raw.pending_intent_records() as usize;
+        assert!(
+            acknowledged <= groups,
+            "{context}: {acknowledged} acknowledged records"
+        );
+        outcomes[acknowledged] += 1;
+        recover_twice(
+            family,
+            recording,
+            pages,
+            variant,
+            raw.into_device(),
+            acknowledged,
+            &context,
+        );
+
+        // A separate instance retries the interrupted group on the same
+        // handle: the window either carries on or requires a remount.
+        let mut retry = open(FaultBackend::new(recording.base.clone(), *plan), pages);
+        let mut refusal = None;
+        for index in 0..groups {
+            if family
+                .log_group(&mut retry, &recording.state, index)
+                .is_err()
+            {
+                if let Err(second) = family.log_group(&mut retry, &recording.state, index) {
+                    refusal = Some(second);
+                    break;
+                }
+            }
+        }
+        let mut image = retry.into_device().into_inner();
+        assert_checker_clean(&mut image, &context);
+        let raw = open_mode(image, pages, MountMode::NoChanges);
+        let reached = raw.pending_intent_records() as usize;
+        match refusal {
+            None => {
+                assert_eq!(reached, groups, "{context}: same-handle retry");
+                retried += 1;
+            }
+            Some(error) => {
+                assert!(
+                    matches!(error, CoreError::WindowPoisoned),
+                    "{context}: same-handle retry {error:?}"
+                );
+                assert!(
+                    reached <= groups,
+                    "{context}: {reached} records after refusal"
+                );
+                poisoned += 1;
+            }
+        }
+        recover_twice(
+            family,
+            recording,
+            pages,
+            variant,
+            raw.into_device(),
+            reached,
+            &context,
+        );
+    }
+    assert!(
+        outcomes[0] > 0,
+        "{} {variant:?} pages={pages}: an unacknowledged outcome is required {outcomes:?}",
+        family.name()
+    );
+    eprintln!(
+        "{} {variant:?} pages={pages}: logging faults={} writes={writes} flushes={flushes} acknowledged={outcomes:?} same_handle_retries={retried} remount_required={poisoned}",
+        family.name(),
+        plans.len()
+    );
+}
+
+/// Logs every group on a recording backend and then interrupts that logging
+/// phase at every recorded write and flush.
+pub fn replay_logging<F: ReplayFamily>(family: &F, pages: usize, variant: Variant) {
+    let recording = record_replay(family, pages, variant);
+    replay_logging_faults(family, &recording, pages, variant);
+}
+
+/// Forced eviction of a replay recovery commit: the spill evidence of the
+/// recording and the recovery fault matrix. The cut model of the family stays
+/// with its plain and retained fixtures.
+pub fn replay_eviction<F: ReplayFamily>(family: &F, pages: usize) {
+    let recording = record_replay(family, pages, Variant::Eviction);
+    replay_faults(family, &recording, pages, Variant::Eviction);
+}
