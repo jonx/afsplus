@@ -1742,22 +1742,72 @@ and the mask ceiling before the runner starts. The
 run against the same plan with observation disabled, block operation by block
 operation and image block by image block.
 
-Admission covers every code 23 through 64: the synthetic wire admits one
-canonical record per kind and refuses it under an empty mask, so a kind the
-host scenarios leave unproduced has an enforced wire contract. Scenario
-production covers the allocator, the mutable trees, reclaim, mount recovery
-with intent-log replay, a refused mount, formatting, verification phases,
-staged window writes, the intent-group data barrier and read-only view
-descents.
+Four commands reach the events a healthy image cannot produce.
+`fault write|flush|read INDEX` arms one single-shot device fault, counted in
+device operations of that class from the moment it is armed, so the index is
+relative to the operation that follows. The recording device applies the
+`FaultBackend` contract of [afsplus-block](../crates/afsplus-block/src/fault.rs)
+inline, because a scenario arms a fault between operations and also selects a
+read index, neither of which that shared wrapper carries; the injected error is
+the same `BlockError::Injected`. The failing operation becomes a captured
+operation failure at a known index, and a fault the scenario arms and no device
+operation reaches is refused, so a wrong index proves nothing silently.
+`format_fault write|flush INDEX` fails the first format attempt through the
+shared `FaultBackend`. Formatting is not atomic, so the partially written
+device is discarded and a fresh image is formatted without the fault; the
+pre-mount batch carries both attempts, and only the first scenario operation
+may carry the command. `corrupt LBA OFFSET BYTE` writes one byte into the image
+beneath the mount the way the corruption corpus edits a captured image, and
+`reseal LBA OFFSET BYTE` recomputes the block checksum over the block's own
+header type, so the edit survives integrity checks and reaches the invariant
+sweep. Both record the write, so replay reproduces the edited image exactly.
+Their block addresses belong to one geometry and operation prefix, because the
+runner formats the same image for the same input.
+
+Version 8 carries `expected_findings`: the full-sweep findings the scenario
+declares, each with its scope, phase, finding class, region, ordinal, object
+and block, compared exactly against the `VerifyFinding` records of the
+artifact. A scenario declaring any finding selects the verify category and a
+256-event ring, so the comparison never depends on what a narrow profile
+retained. A wrong declaration is a reduction signature of its own. An edited
+image is a recorded failure whose replay reproduces that failure, so a bad
+image never replays as a passing bundle.
+
+Sixty-three of the sixty-four kinds reach the wire from a host scenario.
+
+| Kinds | Scenario |
+| --- | --- |
+| 1-6, 20-21, 23-25, 27-28, 32-37, 39-42, 44, 46-49, 51-52, 54, 56-57, 61-62 | the namespace, snapshot and verification scenarios of the qualification matrix |
+| 7, 10, 26 | volume exhaustion (`AllocationFailed` and the failed transaction that carries it) |
+| 12, 18, 19 | a deferred window opened, committed and detached |
+| 13 | `verify` while a window is open, which reattaches the recorder to that window |
+| 14-15 | a window fsync logging its group |
+| 16 | `fault write 0` before a window fsync |
+| 17 | `fault write 1` before a window fsync |
+| 22 | `reseal` of an object-map key followed by a remount and a write |
+| 29-30 | sixty long directory entries at two cache pages |
+| 31 | `fault read 2` before a snapshot creation |
+| 38 | `fault read 0` before a snapshot creation |
+| 43 | a remount over uncommitted staged window writes |
+| 45 | `remount_refused` |
+| 50 | `format_fault write 0` |
+| 53 | `reseal` of an object link count followed by `verify` |
+| 55 | `corrupt` of a region descriptor followed by `verify` |
+| 58 | `fault write 0` before a staged window write |
+| 59-60 | a window fsync carrying a record, then one carrying none |
+| 63 | `fault read 6` before a captured-view inspection |
+| 64 | `fault write 0` before a snapshot creation |
+
+Admission covers every code 23 through 64 independently: the synthetic wire
+admits one canonical record per kind and refuses it under an empty mask, so a
+kind has an enforced wire contract whatever a scenario produces.
 
 Deliberate limits: this profile observes a host memory image, and a native
-adapter has its own qualification. The memory runner injects no device error
-and no provider unwinding, so `TreeIoFailed`, `ReclaimFailed`, `FormatFailed`,
-`DataWriteFailed`, `VerifyFailed`, `ViewReadFailed` and
-`ViewMaintenanceFailed` reach the wire through the synthetic controls alone.
-A healthy image reports no invariant violation, so `VerifyFinding` belongs to
-the same set. The category mask selects what a batch retains; it makes no
-claim about which operations produce which events.
+adapter has its own qualification. `ApiUnwound` has no host scenario, because
+the API guard reports it when a panic unwinds through the observed call; a
+scenario command cannot raise one, and the version-5 API-span profile owns
+that gap. The category mask selects what a batch retains; it makes no claim
+about which operations produce which events.
 
 ## Linked namespace replay bundles
 
