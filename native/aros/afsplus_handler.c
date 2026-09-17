@@ -1010,34 +1010,46 @@ static void refuse_queued_packets(struct ExecBase *SysBase,
     }
 }
 
-/* afsplus_claim.h: whether the owner of a claim is still a task of this
- * system. Called under Forbid(), which is what keeps the lists still. A task
- * that crashed is on neither list; the running task is on neither as well. */
-uint32_t afsplus_claim_owner_alive(struct ExecBase *SysBase,
+/* afsplus_claim.h: the identity of a task, and whether a recorded task is
+ * still that task. Called under Forbid(), which is what keeps the lists
+ * still. A task that crashed or ended is on neither list; the running task
+ * is on neither as well. The address alone is not an identity: exec reissues
+ * it, so the unique task ID has to match too. */
+uint32_t afsplus_claim_task_id(struct ExecBase *SysBase,
     const struct Task *task)
 {
+    (void)SysBase;
+    if (task == NULL || !(task->tc_Flags & TF_ETASK)
+        || task->tc_UnionETask.tc_ETask == NULL)
+        return 0;
+    return (uint32_t)task->tc_UnionETask.tc_ETask->et_UniqueID;
+}
+
+uint32_t afsplus_claim_task_alive(struct ExecBase *SysBase,
+    const struct Task *task, uint32_t task_id)
+{
     const struct Node *node;
+    uint32_t listed = 0;
 
     if (task == NULL)
         return 0;
     if (task == SysBase->ThisTask)
-        return 1;
-    for (node = SysBase->TaskReady.lh_Head; node->ln_Succ != NULL;
+        listed = 1;
+    for (node = SysBase->TaskReady.lh_Head; !listed && node->ln_Succ != NULL;
         node = node->ln_Succ)
-        if ((const struct Task *)node == task)
-            return 1;
-    for (node = SysBase->TaskWait.lh_Head; node->ln_Succ != NULL;
+        listed = (const struct Task *)node == task;
+    for (node = SysBase->TaskWait.lh_Head; !listed && node->ln_Succ != NULL;
         node = node->ln_Succ)
-        if ((const struct Task *)node == task)
-            return 1;
-    return 0;
+        listed = (const struct Task *)node == task;
+    /* Only now is task known to be a task, and safe to read. */
+    return listed && task->tc_Node.ln_Type == NT_PROCESS
+        && afsplus_claim_task_id(SysBase, task) == task_id;
 }
 
-/* The life of an instance that found its unit claimed: see afsplus_claim.h.
- * A packet is not touched again once it has been forwarded; it belongs to
- * the other instance then. The forwarder ends with the instance it serves,
- * or with the ACTION_DIE it passed on, after answering what is still queued:
- * the one caller that holds this port got it for one operation. */
+/* The life of an instance that found its medium claimed: see
+ * afsplus_claim.h. A packet is not touched again once it has been forwarded;
+ * it belongs to the other instance then. The forwarder ends with the
+ * instance it serves, after answering what is still queued. */
 static LONG forward_to_claimed_instance(struct ExecBase *SysBase,
     struct MsgPort *port, const char *claim_name, uint64_t generation)
 {
@@ -1045,7 +1057,8 @@ static LONG forward_to_claimed_instance(struct ExecBase *SysBase,
     struct Message *message;
     uint32_t serving;
 
-    /* Enrolled so that the instance wakes this task when it goes. */
+    /* Enrolled so that the instance wakes this task when it goes. The answer
+     * says whether that instance is still there, slot or no slot. */
     serving = afsplus_claim_enroll(SysBase, claim_name, generation, self, 1);
     while (serving)
     {
@@ -1058,12 +1071,9 @@ static LONG forward_to_claimed_instance(struct ExecBase *SysBase,
         {
             struct DosPacket *packet =
                 (struct DosPacket *)message->mn_Node.ln_Name;
-            LONG action;
 
             if (packet == NULL)
                 continue;
-            /* Read before the packet changes hands. */
-            action = packet->dp_Type;
             if (!afsplus_claim_forward(SysBase, claim_name, generation,
                     message))
             {
@@ -1072,8 +1082,6 @@ static LONG forward_to_claimed_instance(struct ExecBase *SysBase,
                 reply_packet(port, SysBase, packet);
                 serving = 0;
             }
-            else if (action == ACTION_DIE)
-                serving = 0;
         }
     }
     (void)afsplus_claim_enroll(SysBase, claim_name, generation, self, 0);
@@ -1108,18 +1116,38 @@ LONG handler(struct ExecBase *SysBase)
         return RETURN_FAIL;
     packet = (struct DosPacket *)message->mn_Node.ln_Name;
 
-    /* The unit is claimed before anything opens it. A startup message that
-     * names no device is left to initialize_handler() to refuse. */
+    /* The medium is claimed before anything opens it. A startup message
+     * that names no device or no partition is left to initialize_handler()
+     * to refuse: nothing is opened for it. */
     claimed_startup = (struct FileSysStartupMsg *)BADDR(packet->dp_Arg2);
     if (claimed_startup != NULL && (IPTR)packet->dp_Arg2 >= 64
-        && claimed_startup->fssm_Device != BNULL)
+        && claimed_startup->fssm_Device != BNULL
+        && claimed_startup->fssm_Environ != BNULL
+        && ((struct DosEnvec *)BADDR(claimed_startup->fssm_Environ))
+            ->de_TableSize >= DE_UPPERCYL)
     {
-        const uint8_t *device = (const uint8_t *)AROS_BSTR_ADDR(
-            claimed_startup->fssm_Device);
+        const struct DosEnvec *environment =
+            (const struct DosEnvec *)BADDR(claimed_startup->fssm_Environ);
+        struct AfsplusArosClaimKey key;
 
-        if (!afsplus_claim_name(claim_name, device,
-                (uint32_t)strlen((const char *)device),
-                (uint64_t)claimed_startup->fssm_Unit))
+        key.device = (const uint8_t *)AROS_BSTR_ADDR(
+            claimed_startup->fssm_Device);
+        /* The length the BSTR form of this build states, as
+         * afsplus_packet.c reads it. */
+#ifdef AROS_FAST_BSTR
+        key.device_length = (uint32_t)strlen((const char *)key.device);
+#else
+        key.device_length = (uint32_t)AROS_BSTR_strlen(
+            claimed_startup->fssm_Device);
+#endif
+        key.unit = (uint64_t)claimed_startup->fssm_Unit;
+        key.flags = (uint64_t)claimed_startup->fssm_Flags;
+        key.size_block = (uint64_t)environment->de_SizeBlock;
+        key.surfaces = (uint64_t)environment->de_Surfaces;
+        key.blocks_per_track = (uint64_t)environment->de_BlocksPerTrack;
+        key.low_cylinder = (uint64_t)environment->de_LowCyl;
+        key.high_cylinder = (uint64_t)environment->de_HighCyl;
+        if (!afsplus_claim_name(claim_name, &key))
             claim_result = AFSPLUS_CLAIM_NAME_TOO_LONG;
         else
             claim_result = afsplus_claim_take(SysBase, claim_name,

@@ -92,15 +92,28 @@ void RemPort(struct MsgPort *port)
     abort();
 }
 
-/* Tasks the faked system still runs. */
+/* The faked system's tasks: an address is alive unless it is dead_task, and
+ * carries the unique ID the table says, so an address can be reissued. */
 static struct Task *dead_task;
+static struct Task *reissued_task;
+static uint32_t reissued_id;
 
-uint32_t afsplus_claim_owner_alive(struct ExecBase *sysbase,
+uint32_t afsplus_claim_task_id(struct ExecBase *sysbase,
     const struct Task *task)
 {
     (void)sysbase;
     assert(forbid_depth > 0);
-    return task != NULL && task != dead_task;
+    if (task == reissued_task)
+        return reissued_id;
+    return (uint32_t)((uintptr_t)task >> 4);
+}
+
+uint32_t afsplus_claim_task_alive(struct ExecBase *sysbase,
+    const struct Task *task, uint32_t task_id)
+{
+    assert(forbid_depth > 0);
+    return task != NULL && task != dead_task
+        && afsplus_claim_task_id(sysbase, task) == task_id;
 }
 
 static struct Task *signalled[4];
@@ -137,24 +150,75 @@ int main(void)
     struct Task *second_task = (struct Task *)0x2000;
     uint64_t seen = 0;
     uint64_t unused = 0;
+    struct AfsplusArosClaimKey key;
+    struct AfsplusArosClaimKey other_key;
+    struct AfsplusArosClaimKey big;
     char name[AFSPLUS_CLAIM_NAME_BYTES];
     char other[AFSPLUS_CLAIM_NAME_BYTES];
     uint8_t long_device[AFSPLUS_CLAIM_DEVICE_NAME_MAX + 1];
 
-    /* The key is the medium: device and unit, nothing of the DOS node. */
-    assert(afsplus_claim_name(name, (const uint8_t *)"fdsk.device", 11, 19));
-    assert(strcmp(name, "AFSPLUS.fdsk.device.19") == 0);
-    assert(afsplus_claim_name(other, (const uint8_t *)"fdsk.device", 11, 0));
-    assert(strcmp(other, "AFSPLUS.fdsk.device.0") == 0);
-    assert(afsplus_claim_name(other, (const uint8_t *)"x", 1,
-        UINT64_C(18446744073709551615)));
-    assert(strcmp(other, "AFSPLUS.x.18446744073709551615") == 0);
+    /* The key is the medium: device, unit, flags and the partition's place
+     * on the unit, as numbers. Nothing of the DOS node is in it. */
+    memset(&key, 0, sizeof(key));
+    key.device = (const uint8_t *)"ata.device";
+    key.device_length = 10;
+    key.unit = 0;
+    key.flags = 0;
+    key.size_block = 1024;
+    key.surfaces = 16;
+    key.blocks_per_track = 63;
+    key.low_cylinder = 2;
+    key.high_cylinder = 4095;
+    assert(afsplus_claim_name(name, &key));
+    assert(strcmp(name, "AFSPLUS.ata.device.0.0.1024.16.63.2.4095") == 0);
+
+    /* Two partitions of one disk share device and unit and nothing else:
+     * two names, two first instances, no forwarding between them. */
+    {
+        struct AfsplusArosClaimKey second_partition = key;
+        struct AfsplusArosClaim *dh0 = NULL;
+        struct AfsplusArosClaim *dh1 = NULL;
+        uint64_t generation = 0;
+
+        second_partition.low_cylinder = 4096;
+        second_partition.high_cylinder = 8191;
+        assert(afsplus_claim_name(other, &second_partition));
+        assert(strcmp(name, other) != 0);
+        assert(afsplus_claim_take(NULL, name, (struct Task *)0x5000,
+            &first_port, &dh0, &generation) == AFSPLUS_CLAIM_TAKEN);
+        assert(afsplus_claim_take(NULL, other, (struct Task *)0x6000,
+            &second_port, &dh1, &generation) == AFSPLUS_CLAIM_TAKEN);
+        assert(dh0 != NULL && dh1 != NULL && dh0 != dh1);
+        last_target = NULL;
+        assert(afsplus_claim_forward(NULL, other, dh1->generation, &message)
+            == 1);
+        assert(last_target == &second_port);
+        afsplus_claim_release(NULL, dh0);
+        afsplus_claim_release(NULL, dh1);
+        /* Every number of the key separates. */
+        second_partition = key;
+        second_partition.flags = 1;
+        assert(afsplus_claim_name(other, &second_partition));
+        assert(strcmp(name, other) != 0);
+        second_partition = key;
+        second_partition.size_block = 512;
+        assert(afsplus_claim_name(other, &second_partition));
+        assert(strcmp(name, other) != 0);
+    }
+    /* The largest key fits its buffer; a device name too long or missing has
+     * no name. */
     memset(long_device, 'd', sizeof(long_device));
-    assert(afsplus_claim_name(other, long_device,
-        AFSPLUS_CLAIM_DEVICE_NAME_MAX, 1));
-    assert(strlen(other) < sizeof(other));
-    assert(!afsplus_claim_name(other, long_device, sizeof(long_device), 1));
-    assert(!afsplus_claim_name(other, NULL, 0, 1));
+    big = key;
+    big.device = long_device;
+    big.device_length = AFSPLUS_CLAIM_DEVICE_NAME_MAX;
+    big.unit = big.flags = big.size_block = big.surfaces = UINT64_MAX;
+    big.blocks_per_track = big.low_cylinder = big.high_cylinder = UINT64_MAX;
+    assert(afsplus_claim_name(other, &big));
+    assert(strlen(other) == AFSPLUS_CLAIM_NAME_BYTES - 1);
+    big.device_length = sizeof(long_device);
+    assert(!afsplus_claim_name(other, &big));
+    big.device = NULL;
+    assert(!afsplus_claim_name(other, &big));
 
     /* The first instance gets the unit; a second one does not, publishes
      * nothing, keeps nothing allocated and learns whom it serves. */
@@ -166,7 +230,9 @@ int main(void)
     assert(second == NULL && allocations == 1);
     assert(seen == first->generation && seen != 0);
     /* Another unit of the same device is another medium. */
-    assert(afsplus_claim_name(other, (const uint8_t *)"fdsk.device", 11, 20));
+    other_key = key;
+    other_key.unit = 1;
+    assert(afsplus_claim_name(other, &other_key));
     assert(afsplus_claim_take(NULL, other, second_task, &second_port,
         &other_unit, &unused) == AFSPLUS_CLAIM_TAKEN);
     afsplus_claim_release(NULL, other_unit);
@@ -203,6 +269,11 @@ int main(void)
         assert(afsplus_claim_enroll(NULL, name, seen + 1, second_task, 1)
             == 0);
         assert(afsplus_claim_enroll(NULL, name, seen, forwarder_b, 0) == 1);
+        /* A forwarder that was killed while enrolled: its address now
+         * belongs to another task, which must not be signalled. */
+        assert(afsplus_claim_enroll(NULL, name, seen, forwarder_b, 1) == 1);
+        reissued_task = forwarder_b;
+        reissued_id = 0x7777;
         signalled_count = 0;
     }
 
@@ -249,6 +320,23 @@ int main(void)
     dead_task = NULL;
     afsplus_claim_release(NULL, second);
     afsplus_claim_release(NULL, NULL);
+
+    /* The owner died and exec gave its address to another process: the
+     * address is on the task lists again, the unique ID is not the claim's.
+     * Nothing is sent to it, and the next start is a first instance. */
+    reissued_task = NULL;
+    assert(afsplus_claim_take(NULL, name, first_task, &first_port, &first,
+        &unused) == AFSPLUS_CLAIM_TAKEN);
+    seen = first->generation;
+    reissued_task = first_task;
+    reissued_id = 0x4242;
+    last_target = NULL;
+    assert(afsplus_claim_forward(NULL, name, seen, &message) == 0);
+    assert(last_target == NULL && allocations == 0);
+    assert(afsplus_claim_take(NULL, name, second_task, &second_port, &second,
+        &unused) == AFSPLUS_CLAIM_TAKEN);
+    afsplus_claim_release(NULL, second);
+    reissued_task = NULL;
 
     assert(puts_outside_forbid == 0 && forbid_depth == 0);
     assert(allocations == 0);

@@ -1,8 +1,8 @@
 diff --git a/rom/dos/runhandler.c b/rom/dos/runhandler.c
-index 2bc3247b62..47d81eb4d0 100644
+index 2bc3247b62..499fd86ac8 100644
 --- a/rom/dos/runhandler.c
 +++ b/rom/dos/runhandler.c
-@@ -23,7 +23,100 @@
+@@ -23,7 +23,189 @@
   */
  void BCPL_RunHandler(void);
  
@@ -16,13 +16,21 @@ index 2bc3247b62..47d81eb4d0 100644
 + * that finds a start of the same node in progress now waits for it and
 + * takes its result. Starts of different nodes stay independent, because a
 + * handler may open files on other volumes while it starts.
++ *
++ * Two callers must never wait: the handler being started, when its startup
++ * touches its own node, because the starter is waiting for that very
++ * handler; and anybody once the starter is no longer a task, because nobody
++ * would release them. The first gets the node's current dn_Task, as it did
++ * before. The second removes the dead start and starts the handler itself.
 + */
 +struct HandlerStart
 +{
 +    struct MinNode          hs_Node;
 +    struct DeviceNode      *hs_DeviceNode;
-+    struct SignalSemaphore  hs_Done;    /* held by the starter until it is done */
-+    ULONG                   hs_Users;   /* the starter and its waiters */
++    struct SignalSemaphore  hs_Done;     /* held by the starter until it is done */
++    struct Task            *hs_Starter;
++    struct MsgPort         *hs_Result;   /* what the starter returns; valid once hs_Done is free */
++    ULONG                   hs_Users;    /* the starter and its waiters */
 +};
 +
 +static struct MinList handlerStarts;
@@ -39,57 +47,138 @@ index 2bc3247b62..47d81eb4d0 100644
 +        FreeMem(start, sizeof(*start));
 +}
 +
++/* Call under Forbid(). */
++static BOOL TaskIsListed(struct Task *task)
++{
++#if defined(__AROSEXEC_SMP__)
++    /* The task lists have their own locks there; without walking them a
++       dead starter is not detected, and its waiters wait as before. */
++    (void)task;
++    return TRUE;
++#else
++    struct Node *node;
++
++    if (task == SysBase->ThisTask)
++        return TRUE;
++    ForeachNode(&SysBase->TaskReady, node)
++        if ((struct Task *)node == task)
++            return TRUE;
++    ForeachNode(&SysBase->TaskWait, node)
++        if ((struct Task *)node == task)
++            return TRUE;
++    return FALSE;
++#endif
++}
++
++/* The process RunHandler() creates for a node runs the node's seglist. */
++static BOOL IsHandlerOfNode(struct Process *me, struct DeviceNode *deviceNode)
++{
++    BPTR *segArray = BADDR(me->pr_SegList);
++
++    return me->pr_Task.tc_Node.ln_Type == NT_PROCESS && segArray != NULL
++        && deviceNode->dn_SegList != BNULL
++        && segArray[3] == deviceNode->dn_SegList;
++}
++
 +static struct MsgPort *StartHandler(struct DeviceNode *deviceNode, const char *path, struct DosLibrary *DOSBase);
 +
  struct MsgPort *RunHandler(struct DeviceNode *deviceNode, const char *path, struct DosLibrary *DOSBase)
 +{
-+    struct HandlerStart *mine, *start, *running = NULL;
++    struct HandlerStart *mine, *start, *running, *abandoned;
 +    struct MsgPort *port;
++    BOOL held;
++
++    /* The handler being started asks for its own device. */
++    if (IsHandlerOfNode((struct Process *)FindTask(NULL), deviceNode))
++        return deviceNode->dn_Task;
 +
 +    mine = AllocMem(sizeof(*mine), MEMF_PUBLIC | MEMF_CLEAR);
 +    if (mine == NULL)
 +        return NULL;
 +    mine->hs_DeviceNode = deviceNode;
++    mine->hs_Starter = FindTask(NULL);
 +    mine->hs_Users = 1;
 +    InitSemaphore(&mine->hs_Done);
 +    /* Owned before it is published, so this never waits. */
 +    ObtainSemaphore(&mine->hs_Done);
 +
-+    Forbid();
-+    if (!handlerStartsReady)
++    for (;;)
 +    {
-+        NEWLIST((struct List *)&handlerStarts);
-+        handlerStartsReady = TRUE;
-+    }
-+    ForeachNode(&handlerStarts, start)
-+    {
-+        if (start->hs_DeviceNode == deviceNode)
++        running = NULL;
++        abandoned = NULL;
++        Forbid();
++        if (!handlerStartsReady)
 +        {
-+            running = start;
-+            running->hs_Users++;
-+            break;
++            NEWLIST((struct List *)&handlerStarts);
++            handlerStartsReady = TRUE;
 +        }
-+    }
-+    if (running == NULL)
-+        AddTail((struct List *)&handlerStarts, (struct Node *)&mine->hs_Node);
-+    Permit();
++        ForeachNode(&handlerStarts, start)
++        {
++            if (start->hs_DeviceNode == deviceNode)
++            {
++                running = start;
++                break;
++            }
++        }
++        if (running != NULL && !TaskIsListed(running->hs_Starter))
++        {
++            /* Its starter is gone and will never finish it, nor give up its
++               own reference to it. */
++            Remove((struct Node *)&running->hs_Node);
++            abandoned = running;
++            running = NULL;
++        }
++        if (running != NULL)
++            running->hs_Users++;
++        else
++            AddTail((struct List *)&handlerStarts, (struct Node *)&mine->hs_Node);
++        Permit();
 +
-+    if (running != NULL)
-+    {
-+        ReleaseSemaphore(&mine->hs_Done);
-+        FreeMem(mine, sizeof(*mine));
-+        /* Wait for the start in progress and take what it achieved. */
-+        ObtainSemaphore(&running->hs_Done);
-+        ReleaseSemaphore(&running->hs_Done);
-+        port = deviceNode->dn_Task;
++        if (abandoned != NULL)
++            DropHandlerStart(abandoned);
++        if (running == NULL)
++            break;
++
++        /* Wait for the start in progress, but not for a starter that died
++           while we waited. */
++        held = FALSE;
++        for (;;)
++        {
++            BOOL alive;
++
++            if (AttemptSemaphore(&running->hs_Done))
++            {
++                held = TRUE;
++                break;
++            }
++            Forbid();
++            alive = TaskIsListed(running->hs_Starter);
++            Permit();
++            if (!alive)
++                break;
++            Delay(2);
++        }
++        if (held)
++        {
++            /* What the starter achieved, also for a handler that keeps
++               dn_Task NULL and answers on a port of its own. */
++            port = running->hs_Result ? running->hs_Result : deviceNode->dn_Task;
++            ReleaseSemaphore(&running->hs_Done);
++            DropHandlerStart(running);
++            ReleaseSemaphore(&mine->hs_Done);
++            FreeMem(mine, sizeof(*mine));
++            return port;
++        }
++        /* The starter died: look again, which removes its entry, and start
++           the handler here. */
 +        DropHandlerStart(running);
-+        return port;
 +    }
 +
 +    /* A start that finished between the caller's look at dn_Task and here. */
 +    port = deviceNode->dn_Task;
 +    if (port == NULL)
 +        port = StartHandler(deviceNode, path, DOSBase);
++    mine->hs_Result = port;
 +
 +    Forbid();
 +    Remove((struct Node *)&mine->hs_Node);
@@ -103,7 +192,7 @@ index 2bc3247b62..47d81eb4d0 100644
  {
          D(struct FileSysStartupMsg *fssm = NULL;)
          struct DosPacket *dp;
-@@ -171,8 +264,12 @@ struct MsgPort *RunHandler(struct DeviceNode *deviceNode, const char *path, stru
+@@ -171,8 +353,12 @@ struct MsgPort *RunHandler(struct DeviceNode *deviceNode, const char *path, stru
          if (dp->dp_Res1 == DOSFALSE)
          {
              D(bug("[RunHandler] handler failed startup [%d]\n", dp->dp_Res2));

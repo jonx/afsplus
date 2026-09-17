@@ -12,29 +12,43 @@
 
 #include <string.h>
 
-uint32_t afsplus_claim_name(char *name, const uint8_t *device,
-    uint32_t device_length, uint64_t unit)
+static size_t append_number(char *name, size_t at, uint64_t value)
 {
-    static const char prefix[] = "AFSPLUS.";
     char digits[20];
-    size_t at = sizeof(prefix) - 1;
     size_t count = 0;
 
-    if (device == NULL || device_length == 0
-        || device_length > AFSPLUS_CLAIM_DEVICE_NAME_MAX)
-        return 0;
-    memcpy(name, prefix, at);
-    memcpy(name + at, device, device_length);
-    at += device_length;
     name[at++] = '.';
     do
     {
-        digits[count++] = (char)('0' + unit % 10);
-        unit /= 10;
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
     }
-    while (unit != 0);
+    while (value != 0);
     while (count != 0)
         name[at++] = digits[--count];
+    return at;
+}
+
+uint32_t afsplus_claim_name(char *name,
+    const struct AfsplusArosClaimKey *key)
+{
+    static const char prefix[] = "AFSPLUS.";
+    size_t at = sizeof(prefix) - 1;
+
+    if (key->device == NULL || key->device_length == 0
+        || key->device_length > AFSPLUS_CLAIM_DEVICE_NAME_MAX)
+        return 0;
+    memcpy(name, prefix, at);
+    memcpy(name + at, key->device, key->device_length);
+    at += key->device_length;
+    /* Numbers, never a digest: two different media cannot share a name. */
+    at = append_number(name, at, key->unit);
+    at = append_number(name, at, key->flags);
+    at = append_number(name, at, key->size_block);
+    at = append_number(name, at, key->surfaces);
+    at = append_number(name, at, key->blocks_per_track);
+    at = append_number(name, at, key->low_cylinder);
+    at = append_number(name, at, key->high_cylinder);
     name[at] = 0;
     return 1;
 }
@@ -53,7 +67,8 @@ static struct AfsplusArosClaim *live_holder(struct ExecBase *SysBase,
     struct AfsplusArosClaim *holder =
         (struct AfsplusArosClaim *)FindPort((CONST_STRPTR)name);
 
-    if (holder != NULL && !afsplus_claim_owner_alive(SysBase, holder->owner))
+    if (holder != NULL && !afsplus_claim_task_alive(SysBase, holder->owner,
+            holder->owner_id))
     {
         RemPort(&holder->port);
         *stale = holder;
@@ -102,6 +117,7 @@ uint32_t afsplus_claim_take(struct ExecBase *sysbase, const char *name,
     else
     {
         mine->generation = next_generation++;
+        mine->owner_id = afsplus_claim_task_id(SysBase, owner);
         AddPort(&mine->port);
         result = AFSPLUS_CLAIM_TAKEN;
     }
@@ -130,7 +146,9 @@ void afsplus_claim_release(struct ExecBase *sysbase,
     Forbid();
     RemPort(&claim->port);
     for (index = 0; index < AFSPLUS_CLAIM_FORWARDERS; index++)
-        if (claim->forwarders[index] != NULL)
+        if (claim->forwarders[index] != NULL
+            && afsplus_claim_task_alive(SysBase, claim->forwarders[index],
+                claim->forwarder_ids[index]))
             Signal(claim->forwarders[index], AFSPLUS_CLAIM_WAKE_SIGNAL);
     Permit();
     FreeMem(claim, sizeof(*claim));
@@ -166,7 +184,11 @@ uint32_t afsplus_claim_enroll(struct ExecBase *sysbase, const char *name,
             holder->forwarders[own_slot] = NULL;
         else if (enroll && own_slot == AFSPLUS_CLAIM_FORWARDERS
             && free_slot != AFSPLUS_CLAIM_FORWARDERS)
+        {
             holder->forwarders[free_slot] = forwarder;
+            holder->forwarder_ids[free_slot] =
+                afsplus_claim_task_id(SysBase, forwarder);
+        }
     }
     Permit();
     if (stale != NULL)
