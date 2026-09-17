@@ -26,19 +26,25 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use sha2::{Digest, Sha256};
+
 use afsplus_block::BlockDevice;
+use afsplus_format::attrs::{
+    decode_attribute_set, ATTRIBUTE_CHAIN, ATTRIBUTE_SET_FORMAT, ATTRIBUTE_SET_VERSION,
+};
+use afsplus_format::chain::{ChainKind, ChainSegment};
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::extent::{ExtentItem, EXTENT_SHARED, EXTENT_UNWRITTEN};
 use afsplus_format::ident::Identification;
 use afsplus_format::object::{ObjectRecord, ObjectType, SymlinkRecord, OBJECT_FLAG_EXTENT_TREE};
 use afsplus_format::reclaim::{ReclaimEntry, ReclaimRoot, ReclaimSegment, ReclaimTable};
-use afsplus_format::security::SecuritySegment;
+use afsplus_format::security::SECURITY_CHAIN;
 use afsplus_format::snapshot::{decode_key, RegistryState, SnapshotRecord};
 use afsplus_format::tree::{TreeKind, TreeNode};
 use afsplus_format::{Timespec, OBJECT_ORPHAN_DIRECTORY};
 
 /// Versioned structured-output schema of the diff (ADR-025).
-pub const DIFF_SCHEMA_VERSION: u32 = 2;
+pub const DIFF_SCHEMA_VERSION: u32 = 3;
 
 /// What the diff compares.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -75,6 +81,50 @@ pub struct SecurityState {
     pub total_len: u32,
     /// The classic projection was edited without evaluating the descriptor.
     pub diverged: bool,
+}
+
+/// Longest attribute value reported byte for byte. A longer value is
+/// reported by its length and the SHA-256 of its bytes, so a change is always
+/// provable without the report carrying 64 KiB of payload.
+pub const ATTRIBUTE_VALUE_INLINE_BYTES: usize = 256;
+
+/// One value of one attribute, on one side of the diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeValue {
+    pub len: usize,
+    /// The bytes, when the value is at most
+    /// [`ATTRIBUTE_VALUE_INLINE_BYTES`] long.
+    pub bytes: Option<Vec<u8>>,
+    /// Lowercase hexadecimal SHA-256 of the bytes, when they are longer.
+    pub digest: Option<String>,
+}
+
+impl AttributeValue {
+    fn of(bytes: &[u8]) -> AttributeValue {
+        if bytes.len() <= ATTRIBUTE_VALUE_INLINE_BYTES {
+            AttributeValue {
+                len: bytes.len(),
+                bytes: Some(bytes.to_vec()),
+                digest: None,
+            }
+        } else {
+            AttributeValue {
+                len: bytes.len(),
+                bytes: None,
+                digest: Some(hex(&Sha256::digest(bytes))),
+            }
+        }
+    }
+}
+
+/// One extended attribute that the two states disagree about. `from` absent
+/// is an attribute added, `to` absent one removed, both present a value
+/// changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeChange {
+    pub name: String,
+    pub from: Option<AttributeValue>,
+    pub to: Option<AttributeValue>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +193,11 @@ pub enum FieldChange {
         from: Option<SecurityState>,
         to: Option<SecurityState>,
         bytes_changed: bool,
+    },
+    /// Extended attributes added, removed or given another value (ADR-108),
+    /// in name order.
+    Attributes {
+        changes: Vec<AttributeChange>,
     },
     /// Logical byte ranges whose content differs. A byte past a file's
     /// logical size is absent; absent differs from any present byte and
@@ -383,6 +438,26 @@ impl Stream {
     }
 }
 
+/// The content of one owned chain, or the fact that it could not be proven.
+enum ChainRead {
+    Content {
+        format: u32,
+        version: u16,
+        bytes: Vec<u8>,
+    },
+    Unreadable,
+}
+
+/// What one state holds for a field read through a chain: nothing, a value,
+/// or damage. Damage is never read as absence.
+enum Read<T> {
+    Absent,
+    Present(T),
+    Unreadable,
+}
+
+type AttributeSet = Vec<(String, Vec<u8>)>;
+
 struct Image<'a, D: BlockDevice> {
     dev: &'a mut D,
     side: &'static str,
@@ -605,30 +680,36 @@ impl<'a, D: BlockDevice> Image<'a, D> {
         Some((record, target))
     }
 
-    /// Format, version and bytes of the descriptor chain of `object_id`.
-    /// Bounded by `MAX_SECURITY_DESCRIPTOR_BYTES`.
-    fn security(
+    /// Read one owned chain of `object_id` (`afsplus_format::chain`): the
+    /// same walk for the security descriptor and for the attribute set, and
+    /// for every kind added later. Bounded by the kind's content bound.
+    fn chain(
         &mut self,
         object_id: u64,
-        record: &ObjectRecord,
-    ) -> Option<(SecurityState, Vec<u8>)> {
-        let reference = record.security?;
+        kind: &ChainKind,
+        first_block: u64,
+        total_len: u32,
+        segment_count: u16,
+    ) -> ChainRead {
         let what = format!("object {object_id}");
-        let mut lba = reference.first_block;
+        let label = kind.label;
+        let mut lba = first_block;
         let mut bytes = Vec::new();
         let mut head: Option<(u32, u16)> = None;
-        for index in 0..reference.segment_count {
+        let mut chain_generation: Option<u64> = None;
+        for index in 0..segment_count {
             if !self.read(lba, &what) {
-                return None;
+                return ChainRead::Unreadable;
             }
-            match SecuritySegment::decode(&self.buf) {
+            match ChainSegment::decode(kind, &self.buf) {
                 Ok((segment, generation))
                     if segment.object_id == object_id
                         && segment.index == index
-                        && segment.count == reference.segment_count
-                        && segment.total_len == reference.total_len
+                        && segment.count == segment_count
+                        && segment.total_len == total_len
                         && generation != 0
-                        && generation <= self.checkpoint.generation =>
+                        && generation <= self.checkpoint.generation
+                        && *chain_generation.get_or_insert(generation) == generation =>
                 {
                     if index == 0 {
                         head = Some((segment.format, segment.version));
@@ -638,24 +719,98 @@ impl<'a, D: BlockDevice> Image<'a, D> {
                 }
                 _ => {
                     self.problem(&format!(
-                        "{what}: security segment {index} at block {lba} is not provable"
+                        "{what}: {label} segment {index} at block {lba} is not provable"
                     ));
-                    return None;
+                    return ChainRead::Unreadable;
                 }
             }
         }
-        let (format, version) = head?;
-        Some((
-            SecurityState {
+        match head {
+            Some((format, version)) => ChainRead::Content {
                 format,
                 version,
-                total_len: reference.total_len,
-                diverged: reference.flags
-                    & afsplus_format::object::SECURITY_REF_PROJECTION_DIVERGED
-                    != 0,
+                bytes,
             },
-            bytes,
-        ))
+            None => ChainRead::Unreadable,
+        }
+    }
+
+    /// The security descriptor of `object_id`, with its bytes.
+    fn security(
+        &mut self,
+        object_id: u64,
+        record: &ObjectRecord,
+    ) -> Read<(SecurityState, Vec<u8>)> {
+        let Some(reference) = record.security else {
+            return Read::Absent;
+        };
+        match self.chain(
+            object_id,
+            &SECURITY_CHAIN,
+            reference.first_block,
+            reference.total_len,
+            reference.segment_count,
+        ) {
+            ChainRead::Unreadable => Read::Unreadable,
+            ChainRead::Content {
+                format,
+                version,
+                bytes,
+            } => Read::Present((
+                SecurityState {
+                    format,
+                    version,
+                    total_len: reference.total_len,
+                    diverged: reference.flags
+                        & afsplus_format::object::SECURITY_REF_PROJECTION_DIVERGED
+                        != 0,
+                },
+                bytes,
+            )),
+        }
+    }
+
+    /// The whole attribute set of `object_id`, in stored order, which is
+    /// ascending by name bytes. Metadata: read in every mode, bounded by
+    /// `MAX_ATTRIBUTE_SET_BYTES` per object.
+    fn attributes(&mut self, object_id: u64, record: &ObjectRecord) -> Read<AttributeSet> {
+        let Some(reference) = record.attributes else {
+            return Read::Absent;
+        };
+        let bytes = match self.chain(
+            object_id,
+            &ATTRIBUTE_CHAIN,
+            reference.first_block,
+            reference.total_len,
+            reference.segment_count,
+        ) {
+            ChainRead::Unreadable => return Read::Unreadable,
+            ChainRead::Content {
+                format,
+                version,
+                bytes,
+            } => {
+                if (format, version) != (ATTRIBUTE_SET_FORMAT, ATTRIBUTE_SET_VERSION) {
+                    self.problem(&format!(
+                        "object {object_id}: attribute set format {format} version {version}"
+                    ));
+                    return Read::Unreadable;
+                }
+                bytes
+            }
+        };
+        match decode_attribute_set(&bytes) {
+            Ok(entries) => Read::Present(
+                entries
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value.to_vec()))
+                    .collect(),
+            ),
+            Err(error) => {
+                self.problem(&format!("object {object_id}: attribute set: {error}"));
+                Read::Unreadable
+            }
+        }
     }
 
     /// Blocks and runs the reclaim queue holds, reconstructed in FIFO order
@@ -1200,18 +1355,49 @@ fn compare_object<A: BlockDevice, B: BlockDevice>(
             }
             let security_a = a.security(object_id, x);
             let security_b = b.security(object_id, y);
-            let state_a = security_a.as_ref().map(|(state, _)| *state);
-            let state_b = security_b.as_ref().map(|(state, _)| *state);
-            let bytes_changed = match (&security_a, &security_b) {
-                (Some((_, bytes_a)), Some((_, bytes_b))) => bytes_a != bytes_b,
-                _ => false,
-            };
-            if state_a != state_b || bytes_changed {
-                fields.push(FieldChange::Security {
-                    from: state_a,
-                    to: state_b,
-                    bytes_changed,
-                });
+            // A chain that could not be proven is not an absent one: the
+            // problem stands and the field stays uncompared.
+            if !matches!(security_a, Read::Unreadable) && !matches!(security_b, Read::Unreadable) {
+                let state_a = match &security_a {
+                    Read::Present((state, _)) => Some(*state),
+                    _ => None,
+                };
+                let state_b = match &security_b {
+                    Read::Present((state, _)) => Some(*state),
+                    _ => None,
+                };
+                let bytes_changed = match (&security_a, &security_b) {
+                    (Read::Present((_, bytes_a)), Read::Present((_, bytes_b))) => {
+                        bytes_a != bytes_b
+                    }
+                    _ => false,
+                };
+                if state_a != state_b || bytes_changed {
+                    fields.push(FieldChange::Security {
+                        from: state_a,
+                        to: state_b,
+                        bytes_changed,
+                    });
+                }
+            }
+            let attributes_a = a.attributes(object_id, x);
+            let attributes_b = b.attributes(object_id, y);
+            if !matches!(attributes_a, Read::Unreadable)
+                && !matches!(attributes_b, Read::Unreadable)
+            {
+                let empty = Vec::new();
+                let left = match &attributes_a {
+                    Read::Present(set) => set,
+                    _ => &empty,
+                };
+                let right = match &attributes_b {
+                    Read::Present(set) => set,
+                    _ => &empty,
+                };
+                let changes = attribute_changes(left, right);
+                if !changes.is_empty() {
+                    fields.push(FieldChange::Attributes { changes });
+                }
             }
             if x.object_type == ObjectType::File && y.object_type == ObjectType::File {
                 compare_data(a, b, object_id, x, y, block_size, options, &mut fields);
@@ -1301,6 +1487,68 @@ fn compare_object<A: BlockDevice, B: BlockDevice>(
             _ => {}
         }
     }
+}
+
+/// Merge two stored sets, both ascending by name bytes, into the changes
+/// between them, in name order.
+fn attribute_changes(
+    left: &[(String, Vec<u8>)],
+    right: &[(String, Vec<u8>)],
+) -> Vec<AttributeChange> {
+    let mut changes = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() || j < right.len() {
+        let order = match (left.get(i), right.get(j)) {
+            (Some((name_a, _)), Some((name_b, _))) => name_a.as_bytes().cmp(name_b.as_bytes()),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => break,
+        };
+        match order {
+            std::cmp::Ordering::Less => {
+                let (name, value) = &left[i];
+                changes.push(AttributeChange {
+                    name: name.clone(),
+                    from: Some(AttributeValue::of(value)),
+                    to: None,
+                });
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                let (name, value) = &right[j];
+                changes.push(AttributeChange {
+                    name: name.clone(),
+                    from: None,
+                    to: Some(AttributeValue::of(value)),
+                });
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                let (name, value_a) = &left[i];
+                let (_, value_b) = &right[j];
+                if value_a != value_b {
+                    changes.push(AttributeChange {
+                        name: name.clone(),
+                        from: Some(AttributeValue::of(value_a)),
+                        to: Some(AttributeValue::of(value_b)),
+                    });
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    changes
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1484,6 +1732,25 @@ fn json_security(state: &Option<SecurityState>) -> String {
     }
 }
 
+fn json_attribute_value(value: &Option<AttributeValue>) -> String {
+    match value {
+        None => "null".into(),
+        Some(value) => match (&value.bytes, &value.digest) {
+            (Some(bytes), _) => format!(
+                "{{\"length\":{},\"hex\":{}}}",
+                value.len,
+                json_string(&hex(bytes))
+            ),
+            (None, Some(digest)) => format!(
+                "{{\"length\":{},\"sha256\":{}}}",
+                value.len,
+                json_string(digest)
+            ),
+            (None, None) => format!("{{\"length\":{}}}", value.len),
+        },
+    }
+}
+
 fn json_field(field: &FieldChange) -> String {
     match field {
         FieldChange::Type { from, to } => format!(
@@ -1532,6 +1799,23 @@ fn json_field(field: &FieldChange) -> String {
             json_security(to),
             bytes_changed
         ),
+        FieldChange::Attributes { changes } => {
+            let mut out = String::from("{\"field\":\"attributes\",\"changes\":[");
+            for (index, change) in changes.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                let _ = write!(
+                    out,
+                    "{{\"name\":{},\"from\":{},\"to\":{}}}",
+                    json_string(&change.name),
+                    json_attribute_value(&change.from),
+                    json_attribute_value(&change.to)
+                );
+            }
+            out.push_str("]}");
+            out
+        }
         FieldChange::Content { ranges } => {
             let mut out = String::from("{\"field\":\"content\",\"ranges\":[");
             for (index, range) in ranges.iter().enumerate() {
@@ -1901,6 +2185,25 @@ fn human_field(field: &FieldChange) -> String {
             ),
             (None, None) => "security descriptor unreadable".into(),
         },
+        FieldChange::Attributes { changes } => {
+            let mut parts = Vec::new();
+            for change in changes {
+                parts.push(match (&change.from, &change.to) {
+                    (None, Some(to)) => {
+                        format!("{:?} added ({} bytes)", change.name, to.len)
+                    }
+                    (Some(from), None) => {
+                        format!("{:?} removed ({} bytes)", change.name, from.len)
+                    }
+                    (Some(from), Some(to)) => format!(
+                        "{:?} value {} -> {} bytes",
+                        change.name, from.len, to.len
+                    ),
+                    (None, None) => format!("{:?} unchanged", change.name),
+                });
+            }
+            format!("attribute {}", parts.join("; attribute "))
+        }
         FieldChange::Content { ranges } => {
             let shown: Vec<String> = ranges
                 .iter()

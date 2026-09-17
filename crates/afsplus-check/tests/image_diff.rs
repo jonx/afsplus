@@ -11,11 +11,12 @@
 //! comparison of the two files read through the core.
 use afsplus_block::{BlockDevice, MemoryBackend};
 use afsplus_check::diff::{
-    diff_devices, AllocationSummary, ByteRange, DiffOptions, FieldChange, ImageDiff, LinkChange,
-    ObjectChange, ObjectDiff, ObjectSummary, OrphanChange, Rename, SecurityState, SnapshotChange,
-    TimestampField, DIFF_SCHEMA_VERSION,
+    diff_devices, AllocationSummary, AttributeChange, AttributeValue, ByteRange, DiffOptions,
+    FieldChange, ImageDiff, LinkChange, ObjectChange, ObjectDiff, ObjectSummary, OrphanChange,
+    Rename, SecurityState, SnapshotChange, TimestampField, ATTRIBUTE_VALUE_INLINE_BYTES,
+    DIFF_SCHEMA_VERSION,
 };
-use afsplus_core::volume::{BatchOp, SnapshotWorkLimits};
+use afsplus_core::volume::{AttributeWriteMode, BatchOp, SnapshotWorkLimits};
 use afsplus_core::{
     mkfs_with_options, mkfs_with_security_descriptors, mount, mount_with_snapshot_limits,
     MkfsOptions, MkfsParams, MountOptions, NamePolicy, Volume,
@@ -189,6 +190,16 @@ fn mirror_field(field: &FieldChange) -> FieldChange {
             bytes_changed,
         },
         FieldChange::Comment { from, to } => FieldChange::Comment { from: to, to: from },
+        FieldChange::Attributes { changes } => FieldChange::Attributes {
+            changes: changes
+                .into_iter()
+                .map(|change| AttributeChange {
+                    name: change.name,
+                    from: change.to,
+                    to: change.from,
+                })
+                .collect(),
+        },
         FieldChange::Content { ranges } => FieldChange::Content { ranges },
         FieldChange::Allocation { from, to } => FieldChange::Allocation { from: to, to: from },
     }
@@ -1430,7 +1441,7 @@ fn a_comment_set_then_changed_then_cleared() {
         metadata.objects,
         vec![comment_change(base.seed, "", "first note", (2, 3))]
     );
-    assert_eq!(metadata.schema_version, 2);
+    assert_eq!(metadata.schema_version, 3);
     assert!(metadata
         .render_json()
         .contains("{\"field\":\"comment\",\"from\":\"\",\"to\":\"first note\"}"));
@@ -1538,4 +1549,520 @@ fn negative_control_a_corrupted_comment_expectation_does_not_match() {
         vec![comment_change(base.seed, "first note", "", (2, 3))]
     );
     assert!(diff_of(&commented, &commented).is_empty());
+}
+
+// --- extended attributes (ADR-108) ------------------------------------------
+
+fn value(bytes: &[u8]) -> AttributeValue {
+    AttributeValue {
+        len: bytes.len(),
+        bytes: Some(bytes.to_vec()),
+        digest: None,
+    }
+}
+
+fn attributes_field(object_id: u64, at: (i64, i64), changes: Vec<AttributeChange>) -> ObjectDiff {
+    ObjectDiff {
+        object_id,
+        change: ObjectChange::Modified(vec![
+            FieldChange::Timestamp {
+                field: TimestampField::Changed,
+                from: time(at.0),
+                to: time(at.1),
+            },
+            FieldChange::Attributes { changes },
+        ]),
+    }
+}
+
+fn added(name: &str, bytes: &[u8]) -> AttributeChange {
+    AttributeChange {
+        name: name.into(),
+        from: None,
+        to: Some(value(bytes)),
+    }
+}
+
+fn removed(name: &str, bytes: &[u8]) -> AttributeChange {
+    AttributeChange {
+        name: name.into(),
+        from: Some(value(bytes)),
+        to: None,
+    }
+}
+
+fn replaced(name: &str, from: &[u8], to: &[u8]) -> AttributeChange {
+    AttributeChange {
+        name: name.into(),
+        from: Some(value(from)),
+        to: Some(value(to)),
+    }
+}
+
+/// Every value the diff reports is what the core returns for that name on
+/// the side it was reported from.
+fn assert_values_agree_with_the_core(a: &MemoryBackend, b: &MemoryBackend, diff: &ImageDiff) {
+    let mut left = mount(a.clone()).unwrap();
+    let mut right = mount(b.clone()).unwrap();
+    for object in &diff.objects {
+        let ObjectChange::Modified(fields) = &object.change else {
+            continue;
+        };
+        for field in fields {
+            let FieldChange::Attributes { changes } = field else {
+                continue;
+            };
+            for change in changes {
+                let from = left.attribute(object.object_id, &change.name).unwrap();
+                let to = right.attribute(object.object_id, &change.name).unwrap();
+                assert_eq!(
+                    change.from.as_ref().and_then(|value| value.bytes.clone()),
+                    from,
+                    "{}: reported from-value disagrees with the core",
+                    change.name
+                );
+                assert_eq!(
+                    change.to.as_ref().and_then(|value| value.bytes.clone()),
+                    to,
+                    "{}: reported to-value disagrees with the core",
+                    change.name
+                );
+            }
+        }
+    }
+}
+
+fn set_attribute(dev: &MemoryBackend, id: u64, name: &str, bytes: &[u8], at: i64) -> MemoryBackend {
+    mutate(dev, |volume| {
+        volume
+            .set_attributes(
+                id,
+                &[(name, Some(bytes))],
+                AttributeWriteMode::Upsert,
+                time(at),
+            )
+            .unwrap();
+    })
+}
+
+#[test]
+fn attributes_added_replaced_and_removed_one_by_one() {
+    let base = base();
+
+    // One attribute.
+    let one = set_attribute(&base.dev, base.seed, "user.one", b"alpha", 3);
+    let diff = diff_of(&base.dev, &one);
+    assert_eq!(
+        diff.objects,
+        vec![attributes_field(
+            base.seed,
+            (2, 3),
+            vec![added("user.one", b"alpha")]
+        )]
+    );
+    assert_eq!(diff.schema_version, 3);
+    assert!(diff.problems.is_empty());
+    assert_values_agree_with_the_core(&base.dev, &one, &diff);
+    assert_identity_and_mirror(&base.dev, &one, &diff);
+
+    // Three more in one commit, reported in name order whatever the order of
+    // the batch.
+    let several = mutate(&one, |volume| {
+        volume
+            .set_attributes(
+                base.seed,
+                &[
+                    ("user.zulu", Some(b"z".as_slice())),
+                    ("aros.comment", Some(b"cc".as_slice())),
+                    ("system.two", Some(b"22".as_slice())),
+                ],
+                AttributeWriteMode::Create,
+                time(4),
+            )
+            .unwrap();
+    });
+    let diff = diff_of(&one, &several);
+    assert_eq!(
+        diff.objects,
+        vec![attributes_field(
+            base.seed,
+            (3, 4),
+            vec![
+                added("aros.comment", b"cc"),
+                added("system.two", b"22"),
+                added("user.zulu", b"z"),
+            ]
+        )]
+    );
+    assert_values_agree_with_the_core(&one, &several, &diff);
+    assert_identity_and_mirror(&one, &several, &diff);
+
+    // A value replaced.
+    let replaced_value = mutate(&several, |volume| {
+        volume
+            .set_attributes(
+                base.seed,
+                &[("user.one", Some(b"omega!".as_slice()))],
+                AttributeWriteMode::Replace,
+                time(5),
+            )
+            .unwrap();
+    });
+    let diff = diff_of(&several, &replaced_value);
+    assert_eq!(
+        diff.objects,
+        vec![attributes_field(
+            base.seed,
+            (4, 5),
+            vec![replaced("user.one", b"alpha", b"omega!")]
+        )]
+    );
+    assert_values_agree_with_the_core(&several, &replaced_value, &diff);
+    assert_identity_and_mirror(&several, &replaced_value, &diff);
+
+    // One removed.
+    let fewer = mutate(&replaced_value, |volume| {
+        volume
+            .set_attributes(
+                base.seed,
+                &[("system.two", None)],
+                AttributeWriteMode::Upsert,
+                time(6),
+            )
+            .unwrap();
+    });
+    let diff = diff_of(&replaced_value, &fewer);
+    assert_eq!(
+        diff.objects,
+        vec![attributes_field(
+            base.seed,
+            (5, 6),
+            vec![removed("system.two", b"22")]
+        )]
+    );
+    assert_values_agree_with_the_core(&replaced_value, &fewer, &diff);
+    assert_identity_and_mirror(&replaced_value, &fewer, &diff);
+
+    // The last three removed: the set disappears and the record keeps no
+    // reference to a chain.
+    let empty = mutate(&fewer, |volume| {
+        volume
+            .set_attributes(
+                base.seed,
+                &[
+                    ("user.one", None),
+                    ("user.zulu", None),
+                    ("aros.comment", None),
+                ],
+                AttributeWriteMode::Upsert,
+                time(7),
+            )
+            .unwrap();
+    });
+    assert!(mount(empty.clone())
+        .unwrap()
+        .stat(base.seed)
+        .unwrap()
+        .unwrap()
+        .attributes
+        .is_none());
+    let diff = diff_of(&fewer, &empty);
+    assert_eq!(
+        diff.objects,
+        vec![attributes_field(
+            base.seed,
+            (6, 7),
+            vec![
+                removed("aros.comment", b"cc"),
+                removed("user.one", b"omega!"),
+                removed("user.zulu", b"z"),
+            ]
+        )]
+    );
+    assert_values_agree_with_the_core(&fewer, &empty, &diff);
+    assert_identity_and_mirror(&fewer, &empty, &diff);
+
+    // The set is metadata: the metadata mode reports it and reads no content.
+    let metadata = metadata_diff_of(&base.dev, &one);
+    assert_eq!(
+        metadata.objects,
+        vec![attributes_field(
+            base.seed,
+            (2, 3),
+            vec![added("user.one", b"alpha")]
+        )]
+    );
+    assert!(diff_of(&base.dev, &one)
+        .render_json()
+        .contains("{\"field\":\"attributes\",\"changes\":[{\"name\":\"user.one\",\"from\":null,\"to\":{\"length\":5,\"hex\":\"616c706861\"}}]}"));
+    assert!(diff_of(&base.dev, &one)
+        .render_human()
+        .contains("attribute \"user.one\" added (5 bytes)"));
+}
+
+#[test]
+fn a_long_attribute_value_is_reported_by_its_digest() {
+    use sha2::{Digest, Sha256};
+    let base = base();
+    let long = pattern(ATTRIBUTE_VALUE_INLINE_BYTES + 1, 4);
+    let short = pattern(ATTRIBUTE_VALUE_INLINE_BYTES, 4);
+
+    let with_short = set_attribute(&base.dev, base.seed, "user.blob", &short, 3);
+    let diff = diff_of(&base.dev, &with_short);
+    assert_eq!(
+        diff.objects,
+        vec![attributes_field(
+            base.seed,
+            (2, 3),
+            vec![added("user.blob", &short)]
+        )],
+        "a value at the bound is reported byte for byte"
+    );
+
+    let with_long = set_attribute(&base.dev, base.seed, "user.blob", &long, 3);
+    let diff = diff_of(&base.dev, &with_long);
+    assert_eq!(
+        diff.objects,
+        vec![attributes_field(
+            base.seed,
+            (2, 3),
+            vec![AttributeChange {
+                name: "user.blob".into(),
+                from: None,
+                to: Some(AttributeValue {
+                    len: ATTRIBUTE_VALUE_INLINE_BYTES + 1,
+                    bytes: None,
+                    digest: Some(
+                        Sha256::digest(&long)
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                    ),
+                }),
+            }]
+        )],
+        "one byte past the bound is reported by its digest"
+    );
+    assert!(diff.render_json().contains("\"sha256\":\""));
+    assert_identity_and_mirror(&base.dev, &with_long, &diff);
+}
+
+#[test]
+fn clone_file_carries_the_attribute_set_and_clone_range_does_not() {
+    let base = base();
+    let source = set_attribute(&base.dev, base.seed, "user.carried", b"value", 3);
+
+    let mut copy = 0;
+    let cloned = mutate(&source, |volume| {
+        copy = volume
+            .clone_file(base.seed, OBJECT_ROOT, "copy", time(4))
+            .unwrap();
+    });
+    assert_eq!(
+        mount(cloned.clone())
+            .unwrap()
+            .attribute(copy, "user.carried")
+            .unwrap(),
+        Some(b"value".to_vec())
+    );
+    let diff = diff_of(&source, &cloned);
+    assert!(
+        !diff
+            .objects
+            .iter()
+            .any(|object| object.object_id == copy
+                && matches!(object.change, ObjectChange::Modified(_))),
+        "the clone is a created object: {:?}",
+        diff.objects
+    );
+    assert_identity_and_mirror(&source, &cloned, &diff);
+
+    // CloneRange moves data: the destination keeps its own set.
+    let mut target = 0;
+    let with_target = mutate(&source, |volume| {
+        target = volume
+            .create_file_in_directory(OBJECT_ROOT, "target", &pattern(9000, 5), time(4))
+            .unwrap();
+        volume
+            .set_attributes(
+                target,
+                &[("user.destination", Some(b"kept".as_slice()))],
+                AttributeWriteMode::Create,
+                time(4),
+            )
+            .unwrap();
+    });
+    let after = mutate(&with_target, |volume| {
+        volume
+            .clone_range(base.seed, 0, target, 0, 8192, time(5))
+            .unwrap();
+    });
+    assert_eq!(
+        mount(after.clone())
+            .unwrap()
+            .attribute(target, "user.destination")
+            .unwrap(),
+        Some(b"kept".to_vec())
+    );
+    assert_eq!(
+        mount(after.clone())
+            .unwrap()
+            .attribute(target, "user.carried")
+            .unwrap(),
+        None
+    );
+    let diff = diff_of(&with_target, &after);
+    let attribute_fields: Vec<&FieldChange> = diff
+        .objects
+        .iter()
+        .filter_map(|object| match &object.change {
+            ObjectChange::Modified(fields) => fields
+                .iter()
+                .find(|field| matches!(field, FieldChange::Attributes { .. })),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        attribute_fields.is_empty(),
+        "clone_range changes no attribute: {attribute_fields:?}"
+    );
+    assert_identity_and_mirror(&with_target, &after, &diff);
+}
+
+#[test]
+fn a_descriptor_a_comment_and_a_set_on_one_object() {
+    let base = base();
+    let descriptor = pattern(200, 7);
+    let after = mutate(&base.dev, |volume| {
+        volume
+            .set_security_descriptor(base.seed, 0x7fff_0001, 1, &descriptor, time(3))
+            .unwrap();
+        volume
+            .set_object_comment(base.seed, "all three", time(3))
+            .unwrap();
+        volume
+            .set_attributes(
+                base.seed,
+                &[("user.three", Some(b"yes".as_slice()))],
+                AttributeWriteMode::Create,
+                time(3),
+            )
+            .unwrap();
+    });
+    let diff = diff_of(&base.dev, &after);
+    assert_eq!(
+        diff.objects,
+        vec![ObjectDiff {
+            object_id: base.seed,
+            change: ObjectChange::Modified(vec![
+                FieldChange::Timestamp {
+                    field: TimestampField::Changed,
+                    from: time(2),
+                    to: time(3),
+                },
+                FieldChange::Comment {
+                    from: "".into(),
+                    to: "all three".into(),
+                },
+                FieldChange::Security {
+                    from: None,
+                    to: Some(SecurityState {
+                        format: 0x7fff_0001,
+                        version: 1,
+                        total_len: 200,
+                        diverged: false,
+                    }),
+                    bytes_changed: false,
+                },
+                FieldChange::Attributes {
+                    changes: vec![added("user.three", b"yes")],
+                },
+            ]),
+        }]
+    );
+    assert!(diff.problems.is_empty());
+    assert_values_agree_with_the_core(&base.dev, &after, &diff);
+    assert_identity_and_mirror(&base.dev, &after, &diff);
+}
+
+#[test]
+fn a_damaged_attribute_chain_is_reported_and_no_attribute_is_concluded() {
+    let base = base();
+    let with_set = set_attribute(&base.dev, base.seed, "user.one", b"alpha", 3);
+    let first_block = mount(with_set.clone())
+        .unwrap()
+        .stat(base.seed)
+        .unwrap()
+        .unwrap()
+        .attributes
+        .unwrap()
+        .first_block;
+    let mut damaged = with_set.clone();
+    damaged.apply_raw(first_block, &vec![0u8; BLOCK]);
+
+    let diff = diff_of(&with_set, &damaged);
+    assert!(diff.has_problems(), "{diff:?}");
+    assert!(
+        diff.problems
+            .iter()
+            .any(|problem| problem.contains("attribute segment 0")),
+        "{:?}",
+        diff.problems
+    );
+    let attribute_fields: Vec<&FieldChange> = diff
+        .objects
+        .iter()
+        .filter_map(|object| match &object.change {
+            ObjectChange::Modified(fields) => fields
+                .iter()
+                .find(|field| matches!(field, FieldChange::Attributes { .. })),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        attribute_fields.is_empty(),
+        "a damaged chain removes no attribute: {attribute_fields:?}"
+    );
+    assert!(!diff.render_json().is_empty());
+}
+
+#[test]
+fn negative_control_a_corrupted_attribute_expectation_does_not_match() {
+    let base = base();
+    let one = set_attribute(&base.dev, base.seed, "user.one", b"alpha", 3);
+    let diff = diff_of(&base.dev, &one);
+    assert_eq!(
+        diff.objects,
+        vec![attributes_field(
+            base.seed,
+            (2, 3),
+            vec![added("user.one", b"alpha")]
+        )]
+    );
+    // One byte of the value, one letter of the name, and the direction.
+    assert_ne!(
+        diff.objects,
+        vec![attributes_field(
+            base.seed,
+            (2, 3),
+            vec![added("user.one", b"alphb")]
+        )]
+    );
+    assert_ne!(
+        diff.objects,
+        vec![attributes_field(
+            base.seed,
+            (2, 3),
+            vec![added("user.One", b"alpha")]
+        )]
+    );
+    assert_ne!(
+        diff.objects,
+        vec![attributes_field(
+            base.seed,
+            (2, 3),
+            vec![removed("user.one", b"alpha")]
+        )]
+    );
+    assert!(diff_of(&one, &one).is_empty());
 }
