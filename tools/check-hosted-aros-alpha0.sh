@@ -11,6 +11,8 @@ aros_build=${AROS_BUILD:-"$HOME/aros-build"}
 aros_tree="$aros_build/bin/darwin-aarch64/AROS"
 control="$macaros_root/graft/aros-ctl"
 output=${AFSPLUS_HOSTED_RESULT_OUTPUT:-"$repo_root/build/hosted-aros-alpha0"}
+# Where cargo puts the host binaries of the same-image phase.
+cargo_target=${CARGO_TARGET_DIR:-"$repo_root/target"}
 work=$(mktemp -d "${TMPDIR:-/tmp}/afsplus-hosted-alpha0.XXXXXX")
 package="$work/package"
 result="$work/result"
@@ -166,11 +168,11 @@ grep -q '"clean":true' "$result/check-after-target.json"
 
 echo "[hosted-alpha0] host same-image phase"
 cargo build -p afsplus-fuse --features macfuse-mount --bins
-./target/debug/afsplus-mount "$image" "$host_mount" \
+"$cargo_target/debug/afsplus-mount" "$image" "$host_mount" \
     >"$result/host-mount.log" 2>&1 &
 host_mount_pid=$!
 wait_for_host_mount
-./target/debug/afsplus-mounted-alpha0 "$host_mount" \
+"$cargo_target/debug/afsplus-mounted-alpha0" "$host_mount" \
     >"$result/host-probe.out"
 grep -q '^\[AFSPLUS-HOST-ALPHA0\] PASS ' "$result/host-probe.out"
 [ "$(cat "$host_mount/alpha0.from-host")" = host ]
