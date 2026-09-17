@@ -35,6 +35,7 @@ pub mod ident;
 pub mod intent_log;
 pub mod le;
 pub mod object;
+pub mod posix;
 pub mod reclaim;
 pub mod region;
 pub mod security;
