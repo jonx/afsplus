@@ -146,9 +146,9 @@ fn interface_query_needs_no_mount_and_names_its_revision_and_groups() {
         AfsplusArosInterface {
             struct_size: 24,
             abi_version: 1,
-            interface_revision: 3,
+            interface_revision: 4,
             reserved: 0,
-            groups: 0xF,
+            groups: 0x1F,
         }
     );
     assert_eq!(afsplus_aros_interface(ptr::null_mut()), 210);
@@ -185,7 +185,7 @@ fn sized_output_refuses_short_callers_and_never_writes_past_a_long_one() {
         0
     );
     assert_eq!(future.known.struct_size, 24);
-    assert_eq!(future.known.interface_revision, 3);
+    assert_eq!(future.known.interface_revision, 4);
     assert_eq!(future.tail, [0x5A; 16]);
 }
 
@@ -197,8 +197,8 @@ fn capabilities_use_published_c_identities_and_follow_the_volume() {
     let full = query(filesystem);
     assert_eq!(full.struct_size, 64);
     assert_eq!(full.mount_mode, 0);
-    // Bits 0,1,2,3,5,6,9,10,11,12,13,15,16 of api/filesystem_v2.h.
-    assert_eq!(full.capabilities, 0x1_BE6F);
+    // Bits 0,1,2,3,5,6,9,10,11,12,13,15,16,17 of api/filesystem_v2.h.
+    assert_eq!(full.capabilities, 0x3_BE6F);
     assert_eq!(full.block_size, 4096);
     assert_eq!(full.max_name_bytes, 255);
     assert_eq!(full.case_sensitive, 0);
@@ -222,7 +222,7 @@ fn capabilities_use_published_c_identities_and_follow_the_volume() {
     let mut device = formatted(0, false, true, NamePolicy::Sensitive);
     let filesystem = mount(&mut device, AFSPLUS_AROS_MOUNT_READ_ONLY);
     let plain = query(filesystem);
-    assert_eq!(plain.capabilities, 0x1_C66F);
+    assert_eq!(plain.capabilities, 0x3_C66F);
     assert_eq!(plain.capabilities & 0x3800, 0);
     assert_eq!(plain.mount_mode, 1);
     assert_eq!(plain.case_sensitive, 1);

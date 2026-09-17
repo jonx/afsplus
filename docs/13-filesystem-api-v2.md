@@ -15,6 +15,7 @@
   - [enumeration](#enumeration)
   - [synchronization](#synchronization)
   - [cloning](#cloning)
+  - [preallocation and access intent](#preallocation-and-access-intent)
   - [observation](#observation)
 - [4. Compatibility adapters](#4-compatibility-adapters)
 - [5. Large files](#5-large-files)
@@ -198,6 +199,26 @@ structure layouts or the classic DOS ABI. A profile without shared extents
 does not advertise either capability and returns `NOT_SUPPORTED`, allowing a
 caller to fall back to an ordinary copy. Read-only mounts may report that the
 format supports cloning but still reject mutation as `READ_ONLY`.
+
+### preallocation and access intent
+
+- `Preallocate(handle, offset, length)` reserves storage for a byte range
+  without changing the logical size; the range reads as zeros until written.
+  It is advertised as `PREALLOCATE` (additive Rust capability bit 14,
+  `FSV2_CAP_PREALLOCATE`). One request is bounded by a caller-supplied block
+  budget and 64 extent records; beyond that it fails with a limit error and
+  the volume unchanged, and the caller splits the reservation.
+- `Advise(handle, offset, length, hint)` admits every hint of
+  [`performance_hints.h`](../api/performance_hints.h) and returns the effect
+  it had. No hint alters durability, contents or allocation. An
+  implementation without read-ahead to steer returns "no effect" and the
+  caller never assumes one.
+
+The AROS C boundary carries these together with positioned 64-bit read and
+write, `CloneFile`, `CloneRange` and atomic replace as the `API_V2`
+entry-point group of [`afsplus_aros.h`](../api/afsplus_aros.h). They operate
+on the same locks and file handles as the DOS calls, and the positioned calls
+neither use nor move the DOS file position.
 
 ### observation
 

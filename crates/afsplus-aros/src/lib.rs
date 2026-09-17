@@ -36,6 +36,10 @@ pub struct ArosConfig {
     /// metadata the classic view cannot express. Off by default: such a write
     /// is refused and the richer metadata is preserved.
     pub allow_security_downgrade: bool,
+    /// Largest number of filesystem blocks one preallocation request edits.
+    /// The handler is a single task; a larger request is `ObjectTooLarge`
+    /// and the caller splits it.
+    pub max_preallocate_blocks: u64,
 }
 
 impl Default for ArosConfig {
@@ -48,6 +52,7 @@ impl Default for ArosConfig {
             // MAXFILENAMELENGTH includes the terminating NUL.
             max_file_info_name_bytes: 107,
             allow_security_downgrade: false,
+            max_preallocate_blocks: 4096,
         }
     }
 }
@@ -102,6 +107,17 @@ pub struct DiskInfo {
     pub bytes_per_block: u32,
     pub disk_type: i32,
     pub in_use: bool,
+}
+
+/// Highest `afsplus_access_hint_t` value (`IMMUTABLE_EXPECTED`).
+pub const ACCESS_HINT_LAST: u32 = 11;
+
+/// What an access-intent hint changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum AdviceEffect {
+    /// Admitted and recorded nowhere: behavior is unchanged.
+    None = 0,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -529,6 +545,136 @@ impl<D: BlockDevice> ArosAdapter<D> {
         let size = add_signed(base, offset)?;
         self.vfs.truncate(vfs_handle, size, now)?;
         Ok(size)
+    }
+
+    /// Positioned 64-bit read. The DOS file position is neither used nor
+    /// moved, so v2 callers and classic `Read` calls share one handle.
+    pub fn read_at(
+        &mut self,
+        handle: FileHandleId,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> Result<usize, ArosError> {
+        let vfs_handle = self.file_state(handle)?.vfs_handle;
+        Ok(self.vfs.read(vfs_handle, offset, destination)?)
+    }
+
+    /// Positioned 64-bit write; see [`Self::read_at`].
+    pub fn write_at(
+        &mut self,
+        handle: FileHandleId,
+        offset: u64,
+        source: &[u8],
+        now: Timespec,
+    ) -> Result<usize, ArosError> {
+        let vfs_handle = self.file_state(handle)?.vfs_handle;
+        Ok(self.vfs.write(vfs_handle, offset, source, now)?)
+    }
+
+    /// `CloneFile`: a new file `name` that initially shares the source's
+    /// storage. `NotSupported` maps to `ERROR_ACTION_NOT_KNOWN`, the signal
+    /// for a caller to fall back to a byte copy.
+    pub fn clone_file(
+        &mut self,
+        source: LockId,
+        base: Option<LockId>,
+        name: &[u8],
+        now: Timespec,
+    ) -> Result<(), ArosError> {
+        let source_object = self.lock_state(source)?.object_id;
+        let parent = self.lock_object_or_root(base)?;
+        let decoded = self.decode_component(name)?;
+        self.vfs.clone_file(source_object, parent, &decoded, now)?;
+        Ok(())
+    }
+
+    /// `CloneRange` between two open files.
+    pub fn clone_range(
+        &mut self,
+        source: FileHandleId,
+        source_offset: u64,
+        destination: FileHandleId,
+        destination_offset: u64,
+        length: u64,
+        now: Timespec,
+    ) -> Result<(), ArosError> {
+        let source_handle = self.file_state(source)?.vfs_handle;
+        let destination_handle = self.file_state(destination)?.vfs_handle;
+        Ok(self.vfs.clone_range(
+            source_handle,
+            source_offset,
+            destination_handle,
+            destination_offset,
+            length,
+            now,
+        )?)
+    }
+
+    /// Reserves storage for a byte range without changing the file size.
+    pub fn preallocate(
+        &mut self,
+        handle: FileHandleId,
+        offset: u64,
+        length: u64,
+        now: Timespec,
+    ) -> Result<(), ArosError> {
+        let vfs_handle = self.file_state(handle)?.vfs_handle;
+        Ok(self.vfs.preallocate(
+            vfs_handle,
+            offset,
+            length,
+            self.config.max_preallocate_blocks,
+            now,
+        )?)
+    }
+
+    /// Access-intent hint for a byte range. Every hint of
+    /// `api/performance_hints.h` is admitted and reports what it changed, so
+    /// a caller never assumes an effect. No hint alters durability, contents
+    /// or allocation; the single-task handler has no read-ahead to steer, so
+    /// each one reports [`AdviceEffect::None`].
+    pub fn advise(
+        &mut self,
+        handle: FileHandleId,
+        offset: u64,
+        length: u64,
+        hint: u32,
+    ) -> Result<AdviceEffect, ArosError> {
+        self.file_state(handle)?;
+        if hint > ACCESS_HINT_LAST || offset.checked_add(length).is_none() {
+            return Err(ArosError::BadNumber);
+        }
+        Ok(AdviceEffect::None)
+    }
+
+    /// Atomic replace: `target` names the source object afterwards and a
+    /// crash leaves either the old or the new target, never neither. A
+    /// target that a lock or handle holds is not replaced.
+    pub fn replace(
+        &mut self,
+        source_base: Option<LockId>,
+        source_name: &[u8],
+        target_base: Option<LockId>,
+        target_name: &[u8],
+        now: Timespec,
+    ) -> Result<(), ArosError> {
+        let source_parent = self.lock_object_or_root(source_base)?;
+        let target_parent = self.lock_object_or_root(target_base)?;
+        let source = self.decode_component(source_name)?;
+        let target = self.decode_component(target_name)?;
+        let object_id = self.vfs.lookup(source_parent, &source)?;
+        match self.vfs.lookup(target_parent, &target) {
+            Ok(existing) if self.lock_counts.contains_key(&existing) => {
+                return Err(ArosError::ObjectInUse);
+            }
+            Ok(_) | Err(VfsError::NotFound) => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.vfs
+            .rename(source_parent, &source, target_parent, &target, true, now)?;
+        self.known_parents
+            .insert(object_id, (Some(target_parent), target_name.to_vec()));
+        Ok(())
     }
 
     pub fn fsync(&mut self, handle: FileHandleId) -> Result<(), ArosError> {

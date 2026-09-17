@@ -23,12 +23,16 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(3)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(4)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
 #define AFSPLUS_AROS_GROUP_DOS_METADATA UINT64_C(0x4)
 #define AFSPLUS_AROS_GROUP_SOFT_LINKS UINT64_C(0x8)
+#define AFSPLUS_AROS_GROUP_API_V2 UINT64_C(0x10)
+
+/* afsplus_aros_advise effect. */
+#define AFSPLUS_AROS_ADVICE_NO_EFFECT UINT32_C(0)
 
 #define AFSPLUS_AROS_MOUNT_READ_WRITE UINT32_C(0)
 #define AFSPLUS_AROS_MOUNT_READ_ONLY UINT32_C(1)
@@ -271,6 +275,43 @@ int32_t afsplus_aros_make_soft_link(struct AfsplusAros *filesystem,
 int32_t afsplus_aros_read_soft_link(struct AfsplusAros *filesystem,
     uint64_t base_lock, const uint8_t *name, uint32_t name_length,
     uint8_t *target, uint32_t target_capacity, uint32_t *output_required);
+
+/* Group AFSPLUS_AROS_GROUP_API_V2: filesystem-neutral 64-bit operations on
+ * the same locks and file handles as the DOS calls.
+ *
+ * read_at/write_at take an explicit 64-bit offset and neither use nor move
+ * the DOS file position. clone_file and clone_range answer
+ * ERROR_ACTION_NOT_KNOWN on a volume without the capability, the signal to
+ * fall back to a byte copy. preallocate reserves storage without changing
+ * the file size and answers ERROR_OBJECT_TOO_LARGE, with nothing reserved,
+ * when one request exceeds the mount's per-request block budget. replace is
+ * an atomic rename over an existing target that no lock or handle holds.
+ * advise takes an afsplus_access_hint_t value and reports what it changed;
+ * no hint alters durability, contents or allocation. */
+int32_t afsplus_aros_read_at(struct AfsplusAros *filesystem, uint64_t file,
+    uint64_t offset, uint8_t *destination, uint32_t length,
+    uint32_t *output_count);
+int32_t afsplus_aros_write_at(struct AfsplusAros *filesystem, uint64_t file,
+    uint64_t offset, const uint8_t *source, uint32_t length,
+    int64_t now_seconds, uint32_t now_nanoseconds, uint32_t *output_count);
+int32_t afsplus_aros_clone_file(struct AfsplusAros *filesystem,
+    uint64_t source_lock, uint64_t target_base_lock,
+    const uint8_t *target_name, uint32_t target_name_length,
+    int64_t now_seconds, uint32_t now_nanoseconds);
+int32_t afsplus_aros_clone_range(struct AfsplusAros *filesystem,
+    uint64_t source_file, uint64_t source_offset, uint64_t target_file,
+    uint64_t target_offset, uint64_t length, int64_t now_seconds,
+    uint32_t now_nanoseconds);
+int32_t afsplus_aros_preallocate(struct AfsplusAros *filesystem,
+    uint64_t file, uint64_t offset, uint64_t length, int64_t now_seconds,
+    uint32_t now_nanoseconds);
+int32_t afsplus_aros_replace(struct AfsplusAros *filesystem,
+    uint64_t source_base_lock, const uint8_t *source_name,
+    uint32_t source_name_length, uint64_t target_base_lock,
+    const uint8_t *target_name, uint32_t target_name_length,
+    int64_t now_seconds, uint32_t now_nanoseconds);
+int32_t afsplus_aros_advise(struct AfsplusAros *filesystem, uint64_t file,
+    uint64_t offset, uint64_t length, uint32_t hint, uint32_t *output_effect);
 
 /* Group AFSPLUS_AROS_GROUP_INTERFACE_QUERY. */
 int32_t afsplus_aros_capabilities(struct AfsplusAros *filesystem,

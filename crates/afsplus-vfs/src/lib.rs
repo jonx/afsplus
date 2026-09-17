@@ -14,7 +14,7 @@ use std::fmt;
 use afsplus_block::BlockDevice;
 use afsplus_core::name_key::comparison_key;
 use afsplus_core::volume::{
-    DataUpdatePolicy, DirectoryCursor, ObjectMetadata, PreservedMetadata, Volume,
+    DataUpdatePolicy, DirectoryCursor, FileEditLimits, ObjectMetadata, PreservedMetadata, Volume,
 };
 use afsplus_core::{mount_with_options, CoreError, MountMode, MountOptions};
 use afsplus_format::ident::{
@@ -144,6 +144,9 @@ impl Capabilities {
     /// persistent crash cleanup is provided by ADR-066.
     pub const OPEN_UNLINKED: u64 = 1 << 12;
     pub const SYMLINKS: u64 = 1 << 13;
+    /// Additive: `preallocate` reserves unwritten storage for a byte range
+    /// without changing the logical size.
+    pub const PREALLOCATE: u64 = 1 << 14;
 
     pub const BASELINE: Capabilities = Capabilities(
         Self::IO_64BIT
@@ -284,7 +287,8 @@ impl<D: BlockDevice> Vfs<D> {
     }
 
     pub fn capabilities(&self) -> Capabilities {
-        let mut bits = Capabilities::BASELINE.bits() | Capabilities::SYMLINKS;
+        let mut bits =
+            Capabilities::BASELINE.bits() | Capabilities::SYMLINKS | Capabilities::PREALLOCATE;
         if self.volume.ident().features.ro_compat & RO_COMPAT_SHARED_EXTENTS != 0 {
             bits |= Capabilities::CLONE_FILE | Capabilities::CLONE_RANGE;
         }
@@ -839,6 +843,44 @@ impl<D: BlockDevice> Vfs<D> {
                 created: current.created,
                 modified,
                 changed: now,
+            },
+        )?)
+    }
+
+    /// Reserves storage for `offset..offset + length` without changing the
+    /// logical size; reserved ranges read as zeros until written. The range
+    /// may be unaligned and covers every block it touches. One call edits at
+    /// most `max_blocks` blocks and 64 extent records and otherwise returns
+    /// `Limit` with the volume unchanged, so an adapter bounds the time one
+    /// request holds its task and splits larger reservations.
+    pub fn preallocate(
+        &mut self,
+        handle: Handle,
+        offset: u64,
+        length: u64,
+        max_blocks: u64,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        let (object_id, access) = match self.handles.get(&handle).copied() {
+            Some(OpenHandle::File { object_id, access }) => (object_id, access),
+            Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
+            None => return Err(VfsError::Stale),
+        };
+        if !access.can_write() {
+            return Err(VfsError::ReadOnly);
+        }
+        if length == 0 || max_blocks == 0 || offset.checked_add(length).is_none() {
+            return Err(VfsError::Invalid);
+        }
+        self.checkpoint_data_window(now)?;
+        Ok(self.volume.preallocate_file_bounded(
+            object_id,
+            offset,
+            length,
+            now,
+            FileEditLimits {
+                max_blocks,
+                max_records: 64,
             },
         )?)
     }

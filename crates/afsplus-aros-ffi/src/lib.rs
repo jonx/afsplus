@@ -21,15 +21,18 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 3;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 4;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
 pub const AFSPLUS_AROS_GROUP_SOFT_LINKS: u64 = 0x8;
+pub const AFSPLUS_AROS_GROUP_API_V2: u64 = 0x10;
+pub const AFSPLUS_AROS_ADVICE_NO_EFFECT: u32 = 0;
 const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_INTERFACE_QUERY
     | AFSPLUS_AROS_GROUP_DOS_METADATA
-    | AFSPLUS_AROS_GROUP_SOFT_LINKS;
+    | AFSPLUS_AROS_GROUP_SOFT_LINKS
+    | AFSPLUS_AROS_GROUP_API_V2;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -50,10 +53,12 @@ pub const FSV2_CAP_LOGGED_DATA_FSYNC: u64 = 1 << 13;
 pub const FSV2_CAP_DATA_POLICY: u64 = 1 << 14;
 pub const FSV2_CAP_OPEN_UNLINKED: u64 = 1 << 15;
 pub const FSV2_CAP_PAGED_DIRECTORIES: u64 = 1 << 16;
+pub const FSV2_CAP_PREALLOCATE: u64 = 1 << 17;
 
 /// Rust capability bit to published C identity. A Rust bit without a row is
 /// not advertised at the C boundary.
-const CAPABILITY_MAP: [(u64, u64); 14] = [
+const CAPABILITY_MAP: [(u64, u64); 15] = [
+    (Capabilities::PREALLOCATE, FSV2_CAP_PREALLOCATE),
     (Capabilities::IO_64BIT, FSV2_CAP_64BIT_IO),
     (Capabilities::UTF8_NAMES, FSV2_CAP_UTF8_NAMES),
     (Capabilities::HARD_LINKS, FSV2_CAP_HARDLINKS),
@@ -570,6 +575,7 @@ pub extern "C" fn afsplus_aros_mount(
                 max_file_info_name_bytes,
                 allow_security_downgrade: config.flags & AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE
                     != 0,
+                ..ArosConfig::default()
             },
         );
         let raw = Box::into_raw(Box::new(NativeBridge {
@@ -1143,5 +1149,157 @@ pub extern "C" fn afsplus_aros_read_soft_link(
             output_required,
             u32::try_from(required).map_err(|_| ArosError::ObjectTooLarge)?,
         )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_read_at(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    offset: u64,
+    destination: *mut u8,
+    length: u32,
+    output_count: *mut u32,
+) -> i32 {
+    ffi_status(|| {
+        require_output(output_count)?;
+        let destination = output_slice(destination, length)?;
+        let count = bridge_mut(filesystem)?
+            .adapter
+            .read_at(file, offset, destination)?;
+        write_output(output_count, count as u32)
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn afsplus_aros_write_at(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    offset: u64,
+    source: *const u8,
+    length: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+    output_count: *mut u32,
+) -> i32 {
+    ffi_status(|| {
+        require_output(output_count)?;
+        let source = input_bytes(source, length)?;
+        let count = bridge_mut(filesystem)?.adapter.write_at(
+            file,
+            offset,
+            source,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )?;
+        write_output(output_count, count as u32)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_clone_file(
+    filesystem: *mut AfsplusAros,
+    source_lock: u64,
+    target_base_lock: u64,
+    target_name: *const u8,
+    target_name_length: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    ffi_status(|| {
+        let name = input_bytes(target_name, target_name_length)?;
+        bridge_mut(filesystem)?.adapter.clone_file(
+            source_lock,
+            optional_lock(target_base_lock),
+            name,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn afsplus_aros_clone_range(
+    filesystem: *mut AfsplusAros,
+    source_file: u64,
+    source_offset: u64,
+    target_file: u64,
+    target_offset: u64,
+    length: u64,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    ffi_status(|| {
+        bridge_mut(filesystem)?.adapter.clone_range(
+            source_file,
+            source_offset,
+            target_file,
+            target_offset,
+            length,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_preallocate(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    offset: u64,
+    length: u64,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    ffi_status(|| {
+        bridge_mut(filesystem)?.adapter.preallocate(
+            file,
+            offset,
+            length,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn afsplus_aros_replace(
+    filesystem: *mut AfsplusAros,
+    source_base_lock: u64,
+    source_name: *const u8,
+    source_name_length: u32,
+    target_base_lock: u64,
+    target_name: *const u8,
+    target_name_length: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    ffi_status(|| {
+        let source = input_bytes(source_name, source_name_length)?;
+        let target = input_bytes(target_name, target_name_length)?;
+        bridge_mut(filesystem)?.adapter.replace(
+            optional_lock(source_base_lock),
+            source,
+            optional_lock(target_base_lock),
+            target,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_advise(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    offset: u64,
+    length: u64,
+    hint: u32,
+    output_effect: *mut u32,
+) -> i32 {
+    ffi_status(|| {
+        require_output(output_effect)?;
+        let effect = bridge_mut(filesystem)?
+            .adapter
+            .advise(file, offset, length, hint)?;
+        write_output(output_effect, effect as u32)
     })
 }
