@@ -311,6 +311,16 @@ the protection and start no orphan cleanup, which waits, visible in the
 health snapshot, until the volume is unprotected. `ACTION_DISK_INFO` reports
 the protected state, and nothing is written to the volume for it.
 
+The DOSDriver's `Control` string is where a mountlist names what the numeric
+fields cannot ([`afsplus_control.h`](../native/aros/afsplus_control.h)):
+`SECURITY=PRESERVE|STRICT|DOWNGRADE` selects the projection policy of the
+section above, and `ENCODING=UTF8|LATIN1` the encoding of names on the
+packet boundary. Settings are separated by spaces or commas, keyword and
+value are compared without regard to case, and a string this handler does not
+understand fails the mount: one that looked applied and was not would be
+worse than none. Both policies were reachable only from a program calling the
+C boundary directly before this.
+
 A handler that cannot open one of its libraries fails its mount. The
 generated entry opens them before any AFS+ code runs; autoinit reports a
 failure through a requester when the process has no console, and the entry

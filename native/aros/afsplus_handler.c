@@ -34,6 +34,7 @@
 #include <stdint.h>
 
 #include "afsplus_claim.h"
+#include "afsplus_control.h"
 #include "afsplus_packet.h"
 #include "afsplus_trackdisk.h"
 
@@ -99,6 +100,9 @@ struct AfsplusArosHandler {
     uint32_t device_open;
     uint32_t volume_registered;
     uint32_t read_only;
+    /* From the DOSDriver Control string. */
+    uint32_t mount_flags;
+    uint32_t name_encoding;
     uint16_t read_command;
     uint16_t write_command;
     uint32_t supports_64bit_offsets;
@@ -753,12 +757,46 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     if (error != 0)
         return error;
 
+    /* The DOSDriver Control string, the only place a mountlist can name a
+     * policy. A string this handler does not understand fails the mount:
+     * one that looks applied and is not would be worse than none. */
+    set_startup_stage(handler, "control-string");
+    {
+        struct AfsplusArosControl control;
+        const char *text = NULL;
+        uint32_t length = 0;
+        uint32_t result;
+
+        if ((SIPTR)handler->environment->de_TableSize >= DE_CONTROL
+            && handler->environment->de_Control != 0)
+        {
+            BSTR value = (BSTR)handler->environment->de_Control;
+
+            text = (const char *)AROS_BSTR_ADDR(value);
+#ifdef AROS_FAST_BSTR
+            length = (uint32_t)strlen(text);
+#else
+            length = (uint32_t)AROS_BSTR_strlen(value);
+#endif
+        }
+        result = afsplus_control_parse(text, length, &control);
+        if (result != AFSPLUS_CONTROL_OK)
+        {
+            bug("[AFSPLUS] Control string refused (reason %u): %s\n",
+                (unsigned)result, text != NULL ? text : "");
+            return ERROR_BAD_NUMBER;
+        }
+        handler->mount_flags = control.mount_flags;
+        handler->name_encoding = control.name_encoding;
+    }
+
     memset(&mount_config, 0, sizeof(mount_config));
     mount_config.abi_version = AFSPLUS_AROS_ABI_VERSION;
     mount_config.struct_size = sizeof(mount_config);
     mount_config.mount_mode = handler->read_only
         ? AFSPLUS_AROS_MOUNT_READ_ONLY : AFSPLUS_AROS_MOUNT_READ_WRITE;
-    mount_config.name_encoding = AFSPLUS_AROS_ENCODING_UTF8;
+    mount_config.name_encoding = handler->name_encoding;
+    mount_config.flags = handler->mount_flags;
     /* No name: the volume is named after its committed label, so a renamed
      * volume comes back under its new name. */
     mount_config.volume_name = NULL;

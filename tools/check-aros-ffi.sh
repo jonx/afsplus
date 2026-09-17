@@ -121,6 +121,15 @@ clang -std=c11 -Wall -Wextra -Werror \
     -o "$task_dir/client-stub"
 "$task_dir/client-stub"
 
+echo "[aros-ffi] host DOSDriver control string matrix"
+clang -std=c11 -Wall -Wextra -Werror \
+    -D__WORDSIZE=64 -DAROS_FAST_BPTR=1 -DAROS_FAST_BSTR=1 \
+    -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
+    -I api -I native/aros \
+    native/aros/afsplus_control.c native/aros/tests/control_stub.c \
+    -o "$task_dir/control-stub"
+"$task_dir/control-stub"
+
 echo "[aros-ffi] host one-instance claim matrix"
 clang -std=c11 -Wall -Wextra -Werror \
     -D__WORDSIZE=64 -DAROS_FAST_BPTR=1 -DAROS_FAST_BSTR=1 \
@@ -219,6 +228,14 @@ echo "[aros-ffi] AROS AArch64 extension-packet client"
     -I api -I native/aros -c native/aros/client/afsplus_client.c \
     -o "$task_dir/client-aarch64.o"
 
+echo "[aros-ffi] AROS AArch64 DOSDriver control string"
+# shellcheck disable=SC2086 -- profile and handler flags are separate words.
+"$aros_clang" --target="$aros_target" $aros_arch_flags \
+    $handler_cflags -std=gnu11 -Wall -Wextra -Werror -D__NOLIBBASE__ \
+    -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
+    -I api -I native/aros -c native/aros/afsplus_control.c \
+    -o "$task_dir/control-aarch64.o"
+
 echo "[aros-ffi] AROS AArch64 one-instance claim"
 # shellcheck disable=SC2086 -- profile and handler flags are separate words.
 "$aros_clang" --target="$aros_target" $aros_arch_flags \
@@ -239,6 +256,7 @@ echo "[aros-ffi] AROS AArch64 relocatable handler/staticlib link"
 "$aros_ld" -r "$task_dir/handler-aarch64.o" \
     "$task_dir/packet-aarch64.o" "$task_dir/trackdisk-aarch64.o" \
     "$task_dir/claim-aarch64.o" \
+    "$task_dir/control-aarch64.o" \
     "$archive" -o "$task_dir/handler-bundle-aarch64.o"
 for symbol in handler afsplus_aros_mount afsplus_aros_packet_process; do
     "$aros_nm" --defined-only "$task_dir/handler-bundle-aarch64.o" \
@@ -316,6 +334,7 @@ PATH="$aros_tools:$PATH" COMPILER_PATH="$aros_crosstools/bin" \
     "$task_dir/packet-aarch64.o" \
     "$task_dir/trackdisk-aarch64.o" \
     "$task_dir/claim-aarch64.o" \
+    "$task_dir/control-aarch64.o" \
     "$task_dir/module"/aros_*_glue.o \
     "$archive" "$task_dir/module/afsplus_end.o" \
     -Wl,--start-group \
@@ -361,6 +380,14 @@ if [ "${AFSPLUS_AROS_SKIP_M68K_ABI:-0}" != 1 ]; then
         -I "$m68k_gen_include" -I api -I native/aros \
         -c native/aros/afsplus_trackdisk.c \
         -o "$task_dir/trackdisk-m68k.o"
+    echo "[aros-ffi] AROS m68k DOSDriver control string"
+    # shellcheck disable=SC2086 -- handler flags are intentional words.
+    "$m68k_cc" $handler_cflags -O2 -std=gnu11 -Wall -Wextra -Werror \
+        -Wno-volatile-register-var -D__NOLIBBASE__ \
+        -I "$m68k_stdc_include" -I "$m68k_include" \
+        -I "$m68k_gen_include" -I api -I native/aros \
+        -c native/aros/afsplus_control.c \
+        -o "$task_dir/control-m68k.o"
     echo "[aros-ffi] AROS m68k one-instance claim"
     # shellcheck disable=SC2086 -- handler flags are intentional words.
     "$m68k_cc" $handler_cflags -O2 -std=gnu11 -Wall -Wextra -Werror \

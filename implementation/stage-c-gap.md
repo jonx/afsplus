@@ -122,7 +122,9 @@ Rename and hard link keep the object and its metadata.
 Lacking: the on-disk answer to the probe, which is the Stage B item B5 (the
 default probe answers no, which is exact for a format that stores protection
 bits only); preservation across clone and atomic replace, which follows the
-container's inheritance rule; a DOSDriver keyword that sets the mount flag.
+container's inheritance rule. The `Control` string of the DOSDriver selects
+the policy (`SECURITY=PRESERVE|STRICT|DOWNGRADE`), and the name encoding with
+it.
 
 ## C4. Filesystem API v2 and the modern 64-bit API
 
