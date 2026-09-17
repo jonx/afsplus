@@ -1510,11 +1510,17 @@ static int32_t process_extension(struct AfsplusArosPacketContext *context,
 
     if (shared == NULL)
         return ERROR_REQUIRED_ARG_MISSING;
-    memcpy(&request, shared, sizeof(request));
+    /* The first eight bytes say how long the block is. Nothing beyond them
+     * is read until they say the rest exists: a sender of another protocol,
+     * or of a shorter future one, may own no more than that. */
+    memcpy(&request, shared, AFSPLUS_EXT_PREFIX_BYTES);
     if (request.magic != AFSPLUS_EXT_MAGIC
         || request.version != AFSPLUS_EXT_VERSION
         || request.header_size < sizeof(request))
         return ERROR_BAD_NUMBER;
+    memcpy((uint8_t *)&request + AFSPLUS_EXT_PREFIX_BYTES,
+        (const uint8_t *)shared + AFSPLUS_EXT_PREFIX_BYTES,
+        sizeof(request) - AFSPLUS_EXT_PREFIX_BYTES);
     request.output_count = 0;
     request.output_flags = 0;
     request.output_value = 0;

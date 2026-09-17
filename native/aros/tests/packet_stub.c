@@ -817,6 +817,29 @@ int32_t afsplus_aros_stat_id(struct AfsplusAros *filesystem,
     return ext_call('e', 0, NULL, 0, object_id, output->struct_size, 0, 0);
 }
 
+/* Host memory with an inaccessible page behind it, declared here because the
+ * matrix compiles against the AROS C library headers. */
+void *mmap(void *address, size_t length, int protection, int flags, int fd,
+    long long offset);
+int mprotect(void *address, size_t length, int protection);
+#ifdef __APPLE__
+#define STUB_MAP_ANON_PRIVATE (0x1000 | 0x0002)
+#else
+#define STUB_MAP_ANON_PRIVATE (0x20 | 0x02)
+#endif
+#define STUB_GUARD_PAGE 65536
+
+/* The last `size` readable bytes before a page that faults on any access. */
+static uint8_t *before_guard_page(size_t size)
+{
+    uint8_t *region = mmap(NULL, 2 * STUB_GUARD_PAGE, 3,
+        STUB_MAP_ANON_PRIVATE, -1, 0);
+
+    assert(region != (uint8_t *)-1 && region != NULL);
+    assert(mprotect(region + STUB_GUARD_PAGE, STUB_GUARD_PAGE, 0) == 0);
+    return region + STUB_GUARD_PAGE - size;
+}
+
 static struct DosPacket *completed[24];
 static size_t completed_count;
 
@@ -1312,6 +1335,25 @@ int main(void)
         EXT_BEGIN(99);
         EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
         assert(event_count == 0);
+
+        /* A sender that owns only the eight-byte prefix, with a size that
+         * says so: nothing behind the prefix is read. The bytes end where an
+         * inaccessible page begins. */
+        {
+            struct AfsplusExtRequest prefix;
+            uint8_t *short_block = before_guard_page(AFSPLUS_EXT_PREFIX_BYTES);
+
+            memset(&prefix, 0, sizeof(prefix));
+            prefix.magic = AFSPLUS_EXT_MAGIC;
+            prefix.version = AFSPLUS_EXT_VERSION;
+            prefix.header_size = AFSPLUS_EXT_PREFIX_BYTES;
+            memcpy(short_block, &prefix, AFSPLUS_EXT_PREFIX_BYTES);
+            initialize_packet(&packet, ACTION_AFSPLUS_EXT);
+            packet.dp_Arg1 = (SIPTR)short_block;
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSFALSE
+                && packet.dp_Res2 == ERROR_BAD_NUMBER);
+        }
 
         /* A longer block from a newer client is served by its known part. */
         EXT_BEGIN(AFSPLUS_EXT_INTERFACE);

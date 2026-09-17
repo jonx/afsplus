@@ -22,6 +22,7 @@
  * allocation; the value spells "AFS2" and lies outside every range
  * dos/dosextens.h assigns. A different allocation changes this one constant.
  */
+#include <stddef.h>
 #include <stdint.h>
 
 #define ACTION_AFSPLUS_EXT INT32_C(0x41465332)
@@ -137,7 +138,13 @@ struct AfsplusExtRequest {
     uint64_t output_value;
 };
 
+/* magic, version and header_size: all a handler reads of a block before
+ * header_size has told it that more exists. */
+#define AFSPLUS_EXT_PREFIX_BYTES 8
+
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(offsetof(struct AfsplusExtRequest, operation)
+    == AFSPLUS_EXT_PREFIX_BYTES, "AfsplusExtRequest prefix drift");
 _Static_assert(sizeof(struct AfsplusExtRequest) == 112,
     "AfsplusExtRequest layout drift");
 _Static_assert(sizeof(struct AfsplusExtPacketCount) == 24,
