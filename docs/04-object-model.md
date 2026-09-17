@@ -63,6 +63,36 @@ The core record contains only fields required by almost every implementation:
 
 Large or uncommon metadata belongs in attributes, not in an ever-growing fixed inode.
 
+The executable record is one checksummed block: the 32-byte common header
+(owner field = object ID) and this payload, little-endian, taken from
+[the codec](../crates/afsplus-format/src/object.rs):
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | object ID |
+| 8 | 1 | object type (1 file, 2 directory, 3 symlink, 4 internal) |
+| 9 | 1 | reserved, zero |
+| 10 | 2 | object flags (bit 0 extent tree, bit 1 data in place, bit 2 security reference) |
+| 12 | 4 | link count, nonzero |
+| 16 | 8 | logical size in bytes |
+| 24 | 8 | allocated size in bytes |
+| 32 | 12 | creation time |
+| 44 | 12 | modification time |
+| 56 | 12 | metadata-change time |
+| 68 | 4 | AROS protection word |
+| 72 | 8 | content generation |
+| 80 | 8 | data root: directory tree root, extent tree root, or direct extent start |
+| 88 | 8 | direct extent length in blocks; zero for a directory or an empty file |
+| 96 | 16 | security reference, present with flag bit 2: first segment block (8), descriptor length (4), segment count (2), reference flags (2) |
+| 96 or 112 | n | inline target of a symlink, NUL-free UTF-8 |
+
+A time is 12 bytes: signed 64-bit seconds since the Unix epoch and unsigned
+32-bit nanoseconds below one billion, with no padding or reserved field
+(`struct afsp_timespec_wire` in the [format header](../spec/afsplus_format.h)).
+[The constant-pinning test](../crates/afsplus-format/tests/c_constants.rs)
+holds every constant and wire-structure size of that header, and every format
+constant the portable C reader compiles with, equal to the Rust codecs.
+
 An object record is admitted only in its canonical image
 ([ADR-100](../adr/ADR-100-exact-object-record-admission.md)): zero common
 header flags, a payload of exactly the length its type and flags define, a

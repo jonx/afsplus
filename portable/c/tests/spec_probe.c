@@ -1,0 +1,39 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Prints every constant and wire-structure size of spec/afsplus_format.h as
+ * "NAME value" lines, so a test can pin the header against the Rust codecs. */
+#include "afsplus_format.h"
+#include <stdio.h>
+
+#define SHOW(name) printf(#name " %llu\n", (unsigned long long)(name))
+#define SIZE(type) printf("sizeof_" #type " %llu\n", (unsigned long long)sizeof(struct type))
+
+int main(void)
+{
+    SHOW(AFSP_FORMAT_EPOCH);
+    SHOW(AFSP_DEFAULT_BLOCK_SHIFT);
+    SHOW(AFSP_DEFAULT_BLOCK_SIZE);
+    SHOW(AFSP_NAME_MAX_UTF8_BYTES);
+    SHOW(AFSP_OBJECT_INVALID);
+    SHOW(AFSP_OBJECT_ROOT);
+    SHOW(AFSP_OBJECT_ORPHAN_DIRECTORY);
+    SHOW(AFSP_MAGIC_U64);
+    SHOW(AFSP_INCOMPAT_INTENT_LOG);
+    SHOW(AFSP_INCOMPAT_INTENT_LOG_DATA_UPDATES);
+    SHOW(AFSP_INCOMPAT_PERSISTENT_SNAPSHOTS);
+    SHOW(AFSP_INCOMPAT_SECURITY_DESCRIPTORS);
+    SHOW(AFSP_RO_COMPAT_SHARED_EXTENTS);
+    SHOW(AFSP_RO_COMPAT_ORPHAN_DIRECTORY);
+    SHOW(AFSP_COMPAT_DATA_POLICY);
+    SHOW(AFSP_OBJECT_FILE);
+    SHOW(AFSP_OBJECT_DIRECTORY);
+    SHOW(AFSP_OBJECT_SYMLINK);
+    SHOW(AFSP_OBJECT_INTERNAL);
+    SHOW(AFSP_EXTENT_FLAG_UNWRITTEN);
+    SHOW(AFSP_EXTENT_FLAG_SHARED);
+    SHOW(AFSP_OBJECT_FLAG_EXTENT_TREE);
+    SHOW(AFSP_OBJECT_FLAG_DATA_IN_PLACE);
+    SHOW(AFSP_OBJECT_FLAG_SECURITY_REF);
+    SIZE(afsp_timespec_wire);
+    SIZE(afsp_extent_value_wire);
+    return 0;
+}

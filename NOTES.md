@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Pin the C statements of the format against the Rust codecs](#2026-09-17--pin-the-c-statements-of-the-format-against-the-rust-codecs)
 - [2026-09-17 — Move the placement of the permanent areas into geometry](#2026-09-17--move-the-placement-of-the-permanent-areas-into-geometry)
 - [2026-09-17 — Give the extent-map item one codec](#2026-09-17--give-the-extent-map-item-one-codec)
 - [2026-09-17 — Explain one block with a walk that shares nothing with the checker](#2026-09-17--explain-one-block-with-a-walk-that-shares-nothing-with-the-checker)
@@ -186,6 +187,30 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-17 — Pin the C statements of the format against the Rust codecs
+
+`struct afsp_timespec_wire` in the format header was 16 bytes with a reserved
+field that no codec writes: the executable format, both readers and every
+image use 12-byte times, three of them in 36 bytes of the object record. The
+structure was referenced by nothing, so nothing noticed. It is 12 bytes now;
+the wire is unchanged.
+
+`crates/afsplus-format/tests/c_constants.rs` compiles two probes and requires
+the printed map to equal the Rust side exactly, so an unpaired constant on
+either side fails too. `spec_probe.c` prints the 24 constants and both
+wire-structure sizes of the header. `reader_constants_probe.c` includes
+`reader.c` and prints the 43 format constants the portable reader compiles
+with as private macros: header size, checksum offset, eight block magics,
+payload sizes, region bounds, slot counts, tree kinds and limits, log limits
+and the security sizes. Rust values come from public constants, or from the
+payload length of a block the codec just encoded where the constant is
+private. The header had that one mismatch; the 43 macros all agree and were
+pinned by nothing before. The object record now has an offset table in
+[docs/04](docs/04-object-model.md). The layouts no C code reads (snapshot
+checkpoint payload, reclaim structures, snapshot records) are Q15 in
+[open questions](implementation/open-questions.md).
 
 ## 2026-09-17 — Move the placement of the permanent areas into geometry
 

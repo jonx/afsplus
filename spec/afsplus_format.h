@@ -66,11 +66,13 @@ enum afsp_mount_intent {
  *
  * No local timezone, daylight-saving state, or Amiga epoch is stored on disk.
  * Host adapters convert to/from their native time representation.
+ *
+ * The wire form is 12 bytes with no padding or reserved field: an object
+ * record carries three of them in 36 bytes.
  */
 struct afsp_timespec_wire {
     uint8_t seconds_le[8];
     uint8_t nanoseconds_le[4];
-    uint8_t reserved[4];
 };
 
 /*
