@@ -1,6 +1,6 @@
 # 32. Reflink and Clone Semantics
 
-> **ADRs:** [ADR-027](../adr/ADR-027-reflink-clones.md), [ADR-061](../adr/ADR-061-shared-extent-references.md) · **Spec:** none ·
+> **ADRs:** [ADR-027](../adr/ADR-027-reflink-clones.md), [ADR-061](../adr/ADR-061-shared-extent-references.md), [ADR-102](../adr/ADR-102-clone-metadata-inheritance.md) · **Spec:** none ·
 > **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
 
 ## 1. Move, hard link, symlink, clone, and copy are different
@@ -34,9 +34,22 @@ source object 100 -> extent X, Y, Z
 clone  object 101 -> extent X, Y, Z
 ```
 
-Object metadata is independent unless explicitly inherited by API contract.
+The clone gets a new stable object ID. Its metadata follows
+[ADR-102](../adr/ADR-102-clone-metadata-inheritance.md):
 
-The clone gets a new stable object ID.
+| Field | The clone receives |
+|---|---|
+| Object ID, content generation | New |
+| Link count | One |
+| Size and data mapping | The source's, shared |
+| Modification time | The source's |
+| Creation time, change time | The clone time |
+| Protection word | The source's |
+| Data-update policy flag | Cleared: full COW |
+| Security descriptor | A copy of the source's, in segments of its own, with its divergence mark |
+
+The source keeps every user-visible field, including its change time: marking
+its runs as shared is a layout fact, and a clone needs read access only.
 
 ## 4. Copy-on-write after cloning
 
@@ -64,7 +77,7 @@ COW regardless of policy.
 
 ## 5. CloneRange
 
-`CloneRange()` shares only the requested aligned or representable source range with a destination file.
+`CloneRange()` shares only the requested aligned or representable source range with a destination file. It is a content write to the destination: its modification and change time move and its content generation advances, while its creation time, protection word, link count, data-update policy and security descriptor stay its own. The source keeps every user-visible field ([ADR-102](../adr/ADR-102-clone-metadata-inheritance.md)).
 
 The API defines byte ranges. The filesystem may internally round/split extents as required while preserving exact visible byte semantics.
 

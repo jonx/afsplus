@@ -1,16 +1,7 @@
-# Proposed ADR: reserve an actor field in the change record
+# ADR-103: Reserved actor field in the change record
 
-> **ADRs:** [ADR-013](../adr/ADR-013-change-stream-bounded.md), [ADR-031](../adr/ADR-031-portable-security-acls.md), [ADR-065](../adr/ADR-065-persistent-data-update-policy.md) · **Spec:** none ·
-> **Tests:** [security-scanning-benchmarks](../testing/security-scanning-benchmarks.md) · **Milestones:** M10, M14
-
-Target on acceptance: a numbered ADR in `adr/`; the record section of
-[docs/11](../docs/11-change-stream.md) gains the common change-record header
-and its actor field, and [Q8](../implementation/open-questions.md) records the
-change stream's attribution contract.
-
-Decisions requested: M1 (reserve the field and its layout), M2 (trust level and
-format neutrality), M3 (admission rule), M4 (relation to principal identity),
-D1 (the API-v2 surface consequence).
+Status: Accepted
+Amends: ADR-013
 
 <!-- toc -->
 
@@ -90,14 +81,14 @@ incarnation token are likewise open design gates
 therefore changes no code and no image.
 
 The admission question is settled by precedent rather than by fresh
-experiment. The proposed object-record rule admits a record only in its
+experiment. The object-record rule admits a record only in its
 canonical image, because every mutation path decodes a record into fields and
 re-encodes those fields into a zeroed block, so a byte admitted without a field
 is destroyed by the next rewrite
-([exact admission](adr-object-record-admission.md)). Change records differ on
+([exact admission](ADR-100-exact-object-record-admission.md)). Change records differ on
 exactly that point: the stream is append-only, a committed record is never
 re-encoded, and retention discards whole records rather than rewriting them
-([ADR-013](../adr/ADR-013-change-stream-bounded.md)). The reason for refusing
+([ADR-013](ADR-013-change-stream-bounded.md)). The reason for refusing
 to tolerate an unknown byte is absent for the payload of the actor field and
 present for every byte whose value no writer may choose.
 
@@ -157,7 +148,7 @@ not:
    value and the raw bytes, never a substituted or fabricated actor.
 
 Rules 1 and 3 are the exact-admission rule of
-[exact admission](adr-object-record-admission.md) applied to every byte whose
+[exact admission](ADR-100-exact-object-record-admission.md) applied to every byte whose
 value no writer may choose: reserved bytes are zero or defined and are never
 ignored. Rules 2 and 5 depart from that rule deliberately and only for values
 a writer chooses and the record itself names. Its justification is the loss
@@ -206,11 +197,11 @@ does not know the class a defined outcome.
 | Step | State |
 |---|---|
 | Specification update | The common change-record header and the actor field land in docs/11 on acceptance; the wire offsets join the disk layout when M10 defines the stream encoding |
-| ADR | This proposal |
+| ADR | This ADR |
 | Compatibility classification | None needed: no writer, image or corpus entry contains a change record |
 | Conformance image | None available: the shared corpus gains change-stream images when the M10 codec produces the first one |
 | Parser tests | None exist and none are written here, because no change-record codec exists in `crates/`. The M10 change-stream lot owns the codec and its admission tests: a nonzero reserved byte, an unassigned `actor_trust` reported as advisory with its raw value, a zero class with each of the thirteen following bytes nonzero in turn, a canonical unattributed control that decodes to the literal record and re-encodes to the identical bytes, an attributed control per assigned class, and an unassigned-class record admitted with an unreadable actor |
-| Repair-tool behavior | A record that fails rule 1 or rule 3 is reported as a corrupt change record. The checker never repairs it by zeroing the field, because that would assert an unattributed change that the volume does not record. The stream is discardable, so the sanctioned recovery is discard and reset with `FSV2_ERR_RESCAN_REQUIRED` to every cursor ([ADR-013](../adr/ADR-013-change-stream-bounded.md)) |
+| Repair-tool behavior | A record that fails rule 1 or rule 3 is reported as a corrupt change record. The checker never repairs it by zeroing the field, because that would assert an unattributed change that the volume does not record. The stream is discardable, so the sanctioned recovery is discard and reset with `FSV2_ERR_RESCAN_REQUIRED` to every cursor ([ADR-013](ADR-013-change-stream-bounded.md)) |
 | Resource impact | Sixteen bytes per record, present whether or not a host supplies an actor. The stream is bounded, so the cost is paid in retention depth: a fixed stream budget retains fewer records in proportion to the record width that M10 fixes. No allocation, no additional I/O and no extra pass, because the field lies inside the record the reader already decodes and the checksum already covers |
 
 ## API contract consequences
@@ -226,7 +217,7 @@ an absent actor. A consumer that filters by actor treats an unattributed and an
 unreadable record as candidates rather than as exclusions, which keeps a
 scanner fail-open with respect to coverage and closed with respect to claims.
 
-The API structure and its ABI are not edited by this proposal. The Stage C
+The API structure and its ABI are not edited by this ADR. The Stage C
 session that owns docs/13 and `api/` places the field in the iterator's record
 structure as an additive, capability-gated extension, sized for the sixteen
 bytes plus whatever reporting the unreadable case requires, and runs the
@@ -248,7 +239,7 @@ mapping impact and one filesystem-neutral test.
   consumer's report and never the volume.
 - The two reference implementations share rules 1 to 5 in one admission
   function from the first codec, so they cannot diverge the way the object
-  readers did ([ADR-029](../adr/ADR-029-dual-reference-implementations.md)).
+  readers did ([ADR-029](ADR-029-dual-reference-implementations.md)).
 - Change records deliberately adopt a weaker admission rule than object
   records for one bounded payload. The difference is justified by append-only
   records, and the justification fails the moment any path rewrites a committed
@@ -280,4 +271,4 @@ mapping impact and one filesystem-neutral test.
   a volume moves between hosts, given that a class payload can identify a user
   account. The security model's projection and preservation rules are written
   for security descriptors rather than for observational evidence, and the
-  question needs a real multi-host adapter ([ADR-031](../adr/ADR-031-portable-security-acls.md)).
+  question needs a real multi-host adapter ([ADR-031](ADR-031-portable-security-acls.md)).

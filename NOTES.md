@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Accept the four Stage B decisions as ADR-100 to ADR-103](#2026-09-17--accept-the-four-stage-b-decisions-as-adr-100-to-adr-103)
 - [2026-09-17 — Bring the portable C reader to exact admission and the security container](#2026-09-17--bring-the-portable-c-reader-to-exact-admission-and-the-security-container)
 - [2026-09-17 — Grow the AROS C boundary to interface revision 7](#2026-09-17--grow-the-aros-c-boundary-to-interface-revision-7)
 - [2026-09-17 — Decide clone metadata inheritance and leave the clone source untouched](#2026-09-17--decide-clone-metadata-inheritance-and-leave-the-clone-source-untouched)
@@ -179,6 +180,35 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — Accept the four Stage B decisions as ADR-100 to ADR-103
+
+The four Stage B proposals are accepted and numbered:
+[ADR-100](adr/ADR-100-exact-object-record-admission.md) exact admission of
+object records, [ADR-101](adr/ADR-101-security-preservation-container.md) the
+security preservation container,
+[ADR-102](adr/ADR-102-clone-metadata-inheritance.md) clone metadata
+inheritance and [ADR-103](adr/ADR-103-change-record-actor.md) the reserved
+actor field of the change record. ADR-101 amends ADR-031, ADR-102 amends
+ADR-027 and ADR-103 amends ADR-013; ADR-031 keeps its Proposed status for the
+canonical ACL candidate it still describes.
+
+The accepted texts carry the state at acceptance: `CloneFile` copies the
+descriptor chain, a damaged chain never makes its object undeletable, the
+AROS handler defaults to the preserve projection policy with strict as a
+mount flag, both readers bound the first segment where they admit the record,
+and the portable C reader shares the admission rule, so the C parity items
+left the open lists. Q13 and Q14 are closed and the format half of Q5 is
+closed in [open questions](implementation/open-questions.md). The decisions
+landed in their target documents: the admission rule and the security
+reference in [docs/04](docs/04-object-model.md) and the
+[disk layout](spec/disk-layout.md), the projection rule and the clone copy in
+[docs/30](docs/30-portable-security-model.md), the clone metadata table in
+[docs/32](docs/32-reflink-clone-semantics.md), the actor header in
+[docs/11](docs/11-change-stream.md) and ROADMAP B5. The C volume test checks
+the out-of-range reference against both readers. The filesystem API documents
+are unchanged; their consequences are listed in ADR-101, ADR-102 and ADR-103.
+
 ## 2026-09-17 — Bring the portable C reader to exact admission and the security container
 
 The portable C reader shares the object admission rule of the Rust decoder.
@@ -269,7 +299,7 @@ times; its two source assertions failed with the clone times 40 and 50 before
 the correction. The 17 shared-clone tests and the two data-policy clone tests
 pass with it. The decision, its build-cache consumer and the API consequences
 are in
-[clone metadata inheritance](proposals/adr-clone-metadata-inheritance.md).
+[clone metadata inheritance](adr/ADR-102-clone-metadata-inheritance.md).
 
 ## 2026-09-17 — Carry opaque security descriptors through every object rewrite
 
@@ -304,7 +334,7 @@ the checker's leak findings. The fuzz oracle models the reference
 independently. Clippy is clean on the format, core and VFS crates.
 
 The decision is proposed in
-[security preservation container](proposals/adr-security-preservation-container.md).
+[security preservation container](adr/ADR-101-security-preservation-container.md).
 Portable C parity, conformance images, the format-identity registry, backup
 transport, descriptors under persistent snapshots and every evaluation
 semantic are open there. The filesystem API consequences (three descriptor
@@ -326,7 +356,7 @@ reserving the field changes no code and no image while adding it after the
 freeze would change the epoch.
 
 The proposal
-[reserve an actor field in the change record](proposals/adr-change-record-actor.md)
+[reserve an actor field in the change record](adr/ADR-103-change-record-actor.md)
 places a fixed 16-byte actor in the common record header, as a 16-bit host
 actor class, an 8-bit host trust claim, a zero reserved byte and twelve opaque
 bytes that the class defines, with an all-zero field meaning unattributed. The
@@ -365,7 +395,7 @@ images, each refused by three readers with an exact reason, a canonical
 control and a symlink image; five tests pass, alongside the existing
 reserved-byte, roundtrip and C symlink tests. The rule and its extension path
 are proposed in
-[exact admission of object records](proposals/adr-object-record-admission.md).
+[exact admission of object records](adr/ADR-100-exact-object-record-admission.md).
 Portable C parity for payload length and tail, and the resealed conformance
 images, are open under that proposal.
 

@@ -1,6 +1,6 @@
 # 11. Change Stream
 
-> **ADRs:** none · **Spec:** none ·
+> **ADRs:** [ADR-013](../adr/ADR-013-change-stream-bounded.md), [ADR-103](../adr/ADR-103-change-record-actor.md) · **Spec:** none ·
 > **Tests:** [security-scanning-benchmarks](../testing/security-scanning-benchmarks.md) · **Milestones:** M10
 
 ## 1. Purpose
@@ -39,6 +39,27 @@ Initial record types:
 - XATTR_CHANGED
 
 Records contain object ID and only the additional information required by the event.
+
+Every record type shares a common header that reserves a 16-byte actor
+([ADR-103](../adr/ADR-103-change-record-actor.md)):
+
+```text
+actor_class  u16    validated namespace of the host actor identity
+actor_trust  u8     the host's claim about the mechanism behind actor_id
+reserved     u8     zero
+actor_id     u8[12] opaque to the format, defined by actor_class
+```
+
+An all-zero field means unattributed. The actor is advisory evidence supplied
+by the host adapter: the format authenticates nothing about it and no
+filesystem decision reads it. The layout names no host concept; each adapter
+maps its own runtime subject into a class. A nonzero reserved byte, or a zero
+class with any other nonzero byte, makes the record corrupt. A reader reports
+an unassigned trust value as advisory together with the raw value, and admits
+an unassigned class with the actor reported as unreadable, which is sound
+because a committed change record is never re-encoded. An actor is a runtime
+subject; a security principal ([docs/30](30-portable-security-model.md)) is a
+separate concept, and epoch 1 reserves no principal field in the record.
 
 ## 4. Rename
 

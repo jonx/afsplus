@@ -1,20 +1,7 @@
-# Proposed ADR: security preservation container
+# ADR-101: Security preservation container
 
-> **ADRs:** [ADR-031](../adr/ADR-031-portable-security-acls.md), [ADR-065](../adr/ADR-065-persistent-data-update-policy.md), [ADR-075](../adr/ADR-075-revocable-backup-capability.md), [ADR-082](../adr/ADR-082-backup-object-metadata.md) · **Spec:** [invariants](../spec/invariants.md) ·
-> **Tests:** [security conformance](../testing/security-model-conformance.md) · **Milestones:** M14
-
-Target on acceptance: a numbered ADR in `adr/` that closes ROADMAP B5 and the
-format half of Q5 in [open questions](../implementation/open-questions.md);
-the wire layout lands in [disk layout](../spec/disk-layout.md) and
-[docs/04](../docs/04-object-model.md), the projection rule in
-[docs/30](../docs/30-portable-security-model.md), and the feature identity in
-the [feature registry](../spec/feature-registry.toml).
-
-Decisions requested: M1 (container and reference), M2 (feature class), M3
-(projection rule), M4 (lifetime and ownership), M5 (what stays outside
-epoch 1). It builds on the
-[exact admission of object records](adr-object-record-admission.md), whose
-extension path it is the first to use.
+Status: Accepted
+Amends: ADR-031
 
 <!-- toc -->
 
@@ -35,7 +22,7 @@ extension path it is the first to use.
 
 ## Context
 
-[ADR-031](../adr/ADR-031-portable-security-acls.md) separates two commitments:
+[ADR-031](ADR-031-portable-security-acls.md) separates two commitments:
 a container that carries rich security metadata across hosts, needed before
 epoch 1, and the evaluation semantics of a canonical ACL, which need real
 POSIX and Windows adapters first. The epoch-1 freeze gate reads "unknown
@@ -159,7 +146,7 @@ never implied. The policy is host runtime state and is absent from the disk.
   the source's format identity, version, bytes and divergence mark, so a
   crash shows no clone or a clone with its complete descriptor. `CloneRange`
   is a content write and keeps the destination's own
-  ([clone metadata inheritance](adr-clone-metadata-inheritance.md)).
+  ([clone metadata inheritance](ADR-102-clone-metadata-inheritance.md)).
 - Retiring a chain, whether the object dies or its descriptor is replaced,
   proves one segment at a time: valid magic and checksum, this owner, the
   expected position, the reference's identity and length, and a committed
@@ -177,7 +164,7 @@ never implied. The policy is host runtime state and is absent from the disk.
   partially retired chain appears there as a block owned by nothing, which
   is the existing leak finding and needs nothing new on the wire.
 - The volume combination with persistent snapshots
-  ([ADR-070](../adr/ADR-070-persistent-snapshot-priority.md)) is refused at
+  ([ADR-070](ADR-070-persistent-snapshot-priority.md)) is refused at
   mount and is absent from the formatter: historical ownership of descriptor
   segments under the lifetime ledger is unqualified.
 
@@ -187,7 +174,7 @@ The base writable milestone defines no principal encoding, no ACE layout, no
 inheritance, no evaluation order, no audit semantics and no shared descriptor
 store. Those belong to descriptor formats, each behind its own format
 identity, validated by the adapters that
-[ADR-031](../adr/ADR-031-portable-security-acls.md) names. Shared immutable
+[ADR-031](ADR-031-portable-security-acls.md) names. Shared immutable
 descriptors ([docs/30 section 8](../docs/30-portable-security-model.md#8-security-descriptors-as-shared-objects))
 stay an optimisation candidate: the reference has room for it through a new
 reference flag and an ownership rule of its own.
@@ -204,9 +191,9 @@ reused.
 | Step | State |
 |---|---|
 | Specification update | Layouts above land in the disk layout and docs/04 on acceptance; `crates/afsplus-format/src/security.rs` and `object.rs` carry them as module documentation today |
-| ADR | This proposal |
+| ADR | This ADR |
 | Compatibility classification | INCOMPAT bit 3, reasoned in M2 |
-| Conformance image | Open: one image per object type with a multi-segment descriptor, plus resealed negative images, joins the shared corpus with the portable C lot |
+| Conformance image | `crates/afsplus-format/tests/security_c.rs` generates 67 object images and 10 segment images, positive and resealed negative, and `crates/afsplus-check/tests/security_c.rs` real volumes with descriptors on a file, a directory, a symlink and the root; the Rust codec, the portable C codec and a literal expectation agree on each. Retained corpus files follow with the M14 corpus |
 | Parser tests | `crates/afsplus-format/tests/security_container.rs`: literal wire bytes of the reference and the segment, flag and field congruence in both directions, five malformed references, directory and symlink carriers with the 16-byte target reduction, literal segment geometry, seven invalid segments and four resealed corruptions. The independent fuzz oracle (`fuzz/src/object_payload.rs`) models the reference separately from the decoder |
 | Repair-tool behavior | The checker validates and claims every chain and never edits one: descriptor bytes have an owner the tool does not understand ([tool rule](../spec/compatibility-rules.md#tool-rule)). Salvage of an object whose chain is damaged reports the loss of the descriptor explicitly |
 | Resource impact | No cost on objects without a descriptor: the record stays 96 bytes and no path reads a segment. With one: 16 bytes in the record; one block per 4,040 descriptor bytes; one extra block read per segment on descriptor read, replacement and deletion, none on lookup, stat, data I/O or mount. Bounded at 17 segments by the 64 KiB limit. Peak memory is one descriptor |
@@ -234,7 +221,7 @@ the transition with a clean checker verdict.
 
 ## API contract consequences
 
-These belong to the Stage C API and handler work; this proposal changes no
+These belong to the Stage C API and handler work; this ADR changes no
 API document.
 
 - Filesystem API v2 gains three capability-gated operations: read, set and
@@ -260,7 +247,7 @@ API document.
   because there is nothing on disk to preserve or to mark. Volumes without
   descriptors behave as before.
 - Backup and restore transport the descriptor as one opaque value pair per
-  object ([ADR-084](../adr/ADR-084-opaque-backup-value-pairs.md)); restoration
+  object ([ADR-084](ADR-084-opaque-backup-value-pairs.md)); restoration
   sets the descriptor after the protection word, which also leaves the
   divergence mark clear.
 
@@ -273,15 +260,16 @@ API document.
   bytes and refuses or marks one kind of edit.
 - Rich semantics evolve by format identity, without an epoch change and
   without touching the object record again.
-- Volumes that enable the feature are unreadable by pre-decision prototypes
-  and, until the parity lot, by the portable C reader, which fails closed on
-  the unknown flag.
+- Volumes that enable the feature are unreadable by pre-decision
+  prototypes. The portable C reader admits the reference and the segments
+  under the same rules and exposes two standalone decoders for them.
 
 ## Open after this decision
 
-- Portable C reader and writer parity and the conformance images: the C
-  object decoder has no single-test harness outside the portable-C suite,
-  and that work is scheduled with the C portability lot.
+- A portable C read path for whole descriptors, walking a chain through the
+  block callbacks: it belongs with the API operation that returns a
+  descriptor. The C writer appends intent records and rewrites no object
+  record, so it needs nothing.
 - The registry of format identities, including the host-private range: no
   adapter exists, so values would be invented.
 - Descriptors on volumes with persistent snapshots, and the second half of

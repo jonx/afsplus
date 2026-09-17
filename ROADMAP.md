@@ -213,11 +213,21 @@ Wire freeze and hardware acceptance belong to [\[M14\]](implementation/milestone
 
 ### B5. Security preservation container
 
-- versioned security descriptor/blob reference path
-- preserve unknown rich security metadata
-- classic/simple-host projection must not destroy it
+Architecture closed by [ADR-101](adr/ADR-101-security-preservation-container.md),
+on the admission rule of [ADR-100](adr/ADR-100-exact-object-record-admission.md):
 
-Do **not** require full canonical NFSv4/Windows ACL evaluation semantics in the base writable milestone.
+- an object record references a versioned, opaque security descriptor in a
+  chain of segments it owns alone;
+- every rewrite of the record carries the reference, so metadata no host
+  evaluates survives byte for byte, and `CloneFile` copies it
+  ([ADR-102](adr/ADR-102-clone-metadata-inheritance.md));
+- a classic protection edit is refused or applied with a durable divergence
+  mark, and only the explicit clear discards descriptor bytes.
+
+The base writable milestone defines no canonical NFSv4/Windows ACL evaluation
+semantics. Descriptor formats, their registry and evaluation remain with
+[Q5](implementation/open-questions.md); exact offsets remain subject to M14
+review.
 
 ## \[Stage C\]: integrate AROS and begin independent C portability
 

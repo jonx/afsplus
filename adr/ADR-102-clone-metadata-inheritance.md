@@ -1,28 +1,20 @@
-# Proposed ADR: metadata inheritance of CloneFile and CloneRange
+# ADR-102: Metadata inheritance of CloneFile and CloneRange
 
-> **ADRs:** [ADR-027](../adr/ADR-027-reflink-clones.md), [ADR-061](../adr/ADR-061-shared-extent-references.md), [ADR-065](../adr/ADR-065-persistent-data-update-policy.md) · **Spec:** [invariants](../spec/invariants.md) ·
-> **Tests:** [shared extents](../testing/shared-extents-qualification.md), [fuzzing](../testing/fuzzing.md) · **Milestones:** M07, M14
-
-Target on acceptance: a numbered ADR in `adr/`, closing Q14 in
-[open questions](../implementation/open-questions.md); the table below lands
-in [clone semantics](../docs/32-reflink-clone-semantics.md) and in the clone
-capability of [FS API v2](../docs/13-filesystem-api-v2.md).
-
-Decisions requested: D1 (CloneFile destination), D2 (CloneRange
-destination), D3 (the source), D4 (the explicit-preservation option).
+Status: Accepted
+Amends: ADR-027
 
 ## Context
 
 Four sources described the metadata of a clone and none decided it:
 [clone semantics](../docs/32-reflink-clone-semantics.md) defer to the API
-contract, FS API v2 is silent, [ADR-027](../adr/ADR-027-reflink-clones.md)
+contract, FS API v2 is silent, [ADR-027](ADR-027-reflink-clones.md)
 says "independent metadata", and
 [docs/30](../docs/30-portable-security-model.md#13-move-copy-and-clone-security-semantics)
 says the destination inherits the destination's security policy. The
 executable `CloneFile` copied the protection word and the modification time,
 set creation and change time to the clone time and the link count to one, and
 left the data-update policy at full COW
-([ADR-065](../adr/ADR-065-persistent-data-update-policy.md)).
+([ADR-065](ADR-065-persistent-data-update-policy.md)).
 
 Two precedents frame the choice. A Linux `FICLONE` shares data into a file
 the caller already created, so every metadata field is the destination's own.
@@ -49,8 +41,8 @@ D1. `CloneFile` creates a new object:
 | Modification time | The source's: it dates the content, and the content is the source's |
 | Creation time, change time | The clone time |
 | Protection word | The source's: a cloned executable stays executable, a cloned script stays a script |
-| Data-update policy flag | Cleared: full COW ([ADR-065](../adr/ADR-065-persistent-data-update-policy.md)); in-place updates of a shared run are excluded by [ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md) |
-| Security descriptor | A copy of the source's, in segments of its own: same format identity, version, bytes and divergence mark, allocated and published by the clone transaction ([security preservation container](adr-security-preservation-container.md)) |
+| Data-update policy flag | Cleared: full COW ([ADR-065](ADR-065-persistent-data-update-policy.md)); in-place updates of a shared run are excluded by [ADR-062](ADR-062-explicit-hybrid-data-updates.md) |
+| Security descriptor | A copy of the source's, in segments of its own: same format identity, version, bytes and divergence mark, allocated and published by the clone transaction ([security preservation container](ADR-101-security-preservation-container.md)) |
 | Extended attributes and comment, once they exist | Undecided here; see the open list |
 
 D2. `CloneRange` is a content write to an existing destination. The
@@ -105,7 +97,7 @@ released consumer exists.
 
 ## API contract consequences
 
-For the Stage C API work; this proposal edits no API document.
+For the Stage C API work; this ADR edits no API document.
 
 - The clone capability of FS API v2 states D1 to D3 as its metadata contract,
   and a filesystem-neutral test asserts them through the API.

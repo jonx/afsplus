@@ -258,19 +258,14 @@ fn c_and_rust_agree_on_objects_of_real_images() {
     let mut outside = secured.clone();
     outside[at + HEADER_SIZE + 96..at + HEADER_SIZE + 104].copy_from_slice(&u64::MAX.to_le_bytes());
     reseal(&mut outside[at..at + BLOCK], 112);
-    // The Rust lookup carries the reference unread, as the C lookup does;
-    // only the C volume path bounds the first segment at lookup, so this
-    // image is checked against C alone.
-    fs::write(scratch.0.join("image"), &outside).unwrap();
-    assert_eq!(
-        Command::new(&probe)
-            .arg("lookup")
-            .arg(scratch.0.join("image"))
-            .args([file.to_string(), "corrupt".into()])
-            .status()
-            .unwrap()
-            .code(),
-        Some(0)
+    // Both readers bound the first segment where they admit the record.
+    agree(
+        &probe,
+        &scratch,
+        "reference outside the volume",
+        &outside,
+        file,
+        Verdict::Corrupt,
     );
 
     // A volume without the feature: a record that carries a reference is

@@ -1,6 +1,6 @@
 # 30. Portable Multi-User Security Model
 
-> **ADRs:** [ADR-031](../adr/ADR-031-portable-security-acls.md), [ADR-082](../adr/ADR-082-backup-object-metadata.md) · **Spec:** [backup object metadata](../spec/backup-object-metadata.md) ·
+> **ADRs:** [ADR-031](../adr/ADR-031-portable-security-acls.md), [ADR-082](../adr/ADR-082-backup-object-metadata.md), [ADR-101](../adr/ADR-101-security-preservation-container.md), [ADR-102](../adr/ADR-102-clone-metadata-inheritance.md) · **Spec:** [backup object metadata](../spec/backup-object-metadata.md) ·
 > **Tests:** [security conformance](../testing/security-model-conformance.md) · **Milestones:** M14
 
 <!-- toc -->
@@ -42,6 +42,10 @@ requirements, not accepted disk encodings or implemented host guarantees.
 Cross-platform adapters must validate or revise them before adoption.
 [ADR-082](../adr/ADR-082-backup-object-metadata.md) requires explicit backup
 inventory knowledge without selecting this candidate evaluation model.
+[ADR-101](../adr/ADR-101-security-preservation-container.md) defines the
+preservation container: an opaque, versioned descriptor per object that the
+filesystem carries and never evaluates. A descriptor format that encodes the
+candidate below is one format identity among others inside that container.
 
 AFS+ must preserve useful single-user Amiga semantics while also being able to serve as a serious multi-user filesystem on AROS, Linux, BSD, Windows, macOS, or another operating system.
 
@@ -225,6 +229,19 @@ Critical rule: a classic implementation may preserve rich ACLs it cannot fully e
 
 If a requested write would destroy security information the implementation should reject it unless the user explicitly requests security downgrade/conversion.
 
+For the descriptor container this rule is executable
+([ADR-101](../adr/ADR-101-security-preservation-container.md)). The protection
+word stays the classic projection, and a descriptor never changes when the
+protection word changes. An edit of the protection word on an object that
+carries a descriptor follows the host's projection policy: **strict** refuses
+the edit and changes nothing; **preserve** applies it, keeps every descriptor
+byte and sets the durable projection-diverged mark in the same transaction,
+so a host that evaluates the descriptor reconciles the two views. The core
+default is strict at every mount. The AROS handler defaults to preserve,
+because a refusal leaves a DOS user with no way to change protection at all,
+and a mount flag selects strict. Clearing a descriptor is a separate explicit
+operation and the only one that discards descriptor bytes of a live object.
+
 ## 10. POSIX mapping
 
 POSIX rwx and POSIX ACLs are a projection of the richer AFS+ model.
@@ -312,10 +329,14 @@ Default:
 shared data initially
 new object ID
 new content generation namespace
-inherit destination security policy
+a copy of the source's security descriptor, in blocks the clone owns
 ```
 
-An authorized caller may request cloned security metadata explicitly.
+[ADR-102](../adr/ADR-102-clone-metadata-inheritance.md) selects the copy: a
+clone is protected from the first transaction that makes it visible, and the
+explicit clear stays the only path that loses a descriptor. A caller that
+wants another descriptor replaces it through the explicit setter; an option
+to create the clone without one is an API-level addition.
 
 These semantics must be tested across platforms before epoch 1.
 

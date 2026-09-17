@@ -1,6 +1,7 @@
 # ADR-031: Portable security metadata and canonical ACL candidate
 
 Status: Proposed
+Amended by: ADR-101
 
 ## Context
 

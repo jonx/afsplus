@@ -1,8 +1,21 @@
 # 04. Object Model
 
 > **ADRs:** [ADR-066](../adr/ADR-066-bounded-orphan-directory.md) ·
-> [ADR-068](../adr/ADR-068-portable-symlink-targets.md) · **Spec:** none ·
+> [ADR-068](../adr/ADR-068-portable-symlink-targets.md), [ADR-100](../adr/ADR-100-exact-object-record-admission.md), [ADR-101](../adr/ADR-101-security-preservation-container.md) · **Spec:** none ·
 > **Tests:** [crash-testing](../testing/crash-testing.md) · **Milestones:** M03
+
+<!-- toc -->
+
+- [1. Stable objects](#1-stable-objects)
+- [2. Object types](#2-object-types)
+- [3. Core object record](#3-core-object-record)
+- [4. Object identity invariants](#4-object-identity-invariants)
+- [5. Orphan handling](#5-orphan-handling)
+- [6. ID reuse](#6-id-reuse)
+- [7. Executable prototype status](#7-executable-prototype-status)
+- [Metadata mutation and restoration](#metadata-mutation-and-restoration)
+
+<!-- /toc -->
 
 ## 1. Stable objects
 
@@ -49,6 +62,26 @@ The core record contains only fields required by almost every implementation:
 - checksum
 
 Large or uncommon metadata belongs in attributes, not in an ever-growing fixed inode.
+
+An object record is admitted only in its canonical image
+([ADR-100](../adr/ADR-100-exact-object-record-admission.md)): zero common
+header flags, a payload of exactly the length its type and flags define, a
+zero reserved byte, assigned object flags only and a zero tail. Every reader
+applies the rule through one shared check, in Rust and in portable C, because
+a rewrite re-encodes decoded fields into a zeroed block and would drop any
+byte admitted without a field. The record grows only through an object flag
+bound to a volume feature identity that defines the exact new length.
+
+The first such extension is the security reference
+([ADR-101](../adr/ADR-101-security-preservation-container.md)). Object flag
+bit 2 extends the fixed payload from 96 to 112 bytes, before any inline
+symlink target: first descriptor segment block, descriptor length, segment
+count and a flags word whose bit 0 marks a diverged classic projection. The
+descriptor is an opaque byte string of 1 to 65,536 bytes with a format
+identity and a format version, stored in a chain of `"AFSX"` segments owned
+by that object alone. The filesystem stores, returns, copies on `CloneFile`
+and removes it, and never evaluates it. The projection rule for protection
+edits is in [docs/30](30-portable-security-model.md#9-classic-amiga-compatibility-profile).
 
 ## 4. Object identity invariants
 

@@ -41,7 +41,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-010](ADR-010-feature-flags.md) | Feature flags instead of a linear feature version | Accepted | — |
 | [ADR-011](ADR-011-portable-core.md) | Portable filesystem core | Accepted | — |
 | [ADR-012](ADR-012-catalog-derived.md) | Global catalog is derived, not authoritative | Accepted | — |
-| [ADR-013](ADR-013-change-stream-bounded.md) | Change stream is bounded and may require rescan | Accepted | — |
+| [ADR-013](ADR-013-change-stream-bounded.md) | Change stream is bounded and may require rescan | Accepted | amended by [ADR-103](ADR-103-change-record-actor.md) |
 | [ADR-014](ADR-014-no-changes.md) | Strict no-changes mount mode | Accepted | — |
 | [ADR-015](ADR-015-shared-repair-core.md) | Filesystem and repair tools share validation code | Accepted | — |
 | [ADR-016](ADR-016-no-core-layout-plugins.md) | Fundamental layouts are not runtime plugins | Accepted | — |
@@ -55,11 +55,11 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-024](ADR-024-rebuildable-reverse-map.md) | Rebuildable reverse physical-to-owner map | Proposed | — |
 | [ADR-025](ADR-025-structured-management-api.md) | Structured management API from the first release | Accepted | — |
 | [ADR-026](ADR-026-bounded-atomic-batches.md) | Bounded atomic namespace batches | Partially accepted | amended by [ADR-063](ADR-063-intent-log-epoch1.md) |
-| [ADR-027](ADR-027-reflink-clones.md) | Reflink file and range cloning | Accepted | — |
+| [ADR-027](ADR-027-reflink-clones.md) | Reflink file and range cloning | Accepted | amended by [ADR-102](ADR-102-clone-metadata-inheritance.md) |
 | [ADR-028](ADR-028-rust-reference-core.md) | Rust reference core with language-neutral format | Accepted | — |
 | [ADR-029](ADR-029-dual-reference-implementations.md) | Rust primary implementation plus portable C implementation | Accepted | — |
 | [ADR-030](ADR-030-first-class-content-inspection.md) | First-class content inspection contract | Proposed | — |
-| [ADR-031](ADR-031-portable-security-acls.md) | Portable security metadata and canonical ACL candidate | Proposed | — |
+| [ADR-031](ADR-031-portable-security-acls.md) | Portable security metadata and canonical ACL candidate | Proposed | amended by [ADR-101](ADR-101-security-preservation-container.md) |
 | [ADR-032](ADR-032-access-intent-hints.md) | Advisory access-intent hints | Proposed | — |
 | [ADR-033](ADR-033-sealed-content.md) | Sealed immutable content | Proposed | — |
 | [ADR-034](ADR-034-bounded-cow-tree.md) | Shared bounded copy-on-write tree engine | Accepted | — |
@@ -128,6 +128,10 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-097](ADR-097-bounded-memory-overlay-branches.md) | Share immutable bases across bounded memory overlay branches | Accepted | — |
 | [ADR-098](ADR-098-bound-block-replay-traces.md) | Bind persistent block replay traces to their base image | Accepted | — |
 | [ADR-099](ADR-099-semantic-replay-bundles.md) | Bind semantic scenarios and replay results in complete bundles | Proposed | — |
+| [ADR-100](ADR-100-exact-object-record-admission.md) | Exact admission of object records | Accepted | — |
+| [ADR-101](ADR-101-security-preservation-container.md) | Security preservation container | Accepted | amends [ADR-031](ADR-031-portable-security-acls.md) |
+| [ADR-102](ADR-102-clone-metadata-inheritance.md) | Metadata inheritance of CloneFile and CloneRange | Accepted | amends [ADR-027](ADR-027-reflink-clones.md) |
+| [ADR-103](ADR-103-change-record-actor.md) | Reserved actor field in the change record | Accepted | amends [ADR-013](ADR-013-change-stream-bounded.md) |
 
 <!-- /adr-index -->
 

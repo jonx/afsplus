@@ -48,4 +48,15 @@ Rules:
    real-device and independent format-review gates pass
 7. allocation regions use the authoritative triple-version bitmap/descriptor
    slots, fixed allocation-root pool and segmented quarantine of ADR-067
-8. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0
+8. an object record is admitted only in its canonical image
+   ([ADR-100](../adr/ADR-100-exact-object-record-admission.md)): zero common
+   header flags, exact payload length (96 bytes, or 112 with the security
+   reference, plus the inline target of a symlink) and a zero tail
+9. with `org.aros.afsplus:security-descriptors` (INCOMPAT bit 3) an object
+   record may carry the 16-byte security reference at payload offset 96 and
+   own a chain of `"AFSX"` descriptor segments of 24 fixed bytes plus
+   descriptor bytes, every segment but the last full
+   ([ADR-101](../adr/ADR-101-security-preservation-container.md)); the
+   reference on a volume without the feature is corruption, and the first
+   segment is bounds checked where the record is admitted
+10. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0
