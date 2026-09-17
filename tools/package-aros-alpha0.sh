@@ -83,6 +83,8 @@ profile_id=${profile_id:-$sdk_platform}
 build_target_program() {
     source=$1
     target=$2
+    # Further sources are linked into the same program.
+    shift 2
 
     # shellcheck disable=SC2086 -- the platform profile supplies separate flags.
     COMPILER_PATH="$build_tools:$aros_crosstools/bin" \
@@ -96,7 +98,8 @@ build_target_program() {
         -isystem "$developer/include/aros/stdc" \
         -nostartfiles -nodefaultlibs \
         -L "$developer/lib" -L "$aros_cross_lib" \
-        "$developer/lib/startup.o" "$source" \
+        -I api \
+        "$developer/lib/startup.o" "$source" "$@" \
         -o "$staging/$target" \
         -Wl,--allow-multiple-definition -Wl,--start-group \
         -lpthread -lposixc -lstdc -lstdcio -ldos -lexec -laros \
@@ -131,6 +134,10 @@ build_target_program native/aros/tests/alpha0_probe.c AFSPlusAlpha0Probe
 
 echo "[aros-package] build the target-side DOS semantics probe"
 build_target_program native/aros/tests/dos_compat_probe.c AFSPlusDosProbe
+
+echo "[aros-package] build the target-side handler report tool"
+build_target_program native/aros/tools/afsplus_info.c AFSPlusInfo \
+    native/aros/client/afsplus_client.c
 
 echo "[aros-package] build the target-side crash-replay probe"
 build_target_program native/aros/tests/replay_probe.c AFSPlusReplayProbe
@@ -186,6 +193,7 @@ cp docs/aros-alpha0-package.md "$staging/README.md"
 (
     cd "$staging"
     shasum -a 256 afsplus-handler AFSPlusAlpha0Probe AFSPlusDosProbe \
+        AFSPlusInfo \
         AFSPlusReplayProbe \
         AFSPlusS1Probe AFSPlusS1bProbe AFSPlusS1Pivot AFSPLUS19 Unit19 \
         abi-report.txt build-profile.txt check-before.json README.md \

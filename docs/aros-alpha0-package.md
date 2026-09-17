@@ -17,6 +17,7 @@ The files map to a runnable MacAROS tree as follows:
 | `afsplus-handler` | `AROS/L/afsplus-handler` |
 | `AFSPlusAlpha0Probe` | `AROS/C/AFSPlusAlpha0Probe` |
 | `AFSPlusDosProbe` | `AROS/C/AFSPlusDosProbe` |
+| `AFSPlusInfo` | `AROS/C/AFSPlusInfo`, the handler report tool |
 | `AFSPlusReplayProbe` | `AROS/C/AFSPlusReplayProbe` |
 | `AFSPlusS1Probe` | Stored only in the S1 AFS+ image |
 | `AFSPlusS1bProbe` | Stored only in the desktop S1b AFS+ image |
@@ -119,7 +120,10 @@ unreplied must arrive after the reply, never before. The result keeps what
 the handler answers to a record lock overlapping the caller's own, as an
 observation. A second boot runs `AFSPlusDosProbe HOLD`, which ends a request
 while one of its messages is still unreplied and never replies, and requires
-the shutdown and the dismount to succeed and the shell to continue. A request
+the shutdown and the dismount to succeed and the shell to continue. The first boot also runs
+`AFSPlusInfo` against the AFS+ volume, whose JSON report must carry the
+`afsplus-handler-info` schema, and against `SYS:`, which must be recognised
+as a handler without the extension transport. A request
 that is still registered refuses `ACTION_DIE` by design. The checker must find the
 image clean after each boot.
 

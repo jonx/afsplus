@@ -20,6 +20,7 @@ installed=0
 
 handler="$aros_tree/L/afsplus-handler"
 probe="$aros_tree/C/AFSPlusDosProbe"
+info="$aros_tree/C/AFSPlusInfo"
 dosdriver="$aros_tree/Devs/DOSDrivers/AFSPLUS19"
 image="$aros_tree/DiskImages/Unit19"
 
@@ -31,6 +32,7 @@ cleanup() {
     if [ "$installed" = 1 ]; then
         [ ! -e "$handler" ] || unlink "$handler"
         [ ! -e "$probe" ] || unlink "$probe"
+        [ ! -e "$info" ] || unlink "$info"
         [ ! -e "$dosdriver" ] || unlink "$dosdriver"
         [ ! -e "$image" ] || unlink "$image"
     fi
@@ -96,7 +98,7 @@ require_file "$aros_tree/C/Assign"
     echo "Refusing to replace existing result: $output" >&2
     exit 73
 }
-for target in "$handler" "$probe" "$dosdriver" "$image"; do
+for target in "$handler" "$probe" "$info" "$dosdriver" "$image"; do
     [ ! -e "$target" ] || {
         echo "Refusing to replace Hosted MacAROS artifact: $target" >&2
         exit 73
@@ -116,6 +118,7 @@ AFSPLUS_AROS_PACKAGE_OUTPUT="$package" tools/package-aros-alpha0.sh
 installed=1
 cp "$package/afsplus-handler" "$handler"
 cp "$package/AFSPlusDosProbe" "$probe"
+cp "$package/AFSPlusInfo" "$info"
 cp "$package/AFSPLUS19" "$dosdriver"
 cp "$package/Unit19" "$image"
 
@@ -126,6 +129,8 @@ Assign "FDSK:" "SYS:DiskImages"
 C:Mount DEVS:DOSDrivers/AFSPLUS19 >MacRW:mount.out
 C:AFSPlusDosProbe >MacRW:probe.out
 C:List AFSPLUS19: ALL >MacRW:list-after.out
+C:AFSPlusInfo AFSPLUS19: >MacRW:info.json
+C:AFSPlusInfo SYS: >MacRW:info-foreign.out
 C:Mount AFSPLUS19: SHUTDOWN >MacRW:shutdown.out
 If WARN
     C:Echo fail >MacRW:shutdown.status
@@ -141,6 +146,14 @@ if grep -q 'dosprobe' "$result/dos/list-after.out"; then
     echo "The probe left its drawer behind" >&2
     exit 1
 fi
+# The report reached an application through the extension packet, and a
+# handler that does not know the packet was recognised as such.
+python3 -c 'import json, sys
+document = json.load(open(sys.argv[1]))
+assert document["schema"] == "afsplus-handler-info", document
+assert document["schema_version"] == 1, document' "$result/dos/info.json"
+cp "$result/dos/info.json" "$result/handler-info.json"
+grep -q 'not served by an AFS+ handler' "$result/dos/info-foreign.out"
 check_image "$result/check-after-dos.json"
 
 echo "[hosted-dos] dismount with an unreplied notification"

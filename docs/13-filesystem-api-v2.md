@@ -18,6 +18,7 @@
   - [preallocation and access intent](#preallocation-and-access-intent)
   - [observation](#observation)
 - [4. Compatibility adapters](#4-compatibility-adapters)
+  - [The AROS transport](#the-aros-transport)
 - [5. Large files](#5-large-files)
 - [6. Rust](#6-rust)
 - [7. Zed](#7-zed)
@@ -233,6 +234,40 @@ A legacy handler can expose v2 through an adapter.
 Unsupported capabilities return a precise `NOT_SUPPORTED` result.
 
 Applications must not infer capability from filesystem name.
+
+### The AROS transport
+
+On AROS an application reaches these operations in a running handler through
+one DOS packet type, `ACTION_AFSPLUS_EXT`
+([`afsplus_ext_packet.h`](../api/afsplus_ext_packet.h)). Its first argument
+is a request block in the sender's memory: a magic, a version, the size of
+the block as the sender knows it, an operation number, and one set of fields
+every operation reads its own part of. The block has the same 112-byte layout
+on every target, so pointers occupy eight bytes. A handler accepts a longer
+block from a newer client and serves the part it knows; it refuses a shorter
+one, a foreign magic or version, and an unassigned operation with
+`ERROR_BAD_NUMBER`, and an operation of an entry-point group its library
+lacks with `ERROR_ACTION_NOT_KNOWN`.
+
+Objects travel as the application holds them: a lock as its `BPTR`, a file as
+the `fh_Arg1` of its `FileHandle`. Names are single components; the transport
+resolves no path. A report struct in a caller buffer declares its size in its
+first field, and the buffer must hold that much.
+
+A handler that does not know the packet type answers
+`ERROR_ACTION_NOT_KNOWN`, as every handler does, so the absence of the
+transport costs a client one request. The client library
+([`afsplus_client.h`](../native/aros/client/afsplus_client.h)) falls back
+only where a classic call produces the same result: positioned read and write
+become seek, transfer and seek back, within what a classic `Seek` expresses
+and without protection against another user of the same handle. Clone,
+preallocation and the reports have no classic equivalent; the error is the
+signal to copy, to do without, or to report nothing. The library never sends
+objects of two handlers to one of them.
+
+The packet number is provisional: packet numbers are an AROS-wide allocation,
+and the value in the header lies outside every assigned range until one is
+made.
 
 ## 5. Large files
 

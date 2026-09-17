@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Reach the 64-bit groups from an application](#2026-09-17--reach-the-64-bit-groups-from-an-application)
 - [2026-09-17 — Codecs for the extended attribute set and its reference](#2026-09-17--codecs-for-the-extended-attribute-set-and-its-reference)
 - [2026-09-17 — Generalise the descriptor chain into an owned chain](#2026-09-17--generalise-the-descriptor-chain-into-an-owned-chain)
 - [2026-09-17 — Explain one object and one path](#2026-09-17--explain-one-object-and-one-path)
@@ -202,6 +203,27 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — Reach the 64-bit groups from an application
+
+The 64-bit entry points existed behind the C boundary with nobody able to
+call them: an application talks to a handler in DOS packets. One packet type,
+`ACTION_AFSPLUS_EXT`, now carries a request block to the packet layer, which
+maps fifteen operations onto the existing entry points. One block for all
+operations was preferred to one struct per operation because the envelope
+checks, the 32- and 64-bit layout and the growth rule are then written once;
+pointers take eight bytes everywhere so the layout is asserted as 112 bytes
+on three targets. Objects travel as the application holds them, which keeps
+the client free of handler knowledge and lets the packet layer refuse an
+object that is not its own with the lookup it already had. The unknown-packet
+answer of every existing handler is the capability probe, so nothing had to
+be added for older handlers. The client library falls back only for
+positioned I/O, where seek, transfer and seek back gives the same bytes; a
+clone or a report that silently became something else would be a lie, so
+those return the error. `AFSPlusInfo` is the first consumer. The packet
+number is provisional and named as such in the header. Proven by the packet
+and client host matrices, with two mutations that fail them, and
+cross-compiled into the package; not run on a target.
 
 ## 2026-09-17 — Codecs for the extended attribute set and its reference
 

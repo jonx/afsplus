@@ -7,6 +7,12 @@
 #include <dos/dosextens.h>
 
 SIPTR IoErr(void);
+SIPTR SetIoErr(SIPTR result);
+SIPTR DoPkt(struct MsgPort *port, LONG action, SIPTR arg1, SIPTR arg2,
+    SIPTR arg3, SIPTR arg4, SIPTR arg5);
+LONG Seek(BPTR file, LONG position, LONG mode);
+LONG Read(BPTR file, APTR buffer, LONG length);
+LONG Write(BPTR file, CONST_APTR buffer, LONG length);
 struct DateStamp *DateStamp(struct DateStamp *date);
 struct DosList *MakeDosEntry(CONST_STRPTR name, LONG type);
 LONG FreeDosEntry(struct DosList *dlist);

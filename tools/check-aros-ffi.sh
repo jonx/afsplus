@@ -111,6 +111,16 @@ clang -std=c11 -Wall -Wextra -Werror \
     -o "$task_dir/trackdisk-stub"
 "$task_dir/trackdisk-stub"
 
+echo "[aros-ffi] host extension-packet client matrix"
+clang -std=c11 -Wall -Wextra -Werror \
+    -D__WORDSIZE=64 -DAROS_FAST_BPTR=1 -DAROS_FAST_BSTR=1 \
+    -I native/aros/tests/dev-proto \
+    -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
+    -I api -I native/aros \
+    native/aros/client/afsplus_client.c native/aros/tests/client_stub.c \
+    -o "$task_dir/client-stub"
+"$task_dir/client-stub"
+
 echo "[aros-ffi] AROS AArch64 profile: sdk=$sdk_platform target=$aros_target codegen=$aros_codegen_target"
 echo "[aros-ffi] AROS AArch64 Rust static library"
 PATH="$aros_crosstools/bin:$PATH" cargo "+$rust_toolchain" build \
@@ -170,6 +180,14 @@ echo "[aros-ffi] AROS AArch64 bounded trackdisk viewport"
     -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
     -I api -I native/aros -c native/aros/afsplus_trackdisk.c \
     -o "$task_dir/trackdisk-aarch64.o"
+
+echo "[aros-ffi] AROS AArch64 extension-packet client"
+# shellcheck disable=SC2086 -- the profile intentionally supplies separate flags.
+"$aros_clang" --target="$aros_target" $aros_arch_flags \
+    -std=gnu11 -Wall -Wextra -Werror \
+    -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
+    -I api -I native/aros -c native/aros/client/afsplus_client.c \
+    -o "$task_dir/client-aarch64.o"
 
 echo "[aros-ffi] AROS AArch64 native handler shell"
 # shellcheck disable=SC2086 -- profile and handler flags are separate words.

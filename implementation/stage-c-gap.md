@@ -136,10 +136,12 @@ whose position survives namespace changes between pages.
 
 Lacking:
 
-1. a transport that reaches a running handler from an application: a
-   versioned extension packet that older handlers refuse for free
-   (`ERROR_ACTION_NOT_KNOWN`), its packet-layer cases, and a client library
-   that falls back. The packet number is an AROS-wide allocation;
+1. the transport ([docs/13](../docs/13-filesystem-api-v2.md#the-aros-transport))
+   is present at L3: `ACTION_AFSPLUS_EXT`, its fifteen packet-layer
+   operations and a client library with fallback, proven by the packet and
+   client host matrices and cross-compiled. Open: its target run, which
+   [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) drives
+   through `AFSPlusInfo`, and the AROS-wide allocation of the packet number;
 2. a consumer: the AROS Rust `std` port binding to the group.
 
 Hosted and QEMU: all. Apple hardware: none.
@@ -150,8 +152,8 @@ Present (L1, L2): `afsplus_aros_clone_file` from a lock and
 `afsplus_aros_clone_range` between two handles, advertised separately and
 answering `ERROR_ACTION_NOT_KNOWN` on a volume without shared extents.
 
-Lacking: the extension packet of C4; a `Copy CLONE`-style consumer that falls
-back to a byte copy. Metadata inheritance follows the executable behavior
+Lacking: a `Copy CLONE`-style consumer of `afsplus_client_clone_file` that
+falls back to a byte copy. Metadata inheritance follows the executable behavior
 until Q14 is answered.
 
 ## C6. Access-intent and preallocation mapping
@@ -238,7 +240,10 @@ Present (L1, L2): `afsplus_aros_info_json` serves one versioned JSON
 document (`afsplus-handler-info`, version 1) from the mounted instance:
 identity, feature masks, mount state, capability names, health, handle usage.
 
-Lacking: the target `afsplus-info` client and its transport (C4);
+Present (L3, cross-compiled): `AFSPlusInfo`, which prints the report of the
+handler behind a path through the transport of C4; not yet run on a target.
+
+Lacking:
 machine-readable error documents for failed management calls; dry-run
 planning for destructive operations, which starts with `ACTION_FORMAT`.
 
