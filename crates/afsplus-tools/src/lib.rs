@@ -9,6 +9,7 @@
 mod common;
 mod diff;
 mod dump;
+mod explain;
 mod extract;
 mod info;
 mod mkfs;
@@ -49,6 +50,16 @@ where
     I: IntoIterator<Item = OsString>,
 {
     diff::run(args)
+}
+
+/// Runs the `afsplus-explain` command: what the committed state of an image
+/// believes about one block, one object or one path. An answer from a walk
+/// that could not decode every branch gives the media status.
+pub fn run_explain<I>(args: I) -> u8
+where
+    I: IntoIterator<Item = OsString>,
+{
+    explain::run(args)
 }
 
 /// Extracts readable checkpoint objects into a new, separate directory.

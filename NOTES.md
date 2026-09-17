@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — The afsplus-explain command](#2026-09-17--the-afsplus-explain-command)
 - [2026-09-17 — Owned chains under persistent snapshots (ADR-109)](#2026-09-17--owned-chains-under-persistent-snapshots-adr-109)
 - [2026-09-17 — Read extended attributes in the portable C reader](#2026-09-17--read-extended-attributes-in-the-portable-c-reader)
 - [2026-09-17 — Extended attributes in the core (ADR-108)](#2026-09-17--extended-attributes-in-the-core-adr-108)
@@ -206,6 +207,27 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — The afsplus-explain command
+
+`afsplus-explain [--json] <image> (block <number> | object <id> | path
+<path>)` in afsplus-tools, built like `afsplus-image-diff`: read-only image,
+status 0 for an answer from a complete walk, 1 for a partial walk or a
+question about something absent, 2 for usage or host I/O. The renderers live
+in `afsplus_check::explain_render`; the JSON carries `schema_version` 1, the
+generation, `has_snapshots`, `partial` and `problems`, then the answer. A
+block gets a one-word verdict; on a snapshot volume an allocated block without
+a live role reads `retained-or-leaked`, because explain walks the live state
+only and the checker is the one that decides. Comment, symlink target,
+security summary and attribute names with value lengths are shown.
+
+Proof: `explain_cli` in afsplus-tools (2 tests): path, object and block in
+both forms over an image with a directory, a file whose name holds quotes, a
+comment with a tab and non-ASCII text, and two attributes; the JSON is parsed
+by Python's `json`, not by our code, and field values are compared to
+literals; eight failing invocations give their status with empty stdout; a
+corrupted root directory gives `partial` true and status 1. Negative control:
+without the quote escape in `json_string` the test fails.
 
 ## 2026-09-17 — Owned chains under persistent snapshots (ADR-109)
 

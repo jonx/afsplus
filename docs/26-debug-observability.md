@@ -254,12 +254,25 @@ geometry ([disk layout](../spec/disk-layout.md)). `explain_object` states one ob
 and fields, its comment, a symlink's target, the node count of its own tree, a
 directory's entry count, the extents and the mapped, shared and unwritten
 blocks of a file, the state of its security descriptor chain (length, expected
-and consistent segments, format identity, divergence mark) and every directory
-entry that names it. `explain_path` resolves a path from the root by the
+and consistent segments, format identity, divergence mark), the state of its
+attribute chain with the name and value length of every attribute, and every
+directory entry that names it. `explain_path` resolves a path from the root by the
 spelling each directory stores and returns every component with the object it
 names; the walk reads the format alone, so it applies no case folding.
-`ExplainExtent`, `ExplainCheckpoint`, `ExplainReclaim`, `ExplainSpace`,
-`ExplainFeature` and the versioned tool output are open.
+
+The command is `afsplus-explain [--json] <image> (block <number> | object <id>
+| path <path>)`, in [`afsplus-tools`](../crates/afsplus-tools/src/explain.rs).
+It opens the image read-only. The JSON document carries `schema_version` 1
+(ADR-025), the kind of question, the generation answered for, `has_snapshots`,
+`partial` with the list of branches the walk could not decode, and the answer;
+a block also carries a one-word verdict (`owned`, `free`, `leaked`,
+`retained-or-leaked` on a snapshot volume, `owned-but-free`). Status 0 is an
+answer from a complete walk, 1 an answer from a partial walk or a question
+about something the image does not hold, 2 a usage or host I/O failure.
+[Its test](../crates/afsplus-tools/tests/explain_cli.rs) reads the documents
+back with an independent JSON parser.
+`ExplainExtent`, `ExplainCheckpoint`, `ExplainReclaim`, `ExplainSpace` and
+`ExplainFeature` are open.
 
 ## 6. Optional reverse-map index
 

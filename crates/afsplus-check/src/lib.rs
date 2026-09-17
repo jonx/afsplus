@@ -19,6 +19,7 @@
 pub mod crash_replay;
 pub mod diff;
 pub mod explain;
+pub mod explain_render;
 pub mod replay_trace;
 pub mod scenario;
 
