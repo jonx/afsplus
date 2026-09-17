@@ -795,6 +795,9 @@ int32_t afsplus_aros_extent_map(struct AfsplusAros *filesystem,
 {
     assert(filesystem == STUB_FILESYSTEM);
     (void)extents;
+    /* The entry point's own range, as afsplus_aros.h states it. */
+    if (capacity == 0 || capacity > 64)
+        return ERROR_BAD_NUMBER;
     *output_count = capacity;
     *output_complete = 1;
     *output_next_offset = offset + length;
@@ -1523,6 +1526,16 @@ int main(void)
         EXT_SEND(DOSTRUE, 0);
         assert(ext_seen[2] == 2 && request.output_count == 2);
         assert(request.output_flags == 1 && request.output_value == 30);
+
+        /* A buffer for a hundred extents is served with sixty-four. */
+        {
+            static struct AfsplusArosExtent many_extents[100];
+
+            request.buffer = many_extents;
+            request.buffer_size = sizeof(many_extents);
+            EXT_SEND(DOSTRUE, 0);
+            assert(ext_seen[2] == 64 && request.output_count == 64);
+        }
 
         EXT_BEGIN(AFSPLUS_EXT_LOOKUP_ID);
         request.name0 = (const uint8_t *)"ext";

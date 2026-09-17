@@ -138,6 +138,11 @@ struct AfsplusExtRequest {
     uint64_t output_value;
 };
 
+/* One EXTENT_MAP request stores at most this many extents, whatever the
+ * buffer holds; output_flags and output_value say whether and where to
+ * continue. */
+#define AFSPLUS_EXT_EXTENTS_MAX UINT32_C(64)
+
 /* magic, version and header_size: all a handler reads of a block before
  * header_size has told it that more exists. */
 #define AFSPLUS_EXT_PREFIX_BYTES 8

@@ -1428,7 +1428,12 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
     case AFSPLUS_EXT_EXTENT_MAP:
     {
         uint32_t complete = 0;
+        /* A larger buffer is a caller's convenience, not an error. */
+        uint32_t capacity = request->buffer_size
+            / (uint32_t)sizeof(struct AfsplusArosExtent);
 
+        if (capacity > AFSPLUS_EXT_EXTENTS_MAX)
+            capacity = AFSPLUS_EXT_EXTENTS_MAX;
         error = require_group(context, AFSPLUS_AROS_GROUP_EXTENT_MAP);
         if (error == 0)
             error = extension_file(context, request->object[0], 0, &first);
@@ -1438,9 +1443,7 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
         if (error == 0)
             error = afsplus_aros_extent_map(context->filesystem, first,
                 request->offset[0], request->length,
-                (struct AfsplusArosExtent *)request->buffer,
-                request->buffer_size / (uint32_t)sizeof(
-                    struct AfsplusArosExtent),
+                (struct AfsplusArosExtent *)request->buffer, capacity,
                 &request->output_count, &complete, &request->output_value);
         request->output_flags = complete;
         return error;
