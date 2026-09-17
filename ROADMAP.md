@@ -16,7 +16,7 @@ stage scope can coexist with a shared milestone awaiting later qualification.
 - [Stage and milestone map](#stage-and-milestone-map)
 - [Stage 0: Amiga-native design review](#stage-0-amiga-native-design-review)
 - [~~Stage A~~: make the core executable](#stage-a-make-the-core-executable)
-- [\[Stage B\]: resolve the epoch-1 architecture blockers](#stage-b-resolve-the-epoch-1-architecture-blockers)
+- [~~Stage B~~: resolve the epoch-1 architecture blockers](#stage-b-resolve-the-epoch-1-architecture-blockers)
   - [B1. Allocation state](#b1-allocation-state)
   - [B2. User-data update policy](#b2-user-data-update-policy)
   - [B3. Checkpoint and fsync](#b3-checkpoint-and-fsync)
@@ -47,7 +47,7 @@ format that the earlier stages have settled.
 |---|---|---|
 | [Stage 0](#stage-0-amiga-native-design-review) | Ongoing design review, excluded from finite completion | Amiga filesystem design references |
 | [~~Stage A~~](#stage-a-make-the-core-executable) | [\[M01\]](implementation/milestones.md), [~~M02~~](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md), [\[M05\]](implementation/milestones.md) | Executable core and reader/format foundations |
-| [\[Stage B\]](#stage-b-resolve-the-epoch-1-architecture-blockers) | [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md) | Allocation, update and durability architecture |
+| [~~Stage B~~](#stage-b-resolve-the-epoch-1-architecture-blockers) | [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md) | Allocation, update and durability architecture |
 | [\[Stage C\]](#stage-c-integrate-aros-and-begin-independent-c-portability) | [\[M06\]](implementation/milestones.md), [\[M07\]](implementation/milestones.md), [\[M12\]](implementation/milestones.md) | AROS adapters and independent C integration |
 | [\[Stage D\]](#stage-d-portability-and-host-tooling) | [\[M01\]](implementation/milestones.md), [~~M08~~](implementation/milestones.md), [\[M12\]](implementation/milestones.md) | Portable implementations and host tooling |
 | [Stage E](#stage-e-developer-contract-accelerators-and-optional-features) | [M09](implementation/milestones.md), [M10](implementation/milestones.md) | Catalog and persistent change services |
@@ -154,9 +154,16 @@ Do not block this stage on:
 - tiny-file packing
 - LLM-specific tuning
 
-## \[Stage B\]: resolve the epoch-1 architecture blockers
+## ~~Stage B~~: resolve the epoch-1 architecture blockers
 
 Milestones: [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md).
+
+Stage B closes on its own finite gates
+([scoped stage acceptance](implementation/milestones.md#stage-b-acceptance-inventory)),
+not on the contributing milestones, whose remaining work belongs to later
+stages.
+
+<!-- stage-gates: Stage B = b-allocation,b-data-policy,b-durability,b-structures,b-security,b-c-parity,b-explain,b-diff -->
 
 ### B1. Allocation state
 

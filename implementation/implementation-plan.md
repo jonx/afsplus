@@ -94,7 +94,7 @@ Acceptance:
 
 ## Phase 3: allocator and mutations
 
-> **Roadmap:** [~~Stage A~~](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) · **Milestones:** [\[M03\]](milestones.md)
+> **Roadmap:** [~~Stage A~~](../ROADMAP.md#stage-a-make-the-core-executable), [~~Stage B~~](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) · **Milestones:** [\[M03\]](milestones.md)
 
 Implement:
 
@@ -110,7 +110,7 @@ Initially run only against disposable images.
 
 ## Phase 4: journal
 
-> **Roadmap:** [~~Stage A~~](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) · **Milestones:** [\[M04\]](milestones.md)
+> **Roadmap:** [~~Stage A~~](../ROADMAP.md#stage-a-make-the-core-executable), [~~Stage B~~](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) · **Milestones:** [\[M04\]](milestones.md)
 
 Implement the checkpoint-COW/group-commit/intent-log contract of
 [ADR-063](../adr/ADR-063-intent-log-epoch1.md), with existing-file write/truncate
@@ -189,7 +189,7 @@ Qualify:
 
 ## Snapshot and backup integration across phases
 
-> **Roadmap:** [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers), [\[Stage C\]](../ROADMAP.md#stage-c-integrate-aros-and-begin-independent-c-portability), [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [\[M03\]](milestones.md), [\[M04\]](milestones.md), [\[M07\]](milestones.md), [\[M13\]](milestones.md), [\[M14\]](milestones.md)
+> **Roadmap:** [~~Stage B~~](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers), [\[Stage C\]](../ROADMAP.md#stage-c-integrate-aros-and-begin-independent-c-portability), [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [\[M03\]](milestones.md), [\[M04\]](milestones.md), [\[M07\]](milestones.md), [\[M13\]](milestones.md), [\[M14\]](milestones.md)
 
 This work connects core lifetime management, the capability API and application
 qualification without renumbering phases.

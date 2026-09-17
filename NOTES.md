@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — A finite acceptance inventory for Stage B](#2026-09-17--a-finite-acceptance-inventory-for-stage-b)
 - [2026-09-17 — Carry extended attributes to FUSE and to AROS](#2026-09-17--carry-extended-attributes-to-fuse-and-to-aros)
 - [2026-09-17 — The checkpoint flags word is zero (ADR-113); Q10 closed](#2026-09-17--the-checkpoint-flags-word-is-zero-adr-113-q10-closed)
 - [2026-09-17 — A second reader for the snapshot records; Q15 closed](#2026-09-17--a-second-reader-for-the-snapshot-records-q15-closed)
@@ -218,6 +219,29 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — A finite acceptance inventory for Stage B
+
+Stage B had no scoped inventory, so its roadmap label fell back to M03 and
+M04, which stay partial for work that belongs to M13 and M14. It now declares
+eight gates in ROADMAP (`stage-gates: Stage B = ...`) with their rows in
+`implementation/milestones.md`: allocation state, data-update policy,
+durability, core structures, security container, C parity, explain, image
+diff. A section "Stage B acceptance inventory" lists what the roadmap's B
+sections mention and Stage B does not own, each with its owner: byte offsets
+and the wire freeze, real-device barriers, portable C data emission, target
+qualification through the AROS handler and the API documents, hardware
+resource claims, descriptor formats and historical-read policy, the reserved
+fields of five block kinds, a threat model for crafted images, backup
+transport of chains. With all eight gates Complete, `progress-markers` strikes
+Stage B in ROADMAP and in the implementation plan.
+
+What this entry does not claim: the gates were not re-proven. No suite was
+run. The three gates for B1 to B3 cite decisions and tests that predate this
+session and are marked Complete on what the roadmap and the qualification
+documents already state; the five others cite tests written or extended today
+and run by name. The inventory also says that ADR-104 and ADR-106 to ADR-113
+rest on a working rule the owner has not confirmed to this session.
 
 ## 2026-09-17 — Carry extended attributes to FUSE and to AROS
 
