@@ -128,6 +128,23 @@ pub struct VolumeIdentity {
     pub ro_compat: u64,
     pub incompat: u64,
 }
+/// Reclaim steps run after an operation that retired storage. Two is what a
+/// drain takes in practice; the third confirms there is nothing left and costs
+/// one comparison, not a transaction.
+const RECLAIM_STEPS_PER_RELEASE: usize = 3;
+
+/// Orphan cleanup steps run after an unlink. One step empties the extents of an
+/// ordinary file and the next removes its entry, so a file deleted now is gone
+/// by the time the caller returns. A file large enough to need more steps
+/// finishes on the following delete or sync rather than holding this one up.
+const ORPHAN_STEPS_PER_RELEASE: usize = 4;
+
+/// Reclaim steps run on a filesystem sync. A sync is the one moment a host
+/// gives us for maintenance, so it is allowed a longer drain than a delete.
+const RECLAIM_STEPS_PER_SYNC: usize = 8;
+
+/// Orphan cleanup steps run on a filesystem sync, for the same reason.
+const ORPHAN_STEPS_PER_SYNC: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatFs {
@@ -432,6 +449,41 @@ impl<D: BlockDevice> Vfs<D> {
     /// Advances at most one orphan and at most the volume's configured
     /// logical-extent budget. Adapters may call this from idle maintenance;
     /// mount and filesystem sync already invoke it once.
+    /// Return retired blocks to the free pool, and say how many came back.
+    ///
+    /// Retiring a file's extents only moves them to the reclaim ledger. The
+    /// free pool grows again when the ledger is drained, and nothing above the
+    /// core drained it: a mounted volume never gave back a deleted byte, so
+    /// writing and deleting the same file filled it until `rm` itself failed
+    /// for want of space.
+    ///
+    /// Bounded twice over. It stops as soon as a step returns nothing, which in
+    /// practice is after two, and never runs more than `max_steps`. What a step
+    /// leaves behind is storage the older checkpoint still protects; the next
+    /// transaction releases it.
+    pub fn reclaim_space(&mut self, max_steps: usize, now: Timespec) -> Result<u64, VfsError> {
+        if self.volume.mount_mode() != MountMode::ReadWrite {
+            return Ok(0);
+        }
+        let mut returned = 0;
+        for _ in 0..max_steps {
+            if self.volume.reclaim_pending_blocks() == 0 {
+                break;
+            }
+            let step = self.volume.reclaim_step(now)?;
+            if step == 0 {
+                break;
+            }
+            returned += step;
+        }
+        Ok(returned)
+    }
+
+    /// Blocks retired but not yet returned to the free pool.
+    pub fn reclaim_pending_blocks(&self) -> u64 {
+        self.volume.reclaim_pending_blocks()
+    }
+
     pub fn resume_one_orphan(&mut self, now: Timespec) -> Result<(), VfsError> {
         let Some(object_id) = self.volume.first_orphan()? else {
             return Ok(());
@@ -846,9 +898,68 @@ impl<D: BlockDevice> Vfs<D> {
             // live handle the orphan is eligible for idle/sync cleanup
             // immediately; with a live handle last-close starts cleanup.
             self.volume.orphan_file(parent, name, now)?;
+            self.reclaim_after_release(now);
             return Ok(());
         }
-        Ok(self.volume.delete_file(parent, name, now)?)
+        self.volume.delete_file(parent, name, now)?;
+        self.reclaim_after_release(now);
+        Ok(())
+    }
+
+    /// Maintenance after an operation that released a name. A failure here must
+    /// not turn the caller's successful delete into a failure, and it is not
+    /// lost either: both steps are traced calls, so a refusal reaches the flight
+    /// recorder and the mount's diagnostics report.
+    ///
+    /// The order is the chain itself. Unlinking a file parks it in the orphan
+    /// directory, cleaning the orphan retires its extents into the reclaim
+    /// ledger, and draining the ledger returns the blocks to the free pool.
+    /// Driving only the last of the three returns nothing.
+    fn reclaim_after_release(&mut self, now: Timespec) {
+        if !self.idle_maintenance {
+            return;
+        }
+        let _ = self.cleanup_orphans(ORPHAN_STEPS_PER_RELEASE, now);
+        let _ = self.reclaim_space(RECLAIM_STEPS_PER_RELEASE, now);
+    }
+
+    /// Retire the storage of unlinked files that nobody still has open, and say
+    /// how many cleanup steps ran.
+    ///
+    /// An orphan with a live handle is skipped: the name is gone but the file is
+    /// not, and a reader holding it must keep reading its bytes. Such an orphan
+    /// is cleaned at last close, which is what [`Self::close`] already does.
+    /// Bounded by `max_steps`, and it stops as soon as a step makes no progress.
+    pub fn cleanup_orphans(&mut self, max_steps: usize, now: Timespec) -> Result<usize, VfsError> {
+        if self.volume.mount_mode() != MountMode::ReadWrite {
+            return Ok(0);
+        }
+        let mut steps = 0;
+        for _ in 0..max_steps {
+            let Some(object_id) = self.volume.first_orphan()? else {
+                break;
+            };
+            if self.object_is_open(object_id) {
+                break;
+            }
+            let progress = self.volume.cleanup_orphan(object_id, now)?;
+            steps += 1;
+            if !progress.still_pending && !progress.object_removed {
+                break;
+            }
+        }
+        Ok(steps)
+    }
+
+    fn object_is_open(&self, object_id: ObjectId) -> bool {
+        self.handles.values().any(|handle| match handle {
+            OpenHandle::File {
+                object_id: open, ..
+            } => *open == object_id,
+            OpenHandle::Directory {
+                object_id: open, ..
+            } => *open == object_id,
+        })
     }
 
     pub fn remove_directory(
@@ -858,7 +969,9 @@ impl<D: BlockDevice> Vfs<D> {
         now: Timespec,
     ) -> Result<(), VfsError> {
         self.checkpoint_data_window(now)?;
-        Ok(self.volume.remove_directory(parent, name, now)?)
+        self.volume.remove_directory(parent, name, now)?;
+        self.reclaim_after_release(now);
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1259,7 +1372,8 @@ impl<D: BlockDevice> Vfs<D> {
             self.volume.sync()?;
         }
         if self.volume.mount_mode() == MountMode::ReadWrite && self.idle_maintenance {
-            self.resume_one_orphan(Timespec::default())?;
+            self.cleanup_orphans(ORPHAN_STEPS_PER_SYNC, Timespec::default())?;
+            self.reclaim_space(RECLAIM_STEPS_PER_SYNC, Timespec::default())?;
         }
         Ok(())
     }
