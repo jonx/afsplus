@@ -10,7 +10,7 @@ use afsplus_format::ident::{self, FeatureFlags, Identification, NameKeyAlgorithm
 use afsplus_format::object::{self, ObjectRecord, ObjectType, SecurityRef};
 use afsplus_format::security::{segment_capacity, MAX_SECURITY_DESCRIPTOR_BYTES};
 use afsplus_format::tree::{TreeItem, TreeKind, TreeNode, MAX_TREE_KEY_BYTES, MAX_TREE_LEVEL};
-use afsplus_format::{attrs, bitmap, extent, geometry, intent_log, Timespec};
+use afsplus_format::{attrs, bitmap, extent, geometry, intent_log, reclaim, Timespec};
 use std::collections::BTreeMap;
 use std::{fs, path::PathBuf, process::Command};
 
@@ -156,6 +156,18 @@ fn every_c_format_constant_equals_the_rust_codec() {
         total_len: 1,
         segment_count: 1,
     }));
+    let tiny_root = reclaim::ReclaimRoot::empty(reclaim::ReclaimCaps {
+        inline_entries: 1,
+        segment_refs: 1,
+        table_refs: 1,
+    });
+    let one_entry = reclaim::ReclaimSegment {
+        entries: vec![reclaim::ReclaimEntry {
+            start: 9,
+            blocks: 1,
+            retire_generation: 1,
+        }],
+    };
     let empty_leaf = TreeNode::leaf(TreeKind::ObjectMap, 0);
     let mut one_item = empty_leaf.clone();
     one_item.items.push(TreeItem {
@@ -407,6 +419,40 @@ fn every_c_format_constant_equals_the_rust_codec() {
             "AFSPR_ATTRIBUTE_SET_FORMAT",
             u64::from(attrs::ATTRIBUTE_SET_FORMAT),
         ),
+        (
+            "AFSPR_BLOCK_TYPE_RECLAIM_ROOT",
+            u64::from(block_type::RECLAIM_ROOT),
+        ),
+        (
+            "AFSPR_BLOCK_TYPE_RECLAIM_SEGMENT",
+            u64::from(block_type::RECLAIM_SEGMENT),
+        ),
+        (
+            "AFSPR_BLOCK_TYPE_RECLAIM_TABLE",
+            u64::from(block_type::RECLAIM_TABLE),
+        ),
+        ("AFSPR_RECLAIM_ENTRY_SIZE", reclaim::ENTRY_WIRE_SIZE as u64),
+        ("AFSPR_RECLAIM_REF_SIZE", reclaim::REF_WIRE_SIZE as u64),
+        // Measured: an empty root with one slot per area is the fixed part
+        // plus two refs and one entry.
+        (
+            "AFSPR_RECLAIM_ROOT_FIXED",
+            payload_len(&tiny_root.encode(BS, 1).unwrap())
+                - 2 * reclaim::REF_WIRE_SIZE as u64
+                - reclaim::ENTRY_WIRE_SIZE as u64,
+        ),
+        // Measured: a sealed segment of one entry.
+        (
+            "AFSPR_RECLAIM_SEALED_FIXED",
+            payload_len(&one_entry.encode(BS, 1).unwrap()) - reclaim::ENTRY_WIRE_SIZE as u64,
+        ),
+        // Literal: the root version is private to its codec.
+        ("AFSPR_RECLAIM_ROOT_VERSION", 1),
+        (
+            "AFSPR_RECLAIM_SEGMENT_ENTRY_CAP",
+            reclaim::SEGMENT_ENTRY_CAP as u64,
+        ),
+        ("AFSPR_RECLAIM_TABLE_REF_CAP", reclaim::TABLE_REF_CAP as u64),
     ];
 
     for (source, expected) in [

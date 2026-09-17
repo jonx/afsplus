@@ -119,7 +119,14 @@ Rust codec, and `afspr_attribute_set_next` steps through an admitted set
 without copying. The reader has no volume-level attribute read: a caller walks
 the chain with the segment decoder into its own buffer.
 [`attributes_c.rs`](../../crates/afsplus-format/tests/attributes_c.rs) holds
-the per-image agreement for these four. The reader preserves
+the per-image agreement for these four. The reclaim queue of
+[ADR-036](../../adr/ADR-036-reclaim-queue.md) has three standalone decoders,
+`afspr_decode_reclaim_root`, `afspr_decode_reclaim_segment` and
+`afspr_decode_reclaim_table`, with `afspr_reclaim_ref_at` and
+`afspr_reclaim_entry_at` to read the areas they validated; the reader does not
+walk the queue, since no read path needs it.
+[`reclaim_c.rs`](../../crates/afsplus-format/tests/reclaim_c.rs) holds their
+per-image agreement with the Rust codec. The reader preserves
 these bytes and never evaluates them; the writer appends intent records only
 and rewrites no object record, so it cannot drop a reference.
 [`security_c.rs`](../../crates/afsplus-format/tests/security_c.rs) holds the

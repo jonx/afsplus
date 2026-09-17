@@ -335,6 +335,66 @@ int afspr_validate_attribute_set(const void *set, size_t set_size,
 int afspr_attribute_set_next(const void *set, size_t set_size, size_t *cursor,
                              struct afspr_attribute *attribute);
 
+/* Reclaim queue (ADR-036): standalone decoders of its three block kinds.
+ * They validate one block and borrow it; walking the queue is the caller's.
+ * No I/O, no allocation; outputs are unchanged on error. */
+struct afspr_reclaim_entry {
+    uint64_t start;
+    uint64_t retire_generation;
+    uint32_t blocks;
+    uint32_t reserved32;
+};
+
+/* Reference to a sealed table (count = segment refs in it) or to a sealed
+ * segment (count = entries in it). */
+struct afspr_reclaim_ref {
+    uint64_t lba;
+    uint32_t count;
+    uint32_t reserved32;
+};
+
+struct afspr_reclaim_root {
+    uint64_t pending_blocks;
+    uint64_t appended_blocks_total;
+    uint64_t reclaimed_blocks_total;
+    uint32_t head_segment_offset;
+    uint32_t head_entry_offset;
+    uint32_t head_block_offset;
+    uint32_t table_count;
+    uint32_t segment_count;
+    uint32_t inline_count;
+    uint16_t inline_capacity;
+    uint16_t segment_capacity;
+    uint16_t table_capacity;
+    uint16_t reserved16;
+    /* Wire areas inside the decoded block, read with afspr_reclaim_ref_at
+     * and afspr_reclaim_entry_at. */
+    const uint8_t *tables;
+    const uint8_t *segments;
+    const uint8_t *inline_entries;
+};
+
+int afspr_decode_reclaim_root(const void *block, size_t block_size,
+                              struct afspr_reclaim_root *root,
+                              uint64_t *generation);
+
+/* A sealed segment: entries receives the wire area of count entries. */
+int afspr_decode_reclaim_segment(const void *block, size_t block_size,
+                                 const uint8_t **entries, uint32_t *count,
+                                 uint64_t *generation);
+
+/* A sealed table: refs receives the wire area of count segment refs. */
+int afspr_decode_reclaim_table(const void *block, size_t block_size,
+                               const uint8_t **refs, uint32_t *count,
+                               uint64_t *generation);
+
+/* Item index of an area a decoder above validated. The caller keeps index
+ * below the count that decoder returned. */
+void afspr_reclaim_entry_at(const uint8_t *area, uint32_t index,
+                            struct afspr_reclaim_entry *entry);
+void afspr_reclaim_ref_at(const uint8_t *area, uint32_t index,
+                          struct afspr_reclaim_ref *ref);
+
 /*
  * Initial placeholder: no function writes this type. Its layout is retained
  * for source compatibility; new integrations use afspr_directory_entry.

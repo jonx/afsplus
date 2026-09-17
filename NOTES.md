@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — A second reader for the reclaim queue blocks](#2026-09-17--a-second-reader-for-the-reclaim-queue-blocks)
 - [2026-09-17 — The remaining explain operations](#2026-09-17--the-remaining-explain-operations)
 - [2026-09-17 — The afsplus-explain command](#2026-09-17--the-afsplus-explain-command)
 - [2026-09-17 — Owned chains under persistent snapshots (ADR-109)](#2026-09-17--owned-chains-under-persistent-snapshots-adr-109)
@@ -208,6 +209,31 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — A second reader for the reclaim queue blocks
+
+Q15 named three layouts stated by the Rust codec alone. The first is settled:
+the portable C reader has `afspr_decode_reclaim_root`,
+`afspr_decode_reclaim_segment` and `afspr_decode_reclaim_table`, heap-free,
+borrowing the block, with `afspr_reclaim_ref_at` and `afspr_reclaim_entry_at`
+for the areas they validated. It does not walk the queue: no read path needs
+it. `spec/disk-layout.md` has the layout tables, `c_constants` pins ten new
+constants, the m68k step compiles the code.
+
+Proof: `reclaim_c` in afsplus-format: 60 images, each given to the Rust
+decoder, to the C decoder in a strict and a sanitized build, and compared to a
+literal verdict; for an accepted image the C fields and every item are
+compared to the Rust ones. Roots with and without tables, empty, at capacity;
+every field rule broken one at a time; a run whose end overflows; both sealed
+kinds full, empty, long, short, and read as each other. Negative controls,
+each failing the test: C without the overflow check, the cursor bound off by
+one, a sealed payload not exact.
+
+Finding, written as `proposals/adr-exact-reclaim-admission.md` and not
+changed: neither reader looks at the common header's flags and owner, at the
+unused slots of a root area, at a root payload longer than its areas, or at
+the bytes after a payload. The test states those eleven images as admitted by
+both, so the two readers cannot drift apart while the owner decides.
 
 ## 2026-09-17 — The remaining explain operations
 

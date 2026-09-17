@@ -15,6 +15,16 @@
 #define AFSPR_BLOCK_TYPE_OBJECT UINT32_C(0x4f534641)
 #define AFSPR_BLOCK_TYPE_SECURITY UINT32_C(0x58534641)
 #define AFSPR_BLOCK_TYPE_ATTRIBUTES UINT32_C(0x41534641)
+#define AFSPR_BLOCK_TYPE_RECLAIM_ROOT UINT32_C(0x48534641)
+#define AFSPR_BLOCK_TYPE_RECLAIM_SEGMENT UINT32_C(0x53534641)
+#define AFSPR_BLOCK_TYPE_RECLAIM_TABLE UINT32_C(0x4c534641)
+#define AFSPR_RECLAIM_ENTRY_SIZE 20u
+#define AFSPR_RECLAIM_REF_SIZE 12u
+#define AFSPR_RECLAIM_ROOT_FIXED 64u
+#define AFSPR_RECLAIM_SEALED_FIXED 8u
+#define AFSPR_RECLAIM_ROOT_VERSION 1u
+#define AFSPR_RECLAIM_SEGMENT_ENTRY_CAP 202u
+#define AFSPR_RECLAIM_TABLE_REF_CAP 338u
 #define AFSPR_BLOCK_TYPE_TREE UINT32_C(0x54534641)
 #define AFSPR_BLOCK_TYPE_INTENT UINT32_C(0x4a534641)
 #define AFSPR_BLOCK_TYPE_BITMAP UINT32_C(0x42534641)
@@ -5827,4 +5837,204 @@ const char *afspr_intent_tail_string(uint32_t tail_state)
     default:
         return "unknown intent-log tail";
     }
+}
+
+/* Reclaim queue (ADR-036). */
+
+void afspr_reclaim_entry_at(const uint8_t *area, uint32_t index,
+                            struct afspr_reclaim_entry *entry)
+{
+    const uint8_t *p = area + (size_t)index * AFSPR_RECLAIM_ENTRY_SIZE;
+    entry->start = afspr_get_le64(p);
+    entry->blocks = afspr_get_le32(p + 8u);
+    entry->retire_generation = afspr_get_le64(p + 12u);
+    entry->reserved32 = 0u;
+}
+
+void afspr_reclaim_ref_at(const uint8_t *area, uint32_t index,
+                          struct afspr_reclaim_ref *ref)
+{
+    const uint8_t *p = area + (size_t)index * AFSPR_RECLAIM_REF_SIZE;
+    ref->lba = afspr_get_le64(p);
+    ref->count = afspr_get_le32(p + 8u);
+    ref->reserved32 = 0u;
+}
+
+/* A run has blocks, a retire generation, and an end that fits 64 bits. */
+static int afspr_reclaim_entries_ok(const uint8_t *area, uint32_t count)
+{
+    uint32_t i;
+    for (i = 0u; i < count; ++i) {
+        struct afspr_reclaim_entry entry;
+        afspr_reclaim_entry_at(area, i, &entry);
+        if (entry.blocks == 0u || entry.retire_generation == 0u ||
+            entry.start > UINT64_MAX - (uint64_t)entry.blocks) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int afspr_reclaim_refs_ok(const uint8_t *area, uint32_t count,
+                                 uint32_t cap)
+{
+    uint32_t i;
+    for (i = 0u; i < count; ++i) {
+        struct afspr_reclaim_ref ref;
+        afspr_reclaim_ref_at(area, i, &ref);
+        if (ref.count == 0u || ref.count > cap) return 0;
+    }
+    return 1;
+}
+
+int afspr_decode_reclaim_root(const void *input, size_t block_size,
+                              struct afspr_reclaim_root *root_out,
+                              uint64_t *generation)
+{
+    const uint8_t *block = (const uint8_t *)input;
+    const uint8_t *p;
+    struct afspr_header header;
+    struct afspr_reclaim_root root;
+    struct afspr_reclaim_ref first;
+    size_t areas;
+    int status;
+
+    if (input == NULL || root_out == NULL || generation == NULL) {
+        return AFSPR_ERR_INVALID_ARGUMENT;
+    }
+    status = afspr_verify_header(block, block_size,
+                                 AFSPR_BLOCK_TYPE_RECLAIM_ROOT, &header);
+    if (status != AFSPR_OK) return status;
+    p = block + AFSPR_HEADER_SIZE;
+    if (header.payload_len < AFSPR_RECLAIM_ROOT_FIXED ||
+        afspr_get_le32(p) != AFSPR_RECLAIM_ROOT_VERSION ||
+        afspr_get_le32(p + 4u) != 0u || afspr_get_le16(p + 50u) != 0u) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    memset(&root, 0, sizeof(root));
+    root.pending_blocks = afspr_get_le64(p + 8u);
+    root.appended_blocks_total = afspr_get_le64(p + 16u);
+    root.reclaimed_blocks_total = afspr_get_le64(p + 24u);
+    root.head_segment_offset = afspr_get_le32(p + 32u);
+    root.head_entry_offset = afspr_get_le32(p + 36u);
+    root.head_block_offset = afspr_get_le32(p + 40u);
+    root.inline_capacity = afspr_get_le16(p + 44u);
+    root.segment_capacity = afspr_get_le16(p + 46u);
+    root.table_capacity = afspr_get_le16(p + 48u);
+    root.table_count = afspr_get_le32(p + 52u);
+    root.segment_count = afspr_get_le32(p + 56u);
+    root.inline_count = afspr_get_le32(p + 60u);
+    /* Bounds first: the capacities place the three areas. */
+    if (root.inline_capacity == 0u || root.segment_capacity == 0u ||
+        root.table_capacity == 0u) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    areas = (size_t)AFSPR_RECLAIM_ROOT_FIXED +
+            ((size_t)root.table_capacity + (size_t)root.segment_capacity) *
+                AFSPR_RECLAIM_REF_SIZE +
+            (size_t)root.inline_capacity * AFSPR_RECLAIM_ENTRY_SIZE;
+    if (areas > block_size - AFSPR_HEADER_SIZE ||
+        areas > (size_t)header.payload_len ||
+        root.table_count > root.table_capacity ||
+        root.segment_count > root.segment_capacity ||
+        root.inline_count > root.inline_capacity) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    root.tables = p + AFSPR_RECLAIM_ROOT_FIXED;
+    root.segments =
+        root.tables + (size_t)root.table_capacity * AFSPR_RECLAIM_REF_SIZE;
+    root.inline_entries =
+        root.segments + (size_t)root.segment_capacity * AFSPR_RECLAIM_REF_SIZE;
+    if (!afspr_reclaim_refs_ok(root.tables, root.table_count,
+                               AFSPR_RECLAIM_TABLE_REF_CAP) ||
+        !afspr_reclaim_refs_ok(root.segments, root.segment_count,
+                               AFSPR_RECLAIM_SEGMENT_ENTRY_CAP) ||
+        !afspr_reclaim_entries_ok(root.inline_entries, root.inline_count)) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    /* The cursor names sealed blocks only, in FIFO order. */
+    if (root.table_count == 0u) {
+        if (root.head_segment_offset != 0u) return AFSPR_ERR_CORRUPT;
+        if (root.segment_count == 0u) {
+            if (root.head_entry_offset != 0u || root.head_block_offset != 0u) {
+                return AFSPR_ERR_CORRUPT;
+            }
+        } else {
+            afspr_reclaim_ref_at(root.segments, 0u, &first);
+            if (root.head_entry_offset >= first.count) return AFSPR_ERR_CORRUPT;
+        }
+    } else {
+        afspr_reclaim_ref_at(root.tables, 0u, &first);
+        if (root.head_segment_offset >= first.count) return AFSPR_ERR_CORRUPT;
+    }
+    if (root.appended_blocks_total < root.reclaimed_blocks_total ||
+        root.appended_blocks_total - root.reclaimed_blocks_total !=
+            root.pending_blocks) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    *root_out = root;
+    *generation = header.generation;
+    return AFSPR_OK;
+}
+
+static int afspr_decode_reclaim_sealed(const void *input, size_t block_size,
+                                       uint32_t block_type, size_t item_size,
+                                       uint32_t cap, const uint8_t **area,
+                                       uint32_t *count_out,
+                                       uint64_t *generation)
+{
+    const uint8_t *block = (const uint8_t *)input;
+    const uint8_t *p;
+    struct afspr_header header;
+    uint32_t count;
+    int status;
+
+    if (input == NULL || area == NULL || count_out == NULL ||
+        generation == NULL) {
+        return AFSPR_ERR_INVALID_ARGUMENT;
+    }
+    status = afspr_verify_header(block, block_size, block_type, &header);
+    if (status != AFSPR_OK) return status;
+    p = block + AFSPR_HEADER_SIZE;
+    if (header.payload_len < AFSPR_RECLAIM_SEALED_FIXED ||
+        afspr_get_le32(p + 4u) != 0u) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    count = afspr_get_le32(p);
+    if (count == 0u || count > cap ||
+        (size_t)header.payload_len !=
+            AFSPR_RECLAIM_SEALED_FIXED + (size_t)count * item_size) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    p += AFSPR_RECLAIM_SEALED_FIXED;
+    if (item_size == AFSPR_RECLAIM_ENTRY_SIZE
+            ? !afspr_reclaim_entries_ok(p, count)
+            : !afspr_reclaim_refs_ok(p, count,
+                                     AFSPR_RECLAIM_SEGMENT_ENTRY_CAP)) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    *area = p;
+    *count_out = count;
+    *generation = header.generation;
+    return AFSPR_OK;
+}
+
+int afspr_decode_reclaim_segment(const void *block, size_t block_size,
+                                 const uint8_t **entries, uint32_t *count,
+                                 uint64_t *generation)
+{
+    return afspr_decode_reclaim_sealed(
+        block, block_size, AFSPR_BLOCK_TYPE_RECLAIM_SEGMENT,
+        AFSPR_RECLAIM_ENTRY_SIZE, AFSPR_RECLAIM_SEGMENT_ENTRY_CAP, entries,
+        count, generation);
+}
+
+int afspr_decode_reclaim_table(const void *block, size_t block_size,
+                               const uint8_t **refs, uint32_t *count,
+                               uint64_t *generation)
+{
+    return afspr_decode_reclaim_sealed(
+        block, block_size, AFSPR_BLOCK_TYPE_RECLAIM_TABLE,
+        AFSPR_RECLAIM_REF_SIZE, AFSPR_RECLAIM_TABLE_REF_CAP, refs, count,
+        generation);
 }

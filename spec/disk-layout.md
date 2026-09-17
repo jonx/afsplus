@@ -88,3 +88,61 @@ Rules:
    bytes, at most 65,536 bytes
    ([ADR-108](../adr/ADR-108-extended-attributes.md)); no feature gates it
 13. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0
+
+## Reclaim queue blocks
+
+The reclaim queue ([ADR-036](../adr/ADR-036-reclaim-queue.md)) has three block
+kinds. Each starts with the common 32-byte header; offsets below are inside
+the payload, integers are little-endian. The Rust codec
+([reclaim.rs](../crates/afsplus-format/src/reclaim.rs)) and the portable C
+decoders (`afspr_decode_reclaim_root`, `afspr_decode_reclaim_segment`,
+`afspr_decode_reclaim_table`) are held to the same verdict image by image in
+[the cross-read test](../crates/afsplus-format/tests/reclaim_c.rs).
+
+An entry is 20 bytes: run start (8), block count (4, nonzero), retire
+generation (8, nonzero); the run end fits 64 bits. A reference is 12 bytes:
+block (8) and item count (4): 1 to 338 segment references for a table, 1 to
+202 entries for a segment.
+
+Root, `"AFSH"`:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | version, 1 |
+| 4 | 4 | reserved, zero |
+| 8 | 8 | pending blocks, equal to appended minus reclaimed |
+| 16 | 8 | appended blocks, monotonic total |
+| 24 | 8 | reclaimed blocks, monotonic total, at most appended |
+| 32 | 4 | head segment offset: consumed references in the first table; below that table's count, zero without a table |
+| 36 | 4 | head entry offset: consumed entries in the head segment; zero without a sealed block, below the first segment's count when no table exists |
+| 40 | 4 | head block offset: consumed blocks of the head entry; zero without a sealed block |
+| 44 | 2 | inline entry capacity, nonzero |
+| 46 | 2 | segment reference capacity, nonzero |
+| 48 | 2 | table reference capacity, nonzero |
+| 50 | 2 | reserved, zero |
+| 52 | 4 | table reference count, at most its capacity |
+| 56 | 4 | segment reference count, at most its capacity |
+| 60 | 4 | inline entry count, at most its capacity |
+| 64 | 12 × table capacity | table references, oldest first |
+| after the tables | 12 × segment capacity | segment references, oldest first, newer than every table |
+| after the segments | 20 × inline capacity | inline entries, oldest first |
+
+The three areas sit at their capacity offsets whatever their counts, and
+64 + 12 × (table + segment capacity) + 20 × inline capacity fits the block
+and the payload.
+
+Sealed segment, `"AFSS"`, and sealed table, `"AFSL"`:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | item count, nonzero, at most 202 entries or 338 references |
+| 4 | 4 | reserved, zero |
+| 8 | count × 20 or count × 12 | entries, or segment references |
+
+The payload length of a sealed block is exactly 8 plus its items.
+
+Admission does not look at the common header's flags and owner, at the unused
+slots of a root area, at a root payload longer than its areas, or at the bytes
+after a payload. Both readers agree on that today, the cross-read test states
+it, and [a proposal](../proposals/adr-exact-reclaim-admission.md) would refuse
+all of them before the freeze.
