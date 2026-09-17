@@ -18,10 +18,11 @@ use afsplus_core::volume::{
     DataUpdatePolicy, DirectoryCursor, FileEditLimits, ObjectMetadata, PreservedMetadata,
     SecurityProjectionPolicy, Volume,
 };
+pub use afsplus_core::AttributeWriteMode;
 use afsplus_core::{mount_with_options, CoreError, MountMode, MountOptions};
 use afsplus_format::ident::{
     NameKeyAlgorithm, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG_DATA_UPDATES,
-    RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
+    INCOMPAT_PERSISTENT_SNAPSHOTS, RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::object::ObjectType;
 use afsplus_format::{Timespec, NAME_MAX_UTF8_BYTES, OBJECT_ROOT};
@@ -181,6 +182,9 @@ impl Capabilities {
     /// Additive: `preallocate` reserves unwritten storage for a byte range
     /// without changing the logical size.
     pub const PREALLOCATE: u64 = 1 << 14;
+    /// Additive: named attributes can be written. Reading them needs no
+    /// capability: a volume that cannot write them still reports what it has.
+    pub const EXTENDED_ATTRIBUTES: u64 = 1 << 15;
 
     pub const BASELINE: Capabilities = Capabilities(
         Self::IO_64BIT
@@ -194,7 +198,7 @@ impl Capabilities {
     );
 
     /// Stable lower-case names for structured output, in bit order.
-    pub const NAMES: [(u64, &'static str); 15] = [
+    pub const NAMES: [(u64, &'static str); 16] = [
         (Self::IO_64BIT, "io_64bit"),
         (Self::UTF8_NAMES, "utf8_names"),
         (Self::HARD_LINKS, "hard_links"),
@@ -210,6 +214,7 @@ impl Capabilities {
         (Self::OPEN_UNLINKED, "open_unlinked"),
         (Self::SYMLINKS, "symlinks"),
         (Self::PREALLOCATE, "preallocate"),
+        (Self::EXTENDED_ATTRIBUTES, "extended_attributes"),
     ];
 
     pub fn names(self) -> impl Iterator<Item = &'static str> {
@@ -362,6 +367,11 @@ impl<D: BlockDevice> Vfs<D> {
         }
         if self.volume.ident().features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0 {
             bits |= Capabilities::OPEN_UNLINKED;
+        }
+        // ADR-108: a snapshot-bearing volume refuses attribute writes until
+        // the snapshot lifetime ledger owns attribute chains.
+        if self.volume.ident().features.incompat & INCOMPAT_PERSISTENT_SNAPSHOTS == 0 {
+            bits |= Capabilities::EXTENDED_ATTRIBUTES;
         }
         Capabilities(bits)
     }
@@ -952,6 +962,42 @@ impl<D: BlockDevice> Vfs<D> {
         Ok(self
             .volume
             .set_object_protection(object_id, protection, now)?)
+    }
+
+    /// The value of the attribute `name`, or `None` when the object has no
+    /// such attribute. Names carry their namespace (`user.`, `system.`,
+    /// `security.`, `aros.`); which of them a caller may touch is the host
+    /// adapter's policy, not this layer's.
+    pub fn attribute(
+        &mut self,
+        object_id: ObjectId,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>, VfsError> {
+        self.stat(object_id)?;
+        Ok(self.volume.attribute(object_id, name)?)
+    }
+
+    /// Every attribute name of the object, ascending by name bytes.
+    pub fn attribute_names(&mut self, object_id: ObjectId) -> Result<Vec<String>, VfsError> {
+        self.stat(object_id)?;
+        Ok(self.volume.attribute_names(object_id)?)
+    }
+
+    /// Applies `changes` in one commit: every change or none survives a
+    /// power cut. `Some(value)` writes under `mode`, `None` removes and is
+    /// [`VfsError::NotFound`] for an absent attribute. A volume without
+    /// [`Capabilities::EXTENDED_ATTRIBUTES`] answers
+    /// [`VfsError::NotSupported`]. The change time is `now`.
+    pub fn set_attributes(
+        &mut self,
+        object_id: ObjectId,
+        changes: &[(&str, Option<&[u8]>)],
+        mode: AttributeWriteMode,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        self.stat(object_id)?;
+        self.checkpoint_data_window(now)?;
+        Ok(self.volume.set_attributes(object_id, changes, mode, now)?)
     }
 
     /// Largest stored comment, in UTF-8 bytes.

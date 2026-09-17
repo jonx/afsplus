@@ -53,7 +53,7 @@ fn info_document_is_versioned_exact_and_follows_the_live_state() {
             "\"capabilities\":[\"io_64bit\",\"utf8_names\",\"hard_links\",",
             "\"atomic_replace\",\"object_ids\",\"paged_directories\",\"sparse_files\",",
             "\"fsync\",\"clone_file\",\"clone_range\",\"logged_data_fsync\",",
-            "\"open_unlinked\",\"symlinks\",\"preallocate\"],",
+            "\"open_unlinked\",\"symlinks\",\"preallocate\",\"extended_attributes\"],",
             "\"health\":{{\"flags\":[],\"device_errors\":0,\"corruption_errors\":0,",
             "\"no_space_errors\":0,\"internal_faults\":0,\"events_recorded\":0,",
             "\"events_dropped\":0,\"last_error\":0}},",
