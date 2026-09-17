@@ -6752,6 +6752,36 @@ impl<D: BlockDevice> Volume<D> {
     /// Materializes the open window as one checkpoint transaction. Always
     /// publishes a checkpoint when any record was logged, so stale records
     /// can never be mistaken for live ones.
+    /// Abandon the open data window and say how many acknowledged operations
+    /// it was holding.
+    ///
+    /// The only way out of a poisoned window. A window is poisoned when its
+    /// staged work cannot be published, and every operation that needs the
+    /// window closed then refuses; the poison is cleared only by a successful
+    /// commit, and a poisoned window refuses to commit. A volume that ran out
+    /// of space during one write therefore refused EVERY later operation for
+    /// ever, including the delete that would have freed the space, while
+    /// almost all of its blocks were free. A mount could not even be unmounted
+    /// afterwards.
+    ///
+    /// What this discards was never durable: the window is exactly the work
+    /// that has not reached a checkpoint. It was acknowledged to the caller,
+    /// so losing it is a real loss and the count is returned rather than
+    /// swallowed; the caller says so. Losing it is what already happened. The
+    /// choice this makes is only whether the volume stays usable afterwards.
+    pub fn window_discard(&mut self) -> u32 {
+        let Some(window) = self.window.take() else {
+            self.window_poisoned = false;
+            return 0;
+        };
+        let lost = window.logged_records + window.unlogged.len() as u32;
+        let generation = window.generation;
+        drop(window);
+        self.window_poisoned = false;
+        self.flight_window_event(generation, crate::flight::EventKind::WindowClosed, None);
+        lost
+    }
+
     pub fn window_commit(&mut self, now: Timespec) -> Result<(), CoreError> {
         self.trace_api(crate::flight::ApiMethod::WindowCommit, |volume| {
             volume.window_commit_untraced(now)

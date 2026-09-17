@@ -266,6 +266,9 @@ pub enum VfsError {
     Corrupt(String),
     Io(String),
     Limit(&'static str),
+    /// Staged data could not be published and was abandoned so that the volume
+    /// stays usable; this many acknowledged operations were lost.
+    WindowLost(u32),
 }
 
 impl fmt::Display for VfsError {
@@ -285,6 +288,10 @@ impl fmt::Display for VfsError {
             VfsError::Corrupt(detail) => write!(f, "corrupt filesystem: {detail}"),
             VfsError::Io(detail) => write!(f, "I/O error: {detail}"),
             VfsError::Limit(detail) => write!(f, "implementation limit: {detail}"),
+            VfsError::WindowLost(lost) => write!(
+                f,
+                "{lost} acknowledged writes could not be published and were lost; the volume is usable again"
+            ),
         }
     }
 }
@@ -404,10 +411,25 @@ impl<D: BlockDevice> Vfs<D> {
     /// global data-update window. Publish that window first; this is also the
     /// bounded fallback used when an fsync group cannot fit in the log.
     fn checkpoint_data_window(&mut self, now: Timespec) -> Result<(), VfsError> {
-        if self.volume.mount_mode() == MountMode::ReadWrite && self.logged_data_fsync_enabled() {
-            self.volume.window_commit(now)?;
+        if self.volume.mount_mode() != MountMode::ReadWrite || !self.logged_data_fsync_enabled() {
+            return Ok(());
         }
-        Ok(())
+        match self.volume.window_commit(now) {
+            Ok(()) => Ok(()),
+            // The window could not be published and is now poisoned, which
+            // refuses every later commit, which is what poisons it further. A
+            // volume that hit one full-disk write used to answer "busy" to
+            // everything for ever, including the delete that would have freed
+            // the space, and could not be unmounted. Abandon the window so the
+            // volume stays usable, and say how much was lost rather than
+            // letting a caller believe the writes landed. They had not landed
+            // either way: the window IS the work that has not reached a
+            // checkpoint.
+            Err(_) => {
+                let lost = self.volume.window_discard();
+                Err(VfsError::WindowLost(lost))
+            }
+        }
     }
 
     /// Generation of the checkpoint or open data window the mount exposes.
