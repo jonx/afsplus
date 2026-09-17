@@ -63,6 +63,14 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
     if p[9] != 0 {
         return None;
     }
+    // Exact admission: zero header flags, zero tail, and no payload beyond
+    // the fixed record unless the type defines one.
+    if h.flags != 0 || input[HEADER_SIZE + p.len()..].iter().any(|b| *b != 0) {
+        return None;
+    }
+    if p[8] != 3 && p.len() != 96 {
+        return None;
+    }
     let kind = match p[8] {
         1 => ObjectType::File,
         2 => ObjectType::Directory,

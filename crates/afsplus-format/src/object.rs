@@ -182,8 +182,20 @@ impl ObjectRecord {
         if p.len() < PAYLOAD_LEN {
             return Err(FormatError::Invalid("object record payload too short"));
         }
+        // Exact admission: a rewrite re-encodes the decoded fields into a
+        // zeroed block, so any byte accepted here without a field would be
+        // dropped by the next metadata edit.
+        if header.flags != 0 {
+            return Err(FormatError::Invalid("object header flags are nonzero"));
+        }
         if p[9] != 0 {
             return Err(FormatError::Invalid("object reserved byte is nonzero"));
+        }
+        if p[8] != ObjectType::Symlink.to_wire() && p.len() != PAYLOAD_LEN {
+            return Err(FormatError::Invalid("object payload length is not exact"));
+        }
+        if block[HEADER_SIZE + p.len()..].iter().any(|b| *b != 0) {
+            return Err(FormatError::Invalid("object unused tail is nonzero"));
         }
         let record = ObjectRecord {
             object_id: le::get_u64(&p[0..8]),

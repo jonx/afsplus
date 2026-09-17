@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Admit object records only in their canonical image](#2026-09-17--admit-object-records-only-in-their-canonical-image)
 - [2026-09-17 — Close a-cache and Stage A](#2026-09-17--close-a-cache-and-stage-a)
 - [2026-09-17 — Fix window refusals that poisoned an open deferred window](#2026-09-17--fix-window-refusals-that-poisoned-an-open-deferred-window)
 - [2026-09-16 — Fix intent-log replay reusing a logged data run](#2026-09-16--fix-intent-log-replay-reusing-a-logged-data-run)
@@ -171,6 +172,28 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-17 — Admit object records only in their canonical image
+
+The Q13 experiment ran against the object readers: after a CRC reseal, the
+generic, generation-returning and metadata readers admitted all 16 common
+header flag bits, payload lengths of 97, 104, 112 and the full block, and a
+nonzero byte at four tail positions, on files and directories. The symlink
+reader refused all three; the portable C reader refused header flags and
+admitted the other two. Every mutation path re-encodes decoded fields into a
+zeroed block, so an admitted byte without a field is dropped by the next
+rewrite of that object.
+
+The object decoder now checks header flags, exact payload length and the zero
+tail in the one function all four readers share.
+`crates/afsplus-format/tests/object_admission.rs` holds 56 resealed negative
+images, each refused by three readers with an exact reason, a canonical
+control and a symlink image; five tests pass, alongside the existing
+reserved-byte, roundtrip and C symlink tests. The rule and its extension path
+are proposed in
+[exact admission of object records](proposals/adr-object-record-admission.md).
+Portable C parity for payload length and tail, and the resealed conformance
+images, are open under that proposal.
 
 ## 2026-09-17 — Close a-cache and Stage A
 
