@@ -103,7 +103,6 @@ Lacking, in the order classic software meets them:
 | `ACTION_RENAME_DISK` | label rewrite in the identity block; needs a core label setter | L1, core |
 | `ACTION_WRITE_PROTECT` | runtime switch to a read-only view with the pass key | L1 |
 | `ACTION_LOCK_RECORD`, `ACTION_FREE_RECORD` | byte-range record table per object, with timeout handled by the handler loop | L1, L4 |
-| `ACTION_ADD_NOTIFY`, `ACTION_REMOVE_NOTIFY` | C8 | C8 |
 | `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |
 | `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |
 
@@ -191,12 +190,13 @@ one pending flag per watch, so events coalesce and memory does not follow the
 change rate; writes reported at close; `watch_add`, `watch_remove` and
 `watch_drain` at the C boundary.
 
-Lacking: `ACTION_ADD_NOTIFY` and `ACTION_REMOVE_NOTIFY` in the packet layer
-(`NotifyRequest` to watch identifier, `nr_FullName` resolution); delivery in
-the handler loop after each packet (`NotifyMessage` or `Signal`,
-`NRF_NOTIFY_INITIAL`, suppression while a message is unreplied), which needs
-a delivery callback in the packet configuration; the v2 `watch` operation
-over the same table.
+At L3 `ACTION_ADD_NOTIFY` and `ACTION_REMOVE_NOTIFY` pair each
+`NotifyRequest` with a watch and deliver fired watches through a callback of
+the packet configuration after every packet.
+
+Lacking: the callback in the handler shell (`NotifyMessage` or `Signal`,
+`nr_MsgCount`, suppression while a message is unreplied under
+`NRF_WAIT_REPLY`), which is L4; the v2 `watch` operation over the same table.
 
 Hosted and QEMU: all. Apple hardware: none.
 

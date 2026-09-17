@@ -38,7 +38,13 @@ static uint64_t created_lock_id;
 static int32_t stub_directory_size = -1;
 static int32_t stub_directory_at;
 static uint32_t rewind_count;
-static uint64_t stub_groups = UINT64_C(0xF);
+static uint64_t stub_next_watch = 500;
+static uint64_t stub_fired[4];
+static uint32_t stub_fired_count;
+static uint32_t stub_removed_watches;
+static struct NotifyRequest *delivered[8];
+static uint32_t delivered_count;
+static uint64_t stub_groups = UINT64_C(0x2F);
 static const char *stub_link_target = "";
 static uint32_t stub_protection;
 static int64_t stub_modified_seconds;
@@ -508,6 +514,46 @@ int32_t afsplus_aros_read_soft_link(struct AfsplusAros *filesystem,
     return 0;
 }
 
+int32_t afsplus_aros_watch_add(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint64_t *output_watch)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    record('W', base_lock, name, name_length, 0);
+    *output_watch = stub_next_watch++;
+    return 0;
+}
+
+int32_t afsplus_aros_watch_remove(struct AfsplusAros *filesystem,
+    uint64_t watch)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(watch >= 500);
+    stub_removed_watches++;
+    return 0;
+}
+
+int32_t afsplus_aros_watch_drain(struct AfsplusAros *filesystem,
+    uint64_t *watches, uint32_t capacity, uint32_t *output_count)
+{
+    uint32_t i;
+
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(capacity >= stub_fired_count);
+    for (i = 0; i < stub_fired_count; i++)
+        watches[i] = stub_fired[i];
+    *output_count = stub_fired_count;
+    stub_fired_count = 0;
+    return 0;
+}
+
+static void packet_notify(void *context, struct NotifyRequest *request)
+{
+    (void)context;
+    assert(delivered_count < 8);
+    delivered[delivered_count++] = request;
+}
+
 static void assert_event(size_t index, char operation, const char *name,
     uint32_t access)
 {
@@ -545,6 +591,7 @@ int main(void)
     config.allocate = packet_allocate;
     config.free = packet_free;
     config.now = packet_now;
+    config.notify = packet_notify;
     assert(afsplus_aros_packet_create(&config, &context) == 0);
     assert(context != NULL);
 
@@ -946,6 +993,77 @@ int main(void)
         stub_directory_size = -1;
     }
 
+    /* C8: notification requests map to watches; fired watches are delivered
+     * after the packet that caused them. */
+    {
+        struct NotifyRequest first;
+        struct NotifyRequest second;
+
+        memset(&first, 0, sizeof(first));
+        memset(&second, 0, sizeof(second));
+        first.nr_FullName = (STRPTR)"AFS+:Prefs/settings";
+        first.nr_MsgCount = 9;
+        second.nr_FullName = (STRPTR)"AFS+:Prefs";
+        second.nr_Flags = NRF_NOTIFY_INITIAL;
+
+        reset_events();
+        initialize_packet(&packet, ACTION_ADD_NOTIFY);
+        packet.dp_Arg1 = (SIPTR)&first;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(first.nr_Handler == config.handler_port);
+        assert(first.nr_MsgCount == 0);
+        /* Parent resolved from the volume root, leaf watched by name. */
+        assert_event(0, 'L', "Prefs", AFSPLUS_AROS_LOCK_SHARED);
+        assert_event(1, 'W', "settings", 0);
+        assert(delivered_count == 0);
+
+        /* The same request twice is refused. */
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_OBJECT_IN_USE);
+
+        /* NRF_NOTIFY_INITIAL on an existing object delivers at once. */
+        initialize_packet(&packet, ACTION_ADD_NOTIFY);
+        packet.dp_Arg1 = (SIPTR)&second;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE);
+        assert(delivered_count == 1 && delivered[0] == &second);
+
+        /* Watches 500 (first) and 501 (second) fire during an unrelated
+         * packet: both requests are delivered once, unknown id 777 to
+         * nobody. */
+        delivered_count = 0;
+        stub_fired[0] = 501;
+        stub_fired[1] = 777;
+        stub_fired[2] = 500;
+        stub_fired_count = 3;
+        initialize_packet(&packet, ACTION_IS_FILESYSTEM);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(delivered_count == 2);
+        assert(delivered[0] == &second && delivered[1] == &first);
+        /* Nothing fired: nothing delivered. */
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(delivered_count == 2);
+
+        /* Removal stops delivery for that request only. */
+        initialize_packet(&packet, ACTION_REMOVE_NOTIFY);
+        packet.dp_Arg1 = (SIPTR)&first;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && stub_removed_watches == 1);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_OBJECT_NOT_FOUND);
+        delivered_count = 0;
+        stub_fired[0] = 500;
+        stub_fired[1] = 501;
+        stub_fired_count = 2;
+        initialize_packet(&packet, ACTION_IS_FILESYSTEM);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(delivered_count == 1 && delivered[0] == &second);
+        /* "second" stays registered: destroy must remove its watch. */
+    }
+
     /* C1 control: a library without the later groups makes the same packets
      * unknown actions, and no boundary function is reached. */
     {
@@ -972,7 +1090,27 @@ int main(void)
         stub_groups = 0;
         assert(afsplus_aros_packet_create(&config, &old_context)
             == ERROR_BAD_NUMBER);
-        stub_groups = UINT64_C(0xF);
+        stub_groups = UINT64_C(0x2F);
+
+        /* A handler shell without a delivery callback cannot notify, so the
+         * request is an unknown action and no watch is created. */
+        {
+            struct NotifyRequest request;
+
+            memset(&request, 0, sizeof(request));
+            request.nr_FullName = (STRPTR)"AFS+:x";
+            config.notify = NULL;
+            assert(afsplus_aros_packet_create(&config, &old_context) == 0);
+            reset_events();
+            initialize_packet(&packet, ACTION_ADD_NOTIFY);
+            packet.dp_Arg1 = (SIPTR)&request;
+            assert(afsplus_aros_packet_process(old_context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSFALSE
+                && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+            assert(event_count == 0);
+            assert(afsplus_aros_packet_destroy(old_context) == 0);
+            config.notify = packet_notify;
+        }
     }
 
     initialize_packet(&packet, ACTION_DIE);
@@ -1027,7 +1165,10 @@ int main(void)
     assert(afsplus_aros_packet_should_quit(context) == 1);
     assert(flush_count == 3);
 
+    assert(stub_removed_watches == 1);
     assert(afsplus_aros_packet_destroy(context) == 0);
+    /* The registration that was never removed is released with the context. */
+    assert(stub_removed_watches == 2);
     puts("afsplus packet stub: PASS");
     return 0;
 }

@@ -282,8 +282,15 @@ plus the comparison key of a name, so it covers names that do not exist yet
 and any spelling the name policy folds together; a directory watch also fires
 for changes to its entries. Pending state is one flag per watch, so changes
 between two drains are one event and memory does not follow the change rate.
-File writes are reported when the handle closes. The handler loop drains
-identifiers after each packet and owns the `NotifyRequest` delivery.
+File writes are reported when the handle closes. `ACTION_ADD_NOTIFY`
+resolves `nr_FullName` to a parent lock plus leaf, registers the watch and
+keeps the request-to-watch pairing in the packet context;
+`ACTION_REMOVE_NOTIFY` and context destruction release it. After every packet
+the layer drains the fired watches and calls the `notify` callback of the
+packet configuration once per request, and at once for `NRF_NOTIFY_INITIAL` on
+an existing object. The handler shell owns the delivery itself: the
+`NotifyMessage` or `Signal`, `nr_MsgCount` and `NRF_WAIT_REPLY` suppression. A
+shell that supplies no callback answers `ERROR_ACTION_NOT_KNOWN`.
 
 `OBSERVE` carries health and tracing. Every failed call on a mounted instance
 that describes the volume or its device (device error, failed validation,

@@ -11,6 +11,7 @@
  */
 
 #include <dos/dos64.h>
+#include <dos/notify.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -20,7 +21,7 @@
 extern "C" {
 #endif
 
-#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(1)
+#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(2)
 
 struct AfsplusArosPacketContext;
 
@@ -29,6 +30,12 @@ typedef void (*AfsplusArosPacketFree)(void *context, void *allocation,
     size_t size);
 typedef int32_t (*AfsplusArosPacketNow)(void *context,
     int64_t *unix_seconds, uint32_t *nanoseconds);
+/* Delivers one change notification: a NotifyMessage to nr_Port or a Signal
+ * to nr_Task, as nr_Flags selects. The handler owns message memory, the
+ * nr_MsgCount bookkeeping and NRF_WAIT_REPLY suppression. Called from
+ * afsplus_aros_packet_process after the packet's own result is stored. */
+typedef void (*AfsplusArosPacketNotify)(void *context,
+    struct NotifyRequest *request);
 
 struct AfsplusArosPacketConfig {
     uint32_t abi_version;
@@ -40,14 +47,16 @@ struct AfsplusArosPacketConfig {
     AfsplusArosPacketAllocate allocate;
     AfsplusArosPacketFree free;
     AfsplusArosPacketNow now;
+    /* Optional. Without it ACTION_ADD_NOTIFY is ERROR_ACTION_NOT_KNOWN. */
+    AfsplusArosPacketNotify notify;
 };
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 64,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 72,
     "AfsplusArosPacketConfig 64-bit ABI drift");
 #elif UINTPTR_MAX == UINT32_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 36,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 40,
     "AfsplusArosPacketConfig 32-bit ABI drift");
 #endif
 #endif
