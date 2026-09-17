@@ -2,7 +2,6 @@
 
 use afsplus_block::BlockDevice;
 use afsplus_format::geometry::Geometry;
-use afsplus_format::le;
 use afsplus_format::tree::{
     child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode, MAX_TREE_LEVEL,
 };
@@ -10,18 +9,11 @@ use afsplus_format::tree::{
 use crate::tree::{lookup_floor, read_range, visit_tree_nodes, TreeSpec, TreeSummary};
 use crate::CoreError;
 
-const VALUE_SIZE: usize = 24;
-
-/// Allocated blocks whose contents are not yet part of the logical file read
-/// as zeros until a later write replaces the extent or clears this flag.
-pub const EXTENT_UNWRITTEN: u32 = 1 << 0;
-
-/// Conservative marker: this extent's physical run *may* overlap shared
-/// records, and every operation on it must resolve by overlap against the
-/// reference tree (ADR-061). Set with no overlapping record is legal (the
-/// run is private); clear over an existing record is corruption.
-pub const EXTENT_SHARED: u32 = 1 << 1;
-const KNOWN_FLAGS: u32 = EXTENT_UNWRITTEN | EXTENT_SHARED;
+use afsplus_format::extent::{ExtentItem, EXTENT_VALUE_LEN as VALUE_SIZE};
+/// The wire codec of one extent item lives in `afsplus_format::extent`.
+/// `EXTENT_SHARED` set with no overlapping record is legal (the run is
+/// private); clear over an existing record is corruption (ADR-061).
+pub use afsplus_format::extent::{EXTENT_SHARED, EXTENT_UNWRITTEN};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Extent {
@@ -338,12 +330,27 @@ pub fn validate_root<D: BlockDevice>(
 }
 
 pub fn encode_extent(extent: Extent) -> Result<([u8; 8], [u8; VALUE_SIZE]), CoreError> {
-    validate_extent_shape(extent)?;
-    let mut value = [0u8; VALUE_SIZE];
-    le::put_u64(&mut value[0..8], extent.physical_start);
-    le::put_u64(&mut value[8..16], extent.block_count);
-    le::put_u32(&mut value[16..20], extent.flags);
-    Ok((key_u64(extent.logical_start), value))
+    wire(extent).encode().map_err(shape_error)
+}
+
+fn wire(extent: Extent) -> ExtentItem {
+    ExtentItem {
+        logical_start: extent.logical_start,
+        physical_start: extent.physical_start,
+        block_count: extent.block_count,
+        flags: extent.flags,
+    }
+}
+
+/// The codec's verdict with the messages this module has always reported.
+fn shape_error(error: afsplus_format::FormatError) -> CoreError {
+    match error {
+        afsplus_format::FormatError::Invalid(message) => CoreError::Corrupt(message.into()),
+        afsplus_format::FormatError::Overflow(what) => {
+            CoreError::Corrupt(format!("{what} overflows"))
+        }
+        other => CoreError::Format(other),
+    }
 }
 
 /// Finds the extent containing `logical_block`, or `None` for a hole.
@@ -549,40 +556,15 @@ pub fn load_all<D: BlockDevice>(
 }
 
 fn decode_extent(key: &[u8], value: &[u8], geo: &Geometry) -> Result<Extent, CoreError> {
-    let key: [u8; 8] = key
-        .try_into()
-        .map_err(|_| CoreError::Corrupt("extent key is not eight bytes".into()))?;
-    if value.len() != VALUE_SIZE {
-        return Err(CoreError::Corrupt(
-            "extent value is not twenty-four bytes".into(),
-        ));
-    }
-    if value[20..24] != [0; 4] {
-        return Err(CoreError::Corrupt(
-            "extent reserved bytes are nonzero".into(),
-        ));
-    }
+    let item = ExtentItem::decode(key, value).map_err(shape_error)?;
     let extent = Extent {
-        logical_start: u64::from_be_bytes(key),
-        physical_start: le::get_u64(&value[0..8]),
-        block_count: le::get_u64(&value[8..16]),
-        flags: le::get_u32(&value[16..20]),
+        logical_start: item.logical_start,
+        physical_start: item.physical_start,
+        block_count: item.block_count,
+        flags: item.flags,
     };
-    validate_extent_shape(extent)?;
     validate_physical_range(extent, geo)?;
     Ok(extent)
-}
-
-fn validate_extent_shape(extent: Extent) -> Result<(), CoreError> {
-    if extent.block_count == 0 {
-        return Err(CoreError::Corrupt("zero-length extent".into()));
-    }
-    if extent.flags & !KNOWN_FLAGS != 0 {
-        return Err(CoreError::Corrupt("extent has unsupported flags".into()));
-    }
-    extent.logical_end()?;
-    extent.physical_end()?;
-    Ok(())
 }
 
 fn validate_physical_range(extent: Extent, geo: &Geometry) -> Result<(), CoreError> {

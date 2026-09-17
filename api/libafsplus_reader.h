@@ -216,6 +216,23 @@ int afspr_decode_symlink_record(const void *block, size_t block_size,
                                const uint8_t **target, size_t *target_size,
                                uint64_t *generation);
 
+/* One extent-map item: spec/afsplus_format.h, struct afsp_extent_value_wire. */
+struct afspr_extent {
+    uint64_t logical_start;
+    uint64_t physical_start;
+    uint64_t block_count;
+    uint32_t flags;
+    uint32_t reserved32;
+};
+
+/* Validate the shape of one standalone extent item: eight-byte big-endian
+ * key, 24-byte value, nonzero count, known flags, zero reserved bytes, no
+ * overflow. Whether the run lies inside the volume is a volume-path check.
+ * Outputs are unchanged on error. */
+int afspr_decode_extent_item(const uint8_t *key, size_t key_size,
+                             const uint8_t *value, size_t value_size,
+                             struct afspr_extent *extent);
+
 /* Security reference of an object record: where its opaque descriptor
  * chain starts and how long it is. present is 0 for a record without one. */
 struct afspr_security_reference {

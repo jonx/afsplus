@@ -51,9 +51,10 @@
 #define AFSPR_SECURITY_REF_SIZE 16u
 #define AFSPR_SECURITY_SEGMENT_FIXED 24u
 #define AFSPR_MAX_DIRECT_BLOCKS UINT64_C(4096)
-#define AFSPR_EXTENT_VALUE_SIZE 24u
-#define AFSPR_EXTENT_UNWRITTEN (UINT32_C(1) << 0)
-#define AFSPR_EXTENT_SHARED (UINT32_C(1) << 1)
+/* The extent item layout and its flag bits are the spec header's. */
+#define AFSPR_EXTENT_VALUE_SIZE sizeof(struct afsp_extent_value_wire)
+#define AFSPR_EXTENT_UNWRITTEN ((uint32_t)AFSP_EXTENT_FLAG_UNWRITTEN)
+#define AFSPR_EXTENT_SHARED ((uint32_t)AFSP_EXTENT_FLAG_SHARED)
 #define AFSPR_EXTENT_KNOWN_FLAGS (AFSPR_EXTENT_UNWRITTEN | AFSPR_EXTENT_SHARED)
 #define AFSPR_LOG_FIXED_PAYLOAD 32u
 #define AFSPR_LOG_LEGACY_OP_FIXED 48u
@@ -140,13 +141,6 @@ struct afspr_tree_item {
     size_t key_len;
     const uint8_t *value;
     size_t value_len;
-};
-
-struct afspr_extent {
-    uint64_t logical_start;
-    uint64_t physical_start;
-    uint64_t block_count;
-    uint32_t flags;
 };
 
 struct afspr_log_record {
@@ -2056,31 +2050,49 @@ int afspr_directory_entry_at(const struct afspr_block_ops *ops,
         diagnostic, diagnostic_size);
 }
 
+int afspr_decode_extent_item(const uint8_t *key, size_t key_size,
+                             const uint8_t *value, size_t value_size,
+                             struct afspr_extent *extent)
+{
+    struct afspr_extent decoded;
+
+    if (key == NULL || value == NULL || extent == NULL) {
+        return AFSPR_ERR_INVALID_ARGUMENT;
+    }
+    if (key_size != 8u || value_size != AFSPR_EXTENT_VALUE_SIZE) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    decoded.logical_start = afspr_get_be64(key);
+    decoded.physical_start = afspr_get_le64(value);
+    decoded.block_count = afspr_get_le64(value + 8u);
+    decoded.flags = afspr_get_le32(value + 16u);
+    decoded.reserved32 = 0u;
+    if (value[20] != 0u || value[21] != 0u || value[22] != 0u ||
+        value[23] != 0u || decoded.block_count == 0u ||
+        (decoded.flags & ~AFSPR_EXTENT_KNOWN_FLAGS) != 0u ||
+        UINT64_MAX - decoded.logical_start < decoded.block_count ||
+        UINT64_MAX - decoded.physical_start < decoded.block_count) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    *extent = decoded;
+    return AFSPR_OK;
+}
+
 static int afspr_decode_extent(const struct afspr_ident *ident,
                                const struct afspr_probe_result *volume,
                                const uint8_t key[8], const uint8_t value[24],
                                struct afspr_extent *extent)
 {
-    uint64_t logical_end;
     uint64_t physical_end;
     uint32_t first_region;
     uint32_t last_region;
 
-    extent->logical_start = afspr_get_be64(key);
-    extent->physical_start = afspr_get_le64(value);
-    extent->block_count = afspr_get_le64(value + 8u);
-    extent->flags = afspr_get_le32(value + 16u);
-    if (value[20] != 0u || value[21] != 0u || value[22] != 0u ||
-        value[23] != 0u || extent->block_count == 0u ||
-        (extent->flags & ~AFSPR_EXTENT_KNOWN_FLAGS) != 0u ||
-        UINT64_MAX - extent->logical_start < extent->block_count ||
-        UINT64_MAX - extent->physical_start < extent->block_count) {
+    if (afspr_decode_extent_item(key, 8u, value, AFSPR_EXTENT_VALUE_SIZE,
+                                 extent) != AFSPR_OK) {
         return AFSPR_ERR_CORRUPT;
     }
-    logical_end = extent->logical_start + extent->block_count;
     physical_end = extent->physical_start + extent->block_count;
-    if (logical_end <= extent->logical_start ||
-        physical_end > ident->total_blocks ||
+    if (physical_end > ident->total_blocks ||
         !afspr_is_allocatable(ident, extent->physical_start) ||
         !afspr_is_allocatable(ident, physical_end - 1u)) {
         return AFSPR_ERR_CORRUPT;

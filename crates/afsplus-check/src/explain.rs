@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use afsplus_block::BlockDevice;
 use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::Checkpoint;
+use afsplus_format::extent::{ExtentItem, EXTENT_SHARED, EXTENT_UNWRITTEN};
 use afsplus_format::header::{block_type, BlockHeader};
 use afsplus_format::ident::Identification;
 use afsplus_format::object::{ObjectRecord, ObjectType, OBJECT_FLAG_EXTENT_TREE};
@@ -33,12 +34,6 @@ use afsplus_format::tree::{TreeKind, TreeNode};
 
 /// Versioned structured-output schema of the explain records (ADR-025).
 pub const EXPLAIN_SCHEMA_VERSION: u32 = 1;
-
-/// Extent flag bits of the 20-byte extent-map value (physical start, block
-/// count, flags). The value codec lives in `afsplus-core` and in the portable
-/// C reader, not in `afsplus-format`; these are the wire values both use.
-const EXTENT_UNWRITTEN: u32 = 1 << 0;
-const EXTENT_SHARED: u32 = 1 << 1;
 
 /// One thing the committed state says a block is.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -533,30 +528,25 @@ impl Explainer {
                     &|level| BlockRole::ExtentNode { object_id, level },
                 );
                 for (key, value) in extents {
-                    let (Ok(logical), Some(physical), Some(count), Some(flags)) = (
-                        <[u8; 8]>::try_from(key.as_slice()).map(u64::from_be_bytes),
-                        u64_at(&value, 0),
-                        u64_at(&value, 8),
-                        value
-                            .get(16..20)
-                            .and_then(|b| b.try_into().ok())
-                            .map(u32::from_le_bytes),
-                    ) else {
-                        walk.problems.push(format!("{what}: malformed extent"));
-                        continue;
+                    let item = match ExtentItem::decode(&key, &value) {
+                        Ok(item) if item.block_count <= walk.dev.total_blocks() => item,
+                        Ok(_) => {
+                            walk.problems.push(format!("{what}: extent too long"));
+                            continue;
+                        }
+                        Err(error) => {
+                            walk.problems.push(format!("{what}: {error}"));
+                            continue;
+                        }
                     };
-                    if count > walk.dev.total_blocks() {
-                        walk.problems.push(format!("{what}: extent too long"));
-                        continue;
-                    }
-                    for offset in 0..count {
+                    for offset in 0..item.block_count {
                         walk.add(
-                            physical + offset,
+                            item.physical_start + offset,
                             BlockRole::Data {
                                 object_id,
-                                logical_block: logical + offset,
-                                shared: flags & EXTENT_SHARED != 0,
-                                unwritten: flags & EXTENT_UNWRITTEN != 0,
+                                logical_block: item.logical_start + offset,
+                                shared: item.flags & EXTENT_SHARED != 0,
+                                unwritten: item.flags & EXTENT_UNWRITTEN != 0,
                             },
                         );
                     }

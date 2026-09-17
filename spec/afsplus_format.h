@@ -82,6 +82,19 @@ struct afsp_timespec_wire {
  * reference tree. A data-checksum association bit stays reserved so adding
  * that feature later does not require redefining the base extent record.
  */
+/*
+ * Extent-map item of a regular file's extent tree. The key is the logical
+ * start block as eight big-endian bytes, so byte order is numeric order. The
+ * value is 24 bytes; block_count is nonzero, the reserved bytes are zero and
+ * a reader refuses a flag bit it does not know.
+ */
+struct afsp_extent_value_wire {
+    uint8_t physical_start_le[8];
+    uint8_t block_count_le[8];
+    uint8_t flags_le[4];
+    uint8_t reserved[4];
+};
+
 enum afsp_extent_flag {
     AFSP_EXTENT_FLAG_NONE = 0,
     AFSP_EXTENT_FLAG_UNWRITTEN = 1u << 0,

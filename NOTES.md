@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Give the extent-map item one codec](#2026-09-17--give-the-extent-map-item-one-codec)
 - [2026-09-17 — Explain one block with a walk that shares nothing with the checker](#2026-09-17--explain-one-block-with-a-walk-that-shares-nothing-with-the-checker)
 - [2026-09-17 — Accept the four Stage B decisions as ADR-100 to ADR-103](#2026-09-17--accept-the-four-stage-b-decisions-as-adr-100-to-adr-103)
 - [2026-09-17 — Bring the portable C reader to exact admission and the security container](#2026-09-17--bring-the-portable-c-reader-to-exact-admission-and-the-security-container)
@@ -182,6 +183,29 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-17 — Give the extent-map item one codec
+
+The extent-map item (eight-byte big-endian logical start; 24-byte value with
+physical start, nonzero block count, flags and four zero reserved bytes) is
+defined once, in `afsplus_format::extent` and as
+`struct afsp_extent_value_wire` in the format header, whose flag enum already
+named unwritten as bit 0 and shared as bit 1. The core's extent adapter keeps
+its contextual range checks and its error messages and delegates the shape to
+the codec; the explain walk decodes through it; the portable C reader takes
+the value size and the two flag bits from the header and exposes its shape
+check as `afspr_decode_extent_item`. The wire image is unchanged.
+
+`crates/afsplus-format/tests/extent_c.rs` pins the literal image and drives a
+sanitizer-built C probe over 16 items: the four flag combinations, the last
+representable block, zero count, two unknown flag bits, each reserved byte,
+short and long values, a short key and an overflowing run. The C verdict, the
+Rust verdict and the literal expectation agree on each, and a wrong
+expectation makes the probe report a mismatch. The explain tests, the 17
+shared-clone tests and `tools/check-portable-c-reader.sh` pass on the changed
+reader; that script skips its m68k compile step on this host, where no m68k
+compiler is installed.
 
 ## 2026-09-17 — Explain one block with a walk that shares nothing with the checker
 

@@ -31,6 +31,25 @@ Contiguous data requires one extent rather than one pointer per block.
 
 The base extent record includes a versioned flag namespace. Unknown semantic flags are governed by their owning feature's compatibility class.
 
+One item of a file's extent tree has one wire image, defined by
+[`afsplus_format::extent`](../crates/afsplus-format/src/extent.rs) and by
+`struct afsp_extent_value_wire` in the
+[format header](../spec/afsplus_format.h):
+
+```text
+key    8    logical start block, big-endian so byte order is numeric order
+value  24   physical start block (8), block count (8, nonzero),
+            flags (4: bit 0 unwritten, bit 1 shared), reserved (4, zero)
+```
+
+A reader refuses a flag bit it does not know, a zero count, a nonzero
+reserved byte and a run whose end overflows. Whether the run lies inside the
+volume and one region, and whether the shared marker is legal on the volume,
+are contextual checks of the reader. The Rust core, the explain walk and the
+portable C reader decode the item through that one definition, and
+[the cross-read test](../crates/afsplus-format/tests/extent_c.rs) holds their
+agreement per image.
+
 ## 2. Inline extents
 
 Small files should store a small fixed number of extents directly in the object record.

@@ -26,6 +26,7 @@ pub mod bitmap;
 pub mod checkpoint;
 pub mod crc32c;
 pub mod dir;
+pub mod extent;
 pub mod geometry;
 pub mod header;
 pub mod ident;
