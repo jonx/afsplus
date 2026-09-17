@@ -23,6 +23,8 @@ fn record(kind: ObjectType) -> ObjectRecord {
         object_type: kind,
         flags: 0,
         link_count: 1,
+        owner_uid: 0,
+        owner_gid: 0,
         size_bytes: 0,
         allocated_bytes: 0,
         created: Timespec::default(),
@@ -127,14 +129,14 @@ fn independent_c_codec_agrees_on_object_admission_and_the_security_container() {
         ));
         for bit in 0..16 {
             let mut block = plain.clone();
-            reseal(&mut block, block_type::OBJECT, 1 << bit, 96);
+            reseal(&mut block, block_type::OBJECT, 1 << bit, 104);
             references.push((format!("{kind:?} header flag {bit}"), block, None));
         }
-        for extra in [1usize, 16, size - HEADER_SIZE - 96] {
+        for extra in [1usize, 16, size - HEADER_SIZE - 104] {
             for fill in [0u8, 0xa5] {
                 let mut block = plain.clone();
-                block[HEADER_SIZE + 96..HEADER_SIZE + 96 + extra].fill(fill);
-                reseal(&mut block, block_type::OBJECT, 0, (96 + extra) as u32);
+                block[HEADER_SIZE + 104..HEADER_SIZE + 104 + extra].fill(fill);
+                reseal(&mut block, block_type::OBJECT, 0, (104 + extra) as u32);
                 references.push((
                     format!("{kind:?} payload +{extra} fill {fill}"),
                     block,
@@ -142,34 +144,34 @@ fn independent_c_codec_agrees_on_object_admission_and_the_security_container() {
                 ));
             }
         }
-        for offset in [HEADER_SIZE + 96, size / 2, size - 1] {
+        for offset in [HEADER_SIZE + 104, size / 2, size - 1] {
             let mut block = plain.clone();
             block[offset] = 1;
-            reseal(&mut block, block_type::OBJECT, 0, 96);
+            reseal(&mut block, block_type::OBJECT, 0, 104);
             references.push((format!("{kind:?} tail at {offset}"), block, None));
         }
         // The flag without the 16 bytes, and malformed reference fields.
         let mut flag_only = plain.clone();
         flag_only[HEADER_SIZE + 10] = 4;
-        reseal(&mut flag_only, block_type::OBJECT, 0, 96);
+        reseal(&mut flag_only, block_type::OBJECT, 0, 104);
         references.push((format!("{kind:?} flag without reference"), flag_only, None));
         for (offset, value, what) in [
-            (96usize, 0u8, "zero first block"),
-            (104, 0x89, "length that needs another count"),
-            (108, 3, "wrong segment count"),
-            (110, 3, "unassigned reference flag"),
+            (104usize, 0u8, "zero first block"),
+            (112, 0x89, "length that needs another count"),
+            (116, 3, "wrong segment count"),
+            (118, 3, "unassigned reference flag"),
         ] {
             let mut block = secured.clone();
-            if offset == 96 {
-                block[HEADER_SIZE + 96..HEADER_SIZE + 104].fill(value);
-            } else if offset == 104 {
+            if offset == 104 {
+                block[HEADER_SIZE + 104..HEADER_SIZE + 112].fill(value);
+            } else if offset == 112 {
                 // 5000 -> 5001 keeps two segments; 0x89 0x3f = 16265 needs five.
-                block[HEADER_SIZE + 104] = value;
-                block[HEADER_SIZE + 105] = 0x3f;
+                block[HEADER_SIZE + 112] = value;
+                block[HEADER_SIZE + 113] = 0x3f;
             } else {
                 block[HEADER_SIZE + offset] = value;
             }
-            reseal(&mut block, block_type::OBJECT, 0, 112);
+            reseal(&mut block, block_type::OBJECT, 0, 120);
             references.push((format!("{kind:?} {what}"), block, None));
         }
     }
@@ -282,7 +284,7 @@ fn independent_c_codec_agrees_on_object_admission_and_the_security_container() {
     // All three variable parts at once, at their bounds: a security
     // reference, a 255-byte comment and the longest symlink target the block
     // still holds. One more target byte has no encoding at all.
-    let room = size - HEADER_SIZE - 112 - 256;
+    let room = size - HEADER_SIZE - 120 - 256;
     let target = "t".repeat(room);
     let mut full = record(ObjectType::Symlink);
     full.size_bytes = room as u64;

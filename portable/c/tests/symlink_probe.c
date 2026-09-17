@@ -29,7 +29,7 @@ int main(int argc, char **argv)
     if (file == NULL) return 2;
     expected_size = fread(expected, 1u, sizeof(expected), file);
     if (fclose(file) != 0) return 2;
-    if (status != AFSPR_OK || target != block + 128u ||
+    if (status != AFSPR_OK || target != block + 136u ||
         size != expected_size || memcmp(target, expected, size) != 0 ||
         generation != 7u || object.object_id != 16u ||
         object.size_bytes != expected_size || object.link_count != 1u ||

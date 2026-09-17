@@ -77,6 +77,8 @@ fn sample_record() -> ObjectRecord {
         object_type: ObjectType::File,
         flags: 0,
         link_count: 1,
+        owner_uid: 0,
+        owner_gid: 0,
         size_bytes: 5000,
         allocated_bytes: 8192,
         created: ts(),
@@ -209,7 +211,7 @@ fn checkpoint_rejects_every_reserved_field() {
             flags,
             owner,
             generation: checkpoint.generation,
-            // The real payload length. This test sealed 96, the length of
+            // The real payload length. This test sealed 104, the length of
             // the layout before the label field, and passed only because
             // the header fields were judged before the length.
             payload_len: 168,
@@ -960,7 +962,7 @@ fn object_encoder_refuses_every_short_fixed_record_buffer() {
     record.allocated_bytes = 0;
     record.data_root = 0;
     record.data_blocks = 0;
-    let minimum = HEADER_SIZE + 96;
+    let minimum = HEADER_SIZE + 104;
     for actual in 0..minimum {
         assert_eq!(
             record.encode(actual, 1),
@@ -1008,7 +1010,7 @@ fn inline_symlink_codec_preserves_exact_targets_and_refuses_fixed_encoding() {
         );
         assert!(record.encode(BS, 8).is_err());
         assert!(ObjectRecord::decode(&block).is_err());
-        for short in 0..HEADER_SIZE + 96 + target.len() {
+        for short in 0..HEADER_SIZE + 104 + target.len() {
             assert!(source.encode(short, 7).is_err());
         }
     }
@@ -1033,8 +1035,8 @@ fn inline_symlink_codec_rejects_valid_crc_malformed_payloads() {
         let mut block = valid.clone();
         let mut header = BlockHeader::verify(&block, block_type::OBJECT).unwrap();
         match case {
-            0 => block[HEADER_SIZE + 96] = 0xff,
-            1 => block[HEADER_SIZE + 96] = 0,
+            0 => block[HEADER_SIZE + 104] = 0xff,
+            1 => block[HEADER_SIZE + 104] = 0,
             2 => block[HEADER_SIZE + 9] = 1,
             3 => block[HEADER_SIZE + 10] = 1,
             4 => block[HEADER_SIZE + 24] = 1,

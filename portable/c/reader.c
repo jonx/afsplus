@@ -62,7 +62,8 @@
 #define AFSPR_MAX_BITMAP_PAGES                                           \
     ((AFSPR_MAX_REGION_BLOCKS + AFSPR_BITMAP_PAGE_BLOCKS - 1u) /          \
      AFSPR_BITMAP_PAGE_BLOCKS)
-#define AFSPR_OBJECT_PAYLOAD 96u
+/* 96..99 owner UID, 100..103 owner GID; the optional references follow. */
+#define AFSPR_OBJECT_PAYLOAD 104u
 #define AFSPR_SECURITY_REF_SIZE 16u
 /* Flags the reader carries and never interprets. */
 #define AFSPR_ATTRIBUTE_REF_SIZE 16u
@@ -1546,10 +1547,10 @@ static int afspr_object_shape_full(
         return AFSPR_OK;
     }
     reference->present = 1u;
-    reference->first_block = afspr_get_le64(p + 96u);
-    reference->total_len = afspr_get_le32(p + 104u);
-    reference->segment_count = afspr_get_le16(p + 108u);
-    reference->flags = afspr_get_le16(p + 110u);
+    reference->first_block = afspr_get_le64(p + AFSPR_OBJECT_PAYLOAD);
+    reference->total_len = afspr_get_le32(p + AFSPR_OBJECT_PAYLOAD + 8u);
+    reference->segment_count = afspr_get_le16(p + AFSPR_OBJECT_PAYLOAD + 12u);
+    reference->flags = afspr_get_le16(p + AFSPR_OBJECT_PAYLOAD + 14u);
     if (reference->first_block == 0u || reference->total_len == 0u ||
         reference->total_len > AFSPR_MAX_SECURITY_DESCRIPTOR_BYTES ||
         ((size_t)reference->total_len + capacity - 1u) / capacity !=
@@ -1608,6 +1609,8 @@ int afspr_decode_symlink_record(const void *input, size_t block_size,
     decoded.size_bytes = afspr_get_le64(p + 16u);
     decoded.allocated_bytes = afspr_get_le64(p + 24u);
     decoded.protection = afspr_get_le32(p + 68u);
+    decoded.owner_uid = afspr_get_le32(p + 96u);
+    decoded.owner_gid = afspr_get_le32(p + 100u);
     decoded.content_generation = afspr_get_le64(p + 72u);
     decoded.data_root = afspr_get_le64(p + 80u);
     decoded.data_blocks = afspr_get_le64(p + 88u);
@@ -1949,6 +1952,8 @@ static int afspr_decode_object(const uint8_t *block, size_t block_size,
     object->size_bytes = afspr_get_le64(p + 16u);
     object->allocated_bytes = afspr_get_le64(p + 24u);
     object->protection = afspr_get_le32(p + 68u);
+    object->owner_uid = afspr_get_le32(p + 96u);
+    object->owner_gid = afspr_get_le32(p + 100u);
     object->content_generation = afspr_get_le64(p + 72u);
     object->data_root = afspr_get_le64(p + 80u);
     object->data_blocks = afspr_get_le64(p + 88u);

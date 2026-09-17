@@ -16,6 +16,8 @@ fn file() -> ObjectRecord {
         object_type: ObjectType::File,
         flags: 0,
         link_count: 1,
+        owner_uid: 0,
+        owner_gid: 0,
         size_bytes: 0,
         allocated_bytes: 0,
         created: Timespec::default(),
@@ -56,11 +58,11 @@ fn security_reference_has_the_documented_wire_bytes() {
     let record = file().with_security(Some(reference()));
     assert_eq!(record.flags, OBJECT_FLAG_SECURITY_REF);
     let block = record.encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
-    // payload_len 112, flag bit 2, then the literal little-endian trailer.
-    assert_eq!(&block[24..28], &112u32.to_le_bytes());
+    // payload_len 120, flag bit 2, then the literal little-endian trailer.
+    assert_eq!(&block[24..28], &120u32.to_le_bytes());
     assert_eq!(&block[HEADER_SIZE + 10..HEADER_SIZE + 12], &[0x04, 0x00]);
     assert_eq!(
-        &block[HEADER_SIZE + 96..HEADER_SIZE + 112],
+        &block[HEADER_SIZE + 104..HEADER_SIZE + 120],
         &[
             0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // first block
             0x88, 0x13, 0x00, 0x00, // 5000 bytes
@@ -68,7 +70,7 @@ fn security_reference_has_the_documented_wire_bytes() {
             0x01, 0x00, // projection diverged
         ]
     );
-    assert!(block[HEADER_SIZE + 112..].iter().all(|b| *b == 0));
+    assert!(block[HEADER_SIZE + 120..].iter().all(|b| *b == 0));
     assert_eq!(ObjectRecord::decode(&block), Ok(record));
     assert_eq!(
         ObjectRecord::decode_metadata_with_generation(&block),
@@ -77,9 +79,9 @@ fn security_reference_has_the_documented_wire_bytes() {
 }
 
 #[test]
-fn a_record_without_a_reference_keeps_its_96_byte_image() {
+fn a_record_without_a_reference_keeps_its_104_byte_image() {
     let block = file().encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
-    assert_eq!(&block[24..28], &96u32.to_le_bytes());
+    assert_eq!(&block[24..28], &104u32.to_le_bytes());
     let attached = file().with_security(Some(reference()));
     assert_eq!(attached.with_security(None), file());
 }
@@ -98,13 +100,13 @@ fn flag_and_field_must_agree_in_both_directions() {
             ))
         );
     }
-    // On the wire: the flag with a 96-byte payload, and a 112-byte payload
+    // On the wire: the flag with a 104-byte payload, and a 120-byte payload
     // without the flag, are both refused by the exact-length rule.
     let mut short = file().encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
     short[HEADER_SIZE + 10] = 0x04;
-    reseal(&mut short, block_type::OBJECT, 16, 96);
+    reseal(&mut short, block_type::OBJECT, 16, 104);
     let mut long = file().encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
-    reseal(&mut long, block_type::OBJECT, 16, 112);
+    reseal(&mut long, block_type::OBJECT, 16, 120);
     for block in [short, long] {
         assert_eq!(
             ObjectRecord::decode(&block),
@@ -152,8 +154,8 @@ fn malformed_references_are_refused() {
         .with_security(Some(reference()))
         .encode(DEFAULT_BLOCK_SIZE, 7)
         .unwrap();
-    block[HEADER_SIZE + 110] = 2;
-    reseal(&mut block, block_type::OBJECT, 16, 112);
+    block[HEADER_SIZE + 118] = 2;
+    reseal(&mut block, block_type::OBJECT, 16, 120);
     assert_eq!(
         ObjectRecord::decode(&block),
         Err(FormatError::Invalid("invalid security reference"))
@@ -179,8 +181,8 @@ fn directories_and_symlinks_carry_a_reference_and_symlinks_keep_their_target() {
     }
     .encode(DEFAULT_BLOCK_SIZE, 7)
     .unwrap();
-    assert_eq!(&block[24..28], &118u32.to_le_bytes());
-    assert_eq!(&block[HEADER_SIZE + 112..HEADER_SIZE + 118], b"target");
+    assert_eq!(&block[24..28], &126u32.to_le_bytes());
+    assert_eq!(&block[HEADER_SIZE + 120..HEADER_SIZE + 126], b"target");
     let (decoded, generation) = SymlinkRecord::decode(&block).unwrap();
     assert_eq!(
         (decoded.record, decoded.target, generation),
@@ -188,7 +190,7 @@ fn directories_and_symlinks_carry_a_reference_and_symlinks_keep_their_target() {
     );
 
     // A reference takes 16 bytes from the longest admissible target.
-    let longest = "x".repeat(DEFAULT_BLOCK_SIZE - HEADER_SIZE - 112);
+    let longest = "x".repeat(DEFAULT_BLOCK_SIZE - HEADER_SIZE - 120);
     let mut full = link;
     full.size_bytes = longest.len() as u64;
     assert!(SymlinkRecord {

@@ -208,6 +208,9 @@ struct afspr_object {
     struct afspr_timespec modified;
     struct afspr_timespec changed;
     uint32_t protection;
+    /* POSIX owner, payload offsets 96 and 100. Zero is a real identity. */
+    uint32_t owner_uid;
+    uint32_t owner_gid;
     uint32_t reserved32;
     uint64_t content_generation;
     uint64_t data_root;

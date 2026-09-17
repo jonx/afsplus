@@ -241,6 +241,8 @@ fn mkfs_impl<D: BlockDevice>(
         object_type: ObjectType::Directory,
         flags: 0,
         link_count: 1,
+        owner_uid: 0,
+        owner_gid: 0,
         size_bytes: 0,
         allocated_bytes: block_size as u64,
         created: params.timestamp,

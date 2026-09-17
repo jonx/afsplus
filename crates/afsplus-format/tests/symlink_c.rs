@@ -25,7 +25,7 @@ fn independent_c_symlink_codec_matches_valid_and_malformed_rust_records() {
         seconds: -3,
         nanoseconds: 999_999_999,
     };
-    let maximum = "x".repeat(3968);
+    let maximum = "x".repeat(3960);
     for sanitize in [false, true] {
         let executable = scratch
             .0
@@ -73,6 +73,8 @@ fn independent_c_symlink_codec_matches_valid_and_malformed_rust_records() {
                 object_type: ObjectType::Symlink,
                 flags: 0,
                 link_count: 1,
+                owner_uid: 0,
+                owner_gid: 0,
                 size_bytes: target.len() as u64,
                 allocated_bytes: 0,
                 created: stamp,
@@ -101,8 +103,8 @@ fn independent_c_symlink_codec_matches_valid_and_malformed_rust_records() {
                 let mut block = valid.clone();
                 let mut header = BlockHeader::verify(&block, block_type::OBJECT).unwrap();
                 match case {
-                    0 => block[128] = 0xff,
-                    1 => block[128] = 0,
+                    0 => block[136] = 0xff,
+                    1 => block[136] = 0,
                     2 => block[HEADER_SIZE + 9] = 1,
                     3 => block[HEADER_SIZE + 10] = 1,
                     4 => block[HEADER_SIZE + 24] = 1,

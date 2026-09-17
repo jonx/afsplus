@@ -29,16 +29,24 @@
 //! 72     8    content generation
 //! 80     8    data root LBA (directory: tree root; file: extent start)
 //! 88     8    data extent length in blocks (files; 0 = empty file)
+//! 96     4    owner UID
+//! 100    4    owner GID
 //! ```
 //!
-//! With [`OBJECT_FLAG_SECURITY_REF`] the fixed payload is 112 bytes: a
+//! The owner UID and GID are the POSIX identities the FUSE path stores and
+//! the `fib_OwnerUID`/`fib_OwnerGID` an AROS `FileInfoBlock` has always had
+//! nowhere to read from. They are `u32` because POSIX is, and the AROS
+//! projection reports the stored value when it fits in a `UWORD` and the
+//! unknown owner otherwise, rather than truncating into a different user.
+//!
+//! With [`OBJECT_FLAG_SECURITY_REF`] the fixed payload is 120 bytes: a
 //! security reference follows, before any inline symlink target.
 //!
 //! ```text
-//! 96     8    first security descriptor segment LBA (nonzero)
-//! 104    4    descriptor length in bytes
-//! 108    2    descriptor segment count
-//! 110    2    reference flags (bit 0: projection diverged)
+//! 104    8    first security descriptor segment LBA (nonzero)
+//! 112    4    descriptor length in bytes
+//! 116    2    descriptor segment count
+//! 118    2    reference flags (bit 0: projection diverged)
 //! ```
 //!
 //! With [`OBJECT_FLAG_COMMENT`] a comment follows the fixed payload (after
@@ -52,7 +60,9 @@ use alloc::vec::Vec;
 use crate::header::{block_type, BlockHeader, HEADER_SIZE};
 use crate::{le, FormatError, Timespec, OBJECT_INVALID};
 
-const PAYLOAD_LEN: usize = 96;
+/// The fixed payload. Everything optional is placed relative to this, so the
+/// layout moves in one place.
+const PAYLOAD_LEN: usize = 104;
 
 /// Resource-exhaustion guard (`docs/21-security-and-corruption.md` §5): a
 /// corrupt record must not be able to demand absurd extent walks.
@@ -215,6 +225,10 @@ pub struct ObjectRecord {
     pub modified: Timespec,
     pub changed: Timespec,
     pub protection: u32,
+    /// POSIX owner. Zero is a real value (root), so there is no "unset":
+    /// mkfs and object creation write the identities they are given.
+    pub owner_uid: u32,
+    pub owner_gid: u32,
     pub content_generation: u64,
     pub data_root: u64,
     pub data_blocks: u64,
@@ -340,11 +354,14 @@ impl ObjectRecord {
         le::put_u64(&mut p[72..80], self.content_generation);
         le::put_u64(&mut p[80..88], self.data_root);
         le::put_u64(&mut p[88..96], self.data_blocks);
+        le::put_u32(&mut p[96..100], self.owner_uid);
+        le::put_u32(&mut p[100..104], self.owner_gid);
         if let Some(security) = self.security {
-            le::put_u64(&mut p[96..104], security.first_block);
-            le::put_u32(&mut p[104..108], security.total_len);
-            le::put_u16(&mut p[108..110], security.segment_count);
-            le::put_u16(&mut p[110..112], security.flags);
+            let at = PAYLOAD_LEN;
+            le::put_u64(&mut p[at..at + 8], security.first_block);
+            le::put_u32(&mut p[at + 8..at + 12], security.total_len);
+            le::put_u16(&mut p[at + 12..at + 14], security.segment_count);
+            le::put_u16(&mut p[at + 14..at + 16], security.flags);
         }
         if let Some(attributes) = self.attributes {
             let at = self.security_end();
@@ -478,13 +495,15 @@ impl ObjectRecord {
             content_generation: le::get_u64(&p[72..80]),
             data_root: le::get_u64(&p[80..88]),
             data_blocks: le::get_u64(&p[88..96]),
+            owner_uid: le::get_u32(&p[96..100]),
+            owner_gid: le::get_u32(&p[100..104]),
             comment,
             attributes,
             security: (security_end != PAYLOAD_LEN).then(|| SecurityRef {
-                first_block: le::get_u64(&p[96..104]),
-                total_len: le::get_u32(&p[104..108]),
-                segment_count: le::get_u16(&p[108..110]),
-                flags: le::get_u16(&p[110..112]),
+                first_block: le::get_u64(&p[PAYLOAD_LEN..PAYLOAD_LEN + 8]),
+                total_len: le::get_u32(&p[PAYLOAD_LEN + 8..PAYLOAD_LEN + 12]),
+                segment_count: le::get_u16(&p[PAYLOAD_LEN + 12..PAYLOAD_LEN + 14]),
+                flags: le::get_u16(&p[PAYLOAD_LEN + 14..PAYLOAD_LEN + 16]),
             }),
         };
         if record.object_id != header.owner {

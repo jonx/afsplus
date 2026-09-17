@@ -25,6 +25,8 @@ fn record(kind: ObjectType) -> ObjectRecord {
         object_type: kind,
         flags: 0,
         link_count: 1,
+        owner_uid: 0,
+        owner_gid: 0,
         size_bytes: 0,
         allocated_bytes: 0,
         created: Timespec::default(),

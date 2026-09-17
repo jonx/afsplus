@@ -12,6 +12,8 @@ fn file() -> ObjectRecord {
         object_type: ObjectType::File,
         flags: 0,
         link_count: 1,
+        owner_uid: 0,
+        owner_gid: 0,
         size_bytes: 0,
         allocated_bytes: 0,
         created: Timespec::default(),
@@ -55,23 +57,23 @@ fn the_comment_follows_the_fixed_payload_and_the_security_reference() {
     let record = file().with_comment(Comment::new("Dé").unwrap());
     assert_eq!(record.flags, OBJECT_FLAG_COMMENT);
     let block = record.encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
-    assert_eq!(&block[24..28], &100u32.to_le_bytes());
+    assert_eq!(&block[24..28], &108u32.to_le_bytes());
     assert_eq!(&block[HEADER_SIZE + 10..HEADER_SIZE + 12], &[0x08, 0x00]);
     assert_eq!(
-        &block[HEADER_SIZE + 96..HEADER_SIZE + 100],
+        &block[HEADER_SIZE + 104..HEADER_SIZE + 108],
         &[3, b'D', 0xc3, 0xa9]
     );
-    assert!(block[HEADER_SIZE + 100..].iter().all(|b| *b == 0));
+    assert!(block[HEADER_SIZE + 108..].iter().all(|b| *b == 0));
     assert_eq!(ObjectRecord::decode(&block), Ok(record));
     assert_eq!(ObjectRecord::decode(&block).unwrap().comment.as_str(), "Dé");
 
-    // With a security reference the comment starts at 112.
+    // With a security reference the comment starts at 120.
     let both = record.with_security(Some(reference()));
     assert_eq!(both.flags, OBJECT_FLAG_COMMENT | OBJECT_FLAG_SECURITY_REF);
     let block = both.encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
-    assert_eq!(&block[24..28], &116u32.to_le_bytes());
+    assert_eq!(&block[24..28], &124u32.to_le_bytes());
     assert_eq!(
-        &block[HEADER_SIZE + 112..HEADER_SIZE + 116],
+        &block[HEADER_SIZE + 120..HEADER_SIZE + 124],
         &[3, b'D', 0xc3, 0xa9]
     );
     assert_eq!(ObjectRecord::decode(&block), Ok(both));
@@ -80,7 +82,7 @@ fn the_comment_follows_the_fixed_payload_and_the_security_reference() {
     assert_eq!(record.with_comment(Comment::EMPTY), file());
     assert_eq!(
         &file().encode(DEFAULT_BLOCK_SIZE, 7).unwrap()[24..28],
-        &96u32.to_le_bytes()
+        &104u32.to_le_bytes()
     );
 }
 
@@ -96,12 +98,12 @@ fn a_symlink_keeps_its_target_after_the_comment() {
     }
     .encode(DEFAULT_BLOCK_SIZE, 7)
     .unwrap();
-    assert_eq!(&block[24..28], &(96u32 + 5 + 6).to_le_bytes());
+    assert_eq!(&block[24..28], &(104u32 + 5 + 6).to_le_bytes());
     assert_eq!(
-        &block[HEADER_SIZE + 96..HEADER_SIZE + 101],
+        &block[HEADER_SIZE + 104..HEADER_SIZE + 109],
         &[4, b'n', b'o', b't', b'e']
     );
-    assert_eq!(&block[HEADER_SIZE + 101..HEADER_SIZE + 107], b"target");
+    assert_eq!(&block[HEADER_SIZE + 109..HEADER_SIZE + 115], b"target");
     let (decoded, _) = SymlinkRecord::decode(&block).unwrap();
     assert_eq!((decoded.record, decoded.target), (link, "target"));
     assert_eq!(
@@ -185,7 +187,7 @@ fn bounds_and_refusals() {
         (
             "zero length under the flag",
             Box::new(|b| {
-                b[HEADER_SIZE + 96] = 0;
+                b[HEADER_SIZE + 104] = 0;
                 b[HEADER_SIZE + 97..HEADER_SIZE + 101].fill(0);
                 97
             }),
@@ -193,7 +195,7 @@ fn bounds_and_refusals() {
         (
             "length past the payload",
             Box::new(|b| {
-                b[HEADER_SIZE + 96] = 5;
+                b[HEADER_SIZE + 104] = 5;
                 101
             }),
         ),

@@ -19,6 +19,8 @@ fn file() -> ObjectRecord {
         object_type: ObjectType::File,
         flags: 0,
         link_count: 1,
+        owner_uid: 0,
+        owner_gid: 0,
         size_bytes: 0,
         allocated_bytes: 0,
         created: Timespec::default(),
@@ -66,11 +68,11 @@ fn reseal(block: &mut [u8], payload_len: u32) {
 fn the_reference_sits_after_the_security_reference_and_before_the_comment() {
     let alone = file().with_attributes(Some(set()));
     assert_eq!(alone.flags, OBJECT_FLAG_ATTRIBUTES);
-    assert_eq!(alone.fixed_payload_len(), 112);
+    assert_eq!(alone.fixed_payload_len(), 120);
     let block = alone.encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
     assert_eq!(&block[HEADER_SIZE + 10..HEADER_SIZE + 12], &[0x10, 0x00]);
     assert_eq!(
-        &block[HEADER_SIZE + 96..HEADER_SIZE + 112],
+        &block[HEADER_SIZE + 104..HEADER_SIZE + 120],
         &[8, 7, 6, 5, 4, 3, 2, 1, 0x88, 0x13, 0, 0, 2, 0, 0, 0]
     );
     assert_eq!(ObjectRecord::decode(&block).unwrap(), alone);
@@ -83,13 +85,13 @@ fn the_reference_sits_after_the_security_reference_and_before_the_comment() {
         full.flags,
         OBJECT_FLAG_SECURITY_REF | OBJECT_FLAG_ATTRIBUTES | OBJECT_FLAG_COMMENT
     );
-    assert_eq!(full.fixed_payload_len(), 96 + 16 + 16 + 1 + 3);
+    assert_eq!(full.fixed_payload_len(), 104 + 16 + 16 + 1 + 3);
     let block = full.encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
-    assert_eq!(block[HEADER_SIZE + 96], 77);
-    assert_eq!(block[HEADER_SIZE + 112], 8);
-    assert_eq!(block[HEADER_SIZE + 128], 3);
+    assert_eq!(block[HEADER_SIZE + 104], 77);
+    assert_eq!(block[HEADER_SIZE + 120], 8);
+    assert_eq!(block[HEADER_SIZE + 136], 3);
     assert_eq!(
-        &block[HEADER_SIZE + 129..HEADER_SIZE + 132],
+        &block[HEADER_SIZE + 137..HEADER_SIZE + 140],
         "Dé".as_bytes()
     );
     assert_eq!(ObjectRecord::decode(&block).unwrap(), full);
@@ -123,7 +125,7 @@ fn every_object_type_carries_the_reference() {
         target: "target",
     };
     let block = symlink.encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
-    assert_eq!(&block[HEADER_SIZE + 112..HEADER_SIZE + 118], b"target");
+    assert_eq!(&block[HEADER_SIZE + 120..HEADER_SIZE + 126], b"target");
     assert_eq!(SymlinkRecord::decode(&block).unwrap().0, symlink);
     // The reference takes 16 bytes of the longest target.
     let longest = "t".repeat(SymlinkRecord::maximum_target_bytes(DEFAULT_BLOCK_SIZE));
@@ -171,11 +173,11 @@ fn a_malformed_reference_is_refused_by_both_directions() {
             .with_attributes(Some(set()))
             .encode(DEFAULT_BLOCK_SIZE, 7)
             .unwrap();
-        let at = HEADER_SIZE + 96;
+        let at = HEADER_SIZE + 104;
         block[at..at + 8].copy_from_slice(&bad.first_block.to_le_bytes());
         block[at + 8..at + 12].copy_from_slice(&bad.total_len.to_le_bytes());
         block[at + 12..at + 14].copy_from_slice(&bad.segment_count.to_le_bytes());
-        reseal(&mut block, 112);
+        reseal(&mut block, 120);
         assert!(ObjectRecord::decode(&block).is_err(), "{bad:?}");
     }
 
@@ -185,8 +187,8 @@ fn a_malformed_reference_is_refused_by_both_directions() {
         .unwrap();
 
     let mut reserved = good.clone();
-    reserved[HEADER_SIZE + 110] = 1;
-    reseal(&mut reserved, 112);
+    reserved[HEADER_SIZE + 118] = 1;
+    reseal(&mut reserved, 120);
     assert_eq!(
         ObjectRecord::decode(&reserved),
         Err(FormatError::Invalid(
@@ -197,11 +199,11 @@ fn a_malformed_reference_is_refused_by_both_directions() {
     // The flag without the field, and the field without the flag.
     let mut short = file().encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
     short[HEADER_SIZE + 10] = 0x10;
-    reseal(&mut short, 96);
+    reseal(&mut short, 104);
     assert!(ObjectRecord::decode(&short).is_err());
     let mut unflagged = good.clone();
     unflagged[HEADER_SIZE + 10] = 0;
-    reseal(&mut unflagged, 112);
+    reseal(&mut unflagged, 120);
     assert!(ObjectRecord::decode(&unflagged).is_err());
 
     let mut disagree = file().with_attributes(Some(set()));

@@ -414,7 +414,7 @@ pub fn build_corruption_corpus() -> Result<Vec<CorruptionCase>, String> {
         &[layout.object_lba],
         false,
         error(
-            "chosen checkpoint generation 2 references invalid state: format error: checksum mismatch: stored 0x8b28bb78, computed 0x19978cd4",
+            "chosen checkpoint generation 2 references invalid state: format error: checksum mismatch: stored 0xef720e76, computed 0x7dcd39da",
         ),
     )?);
     {

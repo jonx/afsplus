@@ -5,7 +5,7 @@ use afsplus_format::header::{block_type, BlockHeader, HEADER_SIZE};
 use afsplus_format::object::{ObjectRecord, ObjectType, SymlinkRecord};
 use afsplus_format::{FormatError, Timespec, DEFAULT_BLOCK_SIZE};
 
-const FIXED_PAYLOAD: usize = 96;
+const FIXED_PAYLOAD: usize = 104;
 
 fn record(kind: ObjectType) -> ObjectRecord {
     ObjectRecord {
@@ -13,6 +13,8 @@ fn record(kind: ObjectType) -> ObjectRecord {
         object_type: kind,
         flags: 0,
         link_count: 1,
+        owner_uid: 0,
+        owner_gid: 0,
         size_bytes: 0,
         allocated_bytes: 0,
         created: Timespec::default(),
