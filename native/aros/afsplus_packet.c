@@ -1154,16 +1154,39 @@ static void deliver_notifications(struct AfsplusArosPacketContext *context)
     } while (count == sizeof(fired) / sizeof(fired[0]));
 }
 
-/* A query struct in a caller buffer declares its own size in its first
- * field; the entry point fills at most that much, so it must fit. */
-static int32_t sized_buffer(const struct AfsplusExtRequest *request)
+/* The report structs an extension request can ask for. */
+union AfsplusExtReport {
+    uint32_t struct_size;
+    struct AfsplusArosCapabilities capabilities;
+    struct AfsplusArosCounters counters;
+    struct AfsplusArosHealth health;
+    struct AfsplusArosStat stat;
+};
+
+/* A report struct in a caller buffer declares its own size in its first
+ * field. That field is application memory and is read exactly once: the
+ * entry point fills a local struct of the size read here, never the caller's
+ * buffer, so a size that changes afterwards cannot move a write. */
+static int32_t report_begin(const struct AfsplusExtRequest *request,
+    uint32_t known, union AfsplusExtReport *local)
 {
     uint32_t declared;
 
     if (request->buffer == NULL || request->buffer_size < sizeof(declared))
         return ERROR_BAD_NUMBER;
     memcpy(&declared, request->buffer, sizeof(declared));
-    return declared <= request->buffer_size ? 0 : ERROR_BAD_NUMBER;
+    if (declared > request->buffer_size)
+        return ERROR_BAD_NUMBER;
+    memset(local, 0, sizeof(*local));
+    local->struct_size = declared < known ? declared : known;
+    return 0;
+}
+
+/* The entry point stored how much it filled, never more than it was given. */
+static void report_end(const struct AfsplusExtRequest *request,
+    const union AfsplusExtReport *local)
+{
+    memcpy(request->buffer, local, local->struct_size);
 }
 
 static int32_t extension_file(struct AfsplusArosPacketContext *context,
@@ -1196,25 +1219,16 @@ static int32_t extension_name(const uint8_t *name, uint32_t length)
     return length != 0 && name == NULL ? ERROR_BAD_NUMBER : 0;
 }
 
-/* ACTION_AFSPLUS_EXT: see api/afsplus_ext_packet.h. */
-static int32_t process_extension(struct AfsplusArosPacketContext *context,
+/* One operation on the handler's own copy of the request. */
+static int32_t run_extension(struct AfsplusArosPacketContext *context,
     struct AfsplusExtRequest *request)
 {
+    union AfsplusExtReport report;
     uint64_t first = 0;
     uint64_t second = 0;
     int64_t seconds = 0;
     uint32_t nanoseconds = 0;
     int32_t error;
-
-    if (request == NULL)
-        return ERROR_REQUIRED_ARG_MISSING;
-    if (request->magic != AFSPLUS_EXT_MAGIC
-        || request->version != AFSPLUS_EXT_VERSION
-        || request->header_size < sizeof(*request))
-        return ERROR_BAD_NUMBER;
-    request->output_count = 0;
-    request->output_flags = 0;
-    request->output_value = 0;
 
     switch (request->operation)
     {
@@ -1226,10 +1240,13 @@ static int32_t process_extension(struct AfsplusArosPacketContext *context,
     case AFSPLUS_EXT_CAPABILITIES:
         error = require_group(context, AFSPLUS_AROS_GROUP_INTERFACE_QUERY);
         if (error == 0)
-            error = sized_buffer(request);
+            error = report_begin(request, sizeof(report.capabilities),
+                &report);
         if (error == 0)
             error = afsplus_aros_capabilities(context->filesystem,
-                (struct AfsplusArosCapabilities *)request->buffer);
+                &report.capabilities);
+        if (error == 0)
+            report_end(request, &report);
         return error;
     case AFSPLUS_EXT_READ_AT:
     case AFSPLUS_EXT_WRITE_AT:
@@ -1340,18 +1357,21 @@ static int32_t process_extension(struct AfsplusArosPacketContext *context,
     case AFSPLUS_EXT_COUNTERS:
         error = require_group(context, AFSPLUS_AROS_GROUP_COUNTERS);
         if (error == 0)
-            error = sized_buffer(request);
+            error = report_begin(request, sizeof(report.counters), &report);
         if (error == 0)
             error = afsplus_aros_counters(context->filesystem,
-                (struct AfsplusArosCounters *)request->buffer);
+                &report.counters);
+        if (error == 0)
+            report_end(request, &report);
         return error;
     case AFSPLUS_EXT_HEALTH:
         error = require_group(context, AFSPLUS_AROS_GROUP_OBSERVE);
         if (error == 0)
-            error = sized_buffer(request);
+            error = report_begin(request, sizeof(report.health), &report);
         if (error == 0)
-            error = afsplus_aros_health(context->filesystem,
-                (struct AfsplusArosHealth *)request->buffer);
+            error = afsplus_aros_health(context->filesystem, &report.health);
+        if (error == 0)
+            report_end(request, &report);
         return error;
     case AFSPLUS_EXT_EXTENT_MAP:
     {
@@ -1387,15 +1407,43 @@ static int32_t process_extension(struct AfsplusArosPacketContext *context,
     case AFSPLUS_EXT_STAT_ID:
         error = require_group(context, AFSPLUS_AROS_GROUP_OBJECT_IDS);
         if (error == 0)
-            error = sized_buffer(request);
+            error = report_begin(request, sizeof(report.stat), &report);
         if (error == 0)
             error = afsplus_aros_stat_id(context->filesystem,
-                request->offset[0],
-                (struct AfsplusArosStat *)request->buffer);
+                request->offset[0], &report.stat);
+        if (error == 0)
+            report_end(request, &report);
         return error;
     default:
         return ERROR_BAD_NUMBER;
     }
+}
+
+/* ACTION_AFSPLUS_EXT: see api/afsplus_ext_packet.h. The block lives in
+ * application memory, which another task can change while the packet is
+ * here. It is copied once; every check and every use reads the copy, and
+ * only the three output fields are written back. */
+static int32_t process_extension(struct AfsplusArosPacketContext *context,
+    struct AfsplusExtRequest *shared)
+{
+    struct AfsplusExtRequest request;
+    int32_t error;
+
+    if (shared == NULL)
+        return ERROR_REQUIRED_ARG_MISSING;
+    memcpy(&request, shared, sizeof(request));
+    if (request.magic != AFSPLUS_EXT_MAGIC
+        || request.version != AFSPLUS_EXT_VERSION
+        || request.header_size < sizeof(request))
+        return ERROR_BAD_NUMBER;
+    request.output_count = 0;
+    request.output_flags = 0;
+    request.output_value = 0;
+    error = run_extension(context, &request);
+    shared->output_count = request.output_count;
+    shared->output_flags = request.output_flags;
+    shared->output_value = request.output_value;
+    return error;
 }
 
 int32_t afsplus_aros_packet_process(

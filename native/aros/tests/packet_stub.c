@@ -660,11 +660,24 @@ static int32_t ext_call(char operation, uint64_t object, const uint8_t *name,
     return ext_error;
 }
 
+/* The application's report buffer, which no entry point may be handed. */
+static uint8_t *ext_caller_buffer;
+
 int32_t afsplus_aros_capabilities(struct AfsplusAros *filesystem,
     struct AfsplusArosCapabilities *output)
 {
     assert(filesystem == STUB_FILESYSTEM);
+    assert((uint8_t *)output != ext_caller_buffer);
+    /* Another task enlarges the declared size while the packet is here. */
+    if (ext_caller_buffer != NULL)
+    {
+        uint32_t huge = UINT32_C(0xFFFFFFF0);
+
+        memcpy(ext_caller_buffer, &huge, sizeof(huge));
+    }
     output->mount_mode = 77;
+    /* Past a short declared size: must never reach the caller. */
+    output->free_blocks = 5;
     return ext_call('1', 0, NULL, 0, output->struct_size, 0, 0, 0);
 }
 
@@ -1320,6 +1333,29 @@ int main(void)
         EXT_SEND(DOSTRUE, 0);
         assert(capabilities.mount_mode == 77);
         assert(ext_seen[0] == sizeof(capabilities));
+
+        /* The declared size is read once. A writer that enlarges it during
+         * the call moves nothing: the entry point never sees this buffer,
+         * and exactly the size read at entry is copied back. */
+        {
+            union { uint8_t bytes[96]; struct AfsplusArosCapabilities c; }
+                guarded;
+            uint32_t declared = 24;
+            size_t at;
+
+            memset(&guarded, 0x7e, sizeof(guarded));
+            memcpy(guarded.bytes, &declared, sizeof(declared));
+            ext_caller_buffer = guarded.bytes;
+            EXT_BEGIN(AFSPLUS_EXT_CAPABILITIES);
+            request.buffer = guarded.bytes;
+            request.buffer_size = sizeof(guarded);
+            EXT_SEND(DOSTRUE, 0);
+            ext_caller_buffer = NULL;
+            assert(ext_seen[0] == 24);
+            assert(guarded.c.struct_size == 24 && guarded.c.mount_mode == 77);
+            for (at = 24; at < sizeof(guarded); at++)
+                assert(guarded.bytes[at] == 0x7e);
+        }
 
         /* Positioned I/O on the application's fh_Arg1. */
         EXT_BEGIN(AFSPLUS_EXT_READ_AT);

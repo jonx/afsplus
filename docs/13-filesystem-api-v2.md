@@ -254,6 +254,13 @@ the `fh_Arg1` of its `FileHandle`. Names are single components; the transport
 resolves no path. A report struct in a caller buffer declares its size in its
 first field, and the buffer must hold that much.
 
+The block and the buffers are application memory, which another task can
+change while the packet is with the handler. The handler copies the block
+once and checks and uses only its copy; it reads the declared size of a
+report once, has the entry point fill a struct of its own, and copies back
+exactly the size it read. It writes back three output fields and nothing else
+of the block.
+
 A handler that does not know the packet type answers
 `ERROR_ACTION_NOT_KNOWN`, as every handler does, so the absence of the
 transport costs a client one request. The client library
