@@ -16,3 +16,4 @@ measurement reports; the sequence of stages is [ROADMAP.md](../ROADMAP.md).
 | [data-policy-bakeoff.md](data-policy-bakeoff.md) | Measured full-COW versus private-in-place evidence supporting ADR-062 |
 | [shared-extents-completion.md](shared-extents-completion.md) | Retained host-side completion evidence for ADR-061 shared extents and reflinks |
 | [audit-work-queue.md](audit-work-queue.md) | Complete audit findings, dependency order, evidence boundaries and next-session handoff |
+| [stage-c-gap.md](stage-c-gap.md) | What the external AROS handler lacks for each Stage C item, in dependency order, with the proof target of each layer |
