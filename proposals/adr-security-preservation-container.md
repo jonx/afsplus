@@ -153,9 +153,22 @@ never implied. The policy is host runtime state and is absent from the disk.
   crash shows no clone or a clone with its complete descriptor. `CloneRange`
   is a content write and keeps the destination's own
   ([clone metadata inheritance](adr-clone-metadata-inheritance.md)).
+- Retiring a chain, whether the object dies or its descriptor is replaced,
+  proves one segment at a time: valid magic and checksum, this owner, the
+  expected position, the reference's identity and length, and a committed
+  generation, from the first segment up to the first invalid link. Only
+  proven segments are freed, so a damaged chain never makes its object
+  undeletable, and no block that was not proven to belong to the chain is
+  ever handed back. Freeing an unproven block and leaking one are both
+  defensible, and the leak is the safer answer: a wrongly freed block can be
+  reused by another object and destroy live data, while a leaked block costs
+  space the checker can name. Reading a damaged descriptor still fails:
+  descriptor bytes are returned whole or not at all.
 - The checker claims every segment in the single ownership set, so a leaked,
   doubly referenced, foreign or damaged segment is a finding, and it reports
-  the flag on a volume without the feature as corruption.
+  the flag on a volume without the feature as corruption. The remainder of a
+  partially retired chain appears there as a block owned by nothing, which
+  is the existing leak finding and needs nothing new on the wire.
 - The volume combination with persistent snapshots
   ([ADR-070](../adr/ADR-070-persistent-snapshot-priority.md)) is refused at
   mount and is absent from the formatter: historical ownership of descriptor
@@ -201,7 +214,12 @@ protection word, the change time and the descriptor untouched; preserve keeps
 the bytes and makes the divergence durable; every removal path, orphan
 cleanup and intent-log replay retire the chain; three resealed segment
 corruptions are checker errors; removing the retirement call makes the
-checker report each leaked block; and 2,334 modeled power cuts over attach,
+checker report each leaked block; a chain whose first, middle or last
+segment is resealed under a foreign owner still unlinks, still empties its
+name, frees exactly the proven segments and leaves exactly the unproven ones
+as leak findings, and the same holds for directory removal, a final unlink
+inside a window, orphan cleanup, descriptor replacement and the explicit
+clear; and 2,334 modeled power cuts over attach,
 replace, preserve-mode edit and delete each mount to the state before or
 after the transition with a clean checker verdict.
 

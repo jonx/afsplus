@@ -11,6 +11,7 @@ use afsplus_core::{
 };
 use afsplus_format::header::{block_type, BlockHeader};
 use afsplus_format::ident::{Identification, INCOMPAT_PERSISTENT_SNAPSHOTS};
+use afsplus_format::security::SecuritySegment;
 use afsplus_format::{Timespec, OBJECT_ROOT};
 
 /// A format identity no implementation in this repository evaluates.
@@ -73,6 +74,45 @@ fn segments_owned_by<D: BlockDevice>(dev: &mut D, owner: u64) -> Vec<u64> {
         }
     }
     found
+}
+
+/// The chain of `owner` in segment order, read straight from the image.
+fn chain_of<D: BlockDevice>(dev: &mut D, owner: u64) -> Vec<u64> {
+    let mut block = vec![0u8; dev.block_size()];
+    let mut found = Vec::new();
+    for lba in segments_owned_by(dev, owner) {
+        dev.read_block(lba, &mut block).unwrap();
+        let (segment, _) = SecuritySegment::decode(&block).unwrap();
+        found.push((segment.index, lba));
+    }
+    found.sort_unstable();
+    found.into_iter().map(|(_, lba)| lba).collect()
+}
+
+/// Reseal segment `position` of `owner`'s chain under a foreign owner, so the
+/// block stays a well-formed, checksummed `"AFSX"` block that this chain
+/// cannot claim. Returns the chain in segment order.
+fn corrupt_segment<D: BlockDevice>(dev: &mut D, owner: u64, position: usize) -> Vec<u64> {
+    let chain = chain_of(dev, owner);
+    let mut block = vec![0u8; dev.block_size()];
+    dev.read_block(chain[position], &mut block).unwrap();
+    let header = BlockHeader::verify(&block, block_type::SECURITY_DESCRIPTOR).unwrap();
+    BlockHeader {
+        owner: header.owner ^ 0x5a,
+        ..header
+    }
+    .seal(&mut block);
+    dev.write_block(chain[position], &block).unwrap();
+    chain
+}
+
+fn leak_findings(blocks: &[u64]) -> Vec<String> {
+    let mut sorted = blocks.to_vec();
+    sorted.sort_unstable();
+    sorted
+        .iter()
+        .map(|lba| format!("block {lba} is allocated but owned by nothing (leak)"))
+        .collect()
 }
 
 fn checked<D: BlockDevice>(volume: Volume<D>) -> D {
@@ -740,4 +780,196 @@ fn a_clone_receives_its_own_copy_of_the_descriptor() {
     }
     assert!(outcomes.iter().all(|&n| n > 0), "{outcomes:?}");
     eprintln!("clone crash states no-clone/clone: {outcomes:?}");
+}
+
+#[test]
+fn a_damaged_chain_never_makes_its_object_undeletable() {
+    // Three segments, so the corruption can sit at the first, the middle or
+    // the last link of a chain.
+    let bytes = blob(9000, 21);
+    let build = || {
+        let mut volume = mount(formatted()).unwrap();
+        let file = volume
+            .create_file_in_directory(OBJECT_ROOT, "file", b"payload", time(2))
+            .unwrap();
+        volume
+            .set_security_descriptor(file, UNKNOWN_FORMAT, 1, &bytes, time(3))
+            .unwrap();
+        (checked(volume), file)
+    };
+
+    // Control: the same removal on an intact chain frees every segment.
+    let (control, file) = build();
+    let mut volume = mount(control).unwrap();
+    volume.delete_file(OBJECT_ROOT, "file", time(4)).unwrap();
+    // Retirement is deferred, so the blocks a removal gives back are the free
+    // ones plus the ones queued for reclamation.
+    let control_released = volume.free_blocks() + volume.reclaim_pending_blocks();
+    checked(volume);
+
+    for position in 0..3 {
+        let (mut image, _) = build();
+        let chain = corrupt_segment(&mut image, file, position);
+        // Everything from the damaged link on is unproven and stays put.
+        let unproven = &chain[position..];
+
+        // Reading a damaged descriptor is still Corrupt.
+        let mut volume = mount(image.clone()).unwrap();
+        assert!(matches!(
+            volume.security_descriptor(file),
+            Err(CoreError::Corrupt(_))
+        ));
+
+        // The unlink succeeds and the name is gone.
+        volume.delete_file(OBJECT_ROOT, "file", time(4)).unwrap();
+        assert_eq!(
+            volume.lookup_in_directory(OBJECT_ROOT, "file").unwrap(),
+            None
+        );
+        assert!(matches!(
+            volume.security_descriptor(file),
+            Err(CoreError::NotFound)
+        ));
+        // Exactly the proven segments were freed: every other block matches
+        // the intact control, so nothing outside the chain changed state.
+        assert_eq!(
+            volume.free_blocks() + volume.reclaim_pending_blocks(),
+            control_released - unproven.len() as u64,
+            "position {position}"
+        );
+        let mut device = volume.into_device();
+        let report = check_device(&mut device);
+        assert_eq!(
+            report.errors,
+            leak_findings(unproven),
+            "position {position}"
+        );
+        // The retained checkpoint predates the removal, so it still reaches
+        // the damaged chain; every warning belongs to it.
+        assert!(
+            report
+                .warnings
+                .iter()
+                .all(|warning| warning.starts_with("retained checkpoint")),
+            "{:?}",
+            report.warnings
+        );
+    }
+}
+
+#[test]
+fn every_removal_and_replacement_path_survives_a_damaged_chain() {
+    let bytes = blob(9000, 22);
+    let mut dev = MemoryBackend::new(4096, 1024);
+    mkfs_with_security_descriptors(
+        &mut dev,
+        &MkfsParams {
+            log_slots: 8,
+            ..params()
+        },
+    )
+    .unwrap();
+    let mut volume = mount(dev).unwrap();
+    let dir = volume
+        .create_directory(OBJECT_ROOT, "dir", time(2))
+        .unwrap();
+    let windowed = volume
+        .create_file_in_directory(OBJECT_ROOT, "windowed", b"w", time(2))
+        .unwrap();
+    let orphaned = volume
+        .create_file_in_directory(OBJECT_ROOT, "orphaned", b"o", time(2))
+        .unwrap();
+    let replaced = volume
+        .create_file_in_directory(OBJECT_ROOT, "replaced", b"r", time(2))
+        .unwrap();
+    let cleared = volume
+        .create_file_in_directory(OBJECT_ROOT, "cleared", b"c", time(2))
+        .unwrap();
+    let objects = [dir, windowed, orphaned, replaced, cleared];
+    for id in objects {
+        volume
+            .set_security_descriptor(id, UNKNOWN_FORMAT, 1, &bytes, time(3))
+            .unwrap();
+    }
+    let mut image = checked(volume);
+
+    // The middle segment of every chain is resealed under a foreign owner,
+    // so one segment of each chain is proven and two are not.
+    let mut unproven = Vec::new();
+    for id in objects {
+        unproven.extend_from_slice(&corrupt_segment(&mut image, id, 1)[1..]);
+    }
+    assert_eq!(unproven.len(), 10);
+
+    let mut volume = mount(image).unwrap();
+    for id in objects {
+        assert!(matches!(
+            volume.security_descriptor(id),
+            Err(CoreError::Corrupt(_))
+        ));
+    }
+    volume
+        .remove_directory(OBJECT_ROOT, "dir", time(4))
+        .unwrap();
+    // The final unlink of a file inside an open window.
+    volume
+        .window_op(
+            &BatchOp::DeleteFile {
+                parent_id: OBJECT_ROOT,
+                name: "windowed",
+            },
+            time(4),
+        )
+        .unwrap();
+    volume.window_commit(time(4)).unwrap();
+    // Orphan cleanup.
+    assert_eq!(
+        volume
+            .orphan_file(OBJECT_ROOT, "orphaned", time(4))
+            .unwrap(),
+        orphaned
+    );
+    // The windowed delete of a final link orphans the object as well.
+    for id in [orphaned, windowed] {
+        while volume.cleanup_orphan(id, time(5)).unwrap().still_pending {}
+    }
+    assert_eq!(volume.orphan_count().unwrap(), 0);
+    // Replacement and the explicit clear.
+    let fresh = blob(20, 23);
+    volume
+        .set_security_descriptor(replaced, UNKNOWN_FORMAT, 2, &fresh, time(5))
+        .unwrap();
+    volume.clear_security_descriptor(cleared, time(5)).unwrap();
+
+    for id in [dir, windowed, orphaned] {
+        assert!(matches!(
+            volume.security_descriptor(id),
+            Err(CoreError::NotFound)
+        ));
+    }
+    assert_eq!(
+        volume.security_descriptor(replaced).unwrap(),
+        expect(UNKNOWN_FORMAT, 2, false, &fresh)
+    );
+    assert_eq!(volume.security_descriptor(cleared).unwrap(), None);
+    for name in ["dir", "windowed", "orphaned"] {
+        assert_eq!(volume.lookup_in_directory(OBJECT_ROOT, name).unwrap(), None);
+    }
+    // The classic edit refused before the clear is allowed after it.
+    volume
+        .set_object_protection(cleared, 0x21, time(6))
+        .unwrap();
+
+    // The unproven remainder is reported, and nothing else is.
+    let mut device = volume.into_device();
+    let report = check_device(&mut device);
+    assert_eq!(report.errors, leak_findings(&unproven));
+    assert!(
+        report
+            .warnings
+            .iter()
+            .all(|warning| warning.starts_with("retained checkpoint")),
+        "{:?}",
+        report.warnings
+    );
 }

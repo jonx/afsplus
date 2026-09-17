@@ -30,14 +30,29 @@ pub struct SecurityDescriptor {
     pub bytes: Vec<u8>,
 }
 
-/// Blocks of one descriptor chain, validated against its reference.
-pub(crate) fn load_descriptor_chain<D: BlockDevice>(
+/// One walk of a descriptor chain.
+pub(crate) struct ChainWalk {
+    /// Segments proven to belong to this object's chain: valid magic and
+    /// checksum, this owner, the expected position, matching identity and a
+    /// committed generation, from the first segment up to the first invalid
+    /// link. A block past that point is never proven, whoever else may own it.
+    pub blocks: Vec<u64>,
+    /// Present only when every segment of the chain was proven.
+    pub descriptor: Option<SecurityDescriptor>,
+    /// Why the walk stopped, when it stopped early.
+    pub damage: Option<String>,
+}
+
+/// Walk the chain a reference names, proving one segment at a time. Device
+/// errors propagate; a damaged chain is a value, not an error, so the paths
+/// that must free an object are not blocked by the bytes it points at.
+pub(crate) fn walk_descriptor_chain<D: BlockDevice>(
     dev: &mut D,
     geometry: &afsplus_format::geometry::Geometry,
     object_id: u64,
     reference: SecurityRef,
     max_generation: u64,
-) -> Result<(Vec<u64>, SecurityDescriptor), CoreError> {
+) -> Result<ChainWalk, CoreError> {
     let mut block = vec![0u8; dev.block_size()];
     let mut blocks = Vec::with_capacity(reference.segment_count as usize);
     let mut bytes = Vec::with_capacity(reference.total_len as usize);
@@ -45,40 +60,80 @@ pub(crate) fn load_descriptor_chain<D: BlockDevice>(
     let mut lba = reference.first_block;
     for index in 0..reference.segment_count {
         if !geometry.is_allocatable(lba) || blocks.contains(&lba) {
-            return Err(CoreError::Corrupt(format!(
-                "object {object_id} security segment {index} at invalid block {lba}"
-            )));
+            return Ok(ChainWalk {
+                blocks,
+                descriptor: None,
+                damage: Some(format!(
+                    "object {object_id} security segment {index} at invalid block {lba}"
+                )),
+            });
         }
         dev.read_block(lba, &mut block)?;
-        let (segment, generation) = SecuritySegment::decode(&block)?;
-        let first = *identity.get_or_insert((segment.format, segment.version));
-        if segment.object_id != object_id
-            || segment.index != index
-            || segment.count != reference.segment_count
-            || segment.total_len != reference.total_len
-            || (segment.format, segment.version) != first
-            || generation == 0
-            || generation > max_generation
-        {
-            return Err(CoreError::Corrupt(format!(
-                "object {object_id} security segment {index} does not match its reference"
-            )));
+        let mismatch = match SecuritySegment::decode(&block) {
+            Err(_) => true,
+            Ok((segment, generation)) => {
+                let first = *identity.get_or_insert((segment.format, segment.version));
+                let ok = segment.object_id == object_id
+                    && segment.index == index
+                    && segment.count == reference.segment_count
+                    && segment.total_len == reference.total_len
+                    && (segment.format, segment.version) == first
+                    && generation != 0
+                    && generation <= max_generation;
+                if ok {
+                    blocks.push(lba);
+                    bytes.extend_from_slice(segment.bytes);
+                    lba = segment.next;
+                }
+                !ok
+            }
+        };
+        if mismatch {
+            return Ok(ChainWalk {
+                blocks,
+                descriptor: None,
+                damage: Some(format!(
+                    "object {object_id} security segment {index} does not match its reference"
+                )),
+            });
         }
-        blocks.push(lba);
-        bytes.extend_from_slice(segment.bytes);
-        lba = segment.next;
     }
-    let (format, version) =
-        identity.ok_or_else(|| CoreError::Corrupt("security reference without segments".into()))?;
-    Ok((
+    let Some((format, version)) = identity else {
+        return Ok(ChainWalk {
+            blocks,
+            descriptor: None,
+            damage: Some("security reference without segments".into()),
+        });
+    };
+    Ok(ChainWalk {
         blocks,
-        SecurityDescriptor {
+        descriptor: Some(SecurityDescriptor {
             format,
             version,
             projection_diverged: reference.flags & SECURITY_REF_PROJECTION_DIVERGED != 0,
             bytes,
-        },
-    ))
+        }),
+        damage: None,
+    })
+}
+
+/// Blocks of one descriptor chain, validated against its reference. A chain
+/// that does not validate in full is `Corrupt`: descriptor bytes are returned
+/// whole or not at all.
+pub(crate) fn load_descriptor_chain<D: BlockDevice>(
+    dev: &mut D,
+    geometry: &afsplus_format::geometry::Geometry,
+    object_id: u64,
+    reference: SecurityRef,
+    max_generation: u64,
+) -> Result<(Vec<u64>, SecurityDescriptor), CoreError> {
+    let walk = walk_descriptor_chain(dev, geometry, object_id, reference, max_generation)?;
+    match walk.descriptor {
+        Some(descriptor) => Ok((walk.blocks, descriptor)),
+        None => Err(CoreError::Corrupt(walk.damage.unwrap_or_else(|| {
+            format!("object {object_id} security chain is damaged")
+        }))),
+    }
 }
 
 impl<D: BlockDevice> Volume<D> {
@@ -222,7 +277,17 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     /// Retire the descriptor chain of an object that leaves the namespace
-    /// for good. Callers retire the object record themselves.
+    /// for good, or whose descriptor is replaced. Callers retire the object
+    /// record themselves.
+    ///
+    /// A damaged chain never blocks the operation: an object must stay
+    /// deletable whatever the bytes it points at look like, or a single
+    /// corrupt segment would pin its name, its records and its data
+    /// forever. Only the segments proven to belong to this chain are freed;
+    /// the unproven remainder stays allocated, where the checker reports it
+    /// as a block owned by nothing. Leaking beats freeing a block that may
+    /// still belong to something else: on uncertainty, ADR-021 quarantines
+    /// or leaks rather than reusing early.
     pub(super) fn retire_security_descriptor(
         &mut self,
         tx: &mut TxAllocator,
@@ -232,14 +297,14 @@ impl<D: BlockDevice> Volume<D> {
             return Ok(());
         };
         let geometry = self.ident.geometry();
-        let (blocks, _) = load_descriptor_chain(
+        let walk = walk_descriptor_chain(
             &mut self.dev,
             &geometry,
             record.object_id,
             reference,
             self.checkpoint.generation,
         )?;
-        for lba in blocks {
+        for lba in walk.blocks {
             tx.retire(&mut self.dev, lba)?;
         }
         Ok(())
