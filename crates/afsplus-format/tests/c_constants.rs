@@ -376,6 +376,23 @@ fn every_c_format_constant_equals_the_rust_codec() {
             tree_kind_wire(TreeKind::AllocationRoot),
         ),
         (
+            "AFSPR_TREE_KIND_SNAPSHOT_REGISTRY",
+            tree_kind_wire(TreeKind::SnapshotRegistry),
+        ),
+        (
+            "AFSPR_TREE_KIND_SNAPSHOT_LIFETIMES",
+            tree_kind_wire(TreeKind::SnapshotLifetimes),
+        ),
+        (
+            "AFSPR_SNAPSHOT_VALUE_SIZE",
+            afsplus_format::snapshot::VALUE_SIZE as u64,
+        ),
+        // Measured: the key the tree codec writes for a snapshot ID.
+        (
+            "AFSPR_SNAPSHOT_KEY_SIZE",
+            afsplus_format::tree::key_u64(7).len() as u64,
+        ),
+        (
             "AFSPR_ALLOCATION_VALUE_SIZE",
             geometry::ALLOCATION_ROOT_VALUE_BYTES as u64,
         ),

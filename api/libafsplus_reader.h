@@ -335,6 +335,49 @@ int afspr_validate_attribute_set(const void *set, size_t set_size,
 int afspr_attribute_set_next(const void *set, size_t set_size, size_t *cursor,
                              struct afspr_attribute *attribute);
 
+/* Snapshot records (ADR-072): the 32-byte values of the snapshot registry
+ * tree and of the lifetime ledger tree, and their 8-byte big-endian keys.
+ * Key zero of each tree holds its control record. The decoders take the
+ * context a value is judged in; the reader walks neither tree. No I/O, no
+ * allocation; outputs are unchanged on error. */
+#define AFSPR_SNAPSHOT_VALUE_SIZE 32u
+#define AFSPR_SNAPSHOT_KEY_SIZE 8u
+
+struct afspr_snapshot_record {
+    uint64_t generation;
+    uint64_t committed_tx_id;
+    uint64_t object_map_root;
+};
+
+struct afspr_snapshot_lifetime {
+    uint64_t blocks;
+    uint64_t birth;
+    /* Zero while live; otherwise the first generation without an owner. */
+    uint64_t retirement;
+};
+
+int afspr_decode_snapshot_key(const uint8_t *key, size_t key_size,
+                              uint64_t *id);
+/* Registry control record: the next snapshot ID, nonzero. */
+int afspr_decode_snapshot_registry_state(const uint8_t *value,
+                                         size_t value_size,
+                                         uint64_t *next_id);
+int afspr_decode_snapshot_record(const uint8_t *value, size_t value_size,
+                                 uint64_t max_generation,
+                                 uint64_t total_blocks,
+                                 struct afspr_snapshot_record *record);
+/* start is the run's first block, the record's key. */
+int afspr_decode_snapshot_lifetime(const uint8_t *value, size_t value_size,
+                                   uint64_t start, uint64_t max_generation,
+                                   uint64_t total_blocks,
+                                   struct afspr_snapshot_lifetime *lifetime);
+/* Ledger control record: reclaim scan position and retained block count. */
+int afspr_decode_snapshot_ledger_state(const uint8_t *value,
+                                       size_t value_size,
+                                       uint64_t total_blocks,
+                                       uint64_t *scan_position,
+                                       uint64_t *retained_blocks);
+
 /* One checkpoint slot as the format states it, without the geometry of a
  * volume: both payload lengths, with and without the snapshot roots of
  * ADR-073. The volume paths of this reader select only checkpoints without

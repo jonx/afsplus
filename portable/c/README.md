@@ -132,7 +132,14 @@ bytes and 184 with the snapshot roots, and refuses a nonzero byte after the
 payload ([ADR-111](../../adr/ADR-111-checkpoint-zero-tail.md)); the volume
 paths sit on top of it and still refuse a checkpoint with snapshot roots.
 [`checkpoint_c.rs`](../../crates/afsplus-format/tests/checkpoint_c.rs) holds
-its per-image agreement. The reader preserves
+its per-image agreement. The snapshot records of
+[ADR-072](../../adr/ADR-072-snapshot-record-codecs.md) have five pure
+decoders, `afspr_decode_snapshot_key`, `afspr_decode_snapshot_registry_state`,
+`afspr_decode_snapshot_record`, `afspr_decode_snapshot_lifetime` and
+`afspr_decode_snapshot_ledger_state`, each judged in the context the Rust
+codec uses (checkpoint generation, volume size, the run's first block);
+[`snapshot_c.rs`](../../crates/afsplus-format/tests/snapshot_c.rs) holds their
+agreement. The reader walks neither snapshot tree. The reader preserves
 these bytes and never evaluates them; the writer appends intent records only
 and rewrites no object record, so it cannot drop a reference.
 [`security_c.rs`](../../crates/afsplus-format/tests/security_c.rs) holds the

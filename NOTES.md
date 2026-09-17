@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — A second reader for the snapshot records; Q15 closed](#2026-09-17--a-second-reader-for-the-snapshot-records-q15-closed)
 - [2026-09-17 — The zero tail, once, in the header verification (ADR-112)](#2026-09-17--the-zero-tail-once-in-the-header-verification-adr-112)
 - [2026-09-17 — Run the handler on AROS for the first time](#2026-09-17--run-the-handler-on-aros-for-the-first-time)
 - [2026-09-17 — A selected checkpoint in the wrong form refuses the volume, in C too](#2026-09-17--a-selected-checkpoint-in-the-wrong-form-refuses-the-volume-in-c-too)
@@ -215,6 +216,25 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — A second reader for the snapshot records; Q15 closed
+
+Last item of Q15. The portable C reader has five pure decoders for the
+snapshot records of ADR-072: the 8-byte big-endian key, the registry control
+record, the snapshot record, the lifetime record and the ledger control
+record, each judged in the context the Rust codec uses (checkpoint generation,
+volume size, first block of the run). The reader walks neither tree.
+`spec/disk-layout.md` has a "Snapshot records" table; `c_constants` pins the
+two tree kinds, the value size and the key size. Q15 is closed: the reclaim
+blocks, the snapshot checkpoint payload and the snapshot records each have a
+decoder in C, a cross-read test, pinned constants and a layout table.
+
+Proof: `snapshot_c` in afsplus-format, 40 cases, 80 verdicts over a strict and
+a sanitized build, each compared to the Rust verdict and to a literal: keys of
+four lengths, every bound of every field at its edge and one past it, a run
+whose end overflows, reserved bytes, short, long and empty values. Negative
+controls, each failing it: C without the transaction-above-generation rule, C
+without the overflow check of a run's end.
 
 ## 2026-09-17 — The zero tail, once, in the header verification (ADR-112)
 

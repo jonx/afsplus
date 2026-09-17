@@ -55,6 +55,8 @@
 #define AFSPR_TREE_KIND_DIRECTORY 2u
 #define AFSPR_TREE_KIND_EXTENT_MAP 3u
 #define AFSPR_TREE_KIND_ALLOCATION_ROOT 4u
+#define AFSPR_TREE_KIND_SNAPSHOT_REGISTRY 6u
+#define AFSPR_TREE_KIND_SNAPSHOT_LIFETIMES 7u
 #define AFSPR_ALLOCATION_VALUE_SIZE 16u
 #define AFSPR_REGION_DESCRIPTOR_FIXED 16u
 #define AFSPR_BITMAP_FIXED 16u
@@ -6132,4 +6134,119 @@ int afspr_decode_reclaim_table(const void *block, size_t block_size,
         block, block_size, AFSPR_BLOCK_TYPE_RECLAIM_TABLE,
         AFSPR_RECLAIM_REF_SIZE, AFSPR_RECLAIM_TABLE_REF_CAP, refs, count,
         generation);
+}
+
+/* Snapshot records (ADR-072). */
+
+/* A value is 32 bytes whose unused part, from used on, is zero. */
+static int afspr_snapshot_value_ok(const uint8_t *value, size_t value_size,
+                                   size_t used)
+{
+    size_t i;
+    if (value == NULL || value_size != AFSPR_SNAPSHOT_VALUE_SIZE) return 0;
+    for (i = used; i < AFSPR_SNAPSHOT_VALUE_SIZE; ++i) {
+        if (value[i] != 0u) return 0;
+    }
+    return 1;
+}
+
+int afspr_decode_snapshot_key(const uint8_t *key, size_t key_size,
+                              uint64_t *id)
+{
+    uint64_t value = 0u;
+    size_t i;
+    if (key == NULL || id == NULL) return AFSPR_ERR_INVALID_ARGUMENT;
+    if (key_size != AFSPR_SNAPSHOT_KEY_SIZE) return AFSPR_ERR_CORRUPT;
+    for (i = 0u; i < AFSPR_SNAPSHOT_KEY_SIZE; ++i) {
+        value = (value << 8) | key[i];
+    }
+    *id = value;
+    return AFSPR_OK;
+}
+
+int afspr_decode_snapshot_registry_state(const uint8_t *value,
+                                         size_t value_size,
+                                         uint64_t *next_id)
+{
+    if (next_id == NULL) return AFSPR_ERR_INVALID_ARGUMENT;
+    if (!afspr_snapshot_value_ok(value, value_size, 8u) ||
+        afspr_get_le64(value) == 0u) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    *next_id = afspr_get_le64(value);
+    return AFSPR_OK;
+}
+
+int afspr_decode_snapshot_record(const uint8_t *value, size_t value_size,
+                                 uint64_t max_generation,
+                                 uint64_t total_blocks,
+                                 struct afspr_snapshot_record *record)
+{
+    struct afspr_snapshot_record decoded;
+    if (record == NULL) return AFSPR_ERR_INVALID_ARGUMENT;
+    if (!afspr_snapshot_value_ok(value, value_size, 24u)) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    decoded.generation = afspr_get_le64(value);
+    decoded.committed_tx_id = afspr_get_le64(value + 8u);
+    decoded.object_map_root = afspr_get_le64(value + 16u);
+    if (decoded.generation == 0u || decoded.generation > max_generation ||
+        decoded.committed_tx_id == 0u ||
+        decoded.committed_tx_id > decoded.generation ||
+        decoded.object_map_root == 0u ||
+        decoded.object_map_root >= total_blocks) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    *record = decoded;
+    return AFSPR_OK;
+}
+
+int afspr_decode_snapshot_lifetime(const uint8_t *value, size_t value_size,
+                                   uint64_t start, uint64_t max_generation,
+                                   uint64_t total_blocks,
+                                   struct afspr_snapshot_lifetime *lifetime)
+{
+    struct afspr_snapshot_lifetime decoded;
+    if (lifetime == NULL) return AFSPR_ERR_INVALID_ARGUMENT;
+    if (!afspr_snapshot_value_ok(value, value_size, 24u)) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    decoded.blocks = afspr_get_le64(value);
+    decoded.birth = afspr_get_le64(value + 8u);
+    decoded.retirement = afspr_get_le64(value + 16u);
+    if (start == 0u || decoded.blocks == 0u ||
+        start > UINT64_MAX - decoded.blocks ||
+        start + decoded.blocks > total_blocks || decoded.birth == 0u ||
+        decoded.birth > max_generation ||
+        (decoded.retirement != 0u &&
+         (decoded.retirement <= decoded.birth ||
+          decoded.retirement > max_generation))) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    *lifetime = decoded;
+    return AFSPR_OK;
+}
+
+int afspr_decode_snapshot_ledger_state(const uint8_t *value,
+                                       size_t value_size,
+                                       uint64_t total_blocks,
+                                       uint64_t *scan_position,
+                                       uint64_t *retained_blocks)
+{
+    uint64_t position, retained;
+    if (scan_position == NULL || retained_blocks == NULL) {
+        return AFSPR_ERR_INVALID_ARGUMENT;
+    }
+    if (!afspr_snapshot_value_ok(value, value_size, 16u)) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    position = afspr_get_le64(value);
+    retained = afspr_get_le64(value + 8u);
+    if (total_blocks == 0u || position >= total_blocks ||
+        retained > total_blocks) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    *scan_position = position;
+    *retained_blocks = retained;
+    return AFSPR_OK;
 }

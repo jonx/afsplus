@@ -97,6 +97,7 @@ Rules:
 <!-- toc -->
 
 - [Reclaim queue blocks](#reclaim-queue-blocks)
+- [Snapshot records](#snapshot-records)
 
 <!-- /toc -->
 
@@ -157,3 +158,28 @@ Admission is exact
 owner in the common header, a root payload of exactly 64 + 12 × (table +
 segment capacity) + 20 × inline capacity, zero bytes in the unused slots of
 each root area, and zero bytes after the payload.
+
+
+## Snapshot records
+
+A volume with persistent snapshots keeps two trees, named by the checkpoint
+([ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md)): the snapshot registry
+(tree kind 6) and the lifetime ledger (tree kind 7). Both use 8-byte big-endian
+keys and 32-byte little-endian values whose unused bytes are zero
+([ADR-072](../adr/ADR-072-snapshot-record-codecs.md)). Key zero of each tree is
+its control record. The Rust codec
+([snapshot.rs](../crates/afsplus-format/src/snapshot.rs)) and the portable C
+decoders (`afspr_decode_snapshot_*`) are held to the same verdict value by
+value in [the cross-read test](../crates/afsplus-format/tests/snapshot_c.rs).
+
+| Tree | Key | Offset | Size | Field |
+|---|---|---:|---:|---|
+| registry | 0 | 0 | 8 | next snapshot ID, nonzero; never wraps |
+| registry | snapshot ID | 0 | 8 | captured generation, nonzero, at most the checkpoint's |
+| | | 8 | 8 | committed transaction, nonzero, at most the captured generation |
+| | | 16 | 8 | object-map root of the view, nonzero, inside the volume |
+| ledger | 0 | 0 | 8 | reclaim scan position, below the volume's block count |
+| | | 8 | 8 | retained blocks, at most the volume's block count |
+| ledger | first block of a run, nonzero | 0 | 8 | blocks in the run, nonzero; the run ends inside the volume |
+| | | 8 | 8 | birth generation, nonzero, at most the checkpoint's |
+| | | 16 | 8 | retirement generation: zero while live, otherwise above the birth and at most the checkpoint's |
