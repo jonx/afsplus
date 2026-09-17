@@ -260,9 +260,26 @@ directory entry that names it. `explain_path` resolves a path from the root by t
 spelling each directory stores and returns every component with the object it
 names; the walk reads the format alone, so it applies no case folding.
 
+`explain_extent` says where one byte offset of a file lives: past the end, in
+a hole, or in an extent, with the physical block and the shared and unwritten
+marks. `explain_checkpoint` states both slots (the generation each carries, or
+why it cannot be selected, "never written" included) and every field of the
+selected checkpoint. `explain_reclaim` summarises the queue and, for a block,
+names the pending run that holds it with its retire generation and its
+position. `explain_space` counts one region from the live bitmap and the roles:
+reserved, allocated, free, quarantined, allocated with no live role, and the
+longest free run. `explain_features` lists every feature bit this
+implementation assigns and every bit the volume sets, so a bit nobody assigned
+shows without an identity. `ExplainDirectory` is `explain_object` on a
+directory. [Their test](../crates/afsplus-check/tests/explain_more.rs) holds
+each against a witness outside the walk: the bytes the core reads at every
+block boundary of three files, the core's checkpoint selection, the checker's
+reclaim runs and bitmap, the identification block.
+
 The command is `afsplus-explain [--json] <image> (block <number> | object <id>
-| path <path>)`, in [`afsplus-tools`](../crates/afsplus-tools/src/explain.rs).
-It opens the image read-only. The JSON document carries `schema_version` 1
+| path <path> | extent <id> <offset> | checkpoint | reclaim [<block>] | space
+<region> | feature [<id>])`, in [`afsplus-tools`](../crates/afsplus-tools/src/explain.rs).
+It opens the image read-only. The JSON document carries `schema_version` 2
 (ADR-025), the kind of question, the generation answered for, `has_snapshots`,
 `partial` with the list of branches the walk could not decode, and the answer;
 a block also carries a one-word verdict (`owned`, `free`, `leaked`,
@@ -271,8 +288,10 @@ answer from a complete walk, 1 an answer from a partial walk or a question
 about something the image does not hold, 2 a usage or host I/O failure.
 [Its test](../crates/afsplus-tools/tests/explain_cli.rs) reads the documents
 back with an independent JSON parser.
-`ExplainExtent`, `ExplainCheckpoint`, `ExplainReclaim`, `ExplainSpace` and
-`ExplainFeature` are open.
+`ExplainCheckpoint` answers for the two slots an image holds; a generation
+that no slot carries any more has no answer in the image. `ExplainReclaim` by
+object has none either: a reclaim entry records a run and its retire
+generation, not the object that owned it.
 
 ## 6. Optional reverse-map index
 

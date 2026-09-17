@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — The remaining explain operations](#2026-09-17--the-remaining-explain-operations)
 - [2026-09-17 — The afsplus-explain command](#2026-09-17--the-afsplus-explain-command)
 - [2026-09-17 — Owned chains under persistent snapshots (ADR-109)](#2026-09-17--owned-chains-under-persistent-snapshots-adr-109)
 - [2026-09-17 — Read extended attributes in the portable C reader](#2026-09-17--read-extended-attributes-in-the-portable-c-reader)
@@ -207,6 +208,39 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — The remaining explain operations
+
+`explain_extent`, `explain_checkpoint`, `explain_reclaim`, `explain_space` and
+`explain_features` in `afsplus_check::explain` (file `explain/more.rs`), all
+answered from the walk `Explainer::load` already makes; the walk now keeps
+each file's extents, both slot states and the pending reclaim runs. The
+command gained `extent <id> <offset>`, `checkpoint`, `reclaim [<block>]`,
+`space <region>` and `feature [<id>]`. `EXPLAIN_SCHEMA_VERSION` is 2: the
+documents gained kinds. A slot of zeros reads "never written" instead of a
+checksum mismatch. `ExplainDirectory` is `explain_object` on a directory.
+Two listed operations have no answer an image can give: a checkpoint
+generation no slot carries any more, and reclaim by object, since a reclaim
+entry records no owner. roadmap-36 is Complete; Stage B has no open roadmap
+line.
+
+Proof: `explain_more` in afsplus-check (3 tests). Extent: every block boundary
+of a direct file, a sparse file with a preallocated run and its clone, against
+the byte the core reads and the byte at the explained physical block; all five
+states occur. Checkpoint: the core's `select_checkpoint` and fields, the slot
+flip after one commit, a damaged slot, a fresh volume. Reclaim: the checker's
+runs, every block of the volume asked. Space: three regions summing to the
+volume, to the checkpoint's free count and to the queue, longest free run by
+brute force over the core's bitmap. Features: three formatters against the
+identification bits, and an unassigned bit. `explain_cli` (4 tests now) asks
+the same through the command and parses the JSON with Python. Negative
+controls, each failing its test: physical block off by one, feature lookup
+ignoring the class, one-block runs dropped from the queue.
+
+Found on the way: `afsplus-info` did not name `persistent-snapshots` and
+`security-descriptors` among the enabled features. Fixed in
+`afsplus-tools/src/common.rs`; `info_and_explain_name_the_same_enabled_features`
+fails on the old list.
 
 ## 2026-09-17 — The afsplus-explain command
 

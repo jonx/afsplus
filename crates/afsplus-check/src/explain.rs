@@ -35,7 +35,13 @@ use afsplus_format::tree::{TreeKind, TreeNode};
 use afsplus_format::Timespec;
 
 /// Versioned structured-output schema of the explain records (ADR-025).
-pub const EXPLAIN_SCHEMA_VERSION: u32 = 1;
+pub const EXPLAIN_SCHEMA_VERSION: u32 = 2;
+
+mod more;
+pub use more::{
+    CheckpointExplanation, ExtentExplanation, ExtentState, FeatureClass, FeatureExplanation,
+    ReclaimExplanation, ReclaimRun, SlotExplanation, SpaceExplanation,
+};
 
 /// One thing the committed state says a block is.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -246,6 +252,13 @@ pub struct Explainer {
     objects: BTreeMap<u64, ObjectExplanation>,
     /// Directory object -> original name -> child object.
     children: BTreeMap<u64, BTreeMap<Vec<u8>, u64>>,
+    /// File object -> its extents in logical order.
+    extents: BTreeMap<u64, Vec<ExtentItem>>,
+    checkpoint: Checkpoint,
+    selected_slot: u8,
+    /// Per slot: the generation it carries, or why it is not selectable.
+    slot_states: [Result<u64, String>; 2],
+    reclaim: more::ReclaimState,
 }
 
 struct Walk<'a, D: BlockDevice> {
@@ -256,6 +269,8 @@ struct Walk<'a, D: BlockDevice> {
     problems: Vec<String>,
     objects: BTreeMap<u64, ObjectExplanation>,
     children: BTreeMap<u64, BTreeMap<Vec<u8>, u64>>,
+    extents: BTreeMap<u64, Vec<ExtentItem>>,
+    reclaim: more::ReclaimState,
     /// Tree nodes accepted so far, over every tree.
     tree_nodes: u64,
 }
@@ -360,11 +375,24 @@ impl Explainer {
         // Checkpoint selection: the structurally valid slot with the highest
         // generation; equal generations are ambiguous.
         let mut slots: [Option<Checkpoint>; 2] = [None, None];
+        let mut slot_states: [Result<u64, String>; 2] =
+            [Err("unreadable".into()), Err("unreadable".into())];
         for (index, slot) in slots.iter_mut().enumerate() {
             if dev.read_block(1 + index as u64, &mut buf).is_ok() {
-                *slot = Checkpoint::decode(&buf, &ident.uuid)
-                    .ok()
-                    .filter(|checkpoint| checkpoint.validate_structural(&geo).is_ok());
+                if buf.iter().all(|byte| *byte == 0) {
+                    slot_states[index] = Err("never written".into());
+                    continue;
+                }
+                match Checkpoint::decode(&buf, &ident.uuid) {
+                    Ok(checkpoint) => match checkpoint.validate_structural(&geo) {
+                        Ok(()) => {
+                            slot_states[index] = Ok(checkpoint.generation);
+                            *slot = Some(checkpoint);
+                        }
+                        Err(error) => slot_states[index] = Err(error.to_string()),
+                    },
+                    Err(error) => slot_states[index] = Err(error.to_string()),
+                }
             }
         }
         let selected = match (&slots[0], &slots[1]) {
@@ -389,6 +417,8 @@ impl Explainer {
             problems: Vec::new(),
             objects: BTreeMap::new(),
             children: BTreeMap::new(),
+            extents: BTreeMap::new(),
+            reclaim: more::ReclaimState::default(),
             tree_nodes: 0,
         };
         walk.add(0, BlockRole::Identification);
@@ -572,6 +602,8 @@ impl Explainer {
             problems,
             mut objects,
             children,
+            extents,
+            reclaim,
             ..
         } = walk;
         for (parent, entries) in &children {
@@ -594,6 +626,11 @@ impl Explainer {
             ident,
             objects,
             children,
+            extents,
+            checkpoint,
+            selected_slot: selected as u8,
+            slot_states,
+            reclaim,
         })
     }
 
@@ -666,6 +703,7 @@ impl Explainer {
                             continue;
                         }
                     };
+                    walk.extents.entry(object_id).or_default().push(item);
                     data.extents += 1;
                     data.mapped_blocks += item.block_count;
                     if item.flags & EXTENT_SHARED != 0 {
@@ -688,6 +726,14 @@ impl Explainer {
                 }
             }
             ObjectType::File => {
+                if record.data_blocks > 0 {
+                    walk.extents.entry(object_id).or_default().push(ExtentItem {
+                        logical_start: 0,
+                        physical_start: record.data_root,
+                        block_count: record.data_blocks,
+                        flags: 0,
+                    });
+                }
                 data.extents = u64::from(record.data_blocks > 0);
                 data.mapped_blocks = record.data_blocks;
                 for offset in 0..record.data_blocks {
@@ -898,6 +944,8 @@ impl Explainer {
             }
         };
         walk.add(root_lba, BlockRole::ReclaimRoot);
+        walk.reclaim.tables = root.table_refs.len() as u64;
+        walk.reclaim.inline_entries = root.inline_entries.len() as u64;
 
         // FIFO order: tables (oldest), then sealed segments, then the inline
         // entries. The cursor consumes the head segment of the head table,
@@ -921,6 +969,7 @@ impl Explainer {
             }
         }
         segments.extend(root.segment_refs.iter().copied());
+        walk.reclaim.segments = segments.len() as u64;
 
         let mut entries: Vec<ReclaimEntry> = Vec::new();
         for (segment_index, segment_ref) in segments.iter().enumerate() {
@@ -950,6 +999,11 @@ impl Explainer {
             }
         }
         entries.extend(root.inline_entries.iter().copied());
+        walk.reclaim.runs = entries
+            .iter()
+            .filter(|entry| entry.blocks > 0)
+            .map(|entry| (entry.start, entry.blocks, entry.retire_generation))
+            .collect();
         for entry in entries {
             for offset in 0..u64::from(entry.blocks) {
                 walk.add(

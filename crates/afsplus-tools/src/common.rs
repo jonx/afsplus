@@ -8,7 +8,8 @@ use afsplus_core::volume::emergency_headroom_for_volume;
 use afsplus_core::CoreError;
 use afsplus_format::ident::{
     Identification, NameKeyAlgorithm, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG,
-    INCOMPAT_INTENT_LOG_DATA_UPDATES, RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
+    INCOMPAT_INTENT_LOG_DATA_UPDATES, INCOMPAT_PERSISTENT_SNAPSHOTS, INCOMPAT_SECURITY_DESCRIPTORS,
+    RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::DEFAULT_BLOCK_SIZE;
 
@@ -239,6 +240,12 @@ pub fn feature_names(ident: &Identification) -> Vec<&'static str> {
     }
     if ident.features.incompat & INCOMPAT_INTENT_LOG_DATA_UPDATES != 0 {
         names.push("org.aros.afsplus:intent-log-data-updates");
+    }
+    if ident.features.incompat & INCOMPAT_PERSISTENT_SNAPSHOTS != 0 {
+        names.push("org.aros.afsplus:persistent-snapshots");
+    }
+    if ident.features.incompat & INCOMPAT_SECURITY_DESCRIPTORS != 0 {
+        names.push("org.aros.afsplus:security-descriptors");
     }
     names.sort_unstable();
     names

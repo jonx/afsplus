@@ -208,7 +208,7 @@ Wire freeze and hardware acceptance belong to [\[M14\]](implementation/milestone
 - ~~CloneFile/CloneRange semantics~~ <!-- progress: roadmap-25 -->
 - ~~deferred reclamation~~ <!-- progress: roadmap-26 -->
 - ~~checker~~ <!-- progress: roadmap-27 -->
-- explain APIs <!-- progress: roadmap-36 -->
+- ~~explain APIs~~ <!-- progress: roadmap-36 -->
 - ~~semantic image diff~~ <!-- progress: roadmap-37 -->
 
 ### B5. Security preservation container

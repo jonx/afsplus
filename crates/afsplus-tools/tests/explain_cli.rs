@@ -116,7 +116,7 @@ fn the_three_questions_in_both_forms() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let json = String::from_utf8(output.stdout).unwrap();
     assert!(
-        json.starts_with("{\"schema_version\":1,\"kind\":\"path\","),
+        json.starts_with("{\"schema_version\":2,\"kind\":\"path\","),
         "{json}"
     );
     assert_eq!(query(&json, "d['partial'], d['problems']"), "(False, [])");
@@ -252,5 +252,204 @@ fn statuses_for_absent_things_bad_usage_and_a_damaged_image() {
     assert_eq!(
         query(&damaged, "d['partial'], len(d['problems']) > 0"),
         "(True, True)"
+    );
+}
+
+#[test]
+fn extent_checkpoint_reclaim_space_and_feature() {
+    let temp = TempDir::new("more");
+    let image = temp.0.join("image.afsplus");
+    format_image(&image);
+    let device = FileBackend::open(&image, DEFAULT_BLOCK_SIZE, 512).unwrap();
+    let mut volume = mount(device).unwrap();
+    let file = volume
+        .create_file_in_directory(OBJECT_ROOT, "sparse", &[7u8; 100], time(200))
+        .unwrap();
+    volume
+        .write_file_at(file, 20 * 4096, &[9u8; 5000], time(201))
+        .unwrap();
+    let doomed = volume
+        .create_file_in_directory(OBJECT_ROOT, "doomed", &[1u8; 9000], time(202))
+        .unwrap();
+    volume
+        .delete_file(OBJECT_ROOT, "doomed", time(203))
+        .unwrap();
+    let generation = volume.checkpoint().generation;
+    let free = volume.checkpoint().free_blocks_total;
+    volume.sync().unwrap();
+    drop(volume.into_device());
+    let _ = doomed;
+    let image = image.to_str().unwrap();
+    let ask = |args: &[&str]| {
+        let mut full = vec!["--json", image];
+        full.extend_from_slice(args);
+        let output = explain(&full);
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let id = file.to_string();
+    let json = ask(&["extent", &id, "81925"]);
+    assert_eq!(
+        query(
+            &json,
+            "d['kind'], d['extent']['state'], d['extent']['logical_block'], d['extent']['offset_in_block'], d['extent']['shared'], d['extent']['unwritten']"
+        ),
+        "('extent', 'mapped', 20, 5, False, False)"
+    );
+    let physical: u64 = query(&json, "d['extent']['physical_block']")
+        .parse()
+        .unwrap();
+    // The block the extent names is a data block of that file at that place.
+    let block = ask(&["block", &physical.to_string()]);
+    assert_eq!(
+        query(
+            &block,
+            "[(r['role'], r['object'], r['logical_block']) for r in d['block']['roles']]"
+        ),
+        format!("[('data', {file}, 20)]")
+    );
+    assert_eq!(
+        query(&ask(&["extent", &id, "8192"]), "d['extent']['state']"),
+        "hole"
+    );
+    assert_eq!(
+        query(&ask(&["extent", &id, "86920"]), "d['extent']['state']"),
+        "beyond-end"
+    );
+
+    let json = ask(&["checkpoint"]);
+    assert_eq!(
+        query(
+            &json,
+            "d['generation'], d['checkpoint']['free_blocks_total'], d['checkpoint']['label'], sorted(s['selected'] for s in d['checkpoint']['slots']), d['checkpoint']['snapshot_roots']"
+        ),
+        format!("({generation}, {free}, 'AFSPlus', [False, True], None)")
+    );
+    assert_eq!(
+        query(
+            &json,
+            "[s['generation'] for s in d['checkpoint']['slots'] if s['selected']]"
+        ),
+        format!("[{generation}]")
+    );
+
+    // The deleted file's blocks wait in the queue; one of them names its run.
+    let json = ask(&["reclaim"]);
+    assert_eq!(
+        query(&json, "d['reclaim']['blocks'] >= 3, d['reclaim']['run']"),
+        "(True, None)"
+    );
+    let quarantined: u64 = (0..512)
+        .find(|lba| {
+            let block = ask(&["block", &lba.to_string()]);
+            query(
+                &block,
+                "any(r['role'] == 'quarantined' for r in d['block']['roles'])",
+            ) == "True"
+        })
+        .expect("a quarantined block");
+    let json = ask(&["reclaim", &quarantined.to_string()]);
+    assert_eq!(
+        query(
+            &json,
+            "d['reclaim']['block'], d['reclaim']['run']['start'] <= d['reclaim']['block'] < d['reclaim']['run']['start'] + d['reclaim']['run']['blocks']"
+        ),
+        format!("({quarantined}, True)")
+    );
+    assert_eq!(
+        query(&ask(&["reclaim", "0"]), "d['reclaim']['run']"),
+        "None"
+    );
+
+    let json = ask(&["space", "0"]);
+    assert_eq!(
+        query(
+            &json,
+            "d['space']['blocks'], d['space']['reserved_blocks'] + d['space']['allocated_blocks'] + d['space']['free_blocks'], d['space']['free_blocks'], d['space']['unowned_blocks']"
+        ),
+        format!("(512, 512, {free}, 0)")
+    );
+
+    let json = ask(&["feature"]);
+    assert_eq!(
+        query(&json, "len(d['features']), [f['id'] for f in d['features'] if f['class'] == 'incompat' and f['enabled']]"),
+        "(7, ['org.aros.afsplus:intent-log', 'org.aros.afsplus:intent-log-data-updates'])"
+    );
+    let json = ask(&["feature", "org.aros.afsplus:persistent-snapshots"]);
+    assert_eq!(
+        query(
+            &json,
+            "[(f['class'], f['bit'], f['enabled']) for f in d['features']]"
+        ),
+        "[('incompat', 2, False)]"
+    );
+
+    // Human forms answer too, and the wrong shapes are usage errors.
+    for args in [
+        vec![image, "extent", &id, "0"],
+        vec![image, "checkpoint"],
+        vec![image, "reclaim"],
+        vec![image, "space", "0"],
+        vec![image, "feature"],
+    ] {
+        let output = explain(&args);
+        assert_eq!(output.status.code(), Some(0), "{args:?}");
+        assert!(!output.stdout.is_empty());
+    }
+    for (args, status) in [
+        (vec![image, "extent", &id], 2),
+        (vec![image, "checkpoint", "1"], 2),
+        (vec![image, "space", "9"], 1),
+        (vec![image, "extent", "1", "0"], 1),
+        (vec![image, "feature", "org.aros.afsplus:nothing"], 1),
+    ] {
+        assert_eq!(explain(&args).status.code(), Some(status), "{args:?}");
+    }
+}
+
+#[test]
+fn info_and_explain_name_the_same_enabled_features() {
+    let temp = TempDir::new("features");
+    let image = temp.0.join("image.afsplus");
+    let mut device = FileBackend::create(&image, DEFAULT_BLOCK_SIZE, 1024).unwrap();
+    afsplus_core::mkfs_with_snapshots_and_security_descriptors(
+        &mut device,
+        &afsplus_core::MkfsParams {
+            uuid: [7; 16],
+            label: "Both".into(),
+            region_size: 512,
+            reclaim_caps: Default::default(),
+            log_slots: 0,
+            shared_extents: true,
+            data_policy: true,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
+            timestamp: time(1),
+        },
+    )
+    .unwrap();
+    device.flush().unwrap();
+    drop(device);
+    let image = image.to_str().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_afsplus-info"))
+        .args(["--json", image])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let info = query(
+        &String::from_utf8(output.stdout).unwrap(),
+        "d['volume']['features']['enabled']",
+    );
+    let output = explain(&["--json", image, "feature"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let explained = query(
+        &String::from_utf8(output.stdout).unwrap(),
+        "sorted(f['id'] for f in d['features'] if f['enabled'])",
+    );
+    assert_eq!(info, explained);
+    assert_eq!(
+        explained,
+        "['org.aros.afsplus:data-policy', 'org.aros.afsplus:orphan-directory', 'org.aros.afsplus:persistent-snapshots', 'org.aros.afsplus:security-descriptors', 'org.aros.afsplus:shared-extents']"
     );
 }

@@ -456,3 +456,345 @@ pub fn render_path_human(explainer: &Explainer, path: &PathExplanation) -> Strin
     problems_human(explainer, &mut out);
     out
 }
+
+fn option_json<T: ToString>(value: Option<T>) -> String {
+    value.map_or("null".to_owned(), |value| value.to_string())
+}
+
+fn class_name(class: crate::explain::FeatureClass) -> &'static str {
+    match class {
+        crate::explain::FeatureClass::Compat => "compat",
+        crate::explain::FeatureClass::RoCompat => "ro_compat",
+        crate::explain::FeatureClass::Incompat => "incompat",
+    }
+}
+
+pub fn render_extent_json(
+    explainer: &Explainer,
+    extent: &crate::explain::ExtentExplanation,
+) -> String {
+    use crate::explain::ExtentState;
+    let state = match extent.state {
+        ExtentState::BeyondEnd => "\"state\":\"beyond-end\"".to_owned(),
+        ExtentState::Hole => "\"state\":\"hole\"".to_owned(),
+        ExtentState::Mapped {
+            physical_block,
+            extent_logical_start,
+            extent_physical_start,
+            extent_blocks,
+            shared,
+            unwritten,
+        } => format!(
+            "\"state\":\"mapped\",\"physical_block\":{physical_block},\"extent_logical_start\":{extent_logical_start},\"extent_physical_start\":{extent_physical_start},\"extent_blocks\":{extent_blocks},\"shared\":{shared},\"unwritten\":{unwritten}"
+        ),
+    };
+    envelope(
+        explainer,
+        "extent",
+        &format!(
+            "\"extent\":{{\"object\":{},\"offset\":{},\"size_bytes\":{},\"logical_block\":{},\"offset_in_block\":{},{state}}}",
+            extent.object_id,
+            extent.offset,
+            extent.size_bytes,
+            extent.logical_block,
+            extent.offset_in_block
+        ),
+    )
+}
+
+pub fn render_extent_human(
+    explainer: &Explainer,
+    extent: &crate::explain::ExtentExplanation,
+) -> String {
+    use crate::explain::ExtentState;
+    let mut out = format!(
+        "generation {}\nobject {} offset {} of {} bytes: logical block {}, byte {} in it\n",
+        explainer.generation,
+        extent.object_id,
+        extent.offset,
+        extent.size_bytes,
+        extent.logical_block,
+        extent.offset_in_block
+    );
+    match extent.state {
+        ExtentState::BeyondEnd => out.push_str("  at or past the end of the file\n"),
+        ExtentState::Hole => out.push_str("  hole: mapped by no extent, reads as zeros\n"),
+        ExtentState::Mapped {
+            physical_block,
+            extent_logical_start,
+            extent_physical_start,
+            extent_blocks,
+            shared,
+            unwritten,
+        } => {
+            let _ = writeln!(
+                out,
+                "  block {physical_block}, in the extent of {extent_blocks} block(s) that maps logical {extent_logical_start} to physical {extent_physical_start}{}{}",
+                if shared { ", shared" } else { "" },
+                if unwritten { ", unwritten: reads as zeros" } else { "" }
+            );
+        }
+    }
+    problems_human(explainer, &mut out);
+    out
+}
+
+pub fn render_checkpoint_json(
+    explainer: &Explainer,
+    checkpoint: &crate::explain::CheckpointExplanation,
+) -> String {
+    let slots: Vec<String> = checkpoint
+        .slots
+        .iter()
+        .map(|slot| {
+            let (generation, reason) = match &slot.state {
+                Ok(generation) => (generation.to_string(), "null".to_owned()),
+                Err(reason) => ("null".to_owned(), json_string(reason)),
+            };
+            format!(
+                "{{\"slot\":{},\"block\":{},\"selected\":{},\"generation\":{generation},\"refused\":{reason}}}",
+                slot.slot, slot.block, slot.selected
+            )
+        })
+        .collect();
+    let snapshots = checkpoint
+        .snapshot_roots
+        .map_or("null".to_owned(), |(registry, lifetimes)| {
+            format!("{{\"registry\":{registry},\"lifetimes\":{lifetimes}}}")
+        });
+    envelope(
+        explainer,
+        "checkpoint",
+        &format!(
+            "\"checkpoint\":{{\"slots\":[{}],\"committed_tx_id\":{},\"label\":{},\"root_object\":{},\"next_object_id\":{},\"free_blocks_total\":{},\"object_map_block\":{},\"allocation_root_block\":{},\"reclaim_root_block\":{},\"shared_extent_root_block\":{},\"snapshot_roots\":{snapshots}}}",
+            slots.join(","),
+            checkpoint.committed_tx_id,
+            json_string(&checkpoint.label),
+            checkpoint.root_object_id,
+            checkpoint.next_object_id,
+            checkpoint.free_blocks_total,
+            checkpoint.object_map_block,
+            checkpoint.allocation_root_block,
+            checkpoint.reclaim_root_block,
+            checkpoint.shared_extent_root_block,
+        ),
+    )
+}
+
+pub fn render_checkpoint_human(
+    explainer: &Explainer,
+    checkpoint: &crate::explain::CheckpointExplanation,
+) -> String {
+    let mut out = String::new();
+    for slot in &checkpoint.slots {
+        let state = match &slot.state {
+            Ok(generation) => format!("generation {generation}"),
+            Err(reason) => format!("not selectable: {reason}"),
+        };
+        let _ = writeln!(
+            out,
+            "slot {} at block {}: {state}{}",
+            slot.slot,
+            slot.block,
+            if slot.selected { " (selected)" } else { "" }
+        );
+    }
+    let _ = writeln!(
+        out,
+        "generation {}, transaction {}, label {:?}",
+        checkpoint.generation, checkpoint.committed_tx_id, checkpoint.label
+    );
+    let _ = writeln!(
+        out,
+        "  root object {}, next object ID {}, {} free block(s)",
+        checkpoint.root_object_id, checkpoint.next_object_id, checkpoint.free_blocks_total
+    );
+    let _ = writeln!(
+        out,
+        "  object map at block {}, allocation root at {}, reclaim root at {}",
+        checkpoint.object_map_block,
+        checkpoint.allocation_root_block,
+        checkpoint.reclaim_root_block
+    );
+    if checkpoint.shared_extent_root_block != 0 {
+        let _ = writeln!(
+            out,
+            "  shared-extent tree at block {}",
+            checkpoint.shared_extent_root_block
+        );
+    }
+    if let Some((registry, lifetimes)) = checkpoint.snapshot_roots {
+        let _ = writeln!(
+            out,
+            "  snapshot registry at block {registry}, lifetime ledger at {lifetimes}"
+        );
+    }
+    problems_human(explainer, &mut out);
+    out
+}
+
+pub fn render_reclaim_json(
+    explainer: &Explainer,
+    reclaim: &crate::explain::ReclaimExplanation,
+) -> String {
+    let run = reclaim.run.map_or("null".to_owned(), |run| {
+        format!(
+            "{{\"start\":{},\"blocks\":{},\"retire_generation\":{},\"position\":{}}}",
+            run.start, run.blocks, run.retire_generation, run.position
+        )
+    });
+    envelope(
+        explainer,
+        "reclaim",
+        &format!(
+            "\"reclaim\":{{\"tables\":{},\"segments\":{},\"inline_entries\":{},\"runs\":{},\"blocks\":{},\"oldest_retire_generation\":{},\"newest_retire_generation\":{},\"block\":{},\"run\":{run}}}",
+            reclaim.tables,
+            reclaim.segments,
+            reclaim.inline_entries,
+            reclaim.runs,
+            reclaim.blocks,
+            option_json(reclaim.oldest_retire_generation),
+            option_json(reclaim.newest_retire_generation),
+            option_json(reclaim.block),
+        ),
+    )
+}
+
+pub fn render_reclaim_human(
+    explainer: &Explainer,
+    reclaim: &crate::explain::ReclaimExplanation,
+) -> String {
+    let mut out = format!(
+        "generation {}\nreclaim queue: {} run(s), {} block(s), in {} table(s), {} segment(s) and {} inline entries\n",
+        explainer.generation,
+        reclaim.runs,
+        reclaim.blocks,
+        reclaim.tables,
+        reclaim.segments,
+        reclaim.inline_entries
+    );
+    if let (Some(oldest), Some(newest)) = (
+        reclaim.oldest_retire_generation,
+        reclaim.newest_retire_generation,
+    ) {
+        let _ = writeln!(out, "  retired between generation {oldest} and {newest}");
+    }
+    match (reclaim.block, reclaim.run) {
+        (Some(block), Some(run)) => {
+            let _ = writeln!(
+                out,
+                "block {block}: quarantined in the run of {} block(s) at {}, retired at generation {}, position {} in the queue",
+                run.blocks, run.start, run.retire_generation, run.position
+            );
+        }
+        (Some(block), None) => {
+            let _ = writeln!(out, "block {block}: not in the reclaim queue");
+        }
+        _ => {}
+    }
+    problems_human(explainer, &mut out);
+    out
+}
+
+pub fn render_space_json(
+    explainer: &Explainer,
+    space: &crate::explain::SpaceExplanation,
+) -> String {
+    let run = space
+        .largest_free_run
+        .map_or("null".to_owned(), |(start, blocks)| {
+            format!("{{\"start\":{start},\"blocks\":{blocks}}}")
+        });
+    envelope(
+        explainer,
+        "space",
+        &format!(
+            "\"space\":{{\"region\":{},\"first_block\":{},\"blocks\":{},\"reserved_blocks\":{},\"allocated_blocks\":{},\"free_blocks\":{},\"quarantined_blocks\":{},\"unowned_blocks\":{},\"largest_free_run\":{run},\"live_descriptor_slot\":{}}}",
+            space.region,
+            space.first_block,
+            space.blocks,
+            space.reserved_blocks,
+            space.allocated_blocks,
+            space.free_blocks,
+            space.quarantined_blocks,
+            space.unowned_blocks,
+            option_json(space.live_descriptor_slot),
+        ),
+    )
+}
+
+pub fn render_space_human(
+    explainer: &Explainer,
+    space: &crate::explain::SpaceExplanation,
+) -> String {
+    let mut out = format!(
+        "generation {}\nregion {}: blocks {} to {}\n",
+        explainer.generation,
+        space.region,
+        space.first_block,
+        space.first_block + space.blocks - 1
+    );
+    let _ = writeln!(
+        out,
+        "  {} reserved, {} allocated, {} free",
+        space.reserved_blocks, space.allocated_blocks, space.free_blocks
+    );
+    let _ = writeln!(
+        out,
+        "  of the allocated: {} quarantined, {} with no live role",
+        space.quarantined_blocks, space.unowned_blocks
+    );
+    match space.largest_free_run {
+        Some((start, blocks)) => {
+            let _ = writeln!(out, "  longest free run: {blocks} block(s) at {start}");
+        }
+        None => out.push_str("  no free block\n"),
+    }
+    if let Some(slot) = space.live_descriptor_slot {
+        let _ = writeln!(out, "  live region descriptor in slot {slot}");
+    }
+    problems_human(explainer, &mut out);
+    out
+}
+
+pub fn render_features_json(
+    explainer: &Explainer,
+    features: &[crate::explain::FeatureExplanation],
+) -> String {
+    let items: Vec<String> = features
+        .iter()
+        .map(|feature| {
+            format!(
+                "{{\"class\":{},\"bit\":{},\"id\":{},\"enabled\":{}}}",
+                json_string(class_name(feature.class)),
+                feature.bit,
+                feature.id.map_or("null".to_owned(), json_string),
+                feature.enabled
+            )
+        })
+        .collect();
+    envelope(
+        explainer,
+        "features",
+        &format!("\"features\":[{}]", items.join(",")),
+    )
+}
+
+pub fn render_features_human(
+    explainer: &Explainer,
+    features: &[crate::explain::FeatureExplanation],
+) -> String {
+    let mut out = String::new();
+    for feature in features {
+        let _ = writeln!(
+            out,
+            "{} bit {}: {} {}",
+            class_name(feature.class),
+            feature.bit,
+            feature.id.unwrap_or("unknown to this implementation"),
+            if feature.enabled { "enabled" } else { "absent" }
+        );
+    }
+    problems_human(explainer, &mut out);
+    out
+}
