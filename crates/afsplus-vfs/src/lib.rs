@@ -954,6 +954,32 @@ impl<D: BlockDevice> Vfs<D> {
             .set_object_protection(object_id, protection, now)?)
     }
 
+    /// Largest stored comment, in UTF-8 bytes.
+    pub const COMMENT_MAX_BYTES: usize = afsplus_format::object::COMMENT_MAX_BYTES;
+
+    /// The object's stored comment; empty when it has none.
+    pub fn comment(&mut self, object_id: ObjectId) -> Result<String, VfsError> {
+        self.stat(object_id)?;
+        Ok(self.volume.object_comment(object_id)?)
+    }
+
+    /// Replaces the stored comment; an empty string removes it. A comment
+    /// longer than [`Self::COMMENT_MAX_BYTES`] is [`VfsError::Limit`]. The
+    /// change time is `now`; an unchanged comment writes nothing.
+    pub fn set_comment(
+        &mut self,
+        object_id: ObjectId,
+        comment: &str,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        self.stat(object_id)?;
+        if comment.len() > Self::COMMENT_MAX_BYTES {
+            return Err(VfsError::Limit("comment exceeds the stored bound"));
+        }
+        self.checkpoint_data_window(now)?;
+        Ok(self.volume.set_object_comment(object_id, comment, now)?)
+    }
+
     /// Sets the modification time chosen by the caller. Creation time and
     /// protection are kept and the change time is `now`.
     pub fn set_modified(

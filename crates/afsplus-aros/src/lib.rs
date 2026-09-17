@@ -160,6 +160,7 @@ pub struct VolumePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ArosError {
+    CommentTooBig = 81,
     Unknown = 100,
     NoFreeStore = 103,
     BadNumber = 115,
@@ -1357,6 +1358,60 @@ impl<D: BlockDevice> ArosAdapter<D> {
         self.vfs.set_protection(object, protection, now)?;
         self.touch_named(base, name);
         Ok(())
+    }
+
+    /// `ACTION_SET_COMMENT`. An empty name addresses the base object and an
+    /// empty comment removes the stored one. The bytes are text in the
+    /// mount's name encoding; a comment whose stored form exceeds the format
+    /// bound is `ERROR_COMMENT_TOO_BIG`. The DOS bound of 79 bytes belongs to
+    /// the packet layer, which knows the width of `fib_Comment`.
+    pub fn set_comment(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+        comment: &[u8],
+        now: Timespec,
+    ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
+        let object = self.named_object(base, name)?;
+        let text = self.decode_text(comment)?;
+        if text.len() > Vfs::<D>::COMMENT_MAX_BYTES {
+            return Err(ArosError::CommentTooBig);
+        }
+        self.vfs.set_comment(object, &text, now)?;
+        self.touch_named(base, name);
+        Ok(())
+    }
+
+    /// The comment of the object `name` under `base`, in the mount's name
+    /// encoding and at most `max_bytes` long. Reading never fails on the
+    /// comment's content: a comment written through another interface may be
+    /// longer than a DOS structure holds or carry characters Latin-1 lacks,
+    /// so it is cut at a character boundary and such characters read as `?`.
+    pub fn comment(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ArosError> {
+        let object = self.named_object(base, name)?;
+        let text = self.vfs.comment(object)?;
+        let mut encoded = Vec::with_capacity(text.len().min(max_bytes));
+        let mut buffer = [0u8; 4];
+        for character in text.chars() {
+            let bytes: &[u8] = match self.config.name_encoding {
+                NameEncoding::Utf8 => character.encode_utf8(&mut buffer).as_bytes(),
+                NameEncoding::Latin1 => {
+                    buffer[0] = u8::try_from(u32::from(character)).unwrap_or(b'?');
+                    &buffer[..1]
+                }
+            };
+            if encoded.len() + bytes.len() > max_bytes {
+                break;
+            }
+            encoded.extend_from_slice(bytes);
+        }
+        Ok(encoded)
     }
 
     /// `ACTION_SET_DATE`.
