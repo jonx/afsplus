@@ -15,6 +15,7 @@
 //! ([`CommitStats`]) — metadata bytes, bitmap pages, region descriptors,
 //! flushes, retired and promoted blocks, reclaim latency, allocator RAM.
 
+mod chain;
 mod metadata;
 pub use metadata::PreservedMetadata;
 mod security;

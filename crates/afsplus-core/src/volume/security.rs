@@ -4,7 +4,8 @@
 use super::*;
 use afsplus_format::ident::INCOMPAT_SECURITY_DESCRIPTORS;
 use afsplus_format::object::{SecurityRef, SECURITY_REF_PROJECTION_DIVERGED};
-use afsplus_format::security::{segment_capacity, segment_count, SecuritySegment};
+use afsplus_format::security::{segment_count, SECURITY_CHAIN};
+use chain::{load_chain, retire_chain, stage_chain, ChainRef};
 
 /// What a protection edit does to an object that carries a descriptor.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -30,101 +31,12 @@ pub struct SecurityDescriptor {
     pub bytes: Vec<u8>,
 }
 
-/// One walk of a descriptor chain.
-pub(crate) struct ChainWalk {
-    /// Segments whose content is consistent with this object's reference:
-    /// valid magic and checksum, this owner, the expected position, matching
-    /// identity, a committed generation and the generation of the first
-    /// segment, from the first segment up to the first inconsistent link. A
-    /// block past that point is never accepted, whoever else may own it. The
-    /// walk judges bytes, not allocator ownership: a data block that holds a
-    /// valid segment image, reached through a forged and resealed next
-    /// pointer, passes. That needs a crafted image, and is the trust level
-    /// the extent trees have.
-    pub blocks: Vec<u64>,
-    /// Present only when every segment of the chain was proven.
-    pub descriptor: Option<SecurityDescriptor>,
-    /// Why the walk stopped, when it stopped early.
-    pub damage: Option<String>,
-}
-
-/// Walk the chain a reference names, proving one segment at a time. Device
-/// errors propagate; a damaged chain is a value, not an error, so the paths
-/// that must free an object are not blocked by the bytes it points at.
-pub(crate) fn walk_descriptor_chain<D: BlockDevice>(
-    dev: &mut D,
-    geometry: &afsplus_format::geometry::Geometry,
-    object_id: u64,
-    reference: SecurityRef,
-    max_generation: u64,
-) -> Result<ChainWalk, CoreError> {
-    let mut block = vec![0u8; dev.block_size()];
-    let mut blocks = Vec::with_capacity(reference.segment_count as usize);
-    let mut bytes = Vec::with_capacity(reference.total_len as usize);
-    let mut identity = None;
-    // One commit writes every segment of a chain, so they all carry the
-    // generation of the first. A stale segment of an earlier descriptor of
-    // the same object and size matches every other field and not this one.
-    let mut chain_generation = None;
-    let mut lba = reference.first_block;
-    for index in 0..reference.segment_count {
-        if !geometry.is_allocatable(lba) || blocks.contains(&lba) {
-            return Ok(ChainWalk {
-                blocks,
-                descriptor: None,
-                damage: Some(format!(
-                    "object {object_id} security segment {index} at invalid block {lba}"
-                )),
-            });
-        }
-        dev.read_block(lba, &mut block)?;
-        let mismatch = match SecuritySegment::decode(&block) {
-            Err(_) => true,
-            Ok((segment, generation)) => {
-                let first = *identity.get_or_insert((segment.format, segment.version));
-                let ok = segment.object_id == object_id
-                    && segment.index == index
-                    && segment.count == reference.segment_count
-                    && segment.total_len == reference.total_len
-                    && (segment.format, segment.version) == first
-                    && generation != 0
-                    && generation <= max_generation
-                    && *chain_generation.get_or_insert(generation) == generation;
-                if ok {
-                    blocks.push(lba);
-                    bytes.extend_from_slice(segment.bytes);
-                    lba = segment.next;
-                }
-                !ok
-            }
-        };
-        if mismatch {
-            return Ok(ChainWalk {
-                blocks,
-                descriptor: None,
-                damage: Some(format!(
-                    "object {object_id} security segment {index} does not match its reference"
-                )),
-            });
-        }
+fn chain_ref(reference: SecurityRef) -> ChainRef {
+    ChainRef {
+        first_block: reference.first_block,
+        total_len: reference.total_len,
+        segment_count: reference.segment_count,
     }
-    let Some((format, version)) = identity else {
-        return Ok(ChainWalk {
-            blocks,
-            descriptor: None,
-            damage: Some("security reference without segments".into()),
-        });
-    };
-    Ok(ChainWalk {
-        blocks,
-        descriptor: Some(SecurityDescriptor {
-            format,
-            version,
-            projection_diverged: reference.flags & SECURITY_REF_PROJECTION_DIVERGED != 0,
-            bytes,
-        }),
-        damage: None,
-    })
 }
 
 /// Blocks of one descriptor chain, validated against its reference. A chain
@@ -137,13 +49,23 @@ pub(crate) fn load_descriptor_chain<D: BlockDevice>(
     reference: SecurityRef,
     max_generation: u64,
 ) -> Result<(Vec<u64>, SecurityDescriptor), CoreError> {
-    let walk = walk_descriptor_chain(dev, geometry, object_id, reference, max_generation)?;
-    match walk.descriptor {
-        Some(descriptor) => Ok((walk.blocks, descriptor)),
-        None => Err(CoreError::Corrupt(walk.damage.unwrap_or_else(|| {
-            format!("object {object_id} security chain is damaged")
-        }))),
-    }
+    let (blocks, content) = load_chain(
+        dev,
+        geometry,
+        &SECURITY_CHAIN,
+        object_id,
+        chain_ref(reference),
+        max_generation,
+    )?;
+    Ok((
+        blocks,
+        SecurityDescriptor {
+            format: content.format,
+            version: content.version,
+            projection_diverged: reference.flags & SECURITY_REF_PROJECTION_DIVERGED != 0,
+            bytes: content.bytes,
+        },
+    ))
 }
 
 impl<D: BlockDevice> Volume<D> {
@@ -261,27 +183,18 @@ impl<D: BlockDevice> Volume<D> {
             reference,
             self.checkpoint.generation,
         )?;
-        let block_size = self.dev.block_size();
-        let count = reference.segment_count;
-        let lbas = (0..count)
-            .map(|_| tx.allocate(&mut self.dev))
-            .collect::<Result<Vec<_>, _>>()?;
-        let capacity = segment_capacity(block_size);
-        for (index, chunk) in descriptor.bytes.chunks(capacity).enumerate() {
-            let segment = SecuritySegment {
-                object_id,
-                format: descriptor.format,
-                version: descriptor.version,
-                total_len: reference.total_len,
-                index: index as u16,
-                count,
-                next: lbas.get(index + 1).copied().unwrap_or(0),
-                bytes: chunk,
-            };
-            writes.push((lbas[index], segment.encode(block_size, generation)?));
-        }
+        let first_block = stage_chain(
+            &mut self.dev,
+            tx,
+            &SECURITY_CHAIN,
+            object_id,
+            (descriptor.format, descriptor.version, &descriptor.bytes),
+            reference.segment_count,
+            generation,
+            writes,
+        )?;
         Ok(Some(SecurityRef {
-            first_block: lbas[0],
+            first_block,
             ..reference
         }))
     }
@@ -310,17 +223,15 @@ impl<D: BlockDevice> Volume<D> {
             return Ok(());
         };
         let geometry = self.ident.geometry();
-        let walk = walk_descriptor_chain(
+        retire_chain(
             &mut self.dev,
+            tx,
             &geometry,
+            &SECURITY_CHAIN,
             record.object_id,
-            reference,
+            chain_ref(reference),
             self.checkpoint.generation,
-        )?;
-        for lba in walk.blocks {
-            tx.retire(&mut self.dev, lba)?;
-        }
-        Ok(())
+        )
     }
 
     fn replace_security_descriptor(
@@ -379,25 +290,18 @@ impl<D: BlockDevice> Volume<D> {
         let mut writes = Vec::new();
         let mut reference = None;
         if let Some((format, version, bytes)) = descriptor {
-            let lbas = (0..count)
-                .map(|_| tx.allocate(&mut self.dev))
-                .collect::<Result<Vec<_>, _>>()?;
-            let capacity = segment_capacity(block_size);
-            for (index, chunk) in bytes.chunks(capacity).enumerate() {
-                let segment = SecuritySegment {
-                    object_id,
-                    format,
-                    version,
-                    total_len: bytes.len() as u32,
-                    index: index as u16,
-                    count,
-                    next: lbas.get(index + 1).copied().unwrap_or(0),
-                    bytes: chunk,
-                };
-                writes.push((lbas[index], segment.encode(block_size, generation)?));
-            }
+            let first_block = stage_chain(
+                &mut self.dev,
+                &mut tx,
+                &SECURITY_CHAIN,
+                object_id,
+                (format, version, bytes),
+                count,
+                generation,
+                &mut writes,
+            )?;
             reference = Some(SecurityRef {
-                first_block: lbas[0],
+                first_block,
                 total_len: bytes.len() as u32,
                 segment_count: count,
                 flags: 0,

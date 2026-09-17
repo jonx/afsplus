@@ -23,6 +23,7 @@
 extern crate alloc;
 
 pub mod bitmap;
+pub mod chain;
 pub mod checkpoint;
 pub mod crc32c;
 pub mod dir;
