@@ -31,6 +31,8 @@ LONG OpenDevice(CONST_STRPTR devName, IPTR unitNumber,
     struct IORequest *iORequest, ULONG flags);
 void CloseDevice(struct IORequest *iORequest);
 LONG DoIO(struct IORequest *iORequest);
+void Forbid(void);
+void Permit(void);
 APTR CreateIORequest(struct MsgPort *ioReplyPort, ULONG size);
 void DeleteIORequest(APTR iorequest);
 

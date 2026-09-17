@@ -4,6 +4,7 @@
 
 #include <dos/dosextens.h>
 #include <proto/dos.h>
+#include <proto/exec.h>
 
 #include <string.h>
 
@@ -19,6 +20,45 @@ struct MsgPort *afsplus_client_lock_port(BPTR lock)
     struct FileLock *native = BADDR(lock);
 
     return native != NULL ? native->fl_Task : NULL;
+}
+
+/* Ports whose handler answered that it does not know the packet. A fallback
+ * then costs no failed request each time. The memory is only a hint: a port
+ * address reused by a handler that has the transport keeps falling back,
+ * which is correct and merely slower, until another port displaces it. */
+#define ABSENT_PORTS 4
+static struct MsgPort *absent_ports[ABSENT_PORTS];
+static uint32_t absent_next;
+
+static uint32_t known_absent(const struct MsgPort *port)
+{
+    uint32_t index;
+    uint32_t found = 0;
+
+    Forbid();
+    for (index = 0; index < ABSENT_PORTS; index++)
+        if (absent_ports[index] == port)
+            found = 1;
+    Permit();
+    return found;
+}
+
+static void remember_absent(struct MsgPort *port)
+{
+    Forbid();
+    absent_ports[absent_next] = port;
+    absent_next = (absent_next + 1) % ABSENT_PORTS;
+    Permit();
+}
+
+void afsplus_client_forget_ports(void)
+{
+    uint32_t index;
+
+    Forbid();
+    for (index = 0; index < ABSENT_PORTS; index++)
+        absent_ports[index] = NULL;
+    Permit();
 }
 
 static void begin(struct AfsplusExtRequest *request, uint32_t operation)
@@ -107,6 +147,7 @@ static LONG transfer_at(BPTR file, uint64_t offset, void *buffer,
     uint32_t length, uint32_t writing, uint32_t *count)
 {
     struct AfsplusExtRequest request;
+    struct MsgPort *port;
     LONG error;
 
     if (count == NULL || (length != 0 && buffer == NULL))
@@ -117,9 +158,19 @@ static LONG transfer_at(BPTR file, uint64_t offset, void *buffer,
     request.offset[0] = offset;
     request.buffer = buffer;
     request.buffer_size = length;
-    error = afsplus_client_send(afsplus_client_file_port(file), &request);
-    if (error == ERROR_ACTION_NOT_KNOWN)
+    port = afsplus_client_file_port(file);
+    if (port != NULL && known_absent(port))
         return classic_at(file, offset, buffer, length, writing, count);
+    error = afsplus_client_send(port, &request);
+    /* Only "the packet is unknown" is a reason to fall back. A handler that
+     * knows the packet and cannot serve it answers ERROR_NOT_IMPLEMENTED,
+     * and a classic transfer would fail the same way after moving the
+     * position. */
+    if (error == ERROR_ACTION_NOT_KNOWN)
+    {
+        remember_absent(port);
+        return classic_at(file, offset, buffer, length, writing, count);
+    }
     if (error == 0)
         *count = request.output_count;
     return error;

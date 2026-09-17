@@ -1562,6 +1562,14 @@ int main(void)
         ext_error = ERROR_OBJECT_NOT_FOUND;
         request.output_value = 5;
         EXT_SEND(DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+        /* A volume without the capability says "unknown action" at the C
+         * boundary. Through the transport that value would tell the client
+         * that the packet is unknown, and it would fall back. */
+        ext_error = ERROR_ACTION_NOT_KNOWN;
+        EXT_BEGIN(AFSPLUS_EXT_CLONE_RANGE);
+        request.object[0] = file_object;
+        request.object[1] = file_object;
+        EXT_SEND(DOSFALSE, ERROR_NOT_IMPLEMENTED);
         ext_error = 0;
 
         initialize_packet(&packet, ACTION_END);
@@ -2439,12 +2447,42 @@ int main(void)
             assert(afsplus_aros_packet_process(old_context, &packet) == 0);
             assert(packet.dp_Res1 == DOSTRUE);
             assert(request.output_value == AFSPLUS_AROS_GROUP_BASE);
+            /* A handler without a clock cannot stamp a change. That too is
+             * not "unknown packet": a client that fell back here would move
+             * the file position for a write that cannot succeed either. */
+            {
+                struct AfsplusArosPacketContext *clockless = NULL;
+
+                stub_groups = UINT64_C(0x7FFF);
+                config.now = NULL;
+                assert(afsplus_aros_packet_create(&config, &clockless) == 0);
+                config.now = packet_now;
+                stub_groups = AFSPLUS_AROS_GROUP_BASE;
+                request.operation = AFSPLUS_EXT_REPLACE;
+                request.name0 = (const uint8_t *)"a";
+                request.name_length[0] = 1;
+                request.name1 = (const uint8_t *)"b";
+                request.name_length[1] = 1;
+                reset_events();
+                assert(afsplus_aros_packet_process(clockless, &packet) == 0);
+                assert(packet.dp_Res1 == DOSFALSE
+                    && packet.dp_Res2 == ERROR_NOT_IMPLEMENTED);
+                assert(event_count == 0);
+                assert(afsplus_aros_packet_destroy(clockless) == 0);
+                request.name0 = NULL;
+                request.name1 = NULL;
+                request.name_length[0] = 0;
+                request.name_length[1] = 0;
+            }
+
+            /* Never ERROR_ACTION_NOT_KNOWN from inside the transport: that
+             * value tells a client the packet itself is unknown. */
             request.operation = AFSPLUS_EXT_INFO_JSON;
             request.buffer = &byte;
             request.buffer_size = 1;
             assert(afsplus_aros_packet_process(old_context, &packet) == 0);
             assert(packet.dp_Res1 == DOSFALSE
-                && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+                && packet.dp_Res2 == ERROR_NOT_IMPLEMENTED);
         }
         assert(event_count == 0);
         assert(afsplus_aros_packet_destroy(old_context) == 0);

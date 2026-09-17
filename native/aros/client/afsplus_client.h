@@ -8,8 +8,11 @@
  * file handle, a lock or a path, sends one extension packet, and returns 0 or
  * an ERROR_* value. No call leaves a secondary result in IoErr().
  *
- * A handler without the transport answers ERROR_ACTION_NOT_KNOWN. Only the
- * two calls whose result a classic call can also produce fall back on it:
+ * A handler without the transport answers ERROR_ACTION_NOT_KNOWN; one that
+ * has it never does, and answers ERROR_NOT_IMPLEMENTED for what it cannot
+ * do (a missing group of its library, a volume capability, a clock). Only the
+ * two calls whose result a classic call can also produce fall back, and only
+ * on the first of these answers:
  * afsplus_client_read_at and afsplus_client_write_at. Every other call
  * returns the error, which is the signal to take the portable path: copy
  * instead of clone, write zeros instead of preallocating, do without the
@@ -30,6 +33,11 @@ extern "C" {
  * zero lock, which name no handler. */
 struct MsgPort *afsplus_client_file_port(BPTR file);
 struct MsgPort *afsplus_client_lock_port(BPTR lock);
+
+/* The positioned-I/O fallback remembers a few ports that answered "unknown
+ * packet" and does not ask them again. A program that knows a handler was
+ * replaced clears that memory here; forgetting is never wrong. */
+void afsplus_client_forget_ports(void);
 
 /* Sends a filled request. magic, version and header_size are set here. */
 LONG afsplus_client_send(struct MsgPort *port,

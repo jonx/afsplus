@@ -103,9 +103,9 @@ int main(int argc, char **argv)
     }
     error = afsplus_client_clone_file(source, directory,
         (CONST_STRPTR)argv[3]);
-    /* No transport, two volumes, or a volume without shared extents: the
-     * portable path. Every other error is the answer. */
-    if (error == ERROR_ACTION_NOT_KNOWN
+    /* No transport, a handler or volume that cannot clone, or two volumes:
+     * the portable path. Every other error is the answer. */
+    if (error == ERROR_ACTION_NOT_KNOWN || error == ERROR_NOT_IMPLEMENTED
         || error == ERROR_RENAME_ACROSS_DEVICES)
     {
         status = byte_copy(source, directory, (CONST_STRPTR)argv[3]);

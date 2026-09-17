@@ -1528,6 +1528,12 @@ static int32_t process_extension(struct AfsplusArosPacketContext *context,
     request.output_flags = 0;
     request.output_value = 0;
     error = run_extension(context, &request);
+    /* ERROR_ACTION_NOT_KNOWN is what a handler without this packet answers,
+     * and a client falls back on it. From here it would be a lie: the packet
+     * is known, and what is missing is a group of the library, the volume's
+     * capability or the handler's clock. */
+    if (error == ERROR_ACTION_NOT_KNOWN)
+        error = ERROR_NOT_IMPLEMENTED;
     shared->output_count = request.output_count;
     shared->output_flags = request.output_flags;
     shared->output_value = request.output_value;

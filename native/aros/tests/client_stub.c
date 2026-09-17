@@ -36,6 +36,19 @@ static LONG file_position;
 static uint32_t seeks;
 static LONG fail_transfer;
 
+static int forbid_depth;
+
+void Forbid(void)
+{
+    forbid_depth++;
+}
+
+void Permit(void)
+{
+    assert(forbid_depth > 0);
+    forbid_depth--;
+}
+
 SIPTR IoErr(void)
 {
     return io_error;
@@ -218,13 +231,27 @@ int main(void)
     assert(count == 0 && seeks == 0 && io_error == 0);
     handler_error = 0;
 
+    /* A handler that knows the packet and cannot serve it is not a missing
+     * transport: no fallback, and the position stays where it was. */
+    handler_error = ERROR_NOT_IMPLEMENTED;
+    assert(afsplus_client_read_at(file, 0, data, 8, &count)
+        == ERROR_NOT_IMPLEMENTED);
+    assert(seeks == 0 && file_position == 7);
+    handler_error = 0;
+
     /* Without the transport: seek, transfer, seek back. */
     transport_present = 0;
     file_position = 7;
     memset(data, 0, sizeof(data));
+    packets_sent = 0;
     assert(afsplus_client_read_at(file, 32, data, sizeof(data), &count) == 0);
     assert(count == 8 && data[0] == 32 && data[7] == 39);
     assert(seeks == 2 && file_position == 7 && io_error == 0);
+    /* The port is remembered: the next fallback asks nothing first. */
+    assert(packets_sent == 1);
+    assert(afsplus_client_read_at(file, 32, data, sizeof(data), &count) == 0);
+    assert(packets_sent == 1 && seeks == 4);
+    seeks = 2;
     /* A short read near the end is a count, not an error. */
     assert(afsplus_client_read_at(file, 60, data, sizeof(data), &count) == 0);
     assert(count == 4 && file_position == 7);
@@ -253,6 +280,14 @@ int main(void)
     assert(afsplus_client_info_json(&handler_port, NULL, 0, &required)
         == ERROR_ACTION_NOT_KNOWN);
     transport_present = 1;
+    /* Still remembered as absent until the program says otherwise. */
+    seeks = 0;
+    assert(afsplus_client_read_at(file, 16, data, 8, &count) == 0);
+    assert(seeks == 2);
+    afsplus_client_forget_ports();
+    seeks = 0;
+    assert(afsplus_client_read_at(file, 16, data, 8, &count) == 0);
+    assert(seeks == 0 && forbid_depth == 0);
 
     /* Objects of two handlers are never sent to one of them. */
     packets_sent = 0;

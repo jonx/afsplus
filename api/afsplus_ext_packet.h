@@ -15,7 +15,10 @@
  *
  * A handler that does not know the packet answers ERROR_ACTION_NOT_KNOWN, as
  * every handler does for an unknown type, so a client learns the absence of
- * the transport from the first request and falls back. This header uses no
+ * the transport from the first request and falls back. A handler that knows
+ * the packet never answers that value: what it cannot do, for want of an
+ * entry-point group, a volume capability or a clock, is
+ * ERROR_NOT_IMPLEMENTED. This header uses no
  * AROS type: objects travel as the integers the application already holds.
  *
  * The packet number is provisional. Packet numbers are an AROS-wide
@@ -35,7 +38,7 @@
 
 /* Operations. The group that must be present in the handler's library is
  * named on the right; an operation of an absent group is
- * ERROR_ACTION_NOT_KNOWN, an unassigned number ERROR_BAD_NUMBER. */
+ * ERROR_NOT_IMPLEMENTED, an unassigned number ERROR_BAD_NUMBER. */
 #define AFSPLUS_EXT_INTERFACE UINT32_C(1)     /* always */
 #define AFSPLUS_EXT_CAPABILITIES UINT32_C(2)  /* INTERFACE_QUERY */
 #define AFSPLUS_EXT_READ_AT UINT32_C(3)       /* API_V2 */

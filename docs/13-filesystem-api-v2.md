@@ -246,8 +246,12 @@ every operation reads its own part of. The block has the same 112-byte layout
 on every target, so pointers occupy eight bytes. A handler accepts a longer
 block from a newer client and serves the part it knows; it refuses a shorter
 one, a foreign magic or version, and an unassigned operation with
-`ERROR_BAD_NUMBER`, and an operation of an entry-point group its library
-lacks with `ERROR_ACTION_NOT_KNOWN`.
+`ERROR_BAD_NUMBER`. It reads the first eight bytes, which carry the size,
+before it reads anything behind them. What it knows but cannot do, for want
+of an entry-point group in its library, a capability of the volume or a
+clock, is `ERROR_NOT_IMPLEMENTED`: `ERROR_ACTION_NOT_KNOWN` never comes out
+of the transport, because that value is how a client recognises a handler
+without it.
 
 Objects travel as the application holds them: a lock as its `BPTR`, a file as
 the `fh_Arg1` of its `FileHandle`. Names are single components; the transport
@@ -267,7 +271,10 @@ transport costs a client one request. The client library
 ([`afsplus_client.h`](../native/aros/client/afsplus_client.h)) falls back
 only where a classic call produces the same result: positioned read and write
 become seek, transfer and seek back, within what a classic `Seek` expresses
-and without protection against another user of the same handle. Clone,
+and without protection against another user of the same handle. The library
+remembers a few ports that answered "unknown packet" so that a fallback does
+not pay a failed request each time; that memory is a hint a program may
+clear, and a stale entry only keeps the slower path. Clone,
 preallocation and the reports have no classic equivalent; the error is the
 signal to copy, to do without, or to report nothing. The library never sends
 objects of two handlers to one of them.
