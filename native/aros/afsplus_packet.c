@@ -1966,19 +1966,32 @@ int32_t afsplus_aros_packet_process(
             }
         }
         break;
+#if (__WORDSIZE == 64)
+    /* dos64.library sends these only where dp_Arg# is 64 bits wide; a 32-bit
+     * build delegates LockRecord64 to the classic packets instead. */
+    case ACTION_LOCK_RECORD64:
+    case ACTION_FREE_RECORD64:
+#endif
     case ACTION_LOCK_RECORD:
     case ACTION_FREE_RECORD:
     {
         struct AfsplusArosNativeFile *file = find_file(context,
             (BPTR)packet->dp_Arg1);
-        uint64_t offset = (uint64_t)(ULONG)packet->dp_Arg2;
-        uint64_t length = (uint64_t)(ULONG)packet->dp_Arg3;
+        uint32_t wide = packet->dp_Type != ACTION_LOCK_RECORD
+            && packet->dp_Type != ACTION_FREE_RECORD;
+        uint32_t freeing = packet->dp_Type == ACTION_FREE_RECORD
+            || packet->dp_Type == ACTION_FREE_RECORD64;
+        /* Classic arguments are unsigned 32-bit values in a signed slot. */
+        uint64_t offset = wide ? (uint64_t)packet->dp_Arg2
+            : (uint64_t)(ULONG)packet->dp_Arg2;
+        uint64_t length = wide ? (uint64_t)packet->dp_Arg3
+            : (uint64_t)(ULONG)packet->dp_Arg3;
         LONG mode = (LONG)packet->dp_Arg4;
 
         error = require_group(context, AFSPLUS_AROS_GROUP_DOS_RECORDS);
         if (error == 0 && file == NULL)
             error = ERROR_INVALID_LOCK;
-        if (error == 0 && packet->dp_Type == ACTION_FREE_RECORD)
+        if (error == 0 && freeing)
             error = afsplus_aros_free_record(context->filesystem, file->id,
                 offset, length);
         else if (error == 0 && (mode < REC_EXCLUSIVE

@@ -303,6 +303,9 @@ exclusive. The filesystem never waits: an immediate mode answers
 `ERROR_LOCK_COLLISION`, and a waiting mode whose range is taken answers
 `ERROR_LOCK_TIMEOUT` at once, the `dp_Arg5` tick count being a handler-loop
 matter. `ACTION_FREE_RECORD` needs the owning handle and the exact range.
+`ACTION_LOCK_RECORD64` and `ACTION_FREE_RECORD64`, which dos64.library sends
+where packet arguments are 64 bits wide, carry full-width ranges; the classic
+packets stop at 4 GiB.
 
 Soft-link targets are opaque paths in the mount encoding. Locate and open
 answer `ERROR_IS_SOFT_LINK`; `ACTION_READ_LINK` walks the path to the first

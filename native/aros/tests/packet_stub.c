@@ -1267,6 +1267,31 @@ int main(void)
         event_count = 0;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res2 == ERROR_BAD_NUMBER && event_count == 0);
+        /* The 64-bit packets carry full-width ranges; the classic packet
+         * given the same bits keeps only the low 32. */
+        initialize_packet(&packet, ACTION_LOCK_RECORD64);
+        packet.dp_Arg1 = from_lock.fh_Arg1;
+        packet.dp_Arg2 = (SIPTR)INT64_C(0x500000010);
+        packet.dp_Arg3 = (SIPTR)INT64_C(0x200000000);
+        packet.dp_Arg4 = REC_SHARED_IMMED;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE);
+        assert(events[event_count - 1].operation == 'k');
+        assert(stub_record_offset == UINT64_C(0x500000010));
+        assert(stub_record_length == UINT64_C(0x200000000));
+        packet.dp_Type = ACTION_LOCK_RECORD;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(stub_record_offset == UINT64_C(0x10));
+        assert(stub_record_length == 0);
+        initialize_packet(&packet, ACTION_FREE_RECORD64);
+        packet.dp_Arg1 = from_lock.fh_Arg1;
+        packet.dp_Arg2 = (SIPTR)INT64_C(0x500000010);
+        packet.dp_Arg3 = (SIPTR)INT64_C(0x200000000);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE);
+        assert(events[event_count - 1].operation == 'u');
+        assert(stub_record_offset == UINT64_C(0x500000010));
+
         initialize_packet(&packet, ACTION_FREE_RECORD);
         packet.dp_Arg1 = from_lock.fh_Arg1;
         packet.dp_Arg2 = 8;
