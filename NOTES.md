@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Generalise the descriptor chain into an owned chain](#2026-09-17--generalise-the-descriptor-chain-into-an-owned-chain)
 - [2026-09-17 — Explain one object and one path](#2026-09-17--explain-one-object-and-one-path)
 - [2026-09-17 — Diff two images in filesystem terms](#2026-09-17--diff-two-images-in-filesystem-terms)
 - [2026-09-17 — Read the object comment in the portable C reader](#2026-09-17--read-the-object-comment-in-the-portable-c-reader)
@@ -200,6 +201,25 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — Generalise the descriptor chain into an owned chain
+
+The security descriptor chain was the only chain of immutable blocks owned by
+one object, and its codec, walk, staging and retirement named security
+throughout. Extended attributes need the same container under another block
+magic. The segment codec now lives in `afsplus_format::chain` and takes a
+`ChainKind`: block magic, content bound, a label for damage reports and the
+refusal messages. `SecuritySegment` delegates to it through `SECURITY_CHAIN`.
+In the core, `volume/chain.rs` holds `walk_chain`, `load_chain`, `stage_chain`
+and `retire_chain`; `volume/security.rs` keeps the descriptor API, the
+projection rule and the reference flags.
+
+No byte and no message changes. Proof: `owned_chain` (new, 3 tests: the
+generic encoder equals the security encoder byte for byte, one kind refuses
+the blocks of another, bound and messages belong to the kind), and unchanged
+`security_container`, `security_c`, `c_constants` (format), `security_container`
+(13), `security_c`, `clone_metadata`, `explain` (check), the fuzz unit tests
+with their fingerprints (16), and `tools/check-portable-c-reader.sh` PASS.
 
 ## 2026-09-17 — Explain one object and one path
 
