@@ -26,12 +26,17 @@ extern void afsplus_aros_trace_stage(const char *stage);
 #define AFSPLUS_SECONDS_PER_DAY INT64_C(86400)
 #define AFSPLUS_SECONDS_PER_MINUTE INT64_C(60)
 #define AFSPLUS_TICKS_PER_SECOND UINT32_C(50)
+/* fib_Comment holds a length byte and 79 characters; ACTION_SET_COMMENT
+ * refuses more and every report is cut to it. */
+#define AFSPLUS_DOS_COMMENT_MAX 79
 
 /* One directory entry read from the filesystem that did not fit the caller's
  * ExAll buffer. It is returned first by the next ACTION_EXAMINE_ALL. */
 struct AfsplusArosPendingEntry {
     struct AfsplusArosFileInfo info;
     uint8_t name[MAXFILENAMELENGTH];
+    uint8_t comment[AFSPLUS_DOS_COMMENT_MAX];
+    uint32_t comment_length;
 };
 
 struct AfsplusArosNativeLock {
@@ -638,7 +643,7 @@ static uint32_t exall_append(uint8_t **cursor, uint8_t *end, LONG type,
     struct ExAllData *entry = (struct ExAllData *)*cursor;
     size_t name_length = source->info.name_length;
     size_t need = exall_fixed_size[type] + name_length + 1
-        + (type >= ED_COMMENT ? 1 : 0);
+        + (type >= ED_COMMENT ? (size_t)source->comment_length + 1 : 0);
     uint8_t *strings;
 
     /* The entry's own bytes decide whether it fits; the padding only places
@@ -679,7 +684,8 @@ static uint32_t exall_append(uint8_t **cursor, uint8_t *end, LONG type,
     if (type >= ED_COMMENT)
     {
         entry->ed_Comment = strings + name_length + 1;
-        entry->ed_Comment[0] = 0;
+        memcpy(entry->ed_Comment, source->comment, source->comment_length);
+        entry->ed_Comment[source->comment_length] = 0;
     }
     if (type >= ED_OWNER)
     {
@@ -707,13 +713,17 @@ static int32_t fill_fib_name(UBYTE *destination, size_t capacity,
 }
 
 static int32_t fill_fib64(struct FileInfoBlock64 *fib,
-    const struct AfsplusArosFileInfo *info, const uint8_t *name)
+    const struct AfsplusArosFileInfo *info, const uint8_t *name,
+    const uint8_t *comment, uint32_t comment_length)
 {
     int32_t error;
 
     memset(fib, 0, sizeof(*fib));
     error = fill_fib_name(fib->fib_FileName, sizeof(fib->fib_FileName),
         name, info->name_length);
+    if (error == 0)
+        error = fill_fib_name(fib->fib_Comment, sizeof(fib->fib_Comment),
+            comment, comment_length);
     if (error != 0)
         return error;
     fib->fib_DiskKey = info->disk_key > (uint64_t)INTPTR_MAX
@@ -730,13 +740,17 @@ static int32_t fill_fib64(struct FileInfoBlock64 *fib,
 
 #if !(__DOS64)
 static int32_t fill_fib32(struct FileInfoBlock32 *fib,
-    const struct AfsplusArosFileInfo *info, const uint8_t *name)
+    const struct AfsplusArosFileInfo *info, const uint8_t *name,
+    const uint8_t *comment, uint32_t comment_length)
 {
     int32_t error;
 
     memset(fib, 0, sizeof(*fib));
     error = fill_fib_name(fib->fib_FileName, sizeof(fib->fib_FileName),
         name, info->name_length);
+    if (error == 0)
+        error = fill_fib_name(fib->fib_Comment, sizeof(fib->fib_Comment),
+            comment, comment_length);
     if (error != 0)
         return error;
     fib->fib_DiskKey = info->disk_key > (uint64_t)INTPTR_MAX
@@ -754,7 +768,8 @@ static int32_t fill_fib32(struct FileInfoBlock32 *fib,
 #endif
 
 static int32_t fill_packet_fib(LONG action, BPTR raw,
-    const struct AfsplusArosFileInfo *info, const uint8_t *name)
+    const struct AfsplusArosFileInfo *info, const uint8_t *name,
+    const uint8_t *comment, uint32_t comment_length)
 {
     void *destination;
 
@@ -764,11 +779,14 @@ static int32_t fill_packet_fib(LONG action, BPTR raw,
     if (action == ACTION_EXAMINE_OBJECT64
         || action == ACTION_EXAMINE_NEXT64
         || action == ACTION_EXAMINE_FH64)
-        return fill_fib64((struct FileInfoBlock64 *)destination, info, name);
+        return fill_fib64((struct FileInfoBlock64 *)destination, info, name,
+            comment, comment_length);
 #if (__DOS64)
-    return fill_fib64((struct FileInfoBlock64 *)destination, info, name);
+    return fill_fib64((struct FileInfoBlock64 *)destination, info, name,
+            comment, comment_length);
 #else
-    return fill_fib32((struct FileInfoBlock32 *)destination, info, name);
+    return fill_fib32((struct FileInfoBlock32 *)destination, info, name,
+        comment, comment_length);
 #endif
 }
 
@@ -1656,6 +1674,45 @@ int32_t afsplus_aros_packet_process(
             result = DOSTRUE;
         break;
     }
+    case ACTION_SET_COMMENT:
+    {
+        const uint8_t *path;
+        const uint8_t *comment;
+        uint32_t path_length = 0;
+        uint32_t comment_length = 0;
+        uint64_t base;
+        int64_t seconds;
+        uint32_t nanoseconds;
+        struct AfsplusResolvedParent object;
+        uint32_t object_ready = 0;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_DOS_COMMENT);
+        if (error == 0)
+            error = lock_id(context, (BPTR)packet->dp_Arg2, &base);
+        if (error == 0)
+            error = bstr_view(packet->dp_Arg3, &path, &path_length);
+        if (error == 0)
+            error = bstr_view(packet->dp_Arg4, &comment, &comment_length);
+        if (error == 0 && comment_length > AFSPLUS_DOS_COMMENT_MAX)
+            error = ERROR_COMMENT_TOO_BIG;
+        if (error == 0)
+        {
+            error = resolve_named_object(context, base, path, path_length,
+                &object);
+            object_ready = error == 0;
+        }
+        if (error == 0)
+            error = packet_now(context, &seconds, &nanoseconds);
+        if (error == 0)
+            error = afsplus_aros_set_comment(context->filesystem, object.id,
+                object.leaf, object.leaf_length, comment, comment_length,
+                seconds, nanoseconds);
+        if (object_ready)
+            release_temporary_lock(context, object.id, object.owned);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
     case ACTION_SET_PROTECT:
     case ACTION_SET_DATE:
     {
@@ -1734,8 +1791,13 @@ int32_t afsplus_aros_packet_process(
     {
         struct AfsplusArosFileInfo info;
         uint8_t name[MAXFILENAMELENGTH];
+        uint8_t comment[AFSPLUS_DOS_COMMENT_MAX];
+        uint32_t comment_length = 0;
         uint64_t temporary_root = 0;
         uint64_t id = 0;
+        /* A library without the comment group reports no comment. */
+        uint32_t comments = require_group(context,
+            AFSPLUS_AROS_GROUP_DOS_COMMENT) == 0;
 
         if ((BPTR)packet->dp_Arg2 == BNULL)
             error = ERROR_INVALID_LOCK;
@@ -1749,6 +1811,9 @@ int32_t afsplus_aros_packet_process(
             else if (error == 0)
                 error = afsplus_aros_examine_file(context->filesystem,
                     file->id, &info, name, sizeof(name));
+            if (error == 0 && comments)
+                error = afsplus_aros_file_comment(context->filesystem,
+                    file->id, comment, sizeof(comment), &comment_length);
         }
         else
         {
@@ -1783,15 +1848,28 @@ int32_t afsplus_aros_packet_process(
                     id);
             if (error == 0 && (packet->dp_Type == ACTION_EXAMINE_NEXT
                     || packet->dp_Type == ACTION_EXAMINE_NEXT64))
+            {
                 error = afsplus_aros_examine_next(context->filesystem, id,
                     &info, name, sizeof(name));
+                /* The entry is a child of the examined directory. */
+                if (error == 0 && comments)
+                    error = afsplus_aros_comment(context->filesystem, id,
+                        name, info.name_length, comment, sizeof(comment),
+                        &comment_length);
+            }
             else if (error == 0)
+            {
                 error = afsplus_aros_examine_lock(context->filesystem, id,
                     &info, name, sizeof(name));
+                if (error == 0 && comments)
+                    error = afsplus_aros_comment(context->filesystem, id,
+                        NULL, 0, comment, sizeof(comment), &comment_length);
+            }
         }
         if (error == 0)
             error = fill_packet_fib(packet->dp_Type,
-                (BPTR)packet->dp_Arg2, &info, name);
+                (BPTR)packet->dp_Arg2, &info, name, comment,
+                comment_length);
         if (temporary_root != 0)
             (void)afsplus_aros_free_lock(context->filesystem,
                 temporary_root);
@@ -1865,6 +1943,14 @@ int32_t afsplus_aros_packet_process(
                     sizeof(lock->exall->name));
                 if (error == ERROR_NO_MORE_ENTRIES)
                     finished = 1;
+                if (error == 0 && type >= ED_COMMENT
+                    && require_group(context,
+                        AFSPLUS_AROS_GROUP_DOS_COMMENT) == 0)
+                    error = afsplus_aros_comment(context->filesystem,
+                        lock->id, lock->exall->name,
+                        lock->exall->info.name_length, lock->exall->comment,
+                        sizeof(lock->exall->comment),
+                        &lock->exall->comment_length);
                 if (error != 0)
                     break;
                 lock->exall_pending = 1;

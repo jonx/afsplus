@@ -48,7 +48,7 @@ static uint32_t stub_removed_watches;
 static struct NotifyRequest second;
 static struct NotifyRequest *delivered[8];
 static uint32_t delivered_count;
-static uint64_t stub_groups = UINT64_C(0x262F);
+static uint64_t stub_groups = UINT64_C(0x662F);
 static uint32_t stub_revision = AFSPLUS_AROS_INTERFACE_REVISION;
 static uint32_t stub_protect;
 static uint32_t stub_protect_key;
@@ -484,6 +484,61 @@ int32_t afsplus_aros_interface(struct AfsplusArosInterface *output)
     output->abi_version = AFSPLUS_AROS_ABI_VERSION;
     output->interface_revision = stub_revision;
     output->groups = stub_groups;
+    return 0;
+}
+
+/* The comment the fake filesystem stores for every object. */
+static uint8_t stub_comment[256];
+static uint32_t stub_comment_length;
+static int32_t stub_comment_error;
+
+static int32_t comment_common(uint8_t *comment, uint32_t capacity,
+    uint32_t *output_length)
+{
+    uint32_t length = stub_comment_length < capacity
+        ? stub_comment_length : capacity;
+
+    if (stub_comment_error != 0)
+        return stub_comment_error;
+    /* The packet layer always offers exactly the width of fib_Comment. */
+    assert(capacity == 79);
+    memcpy(comment, stub_comment, length);
+    *output_length = length;
+    return 0;
+}
+
+int32_t afsplus_aros_comment(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint8_t *comment, uint32_t comment_capacity, uint32_t *output_length)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(base_lock != 0);
+    record('c', base_lock, name, name_length, 0);
+    return comment_common(comment, comment_capacity, output_length);
+}
+
+int32_t afsplus_aros_file_comment(struct AfsplusAros *filesystem,
+    uint64_t file, uint8_t *comment, uint32_t comment_capacity,
+    uint32_t *output_length)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(file >= 100);
+    record('c', file, NULL, 0, 1);
+    return comment_common(comment, comment_capacity, output_length);
+}
+
+int32_t afsplus_aros_set_comment(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    const uint8_t *comment, uint32_t comment_length,
+    int64_t now_seconds, uint32_t now_nanoseconds)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    assert(now_nanoseconds == UINT32_C(40000000));
+    assert(comment_length <= 79);
+    record('C', base_lock, name, name_length, 0);
+    memcpy(stub_comment, comment, comment_length);
+    stub_comment_length = comment_length;
     return 0;
 }
 
@@ -1016,6 +1071,149 @@ int main(void)
             && packet.dp_Res2 == ERROR_OBJECT_WRONG_TYPE);
     }
 
+    /* C2: ACTION_SET_COMMENT, and the comment in Examine, ExNext, ExamineFH
+     * and ExAll records. */
+    {
+        union { struct FileInfoBlock fib; void *align; } block;
+        union { uint8_t bytes[512]; void *align; } buffer;
+        struct FileHandle commented;
+        struct ExAllControl control;
+        struct ExAllData *entry;
+        char text[81];
+        size_t first;
+
+        reset_events();
+        initialize_packet(&packet, ACTION_SET_COMMENT);
+        packet.dp_Arg2 = (SIPTR)root;
+        packet.dp_Arg3 = packet_bstr("dir/note");
+        packet.dp_Arg4 = packet_bstr("draft two");
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert_event(0, 'L', "dir", AFSPLUS_AROS_LOCK_SHARED);
+        assert_event(1, 'C', "note", 0);
+        assert(stub_comment_length == 9
+            && memcmp(stub_comment, "draft two", 9) == 0);
+
+        /* 79 characters is the most fib_Comment holds; 80 is refused before
+         * the filesystem is reached and the stored comment stays. */
+        memset(text, 'k', 80);
+        text[80] = 0;
+        reset_events();
+        initialize_packet(&packet, ACTION_SET_COMMENT);
+        packet.dp_Arg2 = (SIPTR)root;
+        packet.dp_Arg3 = packet_bstr("note");
+        packet.dp_Arg4 = packet_bstr(text);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_COMMENT_TOO_BIG);
+        assert(event_count == 0 && stub_comment_length == 9);
+        text[79] = 0;
+        packet.dp_Arg4 = packet_bstr(text);
+        initialize_packet(&packet, ACTION_SET_COMMENT);
+        packet.dp_Arg2 = (SIPTR)root;
+        packet.dp_Arg3 = packet_bstr("note");
+        packet.dp_Arg4 = packet_bstr(text);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && stub_comment_length == 79);
+
+        /* Examine: the lock's own object, addressed by the empty name. The
+         * 79-character comment fills fib_Comment to its last byte. */
+        reset_events();
+        memset(&block, 0x7e, sizeof(block));
+        initialize_packet(&packet, ACTION_EXAMINE_OBJECT);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = (SIPTR)MKBADDR(&block.fib);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert_event(0, 'c', "", 0);
+        assert(block.fib.fib_Comment[0] == 79);
+        assert(memcmp(block.fib.fib_Comment + 1, text, 79) == 0);
+        assert(sizeof(block.fib.fib_Comment) == 80);
+
+        /* ExNext: the entry is named under the directory lock. */
+        memcpy(stub_comment, "next", 4);
+        stub_comment_length = 4;
+        reset_events();
+        initialize_packet(&packet, ACTION_EXAMINE_NEXT);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = (SIPTR)MKBADDR(&block.fib);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE);
+        assert_event(0, 'c', "entry", 0);
+        assert(block.fib.fib_Comment[0] == 4
+            && memcmp(block.fib.fib_Comment + 1, "next", 5) == 0);
+
+        /* ExamineFH has no lock and asks by file. */
+        memset(&commented, 0, sizeof(commented));
+        initialize_packet(&packet, ACTION_FINDOUTPUT);
+        packet.dp_Arg1 = (SIPTR)MKBADDR(&commented);
+        packet.dp_Arg2 = (SIPTR)root;
+        packet.dp_Arg3 = packet_bstr("note");
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE);
+        reset_events();
+        initialize_packet(&packet, ACTION_EXAMINE_FH);
+        packet.dp_Arg1 = commented.fh_Arg1;
+        packet.dp_Arg2 = (SIPTR)MKBADDR(&block.fib);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE);
+        assert(events[0].operation == 'c' && events[0].access == 1);
+        assert(block.fib.fib_Comment[0] == 4);
+        initialize_packet(&packet, ACTION_END);
+        packet.dp_Arg1 = commented.fh_Arg1;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+
+        /* A comment that cannot be read fails the Examine: the block is not
+         * reported as commentless. */
+        stub_comment_error = ERROR_SEEK_ERROR;
+        initialize_packet(&packet, ACTION_EXAMINE_OBJECT);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = (SIPTR)MKBADDR(&block.fib);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_SEEK_ERROR);
+        stub_comment_error = 0;
+
+        /* ExAll: ED_COMMENT records carry the comment after the name and its
+         * bytes count toward the fit; ED_DATE records never ask for it. */
+        stub_directory_size = 2;
+        memset(&control, 0, sizeof(control));
+        memset(&buffer, 0x7e, sizeof(buffer));
+        first = offsetof(struct ExAllData, ed_OwnerUID) + 3 + 5;
+        reset_events();
+        initialize_packet(&packet, ACTION_EXAMINE_ALL);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = (SIPTR)buffer.bytes;
+        /* One byte short of the first record with its comment. */
+        packet.dp_Arg3 = (SIPTR)(first - 1);
+        packet.dp_Arg4 = ED_COMMENT;
+        packet.dp_Arg5 = (SIPTR)&control;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_BUFFER_OVERFLOW);
+        assert(control.eac_Entries == 0);
+        packet.dp_Arg3 = (SIPTR)sizeof(buffer);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_NO_MORE_ENTRIES);
+        assert(control.eac_Entries == 2);
+        entry = (struct ExAllData *)buffer.bytes;
+        assert(strcmp((char *)entry->ed_Name, "e0") == 0);
+        assert(entry->ed_Comment == entry->ed_Name + 3);
+        assert(strcmp((char *)entry->ed_Comment, "next") == 0);
+        assert(strcmp((char *)entry->ed_Next->ed_Comment, "next") == 0);
+        assert_event(0, 'c', "e0", 0);
+
+        memset(&control, 0, sizeof(control));
+        reset_events();
+        packet.dp_Arg4 = ED_DATE;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(control.eac_Entries == 2 && event_count == 0);
+
+        stub_comment_length = 0;
+        stub_directory_size = -1;
+    }
+
     /* C2: ACTION_EXAMINE_ALL over a five-entry directory. */
     {
         /* ED_DATE entry with a two-character name: fixed part up to
@@ -1504,13 +1702,19 @@ int main(void)
         assert(afsplus_aros_packet_process(old_context, &packet) == 0);
         assert(packet.dp_Res1 == DOSFALSE
             && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+        initialize_packet(&packet, ACTION_SET_COMMENT);
+        packet.dp_Arg3 = packet_bstr("note");
+        packet.dp_Arg4 = packet_bstr("text");
+        assert(afsplus_aros_packet_process(old_context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
         assert(event_count == 0);
         assert(afsplus_aros_packet_destroy(old_context) == 0);
 
         stub_groups = 0;
         assert(afsplus_aros_packet_create(&config, &old_context)
             == ERROR_BAD_NUMBER);
-        stub_groups = UINT64_C(0x262F);
+        stub_groups = UINT64_C(0x662F);
 
         /* A handler shell without a delivery callback cannot notify, so the
          * request is an unknown action and no watch is created. */

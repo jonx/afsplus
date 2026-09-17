@@ -11,6 +11,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 - [2026-09-17 — Diff two images in filesystem terms](#2026-09-17--diff-two-images-in-filesystem-terms)
 - [2026-09-17 — Read the object comment in the portable C reader](#2026-09-17--read-the-object-comment-in-the-portable-c-reader)
+- [2026-09-17 — Carry the object comment to DOS](#2026-09-17--carry-the-object-comment-to-dos)
 - [2026-09-17 — Store the object comment in the object record](#2026-09-17--store-the-object-comment-in-the-object-record)
 - [2026-09-17 — Admit a well-formed security reference wherever it points](#2026-09-17--admit-a-well-formed-security-reference-wherever-it-points)
 - [2026-09-17 — Pass a relabel's label as a value, never as volume state](#2026-09-17--pass-a-relabels-label-as-a-value-never-as-volume-state)
@@ -266,6 +267,24 @@ flag-namespace check now sits in the shared shape function.
 `crates/afsplus-check/tests/security_c.rs` requires the C lookup and the Rust
 core to agree on a commented file and on a file with both a descriptor and a
 comment. The comment in the explain output belongs to `ExplainObject`.
+
+## 2026-09-17 — Carry the object comment to DOS
+
+`ACTION_SET_COMMENT` and the comment of `FileInfoBlock` and `ExAllData` run
+through `Vfs::comment` / `set_comment`, the AROS adapter, C boundary revision
+14 (group `DOS_COMMENT`, three entry points) and the packet layer. Two bounds
+meet: DOS holds 79 characters, the record 255 UTF-8 bytes. The packet layer
+owns the DOS bound because it knows the width of `fib_Comment`; the adapter
+owns the stored one. Reading was made total on content: a comment written
+through FUSE or the portable API may be longer or carry characters outside
+Latin-1, and a directory scan that failed on one such entry would hide the
+whole directory, so the report is cut at a character boundary and substitutes
+`?`. A read error is a different matter and fails the request. `ExamineFH`
+has no lock to name the object by, hence a separate by-file entry point. The
+stub proves the fit arithmetic of `ED_COMMENT` records with a buffer one byte
+short, and removing the comment length from that arithmetic fails exactly
+that assertion. Proven on the host and cross-compiled for AROS AArch64; no
+target run yet.
 
 ## 2026-09-17 — Store the object comment in the object record
 

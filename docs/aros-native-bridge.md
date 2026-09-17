@@ -322,6 +322,18 @@ matter. `ACTION_FREE_RECORD` needs the owning handle and the exact range.
 where packet arguments are 64 bits wide, carry full-width ranges; the classic
 packets stop at 4 GiB.
 
+`ACTION_SET_COMMENT` stores the object comment of
+[ADR-106](../adr/ADR-106-stored-object-comment.md). The bytes are text in the
+mount's name encoding, like names. The packet layer refuses more than the 79
+characters `fib_Comment` holds with `ERROR_COMMENT_TOO_BIG` before the
+filesystem is reached; the stored bound is 255 UTF-8 bytes and other
+interfaces may use all of it. `Examine`, `ExNext`, `ExamineFH` and `ExAll`
+records from `ED_COMMENT` up report the comment cut at a character boundary to
+79 bytes, with `?` for a character Latin-1 lacks, so a comment written
+elsewhere never fails a directory scan. A comment that cannot be read fails
+the request; it is not reported as absent. With a library that lacks the
+comment group the records carry an empty comment and the action is unknown.
+
 `ACTION_RENAME_DISK` changes the volume label
 ([ADR-104](../adr/ADR-104-volume-label-in-checkpoint.md)) and the name of the
 DOS volume node so that neither changes alone. The packet layer asks the

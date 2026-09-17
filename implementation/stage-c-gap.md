@@ -67,7 +67,7 @@ older library must be able to refuse by value.
 
 ## C1. Rust/C integration boundary
 
-Present (L1 to L3): ABI version 1 with interface revision 13.
+Present (L1 to L3): ABI version 1 with interface revision 14.
 `afsplus_aros_interface` answers without a mount with the revision and a
 mask of entry-point groups; the packet layer asks it at creation and answers
 `ERROR_ACTION_NOT_KNOWN` for an action of a missing group.
@@ -91,7 +91,7 @@ L3 `ACTION_SET_PROTECT`, `ACTION_SET_DATE`, soft `ACTION_MAKE_LINK`,
 `ACTION_READ_LINK` with `ERROR_IS_SOFT_LINK` on traversal, DOS open-mode
 locking (`MODE_NEWFILE` exclusive, held objects not deletable, refused
 `DupLockFromFH` on an exclusive handle), `ExNext` that continues across
-namespace changes, `ACTION_FH_FROM_LOCK`, `ACTION_CHANGE_MODE`, `ACTION_WRITE_PROTECT`, `ACTION_RENAME_DISK`, immediate `ACTION_LOCK_RECORD` with
+namespace changes, `ACTION_FH_FROM_LOCK`, `ACTION_CHANGE_MODE`, `ACTION_WRITE_PROTECT`, `ACTION_RENAME_DISK`, `ACTION_SET_COMMENT` with the comment in `FileInfoBlock` and `ED_COMMENT` records, immediate `ACTION_LOCK_RECORD` with
 `ACTION_FREE_RECORD`, and at L3 `ACTION_EXAMINE_ALL`
 with `ACTION_EXAMINE_ALL_END`.
 
@@ -100,13 +100,12 @@ Lacking, in the order classic software meets them:
 | Action | Missing piece | Layer where it starts |
 |---|---|---|
 | all of the above | target run: a probe extension for the S0 matrix on Hosted, QEMU and m68k | L4 |
-| `ACTION_SET_COMMENT`, comment in `FileInfoBlock` | a stored comment attribute; the format has no comment or extended-attribute record ([docs/12](../docs/12-metadata-and-xattrs.md)) | Stage B decision |
 | record lock self-overlap | a handle does not collide with its own range; unverified against rom/dos `LockRecord` and a reference handler until a target run | L4 |
 | `ACTION_LOCK_RECORD` waiting modes | honouring the `dp_Arg5` timeout: a queue of deferred packets in the handler loop, retried when a range is freed | L4 |
 | `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |
 | `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |
 
-Hosted and QEMU: every row except the comment. Apple hardware: none.
+Hosted and QEMU: every row. Apple hardware: none.
 
 ## C3. Classic single-user security preservation adapter
 
