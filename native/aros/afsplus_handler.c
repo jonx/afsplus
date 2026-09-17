@@ -602,6 +602,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     struct AfsplusArosMountConfig mount_config;
     struct AfsplusArosPacketConfig packet_config;
     struct AfsplusArosDiskInfo disk_info;
+    struct ExecBase *SysBase = handler->SysBase;
     struct DosLibrary *DOSBase = handler->DOSBase;
     struct DosEnvec *environment = handler->environment;
     struct DateStamp now;

@@ -71,29 +71,52 @@ echo "[dev-packet] trackdisk viewport matrix (source headers)"
 run_matrix trackdisk-stub native/aros/afsplus_trackdisk.c \
     native/aros/tests/trackdisk_stub.c
 # The handler shell calls Exec and DOS, so it needs the installed SDK include
-# tree of a running AROS build. Its generated proto headers arrive late in
-# that build; native/aros/tests/dev-proto stands in for the three the shell
-# uses. dos/dos64.h comes from the SDK when it is there, else from the AROS
-# source tree. This is a syntax and type check only.
+# tree of an AROS build. With the generated proto headers present it is
+# compiled as the gate compiles it: -D__NOLIBBASE__ makes every library call
+# need its base in scope, which plain prototypes cannot check, and the AROS
+# cross clang is used when it exists. Early in a build the proto headers are
+# missing; native/aros/tests/dev-proto then stands in for the three the shell
+# uses, which checks types and nothing about library bases. dos/dos64.h comes
+# from the SDK when it is there, else from the AROS source tree.
 sdk=${AFSPLUS_AROS_SDK_ROOT:-"$HOME/aros-build/bin/darwin-aarch64"}
-if [ -f "$sdk/AROS/Developer/include/exec/execbase.h" ] \
+crosstools=${AROS_CROSSTOOLS:-"$HOME/aros-crosstools"}
+sdk_include="$sdk/AROS/Developer/include"
+if [ -f "$sdk_include/exec/execbase.h" ] \
     && [ -f "$sdk/gen/include/aros/config.h" ]; then
-    echo "[dev-packet] handler shell type check (SDK include tree, stand-in proto headers)"
     mkdir -p "$work/dos64/dos"
-    if [ -f "$sdk/AROS/Developer/include/dos/dos64.h" ]; then
-        ln -sf "$sdk/AROS/Developer/include/dos/dos64.h" "$work/dos64/dos/dos64.h"
+    if [ -f "$sdk_include/dos/dos64.h" ]; then
+        ln -sf "$sdk_include/dos/dos64.h" "$work/dos64/dos/dos64.h"
     else
         ln -sf "$aros_source/compiler/include/dos/dos64.h" "$work/dos64/dos/dos64.h"
     fi
-    clang -std=gnu11 -fsyntax-only -Wall -Wextra -Werror \
-        -Wno-unused-variable -Wno-unused-but-set-variable \
-        -Wno-unused-parameter -nostdlibinc -D__WORDSIZE=64 \
-        -I native/aros/tests/dev-proto \
-        -I "$sdk/AROS/Developer/include/aros/stdc" \
-        -I "$sdk/AROS/Developer/include" -I "$sdk/gen/include" \
-        -I "$work/dos64" -I api -I native/aros \
-        native/aros/afsplus_handler.c
+    if [ -f "$sdk_include/proto/exec.h" ] && [ -f "$sdk_include/proto/dos.h" ] \
+        && [ -f "$sdk_include/proto/locale.h" ]; then
+        if [ -x "$crosstools/bin/clang" ]; then
+            echo "[dev-packet] handler shell cross compile (AROS clang, generated proto headers)"
+            "$crosstools/bin/clang" --target=aarch64-unknown-aros \
+                -mcmodel=large -ffixed-x18 -std=gnu11 -Wall -Wextra -Werror \
+                -D__NOLIBBASE__ -I "$sdk_include/aros/stdc" -I "$sdk_include" \
+                -I "$sdk/gen/include" -I "$work/dos64" -I api -I native/aros \
+                -c native/aros/afsplus_handler.c -o "$work/handler.o"
+        else
+            echo "[dev-packet] handler shell type check (host clang, generated proto headers)"
+            clang -std=gnu11 -fsyntax-only -Wall -Wextra -Werror -nostdlibinc \
+                -D__WORDSIZE=64 -D__NOLIBBASE__ \
+                -I "$sdk_include/aros/stdc" -I "$sdk_include" \
+                -I "$sdk/gen/include" -I "$work/dos64" -I api -I native/aros \
+                native/aros/afsplus_handler.c
+        fi
+    else
+        echo "[dev-packet] handler shell type check (stand-in proto headers, no library-base check)"
+        clang -std=gnu11 -fsyntax-only -Wall -Wextra -Werror \
+            -Wno-unused-variable -Wno-unused-but-set-variable \
+            -Wno-unused-parameter -nostdlibinc -D__WORDSIZE=64 \
+            -I native/aros/tests/dev-proto \
+            -I "$sdk_include/aros/stdc" -I "$sdk_include" \
+            -I "$sdk/gen/include" -I "$work/dos64" -I api -I native/aros \
+            native/aros/afsplus_handler.c
+    fi
 else
-    echo "[dev-packet] handler shell type check skipped: no SDK include tree at $sdk"
+    echo "[dev-packet] handler shell check skipped: no SDK include tree at $sdk"
 fi
 echo "[dev-packet] PASS (development check, no qualification claim)"
