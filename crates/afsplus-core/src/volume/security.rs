@@ -171,6 +171,56 @@ impl<D: BlockDevice> Volume<D> {
         Ok(())
     }
 
+    /// Copy the descriptor chain of `source` into a fresh chain owned by
+    /// `object_id`, inside the caller's transaction. A chain has exactly one
+    /// owner, so a copy never shares the source's segments; format identity,
+    /// version, bytes and the projection-divergence mark are carried over
+    /// unchanged. The segment writes join `writes`, so the new chain and the
+    /// record that references it are published by one commit.
+    pub(super) fn copy_security_descriptor(
+        &mut self,
+        tx: &mut TxAllocator,
+        source: &ObjectRecord,
+        object_id: u64,
+        generation: u64,
+        writes: &mut Vec<(u64, Vec<u8>)>,
+    ) -> Result<Option<SecurityRef>, CoreError> {
+        let Some(reference) = source.security else {
+            return Ok(None);
+        };
+        let geometry = self.ident.geometry();
+        let (_, descriptor) = load_descriptor_chain(
+            &mut self.dev,
+            &geometry,
+            source.object_id,
+            reference,
+            self.checkpoint.generation,
+        )?;
+        let block_size = self.dev.block_size();
+        let count = reference.segment_count;
+        let lbas = (0..count)
+            .map(|_| tx.allocate(&mut self.dev))
+            .collect::<Result<Vec<_>, _>>()?;
+        let capacity = segment_capacity(block_size);
+        for (index, chunk) in descriptor.bytes.chunks(capacity).enumerate() {
+            let segment = SecuritySegment {
+                object_id,
+                format: descriptor.format,
+                version: descriptor.version,
+                total_len: reference.total_len,
+                index: index as u16,
+                count,
+                next: lbas.get(index + 1).copied().unwrap_or(0),
+                bytes: chunk,
+            };
+            writes.push((lbas[index], segment.encode(block_size, generation)?));
+        }
+        Ok(Some(SecurityRef {
+            first_block: lbas[0],
+            ..reference
+        }))
+    }
+
     /// Retire the descriptor chain of an object that leaves the namespace
     /// for good. Callers retire the object record themselves.
     pub(super) fn retire_security_descriptor(

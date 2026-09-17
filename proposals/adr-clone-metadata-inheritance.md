@@ -50,7 +50,7 @@ D1. `CloneFile` creates a new object:
 | Creation time, change time | The clone time |
 | Protection word | The source's: a cloned executable stays executable, a cloned script stays a script |
 | Data-update policy flag | Cleared: full COW ([ADR-065](../adr/ADR-065-persistent-data-update-policy.md)); in-place updates of a shared run are excluded by [ADR-062](../adr/ADR-062-explicit-hybrid-data-updates.md) |
-| Security descriptor | None: a descriptor has one owner, and the destination's security comes from the destination's policy ([security preservation container](adr-security-preservation-container.md)) |
+| Security descriptor | A copy of the source's, in segments of its own: same format identity, version, bytes and divergence mark, allocated and published by the clone transaction ([security preservation container](adr-security-preservation-container.md)) |
 | Extended attributes and comment, once they exist | Undecided here; see the open list |
 
 D2. `CloneRange` is a content write to an existing destination. The
@@ -66,28 +66,42 @@ no trace in the source's metadata: a moved change time makes every
 incremental backup and every scanner revisit a file whose bytes, size,
 protection and links are unchanged.
 
-D4. An explicit option to carry the source's security descriptor into the
-clone, for an authorized caller, is an API-level addition with its own
-capability bit. The default never carries it.
+D4. An explicit option to create the clone without a descriptor, for a caller
+that supplies its own afterwards, is an API-level addition with its own
+capability bit. The default always copies.
+
+Copying and dropping are both defensible, and the copy is the safer answer:
+dropping turns one call into a silent security downgrade of bytes the
+filesystem cannot reconstruct, while a copy at worst leaves a descriptor the
+caller then replaces through the explicit setter. The copy also keeps the rule
+that no ordinary operation discards descriptor bytes, so the only path that
+loses a descriptor stays the explicit clear.
 
 ## Implementation state
 
 D1 and D2 matched the executable behaviour. D3 did not: both operations set
 the source's change time to the clone time whenever they rewrote the source
 record. They now leave it, and
-`crates/afsplus-check/tests/clone_metadata.rs` pins all three decisions with
+`crates/afsplus-check/tests/clone_metadata.rs` pins all four decisions with
 literal times: a source created at 10, written at 20, changed at 33, with
 protection `0x5a`, the in-place policy, a descriptor and two links; a clone
 at 40 that reports created 40, modified 20, changed 40, protection `0x5a`,
-one link, full COW and no descriptor; a range clone at 50 that moves only
-the destination's modification and change time; and a source that reads
-10, 20, 33 after both. Before the correction the two source assertions
-failed with 40 and 50 in the change time, which is the negative control.
+one link, full COW and an equal copy of the descriptor; a range clone at 50
+that moves only the destination's modification and change time and keeps the
+destination's own descriptor; and a source that reads 10, 20, 33 after both.
+Before the correction the two source assertions failed with 40 and 50 in the
+change time, and the clone reported no descriptor, which is the negative
+control. `crates/afsplus-check/tests/security_container.rs` proves the copy
+itself: three segments each in distinct blocks, either file unlinkable with
+the other's descriptor still readable and the checker clean, and a modeled
+power-cut matrix over the clone that mounts to no clone or to a clone with
+its complete chain.
 
 ## Compatibility
 
-No disk field, flag or feature changes. The change time of a clone source is
-the one observable difference, and no released consumer exists.
+No disk field, flag or feature changes. The change time of a clone source and
+the descriptor of a clone destination are the observable differences, and no
+released consumer exists.
 
 ## API contract consequences
 
@@ -107,9 +121,13 @@ For the Stage C API work; this proposal edits no API document.
   models size, bytes, protection and one link for a clone; its oracle now
   rests on a decision.
 - Build caches and indexers keep their fingerprints across a cloned tree.
-- A clone of a descriptor-protected file is a file without a descriptor whose
-  protection word is the source's. A host that evaluates descriptors applies
-  its own creation policy to the clone, exactly as for a byte copy.
+- A clone of a descriptor-protected file is protected from the first
+  transaction that makes it visible: the classic protection word and the
+  descriptor both come from the source, in blocks the clone owns alone. A
+  crash during the clone shows no clone or a clone with its full descriptor,
+  never a file whose security metadata arrives later.
+- A clone costs one block per 4,040 descriptor bytes, at most 17, on top of
+  its records; a file without a descriptor is unaffected.
 
 ## Open after this decision
 

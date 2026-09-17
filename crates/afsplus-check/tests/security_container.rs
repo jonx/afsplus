@@ -60,6 +60,21 @@ fn expect(format: u32, version: u16, diverged: bool, bytes: &[u8]) -> Option<Sec
     })
 }
 
+/// Every sealed `"AFSX"` block the image holds for `owner`.
+fn segments_owned_by<D: BlockDevice>(dev: &mut D, owner: u64) -> Vec<u64> {
+    let mut block = vec![0u8; dev.block_size()];
+    let mut found = Vec::new();
+    for lba in 0..dev.total_blocks() {
+        dev.read_block(lba, &mut block).unwrap();
+        if let Ok(header) = BlockHeader::verify(&block, block_type::SECURITY_DESCRIPTOR) {
+            if header.owner == owner {
+                found.push(lba);
+            }
+        }
+    }
+    found
+}
+
 fn checked<D: BlockDevice>(volume: Volume<D>) -> D {
     let mut dev = volume.into_device();
     let report = check_device(&mut dev);
@@ -217,8 +232,11 @@ fn an_unknown_descriptor_survives_every_rewrite_of_its_object() {
     let length = volume.read_link(link, &mut target).unwrap();
     assert_eq!(&target[..length], b"dir/target");
     assert_eq!(volume.stat(file).unwrap().unwrap().created, time(-5));
-    // The clone is a new object: it shares data and carries no descriptor.
-    assert_eq!(volume.security_descriptor(clone).unwrap(), None);
+    // The clone is a new object with its own copy of the descriptor.
+    assert_eq!(
+        volume.security_descriptor(clone).unwrap(),
+        expect(UNKNOWN_FORMAT, 1, false, &file_bytes)
+    );
     assert_eq!(volume.read_file(clone).unwrap().len(), 9000);
     checked(volume);
 }
@@ -606,4 +624,120 @@ fn every_power_cut_leaves_the_old_or_the_new_descriptor_state() {
         );
         eprintln!("security transition {transition} crash states old/new: {outcomes:?}");
     }
+}
+
+#[test]
+fn a_clone_receives_its_own_copy_of_the_descriptor() {
+    // Three segments, so the copy exercises a chain and not a single block.
+    let bytes = blob(9000, 13);
+    let mut volume = mount(formatted()).unwrap();
+    let source = volume
+        .create_file_in_directory(OBJECT_ROOT, "source", &[0x41; 9000], time(2))
+        .unwrap();
+    volume
+        .set_security_descriptor(source, UNKNOWN_FORMAT, 5, &bytes, time(3))
+        .unwrap();
+    // A diverged source, so the copy has to carry the mark as well.
+    volume.set_security_projection_policy(SecurityProjectionPolicy::Preserve);
+    volume.set_object_protection(source, 0x5a, time(4)).unwrap();
+    let base = checked(volume);
+
+    let mut volume = mount(base.clone()).unwrap();
+    let clone = volume
+        .clone_file(source, OBJECT_ROOT, "clone", time(5))
+        .unwrap();
+    // Equal descriptor: identity, version, bytes and divergence mark.
+    assert_eq!(
+        volume.security_descriptor(clone).unwrap(),
+        expect(UNKNOWN_FORMAT, 5, true, &bytes)
+    );
+    assert_eq!(
+        volume.security_descriptor(source).unwrap(),
+        expect(UNKNOWN_FORMAT, 5, true, &bytes)
+    );
+    let mut image = checked(volume);
+
+    // Distinct blocks: three segments each, and no block in common.
+    let source_segments = segments_owned_by(&mut image, source);
+    let clone_segments = segments_owned_by(&mut image, clone);
+    assert_eq!(source_segments.len(), 3);
+    assert_eq!(clone_segments.len(), 3);
+    assert!(source_segments
+        .iter()
+        .all(|lba| !clone_segments.contains(lba)));
+
+    // Unlinking either file leaves the other's descriptor readable, and the
+    // checker sees no leaked and no doubly owned segment.
+    for (removed, kept, gone) in [("source", clone, source), ("clone", source, clone)] {
+        let mut volume = mount(image.clone()).unwrap();
+        volume.delete_file(OBJECT_ROOT, removed, time(6)).unwrap();
+        assert!(matches!(
+            volume.security_descriptor(gone),
+            Err(CoreError::NotFound)
+        ));
+        assert_eq!(
+            volume.security_descriptor(kept).unwrap(),
+            expect(UNKNOWN_FORMAT, 5, true, &bytes)
+        );
+        assert_eq!(volume.read_file(kept).unwrap().len(), 9000);
+        checked(volume);
+    }
+
+    // Power cuts over the clone: no clone, or a clone with its full chain.
+    // The transition under test is the publication of the copied chain, so
+    // the source is empty: without shared runs the clone writes no extent
+    // tree, and the unflushed tail stays inside the full-enumeration budget.
+    let bytes = blob(4100, 14);
+    let mut volume = mount(formatted()).unwrap();
+    assert_eq!(
+        volume
+            .create_file_in_directory(OBJECT_ROOT, "source", b"", time(2))
+            .unwrap(),
+        source
+    );
+    volume
+        .set_security_descriptor(source, UNKNOWN_FORMAT, 5, &bytes, time(3))
+        .unwrap();
+    volume.set_security_projection_policy(SecurityProjectionPolicy::Preserve);
+    volume.set_object_protection(source, 0x5a, time(4)).unwrap();
+    let base = checked(volume);
+    let mut recording = mount(RecordingBackend::new(base.clone())).unwrap();
+    assert_eq!(
+        recording
+            .clone_file(source, OBJECT_ROOT, "clone", time(5))
+            .unwrap(),
+        clone
+    );
+    let (_, log) = recording.into_device().into_parts();
+    let mut outcomes = [0u32, 0];
+    for cut in 0..=log.len() {
+        for_each_crash_state(&base, &log, cut, |state| {
+            let mut volume = mount(state.image).unwrap();
+            match volume.lookup_in_directory(OBJECT_ROOT, "clone").unwrap() {
+                Some(_) => {
+                    assert_eq!(
+                        volume.security_descriptor(clone).unwrap(),
+                        expect(UNKNOWN_FORMAT, 5, true, &bytes)
+                    );
+                    assert!(volume.read_file(clone).unwrap().is_empty());
+                    outcomes[1] += 1;
+                }
+                None => {
+                    assert!(matches!(
+                        volume.security_descriptor(clone),
+                        Err(CoreError::NotFound)
+                    ));
+                    outcomes[0] += 1;
+                }
+            }
+            // The source keeps its own chain in either state.
+            assert_eq!(
+                volume.security_descriptor(source).unwrap(),
+                expect(UNKNOWN_FORMAT, 5, true, &bytes)
+            );
+            checked(volume);
+        });
+    }
+    assert!(outcomes.iter().all(|&n| n > 0), "{outcomes:?}");
+    eprintln!("clone crash states no-clone/clone: {outcomes:?}");
 }

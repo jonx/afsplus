@@ -83,12 +83,18 @@ fn clone_file_inherits_content_time_and_protection_and_nothing_else() {
     assert_eq!(record.created, time(40));
     assert_eq!(record.changed, time(40));
     assert_eq!(record.link_count, 1);
-    // Never inherited: the data-update policy and the security descriptor.
+    // Never inherited: the data-update policy.
     assert_eq!(
         volume.file_data_policy(clone).unwrap(),
         DataUpdatePolicy::FullCow
     );
-    assert_eq!(volume.security_descriptor(clone).unwrap(), None);
+    // Copied into blocks of its own: the security descriptor.
+    let copied = volume.security_descriptor(clone).unwrap().unwrap();
+    assert_eq!(
+        (copied.format, copied.version, copied.bytes.as_slice()),
+        (0x7fff_0001, 1, &b"source descriptor"[..])
+    );
+    assert!(!copied.projection_diverged);
 
     // The source keeps every metadata field, its policy and its descriptor.
     let after = volume.stat(source).unwrap().unwrap();
@@ -109,10 +115,10 @@ fn clone_file_inherits_content_time_and_protection_and_nothing_else() {
         volume.security_descriptor(source).unwrap().unwrap().bytes,
         b"source descriptor"
     );
-    // The clone is free of the source's descriptor, so the classic edit that
-    // the source refuses is allowed on it.
+    // The clone carries a descriptor of its own, so the classic edit the
+    // source refuses is refused on it too.
     assert!(volume.set_object_protection(source, 0, time(41)).is_err());
-    volume.set_object_protection(clone, 0, time(41)).unwrap();
+    assert!(volume.set_object_protection(clone, 0, time(41)).is_err());
     let mut volume = mount(checked(volume)).unwrap();
     assert_eq!(volume.stat(clone).unwrap().unwrap().modified, time(20));
     checked(volume);

@@ -2331,6 +2331,17 @@ impl<D: BlockDevice> Volume<D> {
                 }
                 (OBJECT_FLAG_EXTENT_TREE, built.root_lba, source.data_blocks)
             };
+        // The destination receives its own copy of the source's descriptor,
+        // in new blocks allocated and published by this same transaction: a
+        // chain has exactly one owner, so the two files never share segments.
+        // A failed allocation fails the clone as a whole.
+        let dest_security = self.copy_security_descriptor(
+            &mut tx,
+            &source,
+            object_id,
+            generation,
+            &mut meta_writes,
+        )?;
         let dest_record = ObjectRecord {
             object_id,
             object_type: ObjectType::File,
@@ -2346,7 +2357,8 @@ impl<D: BlockDevice> Volume<D> {
             data_root: dest_data_root,
             data_blocks: dest_data_blocks,
             security: None,
-        };
+        }
+        .with_security(dest_security);
 
         // Namespace: one new directory entry, parent record COW'd.
         let parent_record_new_lba = tx.allocate(&mut self.dev)?;

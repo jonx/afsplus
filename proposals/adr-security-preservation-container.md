@@ -147,9 +147,12 @@ never implied. The policy is host runtime state and is absent from the disk.
   restoration and orphaning keep the reference. Deleting the final link,
   through the direct path, the batch and window engine, atomic replacement
   or orphan cleanup, retires the chain with the record.
-- `CloneFile` and `CloneRange` never share or copy a chain: the destination
-  of a clone carries no descriptor, and a range clone keeps the destination's
-  own ([clone metadata inheritance](adr-clone-metadata-inheritance.md)).
+- No chain is ever shared. `CloneFile` copies one: the destination receives
+  its own segments, allocated and published by the clone transaction, with
+  the source's format identity, version, bytes and divergence mark, so a
+  crash shows no clone or a clone with its complete descriptor. `CloneRange`
+  is a content write and keeps the destination's own
+  ([clone metadata inheritance](adr-clone-metadata-inheritance.md)).
 - The checker claims every segment in the single ownership set, so a leaked,
   doubly referenced, foreign or damaged segment is a finding, and it reports
   the flag on a volume without the feature as corruption.
