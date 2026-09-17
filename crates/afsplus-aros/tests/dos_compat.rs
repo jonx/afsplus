@@ -722,12 +722,24 @@ fn a_protected_volume_is_not_changed_by_flush_or_by_protecting_it() {
     assert_eq!(protected.free_blocks, free_before);
     assert_eq!(protected.generation, generation_before);
 
-    // Control: unprotected, the same flush resumes exactly one orphan and
-    // frees its blocks, so the stillness above was the protection.
+    // Control: unprotected, the same flush resumes work and frees blocks, so
+    // the stillness above was the protection and not an empty queue.
+    //
+    // How MUCH it resumes is not the subject. It used to be exactly one orphan
+    // per flush, and this asserted that number; a flush now drains the queue
+    // instead of taking one slice off it, because taking one slice meant the
+    // space of a deleted file could stay outstanding for the whole life of a
+    // mount. Pinning the count here made this test fail for a change it was
+    // never about, and bumping the number would have left it asserting the new
+    // arithmetic rather than the protection.
     adapter.set_write_protect(false, 7).unwrap();
     adapter.flush().unwrap();
     let resumed = adapter.health().unwrap();
-    assert_eq!(resumed.pending_orphans, 1);
+    assert!(
+        resumed.pending_orphans < protected.pending_orphans,
+        "an unprotected flush must resume orphan work: still {} pending",
+        resumed.pending_orphans
+    );
     assert!(resumed.free_blocks > free_before);
     remount(adapter);
 }

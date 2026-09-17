@@ -207,6 +207,13 @@ impl From<VfsError> for ArosError {
             VfsError::Corrupt(_) => ArosError::NotDosDisk,
             VfsError::Io(_) => ArosError::Unknown,
             VfsError::Limit(_) => ArosError::ObjectTooLarge,
+            // Staged writes could not be published and were abandoned so the
+            // volume stays usable. Data a caller was told had been written is
+            // gone, which is a disk write failure and not a refusal: DOS has
+            // no code for "some of what you wrote is lost", and the nearest
+            // honest one says the write did not reach the disk. How much is in
+            // the flight recorder.
+            VfsError::WindowLost(_) => ArosError::Unknown,
         }
     }
 }
