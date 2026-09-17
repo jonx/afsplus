@@ -67,6 +67,20 @@ struct AfsplusArosNativeNotify {
     struct AfsplusArosNativeNotify *next;
 };
 
+/* Bound on waiting ACTION_LOCK_RECORD packets; one more answers
+ * ERROR_LOCK_TIMEOUT at once. */
+#define AFSPLUS_AROS_PARKED_MAX 16
+
+struct AfsplusArosParked {
+    struct DosPacket *packet;
+    struct AfsplusArosNativeFile *file;
+    uint64_t offset;
+    uint64_t length;
+    uint32_t exclusive;
+    uint32_t remaining_ticks;
+    uint32_t packet64;
+};
+
 struct AfsplusArosPacketContext {
     struct AfsplusAros *filesystem;
     struct MsgPort *handler_port;
@@ -80,6 +94,9 @@ struct AfsplusArosPacketContext {
     struct AfsplusArosNativeNotify *notifies;
     AfsplusArosPacketNotify notify;
     AfsplusArosPacketRelabel relabel;
+    AfsplusArosPacketComplete complete;
+    struct AfsplusArosParked parked[AFSPLUS_AROS_PARKED_MAX];
+    uint32_t parked_count;
     uint32_t exall_serial;
     uint32_t inhibited;
     uint32_t quit;
@@ -917,6 +934,77 @@ static void store_packet_result(struct DosPacket *packet, SIPTR result,
     packet->dp_Res2 = error;
 }
 
+/* Stores the result of the deferred packet at index, removes it keeping the
+ * order of the others, and hands it back. */
+static void complete_parked(struct AfsplusArosPacketContext *context,
+    uint32_t index, int32_t error)
+{
+    struct AfsplusArosParked done = context->parked[index];
+
+    context->parked_count--;
+    for (; index < context->parked_count; index++)
+        context->parked[index] = context->parked[index + 1];
+    store_packet_result(done.packet, error == 0 ? DOSTRUE : DOSFALSE,
+        error == 0 ? DOSTRUE : DOSFALSE, error, done.packet64);
+    context->complete(context->callback_context, done.packet);
+}
+
+/* Oldest first. A range still taken keeps its place; any other answer ends
+ * the wait with that answer. */
+static void retry_parked(struct AfsplusArosPacketContext *context)
+{
+    uint32_t index = 0;
+
+    while (index < context->parked_count)
+    {
+        struct AfsplusArosParked *entry = &context->parked[index];
+        int32_t error = afsplus_aros_lock_record(context->filesystem,
+            entry->file->id, entry->offset, entry->length, entry->exclusive);
+
+        if (error == ERROR_LOCK_COLLISION)
+            index++;
+        else
+            complete_parked(context, index, error);
+    }
+}
+
+/* A file that closes takes its own waiting packets with it. */
+static void fail_parked_of(struct AfsplusArosPacketContext *context,
+    const struct AfsplusArosNativeFile *file, int32_t error)
+{
+    uint32_t index = 0;
+
+    while (index < context->parked_count)
+    {
+        if (file == NULL || context->parked[index].file == file)
+            complete_parked(context, index, error);
+        else
+            index++;
+    }
+}
+
+uint32_t afsplus_aros_packet_waiting(
+    const struct AfsplusArosPacketContext *context)
+{
+    return context != NULL ? context->parked_count : 0;
+}
+
+void afsplus_aros_packet_elapsed(struct AfsplusArosPacketContext *context,
+    uint32_t ticks)
+{
+    uint32_t index = 0;
+
+    if (context == NULL)
+        return;
+    while (index < context->parked_count)
+    {
+        if (context->parked[index].remaining_ticks <= ticks)
+            complete_parked(context, index, ERROR_LOCK_TIMEOUT);
+        else
+            context->parked[index++].remaining_ticks -= ticks;
+    }
+}
+
 int32_t afsplus_aros_packet_create(
     const struct AfsplusArosPacketConfig *config,
     struct AfsplusArosPacketContext **output)
@@ -944,6 +1032,7 @@ int32_t afsplus_aros_packet_create(
     context->now = config->now;
     context->notify = config->notify;
     context->relabel = config->relabel;
+    context->complete = config->complete;
     {
         struct AfsplusArosInterface interface;
 
@@ -970,6 +1059,7 @@ int32_t afsplus_aros_packet_destroy(
 
     if (context == NULL)
         return ERROR_BAD_NUMBER;
+    fail_parked_of(context, NULL, ERROR_DEVICE_NOT_MOUNTED);
     while (context->files != NULL)
     {
         struct AfsplusArosNativeFile *file = context->files;
@@ -1072,6 +1162,8 @@ int32_t afsplus_aros_packet_process(
     int32_t error = 0;
     uint32_t packet64 = 0;
     struct NotifyRequest *initial_notify = NULL;
+    uint32_t deferred = 0;
+    uint32_t released = 0;
 
     if (context == NULL || packet == NULL)
         return ERROR_BAD_NUMBER;
@@ -1495,6 +1587,8 @@ int32_t afsplus_aros_packet_process(
             error = ERROR_INVALID_LOCK;
         else
         {
+            fail_parked_of(context, file, ERROR_INVALID_LOCK);
+            released = 1;
             if (file->writable)
                 error = afsplus_aros_fsync(context->filesystem, file->id);
             close_error = afsplus_aros_close(context->filesystem, file->id);
@@ -2094,8 +2188,11 @@ int32_t afsplus_aros_packet_process(
         if (error == 0 && file == NULL)
             error = ERROR_INVALID_LOCK;
         if (error == 0 && freeing)
+        {
             error = afsplus_aros_free_record(context->filesystem, file->id,
                 offset, length);
+            released = error == 0;
+        }
         else if (error == 0 && (mode < REC_EXCLUSIVE
             || mode > REC_SHARED_IMMED))
             error = ERROR_BAD_NUMBER;
@@ -2104,11 +2201,33 @@ int32_t afsplus_aros_packet_process(
             error = afsplus_aros_lock_record(context->filesystem, file->id,
                 offset, length,
                 mode == REC_EXCLUSIVE || mode == REC_EXCLUSIVE_IMMED);
-            /* This layer never waits. A waiting mode whose range is taken
-             * reports its wait as expired; dp_Arg5 ticks are not honoured. */
+            /* A waiting mode whose range is taken waits dp_Arg5 ticks when
+             * the handler can take the packet back later and the table has
+             * room; otherwise its wait is reported as expired at once. */
             if (error == ERROR_LOCK_COLLISION
                 && (mode == REC_EXCLUSIVE || mode == REC_SHARED))
-                error = ERROR_LOCK_TIMEOUT;
+            {
+                if (context->complete != NULL && packet->dp_Arg5 > 0
+                    && context->parked_count < AFSPLUS_AROS_PARKED_MAX)
+                {
+                    struct AfsplusArosParked *entry =
+                        &context->parked[context->parked_count++];
+
+                    entry->packet = packet;
+                    entry->file = file;
+                    entry->offset = offset;
+                    entry->length = length;
+                    entry->exclusive = mode == REC_EXCLUSIVE;
+                    entry->remaining_ticks =
+                        (uint64_t)packet->dp_Arg5 > UINT32_MAX
+                        ? UINT32_MAX : (uint32_t)packet->dp_Arg5;
+                    entry->packet64 = packet64;
+                    deferred = 1;
+                    error = 0;
+                }
+                else
+                    error = ERROR_LOCK_TIMEOUT;
+            }
         }
         if (error == 0)
             result = DOSTRUE;
@@ -2350,9 +2469,13 @@ int32_t afsplus_aros_packet_process(
         break;
     }
 
-    store_packet_result(packet, result, result64, error, packet64);
+    if (!deferred)
+        store_packet_result(packet, result, result64, error, packet64);
     if (initial_notify != NULL)
         context->notify(context->callback_context, initial_notify);
+    /* Whatever this packet released may be what an older one waits for. */
+    if (released && context->parked_count != 0)
+        retry_parked(context);
     deliver_notifications(context);
-    return 0;
+    return deferred ? AFSPLUS_AROS_PACKET_DEFERRED : 0;
 }

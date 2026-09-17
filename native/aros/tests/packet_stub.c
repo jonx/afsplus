@@ -59,6 +59,8 @@ static uint32_t relabel_calls;
 static char relabel_phases[8];
 static int32_t stub_relabel_prepare_error;
 static int32_t stub_record_error;
+/* Lets a free succeed while locks still collide. */
+static uint32_t stub_free_succeeds;
 static uint64_t stub_record_offset;
 static uint64_t stub_record_length;
 static uint32_t stub_record_exclusive;
@@ -642,6 +644,16 @@ int32_t afsplus_aros_set_volume_label(struct AfsplusAros *filesystem,
     return stub_label_error;
 }
 
+static struct DosPacket *completed[24];
+static size_t completed_count;
+
+static void packet_complete(void *context, struct DosPacket *packet)
+{
+    (void)context;
+    assert(completed_count < sizeof(completed) / sizeof(completed[0]));
+    completed[completed_count++] = packet;
+}
+
 static int32_t packet_relabel(void *context, uint32_t phase,
     const uint8_t *name, uint32_t name_length)
 {
@@ -725,7 +737,7 @@ int32_t afsplus_aros_free_record(struct AfsplusAros *filesystem,
     record('u', file, NULL, 0, 0);
     stub_record_offset = offset;
     stub_record_length = length;
-    return stub_record_error;
+    return stub_free_succeeds ? 0 : stub_record_error;
 }
 
 static void assert_event(size_t index, char operation, const char *name,
@@ -767,6 +779,7 @@ int main(void)
     config.now = packet_now;
     config.notify = packet_notify;
     config.relabel = packet_relabel;
+    config.complete = packet_complete;
     assert(afsplus_aros_packet_create(&config, &context) == 0);
     assert(context != NULL);
 
@@ -1537,6 +1550,139 @@ int main(void)
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res2 == ERROR_INVALID_LOCK);
 
+        /* Waiting modes with a timeout: the packet is kept, not answered,
+         * and comes back through the complete callback. */
+        {
+            struct DosPacket first;
+            struct DosPacket second;
+            struct DosPacket third;
+            struct FileHandle other;
+            struct DosPacket many[17];
+            size_t index;
+
+            completed_count = 0;
+            stub_record_error = ERROR_LOCK_COLLISION;
+            initialize_packet(&first, ACTION_LOCK_RECORD);
+            first.dp_Arg1 = from_lock.fh_Arg1;
+            first.dp_Arg2 = 100;
+            first.dp_Arg3 = 10;
+            first.dp_Arg4 = REC_EXCLUSIVE;
+            first.dp_Arg5 = 10;
+            first.dp_Res1 = 0x5a5a;
+            first.dp_Res2 = 0x5a5a;
+            assert(afsplus_aros_packet_process(context, &first)
+                == AFSPLUS_AROS_PACKET_DEFERRED);
+            assert(first.dp_Res1 == 0x5a5a && first.dp_Res2 == 0x5a5a);
+            second = first;
+            second.dp_Arg2 = 200;
+            second.dp_Arg4 = REC_SHARED;
+            second.dp_Arg5 = 30;
+            assert(afsplus_aros_packet_process(context, &second)
+                == AFSPLUS_AROS_PACKET_DEFERRED);
+            assert(afsplus_aros_packet_waiting(context) == 2);
+            assert(completed_count == 0);
+
+            /* Nine ticks expire nobody; the tenth expires the first only. */
+            afsplus_aros_packet_elapsed(context, 9);
+            assert(completed_count == 0);
+            afsplus_aros_packet_elapsed(context, 1);
+            assert(completed_count == 1 && completed[0] == &first);
+            assert(first.dp_Res1 == DOSFALSE
+                && first.dp_Res2 == ERROR_LOCK_TIMEOUT);
+            assert(afsplus_aros_packet_waiting(context) == 1);
+
+            /* A free that does not release the awaited range: the waiter is
+             * retried, collides again and keeps its place and its time. */
+            stub_free_succeeds = 1;
+            reset_events();
+            initialize_packet(&packet, ACTION_FREE_RECORD);
+            packet.dp_Arg1 = from_lock.fh_Arg1;
+            packet.dp_Arg2 = 8;
+            packet.dp_Arg3 = 16;
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE);
+            assert(event_count == 2 && events[0].operation == 'u'
+                && events[1].operation == 'k' && events[1].access == 0);
+            assert(completed_count == 1);
+            assert(afsplus_aros_packet_waiting(context) == 1);
+
+            /* The free that releases it: the waiter is granted before the
+             * freeing packet returns, with the range it asked for. */
+            stub_record_error = 0;
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(completed_count == 2 && completed[1] == &second);
+            assert(second.dp_Res1 == DOSTRUE && second.dp_Res2 == 0);
+            assert(stub_record_offset == 200 && stub_record_exclusive == 0);
+            assert(afsplus_aros_packet_waiting(context) == 0);
+            /* Twenty ticks were left; time passing later touches nothing. */
+            afsplus_aros_packet_elapsed(context, 1000);
+            assert(completed_count == 2);
+
+            /* A retry that fails for another reason ends the wait with that
+             * reason. */
+            stub_record_error = ERROR_LOCK_COLLISION;
+            third = first;
+            assert(afsplus_aros_packet_process(context, &third)
+                == AFSPLUS_AROS_PACKET_DEFERRED);
+            stub_record_error = ERROR_NO_FREE_STORE;
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(completed_count == 3 && completed[2] == &third);
+            assert(third.dp_Res1 == DOSFALSE
+                && third.dp_Res2 == ERROR_NO_FREE_STORE);
+
+            /* A file that closes takes its waiting packet with it, before the
+             * filesystem forgets the handle; another file's waiter stays. */
+            memset(&other, 0, sizeof(other));
+            initialize_packet(&packet, ACTION_FINDOUTPUT);
+            packet.dp_Arg1 = (SIPTR)MKBADDR(&other);
+            packet.dp_Arg2 = (SIPTR)root;
+            packet.dp_Arg3 = packet_bstr("other");
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE);
+            stub_record_error = ERROR_LOCK_COLLISION;
+            third = first;
+            third.dp_Arg1 = other.fh_Arg1;
+            assert(afsplus_aros_packet_process(context, &third)
+                == AFSPLUS_AROS_PACKET_DEFERRED);
+            second = first;
+            assert(afsplus_aros_packet_process(context, &second)
+                == AFSPLUS_AROS_PACKET_DEFERRED);
+            initialize_packet(&packet, ACTION_END);
+            packet.dp_Arg1 = other.fh_Arg1;
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE);
+            assert(completed_count == 4 && completed[3] == &third);
+            assert(third.dp_Res2 == ERROR_INVALID_LOCK);
+            assert(afsplus_aros_packet_waiting(context) == 1);
+            afsplus_aros_packet_elapsed(context, 10);
+            assert(completed_count == 5 && completed[4] == &second);
+
+            /* The table is bounded: the seventeenth waiter answers at once.
+             * The others expire together, oldest first. */
+            completed_count = 0;
+            for (index = 0; index < 17; index++)
+            {
+                many[index] = first;
+                many[index].dp_Arg5 = 5;
+                assert(afsplus_aros_packet_process(context, &many[index])
+                    == (index < 16 ? AFSPLUS_AROS_PACKET_DEFERRED : 0));
+            }
+            assert(many[16].dp_Res1 == DOSFALSE
+                && many[16].dp_Res2 == ERROR_LOCK_TIMEOUT);
+            assert(afsplus_aros_packet_waiting(context) == 16);
+            afsplus_aros_packet_elapsed(context, 5);
+            assert(completed_count == 16
+                && afsplus_aros_packet_waiting(context) == 0);
+            for (index = 0; index < 16; index++)
+                assert(completed[index] == &many[index]
+                    && many[index].dp_Res2 == ERROR_LOCK_TIMEOUT);
+            stub_record_error = 0;
+            stub_free_succeeds = 0;
+            completed_count = 0;
+            /* "other" was closed in this block. */
+            closes++;
+        }
+
         initialize_packet(&packet, ACTION_END);
         packet.dp_Arg1 = from_lock.fh_Arg1;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
@@ -1725,6 +1871,7 @@ int main(void)
             request.nr_FullName = (STRPTR)"AFS+:x";
             config.notify = NULL;
             config.relabel = NULL;
+            config.complete = NULL;
             assert(afsplus_aros_packet_create(&config, &old_context) == 0);
             reset_events();
             initialize_packet(&packet, ACTION_ADD_NOTIFY);
@@ -1740,9 +1887,68 @@ int main(void)
             assert(packet.dp_Res1 == DOSFALSE
                 && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
             assert(event_count == 0);
+            /* A context destroyed with a waiter hands the packet back before
+             * it closes the file the packet names. */
+            {
+                struct AfsplusArosPacketContext *dying = NULL;
+                struct FileHandle held;
+                struct DosPacket waiter;
+                uint32_t closes_before;
+
+                config.complete = packet_complete;
+                assert(afsplus_aros_packet_create(&config, &dying) == 0);
+                config.complete = NULL;
+                memset(&held, 0, sizeof(held));
+                initialize_packet(&packet, ACTION_FINDOUTPUT);
+                packet.dp_Arg1 = (SIPTR)MKBADDR(&held);
+                packet.dp_Arg3 = packet_bstr("held");
+                assert(afsplus_aros_packet_process(dying, &packet) == 0);
+                stub_record_error = ERROR_LOCK_COLLISION;
+                initialize_packet(&waiter, ACTION_LOCK_RECORD);
+                waiter.dp_Arg1 = held.fh_Arg1;
+                waiter.dp_Arg3 = 4;
+                waiter.dp_Arg4 = REC_SHARED;
+                waiter.dp_Arg5 = 50;
+                assert(afsplus_aros_packet_process(dying, &waiter)
+                    == AFSPLUS_AROS_PACKET_DEFERRED);
+                stub_record_error = 0;
+                completed_count = 0;
+                closes_before = close_count;
+                assert(afsplus_aros_packet_destroy(dying) == 0);
+                assert(completed_count == 1 && completed[0] == &waiter);
+                assert(waiter.dp_Res1 == DOSFALSE
+                    && waiter.dp_Res2 == ERROR_DEVICE_NOT_MOUNTED);
+                assert(close_count == closes_before + 1);
+                completed_count = 0;
+            }
+
+            /* Nor can it take a packet back later: a waiting record lock
+             * with a timeout still answers at once. */
+            {
+                struct FileHandle plain;
+
+                memset(&plain, 0, sizeof(plain));
+                initialize_packet(&packet, ACTION_FINDOUTPUT);
+                packet.dp_Arg1 = (SIPTR)MKBADDR(&plain);
+                packet.dp_Arg3 = packet_bstr("plain");
+                assert(afsplus_aros_packet_process(old_context, &packet) == 0);
+                assert(packet.dp_Res1 == DOSTRUE);
+                stub_record_error = ERROR_LOCK_COLLISION;
+                initialize_packet(&packet, ACTION_LOCK_RECORD);
+                packet.dp_Arg1 = plain.fh_Arg1;
+                packet.dp_Arg3 = 4;
+                packet.dp_Arg4 = REC_EXCLUSIVE;
+                packet.dp_Arg5 = 50;
+                assert(afsplus_aros_packet_process(old_context, &packet) == 0);
+                assert(packet.dp_Res1 == DOSFALSE
+                    && packet.dp_Res2 == ERROR_LOCK_TIMEOUT);
+                assert(afsplus_aros_packet_waiting(old_context) == 0);
+                stub_record_error = 0;
+            }
             assert(afsplus_aros_packet_destroy(old_context) == 0);
             config.notify = packet_notify;
             config.relabel = packet_relabel;
+            config.complete = packet_complete;
         }
     }
 

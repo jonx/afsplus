@@ -21,7 +21,12 @@
 extern "C" {
 #endif
 
-#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(3)
+#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(4)
+
+/* afsplus_aros_packet_process kept the packet: no result is stored and the
+ * handler must not reply. The packet comes back through the complete
+ * callback. Only a configuration with that callback ever sees this value. */
+#define AFSPLUS_AROS_PACKET_DEFERRED INT32_C(-1)
 
 struct AfsplusArosPacketContext;
 
@@ -49,6 +54,13 @@ typedef void (*AfsplusArosPacketNotify)(void *context,
 typedef int32_t (*AfsplusArosPacketRelabel)(void *context, uint32_t phase,
     const uint8_t *name, uint32_t name_length);
 
+/* Hands back a packet that afsplus_aros_packet_process deferred, with its
+ * result stored; the handler replies to it. Called from inside
+ * afsplus_aros_packet_process, afsplus_aros_packet_elapsed and
+ * afsplus_aros_packet_destroy. */
+typedef void (*AfsplusArosPacketComplete)(void *context,
+    struct DosPacket *packet);
+
 struct AfsplusArosPacketConfig {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -64,14 +76,17 @@ struct AfsplusArosPacketConfig {
     /* Optional. Without it ACTION_RENAME_DISK is ERROR_ACTION_NOT_KNOWN:
      * a volume whose DOS node kept the old name would answer to two names. */
     AfsplusArosPacketRelabel relabel;
+    /* Optional. Without it a waiting ACTION_LOCK_RECORD whose range is taken
+     * answers ERROR_LOCK_TIMEOUT at once instead of waiting dp_Arg5 ticks. */
+    AfsplusArosPacketComplete complete;
 };
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 80,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 88,
     "AfsplusArosPacketConfig 64-bit ABI drift");
 #elif UINTPTR_MAX == UINT32_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 44,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 48,
     "AfsplusArosPacketConfig 32-bit ABI drift");
 #endif
 #endif
@@ -98,6 +113,17 @@ int32_t afsplus_aros_packet_process(
 uint32_t afsplus_aros_packet_notify_registered(
     const struct AfsplusArosPacketContext *context,
     const struct NotifyRequest *request);
+
+/* Number of deferred packets. While it is nonzero the handler reports the
+ * passing of time with afsplus_aros_packet_elapsed, in ticks of 1/50 s; a
+ * packet whose dp_Arg5 ticks have passed completes with ERROR_LOCK_TIMEOUT.
+ * Deferred packets are retried, oldest first, whenever a record is freed or
+ * a file closed. A later immediate request may take a range before an older
+ * waiting one is retried: the queue orders waiters, not all requests. */
+uint32_t afsplus_aros_packet_waiting(
+    const struct AfsplusArosPacketContext *context);
+void afsplus_aros_packet_elapsed(struct AfsplusArosPacketContext *context,
+    uint32_t ticks);
 
 uint32_t afsplus_aros_packet_should_quit(
     const struct AfsplusArosPacketContext *context);
