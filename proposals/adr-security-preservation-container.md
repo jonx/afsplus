@@ -149,7 +149,7 @@ never implied. The policy is host runtime state and is absent from the disk.
   or orphan cleanup, retires the chain with the record.
 - `CloneFile` and `CloneRange` never share or copy a chain: the destination
   of a clone carries no descriptor, and a range clone keeps the destination's
-  own.
+  own ([clone metadata inheritance](adr-clone-metadata-inheritance.md)).
 - The checker claims every segment in the single ownership set, so a leaked,
   doubly referenced, foreign or damaged segment is a finding, and it reports
   the flag on a volume without the feature as corruption.

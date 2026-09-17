@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Decide clone metadata inheritance and leave the clone source untouched](#2026-09-17--decide-clone-metadata-inheritance-and-leave-the-clone-source-untouched)
 - [2026-09-17 — Carry opaque security descriptors through every object rewrite](#2026-09-17--carry-opaque-security-descriptors-through-every-object-rewrite)
 - [2026-09-17 — Admit object records only in their canonical image](#2026-09-17--admit-object-records-only-in-their-canonical-image)
 - [2026-09-17 — Close a-cache and Stage A](#2026-09-17--close-a-cache-and-stage-a)
@@ -173,6 +174,24 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-17 — Decide clone metadata inheritance and leave the clone source untouched
+
+`CloneFile` gives the destination the source's modification time and
+protection word, a new identity, creation and change time at the clone time,
+one link, full COW and no security descriptor. `CloneRange` moves only the
+destination's modification and change time. Both leave every user-visible
+field of the source, including its change time: before this entry both set
+the source's change time to the clone time when they rewrote its record to
+mark shared runs, so a reader's clone made backup and scanning tools revisit
+an unchanged file.
+
+`crates/afsplus-check/tests/clone_metadata.rs` pins the contract with literal
+times; its two source assertions failed with the clone times 40 and 50 before
+the correction. The 17 shared-clone tests and the two data-policy clone tests
+pass with it. The decision, its build-cache consumer and the API consequences
+are in
+[clone metadata inheritance](proposals/adr-clone-metadata-inheritance.md).
 
 ## 2026-09-17 — Carry opaque security descriptors through every object rewrite
 

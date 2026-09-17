@@ -2304,10 +2304,11 @@ impl<D: BlockDevice> Volume<D> {
             (source.flags | OBJECT_FLAG_EXTENT_TREE, built.root_lba)
         };
         let _ = source_tree_blocks; // COW originals are retired by mutate_many
+                                    // Sharing is a layout fact: no user-visible field of the source
+                                    // changes, so its change time stays.
         let source_new_record = ObjectRecord {
             flags: source_flags,
             data_root: source_data_root,
-            changed: now,
             ..source
         };
 
@@ -2681,8 +2682,9 @@ impl<D: BlockDevice> Volume<D> {
                 &source_new_extents,
                 source.size_bytes,
                 false,
-                now,
-                now,
+                source.modified,
+                // Sharing is a layout fact: the source's change time stays.
+                source.changed,
                 generation,
             )?;
             metadata_writes.extend(staged.metadata_writes);
