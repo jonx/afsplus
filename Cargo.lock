@@ -77,6 +77,7 @@ dependencies = [
  "fuser",
  "libc",
  "log",
+ "nix",
 ]
 
 [[package]]

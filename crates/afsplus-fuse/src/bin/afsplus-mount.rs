@@ -1,5 +1,4 @@
 use std::io;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +13,7 @@ use afsplus_fuse::fuser_adapter::FuserFilesystem;
 use afsplus_fuse::{host_names, FuseConfig};
 use afsplus_vfs::Vfs;
 use fuser::{Config, MountOption, SessionACL};
+use nix::unistd::{getegid, geteuid};
 
 /// How often the diagnostics report is rewritten while the volume is mounted.
 /// A reader gets a report at most this old, without stopping the filesystem.
@@ -63,7 +63,7 @@ fn init_logging() {
 
 fn run() -> Result<(), String> {
     let (mode, image, mountpoint, diagnostics_path) = arguments()?;
-    let (uid, gid) = mount_ownership(&image, &mountpoint)?;
+    let (uid, gid) = mount_ownership(&mountpoint)?;
 
     let device = open_image(&image)?;
     let mut vfs = Vfs::mount(
@@ -248,20 +248,33 @@ fn write_report(path: &Path, report: &str) {
     }
 }
 
-fn mount_ownership(image: &Path, mountpoint: &Path) -> Result<(u32, u32), String> {
+/// The volume belongs to whoever mounted it.
+///
+/// It used to take the owner from the mountpoint, or from the image file when
+/// the mountpoint did not exist yet. Both read a group from wherever the file
+/// or directory happened to sit: an image under a home directory gave the
+/// volume `staff`, the same image under `/tmp` gave it `wheel`. The host then
+/// asks, after every create, for the group the creating process actually has,
+/// and the driver answered that it could not. On a volume whose image sat in
+/// `/tmp`, every mkdir and every new file reported "Operation not supported"
+/// while quietly succeeding, and a whole battery of ordinary use collapsed for
+/// a reason that had nothing to do with the filesystem.
+///
+/// The mount is already `noowners`, which means exactly this: the volume is
+/// the mounting user's. Reading it from the process says so once, and says the
+/// same thing wherever the image lives.
+fn mount_ownership(mountpoint: &Path) -> Result<(u32, u32), String> {
     match std::fs::metadata(mountpoint) {
-        Ok(metadata) if metadata.is_dir() => Ok((metadata.uid(), metadata.gid())),
-        Ok(_) => Err(format!("{} is not a directory", mountpoint.display())),
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err(format!("{} is not a directory", mountpoint.display())),
         Err(error)
             if error.kind() == io::ErrorKind::NotFound
-                && missing_mountpoint_is_supported(mountpoint) =>
-        {
-            let metadata = std::fs::metadata(image)
-                .map_err(|error| format!("cannot inspect {}: {error}", image.display()))?;
-            Ok((metadata.uid(), metadata.gid()))
+                && missing_mountpoint_is_supported(mountpoint) => {}
+        Err(error) => {
+            return Err(format!("cannot inspect {}: {error}", mountpoint.display()));
         }
-        Err(error) => Err(format!("cannot inspect {}: {error}", mountpoint.display())),
     }
+    Ok((geteuid().as_raw(), getegid().as_raw()))
 }
 
 #[cfg(all(target_os = "macos", feature = "macfuse-mount"))]
