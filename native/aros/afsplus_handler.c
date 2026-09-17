@@ -212,15 +212,22 @@ static void packet_notify(void *context, struct NotifyRequest *request)
 
     if ((request->nr_Flags & NRF_SEND_SIGNAL) != 0)
     {
-        Signal(request->nr_stuff.nr_Signal.nr_Task,
-            1UL << request->nr_stuff.nr_Signal.nr_SignalNum);
+        if (request->nr_stuff.nr_Signal.nr_Task != NULL
+            && request->nr_stuff.nr_Signal.nr_SignalNum < 32)
+            Signal(request->nr_stuff.nr_Signal.nr_Task,
+                1UL << request->nr_stuff.nr_Signal.nr_SignalNum);
         return;
     }
     if ((request->nr_Flags & NRF_SEND_MESSAGE) == 0)
         return;
     if ((request->nr_Flags & NRF_WAIT_REPLY) != 0
         && request->nr_MsgCount > 0)
+    {
+        /* The change is not dropped: it is owed, and sent when the
+         * outstanding message comes back (the AROS RAM handler's rule). */
+        request->nr_Flags |= NRF_MAGIC;
         return;
+    }
     message = AllocMem(sizeof(*message), MEMF_PUBLIC | MEMF_CLEAR);
     if (message == NULL)
         return;
@@ -249,14 +256,26 @@ static void collect_notify_replies(struct AfsplusArosHandler *handler)
     {
         if (message->nm_Class != NOTIFY_CLASS
             || message->nm_Code != NOTIFY_CODE)
+        {
+            /* Not ours: its sender waits for a reply like anyone else. */
+            ReplyMsg(&message->nm_ExecMessage);
             continue;
-        if (afsplus_aros_packet_notify_registered(handler->packets,
-                message->nm_NReq)
-            && message->nm_NReq->nr_MsgCount > 0)
-            message->nm_NReq->nr_MsgCount--;
+        }
+        struct NotifyRequest *request = message->nm_NReq;
+        uint32_t registered = afsplus_aros_packet_notify_registered(
+            handler->packets, request);
+
+        if (registered && request->nr_MsgCount > 0)
+            request->nr_MsgCount--;
         if (handler->notify_outstanding > 0)
             handler->notify_outstanding--;
         FreeMem(message, sizeof(*message));
+        /* A change that arrived while this message was out is sent now. */
+        if (registered && (request->nr_Flags & NRF_MAGIC) != 0)
+        {
+            request->nr_Flags &= ~NRF_MAGIC;
+            packet_notify(handler, request);
+        }
     }
 }
 
@@ -882,6 +901,19 @@ LONG handler(struct ExecBase *SysBase)
             else
                 reply_packet(port, SysBase, packet);
         }
+    }
+
+    /* Packets that queued up behind ACTION_DIE would wait for ever on a port
+     * nobody serves. No lock or file exists at this point, so each of them
+     * names the volume only, and the volume is going away. */
+    while ((message = GetMsg(port)) != NULL)
+    {
+        packet = (struct DosPacket *)message->mn_Node.ln_Name;
+        if (packet == NULL)
+            continue;
+        packet->dp_Res1 = DOSFALSE;
+        packet->dp_Res2 = ERROR_DEVICE_NOT_MOUNTED;
+        reply_packet(port, SysBase, packet);
     }
 
     /* Keep the ACTION_DIE sender blocked until every handler-owned reference

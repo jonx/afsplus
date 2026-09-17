@@ -200,8 +200,10 @@ the packet configuration after every packet.
 The handler shell delivers through its own reply port (L4 source, type-checked
 against the SDK include tree, never run).
 
-Lacking: the target run of the delivery path; the v2 `watch` operation over
-the same table.
+Lacking: the target run of the delivery path, which must show a change made
+during an unreplied `NRF_WAIT_REPLY` message arriving after the reply, and a
+dismount succeeding with a message never replied; the v2 `watch` operation
+over the same table.
 
 Hosted and QEMU: all. Apple hardware: none.
 

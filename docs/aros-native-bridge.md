@@ -335,7 +335,9 @@ The shell sends messages from its own reply port, waits on that port next to
 the packet port, and takes replied messages back before each batch of
 packets. After `EndNotify` the `NotifyRequest` belongs to the application
 again, so a returning message touches `nr_MsgCount` only while
-`afsplus_aros_packet_notify_registered` still knows the request. A message can
+`afsplus_aros_packet_notify_registered` still knows the request. A change that arrives while an `NRF_WAIT_REPLY` message is unreplied is
+owed, marked with `NRF_MAGIC` as the AROS RAM handler does, and sent when the
+reply comes back, so it is delayed and never lost. A message can
 stay out for good: `EndNotify` takes back only messages still queued at the
 application, and one already fetched by an application that crashed is never
 replied. The shell dies anyway, so the volume stays dismountable, and in that
