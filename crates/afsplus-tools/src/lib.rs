@@ -7,6 +7,7 @@
 //! fail closed.
 
 mod common;
+mod diff;
 mod dump;
 mod extract;
 mod info;
@@ -38,6 +39,16 @@ where
     I: IntoIterator<Item = OsString>,
 {
     dump::run(args)
+}
+
+/// Runs the `afsplus-image-diff` command and returns its documented process
+/// status. A reported difference is a normal result; an image that could
+/// only be compared in part gives the media status.
+pub fn run_image_diff<I>(args: I) -> u8
+where
+    I: IntoIterator<Item = OsString>,
+{
+    diff::run(args)
 }
 
 /// Extracts readable checkpoint objects into a new, separate directory.

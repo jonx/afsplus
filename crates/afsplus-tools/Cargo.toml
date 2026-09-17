@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 afsplus-block = { path = "../afsplus-block" }
+afsplus-check = { path = "../afsplus-check" }
 afsplus-core = { path = "../afsplus-core" }
 afsplus-format = { path = "../afsplus-format" }
 
