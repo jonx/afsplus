@@ -99,6 +99,54 @@ impl<D: BlockDevice> Volume<D> {
         self.commit_object_metadata(record)
     }
 
+    /// The committed volume label. The identification block keeps the label
+    /// given at format time; this is the current one (ADR-104).
+    pub fn volume_label(&self) -> &str {
+        &self.checkpoint.label
+    }
+
+    /// Relabel the volume: one commit whose checkpoint carries the new
+    /// label, so a power cut leaves the old label or the new one. The rule
+    /// is the formatter's: at most 64 bytes of UTF-8 without NUL. An
+    /// unchanged label is a no-op.
+    pub fn set_volume_label(&mut self, label: &str) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SetVolumeLabel, |volume| {
+            volume.set_volume_label_untraced(label)
+        })
+    }
+
+    fn set_volume_label_untraced(&mut self, label: &str) -> Result<(), CoreError> {
+        self.ensure_window_closed()?;
+        afsplus_format::ident::validate_label(label)
+            .map_err(|_| CoreError::InvalidMetadata("volume label out of range"))?;
+        if label == self.checkpoint.label {
+            return Ok(());
+        }
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            generation,
+            self.reclaim_batch_blocks,
+            self.alloc_rover_region,
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
+        self.protect_emergency_headroom(&mut tx);
+        self.pending_label = Some(label.to_owned());
+        let result = self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            Vec::new(),
+            Vec::new(),
+            self.checkpoint.object_map_block,
+        );
+        self.pending_label = None;
+        result
+    }
+
     fn metadata_target(&mut self, object_id: u64) -> Result<ObjectRecord, CoreError> {
         let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
         if record.object_type == ObjectType::Internal {

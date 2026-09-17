@@ -74,4 +74,9 @@ Rules:
    leftmost child) up to a single root. At 4 KiB blocks and 512-block regions
    a four-region volume has its bootstrap metadata at blocks 9 to 12, its pool
    at 13 to 15 and eight log slots at 16 to 23
-11. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0
+11. the current volume label is committed state in the checkpoint payload
+   ([ADR-104](../adr/ADR-104-volume-label-in-checkpoint.md)): length at offset
+   96, seven zero bytes, 64 bytes of NUL-free UTF-8 zero padded, payload of
+   168 bytes, or 184 with the snapshot roots after it; the identification
+   block keeps the format-time label and is never rewritten
+12. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0

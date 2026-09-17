@@ -474,6 +474,7 @@ fn mkfs_impl<D: BlockDevice>(
         free_blocks_total: regions.iter().map(|record| record.free_blocks as u64).sum(),
         flags: 0,
         shared_extent_root_block: 0,
+        label: params.label.clone(),
         snapshot_roots,
     };
     dev.write_block(layout::CKPT_SLOT_A, &checkpoint.encode(block_size)?)?;

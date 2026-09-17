@@ -17,6 +17,18 @@
 
 #define AFSP_NAME_MAX_UTF8_BYTES   255u
 
+/*
+ * Volume label: at most 64 bytes of UTF-8 without NUL. The identification
+ * block keeps the label given at format time and is never rewritten. The
+ * current label is committed state in the checkpoint payload (ADR-104):
+ * offset 96 length, 97..103 reserved zero, 104..167 label, zero padded; the
+ * snapshot roots of ADR-073, when present, follow at 168 and 176.
+ */
+#define AFSP_LABEL_MAX_UTF8_BYTES  64u
+#define AFSP_CHECKPOINT_LABEL_OFFSET 96u
+#define AFSP_CHECKPOINT_PAYLOAD_BYTES 168u
+#define AFSP_CHECKPOINT_SNAPSHOT_PAYLOAD_BYTES 184u
+
 #define AFSP_OBJECT_INVALID        UINT64_C(0)
 #define AFSP_OBJECT_ROOT           UINT64_C(1)
 #define AFSP_OBJECT_ORPHAN_DIRECTORY UINT64_C(2) /* ADR-066 */

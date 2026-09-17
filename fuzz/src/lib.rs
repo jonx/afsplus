@@ -26,7 +26,7 @@ use afsplus_format::region::{BitmapBinding, RegionDescriptor};
 use afsplus_format::tree::{TreeItem, TreeKind, TreeNode};
 use afsplus_format::{Timespec, DEFAULT_BLOCK_SHIFT, DEFAULT_BLOCK_SIZE, OBJECT_ROOT};
 
-pub const SEED_SCHEMA_VERSION: u16 = 1;
+pub const SEED_SCHEMA_VERSION: u16 = 2;
 pub const ARTIFACT_SCHEMA_VERSION: u16 = 1;
 
 const ARTIFACT_MAGIC: [u8; 4] = *b"AFRF";
@@ -195,6 +195,7 @@ fn checkpoint_seed() -> Result<Vec<u8>, String> {
         free_blocks_total: 8000,
         flags: 0,
         shared_extent_root_block: 35,
+        label: "Fuzz".into(),
         snapshot_roots: None,
     }
     .encode(DEFAULT_BLOCK_SIZE)
@@ -791,32 +792,35 @@ mod tests {
             .collect();
         // Changing either column changes stable case identities. Bump
         // SEED_SCHEMA_VERSION and regenerate retained artifacts deliberately
-        // before updating these fingerprints. New target IDs append rows;
-        // the original five targets retain their exact version-1 bytes.
+        // before updating these fingerprints. New target IDs append rows.
+        // Seed schema 2: the checkpoint carries the volume label field
+        // (ADR-104), which changed the seed column of the checkpoint row and
+        // of the snapshot-checkpoint row; the version bump re-keys the
+        // mutation column of every row.
         assert_eq!(
             actual,
             vec![
-                (2_222_231_502, 4_262_541_247),
-                (871_648_849, 3_020_652_461),
-                (2_376_739_319, 847_916_959),
-                (3_397_820_429, 566_230_885),
-                (1_397_445_837, 1_646_714_288),
-                (2_056_605_176, 3_969_668_773),
-                (3_251_275_802, 4_105_609_348),
-                (3_025_747_490, 4_283_471_495),
-                (2_787_334_268, 1_549_429_375),
-                (1_278_262_154, 32_389_227),
-                (533_851_047, 67_109_637),
-                (3_346_469_996, 389_921_249),
-                (3_977_748_295, 1_732_764_413),
-                (1_589_963_715, 1_381_077_657),
-                (1_491_793_277, 3_037_729_287),
-                (1_979_058_185, 607_977_437),
-                (4_116_635_091, 3_389_458_638),
-                (1_571_146_886, 2_571_305_043),
-                (2_107_079_709, 3_576_662_424),
-                (1_972_104_977, 266_223_001),
-                (1_111_250_663, 445_173_983),
+                (2_222_231_502, 575_347_948),
+                (4_075_251_872, 1_022_669_042),
+                (2_376_739_319, 1_919_555_665),
+                (3_397_820_429, 84_032_268),
+                (1_397_445_837, 1_075_029_452),
+                (2_056_605_176, 3_356_925_986),
+                (3_251_275_802, 1_169_680_058),
+                (3_025_747_490, 322_828_749),
+                (2_787_334_268, 3_797_417_294),
+                (1_278_262_154, 1_402_220_451),
+                (533_851_047, 1_481_528_402),
+                (3_346_469_996, 4_033_660_905),
+                (3_977_748_295, 1_651_671_149),
+                (1_589_963_715, 713_067_800),
+                (1_491_793_277, 4_143_195_240),
+                (1_069_280_442, 2_035_905_823),
+                (4_116_635_091, 1_411_047_614),
+                (1_571_146_886, 1_621_436_109),
+                (2_107_079_709, 1_468_838_692),
+                (1_972_104_977, 98_234_878),
+                (1_111_250_663, 3_131_024_779),
             ]
         );
     }

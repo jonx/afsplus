@@ -132,6 +132,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-101](ADR-101-security-preservation-container.md) | Security preservation container | Accepted | amends [ADR-031](ADR-031-portable-security-acls.md) |
 | [ADR-102](ADR-102-clone-metadata-inheritance.md) | Metadata inheritance of CloneFile and CloneRange | Accepted | amends [ADR-027](ADR-027-reflink-clones.md) |
 | [ADR-103](ADR-103-change-record-actor.md) | Reserved actor field in the change record | Accepted | amends [ADR-013](ADR-013-change-stream-bounded.md) |
+| [ADR-104](ADR-104-volume-label-in-checkpoint.md) | The volume label is committed checkpoint state | Accepted | — |
 
 <!-- /adr-index -->
 

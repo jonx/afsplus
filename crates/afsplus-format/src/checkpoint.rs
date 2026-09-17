@@ -34,19 +34,30 @@
 //! 72     8    total free blocks
 //! 80     8    flags (zero; reserved)
 //! 88     8    shared-extent reference-tree root LBA (0 = no tree; ADR-061)
-//! 96     8    snapshot registry root (extended payload only; ADR-073)
-//! 104    8    lifetime ledger root (extended payload only; ADR-073)
+//! 96     1    volume label length in bytes (0..=64; ADR-104)
+//! 97     7    reserved (zero)
+//! 104    64   volume label, UTF-8 without NUL, zero padded
+//! 168    8    snapshot registry root (extended payload only; ADR-073)
+//! 176    8    lifetime ledger root (extended payload only; ADR-073)
 //! ```
+//!
+//! The label is committed state: a relabel is an ordinary commit, so a power
+//! cut leaves the old label or the new one. The identification block keeps
+//! the label given at format time and is never rewritten.
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+
+use crate::ident::{validate_label, LABEL_MAX_BYTES};
 
 use crate::geometry::Geometry;
 use crate::header::{block_type, BlockHeader, HEADER_SIZE};
 use crate::{le, FormatError, OBJECT_FIRST_DYNAMIC, OBJECT_ROOT};
 
-const FIXED_PAYLOAD: usize = 96;
-const SNAPSHOT_PAYLOAD: usize = 112;
+const LABEL_OFFSET: usize = 96;
+const FIXED_PAYLOAD: usize = LABEL_OFFSET + 8 + LABEL_MAX_BYTES;
+const SNAPSHOT_PAYLOAD: usize = FIXED_PAYLOAD + 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotRoots {
@@ -97,7 +108,9 @@ pub struct Checkpoint {
     /// that has never cloned; allocated by the first clone and kept allocated
     /// afterwards, even once the tree is empty again.
     pub shared_extent_root_block: u64,
-    /// Negotiated by INCOMPAT_PERSISTENT_SNAPSHOTS; absent uses legacy bytes.
+    /// Current volume label (ADR-104).
+    pub label: String,
+    /// Negotiated by INCOMPAT_PERSISTENT_SNAPSHOTS; absent uses the short payload.
     pub snapshot_roots: Option<SnapshotRoots>,
 }
 
@@ -116,6 +129,7 @@ impl Checkpoint {
                 "checkpoint requires an allocation root",
             ));
         }
+        validate_label(&self.label)?;
         let payload_len = if let Some(roots) = self.snapshot_roots {
             roots.validate()?;
             SNAPSHOT_PAYLOAD
@@ -139,9 +153,12 @@ impl Checkpoint {
         le::put_u64(&mut p[72..80], self.free_blocks_total);
         le::put_u64(&mut p[80..88], self.flags);
         le::put_u64(&mut p[88..96], self.shared_extent_root_block);
+        p[LABEL_OFFSET] = self.label.len() as u8;
+        p[LABEL_OFFSET + 8..LABEL_OFFSET + 8 + self.label.len()]
+            .copy_from_slice(self.label.as_bytes());
         if let Some(roots) = self.snapshot_roots {
-            le::put_u64(&mut p[96..104], roots.registry);
-            le::put_u64(&mut p[104..112], roots.lifetimes);
+            le::put_u64(&mut p[FIXED_PAYLOAD..FIXED_PAYLOAD + 8], roots.registry);
+            le::put_u64(&mut p[FIXED_PAYLOAD + 8..SNAPSHOT_PAYLOAD], roots.lifetimes);
         }
 
         BlockHeader {
@@ -188,6 +205,19 @@ impl Checkpoint {
                 "checkpoint generation invalid or inconsistent",
             ));
         }
+        let label_len = p[LABEL_OFFSET] as usize;
+        let label_field = &p[LABEL_OFFSET + 8..FIXED_PAYLOAD];
+        if label_len > LABEL_MAX_BYTES
+            || p[LABEL_OFFSET + 1..LABEL_OFFSET + 8] != [0; 7]
+            || label_field[label_len..].iter().any(|b| *b != 0)
+        {
+            return Err(FormatError::Invalid(
+                "checkpoint label field is not canonical",
+            ));
+        }
+        let label = core::str::from_utf8(&label_field[..label_len])
+            .map_err(|_| FormatError::InvalidUtf8)?;
+        validate_label(label)?;
         let checkpoint = Checkpoint {
             uuid,
             generation,
@@ -200,10 +230,11 @@ impl Checkpoint {
             free_blocks_total: le::get_u64(&p[72..80]),
             flags: le::get_u64(&p[80..88]),
             shared_extent_root_block: le::get_u64(&p[88..96]),
+            label: String::from(label),
             snapshot_roots: if p.len() == SNAPSHOT_PAYLOAD {
                 let roots = SnapshotRoots {
-                    registry: le::get_u64(&p[96..104]),
-                    lifetimes: le::get_u64(&p[104..112]),
+                    registry: le::get_u64(&p[FIXED_PAYLOAD..FIXED_PAYLOAD + 8]),
+                    lifetimes: le::get_u64(&p[FIXED_PAYLOAD + 8..SNAPSHOT_PAYLOAD]),
                 };
                 roots.validate()?;
                 Some(roots)

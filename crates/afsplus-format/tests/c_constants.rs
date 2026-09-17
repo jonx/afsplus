@@ -124,7 +124,24 @@ fn every_c_format_constant_equals_the_rust_codec() {
         free_blocks_total: 800,
         flags: 0,
         shared_extent_root_block: 0,
+        label: String::new(),
         snapshot_roots: None,
+    };
+    let mut with_roots = checkpoint.clone();
+    with_roots.snapshot_roots = Some(afsplus_format::checkpoint::SnapshotRoots {
+        registry: 30,
+        lifetimes: 31,
+    });
+    let mut labelled = checkpoint.clone();
+    labelled.label = "L".into();
+    let label_offset = {
+        let plain = checkpoint.encode(BS).unwrap();
+        let named = labelled.encode(BS).unwrap();
+        // The length byte is the first payload byte that differs.
+        (HEADER_SIZE..BS)
+            .find(|at| plain[*at] != named[*at] && *at >= HEADER_SIZE + 88)
+            .unwrap() as u64
+            - HEADER_SIZE as u64
     };
     let secured = file_record().with_security(Some(SecurityRef {
         first_block: 77,
@@ -155,6 +172,18 @@ fn every_c_format_constant_equals_the_rust_codec() {
         (
             "AFSP_NAME_MAX_UTF8_BYTES",
             afsplus_format::NAME_MAX_UTF8_BYTES as u64,
+        ),
+        ("AFSP_LABEL_MAX_UTF8_BYTES", ident::LABEL_MAX_BYTES as u64),
+        // Measured: a checkpoint whose label is one byte long has that byte
+        // as the first nonzero byte after the 96 fixed bytes plus eight.
+        ("AFSP_CHECKPOINT_LABEL_OFFSET", label_offset),
+        (
+            "AFSP_CHECKPOINT_PAYLOAD_BYTES",
+            payload_len(&checkpoint.encode(BS).unwrap()),
+        ),
+        (
+            "AFSP_CHECKPOINT_SNAPSHOT_PAYLOAD_BYTES",
+            payload_len(&with_roots.encode(BS).unwrap()),
         ),
         ("AFSP_OBJECT_INVALID", afsplus_format::OBJECT_INVALID),
         ("AFSP_OBJECT_ROOT", afsplus_format::OBJECT_ROOT),

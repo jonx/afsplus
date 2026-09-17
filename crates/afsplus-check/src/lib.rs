@@ -269,7 +269,7 @@ pub fn check_device<D: BlockDevice>(dev: &mut D) -> CheckReport {
             }
             report.volume = Some(VolumeSummary {
                 uuid_hex: hex(&ident.uuid),
-                label: ident.label.clone(),
+                label: selection.chosen.label.clone(),
                 total_blocks: ident.total_blocks,
                 region_size: ident.region_size,
                 name_key_algorithm: match ident.name_key_algorithm {

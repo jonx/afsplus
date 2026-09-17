@@ -281,7 +281,7 @@ pub fn header_json(view: &HeaderView) -> String {
     format!(
         "\"volume\":{{\"uuid\":{},\"label\":{},\"block_size\":{},\"total_blocks\":{},\"region_blocks\":{},\"log_slots\":{},\"name_key_algorithm\":{},\"case_sensitive\":{},\"unicode_version\":\"{}.{}.{}\",\"features\":{}}},\"checkpoint\":{{\"chosen_slot\":{},\"generation\":{},\"other_generation\":{},\"committed_tx_id\":{},\"next_object_id\":{},\"free_blocks\":{},\"emergency_headroom_blocks\":{emergency_headroom},\"available_blocks\":{available_blocks},\"object_map_lba\":{},\"allocation_root_lba\":{},\"reclaim_root_lba\":{},\"shared_extent_root_lba\":{},\"slot_status\":[{},{}]}}",
         json_string(&uuid_hex(&ident.uuid)),
-        json_string(&ident.label),
+        json_string(&checkpoint.label),
         ident.block_size(),
         ident.total_blocks,
         ident.region_size,

@@ -106,7 +106,7 @@ fn execute(options: &Options) -> Result<String, Failure> {
     Ok(format!(
         "AFS+ volume {}\nlabel: {:?}\ngeometry: {} blocks x {} bytes; region {} blocks\nnames: {} (Unicode {}.{}.{})\nfeatures: {}\nfeature masks: {}\ncheckpoint: slot {}, generation {}, transaction {}, raw free {}, emergency headroom {}, normally available {} blocks\nslot A: {}\nslot B: {}",
         uuid_hex(&ident.uuid),
-        ident.label,
+        checkpoint.label,
         ident.total_blocks,
         ident.block_size(),
         ident.region_size,

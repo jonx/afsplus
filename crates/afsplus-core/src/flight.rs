@@ -354,6 +354,7 @@ pub enum ApiMethod {
     SecurityDescriptor = 68,
     SetSecurityDescriptor = 69,
     SetSecurityProjectionPolicy = 70,
+    SetVolumeLabel = 71,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

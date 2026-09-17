@@ -44,6 +44,20 @@ pub const IDENT_VERSION: u32 = 3;
 pub const IDENT_VERSION_FEATURES: u32 = 2;
 pub const IDENT_VERSION_LEGACY: u32 = 1;
 pub const LABEL_MAX_BYTES: usize = 64;
+
+/// The label rule shared by the formatter, the relabel operation and both
+/// label carriers (this block at format time, the checkpoint afterwards): at
+/// most 64 bytes of UTF-8 and no NUL byte. Naming syntax of a host (a DOS
+/// colon, a path separator) is host policy and absent from the format.
+pub fn validate_label(label: &str) -> Result<(), FormatError> {
+    if label.len() > LABEL_MAX_BYTES {
+        return Err(FormatError::Overflow("volume label"));
+    }
+    if label.as_bytes().contains(&0) {
+        return Err(FormatError::Invalid("volume label contains NUL"));
+    }
+    Ok(())
+}
 /// The intent-log area and its replay semantics must be understood by every
 /// implementation that opens the volume (ADR-037).
 pub const INCOMPAT_INTENT_LOG: u64 = 1 << 0;
@@ -159,10 +173,8 @@ impl Identification {
                 actual: block_size,
             });
         }
+        validate_label(&self.label)?;
         let label = self.label.as_bytes();
-        if label.len() > LABEL_MAX_BYTES {
-            return Err(FormatError::Overflow("volume label"));
-        }
         self.validate_geometry()?;
 
         let mut block = vec![0u8; block_size];
@@ -267,6 +279,9 @@ impl Identification {
         }
         let label =
             core::str::from_utf8(&p[73..73 + label_len]).map_err(|_| FormatError::InvalidUtf8)?;
+        // The reader applies the rule the writer applies, so a decoded
+        // identification always encodes again.
+        validate_label(label)?;
 
         let ident = Identification {
             uuid,

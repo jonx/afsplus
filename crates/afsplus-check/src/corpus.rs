@@ -332,7 +332,7 @@ pub fn build_corruption_corpus() -> Result<Vec<CorruptionCase>, String> {
         &CHECKPOINT_LBAS,
         false,
         error(
-            "no valid checkpoint (slot A: invalid: checksum mismatch: stored 0xcbbe4fcb, computed 0x59017867; slot B: invalid: checksum mismatch: stored 0xb8928542, computed 0x2a2db2ee)",
+            "no valid checkpoint (slot A: invalid: checksum mismatch: stored 0x3fa465cf, computed 0xad1b5263; slot B: invalid: checksum mismatch: stored 0x4c88af46, computed 0xde3798ea)",
         ),
     )?);
     {

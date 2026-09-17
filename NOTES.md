@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Make the volume label committed checkpoint state](#2026-09-17--make-the-volume-label-committed-checkpoint-state)
 - [2026-09-17 — Pin the C statements of the format against the Rust codecs](#2026-09-17--pin-the-c-statements-of-the-format-against-the-rust-codecs)
 - [2026-09-17 — Move the placement of the permanent areas into geometry](#2026-09-17--move-the-placement-of-the-permanent-areas-into-geometry)
 - [2026-09-17 — Give the extent-map item one codec](#2026-09-17--give-the-extent-map-item-one-codec)
@@ -188,6 +189,40 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-17 — Make the volume label committed checkpoint state
+
+The label had one home, the identification block, which exists in one copy
+and is written once, so a relabel had no state with two legal outcomes under
+a power cut. [ADR-104](adr/ADR-104-volume-label-in-checkpoint.md) puts the
+current label in the checkpoint payload at offset 96 (length, seven zero
+bytes, 64 bytes of NUL-free UTF-8, zero padded); the payload is 168 bytes, or
+184 with the snapshot roots after the label. The identification block keeps
+the format-time label and is never rewritten. `Volume::set_volume_label` is
+one commit that changes nothing else, and every commit carries the label
+forward. The checker, `afsplus-info`, `afsplus-dump` and the JSON volume
+summary report the committed label. The portable C reader decodes the field
+under the same canonical rule and reports the committed label in its probe
+result.
+
+Proof: literal bytes, bounds, seven resealed non-canonical fields and six
+refused payload lengths in `crates/afsplus-format/tests/checkpoint_label.rs`;
+durability across remount and later commits, refusals, a read-only mount and
+68 modeled power cuts that each mount to the old or the new label with a clean
+checker verdict in `crates/afsplus-check/tests/volume_label.rs`, where the C
+reader also reports the same generation and label as the core, including the
+fallback to the older slot for four resealed label fields. The independent
+Python generator assembles the two new checkpoint images byte for byte equal
+to the Rust encoder; the two images of the retired layout are refused
+negatives. `tools/check-portable-c-reader.sh` passes on the new layout.
+
+The fuzz crate's checkpoint oracle models the field. Its mutation run found
+that the identification decoder admitted a label with an embedded NUL that
+the encoder, now sharing the label rule, refused to write back; the decoder
+and the C reader apply the rule too. The changed checkpoint seeds moved the
+seed fingerprints of the two checkpoint targets, so the seed schema version
+is 2 and all fingerprints are pinned again.
 
 ## 2026-09-17 — Pin the C statements of the format against the Rust codecs
 

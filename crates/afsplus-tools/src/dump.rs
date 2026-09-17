@@ -414,7 +414,7 @@ fn render_text(
     let mut output = format!(
         "AFS+ metadata dump schema 1\nvolume {} label {:?}\ncheckpoint slot {} generation {} transaction {}\nobjects {} directories {} metadata blocks {} data blocks {} raw free {} emergency headroom {} normally available {}\n",
         crate::common::uuid_hex(&view.ident.uuid),
-        view.ident.label,
+        view.selection.chosen.label,
         if view.selection.chosen_slot == 0 { "A" } else { "B" },
         view.selection.chosen.generation,
         view.selection.chosen.committed_tx_id,

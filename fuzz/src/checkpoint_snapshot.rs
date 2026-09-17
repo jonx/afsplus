@@ -31,7 +31,7 @@ fn allocatable(lba: u64) -> bool {
 }
 fn expected(input: &[u8]) -> Option<Checkpoint> {
     let h = BlockHeader::verify(input, block_type::CHECKPOINT).ok()?;
-    if h.flags != 0 || h.owner != 0 || !matches!(h.payload_len, 96 | 112) {
+    if h.flags != 0 || h.owner != 0 || !matches!(h.payload_len, 168 | 184) {
         return None;
     }
     let p = &input[HEADER_SIZE..HEADER_SIZE + h.payload_len as usize];
@@ -43,8 +43,19 @@ fn expected(input: &[u8]) -> Option<Checkpoint> {
     {
         return None;
     }
-    let roots = if p.len() == 112 {
-        let (registry, lifetimes) = (word(p, 96), word(p, 104));
+    // Label field (ADR-104): length, seven zero bytes, NUL-free UTF-8, zero
+    // padding to 64 bytes.
+    let length = p[96] as usize;
+    if length > 64
+        || p[97..104].iter().any(|b| *b != 0)
+        || p[104 + length..168].iter().any(|b| *b != 0)
+        || p[104..104 + length].contains(&0)
+    {
+        return None;
+    }
+    let label = std::str::from_utf8(&p[104..104 + length]).ok()?.to_owned();
+    let roots = if p.len() == 184 {
+        let (registry, lifetimes) = (word(p, 168), word(p, 176));
         if registry == lifetimes || !allocatable(registry) || !allocatable(lifetimes) {
             return None;
         }
@@ -76,6 +87,7 @@ fn expected(input: &[u8]) -> Option<Checkpoint> {
         free_blocks_total: word(p, 72),
         flags: word(p, 80),
         shared_extent_root_block: word(p, 88),
+        label,
         snapshot_roots: roots,
     })
 }
@@ -114,22 +126,22 @@ mod tests {
     fn snapshot_checkpoint_roots_and_lengths_are_explicit() {
         let bytes = seed().unwrap();
         let header = BlockHeader::verify(&bytes, block_type::CHECKPOINT).unwrap();
-        assert_eq!(header.payload_len, 112);
+        assert_eq!(header.payload_len, 184);
         assert!(decoded(&bytes).unwrap().snapshot_roots.is_some());
         for n in 0..=DEFAULT_BLOCK_SIZE {
             exercise(&bytes[..n]).unwrap();
         }
-        for len in 0..=120 {
+        for len in 0..=192 {
             let mut changed = bytes.clone();
             BlockHeader {
                 payload_len: len,
                 ..header
             }
             .seal(&mut changed);
-            assert_eq!(accepts(&changed), matches!(len, 96 | 112));
+            assert_eq!(accepts(&changed), matches!(len, 168 | 184));
             exercise(&changed).unwrap();
         }
-        for offset in [96, 104] {
+        for offset in [168, 176] {
             for lba in [0, 1, 8, 9, 4095, 4096, 4101, 4102, 8191, 8192, u64::MAX] {
                 let changed = resealed(offset, lba);
                 assert_eq!(accepts(&changed), allocatable(lba));
@@ -137,8 +149,12 @@ mod tests {
             }
         }
         for (offset, value) in [
-            (96, 46),
-            (104, 45),
+            (168, 46),
+            (176, 45),
+            // Label field: length above the bound, a reserved byte, padding.
+            (96, 65),
+            (96, 0x0100),
+            (160, 1),
             (16, 0),
             (16, 8),
             (24, 0),

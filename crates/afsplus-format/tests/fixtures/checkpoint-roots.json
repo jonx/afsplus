@@ -1,17 +1,34 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "scope": "standalone checkpoint blocks",
   "generation": 5,
   "uuid": "07070707070707070707070707070707",
   "images": [
     {
+      "file": "checkpoint-label-v2.bin",
+      "payload_bytes": 168,
+      "label": "Test Volume",
+      "snapshot_roots": null
+    },
+    {
+      "file": "checkpoint-snapshot-v2.bin",
+      "payload_bytes": 184,
+      "label": "Test Volume",
+      "snapshot_roots": {
+        "registry": 30,
+        "lifetimes": 31
+      }
+    },
+    {
       "file": "checkpoint-legacy-v1.bin",
       "payload_bytes": 96,
+      "retired": true,
       "snapshot_roots": null
     },
     {
       "file": "checkpoint-snapshot-v1.bin",
       "payload_bytes": 112,
+      "retired": true,
       "snapshot_roots": {
         "registry": 30,
         "lifetimes": 31

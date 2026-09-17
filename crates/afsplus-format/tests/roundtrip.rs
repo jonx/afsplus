@@ -69,6 +69,7 @@ fn sample_checkpoint() -> Checkpoint {
         free_blocks_total: 800,
         flags: 0,
         shared_extent_root_block: 0,
+        label: "Test Volume".into(),
         snapshot_roots: None,
     }
 }
@@ -1039,35 +1040,42 @@ fn dir_overflow_is_reported_not_truncated() {
 #[test]
 fn snapshot_checkpoint_extension_matches_independent_block_images() {
     use afsplus_format::checkpoint::SnapshotRoots;
-    let legacy = sample_checkpoint();
-    assert_eq!(
-        legacy.encode(BS).unwrap(),
-        include_bytes!("fixtures/checkpoint-legacy-v1.bin").as_slice()
+    let plain = sample_checkpoint();
+    assert!(
+        plain.encode(BS).unwrap() == include_bytes!("fixtures/checkpoint-label-v2.bin").as_slice(),
+        "checkpoint image differs from fixtures/checkpoint-label-v2.bin"
     );
-    let mut extended = legacy.clone();
+    // The images of the layout without a label field are refused.
+    for retired in [
+        include_bytes!("fixtures/checkpoint-legacy-v1.bin").as_slice(),
+        include_bytes!("fixtures/checkpoint-snapshot-v1.bin").as_slice(),
+    ] {
+        assert!(Checkpoint::decode(retired, &[7; 16]).is_err());
+    }
+    let mut extended = plain.clone();
     extended.snapshot_roots = Some(SnapshotRoots {
         registry: 30,
         lifetimes: 31,
     });
     let image = extended.encode(BS).unwrap();
-    assert_eq!(
-        image,
-        include_bytes!("fixtures/checkpoint-snapshot-v1.bin").as_slice()
+    assert!(
+        image == include_bytes!("fixtures/checkpoint-snapshot-v2.bin").as_slice(),
+        "checkpoint image differs from fixtures/checkpoint-snapshot-v2.bin"
     );
     assert_eq!(Checkpoint::decode(&image, &[7; 16]).unwrap(), extended);
-    assert_eq!(le::get_u64(&image[128..136]), 30);
-    assert_eq!(le::get_u64(&image[136..144]), 31);
-    for length in 0..129 {
+    assert_eq!(le::get_u64(&image[200..208]), 30);
+    assert_eq!(le::get_u64(&image[208..216]), 31);
+    for length in 0..201 {
         let mut invalid = image.clone();
         let mut header = BlockHeader::verify(&invalid, block_type::CHECKPOINT).unwrap();
         header.payload_len = length;
         header.seal(&mut invalid);
         assert_eq!(
             Checkpoint::decode(&invalid, &[7; 16]).is_ok(),
-            length == 96 || length == 112
+            length == 168 || length == 184
         );
     }
-    for size in 0..144 {
+    for size in 0..216 {
         assert!(extended.encode(size).is_err());
     }
     for roots in [
@@ -1086,8 +1094,8 @@ fn snapshot_checkpoint_extension_matches_independent_block_images() {
     ] {
         let mut invalid = image.clone();
         let header = BlockHeader::verify(&invalid, block_type::CHECKPOINT).unwrap();
-        le::put_u64(&mut invalid[128..136], roots.registry);
-        le::put_u64(&mut invalid[136..144], roots.lifetimes);
+        le::put_u64(&mut invalid[200..208], roots.registry);
+        le::put_u64(&mut invalid[208..216], roots.lifetimes);
         header.seal(&mut invalid);
         assert!(Checkpoint::decode(&invalid, &[7; 16]).is_err());
     }

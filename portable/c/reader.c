@@ -22,7 +22,9 @@
 #define AFSPR_IDENT_LEGACY_PAYLOAD 137u
 #define AFSPR_IDENT_FEATURE_PAYLOAD 161u
 #define AFSPR_IDENT_CURRENT_PAYLOAD 165u
-#define AFSPR_CHECKPOINT_PAYLOAD 96u
+/* 96 fixed bytes, then the label field: length (1), reserved (7), 64 bytes. */
+#define AFSPR_CHECKPOINT_LABEL_OFFSET AFSP_CHECKPOINT_LABEL_OFFSET
+#define AFSPR_CHECKPOINT_PAYLOAD AFSP_CHECKPOINT_PAYLOAD_BYTES
 #define AFSPR_OBJECT_FIRST_DYNAMIC UINT64_C(16)
 #define AFSPR_MIN_REGION_BLOCKS UINT32_C(16)
 #define AFSPR_MAX_REGION_BLOCKS UINT32_C(262144)
@@ -118,6 +120,8 @@ struct afspr_checkpoint {
     uint64_t committed_tx_id;
     uint64_t free_blocks_total;
     uint64_t shared_extent_root_block;
+    uint8_t label_len;
+    char label[AFSPR_LABEL_CAPACITY];
 };
 
 struct afspr_tree_spec {
@@ -658,7 +662,8 @@ static int afspr_decode_ident(const uint8_t *block, size_t block_size,
     ident->metadata_start = afspr_get_le64(p + 64);
     ident->label_len = p[72];
     if (ident->label_len > 64u ||
-        !afspr_valid_utf8(p + 73, ident->label_len)) {
+        !afspr_valid_utf8(p + 73, ident->label_len) ||
+        memchr(p + 73, 0, ident->label_len) != NULL) {
         return AFSPR_ERR_CORRUPT;
     }
     memcpy(ident->label, p + 73, ident->label_len);
@@ -753,6 +758,27 @@ static int afspr_decode_checkpoint(const uint8_t *block, size_t block_size,
     checkpoint->committed_tx_id = afspr_get_le64(p + 64);
     checkpoint->free_blocks_total = afspr_get_le64(p + 72);
     checkpoint->shared_extent_root_block = afspr_get_le64(p + 88);
+    /* The label field is canonical: length, zero reserved bytes, NUL-free
+     * UTF-8 and zero padding. */
+    {
+        const uint8_t *field = p + AFSPR_CHECKPOINT_LABEL_OFFSET;
+        size_t i;
+        checkpoint->label_len = field[0];
+        if (checkpoint->label_len > 64u ||
+            !afspr_valid_utf8(field + 8u, checkpoint->label_len) ||
+            memchr(field + 8u, 0, checkpoint->label_len) != NULL) {
+            return AFSPR_ERR_CORRUPT;
+        }
+        for (i = 1u; i < 8u; ++i) {
+            if (field[i] != 0u) return AFSPR_ERR_CORRUPT;
+        }
+        for (i = checkpoint->label_len; i < 64u; ++i) {
+            if (field[8u + i] != 0u) return AFSPR_ERR_CORRUPT;
+        }
+        memset(checkpoint->label, 0, sizeof(checkpoint->label));
+        memcpy(checkpoint->label, field + 8u, checkpoint->label_len);
+        checkpoint->label[checkpoint->label_len] = '\0';
+    }
     if (afspr_get_le64(p + 80) != 0u ||
         !afspr_is_allocatable(ident, checkpoint->object_map_block) ||
         !afspr_is_allocatable(ident, checkpoint->allocation_root_block) ||
@@ -1314,7 +1340,9 @@ int afspr_probe_detailed(const struct afspr_block_ops *ops,
     result->name_key_algorithm = ident.name_key_algorithm;
     memcpy(result->unicode_version, ident.unicode_version,
            sizeof(result->unicode_version));
-    memcpy(result->label, ident.label, sizeof(result->label));
+    /* The current label is committed state; the identification block keeps
+     * the one given at format time. */
+    memcpy(result->label, candidates[selected].label, sizeof(result->label));
     result->selected_checkpoint = selected;
     result->valid_checkpoint_mask = valid_mask;
     result->generation = candidates[selected].generation;

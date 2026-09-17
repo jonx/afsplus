@@ -390,6 +390,8 @@ pub struct Volume<D: BlockDevice> {
     alloc_rover_region: u32,
     /// Host policy for protection edits of descriptor-bearing objects.
     security_projection: SecurityProjectionPolicy,
+    /// Label the next commit publishes; set only inside `set_volume_label`.
+    pending_label: Option<String>,
     window: Option<OpenWindow>,
     window_poisoned: bool,
     last_commit: Option<CommitStats>,
@@ -507,6 +509,7 @@ impl<D: BlockDevice> Volume<D> {
             allocation_tree_cache: None,
             alloc_rover_region: 0,
             security_projection: SecurityProjectionPolicy::default(),
+            pending_label: None,
             window: None,
             window_poisoned: false,
             last_commit: None,
@@ -7766,6 +7769,12 @@ impl<D: BlockDevice> Volume<D> {
             free_blocks_total,
             flags: 0,
             shared_extent_root_block: shared_root,
+            // The label travels with every commit; a relabel is the commit
+            // that carries a new one.
+            label: self
+                .pending_label
+                .clone()
+                .unwrap_or_else(|| self.checkpoint.label.clone()),
             snapshot_roots: finished.snapshot_roots,
         };
         let checkpoint_bytes = new_checkpoint.encode(block_size)?;

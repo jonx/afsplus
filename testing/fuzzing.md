@@ -523,6 +523,11 @@ mount-lifetime policy. They have no wire command; the
 [container test](../crates/afsplus-check/tests/security_container.rs) owns
 their proof; no generated family carries descriptors yet.
 
+`SetVolumeLabel` relabels the volume in one commit
+([ADR-104](../adr/ADR-104-volume-label-in-checkpoint.md)). It has no wire
+command; [the label test](../crates/afsplus-check/tests/volume_label.rs) owns
+its proof, power-cut matrix included.
+
 The remaining twenty-three methods read: `FileAllocationPage`,
 `FileDataPolicy`, `FirstOrphan`, `ListDirectory`, `ListRoot`,
 `LookupInDirectory`, `LookupRoot`, `OrphanCount`, `OrphanObject`,
