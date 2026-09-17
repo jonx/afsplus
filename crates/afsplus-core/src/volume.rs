@@ -2446,6 +2446,7 @@ impl<D: BlockDevice> Volume<D> {
             data_root: dest_data_root,
             data_blocks: dest_data_blocks,
             security: None,
+            attributes: None,
             comment: afsplus_format::object::Comment::EMPTY,
         }
         .with_security(dest_security)
@@ -3020,6 +3021,7 @@ impl<D: BlockDevice> Volume<D> {
             data_root: data_start,
             data_blocks: data_block_count,
             security: None,
+            attributes: None,
             comment: afsplus_format::object::Comment::EMPTY,
         };
 
@@ -3201,6 +3203,7 @@ impl<D: BlockDevice> Volume<D> {
             data_root: directory_root_lba,
             data_blocks: 0,
             security: None,
+            attributes: None,
             comment: afsplus_format::object::Comment::EMPTY,
         };
 
@@ -3753,6 +3756,7 @@ impl<D: BlockDevice> Volume<D> {
             data_root: directory_root_lba,
             data_blocks: 0,
             security: None,
+            attributes: None,
             comment: afsplus_format::object::Comment::EMPTY,
         };
         let map_key = object_map::key(OBJECT_ORPHAN_DIRECTORY);
@@ -5121,6 +5125,7 @@ impl<D: BlockDevice> Volume<D> {
                 data_root: root_lba,
                 data_blocks: 0,
                 security: None,
+                attributes: None,
                 comment: afsplus_format::object::Comment::EMPTY,
             }),
         );
@@ -5554,6 +5559,7 @@ impl<D: BlockDevice> Volume<D> {
                         data_root: data_start,
                         data_blocks: data_block_count,
                         security: None,
+                        attributes: None,
                         comment: afsplus_format::object::Comment::EMPTY,
                     }),
                 );
@@ -7100,6 +7106,7 @@ impl<D: BlockDevice> Volume<D> {
                 size_bytes,
                 allocated_bytes: data_blocks * block_size as u64,
                 security: None,
+                attributes: None,
                 comment: afsplus_format::object::Comment::EMPTY,
                 created: now,
                 modified: now,

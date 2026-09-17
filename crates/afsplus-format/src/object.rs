@@ -78,6 +78,16 @@ pub const OBJECT_FLAG_SECURITY_REF: u16 = 1 << 2;
 /// implementation of the format reads the comment field.
 pub const OBJECT_FLAG_COMMENT: u16 = 1 << 3;
 
+/// The record carries an [`AttributeRef`] to its extended attribute set. No
+/// volume feature gates it: every implementation of the format knows the
+/// field, and one that does not read attributes still preserves them.
+pub const OBJECT_FLAG_ATTRIBUTES: u16 = 1 << 4;
+
+/// Flags that say which optional metadata fields the record carries; legal
+/// on every object type.
+const OBJECT_METADATA_FLAGS: u16 =
+    OBJECT_FLAG_SECURITY_REF | OBJECT_FLAG_COMMENT | OBJECT_FLAG_ATTRIBUTES;
+
 /// Longest comment, in UTF-8 bytes.
 pub const COMMENT_MAX_BYTES: usize = 255;
 
@@ -210,14 +220,46 @@ pub struct ObjectRecord {
     pub data_blocks: u64,
     /// Present exactly when `flags` carries [`OBJECT_FLAG_SECURITY_REF`].
     pub security: Option<SecurityRef>,
+    /// Present exactly when `flags` carries [`OBJECT_FLAG_ATTRIBUTES`].
+    pub attributes: Option<AttributeRef>,
     /// Nonempty exactly when `flags` carries [`OBJECT_FLAG_COMMENT`].
     pub comment: Comment,
+}
+
+const ATTRIBUTE_REF_LEN: usize = 16;
+
+/// Reference from an object record to its attribute set chain (`attrs.rs`).
+/// The record owns the chain exclusively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttributeRef {
+    pub first_block: u64,
+    pub total_len: u32,
+    pub segment_count: u16,
+}
+
+impl AttributeRef {
+    fn validate(&self, block_size: usize) -> Result<(), FormatError> {
+        if self.first_block == 0
+            || crate::attrs::segment_count(self.total_len, block_size) != Some(self.segment_count)
+        {
+            return Err(FormatError::Invalid("invalid attribute reference"));
+        }
+        Ok(())
+    }
 }
 
 impl ObjectRecord {
     /// Length of the fixed payload, before any inline symlink target.
     pub fn fixed_payload_len(&self) -> usize {
-        self.security_end() + self.comment.wire_len()
+        self.attributes_end() + self.comment.wire_len()
+    }
+
+    fn attributes_end(&self) -> usize {
+        if self.attributes.is_some() {
+            self.security_end() + ATTRIBUTE_REF_LEN
+        } else {
+            self.security_end()
+        }
     }
 
     fn security_end(&self) -> usize {
@@ -236,6 +278,18 @@ impl ObjectRecord {
             self.flags &= !OBJECT_FLAG_COMMENT;
         } else {
             self.flags |= OBJECT_FLAG_COMMENT;
+        }
+        self
+    }
+
+    /// The same record with `attributes` attached or removed; keeps the flag
+    /// and the field congruent.
+    pub fn with_attributes(mut self, attributes: Option<AttributeRef>) -> Self {
+        self.attributes = attributes;
+        if attributes.is_some() {
+            self.flags |= OBJECT_FLAG_ATTRIBUTES;
+        } else {
+            self.flags &= !OBJECT_FLAG_ATTRIBUTES;
         }
         self
     }
@@ -292,8 +346,14 @@ impl ObjectRecord {
             le::put_u16(&mut p[108..110], security.segment_count);
             le::put_u16(&mut p[110..112], security.flags);
         }
-        if !self.comment.is_empty() {
+        if let Some(attributes) = self.attributes {
             let at = self.security_end();
+            le::put_u64(&mut p[at..at + 8], attributes.first_block);
+            le::put_u32(&mut p[at + 8..at + 12], attributes.total_len);
+            le::put_u16(&mut p[at + 12..at + 14], attributes.segment_count);
+        }
+        if !self.comment.is_empty() {
+            let at = self.attributes_end();
             p[at] = self.comment.len;
             p[at + 1..at + 1 + self.comment.len as usize]
                 .copy_from_slice(&self.comment.bytes[..self.comment.len as usize]);
@@ -360,16 +420,36 @@ impl ObjectRecord {
         } else {
             PAYLOAD_LEN
         };
-        if p.len() < security_end {
+        let attributes_end = if flags & OBJECT_FLAG_ATTRIBUTES != 0 {
+            security_end + ATTRIBUTE_REF_LEN
+        } else {
+            security_end
+        };
+        if p.len() < attributes_end {
             return Err(FormatError::Invalid("object payload length is not exact"));
         }
+        let attributes = if attributes_end != security_end {
+            let at = security_end;
+            if le::get_u16(&p[at + 14..at + 16]) != 0 {
+                return Err(FormatError::Invalid(
+                    "attribute reference reserved field is nonzero",
+                ));
+            }
+            Some(AttributeRef {
+                first_block: le::get_u64(&p[at..at + 8]),
+                total_len: le::get_u32(&p[at + 8..at + 12]),
+                segment_count: le::get_u16(&p[at + 12..at + 14]),
+            })
+        } else {
+            None
+        };
         let comment = if flags & OBJECT_FLAG_COMMENT != 0 {
             let length = *p
-                .get(security_end)
+                .get(attributes_end)
                 .ok_or(FormatError::Invalid("object payload length is not exact"))?
                 as usize;
             let text = p
-                .get(security_end + 1..security_end + 1 + length)
+                .get(attributes_end + 1..attributes_end + 1 + length)
                 .ok_or(FormatError::Invalid("object payload length is not exact"))?;
             if length == 0 {
                 return Err(FormatError::Invalid("object comment flag without comment"));
@@ -379,7 +459,7 @@ impl ObjectRecord {
         } else {
             Comment::EMPTY
         };
-        let fixed = security_end + comment.wire_len();
+        let fixed = attributes_end + comment.wire_len();
         let is_symlink = p[8] == ObjectType::Symlink.to_wire();
         if !is_symlink && p.len() != fixed {
             return Err(FormatError::Invalid("object payload length is not exact"));
@@ -402,6 +482,7 @@ impl ObjectRecord {
             data_root: le::get_u64(&p[80..88]),
             data_blocks: le::get_u64(&p[88..96]),
             comment,
+            attributes,
             security: (security_end != PAYLOAD_LEN).then(|| SecurityRef {
                 first_block: le::get_u64(&p[96..104]),
                 total_len: le::get_u32(&p[104..108]),
@@ -431,7 +512,8 @@ impl ObjectRecord {
             & !(OBJECT_FLAG_EXTENT_TREE
                 | OBJECT_FLAG_DATA_IN_PLACE
                 | OBJECT_FLAG_SECURITY_REF
-                | OBJECT_FLAG_COMMENT)
+                | OBJECT_FLAG_COMMENT
+                | OBJECT_FLAG_ATTRIBUTES)
             != 0
         {
             return Err(FormatError::Invalid("object has unsupported flags"));
@@ -444,6 +526,14 @@ impl ObjectRecord {
         if let Some(security) = self.security {
             security.validate(block_size)?;
         }
+        if (self.flags & OBJECT_FLAG_ATTRIBUTES != 0) != self.attributes.is_some() {
+            return Err(FormatError::Invalid(
+                "attribute reference flag and field disagree",
+            ));
+        }
+        if let Some(attributes) = self.attributes {
+            attributes.validate(block_size)?;
+        }
         if (self.flags & OBJECT_FLAG_COMMENT != 0) == self.comment.is_empty() {
             return Err(FormatError::Invalid("comment flag and field disagree"));
         }
@@ -454,7 +544,7 @@ impl ObjectRecord {
         self.validate_common(block_size)?;
         match self.object_type {
             ObjectType::Directory => {
-                if self.flags & !(OBJECT_FLAG_SECURITY_REF | OBJECT_FLAG_COMMENT) != 0 {
+                if self.flags & !OBJECT_METADATA_FLAGS != 0 {
                     return Err(FormatError::Invalid("directory has file extent flags"));
                 }
                 if self.data_root == 0 {
@@ -531,7 +621,7 @@ impl<'a> SymlinkRecord<'a> {
         self.record.validate_common(block_size)?;
         let fixed = self.record.fixed_payload_len();
         if self.record.object_type != ObjectType::Symlink
-            || self.record.flags & !(OBJECT_FLAG_SECURITY_REF | OBJECT_FLAG_COMMENT) != 0
+            || self.record.flags & !OBJECT_METADATA_FLAGS != 0
             || self.record.data_root != 0
             || self.record.data_blocks != 0
             || self.record.allocated_bytes != 0

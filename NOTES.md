@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Codecs for the extended attribute set and its reference](#2026-09-17--codecs-for-the-extended-attribute-set-and-its-reference)
 - [2026-09-17 — Generalise the descriptor chain into an owned chain](#2026-09-17--generalise-the-descriptor-chain-into-an-owned-chain)
 - [2026-09-17 — Explain one object and one path](#2026-09-17--explain-one-object-and-one-path)
 - [2026-09-17 — Diff two images in filesystem terms](#2026-09-17--diff-two-images-in-filesystem-terms)
@@ -201,6 +202,32 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — Codecs for the extended attribute set and its reference
+
+Format half of extended attributes, no writer yet. `afsplus_format::attrs`
+holds the set codec and `ATTRIBUTE_CHAIN`, the owned chain of `"AFSA"` blocks
+(bound 64 KiB, segment format 1 version 0). A set is one blob: entry count,
+then entries in strictly ascending order of name bytes, each with a one-byte
+name length, a two-byte value length, the name and the opaque value. Names are
+1 to 255 bytes of NUL-free UTF-8 in one of `user.`, `system.`, `security.`,
+`aros.`, with something after the namespace. An empty set is never stored.
+The object record gains `attributes: Option<AttributeRef>` behind object flag
+bit 4: 16 bytes (first block, set length, segment count, zero reserved) after
+the security reference and before the comment, on every object type. The
+independent fuzz oracle for the object payload learned the field.
+
+Proof: `object_attributes` (6 tests: golden bytes of the reference and of the
+set, order of the three optional fields, symlink target after the reference,
+every malformed reference refused by encoder and decoder, every proper prefix
+and extension of a set refused, order, duplicates, namespaces and bounds,
+`"AFSA"` refused by the `"AFSX"` decoder). Negative control: with the reserved
+check of the reference disabled and the order check relaxed to admit
+duplicates, 2 of the 6 tests fail. Unchanged and passing: `object_admission`,
+`object_comment`, `roundtrip` (44), fuzz unit tests with fingerprints (16).
+
+Left for the core lot: `stage_file_layout` in `volume.rs` keeps a fixed mask
+of record flags across a data rewrite and must add the attribute flag.
 
 ## 2026-09-17 — Generalise the descriptor chain into an owned chain
 

@@ -22,6 +22,7 @@ fn file() -> ObjectRecord {
         data_root: 0,
         data_blocks: 0,
         security: None,
+        attributes: None,
         comment: Comment::EMPTY,
     }
 }

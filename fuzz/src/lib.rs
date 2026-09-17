@@ -241,6 +241,7 @@ fn object_seed() -> Result<Vec<u8>, String> {
         data_root: 128,
         data_blocks: 1,
         security: None,
+        attributes: None,
         comment: afsplus_format::object::Comment::EMPTY,
     }
     .encode(DEFAULT_BLOCK_SIZE, 7)

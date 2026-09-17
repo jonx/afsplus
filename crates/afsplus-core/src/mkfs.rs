@@ -242,6 +242,7 @@ fn mkfs_impl<D: BlockDevice>(
         data_root: root_dir_lba,
         data_blocks: 0,
         security: None,
+        attributes: None,
         comment: afsplus_format::object::Comment::EMPTY,
     };
     let root_dir = directory::empty_leaf(OBJECT_ROOT);

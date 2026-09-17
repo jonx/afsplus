@@ -22,6 +22,7 @@
 
 extern crate alloc;
 
+pub mod attrs;
 pub mod bitmap;
 pub mod chain;
 pub mod checkpoint;

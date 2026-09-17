@@ -43,6 +43,7 @@ fn file_record() -> ObjectRecord {
         data_root: 0,
         data_blocks: 0,
         security: None,
+        attributes: None,
         comment: afsplus_format::object::Comment::EMPTY,
     }
 }

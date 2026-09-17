@@ -97,7 +97,36 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
     } else {
         None
     };
-    // Flag bit 3 adds the comment after the reference: one length byte,
+    // Flag bit 4 adds the 16-byte attribute reference after the security
+    // reference: first block, set length, segment count, zero reserved.
+    let (attributes, fixed) = if u16_at(p, 10) & 16 != 0 {
+        let field = p.get(fixed..fixed + 16)?;
+        let total = u32_at(field, 8);
+        let count = u16_at(field, 12);
+        let capacity = input
+            .len()
+            .checked_sub(HEADER_SIZE + 24)
+            .filter(|c| *c > 0)?;
+        if u64_at(field, 0) == 0
+            || total == 0
+            || total > 65_536
+            || (total as usize).div_ceil(capacity) != count as usize
+            || u16_at(field, 14) != 0
+        {
+            return None;
+        }
+        (
+            Some(afsplus_format::object::AttributeRef {
+                first_block: u64_at(field, 0),
+                total_len: total,
+                segment_count: count,
+            }),
+            fixed + 16,
+        )
+    } else {
+        (None, fixed)
+    };
+    // Flag bit 3 adds the comment after the references: one length byte,
     // 1..=255, then NUL-free UTF-8 (ADR-106).
     let (comment, fixed) = if u16_at(p, 10) & 8 != 0 {
         let length = *p.get(fixed)? as usize;
@@ -136,10 +165,11 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
         data_root: u64_at(p, 80),
         data_blocks: u64_at(p, 88),
         security,
+        attributes,
         comment,
     };
     let r = &record;
-    if r.object_id == 0 || r.object_id != h.owner || r.link_count == 0 || r.flags & !15 != 0 {
+    if r.object_id == 0 || r.object_id != h.owner || r.link_count == 0 || r.flags & !31 != 0 {
         return None;
     }
     let target = match kind {
@@ -147,7 +177,7 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
             let target = std::str::from_utf8(&p[fixed..]).ok()?;
             if h.flags != 0
                 || p[9] != 0
-                || r.flags & !12 != 0
+                || r.flags & !28 != 0
                 || r.data_root != 0
                 || r.data_blocks != 0
                 || r.allocated_bytes != 0
@@ -161,7 +191,7 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
             Some(target)
         }
         ObjectType::Directory => {
-            if r.flags & !12 != 0 || r.data_root == 0 || r.size_bytes != 0 || r.data_blocks != 0 {
+            if r.flags & !28 != 0 || r.data_root == 0 || r.size_bytes != 0 || r.data_blocks != 0 {
                 return None;
             }
             None
@@ -354,6 +384,13 @@ mod tests {
         let commented_file = file.with_comment(note);
         let commented_secured_directory =
             directory.with_security(Some(reference)).with_comment(note);
+        let set = afsplus_format::object::AttributeRef {
+            first_block: 91,
+            total_len: 9000,
+            segment_count: 3,
+        };
+        let attributed_file = file.with_attributes(Some(set));
+        let full_directory = commented_secured_directory.with_attributes(Some(set));
         let secured_file = file.with_security(Some(reference));
         let secured_directory = directory.with_security(Some(reference));
         for record in [
@@ -366,6 +403,8 @@ mod tests {
             secured_directory,
             commented_file,
             commented_secured_directory,
+            attributed_file,
+            full_directory,
         ] {
             let bytes = record.encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
             exercise(CodecTarget::ObjectMetadata, &bytes).unwrap();
@@ -373,7 +412,9 @@ mod tests {
             for size in 0..128 {
                 assert!(record.encode(size, 7).is_err());
             }
-            for offset in [8, 9, 10, 12, 40, 52, 64, 80, 88, 96, 104, 108, 110, 111] {
+            for offset in [
+                8, 9, 10, 12, 40, 52, 64, 80, 88, 96, 104, 108, 110, 111, 112, 120, 124, 126, 127,
+            ] {
                 let mut changed = bytes.clone();
                 changed[HEADER_SIZE + offset] ^= 0xff;
                 reseal(&mut changed);
