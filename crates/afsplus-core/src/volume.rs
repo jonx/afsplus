@@ -179,6 +179,9 @@ pub struct ObjectMetadata {
     pub allocated_bytes: u64,
     pub link_count: u32,
     pub protection: u32,
+    /// POSIX owner. Zero is root, a real identity, not "unset".
+    pub owner_uid: u32,
+    pub owner_gid: u32,
     pub created: Timespec,
     pub modified: Timespec,
     pub changed: Timespec,
@@ -194,6 +197,8 @@ impl From<ObjectRecord> for ObjectMetadata {
             allocated_bytes: record.allocated_bytes,
             link_count: record.link_count,
             protection: record.protection,
+            owner_uid: record.owner_uid,
+            owner_gid: record.owner_gid,
             created: record.created,
             modified: record.modified,
             changed: record.changed,

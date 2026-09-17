@@ -365,6 +365,7 @@ pub enum ApiMethod {
     SnapshotAttribute = 79,
     SnapshotAttributeNames = 80,
     SnapshotSecurityDescriptor = 81,
+    SetObjectOwner = 82,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

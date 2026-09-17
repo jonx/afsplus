@@ -3248,6 +3248,7 @@ fn every_registered_api_method_executes_under_its_own_guard() {
         .ok();
     volume.attribute(file, "user.one").ok();
     volume.attribute_names(file).ok();
+    volume.set_object_owner(file, 501, 20, now).ok();
     volume.set_object_comment(file, "a comment", now).ok();
     volume.object_comment(file).ok();
     volume.set_security_projection_policy(SecurityProjectionPolicy::Preserve);

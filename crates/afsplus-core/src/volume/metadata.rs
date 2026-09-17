@@ -67,6 +67,43 @@ impl<D: BlockDevice> Volume<D> {
         self.commit_object_metadata(record)
     }
 
+    /// Change the POSIX owner, recording the supplied change time. The core
+    /// stores the identities and evaluates nothing: who may set them is the
+    /// trusted host's question, as it is for the protection word. Zero is
+    /// root and a legitimate value, so there is no "unset" to special-case.
+    /// An unchanged pair is a no-op.
+    pub fn set_object_owner(
+        &mut self,
+        object_id: u64,
+        owner_uid: u32,
+        owner_gid: u32,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SetObjectOwner, |volume| {
+            volume.set_object_owner_untraced(object_id, owner_uid, owner_gid, now)
+        })
+    }
+
+    fn set_object_owner_untraced(
+        &mut self,
+        object_id: u64,
+        owner_uid: u32,
+        owner_gid: u32,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.ensure_window_closed()?;
+        self.ensure_public_object_id(object_id)?;
+        validate_time(now)?;
+        let mut record = self.metadata_target(object_id)?;
+        if record.owner_uid == owner_uid && record.owner_gid == owner_gid {
+            return Ok(());
+        }
+        record.owner_uid = owner_uid;
+        record.owner_gid = owner_gid;
+        record.changed = now;
+        self.commit_object_metadata(record)
+    }
+
     /// Exact restoration of the existing protection and timestamp fields.
     /// Requires independently authorized host restore access before invocation.
     /// Unlike ordinary metadata edits, this preserves the archived change time.

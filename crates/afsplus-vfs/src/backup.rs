@@ -713,6 +713,9 @@ mod authority_tests {
                 allocated_size: 0,
                 links: 1,
                 protection: 0,
+                mode: 0,
+                owner_uid: 0,
+                owner_gid: 0,
                 created: Timespec {
                     seconds: 0,
                     nanoseconds: 0,

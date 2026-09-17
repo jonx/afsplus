@@ -25,6 +25,8 @@ use afsplus_format::ident::{
     RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::object::ObjectType;
+use afsplus_format::posix;
+use afsplus_format::FormatError;
 use afsplus_format::{Timespec, NAME_MAX_UTF8_BYTES, OBJECT_ROOT};
 
 pub type ObjectId = u64;
@@ -74,6 +76,11 @@ pub struct Stat {
     pub allocated_size: u64,
     pub links: u32,
     pub protection: u64,
+    /// The POSIX mode this object's protection word projects, and its owner.
+    /// The mode is derived, not stored twice: the word is the single carrier.
+    pub mode: u16,
+    pub owner_uid: u32,
+    pub owner_gid: u32,
     pub created: Timespec,
     pub modified: Timespec,
     pub changed: Timespec,
@@ -89,6 +96,9 @@ impl From<ObjectMetadata> for Stat {
             allocated_size: record.allocated_bytes,
             links: record.link_count,
             protection: record.protection as u64,
+            mode: posix::mode_of(record.protection),
+            owner_uid: record.owner_uid,
+            owner_gid: record.owner_gid,
             created: record.created,
             modified: record.modified,
             changed: record.changed,
@@ -1184,6 +1194,51 @@ impl<D: BlockDevice> Vfs<D> {
         Ok(self
             .volume
             .set_object_protection(object_id, protection, now)?)
+    }
+
+    /// Writes the POSIX permission bits of `mode` into the object's
+    /// protection word, keeping everything the projection does not speak
+    /// for: ARCHIVE, PURE, SCRIPT and every unassigned bit survive, so a
+    /// `chmod` from a POSIX host cannot erase what only AmigaDOS expresses.
+    ///
+    /// A mode write IS a protection write, so it goes through the same
+    /// projection policy as [`Vfs::set_protection`]: on a volume carrying a
+    /// security descriptor, strict refuses it and preserve marks the
+    /// projection as diverged. There is no second policy for POSIX.
+    ///
+    /// The sticky bit has no representation in the word and is refused by
+    /// name rather than dropped.
+    pub fn set_posix_mode(
+        &mut self,
+        object_id: ObjectId,
+        mode: u16,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        let protection = self.stat(object_id)?.protection as u32;
+        // Two different refusals, so a caller learns which it hit: a mode
+        // this format cannot express (sticky) is NotSupported, and a mode
+        // that is not a mode is Invalid.
+        let updated = posix::with_mode(protection, mode).map_err(|error| match error {
+            FormatError::Invalid(reason) if reason.contains("sticky") => VfsError::NotSupported,
+            _ => VfsError::Invalid,
+        })?;
+        self.set_protection(object_id, updated, now)
+    }
+
+    /// Sets the POSIX owner. `None` leaves that half alone, so `chown :group`
+    /// and `chown user` are each one call and neither invents the other.
+    pub fn set_owner(
+        &mut self,
+        object_id: ObjectId,
+        owner_uid: Option<u32>,
+        owner_gid: Option<u32>,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        let current = self.stat(object_id)?;
+        let uid = owner_uid.unwrap_or(current.owner_uid);
+        let gid = owner_gid.unwrap_or(current.owner_gid);
+        self.checkpoint_data_window(now)?;
+        Ok(self.volume.set_object_owner(object_id, uid, gid, now)?)
     }
 
     /// The value of the attribute `name`, or `None` when the object has no

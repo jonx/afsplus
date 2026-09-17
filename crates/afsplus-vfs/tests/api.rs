@@ -688,3 +688,71 @@ fn a_directory_walk_continues_across_a_commit_between_its_pages() {
     assert!(rewound.entries.len() >= names.len());
     vfs.close(root).unwrap();
 }
+
+/// The stored POSIX projection: a mode written through the VFS comes back
+/// from `stat`, survives a remount, and leaves the Amiga-only bits of the
+/// protection word alone. Owner and group are stored beside it.
+#[test]
+fn a_posix_mode_and_owner_are_stored_and_read_back() {
+    let mut vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let object = vfs.create_file(OBJECT_ROOT, "script", ts(1)).unwrap();
+
+    // An AmigaDOS-only bit set first: SCRIPT, which POSIX cannot express.
+    let script_bit = 1u32 << 6;
+    vfs.set_protection(object, script_bit, ts(2)).unwrap();
+
+    for mode in [0o644u16, 0o600, 0o755, 0o444, 0o4755, 0o2750, 0o000] {
+        vfs.set_posix_mode(object, mode, ts(3)).unwrap();
+        let stat = vfs.stat(object).unwrap();
+        assert_eq!(stat.mode, mode, "mode {mode:#o} did not come back");
+        assert_eq!(
+            stat.protection as u32 & script_bit,
+            script_bit,
+            "the SCRIPT bit was lost by chmod {mode:#o}"
+        );
+    }
+
+    vfs.set_owner(object, Some(501), Some(20), ts(4)).unwrap();
+    let stat = vfs.stat(object).unwrap();
+    assert_eq!((stat.owner_uid, stat.owner_gid), (501, 20));
+
+    // Half a chown leaves the other half alone.
+    vfs.set_owner(object, None, Some(80), ts(5)).unwrap();
+    let stat = vfs.stat(object).unwrap();
+    assert_eq!((stat.owner_uid, stat.owner_gid), (501, 80));
+    vfs.set_owner(object, Some(0), None, ts(6)).unwrap();
+    let stat = vfs.stat(object).unwrap();
+    assert_eq!((stat.owner_uid, stat.owner_gid), (0, 80), "root is a value");
+
+    vfs.sync_filesystem().unwrap();
+    let mode_before = vfs.stat(object).unwrap().mode;
+    let device = vfs.into_volume().into_device();
+    let mut vfs = Vfs::mount(device, MountOptions::default()).unwrap();
+    let stat = vfs.stat(object).unwrap();
+    assert_eq!(stat.mode, mode_before, "the mode did not survive a remount");
+    assert_eq!((stat.owner_uid, stat.owner_gid), (0, 80));
+}
+
+/// Sticky has no carrier, so it is refused by a value a caller can act on,
+/// and refused WITHOUT changing the mode it was bundled with.
+#[test]
+fn the_sticky_bit_is_refused_and_changes_nothing() {
+    let mut vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let object = vfs.create_file(OBJECT_ROOT, "f", ts(1)).unwrap();
+    vfs.set_posix_mode(object, 0o755, ts(2)).unwrap();
+
+    assert_eq!(
+        vfs.set_posix_mode(object, 0o1777, ts(3)),
+        Err(VfsError::NotSupported)
+    );
+    assert_eq!(
+        vfs.stat(object).unwrap().mode,
+        0o755,
+        "a refused chmod must leave the mode as it was"
+    );
+    assert_eq!(
+        vfs.set_posix_mode(object, 0o10000, ts(4)),
+        Err(VfsError::Invalid),
+        "a mode outside the permission bits is a different refusal"
+    );
+}
