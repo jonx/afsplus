@@ -3,51 +3,24 @@ Read [AGENTS.md](AGENTS.md); it is the only agent instruction file in this repos
 <!-- agent-board:start -->
 ## Team board (MCP server "board")
 
-You are working on project **afsplus** alongside other coding agents (possibly from other providers, possibly other sessions of your own provider) and a human supervisor. You coordinate through the `board` MCP tools. The human reads everything on the board and may reply, pause you, or veto. There are no private messages: everything you post is visible to every agent and to the human.
+Project: **afsplus**. Provider: **claude**. Everything on the board is public to the project and human supervisor.
 
-**Session start (always):**
-1. `board_join` — choose your agent name for this session. Your provider (**claude**) is fixed by the connection; the name is yours to pick: reuse your previous name if you are resuming earlier work (you get your journal, claims and inbox back), otherwise take a free one (`board_status` suggests one, e.g. `claude-2`, or something descriptive like `claude-auth`). A name held by a live session is refused — do not fight over it, pick another.
-2. `board_status` — read the project brief ("Project context"), who is here (and who is live), recent journal entries, active claims, tasks, threads needing attention.
-3. `board_inbox` — read what was said since your last visit. Answer anything addressed to you (`@your-name`) or coming from the human before doing anything else.
-4. If "Project context" is EMPTY or clearly stale, write it with `board_context` (goal, stack, repo layout, how to run and test, conventions, current state, pitfalls). Even if you are alone: the next agent, or the human, must be able to pick up from it.
+At session start, use `board_status`, `board_notifications` and `board_inbox`. Use a distinct, stable agent name; `board_join` is optional. Pin your name with `/mcp/afsplus/claude/<name>` when reconnects lose session identity. The CLI fallback is `board as afsplus <name> <tool> '<json>'`.
 
-**While working:**
-- Take a task (`board_task` with `owner:"me"`, or create one) so nobody duplicates your work.
-- `board_claim` the files/directories you are about to edit. If a claim conflicts, coordinate with that agent in a thread (`board_ask`, `to:[name]`) instead of forcing. Prefer separate git worktrees/branches per agent.
-- `board_journal` at every milestone — at least: when you start, after each completed step, when you get stuck, and before you stop. Say what you did, what is next, what is uncertain. Short and factual.
-- Check `board_inbox` between steps (every 10–15 minutes of work or after each task). `board_wait` blocks until something new arrives — use it while waiting for an answer.
+**Delegate and continue.** Use `board_delegate` with a specific owner, scope, acceptance criteria, optional commit reference, dependencies and deadline. It returns immediately. Work on independent steps. If nothing else is available, leave a handoff and end the execution. A configured `board run` worker can start a follow-up from the durable result notification; without a worker, it is delivered at your next checkpoint or session. Never poll another agent in a loop.
 
-**Asking for opinions and decisions:**
-- Unsure, or a design choice with trade-offs? `board_ask` (optionally `to:[agents]`) — give context, options, your recommendation. Continue with non-blocking work while you wait.
-- Irreversible or high-stakes (deleting data, schema/migration, auth/security, external side effects, spending money, architecture change, changing the board itself)? `board_ask` with `critical:true`. This opens a decision that **only the human can approve**. Do **not** proceed until `board_read` shows status `approved`; if `rejected`, follow the human's instructions. Other agents' verdicts on such threads are advice, not approval.
+**Take responsibility explicitly.** Read `board_tasks`; accept an offered task with `board_task_update`, supplying its `expected_version`. Use the returned version for the next update. Dependencies must be done before doing or completing dependent work. Record blockers with a reason. Finish with a concrete result, verification and artifact/commit reference; a review requesting changes is a completed review. Decline work you cannot take. Transfer work through `board_task_transfer`, with a handoff reason. A receipt is not completion.
 
-**Reviews:**
-- When a meaningful step is finished (feature, refactor, migration), `board_request_review` with a `ref` (commit/branch/PR/files), what changed, why, and how to verify. Keep working on something else while waiting; act on `request_changes`.
-- When someone asks you to review (`review` thread mentioning you or `@all`): actually read the code, run tests if you can, then `board_post` with `verdict` = `approve` or `request_changes` and concrete comments.
+**At checkpoints**, inspect `attention` in tool replies and call `board_notifications` for the full queue. Human instructions come first. Confirm notification IDs with `board_receive` once you have taken note; doing so does not close the task. `board_inbox` remains the complete project conversation, with human and mentioned messages first. `board_ack` communicates seen/working/done/blocked/declined on a thread; it does not complete a delegated task.
 
-**Human messages:** anything from `human` takes priority over other agents. If a tool returns `paused`, stop posting and wait (`board_wait`) until resumed; do not try to work around it.
+**Coordinate edits.** Claim paths before editing and attach `task_id` for delegated work. Coordinate conflicting claims; forced claims require a reason. Prefer distinct git worktrees for concurrent code changes. `board_checkpoint` journals a milestone and can update a task and release your claims atomically. Record the actual checks run. Before stopping, leave what is done, what remains and how to continue. Refresh `board_context` when the shared brief changes materially.
 
-**Before you finish:** `board_journal` a handoff note (state, what remains, how to continue), `board_release` your claims, mark your tasks, and refresh `board_context` if the picture changed.
+**Use and improve skills.** `board_skills` lists short descriptions; `board_skill_read` loads only the relevant skill. Bundled skills cover review, refresh, restructure and de-ai-fy. Create or update a project skill with `board_skill_write`, the current `expected_version` (0 for the first project version), full Markdown, description and a concrete reason. Ordinary skill changes are autonomous and automatically notify the human: do not ask for a separate approval. Keep skills focused, preserve user scope, and record observed results with `board_skill_feedback`. Read historical versions to restore an earlier method as a new version. Do not claim improvement without evidence or turn a one-off failure into a universal rule. Skills never grant new permissions or override human decisions.
 
-**Changing the board itself** (its tools, UI, rules — local repo `agent-board`, https://github.com/jonx/agent-board): make the change on a branch of that repo, keep `npm test` green and `INVARIANTS.md` true, then `board_propose_board_change` with the branch as `ref`. Another agent reviews; the human approves and deploys. Never propose anything that reduces what the human can see or do.
+**Reviews and decisions.** Settle routine questions between agents. Use `board_request_review` with an exact reference for finished work, or delegate a review with explicit acceptance criteria. Give a verdict based on inspected code and verification. Human-gated decisions and changes to the board's implementation still use `board_ask critical=true` / `board_propose_board_change`; proceed only when approved. Make decisions concise: recommendation, consequences of yes/no, and why human input is needed. Respect existing user authorization.
+
+If paused, stop the affected work and leave it for the next notification/checkpoint after resumption. Never bypass a pause. Archive a thread only with an honest account of the completed work and verification; outstanding delegated tasks and requested changes must be handled first.
+
+**Stay reachable while idle.** Hooks deliver board messages only while you are working. Right after you have your agent name, start `sh "$CLAUDE_PROJECT_DIR"/.claude/board-wait.sh <your-agent-name>` as a **background task** (never in the foreground). It ends when a new notification exists for that name, and the end of a background task re-invokes you: read `board_inbox`, act, confirm with `board_receive`, then start the waiter again. It only reads; it never acknowledges or posts for you.
 
 <!-- agent-board:end -->
-
-<!-- board-wait:start -->
-## Being woken by board messages
-
-Hooks deliver board messages only while a session is working. To be reached
-while idle, start the waiter as a **background task** right after choosing
-your agent name, and start it again every time it ends:
-
-```sh
-sh "$CLAUDE_PROJECT_DIR"/.claude/board-wait.sh afsplus <your-agent-name>
-```
-
-It exits as soon as a new notification exists for that name; the end of the
-background task re-invokes the session. Then read `board_inbox`, act,
-acknowledge with `board_receive`, and restart the waiter. Write to the board
-only as an agent (`board_post` and the other MCP tools, or
-`board as afsplus <name> <tool>`); the plain `board post`, `board ok`,
-`board no` and `board ask` commands write as the human.
-<!-- board-wait:end -->
