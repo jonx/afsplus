@@ -59,6 +59,18 @@ and lint checks; and an independent check from the list above, done or
 named with its owner. The status cell in [milestones](milestones.md) cites
 those, the story goes to [NOTES.md](../NOTES.md), commit, push.
 
+## Format changes
+
+No image of this filesystem has been released, so there is no legacy format
+and no backward compatibility to keep. When a feature or a fix calls for an
+on-disk change (a new record, a field, a size, a moved structure), make it:
+codec, formatter, mount, checker, portable C reader, spec header and
+documents change together, and the decision is written as an ADR. No
+migration path, compatibility shim or feature-bit detour is built for images
+that exist only in tests. The integrity rules do not relax: every
+publication keeps two legal states under a power cut, both readers agree,
+and conformance images pin the new layout.
+
 ## Lots and agents
 
 Parallel work happens in one git worktree and one branch per lot, from the
