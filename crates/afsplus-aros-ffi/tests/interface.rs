@@ -245,3 +245,56 @@ fn capabilities_use_published_c_identities_and_follow_the_volume() {
     assert_eq!(afsplus_aros_capabilities(filesystem, &mut output), 115);
     assert_eq!(afsplus_aros_unmount(filesystem), 0);
 }
+
+#[test]
+fn a_mount_without_a_name_is_named_after_the_label() {
+    let mut device = formatted(8, true, false, NamePolicy::Insensitive);
+    let callbacks = AfsplusArosDevice {
+        abi_version: AFSPLUS_AROS_ABI_VERSION,
+        struct_size: size_of::<AfsplusArosDevice>() as u32,
+        context: ptr::from_mut(&mut device).cast::<c_void>(),
+        block_size: BLOCK_SIZE as u32,
+        reserved: 0,
+        total_blocks: TOTAL_BLOCKS,
+        read_block: Some(read_block),
+        write_block: Some(write_block),
+        flush: Some(flush),
+    };
+    let config = AfsplusArosMountConfig {
+        abi_version: AFSPLUS_AROS_ABI_VERSION,
+        struct_size: size_of::<AfsplusArosMountConfig>() as u32,
+        mount_mode: AFSPLUS_AROS_MOUNT_READ_WRITE,
+        name_encoding: AFSPLUS_AROS_ENCODING_UTF8,
+        volume_name: ptr::null(),
+        volume_name_length: 0,
+        max_file_handles: 8,
+        max_locks: 8,
+        max_file_info_name_bytes: 107,
+        flags: 0,
+    };
+    let mut filesystem = ptr::null_mut();
+    assert_eq!(afsplus_aros_mount(&callbacks, &config, &mut filesystem), 0);
+    let mut root = 0;
+    assert_eq!(
+        afsplus_aros_locate(
+            filesystem,
+            0,
+            ptr::null(),
+            0,
+            AFSPLUS_AROS_LOCK_SHARED,
+            &mut root
+        ),
+        0
+    );
+    let mut info = AfsplusArosFileInfo::default();
+    let mut name = [0u8; 107];
+    assert_eq!(
+        afsplus_aros_examine_lock(filesystem, root, &mut info, name.as_mut_ptr(), 107),
+        0
+    );
+    // The fixture formats with the label "Boundary"; "AFS+" was the old
+    // constant.
+    assert_eq!(&name[..info.name_length as usize], b"Boundary");
+    assert_eq!(afsplus_aros_free_lock(filesystem, root), 0);
+    assert_eq!(afsplus_aros_unmount(filesystem), 0);
+}

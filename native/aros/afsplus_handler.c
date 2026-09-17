@@ -596,7 +596,8 @@ static int32_t open_device(struct AfsplusArosHandler *handler)
 
 static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
 {
-    static const uint8_t volume_name[] = { 'A', 'F', 'S', '+' };
+    uint8_t volume_name[AFSPLUS_VOLUME_NAME_MAX];
+    uint32_t volume_name_length = 0;
     struct AfsplusArosTrackdiskConfig trackdisk_config;
     struct AfsplusArosMountConfig mount_config;
     struct AfsplusArosPacketConfig packet_config;
@@ -665,8 +666,10 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     mount_config.mount_mode = handler->read_only
         ? AFSPLUS_AROS_MOUNT_READ_ONLY : AFSPLUS_AROS_MOUNT_READ_WRITE;
     mount_config.name_encoding = AFSPLUS_AROS_ENCODING_UTF8;
-    mount_config.volume_name = volume_name;
-    mount_config.volume_name_length = sizeof(volume_name);
+    /* No name: the volume is named after its committed label, so a renamed
+     * volume comes back under its new name. */
+    mount_config.volume_name = NULL;
+    mount_config.volume_name_length = 0;
     mount_config.max_file_handles = 1024;
     mount_config.max_locks = 1024;
     mount_config.max_file_info_name_bytes = 107;
@@ -697,8 +700,31 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     }
     if (handler->volume_node == NULL)
         return ERROR_NO_FREE_STORE;
+    /* The DOS volume name is the label. A volume without a usable label
+     * answers to the name of its device node instead. */
+    if (afsplus_aros_volume_label(handler->filesystem, volume_name,
+            sizeof(volume_name), &volume_name_length) != 0
+        || volume_name_length == 0
+        || volume_name_length > sizeof(volume_name))
+    {
+        const uint8_t *device_name = (const uint8_t *)AROS_BSTR_ADDR(
+            handler->device_node->dol_Name);
+
+#ifdef AROS_FAST_BSTR
+        volume_name_length = 0;
+        while (volume_name_length < sizeof(volume_name)
+            && device_name[volume_name_length] != 0)
+            volume_name_length++;
+#else
+        /* A length-prefixed BSTR is not required to carry a terminator. */
+        volume_name_length = device_name[-1];
+        if (volume_name_length > sizeof(volume_name))
+            volume_name_length = sizeof(volume_name);
+#endif
+        memcpy(volume_name, device_name, volume_name_length);
+    }
     write_volume_node_name(handler->volume_node, volume_name,
-        sizeof(volume_name));
+        volume_name_length);
     handler->volume_node->dol_Task = handler->handler_port;
     handler->volume_node->dol_misc.dol_volume.dol_DiskType =
         (ULONG)disk_info.disk_type;

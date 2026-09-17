@@ -21,7 +21,9 @@ int main(void)
         return RETURN_FAIL;
     }
     device = FindDosEntry(list, (CONST_STRPTR)"AFSPLUS19", LDF_DEVICES);
-    volume = FindDosEntry(list, (CONST_STRPTR)"AFS+", LDF_VOLUMES);
+    /* The volume answers to its label; the gate formats the image as
+     * AFSPlusAlpha0. */
+    volume = FindDosEntry(list, (CONST_STRPTR)"AFSPlusAlpha0", LDF_VOLUMES);
     if (device != NULL)
         device_port = device->dol_Task;
     if (volume != NULL)

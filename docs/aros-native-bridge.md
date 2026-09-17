@@ -317,9 +317,12 @@ volume; then the volume takes the label in one commit; then the shell writes
 the node name in place and releases, or only releases when the volume
 refused. Locks point at the node, so it is renamed in place, in a name buffer
 created for the longest name. A name is one DOS path component whose stored
-UTF-8 form fits 64 bytes. The node is named `AFS+` at mount, the name the
-qualification gates address; naming it from the label at mount is part of the
-target work.
+UTF-8 form fits 64 bytes. At every mount the node is named after the
+committed label, so a renamed volume comes back under its new name; a volume
+whose label is empty or cannot be expressed answers to the name of its device
+node. The gates address the device node, whose name the mountlist fixes; the
+one probe that looks the volume up by name uses the label its image is
+formatted with.
 
 Soft-link targets are opaque paths in the mount encoding. Locate and open
 answer `ERROR_IS_SOFT_LINK`; `ACTION_READ_LINK` walks the path to the first

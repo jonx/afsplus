@@ -788,3 +788,42 @@ fn a_latin1_mount_bounds_the_stored_form_of_the_label() {
     );
     assert_eq!(adapter.volume_label().unwrap(), vec![0xE9; 32]);
 }
+
+#[test]
+fn the_volume_is_named_after_its_label_at_every_mount() {
+    let unnamed = || ArosConfig {
+        volume_name: Vec::new(),
+        ..ArosConfig::default()
+    };
+    let mut adapter = ArosAdapter::new(
+        Vfs::mount(formatted(), MountOptions::default()).unwrap(),
+        unnamed(),
+    );
+    let root = adapter.locate(None, b"", LockAccess::Shared).unwrap();
+    assert_eq!(adapter.examine_lock(root).unwrap().name, b"DosCompat");
+    adapter.free_lock(root).unwrap();
+    adapter.set_volume_label(b"Work", timestamp(1)).unwrap();
+
+    // The renamed volume comes back under its new name, never a constant.
+    let device = adapter.into_vfs().unwrap().into_volume().into_device();
+    let mut adapter = ArosAdapter::new(
+        Vfs::mount(device, MountOptions::default()).unwrap(),
+        unnamed(),
+    );
+    let root = adapter.locate(None, b"", LockAccess::Shared).unwrap();
+    assert_eq!(adapter.examine_lock(root).unwrap().name, b"Work");
+    adapter.free_lock(root).unwrap();
+
+    // Control: an explicit name still overrides the label for that mount.
+    let device = adapter.into_vfs().unwrap().into_volume().into_device();
+    let mut adapter = ArosAdapter::new(
+        Vfs::mount(device, MountOptions::default()).unwrap(),
+        ArosConfig {
+            volume_name: b"Override".to_vec(),
+            ..ArosConfig::default()
+        },
+    );
+    let root = adapter.locate(None, b"", LockAccess::Shared).unwrap();
+    assert_eq!(adapter.examine_lock(root).unwrap().name, b"Override");
+    assert_eq!(adapter.volume_label().unwrap(), b"Work");
+}

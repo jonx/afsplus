@@ -101,7 +101,6 @@ Lacking, in the order classic software meets them:
 |---|---|---|
 | all of the above | target run: a probe extension for the S0 matrix on Hosted, QEMU and m68k | L4 |
 | `ACTION_SET_COMMENT`, comment in `FileInfoBlock` | a stored comment attribute; the format has no comment or extended-attribute record ([docs/12](../docs/12-metadata-and-xattrs.md)) | Stage B decision |
-| volume name at mount | the shell names the DOS node `AFS+`, the name the gates address; naming it from the label needs the gates and mountlists to follow | L4 |
 | record lock self-overlap | a handle does not collide with its own range; unverified against rom/dos `LockRecord` and a reference handler until a target run | L4 |
 | `ACTION_LOCK_RECORD` waiting modes | honouring the `dp_Arg5` timeout: a queue of deferred packets in the handler loop, retried when a range is freed | L4 |
 | `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |

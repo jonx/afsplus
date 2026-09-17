@@ -864,8 +864,9 @@ pub extern "C" fn afsplus_aros_mount(
         {
             return Err(ArosError::DiskWriteProtected);
         }
+        // No name: the volume is named after its committed label.
         let volume_name = if config.volume_name_length == 0 {
-            b"AFS+".to_vec()
+            Vec::new()
         } else {
             input_bytes(config.volume_name, config.volume_name_length)?.to_vec()
         };

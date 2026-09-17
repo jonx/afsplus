@@ -126,6 +126,8 @@ struct AfsplusArosMountConfig {
     uint32_t struct_size;
     uint32_t mount_mode;
     uint32_t name_encoding;
+    /* Zero length names the volume after its committed label, which is
+     * what a handler publishes; a name overrides it for this mount. */
     const uint8_t *volume_name;
     uint32_t volume_name_length;
     uint32_t max_file_handles;

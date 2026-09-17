@@ -356,7 +356,24 @@ pub struct ArosAdapter<D: BlockDevice> {
 }
 
 impl<D: BlockDevice> ArosAdapter<D> {
-    pub fn new(mut vfs: Vfs<D>, config: ArosConfig) -> Self {
+    /// An empty `config.volume_name` names the volume after its committed
+    /// label, the DOS volume name a handler publishes; a non-empty one
+    /// overrides it for the mount. A label that is empty or that the mount
+    /// encoding cannot express falls back to `AFS+`.
+    pub fn new(mut vfs: Vfs<D>, mut config: ArosConfig) -> Self {
+        if config.volume_name.is_empty() {
+            let from_label: Option<Vec<u8>> = match config.name_encoding {
+                NameEncoding::Utf8 => Some(vfs.volume_label().as_bytes().to_vec()),
+                NameEncoding::Latin1 => vfs
+                    .volume_label()
+                    .chars()
+                    .map(|character| u8::try_from(u32::from(character)).ok())
+                    .collect(),
+            };
+            config.volume_name = from_label
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| b"AFS+".to_vec());
+        }
         // The projection policy is mount runtime state that the core resets
         // to strict. The handler chooses it here, once, from the mount
         // configuration.
