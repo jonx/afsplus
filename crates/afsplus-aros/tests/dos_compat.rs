@@ -725,3 +725,66 @@ fn a_protected_volume_is_not_changed_by_flush_or_by_protecting_it() {
     assert!(resumed.free_blocks > free_before);
     remount(adapter);
 }
+
+#[test]
+fn rename_disk_relabels_in_one_commit_and_root_locks_follow() {
+    let mut adapter = adapter(formatted());
+    // The label given at format time is the volume name until renamed.
+    assert_eq!(adapter.volume_label().unwrap(), b"DosCompat");
+    let root = adapter.locate(None, b"", LockAccess::Shared).unwrap();
+
+    adapter.set_volume_label(b"Work", timestamp(10)).unwrap();
+    assert_eq!(adapter.volume_label().unwrap(), b"Work");
+    assert_eq!(adapter.examine_lock(root).unwrap().name, b"Work");
+    let again = adapter.locate(None, b"", LockAccess::Shared).unwrap();
+    assert_eq!(adapter.examine_lock(again).unwrap().name, b"Work");
+    adapter.free_lock(again).unwrap();
+    adapter.free_lock(root).unwrap();
+
+    // DOS naming rules and the format bound; a refusal changes nothing.
+    for bad in [&b""[..], b"a:b", b"a/b", b"nul\0"] {
+        assert_eq!(
+            adapter.set_volume_label(bad, timestamp(11)),
+            Err(ArosError::InvalidComponentName)
+        );
+    }
+    assert_eq!(
+        adapter.set_volume_label(&[b'x'; 65], timestamp(11)),
+        Err(ArosError::ObjectTooLarge)
+    );
+    adapter
+        .set_volume_label(&[b'y'; 64], timestamp(12))
+        .unwrap();
+    adapter.set_volume_label(b"Work", timestamp(13)).unwrap();
+    adapter.set_write_protect(true, 0).unwrap();
+    assert_eq!(
+        adapter.set_volume_label(b"Locked", timestamp(14)),
+        Err(ArosError::DiskWriteProtected)
+    );
+    adapter.set_write_protect(false, 0).unwrap();
+
+    // The new label is on the volume, and the info document reports it.
+    let mut adapter = remount(adapter);
+    assert_eq!(adapter.volume_label().unwrap(), b"Work");
+    assert!(adapter.info_json().unwrap().contains("\"label\":\"Work\","));
+}
+
+#[test]
+fn a_latin1_mount_bounds_the_stored_form_of_the_label() {
+    let vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let mut adapter = ArosAdapter::new(
+        vfs,
+        ArosConfig {
+            name_encoding: afsplus_aros::NameEncoding::Latin1,
+            ..ArosConfig::default()
+        },
+    );
+    // 32 times e-acute: 32 Latin-1 bytes, 64 stored bytes. 33 do not fit.
+    adapter.set_volume_label(&[0xE9; 32], timestamp(1)).unwrap();
+    assert_eq!(adapter.volume_label().unwrap(), vec![0xE9; 32]);
+    assert_eq!(
+        adapter.set_volume_label(&[0xE9; 33], timestamp(2)),
+        Err(ArosError::ObjectTooLarge)
+    );
+    assert_eq!(adapter.volume_label().unwrap(), vec![0xE9; 32]);
+}

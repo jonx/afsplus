@@ -418,3 +418,47 @@ fn c_boundary_locks_and_frees_records() {
     assert_eq!(afsplus_aros_close(filesystem, first), 0);
     assert_eq!(afsplus_aros_unmount(filesystem), 0);
 }
+
+#[test]
+fn c_boundary_reads_and_sets_the_volume_label() {
+    let mut device = formatted();
+    let filesystem = mount(&mut device);
+    let mut label = [0xEEu8; 16];
+    let mut required = 0;
+    assert_eq!(
+        afsplus_aros_volume_label(filesystem, label.as_mut_ptr(), 16, &mut required),
+        0
+    );
+    assert_eq!(required, 6);
+    assert_eq!(&label[..7], b"FfiDos\xEE");
+    assert_eq!(
+        afsplus_aros_set_volume_label(filesystem, b"Work".as_ptr(), 4, 5, 0),
+        0
+    );
+    assert_eq!(
+        afsplus_aros_set_volume_label(filesystem, b"a:b".as_ptr(), 3, 6, 0),
+        210
+    );
+    assert_eq!(
+        afsplus_aros_set_volume_label(filesystem, [b'x'; 65].as_ptr(), 65, 6, 0),
+        207
+    );
+    // A short buffer learns the size and stays untouched.
+    let mut short = [0xEEu8; 3];
+    assert_eq!(
+        afsplus_aros_volume_label(filesystem, short.as_mut_ptr(), 3, &mut required),
+        0
+    );
+    assert_eq!((required, short), (4, [0xEE; 3]));
+    assert_eq!(afsplus_aros_unmount(filesystem), 0);
+
+    let report = check_device(&mut device);
+    assert!(report.is_clean(), "{:?}", report.errors);
+    let filesystem = mount(&mut device);
+    assert_eq!(
+        afsplus_aros_volume_label(filesystem, label.as_mut_ptr(), 16, &mut required),
+        0
+    );
+    assert_eq!((required, &label[..4]), (4, &b"Work"[..]));
+    assert_eq!(afsplus_aros_unmount(filesystem), 0);
+}

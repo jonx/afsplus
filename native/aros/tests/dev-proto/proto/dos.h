@@ -12,5 +12,7 @@ struct DosList *MakeDosEntry(CONST_STRPTR name, LONG type);
 LONG FreeDosEntry(struct DosList *dlist);
 LONG AddDosEntry(struct DosList *dlist);
 LONG RemDosEntry(struct DosList *dlist);
+struct DosList *AttemptLockDosList(ULONG flags);
+void UnLockDosList(ULONG flags);
 
 #endif

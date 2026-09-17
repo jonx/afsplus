@@ -431,11 +431,24 @@ impl<D: BlockDevice> Vfs<D> {
         let ident = self.volume.ident();
         VolumeIdentity {
             uuid: ident.uuid,
-            label: ident.label.clone(),
+            label: self.volume.volume_label().to_owned(),
             compat: ident.features.compat,
             ro_compat: ident.features.ro_compat,
             incompat: ident.features.incompat,
         }
+    }
+
+    /// The current volume label (ADR-104), not the format-time one of the
+    /// identification block.
+    pub fn volume_label(&self) -> &str {
+        self.volume.volume_label()
+    }
+
+    /// Relabels the volume in one commit: at most 64 bytes of UTF-8 without
+    /// NUL. Host naming rules beyond that belong to the adapter.
+    pub fn set_volume_label(&mut self, label: &str, now: Timespec) -> Result<(), VfsError> {
+        self.checkpoint_data_window(now)?;
+        Ok(self.volume.set_volume_label(label)?)
     }
 
     pub fn statfs(&self) -> StatFs {

@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(12)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(13)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -40,6 +40,7 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_DOS_RECORDS UINT64_C(0x400)
 #define AFSPLUS_AROS_GROUP_OBJECT_IDS UINT64_C(0x800)
 #define AFSPLUS_AROS_GROUP_EXTENT_MAP UINT64_C(0x1000)
+#define AFSPLUS_AROS_GROUP_VOLUME_LABEL UINT64_C(0x2000)
 
 /* AfsplusArosExtent.flags. */
 #define AFSPLUS_AROS_EXTENT_UNWRITTEN UINT32_C(0x1)
@@ -492,6 +493,19 @@ int32_t afsplus_aros_extent_map(struct AfsplusAros *filesystem,
     struct AfsplusArosExtent *extents, uint32_t capacity,
     uint32_t *output_count, uint32_t *output_complete,
     uint64_t *output_next_offset);
+
+/* Group AFSPLUS_AROS_GROUP_VOLUME_LABEL. The label is the DOS volume name,
+ * in the mount's name encoding. volume_label stores the byte count in
+ * output_required and leaves a short buffer untouched. set_volume_label
+ * relabels in one commit: a power cut leaves the old label or the new one. A
+ * name that is empty or contains ':', '/' or NUL is
+ * ERROR_INVALID_COMPONENT_NAME; one whose stored UTF-8 form exceeds 64 bytes
+ * is ERROR_OBJECT_TOO_LARGE. */
+int32_t afsplus_aros_volume_label(struct AfsplusAros *filesystem,
+    uint8_t *label, uint32_t capacity, uint32_t *output_required);
+int32_t afsplus_aros_set_volume_label(struct AfsplusAros *filesystem,
+    const uint8_t *label, uint32_t label_length, int64_t now_seconds,
+    uint32_t now_nanoseconds);
 
 /* Group AFSPLUS_AROS_GROUP_SOFT_LINKS. The target is an opaque path in the
  * mount's name encoding. Locate and open answer ERROR_IS_SOFT_LINK for a

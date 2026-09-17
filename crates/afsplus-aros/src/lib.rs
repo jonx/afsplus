@@ -1149,6 +1149,35 @@ impl<D: BlockDevice> ArosAdapter<D> {
         Ok(())
     }
 
+    /// The volume label in the mount's name encoding: the DOS volume name.
+    pub fn volume_label(&self) -> Result<Vec<u8>, ArosError> {
+        self.encode_text(self.vfs.volume_label().as_bytes())
+    }
+
+    /// `ACTION_RENAME_DISK`. A DOS volume name is one path component: not
+    /// empty, without `:` or `/`. The format allows 64 bytes of UTF-8; a
+    /// Latin-1 name grows when stored, so the bound applies to the stored
+    /// form and a longer one is `ObjectTooLarge`. One commit: a power cut
+    /// leaves the old label or the new one.
+    pub fn set_volume_label(&mut self, name: &[u8], now: Timespec) -> Result<(), ArosError> {
+        self.ensure_writable()?;
+        let label = self.decode_component(name)?;
+        if label.len() > 64 {
+            return Err(ArosError::ObjectTooLarge);
+        }
+        self.vfs.set_volume_label(&label, now)?;
+        // Root locks report the volume name as their own.
+        self.config.volume_name = name.to_vec();
+        self.known_parents
+            .insert(OBJECT_ROOT, (None, name.to_vec()));
+        for lock in self.locks.values_mut() {
+            if lock.object_id == OBJECT_ROOT {
+                lock.name = name.to_vec();
+            }
+        }
+        Ok(())
+    }
+
     /// `ACTION_WRITE_PROTECT`. Protecting flushes first, then every
     /// mutating call answers `ERROR_DISK_WRITE_PROTECTED` until the volume is
     /// unprotected. One key rule: protecting an already protected volume

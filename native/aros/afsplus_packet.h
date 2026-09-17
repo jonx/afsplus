@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(2)
+#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(3)
 
 struct AfsplusArosPacketContext;
 
@@ -36,6 +36,18 @@ typedef int32_t (*AfsplusArosPacketNow)(void *context,
  * afsplus_aros_packet_process after the packet's own result is stored. */
 typedef void (*AfsplusArosPacketNotify)(void *context,
     struct NotifyRequest *request);
+/* Renames the DOS volume node around the label change on the volume, in
+ * phases, so that neither side changes alone. PREPARE takes whatever the
+ * handler needs to rename the node (the DosList write lock, room for the
+ * name) and may fail with an ERROR_* value, in which case nothing changes.
+ * After a successful PREPARE exactly one of COMMIT (the volume took the
+ * label: write the node name, release) or ABORT (it refused: release) follows;
+ * neither can fail. */
+#define AFSPLUS_AROS_RELABEL_PREPARE UINT32_C(0)
+#define AFSPLUS_AROS_RELABEL_COMMIT UINT32_C(1)
+#define AFSPLUS_AROS_RELABEL_ABORT UINT32_C(2)
+typedef int32_t (*AfsplusArosPacketRelabel)(void *context, uint32_t phase,
+    const uint8_t *name, uint32_t name_length);
 
 struct AfsplusArosPacketConfig {
     uint32_t abi_version;
@@ -49,14 +61,17 @@ struct AfsplusArosPacketConfig {
     AfsplusArosPacketNow now;
     /* Optional. Without it ACTION_ADD_NOTIFY is ERROR_ACTION_NOT_KNOWN. */
     AfsplusArosPacketNotify notify;
+    /* Optional. Without it ACTION_RENAME_DISK is ERROR_ACTION_NOT_KNOWN:
+     * a volume whose DOS node kept the old name would answer to two names. */
+    AfsplusArosPacketRelabel relabel;
 };
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 72,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 80,
     "AfsplusArosPacketConfig 64-bit ABI drift");
 #elif UINTPTR_MAX == UINT32_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 40,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 44,
     "AfsplusArosPacketConfig 32-bit ABI drift");
 #endif
 #endif

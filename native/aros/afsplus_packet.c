@@ -74,6 +74,7 @@ struct AfsplusArosPacketContext {
     struct AfsplusArosNativeFile *files;
     struct AfsplusArosNativeNotify *notifies;
     AfsplusArosPacketNotify notify;
+    AfsplusArosPacketRelabel relabel;
     uint32_t exall_serial;
     uint32_t inhibited;
     uint32_t quit;
@@ -924,6 +925,7 @@ int32_t afsplus_aros_packet_create(
     context->free = config->free;
     context->now = config->now;
     context->notify = config->notify;
+    context->relabel = config->relabel;
     {
         struct AfsplusArosInterface interface;
 
@@ -2021,6 +2023,39 @@ int32_t afsplus_aros_packet_process(
             if (error == ERROR_LOCK_COLLISION
                 && (mode == REC_EXCLUSIVE || mode == REC_SHARED))
                 error = ERROR_LOCK_TIMEOUT;
+        }
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
+    case ACTION_RENAME_DISK:
+    {
+        const uint8_t *name;
+        uint32_t name_length = 0;
+        int64_t seconds;
+        uint32_t nanoseconds;
+
+        if (context->relabel == NULL)
+            error = ERROR_ACTION_NOT_KNOWN;
+        if (error == 0)
+            error = require_group(context, AFSPLUS_AROS_GROUP_VOLUME_LABEL);
+        if (error == 0)
+            error = bstr_view(packet->dp_Arg1, &name, &name_length);
+        if (error == 0)
+            error = packet_now(context, &seconds, &nanoseconds);
+        /* Neither side changes alone: the handler first secures what it
+         * needs to rename the DOS node, then the volume takes the label, then
+         * the node follows or the preparation is undone. */
+        if (error == 0)
+            error = context->relabel(context->callback_context,
+                AFSPLUS_AROS_RELABEL_PREPARE, name, name_length);
+        if (error == 0)
+        {
+            error = afsplus_aros_set_volume_label(context->filesystem, name,
+                name_length, seconds, nanoseconds);
+            (void)context->relabel(context->callback_context,
+                error == 0 ? AFSPLUS_AROS_RELABEL_COMMIT
+                    : AFSPLUS_AROS_RELABEL_ABORT, name, name_length);
         }
         if (error == 0)
             result = DOSTRUE;

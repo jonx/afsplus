@@ -279,6 +279,44 @@ static void collect_notify_replies(struct AfsplusArosHandler *handler)
     }
 }
 
+/* Longest DOS volume name the node buffer is created for. */
+#define AFSPLUS_VOLUME_NAME_MAX 107
+
+static void write_volume_node_name(struct DosList *node, const uint8_t *name,
+    uint32_t name_length)
+{
+    memcpy(AROS_BSTR_ADDR(node->dol_Name), name, name_length);
+    AROS_BSTR_setstrlen(node->dol_Name, name_length);
+}
+
+/* ACTION_RENAME_DISK, DOS side. PREPARE takes the DosList write lock without
+ * waiting: the handler is the only task that can serve a lock holder that is
+ * itself waiting on this volume, so blocking here could deadlock. A busy list
+ * refuses the rename before the volume is touched. */
+static int32_t packet_relabel(void *context, uint32_t phase,
+    const uint8_t *name, uint32_t name_length)
+{
+    struct AfsplusArosHandler *handler = context;
+    struct DosLibrary *DOSBase = handler->DOSBase;
+
+    switch (phase)
+    {
+    case AFSPLUS_AROS_RELABEL_PREPARE:
+        if (name_length == 0 || name_length > AFSPLUS_VOLUME_NAME_MAX)
+            return ERROR_LINE_TOO_LONG;
+        if (AttemptLockDosList(LDF_VOLUMES | LDF_WRITE) == NULL)
+            return ERROR_OBJECT_IN_USE;
+        return 0;
+    case AFSPLUS_AROS_RELABEL_COMMIT:
+        write_volume_node_name(handler->volume_node, name, name_length);
+        UnLockDosList(LDF_VOLUMES | LDF_WRITE);
+        return 0;
+    default:
+        UnLockDosList(LDF_VOLUMES | LDF_WRITE);
+        return 0;
+    }
+}
+
 static int32_t packet_now(void *context, int64_t *unix_seconds,
     uint32_t *nanoseconds)
 {
@@ -646,9 +684,21 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     if (error != 0)
         return error;
     set_startup_stage(handler, "volume-entry");
-    handler->volume_node = MakeDosEntry((STRPTR)"AFS+", DLT_VOLUME);
+    /* Locks carry a pointer to this node, so ACTION_RENAME_DISK renames it
+     * in place. MakeDosEntry sizes the name buffer for the name it is given:
+     * create the node with the longest name a rename may bring, then write
+     * the mount-time name into that buffer. */
+    {
+        char longest[AFSPLUS_VOLUME_NAME_MAX + 1];
+
+        memset(longest, 'x', AFSPLUS_VOLUME_NAME_MAX);
+        longest[AFSPLUS_VOLUME_NAME_MAX] = 0;
+        handler->volume_node = MakeDosEntry((STRPTR)longest, DLT_VOLUME);
+    }
     if (handler->volume_node == NULL)
         return ERROR_NO_FREE_STORE;
+    write_volume_node_name(handler->volume_node, volume_name,
+        sizeof(volume_name));
     handler->volume_node->dol_Task = handler->handler_port;
     handler->volume_node->dol_misc.dol_volume.dol_DiskType =
         (ULONG)disk_info.disk_type;
@@ -673,6 +723,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     if (handler->notify_port == NULL)
         return ERROR_NO_FREE_STORE;
     packet_config.notify = packet_notify;
+    packet_config.relabel = packet_relabel;
     set_startup_stage(handler, "packet-context");
     error = afsplus_aros_packet_create(&packet_config, &handler->packets);
     if (error == 0)

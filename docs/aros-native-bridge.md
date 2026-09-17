@@ -231,6 +231,7 @@ The usual packet mapping is direct:
 | fh from lock, change mode | `open_from_lock`, `change_lock_mode`, `change_file_mode` |
 | write protect | `set_write_protect` |
 | lock record, free record | `lock_record`, `free_record` |
+| rename disk | `set_volume_label`, with the shell's `relabel` callback around it |
 | examine all, examine all end | `examine_next` per entry, `rewind_directory`; the packet layer packs `ExAllData` |
 | examine object/FH/next | corresponding examine function |
 | flush | `flush` |
@@ -306,6 +307,19 @@ matter. `ACTION_FREE_RECORD` needs the owning handle and the exact range.
 `ACTION_LOCK_RECORD64` and `ACTION_FREE_RECORD64`, which dos64.library sends
 where packet arguments are 64 bits wide, carry full-width ranges; the classic
 packets stop at 4 GiB.
+
+`ACTION_RENAME_DISK` changes the volume label
+([ADR-104](../adr/ADR-104-volume-label-in-checkpoint.md)) and the name of the
+DOS volume node so that neither changes alone. The packet layer asks the
+shell to prepare, which takes the DosList write lock without waiting, since a
+handler blocked on that lock could deadlock with a holder waiting on the
+volume; then the volume takes the label in one commit; then the shell writes
+the node name in place and releases, or only releases when the volume
+refused. Locks point at the node, so it is renamed in place, in a name buffer
+created for the longest name. A name is one DOS path component whose stored
+UTF-8 form fits 64 bytes. The node is named `AFS+` at mount, the name the
+qualification gates address; naming it from the label at mount is part of the
+target work.
 
 Soft-link targets are opaque paths in the mount encoding. Locate and open
 answer `ERROR_IS_SOFT_LINK`; `ACTION_READ_LINK` walks the path to the first

@@ -48,10 +48,16 @@ static uint32_t stub_removed_watches;
 static struct NotifyRequest second;
 static struct NotifyRequest *delivered[8];
 static uint32_t delivered_count;
-static uint64_t stub_groups = UINT64_C(0x62F);
+static uint64_t stub_groups = UINT64_C(0x262F);
 static uint32_t stub_revision = AFSPLUS_AROS_INTERFACE_REVISION;
 static uint32_t stub_protect;
 static uint32_t stub_protect_key;
+static int32_t stub_label_error;
+static uint8_t relabelled[16];
+static uint32_t relabelled_length;
+static uint32_t relabel_calls;
+static char relabel_phases[8];
+static int32_t stub_relabel_prepare_error;
 static int32_t stub_record_error;
 static uint64_t stub_record_offset;
 static uint64_t stub_record_length;
@@ -570,6 +576,34 @@ int32_t afsplus_aros_watch_drain(struct AfsplusAros *filesystem,
     return 0;
 }
 
+int32_t afsplus_aros_set_volume_label(struct AfsplusAros *filesystem,
+    const uint8_t *label, uint32_t label_length, int64_t now_seconds,
+    uint32_t now_nanoseconds)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    assert(now_nanoseconds == UINT32_C(40000000));
+    record('V', 0, label, label_length, 0);
+    return stub_label_error;
+}
+
+static int32_t packet_relabel(void *context, uint32_t phase,
+    const uint8_t *name, uint32_t name_length)
+{
+    (void)context;
+    assert(relabel_calls < sizeof(relabel_phases) - 1);
+    relabel_phases[relabel_calls++] = "PCA"[phase];
+    if (phase == AFSPLUS_AROS_RELABEL_PREPARE)
+        return stub_relabel_prepare_error;
+    if (phase == AFSPLUS_AROS_RELABEL_COMMIT)
+    {
+        assert(name_length <= sizeof(relabelled));
+        memcpy(relabelled, name, name_length);
+        relabelled_length = name_length;
+    }
+    return 0;
+}
+
 static void packet_notify(void *context, struct NotifyRequest *request)
 {
     (void)context;
@@ -677,6 +711,7 @@ int main(void)
     config.free = packet_free;
     config.now = packet_now;
     config.notify = packet_notify;
+    config.relabel = packet_relabel;
     assert(afsplus_aros_packet_create(&config, &context) == 0);
     assert(context != NULL);
 
@@ -1310,6 +1345,36 @@ int main(void)
         assert(packet.dp_Res1 == DOSTRUE && close_count == closes + 1);
     }
 
+    /* C2: ACTION_RENAME_DISK: prepare the DOS node, relabel the volume,
+     * commit the node. */
+    reset_events();
+    initialize_packet(&packet, ACTION_RENAME_DISK);
+    packet.dp_Arg1 = packet_bstr("Work");
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert_event(0, 'V', "Work", 0);
+    assert(strcmp(relabel_phases, "PC") == 0);
+    assert(relabelled_length == 4 && memcmp(relabelled, "Work", 4) == 0);
+    /* A label the volume refuses aborts the preparation: the node keeps
+     * its name. */
+    stub_label_error = ERROR_INVALID_COMPONENT_NAME;
+    packet.dp_Arg1 = packet_bstr("a:b");
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE
+        && packet.dp_Res2 == ERROR_INVALID_COMPONENT_NAME);
+    assert(strcmp(relabel_phases, "PCPA") == 0);
+    assert(relabelled_length == 4);
+    stub_label_error = 0;
+    /* A handler that cannot prepare leaves the volume untouched. */
+    stub_relabel_prepare_error = ERROR_OBJECT_IN_USE;
+    reset_events();
+    packet.dp_Arg1 = packet_bstr("Busy");
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE
+        && packet.dp_Res2 == ERROR_OBJECT_IN_USE);
+    assert(strcmp(relabel_phases, "PCPAP") == 0 && event_count == 0);
+    stub_relabel_prepare_error = 0;
+
     /* C2: ACTION_WRITE_PROTECT carries the flag and the 32-bit pass key. */
     initialize_packet(&packet, ACTION_WRITE_PROTECT);
     packet.dp_Arg1 = DOSTRUE;
@@ -1445,7 +1510,7 @@ int main(void)
         stub_groups = 0;
         assert(afsplus_aros_packet_create(&config, &old_context)
             == ERROR_BAD_NUMBER);
-        stub_groups = UINT64_C(0x62F);
+        stub_groups = UINT64_C(0x262F);
 
         /* A handler shell without a delivery callback cannot notify, so the
          * request is an unknown action and no watch is created. */
@@ -1455,6 +1520,7 @@ int main(void)
             memset(&request, 0, sizeof(request));
             request.nr_FullName = (STRPTR)"AFS+:x";
             config.notify = NULL;
+            config.relabel = NULL;
             assert(afsplus_aros_packet_create(&config, &old_context) == 0);
             reset_events();
             initialize_packet(&packet, ACTION_ADD_NOTIFY);
@@ -1463,8 +1529,16 @@ int main(void)
             assert(packet.dp_Res1 == DOSFALSE
                 && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
             assert(event_count == 0);
+            /* Nor can it rename its DOS node, so the label stays untouched. */
+            initialize_packet(&packet, ACTION_RENAME_DISK);
+            packet.dp_Arg1 = packet_bstr("Work");
+            assert(afsplus_aros_packet_process(old_context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSFALSE
+                && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+            assert(event_count == 0);
             assert(afsplus_aros_packet_destroy(old_context) == 0);
             config.notify = packet_notify;
+            config.relabel = packet_relabel;
         }
     }
 
