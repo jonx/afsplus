@@ -38,11 +38,11 @@ fn adapter() -> FuseAdapter<MemoryBackend> {
 fn a_directory_of_a_thousand_entries_lists_all_of_them() {
     let mut a = adapter();
     let dir = a
-        .create_directory(OBJECT_ROOT, b"thousand", at(1))
+        .create_directory(OBJECT_ROOT, b"thousand", None, at(1))
         .unwrap()
         .object_id;
     for i in 0..1000 {
-        a.create_directory(dir, format!("entry-{i}").as_bytes(), at(2))
+        a.create_directory(dir, format!("entry-{i}").as_bytes(), None, at(2))
             .unwrap();
     }
     // Read the whole directory the way a host does: pages until eof.

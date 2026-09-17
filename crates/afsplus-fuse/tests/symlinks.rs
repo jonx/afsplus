@@ -47,6 +47,7 @@ fn a_symlink_can_be_made_and_read_back_exactly() {
             OBJECT_ROOT,
             b"target.txt",
             afsplus_vfs::AccessMode::WriteOnly,
+            None,
             at(1),
         )
         .unwrap();
@@ -87,6 +88,7 @@ fn a_symlink_is_listed_as_one_and_deleting_it_leaves_its_target() {
             OBJECT_ROOT,
             b"kept.txt",
             afsplus_vfs::AccessMode::WriteOnly,
+            None,
             at(1),
         )
         .unwrap();

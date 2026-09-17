@@ -264,18 +264,23 @@ fn c_and_rust_agree_on_objects_of_real_images() {
     // Resealed corruptions of committed records on that image.
     let at = record_offset(&secured, plain);
     let mut long_payload = secured.clone();
-    reseal(&mut long_payload[at..at + BLOCK], 104);
+    // One reference longer than the record carries. The fixed payload is 104
+    // bytes since the object record gained an owner, so this case has to move
+    // with it: at 104 it was naming the correct length and asserting corrupt.
+    reseal(&mut long_payload[at..at + BLOCK], 112);
     agree(
         &probe,
         &scratch,
-        "payload of 104 bytes",
+        "payload of 112 bytes",
         &long_payload,
         plain,
         Verdict::Corrupt,
     );
     let mut dirty_tail = secured.clone();
     dirty_tail[at + BLOCK - 1] = 1;
-    reseal(&mut dirty_tail[at..at + BLOCK], 96);
+    // The correct length, so the tail is what this case is about. At 96 it
+    // would have been a short payload and would have failed for that instead.
+    reseal(&mut dirty_tail[at..at + BLOCK], 104);
     agree(
         &probe,
         &scratch,
@@ -286,7 +291,8 @@ fn c_and_rust_agree_on_objects_of_real_images() {
     );
     let at = record_offset(&secured, file);
     let mut outside = secured.clone();
-    outside[at + HEADER_SIZE + 96..at + HEADER_SIZE + 104].copy_from_slice(&u64::MAX.to_le_bytes());
+    outside[at + HEADER_SIZE + 104..at + HEADER_SIZE + 112]
+        .copy_from_slice(&u64::MAX.to_le_bytes());
     // Keep the record's own payload length: it carries a comment too.
     let payload = u32::from_le_bytes(outside[at + 24..at + 28].try_into().unwrap());
     reseal(&mut outside[at..at + BLOCK], payload);
@@ -307,8 +313,8 @@ fn c_and_rust_agree_on_objects_of_real_images() {
     // A malformed attribute reference is not chain state: both refuse it.
     let at = record_offset(&secured, attributed);
     let mut zero_first = secured.clone();
-    zero_first[at + HEADER_SIZE + 96..at + HEADER_SIZE + 104].fill(0);
-    reseal(&mut zero_first[at..at + BLOCK], 112);
+    zero_first[at + HEADER_SIZE + 104..at + HEADER_SIZE + 112].fill(0);
+    reseal(&mut zero_first[at..at + BLOCK], 120);
     agree(
         &probe,
         &scratch,
