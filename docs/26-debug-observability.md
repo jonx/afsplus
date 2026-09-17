@@ -251,7 +251,9 @@ state and leak findings, with the live bitmap and with the bytes the core
 reads at the attributed offsets. The walk depends on `afsplus-format` alone:
 the placement of the allocation-root pool and of the intent-log slots is
 geometry ([disk layout](../spec/disk-layout.md)). `ExplainObject`, `ExplainPath`, the remaining
-operations and the versioned tool output are open.
+operations and the versioned tool output are open. The semantic image diff of
+[docs/28](28-virtual-images-and-viewports.md) walks two committed states the
+same way and reports what they differ by in filesystem terms.
 
 ## 6. Optional reverse-map index
 

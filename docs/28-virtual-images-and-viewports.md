@@ -1,7 +1,8 @@
 # 28. Virtual Images, Overlays, and Filesystem Viewports
 
 > **ADRs:** none · **Spec:** none ·
-> **Tests:** none · **Milestones:** none
+> **Tests:** [image_diff](../crates/afsplus-check/tests/image_diff.rs) ·
+> **Milestones:** roadmap-37
 
 <!-- toc -->
 
@@ -16,6 +17,7 @@
 - [9. Nested images and reflinks](#9-nested-images-and-reflinks)
 - [10. Directory projections are different](#10-directory-projections-are-different)
 - [11. Debugging commands worth providing](#11-debugging-commands-worth-providing)
+  - [The semantic image diff](#the-semantic-image-diff)
 - [12. Guiding principle](#12-guiding-principle)
 
 <!-- /toc -->
@@ -268,6 +270,61 @@ reclaim queue +1 item
 ```
 
 That becomes a powerful microscope for filesystem development.
+
+### The semantic image diff
+
+[`afsplus_check::diff`](../crates/afsplus-check/src/diff.rs) compares the
+committed states of two images, and `afsplus-image-diff` prints the result as
+the short human form or, with `--json`, as the versioned machine-readable form
+of [ADR-025](../adr/ADR-025-structured-management-api.md). It reports objects
+created and removed; names added, removed, retargeted and moved, where an
+object whose single name disappeared on one side and appeared on the other is
+one move rather than a creation and a removal; hard-link counts; type, size,
+allocated size, protection bits, the three timestamps, content generation and
+symlink target; the presence, format identity, version, length, divergence
+mark and bytes of a security descriptor; the logical byte ranges whose content
+changed, byte precise, where a byte past the end of a file is absent and an
+absent byte differs from any present byte, so a truncation and an extension
+are ranges like any other change; the allocation changes that change no
+content, as mapped, shared and unwritten block counts, which is what a clone,
+a shared range and a preallocation produce; and the volume facts, which are
+the committed label of [ADR-104](../adr/ADR-104-volume-label-in-checkpoint.md),
+the checkpoint generation, the free-block delta, the root and next object IDs,
+the blocks and runs held by the reclaim queue, the entries of the orphan
+directory and the snapshot registry. `--metadata` compares everything except
+file content. Ordering is total: objects and orphans by object ID, names by
+parent then name, snapshots by ID.
+
+Two rules keep the answer simple. Content is compared by reading the bytes of
+both files rather than by trusting equal physical mappings, because two images
+are not necessarily copies of one another and the same block number on two
+volumes is not the same data; the extent maps then serve for the allocation
+summary rather than for the content answer. A single removed name and a single
+added name for one object are reported as a move whatever the sequence of
+operations between the two states, because the two committed states are all
+the diff sees and they say the object kept one name in another place.
+
+The diff is its own reader, like the explain walk of
+[docs/26](26-debug-observability.md): it selects the checkpoint and descends
+every tree with the block codecs of `afsplus-format` alone, sharing no
+traversal, claim set or loader with the checker or with the core, so a
+disagreement with either is a finding about one of them. Every tree is read
+through a cursor that holds one leaf node and the pending child block numbers
+of the path above it, so a directory, an object map or an extent map of any
+size costs one block of items and `O(fan-out x depth)` block numbers per
+image, and content is compared one logical block per side. What the diff
+accumulates is the report, whose size is the number of changes rather than the
+size of the volume. A structure that cannot be decoded is reported rather than
+guessed: what a damaged tree hides stays uncompared, so a damaged object map
+or directory does not turn into a volume of removals, and the command returns
+its media status instead of "no difference".
+
+[Its test](../crates/afsplus-check/tests/image_diff.rs) builds image pairs with
+the real core, one per operation family, and requires the diff to be the
+literal consequence of the operations performed. Each pair carries three
+further witnesses: an image does not differ from itself, the reversed diff is
+the mirror of the diff, and the reported byte ranges equal a brute-force
+comparison of the two files read through the core.
 
 ## 12. Guiding principle
 

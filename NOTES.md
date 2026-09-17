@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Diff two images in filesystem terms](#2026-09-17--diff-two-images-in-filesystem-terms)
 - [2026-09-17 — Store the object comment in the object record](#2026-09-17--store-the-object-comment-in-the-object-record)
 - [2026-09-17 — Admit a well-formed security reference wherever it points](#2026-09-17--admit-a-well-formed-security-reference-wherever-it-points)
 - [2026-09-17 — Pass a relabel's label as a value, never as volume state](#2026-09-17--pass-a-relabels-label-as-a-value-never-as-volume-state)
@@ -195,6 +196,51 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — Diff two images in filesystem terms
+
+The last open item of B4, the semantic image diff, answers what an operation
+really did to a volume: `afsplus_check::diff` compares two committed states and
+reports objects created and removed, names added, removed, retargeted and
+moved, hard-link counts, type, size, allocation, protection, timestamps,
+content generation, symlink target, the security descriptor down to its bytes,
+the logical byte ranges whose content changed, the allocation changes that
+change no content, and the volume facts: label, generation, free space,
+reclaim quarantine, orphan directory and snapshot registry. `--metadata` skips
+content. `afsplus-image-diff` prints the short human form or the versioned JSON
+form of ADR-025.
+
+It reads like the explain walk and not like the checker: checkpoint selection
+and every tree descended with the `afsplus-format` codecs alone, so the
+expectations below cross one implementation against the other. Trees are read
+through a cursor holding one leaf and the pending child block numbers above it,
+content one logical block per side, which keeps a directory or an extent map of
+any size at one block of items per image and leaves the report as the only term
+that grows with the number of changes. Two design questions were settled the
+simple way, with the reasons in
+[docs/28](docs/28-virtual-images-and-viewports.md): content is compared by
+reading bytes rather than by trusting equal physical mappings, since two images
+need not be copies of one another, and one removed name plus one added name for
+the same object is a move whatever the sequence that produced it.
+
+What a damaged tree hides stays uncompared. A zeroed object map or directory
+first reported a volume of removals; the stream now marks itself broken and the
+diff reports the problem instead of concluding anything one-sided from it, and
+the command returns its media status rather than "no difference".
+
+`crates/afsplus-check/tests/image_diff.rs`, 21 tests: image pairs built with
+the real core for create, write, truncate, rename across directories, hard link
+and unlink, symlink, `clone_file`, `clone_range`, preallocate, protection,
+security descriptor and its replacement, relabel, a deferred window, an orphan
+and a snapshot, each against the literal consequence of the operations. Every
+pair also proves that an image does not differ from itself, that the reversed
+diff is the mirror of the diff, and that the reported byte ranges equal a
+brute-force comparison of the two files read through the core. A record
+resealed under another size is reported as the size change and the seven bytes
+behind it. With one range end moved by a single byte the write expectation
+fails, which is what makes the passing run mean something.
+`crates/afsplus-tools/tests/image_diff_cli.rs`, 2 tests, covers the command,
+its JSON and its three exit statuses.
 
 
 ## 2026-09-17 — Store the object comment in the object record
