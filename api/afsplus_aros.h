@@ -12,6 +12,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "debug_observability.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -23,13 +25,27 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(4)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(5)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
 #define AFSPLUS_AROS_GROUP_DOS_METADATA UINT64_C(0x4)
 #define AFSPLUS_AROS_GROUP_SOFT_LINKS UINT64_C(0x8)
 #define AFSPLUS_AROS_GROUP_API_V2 UINT64_C(0x10)
+#define AFSPLUS_AROS_GROUP_NOTIFY UINT64_C(0x20)
+#define AFSPLUS_AROS_GROUP_OBSERVE UINT64_C(0x40)
+
+/* AfsplusArosHealth.flags. Disk-full is counted and is not a degraded state. */
+#define AFSPLUS_AROS_HEALTH_DEVICE_ERROR UINT32_C(0x1)
+#define AFSPLUS_AROS_HEALTH_CORRUPTION UINT32_C(0x2)
+#define AFSPLUS_AROS_HEALTH_REPLAY_PENDING UINT32_C(0x4)
+#define AFSPLUS_AROS_HEALTH_INTERNAL_FAULT UINT32_C(0x8)
+
+/* AfsplusArosHealthEvent.kind. */
+#define AFSPLUS_AROS_HEALTH_EVENT_DEVICE_ERROR UINT32_C(1)
+#define AFSPLUS_AROS_HEALTH_EVENT_CORRUPTION UINT32_C(2)
+#define AFSPLUS_AROS_HEALTH_EVENT_NO_SPACE UINT32_C(3)
+#define AFSPLUS_AROS_HEALTH_EVENT_INTERNAL_FAULT UINT32_C(4)
 
 /* afsplus_aros_advise effect. */
 #define AFSPLUS_AROS_ADVICE_NO_EFFECT UINT32_C(0)
@@ -146,7 +162,54 @@ struct AfsplusArosCapabilities {
     uint64_t available_blocks;
 };
 
+/* Sized query structure; see AfsplusArosInterface for the growth rule. */
+struct AfsplusArosHealth {
+    uint32_t struct_size;
+    uint32_t mount_mode;
+    uint32_t flags;
+    uint32_t pending_intent_records;
+    uint64_t generation;
+    uint64_t pending_orphans;
+    uint64_t total_blocks;
+    uint64_t free_blocks;
+    uint64_t available_blocks;
+    uint64_t device_errors;
+    uint64_t corruption_errors;
+    uint64_t no_space_errors;
+    uint64_t internal_faults;
+    uint64_t events_recorded;
+    uint64_t events_dropped;
+    int32_t last_error;
+    uint32_t reserved;
+};
+
+/* sequence counts every recorded event since mount, so a gap is loss. */
+struct AfsplusArosHealthEvent {
+    uint64_t sequence;
+    uint32_t kind;
+    int32_t dos_error;
+};
+
+/* Sized query structure. delivered and missed count sink calls; filtered
+ * counts events outside the category mask; dropped counts ring overwrites. */
+struct AfsplusArosTraceCounters {
+    uint32_t struct_size;
+    uint32_t attached;
+    uint64_t delivered;
+    uint64_t missed;
+    uint64_t filtered;
+    uint64_t dropped;
+};
+
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(struct AfsplusArosHealth) == 112,
+    "AfsplusArosHealth ABI drift");
+_Static_assert(sizeof(struct AfsplusArosHealthEvent) == 16,
+    "AfsplusArosHealthEvent ABI drift");
+_Static_assert(sizeof(struct AfsplusArosTraceCounters) == 40,
+    "AfsplusArosTraceCounters ABI drift");
+_Static_assert(sizeof(struct afsp_trace_event) == 64,
+    "afsp_trace_event ABI drift");
 _Static_assert(sizeof(struct AfsplusArosInterface) == 24,
     "AfsplusArosInterface ABI drift");
 _Static_assert(sizeof(struct AfsplusArosCapabilities) == 64,
@@ -312,6 +375,37 @@ int32_t afsplus_aros_replace(struct AfsplusAros *filesystem,
     int64_t now_seconds, uint32_t now_nanoseconds);
 int32_t afsplus_aros_advise(struct AfsplusAros *filesystem, uint64_t file,
     uint64_t offset, uint64_t length, uint32_t hint, uint32_t *output_effect);
+
+/* Group AFSPLUS_AROS_GROUP_NOTIFY: a bounded watch table. A watch names an
+ * entry under base_lock, which need not exist; an empty name watches the
+ * object of base_lock. A directory watch also fires for changes to its
+ * entries. Pending state is one flag per watch: changes between two drains
+ * are one event. watch_drain stores up to capacity pending identifiers,
+ * lowest first; the rest stay pending. */
+int32_t afsplus_aros_watch_add(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint64_t *output_watch);
+int32_t afsplus_aros_watch_remove(struct AfsplusAros *filesystem,
+    uint64_t watch);
+int32_t afsplus_aros_watch_drain(struct AfsplusAros *filesystem,
+    uint64_t *watches, uint32_t capacity, uint32_t *output_count);
+
+/* Group AFSPLUS_AROS_GROUP_OBSERVE. Every failed call on a mounted instance
+ * that describes the volume or its device enters the health log.
+ *
+ * set_trace_sink attaches the core flight recorder to sink->emit, or detaches
+ * with NULL. emit runs inside filesystem operations on the handler task: it
+ * must not block, call back into this library or unwind; it hands the event
+ * to a preallocated queue and returns. category_mask uses AFSP_TRACE_*. */
+int32_t afsplus_aros_health(struct AfsplusAros *filesystem,
+    struct AfsplusArosHealth *output);
+int32_t afsplus_aros_health_events(struct AfsplusAros *filesystem,
+    struct AfsplusArosHealthEvent *events, uint32_t capacity,
+    uint32_t *output_count);
+int32_t afsplus_aros_set_trace_sink(struct AfsplusAros *filesystem,
+    const struct afsp_trace_sink *sink);
+int32_t afsplus_aros_trace_counters(struct AfsplusAros *filesystem,
+    struct AfsplusArosTraceCounters *output);
 
 /* Group AFSPLUS_AROS_GROUP_INTERFACE_QUERY. */
 int32_t afsplus_aros_capabilities(struct AfsplusAros *filesystem,

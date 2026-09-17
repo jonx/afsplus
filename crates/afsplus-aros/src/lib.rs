@@ -5,9 +5,12 @@
 //! directory-enumeration semantics, and `IoErr()` translation over the shared
 //! [`afsplus_vfs::Vfs`] API.
 
+pub mod health;
+
 use std::collections::BTreeMap;
 
 use afsplus_block::BlockDevice;
+use afsplus_core::flight::FlightRecorder;
 use afsplus_core::MountMode;
 use afsplus_format::{Timespec, OBJECT_ROOT};
 use afsplus_vfs::{
@@ -43,6 +46,8 @@ pub struct ArosConfig {
     pub max_preallocate_blocks: u64,
     /// Size of the notification watch table.
     pub max_watches: usize,
+    /// Retained health events; older ones give way and are counted.
+    pub health_event_capacity: usize,
 }
 
 impl Default for ArosConfig {
@@ -57,6 +62,7 @@ impl Default for ArosConfig {
             allow_security_downgrade: false,
             max_preallocate_blocks: 4096,
             max_watches: 256,
+            health_event_capacity: 32,
         }
     }
 }
@@ -250,6 +256,7 @@ impl RichSecurityProbe for ProtectionBitsOnly {
 }
 
 pub struct ArosAdapter<D: BlockDevice> {
+    health: health::HealthLog,
     security: Box<dyn RichSecurityProbe>,
     vfs: Vfs<D>,
     config: ArosConfig,
@@ -268,6 +275,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         let mut known_parents = BTreeMap::new();
         known_parents.insert(OBJECT_ROOT, (None, config.volume_name.clone()));
         ArosAdapter {
+            health: health::HealthLog::new(config.health_event_capacity),
             security: Box::new(ProtectionBitsOnly),
             vfs,
             config,
@@ -1094,6 +1102,55 @@ impl<D: BlockDevice> ArosAdapter<D> {
             mount_mode: self.vfs.mount_mode(),
             pending_intent_records: self.vfs.pending_intent_records(),
         }
+    }
+
+    /// The health log. The boundary that turns results into `IoErr()` values
+    /// records every failure here; the adapter's callers decide nothing.
+    pub fn health_log(&mut self) -> &mut health::HealthLog {
+        &mut self.health
+    }
+
+    pub fn health(&mut self) -> Result<health::HealthSnapshot, ArosError> {
+        let statfs = self.vfs.statfs();
+        let mount_mode = self.vfs.mount_mode();
+        let pending_intent_records = self.vfs.pending_intent_records();
+        let mut snapshot = health::HealthSnapshot {
+            mount_mode,
+            flags: 0,
+            generation: self.vfs.generation(),
+            pending_intent_records,
+            pending_orphans: self.vfs.pending_orphans()?,
+            total_blocks: statfs.total_blocks,
+            free_blocks: statfs.free_blocks,
+            available_blocks: statfs.available_blocks,
+            device_errors: 0,
+            corruption_errors: 0,
+            no_space_errors: 0,
+            internal_faults: 0,
+            events_recorded: 0,
+            events_dropped: 0,
+            last_error: 0,
+        };
+        if pending_intent_records != 0 && mount_mode != MountMode::ReadWrite {
+            snapshot.flags |= health::HEALTH_REPLAY_PENDING;
+        }
+        self.health.fill(&mut snapshot);
+        Ok(snapshot)
+    }
+
+    /// Installs or removes the core flight recorder for a trace front-end.
+    pub fn replace_flight_recorder(
+        &mut self,
+        recorder: Option<FlightRecorder>,
+    ) -> Option<FlightRecorder> {
+        self.vfs.replace_flight_recorder(recorder)
+    }
+
+    pub fn with_flight_recorder<T>(
+        &mut self,
+        inspect: impl FnOnce(&mut FlightRecorder) -> T,
+    ) -> Option<T> {
+        self.vfs.with_flight_recorder(inspect)
     }
 
     pub fn into_vfs(mut self) -> Result<Vfs<D>, ArosError> {

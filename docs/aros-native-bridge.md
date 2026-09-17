@@ -258,6 +258,28 @@ layer asks `afsplus_aros_interface` at creation and answers
 `ERROR_ACTION_NOT_KNOWN` for an action whose entry-point group the linked
 library lacks.
 
+Three entry-point groups make a running handler observable without a
+console. `NOTIFY` is a bounded watch table: a watch is a parent directory
+plus the comparison key of a name, so it covers names that do not exist yet
+and any spelling the name policy folds together; a directory watch also fires
+for changes to its entries. Pending state is one flag per watch, so changes
+between two drains are one event and memory does not follow the change rate.
+File writes are reported when the handle closes. The handler loop drains
+identifiers after each packet and owns the `NotifyRequest` delivery.
+
+`OBSERVE` carries health and tracing. Every failed call on a mounted instance
+that describes the volume or its device (device error, failed validation,
+disk full, internal fault) enters a health log with counters, degraded-state
+flags and a bounded event ring whose sequence numbers expose loss.
+`afsplus_aros_health` returns that state with the generation, pending intent
+records, pending orphans and block counts. `afsplus_aros_set_trace_sink`
+attaches the core flight recorder to a callback of
+[`debug_observability.h`](../api/debug_observability.h) with a category mask;
+the callback runs inside filesystem operations and only hands the event to a
+preallocated queue. `afsplus_aros_trace_counters` reports delivered, missed,
+filtered and dropped counts, so a slow consumer costs counted loss and never
+blocks the filesystem.
+
 `ACTION_SEEK64`, size/position variants and `DosPacket64.dp_Res0 == DP64_INIT`
 are decoded and encoded in the C packet layer. The Rust ABI always receives the
 already reconstructed `int64_t`/`uint64_t` value.

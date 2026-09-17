@@ -11,28 +11,38 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
 
+use afsplus_aros::health::HealthEvent;
 use afsplus_aros::{
     ArosAdapter, ArosConfig, ArosError, DiskInfo, FileInfo, LockAccess, NameEncoding, OpenMode,
     SeekMode,
 };
 use afsplus_block::{BlockDevice, BlockError};
+use afsplus_core::flight::{Categories, Category, Event, FlightRecorder, LiveSink, SinkResult};
 use afsplus_core::{MountMode, MountOptions};
 use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 4;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 5;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
 pub const AFSPLUS_AROS_GROUP_SOFT_LINKS: u64 = 0x8;
 pub const AFSPLUS_AROS_GROUP_API_V2: u64 = 0x10;
+pub const AFSPLUS_AROS_GROUP_NOTIFY: u64 = 0x20;
+pub const AFSPLUS_AROS_GROUP_OBSERVE: u64 = 0x40;
+pub const AFSPLUS_AROS_HEALTH_DEVICE_ERROR: u32 = afsplus_aros::health::HEALTH_DEVICE_ERROR;
+pub const AFSPLUS_AROS_HEALTH_CORRUPTION: u32 = afsplus_aros::health::HEALTH_CORRUPTION;
+pub const AFSPLUS_AROS_HEALTH_REPLAY_PENDING: u32 = afsplus_aros::health::HEALTH_REPLAY_PENDING;
+pub const AFSPLUS_AROS_HEALTH_INTERNAL_FAULT: u32 = afsplus_aros::health::HEALTH_INTERNAL_FAULT;
 pub const AFSPLUS_AROS_ADVICE_NO_EFFECT: u32 = 0;
 const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_INTERFACE_QUERY
     | AFSPLUS_AROS_GROUP_DOS_METADATA
     | AFSPLUS_AROS_GROUP_SOFT_LINKS
-    | AFSPLUS_AROS_GROUP_API_V2;
+    | AFSPLUS_AROS_GROUP_API_V2
+    | AFSPLUS_AROS_GROUP_NOTIFY
+    | AFSPLUS_AROS_GROUP_OBSERVE;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -189,6 +199,157 @@ pub struct AfsplusArosCapabilities {
     pub available_blocks: u64,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AfsplusArosHealth {
+    pub struct_size: u32,
+    pub mount_mode: u32,
+    pub flags: u32,
+    pub pending_intent_records: u32,
+    pub generation: u64,
+    pub pending_orphans: u64,
+    pub total_blocks: u64,
+    pub free_blocks: u64,
+    pub available_blocks: u64,
+    pub device_errors: u64,
+    pub corruption_errors: u64,
+    pub no_space_errors: u64,
+    pub internal_faults: u64,
+    pub events_recorded: u64,
+    pub events_dropped: u64,
+    pub last_error: i32,
+    pub reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AfsplusArosHealthEvent {
+    pub sequence: u64,
+    pub kind: u32,
+    pub dos_error: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AfsplusArosTraceCounters {
+    pub struct_size: u32,
+    pub attached: u32,
+    pub delivered: u64,
+    pub missed: u64,
+    pub filtered: u64,
+    pub dropped: u64,
+}
+
+/// `struct afsp_trace_event` of `api/debug_observability.h`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AfspTraceEvent {
+    pub sequence: u64,
+    pub timestamp: u64,
+    pub transaction_id: u64,
+    pub object_id: u64,
+    pub block: u64,
+    pub arg0: u64,
+    pub arg1: u64,
+    pub task_id: u32,
+    pub category: u16,
+    pub event: u16,
+}
+
+pub type AfspTraceSinkFn = unsafe extern "C" fn(context: *mut c_void, event: *const AfspTraceEvent);
+
+/// `struct afsp_trace_sink`.
+#[repr(C)]
+pub struct AfspTraceSink {
+    pub emit: Option<AfspTraceSinkFn>,
+    pub ctx: *mut c_void,
+    pub category_mask: u64,
+}
+
+pub const AFSP_TRACE_TX: u64 = 1 << 0;
+pub const AFSP_TRACE_CHECKPOINT: u64 = 1 << 1;
+pub const AFSP_TRACE_IO: u64 = 1 << 2;
+pub const AFSP_TRACE_ALLOC: u64 = 1 << 3;
+pub const AFSP_TRACE_BTREE: u64 = 1 << 5;
+pub const AFSP_TRACE_OBJECT: u64 = 1 << 6;
+pub const AFSP_TRACE_RECLAIM: u64 = 1 << 10;
+pub const AFSP_TRACE_ERROR: u64 = 1 << 12;
+pub const AFSP_TRACE_API: u64 = 1 << 13;
+pub const AFSP_TRACE_WINDOW: u64 = 1 << 14;
+pub const AFSP_TRACE_LIFECYCLE: u64 = 1 << 15;
+
+/// Core category to published trace bit. Data staging reports as I/O, view
+/// descents as tree activity, and mount, format and verify as lifecycle.
+const TRACE_CATEGORY_MAP: [(Category, u64); 15] = [
+    (Category::Transaction, AFSP_TRACE_TX),
+    (Category::Checkpoint, AFSP_TRACE_CHECKPOINT),
+    (Category::Io, AFSP_TRACE_IO),
+    (Category::Data, AFSP_TRACE_IO),
+    (Category::Allocator, AFSP_TRACE_ALLOC),
+    (Category::Tree, AFSP_TRACE_BTREE),
+    (Category::View, AFSP_TRACE_BTREE),
+    (Category::Object, AFSP_TRACE_OBJECT),
+    (Category::Reclaim, AFSP_TRACE_RECLAIM),
+    (Category::Error, AFSP_TRACE_ERROR),
+    (Category::Api, AFSP_TRACE_API),
+    (Category::Window, AFSP_TRACE_WINDOW),
+    (Category::Mount, AFSP_TRACE_LIFECYCLE),
+    (Category::Format, AFSP_TRACE_LIFECYCLE),
+    (Category::Verify, AFSP_TRACE_LIFECYCLE),
+];
+
+fn trace_bit(category: Category) -> u64 {
+    TRACE_CATEGORY_MAP
+        .iter()
+        .find(|(candidate, _)| *candidate == category)
+        .map_or(0, |(_, bit)| *bit)
+}
+
+struct CallbackSink {
+    emit: AfspTraceSinkFn,
+    context: *mut c_void,
+}
+
+// SAFETY: one AFS+ instance is single-task by the boundary contract; the
+// recorder holding this sink never leaves the handler task that installed it.
+unsafe impl Send for CallbackSink {}
+// SAFETY: as above; no shared access exists.
+unsafe impl Sync for CallbackSink {}
+
+impl LiveSink for CallbackSink {
+    fn try_event(&mut self, event: Event) -> SinkResult {
+        let (object_id, mut block) = event
+            .object
+            .map_or((0, 0), |object| (object.object_id, object.record_block));
+        if let Some(tree) = event.tree {
+            block = tree.block;
+        }
+        if let Some(allocation) = event.allocation {
+            block = allocation.start;
+        }
+        let translated = AfspTraceEvent {
+            sequence: event.sequence,
+            timestamp: 0,
+            transaction_id: event.attempt,
+            object_id,
+            block,
+            arg0: event.generation,
+            arg1: event.api.operation,
+            task_id: 0,
+            category: trace_bit(event.kind.category()) as u16,
+            event: event.kind as u16,
+        };
+        // SAFETY: the installer guarantees the callback and context outlive
+        // the attachment and that the callback does not unwind or reenter.
+        unsafe { (self.emit)(self.context, ptr::from_ref(&translated)) };
+        SinkResult::Accepted
+    }
+}
+
+const _: [(); 112] = [(); std::mem::size_of::<AfsplusArosHealth>()];
+const _: [(); 16] = [(); std::mem::size_of::<AfsplusArosHealthEvent>()];
+const _: [(); 40] = [(); std::mem::size_of::<AfsplusArosTraceCounters>()];
+const _: [(); 64] = [(); std::mem::size_of::<AfspTraceEvent>()];
 const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosInterface>()];
 const _: [(); 64] = [(); std::mem::size_of::<AfsplusArosCapabilities>()];
 const _: [(); 64] = [(); std::mem::size_of::<AfsplusArosFileInfo>()];
@@ -296,6 +457,29 @@ where
         Ok(Ok(())) => 0,
         Ok(Err(error)) => error.io_error(),
         Err(_) => ArosError::Unknown.io_error(),
+    }
+}
+
+/// `ffi_status` for a mounted instance: a failure that describes the volume
+/// or its device, and any internal fault, also enters the health log.
+fn bridge_status<F>(filesystem: *mut AfsplusAros, operation: F) -> i32
+where
+    F: FnOnce() -> Result<(), ArosError>,
+{
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(Ok(())) => 0,
+        Ok(Err(error)) => {
+            if let Ok(bridge) = bridge_mut(filesystem) {
+                bridge.adapter.health_log().record(error);
+            }
+            error.io_error()
+        }
+        Err(_) => {
+            if let Ok(bridge) = bridge_mut(filesystem) {
+                bridge.adapter.health_log().record_internal_fault();
+            }
+            ArosError::Unknown.io_error()
+        }
     }
 }
 
@@ -610,7 +794,7 @@ pub extern "C" fn afsplus_aros_locate(
     access: u32,
     output_lock: *mut u64,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_lock)?;
         let name = input_bytes(name, name_length)?;
         let lock = bridge_mut(filesystem)?.adapter.locate(
@@ -628,7 +812,7 @@ pub extern "C" fn afsplus_aros_duplicate_lock(
     lock: u64,
     output_lock: *mut u64,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_lock)?;
         let copy = bridge_mut(filesystem)?.adapter.duplicate_lock(lock)?;
         write_output(output_lock, copy)
@@ -641,7 +825,7 @@ pub extern "C" fn afsplus_aros_parent_lock(
     lock: u64,
     output_lock: *mut u64,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_lock)?;
         let parent = bridge_mut(filesystem)?.adapter.parent_lock(lock)?;
         write_output(output_lock, parent.unwrap_or(0))
@@ -655,7 +839,7 @@ pub extern "C" fn afsplus_aros_parent_lock_with_access(
     access: u32,
     output_lock: *mut u64,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_lock)?;
         let parent = bridge_mut(filesystem)?
             .adapter
@@ -671,7 +855,7 @@ pub extern "C" fn afsplus_aros_same_lock(
     second_lock: u64,
     output_same: *mut u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_same)?;
         let same = bridge_mut(filesystem)?
             .adapter
@@ -696,7 +880,7 @@ pub extern "C" fn afsplus_aros_open(
     now_nanoseconds: u32,
     output_file: *mut u64,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_file)?;
         let name = input_bytes(name, name_length)?;
         let file = bridge_mut(filesystem)?.adapter.open(
@@ -715,7 +899,7 @@ pub extern "C" fn afsplus_aros_parent_of_file(
     file: u64,
     output_lock: *mut u64,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_lock)?;
         let lock = bridge_mut(filesystem)?.adapter.parent_of_file(file)?;
         write_output(output_lock, lock)
@@ -728,7 +912,7 @@ pub extern "C" fn afsplus_aros_lock_from_file(
     file: u64,
     output_lock: *mut u64,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_lock)?;
         let lock = bridge_mut(filesystem)?.adapter.lock_from_file(file)?;
         write_output(output_lock, lock)
@@ -748,7 +932,7 @@ pub extern "C" fn afsplus_aros_read(
     length: u32,
     output_count: *mut u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_count)?;
         let destination = output_slice(destination, length)?;
         let count = bridge_mut(filesystem)?.adapter.read(file, destination)?;
@@ -767,7 +951,7 @@ pub extern "C" fn afsplus_aros_write(
     now_nanoseconds: u32,
     output_count: *mut u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_count)?;
         let source = input_bytes(source, length)?;
         let count = bridge_mut(filesystem)?.adapter.write(
@@ -788,7 +972,7 @@ pub extern "C" fn afsplus_aros_seek(
     mode: u32,
     output_old_position: *mut u64,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_old_position)?;
         let old = bridge_mut(filesystem)?
             .adapter
@@ -803,7 +987,7 @@ pub extern "C" fn afsplus_aros_file_position(
     file: u64,
     output_position: *mut u64,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_position)?;
         let position = bridge_mut(filesystem)?.adapter.file_position(file)?;
         write_output(output_position, position)
@@ -816,7 +1000,7 @@ pub extern "C" fn afsplus_aros_file_size(
     file: u64,
     output_size: *mut u64,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_size)?;
         let size = bridge_mut(filesystem)?.adapter.file_size(file)?;
         write_output(output_size, size)
@@ -833,7 +1017,7 @@ pub extern "C" fn afsplus_aros_set_file_size(
     now_nanoseconds: u32,
     output_size: *mut u64,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_size)?;
         let size = bridge_mut(filesystem)?.adapter.set_file_size(
             file,
@@ -865,7 +1049,7 @@ pub extern "C" fn afsplus_aros_create_directory(
     now_nanoseconds: u32,
     output_lock: *mut u64,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_lock)?;
         let name = input_bytes(name, name_length)?;
         let lock = bridge_mut(filesystem)?.adapter.create_directory(
@@ -886,7 +1070,7 @@ pub extern "C" fn afsplus_aros_delete_object(
     now_seconds: i64,
     now_nanoseconds: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         let name = input_bytes(name, name_length)?;
         bridge_mut(filesystem)?.adapter.delete_object(
             optional_lock(base_lock),
@@ -908,7 +1092,7 @@ pub extern "C" fn afsplus_aros_rename(
     now_seconds: i64,
     now_nanoseconds: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         let source_name = input_bytes(source_name, source_name_length)?;
         let target_name = input_bytes(target_name, target_name_length)?;
         bridge_mut(filesystem)?.adapter.rename(
@@ -931,7 +1115,7 @@ pub extern "C" fn afsplus_aros_make_hard_link(
     now_seconds: i64,
     now_nanoseconds: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         let target_name = input_bytes(target_name, target_name_length)?;
         bridge_mut(filesystem)?.adapter.make_hard_link(
             optional_lock(target_base_lock),
@@ -950,7 +1134,7 @@ pub extern "C" fn afsplus_aros_examine_lock(
     name: *mut u8,
     name_capacity: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         let bridge = bridge_mut(filesystem)?;
         validate_file_info_output(bridge, output, name, name_capacity)?;
         let info = bridge.adapter.examine_lock(lock)?;
@@ -966,7 +1150,7 @@ pub extern "C" fn afsplus_aros_examine_file(
     name: *mut u8,
     name_capacity: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         let bridge = bridge_mut(filesystem)?;
         validate_file_info_output(bridge, output, name, name_capacity)?;
         let info = bridge.adapter.examine_file(file)?;
@@ -982,7 +1166,7 @@ pub extern "C" fn afsplus_aros_examine_next(
     name: *mut u8,
     name_capacity: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         let bridge = bridge_mut(filesystem)?;
         validate_file_info_output(bridge, output, name, name_capacity)?;
         let info = bridge.adapter.examine_next(lock)?;
@@ -1000,7 +1184,7 @@ pub extern "C" fn afsplus_aros_disk_info(
     filesystem: *mut AfsplusAros,
     output: *mut AfsplusArosDiskInfo,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output)?;
         copy_disk_info(bridge_mut(filesystem)?.adapter.disk_info(), output)
     })
@@ -1031,7 +1215,7 @@ pub extern "C" fn afsplus_aros_capabilities(
     filesystem: *mut AfsplusAros,
     output: *mut AfsplusArosCapabilities,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         let policy = bridge_mut(filesystem)?.adapter.volume_policy();
         write_sized_output(
             output,
@@ -1068,7 +1252,7 @@ pub extern "C" fn afsplus_aros_set_protection(
     now_seconds: i64,
     now_nanoseconds: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         let name = input_bytes(name, name_length)?;
         bridge_mut(filesystem)?.adapter.set_protection(
             optional_lock(base_lock),
@@ -1091,7 +1275,7 @@ pub extern "C" fn afsplus_aros_set_modified(
     now_seconds: i64,
     now_nanoseconds: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         let name = input_bytes(name, name_length)?;
         bridge_mut(filesystem)?.adapter.set_modified(
             optional_lock(base_lock),
@@ -1114,7 +1298,7 @@ pub extern "C" fn afsplus_aros_make_soft_link(
     now_seconds: i64,
     now_nanoseconds: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         let name = input_bytes(name, name_length)?;
         let target = input_bytes(target, target_length)?;
         bridge_mut(filesystem)?.adapter.make_soft_link(
@@ -1136,7 +1320,7 @@ pub extern "C" fn afsplus_aros_read_soft_link(
     target_capacity: u32,
     output_required: *mut u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_required)?;
         let name = input_bytes(name, name_length)?;
         let target = output_slice(target, target_capacity)?;
@@ -1161,7 +1345,7 @@ pub extern "C" fn afsplus_aros_read_at(
     length: u32,
     output_count: *mut u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_count)?;
         let destination = output_slice(destination, length)?;
         let count = bridge_mut(filesystem)?
@@ -1183,7 +1367,7 @@ pub extern "C" fn afsplus_aros_write_at(
     now_nanoseconds: u32,
     output_count: *mut u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_count)?;
         let source = input_bytes(source, length)?;
         let count = bridge_mut(filesystem)?.adapter.write_at(
@@ -1206,7 +1390,7 @@ pub extern "C" fn afsplus_aros_clone_file(
     now_seconds: i64,
     now_nanoseconds: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         let name = input_bytes(target_name, target_name_length)?;
         bridge_mut(filesystem)?.adapter.clone_file(
             source_lock,
@@ -1229,7 +1413,7 @@ pub extern "C" fn afsplus_aros_clone_range(
     now_seconds: i64,
     now_nanoseconds: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         bridge_mut(filesystem)?.adapter.clone_range(
             source_file,
             source_offset,
@@ -1250,7 +1434,7 @@ pub extern "C" fn afsplus_aros_preallocate(
     now_seconds: i64,
     now_nanoseconds: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         bridge_mut(filesystem)?.adapter.preallocate(
             file,
             offset,
@@ -1273,7 +1457,7 @@ pub extern "C" fn afsplus_aros_replace(
     now_seconds: i64,
     now_nanoseconds: u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         let source = input_bytes(source_name, source_name_length)?;
         let target = input_bytes(target_name, target_name_length)?;
         bridge_mut(filesystem)?.adapter.replace(
@@ -1295,11 +1479,215 @@ pub extern "C" fn afsplus_aros_advise(
     hint: u32,
     output_effect: *mut u32,
 ) -> i32 {
-    ffi_status(|| {
+    bridge_status(filesystem, || {
         require_output(output_effect)?;
         let effect = bridge_mut(filesystem)?
             .adapter
             .advise(file, offset, length, hint)?;
         write_output(output_effect, effect as u32)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_watch_add(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    output_watch: *mut u64,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_watch)?;
+        let name = input_bytes(name, name_length)?;
+        let watch = bridge_mut(filesystem)?
+            .adapter
+            .add_watch(optional_lock(base_lock), name)?;
+        write_output(output_watch, watch)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_watch_remove(filesystem: *mut AfsplusAros, watch: u64) -> i32 {
+    bridge_status(filesystem, || {
+        bridge_mut(filesystem)?.adapter.remove_watch(watch)
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn afsplus_aros_watch_drain(
+    filesystem: *mut AfsplusAros,
+    watches: *mut u64,
+    capacity: u32,
+    output_count: *mut u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_count)?;
+        let bridge = bridge_mut(filesystem)?;
+        if capacity == 0 {
+            return write_output(output_count, 0);
+        }
+        if watches.is_null() {
+            return Err(ArosError::InvalidComponentName);
+        }
+        // SAFETY: the caller provides `capacity` aligned writable slots.
+        let output = unsafe { slice::from_raw_parts_mut(watches, capacity as usize) };
+        let count = bridge.adapter.drain_watches(output);
+        write_output(output_count, count as u32)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_health(
+    filesystem: *mut AfsplusAros,
+    output: *mut AfsplusArosHealth,
+) -> i32 {
+    bridge_status(filesystem, || {
+        let health = bridge_mut(filesystem)?.adapter.health()?;
+        write_sized_output(
+            output,
+            std::mem::size_of::<AfsplusArosHealth>(),
+            AfsplusArosHealth {
+                struct_size: 0,
+                mount_mode: mount_mode_value(health.mount_mode),
+                flags: health.flags,
+                pending_intent_records: health.pending_intent_records,
+                generation: health.generation,
+                pending_orphans: health.pending_orphans,
+                total_blocks: health.total_blocks,
+                free_blocks: health.free_blocks,
+                available_blocks: health.available_blocks,
+                device_errors: health.device_errors,
+                corruption_errors: health.corruption_errors,
+                no_space_errors: health.no_space_errors,
+                internal_faults: health.internal_faults,
+                events_recorded: health.events_recorded,
+                events_dropped: health.events_dropped,
+                last_error: health.last_error,
+                reserved: 0,
+            },
+            |value, size| value.struct_size = size,
+        )
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn afsplus_aros_health_events(
+    filesystem: *mut AfsplusAros,
+    events: *mut AfsplusArosHealthEvent,
+    capacity: u32,
+    output_count: *mut u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_count)?;
+        let bridge = bridge_mut(filesystem)?;
+        if capacity != 0 && events.is_null() {
+            return Err(ArosError::InvalidComponentName);
+        }
+        let mut written = 0u32;
+        while written < capacity {
+            let mut one = [HealthEvent {
+                sequence: 0,
+                kind: afsplus_aros::health::HealthEventKind::InternalFault,
+                dos_error: 0,
+            }];
+            if bridge.adapter.health_log().drain(&mut one) == 0 {
+                break;
+            }
+            // SAFETY: `written < capacity` writable aligned slots exist.
+            unsafe {
+                ptr::write(
+                    events.add(written as usize),
+                    AfsplusArosHealthEvent {
+                        sequence: one[0].sequence,
+                        kind: one[0].kind as u32,
+                        dos_error: one[0].dos_error,
+                    },
+                );
+            }
+            written += 1;
+        }
+        write_output(output_count, written)
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn afsplus_aros_set_trace_sink(
+    filesystem: *mut AfsplusAros,
+    sink: *const AfspTraceSink,
+) -> i32 {
+    bridge_status(filesystem, || {
+        let bridge = bridge_mut(filesystem)?;
+        // SAFETY: a non-null sink is a readable structure for this call.
+        let Some(sink) = (unsafe { sink.as_ref() }) else {
+            bridge.adapter.replace_flight_recorder(None);
+            return Ok(());
+        };
+        let emit = sink.emit.ok_or(ArosError::InvalidComponentName)?;
+        let mut categories = Categories::NONE;
+        for (category, bit) in TRACE_CATEGORY_MAP {
+            if sink.category_mask & bit != 0 {
+                categories = categories.with(category);
+            }
+        }
+        let capacity = std::num::NonZeroUsize::new(64).expect("nonzero literal");
+        let mut recorder = FlightRecorder::new(capacity).map_err(|_| ArosError::NoFreeStore)?;
+        recorder.set_categories(categories);
+        if categories.contains(Category::Api) {
+            recorder.enable_api_observation();
+        }
+        if categories.contains(Category::Object) {
+            recorder.enable_object_observation();
+        }
+        if categories.contains(Category::Allocator)
+            || categories.contains(Category::Tree)
+            || categories.contains(Category::Reclaim)
+        {
+            recorder.enable_subsystem_observation();
+        }
+        if categories.contains(Category::Data) {
+            recorder.enable_data_observation();
+        }
+        if categories.contains(Category::View) {
+            recorder.enable_view_observation();
+        }
+        recorder.replace_sink(Some(Box::new(CallbackSink {
+            emit,
+            context: sink.ctx,
+        })));
+        bridge.adapter.replace_flight_recorder(Some(recorder));
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_trace_counters(
+    filesystem: *mut AfsplusAros,
+    output: *mut AfsplusArosTraceCounters,
+) -> i32 {
+    bridge_status(filesystem, || {
+        let counters = bridge_mut(filesystem)?
+            .adapter
+            .with_flight_recorder(|recorder| {
+                // The ring only mirrors what the sink already received.
+                let _ = recorder.drain().count();
+                AfsplusArosTraceCounters {
+                    struct_size: 0,
+                    attached: 1,
+                    delivered: recorder.delivered(),
+                    missed: recorder.missed(),
+                    filtered: recorder.filtered(),
+                    dropped: recorder.dropped(),
+                }
+            })
+            .unwrap_or_default();
+        write_sized_output(
+            output,
+            std::mem::size_of::<AfsplusArosTraceCounters>(),
+            counters,
+            |value, size| value.struct_size = size,
+        )
     })
 }

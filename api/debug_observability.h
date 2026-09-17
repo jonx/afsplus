@@ -26,7 +26,10 @@ enum afsp_trace_category {
     AFSP_TRACE_CHANGE     = UINT64_C(1) << 9,
     AFSP_TRACE_RECLAIM    = UINT64_C(1) << 10,
     AFSP_TRACE_REPAIR     = UINT64_C(1) << 11,
-    AFSP_TRACE_ERROR      = UINT64_C(1) << 12
+    AFSP_TRACE_ERROR      = UINT64_C(1) << 12,
+    AFSP_TRACE_API        = UINT64_C(1) << 13,
+    AFSP_TRACE_WINDOW     = UINT64_C(1) << 14,
+    AFSP_TRACE_LIFECYCLE  = UINT64_C(1) << 15
 };
 
 struct afsp_trace_event {

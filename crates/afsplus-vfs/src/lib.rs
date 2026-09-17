@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use afsplus_block::BlockDevice;
+use afsplus_core::flight::FlightRecorder;
 use afsplus_core::name_key::comparison_key;
 use afsplus_core::volume::{
     DataUpdatePolicy, DirectoryCursor, FileEditLimits, ObjectMetadata, PreservedMetadata, Volume,
@@ -316,6 +317,30 @@ impl<D: BlockDevice> Vfs<D> {
             self.volume.window_commit(now)?;
         }
         Ok(())
+    }
+
+    /// Generation of the checkpoint or open data window the mount exposes.
+    pub fn generation(&self) -> u64 {
+        self.volume.generation()
+    }
+
+    /// Installs or removes the core flight recorder; see
+    /// [`Volume::replace_flight_recorder`].
+    pub fn replace_flight_recorder(
+        &mut self,
+        recorder: Option<FlightRecorder>,
+    ) -> Option<FlightRecorder> {
+        self.volume.replace_flight_recorder(recorder)
+    }
+
+    /// Runs `inspect` on the installed recorder, for counters and draining.
+    pub fn with_flight_recorder<T>(
+        &mut self,
+        inspect: impl FnOnce(&mut FlightRecorder) -> T,
+    ) -> Option<T> {
+        self.volume
+            .flight_recorder_mut()
+            .map(|mut recorder| inspect(&mut recorder))
     }
 
     pub fn pending_intent_records(&self) -> u32 {
