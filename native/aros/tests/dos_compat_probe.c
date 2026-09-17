@@ -8,7 +8,11 @@
  * With the argument HOLD it instead ends a notification request while one of
  * its messages is still unreplied, never replies, and exits: the state in
  * which a following dismount has to succeed. A request that is still
- * registered keeps the handler alive by design, so it is ended first. */
+ * registered keeps the handler alive by design, so it is ended first.
+ *
+ * RECORD-HOLDER and RECORD-WAITER run as two tasks: the holder keeps a record
+ * for three seconds, the waiter asks for it with a ten-second timeout and must
+ * get it from the release, neither at once nor by expiry. */
 
 #include <dos/dos.h>
 #include <dos/dosextens.h>
@@ -30,6 +34,7 @@
 #define NOTE DRAWER "/note"
 #define ALIAS DRAWER "/alias"
 #define HELD AFSPLUS_PROBE_VOLUME ":dosprobe.held"
+#define RECORDS AFSPLUS_PROBE_VOLUME ":dosprobe.records"
 #define TEMPORARY_LABEL "AFSPlusRelabelled"
 
 static const UBYTE content[] = "0123456789abcdef";
@@ -470,10 +475,86 @@ static int hold_notification(void)
     return RETURN_OK;
 }
 
+static int hold_record(void)
+{
+    BPTR file = Open(RECORDS, MODE_READWRITE);
+
+    if (file == BNULL)
+        return fail("HOLDER open", DOSFALSE);
+    if (!LockRecord(file, 0, 10, REC_EXCLUSIVE_IMMED, 0))
+    {
+        Close(file);
+        return fail("HOLDER LockRecord", DOSFALSE);
+    }
+    Delay(150);
+    if (!UnLockRecord(file, 0, 10))
+    {
+        Close(file);
+        return fail("HOLDER UnLockRecord", DOSFALSE);
+    }
+    Close(file);
+    return RETURN_OK;
+}
+
+static LONG ticks_between(const struct DateStamp *from,
+    const struct DateStamp *to)
+{
+    return (to->ds_Days - from->ds_Days) * 24 * 60 * 3000
+        + (to->ds_Minute - from->ds_Minute) * 3000
+        + (to->ds_Tick - from->ds_Tick);
+}
+
+static int wait_for_record(void)
+{
+    struct DateStamp before;
+    struct DateStamp after;
+    BPTR file = Open(RECORDS, MODE_READWRITE);
+    LONG waited;
+    int tries;
+
+    if (file == BNULL)
+        return fail("WAITER open", DOSFALSE);
+    /* Until the holder task has the record, an immediate request succeeds. */
+    for (tries = 0; tries < 100; tries++)
+    {
+        if (!LockRecord(file, 0, 10, REC_EXCLUSIVE_IMMED, 0))
+            break;
+        UnLockRecord(file, 0, 10);
+        Delay(2);
+    }
+    if (tries == 100 || IoErr() != ERROR_LOCK_COLLISION)
+    {
+        Close(file);
+        return fail("WAITER never saw the holder", (SIPTR)tries);
+    }
+    DateStamp(&before);
+    if (!LockRecord(file, 0, 10, REC_EXCLUSIVE, 500))
+    {
+        Close(file);
+        return fail("WAITER LockRecord", DOSFALSE);
+    }
+    DateStamp(&after);
+    waited = ticks_between(&before, &after);
+    UnLockRecord(file, 0, 10);
+    Close(file);
+    DeleteFile(RECORDS);
+    /* Granted by the release: it took a while, and far less than the
+     * timeout. */
+    if (waited < 10 || waited >= 400)
+        return fail("WAITER wait length", waited);
+    Printf("[AFSPLUS-DOS] RECORDS granted after %ld ticks\n", waited);
+    return RETURN_OK;
+}
+
 int main(int argc, char **argv)
 {
     struct FileInfoBlock *fib;
     int status;
+
+    if (argc > 1 && strcmp(argv[1], "RECORD-HOLDER") == 0)
+        return hold_record();
+    if (argc > 1 && strcmp(argv[1], "RECORD-WAITER") == 0)
+        return wait_for_record();
 
     if (argc > 1 && strcmp(argv[1], "HOLD") == 0)
         return hold_notification();

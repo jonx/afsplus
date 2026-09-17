@@ -119,7 +119,10 @@ a `NRF_WAIT_REPLY` notification and `Relabel` through dos.library in one
 drawer that it removes. A change made while a notification message is
 unreplied must arrive after the reply, never before. The result keeps what
 the handler answers to a record lock overlapping the caller's own, as an
-observation. A second boot runs `AFSPlusDosProbe HOLD`, which ends a request
+observation. A second boot starts `AFSPlusDosProbe RECORD-HOLDER` as its own
+task, which keeps a record for three seconds, and runs `RECORD-WAITER`, whose
+ten-second waiting request must be granted by that release: later than at
+once and well before its timeout. A third boot runs `AFSPlusDosProbe HOLD`, which ends a request
 while one of its messages is still unreplied and never replies, and requires
 the shutdown and the dismount to succeed and the shell to continue. The first boot also runs
 `AFSPlusInfo` against the AFS+ volume, whose JSON report must carry the

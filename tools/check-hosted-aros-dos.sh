@@ -111,7 +111,7 @@ if ! "$control" status | grep -q '^state=stopped$'; then
     exit 75
 fi
 
-mkdir "$result" "$result/dos" "$result/hold"
+mkdir "$result" "$result/dos" "$result/records" "$result/hold"
 cd "$repo_root"
 
 echo "[hosted-dos] build a fresh qualified package"
@@ -180,6 +180,24 @@ cp "$result/dos/packets.out" "$result/packets.txt"
 grep -Eq '^packet 28 [1-9][0-9]* ' "$result/packets.txt"
 check_image "$result/check-after-dos.json"
 
+echo "[hosted-dos] a waiting record lock granted by another task's release"
+start_aros "$result/records" \
+    'C:FailAt 21
+Assign "FDSK:" "SYS:DiskImages"
+C:Mount DEVS:DOSDrivers/AFSPLUS19 >MacRW:mount.out
+C:Run >NIL: C:AFSPlusDosProbe RECORD-HOLDER
+C:AFSPlusDosProbe RECORD-WAITER >MacRW:records.out
+C:Mount AFSPLUS19: SHUTDOWN >MacRW:shutdown.out
+If WARN
+    C:Echo fail >MacRW:shutdown.status
+Else
+    C:Echo pass >MacRW:shutdown.status
+EndIf'
+stop_aros "$result/records"
+grep -q '^\[AFSPLUS-DOS\] RECORDS granted after ' "$result/records/records.out"
+[ "$(cat "$result/records/shutdown.status")" = pass ]
+check_image "$result/check-after-records.json"
+
 echo "[hosted-dos] dismount with an unreplied notification"
 start_aros "$result/hold" \
     'C:FailAt 21
@@ -210,7 +228,8 @@ printf '%s\n' none >"$result/guest-failure-requester.txt"
 cp "$package/SHA256SUMS" "$result/package-SHA256SUMS"
 (
     cd "$result"
-    shasum -a 256 check-after-dos.json check-after-hold.json \
+    shasum -a 256 check-after-dos.json check-after-records.json \
+        check-after-hold.json \
         record-self-overlap.txt packets.txt handler-info.json \
         guest-failure-requester.txt >SHA256SUMS
 )
