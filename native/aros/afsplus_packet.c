@@ -1918,6 +1918,96 @@ int32_t afsplus_aros_packet_process(
             }
         }
         break;
+    case ACTION_FH_FROM_LOCK:
+    {
+        struct FileHandle *public_file = packet->dp_Arg1 != 0
+            ? (struct FileHandle *)BADDR((BPTR)packet->dp_Arg1) : NULL;
+        struct AfsplusArosNativeLock *lock = find_lock(context,
+            (BPTR)packet->dp_Arg2);
+        struct AfsplusArosNativeFile *file = NULL;
+        struct AfsplusArosDiskInfo disk;
+        uint64_t id = 0;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_DOS_HANDLES);
+        if (error == 0 && (public_file == NULL || lock == NULL))
+            error = ERROR_INVALID_LOCK;
+        if (error == 0)
+            error = afsplus_aros_disk_info(context->filesystem, &disk);
+        if (error == 0)
+            file = reserve_file(context, !disk.write_protected, &error);
+        if (error == 0)
+            error = afsplus_aros_open_from_lock(context->filesystem,
+                lock->id, &id);
+        if (error != 0)
+        {
+            /* The lock is untouched and stays the caller's. */
+            if (file != NULL)
+                discard_reserved_file(context, file);
+            break;
+        }
+        /* The filesystem consumed the lock: only its wrapper is left. */
+        unlink_lock(context, lock);
+        publish_file(context, file, id);
+        public_file->fh_Arg1 = (SIPTR)MKBADDR(file);
+        public_file->fh_Port = DOSFALSE;
+        result = DOSTRUE;
+        break;
+    }
+    case ACTION_CHANGE_MODE:
+    {
+        uint32_t access = 0;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_DOS_HANDLES);
+        if (error == 0)
+            switch ((LONG)packet->dp_Arg3)
+            {
+            case SHARED_LOCK:
+            case MODE_OLDFILE:
+            case MODE_READWRITE:
+                access = AFSPLUS_AROS_LOCK_SHARED;
+                break;
+            case EXCLUSIVE_LOCK:
+            case MODE_NEWFILE:
+                access = AFSPLUS_AROS_LOCK_EXCLUSIVE;
+                break;
+            default:
+                error = ERROR_BAD_NUMBER;
+                break;
+            }
+        if (error == 0 && (LONG)packet->dp_Arg1 == CHANGE_LOCK)
+        {
+            struct AfsplusArosNativeLock *lock = find_lock(context,
+                (BPTR)packet->dp_Arg2);
+
+            if (lock == NULL)
+                error = ERROR_INVALID_LOCK;
+            else
+                error = afsplus_aros_change_lock_mode(context->filesystem,
+                    lock->id, access);
+            if (error == 0)
+                lock->public_lock.fl_Access
+                    = access == AFSPLUS_AROS_LOCK_EXCLUSIVE
+                        ? EXCLUSIVE_LOCK : SHARED_LOCK;
+        }
+        else if (error == 0 && (LONG)packet->dp_Arg1 == CHANGE_FH)
+        {
+            struct FileHandle *public_file = packet->dp_Arg2 != 0
+                ? (struct FileHandle *)BADDR((BPTR)packet->dp_Arg2) : NULL;
+            struct AfsplusArosNativeFile *file = public_file != NULL
+                ? find_file(context, (BPTR)public_file->fh_Arg1) : NULL;
+
+            if (file == NULL)
+                error = ERROR_INVALID_LOCK;
+            else
+                error = afsplus_aros_change_file_mode(context->filesystem,
+                    file->id, access);
+        }
+        else if (error == 0)
+            error = ERROR_BAD_NUMBER;
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
     case ACTION_ADD_NOTIFY:
     {
         struct NotifyRequest *request

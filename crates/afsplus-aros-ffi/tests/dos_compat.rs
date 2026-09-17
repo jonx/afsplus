@@ -261,3 +261,77 @@ fn c_boundary_sets_metadata_and_transports_soft_links() {
     assert_eq!(info.modified_nanoseconds, 40_000_000);
     assert_eq!(afsplus_aros_unmount(filesystem), 0);
 }
+
+#[test]
+fn c_boundary_opens_from_a_lock_and_changes_modes() {
+    let mut device = formatted();
+    let filesystem = mount(&mut device);
+    let mut file = 0;
+    assert_eq!(
+        afsplus_aros_open(
+            filesystem,
+            0,
+            b"data".as_ptr(),
+            4,
+            AFSPLUS_AROS_OPEN_NEW_FILE,
+            1,
+            0,
+            &mut file
+        ),
+        0
+    );
+    assert_eq!(afsplus_aros_close(filesystem, file), 0);
+
+    let (mut lock, mut other) = (0, 0);
+    for output in [&mut lock, &mut other] {
+        assert_eq!(
+            afsplus_aros_locate(
+                filesystem,
+                0,
+                b"data".as_ptr(),
+                4,
+                AFSPLUS_AROS_LOCK_SHARED,
+                output
+            ),
+            0
+        );
+    }
+    // Two holders: no exclusivity, by value, and an unknown mode is refused.
+    assert_eq!(
+        afsplus_aros_change_lock_mode(filesystem, lock, AFSPLUS_AROS_LOCK_EXCLUSIVE),
+        202
+    );
+    assert_eq!(afsplus_aros_change_lock_mode(filesystem, lock, 7), 210);
+
+    let mut opened = 0;
+    assert_eq!(
+        afsplus_aros_open_from_lock(filesystem, lock, &mut opened),
+        0
+    );
+    // The lock identifier died with the conversion.
+    assert_eq!(afsplus_aros_free_lock(filesystem, lock), 211);
+    assert_eq!(afsplus_aros_free_lock(filesystem, other), 0);
+    assert_eq!(
+        afsplus_aros_change_file_mode(filesystem, opened, AFSPLUS_AROS_LOCK_EXCLUSIVE),
+        0
+    );
+    assert_eq!(
+        afsplus_aros_locate(
+            filesystem,
+            0,
+            b"data".as_ptr(),
+            4,
+            AFSPLUS_AROS_LOCK_SHARED,
+            &mut other
+        ),
+        202
+    );
+    assert_eq!(
+        afsplus_aros_open_from_lock(filesystem, opened, ptr::null_mut()),
+        210
+    );
+    assert_eq!(afsplus_aros_close(filesystem, opened), 0);
+    assert_eq!(afsplus_aros_unmount(filesystem), 0);
+    let report = check_device(&mut device);
+    assert!(report.is_clean(), "{:?}", report.errors);
+}

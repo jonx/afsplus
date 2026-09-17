@@ -44,7 +44,10 @@ static uint32_t stub_fired_count;
 static uint32_t stub_removed_watches;
 static struct NotifyRequest *delivered[8];
 static uint32_t delivered_count;
-static uint64_t stub_groups = UINT64_C(0x2F);
+static uint64_t stub_groups = UINT64_C(0x22F);
+static int32_t stub_open_from_lock_error;
+static int32_t stub_change_mode_error;
+static uint32_t stub_changed_access;
 static const char *stub_link_target = "";
 static uint32_t stub_protection;
 static int64_t stub_modified_seconds;
@@ -554,6 +557,35 @@ static void packet_notify(void *context, struct NotifyRequest *request)
     delivered[delivered_count++] = request;
 }
 
+int32_t afsplus_aros_open_from_lock(struct AfsplusAros *filesystem,
+    uint64_t lock, uint64_t *output_file)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    record('O', lock, NULL, 0, 0);
+    if (stub_open_from_lock_error != 0)
+        return stub_open_from_lock_error;
+    *output_file = next_file++;
+    return 0;
+}
+
+int32_t afsplus_aros_change_lock_mode(struct AfsplusAros *filesystem,
+    uint64_t lock, uint32_t access)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    record('m', lock, NULL, 0, access);
+    stub_changed_access = access;
+    return stub_change_mode_error;
+}
+
+int32_t afsplus_aros_change_file_mode(struct AfsplusAros *filesystem,
+    uint64_t file, uint32_t access)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    record('M', file, NULL, 0, access);
+    stub_changed_access = access;
+    return stub_change_mode_error;
+}
+
 static void assert_event(size_t index, char operation, const char *name,
     uint32_t access)
 {
@@ -993,6 +1025,88 @@ int main(void)
         stub_directory_size = -1;
     }
 
+    /* C2: OpenFromLock consumes the lock wrapper; ChangeMode maps DOS modes. */
+    {
+        struct FileHandle from_lock;
+        BPTR file_lock;
+        uint32_t closes = close_count;
+
+        initialize_packet(&packet, ACTION_LOCATE_OBJECT);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = packet_bstr("data");
+        packet.dp_Arg3 = SHARED_LOCK;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        file_lock = (BPTR)packet.dp_Res1;
+        assert(file_lock != BNULL);
+
+        /* A refused conversion leaves the lock usable. */
+        memset(&from_lock, 0, sizeof(from_lock));
+        stub_open_from_lock_error = ERROR_OBJECT_WRONG_TYPE;
+        initialize_packet(&packet, ACTION_FH_FROM_LOCK);
+        packet.dp_Arg1 = (SIPTR)MKBADDR(&from_lock);
+        packet.dp_Arg2 = (SIPTR)file_lock;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_OBJECT_WRONG_TYPE);
+        assert(from_lock.fh_Arg1 == 0);
+        stub_open_from_lock_error = 0;
+
+        initialize_packet(&packet, ACTION_CHANGE_MODE);
+        packet.dp_Arg1 = CHANGE_LOCK;
+        packet.dp_Arg2 = (SIPTR)file_lock;
+        packet.dp_Arg3 = EXCLUSIVE_LOCK;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE);
+        assert(stub_changed_access == AFSPLUS_AROS_LOCK_EXCLUSIVE);
+        assert(((struct FileLock *)BADDR(file_lock))->fl_Access
+            == EXCLUSIVE_LOCK);
+        /* A refused change keeps the published access. */
+        stub_change_mode_error = ERROR_OBJECT_IN_USE;
+        packet.dp_Arg3 = SHARED_LOCK;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_OBJECT_IN_USE);
+        assert(((struct FileLock *)BADDR(file_lock))->fl_Access
+            == EXCLUSIVE_LOCK);
+        stub_change_mode_error = 0;
+        packet.dp_Arg3 = 12345;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res2 == ERROR_BAD_NUMBER);
+
+        /* Conversion: the handle is published, the lock BPTR is dead and the
+         * filesystem lock is never freed separately. */
+        reset_events();
+        initialize_packet(&packet, ACTION_FH_FROM_LOCK);
+        packet.dp_Arg1 = (SIPTR)MKBADDR(&from_lock);
+        packet.dp_Arg2 = (SIPTR)file_lock;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && from_lock.fh_Arg1 != 0);
+        assert(events[event_count - 1].operation == 'O');
+        initialize_packet(&packet, ACTION_FREE_LOCK);
+        packet.dp_Arg1 = (SIPTR)file_lock;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_INVALID_LOCK);
+
+        /* MODE_NEWFILE on a handle means exclusive. */
+        initialize_packet(&packet, ACTION_CHANGE_MODE);
+        packet.dp_Arg1 = CHANGE_FH;
+        packet.dp_Arg2 = (SIPTR)MKBADDR(&from_lock);
+        packet.dp_Arg3 = MODE_NEWFILE;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE);
+        assert(events[event_count - 1].operation == 'M');
+        assert(stub_changed_access == AFSPLUS_AROS_LOCK_EXCLUSIVE);
+        packet.dp_Arg1 = 2;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res2 == ERROR_BAD_NUMBER);
+
+        initialize_packet(&packet, ACTION_END);
+        packet.dp_Arg1 = from_lock.fh_Arg1;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && close_count == closes + 1);
+    }
+
     /* C8: notification requests map to watches; fired watches are delivered
      * after the packet that caused them. */
     {
@@ -1090,7 +1204,7 @@ int main(void)
         stub_groups = 0;
         assert(afsplus_aros_packet_create(&config, &old_context)
             == ERROR_BAD_NUMBER);
-        stub_groups = UINT64_C(0x2F);
+        stub_groups = UINT64_C(0x22F);
 
         /* A handler shell without a delivery callback cannot notify, so the
          * request is an unknown action and no watch is created. */

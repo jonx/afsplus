@@ -25,7 +25,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 7;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 8;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -35,6 +35,7 @@ pub const AFSPLUS_AROS_GROUP_NOTIFY: u64 = 0x20;
 pub const AFSPLUS_AROS_GROUP_OBSERVE: u64 = 0x40;
 pub const AFSPLUS_AROS_GROUP_MANAGE: u64 = 0x80;
 pub const AFSPLUS_AROS_GROUP_COUNTERS: u64 = 0x100;
+pub const AFSPLUS_AROS_GROUP_DOS_HANDLES: u64 = 0x200;
 pub const AFSPLUS_AROS_HEALTH_DEVICE_ERROR: u32 = afsplus_aros::health::HEALTH_DEVICE_ERROR;
 pub const AFSPLUS_AROS_HEALTH_CORRUPTION: u32 = afsplus_aros::health::HEALTH_CORRUPTION;
 pub const AFSPLUS_AROS_HEALTH_REPLAY_PENDING: u32 = afsplus_aros::health::HEALTH_REPLAY_PENDING;
@@ -48,7 +49,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_NOTIFY
     | AFSPLUS_AROS_GROUP_OBSERVE
     | AFSPLUS_AROS_GROUP_MANAGE
-    | AFSPLUS_AROS_GROUP_COUNTERS;
+    | AFSPLUS_AROS_GROUP_COUNTERS
+    | AFSPLUS_AROS_GROUP_DOS_HANDLES;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -1837,5 +1839,44 @@ pub extern "C" fn afsplus_aros_counters(
             },
             |value, size| value.struct_size = size,
         )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_open_from_lock(
+    filesystem: *mut AfsplusAros,
+    lock: u64,
+    output_file: *mut u64,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_file)?;
+        let file = bridge_mut(filesystem)?.adapter.open_from_lock(lock)?;
+        write_output(output_file, file)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_change_lock_mode(
+    filesystem: *mut AfsplusAros,
+    lock: u64,
+    access: u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        bridge_mut(filesystem)?
+            .adapter
+            .change_lock_mode(lock, lock_access(access)?)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_change_file_mode(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    access: u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        bridge_mut(filesystem)?
+            .adapter
+            .change_file_mode(file, lock_access(access)?)
     })
 }

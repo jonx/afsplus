@@ -481,6 +481,106 @@ impl<D: BlockDevice> ArosAdapter<D> {
         Ok(handle)
     }
 
+    /// `ACTION_FH_FROM_LOCK` (`OpenFromLock`). The lock becomes the file
+    /// handle: on success it no longer exists and its hold on the object,
+    /// shared or exclusive, continues as the handle's. On failure the lock is
+    /// untouched. The handle is writable on a read-write mount and never
+    /// truncates.
+    pub fn open_from_lock(&mut self, lock: LockId) -> Result<FileHandleId, ArosError> {
+        self.ensure_file_capacity()?;
+        let state = self.lock_state(lock)?.clone();
+        match self.vfs.stat(state.object_id)?.kind {
+            NodeKind::File => {}
+            _ => return Err(ArosError::ObjectWrongType),
+        }
+        let parent = state.parent.ok_or(ArosError::ObjectWrongType)?;
+        let access = if self.vfs.mount_mode() == MountMode::ReadWrite {
+            AccessMode::ReadWrite
+        } else {
+            AccessMode::ReadOnly
+        };
+        let vfs_handle = self.vfs.open_file(state.object_id, access)?;
+        let handle = match self.allocate_file_id() {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = self.vfs.close(vfs_handle);
+                return Err(error);
+            }
+        };
+        let mut consumed = self.locks.remove(&lock).expect("validated lock");
+        if let Some(directory) = consumed.directory_handle.take() {
+            let _ = self.vfs.close(directory);
+        }
+        self.files.insert(
+            handle,
+            FileState {
+                vfs_handle,
+                object_id: state.object_id,
+                parent,
+                name: state.name,
+                position: 0,
+                access: state.access,
+                dirty: false,
+            },
+        );
+        Ok(handle)
+    }
+
+    /// `ACTION_CHANGE_MODE` on a lock. Shared to exclusive needs this lock to
+    /// be the object's only holder; exclusive to shared always succeeds.
+    pub fn change_lock_mode(&mut self, lock: LockId, access: LockAccess) -> Result<(), ArosError> {
+        let state = self.lock_state(lock)?;
+        let (object_id, current) = (state.object_id, state.access);
+        self.change_hold(object_id, current, access)?;
+        self.locks.get_mut(&lock).expect("validated lock").access = access;
+        Ok(())
+    }
+
+    /// `ACTION_CHANGE_MODE` on a file handle; same rule as for a lock.
+    pub fn change_file_mode(
+        &mut self,
+        handle: FileHandleId,
+        access: LockAccess,
+    ) -> Result<(), ArosError> {
+        let state = self.file_state(handle)?;
+        let (object_id, current) = (state.object_id, state.access);
+        self.change_hold(object_id, current, access)?;
+        self.files
+            .get_mut(&handle)
+            .expect("validated handle")
+            .access = access;
+        Ok(())
+    }
+
+    fn change_hold(
+        &mut self,
+        object_id: ObjectId,
+        current: LockAccess,
+        wanted: LockAccess,
+    ) -> Result<(), ArosError> {
+        if current == wanted {
+            return Ok(());
+        }
+        let counts = self
+            .lock_counts
+            .get_mut(&object_id)
+            .ok_or(ArosError::InvalidLock)?;
+        match wanted {
+            LockAccess::Exclusive => {
+                if counts.shared != 1 || counts.exclusive {
+                    return Err(ArosError::ObjectInUse);
+                }
+                counts.shared = 0;
+                counts.exclusive = true;
+            }
+            LockAccess::Shared => {
+                counts.exclusive = false;
+                counts.shared += 1;
+            }
+        }
+        Ok(())
+    }
+
     pub fn parent_of_file(&mut self, handle: FileHandleId) -> Result<LockId, ArosError> {
         self.ensure_lock_capacity()?;
         let parent = self.file_state(handle)?.parent;

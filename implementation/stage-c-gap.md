@@ -67,7 +67,7 @@ older library must be able to refuse by value.
 
 ## C1. Rust/C integration boundary
 
-Present (L1 to L3): ABI version 1 with interface revision 7.
+Present (L1 to L3): ABI version 1 with interface revision 8.
 `afsplus_aros_interface` answers without a mount with the revision and a
 mask of entry-point groups; the packet layer asks it at creation and answers
 `ERROR_ACTION_NOT_KNOWN` for an action of a missing group.
@@ -91,7 +91,8 @@ L3 `ACTION_SET_PROTECT`, `ACTION_SET_DATE`, soft `ACTION_MAKE_LINK`,
 `ACTION_READ_LINK` with `ERROR_IS_SOFT_LINK` on traversal, DOS open-mode
 locking (`MODE_NEWFILE` exclusive, held objects not deletable, refused
 `DupLockFromFH` on an exclusive handle), `ExNext` that continues across
-namespace changes, and at L3 `ACTION_EXAMINE_ALL` with `ACTION_EXAMINE_ALL_END`.
+namespace changes, `ACTION_FH_FROM_LOCK`, `ACTION_CHANGE_MODE`, and at L3 `ACTION_EXAMINE_ALL`
+with `ACTION_EXAMINE_ALL_END`.
 
 Lacking, in the order classic software meets them:
 
@@ -99,7 +100,6 @@ Lacking, in the order classic software meets them:
 |---|---|---|
 | all of the above | target run: a probe extension for the S0 matrix on Hosted, QEMU and m68k | L4 |
 | `ACTION_SET_COMMENT`, comment in `FileInfoBlock` | a stored comment attribute; the format has no comment or extended-attribute record ([docs/12](../docs/12-metadata-and-xattrs.md)) | Stage B decision |
-| `ACTION_FH_FROM_LOCK`, `ACTION_CHANGE_MODE` | handle from lock, shared/exclusive conversion with conflict check | L1 |
 | `ACTION_RENAME_DISK` | label rewrite in the identity block; needs a core label setter | L1, core |
 | `ACTION_WRITE_PROTECT` | runtime switch to a read-only view with the pass key | L1 |
 | `ACTION_LOCK_RECORD`, `ACTION_FREE_RECORD` | byte-range record table per object, with timeout handled by the handler loop | L1, L4 |

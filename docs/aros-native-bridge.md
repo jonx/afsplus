@@ -228,6 +228,7 @@ The usual packet mapping is direct:
 | create/delete/rename/link | corresponding namespace function |
 | set protect, set date | `set_protection`, `set_modified`; a path without a leaf addresses the resolved lock's object |
 | make link (soft), read link | `make_soft_link`, `read_soft_link` |
+| fh from lock, change mode | `open_from_lock`, `change_lock_mode`, `change_file_mode` |
 | examine all, examine all end | `examine_next` per entry, `rewind_directory`; the packet layer packs `ExAllData` |
 | examine object/FH/next | corresponding examine function |
 | flush | `flush` |
@@ -265,6 +266,14 @@ never loses an entry; a buffer too small for one entry is
 with a match string or match hook is answered `ERROR_ACTION_NOT_KNOWN`,
 because matching needs dos.library, and dos.library then emulates `ExAll`
 through `ExNext`.
+
+`ACTION_FH_FROM_LOCK` turns a lock on a file into a file handle: the lock
+identifier dies, its shared or exclusive hold continues as the handle's, and
+a refused conversion leaves the lock usable. `ACTION_CHANGE_MODE` accepts
+`SHARED_LOCK`, `MODE_OLDFILE` and `MODE_READWRITE` as shared and
+`EXCLUSIVE_LOCK` and `MODE_NEWFILE` as exclusive; shared to exclusive needs
+the caller to be the object's only holder, and `fl_Access` follows a
+successful change only.
 
 Soft-link targets are opaque paths in the mount encoding. Locate and open
 answer `ERROR_IS_SOFT_LINK`; `ACTION_READ_LINK` walks the path to the first

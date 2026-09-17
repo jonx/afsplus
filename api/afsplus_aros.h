@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(7)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(8)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -36,6 +36,7 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_OBSERVE UINT64_C(0x40)
 #define AFSPLUS_AROS_GROUP_MANAGE UINT64_C(0x80)
 #define AFSPLUS_AROS_GROUP_COUNTERS UINT64_C(0x100)
+#define AFSPLUS_AROS_GROUP_DOS_HANDLES UINT64_C(0x200)
 
 /* AfsplusArosHealth.flags. Disk-full is counted and is not a degraded state. */
 #define AFSPLUS_AROS_HEALTH_DEVICE_ERROR UINT32_C(0x1)
@@ -352,6 +353,20 @@ int32_t afsplus_aros_set_modified(struct AfsplusAros *filesystem,
     uint64_t base_lock, const uint8_t *name, uint32_t name_length,
     int64_t modified_seconds, uint32_t modified_nanoseconds,
     int64_t now_seconds, uint32_t now_nanoseconds);
+
+/* Group AFSPLUS_AROS_GROUP_DOS_HANDLES. open_from_lock turns a lock on a file
+ * into a file handle: on success the lock identifier is dead and its shared
+ * or exclusive hold continues as the handle's; on failure the lock is
+ * untouched. The handle is writable on a read-write mount and never
+ * truncates. change_*_mode takes AFSPLUS_AROS_LOCK_*: shared to exclusive
+ * needs the caller to be the object's only holder (ERROR_OBJECT_IN_USE
+ * otherwise, nothing changed); exclusive to shared always succeeds. */
+int32_t afsplus_aros_open_from_lock(struct AfsplusAros *filesystem,
+    uint64_t lock, uint64_t *output_file);
+int32_t afsplus_aros_change_lock_mode(struct AfsplusAros *filesystem,
+    uint64_t lock, uint32_t access);
+int32_t afsplus_aros_change_file_mode(struct AfsplusAros *filesystem,
+    uint64_t file, uint32_t access);
 
 /* Group AFSPLUS_AROS_GROUP_SOFT_LINKS. The target is an opaque path in the
  * mount's name encoding. Locate and open answer ERROR_IS_SOFT_LINK for a

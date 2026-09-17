@@ -383,3 +383,87 @@ fn exnext_continues_across_deletes_creates_and_renames() {
     let report = check_device(&mut device);
     assert!(report.is_clean(), "{:?}", report.errors);
 }
+
+#[test]
+fn open_from_lock_consumes_the_lock_and_change_mode_respects_other_holders() {
+    let mut adapter = adapter(formatted());
+    create(&mut adapter, b"data", b"abcdef", 10);
+    let drawer = adapter
+        .create_directory(None, b"drawer", timestamp(11))
+        .unwrap();
+
+    // A directory lock is not a file; the lock survives the refusal.
+    assert_eq!(
+        adapter.open_from_lock(drawer),
+        Err(ArosError::ObjectWrongType)
+    );
+    assert_eq!(adapter.examine_lock(drawer).unwrap().name, b"drawer");
+    adapter.free_lock(drawer).unwrap();
+
+    // The shared lock becomes the handle: the lock id dies, the hold stays.
+    let lock = adapter.locate(None, b"data", LockAccess::Shared).unwrap();
+    let file = adapter.open_from_lock(lock).unwrap();
+    assert_eq!(adapter.free_lock(lock), Err(ArosError::InvalidLock));
+    assert_eq!(adapter.examine_lock(lock), Err(ArosError::InvalidLock));
+    assert_eq!(
+        adapter.delete_object(None, b"data", timestamp(12)),
+        Err(ArosError::ObjectInUse)
+    );
+    // Position zero, existing content kept, writable without truncation.
+    let mut content = [0u8; 8];
+    assert_eq!(adapter.read(file, &mut content).unwrap(), 6);
+    assert_eq!(&content[..6], b"abcdef");
+    assert_eq!(adapter.write_at(file, 0, b"AB", timestamp(13)).unwrap(), 2);
+    assert_eq!(adapter.file_size(file).unwrap(), 6);
+
+    // Shared to exclusive is refused while a second holder exists...
+    let second = adapter.locate(None, b"data", LockAccess::Shared).unwrap();
+    assert_eq!(
+        adapter.change_file_mode(file, LockAccess::Exclusive),
+        Err(ArosError::ObjectInUse)
+    );
+    assert_eq!(
+        adapter.change_lock_mode(second, LockAccess::Exclusive),
+        Err(ArosError::ObjectInUse)
+    );
+    // ...and the refusal changed nothing: a third shared lock still works.
+    let third = adapter.locate(None, b"data", LockAccess::Shared).unwrap();
+    adapter.free_lock(third).unwrap();
+    adapter.free_lock(second).unwrap();
+
+    // Sole holder: exclusive now excludes, and going back shares again.
+    adapter
+        .change_file_mode(file, LockAccess::Exclusive)
+        .unwrap();
+    assert_eq!(
+        adapter.locate(None, b"data", LockAccess::Shared),
+        Err(ArosError::ObjectInUse)
+    );
+    adapter
+        .change_file_mode(file, LockAccess::Exclusive)
+        .unwrap();
+    adapter.change_file_mode(file, LockAccess::Shared).unwrap();
+    let again = adapter.locate(None, b"data", LockAccess::Shared).unwrap();
+    adapter.change_lock_mode(again, LockAccess::Shared).unwrap();
+    adapter.free_lock(again).unwrap();
+    adapter.close(file).unwrap();
+
+    // An exclusive lock carries its exclusivity into the handle, and closing
+    // that handle releases the object completely.
+    let exclusive = adapter
+        .locate(None, b"data", LockAccess::Exclusive)
+        .unwrap();
+    let file = adapter.open_from_lock(exclusive).unwrap();
+    assert_eq!(
+        adapter.open(None, b"data", OpenMode::OldFile, timestamp(14)),
+        Err(ArosError::ObjectInUse)
+    );
+    adapter.close(file).unwrap();
+    assert!(!adapter.disk_info().in_use);
+    adapter.delete_object(None, b"data", timestamp(15)).unwrap();
+    assert_eq!(
+        adapter.change_lock_mode(999, LockAccess::Shared),
+        Err(ArosError::InvalidLock)
+    );
+    remount(adapter);
+}
