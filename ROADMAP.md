@@ -37,6 +37,12 @@ Stages group dependencies; [implementation phases](implementation/implementation
 identify deliverables. A milestone may contribute to several stages. Progress
 is recorded only in [milestones](implementation/milestones.md).
 
+Stage letters name dependency groups, not the working order. Work proceeds
+B, C, E, F, then D: the catalogue and change stream of Stage E and the
+production qualification of Stage F build on the AROS integration of Stage C,
+while the portable implementations and host tooling of Stage D follow a
+format that the earlier stages have settled.
+
 | Stage | Contributing milestones | Intended outcome |
 |---|---|---|
 | [Stage 0](#stage-0-amiga-native-design-review) | Ongoing design review, excluded from finite completion | Amiga filesystem design references |
