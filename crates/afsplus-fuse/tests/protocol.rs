@@ -334,3 +334,43 @@ fn names_open_modes_and_stale_handles_fail_explicitly() {
         Err(VfsError::Invalid)
     ));
 }
+
+#[test]
+fn a_host_mount_is_named_after_the_committed_label_never_the_format_time_one() {
+    let mut device = MemoryBackend::new(4096, 8192);
+    mkfs(
+        &mut device,
+        &MkfsParams {
+            uuid: [0xF5; 16],
+            label: "Old".into(),
+            region_size: 4096,
+            reclaim_caps: Default::default(),
+            log_slots: 8,
+            shared_extents: true,
+            data_policy: false,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
+            timestamp: timestamp(0),
+        },
+    )
+    .unwrap();
+    let mut vfs = Vfs::mount(device, MountOptions::default()).unwrap();
+    assert_eq!(afsplus_fuse::host_names(&vfs).filesystem, "afsplus: Old");
+    vfs.set_volume_label("Work", timestamp(1)).unwrap();
+
+    // A fresh mount of the relabelled image, as afsplus-mount performs it.
+    let mut device = vfs.into_volume().into_device();
+    // The identification block still says "Old": naming the mount from it
+    // is the defect this pins.
+    let mut block = vec![0u8; 4096];
+    afsplus_block::BlockDevice::read_block(&mut device, 0, &mut block).unwrap();
+    assert_eq!(
+        afsplus_format::ident::Identification::decode(&block)
+            .unwrap()
+            .label,
+        "Old"
+    );
+    let vfs = Vfs::mount(device, MountOptions::default()).unwrap();
+    let names = afsplus_fuse::host_names(&vfs);
+    assert_eq!(names.filesystem, "afsplus: Work");
+    assert_eq!(names.volume, "Work");
+}

@@ -8,7 +8,7 @@ use afsplus_core::{MountMode, MountOptions};
 use afsplus_format::ident::Identification;
 use afsplus_format::DEFAULT_BLOCK_SIZE;
 use afsplus_fuse::fuser_adapter::FuserFilesystem;
-use afsplus_fuse::FuseConfig;
+use afsplus_fuse::{host_names, FuseConfig};
 use afsplus_vfs::Vfs;
 use fuser::{Config, MountOption, SessionACL};
 
@@ -58,7 +58,7 @@ fn run() -> Result<(), String> {
     let (mode, image, mountpoint) = arguments()?;
     let (uid, gid) = mount_ownership(&image, &mountpoint)?;
 
-    let (device, identification) = open_image(&image)?;
+    let device = open_image(&image)?;
     let vfs = Vfs::mount(
         device,
         MountOptions {
@@ -67,6 +67,8 @@ fn run() -> Result<(), String> {
         },
     )
     .map_err(|error| format!("cannot mount {}: {error}", image.display()))?;
+    // Named after the committed label, read from the mounted volume.
+    let names = host_names(&vfs);
     let filesystem = FuserFilesystem::new(
         vfs,
         FuseConfig {
@@ -86,7 +88,7 @@ fn run() -> Result<(), String> {
     // enforces the mode bits exported by AFS+.
     config.acl = SessionACL::RootAndOwner;
     config.mount_options = vec![
-        MountOption::FSName(format!("afsplus: {}", identification.label)),
+        MountOption::FSName(names.filesystem),
         MountOption::Subtype("afsplus".into()),
         MountOption::DefaultPermissions,
         MountOption::NoDev,
@@ -99,7 +101,7 @@ fn run() -> Result<(), String> {
         },
     ];
 
-    mount_session(filesystem, &mountpoint, config, &identification.label, mode).map_err(|error| {
+    mount_session(filesystem, &mountpoint, config, &names.volume, mode).map_err(|error| {
         #[cfg(all(target_os = "macos", not(feature = "macfuse-mount")))]
         return format!(
             "FUSE mount failed: {error}. Install macFUSE and rebuild with --features macfuse-mount"
@@ -215,7 +217,7 @@ fn usage() -> &'static str {
     "usage: afsplus-mount [--read-only|--no-changes|--recovery] <image> <mountpoint>"
 }
 
-fn open_image(path: &Path) -> Result<(FileBackend, Identification), String> {
+fn open_image(path: &Path) -> Result<FileBackend, String> {
     let mut device = FileBackend::open_sized_by_file(path, DEFAULT_BLOCK_SIZE)
         .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
     let mut block = vec![0; DEFAULT_BLOCK_SIZE];
@@ -225,5 +227,5 @@ fn open_image(path: &Path) -> Result<(FileBackend, Identification), String> {
     let identification = Identification::decode(&block)
         .map_err(|error| format!("invalid identification block: {error}"))?;
     device.set_total_blocks(identification.total_blocks);
-    Ok((device, identification))
+    Ok(device)
 }

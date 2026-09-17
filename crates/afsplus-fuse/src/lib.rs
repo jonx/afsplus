@@ -15,6 +15,26 @@ pub mod fuser_adapter;
 
 const FIRST_REAL_DIRECTORY_OFFSET: u64 = 3;
 
+/// Names a host mount presents for a mounted volume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostNames {
+    /// Source name of the mount (`FSName`).
+    pub filesystem: String,
+    /// Volume name shown by the host.
+    pub volume: String,
+}
+
+/// The host names of a mounted volume, from its committed label (ADR-104).
+/// The identification block keeps the label given at format time, which a
+/// relabel makes stale, so a mount never names itself from that block.
+pub fn host_names<D: BlockDevice>(vfs: &Vfs<D>) -> HostNames {
+    let label = vfs.volume_label();
+    HostNames {
+        filesystem: format!("afsplus: {label}"),
+        volume: label.to_owned(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FuseConfig {
     pub uid: u32,
