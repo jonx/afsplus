@@ -15,7 +15,11 @@
 use std::collections::BTreeMap;
 
 use afsplus_block::BlockDevice;
+use afsplus_format::attrs::{
+    decode_attribute_set, ATTRIBUTE_CHAIN, ATTRIBUTE_SET_FORMAT, ATTRIBUTE_SET_VERSION,
+};
 use afsplus_format::bitmap::BitmapPage;
+use afsplus_format::chain::ChainSegment;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::extent::{ExtentItem, EXTENT_SHARED, EXTENT_UNWRITTEN};
 use afsplus_format::header::{block_type, BlockHeader};
@@ -90,6 +94,11 @@ pub enum BlockRole {
     },
     /// Segment `index` of the security descriptor chain of `object_id`.
     SecuritySegment {
+        object_id: u64,
+        index: u16,
+    },
+    /// Segment `index` of the extended attribute chain of `object_id`.
+    AttributeSegment {
         object_id: u64,
         index: u16,
     },
@@ -169,6 +178,18 @@ pub struct SecuritySummary {
     pub projection_diverged: bool,
 }
 
+/// What the committed state says about one object's extended attributes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeSummary {
+    pub total_len: u32,
+    pub segments_expected: u16,
+    /// Segments consistent with the reference, from the first one.
+    pub segments_found: u16,
+    /// Name and value length of every attribute, in stored order; present
+    /// only when the whole chain was proven and holds a valid set.
+    pub attributes: Option<Vec<(String, usize)>>,
+}
+
 /// What the committed state believes about one object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectExplanation {
@@ -195,6 +216,7 @@ pub struct ObjectExplanation {
     pub entries: u64,
     pub data: DataSummary,
     pub security: Option<SecuritySummary>,
+    pub attributes: Option<AttributeSummary>,
     /// Every directory entry that names the object: parent object and name.
     /// Empty for the root, and for an object no directory reaches.
     pub names: Vec<(u64, String)>,
@@ -735,6 +757,72 @@ impl Explainer {
                 }
             }
         }
+        // Attribute chain: the same walk under its own block kind.
+        let mut attributes = record.attributes.map(|reference| AttributeSummary {
+            total_len: reference.total_len,
+            segments_expected: reference.segment_count,
+            segments_found: 0,
+            attributes: None,
+        });
+        if let Some(reference) = record.attributes {
+            let mut lba = reference.first_block;
+            let mut chain_generation = None;
+            let mut bytes = Vec::new();
+            for index in 0..reference.segment_count {
+                if !walk.read(lba, &what) {
+                    break;
+                }
+                let next = match ChainSegment::decode(&ATTRIBUTE_CHAIN, &walk.buf) {
+                    Ok((segment, generation))
+                        if segment.object_id == object_id
+                            && segment.index == index
+                            && segment.count == reference.segment_count
+                            && segment.total_len == reference.total_len
+                            && (segment.format, segment.version)
+                                == (ATTRIBUTE_SET_FORMAT, ATTRIBUTE_SET_VERSION)
+                            && generation != 0
+                            && generation <= walk.max_generation
+                            && *chain_generation.get_or_insert(generation) == generation =>
+                    {
+                        bytes.extend_from_slice(segment.bytes);
+                        Some(segment.next)
+                    }
+                    _ => None,
+                };
+                match next {
+                    Some(next) => {
+                        walk.add(lba, BlockRole::AttributeSegment { object_id, index });
+                        if let Some(summary) = attributes.as_mut() {
+                            summary.segments_found += 1;
+                        }
+                        lba = next;
+                    }
+                    None => {
+                        walk.problems.push(format!(
+                            "{what}: attribute segment {index} at block {lba} is not provable"
+                        ));
+                        break;
+                    }
+                }
+            }
+            if let Some(summary) = attributes.as_mut() {
+                if summary.segments_found == summary.segments_expected {
+                    match decode_attribute_set(&bytes) {
+                        Ok(entries) => {
+                            summary.attributes = Some(
+                                entries
+                                    .into_iter()
+                                    .map(|(name, value)| (name.to_owned(), value.len()))
+                                    .collect(),
+                            )
+                        }
+                        Err(error) => walk
+                            .problems
+                            .push(format!("{what}: attribute set is invalid: {error}")),
+                    }
+                }
+            }
+        }
         walk.objects.insert(
             object_id,
             ObjectExplanation {
@@ -757,6 +845,7 @@ impl Explainer {
                 entries,
                 data,
                 security,
+                attributes,
                 names: Vec::new(),
             },
         );
@@ -928,6 +1017,7 @@ impl Explainer {
             block_type::RECLAIM_TABLE,
             block_type::INTENT_LOG,
             block_type::SECURITY_DESCRIPTOR,
+            block_type::ATTRIBUTE_SET,
         ];
         let identity = known
             .contains(&u32::from_le_bytes(magic))

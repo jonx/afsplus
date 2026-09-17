@@ -15,6 +15,9 @@
 //! ([`CommitStats`]) — metadata bytes, bitmap pages, region descriptors,
 //! flushes, retired and promoted blocks, reclaim latency, allocator RAM.
 
+mod attributes;
+pub(crate) use attributes::load_attribute_chain;
+pub use attributes::AttributeWriteMode;
 mod chain;
 mod metadata;
 pub use metadata::PreservedMetadata;
@@ -2431,6 +2434,9 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             &mut meta_writes,
         )?;
+        // The attribute set travels the same way, in its own fresh chain.
+        let dest_attributes =
+            self.copy_attributes(&mut tx, &source, object_id, generation, &mut meta_writes)?;
         let dest_record = ObjectRecord {
             object_id,
             object_type: ObjectType::File,
@@ -2450,6 +2456,7 @@ impl<D: BlockDevice> Volume<D> {
             comment: afsplus_format::object::Comment::EMPTY,
         }
         .with_security(dest_security)
+        .with_attributes(dest_attributes)
         // The comment describes the content and travels with a clone, as
         // the protection word does (ADR-106).
         .with_comment(source.comment);
@@ -3922,6 +3929,7 @@ impl<D: BlockDevice> Volume<D> {
         tx.retire(&mut self.dev, victim_record_lba)?;
         if !keep_file_object {
             self.retire_security_descriptor(&mut tx, &victim)?;
+            self.retire_attributes(&mut tx, &victim)?;
             if let Some(map) = victim_extent_map {
                 for lba in map.tree_blocks {
                     tx.retire(&mut self.dev, lba)?;
@@ -4631,7 +4639,10 @@ impl<D: BlockDevice> Volume<D> {
             // policy (ADR-065) travels with the record across every rewrite.
             flags: flags
                 | (record.flags
-                    & (OBJECT_FLAG_DATA_IN_PLACE | OBJECT_FLAG_SECURITY_REF | OBJECT_FLAG_COMMENT)),
+                    & (OBJECT_FLAG_DATA_IN_PLACE
+                        | OBJECT_FLAG_SECURITY_REF
+                        | OBJECT_FLAG_COMMENT
+                        | afsplus_format::object::OBJECT_FLAG_ATTRIBUTES)),
             size_bytes: new_size,
             allocated_bytes: allocated_blocks
                 .checked_mul(block_size as u64)
@@ -5787,6 +5798,7 @@ impl<D: BlockDevice> Volume<D> {
         tx.retire(&mut self.dev, committed_lba)?;
         pending.committed_record_lbas.remove(&object_id);
         self.retire_security_descriptor(tx, &victim)?;
+        self.retire_attributes(tx, &victim)?;
         self.retire_file_storage(tx, generation, &victim)?;
         pending.records.insert(object_id, None);
         Ok(())

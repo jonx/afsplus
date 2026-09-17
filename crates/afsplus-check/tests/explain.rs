@@ -261,6 +261,10 @@ fn every_block_explanation_agrees_with_the_checker_the_bitmap_and_the_file_bytes
                     is_metadata = true;
                     "security segment"
                 }
+                BlockRole::AttributeSegment { .. } => {
+                    is_metadata = true;
+                    "attribute segment"
+                }
                 BlockRole::VolumeTreeNode { .. }
                 | BlockRole::ReclaimRoot
                 | BlockRole::ReclaimTable

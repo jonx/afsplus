@@ -571,6 +571,19 @@ fn load_committed_state_inner<D: BlockDevice>(
                 metadata_blocks.push(lba);
             }
         }
+        if let Some(reference) = record.attributes {
+            let (segments, _) = crate::volume::load_attribute_chain(
+                dev,
+                &geo,
+                entry.object_id,
+                reference,
+                checkpoint.generation,
+            )?;
+            for lba in segments {
+                claim(lba, &mut claimed)?;
+                metadata_blocks.push(lba);
+            }
+        }
         if record.object_id != entry.object_id {
             return Err(CoreError::Corrupt(format!(
                 "object record at block {} claims ID {}, map says {}",

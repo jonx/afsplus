@@ -57,7 +57,7 @@ pub use mount::{
     mount_with_snapshot_limits, MountMode, MountOptions, RefusedMount,
 };
 pub use volume::Volume;
-pub use volume::{SecurityDescriptor, SecurityProjectionPolicy};
+pub use volume::{AttributeWriteMode, SecurityDescriptor, SecurityProjectionPolicy};
 
 /// Fixed prototype placement (`spec/disk-layout.md` marks exact offsets TBD;
 /// these are prototype constants, not frozen format commitments). Region

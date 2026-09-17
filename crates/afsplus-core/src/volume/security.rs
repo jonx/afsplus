@@ -5,7 +5,7 @@ use super::*;
 use afsplus_format::ident::INCOMPAT_SECURITY_DESCRIPTORS;
 use afsplus_format::object::{SecurityRef, SECURITY_REF_PROJECTION_DIVERGED};
 use afsplus_format::security::{segment_count, SECURITY_CHAIN};
-use chain::{load_chain, retire_chain, stage_chain, ChainRef};
+use chain::{load_chain, retire_chain, stage_chain, ChainRef, NewChain};
 
 /// What a protection edit does to an object that carries a descriptor.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -271,75 +271,27 @@ impl<D: BlockDevice> Volume<D> {
         if descriptor.is_none() && record.security.is_none() {
             return Ok(());
         }
-        let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
-            CoreError::Corrupt(format!("object {object_id} missing from object map"))
-        })?;
-        let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin(
-            &mut self.dev,
-            &self.ident.geometry(),
-            &self.checkpoint,
-            self.other_checkpoint.as_ref(),
-            generation,
-            self.reclaim_batch_blocks,
-            self.alloc_rover_region,
-        )?
-        .with_tree_cache_pages(self.tree_cache_pages);
-        self.protect_emergency_headroom(&mut tx);
-
-        let mut writes = Vec::new();
-        let mut reference = None;
-        if let Some((format, version, bytes)) = descriptor {
-            let first_block = stage_chain(
-                &mut self.dev,
-                &mut tx,
-                &SECURITY_CHAIN,
-                object_id,
-                (format, version, bytes),
-                count,
-                generation,
-                &mut writes,
-            )?;
-            reference = Some(SecurityRef {
-                first_block,
-                total_len: bytes.len() as u32,
+        let old = record.security.map(chain_ref);
+        self.replace_chain(
+            record,
+            &SECURITY_CHAIN,
+            old,
+            descriptor.map(|(format, version, bytes)| NewChain {
+                format,
+                version,
+                bytes,
                 segment_count: count,
-                flags: 0,
-            });
-        }
-        self.retire_security_descriptor(&mut tx, &record)?;
-        let mut new_record = record.with_security(reference);
-        new_record.changed = now;
-        let new_lba = tx.allocate(&mut self.dev)?;
-        tx.retire(&mut self.dev, record_lba)?;
-        // A symlink at its longest target has no room for the reference;
-        // the encoder refuses it before anything is published.
-        writes.push((
-            new_lba,
-            self.encode_preserving_target(new_record, generation)?,
-        ));
-        let key = object_map::key(object_id);
-        let value = object_map::value(new_lba)?;
-        let mutation = mutate_many(
-            &mut self.dev,
-            &self.ident.geometry(),
-            &mut tx,
-            self.checkpoint.object_map_block,
-            object_map::spec(self.checkpoint.generation),
-            generation,
-            &[TreeOperation::Upsert {
-                key: &key,
-                value: &value,
-            }],
-        )?;
-        writes.extend(mutation.writes);
-        self.commit_transaction(
-            generation,
-            self.checkpoint.next_object_id,
-            tx,
-            Vec::new(),
-            writes,
-            mutation.root_lba,
+            }),
+            |record, staged| {
+                let mut record = record.with_security(staged.map(|chain| SecurityRef {
+                    first_block: chain.first_block,
+                    total_len: chain.total_len,
+                    segment_count: chain.segment_count,
+                    flags: 0,
+                }));
+                record.changed = now;
+                record
+            },
         )
     }
 }

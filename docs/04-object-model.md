@@ -72,7 +72,7 @@ The executable record is one checksummed block: the 32-byte common header
 | 0 | 8 | object ID |
 | 8 | 1 | object type (1 file, 2 directory, 3 symlink, 4 internal) |
 | 9 | 1 | reserved, zero |
-| 10 | 2 | object flags (bit 0 extent tree, bit 1 data in place, bit 2 security reference, bit 3 comment) |
+| 10 | 2 | object flags (bit 0 extent tree, bit 1 data in place, bit 2 security reference, bit 3 comment, bit 4 attribute reference) |
 | 12 | 4 | link count, nonzero |
 | 16 | 8 | logical size in bytes |
 | 24 | 8 | allocated size in bytes |
@@ -84,7 +84,8 @@ The executable record is one checksummed block: the 32-byte common header
 | 80 | 8 | data root: directory tree root, extent tree root, or direct extent start |
 | 88 | 8 | direct extent length in blocks; zero for a directory or an empty file |
 | 96 | 16 | security reference, present with flag bit 2: first segment block (8), descriptor length (4), segment count (2), reference flags (2) |
-| after the reference | 1 + n | comment, present with flag bit 3: length byte 1 to 255, then NUL-free UTF-8 ([ADR-106](../adr/ADR-106-stored-object-comment.md)) |
+| after the security reference | 16 | attribute reference, present with flag bit 4: first segment block (8), set length (4), segment count (2), reserved zero (2) ([ADR-108](../adr/ADR-108-extended-attributes.md)) |
+| after the references | 1 + n | comment, present with flag bit 3: length byte 1 to 255, then NUL-free UTF-8 ([ADR-106](../adr/ADR-106-stored-object-comment.md)) |
 | after the comment | n | inline target of a symlink, NUL-free UTF-8 |
 
 A time is 12 bytes: signed 64-bit seconds since the Unix epoch and unsigned

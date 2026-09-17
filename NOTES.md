@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Extended attributes in the core (ADR-108)](#2026-09-17--extended-attributes-in-the-core-adr-108)
 - [2026-09-17 — Reach the 64-bit groups from an application](#2026-09-17--reach-the-64-bit-groups-from-an-application)
 - [2026-09-17 — Codecs for the extended attribute set and its reference](#2026-09-17--codecs-for-the-extended-attribute-set-and-its-reference)
 - [2026-09-17 — Generalise the descriptor chain into an owned chain](#2026-09-17--generalise-the-descriptor-chain-into-an-owned-chain)
@@ -204,6 +205,34 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+## 2026-09-17 — Extended attributes in the core (ADR-108)
+
+`Volume::attribute`, `attribute_names` and `set_attributes` (modes `Upsert`,
+`Create`, `Replace`; `None` removes) store the attribute set of an object as
+one `"AFSA"` owned chain. `volume/chain.rs` gained `replace_chain`, the
+one-commit replacement the descriptor path already performed; both kinds use
+it, and the descriptor path writes the same blocks in the same order as
+before. A batch of changes to one object is one commit, whole or nothing; a
+batch that leaves the set unchanged commits nothing. `CloneFile` copies the
+set, both deletion paths retire the chain, and the data path keeps the record
+flag across a layout rewrite. The checker walks the chain, decodes the set and
+claims the blocks. `afsplus_check::explain` has the `AttributeSegment` role
+and an `AttributeSummary` (names and value lengths) from its own walk. Errors
+reuse `AlreadyExists`, `NotFound`, `InvalidMetadata` and `FeatureDisabled`,
+so no adapter mapping changes. A volume with persistent snapshots refuses
+`set_attributes`; ADR-108 names ledger ownership of owned chains as the next
+core lot, owner claude-b. ApiMethod 76 to 78; `API_METHOD_MAX` is 78.
+
+Proof: `extended_attributes` in afsplus-check (6 tests, 1,988 crash states,
+each old set or new set with a clean checker verdict). Negative control: with
+the delete retirement, the flag mask of the data path and the clone copy
+removed, 4 of 6 fail. Also run: `explain` (4), `security_container` (13) and
+`clone_metadata` for the refactored descriptor path, `api_coverage`.
+
+Not in this lot: snapshot readers (nothing to read while snapshot volumes
+refuse attributes), the portable C reader and the format header constants
+(next lot), `diff.rs` (claude-main's file: it does not yet compare attribute
+sets), the VFS and AROS surfaces (Stage C).
 ## 2026-09-17 — Reach the 64-bit groups from an application
 
 The 64-bit entry points existed behind the C boundary with nobody able to

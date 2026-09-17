@@ -50,8 +50,9 @@ Rules:
    slots, fixed allocation-root pool and segmented quarantine of ADR-067
 8. an object record is admitted only in its canonical image
    ([ADR-100](../adr/ADR-100-exact-object-record-admission.md)): zero common
-   header flags, exact payload length (96 bytes, or 112 with the security
-   reference, plus the inline target of a symlink) and a zero tail
+   header flags, exact payload length (96 bytes, plus each optional field its
+   object flags announce, plus the inline target of a symlink) and a zero
+   tail
 9. with `org.aros.afsplus:security-descriptors` (INCOMPAT bit 3) an object
    record may carry the 16-byte security reference at payload offset 96 and
    own a chain of `"AFSX"` descriptor segments of 24 fixed bytes plus
@@ -80,4 +81,10 @@ Rules:
    96, seven zero bytes, 64 bytes of NUL-free UTF-8 zero padded, payload of
    168 bytes, or 184 with the snapshot roots after it; the identification
    block keeps the format-time label and is never rewritten
-12. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0
+12. an object record may carry the 16-byte attribute reference (object flag
+   bit 4) after the security reference and own a chain of `"AFSA"` segments,
+   laid out as the `"AFSX"` segments are, whose content is the object's whole
+   attribute set: a count, then entries in strictly ascending order of name
+   bytes, at most 65,536 bytes
+   ([ADR-108](../adr/ADR-108-extended-attributes.md)); no feature gates it
+13. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0

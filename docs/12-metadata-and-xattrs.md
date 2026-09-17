@@ -1,6 +1,6 @@
 # 12. Metadata and Extended Attributes
 
-> **ADRs:** none · **Spec:** none ·
+> **ADRs:** [ADR-106](../adr/ADR-106-stored-object-comment.md), [ADR-108](../adr/ADR-108-extended-attributes.md) · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
 ## 1. Core versus extensible metadata
@@ -15,10 +15,14 @@ This avoids repeatedly expanding the core on-disk object format.
 
 Namespaces are explicit.
 
+A name is 1 to 255 bytes of UTF-8 without NUL. It starts with `user.`,
+`system.`, `security.` or `aros.` and has at least one byte after the
+namespace ([ADR-108](../adr/ADR-108-extended-attributes.md)). The filesystem
+gives no namespace a meaning; access policy belongs to the host adapter.
+
 Examples:
 
 ```text
-aros.comment
 aros.icon
 aros.mime
 user.project
@@ -48,15 +52,15 @@ The attribute architecture should make this possible without adding another fixe
 
 ## 6. Size limits
 
-Attributes have explicit per-value and per-object limits exposed as filesystem capabilities.
+Attributes have explicit per-value and per-object limits exposed as filesystem capabilities: a value holds at most 65,535 bytes, and the encoded set of one object at most 65,536 bytes, names and framing included.
 
 Large arbitrary user data should be stored as files, not abused as attributes.
 
 ## 7. Storage
 
-Small attributes may be stored near the object record.
+The whole attribute set of an object is one blob, sorted by name, in a chain of checksummed `"AFSA"` blocks the object owns; the object record names the chain with a 16-byte reference behind object flag bit 4 ([ADR-108](../adr/ADR-108-extended-attributes.md)). A set of up to 4,040 bytes costs one 4 KiB block. The chain is immutable: every change, or batch of changes to one object, writes a new chain and retires the old one in the commit that publishes the new record, so a power cut leaves the old set or the new one. `CloneFile` copies the set; deleting the object frees it. An object without attributes has no chain.
 
-Larger attribute sets spill into separate checksummed metadata blocks.
+A volume with persistent snapshots refuses attributes until the snapshot lifetime ledger owns these chains.
 
 ## 8. Unknown attributes
 

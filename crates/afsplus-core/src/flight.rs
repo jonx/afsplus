@@ -359,6 +359,9 @@ pub enum ApiMethod {
     ObjectComment = 73,
     SetObjectComment = 74,
     SnapshotObjectComment = 75,
+    Attribute = 76,
+    AttributeNames = 77,
+    SetAttributes = 78,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

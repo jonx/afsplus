@@ -21,6 +21,16 @@ pub(crate) struct ChainContent {
     pub bytes: Vec<u8>,
 }
 
+/// A chain about to be written: segment format, version and the content,
+/// with the segment count the content occupies.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NewChain<'a> {
+    pub format: u32,
+    pub version: u16,
+    pub bytes: &'a [u8],
+    pub segment_count: u16,
+}
+
 /// One walk of an owned chain.
 pub(crate) struct ChainWalk {
     /// Segments whose content is consistent with this object's reference:
@@ -192,4 +202,101 @@ pub(crate) fn retire_chain<D: BlockDevice>(
         tx.retire(dev, lba)?;
     }
     Ok(())
+}
+
+impl<D: BlockDevice> Volume<D> {
+    /// Replace, attach or remove one owned chain of `record`'s object in one
+    /// commit: the new chain is staged, the old one retired, and the record
+    /// `apply` builds from the staged reference is published with them. A
+    /// power cut leaves the old chain with the old record or the new chain
+    /// with the new one.
+    pub(super) fn replace_chain(
+        &mut self,
+        record: ObjectRecord,
+        kind: &ChainKind,
+        old: Option<ChainRef>,
+        new: Option<NewChain<'_>>,
+        apply: impl FnOnce(ObjectRecord, Option<ChainRef>) -> ObjectRecord,
+    ) -> Result<(), CoreError> {
+        let object_id = record.object_id;
+        let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("object {object_id} missing from object map"))
+        })?;
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            generation,
+            self.reclaim_batch_blocks,
+            self.alloc_rover_region,
+        )?
+        .with_tree_cache_pages(self.tree_cache_pages);
+        self.protect_emergency_headroom(&mut tx);
+
+        let mut writes = Vec::new();
+        let mut staged = None;
+        if let Some(new) = new {
+            let first_block = stage_chain(
+                &mut self.dev,
+                &mut tx,
+                kind,
+                object_id,
+                (new.format, new.version, new.bytes),
+                new.segment_count,
+                generation,
+                &mut writes,
+            )?;
+            staged = Some(ChainRef {
+                first_block,
+                total_len: new.bytes.len() as u32,
+                segment_count: new.segment_count,
+            });
+        }
+        if let Some(old) = old {
+            let geometry = self.ident.geometry();
+            retire_chain(
+                &mut self.dev,
+                &mut tx,
+                &geometry,
+                kind,
+                object_id,
+                old,
+                self.checkpoint.generation,
+            )?;
+        }
+        let new_record = apply(record, staged);
+        let new_lba = tx.allocate(&mut self.dev)?;
+        tx.retire(&mut self.dev, record_lba)?;
+        // A symlink at its longest target has no room for another field;
+        // the encoder refuses it before anything is published.
+        writes.push((
+            new_lba,
+            self.encode_preserving_target(new_record, generation)?,
+        ));
+        let key = object_map::key(object_id);
+        let value = object_map::value(new_lba)?;
+        let mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &[TreeOperation::Upsert {
+                key: &key,
+                value: &value,
+            }],
+        )?;
+        writes.extend(mutation.writes);
+        self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            Vec::new(),
+            writes,
+            mutation.root_lba,
+        )
+    }
 }
