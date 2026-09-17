@@ -35,6 +35,7 @@
 #define DRAWER AFSPLUS_PROBE_VOLUME ":dosprobe"
 #define NOTE DRAWER "/note"
 #define ALIAS DRAWER "/alias"
+#define PAGES DRAWER "/pages"
 #define HELD AFSPLUS_PROBE_VOLUME ":dosprobe.held"
 #define RECORDS AFSPLUS_PROBE_VOLUME ":dosprobe.records"
 #define TEMPORARY_LABEL "AFSPlusRelabelled"
@@ -225,6 +226,161 @@ static int probe_exall(void)
     if (calls < 2)
         return fail("ExAll continuation not exercised", (SIPTR)calls);
     return RETURN_OK;
+}
+
+/*
+ * ExAll across three pages, with the directory changing between them.
+ *
+ * The contract the AFS+ resume states: entries ordered after the last one
+ * returned come back exactly once, and an entry created before that position
+ * during the enumeration does not come back at all. One page cannot show
+ * that; three, with a create and a delete in the middle, can.
+ */
+/* PAGES "/pN" for one digit. */
+static const char *page_entry(char *name, ULONG digit)
+{
+    static const char prefix[] = PAGES "/p";
+
+    memcpy(name, prefix, sizeof(prefix) - 1);
+    name[sizeof(prefix) - 1] = (char)('0' + digit);
+    name[sizeof(prefix)] = 0;
+    return name;
+}
+
+static int probe_exall_pages(void)
+{
+    /* ED_NAME records with two-character names: three fit, a fourth does
+     * not, so nine entries need at least three calls. */
+    union { UBYTE bytes[80]; struct ExAllData align; } buffer;
+    struct ExAllControl *control;
+    struct ExAllData *entry;
+    BPTR drawer;
+    LONG more;
+    ULONG calls = 0;
+    ULONG seen[10];
+    ULONG seen_before = 0;
+    ULONG seen_after = 0;
+    ULONG duplicates = 0;
+    ULONG unexpected = 0;
+    ULONG index;
+    int status = RETURN_OK;
+
+    drawer = CreateDir(PAGES);
+    if (drawer == BNULL)
+        return fail("CreateDir pages", DOSFALSE);
+    UnLock(drawer);
+    for (index = 1; index <= 9; index++)
+    {
+        char name[sizeof(PAGES) + 3];
+
+        seen[index] = 0;
+        if (!write_file(page_entry(name, index), MODE_NEWFILE))
+            return fail("create page entry", (SIPTR)index);
+    }
+    drawer = Lock(PAGES, SHARED_LOCK);
+    if (drawer == BNULL)
+        return fail("Lock pages", DOSFALSE);
+    control = AllocDosObject(DOS_EXALLCONTROL, NULL);
+    if (control == NULL)
+    {
+        UnLock(drawer);
+        return fail("AllocDosObject pages", DOSFALSE);
+    }
+    control->eac_LastKey = 0;
+
+    do
+    {
+        more = ExAll(drawer, &buffer.align, sizeof(buffer), ED_NAME, control);
+        calls++;
+        if (!more && IoErr() != ERROR_NO_MORE_ENTRIES)
+        {
+            status = fail("ExAll pages", (SIPTR)calls);
+            break;
+        }
+        entry = control->eac_Entries != 0 ? &buffer.align : NULL;
+        for (; entry != NULL; entry = entry->ed_Next)
+        {
+            const char *name = (const char *)entry->ed_Name;
+
+            if (name[0] == 'p' && name[1] >= '1' && name[1] <= '9'
+                && name[2] == 0)
+            {
+                index = (ULONG)(name[1] - '0');
+                if (seen[index]++)
+                    duplicates++;
+            }
+            else if (strcmp(name, "p0") == 0)
+                seen_before++;
+            else if (strcmp(name, "pz") == 0)
+                seen_after++;
+            else
+                unexpected++;
+        }
+
+        /* After the first page only: p9 has certainly not been returned yet,
+         * p0 sorts before everything returned so far, and pz after
+         * everything. */
+        if (calls == 1 && status == RETURN_OK)
+        {
+            if (control->eac_Entries == 0 || !more)
+            {
+                status = fail("first page held everything",
+                    (SIPTR)control->eac_Entries);
+                break;
+            }
+            if (!DeleteFile(PAGES "/p9"))
+            {
+                status = fail("delete during enumeration", DOSFALSE);
+                break;
+            }
+            if (!write_file(PAGES "/p0", MODE_NEWFILE)
+                || !write_file(PAGES "/pz", MODE_NEWFILE))
+            {
+                status = fail("create during enumeration", DOSFALSE);
+                break;
+            }
+        }
+    }
+    while (more);
+    FreeDosObject(DOS_EXALLCONTROL, control);
+    UnLock(drawer);
+
+    if (status == RETURN_OK)
+    {
+        for (index = 1; index <= 8 && status == RETURN_OK; index++)
+            if (seen[index] != 1)
+                status = fail("entry not returned exactly once",
+                    (SIPTR)index);
+    }
+    if (status == RETURN_OK && duplicates != 0)
+        status = fail("an entry came back twice", (SIPTR)duplicates);
+    if (status == RETURN_OK && seen[9] != 0)
+        status = fail("a deleted entry was returned", (SIPTR)seen[9]);
+    if (status == RETURN_OK && seen_before != 0)
+        status = fail("an entry created behind the cursor was returned",
+            (SIPTR)seen_before);
+    if (status == RETURN_OK && seen_after != 1)
+        status = fail("the entry created ahead of the cursor was not"
+            " returned once", (SIPTR)seen_after);
+    if (status == RETURN_OK && unexpected != 0)
+        status = fail("an entry nobody created was returned",
+            (SIPTR)unexpected);
+    if (status == RETURN_OK && calls < 3)
+        status = fail("the walk did not take three pages", (SIPTR)calls);
+    if (status == RETURN_OK)
+        Printf("[AFSPLUS-DOS] ExAll pages %lu entries 10\n", calls);
+
+    /* The drawer goes, whatever happened, so a rerun starts clean. */
+    for (index = 0; index <= 9; index++)
+    {
+        char name[sizeof(PAGES) + 3];
+
+        DeleteFile(page_entry(name, index));
+    }
+    DeleteFile(PAGES "/pz");
+    if (!DeleteFile(PAGES) && status == RETURN_OK)
+        status = fail("remove pages drawer", DOSFALSE);
+    return status;
 }
 
 static int probe_handles(void)
@@ -673,6 +829,8 @@ int main(int argc, char **argv)
     if (status == RETURN_OK)
         status = probe_exall();
     if (status == RETURN_OK)
+        status = probe_exall_pages();
+    if (status == RETURN_OK)
         status = probe_handles();
     if (status == RETURN_OK)
         status = probe_attributes();
@@ -688,7 +846,7 @@ int main(int argc, char **argv)
     if (!DeleteFile(DRAWER) && status == RETURN_OK)
         status = fail("remove drawer", DOSFALSE);
     if (status == RETURN_OK)
-        Printf("[AFSPLUS-DOS] PASS setters/comment/softlink/exall/"
+        Printf("[AFSPLUS-DOS] PASS setters/comment/softlink/exall/pages/"
             "fromlock/changemode/records/attributes/notify/relabel\n");
     return status;
 }
