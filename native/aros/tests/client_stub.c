@@ -90,6 +90,10 @@ SIPTR DoPkt(struct MsgPort *port, LONG action, SIPTR arg1, SIPTR arg2,
     case AFSPLUS_EXT_INFO_JSON:
         request->output_value = 300;
         break;
+    case AFSPLUS_EXT_PACKET_COUNTS:
+        request->output_count = request->buffer_size / 24;
+        request->output_value = 9;
+        break;
     case AFSPLUS_EXT_COUNTERS:
     {
         struct AfsplusArosCounters *counters = request->buffer;
@@ -275,6 +279,20 @@ int main(void)
     assert(afsplus_client_info_json(&handler_port, (char *)data,
         sizeof(data), &required) == 0);
     assert(required == 300);
+
+    /* The record array is sized in bytes on the wire. */
+    {
+        struct AfsplusExtPacketCount records[3];
+        uint32_t stored = 0;
+        uint32_t total = 0;
+
+        assert(afsplus_client_packet_counts(&handler_port,
+            AFSPLUS_EXT_COUNT_BY_ERROR, records, 3, &stored, &total) == 0);
+        assert(last_request.flags == AFSPLUS_EXT_COUNT_BY_ERROR);
+        assert(last_request.buffer_size == 72 && stored == 3 && total == 9);
+        assert(afsplus_client_packet_counts(&handler_port, 0, NULL, 3,
+            &stored, &total) == ERROR_REQUIRED_ARG_MISSING);
+    }
 
     puts("afsplus client stub: PASS");
     return 0;

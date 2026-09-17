@@ -81,6 +81,16 @@ struct AfsplusArosParked {
     uint32_t packet64;
 };
 
+/* Distinct packet types and error codes counted by name; further ones are
+ * summed in one extra slot. A handler sees a few dozen of each. */
+#define AFSPLUS_AROS_COUNT_KEYS 64
+
+struct AfsplusArosCountTable {
+    struct AfsplusExtPacketCount slots[AFSPLUS_AROS_COUNT_KEYS + 1];
+    uint32_t used;
+    uint32_t overflowed;
+};
+
 struct AfsplusArosPacketContext {
     struct AfsplusAros *filesystem;
     struct MsgPort *handler_port;
@@ -95,6 +105,8 @@ struct AfsplusArosPacketContext {
     AfsplusArosPacketNotify notify;
     AfsplusArosPacketRelabel relabel;
     AfsplusArosPacketComplete complete;
+    struct AfsplusArosCountTable by_action;
+    struct AfsplusArosCountTable by_error;
     struct AfsplusArosParked parked[AFSPLUS_AROS_PARKED_MAX];
     uint32_t parked_count;
     uint32_t exall_serial;
@@ -934,6 +946,41 @@ static void store_packet_result(struct DosPacket *packet, SIPTR result,
     packet->dp_Res2 = error;
 }
 
+static struct AfsplusExtPacketCount *count_slot(
+    struct AfsplusArosCountTable *table, int32_t key)
+{
+    uint32_t index;
+
+    for (index = 0; index < table->used; index++)
+        if (table->slots[index].key == key)
+            return &table->slots[index];
+    if (table->used < AFSPLUS_AROS_COUNT_KEYS)
+    {
+        table->slots[table->used].key = key;
+        return &table->slots[table->used++];
+    }
+    table->overflowed = 1;
+    table->slots[AFSPLUS_AROS_COUNT_KEYS].key = AFSPLUS_EXT_COUNT_OTHER;
+    return &table->slots[AFSPLUS_AROS_COUNT_KEYS];
+}
+
+/* One answered packet. A deferred packet is counted when it is answered. */
+static void count_packet(struct AfsplusArosPacketContext *context,
+    int32_t action, int32_t error)
+{
+    struct AfsplusExtPacketCount *slot = count_slot(&context->by_action,
+        action);
+
+    slot->count++;
+    if (error != 0)
+    {
+        slot->failed++;
+        slot = count_slot(&context->by_error, error);
+        slot->count++;
+        slot->failed++;
+    }
+}
+
 /* Stores the result of the deferred packet at index, removes it keeping the
  * order of the others, and hands it back. */
 static void complete_parked(struct AfsplusArosPacketContext *context,
@@ -946,6 +993,7 @@ static void complete_parked(struct AfsplusArosPacketContext *context,
         context->parked[index] = context->parked[index + 1];
     store_packet_result(done.packet, error == 0 ? DOSTRUE : DOSFALSE,
         error == 0 ? DOSTRUE : DOSFALSE, error, done.packet64);
+    count_packet(context, done.packet->dp_Type, error);
     context->complete(context->callback_context, done.packet);
 }
 
@@ -1414,6 +1462,33 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
         if (error == 0)
             report_end(request, &report);
         return error;
+    case AFSPLUS_EXT_PACKET_COUNTS:
+    {
+        const struct AfsplusArosCountTable *table;
+        uint32_t total;
+        uint32_t room = request->buffer_size
+            / (uint32_t)sizeof(struct AfsplusExtPacketCount);
+
+        if (request->flags == AFSPLUS_EXT_COUNT_BY_ACTION)
+            table = &context->by_action;
+        else if (request->flags == AFSPLUS_EXT_COUNT_BY_ERROR)
+            table = &context->by_error;
+        else
+            return ERROR_BAD_NUMBER;
+        if (room != 0 && request->buffer == NULL)
+            return ERROR_BAD_NUMBER;
+        total = table->used + table->overflowed;
+        if (room > total)
+            room = total;
+        /* The overflow slot directly follows the named ones only when the
+         * table is full, which is the only time it exists. */
+        if (room != 0)
+            memcpy(request->buffer, table->slots,
+                (size_t)room * sizeof(struct AfsplusExtPacketCount));
+        request->output_count = room;
+        request->output_value = total;
+        return 0;
+    }
     default:
         return ERROR_BAD_NUMBER;
     }
@@ -2768,7 +2843,10 @@ int32_t afsplus_aros_packet_process(
     }
 
     if (!deferred)
+    {
         store_packet_result(packet, result, result64, error, packet64);
+        count_packet(context, packet->dp_Type, error);
+    }
     if (initial_notify != NULL)
         context->notify(context->callback_context, initial_notify);
     /* Whatever this packet released may be what an older one waits for. */

@@ -272,6 +272,11 @@ preallocation and the reports have no classic equivalent; the error is the
 signal to copy, to do without, or to report nothing. The library never sends
 objects of two handlers to one of them.
 
+The handler counts the packets it answers by type, and its failures by error
+code, since it started; operation `PACKET_COUNTS` reads either table. Each
+holds sixty-four keys by name and sums further ones in one last record, so no
+packet goes uncounted. A waiting record lock is counted when it is answered.
+
 The packet number is provisional: packet numbers are an AROS-wide allocation,
 and the value in the header lies outside every assigned range until one is
 made.

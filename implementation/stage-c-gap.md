@@ -279,8 +279,11 @@ Present: the host measurement harness and
 `afsplus_aros_counters` (L1, L2) reports completed and failed calls and
 device reads, writes, barriers, bytes and failures since mount.
 
-Lacking: DOS packets by action and failures by code, which belong to the
-packet layer; peak and steady handler memory; a target
+The packet layer counts answered packets by type and failures by error code
+in bounded tables (L3), read through the transport of C4 with
+`afsplus_client_packet_counts`.
+
+Lacking: peak and steady handler memory; a target
 runner executing a fixed operation trace against AFS+ and the AFS/FFS
 baseline with manifest verification before and structural check after; a
 result bundle in the contract format. Hosted gives software cost; the

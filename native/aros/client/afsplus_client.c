@@ -243,3 +243,28 @@ LONG afsplus_client_info_json(struct MsgPort *port, char *buffer,
         *required = (uint32_t)request.output_value;
     return error;
 }
+
+LONG afsplus_client_packet_counts(struct MsgPort *port, uint32_t which,
+    struct AfsplusExtPacketCount *records, uint32_t capacity,
+    uint32_t *stored, uint32_t *total)
+{
+    struct AfsplusExtRequest request;
+    LONG error;
+
+    if (stored == NULL || total == NULL || (capacity != 0 && records == NULL)
+        || capacity > UINT32_MAX / sizeof(*records))
+        return ERROR_REQUIRED_ARG_MISSING;
+    *stored = 0;
+    *total = 0;
+    begin(&request, AFSPLUS_EXT_PACKET_COUNTS);
+    request.flags = which;
+    request.buffer = records;
+    request.buffer_size = capacity * (uint32_t)sizeof(*records);
+    error = afsplus_client_send(port, &request);
+    if (error == 0)
+    {
+        *stored = request.output_count;
+        *total = (uint32_t)request.output_value;
+    }
+    return error;
+}

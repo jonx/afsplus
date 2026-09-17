@@ -47,6 +47,24 @@
 #define AFSPLUS_EXT_EXTENT_MAP UINT32_C(13)   /* EXTENT_MAP */
 #define AFSPLUS_EXT_LOOKUP_ID UINT32_C(14)    /* OBJECT_IDS */
 #define AFSPLUS_EXT_STAT_ID UINT32_C(15)      /* OBJECT_IDS */
+#define AFSPLUS_EXT_PACKET_COUNTS UINT32_C(16) /* always */
+
+/* One record of AFSPLUS_EXT_PACKET_COUNTS. With flags 0 the key is a packet
+ * type, count the packets of that type answered since the handler started
+ * and failed those among them answered with an error. With flags 1 the key
+ * is an ERROR_* value and count the packets answered with it; failed equals
+ * count. The tables are bounded: what no longer fits is summed under
+ * AFSPLUS_EXT_COUNT_OTHER, which is then the last record. */
+#define AFSPLUS_EXT_COUNT_BY_ACTION UINT32_C(0)
+#define AFSPLUS_EXT_COUNT_BY_ERROR UINT32_C(1)
+#define AFSPLUS_EXT_COUNT_OTHER INT32_MAX
+
+struct AfsplusExtPacketCount {
+    int32_t key;
+    uint32_t reserved;
+    uint64_t count;
+    uint64_t failed;
+};
 
 /* A pointer that occupies eight bytes on every target, so the block has one
  * layout. A 32-bit sender clears the block first. */
@@ -87,6 +105,10 @@
  *   LOOKUP_ID     object[0] base lock, name[0] -> output_value object ID
  *   STAT_ID       offset[0]: object ID, buffer: struct AfsplusArosStat,
  *                 struct_size set
+ *   PACKET_COUNTS flags: which table, buffer: array of struct
+ *                 AfsplusExtPacketCount, buffer_size in bytes
+ *                 -> output_count records stored, output_value records the
+ *                    table holds; the request itself is counted by the next
  *
  * A struct buffer must be at least as large as the struct_size it declares.
  * Names are single components in the mount's name encoding, exactly as the
@@ -115,6 +137,8 @@ struct AfsplusExtRequest {
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(struct AfsplusExtRequest) == 112,
     "AfsplusExtRequest layout drift");
+_Static_assert(sizeof(struct AfsplusExtPacketCount) == 24,
+    "AfsplusExtPacketCount layout drift");
 #endif
 
 #endif

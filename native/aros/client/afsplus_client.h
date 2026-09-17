@@ -70,6 +70,14 @@ LONG afsplus_client_health(struct MsgPort *port,
 LONG afsplus_client_info_json(struct MsgPort *port, char *buffer,
     uint32_t capacity, uint32_t *required);
 
+/* Packets by type (AFSPLUS_EXT_COUNT_BY_ACTION) or failures by error code
+ * (AFSPLUS_EXT_COUNT_BY_ERROR) since the handler started. stored records are
+ * written; total is what the table holds, so a caller with too little room
+ * asks again. */
+LONG afsplus_client_packet_counts(struct MsgPort *port, uint32_t which,
+    struct AfsplusExtPacketCount *records, uint32_t capacity,
+    uint32_t *stored, uint32_t *total);
+
 #ifdef __cplusplus
 }
 #endif

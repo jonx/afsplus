@@ -2249,6 +2249,89 @@ int main(void)
         assert(afsplus_aros_packet_process(old_context, &packet) == 0);
         assert(packet.dp_Res1 == DOSFALSE
             && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+        /* Packets by type and failures by code, exactly. This context has
+         * answered SET_PROTECT, MAKE_LINK and SET_COMMENT, each once and each
+         * with ERROR_ACTION_NOT_KNOWN. */
+        {
+            struct AfsplusExtRequest request;
+            struct AfsplusExtPacketCount counts[8];
+            struct DosPacket unknown;
+            uint32_t index;
+
+            memset(&request, 0, sizeof(request));
+            request.magic = AFSPLUS_EXT_MAGIC;
+            request.version = AFSPLUS_EXT_VERSION;
+            request.header_size = sizeof(request);
+            request.operation = AFSPLUS_EXT_PACKET_COUNTS;
+            request.buffer = counts;
+            request.buffer_size = sizeof(counts);
+            initialize_packet(&packet, ACTION_AFSPLUS_EXT);
+            packet.dp_Arg1 = (SIPTR)&request;
+            memset(counts, 0x7e, sizeof(counts));
+            assert(afsplus_aros_packet_process(old_context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE);
+            assert(request.output_count == 3 && request.output_value == 3);
+            assert(counts[0].key == ACTION_SET_PROTECT
+                && counts[0].count == 1 && counts[0].failed == 1);
+            assert(counts[1].key == ACTION_MAKE_LINK && counts[1].count == 1);
+            assert(counts[2].key == ACTION_SET_COMMENT
+                && counts[2].failed == 1);
+            assert(counts[3].key == 0x7e7e7e7e);
+
+            request.flags = AFSPLUS_EXT_COUNT_BY_ERROR;
+            assert(afsplus_aros_packet_process(old_context, &packet) == 0);
+            assert(request.output_count == 1 && request.output_value == 1);
+            assert(counts[0].key == ERROR_ACTION_NOT_KNOWN
+                && counts[0].count == 3 && counts[0].failed == 3);
+
+            /* The two requests above succeeded and are counted by now; a
+             * short buffer gets a prefix and the size of the whole. */
+            request.flags = AFSPLUS_EXT_COUNT_BY_ACTION;
+            request.buffer_size = 2 * sizeof(counts[0]) + 5;
+            memset(counts, 0x7e, sizeof(counts));
+            assert(afsplus_aros_packet_process(old_context, &packet) == 0);
+            assert(request.output_count == 2 && request.output_value == 4);
+            assert(counts[2].key == 0x7e7e7e7e);
+            request.buffer_size = sizeof(counts);
+            assert(afsplus_aros_packet_process(old_context, &packet) == 0);
+            assert(counts[3].key == ACTION_AFSPLUS_EXT
+                && counts[3].count == 3 && counts[3].failed == 0);
+            request.flags = 2;
+            assert(afsplus_aros_packet_process(old_context, &packet) == 0);
+            assert(packet.dp_Res2 == ERROR_BAD_NUMBER);
+
+            /* Sixty-four types are counted by name; the rest share one
+             * record, which comes last and loses no packet. */
+            for (index = 0; index < 70; index++)
+            {
+                initialize_packet(&unknown, (LONG)(900000 + index));
+                assert(afsplus_aros_packet_process(old_context, &unknown)
+                    == 0);
+                assert(unknown.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+            }
+            {
+                static struct AfsplusExtPacketCount all[70];
+
+                request.flags = AFSPLUS_EXT_COUNT_BY_ACTION;
+                request.buffer = all;
+                request.buffer_size = sizeof(all);
+                assert(afsplus_aros_packet_process(old_context, &packet)
+                    == 0);
+                assert(request.output_count == 65
+                    && request.output_value == 65);
+                assert(all[63].key == 900000 + 59 && all[63].count == 1);
+                assert(all[64].key == AFSPLUS_EXT_COUNT_OTHER
+                    && all[64].count == 10 && all[64].failed == 10);
+                request.flags = AFSPLUS_EXT_COUNT_BY_ERROR;
+                assert(afsplus_aros_packet_process(old_context, &packet)
+                    == 0);
+                assert(request.output_count == 2);
+                assert(all[0].key == ERROR_ACTION_NOT_KNOWN
+                    && all[0].count == 73);
+                assert(all[1].key == ERROR_BAD_NUMBER && all[1].count == 1);
+            }
+        }
+
         /* The extension packet itself is known; it reports which groups it
          * can reach, and an operation of an absent group is unknown. */
         {
