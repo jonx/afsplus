@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Hold the claim ADR-115 made about explain](#2026-09-17--hold-the-claim-adr-115-made-about-explain)
 - [2026-09-17 — The feature registry lists what exists (ADR-116)](#2026-09-17--the-feature-registry-lists-what-exists-adr-116)
 - [2026-09-17 — Retire what nothing writes (ADR-115)](#2026-09-17--retire-what-nothing-writes-adr-115)
 - [2026-09-17 — The reserved header fields of the last five kinds (ADR-114)](#2026-09-17--the-reserved-header-fields-of-the-last-five-kinds-adr-114)
@@ -222,6 +223,28 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — Hold the claim ADR-115 made about explain
+
+ADR-115's procedure table claims that `afsplus_check::explain` gives a block
+of a retired magic no identity and that nothing claims it. Nothing held that
+claim, and an ADR statement no test holds is the failure mode of the day in
+another form. `retired_magic` holds it now: a well-formed block of each of the
+three retired magics, right header version and valid checksum, gets no
+identity, no role, and leaves the checker's verdict unchanged, because what a
+free block holds is not a claim about the filesystem. Negative control: put
+one magic back in explain's known list and the test fails.
+
+The second half of that claim, that an allocated block nothing claims is
+reported as owned by nothing, is the general leak rule already held by
+`zero_tail` and the explain tests: `is_unowned` is decided by the allocation
+bit and the roles, never by content, so a retired magic cannot change it. The
+test says so rather than building a contrived allocated case.
+
+Also checked while waiting, and no lot needed: the feature registry is tied to
+the Rust bits by `feature_registry` (ADR-116) and the Rust bits to the C spec
+header by `c_constants`, which pins all seven, so the third copy cannot drift
+either.
 
 ## 2026-09-17 — The feature registry lists what exists (ADR-116)
 
