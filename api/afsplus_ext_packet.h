@@ -58,6 +58,10 @@
 #define AFSPLUS_EXT_GET_ATTRIBUTE UINT32_C(17)   /* ATTRIBUTES */
 #define AFSPLUS_EXT_LIST_ATTRIBUTES UINT32_C(18) /* ATTRIBUTES */
 #define AFSPLUS_EXT_SET_ATTRIBUTE UINT32_C(19)   /* ATTRIBUTES */
+#define AFSPLUS_EXT_DIR_OPEN UINT32_C(20)        /* OBJECT_IDS */
+#define AFSPLUS_EXT_DIR_READ UINT32_C(21)        /* OBJECT_IDS */
+#define AFSPLUS_EXT_DIR_CLOSE UINT32_C(22)       /* OBJECT_IDS */
+#define AFSPLUS_EXT_HEALTH_EVENTS UINT32_C(23)   /* OBSERVE */
 
 /* One record of AFSPLUS_EXT_PACKET_COUNTS. With flags 0 the key is a packet
  * type, count the packets of that type answered since the handler started
@@ -125,6 +129,14 @@ struct AfsplusExtPacketCount {
  *   SET_ATTRIBUTE object[0] base lock, name[0] object, name[1] attribute,
  *                 buffer, buffer_size: the value, flags: an
  *                 AFSPLUS_AROS_ATTRIBUTE_* mode of afsplus_aros.h
+ *   DIR_OPEN      object[0] base lock -> output_value the walk
+ *   DIR_READ      offset[0] the walk, length the record limit (1 to 64),
+ *                 buffer, buffer_size -> output_count records packed,
+ *                 output_flags 1 at the end of the directory
+ *   DIR_CLOSE     offset[0] the walk
+ *   HEALTH_EVENTS buffer: array of struct AfsplusArosHealthEvent,
+ *                 buffer_size in bytes -> output_count events taken from the
+ *                 ring, output_value events the ring has LOST since mount
  *   PACKET_COUNTS flags: which table, buffer: array of struct
  *                 AfsplusExtPacketCount, buffer_size in bytes
  *                 -> output_count records stored, output_value records the

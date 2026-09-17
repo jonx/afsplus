@@ -383,6 +383,138 @@ static int probe_exall_pages(void)
     return status;
 }
 
+/*
+ * The paged walk by object ID, which only the extension packet reaches. It
+ * runs over a nine-entry drawer and holds the same rule as the ExAll
+ * continuation: the position is the last name returned, so an entry created
+ * ahead of it comes back and the walk never loses its place.
+ */
+static int probe_dir_walk(void)
+{
+    UBYTE records[AFSPLUS_AROS_DIR_RECORD_MAX * 2];
+    BPTR drawer;
+    uint64_t walk = 0;
+    ULONG index;
+    ULONG seen[10];
+    ULONG seen_after = 0;
+    ULONG duplicates = 0;
+    ULONG calls = 0;
+    uint32_t eof = 0;
+    LONG error;
+    int status = RETURN_OK;
+
+    drawer = CreateDir(PAGES);
+    if (drawer == BNULL)
+        return fail("CreateDir walk", DOSFALSE);
+    UnLock(drawer);
+    for (index = 1; index <= 9; index++)
+    {
+        char name[sizeof(PAGES) + 3];
+
+        seen[index] = 0;
+        if (!write_file(page_entry(name, index), MODE_NEWFILE))
+            return fail("create walk entry", (SIPTR)index);
+    }
+    drawer = Lock(PAGES, SHARED_LOCK);
+    if (drawer == BNULL)
+        return fail("Lock walk", DOSFALSE);
+
+    error = afsplus_client_dir_open(drawer, &walk);
+    if (error != 0)
+    {
+        UnLock(drawer);
+        return fail("dir_open", error);
+    }
+    while (status == RETURN_OK && !eof)
+    {
+        uint32_t count = 0;
+        uint32_t at = 0;
+
+        error = afsplus_client_dir_read(drawer, walk, records,
+            sizeof(records), 64, &count, &eof);
+        calls++;
+        if (error != 0)
+        {
+            status = fail("dir_read", error);
+            break;
+        }
+        if (count == 0 && !eof)
+        {
+            status = fail("a page with nothing in it", (SIPTR)calls);
+            break;
+        }
+        for (index = 0; index < count; index++)
+        {
+            struct AfsplusArosDirEntry record;
+            const char *name;
+
+            memcpy(&record, records + at, sizeof(record));
+            name = (const char *)(records + at + sizeof(record));
+            at += record.record_length;
+            if (record.name_length == 2 && name[0] == 'p'
+                && name[1] >= '1' && name[1] <= '9')
+            {
+                ULONG which = (ULONG)(name[1] - '0');
+
+                if (seen[which]++)
+                    duplicates++;
+            }
+            else if (record.name_length == 2 && name[0] == 'p'
+                && name[1] == 'z')
+                seen_after++;
+            else
+                status = fail("an entry nobody created", (SIPTR)at);
+        }
+        /* After the first page, one entry ahead of the position: it must
+         * come back, and the walk must not lose its place. */
+        if (calls == 1 && status == RETURN_OK && !eof)
+        {
+            if (!write_file(PAGES "/pz", MODE_NEWFILE))
+                status = fail("create during the walk", DOSFALSE);
+        }
+    }
+    error = afsplus_client_dir_close(drawer, walk);
+    if (status == RETURN_OK && error != 0)
+        status = fail("dir_close", error);
+    /* A closed walk is gone: reading it again is an error, not a second
+     * view of the directory. */
+    if (status == RETURN_OK)
+    {
+        uint32_t count = 0;
+        uint32_t ignored = 0;
+
+        if (afsplus_client_dir_read(drawer, walk, records, sizeof(records),
+                64, &count, &ignored) == 0)
+            status = fail("a closed walk still read", (SIPTR)count);
+    }
+    UnLock(drawer);
+
+    for (index = 1; index <= 9 && status == RETURN_OK; index++)
+        if (seen[index] != 1)
+            status = fail("walk entry not returned exactly once",
+                (SIPTR)index);
+    if (status == RETURN_OK && duplicates != 0)
+        status = fail("the walk returned an entry twice", (SIPTR)duplicates);
+    if (status == RETURN_OK && seen_after != 1)
+        status = fail("the entry created ahead of the walk was not returned"
+            " once", (SIPTR)seen_after);
+    if (status == RETURN_OK && calls < 2)
+        status = fail("the walk took one page", (SIPTR)calls);
+    if (status == RETURN_OK)
+        Printf("[AFSPLUS-DOS] dir walk pages %lu entries 10\n", calls);
+
+    for (index = 1; index <= 9; index++)
+    {
+        char name[sizeof(PAGES) + 3];
+
+        DeleteFile(page_entry(name, index));
+    }
+    DeleteFile(PAGES "/pz");
+    if (!DeleteFile(PAGES) && status == RETURN_OK)
+        status = fail("remove walk drawer", DOSFALSE);
+    return status;
+}
+
 static int probe_handles(void)
 {
     UBYTE readback[4];
@@ -831,6 +963,8 @@ int main(int argc, char **argv)
     if (status == RETURN_OK)
         status = probe_exall_pages();
     if (status == RETURN_OK)
+        status = probe_dir_walk();
+    if (status == RETURN_OK)
         status = probe_handles();
     if (status == RETURN_OK)
         status = probe_attributes();
@@ -847,6 +981,7 @@ int main(int argc, char **argv)
         status = fail("remove drawer", DOSFALSE);
     if (status == RETURN_OK)
         Printf("[AFSPLUS-DOS] PASS setters/comment/softlink/exall/pages/"
-            "fromlock/changemode/records/attributes/notify/relabel\n");
+            "dirwalk/fromlock/changemode/records/attributes/notify/"
+            "relabel\n");
     return status;
 }

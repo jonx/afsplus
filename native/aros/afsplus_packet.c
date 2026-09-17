@@ -1516,6 +1516,60 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
                 request->name_length[1], (const uint8_t *)request->buffer,
                 request->buffer_size, request->flags, seconds, nanoseconds);
         return error;
+    case AFSPLUS_EXT_DIR_OPEN:
+        error = require_group(context, AFSPLUS_AROS_GROUP_OBJECT_IDS);
+        if (error == 0)
+            error = extension_lock(context, request->object[0], &first);
+        if (error == 0)
+            error = afsplus_aros_dir_open(context->filesystem, first,
+                &request->output_value);
+        return error;
+    case AFSPLUS_EXT_DIR_READ:
+    {
+        uint32_t eof = 0;
+        uint32_t limit = request->length > UINT32_MAX
+            ? UINT32_MAX : (uint32_t)request->length;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_OBJECT_IDS);
+        if (error == 0 && request->buffer == NULL)
+            error = ERROR_BAD_NUMBER;
+        if (error == 0)
+            error = afsplus_aros_dir_read(context->filesystem,
+                request->offset[0], (uint8_t *)request->buffer,
+                request->buffer_size, limit, &request->output_count, &eof);
+        request->output_flags = eof;
+        return error;
+    }
+    case AFSPLUS_EXT_DIR_CLOSE:
+        error = require_group(context, AFSPLUS_AROS_GROUP_OBJECT_IDS);
+        if (error == 0)
+            error = afsplus_aros_dir_close(context->filesystem,
+                request->offset[0]);
+        return error;
+    case AFSPLUS_EXT_HEALTH_EVENTS:
+    {
+        uint32_t capacity = request->buffer_size
+            / (uint32_t)sizeof(struct AfsplusArosHealthEvent);
+        struct AfsplusArosHealth health;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_OBSERVE);
+        if (error == 0 && capacity != 0 && request->buffer == NULL)
+            error = ERROR_BAD_NUMBER;
+        if (error == 0)
+            error = afsplus_aros_health_events(context->filesystem,
+                (struct AfsplusArosHealthEvent *)request->buffer, capacity,
+                &request->output_count);
+        /* Events the ring lost since mount: a caller that only reads what
+         * it is handed would never learn that anything is missing. */
+        if (error == 0)
+        {
+            memset(&health, 0, sizeof(health));
+            health.struct_size = sizeof(health);
+            if (afsplus_aros_health(context->filesystem, &health) == 0)
+                request->output_value = health.events_dropped;
+        }
+        return error;
+    }
     case AFSPLUS_EXT_PACKET_COUNTS:
     {
         const struct AfsplusArosCountTable *table;

@@ -378,3 +378,85 @@ LONG afsplus_client_set_attribute(BPTR lock, CONST_STRPTR attribute,
     return attribute_request(AFSPLUS_EXT_SET_ATTRIBUTE, lock, attribute,
         (void *)(uintptr_t)value, length, mode, NULL);
 }
+
+LONG afsplus_client_dir_open(BPTR lock, uint64_t *walk)
+{
+    struct AfsplusExtRequest request;
+    struct MsgPort *port = afsplus_client_lock_port(lock);
+    LONG error;
+
+    if (walk == NULL)
+        return ERROR_REQUIRED_ARG_MISSING;
+    *walk = 0;
+    if (port == NULL)
+        return ERROR_INVALID_LOCK;
+    begin(&request, AFSPLUS_EXT_DIR_OPEN);
+    request.object[0] = (uint64_t)(uintptr_t)lock;
+    error = afsplus_client_send(port, &request);
+    if (error == 0)
+        *walk = request.output_value;
+    return error;
+}
+
+LONG afsplus_client_dir_read(BPTR lock, uint64_t walk, void *records,
+    uint32_t capacity, uint32_t limit, uint32_t *count, uint32_t *eof)
+{
+    struct AfsplusExtRequest request;
+    struct MsgPort *port = afsplus_client_lock_port(lock);
+    LONG error;
+
+    if (count == NULL || eof == NULL || records == NULL)
+        return ERROR_REQUIRED_ARG_MISSING;
+    *count = 0;
+    *eof = 0;
+    if (port == NULL)
+        return ERROR_INVALID_LOCK;
+    begin(&request, AFSPLUS_EXT_DIR_READ);
+    request.offset[0] = walk;
+    request.length = limit;
+    request.buffer = records;
+    request.buffer_size = capacity;
+    error = afsplus_client_send(port, &request);
+    if (error == 0)
+    {
+        *count = request.output_count;
+        *eof = request.output_flags;
+    }
+    return error;
+}
+
+LONG afsplus_client_dir_close(BPTR lock, uint64_t walk)
+{
+    struct AfsplusExtRequest request;
+    struct MsgPort *port = afsplus_client_lock_port(lock);
+
+    if (port == NULL)
+        return ERROR_INVALID_LOCK;
+    begin(&request, AFSPLUS_EXT_DIR_CLOSE);
+    request.offset[0] = walk;
+    return afsplus_client_send(port, &request);
+}
+
+LONG afsplus_client_health_events(struct MsgPort *port,
+    struct AfsplusArosHealthEvent *events, uint32_t capacity,
+    uint32_t *count, uint64_t *lost)
+{
+    struct AfsplusExtRequest request;
+    LONG error;
+
+    if (count == NULL || lost == NULL || (capacity != 0 && events == NULL)
+        || capacity > UINT32_MAX / sizeof(*events))
+        return ERROR_REQUIRED_ARG_MISSING;
+    *count = 0;
+    *lost = 0;
+    begin(&request, AFSPLUS_EXT_HEALTH_EVENTS);
+    request.buffer = events;
+    request.buffer_size = capacity * (uint32_t)sizeof(*events);
+    error = afsplus_client_send(port, &request);
+    if (error == 0)
+    {
+        *count = request.output_count;
+        *lost = request.output_value;
+    }
+    return error;
+}

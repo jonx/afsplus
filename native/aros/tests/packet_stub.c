@@ -783,11 +783,73 @@ int32_t afsplus_aros_counters(struct AfsplusAros *filesystem,
     return ext_call('a', 0, NULL, 0, output->struct_size, 0, 0, 0);
 }
 
+static uint64_t stub_health_dropped = 7;
+
 int32_t afsplus_aros_health(struct AfsplusAros *filesystem,
     struct AfsplusArosHealth *output)
 {
     assert(filesystem == STUB_FILESYSTEM);
+    output->events_dropped = stub_health_dropped;
     return ext_call('b', 0, NULL, 0, output->struct_size, 0, 0, 0);
+}
+
+int32_t afsplus_aros_health_events(struct AfsplusAros *filesystem,
+    struct AfsplusArosHealthEvent *events, uint32_t capacity,
+    uint32_t *output_count)
+{
+    uint32_t index;
+
+    assert(filesystem == STUB_FILESYSTEM);
+    if (ext_error != 0)
+        return ext_error;
+    /* Two events, or as many as the caller can take. */
+    *output_count = capacity < 2 ? capacity : 2;
+    for (index = 0; index < *output_count; index++)
+    {
+        memset(&events[index], 0, sizeof(events[index]));
+        events[index].sequence = index + 1;
+        events[index].kind = AFSPLUS_AROS_HEALTH_EVENT_DEVICE_ERROR;
+    }
+    return ext_call('h', 0, NULL, 0, capacity, 0, 0, 0);
+}
+
+int32_t afsplus_aros_dir_open(struct AfsplusAros *filesystem,
+    uint64_t base_lock, uint64_t *output_dir)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    *output_dir = UINT64_C(0x5000);
+    return ext_call('i', base_lock, NULL, 0, 0, 0, 0, 0);
+}
+
+int32_t afsplus_aros_dir_read(struct AfsplusAros *filesystem, uint64_t dir,
+    uint8_t *buffer, uint32_t capacity, uint32_t max_entries,
+    uint32_t *output_count, uint32_t *output_eof)
+{
+    struct AfsplusArosDirEntry record;
+
+    assert(filesystem == STUB_FILESYSTEM);
+    if (ext_error != 0)
+        return ext_error;
+    /* One record, "e0", when it fits. */
+    memset(&record, 0, sizeof(record));
+    record.object_id = 42;
+    record.name_length = 2;
+    record.record_length = sizeof(record) + 8;
+    *output_count = 0;
+    *output_eof = 1;
+    if (capacity >= record.record_length && max_entries != 0)
+    {
+        memcpy(buffer, &record, sizeof(record));
+        memcpy(buffer + sizeof(record), "e0", 2);
+        *output_count = 1;
+    }
+    return ext_call('j', dir, NULL, 0, capacity, max_entries, 0, 0);
+}
+
+int32_t afsplus_aros_dir_close(struct AfsplusAros *filesystem, uint64_t dir)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    return ext_call('k', dir, NULL, 0, 0, 0, 0, 0);
 }
 
 int32_t afsplus_aros_extent_map(struct AfsplusAros *filesystem,
@@ -1677,6 +1739,65 @@ int main(void)
         EXT_BEGIN(AFSPLUS_EXT_LOOKUP_ID);
         request.name0 = (const uint8_t *)"ext";
         request.name_length[0] = 3;
+
+        /* The paged walk and the health ring, which no target path could
+         * reach before. */
+        {
+            uint8_t records[512];
+            struct AfsplusArosHealthEvent health_events[4];
+            uint64_t walk;
+
+            EXT_BEGIN(AFSPLUS_EXT_DIR_OPEN);
+            request.object[0] = (uint64_t)root;
+            EXT_SEND(DOSTRUE, 0);
+            assert(event_count == 1 && events[0].operation == 'i');
+            walk = request.output_value;
+            assert(walk == UINT64_C(0x5000));
+
+            EXT_BEGIN(AFSPLUS_EXT_DIR_READ);
+            request.offset[0] = walk;
+            request.length = 16;
+            request.buffer = records;
+            request.buffer_size = sizeof(records);
+            EXT_SEND(DOSTRUE, 0);
+            assert(event_count == 1 && events[0].operation == 'j');
+            assert(ext_seen[0] == sizeof(records) && ext_seen[1] == 16);
+            assert(request.output_count == 1 && request.output_flags == 1);
+            assert(memcmp(records + sizeof(struct AfsplusArosDirEntry),
+                "e0", 2) == 0);
+            /* A record limit beyond 32 bits is the caller's error, not a
+             * silently truncated one. */
+            request.length = UINT64_C(0x1000000000);
+            EXT_SEND(DOSTRUE, 0);
+            assert(ext_seen[1] == UINT32_MAX);
+            request.buffer = NULL;
+            EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+
+            EXT_BEGIN(AFSPLUS_EXT_DIR_CLOSE);
+            request.offset[0] = walk;
+            EXT_SEND(DOSTRUE, 0);
+            assert(event_count == 1 && events[0].operation == 'k');
+
+            /* The health ring: what it hands over, and what it lost. */
+            EXT_BEGIN(AFSPLUS_EXT_HEALTH_EVENTS);
+            request.buffer = health_events;
+            request.buffer_size = sizeof(health_events);
+            EXT_SEND(DOSTRUE, 0);
+            assert(request.output_count == 2);
+            assert(health_events[0].sequence == 1
+                && health_events[1].sequence == 2);
+            assert(request.output_value == stub_health_dropped);
+            /* A buffer for one event takes one; a buffer for none is not an
+             * error, it is how a caller asks only what was lost. */
+            request.buffer_size = sizeof(health_events[0]);
+            EXT_SEND(DOSTRUE, 0);
+            assert(request.output_count == 1);
+            request.buffer = NULL;
+            request.buffer_size = 0;
+            EXT_SEND(DOSTRUE, 0);
+            assert(request.output_count == 0
+                && request.output_value == stub_health_dropped);
+        }
 
         /* A filesystem error travels in dp_Res2 and clears the outputs. */
         ext_error = ERROR_OBJECT_NOT_FOUND;

@@ -85,9 +85,9 @@ Lacking:
    [`check-aros-ffi.sh`](../tools/check-aros-ffi.sh) checks at link time, and
    those runs reach the DOS, soft-link, notify, record, volume-label,
    comment, attribute and extension-packet groups through a real
-   dos.library. What no Hosted run reaches: the trace sink, the health
-   events beyond a device failure, and the API v2 entry points that no packet
-   or extension operation calls yet. QEMU and m68k stand where they were,
+   dos.library, and the paged object-ID walk and the health-event ring
+   through the extension packet. What no Hosted run reaches: the trace sink,
+   which no target path can call at all. QEMU and m68k stand where they were,
    because neither toolchain is on the machine that ran the rest;
 2. a structured result for callers that are not DOS packets: every error is
    an `ERROR_*` value, and `Limit`, `Corrupt` and `Io` share codes with

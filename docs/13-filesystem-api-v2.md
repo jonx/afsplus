@@ -286,6 +286,16 @@ preallocation and the reports have no classic equivalent; the error is the
 signal to copy, to do without, or to report nothing. The library never sends
 objects of two handlers to one of them.
 
+The paged directory walk of the object-ID group travels as `DIR_OPEN`,
+`DIR_READ` and `DIR_CLOSE`. A walk belongs to the lock it was opened from and
+to nothing else: it does not disturb that lock's `ExNext` cursor, another
+walk, or a second opener. Its position is the last name it returned, so an
+entry created ahead of that position comes back and one created behind it
+does not, the same rule the `ExNext` resume follows. `HEALTH_EVENTS` empties
+the handler's event ring into the caller's buffer and reports how many events
+the ring has dropped since the mount, which the events themselves cannot
+show.
+
 Extended attributes ([ADR-108](../adr/ADR-108-extended-attributes.md)) travel
 as `GET_ATTRIBUTE`, `LIST_ATTRIBUTES` and `SET_ATTRIBUTE`. The size always
 comes back and the bytes only when they fit, so a zero capacity asks for the

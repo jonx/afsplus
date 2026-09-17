@@ -92,6 +92,26 @@ LONG afsplus_client_list_attributes(BPTR lock, char *names,
 LONG afsplus_client_set_attribute(BPTR lock, CONST_STRPTR attribute,
     const void *value, uint32_t length, uint32_t mode);
 
+/* The paged walk of the directory behind a lock, by object ID. It is
+ * independent of the lock's own ExNext cursor and of every other walk; the
+ * position is the last name returned, so entries created or removed between
+ * two calls do not disturb it. Close it when done, also on the way out of an
+ * error. dir_read packs at most limit records (1 to 64) of struct
+ * AfsplusArosDirEntry, each followed by name_length bytes, the next record
+ * record_length bytes after this one; capacity must be at least
+ * AFSPLUS_AROS_DIR_RECORD_MAX. eof becomes 1 at the end of the directory. */
+LONG afsplus_client_dir_open(BPTR lock, uint64_t *walk);
+LONG afsplus_client_dir_read(BPTR lock, uint64_t walk, void *records,
+    uint32_t capacity, uint32_t limit, uint32_t *count, uint32_t *eof);
+LONG afsplus_client_dir_close(BPTR lock, uint64_t walk);
+
+/* Health events the handler recorded, oldest first; the call empties what it
+ * hands over. lost receives how many the ring has dropped since the mount,
+ * which a caller cannot see from the events themselves. */
+LONG afsplus_client_health_events(struct MsgPort *port,
+    struct AfsplusArosHealthEvent *events, uint32_t capacity,
+    uint32_t *count, uint64_t *lost);
+
 /* Packets by type (AFSPLUS_EXT_COUNT_BY_ACTION) or failures by error code
  * (AFSPLUS_EXT_COUNT_BY_ERROR) since the handler started. stored records are
  * written; total is what the table holds, so a caller with too little room
