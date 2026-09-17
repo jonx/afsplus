@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 
 use afsplus_block::BlockDevice;
 use afsplus_core::flight::FlightRecorder;
+use afsplus_core::volume::SecurityProjectionPolicy;
 use afsplus_core::MountMode;
 use afsplus_format::{Timespec, OBJECT_ROOT};
 use afsplus_vfs::{
@@ -41,6 +42,13 @@ pub struct ArosConfig {
     /// metadata the classic view cannot express. Off by default: such a write
     /// is refused and the richer metadata is preserved.
     pub allow_security_downgrade: bool,
+    /// Refuse a classic protection write on an object that carries an
+    /// on-disk security descriptor, instead of applying it and recording the
+    /// divergence. Off by default: the handler preserves every descriptor
+    /// byte, lets the DOS write land and marks the projection as diverged,
+    /// which a host that evaluates the descriptor reconciles. On, the core's
+    /// strict policy refuses the write and nothing changes.
+    pub strict_security_projection: bool,
     /// Largest number of filesystem blocks one preallocation request edits.
     /// The handler is a single task; a larger request is `ObjectTooLarge`
     /// and the caller splits it.
@@ -61,6 +69,7 @@ impl Default for ArosConfig {
             // MAXFILENAMELENGTH includes the terminating NUL.
             max_file_info_name_bytes: 107,
             allow_security_downgrade: false,
+            strict_security_projection: false,
             max_preallocate_blocks: 4096,
             max_watches: 256,
             health_event_capacity: 32,
@@ -272,7 +281,15 @@ pub struct ArosAdapter<D: BlockDevice> {
 }
 
 impl<D: BlockDevice> ArosAdapter<D> {
-    pub fn new(vfs: Vfs<D>, config: ArosConfig) -> Self {
+    pub fn new(mut vfs: Vfs<D>, config: ArosConfig) -> Self {
+        // The projection policy is mount runtime state that the core resets
+        // to strict. The handler chooses it here, once, from the mount
+        // configuration.
+        vfs.set_security_projection_policy(if config.strict_security_projection {
+            SecurityProjectionPolicy::Strict
+        } else {
+            SecurityProjectionPolicy::Preserve
+        });
         let mut known_parents = BTreeMap::new();
         known_parents.insert(OBJECT_ROOT, (None, config.volume_name.clone()));
         ArosAdapter {

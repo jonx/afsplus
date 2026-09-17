@@ -245,7 +245,15 @@ projection cannot express is refused with `ERROR_WRITE_PROTECTED` and the
 stored state is untouched; the mount flag
 `AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE` is the explicit request to let
 the write through. The adapter asks one question through `RichSecurityProbe`
-and never interprets the metadata. Rename and hard link keep the object and
+and never interprets the metadata.
+
+An on-disk security descriptor is the case where preserving the metadata is
+possible, so the handler preserves it: `ACTION_SET_PROTECT` applies the new
+protection word, every descriptor byte stays and the projection-diverged mark
+is set in the same transaction, which a host that evaluates the descriptor
+reconciles. The mount flag
+`AFSPLUS_AROS_MOUNT_FLAG_STRICT_SECURITY_PROJECTION` selects the core's
+strict policy instead, where such a write is refused and nothing changes. Rename and hard link keep the object and
 therefore its security metadata.
 
 Soft-link targets are opaque paths in the mount encoding. Locate and open

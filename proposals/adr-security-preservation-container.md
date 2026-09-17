@@ -238,9 +238,18 @@ API document.
   strict policy when the object carries a descriptor. The core reports
   `SecurityProjectionRefused`; the VFS layer maps it to `NotSupported` until
   the API assigns a distinct code. An AROS handler chooses its policy at
-  mount: strict fails `ACTION_SET_PROTECT` on such objects, preserve applies
-  it and records the divergence. Volumes without descriptors behave as
-  before.
+  mount and defaults to preserve: `ACTION_SET_PROTECT` on such an object
+  applies the new protection word, keeps every descriptor byte and marks the
+  projection as diverged, and the mount flag
+  `AFSPLUS_AROS_MOUNT_FLAG_STRICT_SECURITY_PROJECTION` selects the refusal
+  instead. Refusing and preserving are both non-destructive, and preserve is
+  the better default for a classic host, because a refusal leaves the DOS
+  user with no way to change protection at all while preserve keeps the
+  bytes and records that the two views disagree. The core default stays
+  strict, so a caller that never chooses gets the refusal. Metadata that the
+  container does not hold keeps its own rule, the explicit downgrade request,
+  because there is nothing on disk to preserve or to mark. Volumes without
+  descriptors behave as before.
 - Backup and restore transport the descriptor as one opaque value pair per
   object ([ADR-084](../adr/ADR-084-opaque-backup-value-pairs.md)); restoration
   sets the descriptor after the protection word, which also leaves the

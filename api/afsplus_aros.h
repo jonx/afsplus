@@ -57,11 +57,18 @@ extern "C" {
 #define AFSPLUS_AROS_MOUNT_NO_CHANGES UINT32_C(2)
 #define AFSPLUS_AROS_MOUNT_RECOVERY UINT32_C(3)
 
-/* AfsplusArosMountConfig.flags. Zero keeps the classic preservation rule: a
- * protection write that would replace security metadata the classic view
- * cannot express is refused with ERROR_WRITE_PROTECTED. The flag is the
- * explicit downgrade request. Undefined bits are refused at mount. */
+/* AfsplusArosMountConfig.flags. Undefined bits are refused at mount.
+ *
+ * SECURITY_DOWNGRADE is the explicit request to let a protection write
+ * replace security metadata the container does not hold, where preserving it
+ * is impossible; zero refuses such a write with ERROR_WRITE_PROTECTED.
+ *
+ * STRICT_SECURITY_PROJECTION refuses a protection write on an object that
+ * carries an on-disk security descriptor; zero takes the handler default,
+ * which applies the write, keeps every descriptor byte and marks the
+ * projection as diverged. */
 #define AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE UINT32_C(1)
+#define AFSPLUS_AROS_MOUNT_FLAG_STRICT_SECURITY_PROJECTION UINT32_C(2)
 
 #define AFSPLUS_AROS_ENCODING_UTF8 UINT32_C(0)
 #define AFSPLUS_AROS_ENCODING_LATIN1 UINT32_C(1)

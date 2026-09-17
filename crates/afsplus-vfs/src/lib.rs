@@ -15,7 +15,8 @@ use afsplus_block::BlockDevice;
 use afsplus_core::flight::FlightRecorder;
 use afsplus_core::name_key::comparison_key;
 use afsplus_core::volume::{
-    DataUpdatePolicy, DirectoryCursor, FileEditLimits, ObjectMetadata, PreservedMetadata, Volume,
+    DataUpdatePolicy, DirectoryCursor, FileEditLimits, ObjectMetadata, PreservedMetadata,
+    SecurityProjectionPolicy, Volume,
 };
 use afsplus_core::{mount_with_options, CoreError, MountMode, MountOptions};
 use afsplus_format::ident::{
@@ -887,6 +888,15 @@ impl<D: BlockDevice> Vfs<D> {
 
     /// The persistent per-file data-update policy (ADR-065): `true` when the
     /// file is opted into private in-place updates.
+    /// Selects what a protection edit does to an object that carries a
+    /// security descriptor. Host runtime state: the core resets it to
+    /// [`SecurityProjectionPolicy::Strict`] at every mount, and an adapter
+    /// that evaluates or preserves descriptors sets its own policy after
+    /// mounting.
+    pub fn set_security_projection_policy(&mut self, policy: SecurityProjectionPolicy) {
+        self.volume.set_security_projection_policy(policy)
+    }
+
     /// Replaces the stored protection word. The host adapter evaluates
     /// permission and owns the meaning of the bits; the change time is `now`.
     pub fn set_protection(

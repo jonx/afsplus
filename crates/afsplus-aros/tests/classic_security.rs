@@ -2,17 +2,20 @@
 //! DOS projection never replaces security metadata the projection cannot
 //! express, unless the mount requests the downgrade.
 //!
-//! The executable format stores protection bits only, so the richer metadata
-//! is supplied by a probe double; the on-disk query waits on the security
-//! preservation container.
+//! Metadata the container does not hold is supplied by a probe double, where
+//! refusal is the only non-destructive answer. An on-disk descriptor is the
+//! other case: the handler preserves its bytes, lets the classic write land
+//! and records the divergence, unless the mount asks for the strict refusal.
 
 use std::collections::BTreeSet;
 
 use afsplus_aros::{ArosAdapter, ArosConfig, ArosError, LockAccess, OpenMode, RichSecurityProbe};
 use afsplus_block::MemoryBackend;
 use afsplus_check::check_device;
-use afsplus_core::{mkfs, MkfsParams, MountOptions};
-use afsplus_format::Timespec;
+use afsplus_core::{
+    mkfs, mkfs_with_security_descriptors, mount, MkfsParams, MountOptions, NamePolicy,
+};
+use afsplus_format::{Timespec, OBJECT_ROOT};
 use afsplus_vfs::{ObjectId, Vfs};
 
 fn timestamp(seconds: i64) -> Timespec {
@@ -22,24 +25,84 @@ fn timestamp(seconds: i64) -> Timespec {
     }
 }
 
+fn params() -> MkfsParams {
+    MkfsParams {
+        uuid: [0xC4; 16],
+        label: "Classic".into(),
+        region_size: 4096,
+        reclaim_caps: Default::default(),
+        log_slots: 8,
+        shared_extents: true,
+        data_policy: false,
+        name_policy: NamePolicy::Insensitive,
+        timestamp: timestamp(0),
+    }
+}
+
 fn formatted() -> MemoryBackend {
     let mut device = MemoryBackend::new(4096, 8192);
-    mkfs(
-        &mut device,
-        &MkfsParams {
-            uuid: [0xC4; 16],
-            label: "Classic".into(),
-            region_size: 4096,
-            reclaim_caps: Default::default(),
-            log_slots: 8,
-            shared_extents: true,
-            data_policy: false,
-            name_policy: afsplus_core::NamePolicy::Insensitive,
-            timestamp: timestamp(0),
-        },
-    )
-    .unwrap();
+    mkfs(&mut device, &params()).unwrap();
     device
+}
+
+/// A format identity no implementation in this repository evaluates.
+const UNKNOWN_FORMAT: u32 = 0x7fff_0055;
+const DESCRIPTOR: &[u8] = b"opaque security descriptor";
+
+/// One protection write through the DOS projection on an object that carries
+/// an on-disk descriptor. Returns the result, and the stored protection bits
+/// and the divergence mark as a fresh mount reads them.
+fn descriptor_scenario(strict_security_projection: bool) -> (Result<(), ArosError>, u32, bool) {
+    let mut device = MemoryBackend::new(4096, 8192);
+    mkfs_with_security_descriptors(&mut device, &params()).unwrap();
+    let mut volume = mount(device).unwrap();
+    let file = volume
+        .create_file_in_directory(OBJECT_ROOT, "guarded", b"x", timestamp(10))
+        .unwrap();
+    volume
+        .set_object_protection(file, 0x0F, timestamp(11))
+        .unwrap();
+    volume
+        .set_security_descriptor(file, UNKNOWN_FORMAT, 3, DESCRIPTOR, timestamp(12))
+        .unwrap();
+    let device = volume.into_device();
+
+    let mut adapter = ArosAdapter::new(
+        Vfs::mount(device, MountOptions::default()).unwrap(),
+        ArosConfig {
+            strict_security_projection,
+            ..ArosConfig::default()
+        },
+    );
+    let write = adapter.set_protection(None, b"guarded", 0x33, timestamp(20));
+
+    let mut device = adapter.into_vfs().unwrap().into_volume().into_device();
+    let report = check_device(&mut device);
+    assert!(report.is_clean(), "{:?}", report.errors);
+    let mut volume = mount(device).unwrap();
+    let descriptor = volume.security_descriptor(file).unwrap().unwrap();
+    // No path weakens the bytes, whichever policy is in force.
+    assert_eq!(descriptor.bytes, DESCRIPTOR);
+    assert_eq!((descriptor.format, descriptor.version), (UNKNOWN_FORMAT, 3));
+    let protection = volume.stat(file).unwrap().unwrap().protection;
+    (write, protection, descriptor.projection_diverged)
+}
+
+#[test]
+fn the_handler_preserves_a_descriptor_by_default_and_refuses_the_edit_when_strict() {
+    // Default: the classic write lands, every descriptor byte stays, and the
+    // divergence mark survives the remount.
+    let (applied, protection, diverged) = descriptor_scenario(false);
+    assert_eq!(applied, Ok(()));
+    assert_eq!(protection, 0x33);
+    assert!(diverged);
+
+    // The strict mount option: the core refuses the projection and nothing
+    // changes, mapped as before through VfsError::NotSupported.
+    let (refused, protection, diverged) = descriptor_scenario(true);
+    assert_eq!(refused, Err(ArosError::ActionNotKnown));
+    assert_eq!(protection, 0x0F);
+    assert!(!diverged);
 }
 
 struct Guarded(BTreeSet<ObjectId>);

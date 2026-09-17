@@ -112,17 +112,21 @@ fn mount_with_flags(
 }
 
 #[test]
-fn mount_flags_admit_only_the_security_downgrade_bit() {
+fn mount_flags_admit_only_the_two_defined_security_bits() {
     let mut device = formatted(8, true, false, NamePolicy::Insensitive);
-    let mut filesystem = ptr::null_mut();
     assert_eq!(AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE, 1);
-    assert_eq!(mount_with_flags(&mut device, 0, 1, &mut filesystem), 0);
-    assert_eq!(afsplus_aros_unmount(filesystem), 0);
+    assert_eq!(AFSPLUS_AROS_MOUNT_FLAG_STRICT_SECURITY_PROJECTION, 2);
+    for flags in [0, 1, 2, 3] {
+        let mut filesystem = ptr::null_mut();
+        assert_eq!(mount_with_flags(&mut device, 0, flags, &mut filesystem), 0);
+        assert_eq!(afsplus_aros_unmount(filesystem), 0);
+    }
     // Undefined bits are refused before any device access.
     let mut filesystem = ptr::null_mut();
-    assert_eq!(mount_with_flags(&mut device, 0, 2, &mut filesystem), 210);
+    assert_eq!(mount_with_flags(&mut device, 0, 4, &mut filesystem), 210);
     assert!(filesystem.is_null());
-    assert_eq!(mount_with_flags(&mut device, 0, 3, &mut filesystem), 210);
+    assert_eq!(mount_with_flags(&mut device, 0, 5, &mut filesystem), 210);
+    assert!(filesystem.is_null());
 }
 
 fn query(filesystem: *mut AfsplusAros) -> AfsplusArosCapabilities {

@@ -101,9 +101,19 @@ pub const AFSPLUS_AROS_MOUNT_READ_WRITE: u32 = 0;
 pub const AFSPLUS_AROS_MOUNT_READ_ONLY: u32 = 1;
 pub const AFSPLUS_AROS_MOUNT_NO_CHANGES: u32 = 2;
 pub const AFSPLUS_AROS_MOUNT_RECOVERY: u32 = 3;
-/// The only defined bit of `AfsplusArosMountConfig::flags`; a zero field, the
-/// value every earlier caller passes, keeps preservation on.
+/// `AfsplusArosMountConfig::flags`: the explicit request to let a classic
+/// protection write replace security metadata the container does not hold,
+/// where preserving is impossible. A zero field keeps the refusal.
 pub const AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE: u32 = 1;
+/// `AfsplusArosMountConfig::flags`: refuse a classic protection write on an
+/// object that carries an on-disk security descriptor. A zero field takes the
+/// handler default, which applies the write, keeps every descriptor byte and
+/// marks the projection as diverged.
+pub const AFSPLUS_AROS_MOUNT_FLAG_STRICT_SECURITY_PROJECTION: u32 = 2;
+
+/// Every defined bit of `AfsplusArosMountConfig::flags`.
+const MOUNT_FLAGS: u32 =
+    AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE | AFSPLUS_AROS_MOUNT_FLAG_STRICT_SECURITY_PROJECTION;
 pub const AFSPLUS_AROS_ENCODING_UTF8: u32 = 0;
 pub const AFSPLUS_AROS_ENCODING_LATIN1: u32 = 1;
 pub const AFSPLUS_AROS_LOCK_SHARED: u32 = 0;
@@ -786,7 +796,7 @@ pub extern "C" fn afsplus_aros_mount(
             || device.block_size == 0
             || device.total_blocks == 0
             || device.reserved != 0
-            || config.flags & !AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE != 0
+            || config.flags & !MOUNT_FLAGS != 0
         {
             return Err(ArosError::InvalidComponentName);
         }
@@ -836,6 +846,9 @@ pub extern "C" fn afsplus_aros_mount(
                 max_locks,
                 max_file_info_name_bytes,
                 allow_security_downgrade: config.flags & AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE
+                    != 0,
+                strict_security_projection: config.flags
+                    & AFSPLUS_AROS_MOUNT_FLAG_STRICT_SECURITY_PROJECTION
                     != 0,
                 ..ArosConfig::default()
             },

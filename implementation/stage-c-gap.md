@@ -117,7 +117,10 @@ Present (L1, L2): the policy seam of
 The adapter asks one question through `RichSecurityProbe`; a protection write
 on an object carrying metadata the classic projection cannot express is
 `ERROR_WRITE_PROTECTED` with the stored state untouched, and the mount flag
-`AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE` is the explicit downgrade.
+`AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE` is the explicit downgrade. An
+on-disk security descriptor takes the preserving path instead: the write
+lands, the bytes stay and the divergence is marked, unless
+`AFSPLUS_AROS_MOUNT_FLAG_STRICT_SECURITY_PROJECTION` selects the refusal.
 Rename and hard link keep the object and its metadata.
 
 Lacking: the on-disk answer to the probe, which is the Stage B item B5 (the
