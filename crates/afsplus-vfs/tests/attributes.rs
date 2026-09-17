@@ -141,7 +141,7 @@ fn write_modes_and_name_rules_answer_distinctly() {
 }
 
 #[test]
-fn a_snapshot_bearing_volume_reads_attributes_and_cannot_write_them() {
+fn a_snapshot_bearing_volume_writes_attributes_and_a_view_keeps_what_it_captured() {
     let mut device = MemoryBackend::new(4096, 1024);
     mkfs_with_options(
         &mut device,
@@ -158,18 +158,82 @@ fn a_snapshot_bearing_volume_reads_attributes_and_cannot_write_them() {
     };
     let volume = mount_with_snapshot_limits(device, MountOptions::default(), limits).unwrap();
     let mut vfs = Vfs::new(volume);
-    assert!(!vfs
+    // ADR-109: the lifetime ledger owns the chains, so this volume writes
+    // attributes like any other.
+    assert!(vfs
         .capabilities()
         .contains(Capabilities::EXTENDED_ATTRIBUTES));
     let file = vfs.create_file(vfs.root_object(), "note", at(1)).unwrap();
+    vfs.set_attributes(
+        file,
+        &[
+            ("user.kind", Some(b"captured".as_slice())),
+            ("user.gone", Some(b"1".as_slice())),
+        ],
+        AttributeWriteMode::Upsert,
+        at(2),
+    )
+    .unwrap();
+
+    // What the view captures is read back through the core's snapshot
+    // readers, which the portable layer does not expose: it has no view.
+    let mut volume = vfs.into_volume();
+    let snapshot = volume.snapshot_create(at(3)).unwrap();
+    let mut vfs = Vfs::new(volume);
+    vfs.set_attributes(
+        file,
+        &[
+            ("user.kind", Some(b"changed".as_slice())),
+            ("user.gone", None),
+            ("user.added", Some(b"later".as_slice())),
+        ],
+        AttributeWriteMode::Upsert,
+        at(4),
+    )
+    .unwrap();
     assert_eq!(
-        vfs.set_attributes(
-            file,
-            &[("user.a", Some(b"1".as_slice()))],
-            AttributeWriteMode::Upsert,
-            at(2),
-        ),
-        Err(VfsError::NotSupported)
+        vfs.attribute_names(file).unwrap(),
+        ["user.added", "user.kind"]
     );
-    assert_eq!(vfs.attribute_names(file).unwrap(), Vec::<String>::new());
+    assert_eq!(
+        vfs.attribute(file, "user.kind").unwrap(),
+        Some(b"changed".to_vec())
+    );
+
+    let mut volume = vfs.into_volume();
+    let view = volume.snapshot_open(snapshot).unwrap();
+    assert_eq!(
+        volume.snapshot_attribute_names(&view, file).unwrap(),
+        Some(vec!["user.gone".to_owned(), "user.kind".to_owned()])
+    );
+    assert_eq!(
+        volume.snapshot_attribute(&view, file, "user.kind").unwrap(),
+        Some(Some(b"captured".to_vec()))
+    );
+    // Removed on the live side, still in the view; added later, not in it.
+    assert_eq!(
+        volume.snapshot_attribute(&view, file, "user.gone").unwrap(),
+        Some(Some(b"1".to_vec()))
+    );
+    assert_eq!(
+        volume
+            .snapshot_attribute(&view, file, "user.added")
+            .unwrap(),
+        Some(None)
+    );
+    // An object the view does not hold at all.
+    assert_eq!(
+        volume
+            .snapshot_attribute(&view, file + 1000, "user.kind")
+            .unwrap(),
+        None
+    );
+    // The same view over the security descriptor, the third new reader.
+    assert_eq!(
+        volume.snapshot_security_descriptor(&view, file).unwrap(),
+        Some(None)
+    );
+
+    let mut device = volume.into_device();
+    assert!(check_device(&mut device).is_clean());
 }

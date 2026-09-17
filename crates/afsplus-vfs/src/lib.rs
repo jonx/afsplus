@@ -22,7 +22,7 @@ pub use afsplus_core::AttributeWriteMode;
 use afsplus_core::{mount_with_options, CoreError, MountMode, MountOptions};
 use afsplus_format::ident::{
     NameKeyAlgorithm, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG_DATA_UPDATES,
-    INCOMPAT_PERSISTENT_SNAPSHOTS, RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
+    RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::object::ObjectType;
 use afsplus_format::{Timespec, NAME_MAX_UTF8_BYTES, OBJECT_ROOT};
@@ -368,11 +368,7 @@ impl<D: BlockDevice> Vfs<D> {
         if self.volume.ident().features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY != 0 {
             bits |= Capabilities::OPEN_UNLINKED;
         }
-        // ADR-108: a snapshot-bearing volume refuses attribute writes until
-        // the snapshot lifetime ledger owns attribute chains.
-        if self.volume.ident().features.incompat & INCOMPAT_PERSISTENT_SNAPSHOTS == 0 {
-            bits |= Capabilities::EXTENDED_ATTRIBUTES;
-        }
+        bits |= Capabilities::EXTENDED_ATTRIBUTES;
         Capabilities(bits)
     }
 
@@ -985,9 +981,8 @@ impl<D: BlockDevice> Vfs<D> {
 
     /// Applies `changes` in one commit: every change or none survives a
     /// power cut. `Some(value)` writes under `mode`, `None` removes and is
-    /// [`VfsError::NotFound`] for an absent attribute. A volume without
-    /// [`Capabilities::EXTENDED_ATTRIBUTES`] answers
-    /// [`VfsError::NotSupported`]. The change time is `now`.
+    /// [`VfsError::NotFound`] for an absent attribute. A retained snapshot
+    /// keeps what it captured (ADR-109); the change time is `now`.
     pub fn set_attributes(
         &mut self,
         object_id: ObjectId,
