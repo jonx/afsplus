@@ -9,7 +9,7 @@ use afsplus_core::{
     mkfs, mkfs_with_security_descriptors, mount, CoreError, MkfsParams, NamePolicy,
     SecurityDescriptor, SecurityProjectionPolicy, Volume,
 };
-use afsplus_format::header::{block_type, BlockHeader};
+use afsplus_format::header::{block_type, BlockHeader, HEADER_SIZE};
 use afsplus_format::ident::{Identification, INCOMPAT_PERSISTENT_SNAPSHOTS};
 use afsplus_format::security::SecuritySegment;
 use afsplus_format::{Timespec, OBJECT_ROOT};
@@ -971,5 +971,78 @@ fn every_removal_and_replacement_path_survives_a_damaged_chain() {
             .all(|warning| warning.starts_with("retained checkpoint")),
         "{:?}",
         report.warnings
+    );
+}
+
+#[test]
+fn a_security_reference_outside_the_allocatable_bounds_is_refused_at_lookup() {
+    let bytes = blob(100, 31);
+    let mut volume = mount(formatted()).unwrap();
+    let file = volume
+        .create_file_in_directory(OBJECT_ROOT, "file", b"x", time(2))
+        .unwrap();
+    volume
+        .set_security_descriptor(file, UNKNOWN_FORMAT, 1, &bytes, time(3))
+        .unwrap();
+    let clean = checked(volume);
+
+    // Negative control: the untouched image looks up, stats and reads.
+    let mut volume = mount(clean.clone()).unwrap();
+    assert_eq!(volume.stat(file).unwrap().unwrap().protection, 0);
+    assert_eq!(
+        volume.security_descriptor(file).unwrap(),
+        expect(UNKNOWN_FORMAT, 1, false, &bytes)
+    );
+    volume.delete_file(OBJECT_ROOT, "file", time(4)).unwrap();
+    checked(volume);
+
+    // The reference's first segment LBA is moved one block past the volume
+    // and the record resealed, so the block stays well formed.
+    let mut damaged = clean.clone();
+    let past_the_end = damaged.total_blocks();
+    let block_size = damaged.block_size();
+    let mut block = vec![0u8; block_size];
+    let mut record_lba = None;
+    for lba in 0..damaged.total_blocks() {
+        damaged.read_block(lba, &mut block).unwrap();
+        if let Ok(header) = BlockHeader::verify(&block, block_type::OBJECT) {
+            if header.owner == file {
+                record_lba = Some(lba);
+            }
+        }
+    }
+    let record_lba = record_lba.unwrap();
+    damaged.read_block(record_lba, &mut block).unwrap();
+    let header = BlockHeader::verify(&block, block_type::OBJECT).unwrap();
+    block[HEADER_SIZE + 96..HEADER_SIZE + 104].copy_from_slice(&past_the_end.to_le_bytes());
+    header.seal(&mut block);
+    damaged.write_block(record_lba, &block).unwrap();
+
+    // Lookup refuses the object, the same verdict the portable C reader
+    // gives, instead of admitting the record and failing at the first
+    // descriptor read.
+    let mut volume = mount(damaged).unwrap();
+    for result in [
+        volume.stat(file).err(),
+        volume.security_descriptor(file).err(),
+        volume.delete_file(OBJECT_ROOT, "file", time(4)).err(),
+    ] {
+        match result {
+            Some(CoreError::Corrupt(message)) => assert!(
+                message.contains("security reference first block"),
+                "{message}"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+    // The record itself is inadmissible, so no ordinary operation edits the
+    // object and nothing of its chain is freed. Repair belongs to the
+    // checker, which reports the same reference as corruption.
+    let mut device = volume.into_device();
+    let report = check_device(&mut device);
+    assert!(
+        report.errors.iter().any(|error| error.contains("security")),
+        "{:?}",
+        report.errors
     );
 }

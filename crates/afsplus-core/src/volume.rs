@@ -7371,10 +7371,22 @@ impl<D: BlockDevice> Volume<D> {
                 "object {object_id} carries OBJECT_FLAG_DATA_IN_PLACE without the data-policy feature"
             )));
         }
-        if record.security.is_some() && !self.security_descriptors_enabled() {
-            return Err(CoreError::Corrupt(format!(
-                "object {object_id} carries a security reference without the security-descriptors feature"
-            )));
+        if let Some(reference) = record.security {
+            if !self.security_descriptors_enabled() {
+                return Err(CoreError::Corrupt(format!(
+                    "object {object_id} carries a security reference without the security-descriptors feature"
+                )));
+            }
+            // Bound the reference where the record is admitted, as the
+            // portable C reader does, so both implementations refuse the
+            // same object at lookup instead of one deferring the verdict to
+            // the first descriptor read.
+            if !self.ident.geometry().is_allocatable(reference.first_block) {
+                return Err(CoreError::Corrupt(format!(
+                    "object {object_id} security reference first block {} outside allocatable bounds",
+                    reference.first_block
+                )));
+            }
         }
         if record.object_id != object_id {
             return Err(CoreError::Corrupt(format!(

@@ -89,9 +89,16 @@ Every segment except the last is full (block size minus 56 bytes: 4,040 at
 4 KiB, so the bound is 17 segments). Admission is exact for the reference and
 the segment alike: zero header flags, exact payload length, zero tail, zero
 reserved field, flag and field present together, identity and lengths equal
-along the chain. Files, directories, inline symlinks and the root directory
-carry a reference; the internal orphan directory does not. A symlink with a
-reference has 16 fewer bytes for its target.
+along the chain. Every implementation bounds the first segment LBA where it
+admits the record, so a reference outside the allocatable range refuses the
+object at lookup rather than at the first descriptor read, and the Rust core
+and the portable C reader give one verdict. Such a record is inadmissible as
+a whole: no ordinary operation, unlink included, edits the object or frees
+any part of its chain, and the checker reports the reference as corruption.
+This is the opposite of a damaged chain behind an admissible reference, where
+the object stays deletable. Files, directories, inline symlinks and the root
+directory carry a reference; the internal orphan directory does not. A
+symlink with a reference has 16 fewer bytes for its target.
 
 Format identities are registry values ([feature framework](../docs/09-feature-framework.md)).
 The identity names the encoding of the bytes (a canonical AFS+ descriptor, a
@@ -213,15 +220,17 @@ directory and a symlink rename, byte for byte; strict refusal leaves the
 protection word, the change time and the descriptor untouched; preserve keeps
 the bytes and makes the divergence durable; every removal path, orphan
 cleanup and intent-log replay retire the chain; three resealed segment
-corruptions are checker errors; removing the retirement call makes the
+corruptions are checker errors; a resealed record whose reference points one
+block past the volume is refused at lookup, against a negative control on the
+untouched image; removing the retirement call makes the
 checker report each leaked block; a chain whose first, middle or last
 segment is resealed under a foreign owner still unlinks, still empties its
 name, frees exactly the proven segments and leaves exactly the unproven ones
 as leak findings, and the same holds for directory removal, a final unlink
 inside a window, orphan cleanup, descriptor replacement and the explicit
-clear; and 2,334 modeled power cuts over attach,
-replace, preserve-mode edit and delete each mount to the state before or
-after the transition with a clean checker verdict.
+clear; and 2,334 modeled power cuts over attach, replace, preserve-mode edit
+and delete, plus 8,432 over a clone, each mount to the state before or after
+the transition with a clean checker verdict.
 
 ## API contract consequences
 
