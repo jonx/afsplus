@@ -966,6 +966,9 @@ int32_t afsplus_aros_packet_destroy(
         struct AfsplusArosNativeNotify *node = context->notifies;
 
         context->notifies = node->next;
+        /* EndNotify skips a request without a handler instead of sending a
+         * packet to a port that is gone. */
+        node->request->nr_Handler = NULL;
         (void)afsplus_aros_watch_remove(context->filesystem, node->watch);
         context->free(context->callback_context, node, sizeof(*node));
     }
@@ -1906,7 +1909,11 @@ int32_t afsplus_aros_packet_process(
         result = DOSTRUE;
         break;
     case ACTION_DIE:
-        if (context->locks != NULL || context->files != NULL)
+        /* A registered NotifyRequest points at the handler port through
+         * nr_Handler; EndNotify sends ACTION_REMOVE_NOTIFY there. The port
+         * must outlive every registration. */
+        if (context->locks != NULL || context->files != NULL
+            || context->notifies != NULL)
             error = ERROR_OBJECT_IN_USE;
         else
         {

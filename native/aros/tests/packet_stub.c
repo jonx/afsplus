@@ -42,6 +42,8 @@ static uint64_t stub_next_watch = 500;
 static uint64_t stub_fired[4];
 static uint32_t stub_fired_count;
 static uint32_t stub_removed_watches;
+/* Registered by the notify cases and still live when ACTION_DIE is tried. */
+static struct NotifyRequest second;
 static struct NotifyRequest *delivered[8];
 static uint32_t delivered_count;
 static uint64_t stub_groups = UINT64_C(0x22F);
@@ -1111,7 +1113,6 @@ int main(void)
      * after the packet that caused them. */
     {
         struct NotifyRequest first;
-        struct NotifyRequest second;
 
         memset(&first, 0, sizeof(first));
         memset(&second, 0, sizeof(second));
@@ -1175,7 +1176,7 @@ int main(void)
         initialize_packet(&packet, ACTION_IS_FILESYSTEM);
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(delivered_count == 1 && delivered[0] == &second);
-        /* "second" stays registered: destroy must remove its watch. */
+        /* "second" stays registered for the ACTION_DIE cases below. */
     }
 
     /* C1 control: a library without the later groups makes the same packets
@@ -1250,6 +1251,36 @@ int main(void)
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
 
+    /* No lock or file is open, but "second" is registered and its nr_Handler
+     * names this port: the handler must not die under it. */
+    initialize_packet(&packet, ACTION_DIE);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_OBJECT_IN_USE);
+    assert(afsplus_aros_packet_should_quit(context) == 0);
+    assert(second.nr_Handler == config.handler_port);
+    initialize_packet(&packet, ACTION_REMOVE_NOTIFY);
+    packet.dp_Arg1 = (SIPTR)&second;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && stub_removed_watches == 2);
+
+    /* A context destroyed with a live registration detaches the request, so
+     * a later EndNotify sends nothing to the vanished port. */
+    {
+        struct AfsplusArosPacketContext *doomed = NULL;
+        struct NotifyRequest orphan;
+
+        memset(&orphan, 0, sizeof(orphan));
+        orphan.nr_FullName = (STRPTR)"AFS+:orphan";
+        assert(afsplus_aros_packet_create(&config, &doomed) == 0);
+        initialize_packet(&packet, ACTION_ADD_NOTIFY);
+        packet.dp_Arg1 = (SIPTR)&orphan;
+        assert(afsplus_aros_packet_process(doomed, &packet) == 0);
+        assert(orphan.nr_Handler == config.handler_port);
+        assert(afsplus_aros_packet_destroy(doomed) == 0);
+        assert(orphan.nr_Handler == NULL);
+        assert(stub_removed_watches == 3);
+    }
+
     initialize_packet(&packet, ACTION_INHIBIT);
     packet.dp_Arg1 = DOSTRUE;
     assert(afsplus_aros_packet_process(context, &packet) == 0);
@@ -1279,10 +1310,8 @@ int main(void)
     assert(afsplus_aros_packet_should_quit(context) == 1);
     assert(flush_count == 3);
 
-    assert(stub_removed_watches == 1);
     assert(afsplus_aros_packet_destroy(context) == 0);
-    /* The registration that was never removed is released with the context. */
-    assert(stub_removed_watches == 2);
+    assert(stub_removed_watches == 3);
     puts("afsplus packet stub: PASS");
     return 0;
 }
