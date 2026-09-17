@@ -43,6 +43,8 @@
 /* The record carries a security reference; the reader preserves and never
  * evaluates it. */
 #define AFSPR_OBJECT_FLAG_SECURITY_REF (UINT16_C(1) << 2)
+/* The record carries a comment of 1 to 255 bytes of UTF-8 (ADR-106). */
+#define AFSPR_OBJECT_FLAG_COMMENT (UINT16_C(1) << 3)
 #define AFSPR_SECURITY_REF_PROJECTION_DIVERGED (UINT16_C(1) << 0)
 #define AFSPR_MAX_SECURITY_DESCRIPTOR_BYTES UINT32_C(65536)
 /* Required on the volume when an object carries DATA_IN_PLACE. */
@@ -262,6 +264,13 @@ struct afspr_security_segment {
  * reachability belong to the volume paths. */
 int afspr_decode_security_reference(const void *block, size_t block_size,
                                     struct afspr_security_reference *reference);
+
+/* Validate one standalone file, directory or symlink record under exact
+ * admission and return its comment. On success comment borrows block and is
+ * not NUL-terminated; it is NULL with size 0 for a record without one.
+ * Outputs are unchanged on error. */
+int afspr_decode_object_comment(const void *block, size_t block_size,
+                                const uint8_t **comment, size_t *comment_size);
 
 /* Validate one standalone descriptor segment. On success bytes borrows
  * block. Outputs are unchanged on error. */

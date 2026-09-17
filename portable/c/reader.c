@@ -51,6 +51,9 @@
      AFSPR_BITMAP_PAGE_BLOCKS)
 #define AFSPR_OBJECT_PAYLOAD 96u
 #define AFSPR_SECURITY_REF_SIZE 16u
+/* Flags the reader carries and never interprets. */
+#define AFSPR_OBJECT_PRESERVED_FLAGS                                        \
+    (AFSPR_OBJECT_FLAG_SECURITY_REF | AFSPR_OBJECT_FLAG_COMMENT)
 #define AFSPR_SECURITY_SEGMENT_FIXED 24u
 #define AFSPR_MAX_DIRECT_BLOCKS UINT64_C(4096)
 /* The extent item layout and its flag bits are the spec header's. */
@@ -1392,29 +1395,60 @@ static int afspr_decode_timespec(const uint8_t *encoded,
 static int afspr_object_shape(const uint8_t *block, size_t block_size,
                               const struct afspr_header *header,
                               size_t *fixed,
-                              struct afspr_security_reference *reference)
+                              struct afspr_security_reference *reference,
+                              const uint8_t **comment, size_t *comment_size)
 {
     const uint8_t *p = block + AFSPR_HEADER_SIZE;
     size_t payload = (size_t)header->payload_len;
+    size_t security_end = AFSPR_OBJECT_PAYLOAD;
     size_t capacity;
     size_t i;
+    uint16_t flags;
 
     memset(reference, 0, sizeof(*reference));
     *fixed = AFSPR_OBJECT_PAYLOAD;
+    *comment = NULL;
+    *comment_size = 0u;
     if (header->flags != 0u || payload < AFSPR_OBJECT_PAYLOAD) {
         return AFSPR_ERR_CORRUPT;
     }
-    if ((afspr_get_le16(p + 10u) & AFSPR_OBJECT_FLAG_SECURITY_REF) != 0u) {
-        *fixed += AFSPR_SECURITY_REF_SIZE;
+    flags = afspr_get_le16(p + 10u);
+    /* Object flags are a validated namespace: an unassigned bit refuses the
+     * record in every decoder, the standalone ones included. */
+    if ((flags & ~(AFSPR_OBJECT_FLAG_EXTENT_TREE |
+                   AFSPR_OBJECT_FLAG_DATA_IN_PLACE |
+                   AFSPR_OBJECT_PRESERVED_FLAGS)) != 0u) {
+        return AFSPR_ERR_CORRUPT;
     }
-    if (payload < *fixed ||
-        (p[8] != AFSPR_OBJECT_SYMLINK && payload != *fixed)) {
+    if ((flags & AFSPR_OBJECT_FLAG_SECURITY_REF) != 0u) {
+        security_end += AFSPR_SECURITY_REF_SIZE;
+    }
+    if (payload < security_end) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    *fixed = security_end;
+    /* The comment follows the reference: one length byte, 1 to 255, then
+     * that many bytes of UTF-8 without NUL. */
+    if ((flags & AFSPR_OBJECT_FLAG_COMMENT) != 0u) {
+        size_t length;
+        if (payload <= security_end) return AFSPR_ERR_CORRUPT;
+        length = p[security_end];
+        if (length == 0u || payload - security_end - 1u < length ||
+            !afspr_valid_utf8(p + security_end + 1u, length) ||
+            memchr(p + security_end + 1u, 0, length) != NULL) {
+            return AFSPR_ERR_CORRUPT;
+        }
+        *comment = p + security_end + 1u;
+        *comment_size = length;
+        *fixed = security_end + 1u + length;
+    }
+    if (p[8] != AFSPR_OBJECT_SYMLINK && payload != *fixed) {
         return AFSPR_ERR_CORRUPT;
     }
     for (i = AFSPR_HEADER_SIZE + payload; i < block_size; ++i) {
         if (block[i] != 0u) return AFSPR_ERR_CORRUPT;
     }
-    if (*fixed == AFSPR_OBJECT_PAYLOAD) {
+    if (security_end == AFSPR_OBJECT_PAYLOAD) {
         return AFSPR_OK;
     }
     if (block_size <= AFSPR_HEADER_SIZE + AFSPR_SECURITY_SEGMENT_FIXED) {
@@ -1445,6 +1479,8 @@ int afspr_decode_symlink_record(const void *input, size_t block_size,
     const uint8_t *p;
     size_t length;
     size_t fixed;
+    const uint8_t *comment;
+    size_t comment_size;
     struct afspr_header header;
     struct afspr_object decoded;
     struct afspr_security_reference reference;
@@ -1455,7 +1491,8 @@ int afspr_decode_symlink_record(const void *input, size_t block_size,
     }
     status = afspr_verify_header(block, block_size, AFSPR_BLOCK_TYPE_OBJECT, &header);
     if (status != AFSPR_OK) return status;
-    if (afspr_object_shape(block, block_size, &header, &fixed, &reference) !=
+    if (afspr_object_shape(block, block_size, &header, &fixed, &reference,
+                           &comment, &comment_size) !=
             AFSPR_OK ||
         (size_t)header.payload_len <= fixed)
         return AFSPR_ERR_CORRUPT;
@@ -1475,7 +1512,7 @@ int afspr_decode_symlink_record(const void *input, size_t block_size,
     decoded.data_blocks = afspr_get_le64(p + 88u);
     if (decoded.object_id == 0u || decoded.object_id != header.owner ||
         decoded.type != AFSPR_OBJECT_SYMLINK || p[9] != 0u ||
-        (decoded.flags & ~AFSPR_OBJECT_FLAG_SECURITY_REF) != 0u ||
+        (decoded.flags & ~AFSPR_OBJECT_PRESERVED_FLAGS) != 0u ||
         decoded.link_count == 0u ||
         decoded.size_bytes != length || decoded.allocated_bytes != 0u ||
         decoded.data_root != 0u || decoded.data_blocks != 0u ||
@@ -1499,6 +1536,8 @@ int afspr_decode_security_reference(const void *input, size_t block_size,
     struct afspr_header header;
     struct afspr_security_reference decoded;
     size_t fixed;
+    const uint8_t *comment;
+    size_t comment_size;
     int status;
 
     if (input == NULL || reference == NULL) {
@@ -1507,7 +1546,8 @@ int afspr_decode_security_reference(const void *input, size_t block_size,
     status = afspr_verify_header(block, block_size, AFSPR_BLOCK_TYPE_OBJECT,
                                  &header);
     if (status != AFSPR_OK) return status;
-    if (afspr_object_shape(block, block_size, &header, &fixed, &decoded) !=
+    if (afspr_object_shape(block, block_size, &header, &fixed, &decoded,
+                           &comment, &comment_size) !=
             AFSPR_OK ||
         afspr_get_le64(block + AFSPR_HEADER_SIZE) != header.owner ||
         header.owner == 0u || block[AFSPR_HEADER_SIZE + 9u] != 0u ||
@@ -1516,6 +1556,37 @@ int afspr_decode_security_reference(const void *input, size_t block_size,
         return AFSPR_ERR_CORRUPT;
     }
     *reference = decoded;
+    return AFSPR_OK;
+}
+
+int afspr_decode_object_comment(const void *input, size_t block_size,
+                                const uint8_t **comment_out,
+                                size_t *comment_size_out)
+{
+    const uint8_t *block = (const uint8_t *)input;
+    struct afspr_header header;
+    struct afspr_security_reference reference;
+    size_t fixed;
+    const uint8_t *comment;
+    size_t comment_size;
+    int status;
+
+    if (input == NULL || comment_out == NULL || comment_size_out == NULL) {
+        return AFSPR_ERR_INVALID_ARGUMENT;
+    }
+    status = afspr_verify_header(block, block_size, AFSPR_BLOCK_TYPE_OBJECT,
+                                 &header);
+    if (status != AFSPR_OK) return status;
+    if (afspr_object_shape(block, block_size, &header, &fixed, &reference,
+                           &comment, &comment_size) != AFSPR_OK ||
+        afspr_get_le64(block + AFSPR_HEADER_SIZE) != header.owner ||
+        header.owner == 0u || block[AFSPR_HEADER_SIZE + 9u] != 0u ||
+        block[AFSPR_HEADER_SIZE + 8u] < AFSPR_OBJECT_FILE ||
+        block[AFSPR_HEADER_SIZE + 8u] > AFSPR_OBJECT_SYMLINK) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    *comment_out = comment;
+    *comment_size_out = comment_size;
     return AFSPR_OK;
 }
 
@@ -1591,6 +1662,8 @@ static int afspr_decode_object(const uint8_t *block, size_t block_size,
     struct afspr_security_reference reference;
     const uint8_t *p;
     size_t fixed;
+    const uint8_t *comment;
+    size_t comment_size;
     uint64_t expected_allocated;
     uint64_t data_end;
     uint64_t lba;
@@ -1602,7 +1675,8 @@ static int afspr_decode_object(const uint8_t *block, size_t block_size,
     }
     if (header.owner != expected_object_id ||
         header.generation == 0u || header.generation > max_generation ||
-        afspr_object_shape(block, block_size, &header, &fixed, &reference) !=
+        afspr_object_shape(block, block_size, &header, &fixed, &reference,
+                           &comment, &comment_size) !=
             AFSPR_OK ||
         /* Where a well-formed reference points is chain state, not record
          * admission: the object stays reachable and deletable. */
@@ -1628,7 +1702,7 @@ static int afspr_decode_object(const uint8_t *block, size_t block_size,
         object->link_count == 0u ||
         (object->flags & ~(AFSPR_OBJECT_FLAG_EXTENT_TREE |
                            AFSPR_OBJECT_FLAG_DATA_IN_PLACE |
-                           AFSPR_OBJECT_FLAG_SECURITY_REF)) != 0u ||
+                           AFSPR_OBJECT_PRESERVED_FLAGS)) != 0u ||
         ((object->flags & AFSPR_OBJECT_FLAG_DATA_IN_PLACE) != 0u &&
          object->type != AFSPR_OBJECT_FILE) ||
         ((object->flags & AFSPR_OBJECT_FLAG_DATA_IN_PLACE) != 0u &&
@@ -1639,7 +1713,7 @@ static int afspr_decode_object(const uint8_t *block, size_t block_size,
         return AFSPR_ERR_CORRUPT;
     }
     if (object->type == AFSPR_OBJECT_DIRECTORY) {
-        if ((object->flags & ~AFSPR_OBJECT_FLAG_SECURITY_REF) != 0u ||
+        if ((object->flags & ~AFSPR_OBJECT_PRESERVED_FLAGS) != 0u ||
             object->size_bytes != 0u || object->data_blocks != 0u ||
             !afspr_is_allocatable(ident, object->data_root)) {
             return AFSPR_ERR_CORRUPT;
@@ -1910,7 +1984,7 @@ static int afspr_directory_entry_at_internal(
                             AFSPR_STAGE_ARGUMENTS,
                             AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
     }
-    if ((directory->flags & ~AFSPR_OBJECT_FLAG_SECURITY_REF) != 0u ||
+    if ((directory->flags & ~AFSPR_OBJECT_PRESERVED_FLAGS) != 0u ||
         directory->size_bytes != 0u || directory->data_blocks != 0u ||
         !afspr_is_allocatable(&ident, directory->data_root)) {
         return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
@@ -2222,7 +2296,7 @@ int afspr_read_file(const struct afspr_block_ops *ops,
     }
     if ((file->flags & ~(AFSPR_OBJECT_FLAG_EXTENT_TREE |
                          AFSPR_OBJECT_FLAG_DATA_IN_PLACE |
-                         AFSPR_OBJECT_FLAG_SECURITY_REF)) != 0u ||
+                         AFSPR_OBJECT_PRESERVED_FLAGS)) != 0u ||
         ((file->flags & AFSPR_OBJECT_FLAG_DATA_IN_PLACE) != 0u &&
          (ident.compat_features & AFSP_COMPAT_DATA_POLICY) == 0u) ||
         file->data_blocks > UINT64_MAX / ops->block_size ||
@@ -3309,7 +3383,7 @@ static int afspr_committed_directory_lookup_key(
                             AFSPR_STAGE_INTENT_NAMESPACE,
                             AFSPR_NO_CHECKPOINT_SLOT, AFSPR_NO_BLOCK);
     }
-    if ((directory.flags & ~AFSPR_OBJECT_FLAG_SECURITY_REF) != 0u ||
+    if ((directory.flags & ~AFSPR_OBJECT_PRESERVED_FLAGS) != 0u ||
         directory.size_bytes != 0u ||
         directory.data_blocks != 0u ||
         !afspr_is_allocatable(&ident, directory.data_root)) {

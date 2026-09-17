@@ -4,7 +4,7 @@
 #![cfg(unix)]
 use afsplus_format::{
     header::{block_type, BlockHeader, HEADER_SIZE},
-    object::{ObjectRecord, ObjectType, SecurityRef, SymlinkRecord},
+    object::{Comment, ObjectRecord, ObjectType, SecurityRef, SymlinkRecord},
     security::SecuritySegment,
     Timespec, DEFAULT_BLOCK_SIZE,
 };
@@ -231,8 +231,114 @@ fn independent_c_codec_agrees_on_object_admission_and_the_security_container() {
     ));
     references.push(("segment block".into(), clean.clone(), None));
 
+    // Comment images (ADR-106): (label, image, None = reject, Some(text)).
+    let note = "Dé note";
+    let longest = "é".repeat(127) + "x";
+    let mut comments: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
+    for kind in [ObjectType::File, ObjectType::Directory] {
+        comments.push((
+            format!("{kind:?} without comment"),
+            record(kind).encode(size, 7).unwrap(),
+            Some(String::new()),
+        ));
+        for security in [None, Some(reference())] {
+            for text in [note, longest.as_str()] {
+                let image = record(kind)
+                    .with_security(security)
+                    .with_comment(Comment::new(text).unwrap())
+                    .encode(size, 7)
+                    .unwrap();
+                comments.push((
+                    format!(
+                        "{kind:?} security={} comment of {}",
+                        security.is_some(),
+                        text.len()
+                    ),
+                    image,
+                    Some(text.to_owned()),
+                ));
+            }
+        }
+        let clean = record(kind)
+            .with_comment(Comment::new("note").unwrap())
+            .encode(size, 7)
+            .unwrap();
+        for (what, offset, value, payload) in [
+            ("zero length under the flag", 96usize, 0u8, 101u32),
+            ("length past the payload", 96, 5, 101),
+            ("payload longer than the comment", 4000, 0, 102),
+            ("NUL inside", 98, 0, 101),
+            ("invalid UTF-8", 98, 0xff, 101),
+            ("flag cleared with the bytes left", 10, 0, 101),
+            ("unassigned flag bit 4", 10, 0x18, 101),
+        ] {
+            let mut block = clean.clone();
+            block[HEADER_SIZE + offset] = value;
+            reseal(&mut block, block_type::OBJECT, 0, payload);
+            comments.push((format!("{kind:?} {what}"), block, None));
+        }
+    }
+    // All three variable parts at once, at their bounds: a security
+    // reference, a 255-byte comment and the longest symlink target the block
+    // still holds. One more target byte has no encoding at all.
+    let room = size - HEADER_SIZE - 112 - 256;
+    let target = "t".repeat(room);
+    let mut full = record(ObjectType::Symlink);
+    full.size_bytes = room as u64;
+    let full = full
+        .with_security(Some(reference()))
+        .with_comment(Comment::new(&longest).unwrap());
+    let image = SymlinkRecord {
+        record: full,
+        target: &target,
+    }
+    .encode(size, 7)
+    .unwrap();
+    assert_eq!(&image[24..28], &((size - HEADER_SIZE) as u32).to_le_bytes());
+    comments.push((
+        "full symlink block".into(),
+        image.clone(),
+        Some(longest.clone()),
+    ));
+    references.push(("full symlink block".into(), image, Some(Some(reference()))));
+    let over = "t".repeat(room + 1);
+    let mut too_long = full;
+    too_long.size_bytes = over.len() as u64;
+    assert!(SymlinkRecord {
+        record: too_long,
+        target: &over
+    }
+    .encode(size, 7)
+    .is_err());
+
     for sanitize in [false, true] {
         let executable = compile(&scratch, sanitize);
+        for (label, block, expected) in &comments {
+            let rust = ObjectRecord::decode_metadata_with_generation(block)
+                .ok()
+                .map(|(record, _)| record.comment.as_str().to_owned());
+            assert_eq!(&rust, expected, "Rust verdict: {label}");
+            fs::write(&block_path, block).unwrap();
+            let mut command = Command::new(&executable);
+            command.arg("comment").arg(&block_path);
+            match expected {
+                None => {
+                    command.arg("reject");
+                }
+                Some(text) if text.is_empty() => {
+                    command.arg("none");
+                }
+                Some(text) => {
+                    fs::write(&bytes_path, text).unwrap();
+                    command.arg(&bytes_path);
+                }
+            };
+            assert_eq!(
+                command.status().unwrap().code(),
+                Some(0),
+                "C verdict differs: {label} (sanitize={sanitize})"
+            );
+        }
         for (label, block, expected) in &references {
             let rust = ObjectRecord::decode_metadata_with_generation(block)
                 .ok()
@@ -300,6 +406,7 @@ fn independent_c_codec_agrees_on_object_admission_and_the_security_container() {
             .unwrap();
         assert_eq!(wrong.code(), Some(1));
     }
-    assert_eq!(references.len(), 2 * (2 + 16 + 6 + 3 + 1 + 4) + 2 + 1);
+    assert_eq!(references.len(), 2 * (2 + 16 + 6 + 3 + 1 + 4) + 2 + 1 + 1);
+    assert_eq!(comments.len(), 2 * (1 + 4 + 7) + 1);
     assert_eq!(segments.len(), 10);
 }

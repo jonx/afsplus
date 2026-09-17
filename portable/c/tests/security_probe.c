@@ -6,6 +6,9 @@
  *   security_probe ref <block> reject
  *   security_probe ref <block> none
  *   security_probe ref <block> <first> <len> <count> <flags>
+ *   security_probe comment <block> reject
+ *   security_probe comment <block> none
+ *   security_probe comment <block> <bytes-file>
  *   security_probe seg <block> reject
  *   security_probe seg <block> <owner> <format> <version> <total> <index>
  *                      <count> <next> <generation> <bytes-file>
@@ -79,6 +82,41 @@ static int probe_reference(int argc, char **argv)
                    reference.total_len == number(argv[4]) &&
                    reference.segment_count == number(argv[5]) &&
                    reference.flags == number(argv[6])
+               ? 0
+               : 1;
+}
+
+static int probe_comment(char **argv)
+{
+    static uint8_t block[BLOCK], expected[BLOCK];
+    const uint8_t *comment = block; /* poisoned: must stay on error */
+    size_t size = 77u, expected_size, shorter;
+    FILE *file;
+    int status;
+
+    if (!load(argv[2], block)) return 2;
+    status = afspr_decode_object_comment(block, BLOCK, &comment, &size);
+    for (shorter = 0u; shorter < BLOCK; ++shorter) {
+        const uint8_t *other;
+        size_t other_size;
+        if (afspr_decode_object_comment(block, shorter, &other, &other_size) ==
+            AFSPR_OK) {
+            return 1;
+        }
+    }
+    if (strcmp(argv[3], "reject") == 0) {
+        return status != AFSPR_OK && comment == block && size == 77u ? 0 : 1;
+    }
+    if (status != AFSPR_OK) return 1;
+    if (strcmp(argv[3], "none") == 0) {
+        return comment == NULL && size == 0u ? 0 : 1;
+    }
+    file = fopen(argv[3], "rb");
+    if (file == NULL) return 2;
+    expected_size = fread(expected, 1u, sizeof(expected), file);
+    if (fclose(file) != 0) return 2;
+    return comment != NULL && size == expected_size &&
+                   memcmp(comment, expected, size) == 0
                ? 0
                : 1;
 }
@@ -184,6 +222,7 @@ int main(int argc, char **argv)
 {
     if (argc < 4) return 2;
     if (strcmp(argv[1], "ref") == 0) return probe_reference(argc, argv);
+    if (strcmp(argv[1], "comment") == 0) return probe_comment(argv);
     if (strcmp(argv[1], "seg") == 0) return probe_segment(argc, argv);
     if (strcmp(argv[1], "lookup") == 0 && argc >= 5) {
         return probe_lookup(argc, argv);

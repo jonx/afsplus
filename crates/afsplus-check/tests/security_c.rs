@@ -208,10 +208,22 @@ fn c_and_rust_agree_on_objects_of_real_images() {
             .set_security_descriptor(id, 0x7fff_0042, 1, &descriptor, time(4))
             .unwrap();
     }
+    // Comments (ADR-106): beside a descriptor on the file, alone on a second
+    // plain file; the C lookup carries flag bit 3 and reads on.
+    volume
+        .set_object_comment(file, "Résumé 1992", time(5))
+        .unwrap();
+    let commented = volume
+        .create_file_in_directory(OBJECT_ROOT, "commented", b"", time(5))
+        .unwrap();
+    volume
+        .set_object_comment(commented, &"é".repeat(127), time(5))
+        .unwrap();
     let secured = image(&mut volume.into_device());
 
     for (label, id, kind, flags, protection) in [
-        ("secured file", file, 1, 4, 0x11),
+        ("secured and commented file", file, 1, 12, 0x11),
+        ("commented plain file", commented, 1, 8, 0),
         ("secured directory", dir, 2, 4, 0x22),
         ("secured symlink", link, 3, 4, 0),
         ("secured root", OBJECT_ROOT, 2, 4, 0),
@@ -257,7 +269,9 @@ fn c_and_rust_agree_on_objects_of_real_images() {
     let at = record_offset(&secured, file);
     let mut outside = secured.clone();
     outside[at + HEADER_SIZE + 96..at + HEADER_SIZE + 104].copy_from_slice(&u64::MAX.to_le_bytes());
-    reseal(&mut outside[at..at + BLOCK], 112);
+    // Keep the record's own payload length: it carries a comment too.
+    let payload = u32::from_le_bytes(outside[at + 24..at + 28].try_into().unwrap());
+    reseal(&mut outside[at..at + BLOCK], payload);
     // Where a well-formed reference points is chain state: both readers
     // admit the record, so the object stays reachable and deletable.
     agree(
@@ -268,7 +282,7 @@ fn c_and_rust_agree_on_objects_of_real_images() {
         file,
         Verdict::Object {
             kind: 1,
-            flags: 4,
+            flags: 12,
             protection: 0x11,
         },
     );

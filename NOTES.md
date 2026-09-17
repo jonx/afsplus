@@ -10,6 +10,7 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- toc -->
 
 - [2026-09-17 — Diff two images in filesystem terms](#2026-09-17--diff-two-images-in-filesystem-terms)
+- [2026-09-17 — Read the object comment in the portable C reader](#2026-09-17--read-the-object-comment-in-the-portable-c-reader)
 - [2026-09-17 — Store the object comment in the object record](#2026-09-17--store-the-object-comment-in-the-object-record)
 - [2026-09-17 — Admit a well-formed security reference wherever it points](#2026-09-17--admit-a-well-formed-security-reference-wherever-it-points)
 - [2026-09-17 — Pass a relabel's label as a value, never as volume state](#2026-09-17--pass-a-relabels-label-as-a-value-never-as-volume-state)
@@ -242,6 +243,29 @@ fails, which is what makes the passing run mean something.
 `crates/afsplus-tools/tests/image_diff_cli.rs`, 2 tests, covers the command,
 its JSON and its three exit statuses.
 
+
+
+## 2026-09-17 — Read the object comment in the portable C reader
+
+The shared shape check of the portable C reader parses the comment field of
+[ADR-106](adr/ADR-106-stored-object-comment.md) after the security reference:
+length byte of 1 to 255, NUL-free UTF-8, and the exact payload length the
+comment implies, with a symlink's target behind it. The volume lookup admits
+commented objects and carries flag bit 3; `afspr_decode_object_comment` is the
+standalone decoder.
+
+`crates/afsplus-format/tests/security_c.rs` adds 25 comment images, read by
+both codecs in a strict and a sanitizer build: files and directories with a
+short and a 255-byte comment, with and without a security reference, seven
+resealed corruptions per type, and one symlink block filled to its last byte
+by a security reference, a 255-byte comment and a 3,696-byte target, for
+which one more target byte has no encoding. The first run found a
+disagreement: the standalone C decoders admitted a record with an unassigned
+object flag bit, which the Rust decoder and the C volume path refuse. The
+flag-namespace check now sits in the shared shape function.
+`crates/afsplus-check/tests/security_c.rs` requires the C lookup and the Rust
+core to agree on a commented file and on a file with both a descriptor and a
+comment. The comment in the explain output belongs to `ExplainObject`.
 
 ## 2026-09-17 — Store the object comment in the object record
 

@@ -102,7 +102,12 @@ count that length implies, assigned reference flags) and, on the volume path,
 requires `AFSP_INCOMPAT_SECURITY_DESCRIPTORS` and an allocatable first
 segment. `afspr_decode_security_reference` and
 `afspr_decode_security_segment` are standalone, heap-free decoders for the
-reference of a record and for one `"AFSX"` segment. The reader preserves
+reference of a record and for one `"AFSX"` segment. The comment of
+[ADR-106](../../adr/ADR-106-stored-object-comment.md) follows the reference:
+the shared shape check validates its length byte, its NUL-free UTF-8 and the
+exact payload length it implies, `afspr_decode_object_comment` returns it, and
+an unassigned object flag bit refuses the record in every decoder, the
+standalone ones included. The reader preserves
 these bytes and never evaluates them; the writer appends intent records only
 and rewrites no object record, so it cannot drop a reference.
 [`security_c.rs`](../../crates/afsplus-format/tests/security_c.rs) holds the
