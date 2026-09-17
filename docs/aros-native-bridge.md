@@ -280,6 +280,12 @@ preallocated queue. `afsplus_aros_trace_counters` reports delivered, missed,
 filtered and dropped counts, so a slow consumer costs counted loss and never
 blocks the filesystem.
 
+`COUNTERS` reports completed and failed calls on the mounted instance and
+the block callbacks it issued: reads, writes, barriers, bytes each way and
+failures. A native benchmark runner reads them around a workload, as the
+[benchmark contract](../testing/benchmark-contract.md) requires, instead of
+inferring traffic from elapsed time.
+
 `MANAGE` serves the structured management rule of
 [ADR-025](../adr/ADR-025-structured-management-api.md) from the mounted
 instance: `afsplus_aros_info_json` returns one JSON object with schema

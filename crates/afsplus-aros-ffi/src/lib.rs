@@ -10,6 +10,8 @@ use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use afsplus_aros::health::HealthEvent;
 use afsplus_aros::{
@@ -23,7 +25,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 6;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 7;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -32,6 +34,7 @@ pub const AFSPLUS_AROS_GROUP_API_V2: u64 = 0x10;
 pub const AFSPLUS_AROS_GROUP_NOTIFY: u64 = 0x20;
 pub const AFSPLUS_AROS_GROUP_OBSERVE: u64 = 0x40;
 pub const AFSPLUS_AROS_GROUP_MANAGE: u64 = 0x80;
+pub const AFSPLUS_AROS_GROUP_COUNTERS: u64 = 0x100;
 pub const AFSPLUS_AROS_HEALTH_DEVICE_ERROR: u32 = afsplus_aros::health::HEALTH_DEVICE_ERROR;
 pub const AFSPLUS_AROS_HEALTH_CORRUPTION: u32 = afsplus_aros::health::HEALTH_CORRUPTION;
 pub const AFSPLUS_AROS_HEALTH_REPLAY_PENDING: u32 = afsplus_aros::health::HEALTH_REPLAY_PENDING;
@@ -44,7 +47,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_API_V2
     | AFSPLUS_AROS_GROUP_NOTIFY
     | AFSPLUS_AROS_GROUP_OBSERVE
-    | AFSPLUS_AROS_GROUP_MANAGE;
+    | AFSPLUS_AROS_GROUP_MANAGE
+    | AFSPLUS_AROS_GROUP_COUNTERS;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -348,6 +352,22 @@ impl LiveSink for CallbackSink {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AfsplusArosCounters {
+    pub struct_size: u32,
+    pub reserved: u32,
+    pub calls: u64,
+    pub failed_calls: u64,
+    pub device_reads: u64,
+    pub device_writes: u64,
+    pub device_flushes: u64,
+    pub device_read_bytes: u64,
+    pub device_written_bytes: u64,
+    pub device_failures: u64,
+}
+
+const _: [(); 72] = [(); std::mem::size_of::<AfsplusArosCounters>()];
 const _: [(); 112] = [(); std::mem::size_of::<AfsplusArosHealth>()];
 const _: [(); 16] = [(); std::mem::size_of::<AfsplusArosHealthEvent>()];
 const _: [(); 40] = [(); std::mem::size_of::<AfsplusArosTraceCounters>()];
@@ -371,7 +391,41 @@ pub struct AfsplusAros {
     _private: [u8; 0],
 }
 
+/// Device traffic of one mount, shared between the block adapter buried in
+/// the volume and the boundary that reports it.
+#[derive(Debug, Default)]
+struct DeviceCounters {
+    reads: AtomicU64,
+    writes: AtomicU64,
+    flushes: AtomicU64,
+    read_bytes: AtomicU64,
+    written_bytes: AtomicU64,
+    failures: AtomicU64,
+}
+
+impl DeviceCounters {
+    fn finish(
+        &self,
+        result: &Result<(), BlockError>,
+        count: &AtomicU64,
+        bytes: Option<(&AtomicU64, usize)>,
+    ) {
+        match result {
+            Ok(()) => {
+                count.fetch_add(1, Ordering::Relaxed);
+                if let Some((total, length)) = bytes {
+                    total.fetch_add(length as u64, Ordering::Relaxed);
+                }
+            }
+            Err(_) => {
+                self.failures.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 struct CallbackDevice {
+    counters: Arc<DeviceCounters>,
     context: *mut c_void,
     block_size: usize,
     total_blocks: u64,
@@ -396,7 +450,13 @@ impl BlockDevice for CallbackDevice {
         // valid until `afsplus_aros_unmount` returns. `buffer` is writable for
         // exactly `length` bytes for the duration of this call.
         let status = unsafe { (self.read_block)(self.context, lba, buffer.as_mut_ptr(), length) };
-        callback_status(status)
+        let result = callback_status(status);
+        self.counters.finish(
+            &result,
+            &self.counters.reads,
+            Some((&self.counters.read_bytes, buffer.len())),
+        );
+        result
     }
 
     fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
@@ -406,13 +466,21 @@ impl BlockDevice for CallbackDevice {
         // SAFETY: same lifetime contract as `read_block`; `data` is readable
         // for exactly `length` bytes and is not retained by the callback.
         let status = unsafe { write(self.context, lba, data.as_ptr(), length) };
-        callback_status(status)
+        let result = callback_status(status);
+        self.counters.finish(
+            &result,
+            &self.counters.writes,
+            Some((&self.counters.written_bytes, data.len())),
+        );
+        result
     }
 
     fn flush(&mut self) -> Result<(), BlockError> {
         let flush = self.flush.ok_or_else(|| callback_error(-1))?;
         // SAFETY: the callback/context lifetime is the mount lifetime.
-        callback_status(unsafe { flush(self.context) })
+        let result = callback_status(unsafe { flush(self.context) });
+        self.counters.finish(&result, &self.counters.flushes, None);
+        result
     }
 }
 
@@ -437,6 +505,9 @@ impl CallbackDevice {
 struct NativeBridge {
     adapter: ArosAdapter<CallbackDevice>,
     max_file_info_name_bytes: usize,
+    device: Arc<DeviceCounters>,
+    calls: u64,
+    failed_calls: u64,
 }
 
 fn callback_status(status: i32) -> Result<(), BlockError> {
@@ -468,18 +539,21 @@ fn bridge_status<F>(filesystem: *mut AfsplusAros, operation: F) -> i32
 where
     F: FnOnce() -> Result<(), ArosError>,
 {
-    match catch_unwind(AssertUnwindSafe(operation)) {
+    let outcome = catch_unwind(AssertUnwindSafe(operation));
+    let Ok(bridge) = bridge_mut(filesystem) else {
+        return ArosError::InvalidLock.io_error();
+    };
+    bridge.calls += 1;
+    match outcome {
         Ok(Ok(())) => 0,
         Ok(Err(error)) => {
-            if let Ok(bridge) = bridge_mut(filesystem) {
-                bridge.adapter.health_log().record(error);
-            }
+            bridge.failed_calls += 1;
+            bridge.adapter.health_log().record(error);
             error.io_error()
         }
         Err(_) => {
-            if let Ok(bridge) = bridge_mut(filesystem) {
-                bridge.adapter.health_log().record_internal_fault();
-            }
+            bridge.failed_calls += 1;
+            bridge.adapter.health_log().record_internal_fault();
             ArosError::Unknown.io_error()
         }
     }
@@ -736,7 +810,9 @@ pub extern "C" fn afsplus_aros_mount(
         if max_file_handles == 0 || max_locks == 0 || max_file_info_name_bytes == 0 {
             return Err(ArosError::InvalidComponentName);
         }
+        let counters = Arc::new(DeviceCounters::default());
         let callback_device = CallbackDevice {
+            counters: Arc::clone(&counters),
             context: device.context,
             block_size: device.block_size as usize,
             total_blocks: device.total_blocks,
@@ -767,6 +843,9 @@ pub extern "C" fn afsplus_aros_mount(
         let raw = Box::into_raw(Box::new(NativeBridge {
             adapter,
             max_file_info_name_bytes,
+            device: counters,
+            calls: 0,
+            failed_calls: 0,
         }))
         .cast::<AfsplusAros>();
         write_output(output, raw)
@@ -868,7 +947,9 @@ pub extern "C" fn afsplus_aros_same_lock(
 
 #[no_mangle]
 pub extern "C" fn afsplus_aros_free_lock(filesystem: *mut AfsplusAros, lock: u64) -> i32 {
-    ffi_status(|| bridge_mut(filesystem)?.adapter.free_lock(lock))
+    bridge_status(filesystem, || {
+        bridge_mut(filesystem)?.adapter.free_lock(lock)
+    })
 }
 
 #[no_mangle]
@@ -923,7 +1004,7 @@ pub extern "C" fn afsplus_aros_lock_from_file(
 
 #[no_mangle]
 pub extern "C" fn afsplus_aros_close(filesystem: *mut AfsplusAros, file: u64) -> i32 {
-    ffi_status(|| bridge_mut(filesystem)?.adapter.close(file))
+    bridge_status(filesystem, || bridge_mut(filesystem)?.adapter.close(file))
 }
 
 #[no_mangle]
@@ -1033,12 +1114,12 @@ pub extern "C" fn afsplus_aros_set_file_size(
 
 #[no_mangle]
 pub extern "C" fn afsplus_aros_fsync(filesystem: *mut AfsplusAros, file: u64) -> i32 {
-    ffi_status(|| bridge_mut(filesystem)?.adapter.fsync(file))
+    bridge_status(filesystem, || bridge_mut(filesystem)?.adapter.fsync(file))
 }
 
 #[no_mangle]
 pub extern "C" fn afsplus_aros_flush(filesystem: *mut AfsplusAros) -> i32 {
-    ffi_status(|| bridge_mut(filesystem)?.adapter.flush())
+    bridge_status(filesystem, || bridge_mut(filesystem)?.adapter.flush())
 }
 
 #[no_mangle]
@@ -1178,7 +1259,9 @@ pub extern "C" fn afsplus_aros_examine_next(
 
 #[no_mangle]
 pub extern "C" fn afsplus_aros_rewind_directory(filesystem: *mut AfsplusAros, lock: u64) -> i32 {
-    ffi_status(|| bridge_mut(filesystem)?.adapter.rewind_directory(lock))
+    bridge_status(filesystem, || {
+        bridge_mut(filesystem)?.adapter.rewind_directory(lock)
+    })
 }
 
 #[no_mangle]
@@ -1712,6 +1795,34 @@ pub extern "C" fn afsplus_aros_info_json(
         write_output(
             output_required,
             u32::try_from(bytes.len()).map_err(|_| ArosError::ObjectTooLarge)?,
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_counters(
+    filesystem: *mut AfsplusAros,
+    output: *mut AfsplusArosCounters,
+) -> i32 {
+    bridge_status(filesystem, || {
+        let bridge = bridge_mut(filesystem)?;
+        let device = &bridge.device;
+        write_sized_output(
+            output,
+            std::mem::size_of::<AfsplusArosCounters>(),
+            AfsplusArosCounters {
+                struct_size: 0,
+                reserved: 0,
+                calls: bridge.calls,
+                failed_calls: bridge.failed_calls,
+                device_reads: device.reads.load(Ordering::Relaxed),
+                device_writes: device.writes.load(Ordering::Relaxed),
+                device_flushes: device.flushes.load(Ordering::Relaxed),
+                device_read_bytes: device.read_bytes.load(Ordering::Relaxed),
+                device_written_bytes: device.written_bytes.load(Ordering::Relaxed),
+                device_failures: device.failures.load(Ordering::Relaxed),
+            },
+            |value, size| value.struct_size = size,
         )
     })
 }

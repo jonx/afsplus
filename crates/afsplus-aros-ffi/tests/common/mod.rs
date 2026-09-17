@@ -1,4 +1,6 @@
-//! Shared mount fixture for C-boundary tests.
+//! Shared mount fixture for C-boundary tests. Each test binary uses the part
+//! it needs.
+#![allow(dead_code)]
 
 use std::ffi::c_void;
 use std::mem::size_of;

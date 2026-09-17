@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(6)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(7)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -35,6 +35,7 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_NOTIFY UINT64_C(0x20)
 #define AFSPLUS_AROS_GROUP_OBSERVE UINT64_C(0x40)
 #define AFSPLUS_AROS_GROUP_MANAGE UINT64_C(0x80)
+#define AFSPLUS_AROS_GROUP_COUNTERS UINT64_C(0x100)
 
 /* AfsplusArosHealth.flags. Disk-full is counted and is not a degraded state. */
 #define AFSPLUS_AROS_HEALTH_DEVICE_ERROR UINT32_C(0x1)
@@ -202,7 +203,25 @@ struct AfsplusArosTraceCounters {
     uint64_t dropped;
 };
 
+/* Sized query structure. calls counts completed entries on the mounted
+ * instance before this one; device_* counts block callbacks. The benchmark
+ * contract reads these instead of inferring traffic from elapsed time. */
+struct AfsplusArosCounters {
+    uint32_t struct_size;
+    uint32_t reserved;
+    uint64_t calls;
+    uint64_t failed_calls;
+    uint64_t device_reads;
+    uint64_t device_writes;
+    uint64_t device_flushes;
+    uint64_t device_read_bytes;
+    uint64_t device_written_bytes;
+    uint64_t device_failures;
+};
+
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(struct AfsplusArosCounters) == 72,
+    "AfsplusArosCounters ABI drift");
 _Static_assert(sizeof(struct AfsplusArosHealth) == 112,
     "AfsplusArosHealth ABI drift");
 _Static_assert(sizeof(struct AfsplusArosHealthEvent) == 16,
@@ -416,6 +435,10 @@ int32_t afsplus_aros_trace_counters(struct AfsplusAros *filesystem,
  * not know. */
 int32_t afsplus_aros_info_json(struct AfsplusAros *filesystem,
     uint8_t *buffer, uint32_t capacity, uint32_t *output_required);
+
+/* Group AFSPLUS_AROS_GROUP_COUNTERS. */
+int32_t afsplus_aros_counters(struct AfsplusAros *filesystem,
+    struct AfsplusArosCounters *output);
 
 /* Group AFSPLUS_AROS_GROUP_INTERFACE_QUERY. */
 int32_t afsplus_aros_capabilities(struct AfsplusAros *filesystem,
