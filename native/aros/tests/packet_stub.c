@@ -675,9 +675,12 @@ int32_t afsplus_aros_capabilities(struct AfsplusAros *filesystem,
 
         memcpy(ext_caller_buffer, &huge, sizeof(huge));
     }
+    /* The entry point's own floor, as afsplus_aros.h states it. */
+    if (output->struct_size < AFSPLUS_AROS_CAPABILITIES_FIRST_LAYOUT)
+        return ERROR_BAD_NUMBER;
+    /* It fills what it knows and stores that size, never the caller's. */
+    output->struct_size = sizeof(*output);
     output->mount_mode = 77;
-    /* Past a short declared size: must never reach the caller. */
-    output->free_blocks = 5;
     return ext_call('1', 0, NULL, 0, output->struct_size, 0, 0, 0);
 }
 
@@ -1385,7 +1388,9 @@ int main(void)
         {
             union { uint8_t bytes[96]; struct AfsplusArosCapabilities c; }
                 guarded;
-            uint32_t declared = 24;
+            /* A newer client: its struct has sixteen bytes this handler
+             * does not know. */
+            uint32_t declared = sizeof(struct AfsplusArosCapabilities) + 16;
             size_t at;
 
             memset(&guarded, 0x7e, sizeof(guarded));
@@ -1396,9 +1401,18 @@ int main(void)
             request.buffer_size = sizeof(guarded);
             EXT_SEND(DOSTRUE, 0);
             ext_caller_buffer = NULL;
-            assert(ext_seen[0] == 24);
-            assert(guarded.c.struct_size == 24 && guarded.c.mount_mode == 77);
-            for (at = 24; at < sizeof(guarded); at++)
+            assert(guarded.c.struct_size == sizeof(guarded.c)
+                && guarded.c.mount_mode == 77);
+            for (at = sizeof(guarded.c); at < sizeof(guarded); at++)
+                assert(guarded.bytes[at] == 0x7e);
+
+            /* Below the first published layout the entry point refuses, and
+             * the transport hands that answer on with the buffer untouched. */
+            declared = AFSPLUS_AROS_CAPABILITIES_FIRST_LAYOUT - 1;
+            memset(&guarded, 0x7e, sizeof(guarded));
+            memcpy(guarded.bytes, &declared, sizeof(declared));
+            EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+            for (at = sizeof(declared); at < sizeof(guarded); at++)
                 assert(guarded.bytes[at] == 0x7e);
         }
 

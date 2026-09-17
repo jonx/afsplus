@@ -163,7 +163,15 @@ struct AfsplusArosDiskInfo {
 /* Query structures use one growth rule. The caller stores the size of its
  * own structure in struct_size. The library fills the fields that fit, never
  * writes past that size, and stores the number of bytes it filled. A size
- * below the revision-2 layout is refused with ERROR_BAD_NUMBER (115). */
+ * below the layout the structure was first published with is refused with
+ * ERROR_BAD_NUMBER (115). A structure may grow; these floors never move, so
+ * a client built against the first layout works with every later library. */
+#define AFSPLUS_AROS_INTERFACE_FIRST_LAYOUT 24
+#define AFSPLUS_AROS_CAPABILITIES_FIRST_LAYOUT 64
+#define AFSPLUS_AROS_HEALTH_FIRST_LAYOUT 112
+#define AFSPLUS_AROS_TRACE_COUNTERS_FIRST_LAYOUT 40
+#define AFSPLUS_AROS_COUNTERS_FIRST_LAYOUT 72
+#define AFSPLUS_AROS_STAT_FIRST_LAYOUT 88
 struct AfsplusArosInterface {
     uint32_t struct_size;
     uint32_t abi_version;

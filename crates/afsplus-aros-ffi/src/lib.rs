@@ -733,6 +733,31 @@ fn write_output<T>(output: *mut T, value: T) -> Result<(), ArosError> {
 /// Growth rule of the query structures: read the caller's size from the
 /// leading `u32`, refuse a size below the first published layout, copy at most
 /// that many bytes and report the count written in the same field.
+/// The size each size-negotiated query struct had when it was first
+/// published. A caller may declare any size from here up; the struct may
+/// grow, these numbers never do, so a client built against the first layout
+/// keeps working against every later library.
+pub const AFSPLUS_AROS_INTERFACE_FIRST_LAYOUT: usize = 24;
+pub const AFSPLUS_AROS_CAPABILITIES_FIRST_LAYOUT: usize = 64;
+pub const AFSPLUS_AROS_HEALTH_FIRST_LAYOUT: usize = 112;
+pub const AFSPLUS_AROS_TRACE_COUNTERS_FIRST_LAYOUT: usize = 40;
+pub const AFSPLUS_AROS_COUNTERS_FIRST_LAYOUT: usize = 72;
+pub const AFSPLUS_AROS_STAT_FIRST_LAYOUT: usize = 88;
+
+// No struct may be smaller than the layout it was first published with.
+const _: () = {
+    assert!(std::mem::size_of::<AfsplusArosInterface>() >= AFSPLUS_AROS_INTERFACE_FIRST_LAYOUT);
+    assert!(
+        std::mem::size_of::<AfsplusArosCapabilities>() >= AFSPLUS_AROS_CAPABILITIES_FIRST_LAYOUT
+    );
+    assert!(std::mem::size_of::<AfsplusArosHealth>() >= AFSPLUS_AROS_HEALTH_FIRST_LAYOUT);
+    assert!(
+        std::mem::size_of::<AfsplusArosTraceCounters>() >= AFSPLUS_AROS_TRACE_COUNTERS_FIRST_LAYOUT
+    );
+    assert!(std::mem::size_of::<AfsplusArosCounters>() >= AFSPLUS_AROS_COUNTERS_FIRST_LAYOUT);
+    assert!(std::mem::size_of::<AfsplusArosStat>() >= AFSPLUS_AROS_STAT_FIRST_LAYOUT);
+};
+
 fn write_sized_output<T: Copy>(
     output: *mut T,
     minimum: usize,
@@ -1354,7 +1379,7 @@ pub extern "C" fn afsplus_aros_interface(output: *mut AfsplusArosInterface) -> i
     ffi_status(|| {
         write_sized_output(
             output,
-            std::mem::size_of::<AfsplusArosInterface>(),
+            AFSPLUS_AROS_INTERFACE_FIRST_LAYOUT,
             AfsplusArosInterface {
                 struct_size: 0,
                 abi_version: AFSPLUS_AROS_ABI_VERSION,
@@ -1377,7 +1402,7 @@ pub extern "C" fn afsplus_aros_capabilities(
         let policy = bridge_mut(filesystem)?.adapter.volume_policy();
         write_sized_output(
             output,
-            std::mem::size_of::<AfsplusArosCapabilities>(),
+            AFSPLUS_AROS_CAPABILITIES_FIRST_LAYOUT,
             AfsplusArosCapabilities {
                 struct_size: 0,
                 mount_mode: mount_mode_value(policy.mount_mode),
@@ -1770,7 +1795,7 @@ pub extern "C" fn afsplus_aros_health(
         let health = bridge_mut(filesystem)?.adapter.health()?;
         write_sized_output(
             output,
-            std::mem::size_of::<AfsplusArosHealth>(),
+            AFSPLUS_AROS_HEALTH_FIRST_LAYOUT,
             AfsplusArosHealth {
                 struct_size: 0,
                 mount_mode: mount_mode_value(health.mount_mode),
@@ -1909,7 +1934,7 @@ pub extern "C" fn afsplus_aros_trace_counters(
             .unwrap_or_default();
         write_sized_output(
             output,
-            std::mem::size_of::<AfsplusArosTraceCounters>(),
+            AFSPLUS_AROS_TRACE_COUNTERS_FIRST_LAYOUT,
             counters,
             |value, size| value.struct_size = size,
         )
@@ -1948,7 +1973,7 @@ pub extern "C" fn afsplus_aros_counters(
         let device = &bridge.device;
         write_sized_output(
             output,
-            std::mem::size_of::<AfsplusArosCounters>(),
+            AFSPLUS_AROS_COUNTERS_FIRST_LAYOUT,
             AfsplusArosCounters {
                 struct_size: 0,
                 reserved: 0,
@@ -2076,7 +2101,7 @@ pub extern "C" fn afsplus_aros_stat_id(
         let stat = bridge_mut(filesystem)?.adapter.stat_id(object_id)?;
         write_sized_output(
             output,
-            std::mem::size_of::<AfsplusArosStat>(),
+            AFSPLUS_AROS_STAT_FIRST_LAYOUT,
             AfsplusArosStat {
                 struct_size: 0,
                 kind: stat.kind as u32,
@@ -2259,4 +2284,76 @@ pub extern "C" fn afsplus_aros_set_volume_label(
             .adapter
             .set_volume_label(label, timestamp(now_seconds, now_nanoseconds)?)
     })
+}
+
+#[cfg(test)]
+mod sized_output_tests {
+    use super::*;
+
+    /// A query struct after it has grown: its first layout was the first
+    /// sixteen bytes.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Grown {
+        struct_size: u32,
+        first: u32,
+        second: u64,
+        added_later: u64,
+    }
+
+    const GROWN_FIRST_LAYOUT: usize = 16;
+
+    fn ask(declared: u32) -> (Result<(), ArosError>, [u8; 32]) {
+        let mut memory = [0xA5u8; 32];
+        memory[..4].copy_from_slice(&declared.to_ne_bytes());
+        let value = Grown {
+            struct_size: 0,
+            first: 0x1111_1111,
+            second: 0x2222_2222_2222_2222,
+            added_later: 0x3333_3333_3333_3333,
+        };
+        let result = write_sized_output(
+            memory.as_mut_ptr().cast::<Grown>(),
+            GROWN_FIRST_LAYOUT,
+            value,
+            |value, size| value.struct_size = size,
+        );
+        (result, memory)
+    }
+
+    #[test]
+    fn a_client_of_the_first_layout_is_served_after_the_struct_grew() {
+        // The floor is the first layout, not the current size of the struct.
+        let (result, memory) = ask(16);
+        assert_eq!(result, Ok(()));
+        assert_eq!(memory[..4], 16u32.to_ne_bytes());
+        assert_eq!(memory[4..8], 0x1111_1111u32.to_ne_bytes());
+        assert_eq!(memory[8..16], 0x2222_2222_2222_2222u64.to_ne_bytes());
+        assert!(memory[16..].iter().all(|byte| *byte == 0xA5));
+
+        // Below the first layout nothing is written.
+        let (result, memory) = ask(15);
+        assert_eq!(result, Err(ArosError::BadNumber));
+        assert!(memory[4..].iter().all(|byte| *byte == 0xA5));
+
+        // A current client gets everything, a future one no more than exists.
+        let (result, memory) = ask(24);
+        assert_eq!(result, Ok(()));
+        assert_eq!(memory[16..24], 0x3333_3333_3333_3333u64.to_ne_bytes());
+        let (result, memory) = ask(32);
+        assert_eq!(result, Ok(()));
+        assert_eq!(memory[..4], 24u32.to_ne_bytes());
+        assert!(memory[24..].iter().all(|byte| *byte == 0xA5));
+    }
+
+    #[test]
+    fn floors_are_the_published_numbers() {
+        // Literal values: a struct that grows must not move them.
+        assert_eq!(AFSPLUS_AROS_INTERFACE_FIRST_LAYOUT, 24);
+        assert_eq!(AFSPLUS_AROS_CAPABILITIES_FIRST_LAYOUT, 64);
+        assert_eq!(AFSPLUS_AROS_HEALTH_FIRST_LAYOUT, 112);
+        assert_eq!(AFSPLUS_AROS_TRACE_COUNTERS_FIRST_LAYOUT, 40);
+        assert_eq!(AFSPLUS_AROS_COUNTERS_FIRST_LAYOUT, 72);
+        assert_eq!(AFSPLUS_AROS_STAT_FIRST_LAYOUT, 88);
+    }
 }
