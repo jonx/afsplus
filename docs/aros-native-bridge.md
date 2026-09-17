@@ -280,6 +280,14 @@ preallocated queue. `afsplus_aros_trace_counters` reports delivered, missed,
 filtered and dropped counts, so a slow consumer costs counted loss and never
 blocks the filesystem.
 
+`MANAGE` serves the structured management rule of
+[ADR-025](../adr/ADR-025-structured-management-api.md) from the mounted
+instance: `afsplus_aros_info_json` returns one JSON object with schema
+`afsplus-handler-info` and its `schema_version`, then volume identity and
+feature masks, mount state, capability names, health and handle usage. Field
+order is fixed and an addition raises the version. A target tool is a thin
+client that prints this document.
+
 `ACTION_SEEK64`, size/position variants and `DosPacket64.dp_Res0 == DP64_INIT`
 are decoded and encoded in the C packet layer. The Rust ABI always receives the
 already reconstructed `int64_t`/`uint64_t` value.

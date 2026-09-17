@@ -23,7 +23,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 5;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 6;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -31,6 +31,7 @@ pub const AFSPLUS_AROS_GROUP_SOFT_LINKS: u64 = 0x8;
 pub const AFSPLUS_AROS_GROUP_API_V2: u64 = 0x10;
 pub const AFSPLUS_AROS_GROUP_NOTIFY: u64 = 0x20;
 pub const AFSPLUS_AROS_GROUP_OBSERVE: u64 = 0x40;
+pub const AFSPLUS_AROS_GROUP_MANAGE: u64 = 0x80;
 pub const AFSPLUS_AROS_HEALTH_DEVICE_ERROR: u32 = afsplus_aros::health::HEALTH_DEVICE_ERROR;
 pub const AFSPLUS_AROS_HEALTH_CORRUPTION: u32 = afsplus_aros::health::HEALTH_CORRUPTION;
 pub const AFSPLUS_AROS_HEALTH_REPLAY_PENDING: u32 = afsplus_aros::health::HEALTH_REPLAY_PENDING;
@@ -42,7 +43,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_SOFT_LINKS
     | AFSPLUS_AROS_GROUP_API_V2
     | AFSPLUS_AROS_GROUP_NOTIFY
-    | AFSPLUS_AROS_GROUP_OBSERVE;
+    | AFSPLUS_AROS_GROUP_OBSERVE
+    | AFSPLUS_AROS_GROUP_MANAGE;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -1688,6 +1690,28 @@ pub extern "C" fn afsplus_aros_trace_counters(
             std::mem::size_of::<AfsplusArosTraceCounters>(),
             counters,
             |value, size| value.struct_size = size,
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_info_json(
+    filesystem: *mut AfsplusAros,
+    buffer: *mut u8,
+    capacity: u32,
+    output_required: *mut u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_required)?;
+        let destination = output_slice(buffer, capacity)?;
+        let document = bridge_mut(filesystem)?.adapter.info_json()?;
+        let bytes = document.as_bytes();
+        if bytes.len() <= destination.len() {
+            destination[..bytes.len()].copy_from_slice(bytes);
+        }
+        write_output(
+            output_required,
+            u32::try_from(bytes.len()).map_err(|_| ArosError::ObjectTooLarge)?,
         )
     })
 }

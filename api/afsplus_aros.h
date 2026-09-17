@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(5)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(6)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -34,6 +34,7 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_API_V2 UINT64_C(0x10)
 #define AFSPLUS_AROS_GROUP_NOTIFY UINT64_C(0x20)
 #define AFSPLUS_AROS_GROUP_OBSERVE UINT64_C(0x40)
+#define AFSPLUS_AROS_GROUP_MANAGE UINT64_C(0x80)
 
 /* AfsplusArosHealth.flags. Disk-full is counted and is not a degraded state. */
 #define AFSPLUS_AROS_HEALTH_DEVICE_ERROR UINT32_C(0x1)
@@ -406,6 +407,15 @@ int32_t afsplus_aros_set_trace_sink(struct AfsplusAros *filesystem,
     const struct afsp_trace_sink *sink);
 int32_t afsplus_aros_trace_counters(struct AfsplusAros *filesystem,
     struct AfsplusArosTraceCounters *output);
+
+/* Group AFSPLUS_AROS_GROUP_MANAGE. info_json writes one UTF-8 JSON object
+ * without a terminator: schema "afsplus-handler-info", its schema_version,
+ * then volume, mount, capabilities, health and handles. output_required
+ * receives the byte count; when it exceeds capacity the buffer is untouched
+ * and the call still succeeds. A consumer rejects a schema_version it does
+ * not know. */
+int32_t afsplus_aros_info_json(struct AfsplusAros *filesystem,
+    uint8_t *buffer, uint32_t capacity, uint32_t *output_required);
 
 /* Group AFSPLUS_AROS_GROUP_INTERFACE_QUERY. */
 int32_t afsplus_aros_capabilities(struct AfsplusAros *filesystem,

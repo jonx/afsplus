@@ -129,7 +129,7 @@ for symbol in \
     afsplus_aros_replace afsplus_aros_advise \
     afsplus_aros_watch_add afsplus_aros_watch_drain afsplus_aros_health \
     afsplus_aros_health_events afsplus_aros_set_trace_sink \
-    afsplus_aros_trace_counters
+    afsplus_aros_trace_counters afsplus_aros_info_json
 do
     "$aros_nm" --defined-only "$archive" | grep -Eq "[[:space:]]$symbol$" || {
         echo "Missing exported symbol: $symbol" >&2

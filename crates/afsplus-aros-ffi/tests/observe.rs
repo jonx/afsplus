@@ -288,3 +288,41 @@ fn a_failing_device_becomes_a_queryable_health_event() {
     faulty.fail_writes = false;
     let _ = afsplus_aros_unmount(filesystem);
 }
+
+#[test]
+fn info_document_crosses_the_boundary_with_the_short_buffer_rule() {
+    let mut device = formatted(true);
+    let filesystem = mount(&mut device);
+    let mut required = 0;
+    let mut small = [0xEEu8; 16];
+    assert_eq!(
+        afsplus_aros_info_json(filesystem, small.as_mut_ptr(), 16, &mut required),
+        0
+    );
+    assert!(required > 16);
+    assert_eq!(small, [0xEE; 16]);
+
+    let mut buffer = vec![0xEEu8; required as usize + 4];
+    let mut written = 0;
+    assert_eq!(
+        afsplus_aros_info_json(
+            filesystem,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            &mut written
+        ),
+        0
+    );
+    assert_eq!(written, required);
+    let document = std::str::from_utf8(&buffer[..written as usize]).unwrap();
+    assert!(document.starts_with(
+        "{\"schema\":\"afsplus-handler-info\",\"schema_version\":1,\"volume\":{\"uuid\":\"c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6\",\"label\":\"FfiCommon\","
+    ));
+    assert!(document.ends_with("\"handles\":{\"locks\":0,\"files\":0,\"watches\":0}}"));
+    assert_eq!(buffer[written as usize..], [0xEE; 4]);
+    assert_eq!(
+        afsplus_aros_info_json(filesystem, buffer.as_mut_ptr(), 4, ptr::null_mut()),
+        210
+    );
+    assert_eq!(afsplus_aros_unmount(filesystem), 0);
+}

@@ -6,6 +6,7 @@
 //! [`afsplus_vfs::Vfs`] API.
 
 pub mod health;
+pub mod management;
 
 use std::collections::BTreeMap;
 

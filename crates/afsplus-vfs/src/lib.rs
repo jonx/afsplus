@@ -95,6 +95,16 @@ impl From<ObjectMetadata> for Stat {
     }
 }
 
+/// Volume identity and negotiated feature masks for management output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeIdentity {
+    pub uuid: [u8; 16],
+    pub label: String,
+    pub compat: u64,
+    pub ro_compat: u64,
+    pub incompat: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatFs {
     pub block_size: u32,
@@ -159,6 +169,32 @@ impl Capabilities {
             | Self::SPARSE_FILES
             | Self::FSYNC,
     );
+
+    /// Stable lower-case names for structured output, in bit order.
+    pub const NAMES: [(u64, &'static str); 15] = [
+        (Self::IO_64BIT, "io_64bit"),
+        (Self::UTF8_NAMES, "utf8_names"),
+        (Self::HARD_LINKS, "hard_links"),
+        (Self::ATOMIC_REPLACE, "atomic_replace"),
+        (Self::OBJECT_IDS, "object_ids"),
+        (Self::PAGED_DIRECTORIES, "paged_directories"),
+        (Self::SPARSE_FILES, "sparse_files"),
+        (Self::FSYNC, "fsync"),
+        (Self::CLONE_FILE, "clone_file"),
+        (Self::CLONE_RANGE, "clone_range"),
+        (Self::LOGGED_DATA_FSYNC, "logged_data_fsync"),
+        (Self::DATA_POLICY, "data_policy"),
+        (Self::OPEN_UNLINKED, "open_unlinked"),
+        (Self::SYMLINKS, "symlinks"),
+        (Self::PREALLOCATE, "preallocate"),
+    ];
+
+    pub fn names(self) -> impl Iterator<Item = &'static str> {
+        Self::NAMES
+            .into_iter()
+            .filter(move |(bit, _)| self.contains(*bit))
+            .map(|(_, name)| name)
+    }
 
     pub fn bits(self) -> u64 {
         self.0
@@ -364,6 +400,17 @@ impl<D: BlockDevice> Vfs<D> {
         };
         self.volume.cleanup_orphan(object_id, now)?;
         Ok(())
+    }
+
+    pub fn identity(&self) -> VolumeIdentity {
+        let ident = self.volume.ident();
+        VolumeIdentity {
+            uuid: ident.uuid,
+            label: ident.label.clone(),
+            compat: ident.features.compat,
+            ro_compat: ident.features.ro_compat,
+            incompat: ident.features.incompat,
+        }
     }
 
     pub fn statfs(&self) -> StatFs {
