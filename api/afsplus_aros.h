@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(13)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(14)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -41,6 +41,7 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_OBJECT_IDS UINT64_C(0x800)
 #define AFSPLUS_AROS_GROUP_EXTENT_MAP UINT64_C(0x1000)
 #define AFSPLUS_AROS_GROUP_VOLUME_LABEL UINT64_C(0x2000)
+#define AFSPLUS_AROS_GROUP_DOS_COMMENT UINT64_C(0x4000)
 
 /* AfsplusArosExtent.flags. */
 #define AFSPLUS_AROS_EXTENT_UNWRITTEN UINT32_C(0x1)
@@ -508,6 +509,25 @@ int32_t afsplus_aros_volume_label(struct AfsplusAros *filesystem,
 int32_t afsplus_aros_set_volume_label(struct AfsplusAros *filesystem,
     const uint8_t *label, uint32_t label_length, int64_t now_seconds,
     uint32_t now_nanoseconds);
+
+/* Group AFSPLUS_AROS_GROUP_DOS_COMMENT. A comment is text in the mount's
+ * name encoding, addressed like set_protection: an empty name is the base
+ * lock's own object. An empty comment removes the stored one; a comment whose
+ * stored form exceeds 255 bytes is ERROR_COMMENT_TOO_BIG (81). comment() fills
+ * at most comment_capacity bytes, cut at a character boundary, stores the
+ * count in output_length and never fails on the comment's content: a
+ * character the encoding lacks reads as '?'. No terminator is written. */
+int32_t afsplus_aros_set_comment(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    const uint8_t *comment, uint32_t comment_length,
+    int64_t now_seconds, uint32_t now_nanoseconds);
+int32_t afsplus_aros_comment(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint8_t *comment, uint32_t comment_capacity, uint32_t *output_length);
+/* The same report for an open file, which ACTION_EXAMINE_FH needs. */
+int32_t afsplus_aros_file_comment(struct AfsplusAros *filesystem,
+    uint64_t file, uint8_t *comment, uint32_t comment_capacity,
+    uint32_t *output_length);
 
 /* Group AFSPLUS_AROS_GROUP_SOFT_LINKS. The target is an opaque path in the
  * mount's name encoding. Locate and open answer ERROR_IS_SOFT_LINK for a

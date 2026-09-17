@@ -1395,6 +1395,24 @@ impl<D: BlockDevice> ArosAdapter<D> {
         max_bytes: usize,
     ) -> Result<Vec<u8>, ArosError> {
         let object = self.named_object(base, name)?;
+        self.encoded_comment(object, max_bytes)
+    }
+
+    /// The comment of an open file, as [`Self::comment`] reports it.
+    pub fn file_comment(
+        &mut self,
+        handle: FileHandleId,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ArosError> {
+        let object = self.file_state(handle)?.object_id;
+        self.encoded_comment(object, max_bytes)
+    }
+
+    fn encoded_comment(
+        &mut self,
+        object: ObjectId,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ArosError> {
         let text = self.vfs.comment(object)?;
         let mut encoded = Vec::with_capacity(text.len().min(max_bytes));
         let mut buffer = [0u8; 4];

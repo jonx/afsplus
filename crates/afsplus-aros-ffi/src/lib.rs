@@ -25,7 +25,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 13;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 14;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -40,6 +40,7 @@ pub const AFSPLUS_AROS_GROUP_DOS_RECORDS: u64 = 0x400;
 pub const AFSPLUS_AROS_GROUP_OBJECT_IDS: u64 = 0x800;
 pub const AFSPLUS_AROS_GROUP_EXTENT_MAP: u64 = 0x1000;
 pub const AFSPLUS_AROS_GROUP_VOLUME_LABEL: u64 = 0x2000;
+pub const AFSPLUS_AROS_GROUP_DOS_COMMENT: u64 = 0x4000;
 pub const AFSPLUS_AROS_EXTENT_UNWRITTEN: u32 = 1;
 pub const AFSPLUS_AROS_DIR_RECORD_MAX: u32 = 280;
 pub const AFSPLUS_AROS_KIND_FILE: u32 = 1;
@@ -63,7 +64,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_DOS_RECORDS
     | AFSPLUS_AROS_GROUP_OBJECT_IDS
     | AFSPLUS_AROS_GROUP_EXTENT_MAP
-    | AFSPLUS_AROS_GROUP_VOLUME_LABEL;
+    | AFSPLUS_AROS_GROUP_VOLUME_LABEL
+    | AFSPLUS_AROS_GROUP_DOS_COMMENT;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -1489,6 +1491,72 @@ pub extern "C" fn afsplus_aros_read_soft_link(
             output_required,
             u32::try_from(required).map_err(|_| ArosError::ObjectTooLarge)?,
         )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_set_comment(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    comment: *const u8,
+    comment_length: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        let name = input_bytes(name, name_length)?;
+        let comment = input_bytes(comment, comment_length)?;
+        bridge_mut(filesystem)?.adapter.set_comment(
+            optional_lock(base_lock),
+            name,
+            comment,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_comment(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    comment: *mut u8,
+    comment_capacity: u32,
+    output_length: *mut u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_length)?;
+        let name = input_bytes(name, name_length)?;
+        let destination = output_slice(comment, comment_capacity)?;
+        let text = bridge_mut(filesystem)?.adapter.comment(
+            optional_lock(base_lock),
+            name,
+            destination.len(),
+        )?;
+        destination[..text.len()].copy_from_slice(&text);
+        write_output(output_length, text.len() as u32)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_file_comment(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    comment: *mut u8,
+    comment_capacity: u32,
+    output_length: *mut u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_length)?;
+        let destination = output_slice(comment, comment_capacity)?;
+        let text = bridge_mut(filesystem)?
+            .adapter
+            .file_comment(file, destination.len())?;
+        destination[..text.len()].copy_from_slice(&text);
+        write_output(output_length, text.len() as u32)
     })
 }
 
