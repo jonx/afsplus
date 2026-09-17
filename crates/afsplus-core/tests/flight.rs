@@ -2,7 +2,9 @@ use afsplus_block::{
     BlockDevice, BlockError, FaultBackend, FaultPlan, MemoryBackend, TraceBackend,
 };
 use afsplus_core::flight::{EventKind, FlightRecorder};
-use afsplus_core::{mkfs, mount, MkfsParams, NamePolicy};
+use afsplus_core::{
+    mkfs, mount, AttributeWriteMode, MkfsParams, NamePolicy, SecurityProjectionPolicy,
+};
 use afsplus_format::{Timespec, OBJECT_ROOT};
 use std::num::NonZeroUsize;
 
@@ -3230,6 +3232,36 @@ fn every_registered_api_method_executes_under_its_own_guard() {
     volume
         .snapshot_read_directory_page(&handle, OBJECT_ROOT, None, 2)
         .ok();
+    // Attributes, comments, security descriptors, the volume label and the
+    // allocation reader that takes a byte offset. Each is read and written on
+    // the live volume, then read again through the snapshot view, which is
+    // where four of these methods only exist. A refused call still executes
+    // under its guard, and executing under a guard is all this test measures:
+    // what each one does is stated by its own test elsewhere.
+    volume
+        .set_attributes(
+            file,
+            &[("user.one", Some(b"1".as_slice()))],
+            AttributeWriteMode::Upsert,
+            now,
+        )
+        .ok();
+    volume.attribute(file, "user.one").ok();
+    volume.attribute_names(file).ok();
+    volume.set_object_comment(file, "a comment", now).ok();
+    volume.object_comment(file).ok();
+    volume.set_security_projection_policy(SecurityProjectionPolicy::Preserve);
+    volume
+        .set_security_descriptor(file, 1, 0, b"descriptor", now)
+        .ok();
+    volume.security_descriptor(file).ok();
+    volume.clear_security_descriptor(file, now).ok();
+    volume.set_volume_label("Flight").ok();
+    volume.file_allocation_from(file, 0, 2).ok();
+    volume.snapshot_object_comment(&handle, file).ok();
+    volume.snapshot_attribute(&handle, file, "user.one").ok();
+    volume.snapshot_attribute_names(&handle, file).ok();
+    volume.snapshot_security_descriptor(&handle, file).ok();
     volume.snapshot_maintenance_step(now).ok();
     volume.snapshot_list(0, 4).ok();
     if let Ok(second) = volume.snapshot_create(now) {
@@ -3273,13 +3305,25 @@ fn every_registered_api_method_executes_under_its_own_guard() {
         .filter_map(|line| line.split_once('='))
         .map(|(name, _)| name.trim().to_owned())
         .collect();
-    assert_eq!(registry.len(), 66);
+    // No count is asserted here on purpose. There was one, a literal 66 kept in
+    // step by hand, and it went stale while the registry grew to 81. It caught
+    // the growth, which is not the question, and it failed FIRST, so the real
+    // answer stayed hidden behind "left 81, right 66" until somebody bumped the
+    // number: fifteen methods registered and never exercised. A count that
+    // fires before the assertion it is standing in for makes a failure less
+    // informative, not more. The set comparison below needs no maintenance and
+    // names what is wrong.
+    assert!(!registry.is_empty(), "the registry must be readable");
     let missing: Vec<_> = registry.difference(&executed).cloned().collect();
     assert!(
         missing.is_empty(),
         "registered but never executed: {missing:?}"
     );
-    assert_eq!(executed, registry);
+    let unregistered: Vec<_> = executed.difference(&registry).cloned().collect();
+    assert!(
+        unregistered.is_empty(),
+        "executed but not in the registry: {unregistered:?}"
+    );
     assert_eq!(ApiMethod::CleanupOrphan as u16, 1);
 }
 
