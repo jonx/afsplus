@@ -103,7 +103,7 @@ fn the_command_reports_a_file_creation_in_both_forms() {
     let json = String::from_utf8(output.stdout).unwrap();
     assert!(
         json.starts_with(
-            "{\"schema_version\":1,\"metadata_only\":false,\"empty\":false,\"partial\":false,"
+            "{\"schema_version\":2,\"metadata_only\":false,\"empty\":false,\"partial\":false,"
         ),
         "{json}"
     );

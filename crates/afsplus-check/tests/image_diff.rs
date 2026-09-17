@@ -188,6 +188,7 @@ fn mirror_field(field: &FieldChange) -> FieldChange {
             to: from,
             bytes_changed,
         },
+        FieldChange::Comment { from, to } => FieldChange::Comment { from: to, to: from },
         FieldChange::Content { ranges } => FieldChange::Content { ranges },
         FieldChange::Allocation { from, to } => FieldChange::Allocation { from: to, to: from },
     }
@@ -1343,4 +1344,198 @@ fn an_image_without_a_committed_state_is_an_error_not_a_panic() {
     let mut left = base.dev.clone();
     let error = diff_devices(&mut left, &mut nothing, DiffOptions::default()).unwrap_err();
     assert!(error.contains("identification"), "{error}");
+}
+
+// --- stored comments (ADR-106) ---------------------------------------------
+
+fn comment_change(object_id: u64, from: &str, to: &str, at: (i64, i64)) -> ObjectDiff {
+    ObjectDiff {
+        object_id,
+        change: ObjectChange::Modified(vec![
+            FieldChange::Timestamp {
+                field: TimestampField::Changed,
+                from: time(at.0),
+                to: time(at.1),
+            },
+            FieldChange::Comment {
+                from: from.into(),
+                to: to.into(),
+            },
+        ]),
+    }
+}
+
+#[test]
+fn a_comment_set_then_changed_then_cleared() {
+    let base = base();
+    let commented = mutate(&base.dev, |volume| {
+        volume
+            .set_object_comment(base.seed, "first note", time(3))
+            .unwrap();
+    });
+    let first = diff_of(&base.dev, &commented);
+    assert_eq!(
+        first.objects,
+        vec![comment_change(base.seed, "", "first note", (2, 3))]
+    );
+    assert!(first.links.is_empty());
+    assert!(first.problems.is_empty());
+    assert_identity_and_mirror(&base.dev, &commented, &first);
+
+    let rewritten = mutate(&commented, |volume| {
+        volume
+            .set_object_comment(base.seed, "second note", time(4))
+            .unwrap();
+    });
+    let second = diff_of(&commented, &rewritten);
+    assert_eq!(
+        second.objects,
+        vec![comment_change(
+            base.seed,
+            "first note",
+            "second note",
+            (3, 4)
+        )]
+    );
+    assert_identity_and_mirror(&commented, &rewritten, &second);
+
+    let cleared = mutate(&rewritten, |volume| {
+        volume.set_object_comment(base.seed, "", time(5)).unwrap();
+    });
+    let third = diff_of(&rewritten, &cleared);
+    assert_eq!(
+        third.objects,
+        vec![comment_change(base.seed, "second note", "", (4, 5))]
+    );
+    assert_identity_and_mirror(&rewritten, &cleared, &third);
+
+    // The record holds what it held before the comment existed, so only the
+    // change time separates the two images.
+    let round_trip = diff_of(&base.dev, &cleared);
+    assert_eq!(
+        round_trip.objects,
+        vec![ObjectDiff {
+            object_id: base.seed,
+            change: ObjectChange::Modified(vec![FieldChange::Timestamp {
+                field: TimestampField::Changed,
+                from: time(2),
+                to: time(5),
+            }]),
+        }]
+    );
+
+    // The comment is metadata: it is reported without reading any content.
+    let metadata = metadata_diff_of(&base.dev, &commented);
+    assert_eq!(
+        metadata.objects,
+        vec![comment_change(base.seed, "", "first note", (2, 3))]
+    );
+    assert_eq!(metadata.schema_version, 2);
+    assert!(metadata
+        .render_json()
+        .contains("{\"field\":\"comment\",\"from\":\"\",\"to\":\"first note\"}"));
+    assert!(first
+        .render_human()
+        .contains("comment added \"first note\""));
+}
+
+#[test]
+fn clone_file_carries_the_comment_and_clone_range_does_not() {
+    let base = base();
+    let commented = mutate(&base.dev, |volume| {
+        volume
+            .set_object_comment(base.seed, "carried", time(3))
+            .unwrap();
+    });
+
+    // CloneFile copies the comment onto the new object.
+    let mut copy = 0;
+    let cloned = mutate(&commented, |volume| {
+        copy = volume
+            .clone_file(base.seed, OBJECT_ROOT, "copy", time(4))
+            .unwrap();
+    });
+    assert_eq!(
+        mount(cloned.clone()).unwrap().object_comment(copy).unwrap(),
+        "carried"
+    );
+    let diff = diff_of(&commented, &cloned);
+    assert!(
+        !diff
+            .objects
+            .iter()
+            .any(|object| object.object_id == copy
+                && matches!(object.change, ObjectChange::Modified(_))),
+        "the clone is a created object, not a modified one: {:?}",
+        diff.objects
+    );
+    assert_identity_and_mirror(&commented, &cloned, &diff);
+
+    // CloneRange moves data only: the destination keeps its own comment.
+    let mut target = 0;
+    let with_target = mutate(&commented, |volume| {
+        target = volume
+            .create_file_in_directory(OBJECT_ROOT, "target", &pattern(9000, 5), time(4))
+            .unwrap();
+        volume
+            .set_object_comment(target, "destination note", time(4))
+            .unwrap();
+    });
+    let after = mutate(&with_target, |volume| {
+        volume
+            .clone_range(base.seed, 0, target, 0, 8192, time(5))
+            .unwrap();
+    });
+    assert_eq!(
+        mount(after.clone())
+            .unwrap()
+            .object_comment(target)
+            .unwrap(),
+        "destination note"
+    );
+    let diff = diff_of(&with_target, &after);
+    let comments: Vec<&FieldChange> = diff
+        .objects
+        .iter()
+        .filter_map(|object| match &object.change {
+            ObjectChange::Modified(fields) => fields
+                .iter()
+                .find(|field| matches!(field, FieldChange::Comment { .. })),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        comments.is_empty(),
+        "clone_range changes no comment: {comments:?}"
+    );
+    assert_eq!(
+        content_ranges(&diff, target),
+        brute_force_ranges(&with_target, &after, target)
+    );
+    assert_identity_and_mirror(&with_target, &after, &diff);
+}
+
+#[test]
+fn negative_control_a_corrupted_comment_expectation_does_not_match() {
+    let base = base();
+    let commented = mutate(&base.dev, |volume| {
+        volume
+            .set_object_comment(base.seed, "first note", time(3))
+            .unwrap();
+    });
+    let diff = diff_of(&base.dev, &commented);
+    assert_eq!(
+        diff.objects,
+        vec![comment_change(base.seed, "", "first note", (2, 3))]
+    );
+    // One byte of the comment, and the direction of the change: both fail.
+    assert_ne!(
+        diff.objects,
+        vec![comment_change(base.seed, "", "first notes", (2, 3))]
+    );
+    assert_ne!(
+        diff.objects,
+        vec![comment_change(base.seed, "first note", "", (2, 3))]
+    );
+    assert!(diff_of(&commented, &commented).is_empty());
 }

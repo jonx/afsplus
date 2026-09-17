@@ -276,12 +276,15 @@ That becomes a powerful microscope for filesystem development.
 [`afsplus_check::diff`](../crates/afsplus-check/src/diff.rs) compares the
 committed states of two images, and `afsplus-image-diff` prints the result as
 the short human form or, with `--json`, as the versioned machine-readable form
-of [ADR-025](../adr/ADR-025-structured-management-api.md). It reports objects
+of [ADR-025](../adr/ADR-025-structured-management-api.md), at schema version 2. It reports objects
 created and removed; names added, removed, retargeted and moved, where an
 object whose single name disappeared on one side and appeared on the other is
 one move rather than a creation and a removal; hard-link counts; type, size,
-allocated size, protection bits, the three timestamps, content generation and
-symlink target; the presence, format identity, version, length, divergence
+allocated size, protection bits, the three timestamps, content generation,
+symlink target and the stored comment of
+[ADR-106](../adr/ADR-106-stored-object-comment.md), where the empty comment is the
+absent one, so setting, changing and clearing a comment are the same change
+with different ends; the presence, format identity, version, length, divergence
 mark and bytes of a security descriptor; the logical byte ranges whose content
 changed, byte precise, where a byte past the end of a file is absent and an
 absent byte differs from any present byte, so a truncation and an extension
@@ -304,8 +307,9 @@ added name for one object are reported as a move whatever the sequence of
 operations between the two states, because the two committed states are all
 the diff sees and they say the object kept one name in another place.
 
-The diff is its own reader, like the explain walk of
-[docs/26](26-debug-observability.md): it selects the checkpoint and descends
+The block walk of [docs/26](26-debug-observability.md) attributes blocks and
+says nothing about the fields of a record, so the comment, like every other
+field, is the diff's own reading. The diff is its own reader, like that walk: it selects the checkpoint and descends
 every tree with the block codecs of `afsplus-format` alone, sharing no
 traversal, claim set or loader with the checker or with the core, so a
 disagreement with either is a finding about one of them. Every tree is read

@@ -3,7 +3,7 @@
 //!
 //! The diff answers "what did this operation really do to the volume": the
 //! objects that appeared, disappeared, were renamed or moved, the metadata
-//! fields that changed, the logical byte ranges whose content changed, the
+//! fields that changed, including the stored comment (ADR-106), the logical byte ranges whose content changed, the
 //! allocation changes that changed no content, and the volume-wide facts
 //! (label, generation, free space, quarantine, orphans, snapshots).
 //!
@@ -38,7 +38,7 @@ use afsplus_format::tree::{TreeKind, TreeNode};
 use afsplus_format::{Timespec, OBJECT_ORPHAN_DIRECTORY};
 
 /// Versioned structured-output schema of the diff (ADR-025).
-pub const DIFF_SCHEMA_VERSION: u32 = 1;
+pub const DIFF_SCHEMA_VERSION: u32 = 2;
 
 /// What the diff compares.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -127,6 +127,13 @@ pub enum FieldChange {
         to: u64,
     },
     SymlinkTarget {
+        from: String,
+        to: String,
+    },
+    /// The stored comment of the object (ADR-106). The empty string is the
+    /// absent comment, so adding, changing and clearing one are the same
+    /// change with different ends.
+    Comment {
         from: String,
         to: String,
     },
@@ -1186,6 +1193,12 @@ fn compare_object<A: BlockDevice, B: BlockDevice>(
                     to: target_b.clone().unwrap_or_default(),
                 });
             }
+            if x.comment != y.comment {
+                fields.push(FieldChange::Comment {
+                    from: x.comment.as_str().to_owned(),
+                    to: y.comment.as_str().to_owned(),
+                });
+            }
             let security_a = a.security(object_id, x);
             let security_b = b.security(object_id, y);
             let state_a = security_a.as_ref().map(|(state, _)| *state);
@@ -1502,6 +1515,11 @@ fn json_field(field: &FieldChange) -> String {
         }
         FieldChange::SymlinkTarget { from, to } => format!(
             "{{\"field\":\"symlink_target\",\"from\":{},\"to\":{}}}",
+            json_string(from),
+            json_string(to)
+        ),
+        FieldChange::Comment { from, to } => format!(
+            "{{\"field\":\"comment\",\"from\":{},\"to\":{}}}",
             json_string(from),
             json_string(to)
         ),
@@ -1857,6 +1875,11 @@ fn human_field(field: &FieldChange) -> String {
             format!("content generation {from} -> {to}")
         }
         FieldChange::SymlinkTarget { from, to } => format!("symlink target {from:?} -> {to:?}"),
+        FieldChange::Comment { from, to } => match (from.is_empty(), to.is_empty()) {
+            (true, false) => format!("comment added {to:?}"),
+            (false, true) => format!("comment removed {from:?}"),
+            _ => format!("comment {from:?} -> {to:?}"),
+        },
         FieldChange::Security {
             from,
             to,
