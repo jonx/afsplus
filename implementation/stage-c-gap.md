@@ -67,7 +67,7 @@ older library must be able to refuse by value.
 
 ## C1. Rust/C integration boundary
 
-Present (L1 to L3): ABI version 1 with interface revision 14.
+Present (L1 to L3): ABI version 1 with interface revision 15.
 `afsplus_aros_interface` answers without a mount with the revision and a
 mask of entry-point groups; the packet layer asks it at creation and answers
 `ERROR_ACTION_NOT_KNOWN` for an action of a missing group.
@@ -78,8 +78,17 @@ Rust mask and the C identities are separate numberings joined by one table.
 
 Lacking:
 
-1. L4: the Hosted, QEMU and m68k gates relinked against revision 7, with the
-   exported-symbol list of [`check-aros-ffi.sh`](../tools/check-aros-ffi.sh);
+1. L4 on the emulators and on m68k. The Hosted gates were relinked and run
+   against revision 15 on 2026-09-17: the handler that passed S0, S1 and
+   [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) is built
+   from the whole boundary, whose exported-symbol list
+   [`check-aros-ffi.sh`](../tools/check-aros-ffi.sh) checks at link time, and
+   those runs reach the DOS, soft-link, notify, record, volume-label,
+   comment, attribute and extension-packet groups through a real
+   dos.library. What no Hosted run reaches: the trace sink, the health
+   events beyond a device failure, and the API v2 entry points that no packet
+   or extension operation calls yet. QEMU and m68k stand where they were,
+   because neither toolchain is on the machine that ran the rest;
 2. a structured result for callers that are not DOS packets: every error is
    an `ERROR_*` value, and `Limit`, `Corrupt` and `Io` share codes with
    ordinary results.
