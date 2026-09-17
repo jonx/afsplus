@@ -48,10 +48,14 @@ static uint32_t stub_removed_watches;
 static struct NotifyRequest second;
 static struct NotifyRequest *delivered[8];
 static uint32_t delivered_count;
-static uint64_t stub_groups = UINT64_C(0x22F);
+static uint64_t stub_groups = UINT64_C(0x62F);
 static uint32_t stub_revision = AFSPLUS_AROS_INTERFACE_REVISION;
 static uint32_t stub_protect;
 static uint32_t stub_protect_key;
+static int32_t stub_record_error;
+static uint64_t stub_record_offset;
+static uint64_t stub_record_length;
+static uint32_t stub_record_exclusive;
 static int32_t stub_open_from_lock_error;
 static int32_t stub_change_mode_error;
 static uint32_t stub_changed_access;
@@ -612,6 +616,27 @@ int32_t afsplus_aros_set_write_protect(struct AfsplusAros *filesystem,
     stub_protect = protect;
     stub_protect_key = key;
     return 0;
+}
+
+int32_t afsplus_aros_lock_record(struct AfsplusAros *filesystem,
+    uint64_t file, uint64_t offset, uint64_t length, uint32_t exclusive)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    record('k', file, NULL, 0, exclusive);
+    stub_record_offset = offset;
+    stub_record_length = length;
+    stub_record_exclusive = exclusive;
+    return stub_record_error;
+}
+
+int32_t afsplus_aros_free_record(struct AfsplusAros *filesystem,
+    uint64_t file, uint64_t offset, uint64_t length)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    record('u', file, NULL, 0, 0);
+    stub_record_offset = offset;
+    stub_record_length = length;
+    return stub_record_error;
 }
 
 static void assert_event(size_t index, char operation, const char *name,
@@ -1216,6 +1241,44 @@ int main(void)
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res2 == ERROR_BAD_NUMBER);
 
+        /* Record locks on that handle: unsigned 32-bit offsets, mode mapping,
+         * and the collision reported by waiting and immediate modes. */
+        reset_events();
+        initialize_packet(&packet, ACTION_LOCK_RECORD);
+        packet.dp_Arg1 = from_lock.fh_Arg1;
+        packet.dp_Arg2 = (SIPTR)UINT32_C(0xF0000000);
+        packet.dp_Arg3 = 64;
+        packet.dp_Arg4 = REC_EXCLUSIVE_IMMED;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(stub_record_offset == UINT64_C(0xF0000000));
+        assert(stub_record_length == 64 && stub_record_exclusive == 1);
+        packet.dp_Arg4 = REC_SHARED;
+        stub_record_error = ERROR_LOCK_COLLISION;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(stub_record_exclusive == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_LOCK_TIMEOUT);
+        packet.dp_Arg4 = REC_SHARED_IMMED;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res2 == ERROR_LOCK_COLLISION);
+        stub_record_error = 0;
+        packet.dp_Arg4 = REC_SHARED_IMMED + 1;
+        event_count = 0;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res2 == ERROR_BAD_NUMBER && event_count == 0);
+        initialize_packet(&packet, ACTION_FREE_RECORD);
+        packet.dp_Arg1 = from_lock.fh_Arg1;
+        packet.dp_Arg2 = 8;
+        packet.dp_Arg3 = 16;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE);
+        assert(events[event_count - 1].operation == 'u');
+        assert(stub_record_offset == 8 && stub_record_length == 16);
+        packet.dp_Arg1 = 0;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res2 == ERROR_INVALID_LOCK);
+
         initialize_packet(&packet, ACTION_END);
         packet.dp_Arg1 = from_lock.fh_Arg1;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
@@ -1351,7 +1414,7 @@ int main(void)
         stub_groups = 0;
         assert(afsplus_aros_packet_create(&config, &old_context)
             == ERROR_BAD_NUMBER);
-        stub_groups = UINT64_C(0x22F);
+        stub_groups = UINT64_C(0x62F);
 
         /* A handler shell without a delivery callback cannot notify, so the
          * request is an unknown action and no watch is created. */

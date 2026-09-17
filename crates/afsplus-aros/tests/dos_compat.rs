@@ -592,3 +592,95 @@ fn write_protect_refuses_every_mutation_until_the_key_unlocks_it() {
         );
     }
 }
+
+#[test]
+fn record_locks_collide_by_range_mode_and_handle_and_die_with_the_handle() {
+    let vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let mut adapter = ArosAdapter::new(
+        vfs,
+        ArosConfig {
+            max_record_locks: 4,
+            ..ArosConfig::default()
+        },
+    );
+    create(&mut adapter, b"db", b"0123456789", 10);
+    create(&mut adapter, b"other", b"0123456789", 10);
+    let first = adapter
+        .open(None, b"db", OpenMode::ReadWrite, timestamp(11))
+        .unwrap();
+    let second = adapter
+        .open(None, b"db", OpenMode::ReadWrite, timestamp(11))
+        .unwrap();
+    let elsewhere = adapter
+        .open(None, b"other", OpenMode::ReadWrite, timestamp(11))
+        .unwrap();
+
+    // [100, 200) exclusive for the first handle.
+    adapter.lock_record(first, 100, 100, true).unwrap();
+    // Overlap by one byte at either end collides, for shared requests too.
+    assert_eq!(
+        adapter.lock_record(second, 199, 10, false),
+        Err(ArosError::LockCollision)
+    );
+    assert_eq!(
+        adapter.lock_record(second, 50, 51, true),
+        Err(ArosError::LockCollision)
+    );
+    assert_eq!(ArosError::LockCollision.io_error(), 241);
+    // Touching ranges do not overlap; another file is another space; the
+    // owner does not collide with itself.
+    adapter.lock_record(second, 200, 10, true).unwrap();
+    adapter.lock_record(second, 50, 50, false).unwrap();
+    adapter.lock_record(elsewhere, 100, 100, true).unwrap();
+    // Table of four is full.
+    assert_eq!(
+        adapter.lock_record(first, 150, 10, true),
+        Err(ArosError::NoFreeStore)
+    );
+    adapter.free_record(elsewhere, 100, 100).unwrap();
+    adapter.lock_record(first, 150, 10, true).unwrap();
+
+    // Shared ranges coexist; an exclusive request over them collides.
+    adapter.free_record(first, 150, 10).unwrap();
+    adapter.lock_record(first, 60, 10, false).unwrap();
+    adapter.free_record(first, 60, 10).unwrap();
+    assert_eq!(
+        adapter.lock_record(first, 60, 10, true),
+        Err(ArosError::LockCollision)
+    );
+
+    // Free needs the exact range and the owning handle.
+    assert_eq!(
+        adapter.free_record(first, 100, 99),
+        Err(ArosError::RecordNotLocked)
+    );
+    assert_eq!(
+        adapter.free_record(second, 100, 100),
+        Err(ArosError::RecordNotLocked)
+    );
+    assert_eq!(ArosError::RecordNotLocked.io_error(), 240);
+    assert_eq!(
+        adapter.lock_record(first, 0, 0, true),
+        Err(ArosError::BadNumber)
+    );
+    assert_eq!(
+        adapter.lock_record(first, u64::MAX, 2, true),
+        Err(ArosError::BadNumber)
+    );
+    assert_eq!(
+        adapter.lock_record(999, 0, 1, true),
+        Err(ArosError::InvalidLock)
+    );
+
+    // Closing the first handle releases [100, 200): the control shows the
+    // collision above came from that record and nothing else.
+    adapter.close(first).unwrap();
+    adapter.lock_record(second, 199, 10, false).unwrap();
+    // Record locks are advisory: the locked bytes stay readable and writable.
+    assert_eq!(
+        adapter.write_at(elsewhere, 100, b"zz", timestamp(12)),
+        Ok(2)
+    );
+    adapter.close(second).unwrap();
+    adapter.close(elsewhere).unwrap();
+}

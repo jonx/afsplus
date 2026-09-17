@@ -17,6 +17,7 @@ extern void afsplus_aros_trace_stage(const char *stage);
 #include <dos/dosextens.h>
 #include <dos/dosasl.h>
 #include <dos/exall.h>
+#include <dos/record.h>
 #include <aros/stdc/string.h>
 
 #define AFSPLUS_NATIVE_LOCK_MAGIC UINT32_C(0x41464c4b)
@@ -1965,6 +1966,39 @@ int32_t afsplus_aros_packet_process(
             }
         }
         break;
+    case ACTION_LOCK_RECORD:
+    case ACTION_FREE_RECORD:
+    {
+        struct AfsplusArosNativeFile *file = find_file(context,
+            (BPTR)packet->dp_Arg1);
+        uint64_t offset = (uint64_t)(ULONG)packet->dp_Arg2;
+        uint64_t length = (uint64_t)(ULONG)packet->dp_Arg3;
+        LONG mode = (LONG)packet->dp_Arg4;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_DOS_RECORDS);
+        if (error == 0 && file == NULL)
+            error = ERROR_INVALID_LOCK;
+        if (error == 0 && packet->dp_Type == ACTION_FREE_RECORD)
+            error = afsplus_aros_free_record(context->filesystem, file->id,
+                offset, length);
+        else if (error == 0 && (mode < REC_EXCLUSIVE
+            || mode > REC_SHARED_IMMED))
+            error = ERROR_BAD_NUMBER;
+        else if (error == 0)
+        {
+            error = afsplus_aros_lock_record(context->filesystem, file->id,
+                offset, length,
+                mode == REC_EXCLUSIVE || mode == REC_EXCLUSIVE_IMMED);
+            /* This layer never waits. A waiting mode whose range is taken
+             * reports its wait as expired; dp_Arg5 ticks are not honoured. */
+            if (error == ERROR_LOCK_COLLISION
+                && (mode == REC_EXCLUSIVE || mode == REC_SHARED))
+                error = ERROR_LOCK_TIMEOUT;
+        }
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
     case ACTION_WRITE_PROTECT:
         /* Added to the DOS_HANDLES group by interface revision 9. */
         error = require_group(context, AFSPLUS_AROS_GROUP_DOS_HANDLES);

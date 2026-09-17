@@ -132,7 +132,8 @@ for symbol in \
     afsplus_aros_trace_counters afsplus_aros_info_json \
     afsplus_aros_counters afsplus_aros_open_from_lock \
     afsplus_aros_change_lock_mode afsplus_aros_change_file_mode \
-    afsplus_aros_set_write_protect
+    afsplus_aros_set_write_protect afsplus_aros_lock_record \
+    afsplus_aros_free_record
 do
     "$aros_nm" --defined-only "$archive" | grep -Eq "[[:space:]]$symbol$" || {
         echo "Missing exported symbol: $symbol" >&2

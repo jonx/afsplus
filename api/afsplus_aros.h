@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(9)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(10)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -37,6 +37,7 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_MANAGE UINT64_C(0x80)
 #define AFSPLUS_AROS_GROUP_COUNTERS UINT64_C(0x100)
 #define AFSPLUS_AROS_GROUP_DOS_HANDLES UINT64_C(0x200)
+#define AFSPLUS_AROS_GROUP_DOS_RECORDS UINT64_C(0x400)
 
 /* AfsplusArosHealth.flags. Disk-full is counted and is not a degraded state. */
 #define AFSPLUS_AROS_HEALTH_DEVICE_ERROR UINT32_C(0x1)
@@ -374,6 +375,19 @@ int32_t afsplus_aros_change_file_mode(struct AfsplusAros *filesystem,
  * ERROR_DISK_WRITE_PROTECTED and changes nothing. */
 int32_t afsplus_aros_set_write_protect(struct AfsplusAros *filesystem,
     uint32_t protect, uint32_t key);
+
+/* Group AFSPLUS_AROS_GROUP_DOS_RECORDS: advisory byte-range record locks of
+ * LockRecord, held in memory and owned by a file handle; closing the handle
+ * releases them. lock_record never waits: an overlapping range of another
+ * handle of the same object, where either side is exclusive, is
+ * ERROR_LOCK_COLLISION and the caller decides about waiting. A zero length
+ * or a range past 2^64 is ERROR_BAD_NUMBER, a full table
+ * ERROR_NO_FREE_STORE. free_record needs the owning handle and the exact
+ * range, else ERROR_RECORD_NOT_LOCKED. */
+int32_t afsplus_aros_lock_record(struct AfsplusAros *filesystem,
+    uint64_t file, uint64_t offset, uint64_t length, uint32_t exclusive);
+int32_t afsplus_aros_free_record(struct AfsplusAros *filesystem,
+    uint64_t file, uint64_t offset, uint64_t length);
 
 /* Group AFSPLUS_AROS_GROUP_SOFT_LINKS. The target is an opaque path in the
  * mount's name encoding. Locate and open answer ERROR_IS_SOFT_LINK for a

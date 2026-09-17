@@ -25,7 +25,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 9;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 10;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -36,6 +36,7 @@ pub const AFSPLUS_AROS_GROUP_OBSERVE: u64 = 0x40;
 pub const AFSPLUS_AROS_GROUP_MANAGE: u64 = 0x80;
 pub const AFSPLUS_AROS_GROUP_COUNTERS: u64 = 0x100;
 pub const AFSPLUS_AROS_GROUP_DOS_HANDLES: u64 = 0x200;
+pub const AFSPLUS_AROS_GROUP_DOS_RECORDS: u64 = 0x400;
 pub const AFSPLUS_AROS_HEALTH_DEVICE_ERROR: u32 = afsplus_aros::health::HEALTH_DEVICE_ERROR;
 pub const AFSPLUS_AROS_HEALTH_CORRUPTION: u32 = afsplus_aros::health::HEALTH_CORRUPTION;
 pub const AFSPLUS_AROS_HEALTH_REPLAY_PENDING: u32 = afsplus_aros::health::HEALTH_REPLAY_PENDING;
@@ -50,7 +51,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_OBSERVE
     | AFSPLUS_AROS_GROUP_MANAGE
     | AFSPLUS_AROS_GROUP_COUNTERS
-    | AFSPLUS_AROS_GROUP_DOS_HANDLES;
+    | AFSPLUS_AROS_GROUP_DOS_HANDLES
+    | AFSPLUS_AROS_GROUP_DOS_RECORDS;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -1891,5 +1893,34 @@ pub extern "C" fn afsplus_aros_set_write_protect(
         bridge_mut(filesystem)?
             .adapter
             .set_write_protect(protect != 0, key)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_lock_record(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    offset: u64,
+    length: u64,
+    exclusive: u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        bridge_mut(filesystem)?
+            .adapter
+            .lock_record(file, offset, length, exclusive != 0)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_free_record(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    offset: u64,
+    length: u64,
+) -> i32 {
+    bridge_status(filesystem, || {
+        bridge_mut(filesystem)?
+            .adapter
+            .free_record(file, offset, length)
     })
 }

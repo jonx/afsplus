@@ -351,3 +351,70 @@ fn c_boundary_opens_from_a_lock_changes_modes_and_write_protects() {
     let report = check_device(&mut device);
     assert!(report.is_clean(), "{:?}", report.errors);
 }
+
+#[test]
+fn c_boundary_locks_and_frees_records() {
+    let mut device = formatted();
+    let filesystem = mount(&mut device);
+    let mut created = 0;
+    assert_eq!(
+        afsplus_aros_open(
+            filesystem,
+            0,
+            b"db".as_ptr(),
+            2,
+            AFSPLUS_AROS_OPEN_NEW_FILE,
+            1,
+            0,
+            &mut created
+        ),
+        0
+    );
+    assert_eq!(afsplus_aros_close(filesystem, created), 0);
+    // Two shared handles on the same file.
+    let (mut first, mut second) = (0, 0);
+    for output in [&mut first, &mut second] {
+        assert_eq!(
+            afsplus_aros_open(
+                filesystem,
+                0,
+                b"db".as_ptr(),
+                2,
+                AFSPLUS_AROS_OPEN_READ_WRITE,
+                1,
+                0,
+                output
+            ),
+            0
+        );
+    }
+    // Beyond 4 GiB, exclusive.
+    assert_eq!(
+        afsplus_aros_lock_record(filesystem, first, 0x1_0000_0000, 16, 1),
+        0
+    );
+    assert_eq!(
+        afsplus_aros_lock_record(filesystem, second, 0x1_0000_000F, 1, 0),
+        241
+    );
+    assert_eq!(
+        afsplus_aros_lock_record(filesystem, second, 0x1_0000_0010, 1, 0),
+        0
+    );
+    assert_eq!(afsplus_aros_lock_record(filesystem, second, 0, 0, 0), 115);
+    assert_eq!(
+        afsplus_aros_free_record(filesystem, second, 0x1_0000_0000, 16),
+        240
+    );
+    assert_eq!(
+        afsplus_aros_free_record(filesystem, first, 0x1_0000_0000, 16),
+        0
+    );
+    assert_eq!(
+        afsplus_aros_lock_record(filesystem, second, 0x1_0000_000F, 1, 0),
+        0
+    );
+    assert_eq!(afsplus_aros_close(filesystem, second), 0);
+    assert_eq!(afsplus_aros_close(filesystem, first), 0);
+    assert_eq!(afsplus_aros_unmount(filesystem), 0);
+}

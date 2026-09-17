@@ -57,6 +57,8 @@ pub struct ArosConfig {
     pub max_watches: usize,
     /// Retained health events; older ones give way and are counted.
     pub health_event_capacity: usize,
+    /// Size of the byte-range record lock table of the mount.
+    pub max_record_locks: usize,
 }
 
 impl Default for ArosConfig {
@@ -73,6 +75,7 @@ impl Default for ArosConfig {
             max_preallocate_blocks: 4096,
             max_watches: 256,
             health_event_capacity: 32,
+            max_record_locks: 256,
         }
     }
 }
@@ -171,6 +174,8 @@ pub enum ArosError {
     WriteProtected = 223,
     NotDosDisk = 225,
     NoMoreEntries = 232,
+    RecordNotLocked = 240,
+    LockCollision = 241,
     IsSoftLink = 233,
 }
 
@@ -231,6 +236,16 @@ struct FileState {
     dirty: bool,
 }
 
+/// One `LockRecord` byte range. Advisory, in memory, owned by a file handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecordLock {
+    object_id: ObjectId,
+    owner: FileHandleId,
+    offset: u64,
+    length: u64,
+    exclusive: bool,
+}
+
 /// One notification request. DOS watches names, including names that do not
 /// exist yet, so a watch is a parent directory plus a comparison key. A watch
 /// on a directory also fires when an entry inside it changes.
@@ -274,6 +289,7 @@ pub struct ArosAdapter<D: BlockDevice> {
     lock_counts: BTreeMap<ObjectId, LockCounts>,
     known_parents: BTreeMap<ObjectId, (Option<ObjectId>, Vec<u8>)>,
     files: BTreeMap<FileHandleId, FileState>,
+    records: Vec<RecordLock>,
     /// `ACTION_WRITE_PROTECT` state: the pass key while protected.
     write_protect: Option<u32>,
     watches: BTreeMap<WatchId, Watch>,
@@ -303,6 +319,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
             lock_counts: BTreeMap::new(),
             known_parents,
             files: BTreeMap::new(),
+            records: Vec::new(),
             write_protect: None,
             watches: BTreeMap::new(),
             next_lock: 1,
@@ -611,6 +628,8 @@ impl<D: BlockDevice> ArosAdapter<D> {
 
     pub fn close(&mut self, handle: FileHandleId) -> Result<(), ArosError> {
         let state = self.files.remove(&handle).ok_or(ArosError::InvalidLock)?;
+        // Record locks die with the handle that took them.
+        self.records.retain(|record| record.owner != handle);
         self.release_object_lock(state.object_id, state.access);
         if state.dirty {
             self.touch_raw(state.parent, &state.name);
@@ -852,6 +871,66 @@ impl<D: BlockDevice> ArosAdapter<D> {
         self.touch(target_parent, &target);
         self.known_parents
             .insert(object_id, (Some(target_parent), target_name.to_vec()));
+        Ok(())
+    }
+
+    /// `ACTION_LOCK_RECORD` without waiting. Ranges are advisory and never
+    /// checked by read or write. Two ranges collide when they overlap, belong
+    /// to different handles of the same object and at least one is
+    /// exclusive; a handle never collides with itself. A zero length locks
+    /// nothing and is refused. The table is bounded by `max_record_locks`.
+    pub fn lock_record(
+        &mut self,
+        handle: FileHandleId,
+        offset: u64,
+        length: u64,
+        exclusive: bool,
+    ) -> Result<(), ArosError> {
+        let object_id = self.file_state(handle)?.object_id;
+        let end = offset.checked_add(length).ok_or(ArosError::BadNumber)?;
+        if length == 0 {
+            return Err(ArosError::BadNumber);
+        }
+        let collides = self.records.iter().any(|record| {
+            record.object_id == object_id
+                && record.owner != handle
+                && (record.exclusive || exclusive)
+                && record.offset < end
+                && offset < record.offset + record.length
+        });
+        if collides {
+            return Err(ArosError::LockCollision);
+        }
+        if self.records.len() >= self.config.max_record_locks {
+            return Err(ArosError::NoFreeStore);
+        }
+        self.records.push(RecordLock {
+            object_id,
+            owner: handle,
+            offset,
+            length,
+            exclusive,
+        });
+        Ok(())
+    }
+
+    /// `ACTION_FREE_RECORD`: releases one range this handle locked with
+    /// exactly this offset and length.
+    pub fn free_record(
+        &mut self,
+        handle: FileHandleId,
+        offset: u64,
+        length: u64,
+    ) -> Result<(), ArosError> {
+        self.file_state(handle)?;
+        let position = self
+            .records
+            .iter()
+            .position(|record| {
+                record.owner == handle && record.offset == offset && record.length == length
+            })
+            .ok_or(ArosError::RecordNotLocked)?;
+        self.records.swap_remove(position);
         Ok(())
     }
 

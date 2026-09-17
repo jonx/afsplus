@@ -230,6 +230,7 @@ The usual packet mapping is direct:
 | make link (soft), read link | `make_soft_link`, `read_soft_link` |
 | fh from lock, change mode | `open_from_lock`, `change_lock_mode`, `change_file_mode` |
 | write protect | `set_write_protect` |
+| lock record, free record | `lock_record`, `free_record` |
 | examine all, examine all end | `examine_next` per entry, `rewind_directory`; the packet layer packs `ExAllData` |
 | examine object/FH/next | corresponding examine function |
 | flush | `flush` |
@@ -289,6 +290,14 @@ handles opened for writing included, until the same 32-bit key unprotects it;
 a zero key is the keyless lock that any key opens. A wrong key changes
 nothing, `ACTION_DISK_INFO` reports the protected state, and nothing is
 written to the volume for it.
+
+Record locks are advisory byte ranges in a bounded in-memory table, owned
+by a file handle and released when it closes. Two ranges collide when they
+overlap, belong to different handles of one object and at least one is
+exclusive. The filesystem never waits: an immediate mode answers
+`ERROR_LOCK_COLLISION`, and a waiting mode whose range is taken answers
+`ERROR_LOCK_TIMEOUT` at once, the `dp_Arg5` tick count being a handler-loop
+matter. `ACTION_FREE_RECORD` needs the owning handle and the exact range.
 
 Soft-link targets are opaque paths in the mount encoding. Locate and open
 answer `ERROR_IS_SOFT_LINK`; `ACTION_READ_LINK` walks the path to the first
