@@ -679,12 +679,22 @@ static void cleanup_handler(struct AfsplusArosHandler *handler)
         (void)afsplus_aros_packet_destroy(handler->packets);
         handler->packets = NULL;
     }
-    /* ACTION_DIE is refused while a NotifyMessage is out, so every message
-     * has come home by now. */
+    /* A NotifyMessage can stay out for good: EndNotify takes back only the
+     * messages still queued at the application, and one already fetched by
+     * an application that crashed or never replies is never returned.
+     * Refusing to die for it would make the volume undismountable, and
+     * deleting the port would let a late ReplyMsg write into freed memory.
+     * So the port, its signal bit and the message are left behind on
+     * purpose in that case; they cost a few dozen bytes once. */
     collect_notify_replies(handler);
     if (handler->notify_port != NULL)
     {
-        DeleteMsgPort(handler->notify_port);
+        if (handler->notify_outstanding == 0)
+            DeleteMsgPort(handler->notify_port);
+        else
+            /* The port outlives this task: a late reply must queue without
+             * signalling a task that no longer exists. */
+            handler->notify_port->mp_Flags = PA_IGNORE;
         handler->notify_port = NULL;
     }
     afsplus_aros_startup_trace(SysBase, UINT32_C(0x60000002));
@@ -850,19 +860,8 @@ LONG handler(struct ExecBase *SysBase)
             packet = (struct DosPacket *)message->mn_Node.ln_Name;
             if (packet == NULL)
                 continue;
-            /* A NotifyMessage still out would be replied to a deleted port
-             * after this handler is gone. */
             if (packet->dp_Type == ACTION_DIE)
-            {
                 collect_notify_replies(state);
-                if (state->notify_outstanding != 0)
-                {
-                    packet->dp_Res1 = DOSFALSE;
-                    packet->dp_Res2 = ERROR_OBJECT_IN_USE;
-                    reply_packet(port, SysBase, packet);
-                    continue;
-                }
-            }
             afsplus_aros_startup_trace(SysBase, UINT32_C(0x40000000) |
                 ((uint32_t)packet->dp_Type & UINT32_C(0x0fffffff)));
             error = afsplus_aros_packet_process(state->packets, packet);

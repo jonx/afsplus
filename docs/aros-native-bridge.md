@@ -335,9 +335,13 @@ The shell sends messages from its own reply port, waits on that port next to
 the packet port, and takes replied messages back before each batch of
 packets. After `EndNotify` the `NotifyRequest` belongs to the application
 again, so a returning message touches `nr_MsgCount` only while
-`afsplus_aros_packet_notify_registered` still knows the request. The shell
-answers `ACTION_DIE` with `ERROR_OBJECT_IN_USE` while one of its messages is
-out, because the reply would reach a deleted port.
+`afsplus_aros_packet_notify_registered` still knows the request. A message can
+stay out for good: `EndNotify` takes back only messages still queued at the
+application, and one already fetched by an application that crashed is never
+replied. The shell dies anyway, so the volume stays dismountable, and in that
+case leaves its reply port behind, set to `PA_IGNORE`, so that a late reply
+queues into valid memory and signals no dead task; the port and the message
+are a deliberate leak of a few dozen bytes.
 `nr_Handler` names the handler port for `EndNotify`, so `ACTION_DIE` is
 `ERROR_OBJECT_IN_USE` while a request is registered and destroying the packet
 context clears `nr_Handler` of every request it still holds. A
