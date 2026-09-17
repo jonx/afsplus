@@ -101,7 +101,7 @@ Lacking, in the order classic software meets them:
 |---|---|---|
 | all of the above | target run: [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) with `AFSPlusDosProbe` exists and its package builds; it has not booted yet. QEMU and m68k sequences do not run it | L4 |
 | record lock self-overlap | a handle does not collide with its own range; unverified against rom/dos `LockRecord` and a reference handler until a target run | L4 |
-| `ACTION_LOCK_RECORD` waiting modes | honouring the `dp_Arg5` timeout: a queue of deferred packets in the handler loop, retried when a range is freed | L4 |
+| `ACTION_LOCK_RECORD` waiting modes | present at L3 (deferred packet, retry on release, tick expiry; packet ABI 4) and compiled into the shell with `timer.device`; a grant after a release needs two tasks on a target, which no probe drives yet | L4 |
 | `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |
 | `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |
 

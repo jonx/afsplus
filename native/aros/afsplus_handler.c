@@ -16,6 +16,7 @@
 #include <aros/stdc/string.h>
 #include <exec/types.h>
 #include <devices/newstyle.h>
+#include <devices/timer.h>
 #include <devices/trackdisk.h>
 #include <dos/dos.h>
 #include <dos/dosextens.h>
@@ -83,6 +84,12 @@ struct AfsplusArosHandler {
      * them are still out. The port must outlive every one of them. */
     struct MsgPort *notify_port;
     uint32_t notify_outstanding;
+    /* timer.device, open only to time waiting record locks. Without it the
+     * packet layer gets no complete callback and such locks never wait. */
+    struct MsgPort *timer_port;
+    struct timerequest *timer_request;
+    uint32_t timer_open;
+    uint32_t timer_pending;
     uint8_t *bounce;
     uintptr_t dma_mask;
     uint32_t bounce_size;
@@ -179,6 +186,89 @@ static void reply_packet(struct MsgPort *handler_port,
     packet->dp_Port = handler_port;
     message->mn_Node.ln_Name = (char *)packet;
     PutMsg(reply_port, message);
+}
+
+/* A packet the packet layer had kept comes back with its result stored. */
+static void packet_complete(void *context, struct DosPacket *packet)
+{
+    struct AfsplusArosHandler *handler = context;
+
+    reply_packet(handler->handler_port, handler->SysBase, packet);
+}
+
+/* Waiting record locks are timed in steps of this many 1/50 s ticks, so a
+ * wait may last up to one step longer than asked. */
+#define AFSPLUS_AROS_WAIT_STEP_TICKS UINT32_C(5)
+
+static void open_wait_timer(struct AfsplusArosHandler *handler)
+{
+    struct ExecBase *SysBase = handler->SysBase;
+
+    handler->timer_port = CreateMsgPort();
+    if (handler->timer_port == NULL)
+        return;
+    handler->timer_request = (struct timerequest *)CreateIORequest(
+        handler->timer_port, sizeof(*handler->timer_request));
+    if (handler->timer_request != NULL
+        && OpenDevice((CONST_STRPTR)"timer.device", UNIT_VBLANK,
+            (struct IORequest *)handler->timer_request, 0) == 0)
+    {
+        handler->timer_open = 1;
+        return;
+    }
+    if (handler->timer_request != NULL)
+        DeleteIORequest((struct IORequest *)handler->timer_request);
+    handler->timer_request = NULL;
+    DeleteMsgPort(handler->timer_port);
+    handler->timer_port = NULL;
+}
+
+static void close_wait_timer(struct AfsplusArosHandler *handler)
+{
+    struct ExecBase *SysBase = handler->SysBase;
+
+    if (handler->timer_port == NULL)
+        return;
+    if (handler->timer_pending)
+    {
+        AbortIO((struct IORequest *)handler->timer_request);
+        WaitIO((struct IORequest *)handler->timer_request);
+        handler->timer_pending = 0;
+    }
+    if (handler->timer_open)
+        CloseDevice((struct IORequest *)handler->timer_request);
+    handler->timer_open = 0;
+    DeleteIORequest((struct IORequest *)handler->timer_request);
+    handler->timer_request = NULL;
+    DeleteMsgPort(handler->timer_port);
+    handler->timer_port = NULL;
+}
+
+/* Collects an expired step and keeps one step running while a packet waits. */
+static void run_wait_timer(struct AfsplusArosHandler *handler)
+{
+    struct ExecBase *SysBase = handler->SysBase;
+
+    if (!handler->timer_open)
+        return;
+    if (handler->timer_pending
+        && CheckIO((struct IORequest *)handler->timer_request) != NULL)
+    {
+        WaitIO((struct IORequest *)handler->timer_request);
+        handler->timer_pending = 0;
+        afsplus_aros_packet_elapsed(handler->packets,
+            AFSPLUS_AROS_WAIT_STEP_TICKS);
+    }
+    if (!handler->timer_pending
+        && afsplus_aros_packet_waiting(handler->packets) != 0)
+    {
+        handler->timer_request->tr_node.io_Command = TR_ADDREQUEST;
+        handler->timer_request->tr_time.tv_secs = 0;
+        handler->timer_request->tr_time.tv_micro =
+            AFSPLUS_AROS_WAIT_STEP_TICKS * UINT32_C(20000);
+        SendIO((struct IORequest *)handler->timer_request);
+        handler->timer_pending = 1;
+    }
 }
 
 static void *packet_allocate(void *context, size_t size)
@@ -751,6 +841,9 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
         return ERROR_NO_FREE_STORE;
     packet_config.notify = packet_notify;
     packet_config.relabel = packet_relabel;
+    open_wait_timer(handler);
+    if (handler->timer_open)
+        packet_config.complete = packet_complete;
     set_startup_stage(handler, "packet-context");
     error = afsplus_aros_packet_create(&packet_config, &handler->packets);
     if (error == 0)
@@ -776,6 +869,7 @@ static void cleanup_handler(struct AfsplusArosHandler *handler)
         (void)afsplus_aros_packet_destroy(handler->packets);
         handler->packets = NULL;
     }
+    close_wait_timer(handler);
     /* A NotifyMessage can stay out for good: EndNotify takes back only the
      * messages still queued at the application, and one already fetched by
      * an application that crashed or never replies is never returned.
@@ -949,7 +1043,9 @@ LONG handler(struct ExecBase *SysBase)
     {
         afsplus_aros_startup_trace(SysBase, UINT32_C(0x30200004));
         Wait((1UL << port->mp_SigBit)
-            | (1UL << state->notify_port->mp_SigBit));
+            | (1UL << state->notify_port->mp_SigBit)
+            | (state->timer_open
+                ? 1UL << state->timer_port->mp_SigBit : 0));
         afsplus_aros_startup_trace(SysBase, UINT32_C(0x30200005));
         collect_notify_replies(state);
         while (!quit && (message = GetMsg(port)) != NULL)
@@ -962,6 +1058,9 @@ LONG handler(struct ExecBase *SysBase)
             afsplus_aros_startup_trace(SysBase, UINT32_C(0x40000000) |
                 ((uint32_t)packet->dp_Type & UINT32_C(0x0fffffff)));
             error = afsplus_aros_packet_process(state->packets, packet);
+            /* Kept by the packet layer: packet_complete replies later. */
+            if (error == AFSPLUS_AROS_PACKET_DEFERRED)
+                continue;
             if (error != 0)
                 afsplus_aros_startup_trace(SysBase, UINT32_C(0x50000000) |
                     ((uint32_t)error & UINT32_C(0x0fffffff)));
@@ -979,6 +1078,8 @@ LONG handler(struct ExecBase *SysBase)
             else
                 reply_packet(port, SysBase, packet);
         }
+        if (!quit)
+            run_wait_timer(state);
     }
 
     /* Packets that queued up behind ACTION_DIE would wait for ever on a port

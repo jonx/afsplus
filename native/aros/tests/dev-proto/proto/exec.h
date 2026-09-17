@@ -35,6 +35,10 @@ void Forbid(void);
 APTR AllocVec(IPTR size, ULONG requirements);
 void FreeVec(APTR memory);
 void Permit(void);
+void SendIO(struct IORequest *iORequest);
+struct IORequest *CheckIO(struct IORequest *iORequest);
+LONG WaitIO(struct IORequest *iORequest);
+LONG AbortIO(struct IORequest *iORequest);
 APTR CreateIORequest(struct MsgPort *ioReplyPort, ULONG size);
 void DeleteIORequest(APTR iorequest);
 

@@ -314,10 +314,21 @@ the protected state, and nothing is written to the volume for it.
 Record locks are advisory byte ranges in a bounded in-memory table, owned
 by a file handle and released when it closes. Two ranges collide when they
 overlap, belong to different handles of one object and at least one is
-exclusive. The filesystem never waits: an immediate mode answers
-`ERROR_LOCK_COLLISION`, and a waiting mode whose range is taken answers
-`ERROR_LOCK_TIMEOUT` at once, the `dp_Arg5` tick count being a handler-loop
-matter. `ACTION_FREE_RECORD` needs the owning handle and the exact range.
+exclusive. The filesystem never waits: a taken range is
+`ERROR_LOCK_COLLISION`. Waiting belongs to the packet layer. A waiting mode
+with a nonzero `dp_Arg5` keeps the packet: `afsplus_aros_packet_process`
+returns `AFSPLUS_AROS_PACKET_DEFERRED`, stores no result, and the handler
+does not reply. Kept packets are retried oldest first after every freed
+record and every closed file, and a retry that fails for another reason ends
+the wait with that reason. The handler reports time with
+`afsplus_aros_packet_elapsed`; after `dp_Arg5` ticks the packet answers
+`ERROR_LOCK_TIMEOUT`. The shell times this with `timer.device` in steps of
+five ticks, so a wait may last one step longer than asked. A file that
+closes hands its own waiting packets back with `ERROR_INVALID_LOCK` first.
+The table holds sixteen waiters; one more, a zero timeout, or a handler
+without the `complete` callback answers `ERROR_LOCK_TIMEOUT` at once. The
+queue orders waiters among themselves: a later immediate request can take a
+range before an older waiter is retried. `ACTION_FREE_RECORD` needs the owning handle and the exact range.
 `ACTION_LOCK_RECORD64` and `ACTION_FREE_RECORD64`, which dos64.library sends
 where packet arguments are 64 bits wide, carry full-width ranges; the classic
 packets stop at 4 GiB.

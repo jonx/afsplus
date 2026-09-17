@@ -15,6 +15,7 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-09-17 — Owned chains under persistent snapshots (ADR-109)](#2026-09-17--owned-chains-under-persistent-snapshots-adr-109)
 - [2026-09-17 — Read extended attributes in the portable C reader](#2026-09-17--read-extended-attributes-in-the-portable-c-reader)
 - [2026-09-17 — Extended attributes in the core (ADR-108)](#2026-09-17--extended-attributes-in-the-core-adr-108)
+- [2026-09-17 — Let a record lock wait](#2026-09-17--let-a-record-lock-wait)
 - [2026-09-17 — Reach the 64-bit groups from an application](#2026-09-17--reach-the-64-bit-groups-from-an-application)
 - [2026-09-17 — Codecs for the extended attribute set and its reference](#2026-09-17--codecs-for-the-extended-attribute-set-and-its-reference)
 - [2026-09-17 — Generalise the descriptor chain into an owned chain](#2026-09-17--generalise-the-descriptor-chain-into-an-owned-chain)
@@ -374,6 +375,24 @@ Not in this lot: snapshot readers (nothing to read while snapshot volumes
 refuse attributes), the portable C reader and the format header constants
 (next lot), `diff.rs` (claude-main's file: it does not yet compare attribute
 sets), the VFS and AROS surfaces (Stage C).
+## 2026-09-17 — Let a record lock wait
+
+A waiting `ACTION_LOCK_RECORD` used to answer `ERROR_LOCK_TIMEOUT` at once,
+because a handler that blocks on one packet serves no other, the packet that
+would free the range included. The packet layer now keeps such a packet
+instead of answering it (packet ABI 4): `process` returns
+`AFSPLUS_AROS_PACKET_DEFERRED`, the shell skips the reply, and the packet
+comes back through a `complete` callback when a retry after a freed record or
+a closed file grants it, when its ticks have passed, when its own file closes
+or when the context is destroyed. Time stays outside the layer, which calls
+neither Exec nor a device: the shell owns `timer.device` and reports elapsed
+ticks, in steps of five, only while something waits. The wait is opt-in by
+the callback, so a shell that could not open the timer keeps the old answer.
+The stub pins the states: result fields untouched while deferred, expiry at
+the exact tick, a retry that keeps its place and time, grant before the
+freeing packet returns, sixteen waiters and the seventeenth refused; removing
+the retry after a free fails the matrix. Not run on a target: a grant after a
+release needs two tasks.
 ## 2026-09-17 — Reach the 64-bit groups from an application
 
 The 64-bit entry points existed behind the C boundary with nobody able to
