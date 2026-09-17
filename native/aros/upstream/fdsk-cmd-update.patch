@@ -1,0 +1,78 @@
+--- a/workbench/devs/fdsk_device.c
++++ b/workbench/devs/fdsk_device.c
+@@ -252,16 +252,32 @@
+             iotd->iotd_Req.io_Actual = DRIVE_NEWSTYLE;
+             break;
+ #endif
+-        case ETD_UPDATE:
+         case ETD_CLEAR:
+         case ETD_MOTOR:
+-        case CMD_UPDATE:
+         case CMD_CLEAR:
+         case TD_MOTOR:
+             /* Ignore but don't fail */
+             iotd->iotd_Req.io_Error = 0;
+             break;
+ 
++        case ETD_UPDATE:
++        case CMD_UPDATE:
++            /*
++             * A filesystem uses CMD_UPDATE as its write barrier. Answering it
++             * here would reply before the writes already queued on the unit
++             * port have run, and would never reach the backing file. Queue
++             * it behind them instead. Without a file there is nothing to
++             * flush.
++             */
++            if (unit->file == BNULL)
++            {
++                iotd->iotd_Req.io_Error = 0;
++                break;
++            }
++            PutMsg(&unit->port, &iotd->iotd_Req.io_Message);
++            iotd->iotd_Req.io_Flags &= ~IOF_QUICK;
++            return;
++
+         case ETD_READ:
+         case ETD_WRITE:
+         case ETD_FORMAT:
+@@ -426,7 +442,28 @@
+         buf  += subsize;
+         size -= subsize;
+     }
++
++    return 0;
++}
++
++/**************************************************************************/
+ 
++/*
++ * Write barrier: ask the handler that owns the backing file to commit its
++ * buffers. DOS has no per-file sync packet, so this is the handler-wide
++ * ACTION_FLUSH. A handler that does not know the action keeps the previous
++ * behaviour (success); every other failure is reported to the filesystem,
++ * which must not treat the barrier as passed.
++ */
++static LONG update(struct unit *unit)
++{
++    struct FileHandle *fh = (struct FileHandle *)BADDR(unit->file);
++
++    if (!unit->writable)
++        return 0;
++    if (!DoPkt(fh->fh_Type, ACTION_FLUSH, 0, 0, 0, 0, 0)
++        && IoErr() != ERROR_ACTION_NOT_KNOWN)
++        return error(IoErr());
+     return 0;
+ }
+ 
+@@ -592,6 +629,11 @@
+                         (iotd->iotd_Req.io_Command == CMD_WRITE)) ? "CMD_WRITE" : "TD_FORMAT"));
+                     err = write(unit, iotd);
+                     break;
++                case ETD_UPDATE:
++                case CMD_UPDATE:
++                    D(bug("[FDSK%02ld] received CMD_UPDATE.\n", unit->unitnum));
++                    err = update(unit);
++                    break;
+                 case TD_CHANGENUM:
+                     err = 0;
+                     iotd->iotd_Req.io_Actual = unit->changecount;
