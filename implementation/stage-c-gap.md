@@ -47,7 +47,11 @@ beyond the gates of the qualification document.
 
 L1 to L3 are provable on a development host that carries only stable Rust,
 Clang and the AROS source tree. L4 needs the MacAROS development machine
-named in [aros-native-bridge](../docs/aros-native-bridge.md). Apple hardware is
+named in [aros-native-bridge](../docs/aros-native-bridge.md), whose built AROS
+tree needs six things a build of it does not make; they are listed there under
+"Reproduce the Hosted target run" and applied by
+[`prepare-hosted-aros.sh`](../tools/prepare-hosted-aros.sh), which is what to
+run after every rebuild of that tree. Apple hardware is
 needed only where a row says so: a reset-durable transport, physical device
 timing and the performance budget.
 
@@ -108,7 +112,7 @@ Lacking, in the order classic software meets them:
 
 | Action | Missing piece | Layer where it starts |
 |---|---|---|
-| all of the above | target run: [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) with `AFSPlusDosProbe` exists and its package builds; it has not booted yet. QEMU and m68k sequences do not run it | L4 |
+| all of the above | the QEMU and m68k sequences do not run [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh); Hosted does, and passes | L4 |
 | one instance per unit on an SMP kernel | the claim relies on `Forbid()` for the port list | L4 |
 | `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |
 | `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |

@@ -43,6 +43,7 @@ numeric lock/file-handle and durability semantics.
 <!-- toc -->
 
 - [Reproduce the bridge qualification](#reproduce-the-bridge-qualification)
+- [Reproduce the Hosted target run](#reproduce-the-hosted-target-run)
 - [AArch64 platform profiles](#aarch64-platform-profiles)
 - [Trackdisk viewport](#trackdisk-viewport)
 - [Qualification diagnostics](#qualification-diagnostics)
@@ -100,6 +101,55 @@ changing what the link points to, remove those two paths and the
 The archive is looked up under `CARGO_TARGET_DIR` when that variable is set,
 otherwise under `target` in the repository; `AFSPLUS_AROS_RUST_ARCHIVE` names
 it explicitly.
+
+## Reproduce the Hosted target run
+
+The Hosted gates
+([`check-hosted-aros-alpha0.sh`](../tools/check-hosted-aros-alpha0.sh),
+[`check-hosted-aros-s1.sh`](../tools/check-hosted-aros-s1.sh),
+[`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh),
+[`check-aros-fdsk-ordering.sh`](../tools/check-aros-fdsk-ordering.sh)) run
+against a built Hosted AROS tree under `~/aros-build`, driven through
+MacAROS's `graft/aros-ctl`. That tree needs six things a build of it does not
+produce, and every one of them is lost when the tree is rebuilt:
+
+1. one local change in the fork clone, `rom/dos/createnewproc.c`, followed by
+   `make kernel-dos`. `CreateNewProc` makes a speculative `MEMF_31BIT`
+   allocation which runs the low-memory handlers; lddemon then expunges
+   `fdsk.device` in the middle of its own first open, and every gate dies
+   with `SIGILL`. The change asks for `MEMF_NO_EXPUNGE`. The patch is
+   [`native/aros/upstream/dos-createnewproc-noexpunge.patch`](../native/aros/upstream/dos-createnewproc-noexpunge.patch);
+   nothing is committed in the clone;
+2. `Libs/posixc.library` (`make compiler-posixc`), which the handler links
+   against. Without it the boot stops in a requester nothing can answer;
+3. `Devs/fdsk.device` (`make workbench-devs-fdsk`), the block device the
+   gates mount over an image file;
+4. the directory `AROS/S`. Without it the first boot has no place for a
+   startup script and hangs;
+5. the directory `AROS/DiskImages`, which the startup script assigns `FDSK:`
+   to; and
+6. `C:Mount` understanding the `SHUTDOWN` switch, which stops a handler
+   without dismounting it. The fork clone's command has no such switch; the
+   sibling `aros-apple-core` tree's has. The stock command is kept beside it
+   as `C:Mount.stock`, which is what the gates compare against.
+
+[`tools/prepare-hosted-aros.sh`](../tools/prepare-hosted-aros.sh) does all
+six, checks the result and is idempotent, so it is what to run after every
+build of the tree. It takes `AROS_BUILD`, `AROS_SOURCE`, `AROS_APPLE_CORE`,
+`AROS_CROSSTOOLS` and `AROS_BUILD_TOOLS`.
+
+Two rules about `PATH` that cost a day between them. A build of the AROS tree
+needs `$AROS_CROSSTOOLS/bin` first on `PATH`; a gate run must not have it
+there at all, or the gate's own host compilations pick up the AROS clang and
+fail looking for `collect-aros`. The gates otherwise want `CARGO_TARGET_DIR`,
+`AFSPLUS_AROS_SKIP_M68K_ABI=1` while no m68k SDK exists on the machine,
+`MACAROS_ROOT`, and `AROS_SOURCE` for the fdsk gate, which is the one gate
+that patches AROS and reverts it on every exit path.
+
+There is no headless mode: `aros-ctl` opens a Cocoa window, so the run needs
+a session that can. `aros-ctl tasks` dumps task backtraces of a live system
+and `aros-ctl shot` takes a screenshot, which is how a boot that stops in a
+requester is diagnosed; lldb attaches, the binary carrying `get-task-allow`.
 
 ## AArch64 platform profiles
 

@@ -12,6 +12,7 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-09-17 — Read today's ADRs as a stranger: which claims nothing held](#2026-09-17--read-todays-adrs-as-a-stranger-which-claims-nothing-held)
 - [2026-09-17 — Hold the claim ADR-115 made about explain](#2026-09-17--hold-the-claim-adr-115-made-about-explain)
 
+- [2026-09-17 — What a rebuilt AROS tree loses, written down and applied](#2026-09-17--what-a-rebuilt-aros-tree-loses-written-down-and-applied)
 - [2026-09-17 — A round of handler work costs nothing](#2026-09-17--a-round-of-handler-work-costs-nothing)
 - [2026-09-17 — The feature registry lists what exists (ADR-116)](#2026-09-17--the-feature-registry-lists-what-exists-adr-116)
 - [2026-09-17 — Retire what nothing writes (ADR-115)](#2026-09-17--retire-what-nothing-writes-adr-115)
@@ -214,6 +215,35 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-17 — What a rebuilt AROS tree loses, written down and applied
+
+The Hosted gates run against a built AROS tree under `~/aros-build`, and that
+tree needs six things a build of it does not produce: the one local change in
+the fork clone that stops `CreateNewProc` expunging `fdsk.device` during its
+own first open, `posixc.library`, `fdsk.device`, the directories `AROS/S` and
+`AROS/DiskImages`, and a `C:Mount` that understands `SHUTDOWN`. Each was
+found by a failure, over a day, and each was applied by hand. A rebuild of
+the tree loses all six, and nobody who was not here could have known.
+
+They are now listed in
+[aros-native-bridge](docs/aros-native-bridge.md), each with the failure it
+prevents, and applied by
+[`tools/prepare-hosted-aros.sh`](tools/prepare-hosted-aros.sh), which checks
+its result and is idempotent, so it is what to run after every build.
+
+The `Mount` step is the interesting one: the switch exists in the sibling
+`aros-apple-core` tree and not in the fork, so the script puts that one file
+in the fork's place, builds through the fork's own rule, and takes it out
+again on every exit path -- the same shape as the fdsk gate. It was verified
+by putting the stock command back and letting the script rebuild it: the
+result answers `SHUTDOWN/S` and the clone is left carrying only the change it
+is supposed to carry.
+
+The two `PATH` rules that cost a day between them are written down beside
+them: a build of the tree wants the crosstools first on `PATH`, and a gate
+run must not have them there at all, or the gate's host compilations pick up
+the AROS clang.
 
 ## 2026-09-17 — A round of handler work costs nothing
 
