@@ -311,10 +311,33 @@ the protection and start no orphan cleanup, which waits, visible in the
 health snapshot, until the volume is unprotected. `ACTION_DISK_INFO` reports
 the protected state, and nothing is written to the volume for it.
 
+One handler instance serves a backing device unit, whatever dos.library
+starts. `RunHandler()` does not serialise its callers, and Mount defers the
+start to the first access, so two tasks that make their first access together
+each get a handler process; on a target this happened in every run of the
+two-task record probe. The instance that comes first publishes a claim, a
+public port named after the device and unit it is about to open, before it
+opens them ([`afsplus_claim.h`](../native/aros/afsplus_claim.h)). The key is
+the medium, so a second DOS name for the same unit meets the same claim. A
+later instance opens nothing, reports its startup as success and leaves
+`dn_Task` alone, because a refused startup makes `RunHandler()` clear
+`dn_Task`, which by then may be the first instance's. It forwards the packets
+of the one caller that was handed its port, looks the claim up for every
+packet under `Forbid()` together with the `PutMsg()`, and ends with the
+instance it serves: when that instance releases the claim it wakes its
+forwarders, and a forwarder also ends on a packet it can no longer forward,
+which it answers `ERROR_DEVICE_NOT_MOUNTED`, and after passing on an
+`ACTION_DIE`. It never serves a later instance, whose locks and files are
+not the ones its caller's packets name, and it never mounts the volume
+itself. A claim whose owner is no longer a task is withdrawn by whoever finds
+it. `Forbid()` makes lookup and publication one step on the uniprocessor
+kernels AROS ships; an SMP exec.library would need a lock of its own here.
+
 Record locks are advisory byte ranges in a bounded in-memory table, owned
 by a file handle and released when it closes. Two ranges collide when they
 overlap, belong to different handles of one object and at least one is
-exclusive. The filesystem never waits: a taken range is
+exclusive. A handle's request that overlaps its own record is granted; a
+target run shows dos.library passing such a request on unchanged. The filesystem never waits: a taken range is
 `ERROR_LOCK_COLLISION`. Waiting belongs to the packet layer. A waiting mode
 with a nonzero `dp_Arg5` keeps the packet: `afsplus_aros_packet_process`
 returns `AFSPLUS_AROS_PACKET_DEFERRED`, stores no result, and the handler

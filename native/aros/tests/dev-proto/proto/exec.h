@@ -32,6 +32,9 @@ LONG OpenDevice(CONST_STRPTR devName, IPTR unitNumber,
 void CloseDevice(struct IORequest *iORequest);
 LONG DoIO(struct IORequest *iORequest);
 void Forbid(void);
+struct MsgPort *FindPort(CONST_STRPTR name);
+void AddPort(struct MsgPort *port);
+void RemPort(struct MsgPort *port);
 APTR AllocVec(IPTR size, ULONG requirements);
 void FreeVec(APTR memory);
 void Permit(void);

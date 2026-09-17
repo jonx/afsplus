@@ -32,6 +32,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "afsplus_claim.h"
 #include "afsplus_packet.h"
 #include "afsplus_trackdisk.h"
 
@@ -990,85 +991,6 @@ static struct AfsplusArosHandler *initialize_handler(struct ExecBase *SysBase,
     return handler;
 }
 
-/*
- * One instance per device node.
- *
- * dos.library starts a handler from RunHandler() when dn_Task is NULL, without
- * serialising its callers: Mount defers the start to the first access, and two
- * tasks that make their first access together each get a handler process.
- * Two instances on one volume are two writers on one image. So the instance
- * that comes first publishes a claim, a public port named after the address
- * of its DeviceNode, before it touches the device. An instance that finds the
- * claim opens nothing. Failing its startup would not do: RunHandler() then
- * clears dn_Task, which by now may be the first instance's, and the next
- * access would start a third. It reports success, leaves dn_Task alone, and
- * forwards the packets that reach its own port, which are those of the one
- * caller RunHandler() handed that port to, to the claimed instance. A
- * DosPacket can be forwarded: the reply goes to dp_Port.
- */
-struct AfsplusArosClaim {
-    struct MsgPort port;
-    struct MsgPort *handler_port;
-    char name[8 + 2 * sizeof(IPTR) + 1];
-};
-
-static void claim_name(char *name, const struct DosList *node)
-{
-    static const char prefix[] = "AFSPLUS.";
-    static const char digits[] = "0123456789abcdef";
-    IPTR value = (IPTR)node;
-    size_t at = sizeof(prefix) - 1;
-    int shift;
-
-    memcpy(name, prefix, at);
-    for (shift = (int)(8 * sizeof(IPTR)) - 4; shift >= 0; shift -= 4)
-        name[at++] = digits[(value >> shift) & 15];
-    name[at] = 0;
-}
-
-/* Publishes the claim, or returns NULL when the node is already claimed or
- * no memory is left; *claimed tells the two apart. */
-static struct AfsplusArosClaim *claim_device_node(struct ExecBase *SysBase,
-    const struct DosList *node, struct MsgPort *handler_port,
-    uint32_t *claimed)
-{
-    struct AfsplusArosClaim *claim = AllocMem(sizeof(*claim),
-        MEMF_PUBLIC | MEMF_CLEAR);
-
-    *claimed = 0;
-    if (claim == NULL)
-        return NULL;
-    claim_name(claim->name, node);
-    claim->handler_port = handler_port;
-    claim->port.mp_Node.ln_Type = NT_MSGPORT;
-    claim->port.mp_Node.ln_Name = claim->name;
-    claim->port.mp_Flags = PA_IGNORE;
-    NEWLIST(&claim->port.mp_MsgList);
-    Forbid();
-    if (FindPort((CONST_STRPTR)claim->name) != NULL)
-        *claimed = 1;
-    else
-        AddPort(&claim->port);
-    Permit();
-    if (*claimed)
-    {
-        FreeMem(claim, sizeof(*claim));
-        return NULL;
-    }
-    return claim;
-}
-
-static void release_device_node(struct ExecBase *SysBase,
-    struct AfsplusArosClaim *claim)
-{
-    if (claim == NULL)
-        return;
-    Forbid();
-    RemPort(&claim->port);
-    Permit();
-    FreeMem(claim, sizeof(*claim));
-}
-
 /* Answers what is still queued on a port nobody will serve again. */
 static void refuse_queued_packets(struct ExecBase *SysBase,
     struct MsgPort *port)
@@ -1088,42 +1010,75 @@ static void refuse_queued_packets(struct ExecBase *SysBase,
     }
 }
 
-/* The life of an instance that found its node claimed. The claim is looked
- * up for every packet, under Forbid() together with the PutMsg(), so a
- * claimed instance that has gone, or been restarted, is never a stale
- * pointer. It never ends: the port it serves was handed out by dos.library,
- * and nothing says when its last holder is done with it. */
-static LONG forward_to_claimed_instance(struct ExecBase *SysBase,
-    struct MsgPort *port, const struct DosList *node)
+/* afsplus_claim.h: whether the owner of a claim is still a task of this
+ * system. Called under Forbid(), which is what keeps the lists still. A task
+ * that crashed is on neither list; the running task is on neither as well. */
+uint32_t afsplus_claim_owner_alive(struct ExecBase *SysBase,
+    const struct Task *task)
 {
-    char name[sizeof(((struct AfsplusArosClaim *)NULL)->name)];
-    struct Message *message;
+    const struct Node *node;
 
-    claim_name(name, node);
-    for (;;)
+    if (task == NULL)
+        return 0;
+    if (task == SysBase->ThisTask)
+        return 1;
+    for (node = SysBase->TaskReady.lh_Head; node->ln_Succ != NULL;
+        node = node->ln_Succ)
+        if ((const struct Task *)node == task)
+            return 1;
+    for (node = SysBase->TaskWait.lh_Head; node->ln_Succ != NULL;
+        node = node->ln_Succ)
+        if ((const struct Task *)node == task)
+            return 1;
+    return 0;
+}
+
+/* The life of an instance that found its unit claimed: see afsplus_claim.h.
+ * A packet is not touched again once it has been forwarded; it belongs to
+ * the other instance then. The forwarder ends with the instance it serves,
+ * or with the ACTION_DIE it passed on, after answering what is still queued:
+ * the one caller that holds this port got it for one operation. */
+static LONG forward_to_claimed_instance(struct ExecBase *SysBase,
+    struct MsgPort *port, const char *claim_name, uint64_t generation)
+{
+    struct Task *self = FindTask(NULL);
+    struct Message *message;
+    uint32_t serving;
+
+    /* Enrolled so that the instance wakes this task when it goes. */
+    serving = afsplus_claim_enroll(SysBase, claim_name, generation, self, 1);
+    while (serving)
     {
-        WaitPort(port);
-        while ((message = GetMsg(port)) != NULL)
+        Wait((1UL << port->mp_SigBit) | AFSPLUS_CLAIM_WAKE_SIGNAL);
+        /* Woken by the instance's release, or by a packet: either way the
+         * instance it serves may be gone. */
+        serving = afsplus_claim_enroll(SysBase, claim_name, generation, self,
+            1);
+        while (serving && (message = GetMsg(port)) != NULL)
         {
             struct DosPacket *packet =
                 (struct DosPacket *)message->mn_Node.ln_Name;
-            struct AfsplusArosClaim *claim;
+            LONG action;
 
             if (packet == NULL)
                 continue;
-            Forbid();
-            claim = (struct AfsplusArosClaim *)FindPort((CONST_STRPTR)name);
-            if (claim != NULL)
-                PutMsg(claim->handler_port, message);
-            Permit();
-            if (claim == NULL)
+            /* Read before the packet changes hands. */
+            action = packet->dp_Type;
+            if (!afsplus_claim_forward(SysBase, claim_name, generation,
+                    message))
             {
                 packet->dp_Res1 = DOSFALSE;
                 packet->dp_Res2 = ERROR_DEVICE_NOT_MOUNTED;
                 reply_packet(port, SysBase, packet);
+                serving = 0;
             }
+            else if (action == ACTION_DIE)
+                serving = 0;
         }
     }
+    (void)afsplus_claim_enroll(SysBase, claim_name, generation, self, 0);
+    refuse_queued_packets(SysBase, port);
+    return RETURN_OK;
 }
 
 LONG handler(struct ExecBase *SysBase)
@@ -1134,9 +1089,11 @@ LONG handler(struct ExecBase *SysBase)
     struct Message *message;
     struct DosPacket *packet;
     struct DosPacket *death_packet = NULL;
-    struct AfsplusArosClaim *claim;
-    struct DosList *claimed_node;
-    uint32_t already_claimed = 0;
+    struct AfsplusArosClaim *claim = NULL;
+    struct FileSysStartupMsg *claimed_startup;
+    char claim_name[AFSPLUS_CLAIM_NAME_BYTES];
+    uint64_t held_generation = 0;
+    uint32_t claim_result;
     int32_t error = ERROR_NO_FREE_STORE;
     uint32_t quit = 0;
 
@@ -1151,22 +1108,40 @@ LONG handler(struct ExecBase *SysBase)
         return RETURN_FAIL;
     packet = (struct DosPacket *)message->mn_Node.ln_Name;
 
-    claimed_node = BADDR(packet->dp_Arg3);
-    claim = claim_device_node(SysBase, claimed_node, port, &already_claimed);
-    if (already_claimed)
+    /* The unit is claimed before anything opens it. A startup message that
+     * names no device is left to initialize_handler() to refuse. */
+    claimed_startup = (struct FileSysStartupMsg *)BADDR(packet->dp_Arg2);
+    if (claimed_startup != NULL && (IPTR)packet->dp_Arg2 >= 64
+        && claimed_startup->fssm_Device != BNULL)
     {
-        bug("[AFSPLUS] another instance serves this device; forwarding\n");
-        packet->dp_Res1 = DOSTRUE;
-        packet->dp_Res2 = 0;
-        reply_packet(port, SysBase, packet);
-        return forward_to_claimed_instance(SysBase, port, claimed_node);
-    }
-    if (claim == NULL)
-    {
-        packet->dp_Res1 = DOSFALSE;
-        packet->dp_Res2 = ERROR_NO_FREE_STORE;
-        reply_packet(port, SysBase, packet);
-        return RETURN_FAIL;
+        const uint8_t *device = (const uint8_t *)AROS_BSTR_ADDR(
+            claimed_startup->fssm_Device);
+
+        if (!afsplus_claim_name(claim_name, device,
+                (uint32_t)strlen((const char *)device),
+                (uint64_t)claimed_startup->fssm_Unit))
+            claim_result = AFSPLUS_CLAIM_NAME_TOO_LONG;
+        else
+            claim_result = afsplus_claim_take(SysBase, claim_name,
+                &process->pr_Task, port, &claim, &held_generation);
+        if (claim_result == AFSPLUS_CLAIM_ALREADY_HELD)
+        {
+            bug("[AFSPLUS] %s is served by another instance; forwarding\n",
+                claim_name);
+            packet->dp_Res1 = DOSTRUE;
+            packet->dp_Res2 = 0;
+            reply_packet(port, SysBase, packet);
+            return forward_to_claimed_instance(SysBase, port, claim_name,
+                held_generation);
+        }
+        if (claim_result != AFSPLUS_CLAIM_TAKEN)
+        {
+            packet->dp_Res1 = DOSFALSE;
+            packet->dp_Res2 = claim_result == AFSPLUS_CLAIM_NO_MEMORY
+                ? ERROR_NO_FREE_STORE : ERROR_OBJECT_TOO_LARGE;
+            reply_packet(port, SysBase, packet);
+            return RETURN_FAIL;
+        }
     }
 
     state = initialize_handler(SysBase, process, packet, &error);
@@ -1186,7 +1161,7 @@ LONG handler(struct ExecBase *SysBase)
             cleanup_handler(state);
         /* No forwarder may find this instance any more, and what one has
          * already queued here gets an answer. */
-        release_device_node(SysBase, claim);
+        afsplus_claim_release(SysBase, claim);
         refuse_queued_packets(SysBase, port);
         reply_packet(port, SysBase, packet);
         return RETURN_FAIL;
@@ -1247,7 +1222,7 @@ LONG handler(struct ExecBase *SysBase)
      * nobody serves. No lock or file exists at this point, so each of them
      * names the volume only, and the volume is going away. The claim goes
      * first, so that no forwarder queues another one behind this sweep. */
-    release_device_node(SysBase, claim);
+    afsplus_claim_release(SysBase, claim);
     refuse_queued_packets(SysBase, port);
 
     /* Keep the ACTION_DIE sender blocked until every handler-owned reference

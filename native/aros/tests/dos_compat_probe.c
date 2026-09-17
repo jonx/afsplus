@@ -165,8 +165,9 @@ static int probe_soft_link(void)
 
 static int probe_exall(void)
 {
-    /* Small on purpose: two entries with comments need a continuation. */
-    union { UBYTE bytes[160]; struct ExAllData align; } buffer;
+    /* Small on purpose: one ED_COMMENT record with its strings fits, two do
+     * not, so the second entry needs a continuation. */
+    union { UBYTE bytes[104]; struct ExAllData align; } buffer;
     struct ExAllControl *control;
     struct ExAllData *entry;
     BPTR lock;
@@ -219,6 +220,8 @@ static int probe_exall(void)
     if (total != 2 || seen_note != 1 || seen_alias != 1)
         return fail("ExAll entries", (SIPTR)total);
     Printf("[AFSPLUS-DOS] ExAll calls %lu\n", calls);
+    if (calls < 2)
+        return fail("ExAll continuation not exercised", (SIPTR)calls);
     return RETURN_OK;
 }
 
@@ -487,10 +490,20 @@ static LONG now_ticks(void)
 static int hold_record(void)
 {
     BPTR file = Open(RECORDS, MODE_READWRITE);
+    int tries;
 
     if (file == BNULL)
         return fail("HOLDER open", DOSFALSE);
-    if (!LockRecord(file, 0, 10, REC_EXCLUSIVE_IMMED, 0))
+
+    /* The waiter polls the same record and holds it for an instant at a
+     * time, so one attempt can lose to it. */
+    for (tries = 0; tries < 200; tries++)
+    {
+        if (LockRecord(file, 0, 10, REC_EXCLUSIVE_IMMED, 0))
+            break;
+        Delay(1);
+    }
+    if (tries == 200)
     {
         Close(file);
         return fail("HOLDER LockRecord", DOSFALSE);

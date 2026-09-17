@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Run the handler on AROS for the first time](#2026-09-17--run-the-handler-on-aros-for-the-first-time)
 - [2026-09-17 — A selected checkpoint in the wrong form refuses the volume, in C too](#2026-09-17--a-selected-checkpoint-in-the-wrong-form-refuses-the-volume-in-c-too)
 - [2026-09-17 — A second reader for the snapshot checkpoint payload (ADR-111)](#2026-09-17--a-second-reader-for-the-snapshot-checkpoint-payload-adr-111)
 - [2026-09-17 — Exact admission for the reclaim queue blocks (ADR-110)](#2026-09-17--exact-admission-for-the-reclaim-queue-blocks-adr-110)
@@ -214,6 +215,39 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+## 2026-09-17 — Run the handler on AROS for the first time
+
+A hosted darwin-aarch64 AROS was built on the development Mac and the three
+Hosted gates ran against it: S0, S1 and the DOS semantics gate all passed by
+the end of the day. None of what stood in the way was visible from a host
+test. The build had no `S` directory and no `posixc.library`, which the Rust
+standard library port opens at startup; the generated handler entry answers a
+missing library with a requester, so the first access hung instead of
+failing. Then `fdsk.device` died with an illegal instruction at addresses
+whose bytes on disk were valid code. A debugger attached to the hosted
+process showed zeros there, and a logging breakpoint on `munmap` showed the
+device's code page being unmapped from inside its own first open:
+`CreateNewProc()` tries a 31-bit allocation that cannot succeed on this host,
+the failure runs the low-memory handlers, and lddemon expunges every device
+with an open count of zero, the one being opened included. aros-apple-core
+had the one-line fix; the fork got it as a local patch.
+
+The DOS gate then passed its first boot, and its packet table, the handler's
+own count of what dos.library sent, showed an adapter error number that
+disagreed with `dos/dos.h` (`ERROR_COMMENT_TOO_BIG` is 220). Every adapter
+error is now held to the header from both sides by one list. Its second boot
+found the serious one: two handler tasks on one image. `RunHandler()` does not
+serialise its callers, and two tasks that make their first access together
+each get an instance. AFS+ now claims the backing device unit before opening
+it; a later instance forwards its caller's packets and ends with the instance
+it serves. An independent review of the first version found four edge
+defects, among them that failing a second instance's startup makes
+dos.library clear the first one's `dn_Task`; the claim became a unit with a
+host matrix for those cases. On the target the double start still happens in
+every run of that boot and is harmless, and a dismount leaves no handler task
+behind. The generic fix was written as a patch, built and run: one handler
+task in every run. It is not applied in the gate tree, so the gates keep
+exercising the defence that does not depend on it.
 ## 2026-09-17 — A selected checkpoint in the wrong form refuses the volume, in C too
 
 Follow-up to ADR-111, asked by claude-main: bind the checkpoint's payload form

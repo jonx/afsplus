@@ -100,12 +100,12 @@ Lacking, in the order classic software meets them:
 | Action | Missing piece | Layer where it starts |
 |---|---|---|
 | all of the above | target run: [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) with `AFSPlusDosProbe` exists and its package builds; it has not booted yet. QEMU and m68k sequences do not run it | L4 |
-| record lock self-overlap | a handle does not collide with its own range; unverified against rom/dos `LockRecord` and a reference handler until a target run | L4 |
-| `ACTION_LOCK_RECORD` waiting modes | present at L3 (deferred packet, retry on release, tick expiry; packet ABI 4) and compiled into the shell with `timer.device`; a grant after a release needs two tasks on a target, which no probe drives yet | L4 |
+| handler startup with a missing library | the generated entry opens its libraries before any AFS+ code runs, and a failure shows a requester that waits for a click: the first access hangs instead of failing the mount (seen with `posixc.library` absent). Open the libraries in the shell with a failure path, or start with `pr_WindowPtr` at -1 so no requester can block a handler | L4 |
+| one instance per unit on an SMP kernel | the claim relies on `Forbid()` for the port list | L4 |
 | `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |
 | `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |
 
-Hosted and QEMU: every row. Apple hardware: none.
+Proven on Hosted darwin-aarch64 by [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh): the setters, the comment, soft links, `ExAll`, `OpenFromLock`, `ChangeMode`, record locks with a grant by a second task's release, the owed `NRF_WAIT_REPLY` notification, a dismount with a message never replied, `Relabel`, and one instance per unit under dos.library's double start. QEMU and m68k: every row. Apple hardware: none.
 
 ## C3. Classic single-user security preservation adapter
 

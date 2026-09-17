@@ -1,0 +1,19 @@
+diff --git a/rom/dos/createnewproc.c b/rom/dos/createnewproc.c
+index 58680c0dfc..7d05de4458 100644
+--- a/rom/dos/createnewproc.c
++++ b/rom/dos/createnewproc.c
+@@ -189,7 +189,13 @@ void internal_ChildFree(APTR tid, struct DosLibrary * DOSBase);
+      * Additionally, it's horribly bad practice to support broken software this way.
+      */
+ #if __WORDSIZE > 32
+-    process = AllocMem(sizeof(struct Process), MEMF_PUBLIC | MEMF_31BIT | MEMF_CLEAR);
++    /* MEMF_NO_EXPUNGE: on machines with no 31-bit memory at all this
++     * speculative attempt always fails, and a failing AllocMem() runs the
++     * low-memory handlers. lddemon's handler expunges every library and
++     * device whose open count is zero, which includes a device that calls
++     * CreateNewProc() from its own first open (fdsk.device): its code was
++     * unloaded while it was running. */
++    process = AllocMem(sizeof(struct Process), MEMF_PUBLIC | MEMF_31BIT | MEMF_CLEAR | MEMF_NO_EXPUNGE);
+     if (!process)
+ #endif
+     process = AllocMem(sizeof(struct Process), MEMF_PUBLIC | MEMF_CLEAR);

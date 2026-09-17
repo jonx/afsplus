@@ -1,0 +1,119 @@
+diff --git a/rom/dos/runhandler.c b/rom/dos/runhandler.c
+index 2bc3247b62..47d81eb4d0 100644
+--- a/rom/dos/runhandler.c
++++ b/rom/dos/runhandler.c
+@@ -23,7 +23,100 @@
+  */
+ void BCPL_RunHandler(void);
+ 
++/*
++ * One start per DeviceNode at a time.
++ *
++ * GetDeviceProc() calls RunHandler() when dn_Task is NULL. Mount defers the
++ * start of a handler to the first access, so two tasks that make their first
++ * access to a device together both arrive here, and each used to create a
++ * handler process: two instances of a filesystem on one medium. A caller
++ * that finds a start of the same node in progress now waits for it and
++ * takes its result. Starts of different nodes stay independent, because a
++ * handler may open files on other volumes while it starts.
++ */
++struct HandlerStart
++{
++    struct MinNode          hs_Node;
++    struct DeviceNode      *hs_DeviceNode;
++    struct SignalSemaphore  hs_Done;    /* held by the starter until it is done */
++    ULONG                   hs_Users;   /* the starter and its waiters */
++};
++
++static struct MinList handlerStarts;
++static BOOL handlerStartsReady;
++
++static void DropHandlerStart(struct HandlerStart *start)
++{
++    BOOL last;
++
++    Forbid();
++    last = --start->hs_Users == 0;
++    Permit();
++    if (last)
++        FreeMem(start, sizeof(*start));
++}
++
++static struct MsgPort *StartHandler(struct DeviceNode *deviceNode, const char *path, struct DosLibrary *DOSBase);
++
+ struct MsgPort *RunHandler(struct DeviceNode *deviceNode, const char *path, struct DosLibrary *DOSBase)
++{
++    struct HandlerStart *mine, *start, *running = NULL;
++    struct MsgPort *port;
++
++    mine = AllocMem(sizeof(*mine), MEMF_PUBLIC | MEMF_CLEAR);
++    if (mine == NULL)
++        return NULL;
++    mine->hs_DeviceNode = deviceNode;
++    mine->hs_Users = 1;
++    InitSemaphore(&mine->hs_Done);
++    /* Owned before it is published, so this never waits. */
++    ObtainSemaphore(&mine->hs_Done);
++
++    Forbid();
++    if (!handlerStartsReady)
++    {
++        NEWLIST((struct List *)&handlerStarts);
++        handlerStartsReady = TRUE;
++    }
++    ForeachNode(&handlerStarts, start)
++    {
++        if (start->hs_DeviceNode == deviceNode)
++        {
++            running = start;
++            running->hs_Users++;
++            break;
++        }
++    }
++    if (running == NULL)
++        AddTail((struct List *)&handlerStarts, (struct Node *)&mine->hs_Node);
++    Permit();
++
++    if (running != NULL)
++    {
++        ReleaseSemaphore(&mine->hs_Done);
++        FreeMem(mine, sizeof(*mine));
++        /* Wait for the start in progress and take what it achieved. */
++        ObtainSemaphore(&running->hs_Done);
++        ReleaseSemaphore(&running->hs_Done);
++        port = deviceNode->dn_Task;
++        DropHandlerStart(running);
++        return port;
++    }
++
++    /* A start that finished between the caller's look at dn_Task and here. */
++    port = deviceNode->dn_Task;
++    if (port == NULL)
++        port = StartHandler(deviceNode, path, DOSBase);
++
++    Forbid();
++    Remove((struct Node *)&mine->hs_Node);
++    Permit();
++    ReleaseSemaphore(&mine->hs_Done);
++    DropHandlerStart(mine);
++    return port;
++}
++
++static struct MsgPort *StartHandler(struct DeviceNode *deviceNode, const char *path, struct DosLibrary *DOSBase)
+ {
+         D(struct FileSysStartupMsg *fssm = NULL;)
+         struct DosPacket *dp;
+@@ -171,8 +264,12 @@ struct MsgPort *RunHandler(struct DeviceNode *deviceNode, const char *path, stru
+         if (dp->dp_Res1 == DOSFALSE)
+         {
+             D(bug("[RunHandler] handler failed startup [%d]\n", dp->dp_Res2));
++            /* Some handlers (e.g. SFS) don't clear dn_Task upon failure. Only
++               the port of the process that failed is cleared: another value
++               is a live handler's. */
++            if (process != NULL && deviceNode->dn_Task == &process->pr_MsgPort)
++                deviceNode->dn_Task = NULL;
+             process = NULL;
+-            deviceNode->dn_Task = NULL; /* Some handlers (e.g. SFS) don't clear dn_Task upon failure. */
+         }
+             D(else bug("[RunHandler] '%b' now online, dn_Task 0x%p, pr_MsgPort 0x%p\n", deviceNode->dn_Name, deviceNode->dn_Task, &process->pr_MsgPort);)
+ 

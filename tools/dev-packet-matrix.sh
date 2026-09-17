@@ -79,6 +79,9 @@ run_matrix trackdisk-stub native/aros/afsplus_trackdisk.c \
 echo "[dev-packet] extension-packet client matrix (source headers, faked dos.library)"
 run_matrix client-stub -I native/aros/tests/dev-proto \
     native/aros/client/afsplus_client.c native/aros/tests/client_stub.c
+echo "[dev-packet] one-instance claim matrix (source headers, faked exec.library)"
+run_matrix claim-stub -I native/aros/tests/dev-proto \
+    native/aros/afsplus_claim.c native/aros/tests/claim_stub.c
 echo "[dev-packet] byte-copy fallback matrix (source headers, faked dos.library)"
 run_matrix copy-stub -I native/aros/tests/dev-proto \
     native/aros/client/afsplus_copy.c native/aros/tests/copy_stub.c
