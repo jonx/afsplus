@@ -133,7 +133,11 @@ fn independent_c_codec_agrees_on_object_admission_and_the_security_container() {
                 let mut block = plain.clone();
                 block[HEADER_SIZE + 96..HEADER_SIZE + 96 + extra].fill(fill);
                 reseal(&mut block, block_type::OBJECT, 0, (96 + extra) as u32);
-                references.push((format!("{kind:?} payload +{extra} fill {fill}"), block, None));
+                references.push((
+                    format!("{kind:?} payload +{extra} fill {fill}"),
+                    block,
+                    None,
+                ));
             }
         }
         for offset in [HEADER_SIZE + 96, size / 2, size - 1] {

@@ -93,6 +93,23 @@ read semantics. A flagged directory, an unknown object flag, or a flagged file
 on a volume without `AFSPR_COMPAT_DATA_POLICY` is corruption rather than an
 ignored policy.
 
+Object admission is exact, as in the Rust decoder: zero common-header flags,
+a payload of exactly 96 bytes for a file or a directory, 112 bytes when the
+record carries `AFSPR_OBJECT_FLAG_SECURITY_REF`, the inline target after
+either length for a symlink, and a zero tail. The 16-byte security reference
+is validated (nonzero first segment, length of 1 to 65,536 bytes, the segment
+count that length implies, assigned reference flags) and, on the volume path,
+requires `AFSP_INCOMPAT_SECURITY_DESCRIPTORS` and an allocatable first
+segment. `afspr_decode_security_reference` and
+`afspr_decode_security_segment` are standalone, heap-free decoders for the
+reference of a record and for one `"AFSX"` segment. The reader preserves
+these bytes and never evaluates them; the writer appends intent records only
+and rewrites no object record, so it cannot drop a reference.
+[`security_c.rs`](../../crates/afsplus-format/tests/security_c.rs) holds the
+per-image agreement of the C codec, the Rust codec and a literal expectation,
+and [the volume test](../../crates/afsplus-check/tests/security_c.rs) the same
+agreement on objects of real images.
+
 Every reader operation is read-only, allocation-free and bounded by the
 tree-height or configured log-slot cap. The data destination and scratch
 buffer must not overlap. `AFSPR_CAP_FILE_READ` names the selected checkpoint

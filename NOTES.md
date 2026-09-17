@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Bring the portable C reader to exact admission and the security container](#2026-09-17--bring-the-portable-c-reader-to-exact-admission-and-the-security-container)
 - [2026-09-17 — Grow the AROS C boundary to interface revision 7](#2026-09-17--grow-the-aros-c-boundary-to-interface-revision-7)
 - [2026-09-17 — Decide clone metadata inheritance and leave the clone source untouched](#2026-09-17--decide-clone-metadata-inheritance-and-leave-the-clone-source-untouched)
 - [2026-09-17 — Carry opaque security descriptors through every object rewrite](#2026-09-17--carry-opaque-security-descriptors-through-every-object-rewrite)
@@ -176,6 +177,32 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+
+## 2026-09-17 — Bring the portable C reader to exact admission and the security container
+
+The portable C reader shares the object admission rule of the Rust decoder.
+One shape check serves its generic and its symlink decoder: exact payload
+length by the security-reference flag, a well-formed 16-byte reference and a
+zero tail. Before it the C reader refused common-header flags and admitted a
+longer payload and a nonzero tail, and it failed closed on object flag bit 2.
+The volume path requires INCOMPAT bit 3 and an allocatable first segment for a
+reference. Two standalone heap-free decoders return the reference of a record
+and one `"AFSX"` segment. The C writer appends intent records and rewrites no
+object record, so it has no path that drops a reference.
+
+`crates/afsplus-format/tests/security_c.rs` drives a C probe over 67 object
+images and 10 segment images in a strict and a sanitizer build; the C
+verdict, the Rust verdict and a literal expectation agree on each, every
+shorter buffer is refused, outputs stay untouched on error, and a wrong
+expectation makes the probe report a mismatch.
+`crates/afsplus-check/tests/security_c.rs` checks the same agreement through
+`afspr_lookup_object` on real images: a secured file, directory, symlink and
+root, a plain file beside them, resealed 104-byte payload and nonzero tail,
+and a forged reference on a volume without the feature. One difference
+remains by design of the two lookups: the C volume path bounds the first
+segment block at lookup, the Rust lookup carries the reference unread and
+bounds it when the chain is walked.
 
 ## 2026-09-17 — Grow the AROS C boundary to interface revision 7
 
