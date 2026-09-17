@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(8)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(9)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -367,6 +367,13 @@ int32_t afsplus_aros_change_lock_mode(struct AfsplusAros *filesystem,
     uint64_t lock, uint32_t access);
 int32_t afsplus_aros_change_file_mode(struct AfsplusAros *filesystem,
     uint64_t file, uint32_t access);
+/* Interface revision 9, same group. Runtime write protection for the mount's
+ * lifetime: protecting flushes, then every mutating call answers
+ * ERROR_DISK_WRITE_PROTECTED until protect == 0 arrives with the same key. A
+ * zero stored key accepts any key. A wrong key is
+ * ERROR_DISK_WRITE_PROTECTED and changes nothing. */
+int32_t afsplus_aros_set_write_protect(struct AfsplusAros *filesystem,
+    uint32_t protect, uint32_t key);
 
 /* Group AFSPLUS_AROS_GROUP_SOFT_LINKS. The target is an opaque path in the
  * mount's name encoding. Locate and open answer ERROR_IS_SOFT_LINK for a

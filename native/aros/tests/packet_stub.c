@@ -49,6 +49,9 @@ static struct NotifyRequest second;
 static struct NotifyRequest *delivered[8];
 static uint32_t delivered_count;
 static uint64_t stub_groups = UINT64_C(0x22F);
+static uint32_t stub_revision = AFSPLUS_AROS_INTERFACE_REVISION;
+static uint32_t stub_protect;
+static uint32_t stub_protect_key;
 static int32_t stub_open_from_lock_error;
 static int32_t stub_change_mode_error;
 static uint32_t stub_changed_access;
@@ -469,7 +472,7 @@ int32_t afsplus_aros_interface(struct AfsplusArosInterface *output)
 {
     assert(output->struct_size == sizeof(*output));
     output->abi_version = AFSPLUS_AROS_ABI_VERSION;
-    output->interface_revision = AFSPLUS_AROS_INTERFACE_REVISION;
+    output->interface_revision = stub_revision;
     output->groups = stub_groups;
     return 0;
 }
@@ -597,6 +600,18 @@ int32_t afsplus_aros_change_file_mode(struct AfsplusAros *filesystem,
     record('M', file, NULL, 0, access);
     stub_changed_access = access;
     return stub_change_mode_error;
+}
+
+int32_t afsplus_aros_set_write_protect(struct AfsplusAros *filesystem,
+    uint32_t protect, uint32_t key)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    record('w', 0, NULL, 0, protect);
+    if (!protect && key != stub_protect_key)
+        return ERROR_DISK_WRITE_PROTECTED;
+    stub_protect = protect;
+    stub_protect_key = key;
+    return 0;
 }
 
 static void assert_event(size_t index, char operation, const char *name,
@@ -1205,6 +1220,38 @@ int main(void)
         packet.dp_Arg1 = from_lock.fh_Arg1;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res1 == DOSTRUE && close_count == closes + 1);
+    }
+
+    /* C2: ACTION_WRITE_PROTECT carries the flag and the 32-bit pass key. */
+    initialize_packet(&packet, ACTION_WRITE_PROTECT);
+    packet.dp_Arg1 = DOSTRUE;
+    packet.dp_Arg2 = (SIPTR)UINT32_C(0xC0FFEE42);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert(stub_protect == 1 && stub_protect_key == UINT32_C(0xC0FFEE42));
+    packet.dp_Arg1 = DOSFALSE;
+    packet.dp_Arg2 = 1;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE
+        && packet.dp_Res2 == ERROR_DISK_WRITE_PROTECTED);
+    assert(stub_protect == 1);
+    packet.dp_Arg2 = (SIPTR)UINT32_C(0xC0FFEE42);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && stub_protect == 0);
+    /* A revision-8 library has the group and lacks the entry point. */
+    {
+        struct AfsplusArosPacketContext *older = NULL;
+
+        stub_revision = 8;
+        assert(afsplus_aros_packet_create(&config, &older) == 0);
+        stub_revision = AFSPLUS_AROS_INTERFACE_REVISION;
+        reset_events();
+        packet.dp_Arg1 = DOSTRUE;
+        assert(afsplus_aros_packet_process(older, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+        assert(event_count == 0 && stub_protect == 0);
+        assert(afsplus_aros_packet_destroy(older) == 0);
     }
 
     /* C8: notification requests map to watches; fired watches are delivered

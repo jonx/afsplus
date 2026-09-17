@@ -467,3 +467,128 @@ fn open_from_lock_consumes_the_lock_and_change_mode_respects_other_holders() {
     );
     remount(adapter);
 }
+
+#[test]
+fn write_protect_refuses_every_mutation_until_the_key_unlocks_it() {
+    let mut adapter = adapter(formatted());
+    create(&mut adapter, b"kept", b"before", 10);
+    let open_writer = adapter
+        .open(None, b"kept", OpenMode::ReadWrite, timestamp(11))
+        .unwrap();
+    adapter.set_write_protect(true, 0x5EC2E7).unwrap();
+    assert!(adapter.disk_info().write_protected);
+    // The same key again is idempotent; another key cannot re-lock or unlock.
+    adapter.set_write_protect(true, 0x5EC2E7).unwrap();
+    assert_eq!(
+        adapter.set_write_protect(true, 1),
+        Err(ArosError::DiskWriteProtected)
+    );
+    assert_eq!(
+        adapter.set_write_protect(false, 1),
+        Err(ArosError::DiskWriteProtected)
+    );
+
+    let refused = Err(ArosError::DiskWriteProtected);
+    assert_eq!(adapter.write(open_writer, b"x", timestamp(12)), refused);
+    assert_eq!(
+        adapter
+            .write_at(open_writer, 0, b"x", timestamp(12))
+            .map(|_| ()),
+        Err(ArosError::DiskWriteProtected)
+    );
+    assert_eq!(
+        adapter
+            .set_file_size(
+                open_writer,
+                0,
+                afsplus_aros::SeekMode::Beginning,
+                timestamp(12)
+            )
+            .map(|_| ()),
+        Err(ArosError::DiskWriteProtected)
+    );
+    assert_eq!(
+        adapter.preallocate(open_writer, 0, 4096, timestamp(12)),
+        Err(ArosError::DiskWriteProtected)
+    );
+    assert_eq!(
+        adapter
+            .open(None, b"new", OpenMode::NewFile, timestamp(12))
+            .map(|_| ()),
+        Err(ArosError::DiskWriteProtected)
+    );
+    assert_eq!(
+        adapter
+            .create_directory(None, b"dir", timestamp(12))
+            .map(|_| ()),
+        Err(ArosError::DiskWriteProtected)
+    );
+    assert_eq!(
+        adapter.delete_object(None, b"kept", timestamp(12)),
+        Err(ArosError::DiskWriteProtected)
+    );
+    assert_eq!(
+        adapter.rename(None, b"kept", None, b"moved", timestamp(12)),
+        Err(ArosError::DiskWriteProtected)
+    );
+    assert_eq!(
+        adapter.replace(None, b"kept", None, b"moved", timestamp(12)),
+        Err(ArosError::DiskWriteProtected)
+    );
+    assert_eq!(
+        adapter.set_protection(None, b"kept", 1, timestamp(12)),
+        Err(ArosError::DiskWriteProtected)
+    );
+    assert_eq!(
+        adapter.set_modified(None, b"kept", timestamp(1), timestamp(12)),
+        Err(ArosError::DiskWriteProtected)
+    );
+    assert_eq!(
+        adapter.make_soft_link(None, b"alias", b"kept", timestamp(12)),
+        Err(ArosError::DiskWriteProtected)
+    );
+    let lock = adapter.locate(None, b"kept", LockAccess::Shared).unwrap();
+    assert_eq!(
+        adapter.make_hard_link(None, b"hard", lock, timestamp(12)),
+        Err(ArosError::DiskWriteProtected)
+    );
+    assert_eq!(
+        adapter.clone_file(lock, None, b"twin", timestamp(12)),
+        Err(ArosError::DiskWriteProtected)
+    );
+    // Reading stays possible.
+    let mut content = [0u8; 6];
+    assert_eq!(adapter.read_at(open_writer, 0, &mut content).unwrap(), 6);
+    assert_eq!(&content, b"before");
+    adapter.free_lock(lock).unwrap();
+
+    // Control: with the right key the very same calls succeed.
+    adapter.set_write_protect(false, 0x5EC2E7).unwrap();
+    assert!(!adapter.disk_info().write_protected);
+    assert_eq!(adapter.write(open_writer, b"AFTER!", timestamp(13)), Ok(6));
+    adapter.close(open_writer).unwrap();
+    adapter
+        .rename(None, b"kept", None, b"moved", timestamp(14))
+        .unwrap();
+
+    // A zero key is the keyless lock: any key unlocks it.
+    adapter.set_write_protect(true, 0).unwrap();
+    adapter.set_write_protect(false, 77).unwrap();
+    adapter.set_write_protect(false, 0).unwrap();
+
+    let mut adapter = remount(adapter);
+    // Nothing of the refused calls reached the volume, and the state itself
+    // does not survive the mount.
+    assert!(!adapter.disk_info().write_protected);
+    let moved = adapter
+        .open(None, b"moved", OpenMode::OldFile, timestamp(20))
+        .unwrap();
+    assert_eq!(adapter.read(moved, &mut content).unwrap(), 6);
+    assert_eq!(&content, b"AFTER!");
+    for absent in [&b"new"[..], b"dir", b"alias", b"hard", b"twin", b"kept"] {
+        assert_eq!(
+            adapter.locate(None, absent, LockAccess::Shared),
+            Err(ArosError::ObjectNotFound)
+        );
+    }
+}

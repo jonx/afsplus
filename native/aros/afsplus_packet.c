@@ -77,6 +77,7 @@ struct AfsplusArosPacketContext {
     uint32_t inhibited;
     uint32_t quit;
     uint64_t groups;
+    uint32_t revision;
 };
 
 struct AfsplusPathOperation {
@@ -935,6 +936,7 @@ int32_t afsplus_aros_packet_create(
             return ERROR_BAD_NUMBER;
         }
         context->groups = interface.groups;
+        context->revision = interface.interface_revision;
     }
     *output = context;
     return 0;
@@ -1962,6 +1964,17 @@ int32_t afsplus_aros_packet_process(
                 result = DOSTRUE;
             }
         }
+        break;
+    case ACTION_WRITE_PROTECT:
+        /* Added to the DOS_HANDLES group by interface revision 9. */
+        error = require_group(context, AFSPLUS_AROS_GROUP_DOS_HANDLES);
+        if (error == 0 && context->revision < 9)
+            error = ERROR_ACTION_NOT_KNOWN;
+        if (error == 0)
+            error = afsplus_aros_set_write_protect(context->filesystem,
+                packet->dp_Arg1 != DOSFALSE, (uint32_t)packet->dp_Arg2);
+        if (error == 0)
+            result = DOSTRUE;
         break;
     case ACTION_FH_FROM_LOCK:
     {

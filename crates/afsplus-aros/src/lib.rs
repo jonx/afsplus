@@ -274,6 +274,8 @@ pub struct ArosAdapter<D: BlockDevice> {
     lock_counts: BTreeMap<ObjectId, LockCounts>,
     known_parents: BTreeMap<ObjectId, (Option<ObjectId>, Vec<u8>)>,
     files: BTreeMap<FileHandleId, FileState>,
+    /// `ACTION_WRITE_PROTECT` state: the pass key while protected.
+    write_protect: Option<u32>,
     watches: BTreeMap<WatchId, Watch>,
     next_lock: LockId,
     next_file: FileHandleId,
@@ -301,6 +303,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
             lock_counts: BTreeMap::new(),
             known_parents,
             files: BTreeMap::new(),
+            write_protect: None,
             watches: BTreeMap::new(),
             next_lock: 1,
             next_file: 1,
@@ -400,6 +403,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
         mode: OpenMode,
         now: Timespec,
     ) -> Result<FileHandleId, ArosError> {
+        if mode != OpenMode::OldFile {
+            self.ensure_writable()?;
+        }
         self.ensure_file_capacity()?;
         let parent = self.lock_object_or_root(base)?;
         let decoded = self.decode_component(name)?;
@@ -637,6 +643,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         source: &[u8],
         now: Timespec,
     ) -> Result<usize, ArosError> {
+        self.ensure_writable()?;
         let (vfs_handle, position) = {
             let state = self.file_state(handle)?;
             (state.vfs_handle, state.position)
@@ -687,6 +694,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         mode: SeekMode,
         now: Timespec,
     ) -> Result<u64, ArosError> {
+        self.ensure_writable()?;
         let (vfs_handle, object_id, position) = {
             let state = self.file_state(handle)?;
             (state.vfs_handle, state.object_id, state.position)
@@ -722,6 +730,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         source: &[u8],
         now: Timespec,
     ) -> Result<usize, ArosError> {
+        self.ensure_writable()?;
         let vfs_handle = self.file_state(handle)?.vfs_handle;
         let count = self.vfs.write(vfs_handle, offset, source, now)?;
         self.files.get_mut(&handle).expect("validated handle").dirty = true;
@@ -738,6 +747,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         name: &[u8],
         now: Timespec,
     ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
         let source_object = self.lock_state(source)?.object_id;
         let parent = self.lock_object_or_root(base)?;
         let decoded = self.decode_component(name)?;
@@ -756,6 +766,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         length: u64,
         now: Timespec,
     ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
         let source_handle = self.file_state(source)?.vfs_handle;
         let destination_handle = self.file_state(destination)?.vfs_handle;
         self.vfs.clone_range(
@@ -781,6 +792,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         length: u64,
         now: Timespec,
     ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
         let vfs_handle = self.file_state(handle)?.vfs_handle;
         Ok(self.vfs.preallocate(
             vfs_handle,
@@ -821,6 +833,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         target_name: &[u8],
         now: Timespec,
     ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
         let source_parent = self.lock_object_or_root(source_base)?;
         let target_parent = self.lock_object_or_root(target_base)?;
         let source = self.decode_component(source_name)?;
@@ -842,6 +855,40 @@ impl<D: BlockDevice> ArosAdapter<D> {
         Ok(())
     }
 
+    /// `ACTION_WRITE_PROTECT`. Protecting flushes first, then every
+    /// mutating call answers `ERROR_DISK_WRITE_PROTECTED` until the volume is
+    /// unprotected with the same key; a zero stored key accepts any key, as
+    /// the DOS `Lock` command without a password does. Handles opened for
+    /// writing before stay open and refuse writes. The state lasts for the
+    /// mount; nothing is written to the volume for it.
+    pub fn set_write_protect(&mut self, protect: bool, key: u32) -> Result<(), ArosError> {
+        match (protect, self.write_protect) {
+            (true, None) => {
+                if self.vfs.mount_mode() == MountMode::ReadWrite {
+                    self.vfs.sync_filesystem()?;
+                }
+                self.write_protect = Some(key);
+                Ok(())
+            }
+            (true, Some(stored)) if stored == key => Ok(()),
+            (true, Some(_)) => Err(ArosError::DiskWriteProtected),
+            (false, None) => Ok(()),
+            (false, Some(stored)) if stored == 0 || stored == key => {
+                self.write_protect = None;
+                Ok(())
+            }
+            (false, Some(_)) => Err(ArosError::DiskWriteProtected),
+        }
+    }
+
+    fn ensure_writable(&self) -> Result<(), ArosError> {
+        if self.write_protect.is_some() {
+            Err(ArosError::DiskWriteProtected)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn fsync(&mut self, handle: FileHandleId) -> Result<(), ArosError> {
         let vfs_handle = self.file_state(handle)?.vfs_handle;
         Ok(self.vfs.fsync(vfs_handle)?)
@@ -857,6 +904,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         name: &[u8],
         now: Timespec,
     ) -> Result<LockId, ArosError> {
+        self.ensure_writable()?;
         self.ensure_lock_capacity()?;
         let parent = self.lock_object_or_root(base)?;
         let decoded = self.decode_component(name)?;
@@ -873,6 +921,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         name: &[u8],
         now: Timespec,
     ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
         let parent = self.lock_object_or_root(base)?;
         let decoded = self.decode_component(name)?;
         let object = self.vfs.lookup(parent, &decoded)?;
@@ -898,6 +947,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         target_name: &[u8],
         now: Timespec,
     ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
         let source_parent = self.lock_object_or_root(source_base)?;
         let target_parent = self.lock_object_or_root(target_base)?;
         let source = self.decode_component(source_name)?;
@@ -919,6 +969,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         source: LockId,
         now: Timespec,
     ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
         let target_parent = self.lock_object_or_root(target_base)?;
         let source_object = self.lock_state(source)?.object_id;
         if self.vfs.stat(source_object)?.kind != NodeKind::File {
@@ -941,6 +992,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         protection: u32,
         now: Timespec,
     ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
         let object = self.named_object(base, name)?;
         // Classic single-user profile: the session acts as the owner and the
         // DOS bits are a projection. A write through that projection must not
@@ -961,6 +1013,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         modified: Timespec,
         now: Timespec,
     ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
         let object = self.named_object(base, name)?;
         self.vfs.set_modified(object, modified, now)?;
         self.touch_named(base, name);
@@ -976,6 +1029,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         target: &[u8],
         now: Timespec,
     ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
         let parent = self.lock_object_or_root(base)?;
         let decoded = self.decode_component(name)?;
         let target = self.decode_text(target)?;
@@ -1199,7 +1253,8 @@ impl<D: BlockDevice> ArosAdapter<D> {
     pub fn disk_info(&self) -> DiskInfo {
         let stat = self.vfs.statfs();
         DiskInfo {
-            write_protected: self.vfs.mount_mode() != MountMode::ReadWrite,
+            write_protected: self.write_protect.is_some()
+                || self.vfs.mount_mode() != MountMode::ReadWrite,
             total_blocks: stat.total_blocks,
             // Classic DOS exposes total/used rather than a separate
             // privileged raw-free counter. Count emergency headroom as used

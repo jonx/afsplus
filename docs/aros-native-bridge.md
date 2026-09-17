@@ -229,6 +229,7 @@ The usual packet mapping is direct:
 | set protect, set date | `set_protection`, `set_modified`; a path without a leaf addresses the resolved lock's object |
 | make link (soft), read link | `make_soft_link`, `read_soft_link` |
 | fh from lock, change mode | `open_from_lock`, `change_lock_mode`, `change_file_mode` |
+| write protect | `set_write_protect` |
 | examine all, examine all end | `examine_next` per entry, `rewind_directory`; the packet layer packs `ExAllData` |
 | examine object/FH/next | corresponding examine function |
 | flush | `flush` |
@@ -281,6 +282,13 @@ a refused conversion leaves the lock usable. `ACTION_CHANGE_MODE` accepts
 `EXCLUSIVE_LOCK` and `MODE_NEWFILE` as exclusive; shared to exclusive needs
 the caller to be the object's only holder, and `fl_Access` follows a
 successful change only.
+
+`ACTION_WRITE_PROTECT` protects the volume for the lifetime of the mount:
+it flushes, then every mutating call answers `ERROR_DISK_WRITE_PROTECTED`,
+handles opened for writing included, until the same 32-bit key unprotects it;
+a zero key is the keyless lock that any key opens. A wrong key changes
+nothing, `ACTION_DISK_INFO` reports the protected state, and nothing is
+written to the volume for it.
 
 Soft-link targets are opaque paths in the mount encoding. Locate and open
 answer `ERROR_IS_SOFT_LINK`; `ACTION_READ_LINK` walks the path to the first

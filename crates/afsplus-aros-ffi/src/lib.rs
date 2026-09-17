@@ -25,7 +25,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 8;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 9;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -1878,5 +1878,18 @@ pub extern "C" fn afsplus_aros_change_file_mode(
         bridge_mut(filesystem)?
             .adapter
             .change_file_mode(file, lock_access(access)?)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_set_write_protect(
+    filesystem: *mut AfsplusAros,
+    protect: u32,
+    key: u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        bridge_mut(filesystem)?
+            .adapter
+            .set_write_protect(protect != 0, key)
     })
 }

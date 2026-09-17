@@ -263,7 +263,7 @@ fn c_boundary_sets_metadata_and_transports_soft_links() {
 }
 
 #[test]
-fn c_boundary_opens_from_a_lock_and_changes_modes() {
+fn c_boundary_opens_from_a_lock_changes_modes_and_write_protects() {
     let mut device = formatted();
     let filesystem = mount(&mut device);
     let mut file = 0;
@@ -331,6 +331,22 @@ fn c_boundary_opens_from_a_lock_and_changes_modes() {
         210
     );
     assert_eq!(afsplus_aros_close(filesystem, opened), 0);
+
+    // Write protection by value: refused mutation, wrong key, right key.
+    assert_eq!(afsplus_aros_set_write_protect(filesystem, 1, 0xBEEF), 0);
+    let mut info = AfsplusArosDiskInfo::default();
+    assert_eq!(afsplus_aros_disk_info(filesystem, &mut info), 0);
+    assert_eq!(info.write_protected, 1);
+    assert_eq!(
+        afsplus_aros_delete_object(filesystem, 0, b"data".as_ptr(), 4, 9, 0),
+        214
+    );
+    assert_eq!(afsplus_aros_set_write_protect(filesystem, 0, 0xBEE0), 214);
+    assert_eq!(afsplus_aros_set_write_protect(filesystem, 0, 0xBEEF), 0);
+    assert_eq!(
+        afsplus_aros_delete_object(filesystem, 0, b"data".as_ptr(), 4, 9, 0),
+        0
+    );
     assert_eq!(afsplus_aros_unmount(filesystem), 0);
     let report = check_device(&mut device);
     assert!(report.is_clean(), "{:?}", report.errors);
