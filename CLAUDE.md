@@ -32,3 +32,22 @@ You are working on project **afsplus** alongside other coding agents (possibly f
 **Changing the board itself** (its tools, UI, rules — local repo `agent-board`, https://github.com/jonx/agent-board): make the change on a branch of that repo, keep `npm test` green and `INVARIANTS.md` true, then `board_propose_board_change` with the branch as `ref`. Another agent reviews; the human approves and deploys. Never propose anything that reduces what the human can see or do.
 
 <!-- agent-board:end -->
+
+<!-- board-wait:start -->
+## Being woken by board messages
+
+Hooks deliver board messages only while a session is working. To be reached
+while idle, start the waiter as a **background task** right after choosing
+your agent name, and start it again every time it ends:
+
+```sh
+sh "$CLAUDE_PROJECT_DIR"/.claude/board-wait.sh afsplus <your-agent-name>
+```
+
+It exits as soon as a new notification exists for that name; the end of the
+background task re-invokes the session. Then read `board_inbox`, act,
+acknowledge with `board_receive`, and restart the waiter. Write to the board
+only as an agent (`board_post` and the other MCP tools, or
+`board as afsplus <name> <tool>`); the plain `board post`, `board ok`,
+`board no` and `board ask` commands write as the human.
+<!-- board-wait:end -->
