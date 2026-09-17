@@ -32,6 +32,10 @@ pub struct ArosConfig {
     pub max_file_handles: usize,
     pub max_locks: usize,
     pub max_file_info_name_bytes: usize,
+    /// Explicit request to let a classic protection write replace security
+    /// metadata the classic view cannot express. Off by default: such a write
+    /// is refused and the richer metadata is preserved.
+    pub allow_security_downgrade: bool,
 }
 
 impl Default for ArosConfig {
@@ -43,6 +47,7 @@ impl Default for ArosConfig {
             max_locks: 1024,
             // MAXFILENAMELENGTH includes the terminating NUL.
             max_file_info_name_bytes: 107,
+            allow_security_downgrade: false,
         }
     }
 }
@@ -127,6 +132,7 @@ pub enum ArosError {
     DirectoryNotEmpty = 216,
     SeekError = 219,
     DiskFull = 221,
+    WriteProtected = 223,
     NotDosDisk = 225,
     NoMoreEntries = 232,
     IsSoftLink = 233,
@@ -187,7 +193,29 @@ struct FileState {
     access: LockAccess,
 }
 
+/// Answers whether an object carries security metadata that the classic
+/// single-user projection (owner plus DOS protection bits) cannot express.
+///
+/// The classic adapter never interprets such metadata. It only needs this
+/// one fact to keep its rule: never silently rewrite richer security into a
+/// weaker representation.
+pub trait RichSecurityProbe {
+    fn carries_rich_security(&mut self, object_id: ObjectId) -> Result<bool, ArosError>;
+}
+
+/// The executable format stores protection bits only, so no object carries
+/// richer metadata.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProtectionBitsOnly;
+
+impl RichSecurityProbe for ProtectionBitsOnly {
+    fn carries_rich_security(&mut self, _object_id: ObjectId) -> Result<bool, ArosError> {
+        Ok(false)
+    }
+}
+
 pub struct ArosAdapter<D: BlockDevice> {
+    security: Box<dyn RichSecurityProbe>,
     vfs: Vfs<D>,
     config: ArosConfig,
     locks: BTreeMap<LockId, LockState>,
@@ -203,6 +231,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         let mut known_parents = BTreeMap::new();
         known_parents.insert(OBJECT_ROOT, (None, config.volume_name.clone()));
         ArosAdapter {
+            security: Box::new(ProtectionBitsOnly),
             vfs,
             config,
             locks: BTreeMap::new(),
@@ -216,6 +245,12 @@ impl<D: BlockDevice> ArosAdapter<D> {
 
     pub fn root_object(&self) -> ObjectId {
         OBJECT_ROOT
+    }
+
+    /// Installs the volume's answer to "does this object carry security
+    /// metadata beyond the classic bits". The default answers no.
+    pub fn set_security_probe(&mut self, probe: Box<dyn RichSecurityProbe>) {
+        self.security = probe;
     }
 
     pub fn locate(
@@ -592,6 +627,12 @@ impl<D: BlockDevice> ArosAdapter<D> {
         now: Timespec,
     ) -> Result<(), ArosError> {
         let object = self.named_object(base, name)?;
+        // Classic single-user profile: the session acts as the owner and the
+        // DOS bits are a projection. A write through that projection must not
+        // destroy what it cannot see.
+        if !self.config.allow_security_downgrade && self.security.carries_rich_security(object)? {
+            return Err(ArosError::WriteProtected);
+        }
         Ok(self.vfs.set_protection(object, protection, now)?)
     }
 

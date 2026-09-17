@@ -237,6 +237,17 @@ other modes shared. A held object is not deletable, and `ACTION_COPY_DIR_FH`
 on an exclusive handle is `ERROR_OBJECT_IN_USE`, the behavior `NameFromFH`
 in dos.library is written around.
 
+The handler is the classic single-user adapter of the
+[security model](30-portable-security-model.md#9-classic-amiga-compatibility-profile):
+the session acts as the owner and the DOS protection word is a projection.
+`ACTION_SET_PROTECT` on an object that carries security metadata the
+projection cannot express is refused with `ERROR_WRITE_PROTECTED` and the
+stored state is untouched; the mount flag
+`AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE` is the explicit request to let
+the write through. The adapter asks one question through `RichSecurityProbe`
+and never interprets the metadata. Rename and hard link keep the object and
+therefore its security metadata.
+
 Soft-link targets are opaque paths in the mount encoding. Locate and open
 answer `ERROR_IS_SOFT_LINK`; `ACTION_READ_LINK` walks the path to the first
 link and returns the path dos.library retries with: the components before the

@@ -80,6 +80,9 @@ pub const AFSPLUS_AROS_MOUNT_READ_WRITE: u32 = 0;
 pub const AFSPLUS_AROS_MOUNT_READ_ONLY: u32 = 1;
 pub const AFSPLUS_AROS_MOUNT_NO_CHANGES: u32 = 2;
 pub const AFSPLUS_AROS_MOUNT_RECOVERY: u32 = 3;
+/// The only defined bit of `AfsplusArosMountConfig::flags`; a zero field, the
+/// value every earlier caller passes, keeps preservation on.
+pub const AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE: u32 = 1;
 pub const AFSPLUS_AROS_ENCODING_UTF8: u32 = 0;
 pub const AFSPLUS_AROS_ENCODING_LATIN1: u32 = 1;
 pub const AFSPLUS_AROS_LOCK_SHARED: u32 = 0;
@@ -121,7 +124,7 @@ pub struct AfsplusArosMountConfig {
     pub max_file_handles: u32,
     pub max_locks: u32,
     pub max_file_info_name_bytes: u32,
-    pub reserved: u32,
+    pub flags: u32,
 }
 
 #[repr(C)]
@@ -518,7 +521,7 @@ pub extern "C" fn afsplus_aros_mount(
             || device.block_size == 0
             || device.total_blocks == 0
             || device.reserved != 0
-            || config.reserved != 0
+            || config.flags & !AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE != 0
         {
             return Err(ArosError::InvalidComponentName);
         }
@@ -565,6 +568,8 @@ pub extern "C" fn afsplus_aros_mount(
                 max_file_handles,
                 max_locks,
                 max_file_info_name_bytes,
+                allow_security_downgrade: config.flags & AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE
+                    != 0,
             },
         );
         let raw = Box::into_raw(Box::new(NativeBridge {

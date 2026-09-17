@@ -91,7 +91,7 @@ fn mount(device: &mut MemoryBackend) -> *mut AfsplusAros {
         max_file_handles: 8,
         max_locks: 8,
         max_file_info_name_bytes: 107,
-        reserved: 0,
+        flags: 0,
     };
     let mut filesystem = ptr::null_mut();
     assert_eq!(afsplus_aros_mount(&callbacks, &config, &mut filesystem), 0);

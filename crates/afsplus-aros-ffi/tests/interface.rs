@@ -74,6 +74,17 @@ unsafe extern "C" fn flush(context: *mut c_void) -> i32 {
 }
 
 fn mount(device: &mut MemoryBackend, mount_mode: u32) -> *mut AfsplusAros {
+    let mut filesystem = ptr::null_mut();
+    assert_eq!(mount_with_flags(device, mount_mode, 0, &mut filesystem), 0);
+    filesystem
+}
+
+fn mount_with_flags(
+    device: &mut MemoryBackend,
+    mount_mode: u32,
+    flags: u32,
+    filesystem: &mut *mut AfsplusAros,
+) -> i32 {
     let callbacks = AfsplusArosDevice {
         abi_version: AFSPLUS_AROS_ABI_VERSION,
         struct_size: size_of::<AfsplusArosDevice>() as u32,
@@ -95,11 +106,23 @@ fn mount(device: &mut MemoryBackend, mount_mode: u32) -> *mut AfsplusAros {
         max_file_handles: 8,
         max_locks: 8,
         max_file_info_name_bytes: 107,
-        reserved: 0,
+        flags,
     };
+    afsplus_aros_mount(&callbacks, &config, filesystem)
+}
+
+#[test]
+fn mount_flags_admit_only_the_security_downgrade_bit() {
+    let mut device = formatted(8, true, false, NamePolicy::Insensitive);
     let mut filesystem = ptr::null_mut();
-    assert_eq!(afsplus_aros_mount(&callbacks, &config, &mut filesystem), 0);
-    filesystem
+    assert_eq!(AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE, 1);
+    assert_eq!(mount_with_flags(&mut device, 0, 1, &mut filesystem), 0);
+    assert_eq!(afsplus_aros_unmount(filesystem), 0);
+    // Undefined bits are refused before any device access.
+    let mut filesystem = ptr::null_mut();
+    assert_eq!(mount_with_flags(&mut device, 0, 2, &mut filesystem), 210);
+    assert!(filesystem.is_null());
+    assert_eq!(mount_with_flags(&mut device, 0, 3, &mut filesystem), 210);
 }
 
 fn query(filesystem: *mut AfsplusAros) -> AfsplusArosCapabilities {
