@@ -390,8 +390,6 @@ pub struct Volume<D: BlockDevice> {
     alloc_rover_region: u32,
     /// Host policy for protection edits of descriptor-bearing objects.
     security_projection: SecurityProjectionPolicy,
-    /// Label the next commit publishes; set only inside `set_volume_label`.
-    pending_label: Option<String>,
     window: Option<OpenWindow>,
     window_poisoned: bool,
     last_commit: Option<CommitStats>,
@@ -509,7 +507,6 @@ impl<D: BlockDevice> Volume<D> {
             allocation_tree_cache: None,
             alloc_rover_region: 0,
             security_projection: SecurityProjectionPolicy::default(),
-            pending_label: None,
             window: None,
             window_poisoned: false,
             last_commit: None,
@@ -7333,6 +7330,7 @@ impl<D: BlockDevice> Volume<D> {
             meta_writes,
             omap_root,
             None,
+            None,
         )
     }
 
@@ -7666,6 +7664,7 @@ impl<D: BlockDevice> Volume<D> {
             meta_writes,
             new_object_map_block,
             None,
+            None,
         )
     }
 
@@ -7679,6 +7678,9 @@ impl<D: BlockDevice> Volume<D> {
         meta_writes: Vec<(u64, Vec<u8>)>,
         new_object_map_block: u64,
         snapshot_change: Option<SnapshotRegistryChange>,
+        // A relabel passes its label here. Intent travels as a value, never
+        // as a field, so an unwind cannot leave it for a later commit.
+        label: Option<&str>,
     ) -> Result<(), CoreError> {
         self.flight_event(generation, crate::flight::EventKind::Begin);
         let result = self.commit_transaction_body(
@@ -7689,6 +7691,7 @@ impl<D: BlockDevice> Volume<D> {
             meta_writes,
             new_object_map_block,
             snapshot_change,
+            label,
         );
         self.flight_event(
             generation,
@@ -7711,6 +7714,9 @@ impl<D: BlockDevice> Volume<D> {
         mut meta_writes: Vec<(u64, Vec<u8>)>,
         new_object_map_block: u64,
         snapshot_change: Option<SnapshotRegistryChange>,
+        // A relabel passes its label here. Intent travels as a value, never
+        // as a field, so an unwind cannot leave it for a later commit.
+        label: Option<&str>,
     ) -> Result<(), CoreError> {
         let block_size = self.dev.block_size();
 
@@ -7859,10 +7865,7 @@ impl<D: BlockDevice> Volume<D> {
             shared_extent_root_block: shared_root,
             // The label travels with every commit; a relabel is the commit
             // that carries a new one.
-            label: self
-                .pending_label
-                .clone()
-                .unwrap_or_else(|| self.checkpoint.label.clone()),
+            label: label.unwrap_or(&self.checkpoint.label).to_owned(),
             snapshot_roots: finished.snapshot_roots,
         };
         let checkpoint_bytes = new_checkpoint.encode(block_size)?;

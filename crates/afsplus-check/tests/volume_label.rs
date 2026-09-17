@@ -238,3 +238,144 @@ fn the_portable_c_reader_reports_the_same_label_and_the_same_fallback() {
     }
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+/// A device that panics on the next write once armed: the way to unwind out
+/// of the middle of a commit.
+struct PanickingDevice {
+    inner: MemoryBackend,
+    armed: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl BlockDevice for PanickingDevice {
+    fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+    fn total_blocks(&self) -> u64 {
+        self.inner.total_blocks()
+    }
+    fn read_block(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), afsplus_block::BlockError> {
+        self.inner.read_block(lba, buf)
+    }
+    fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), afsplus_block::BlockError> {
+        if self.armed.replace(false) {
+            panic!("injected unwind inside a commit");
+        }
+        self.inner.write_block(lba, data)
+    }
+    fn flush(&mut self) -> Result<(), afsplus_block::BlockError> {
+        self.inner.flush()
+    }
+}
+
+#[test]
+fn an_unwound_relabel_leaves_nothing_for_a_later_commit_to_publish() {
+    let armed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let mut volume = mount(PanickingDevice {
+        inner: formatted("Before"),
+        armed: armed.clone(),
+    })
+    .unwrap();
+    armed.set(true);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = volume.set_volume_label("Never");
+    }));
+    assert!(
+        unwound.is_err(),
+        "the injected panic fired inside the relabel"
+    );
+    assert!(!armed.get());
+    assert_eq!(volume.volume_label(), "Before");
+
+    // An unrelated commit on the same Volume value. Whether the core accepts
+    // it after an unwind or refuses it, the label it can publish is the
+    // committed one: the relabel's intent lived in an argument, not a field.
+    let created = volume.create_file_in_directory(OBJECT_ROOT, "later", b"x", time(9));
+    assert_eq!(volume.volume_label(), "Before");
+    let dev = volume.into_device().inner;
+    let mut remounted = mount(dev).unwrap();
+    assert_eq!(remounted.volume_label(), "Before");
+    assert_eq!(
+        remounted
+            .lookup_in_directory(OBJECT_ROOT, "later")
+            .unwrap()
+            .is_some(),
+        created.is_ok()
+    );
+    checked(remounted);
+}
+
+#[test]
+fn a_relabel_survives_logged_writes_a_cut_and_replay() {
+    let mut volume = mount(formatted("Before")).unwrap();
+    let file = volume
+        .create_file_in_directory(OBJECT_ROOT, "file", &[1; 4096], time(2))
+        .unwrap();
+    volume.set_volume_label("After").unwrap();
+    // Work made durable by the intent log only, then a power cut.
+    volume
+        .window_write_file_at(file, 0, &[2; 4096], time(3))
+        .unwrap();
+    volume.window_fsync().unwrap();
+    let cut = volume.device_mut().clone();
+    drop(volume);
+    // Replay publishes a new checkpoint at mount; it carries the label.
+    let mut volume = mount(cut).unwrap();
+    assert_eq!(volume.volume_label(), "After");
+    assert_eq!(volume.read_file(file).unwrap(), vec![2; 4096]);
+    assert_eq!(mount(checked(volume)).unwrap().volume_label(), "After");
+}
+
+#[test]
+fn a_relabel_on_a_snapshot_volume_keeps_its_roots_and_views() {
+    use afsplus_core::volume::SnapshotWorkLimits;
+    use afsplus_core::{mkfs_with_options, mount_with_snapshot_limits, MkfsOptions};
+
+    let limits = SnapshotWorkLimits {
+        max_edit_records: 4096,
+        max_views: 8,
+        reclaim_records: 8,
+    };
+    let mut dev = MemoryBackend::new(4096, 1024);
+    mkfs_with_options(
+        &mut dev,
+        &MkfsParams {
+            uuid: [0x1b; 16],
+            label: "Before".into(),
+            region_size: 512,
+            reclaim_caps: Default::default(),
+            log_slots: 0,
+            shared_extents: true,
+            data_policy: false,
+            name_policy: NamePolicy::Sensitive,
+            timestamp: time(1),
+        },
+        MkfsOptions {
+            persistent_snapshots: true,
+        },
+    )
+    .unwrap();
+    let mut volume = mount_with_snapshot_limits(dev, MountOptions::default(), limits).unwrap();
+    let file = volume
+        .create_file_in_directory(OBJECT_ROOT, "file", b"captured", time(2))
+        .unwrap();
+    let snapshot = volume.snapshot_create(time(3)).unwrap();
+    volume.set_volume_label("After").unwrap();
+    assert!(volume.checkpoint().snapshot_roots.is_some());
+    let dev = volume.into_device();
+    let mut volume = mount_with_snapshot_limits(dev, MountOptions::default(), limits).unwrap();
+    assert_eq!(volume.volume_label(), "After");
+    let view = volume.snapshot_open(snapshot).unwrap();
+    let mut captured = [0u8; 8];
+    assert_eq!(
+        volume
+            .snapshot_read_file_at(&view, file, 0, &mut captured)
+            .unwrap(),
+        8
+    );
+    assert_eq!(&captured, b"captured");
+    drop(view);
+    let mut dev = volume.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.volume.unwrap().label, "After");
+}

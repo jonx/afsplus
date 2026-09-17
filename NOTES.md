@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Pass a relabel's label as a value, never as volume state](#2026-09-17--pass-a-relabels-label-as-a-value-never-as-volume-state)
 - [2026-09-17 — Make the volume label committed checkpoint state](#2026-09-17--make-the-volume-label-committed-checkpoint-state)
 - [2026-09-17 — Pin the C statements of the format against the Rust codecs](#2026-09-17--pin-the-c-statements-of-the-format-against-the-rust-codecs)
 - [2026-09-17 — Move the placement of the permanent areas into geometry](#2026-09-17--move-the-placement-of-the-permanent-areas-into-geometry)
@@ -190,6 +191,28 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-17 — Pass a relabel's label as a value, never as volume state
+
+An independent read of the label change found that `set_volume_label` parked
+the new label in a `Volume` field for the commit tail to pick up and cleared it
+on the returned result. An unwind inside the commit skips that clearing, and
+the next unrelated commit of the same `Volume` value would have published a
+label nobody asked for. The field is gone: the label is an argument of the
+commit tail, beside the snapshot registry change, and every other caller
+passes none. The four remaining transaction-scoped `pending_*` counters are
+statistics that `next_generation` zeroes at the start of every transaction, so
+none of them carries intent across an unwind.
+
+`crates/afsplus-check/tests/volume_label.rs` gains three tests: a device that
+panics on the next write unwinds out of a relabel, after which a further
+commit on the same value and a remount both show the committed label; a
+relabel followed by intent-logged writes, a cut and replay at mount keeps the
+label; and a relabel through `Volume` on a snapshot-bearing volume keeps the
+snapshot roots, the captured bytes and a clean checker verdict. The stale
+label reader in the FUSE mount tool, found by the same review, is fixed in its
+own lot.
 
 ## 2026-09-17 — Make the volume label committed checkpoint state
 

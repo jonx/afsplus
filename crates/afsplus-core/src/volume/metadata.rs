@@ -134,17 +134,16 @@ impl<D: BlockDevice> Volume<D> {
         )?
         .with_tree_cache_pages(self.tree_cache_pages);
         self.protect_emergency_headroom(&mut tx);
-        self.pending_label = Some(label.to_owned());
-        let result = self.commit_transaction(
+        self.commit_transaction_inner(
             generation,
             self.checkpoint.next_object_id,
             tx,
-            Vec::new(),
+            CommitData::Prepared(Vec::new()),
             Vec::new(),
             self.checkpoint.object_map_block,
-        );
-        self.pending_label = None;
-        result
+            None,
+            Some(label),
+        )
     }
 
     fn metadata_target(&mut self, object_id: u64) -> Result<ObjectRecord, CoreError> {

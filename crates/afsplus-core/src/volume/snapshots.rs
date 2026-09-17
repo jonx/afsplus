@@ -301,6 +301,7 @@ impl<D: BlockDevice> Volume<D> {
             vec![],
             self.checkpoint.object_map_block,
             Some(change),
+            None,
         )
     }
 
