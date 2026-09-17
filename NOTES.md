@@ -11,6 +11,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 - [2026-09-17 — Decide clone metadata inheritance and leave the clone source untouched](#2026-09-17--decide-clone-metadata-inheritance-and-leave-the-clone-source-untouched)
 - [2026-09-17 — Carry opaque security descriptors through every object rewrite](#2026-09-17--carry-opaque-security-descriptors-through-every-object-rewrite)
+- [2026-09-17 — Reserve an actor field in the epoch-1 change record](#2026-09-17--reserve-an-actor-field-in-the-epoch-1-change-record)
 - [2026-09-17 — Admit object records only in their canonical image](#2026-09-17--admit-object-records-only-in-their-canonical-image)
 - [2026-09-17 — Close a-cache and Stage A](#2026-09-17--close-a-cache-and-stage-a)
 - [2026-09-17 — Fix window refusals that poisoned an open deferred window](#2026-09-17--fix-window-refusals-that-poisoned-an-open-deferred-window)
@@ -232,6 +233,42 @@ transport, descriptors under persistent snapshots and every evaluation
 semantic are open there. The filesystem API consequences (three descriptor
 operations, a fidelity query and a new refusal of the protection setter)
 belong to the API work.
+## 2026-09-17 — Reserve an actor field in the epoch-1 change record
+
+A change record names the object, the sequence and the event, and never the
+cause. The enclosing operating-system project lists the actor question among
+the format decisions that precede the epoch-1 freeze, and its integrity and
+provenance service is the consumer with a stated need: it takes the change
+stream as its incremental scan queue and cannot turn an event into a finding
+without a cause. Its packaging feature states the opposite need, because an
+atomically published staging tree attributes itself.
+
+A grep of `crates/` for change-record and change-stream identifiers returns no
+encoder, no decoder, no record type and no test, and M10 is not started, so
+reserving the field changes no code and no image while adding it after the
+freeze would change the epoch.
+
+The proposal
+[reserve an actor field in the change record](proposals/adr-change-record-actor.md)
+places a fixed 16-byte actor in the common record header, as a 16-bit host
+actor class, an 8-bit host trust claim, a zero reserved byte and twelve opaque
+bytes that the class defines, with an all-zero field meaning unattributed. The
+value is advisory evidence supplied by the host adapter, authenticated by
+nothing in the format, and read by no filesystem decision. The layout carries
+no AROS concept: the AROS adapter maps an Exec-owned sender table into one
+class and a POSIX adapter maps a pid, a uid and a process start time into
+another. An actor is a runtime subject observed by the host; a principal is the
+realm, kind and UUID security identity of docs/30, and epoch 1 reserves no
+principal field, because a later host adds one through a negotiated record type
+or actor class.
+
+Admission follows the object-record rule for every byte no writer may choose:
+the reserved byte is zero and a zero class forces the remaining thirteen bytes
+to zero. An unassigned trust value reads as advisory with its raw value, and an
+unassigned class is admitted with the actor reported as unreadable, which the append-only stream affords because a
+committed change record is never re-encoded. The M10 change-stream lot owns the
+codec and its admission tests, the class registry and the wire offsets, and the
+Stage C API session owns the iterator field.
 
 ## 2026-09-17 — Admit object records only in their canonical image
 
