@@ -5250,9 +5250,9 @@ five-row table (moved here verbatim from `README.md § Status`, commit
 
 Two facts from that paragraph found finished-state homes rather than this
 journal: the mount-CLI build instructions are in
-[README.md § Build, test and mount](README.md#build-test-and-mount), and the
+[README.md § Build, test and check](README.md#build-test-and-check), and the
 external-handler distribution model is stated in
-[README.md § What AFS+ is and is not](README.md#what-afs-is-and-is-not) with
+[README.md § Why it exists](README.md#why-it-exists) with
 [ADR-050](adr/ADR-050-external-aros-handler-lifecycle.md). The rule that
 genuine defects in generic AROS interfaces are fixed with focused
 regression-tested patches and proposed upstream is retained in [AGENTS.md](AGENTS.md).
