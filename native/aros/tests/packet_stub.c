@@ -1406,6 +1406,28 @@ int main(void)
             assert(afsplus_aros_packet_process(context, &packet) == 0);
         }
 
+        /* A name length is bounded before its bytes are read: the fakes are
+         * never reached with a 4 GiB claim, nor with one byte too many. */
+        EXT_BEGIN(AFSPLUS_EXT_LOOKUP_ID);
+        request.name0 = (const uint8_t *)"x";
+        request.name_length[0] = UINT32_MAX;
+        EXT_SEND(DOSFALSE, ERROR_INVALID_COMPONENT_NAME);
+        assert(event_count == 0);
+        request.name_length[0] = AFSPLUS_EXT_NAME_MAX + 1;
+        EXT_SEND(DOSFALSE, ERROR_INVALID_COMPONENT_NAME);
+        EXT_BEGIN(AFSPLUS_EXT_REPLACE);
+        request.name0 = (const uint8_t *)"tmp";
+        request.name_length[0] = 3;
+        request.name1 = (const uint8_t *)"x";
+        request.name_length[1] = UINT32_MAX;
+        EXT_SEND(DOSFALSE, ERROR_INVALID_COMPONENT_NAME);
+        EXT_BEGIN(AFSPLUS_EXT_CLONE_FILE);
+        request.object[0] = (uint64_t)root;
+        request.name1 = (const uint8_t *)"x";
+        request.name_length[1] = UINT32_MAX;
+        EXT_SEND(DOSFALSE, ERROR_INVALID_COMPONENT_NAME);
+        assert(event_count == 0);
+
         EXT_BEGIN(AFSPLUS_EXT_CLONE_RANGE);
         request.object[0] = file_object;
         request.object[1] = file_object;

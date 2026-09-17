@@ -14,7 +14,7 @@ use afsplus_block::BlockDevice;
 use afsplus_core::flight::FlightRecorder;
 use afsplus_core::volume::SecurityProjectionPolicy;
 use afsplus_core::MountMode;
-use afsplus_format::{Timespec, OBJECT_ROOT};
+use afsplus_format::{Timespec, NAME_MAX_UTF8_BYTES, OBJECT_ROOT};
 use afsplus_vfs::{
     AccessMode, Capabilities, Handle, NodeKind, ObjectId, Stat, StatFs, Vfs, VfsError,
 };
@@ -1795,6 +1795,11 @@ impl<D: BlockDevice> ArosAdapter<D> {
     }
 
     fn decode_component(&self, bytes: &[u8]) -> Result<String, ArosError> {
+        // Bounded before the scan and the Latin-1 allocation: a length is a
+        // caller's claim, and no stored name is longer in any encoding.
+        if bytes.len() > NAME_MAX_UTF8_BYTES {
+            return Err(ArosError::InvalidComponentName);
+        }
         if bytes.is_empty() || bytes.iter().any(|byte| matches!(byte, 0 | b'/' | b':')) {
             return Err(ArosError::InvalidComponentName);
         }

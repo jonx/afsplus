@@ -1262,8 +1262,12 @@ static int32_t extension_lock(struct AfsplusArosPacketContext *context,
     return lock_id(context, (BPTR)(uintptr_t)object, id);
 }
 
+/* The length is the sender's claim about its own memory; it is bounded by
+ * what a name can be before one byte is read. */
 static int32_t extension_name(const uint8_t *name, uint32_t length)
 {
+    if (length > AFSPLUS_EXT_NAME_MAX)
+        return ERROR_INVALID_COMPONENT_NAME;
     return length != 0 && name == NULL ? ERROR_BAD_NUMBER : 0;
 }
 

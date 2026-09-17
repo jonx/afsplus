@@ -27,6 +27,9 @@
 #define ACTION_AFSPLUS_EXT INT32_C(0x41465332)
 
 #define AFSPLUS_EXT_MAGIC UINT32_C(0x41465332)
+/* No name component of the format is longer, in any mount encoding. A longer
+ * name_length is ERROR_INVALID_COMPONENT_NAME and its bytes are not read. */
+#define AFSPLUS_EXT_NAME_MAX UINT32_C(255)
 #define AFSPLUS_EXT_VERSION UINT16_C(1)
 
 /* Operations. The group that must be present in the handler's library is
