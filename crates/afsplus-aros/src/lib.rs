@@ -18,7 +18,7 @@ use afsplus_format::{Timespec, NAME_MAX_UTF8_BYTES, OBJECT_ROOT};
 use afsplus_vfs::{
     AccessMode, Capabilities, Handle, NodeKind, ObjectId, Stat, StatFs, Vfs, VfsError,
 };
-pub use afsplus_vfs::{ExtentMap, ExtentRange};
+pub use afsplus_vfs::{AttributeWriteMode, ExtentMap, ExtentRange};
 
 pub type LockId = u64;
 pub type FileHandleId = u64;
@@ -1430,6 +1430,65 @@ impl<D: BlockDevice> ArosAdapter<D> {
             encoded.extend_from_slice(bytes);
         }
         Ok(encoded)
+    }
+
+    /// The value of an extended attribute of the object `name` under `base`,
+    /// or `None` when it has no such attribute. Every namespace is readable.
+    /// The attribute name is text in the mount's name encoding.
+    pub fn attribute(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+        attribute: &[u8],
+    ) -> Result<Option<Vec<u8>>, ArosError> {
+        let object = self.named_object(base, name)?;
+        let attribute = self.decode_text(attribute)?;
+        Ok(self.vfs.attribute(object, &attribute)?)
+    }
+
+    /// Every attribute name of the object, each followed by a NUL byte, in
+    /// the volume's byte order of stored names. A name the mount's encoding
+    /// cannot spell is left out: it cannot be asked for through this mount
+    /// either.
+    pub fn attribute_names(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+    ) -> Result<Vec<u8>, ArosError> {
+        let object = self.named_object(base, name)?;
+        let mut list = Vec::new();
+        for stored in self.vfs.attribute_names(object)? {
+            if let Ok(encoded) = self.encode_text(stored.as_bytes()) {
+                list.extend_from_slice(&encoded);
+                list.push(0);
+            }
+        }
+        Ok(list)
+    }
+
+    /// Writes (`Some`) or removes (`None`) one attribute. The classic system
+    /// has one user and no notion of the `security.` and `system.`
+    /// namespaces: they are preserved, shown, and not edited from here, as
+    /// the security descriptor is. `user.` and `aros.` are writable.
+    pub fn set_attribute(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+        attribute: &[u8],
+        value: Option<&[u8]>,
+        mode: AttributeWriteMode,
+        now: Timespec,
+    ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
+        let object = self.named_object(base, name)?;
+        let attribute = self.decode_text(attribute)?;
+        if attribute.starts_with("security.") || attribute.starts_with("system.") {
+            return Err(ArosError::WriteProtected);
+        }
+        self.vfs
+            .set_attributes(object, &[(attribute.as_str(), value)], mode, now)?;
+        self.touch_named(base, name);
+        Ok(())
     }
 
     /// `ACTION_SET_DATE`.
