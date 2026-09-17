@@ -189,6 +189,9 @@ Invariants the reviewer checks on every change that touches the core:
 
 ## Process rules
 
+The working rhythm (code, its test, that test alone, fix, next piece; a
+commit per coherent phase; one complete proof per milestone) is [the development method](implementation/development-method.md).
+
 - Work directly on `main`; there is no branch workflow. Commits are authored
   as the project owner (`John KNIPPER <code@jkn.me>`), carry an imperative
   subject line and a body that says what changed and why, and are pushed to
