@@ -87,6 +87,20 @@ paired with the current MacAROS Rust target and `rust-aros` standard library.
 Override `AFSPLUS_AROS_RUST_TOOLCHAIN` only with a correspondingly rebased
 target and standard library.
 
+The toolchain's `lib/rustlib/src/rust` must be the `rust-aros` tree, not the
+stock `rust-src` component. Cargo does not follow that link when it decides
+what to rebuild, and the `std` build script is a host program: it is cached
+under `<target dir>/release/build/std-*` and `<target dir>/release/.fingerprint/std-*`,
+outside the `aarch64-unknown-aros` directory. A script left there by a build
+against the stock source keeps marking AROS as an unsupported platform, and
+every crate that names `std` then fails with `E0658` (`restricted_std`). After
+changing what the link points to, remove those two paths and the
+`<target dir>/aarch64-unknown-aros` directory.
+
+The archive is looked up under `CARGO_TARGET_DIR` when that variable is set,
+otherwise under `target` in the repository; `AFSPLUS_AROS_RUST_ARCHIVE` names
+it explicitly.
+
 ## AArch64 platform profiles
 
 The default profile remains the qualified Hosted MacAROS build. Its target JSON
