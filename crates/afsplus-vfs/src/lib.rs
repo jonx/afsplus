@@ -293,6 +293,7 @@ pub struct Vfs<D: BlockDevice> {
     volume: Volume<D>,
     handles: BTreeMap<Handle, OpenHandle>,
     next_handle: Handle,
+    idle_maintenance: bool,
 }
 
 impl<D: BlockDevice> Vfs<D> {
@@ -313,6 +314,7 @@ impl<D: BlockDevice> Vfs<D> {
             volume,
             handles: BTreeMap::new(),
             next_handle: 1,
+            idle_maintenance: true,
         }
     }
 
@@ -496,6 +498,11 @@ impl<D: BlockDevice> Vfs<D> {
             || self.volume.ident().features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY == 0
         {
             return Ok(());
+        }
+        if !self.idle_maintenance {
+            // Accepted writes are still published; the orphan, if this was
+            // one, stays pending for a later resume.
+            return self.checkpoint_data_window(Timespec::default());
         }
         self.checkpoint_data_window(Timespec::default())?;
         self.volume.cleanup_orphan(object_id, Timespec::default())?;
@@ -1037,10 +1044,19 @@ impl<D: BlockDevice> Vfs<D> {
         } else {
             self.volume.sync()?;
         }
-        if self.volume.mount_mode() == MountMode::ReadWrite {
+        if self.volume.mount_mode() == MountMode::ReadWrite && self.idle_maintenance {
             self.resume_one_orphan(Timespec::default())?;
         }
         Ok(())
+    }
+
+    /// Whether `sync_filesystem` and the last `close` of an object may start
+    /// orphan cleanup. On by default. An adapter turns it off while its host
+    /// contract forbids new changes to the volume: a sync then only publishes
+    /// writes it already accepted, and pending orphans wait. They stay
+    /// visible through `pending_orphans` and are resumed once it is on again.
+    pub fn set_idle_maintenance(&mut self, enabled: bool) {
+        self.idle_maintenance = enabled;
     }
 
     pub fn into_volume(self) -> Volume<D> {

@@ -341,7 +341,7 @@ fn c_boundary_opens_from_a_lock_changes_modes_and_write_protects() {
         afsplus_aros_delete_object(filesystem, 0, b"data".as_ptr(), 4, 9, 0),
         214
     );
-    assert_eq!(afsplus_aros_set_write_protect(filesystem, 0, 0xBEE0), 214);
+    assert_eq!(afsplus_aros_set_write_protect(filesystem, 0, 0xBEE0), 210);
     assert_eq!(afsplus_aros_set_write_protect(filesystem, 0, 0xBEEF), 0);
     assert_eq!(
         afsplus_aros_delete_object(filesystem, 0, b"data".as_ptr(), 4, 9, 0),

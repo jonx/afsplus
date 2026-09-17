@@ -936,15 +936,27 @@ impl<D: BlockDevice> ArosAdapter<D> {
 
     /// `ACTION_WRITE_PROTECT`. Protecting flushes first, then every
     /// mutating call answers `ERROR_DISK_WRITE_PROTECTED` until the volume is
-    /// unprotected with the same key; a zero stored key accepts any key, as
-    /// the DOS `Lock` command without a password does. Handles opened for
+    /// unprotected. One key rule: protecting an already protected volume
+    /// succeeds only with the stored key (`ERROR_DISK_WRITE_PROTECTED`
+    /// otherwise); unprotecting needs the stored key, or any key when the
+    /// stored key is zero, the keyless `Lock`; a wrong key is
+    /// `ERROR_INVALID_COMPONENT_NAME`. No master key exists. A protected
+    /// volume is not changed at all: flush and close publish writes accepted
+    /// before and start no orphan cleanup. Handles opened for
     /// writing before stay open and refuse writes. The state lasts for the
     /// mount; nothing is written to the volume for it.
     pub fn set_write_protect(&mut self, protect: bool, key: u32) -> Result<(), ArosError> {
         match (protect, self.write_protect) {
             (true, None) => {
+                // Publishing writes already accepted is the last change a
+                // protected volume sees. Orphan cleanup would be a new one,
+                // here and in every later flush or close, so it waits.
+                self.vfs.set_idle_maintenance(false);
                 if self.vfs.mount_mode() == MountMode::ReadWrite {
-                    self.vfs.sync_filesystem()?;
+                    if let Err(error) = self.vfs.sync_filesystem() {
+                        self.vfs.set_idle_maintenance(true);
+                        return Err(error.into());
+                    }
                 }
                 self.write_protect = Some(key);
                 Ok(())
@@ -954,9 +966,11 @@ impl<D: BlockDevice> ArosAdapter<D> {
             (false, None) => Ok(()),
             (false, Some(stored)) if stored == 0 || stored == key => {
                 self.write_protect = None;
+                self.vfs.set_idle_maintenance(true);
                 Ok(())
             }
-            (false, Some(_)) => Err(ArosError::DiskWriteProtected),
+            // The wrong pass key, as the AROS RAM handler answers it.
+            (false, Some(_)) => Err(ArosError::InvalidComponentName),
         }
     }
 

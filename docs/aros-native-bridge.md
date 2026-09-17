@@ -287,9 +287,14 @@ successful change only.
 `ACTION_WRITE_PROTECT` protects the volume for the lifetime of the mount:
 it flushes, then every mutating call answers `ERROR_DISK_WRITE_PROTECTED`,
 handles opened for writing included, until the same 32-bit key unprotects it;
-a zero key is the keyless lock that any key opens. A wrong key changes
-nothing, `ACTION_DISK_INFO` reports the protected state, and nothing is
-written to the volume for it.
+a zero key is the keyless lock that any key opens, and no master key exists.
+A wrong key on unprotect is `ERROR_INVALID_COMPONENT_NAME`, as the AROS RAM
+handler answers it; protecting a protected volume with another key is
+`ERROR_DISK_WRITE_PROTECTED`. A protected volume is not changed at all:
+flush, close, `ACTION_INHIBIT` and `ACTION_DIE` publish writes accepted before
+the protection and start no orphan cleanup, which waits, visible in the
+health snapshot, until the volume is unprotected. `ACTION_DISK_INFO` reports
+the protected state, and nothing is written to the volume for it.
 
 Record locks are advisory byte ranges in a bounded in-memory table, owned
 by a file handle and released when it closes. Two ranges collide when they

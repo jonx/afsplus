@@ -485,7 +485,7 @@ fn write_protect_refuses_every_mutation_until_the_key_unlocks_it() {
     );
     assert_eq!(
         adapter.set_write_protect(false, 1),
-        Err(ArosError::DiskWriteProtected)
+        Err(ArosError::InvalidComponentName)
     );
 
     let refused = Err(ArosError::DiskWriteProtected);
@@ -683,4 +683,45 @@ fn record_locks_collide_by_range_mode_and_handle_and_die_with_the_handle() {
     );
     adapter.close(second).unwrap();
     adapter.close(elsewhere).unwrap();
+}
+
+#[test]
+fn a_protected_volume_is_not_changed_by_flush_or_by_protecting_it() {
+    // Three orphans left by a crash: unlinked while open, never closed.
+    let now = timestamp(1);
+    let mut vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let root = vfs.root_object();
+    for name in ["one", "two", "three"] {
+        let object = vfs.create_file(root, name, now).unwrap();
+        let handle = vfs
+            .open_file(object, afsplus_vfs::AccessMode::ReadWrite)
+            .unwrap();
+        vfs.write(handle, 0, &[0x5A; 3 * 4096], now).unwrap();
+        vfs.fsync(handle).unwrap();
+        vfs.unlink_file(root, name, now).unwrap();
+    }
+    let device = vfs.into_volume().into_device();
+
+    // A read-write mount resumes one orphan; two stay pending.
+    let mut adapter = adapter(device);
+    assert_eq!(adapter.health().unwrap().pending_orphans, 2);
+    let free_before = adapter.health().unwrap().free_blocks;
+    let generation_before = adapter.health().unwrap().generation;
+
+    adapter.set_write_protect(true, 7).unwrap();
+    adapter.flush().unwrap();
+    adapter.flush().unwrap();
+    let protected = adapter.health().unwrap();
+    assert_eq!(protected.pending_orphans, 2);
+    assert_eq!(protected.free_blocks, free_before);
+    assert_eq!(protected.generation, generation_before);
+
+    // Control: unprotected, the same flush resumes exactly one orphan and
+    // frees its blocks, so the stillness above was the protection.
+    adapter.set_write_protect(false, 7).unwrap();
+    adapter.flush().unwrap();
+    let resumed = adapter.health().unwrap();
+    assert_eq!(resumed.pending_orphans, 1);
+    assert!(resumed.free_blocks > free_before);
+    remount(adapter);
 }

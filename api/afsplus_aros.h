@@ -370,9 +370,12 @@ int32_t afsplus_aros_change_file_mode(struct AfsplusAros *filesystem,
     uint64_t file, uint32_t access);
 /* Interface revision 9, same group. Runtime write protection for the mount's
  * lifetime: protecting flushes, then every mutating call answers
- * ERROR_DISK_WRITE_PROTECTED until protect == 0 arrives with the same key. A
- * zero stored key accepts any key. A wrong key is
- * ERROR_DISK_WRITE_PROTECTED and changes nothing. */
+ * ERROR_DISK_WRITE_PROTECTED and the volume is not changed at all: flush and
+ * close publish only writes accepted before and start no orphan cleanup.
+ * Protecting a protected volume succeeds only with the stored key
+ * (ERROR_DISK_WRITE_PROTECTED otherwise). Unprotecting needs the stored key,
+ * or any key when the stored key is zero; a wrong key is
+ * ERROR_INVALID_COMPONENT_NAME and changes nothing. No master key exists. */
 int32_t afsplus_aros_set_write_protect(struct AfsplusAros *filesystem,
     uint32_t protect, uint32_t key);
 
