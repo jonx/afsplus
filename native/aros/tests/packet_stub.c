@@ -1023,6 +1023,57 @@ int main(void)
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res2 == ERROR_BAD_NUMBER);
 
+        /* One lock has one directory cursor. A second sequence takes it
+         * over, and the first one's continuation is refused by value rather
+         * than served from the second one's position. */
+        {
+            struct ExAllControl other;
+            struct FileInfoBlock interleaved;
+
+            memset(&other, 0, sizeof(other));
+            stub_directory_size = 8;
+            control.eac_LastKey = 0;
+            packet.dp_Arg3 = (SIPTR)(2 * one);
+            packet.dp_Arg4 = ED_DATE;
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE && control.eac_Entries == 2);
+
+            packet.dp_Arg5 = (SIPTR)&other;
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE && other.eac_Entries == 2);
+            assert(other.eac_LastKey != control.eac_LastKey);
+            assert(strcmp((char *)((struct ExAllData *)buffer.bytes)->ed_Name,
+                "e0") == 0);
+
+            packet.dp_Arg5 = (SIPTR)&control;
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSFALSE
+                && packet.dp_Res2 == ERROR_OBJECT_IN_USE);
+
+            /* The owner continues exactly where it was: e2, e3. */
+            packet.dp_Arg5 = (SIPTR)&other;
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE && other.eac_Entries == 2);
+            assert(strcmp((char *)((struct ExAllData *)buffer.bytes)->ed_Name,
+                "e2") == 0);
+
+            /* ExNext on the same lock moves the cursor, so it ends the
+             * sequence: the continuation is refused, not silently short. */
+            {
+                struct DosPacket next;
+
+                initialize_packet(&next, ACTION_EXAMINE_NEXT);
+                next.dp_Arg1 = (SIPTR)root;
+                next.dp_Arg2 = (SIPTR)MKBADDR(&interleaved);
+                assert(afsplus_aros_packet_process(context, &next) == 0);
+                assert(next.dp_Res1 == DOSTRUE);
+            }
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSFALSE
+                && packet.dp_Res2 == ERROR_OBJECT_IN_USE);
+            packet.dp_Arg5 = (SIPTR)&control;
+        }
+
         initialize_packet(&packet, ACTION_EXAMINE_ALL_END);
         packet.dp_Arg1 = (SIPTR)root;
         rewinds = rewind_count;

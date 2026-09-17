@@ -42,6 +42,9 @@ struct AfsplusArosNativeLock {
     /* Allocated by the first ACTION_EXAMINE_ALL on this lock. */
     struct AfsplusArosPendingEntry *exall;
     uint32_t exall_pending;
+    /* eac_LastKey of the one ExAll sequence that owns the directory cursor,
+     * zero when none does. */
+    uint32_t exall_key;
 };
 
 struct AfsplusArosNativeFile {
@@ -70,6 +73,7 @@ struct AfsplusArosPacketContext {
     struct AfsplusArosNativeFile *files;
     struct AfsplusArosNativeNotify *notifies;
     AfsplusArosPacketNotify notify;
+    uint32_t exall_serial;
     uint32_t inhibited;
     uint32_t quit;
     uint64_t groups;
@@ -1739,9 +1743,15 @@ int32_t afsplus_aros_packet_process(
             else if (error == 0)
                 id = lock->id;
             if (error == 0 && lock != NULL
-                && (packet->dp_Type == ACTION_EXAMINE_OBJECT
-                    || packet->dp_Type == ACTION_EXAMINE_OBJECT64))
+                && packet->dp_Type != ACTION_EXAMINE_FH
+                && packet->dp_Type != ACTION_EXAMINE_FH64)
+            {
+                /* Examine and ExNext move the lock's only directory cursor,
+                 * so an ExAll sequence on the same lock ends here and its
+                 * continuation is refused instead of skipping entries. */
                 lock->exall_pending = 0;
+                lock->exall_key = 0;
+            }
 
             if (error == 0 && (packet->dp_Type == ACTION_EXAMINE_OBJECT
                     || packet->dp_Type == ACTION_EXAMINE_OBJECT64))
@@ -1795,19 +1805,30 @@ int32_t afsplus_aros_packet_process(
                 error = ERROR_NO_FREE_STORE;
             lock->exall_pending = 0;
         }
-        /* A zero key restarts the scan. */
+        /* A lock has one directory cursor. A zero key starts a sequence,
+         * which takes the cursor over; a continuation whose key no longer
+         * owns the cursor is refused, never served from the wrong place. */
         if (error == 0 && control->eac_LastKey == 0)
         {
             lock->exall_pending = 0;
             error = afsplus_aros_rewind_directory(context->filesystem,
                 lock->id);
+            if (error == 0)
+            {
+                if (++context->exall_serial == 0)
+                    context->exall_serial = 1;
+                lock->exall_key = context->exall_serial;
+                control->eac_LastKey = lock->exall_key;
+            }
         }
+        else if (error == 0 && (lock->exall_key == 0
+            || control->eac_LastKey != (IPTR)lock->exall_key))
+            error = ERROR_OBJECT_IN_USE;
         if (error != 0)
             break;
 
         end = cursor + (size_t)packet->dp_Arg3;
         control->eac_Entries = 0;
-        control->eac_LastKey = 1;
         for (;;)
         {
             if (!lock->exall_pending)
@@ -1834,7 +1855,10 @@ int32_t afsplus_aros_packet_process(
             control->eac_Entries++;
         }
         if (finished)
+        {
             error = ERROR_NO_MORE_ENTRIES;
+            lock->exall_key = 0;
+        }
         else if (error == 0)
             result = DOSTRUE;
         break;
@@ -1849,6 +1873,7 @@ int32_t afsplus_aros_packet_process(
         else
         {
             lock->exall_pending = 0;
+            lock->exall_key = 0;
             error = afsplus_aros_rewind_directory(context->filesystem,
                 lock->id);
         }
