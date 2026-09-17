@@ -63,6 +63,14 @@ enum afsp_feature_class {
 #define AFSP_INCOMPAT_INTENT_LOG_DATA_UPDATES (UINT64_C(1) << 1)
 /* ADR-072: readers without full snapshot ownership support must reject. */
 #define AFSP_INCOMPAT_PERSISTENT_SNAPSHOTS   (UINT64_C(1) << 2)
+/* Object record fixed payload: 104 bytes. Offsets 96 and 100 are the POSIX
+ * owner UID and GID; the optional security and attribute references follow at
+ * 104 and after. The protection word at 68 carries the POSIX mode as a
+ * projection (ADR-118), it is not a second field. */
+#define AFSP_OBJECT_FIXED_PAYLOAD_BYTES 104u
+#define AFSP_OBJECT_OWNER_UID_OFFSET 96u
+#define AFSP_OBJECT_OWNER_GID_OFFSET 100u
+
 /* Object records may carry AFSP_OBJECT_FLAG_SECURITY_REF and AFSX segments. */
 #define AFSP_INCOMPAT_SECURITY_DESCRIPTORS   (UINT64_C(1) << 3)
 

@@ -18,6 +18,7 @@
 - [8. Security descriptors as shared objects](#8-security-descriptors-as-shared-objects)
 - [9. Classic Amiga compatibility profile](#9-classic-amiga-compatibility-profile)
 - [10. POSIX mapping](#10-posix-mapping)
+  - [10.1 The mode a volume without a descriptor projects](#101-the-mode-a-volume-without-a-descriptor-projects)
 - [11. Windows mapping](#11-windows-mapping)
 - [12. Administrator and superuser semantics](#12-administrator-and-superuser-semantics)
 - [13. Move, copy, and clone security semantics](#13-move-copy-and-clone-security-semantics)
@@ -256,6 +257,54 @@ The mapping must follow explicit rules for:
 - default/inherited ACLs
 
 When the AFS+ ACL contains semantics POSIX cannot represent exactly, such as ordered DENY ACEs or certain inheritance combinations, the host must not silently claim a lossless mapping.
+
+### 10.1 The mode a volume without a descriptor projects
+
+An object with no security descriptor has one carrier for permissions, the
+AROS protection word of section 9, and POSIX reads a mode projected from it.
+The rules are executable in
+[`afsplus-format/src/posix.rs`](../crates/afsplus-format/src/posix.rs) and
+decided in [ADR-118](../adr/ADR-118-posix-permission-projection.md):
+
+| POSIX | Protection word | Sense |
+|---|---|---|
+| owner `r` | READ (bit 3) | clear means allowed |
+| owner `w` | WRITE (bit 2) AND DELETE (bit 0) | both clear means allowed |
+| owner `x` | EXECUTE (bit 1) | clear means allowed |
+| group `rwx` | bits 11, 10, 9 | set means allowed |
+| other `rwx` | bits 15, 14, 13 | set means allowed |
+| setuid, setgid | bits 31, 30 | set means allowed |
+
+Owner `w` covers both WRITE and DELETE because a POSIX writer may truncate
+and unlink, and AmigaDOS splits the two. A `w` write moves the matching
+DELETE bit in all three classes, so the two views cannot drift into one
+saying writable while the other refuses the unlink.
+
+Bits 4 to 7, ARCHIVE, PURE and SCRIPT, have no POSIX meaning and are
+preserved: a mode write is a read-modify-write of the word, never a
+replacement, so a `chmod` from a POSIX host cannot clear the SCRIPT bit of a
+file AmigaDOS runs.
+
+A mode round-trips exactly. The WORD does not and cannot: writable but not
+deletable has no POSIX spelling, so it reads as `w` absent, and writing that
+back denies both. A projection loses what it cannot say, and this document
+says which.
+
+The POSIX sticky bit has no carrier. It is REFUSED by name, not dropped, so
+a caller that asked for a restriction is never told it holds when it does
+not. At creation the representable part of the mode is written and the bit is
+visibly absent, which is what a POSIX filesystem does with a mode bit it
+cannot keep.
+
+A POSIX mode write IS a protection-word write, so it passes through the
+projection policy of section 9 unchanged: on a volume carrying a security
+descriptor, strict refuses it and preserve sets the projection-diverged mark.
+There is no second policy for POSIX.
+
+Owner UID and GID are stored in the object record, not projected. There is no
+access time in this format; adapters report the modification time in its
+place, which is a declared property of the volume rather than a write
+discarded in silence.
 
 Possible host policies:
 

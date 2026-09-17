@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-18 — A mode, an owner and a time that a mounted volume keeps](#2026-09-18--a-mode-an-owner-and-a-time-that-a-mounted-volume-keeps)
 - [2026-09-17 — The root of a mounted volume stopped listing after the first write](#2026-09-17--the-root-of-a-mounted-volume-stopped-listing-after-the-first-write)
 - [2026-09-17 — Answer what else renders wrong, having first been wrong about it](#2026-09-17--answer-what-else-renders-wrong-having-first-been-wrong-about-it)
 - [2026-09-17 — Read the tool index and the v2 document as a stranger](#2026-09-17--read-the-tool-index-and-the-v2-document-as-a-stranger)
@@ -218,6 +219,52 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-18 — A mode, an owner and a time that a mounted volume keeps
+
+The owner copied a folder into the mounted volume with the Finder and was
+told the destination was read-only. The directory was created and every file
+inside it failed. The volume was mounted read-write and shell writes worked.
+
+Nothing stored a mode. The FUSE adapter synthesized one from its mount
+options, so `setattr` could accept only a mode equal to the configured one
+and refused every other with `EOPNOTSUPP`, which macOS prints as "Operation
+not supported on socket" and the Finder renders as a read-only destination.
+`rsync`, `tar`, `zip`, `git init` and `chmod +x` all failed the same way,
+each on a file created with a mode.
+
+The same function was handed the timestamps, stored none of them, and
+answered SUCCESS: `touch -t` returned 0 and the time did not move. That is
+the worse half. A refusal is wrong once storage is possible; an untrue
+success is wrong however the day goes.
+
+The carrier is the AmigaDOS protection word that was already there, and the
+POSIX mode is a projection of it, exactly as the classic view is. A second
+field would have meant two sources of truth for one question and a rule for
+what happens when they disagree, which is a rule nobody can test into
+correctness. The bit meanings were read from this machine's own `dos/dos.h`,
+not from memory of AmigaDOS; the first three greps of that header returned
+nothing because the file is ISO-8859 and grep treated it as binary, which is
+the kind of silent empty result that reads as a clean answer.
+
+Three rules make it hold. Owner `w` requires WRITE and DELETE both, and moves
+both, because a POSIX writer may unlink and AmigaDOS splits the two. Bits 4
+to 7 are preserved, so a `chmod` from macOS cannot clear the SCRIPT bit of a
+file AmigaDOS runs. Sticky is refused by name rather than dropped; at
+creation the representable part is written and the bit is visibly absent.
+
+The owner UID and GID became real fields, which grew the object payload from
+96 to 104 bytes. The portable C reader moved in the same commit as the codec
+rather than four commits later: the cross-read tests failed the moment the
+Rust layout moved, which is what a second reader is for, and a tree where
+every cross-read test is red hides the next real breakage among the known
+ones. That move cost eleven hardcoded offsets across seven test files, each
+surfacing only once the previous was fixed.
+
+Verified on a real macFUSE mount rather than asserted: the reproduction from
+the report succeeds, `cp -R` preserves modes, `touch -t` moves the time,
+`chmod +x` makes a script that then runs, and `git init`, `rsync -a`, `tar`
+and `zip` complete.
 
 ## 2026-09-17 — The root of a mounted volume stopped listing after the first write
 

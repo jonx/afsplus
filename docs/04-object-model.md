@@ -55,7 +55,9 @@ The core record contains only fields required by almost every implementation:
 - creation timestamp
 - modification timestamp
 - metadata-change timestamp
-- AROS protection flags
+- AROS protection flags, which also carry the POSIX mode as a projection
+  ([ADR-118](../adr/ADR-118-posix-permission-projection.md))
+- POSIX owner UID and GID
 - extent-root or inline extent data
 - a 16-byte security reference when the object carries a descriptor
   ([ADR-101](../adr/ADR-101-security-preservation-container.md))
@@ -67,6 +69,18 @@ The core record contains only fields required by almost every implementation:
 - checksum
 
 Large or uncommon metadata belongs in attributes, not in an ever-growing fixed inode.
+
+The protection word is read two ways and stored once. AmigaDOS reads it as
+its own RWED bits; POSIX reads a mode projected from the same word, and a
+`chmod` edits the word rather than replacing it, so the bits only AmigaDOS
+uses survive. The rules and what neither view can say are in
+[ADR-118](../adr/ADR-118-posix-permission-projection.md) and
+[docs/30 section 10](30-portable-security-model.md).
+
+The owner UID and GID are `u32` because POSIX is. The AROS `FileInfoBlock`
+has `fib_OwnerUID` and `fib_OwnerGID` as `UWORD`, so the AROS projection
+reports a stored identity that fits in 16 bits and the unknown owner
+otherwise, rather than truncating one user into a different one.
 
 The executable record is one checksummed block: the 32-byte common header
 (owner field = object ID) and this payload, little-endian, taken from
@@ -88,7 +102,9 @@ The executable record is one checksummed block: the 32-byte common header
 | 72 | 8 | content generation |
 | 80 | 8 | data root: directory tree root, extent tree root, or direct extent start |
 | 88 | 8 | direct extent length in blocks; zero for a directory or an empty file |
-| 96 | 16 | security reference, present with flag bit 2: first segment block (8), descriptor length (4), segment count (2), reference flags (2) |
+| 96 | 4 | POSIX owner UID; zero is root, a value, not an absence |
+| 100 | 4 | POSIX owner GID |
+| 104 | 16 | security reference, present with flag bit 2: first segment block (8), descriptor length (4), segment count (2), reference flags (2) |
 | after the security reference | 16 | attribute reference, present with flag bit 4: first segment block (8), set length (4), segment count (2), reserved zero (2) ([ADR-108](../adr/ADR-108-extended-attributes.md)) |
 | after the references | 1 + n | comment, present with flag bit 3: length byte 1 to 255, then NUL-free UTF-8 ([ADR-106](../adr/ADR-106-stored-object-comment.md)) |
 | after the comment | n | inline target of a symlink, NUL-free UTF-8 |
