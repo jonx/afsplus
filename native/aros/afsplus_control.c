@@ -11,6 +11,27 @@ static uint32_t is_separator(char character)
     return character == ' ' || character == '\t' || character == ',';
 }
 
+/* The decimal number in text, or 0 when it is not one or does not fit. */
+static uint32_t parse_count(const char *text, uint32_t length,
+    uint32_t limit, uint32_t *value)
+{
+    uint32_t result = 0;
+    uint32_t index;
+
+    if (length == 0 || length > 10)
+        return 0;
+    for (index = 0; index < length; index++)
+    {
+        if (text[index] < '0' || text[index] > '9')
+            return 0;
+        result = result * 10 + (uint32_t)(text[index] - '0');
+        if (result > limit)
+            return 0;
+    }
+    *value = result;
+    return result != 0;
+}
+
 static uint32_t same_word(const char *text, uint32_t length, const char *word)
 {
     uint32_t index;
@@ -40,10 +61,12 @@ uint32_t afsplus_control_parse(const char *text, uint32_t length,
     struct AfsplusArosControl parsed;
     uint32_t seen_security = 0;
     uint32_t seen_encoding = 0;
+    uint32_t seen_trace = 0;
     uint32_t at = 0;
 
     parsed.mount_flags = 0;
     parsed.name_encoding = AFSPLUS_AROS_ENCODING_UTF8;
+    parsed.trace_events = 0;
     *output = parsed;
     if (text == NULL)
         return AFSPLUS_CONTROL_OK;
@@ -100,6 +123,16 @@ uint32_t afsplus_control_parse(const char *text, uint32_t length,
             else if (same_word(value, at - value_start, "LATIN1"))
                 parsed.name_encoding = AFSPLUS_AROS_ENCODING_LATIN1;
             else
+                return AFSPLUS_CONTROL_UNKNOWN_VALUE;
+        }
+        else if (same_word(keyword, keyword_length, "TRACE"))
+        {
+            if (seen_trace++)
+                return AFSPLUS_CONTROL_REPEATED_KEYWORD;
+            if (same_word(value, at - value_start, "OFF"))
+                ;
+            else if (!parse_count(value, at - value_start,
+                AFSPLUS_CONTROL_TRACE_MAX, &parsed.trace_events))
                 return AFSPLUS_CONTROL_UNKNOWN_VALUE;
         }
         else

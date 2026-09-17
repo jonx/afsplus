@@ -105,6 +105,16 @@ LONG afsplus_client_dir_read(BPTR lock, uint64_t walk, void *records,
     uint32_t capacity, uint32_t limit, uint32_t *count, uint32_t *eof);
 LONG afsplus_client_dir_close(BPTR lock, uint64_t walk);
 
+/* Trace events the handler's ring holds, oldest first; the call empties what
+ * it hands over and reports how many the ring has dropped since the mount. A
+ * mount whose Control string did not ask for a ring answers
+ * ERROR_NOT_IMPLEMENTED. */
+LONG afsplus_client_trace_events(struct MsgPort *port,
+    struct afsp_trace_event *events, uint32_t capacity, uint32_t *count,
+    uint64_t *lost);
+LONG afsplus_client_trace_counters(struct MsgPort *port,
+    struct AfsplusArosTraceCounters *output);
+
 /* Health events the handler recorded, oldest first; the call empties what it
  * hands over. lost receives how many the ring has dropped since the mount,
  * which a caller cannot see from the events themselves. */

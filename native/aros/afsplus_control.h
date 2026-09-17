@@ -28,12 +28,20 @@
  *   ENCODING=UTF8       names on the wire are UTF-8. The default.
  *   ENCODING=LATIN1     names on the wire are Latin-1, converted on the way
  *                       in and out; what a classic program sends.
+ *   TRACE=OFF           no trace ring, and the core records nothing. The
+ *                       default: the ring costs memory and a clock read per
+ *                       event.
+ *   TRACE=<n>           keep a ring of n events, 1 to 4096, which a tool
+ *                       drains through the extension packet.
  */
 #include <stdint.h>
+
+#define AFSPLUS_CONTROL_TRACE_MAX 4096
 
 struct AfsplusArosControl {
     uint32_t mount_flags;   /* AFSPLUS_AROS_MOUNT_FLAG_* of afsplus_aros.h */
     uint32_t name_encoding; /* AFSPLUS_AROS_ENCODING_* of afsplus_aros.h */
+    uint32_t trace_events;  /* ring size, 0 for no trace ring */
 };
 
 #define AFSPLUS_CONTROL_OK 0

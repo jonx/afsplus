@@ -105,6 +105,7 @@ struct AfsplusArosPacketContext {
     AfsplusArosPacketNotify notify;
     AfsplusArosPacketRelabel relabel;
     AfsplusArosPacketComplete complete;
+    AfsplusArosPacketTraceTake trace_take;
     struct AfsplusArosCountTable by_action;
     struct AfsplusArosCountTable by_error;
     struct AfsplusArosParked parked[AFSPLUS_AROS_PARKED_MAX];
@@ -1081,6 +1082,7 @@ int32_t afsplus_aros_packet_create(
     context->notify = config->notify;
     context->relabel = config->relabel;
     context->complete = config->complete;
+    context->trace_take = config->trace_take;
     {
         struct AfsplusArosInterface interface;
 
@@ -1209,6 +1211,7 @@ union AfsplusExtReport {
     struct AfsplusArosCounters counters;
     struct AfsplusArosHealth health;
     struct AfsplusArosStat stat;
+    struct AfsplusArosTraceCounters trace;
 };
 
 /* A report struct in a caller buffer declares its own size in its first
@@ -1570,6 +1573,34 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
         }
         return error;
     }
+    case AFSPLUS_EXT_TRACE_EVENTS:
+    {
+        uint32_t capacity = request->buffer_size
+            / (uint32_t)sizeof(struct afsp_trace_event);
+        uint64_t dropped = 0;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_OBSERVE);
+        if (error == 0 && context->trace_take == NULL)
+            error = ERROR_NOT_IMPLEMENTED;
+        if (error == 0 && capacity != 0 && request->buffer == NULL)
+            error = ERROR_BAD_NUMBER;
+        if (error != 0)
+            return error;
+        request->output_count = context->trace_take(context->callback_context,
+            (struct afsp_trace_event *)request->buffer, capacity, &dropped);
+        request->output_value = dropped;
+        return 0;
+    }
+    case AFSPLUS_EXT_TRACE_COUNTERS:
+        error = require_group(context, AFSPLUS_AROS_GROUP_OBSERVE);
+        if (error == 0)
+            error = report_begin(request, sizeof(report.trace), &report);
+        if (error == 0)
+            error = afsplus_aros_trace_counters(context->filesystem,
+                &report.trace);
+        if (error == 0)
+            report_end(request, &report);
+        return error;
     case AFSPLUS_EXT_PACKET_COUNTS:
     {
         const struct AfsplusArosCountTable *table;

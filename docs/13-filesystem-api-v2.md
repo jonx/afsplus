@@ -286,6 +286,29 @@ preallocation and the reports have no classic equivalent; the error is the
 signal to copy, to do without, or to report nothing. The library never sends
 objects of two handlers to one of them.
 
+The core's flight recorder reaches a target the same way. Its sink runs
+inside filesystem operations, so it may not block or call back into the
+library: the handler gives it a ring preallocated at mount, sized by
+`TRACE=<events>` in the DOSDriver `Control` string, and the sink does
+nothing but copy the event into it. `TRACE_EVENTS` drains that ring and
+`TRACE_COUNTERS` reads the recorder's own counters; `AFSPlusInfo <path>
+TRACE` prints both. A mount without a ring answers `ERROR_NOT_IMPLEMENTED`
+rather than an empty stream, so nobody mistakes "not recording" for "nothing
+happened".
+
+The handler fills the event timestamp, which the core leaves at zero because
+it has no clock. The stamp is the handler's clock as the system has set it,
+at the resolution that clock offers: on AROS that is the 1/50 s tick, so
+events of one operation share a stamp, and on a system whose clock was never
+set they carry its epoch.
+
+Three counters say different things and only one of them is trace loss. The
+ring's own count, what `TRACE_EVENTS` returns beside the events, is how many
+events it overwrote because nobody drained it in time. The recorder's
+`missed` is events a sink refused. The recorder's `dropped` counts overwrites
+in its own local ring, which a mount with a sink attached does not read at
+all; it is not a measure of what the stream lost.
+
 The paged directory walk of the object-ID group travels as `DIR_OPEN`,
 `DIR_READ` and `DIR_CLOSE`. A walk belongs to the lock it was opened from and
 to nothing else: it does not disturb that lock's `ExNext` cursor, another

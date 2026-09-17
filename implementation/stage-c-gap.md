@@ -241,10 +241,17 @@ recorder to a callback of
 category mask; `afsplus_aros_trace_counters` reports delivered, missed,
 filtered and dropped.
 
-Lacking: a timestamp source (the core has no clock, so the field is zero); a
-target front-end that owns the preallocated queue (message port for a
-following tool, serial for QEMU and m68k); stable event codes (the draft
-header publishes the core's event order). Forwarding from the M1 target to a
+The target front-end is the handler: with `TRACE=<events>` in the DOSDriver
+`Control` string it preallocates a ring, attaches the sink, stamps each event
+from its own clock, and a tool drains the ring through the extension packet
+(`AFSPlusInfo <path> TRACE`). Proven on Hosted: 46 events with a ring of 64
+and nothing lost, and with a ring of 8 the last 8 events with the other 85
+counted as overwritten.
+
+Lacking: stable event codes (the draft header publishes the core's event
+order); a serial front-end for QEMU and m68k, where no tool can run beside
+the filesystem; a clock better than the system tick, which today gives every
+event of one operation the same stamp. Forwarding from the M1 target to a
 development host needs the hardware.
 
 ## C11. Structured management APIs

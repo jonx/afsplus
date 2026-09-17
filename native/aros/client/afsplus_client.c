@@ -460,3 +460,33 @@ LONG afsplus_client_health_events(struct MsgPort *port,
     }
     return error;
 }
+
+LONG afsplus_client_trace_events(struct MsgPort *port,
+    struct afsp_trace_event *events, uint32_t capacity, uint32_t *count,
+    uint64_t *lost)
+{
+    struct AfsplusExtRequest request;
+    LONG error;
+
+    if (count == NULL || lost == NULL || (capacity != 0 && events == NULL)
+        || capacity > UINT32_MAX / sizeof(*events))
+        return ERROR_REQUIRED_ARG_MISSING;
+    *count = 0;
+    *lost = 0;
+    begin(&request, AFSPLUS_EXT_TRACE_EVENTS);
+    request.buffer = events;
+    request.buffer_size = capacity * (uint32_t)sizeof(*events);
+    error = afsplus_client_send(port, &request);
+    if (error == 0)
+    {
+        *count = request.output_count;
+        *lost = request.output_value;
+    }
+    return error;
+}
+
+LONG afsplus_client_trace_counters(struct MsgPort *port,
+    struct AfsplusArosTraceCounters *output)
+{
+    return report(port, AFSPLUS_EXT_TRACE_COUNTERS, output, sizeof(*output));
+}

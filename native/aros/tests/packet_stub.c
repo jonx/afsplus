@@ -813,6 +813,39 @@ int32_t afsplus_aros_health_events(struct AfsplusAros *filesystem,
     return ext_call('h', 0, NULL, 0, capacity, 0, 0, 0);
 }
 
+int32_t afsplus_aros_trace_counters(struct AfsplusAros *filesystem,
+    struct AfsplusArosTraceCounters *output)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    output->attached = 1;
+    output->delivered = 11;
+    return ext_call('t', 0, NULL, 0, output->struct_size, 0, 0, 0);
+}
+
+/* The handler's ring, as the packet layer sees it through the callback. */
+static struct afsp_trace_event stub_trace[3];
+static uint32_t stub_trace_count = 3;
+
+static uint32_t stub_trace_take(void *context,
+    struct afsp_trace_event *events, uint32_t capacity, uint64_t *dropped)
+{
+    uint32_t taken = capacity < stub_trace_count
+        ? capacity : stub_trace_count;
+    uint32_t index;
+
+    (void)context;
+    (void)stub_trace;
+    *dropped = 5;
+    for (index = 0; index < taken; index++)
+    {
+        memset(&events[index], 0, sizeof(events[index]));
+        events[index].sequence = index + 1;
+        events[index].timestamp = 1000 + index;
+    }
+    stub_trace_count -= taken;
+    return taken;
+}
+
 int32_t afsplus_aros_dir_open(struct AfsplusAros *filesystem,
     uint64_t base_lock, uint64_t *output_dir)
 {
@@ -1099,6 +1132,7 @@ int main(void)
     config.notify = packet_notify;
     config.relabel = packet_relabel;
     config.complete = packet_complete;
+    config.trace_take = stub_trace_take;
     assert(afsplus_aros_packet_create(&config, &context) == 0);
     assert(context != NULL);
 
@@ -1797,6 +1831,35 @@ int main(void)
             EXT_SEND(DOSTRUE, 0);
             assert(request.output_count == 0
                 && request.output_value == stub_health_dropped);
+
+            /* The trace ring the handler owns, and its counters. */
+            {
+                struct afsp_trace_event trace[4];
+                struct AfsplusArosTraceCounters counters;
+
+                EXT_BEGIN(AFSPLUS_EXT_TRACE_EVENTS);
+                request.buffer = trace;
+                request.buffer_size = sizeof(trace[0]);
+                EXT_SEND(DOSTRUE, 0);
+                assert(request.output_count == 1 && trace[0].sequence == 1);
+                assert(request.output_value == 5);
+                request.buffer_size = sizeof(trace);
+                EXT_SEND(DOSTRUE, 0);
+                assert(request.output_count == 2 && trace[0].sequence == 1
+                    && trace[0].timestamp == 1000);
+                /* Drained: nothing left, and the loss count stays. */
+                EXT_SEND(DOSTRUE, 0);
+                assert(request.output_count == 0
+                    && request.output_value == 5);
+
+                memset(&counters, 0, sizeof(counters));
+                counters.struct_size = sizeof(counters);
+                EXT_BEGIN(AFSPLUS_EXT_TRACE_COUNTERS);
+                request.buffer = &counters;
+                request.buffer_size = sizeof(counters);
+                EXT_SEND(DOSTRUE, 0);
+                assert(counters.attached == 1 && counters.delivered == 11);
+            }
         }
 
         /* A filesystem error travels in dp_Res2 and clears the outputs. */
@@ -2743,6 +2806,7 @@ int main(void)
             config.notify = NULL;
             config.relabel = NULL;
             config.complete = NULL;
+            config.trace_take = NULL;
             assert(afsplus_aros_packet_create(&config, &old_context) == 0);
             reset_events();
             initialize_packet(&packet, ACTION_ADD_NOTIFY);
@@ -2820,6 +2884,7 @@ int main(void)
             config.notify = packet_notify;
             config.relabel = packet_relabel;
             config.complete = packet_complete;
+            config.trace_take = stub_trace_take;
         }
     }
 

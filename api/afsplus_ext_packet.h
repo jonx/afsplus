@@ -62,6 +62,8 @@
 #define AFSPLUS_EXT_DIR_READ UINT32_C(21)        /* OBJECT_IDS */
 #define AFSPLUS_EXT_DIR_CLOSE UINT32_C(22)       /* OBJECT_IDS */
 #define AFSPLUS_EXT_HEALTH_EVENTS UINT32_C(23)   /* OBSERVE */
+#define AFSPLUS_EXT_TRACE_EVENTS UINT32_C(24)    /* OBSERVE */
+#define AFSPLUS_EXT_TRACE_COUNTERS UINT32_C(25)  /* OBSERVE */
 
 /* One record of AFSPLUS_EXT_PACKET_COUNTS. With flags 0 the key is a packet
  * type, count the packets of that type answered since the handler started
@@ -137,6 +139,12 @@ struct AfsplusExtPacketCount {
  *   HEALTH_EVENTS buffer: array of struct AfsplusArosHealthEvent,
  *                 buffer_size in bytes -> output_count events taken from the
  *                 ring, output_value events the ring has LOST since mount
+ *   TRACE_EVENTS  buffer: array of struct afsp_trace_event, buffer_size in
+ *                 bytes -> output_count events taken from the handler's ring,
+ *                 output_value events the ring has LOST since the mount. A
+ *                 mount that did not ask for a ring answers
+ *                 ERROR_NOT_IMPLEMENTED.
+ *   TRACE_COUNTERS buffer: struct AfsplusArosTraceCounters, struct_size set
  *   PACKET_COUNTS flags: which table, buffer: array of struct
  *                 AfsplusExtPacketCount, buffer_size in bytes
  *                 -> output_count records stored, output_value records the

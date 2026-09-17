@@ -37,6 +37,7 @@ static void refuses(const char *text, uint32_t reason)
     check(result == reason);
     check(control.mount_flags == 0);
     check(control.name_encoding == AFSPLUS_AROS_ENCODING_UTF8);
+    check(control.trace_events == 0);
 }
 
 int main(void)
@@ -46,7 +47,8 @@ int main(void)
     /* No string, an empty one and separators only: the defaults. */
     check(parse(NULL, &control) == AFSPLUS_CONTROL_OK);
     check(control.mount_flags == 0
-        && control.name_encoding == AFSPLUS_AROS_ENCODING_UTF8);
+        && control.name_encoding == AFSPLUS_AROS_ENCODING_UTF8
+        && control.trace_events == 0);
     check(parse("", &control) == AFSPLUS_CONTROL_OK);
     check(parse("   ,, \t ", &control) == AFSPLUS_CONTROL_OK);
     check(control.mount_flags == 0);
@@ -77,6 +79,29 @@ int main(void)
         == AFSPLUS_CONTROL_OK);
     check(control.mount_flags == AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE);
     check(control.name_encoding == AFSPLUS_AROS_ENCODING_LATIN1);
+
+    /* The trace ring: off by default, a count when asked for, and bounded. */
+    check(parse("TRACE=OFF", &control) == AFSPLUS_CONTROL_OK);
+    check(control.trace_events == 0);
+    check(parse("TRACE=256", &control) == AFSPLUS_CONTROL_OK);
+    check(control.trace_events == 256);
+    check(parse("trace=1", &control) == AFSPLUS_CONTROL_OK);
+    check(control.trace_events == 1);
+    {
+        char largest[32];
+
+        sprintf(largest, "TRACE=%u", (unsigned)AFSPLUS_CONTROL_TRACE_MAX);
+        check(parse(largest, &control) == AFSPLUS_CONTROL_OK);
+        check(control.trace_events == AFSPLUS_CONTROL_TRACE_MAX);
+        sprintf(largest, "TRACE=%u", (unsigned)AFSPLUS_CONTROL_TRACE_MAX + 1);
+        refuses(largest, AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    }
+    refuses("TRACE=0", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("TRACE=-1", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("TRACE=12x", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("TRACE=99999999999", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("TRACE=ON", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("TRACE=256 TRACE=256", AFSPLUS_CONTROL_REPEATED_KEYWORD);
 
     /* What a mountlist may not say without being told. */
     refuses("SECURITY=NONE", AFSPLUS_CONTROL_UNKNOWN_VALUE);

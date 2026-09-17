@@ -103,6 +103,13 @@ struct AfsplusArosHandler {
     /* From the DOSDriver Control string. */
     uint32_t mount_flags;
     uint32_t name_encoding;
+    /* The preallocated queue the trace sink hands its events to, empty
+     * unless the Control string asked for it. See afsplus_aros_trace_emit. */
+    struct afsp_trace_event *trace_ring;
+    uint32_t trace_capacity;
+    uint32_t trace_count;
+    uint32_t trace_next;
+    uint64_t trace_dropped;
     uint16_t read_command;
     uint16_t write_command;
     uint32_t supports_64bit_offsets;
@@ -192,6 +199,18 @@ static void reply_packet(struct MsgPort *handler_port,
     packet->dp_Port = handler_port;
     message->mn_Node.ln_Name = (char *)packet;
     PutMsg(reply_port, message);
+}
+
+void afsplus_aros_trace_emit(void *context,
+    const struct afsp_trace_event *event);
+uint32_t afsplus_aros_trace_take(struct AfsplusArosHandler *handler,
+    struct afsp_trace_event *events, uint32_t capacity, uint64_t *dropped);
+
+/* afsplus_packet.h: the trace ring of this handler. */
+static uint32_t packet_trace_take(void *context,
+    struct afsp_trace_event *events, uint32_t capacity, uint64_t *dropped)
+{
+    return afsplus_aros_trace_take(context, events, capacity, dropped);
 }
 
 /* A packet the packet layer had kept comes back with its result stored. */
@@ -788,6 +807,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
         }
         handler->mount_flags = control.mount_flags;
         handler->name_encoding = control.name_encoding;
+        handler->trace_capacity = control.trace_events;
     }
 
     memset(&mount_config, 0, sizeof(mount_config));
@@ -812,6 +832,28 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
         &handler->filesystem);
     if (error != 0)
         return error;
+
+    /* The ring exists before the sink can write into it, and the sink is
+     * attached only once both are ready. A mount that asked for tracing and
+     * cannot have it fails rather than running untraced: the caller asked. */
+    if (handler->trace_capacity != 0)
+    {
+        struct afsp_trace_sink sink;
+
+        set_startup_stage(handler, "trace-ring");
+        handler->trace_ring = AllocMem(
+            (ULONG)handler->trace_capacity * sizeof(*handler->trace_ring),
+            MEMF_PUBLIC | MEMF_CLEAR);
+        if (handler->trace_ring == NULL)
+            return ERROR_NO_FREE_STORE;
+        memset(&sink, 0, sizeof(sink));
+        sink.emit = afsplus_aros_trace_emit;
+        sink.ctx = handler;
+        sink.category_mask = UINT64_MAX;
+        error = afsplus_aros_set_trace_sink(handler->filesystem, &sink);
+        if (error != 0)
+            return error;
+    }
 
     set_startup_stage(handler, "disk-info");
     error = afsplus_aros_disk_info(handler->filesystem, &disk_info);
@@ -881,6 +923,8 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
         return ERROR_NO_FREE_STORE;
     packet_config.notify = packet_notify;
     packet_config.relabel = packet_relabel;
+    if (handler->trace_ring != NULL)
+        packet_config.trace_take = packet_trace_take;
     open_wait_timer(handler);
     if (handler->timer_open)
         packet_config.complete = packet_complete;
@@ -943,8 +987,18 @@ static void cleanup_handler(struct AfsplusArosHandler *handler)
     afsplus_aros_startup_trace(SysBase, UINT32_C(0x60000004));
     if (handler->filesystem != NULL)
     {
+        /* Detached before the ring goes: the library must not hold a
+         * callback into memory this is about to free. */
+        if (handler->trace_ring != NULL)
+            (void)afsplus_aros_set_trace_sink(handler->filesystem, NULL);
         (void)afsplus_aros_unmount(handler->filesystem);
         handler->filesystem = NULL;
+    }
+    if (handler->trace_ring != NULL)
+    {
+        FreeMem(handler->trace_ring,
+            (ULONG)handler->trace_capacity * sizeof(*handler->trace_ring));
+        handler->trace_ring = NULL;
     }
     afsplus_aros_startup_trace(SysBase, UINT32_C(0x60000005));
     if (handler->device_open)
@@ -1047,6 +1101,66 @@ static void refuse_queued_packets(struct ExecBase *SysBase,
         packet->dp_Res2 = ERROR_DEVICE_NOT_MOUNTED;
         reply_packet(port, SysBase, packet);
     }
+}
+
+/*
+ * The trace sink, from a target.
+ *
+ * The core hands every recorded event to a callback that runs inside a
+ * filesystem operation on this task; it may not block, call back into the
+ * library or unwind. So it does one thing: it copies the event into a ring
+ * this handler preallocated, and counts what it had to drop. A tool drains
+ * the ring through the extension packet, which runs between operations.
+ *
+ * The event's timestamp is filled here. The core has no clock, so it leaves
+ * the field zero; the handler has one, and a stamp taken when the event is
+ * recorded is the closest a caller can get. It costs a DateStamp per event,
+ * which is why the ring exists only when the mount asked for it.
+ */
+void afsplus_aros_trace_emit(void *context,
+    const struct afsp_trace_event *event)
+{
+    struct AfsplusArosHandler *handler = context;
+    struct afsp_trace_event *slot;
+    int64_t seconds = 0;
+    uint32_t nanoseconds = 0;
+
+    if (handler->trace_ring == NULL || handler->trace_capacity == 0)
+        return;
+    if (handler->trace_count == handler->trace_capacity)
+    {
+        /* The oldest event goes: a tool that came late wants what the
+         * filesystem did last, and the count says what it missed. */
+        handler->trace_dropped++;
+        handler->trace_next = (handler->trace_next + 1)
+            % handler->trace_capacity;
+        handler->trace_count--;
+    }
+    slot = &handler->trace_ring[(handler->trace_next + handler->trace_count)
+        % handler->trace_capacity];
+    *slot = *event;
+    if (packet_now(handler, &seconds, &nanoseconds) == 0)
+        slot->timestamp = (uint64_t)seconds * UINT64_C(1000000000)
+            + nanoseconds;
+    handler->trace_count++;
+}
+
+/* Takes up to capacity events, oldest first, and says how many the ring has
+ * dropped since the mount. */
+uint32_t afsplus_aros_trace_take(struct AfsplusArosHandler *handler,
+    struct afsp_trace_event *events, uint32_t capacity, uint64_t *dropped)
+{
+    uint32_t taken = 0;
+
+    *dropped = handler->trace_dropped;
+    while (taken < capacity && handler->trace_count != 0)
+    {
+        events[taken++] = handler->trace_ring[handler->trace_next];
+        handler->trace_next = (handler->trace_next + 1)
+            % handler->trace_capacity;
+        handler->trace_count--;
+    }
+    return taken;
 }
 
 /* afsplus_claim.h: the identity of a task, and whether a recorded task is

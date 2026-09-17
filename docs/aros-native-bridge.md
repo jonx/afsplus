@@ -320,8 +320,9 @@ worse than none, because the mount would run under a policy nobody chose.
 The DOSDriver's `Control` string is where a mountlist names what the numeric
 fields cannot ([`afsplus_control.h`](../native/aros/afsplus_control.h)):
 `SECURITY=PRESERVE|STRICT|DOWNGRADE` selects the projection policy of the
-section above, and `ENCODING=UTF8|LATIN1` the encoding of names on the
-packet boundary. Settings are separated by spaces or commas, and keyword and
+section above, `ENCODING=UTF8|LATIN1` the encoding of names on the packet
+boundary, and `TRACE=<events>` gives the mount a trace ring of that many
+events, which it has not got by default. Settings are separated by spaces or commas, and keyword and
 value are compared without regard to case. Both policies were reachable only
 from a program calling the C boundary directly before this.
 

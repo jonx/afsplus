@@ -6,7 +6,12 @@
  *
  * AFSPlusInfo <path> PACKETS prints what the handler has answered since it
  * started, one line per packet type ("packet <type> <count> <failed>") and
- * one per error code ("error <code> <count>"), in decimal. */
+ * one per error code ("error <code> <count>"), in decimal.
+ *
+ * AFSPlusInfo <path> TRACE drains the handler's trace ring, one line per
+ * event ("trace <sequence> <timestamp> <category> <event> <object>"), then
+ * "trace lost <n>" and the sink's counters. A mount whose Control string did
+ * not ask for a ring says so. */
 
 #include <dos/dos.h>
 #include <dos/dosextens.h>
@@ -47,6 +52,52 @@ static LONG print_counts(struct MsgPort *port, uint32_t which)
     return error;
 }
 
+#define TRACE_EVENTS 64
+
+static LONG print_trace(struct MsgPort *port)
+{
+    static struct afsp_trace_event events[TRACE_EVENTS];
+    struct AfsplusArosTraceCounters counters;
+    uint32_t count = 0;
+    uint32_t index;
+    uint64_t lost = 0;
+    LONG error;
+
+    /* Drain until the ring is empty: one call takes what fits. */
+    do
+    {
+        error = afsplus_client_trace_events(port, events, TRACE_EVENTS,
+            &count, &lost);
+        /* Printf takes 32-bit words, and three of these fields are 64 bits:
+         * the time is split into seconds and nanoseconds, and the object is
+         * printed as two halves rather than silently truncated. */
+        for (index = 0; error == 0 && index < count; index++)
+            Printf("trace %lu %lu.%09lu %lu %lu %08lx%08lx\n",
+                (ULONG)events[index].sequence,
+                (ULONG)(events[index].timestamp / UINT64_C(1000000000)),
+                (ULONG)(events[index].timestamp % UINT64_C(1000000000)),
+                (ULONG)events[index].category,
+                (ULONG)events[index].event,
+                (ULONG)(events[index].object_id >> 32),
+                (ULONG)events[index].object_id);
+    }
+    while (error == 0 && count == TRACE_EVENTS);
+    if (error != 0)
+        return error;
+    Printf("trace lost %lu\n", (ULONG)lost);
+    if (lost > UINT64_C(0xFFFFFFFF))
+        Printf("trace lost more than a 32-bit count can show\n");
+    memset(&counters, 0, sizeof(counters));
+    error = afsplus_client_trace_counters(port, &counters);
+    if (error == 0)
+        Printf("trace counters attached %lu delivered %lu missed %lu"
+            " filtered %lu dropped %lu\n",
+            (ULONG)counters.attached, (ULONG)counters.delivered,
+            (ULONG)counters.missed, (ULONG)counters.filtered,
+            (ULONG)counters.dropped);
+    return error;
+}
+
 int main(int argc, char **argv)
 {
     struct DevProc *process;
@@ -59,9 +110,10 @@ int main(int argc, char **argv)
     LONG error;
     int attempt;
 
-    if (argc != 2 && !(argc == 3 && strcmp(argv[2], "PACKETS") == 0))
+    if (argc != 2 && !(argc == 3 && (strcmp(argv[2], "PACKETS") == 0
+        || strcmp(argv[2], "TRACE") == 0)))
     {
-        Printf("usage: AFSPlusInfo <volume or path> [PACKETS]\n");
+        Printf("usage: AFSPlusInfo <volume or path> [PACKETS|TRACE]\n");
         return RETURN_ERROR;
     }
     process = GetDeviceProc((CONST_STRPTR)argv[1], NULL);
@@ -78,6 +130,23 @@ int main(int argc, char **argv)
         Printf("AFSPlusInfo: %s is not served by an AFS+ handler with the "
             "extension transport\n", argv[1]);
         return RETURN_WARN;
+    }
+    if (error == 0 && argc == 3 && strcmp(argv[2], "TRACE") == 0)
+    {
+        error = print_trace(port);
+        FreeDeviceProc(process);
+        if (error == ERROR_NOT_IMPLEMENTED)
+        {
+            Printf("AFSPlusInfo: this mount keeps no trace ring; add"
+                " TRACE=<events> to the DOSDriver Control string\n");
+            return RETURN_WARN;
+        }
+        if (error != 0)
+        {
+            Printf("AFSPlusInfo: error %ld\n", error);
+            return RETURN_FAIL;
+        }
+        return RETURN_OK;
     }
     if (error == 0 && argc == 3)
     {

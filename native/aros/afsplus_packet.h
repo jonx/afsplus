@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(4)
+#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(5)
 
 /* afsplus_aros_packet_process kept the packet: no result is stored and the
  * handler must not reply. The packet comes back through the complete
@@ -55,6 +55,14 @@ typedef void (*AfsplusArosPacketNotify)(void *context,
 typedef int32_t (*AfsplusArosPacketRelabel)(void *context, uint32_t phase,
     const uint8_t *name, uint32_t name_length);
 
+/* Takes up to capacity events from the handler's trace ring, oldest first,
+ * and stores in dropped how many it has lost since the mount. Returns the
+ * number taken. Without it the extension packet answers
+ * ERROR_NOT_IMPLEMENTED for the trace operations, which is what a mount
+ * without a ring does. */
+typedef uint32_t (*AfsplusArosPacketTraceTake)(void *context,
+    struct afsp_trace_event *events, uint32_t capacity, uint64_t *dropped);
+
 /* Hands back a packet that afsplus_aros_packet_process deferred, with its
  * result stored; the handler replies to it. Called from inside
  * afsplus_aros_packet_process, afsplus_aros_packet_elapsed and
@@ -80,14 +88,16 @@ struct AfsplusArosPacketConfig {
     /* Optional. Without it a waiting ACTION_LOCK_RECORD whose range is taken
      * answers ERROR_LOCK_TIMEOUT at once instead of waiting dp_Arg5 ticks. */
     AfsplusArosPacketComplete complete;
+    /* Optional; present when the mount asked for a trace ring. */
+    AfsplusArosPacketTraceTake trace_take;
 };
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 88,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 96,
     "AfsplusArosPacketConfig 64-bit ABI drift");
 #elif UINTPTR_MAX == UINT32_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 48,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 52,
     "AfsplusArosPacketConfig 32-bit ABI drift");
 #endif
 #endif
