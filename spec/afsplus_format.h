@@ -25,6 +25,8 @@
  * snapshot roots of ADR-073, when present, follow at 168 and 176.
  */
 #define AFSP_LABEL_MAX_UTF8_BYTES  64u
+/* Object comment: one length byte, then at most 255 bytes of NUL-free UTF-8. */
+#define AFSP_COMMENT_MAX_UTF8_BYTES 255u
 #define AFSP_CHECKPOINT_LABEL_OFFSET 96u
 #define AFSP_CHECKPOINT_PAYLOAD_BYTES 168u
 #define AFSP_CHECKPOINT_SNAPSHOT_PAYLOAD_BYTES 184u
@@ -135,7 +137,8 @@ enum afsp_extent_flag {
 enum afsp_object_flag {
     AFSP_OBJECT_FLAG_EXTENT_TREE = 1u << 0,
     AFSP_OBJECT_FLAG_DATA_IN_PLACE = 1u << 1, /* ADR-065 */
-    AFSP_OBJECT_FLAG_SECURITY_REF = 1u << 2   /* 16-byte security reference */
+    AFSP_OBJECT_FLAG_SECURITY_REF = 1u << 2,  /* 16-byte security reference */
+    AFSP_OBJECT_FLAG_COMMENT = 1u << 3        /* length byte + UTF-8, ADR-106 */
 };
 
 /*

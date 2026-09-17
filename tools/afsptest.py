@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Highest ApiMethod discriminant of crates/afsplus-core/src/flight.rs. The test
 # suite of this tool compares it with the Rust enum, so it cannot lag behind.
-API_METHOD_MAX = 72
+API_METHOD_MAX = 75
 
 
 def module(name, filename):

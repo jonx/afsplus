@@ -72,7 +72,7 @@ The executable record is one checksummed block: the 32-byte common header
 | 0 | 8 | object ID |
 | 8 | 1 | object type (1 file, 2 directory, 3 symlink, 4 internal) |
 | 9 | 1 | reserved, zero |
-| 10 | 2 | object flags (bit 0 extent tree, bit 1 data in place, bit 2 security reference) |
+| 10 | 2 | object flags (bit 0 extent tree, bit 1 data in place, bit 2 security reference, bit 3 comment) |
 | 12 | 4 | link count, nonzero |
 | 16 | 8 | logical size in bytes |
 | 24 | 8 | allocated size in bytes |
@@ -84,11 +84,13 @@ The executable record is one checksummed block: the 32-byte common header
 | 80 | 8 | data root: directory tree root, extent tree root, or direct extent start |
 | 88 | 8 | direct extent length in blocks; zero for a directory or an empty file |
 | 96 | 16 | security reference, present with flag bit 2: first segment block (8), descriptor length (4), segment count (2), reference flags (2) |
-| 96 or 112 | n | inline target of a symlink, NUL-free UTF-8 |
+| after the reference | 1 + n | comment, present with flag bit 3: length byte 1 to 255, then NUL-free UTF-8 ([ADR-106](../adr/ADR-106-stored-object-comment.md)) |
+| after the comment | n | inline target of a symlink, NUL-free UTF-8 |
 
 A time is 12 bytes: signed 64-bit seconds since the Unix epoch and unsigned
 32-bit nanoseconds below one billion, with no padding or reserved field
-(`struct afsp_timespec_wire` in the [format header](../spec/afsplus_format.h)).
+(`struct afsp_timespec_wire` in the [format header](../spec/afsplus_format.h),
+[ADR-107](../adr/ADR-107-twelve-byte-timestamps.md)).
 [The constant-pinning test](../crates/afsplus-format/tests/c_constants.rs)
 holds every constant and wire-structure size of that header, and every format
 constant the portable C reader compiles with, equal to the Rust codecs.

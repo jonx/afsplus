@@ -356,6 +356,9 @@ pub enum ApiMethod {
     SetSecurityProjectionPolicy = 70,
     SetVolumeLabel = 71,
     FileAllocationFrom = 72,
+    ObjectComment = 73,
+    SetObjectComment = 74,
+    SnapshotObjectComment = 75,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

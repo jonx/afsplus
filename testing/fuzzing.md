@@ -534,6 +534,12 @@ offset in one tree descent. It has no wire command;
 including entry-for-entry agreement with `FileAllocationPage` over a
 fragmented file.
 
+`SetObjectComment` sets or removes an object's comment in one commit, and
+`ObjectComment` and `SnapshotObjectComment` read it
+([ADR-106](../adr/ADR-106-stored-object-comment.md)). They have no wire
+command; [the comment test](../crates/afsplus-check/tests/object_comment.rs)
+owns their proof, power-cut matrix included.
+
 The remaining twenty-three methods read: `FileAllocationPage`,
 `FileDataPolicy`, `FirstOrphan`, `ListDirectory`, `ListRoot`,
 `LookupInDirectory`, `LookupRoot`, `OrphanCount`, `OrphanObject`,

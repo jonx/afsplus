@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Store the object comment in the object record](#2026-09-17--store-the-object-comment-in-the-object-record)
 - [2026-09-17 — Admit a well-formed security reference wherever it points](#2026-09-17--admit-a-well-formed-security-reference-wherever-it-points)
 - [2026-09-17 — Pass a relabel's label as a value, never as volume state](#2026-09-17--pass-a-relabels-label-as-a-value-never-as-volume-state)
 - [2026-09-17 — Make the volume label committed checkpoint state](#2026-09-17--make-the-volume-label-committed-checkpoint-state)
@@ -194,6 +195,33 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-17 — Store the object comment in the object record
+
+[ADR-106](adr/ADR-106-stored-object-comment.md) gives the comment a home:
+object flag bit 3 and, after the fixed payload and any security reference, one
+length byte and up to 255 bytes of NUL-free UTF-8, before a symlink's target.
+A directory listing returns the comment of every entry, so it sits in the
+record the listing already reads. `Comment` is a `Copy` field of
+`ObjectRecord`, so every read-modify-write carries it; layout staging keeps the
+flag bit. `set_object_comment` is one metadata commit with the value passed as
+an argument, `object_comment` and `snapshot_object_comment` read it, and
+`CloneFile` copies it. [ADR-107](adr/ADR-107-twelve-byte-timestamps.md) records
+the 12-byte timestamp.
+
+Proof: three wire tests in `crates/afsplus-format/tests/object_comment.rs`
+(literal bytes at 96 and at 112, the symlink target after the comment, the
+bound, congruence, six resealed corruptions); four tests in
+`crates/afsplus-check/tests/object_comment.rs`: ten rewrite paths on a file
+with a descriptor beside the comment, a directory, a symlink and the root
+across remount, the clone copy and its independence, bounds and refusals, a
+snapshot that keeps the captured comment, and 394 modeled power cuts over
+setting and removing a comment, each mounting to the old or the new comment
+with a clean checker verdict. The fuzz oracle models the field and the
+constant-pinning test holds the two new header constants. The portable C
+reader refuses a commented record until its parity lot, which is the fail-closed
+verdict of the validated flag namespace.
 
 ## 2026-09-17 — Admit a well-formed security reference wherever it points
 

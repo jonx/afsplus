@@ -40,7 +40,7 @@ use afsplus_format::ident::{
 };
 use afsplus_format::intent_log::{LogOp, LogRecord, MAX_LOG_OPS};
 use afsplus_format::object::{
-    ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_DATA_IN_PLACE,
+    ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_COMMENT, OBJECT_FLAG_DATA_IN_PLACE,
     OBJECT_FLAG_EXTENT_TREE, OBJECT_FLAG_SECURITY_REF,
 };
 use afsplus_format::{validate_name, FormatError, Timespec, OBJECT_ORPHAN_DIRECTORY, OBJECT_ROOT};
@@ -2445,8 +2445,12 @@ impl<D: BlockDevice> Volume<D> {
             data_root: dest_data_root,
             data_blocks: dest_data_blocks,
             security: None,
+            comment: afsplus_format::object::Comment::EMPTY,
         }
-        .with_security(dest_security);
+        .with_security(dest_security)
+        // The comment describes the content and travels with a clone, as
+        // the protection word does (ADR-106).
+        .with_comment(source.comment);
 
         // Namespace: one new directory entry, parent record COW'd.
         let parent_record_new_lba = tx.allocate(&mut self.dev)?;
@@ -3015,6 +3019,7 @@ impl<D: BlockDevice> Volume<D> {
             data_root: data_start,
             data_blocks: data_block_count,
             security: None,
+            comment: afsplus_format::object::Comment::EMPTY,
         };
 
         let directory_entry = DirEntry {
@@ -3195,6 +3200,7 @@ impl<D: BlockDevice> Volume<D> {
             data_root: directory_root_lba,
             data_blocks: 0,
             security: None,
+            comment: afsplus_format::object::Comment::EMPTY,
         };
 
         let entry = DirEntry {
@@ -3746,6 +3752,7 @@ impl<D: BlockDevice> Volume<D> {
             data_root: directory_root_lba,
             data_blocks: 0,
             security: None,
+            comment: afsplus_format::object::Comment::EMPTY,
         };
         let map_key = object_map::key(OBJECT_ORPHAN_DIRECTORY);
         let map_value = object_map::value(directory_record_lba)?;
@@ -4617,7 +4624,9 @@ impl<D: BlockDevice> Volume<D> {
         let new_record = ObjectRecord {
             // Layout staging owns the layout flag; the persistent data-update
             // policy (ADR-065) travels with the record across every rewrite.
-            flags: flags | (record.flags & (OBJECT_FLAG_DATA_IN_PLACE | OBJECT_FLAG_SECURITY_REF)),
+            flags: flags
+                | (record.flags
+                    & (OBJECT_FLAG_DATA_IN_PLACE | OBJECT_FLAG_SECURITY_REF | OBJECT_FLAG_COMMENT)),
             size_bytes: new_size,
             allocated_bytes: allocated_blocks
                 .checked_mul(block_size as u64)
@@ -5111,6 +5120,7 @@ impl<D: BlockDevice> Volume<D> {
                 data_root: root_lba,
                 data_blocks: 0,
                 security: None,
+                comment: afsplus_format::object::Comment::EMPTY,
             }),
         );
         pending.created_directories.insert(OBJECT_ORPHAN_DIRECTORY);
@@ -5543,6 +5553,7 @@ impl<D: BlockDevice> Volume<D> {
                         data_root: data_start,
                         data_blocks: data_block_count,
                         security: None,
+                        comment: afsplus_format::object::Comment::EMPTY,
                     }),
                 );
                 pending.dir_changes.entry(*parent_id).or_default().insert(
@@ -7088,6 +7099,7 @@ impl<D: BlockDevice> Volume<D> {
                 size_bytes,
                 allocated_bytes: data_blocks * block_size as u64,
                 security: None,
+                comment: afsplus_format::object::Comment::EMPTY,
                 created: now,
                 modified: now,
                 changed: now,

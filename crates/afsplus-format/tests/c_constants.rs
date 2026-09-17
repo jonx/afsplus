@@ -43,6 +43,7 @@ fn file_record() -> ObjectRecord {
         data_root: 0,
         data_blocks: 0,
         security: None,
+        comment: afsplus_format::object::Comment::EMPTY,
     }
 }
 
@@ -239,6 +240,14 @@ fn every_c_format_constant_equals_the_rust_codec() {
         (
             "AFSP_OBJECT_FLAG_SECURITY_REF",
             u64::from(object::OBJECT_FLAG_SECURITY_REF),
+        ),
+        (
+            "AFSP_OBJECT_FLAG_COMMENT",
+            u64::from(object::OBJECT_FLAG_COMMENT),
+        ),
+        (
+            "AFSP_COMMENT_MAX_UTF8_BYTES",
+            object::COMMENT_MAX_BYTES as u64,
         ),
         ("sizeof_afsp_timespec_wire", Timespec::WIRE_SIZE as u64),
         (

@@ -70,7 +70,7 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
     }
     // Flag bit 2 adds the 16-byte security reference to the fixed record.
     let fixed = if u16_at(p, 10) & 4 != 0 { 112 } else { 96 };
-    if p.len() < fixed || (p[8] != 3 && p.len() != fixed) {
+    if p.len() < fixed {
         return None;
     }
     let security = if fixed == 112 {
@@ -97,6 +97,24 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
     } else {
         None
     };
+    // Flag bit 3 adds the comment after the reference: one length byte,
+    // 1..=255, then NUL-free UTF-8 (ADR-106).
+    let (comment, fixed) = if u16_at(p, 10) & 8 != 0 {
+        let length = *p.get(fixed)? as usize;
+        let text = p.get(fixed + 1..fixed + 1 + length)?;
+        if length == 0 || text.contains(&0) {
+            return None;
+        }
+        (
+            afsplus_format::object::Comment::new(std::str::from_utf8(text).ok()?).ok()?,
+            fixed + 1 + length,
+        )
+    } else {
+        (afsplus_format::object::Comment::EMPTY, fixed)
+    };
+    if p[8] != 3 && p.len() != fixed {
+        return None;
+    }
     let kind = match p[8] {
         1 => ObjectType::File,
         2 => ObjectType::Directory,
@@ -118,9 +136,10 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
         data_root: u64_at(p, 80),
         data_blocks: u64_at(p, 88),
         security,
+        comment,
     };
     let r = &record;
-    if r.object_id == 0 || r.object_id != h.owner || r.link_count == 0 || r.flags & !7 != 0 {
+    if r.object_id == 0 || r.object_id != h.owner || r.link_count == 0 || r.flags & !15 != 0 {
         return None;
     }
     let target = match kind {
@@ -128,7 +147,7 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
             let target = std::str::from_utf8(&p[fixed..]).ok()?;
             if h.flags != 0
                 || p[9] != 0
-                || r.flags & !4 != 0
+                || r.flags & !12 != 0
                 || r.data_root != 0
                 || r.data_blocks != 0
                 || r.allocated_bytes != 0
@@ -142,7 +161,7 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
             Some(target)
         }
         ObjectType::Directory => {
-            if r.flags & !4 != 0 || r.data_root == 0 || r.size_bytes != 0 || r.data_blocks != 0 {
+            if r.flags & !12 != 0 || r.data_root == 0 || r.size_bytes != 0 || r.data_blocks != 0 {
                 return None;
             }
             None
@@ -331,6 +350,10 @@ mod tests {
             segment_count: 2,
             flags: 1,
         };
+        let note = afsplus_format::object::Comment::new("Dé note").unwrap();
+        let commented_file = file.with_comment(note);
+        let commented_secured_directory =
+            directory.with_security(Some(reference)).with_comment(note);
         let secured_file = file.with_security(Some(reference));
         let secured_directory = directory.with_security(Some(reference));
         for record in [
@@ -341,6 +364,8 @@ mod tests {
             policy,
             secured_file,
             secured_directory,
+            commented_file,
+            commented_secured_directory,
         ] {
             let bytes = record.encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
             exercise(CodecTarget::ObjectMetadata, &bytes).unwrap();

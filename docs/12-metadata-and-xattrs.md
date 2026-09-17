@@ -32,7 +32,7 @@ The exact standardized registry belongs in the feature registry.
 
 File comments are first-class AROS semantics.
 
-They may be stored using the attribute subsystem, but the AROS handler exposes them through existing comment APIs without requiring applications to know about xattrs.
+The comment is a field of the object record ([ADR-106](../adr/ADR-106-stored-object-comment.md)): at most 255 bytes of UTF-8, read with the record on every lookup and directory listing, carried by every rewrite of the record and by `CloneFile`, and captured by snapshots. The AROS handler exposes it through the existing comment APIs. It is independent of the attribute subsystem.
 
 ## 4. Protection bits
 

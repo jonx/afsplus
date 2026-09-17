@@ -417,6 +417,33 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
+    /// The comment an object had when the view was captured (ADR-106).
+    pub fn snapshot_object_comment(
+        &mut self,
+        handle: &SnapshotHandle,
+        object_id: u64,
+    ) -> Result<Option<String>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SnapshotObjectComment, |volume| {
+            let view = volume.snapshot_view(handle)?;
+            Ok(snapshot::view::object(
+                &mut volume.dev,
+                &volume.ident,
+                &mut snapshot::view::Observation::new(
+                    view,
+                    handle.info.id,
+                    volume
+                        .flight
+                        .as_ref()
+                        .map(|recorder| recorder.borrow_mut())
+                        .as_deref_mut(),
+                    volume.window_poisoned,
+                ),
+                object_id,
+            )?
+            .map(|record| record.comment.as_str().to_owned()))
+        })
+    }
+
     fn snapshot_stat_untraced(
         &mut self,
         handle: &SnapshotHandle,

@@ -99,6 +99,45 @@ impl<D: BlockDevice> Volume<D> {
         self.commit_object_metadata(record)
     }
 
+    /// The comment of `object_id`; empty when it has none (ADR-106).
+    pub fn object_comment(&mut self, object_id: u64) -> Result<String, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::ObjectComment, |volume| {
+            volume.ensure_public_object_id(object_id)?;
+            Ok(volume
+                .metadata_target(object_id)?
+                .comment
+                .as_str()
+                .to_owned())
+        })
+    }
+
+    /// Set or, with an empty string, remove the comment of `object_id`: one
+    /// metadata commit that rewrites the object record, so a power cut
+    /// leaves the old comment or the new one. At most 255 bytes of UTF-8
+    /// without NUL. An unchanged comment is a no-op. The change time
+    /// advances; the modification time stays, the content did not change.
+    pub fn set_object_comment(
+        &mut self,
+        object_id: u64,
+        comment: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SetObjectComment, |volume| {
+            volume.ensure_window_closed()?;
+            volume.ensure_public_object_id(object_id)?;
+            validate_time(now)?;
+            let comment = afsplus_format::object::Comment::new(comment)
+                .map_err(|_| CoreError::InvalidMetadata("object comment out of range"))?;
+            let record = volume.metadata_target(object_id)?;
+            if record.comment == comment {
+                return Ok(());
+            }
+            let mut record = record.with_comment(comment);
+            record.changed = now;
+            volume.commit_object_metadata(record)
+        })
+    }
+
     /// The committed volume label. The identification block keeps the label
     /// given at format time; this is the current one (ADR-104).
     pub fn volume_label(&self) -> &str {

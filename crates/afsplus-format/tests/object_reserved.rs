@@ -23,6 +23,7 @@ fn generic_and_metadata_readers_reject_reserved_object_byte() {
             },
             data_blocks: 0,
             security: None,
+            comment: afsplus_format::object::Comment::EMPTY,
         };
         let bytes = record.encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
         let header = BlockHeader::verify(&bytes, block_type::OBJECT).unwrap();

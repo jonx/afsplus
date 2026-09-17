@@ -27,6 +27,7 @@ fn record(kind: ObjectType) -> ObjectRecord {
         },
         data_blocks: 0,
         security: None,
+        comment: afsplus_format::object::Comment::EMPTY,
     }
 }
 

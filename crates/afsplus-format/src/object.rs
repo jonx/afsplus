@@ -40,6 +40,11 @@
 //! 108    2    descriptor segment count
 //! 110    2    reference flags (bit 0: projection diverged)
 //! ```
+//!
+//! With [`OBJECT_FLAG_COMMENT`] a comment follows the fixed payload (after
+//! the security reference when both are present, before any inline symlink
+//! target): one length byte, 1 to 255, then that many bytes of UTF-8 without
+//! NUL (ADR-106). An empty comment is the absent one: the flag is clear.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -68,6 +73,67 @@ pub const OBJECT_FLAG_DATA_IN_PLACE: u16 = 1 << 1;
 /// identification carries `INCOMPAT_SECURITY_DESCRIPTORS`; the contextual
 /// read paths and the checker enforce that congruence.
 pub const OBJECT_FLAG_SECURITY_REF: u16 = 1 << 2;
+
+/// The record carries a comment (ADR-106). No volume feature gates it: every
+/// implementation of the format reads the comment field.
+pub const OBJECT_FLAG_COMMENT: u16 = 1 << 3;
+
+/// Longest comment, in UTF-8 bytes.
+pub const COMMENT_MAX_BYTES: usize = 255;
+
+/// A file comment held inline in the object record. `Copy`, like the record,
+/// so every read-modify-write of a record carries it without a second path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Comment {
+    len: u8,
+    bytes: [u8; COMMENT_MAX_BYTES],
+}
+
+impl Comment {
+    pub const EMPTY: Comment = Comment {
+        len: 0,
+        bytes: [0; COMMENT_MAX_BYTES],
+    };
+
+    /// At most 255 bytes of UTF-8 without NUL.
+    pub fn new(text: &str) -> Result<Comment, FormatError> {
+        if text.len() > COMMENT_MAX_BYTES {
+            return Err(FormatError::Overflow("object comment"));
+        }
+        if text.as_bytes().contains(&0) {
+            return Err(FormatError::Invalid("object comment contains NUL"));
+        }
+        let mut bytes = [0; COMMENT_MAX_BYTES];
+        bytes[..text.len()].copy_from_slice(text.as_bytes());
+        Ok(Comment {
+            len: text.len() as u8,
+            bytes,
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        // Construction and decoding both validate UTF-8.
+        core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("")
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn wire_len(&self) -> usize {
+        if self.is_empty() {
+            0
+        } else {
+            1 + self.len as usize
+        }
+    }
+}
+
+impl core::fmt::Debug for Comment {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self.as_str())
+    }
+}
 
 /// The protection field was edited by a host that did not evaluate the
 /// descriptor, so the classic projection and the descriptor may disagree.
@@ -144,16 +210,34 @@ pub struct ObjectRecord {
     pub data_blocks: u64,
     /// Present exactly when `flags` carries [`OBJECT_FLAG_SECURITY_REF`].
     pub security: Option<SecurityRef>,
+    /// Nonempty exactly when `flags` carries [`OBJECT_FLAG_COMMENT`].
+    pub comment: Comment,
 }
 
 impl ObjectRecord {
     /// Length of the fixed payload, before any inline symlink target.
     pub fn fixed_payload_len(&self) -> usize {
+        self.security_end() + self.comment.wire_len()
+    }
+
+    fn security_end(&self) -> usize {
         if self.security.is_some() {
             PAYLOAD_LEN + SECURITY_REF_LEN
         } else {
             PAYLOAD_LEN
         }
+    }
+
+    /// The same record with `comment` set or removed; keeps the flag and
+    /// the field congruent.
+    pub fn with_comment(mut self, comment: Comment) -> Self {
+        self.comment = comment;
+        if comment.is_empty() {
+            self.flags &= !OBJECT_FLAG_COMMENT;
+        } else {
+            self.flags |= OBJECT_FLAG_COMMENT;
+        }
+        self
     }
 
     /// The same record with `security` attached or removed; keeps the flag
@@ -207,6 +291,12 @@ impl ObjectRecord {
             le::put_u32(&mut p[104..108], security.total_len);
             le::put_u16(&mut p[108..110], security.segment_count);
             le::put_u16(&mut p[110..112], security.flags);
+        }
+        if !self.comment.is_empty() {
+            let at = self.security_end();
+            p[at] = self.comment.len;
+            p[at + 1..at + 1 + self.comment.len as usize]
+                .copy_from_slice(&self.comment.bytes[..self.comment.len as usize]);
         }
     }
 
@@ -265,13 +355,33 @@ impl ObjectRecord {
             return Err(FormatError::Invalid("object reserved byte is nonzero"));
         }
         let flags = le::get_u16(&p[10..12]);
-        let fixed = if flags & OBJECT_FLAG_SECURITY_REF != 0 {
+        let security_end = if flags & OBJECT_FLAG_SECURITY_REF != 0 {
             PAYLOAD_LEN + SECURITY_REF_LEN
         } else {
             PAYLOAD_LEN
         };
+        if p.len() < security_end {
+            return Err(FormatError::Invalid("object payload length is not exact"));
+        }
+        let comment = if flags & OBJECT_FLAG_COMMENT != 0 {
+            let length = *p
+                .get(security_end)
+                .ok_or(FormatError::Invalid("object payload length is not exact"))?
+                as usize;
+            let text = p
+                .get(security_end + 1..security_end + 1 + length)
+                .ok_or(FormatError::Invalid("object payload length is not exact"))?;
+            if length == 0 {
+                return Err(FormatError::Invalid("object comment flag without comment"));
+            }
+            let text = core::str::from_utf8(text).map_err(|_| FormatError::InvalidUtf8)?;
+            Comment::new(text)?
+        } else {
+            Comment::EMPTY
+        };
+        let fixed = security_end + comment.wire_len();
         let is_symlink = p[8] == ObjectType::Symlink.to_wire();
-        if p.len() < fixed || (!is_symlink && p.len() != fixed) {
+        if !is_symlink && p.len() != fixed {
             return Err(FormatError::Invalid("object payload length is not exact"));
         }
         if block[HEADER_SIZE + p.len()..].iter().any(|b| *b != 0) {
@@ -291,7 +401,8 @@ impl ObjectRecord {
             content_generation: le::get_u64(&p[72..80]),
             data_root: le::get_u64(&p[80..88]),
             data_blocks: le::get_u64(&p[88..96]),
-            security: (fixed != PAYLOAD_LEN).then(|| SecurityRef {
+            comment,
+            security: (security_end != PAYLOAD_LEN).then(|| SecurityRef {
                 first_block: le::get_u64(&p[96..104]),
                 total_len: le::get_u32(&p[104..108]),
                 segment_count: le::get_u16(&p[108..110]),
@@ -317,7 +428,10 @@ impl ObjectRecord {
             ));
         }
         if self.flags
-            & !(OBJECT_FLAG_EXTENT_TREE | OBJECT_FLAG_DATA_IN_PLACE | OBJECT_FLAG_SECURITY_REF)
+            & !(OBJECT_FLAG_EXTENT_TREE
+                | OBJECT_FLAG_DATA_IN_PLACE
+                | OBJECT_FLAG_SECURITY_REF
+                | OBJECT_FLAG_COMMENT)
             != 0
         {
             return Err(FormatError::Invalid("object has unsupported flags"));
@@ -330,6 +444,9 @@ impl ObjectRecord {
         if let Some(security) = self.security {
             security.validate(block_size)?;
         }
+        if (self.flags & OBJECT_FLAG_COMMENT != 0) == self.comment.is_empty() {
+            return Err(FormatError::Invalid("comment flag and field disagree"));
+        }
         Ok(())
     }
 
@@ -337,7 +454,7 @@ impl ObjectRecord {
         self.validate_common(block_size)?;
         match self.object_type {
             ObjectType::Directory => {
-                if self.flags & !OBJECT_FLAG_SECURITY_REF != 0 {
+                if self.flags & !(OBJECT_FLAG_SECURITY_REF | OBJECT_FLAG_COMMENT) != 0 {
                     return Err(FormatError::Invalid("directory has file extent flags"));
                 }
                 if self.data_root == 0 {
@@ -414,7 +531,7 @@ impl<'a> SymlinkRecord<'a> {
         self.record.validate_common(block_size)?;
         let fixed = self.record.fixed_payload_len();
         if self.record.object_type != ObjectType::Symlink
-            || self.record.flags & !OBJECT_FLAG_SECURITY_REF != 0
+            || self.record.flags & !(OBJECT_FLAG_SECURITY_REF | OBJECT_FLAG_COMMENT) != 0
             || self.record.data_root != 0
             || self.record.data_blocks != 0
             || self.record.allocated_bytes != 0

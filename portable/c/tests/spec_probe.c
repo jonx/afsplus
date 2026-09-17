@@ -37,6 +37,8 @@ int main(void)
     SHOW(AFSP_OBJECT_FLAG_EXTENT_TREE);
     SHOW(AFSP_OBJECT_FLAG_DATA_IN_PLACE);
     SHOW(AFSP_OBJECT_FLAG_SECURITY_REF);
+    SHOW(AFSP_OBJECT_FLAG_COMMENT);
+    SHOW(AFSP_COMMENT_MAX_UTF8_BYTES);
     SIZE(afsp_timespec_wire);
     SIZE(afsp_extent_value_wire);
     return 0;

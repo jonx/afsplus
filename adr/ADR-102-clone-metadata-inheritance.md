@@ -1,6 +1,7 @@
 # ADR-102: Metadata inheritance of CloneFile and CloneRange
 
 Status: Accepted
+Amended by: ADR-106
 Amends: ADR-027
 
 ## Context
