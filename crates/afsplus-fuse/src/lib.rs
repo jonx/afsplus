@@ -115,6 +115,10 @@ impl HostAttributeNames {
     }
 }
 
+/// Maintenance steps run when a host asks how much space is free. Each loop
+/// stops as soon as a step makes no progress, so a tidy volume pays nothing.
+const MAINTENANCE_STEPS_PER_STATFS: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FuseConfig {
     pub uid: u32,
@@ -225,6 +229,22 @@ impl<D: BlockDevice> FuseAdapter<D> {
     }
 
     pub fn statfs(&self) -> StatFs {
+        self.vfs.statfs()
+    }
+
+    /// Resume the maintenance bounded operations leave behind, then answer.
+    ///
+    /// A delete does not finish cleaning a large fragmented file: that work is
+    /// proportional to the file and a delete stays bounded, so the remainder is
+    /// left resumable. Nothing resumed it here. A filesystem sync would, and
+    /// the macOS driver only sees one at unmount, so a fragmented file's space
+    /// stayed outstanding for the whole life of the mount.
+    ///
+    /// Asking how much room is left is the right moment to make the answer
+    /// true, and it is the one question a host repeats on its own. The work is
+    /// bounded per call, so a caller waits for a few transactions at most.
+    pub fn statfs_after_maintenance(&mut self, now: Timespec) -> StatFs {
+        let _ = self.vfs.run_maintenance(MAINTENANCE_STEPS_PER_STATFS, now);
         self.vfs.statfs()
     }
 

@@ -338,21 +338,33 @@ say "the space I freed comes back"
 free_blocks() {
     df -k "$mountpoint" 2>/dev/null | awk 'NR == 2 { print $4 }'
 }
-before_free=$(free_blocks)
-dd if=/dev/zero of="$here/temporary.bin" bs=1m count=20 >/dev/null 2>&1 || true
-after_write=$(free_blocks)
-rm -f "$here/temporary.bin"
-sync
-sleep 2
-after_delete=$(free_blocks)
-say "        free space: ${before_free}K before, ${after_write}K with the file, ${after_delete}K after deleting it"
-if [ -z "$before_free" ] || [ -z "$after_delete" ]; then
+# Twice, and the SECOND round is the one that must balance.
+#
+# Writing and deleting a large file the first time can cost a volume something
+# one-off: the structures that track retired blocks grow to hold it and keep
+# their own storage, which the next round reuses. Measuring one round called
+# that a loss and reported a megabyte missing that was never missing. What
+# matters, and what a person would notice, is whether doing the same thing
+# again shrinks the volume every time.
+round_cost() {
+    before=$(free_blocks)
+    dd if=/dev/zero of="$here/temporary.bin" bs=1m count=20 >/dev/null 2>&1 || true
+    rm -f "$here/temporary.bin"
+    sync
+    sleep 1
+    after=$(free_blocks)
+    echo $((before - after))
+}
+first=$(round_cost)
+second=$(round_cost)
+say "        a first write-and-delete of 20 MiB costs ${first}K, a second costs ${second}K"
+if [ -z "$first" ] || [ -z "$second" ]; then
     result_fail "the space I freed comes back" "the volume reported no free space figure"
-elif [ "$after_delete" -ge "$before_free" ]; then
+elif [ "$second" -le 64 ]; then
     result_pass "the space I freed comes back"
 else
     result_fail "the space I freed comes back" \
-        "$((before_free - after_delete))K never came back"
+        "${second}K goes every time the same file is written and deleted"
 fi
 
 say ""

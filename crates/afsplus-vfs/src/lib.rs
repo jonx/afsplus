@@ -128,23 +128,28 @@ pub struct VolumeIdentity {
     pub ro_compat: u64,
     pub incompat: u64,
 }
-/// Reclaim steps run after an operation that retired storage. Two is what a
-/// drain takes in practice; the third confirms there is nothing left and costs
-/// one comparison, not a transaction.
+/// Reclaim steps an unlink runs on its own behalf. Deliberately small: an
+/// unlink must not do work proportional to the file it removes, which is what
+/// `near_full_fragmented_unlink_uses_bounded_orphan_progress` pins. What it
+/// cannot finish stays an orphan for the mount to resume; see
+/// `Vfs::run_maintenance`, and the driver that has to call it.
 const RECLAIM_STEPS_PER_RELEASE: usize = 3;
 
-/// Orphan cleanup steps run after an unlink. One step empties the extents of an
-/// ordinary file and the next removes its entry, so a file deleted now is gone
-/// by the time the caller returns. A file large enough to need more steps
-/// finishes on the following delete or sync rather than holding this one up.
+/// Orphan cleanup steps run after an unlink; bounded for the same reason.
 const ORPHAN_STEPS_PER_RELEASE: usize = 4;
 
 /// Reclaim steps run on a filesystem sync. A sync is the one moment a host
-/// gives us for maintenance, so it is allowed a longer drain than a delete.
-const RECLAIM_STEPS_PER_SYNC: usize = 8;
+/// asks for the volume to be tidy, so it drains the backlog rather than taking
+/// a slice off it: both loops stop as soon as a step makes no progress, so on
+/// an ordinary volume this is two steps and the budget is never reached. It
+/// exists so that a busy volume, where every delete leaves more behind than one
+/// delete's worth of maintenance takes away, still converges. Without it a
+/// battery of ordinary use ended with a megabyte outstanding that was not lost,
+/// only never drained.
+const RECLAIM_STEPS_PER_SYNC: usize = 256;
 
 /// Orphan cleanup steps run on a filesystem sync, for the same reason.
-const ORPHAN_STEPS_PER_SYNC: usize = 16;
+const ORPHAN_STEPS_PER_SYNC: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatFs {
@@ -949,6 +954,25 @@ impl<D: BlockDevice> Vfs<D> {
         }
         let _ = self.cleanup_orphans(ORPHAN_STEPS_PER_RELEASE, now);
         let _ = self.reclaim_space(RECLAIM_STEPS_PER_RELEASE, now);
+    }
+
+    /// Resume the maintenance that bounded operations leave behind, and say
+    /// whether anything remains to do.
+    ///
+    /// An unlink deliberately does not finish cleaning a large fragmented
+    /// file: the work would be proportional to the file, and a delete must
+    /// stay bounded. What it leaves is resumable, and something has to resume
+    /// it. Nothing did on the macOS driver, where a filesystem sync only
+    /// arrives at unmount, so the space of a fragmented file stayed
+    /// outstanding for as long as the volume was mounted. A driver calls this
+    /// on a timer; it is bounded per call and returns true while there is more.
+    pub fn run_maintenance(&mut self, budget: usize, now: Timespec) -> Result<bool, VfsError> {
+        if self.volume.mount_mode() != MountMode::ReadWrite || !self.idle_maintenance {
+            return Ok(false);
+        }
+        self.cleanup_orphans(budget, now)?;
+        self.reclaim_space(budget, now)?;
+        Ok(self.volume.first_orphan()?.is_some() || self.volume.reclaim_pending_blocks() > 0)
     }
 
     /// Retire the storage of unlinked files that nobody still has open, and say

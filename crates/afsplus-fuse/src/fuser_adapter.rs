@@ -518,8 +518,8 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
 
     fn statfs(&self, _request: &Request, _inode: INodeNo, reply: ReplyStatfs) {
         match self.lock() {
-            Ok(adapter) => {
-                let stats = adapter.statfs();
+            Ok(mut adapter) => {
+                let stats = adapter.statfs_after_maintenance(now());
                 reply.statfs(
                     stats.total_blocks,
                     stats.free_blocks,
