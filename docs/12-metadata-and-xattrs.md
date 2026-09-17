@@ -60,7 +60,7 @@ Large arbitrary user data should be stored as files, not abused as attributes.
 
 The whole attribute set of an object is one blob, sorted by name, in a chain of checksummed `"AFSA"` blocks the object owns; the object record names the chain with a 16-byte reference behind object flag bit 4 ([ADR-108](../adr/ADR-108-extended-attributes.md)). A set of up to 4,040 bytes costs one 4 KiB block. The chain is immutable: every change, or batch of changes to one object, writes a new chain and retires the old one in the commit that publishes the new record, so a power cut leaves the old set or the new one. `CloneFile` copies the set; deleting the object frees it. An object without attributes has no chain.
 
-A volume with persistent snapshots refuses attributes until the snapshot lifetime ledger owns these chains.
+A retained snapshot keeps the attribute chain of every record it captured: the snapshot lifetime ledger owns chain segments like any other namespace block, and the core reads the captured set through the snapshot handle ([ADR-109](../adr/ADR-109-owned-chains-under-snapshots.md)).
 
 ## 8. Unknown attributes
 

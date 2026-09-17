@@ -118,14 +118,23 @@ pub fn mkfs_with_options<D: BlockDevice>(
 
 /// Format a new image whose objects may carry security descriptors
 /// (`INCOMPAT_SECURITY_DESCRIPTORS`). Identification is immutable, so the
-/// choice is made here. The combination with persistent snapshots is
-/// unqualified and is a separate entry point by design: this one never
-/// enables snapshots.
+/// choice is made here. This entry point never enables snapshots;
+/// `mkfs_with_snapshots_and_security_descriptors` enables both.
 pub fn mkfs_with_security_descriptors<D: BlockDevice>(
     dev: &mut D,
     params: &MkfsParams,
 ) -> Result<(), CoreError> {
     mkfs_observed_impl(dev, params, false, true, None)
+}
+
+/// Format a new image with both persistent snapshots and security
+/// descriptors. A retained view keeps the chains of the records it captured:
+/// the lifetime ledger owns their blocks like any namespace block (ADR-109).
+pub fn mkfs_with_snapshots_and_security_descriptors<D: BlockDevice>(
+    dev: &mut D,
+    params: &MkfsParams,
+) -> Result<(), CoreError> {
+    mkfs_observed_impl(dev, params, true, true, None)
 }
 
 /// Emit one formatter observation. Only an entry point supplied with a

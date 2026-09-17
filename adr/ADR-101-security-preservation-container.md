@@ -1,7 +1,7 @@
 # ADR-101: Security preservation container
 
 Status: Accepted
-Amended by: ADR-105
+Amended by: ADR-105, ADR-109
 Amends: ADR-031
 
 <!-- toc -->

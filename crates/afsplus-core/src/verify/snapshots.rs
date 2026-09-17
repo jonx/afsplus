@@ -287,6 +287,38 @@ fn historical_namespace<D: BlockDevice>(
                 "historical orphan directory has invalid metadata".into(),
             ));
         }
+        // A retained record keeps its owned chains: each must still prove
+        // itself at the view's generation, and its segments are historical
+        // metadata like the record that names them (ADR-109).
+        if let Some(reference) = record.security {
+            if ident.features.incompat & INCOMPAT_SECURITY_DESCRIPTORS == 0 {
+                return Err(CoreError::Corrupt(
+                    "historical object has an unnegotiated security reference".into(),
+                ));
+            }
+            let (segments, _) = crate::volume::load_descriptor_chain(
+                dev,
+                &geo,
+                record.object_id,
+                reference,
+                view.generation,
+            )?;
+            for lba in segments {
+                claim_meta(lba, &mut metadata)?;
+            }
+        }
+        if let Some(reference) = record.attributes {
+            let (segments, _) = crate::volume::load_attribute_chain(
+                dev,
+                &geo,
+                record.object_id,
+                reference,
+                view.generation,
+            )?;
+            for lba in segments {
+                claim_meta(lba, &mut metadata)?;
+            }
+        }
         match record.object_type {
             ObjectType::Directory => {
                 let dir = directory::load_all(

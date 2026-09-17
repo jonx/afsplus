@@ -8,7 +8,6 @@ use afsplus_format::attrs::{
     decode_attribute_set, encode_attribute_set, segment_count, validate_attribute_name,
     ATTRIBUTE_CHAIN, ATTRIBUTE_SET_FORMAT, ATTRIBUTE_SET_VERSION, ATTRIBUTE_VALUE_MAX_BYTES,
 };
-use afsplus_format::ident::INCOMPAT_PERSISTENT_SNAPSHOTS;
 use afsplus_format::object::AttributeRef;
 use chain::{load_chain, retire_chain, stage_chain, ChainRef, NewChain};
 use std::collections::BTreeMap;
@@ -129,14 +128,6 @@ impl<D: BlockDevice> Volume<D> {
             volume.ensure_window_closed()?;
             metadata::validate_time(now)?;
             let record = volume.attribute_target(object_id)?;
-            // A retained snapshot keeps the record and would keep reading a
-            // chain the live side retires: until the snapshot lifetime
-            // ledger owns chains, such a volume carries no attributes.
-            if volume.ident.features.incompat & INCOMPAT_PERSISTENT_SNAPSHOTS != 0 {
-                return Err(CoreError::FeatureDisabled(
-                    "extended attributes are not available with persistent snapshots",
-                ));
-            }
             let before = volume.load_attributes(&record)?;
             let mut after = before.clone();
             for (name, value) in changes {

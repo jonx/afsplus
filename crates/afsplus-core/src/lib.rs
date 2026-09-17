@@ -49,8 +49,8 @@ use afsplus_block::BlockError;
 use afsplus_format::FormatError;
 
 pub use mkfs::{
-    mkfs, mkfs_observed, mkfs_with_options, mkfs_with_security_descriptors, MkfsOptions,
-    MkfsParams, NamePolicy,
+    mkfs, mkfs_observed, mkfs_with_options, mkfs_with_security_descriptors,
+    mkfs_with_snapshots_and_security_descriptors, MkfsOptions, MkfsParams, NamePolicy,
 };
 pub use mount::{
     mount, mount_observed, mount_observed_with_snapshot_limits, mount_with_options,

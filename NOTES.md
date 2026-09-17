@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Owned chains under persistent snapshots (ADR-109)](#2026-09-17--owned-chains-under-persistent-snapshots-adr-109)
 - [2026-09-17 — Read extended attributes in the portable C reader](#2026-09-17--read-extended-attributes-in-the-portable-c-reader)
 - [2026-09-17 — Extended attributes in the core (ADR-108)](#2026-09-17--extended-attributes-in-the-core-adr-108)
 - [2026-09-17 — Reach the 64-bit groups from an application](#2026-09-17--reach-the-64-bit-groups-from-an-application)
@@ -205,6 +206,32 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — Owned chains under persistent snapshots (ADR-109)
+
+ADR-101 refused to mount descriptors with snapshots and ADR-108 refused
+attributes on a snapshot volume, both waiting for the lifetime ledger to own
+chain segments. It already did: the allocator records every allocation and
+retirement of a transaction's namespace phase as a ledger run, whatever the
+block holds. A probe with the refusal lifted gave a clean checker, so the lot
+is proof and readers. Both refusals are gone;
+`mkfs_with_snapshots_and_security_descriptors` formats both features. The
+checker's walk of a retained view (`verify/snapshots.rs`) proves both chains
+of every captured record at the view's generation and claims the segments as
+historical metadata. New readers: `snapshot_attribute`,
+`snapshot_attribute_names`, `snapshot_security_descriptor` (ApiMethod 79 to
+81, `API_METHOD_MAX` 81). No format change.
+
+Proof: `chain_snapshots` in afsplus-check (3 tests, 1,251 crash states); the
+ADR lists what it covers. Negative control: without the historical chain walk
+the checker test fails. Tests that asserted the refusals were removed
+(`extended_attributes`, now 5) or cut to what still holds
+(`security_container`, 13). Explain keeps its rule on a snapshot volume: a
+block only a view reaches has no live role, and the test checks those blocks
+are ledger-owned. The image diff reports no problem on such a pair.
+
+Open: who may read a captured descriptor after live permissions change (Q5,
+host policy); backup transport of captured chains.
 
 ## 2026-09-17 — Read extended attributes in the portable C reader
 

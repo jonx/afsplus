@@ -444,6 +444,117 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
+    /// The record an object had when the view was captured.
+    fn snapshot_object_record(
+        &mut self,
+        handle: &SnapshotHandle,
+        object_id: u64,
+    ) -> Result<Option<(ObjectRecord, u64)>, CoreError> {
+        let view = self.snapshot_view(handle)?;
+        let record = snapshot::view::object(
+            &mut self.dev,
+            &self.ident,
+            &mut snapshot::view::Observation::new(
+                view,
+                handle.info.id,
+                self.flight
+                    .as_ref()
+                    .map(|recorder| recorder.borrow_mut())
+                    .as_deref_mut(),
+                self.window_poisoned,
+            ),
+            object_id,
+        )?;
+        Ok(record.map(|record| (record, view.generation)))
+    }
+
+    /// The attribute set an object had when the view was captured, read
+    /// from the chain the view retains (ADR-109).
+    fn snapshot_attribute_set(
+        &mut self,
+        handle: &SnapshotHandle,
+        object_id: u64,
+    ) -> Result<Option<attributes::AttributeEntries>, CoreError> {
+        let Some((record, generation)) = self.snapshot_object_record(handle, object_id)? else {
+            return Ok(None);
+        };
+        let Some(reference) = record.attributes else {
+            return Ok(Some(Vec::new()));
+        };
+        let geometry = self.ident.geometry();
+        let (_, entries) =
+            load_attribute_chain(&mut self.dev, &geometry, object_id, reference, generation)?;
+        Ok(Some(entries))
+    }
+
+    /// The value attribute `name` had when the view was captured. The outer
+    /// `None` is an object the view does not hold; the inner one an object
+    /// without that attribute.
+    pub fn snapshot_attribute(
+        &mut self,
+        handle: &SnapshotHandle,
+        object_id: u64,
+        name: &str,
+    ) -> Result<Option<Option<Vec<u8>>>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SnapshotAttribute, |volume| {
+            Ok(volume
+                .snapshot_attribute_set(handle, object_id)?
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .find(|(entry, _)| entry == name)
+                        .map(|(_, value)| value)
+                }))
+        })
+    }
+
+    /// The attribute names an object had when the view was captured,
+    /// ascending by name bytes; `None` for an object the view does not hold.
+    pub fn snapshot_attribute_names(
+        &mut self,
+        handle: &SnapshotHandle,
+        object_id: u64,
+    ) -> Result<Option<Vec<String>>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SnapshotAttributeNames, |volume| {
+            Ok(volume
+                .snapshot_attribute_set(handle, object_id)?
+                .map(|entries| entries.into_iter().map(|(name, _)| name).collect()))
+        })
+    }
+
+    /// The security descriptor an object carried when the view was
+    /// captured. The outer `None` is an object the view does not hold. Who
+    /// may read a captured descriptor after the live permissions changed is
+    /// host policy; the core returns the bytes.
+    pub fn snapshot_security_descriptor(
+        &mut self,
+        handle: &SnapshotHandle,
+        object_id: u64,
+    ) -> Result<Option<Option<SecurityDescriptor>>, CoreError> {
+        self.trace_api(
+            crate::flight::ApiMethod::SnapshotSecurityDescriptor,
+            |volume| {
+                let Some((record, generation)) =
+                    volume.snapshot_object_record(handle, object_id)?
+                else {
+                    return Ok(None);
+                };
+                let Some(reference) = record.security else {
+                    return Ok(Some(None));
+                };
+                let geometry = volume.ident.geometry();
+                let (_, descriptor) = load_descriptor_chain(
+                    &mut volume.dev,
+                    &geometry,
+                    object_id,
+                    reference,
+                    generation,
+                )?;
+                Ok(Some(Some(descriptor)))
+            },
+        )
+    }
+
     fn snapshot_stat_untraced(
         &mut self,
         handle: &SnapshotHandle,

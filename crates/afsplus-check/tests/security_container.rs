@@ -10,7 +10,6 @@ use afsplus_core::{
     SecurityDescriptor, SecurityProjectionPolicy, Volume,
 };
 use afsplus_format::header::{block_type, BlockHeader, HEADER_SIZE};
-use afsplus_format::ident::{Identification, INCOMPAT_PERSISTENT_SNAPSHOTS};
 use afsplus_format::security::SecuritySegment;
 use afsplus_format::{Timespec, OBJECT_ROOT};
 
@@ -468,7 +467,7 @@ fn the_checker_rejects_a_damaged_or_foreign_descriptor_chain() {
 }
 
 #[test]
-fn volumes_without_the_feature_refuse_descriptors_and_unqualified_combinations_do_not_mount() {
+fn volumes_without_the_feature_refuse_descriptors() {
     let mut dev = MemoryBackend::new(4096, 1024);
     mkfs(&mut dev, &params()).unwrap();
     let mut volume = mount(dev).unwrap();
@@ -482,18 +481,6 @@ fn volumes_without_the_feature_refuse_descriptors_and_unqualified_combinations_d
     assert_eq!(volume.security_descriptor(file).unwrap(), None);
     volume.set_object_protection(file, 1, time(3)).unwrap();
     checked(volume);
-
-    // Descriptors together with persistent snapshots are unqualified.
-    let mut dev = formatted();
-    let mut block = vec![0u8; 4096];
-    dev.read_block(0, &mut block).unwrap();
-    let mut ident = Identification::decode(&block).unwrap();
-    ident.features.incompat |= INCOMPAT_PERSISTENT_SNAPSHOTS;
-    dev.write_block(0, &ident.encode(4096).unwrap()).unwrap();
-    assert!(matches!(
-        mount(dev),
-        Err(CoreError::UnsupportedIncompatFeatures(_))
-    ));
 }
 
 #[test]

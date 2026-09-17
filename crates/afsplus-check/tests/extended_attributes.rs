@@ -4,10 +4,10 @@
 use afsplus_block::{for_each_crash_state, BlockDevice, MemoryBackend, RecordingBackend};
 use afsplus_check::check_device;
 use afsplus_check::explain::{BlockRole, Explainer};
-use afsplus_core::volume::{BatchOp, DataUpdatePolicy, SnapshotWorkLimits};
+use afsplus_core::volume::{BatchOp, DataUpdatePolicy};
 use afsplus_core::{
-    mkfs_with_options, mkfs_with_security_descriptors, mount, mount_with_snapshot_limits,
-    AttributeWriteMode, CoreError, MkfsOptions, MkfsParams, MountOptions, NamePolicy, Volume,
+    mkfs_with_security_descriptors, mount, AttributeWriteMode, CoreError, MkfsParams, NamePolicy,
+    Volume,
 };
 use afsplus_format::{Timespec, OBJECT_ROOT};
 
@@ -338,36 +338,6 @@ fn modes_bounds_no_ops_and_refusals() {
     ));
     volume.window_commit(time(6)).unwrap();
     checked(volume);
-}
-
-#[test]
-fn a_volume_with_persistent_snapshots_refuses_attributes() {
-    let limits = SnapshotWorkLimits {
-        max_edit_records: 4096,
-        max_views: 8,
-        reclaim_records: 8,
-    };
-    let mut dev = MemoryBackend::new(4096, 1024);
-    mkfs_with_options(
-        &mut dev,
-        &MkfsParams {
-            log_slots: 0,
-            ..params()
-        },
-        MkfsOptions {
-            persistent_snapshots: true,
-        },
-    )
-    .unwrap();
-    let mut volume = mount_with_snapshot_limits(dev, MountOptions::default(), limits).unwrap();
-    let file = volume
-        .create_file_in_directory(OBJECT_ROOT, "file", b"x", time(2))
-        .unwrap();
-    assert!(matches!(
-        volume.set_attributes(file, &[("user.a", Some(b"1"))], Upsert, time(3)),
-        Err(CoreError::FeatureDisabled(_))
-    ));
-    assert_eq!(volume.attribute_names(file).unwrap(), Vec::<String>::new());
 }
 
 #[test]

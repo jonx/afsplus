@@ -15,7 +15,7 @@
 //! ([`CommitStats`]) — metadata bytes, bitmap pages, region descriptors,
 //! flushes, retired and promoted blocks, reclaim latency, allocator RAM.
 
-mod attributes;
+pub(crate) mod attributes;
 pub(crate) use attributes::load_attribute_chain;
 pub use attributes::AttributeWriteMode;
 mod chain;

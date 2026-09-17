@@ -130,7 +130,7 @@ lifecycle = "experimental"
 authoritative = true
 rebuildable = false
 discardable = false
-description = "Security preservation container (ADR-101): object records may carry OBJECT_FLAG_SECURITY_REF and a 16-byte reference to an exclusively owned chain of AFSX descriptor segments holding opaque, format-tagged security metadata. The filesystem never evaluates the bytes. An implementation without the container cannot decode a flagged record and would drop the reference on rewrite, so the identity is INCOMPAT. Unqualified together with persistent snapshots."
+description = "Security preservation container (ADR-101): object records may carry OBJECT_FLAG_SECURITY_REF and a 16-byte reference to an exclusively owned chain of AFSX descriptor segments holding opaque, format-tagged security metadata. The filesystem never evaluates the bytes. An implementation without the container cannot decode a flagged record and would drop the reference on rewrite, so the identity is INCOMPAT. Combines with persistent snapshots: a retained view keeps the chains it captured (ADR-109)."
 
 [[feature]]
 id = "org.aros.afsplus:orphan-directory"

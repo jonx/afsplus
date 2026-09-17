@@ -73,12 +73,6 @@ fn negotiate_features(
     if unknown_incompat != 0 {
         return Err(CoreError::UnsupportedIncompatFeatures(unknown_incompat));
     }
-    // Descriptor ownership under retained snapshots is unqualified: the
-    // combination is refused instead of mounted on an unproven lifetime rule.
-    let combined = INCOMPAT_SECURITY_DESCRIPTORS | INCOMPAT_PERSISTENT_SNAPSHOTS;
-    if ident.features.incompat & combined == combined {
-        return Err(CoreError::UnsupportedIncompatFeatures(combined));
-    }
     let unknown_ro_compat = ident.features.ro_compat & !SUPPORTED_RO_COMPAT_FEATURES;
     if unknown_ro_compat != 0 && mode.writes_during_mount() {
         return Err(CoreError::ReadOnlyRequiredFeatures(unknown_ro_compat));

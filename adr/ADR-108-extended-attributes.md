@@ -1,6 +1,7 @@
 # ADR-108: Extended attributes are one owned chain per object
 
 Status: Accepted
+Amended by: ADR-109
 Amends: ADR-102
 
 ## Context
