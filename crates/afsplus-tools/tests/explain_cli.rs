@@ -237,8 +237,7 @@ fn statuses_for_absent_things_bad_usage_and_a_damaged_image() {
     let root_directory = (0..512)
         .find(|lba| {
             device.read_block(*lba, &mut block).unwrap();
-            &block[0..4] == b"AFSD"
-                || (&block[0..4] == b"AFST" && block[8..16] == 1u64.to_le_bytes())
+            &block[0..4] == b"AFST" && block[8..16] == 1u64.to_le_bytes()
         })
         .expect("root directory block");
     block[100] ^= 0xff;

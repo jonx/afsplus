@@ -30,8 +30,7 @@
 #define AFSPR_BLOCK_TYPE_BITMAP UINT32_C(0x42534641)
 #define AFSPR_BLOCK_TYPE_REGION_DESCRIPTOR UINT32_C(0x47534641)
 #define AFSPR_CHECKSUM_CRC32C 1u
-#define AFSPR_IDENT_LEGACY_PAYLOAD 137u
-#define AFSPR_IDENT_FEATURE_PAYLOAD 161u
+#define AFSPR_IDENT_VERSION 3u
 #define AFSPR_IDENT_CURRENT_PAYLOAD 165u
 /* 96 fixed bytes, then the label field: length (1), reserved (7), 64 bytes. */
 #define AFSPR_CHECKPOINT_LABEL_OFFSET AFSP_CHECKPOINT_LABEL_OFFSET
@@ -78,7 +77,6 @@
 #define AFSPR_EXTENT_SHARED ((uint32_t)AFSP_EXTENT_FLAG_SHARED)
 #define AFSPR_EXTENT_KNOWN_FLAGS (AFSPR_EXTENT_UNWRITTEN | AFSPR_EXTENT_SHARED)
 #define AFSPR_LOG_FIXED_PAYLOAD 32u
-#define AFSPR_LOG_LEGACY_OP_FIXED 48u
 #define AFSPR_LOG_OP_FIXED 64u
 #define AFSPR_LOG_EXTENT_WIRE 12u
 #define AFSPR_LOG_PREVIOUS_VERSION 2u
@@ -663,21 +661,16 @@ static int afspr_decode_ident(const uint8_t *block, size_t block_size,
     p = block + AFSPR_HEADER_SIZE;
     /* The block belongs to the volume and has no flag namespace (ADR-114). */
     if (header.flags != 0u || header.owner != 0u) return AFSPR_ERR_CORRUPT;
-    if (header.payload_len < AFSPR_IDENT_LEGACY_PAYLOAD ||
+    if (header.payload_len < AFSPR_IDENT_CURRENT_PAYLOAD ||
         afspr_get_le64(p) != AFSP_MAGIC_U64 ||
         afspr_get_le32(p + 8) != AFSP_FORMAT_EPOCH) {
         return AFSPR_ERR_CORRUPT;
     }
+    /* One version, and the two prototype layouts that preceded it are
+     * refused rather than read (ADR-115). */
     ident->version = afspr_get_le32(p + 12);
-    if (ident->version == 1u) {
-        minimum_payload = AFSPR_IDENT_LEGACY_PAYLOAD;
-    } else if (ident->version == 2u) {
-        minimum_payload = AFSPR_IDENT_FEATURE_PAYLOAD;
-    } else if (ident->version == 3u) {
-        minimum_payload = AFSPR_IDENT_CURRENT_PAYLOAD;
-    } else {
-        return AFSPR_ERR_UNSUPPORTED;
-    }
+    if (ident->version != AFSPR_IDENT_VERSION) return AFSPR_ERR_UNSUPPORTED;
+    minimum_payload = AFSPR_IDENT_CURRENT_PAYLOAD;
     /* Exact for its version: a byte past the last field belongs to no field,
      * and a later layout arrives as a new version, not as a longer payload of
      * this one (ADR-114). */
@@ -703,25 +696,11 @@ static int afspr_decode_ident(const uint8_t *block, size_t block_size,
     memcpy(ident->label, p + 73, ident->label_len);
     ident->label[ident->label_len] = '\0';
 
-    if (ident->version >= 2u) {
-        ident->compat_features = afspr_get_le64(p + 137);
-        ident->ro_compat_features = afspr_get_le64(p + 145);
-        ident->incompat_features = afspr_get_le64(p + 153);
-    } else {
-        ident->compat_features = 0u;
-        ident->ro_compat_features = 0u;
-        ident->incompat_features = ident->log_slots != 0u
-                                         ? AFSP_INCOMPAT_INTENT_LOG
-                                         : UINT64_C(0);
-    }
-    if (ident->version == 3u) {
-        ident->name_key_algorithm = p[161];
-        memcpy(ident->unicode_version, p + 162,
-               sizeof(ident->unicode_version));
-    } else {
-        ident->name_key_algorithm = 0u;
-        memset(ident->unicode_version, 0, sizeof(ident->unicode_version));
-    }
+    ident->compat_features = afspr_get_le64(p + 137);
+    ident->ro_compat_features = afspr_get_le64(p + 145);
+    ident->incompat_features = afspr_get_le64(p + 153);
+    ident->name_key_algorithm = p[161];
+    memcpy(ident->unicode_version, p + 162, sizeof(ident->unicode_version));
 
     if (ident->block_shift != AFSP_DEFAULT_BLOCK_SHIFT ||
         ident->checksum_algorithm != AFSPR_CHECKSUM_CRC32C) {
@@ -2899,11 +2878,9 @@ static int afspr_decode_log_operation(
     if (operation->extent_count > AFSPR_LOG_MAX_EXTENTS) {
         return AFSPR_ERR_CORRUPT;
     }
-    if (record->version != 0u) {
-        if (afspr_decode_timespec(entry + 48u, &operation->timestamp) !=
-            AFSPR_OK) {
-            return AFSPR_ERR_CORRUPT;
-        }
+    if (afspr_decode_timespec(entry + 48u, &operation->timestamp) !=
+        AFSPR_OK) {
+        return AFSPR_ERR_CORRUPT;
     }
 
     if (operation->type == 1u && operation->target_len == 0u) {
@@ -3037,14 +3014,13 @@ static int afspr_decode_log_record(
         record->operation_count > AFSPR_LOG_MAX_OPS) {
         return AFSPR_ERR_CORRUPT;
     }
-    if (record->version == 0u) {
-        record->operation_fixed = AFSPR_LOG_LEGACY_OP_FIXED;
-    } else if (record->version == AFSPR_LOG_PREVIOUS_VERSION ||
-               record->version == AFSPR_LOG_CURRENT_VERSION) {
-        record->operation_fixed = AFSPR_LOG_OP_FIXED;
-    } else {
+    /* Version 0, the prototype record without an operation timestamp, is
+     * refused rather than read (ADR-115). */
+    if (record->version != AFSPR_LOG_PREVIOUS_VERSION &&
+        record->version != AFSPR_LOG_CURRENT_VERSION) {
         return AFSPR_ERR_UNSUPPORTED;
     }
+    record->operation_fixed = AFSPR_LOG_OP_FIXED;
     for (index = 0u; index < record->operation_count; ++index) {
         struct afspr_log_operation operation;
 

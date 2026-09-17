@@ -32,18 +32,12 @@ pub mod block_type {
     pub const CHECKPOINT: u32 = u32::from_le_bytes(*b"AFSC");
     /// Object record, `"AFSO"`.
     pub const OBJECT: u32 = u32::from_le_bytes(*b"AFSO");
-    /// Directory block, `"AFSD"`.
-    pub const DIRECTORY: u32 = u32::from_le_bytes(*b"AFSD");
-    /// Object map block, `"AFSM"`.
-    pub const OBJECT_MAP: u32 = u32::from_le_bytes(*b"AFSM");
     /// Region bitmap page, `"AFSB"`.
     pub const BITMAP: u32 = u32::from_le_bytes(*b"AFSB");
     /// Region allocation descriptor, `"AFSG"`.
     pub const REGION_DESCRIPTOR: u32 = u32::from_le_bytes(*b"AFSG");
     /// Shared COW B+ tree node, `"AFST"`.
     pub const TREE_NODE: u32 = u32::from_le_bytes(*b"AFST");
-    /// Retired-block list, `"AFSR"` (transitional; replaced by the reclaim queue).
-    pub const RETIRED: u32 = u32::from_le_bytes(*b"AFSR");
     /// Reclaim-queue root, `"AFSH"`.
     pub const RECLAIM_ROOT: u32 = u32::from_le_bytes(*b"AFSH");
     /// Sealed reclaim segment, `"AFSS"`.

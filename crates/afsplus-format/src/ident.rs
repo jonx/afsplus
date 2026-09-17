@@ -40,9 +40,11 @@ use crate::geometry::Geometry;
 use crate::header::{block_type, BlockHeader, HEADER_SIZE};
 use crate::{le, FormatError, DEFAULT_BLOCK_SHIFT, FORMAT_EPOCH, FS_MAGIC};
 
+/// The only identification version this format defines. Versions 1 and 2
+/// were prototype layouts of this same block; no image of them was released
+/// and none exists, so they are refused rather than read, and neither number
+/// is ever reused (ADR-115).
 pub const IDENT_VERSION: u32 = 3;
-pub const IDENT_VERSION_FEATURES: u32 = 2;
-pub const IDENT_VERSION_LEGACY: u32 = 1;
 pub const LABEL_MAX_BYTES: usize = 64;
 
 /// The label rule shared by the formatter, the relabel operation and both
@@ -93,9 +95,9 @@ pub const RO_COMPAT_ORPHAN_DIRECTORY: u64 = 1 << 1;
 /// profile; identification is immutable.
 pub const COMPAT_DATA_POLICY: u64 = 1 << 0;
 
-const LEGACY_PAYLOAD_LEN: usize = 73 + LABEL_MAX_BYTES;
-const FEATURE_PAYLOAD_LEN: usize = LEGACY_PAYLOAD_LEN + 3 * 8;
-const PAYLOAD_LEN: usize = FEATURE_PAYLOAD_LEN + 4;
+/// Magic, epoch and version: what a reader needs before it knows the rest.
+const IDENTITY_LEN: usize = 16;
+const PAYLOAD_LEN: usize = 73 + LABEL_MAX_BYTES + 3 * 8 + 4;
 
 /// Unicode data frozen by the first executable comparison-key algorithm.
 pub const UNICODE_VERSION_16_0_0: [u8; 3] = [16, 0, 0];
@@ -220,7 +222,10 @@ impl Identification {
                 "identification header flags or owner are nonzero",
             ));
         }
-        if p.len() < LEGACY_PAYLOAD_LEN {
+        // Identity first, then the length its version implies: the version
+        // is what states how long the payload must be, so a retired version
+        // is refused as a version and not as a wrong length (ADR-115).
+        if p.len() < IDENTITY_LEN {
             return Err(FormatError::Invalid("identification payload too short"));
         }
         if le::get_u64(&p[0..8]) != FS_MAGIC {
@@ -230,21 +235,12 @@ impl Identification {
         if epoch != FORMAT_EPOCH {
             return Err(FormatError::Invalid("unsupported format epoch"));
         }
-        let version = le::get_u32(&p[12..16]);
-        if !matches!(
-            version,
-            IDENT_VERSION | IDENT_VERSION_FEATURES | IDENT_VERSION_LEGACY
-        ) {
+        if le::get_u32(&p[12..16]) != IDENT_VERSION {
             return Err(FormatError::Invalid("unsupported identification version"));
         }
-        let minimum_payload = match version {
-            IDENT_VERSION => PAYLOAD_LEN,
-            IDENT_VERSION_FEATURES => FEATURE_PAYLOAD_LEN,
-            _ => LEGACY_PAYLOAD_LEN,
-        };
         // Exact for its version: a byte past the last field belongs to no
         // field, and the formatter writes none (ADR-114).
-        if p.len() != minimum_payload {
+        if p.len() != PAYLOAD_LEN {
             return Err(FormatError::Invalid(
                 "identification payload length is not exact for its version",
             ));
@@ -260,27 +256,13 @@ impl Identification {
             return Err(FormatError::Invalid("unsupported checksum algorithm"));
         }
         let log_slots = le::get_u16(&p[34..36]);
-        let features = if version >= IDENT_VERSION_FEATURES {
-            FeatureFlags {
-                compat: le::get_u64(&p[137..145]),
-                ro_compat: le::get_u64(&p[145..153]),
-                incompat: le::get_u64(&p[153..161]),
-            }
-        } else {
-            FeatureFlags {
-                incompat: if log_slots > 0 {
-                    INCOMPAT_INTENT_LOG
-                } else {
-                    0
-                },
-                ..FeatureFlags::default()
-            }
+        let features = FeatureFlags {
+            compat: le::get_u64(&p[137..145]),
+            ro_compat: le::get_u64(&p[145..153]),
+            incompat: le::get_u64(&p[153..161]),
         };
-        let (name_key_algorithm, unicode_version) = if version == IDENT_VERSION {
-            (NameKeyAlgorithm::decode(p[161])?, [p[162], p[163], p[164]])
-        } else {
-            (NameKeyAlgorithm::LegacyIdentity, [0, 0, 0])
-        };
+        let name_key_algorithm = NameKeyAlgorithm::decode(p[161])?;
+        let unicode_version = [p[162], p[163], p[164]];
         let region_size = le::get_u32(&p[36..40]);
         let label_len = p[72] as usize;
         if label_len > LABEL_MAX_BYTES {

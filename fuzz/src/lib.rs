@@ -1,7 +1,6 @@
 //! Deterministic, replayable fuzz targets for the `afsplus-format` codecs.
 
 mod checkpoint_snapshot;
-mod legacy;
 mod object_payload;
 mod reclaim;
 mod snapshot;
@@ -55,13 +54,10 @@ pub enum CodecTarget {
     SnapshotCheckpoint = 16,
     InlineSymlink = 17,
     ObjectMetadata = 18,
-    LegacyDirectory = 19,
-    LegacyObjectMap = 20,
-    LegacyRetired = 21,
 }
 
 impl CodecTarget {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 18] = [
         Self::Identification,
         Self::Checkpoint,
         Self::TreeNode,
@@ -80,9 +76,6 @@ impl CodecTarget {
         Self::SnapshotCheckpoint,
         Self::InlineSymlink,
         Self::ObjectMetadata,
-        Self::LegacyDirectory,
-        Self::LegacyObjectMap,
-        Self::LegacyRetired,
     ];
 
     pub fn name(self) -> &'static str {
@@ -105,9 +98,6 @@ impl CodecTarget {
             Self::SnapshotCheckpoint => "snapshot-checkpoint",
             Self::InlineSymlink => "inline-symlink",
             Self::ObjectMetadata => "object-metadata",
-            Self::LegacyDirectory => "legacy-directory",
-            Self::LegacyObjectMap => "legacy-object-map",
-            Self::LegacyRetired => "legacy-retired",
         }
     }
 
@@ -128,9 +118,6 @@ impl CodecTarget {
             Self::IntentLog => block_type::INTENT_LOG,
             Self::BitmapPage => block_type::BITMAP,
             Self::RegionDescriptor => block_type::REGION_DESCRIPTOR,
-            Self::LegacyDirectory => block_type::DIRECTORY,
-            Self::LegacyObjectMap => block_type::OBJECT_MAP,
-            Self::LegacyRetired => block_type::RETIRED,
             Self::ReclaimRoot => block_type::RECLAIM_ROOT,
             Self::ReclaimSegment => block_type::RECLAIM_SEGMENT,
             Self::ReclaimTable => block_type::RECLAIM_TABLE,
@@ -342,9 +329,6 @@ fn region_seed_descriptor() -> RegionDescriptor {
 }
 
 fn accepts(target: CodecTarget, input: &[u8]) -> bool {
-    if legacy::handles(target) {
-        return legacy::accepts(target, input);
-    }
     if object_payload::handles(target) {
         return object_payload::accepts(target, input);
     }
@@ -379,9 +363,6 @@ fn accepts(target: CodecTarget, input: &[u8]) -> bool {
 }
 
 pub fn canonical_seed(target: CodecTarget) -> Result<Vec<u8>, String> {
-    if legacy::handles(target) {
-        return legacy::seed(target);
-    }
     if object_payload::handles(target) {
         return object_payload::seed(target);
     }
@@ -411,9 +392,6 @@ pub fn canonical_seed(target: CodecTarget) -> Result<Vec<u8>, String> {
 }
 
 fn roundtrip(target: CodecTarget, input: &[u8]) -> Result<(), String> {
-    if legacy::handles(target) {
-        return legacy::exercise(target, input);
-    }
     if object_payload::handles(target) {
         return object_payload::exercise(target, input);
     }
@@ -798,7 +776,10 @@ mod tests {
         // Seed schema 2: the checkpoint carries the volume label field
         // (ADR-104), which changed the seed column of the checkpoint row and
         // of the snapshot-checkpoint row; the version bump re-keys the
-        // mutation column of every row.
+        // mutation column of every row. Retiring the three legacy targets
+        // (ADR-115) dropped their three trailing rows and re-keyed nothing:
+        // they were the last IDs, so every surviving row is unchanged and the
+        // seed schema stays at 2.
         assert_eq!(
             actual,
             vec![
@@ -820,9 +801,6 @@ mod tests {
                 (1_069_280_442, 2_035_905_823),
                 (4_116_635_091, 1_411_047_614),
                 (1_571_146_886, 1_621_436_109),
-                (2_107_079_709, 1_468_838_692),
-                (1_972_104_977, 98_234_878),
-                (1_111_250_663, 3_131_024_779),
             ]
         );
     }

@@ -5,21 +5,18 @@
 use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::crc32c::CHECKSUM_CRC32C;
-use afsplus_format::dir::{comparison_key, DirBlock, DirEntry};
 use afsplus_format::geometry::Geometry;
 use afsplus_format::header::{block_type, BlockHeader, HEADER_SIZE};
 use afsplus_format::ident::{
-    FeatureFlags, Identification, NameKeyAlgorithm, IDENT_VERSION_FEATURES, IDENT_VERSION_LEGACY,
-    INCOMPAT_INTENT_LOG, INCOMPAT_INTENT_LOG_DATA_UPDATES, UNICODE_VERSION_16_0_0,
+    FeatureFlags, Identification, NameKeyAlgorithm, INCOMPAT_INTENT_LOG,
+    INCOMPAT_INTENT_LOG_DATA_UPDATES, UNICODE_VERSION_16_0_0,
 };
 use afsplus_format::intent_log::{LogOp, LogRecord};
 use afsplus_format::object::{ObjectRecord, ObjectType};
-use afsplus_format::omap::ObjectMap;
 use afsplus_format::reclaim::{
     ReclaimCaps, ReclaimEntry, ReclaimRoot, ReclaimSegment, ReclaimTable, SegmentRef, TableRef,
 };
 use afsplus_format::region::{BitmapBinding, RegionDescriptor};
-use afsplus_format::retired::RetiredList;
 use afsplus_format::tree::{
     child_value, key_u64, ChildRef, TreeItem, TreeKind, TreeNode, MAX_TREE_LEVEL,
 };
@@ -95,20 +92,6 @@ fn sample_record() -> ObjectRecord {
     }
 }
 
-fn sample_dir() -> DirBlock {
-    let mut dir = DirBlock::new(OBJECT_ROOT);
-    for name in ["beta.txt", "alpha.txt", "Émoji-☂.rs"] {
-        dir.insert(DirEntry {
-            key: comparison_key(name.as_bytes()),
-            name: name.as_bytes().to_vec(),
-            child_type_hint: 1,
-            child_id: 17,
-        })
-        .unwrap();
-    }
-    dir
-}
-
 fn sample_bitmap() -> BitmapPage {
     let mut page = BitmapPage::all_free(3, 0, 0, 100);
     for index in [0, 1, 2, 50, 99] {
@@ -149,14 +132,6 @@ fn sample_tree_leaf() -> TreeNode {
     }
 }
 
-fn sample_retired() -> RetiredList {
-    let mut list = RetiredList::default();
-    list.insert(42, 4).unwrap();
-    list.insert(7, 5).unwrap();
-    list.insert(100, 5).unwrap();
-    list
-}
-
 #[test]
 fn identification_roundtrip() {
     let ident = sample_ident();
@@ -174,57 +149,6 @@ fn intent_log_data_update_feature_requires_the_base_log() {
         Identification::decode(&ident.encode(BS).unwrap()).unwrap(),
         ident
     );
-}
-
-#[test]
-fn legacy_identification_derives_the_intent_log_feature() {
-    const LEGACY_PAYLOAD_LEN: usize = 137;
-    let ident = sample_ident();
-    let mut block = ident.encode(BS).unwrap();
-    le::put_u32(
-        &mut block[HEADER_SIZE + 12..HEADER_SIZE + 16],
-        IDENT_VERSION_LEGACY,
-    );
-    block[HEADER_SIZE + LEGACY_PAYLOAD_LEN..].fill(0);
-    BlockHeader {
-        block_type: block_type::IDENTIFICATION,
-        flags: 0,
-        owner: 0,
-        generation: 0,
-        payload_len: LEGACY_PAYLOAD_LEN as u32,
-    }
-    .seal(&mut block);
-
-    let decoded = Identification::decode(&block).unwrap();
-    assert_eq!(decoded.log_slots, ident.log_slots);
-    assert_eq!(decoded.features.incompat, INCOMPAT_INTENT_LOG);
-    assert_eq!(decoded.name_key_algorithm, NameKeyAlgorithm::LegacyIdentity);
-    assert_eq!(decoded.unicode_version, [0, 0, 0]);
-}
-
-#[test]
-fn version_two_identification_preserves_features_and_uses_identity_keys() {
-    const FEATURE_PAYLOAD_LEN: usize = 161;
-    let ident = sample_ident();
-    let mut block = ident.encode(BS).unwrap();
-    le::put_u32(
-        &mut block[HEADER_SIZE + 12..HEADER_SIZE + 16],
-        IDENT_VERSION_FEATURES,
-    );
-    block[HEADER_SIZE + FEATURE_PAYLOAD_LEN..].fill(0);
-    BlockHeader {
-        block_type: block_type::IDENTIFICATION,
-        flags: 0,
-        owner: 0,
-        generation: 0,
-        payload_len: FEATURE_PAYLOAD_LEN as u32,
-    }
-    .seal(&mut block);
-
-    let decoded = Identification::decode(&block).unwrap();
-    assert_eq!(decoded.features, ident.features);
-    assert_eq!(decoded.name_key_algorithm, NameKeyAlgorithm::LegacyIdentity);
-    assert_eq!(decoded.unicode_version, [0, 0, 0]);
 }
 
 #[test]
@@ -428,20 +352,6 @@ fn bitmap_roundtrip_and_free_count() {
     let byte_index = 32 + 16 + (101 / 8);
     torn[byte_index] &= !(1 << (101 % 8));
     assert!(BitmapPage::decode(&torn).is_err());
-}
-
-#[test]
-fn retired_list_roundtrip_and_double_retire() {
-    let list = sample_retired();
-    let block = list.encode(BS, 5).unwrap();
-    assert_eq!(RetiredList::decode(&block).unwrap(), list);
-    assert!(list.contains(42));
-    assert!(!list.contains(43));
-    let mut list = sample_retired();
-    assert!(
-        list.insert(42, 5).is_err(),
-        "double retire must be rejected"
-    );
 }
 
 fn sample_reclaim_root() -> ReclaimRoot {
@@ -699,49 +609,6 @@ fn intent_log_record_roundtrip_and_rejections() {
 }
 
 #[test]
-fn legacy_intent_record_decodes_with_its_historical_zero_timestamp() {
-    const FIXED_PAYLOAD: usize = 32;
-    const LEGACY_OP_FIXED: usize = 48;
-    const CURRENT_OP_FIXED: usize = 64;
-    let name = b"old";
-    let record = LogRecord {
-        uuid: [7u8; 16],
-        base_generation: 9,
-        sequence: 1,
-        ops: vec![LogOp::Delete {
-            parent_id: 1,
-            name: name.to_vec(),
-            timestamp: Timespec::default(),
-        }],
-    };
-    let current = record.encode(BS).unwrap();
-    let mut legacy = vec![0u8; BS];
-    let payload = HEADER_SIZE;
-    legacy[payload..payload + FIXED_PAYLOAD]
-        .copy_from_slice(&current[payload..payload + FIXED_PAYLOAD]);
-    le::put_u16(&mut legacy[payload + 30..payload + 32], 0);
-    legacy[payload + FIXED_PAYLOAD..payload + FIXED_PAYLOAD + LEGACY_OP_FIXED].copy_from_slice(
-        &current[payload + FIXED_PAYLOAD..payload + FIXED_PAYLOAD + LEGACY_OP_FIXED],
-    );
-    legacy[payload + FIXED_PAYLOAD + LEGACY_OP_FIXED
-        ..payload + FIXED_PAYLOAD + LEGACY_OP_FIXED + name.len()]
-        .copy_from_slice(
-            &current[payload + FIXED_PAYLOAD + CURRENT_OP_FIXED
-                ..payload + FIXED_PAYLOAD + CURRENT_OP_FIXED + name.len()],
-        );
-    BlockHeader {
-        block_type: block_type::INTENT_LOG,
-        flags: 0,
-        owner: 0,
-        generation: record.base_generation,
-        payload_len: (FIXED_PAYLOAD + LEGACY_OP_FIXED + name.len()) as u32,
-    }
-    .seal(&mut legacy);
-
-    assert_eq!(LogRecord::decode(&legacy).unwrap(), record);
-}
-
-#[test]
 fn version_two_intent_record_remains_readable() {
     let mut record = sample_log_record();
     record.ops.truncate(3);
@@ -927,64 +794,15 @@ fn shared_tree_rejects_bad_order_depth_children_and_hostile_counts() {
 }
 
 #[test]
-fn dir_block_roundtrip_preserves_original_names_and_key_order() {
-    let dir = sample_dir();
-    let block = dir.encode(BS, 5).unwrap();
-    let decoded = DirBlock::decode(&block).unwrap();
-    assert_eq!(decoded, dir);
-    let keys: Vec<_> = decoded.entries.iter().map(|e| e.key.clone()).collect();
-    let mut sorted = keys.clone();
-    sorted.sort();
-    assert_eq!(keys, sorted);
-    assert!(decoded
-        .entries
-        .iter()
-        .any(|e| e.name == "Émoji-☂.rs".as_bytes()));
-}
-
-#[test]
-fn dir_rejects_duplicate_and_invalid_names() {
-    let mut dir = sample_dir();
-    let dup = DirEntry {
-        key: comparison_key(b"alpha.txt"),
-        name: b"alpha.txt".to_vec(),
-        child_type_hint: 1,
-        child_id: 18,
-    };
-    assert!(matches!(dir.insert(dup), Err(FormatError::Invalid(_))));
-    assert!(afsplus_format::validate_name(b"").is_err());
-    assert!(afsplus_format::validate_name(b"a/b").is_err());
-    assert!(afsplus_format::validate_name(&[0xFF, 0xFE]).is_err());
-    assert!(afsplus_format::validate_name(&[b'x'; 256]).is_err());
-    assert!(afsplus_format::validate_name("naïve-☂.txt".as_bytes()).is_ok());
-}
-
-#[test]
-fn omap_roundtrip_ordering_and_removal() {
-    let mut omap = ObjectMap::default();
-    omap.upsert(17, 100).unwrap();
-    omap.upsert(1, 50).unwrap();
-    omap.upsert(17, 101).unwrap(); // update in place
-    let block = omap.encode(BS, 5).unwrap();
-    let decoded = ObjectMap::decode(&block).unwrap();
-    assert_eq!(decoded, omap);
-    assert_eq!(decoded.lookup(17), Some(101));
-    assert_eq!(omap.remove(17), Some(101));
-    assert_eq!(omap.lookup(17), None);
-}
-
-#[test]
 fn every_flipped_byte_is_detected() {
     // CRC32C must catch any single-byte corruption in any block type.
     let blocks: Vec<Vec<u8>> = vec![
         sample_ident().encode(BS).unwrap(),
         sample_checkpoint().encode(BS).unwrap(),
         sample_record().encode(BS, 5).unwrap(),
-        sample_dir().encode(BS, 5).unwrap(),
         sample_bitmap().encode(BS, 5).unwrap(),
         sample_region_descriptor().encode(BS, 5).unwrap(),
         sample_tree_leaf().encode(BS, 5).unwrap(),
-        sample_retired().encode(BS, 5).unwrap(),
     ];
     for block in blocks {
         for offset in (0..BS).step_by(97) {
@@ -994,12 +812,9 @@ fn every_flipped_byte_is_detected() {
                 Identification::decode(&corrupt).is_err()
                     && Checkpoint::decode(&corrupt, &[7u8; 16]).is_err()
                     && ObjectRecord::decode(&corrupt).is_err()
-                    && DirBlock::decode(&corrupt).is_err()
-                    && ObjectMap::decode(&corrupt).is_err()
                     && BitmapPage::decode(&corrupt).is_err()
                     && RegionDescriptor::decode(&corrupt).is_err()
-                    && TreeNode::decode(&corrupt).is_err()
-                    && RetiredList::decode(&corrupt).is_err(),
+                    && TreeNode::decode(&corrupt).is_err(),
                 "corruption at offset {offset} was not detected"
             );
         }
@@ -1015,31 +830,12 @@ fn decoders_reject_garbage_without_panicking() {
     assert!(Identification::decode(&garbage).is_err());
     assert!(Checkpoint::decode(&garbage, &[0u8; 16]).is_err());
     assert!(ObjectRecord::decode(&garbage).is_err());
-    assert!(DirBlock::decode(&garbage).is_err());
-    assert!(ObjectMap::decode(&garbage).is_err());
     assert!(BitmapPage::decode(&garbage).is_err());
     assert!(RegionDescriptor::decode(&garbage).is_err());
     assert!(TreeNode::decode(&garbage).is_err());
-    assert!(RetiredList::decode(&garbage).is_err());
     // Truncated buffers.
     assert!(Identification::decode(&garbage[..16]).is_err());
-    assert!(DirBlock::decode(&[]).is_err());
-}
-
-#[test]
-fn dir_overflow_is_reported_not_truncated() {
-    let mut dir = DirBlock::new(OBJECT_ROOT);
-    for i in 0..=100u64 {
-        let name = format!("file-with-a-rather-long-name-{i:060}");
-        dir.insert(DirEntry {
-            key: comparison_key(name.as_bytes()),
-            name: name.into_bytes(),
-            child_type_hint: 1,
-            child_id: 16 + i,
-        })
-        .unwrap();
-    }
-    assert!(matches!(dir.encode(BS, 5), Err(FormatError::Overflow(_))));
+    assert!(ObjectRecord::decode(&[]).is_err());
 }
 
 #[test]
@@ -1283,27 +1079,6 @@ fn region_descriptor_encoder_refuses_short_output_without_underflow() {
     }
     let encoded = descriptor.encode(minimum, 9).unwrap();
     assert_eq!(RegionDescriptor::decode(&encoded).unwrap(), (descriptor, 9));
-}
-
-#[test]
-fn omap_encoder_refuses_subheader_output() {
-    for size in 0..HEADER_SIZE {
-        assert!(ObjectMap::default().encode(size, 7).is_err(), "size={size}");
-    }
-}
-
-#[test]
-fn retired_encoder_refuses_subheader_output() {
-    for size in 0..HEADER_SIZE {
-        assert!(sample_retired().encode(size, 7).is_err(), "size={size}");
-    }
-}
-
-#[test]
-fn directory_encoder_refuses_subheader_output() {
-    for size in 0..HEADER_SIZE {
-        assert!(sample_dir().encode(size, 7).is_err(), "size={size}");
-    }
 }
 
 #[test]

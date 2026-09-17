@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Retire what nothing writes (ADR-115)](#2026-09-17--retire-what-nothing-writes-adr-115)
 - [2026-09-17 — The reserved header fields of the last five kinds (ADR-114)](#2026-09-17--the-reserved-header-fields-of-the-last-five-kinds-adr-114)
 - [2026-09-17 — A finite acceptance inventory for Stage B](#2026-09-17--a-finite-acceptance-inventory-for-stage-b)
 - [2026-09-17 — Carry extended attributes to FUSE and to AROS](#2026-09-17--carry-extended-attributes-to-fuse-and-to-aros)
@@ -220,6 +221,48 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — Retire what nothing writes (ADR-115)
+
+Survey first, and it decided the scope. Three prototype layouts still had
+admission with nothing to read: identification versions 1 and 2 beside the 3
+the formatter writes; intent-log record version 0 beside the 2 and 3 the
+writer emits, found while implementing and reported; and the block kinds
+`"AFSD"`, `"AFSM"` and `"AFSR"`, whose codecs, fuzz targets and magics
+survived the typed COW tree. Nothing writes any of them, and a scan of every
+file of the repository and all of build/ in three worktrees, 78,500 files, for
+a block magic at a 4 KiB boundary found no image of any of them: no retired
+magic, no identification block at all, no intent record outside versions 2
+and 3. ADR-036 already called the AFSR codec "transitional test coverage
+only".
+
+Two precisions the survey caught that a grep on names would have got wrong:
+dir.rs is half live, so only DirBlock went and the directory entry with its
+tree-leaf codec stayed; and NameKeyAlgorithm::LegacyIdentity is not a legacy
+version but the case-sensitive key algorithm of version 3, so it stayed.
+
+ADR-115 says a retired version or magic is refused rather than ignored and is
+never reused. The identification decoder now judges the version before the
+length, since the version is what states the length; before, a 137-byte
+prototype payload was refused as "too short", which is the right verdict for
+the wrong reason.
+
+Proof: `retired_surface` (3 tests): identification versions 0, 1, 2 and 4,
+each at its own prototype length and at the current length so the version and
+not the length decides; intent-log versions 0, 1 and 4; and, for the three
+magics, that no current kind claims one and that a well-formed block carrying
+one verifies as no current kind. Both gates pass: the Rust codec fuzz gate
+with 18 targets and the portable C reader gate with the m68k step. The three
+retired targets held the last IDs of the enum, so every surviving row of the
+pinned fingerprint table is unchanged and the seed schema stays at 2.
+
+Assertions that moved, none because an image changed: eleven cases of
+roundtrip.rs that existed only for the retired codecs and versions,
+legacy_reserved.rs and the legacy fuzz oracle, deleted with them. Two stale
+statements found in testing/fuzzing.md on the way and corrected: the
+snapshot-bearing checkpoint target was described with a 112-byte payload,
+which ADR-104 made 184, and the document claimed "the 96-byte form stays
+decodable", which has been false since the label field landed.
 
 ## 2026-09-17 — The reserved header fields of the last five kinds (ADR-114)
 

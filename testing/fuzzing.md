@@ -12,7 +12,6 @@
 - [Seeded semantic properties](#seeded-semantic-properties)
 - [Generated operation families](#generated-operation-families)
 - [Executable surface audit](#executable-surface-audit)
-- [Legacy one-block reader oracles](#legacy-one-block-reader-oracles)
 - [Typed caller and Unicode properties](#typed-caller-and-unicode-properties)
 
 <!-- /toc -->
@@ -36,14 +35,13 @@ replayable without the original workstation.
 
 | Wire surface | Rust codec and caller coverage | Portable C path corpus | Remaining scope |
 |---|---|---|---|
-| Identification and retained checkpoints | Legacy and snapshot-bearing checkpoint targets plus raw and resealed mutations | Probe seed, header/block mutations | Add frozen reserved-field decisions |
+| Identification and retained checkpoints | Checkpoint and snapshot-bearing checkpoint targets plus raw and resealed mutations | Probe seed, header/block mutations | Frozen byte offsets |
 | Object record and object-map node | File/directory/inline-symlink targets, empty/direct/tree-backed/in-place file variants, typed object-map payloads | Root lookup plus multi-leaf paths | Future object extensions and generic header policy ([Q13](../implementation/open-questions.md)) |
 | Directory node | Generic tree-node target, typed payload admission and Unicode 16 comparison-key corpus | First/last ordinal in a 303-entry tree | Native/C Unicode interoperability and format freeze |
 | Extent node and file data | Generic tree target, typed extent range/overflow checks, mounted sparse/shared-file byte oracles | Directory-to-file read seed; direct/sparse synthetic coverage remains in conformance | Portable C committed tree-backed file seed under reader conformance |
 | Allocation-region metadata | Bitmap-page and region-descriptor targets, including a partial final page | None | Add portable repair-walker corpus |
 | Intent-log record and referenced data | All five v3 operation types; three-record prefix, binding, sequence, data reuse/range/CRC and exact read-termination controls | Rust-built v3 write/truncate/create prefix scan plus final namespace lookup | Broader native recovery qualification |
 | Snapshot registry, captured record, lifetime ledger and keys | Five direct targets; typed-tree ownership, ledger model and resealed cross-record snapshot checks | None | Portable C snapshot qualification |
-| Legacy single-block directory, object map and retired list | Three direct targets with independent payload admission and decoded fields | None | Keep volume ownership and negotiated header/extension policy separate |
 | Reclaim queue root, segment and table | Three direct targets; resealed cross-block count, generation, geometry, cursor and pending-total checks | None | Portable C reclaim qualification |
 | Xattr record | None | None | Add when the portable reader exposes xattrs |
 | Catalog record | None | None | Add with catalog implementation |
@@ -52,7 +50,7 @@ replayable without the original workstation.
 ## Rust codec gate
 
 `make rust-codec-fuzz-gate` exercises identification, checkpoint, typed-tree,
-object-record, intent-log, bitmap-page, region-descriptor five snapshot leaf/key, three reclaim block snapshot-bearing checkpoint, inline-symlink, metadata object and three legacy one-block decoders. Each canonical seed must be accepted,
+object-record, intent-log, bitmap-page, region-descriptor, five snapshot leaf/key, three reclaim block, snapshot-bearing checkpoint, inline-symlink and metadata object decoders, each of which must one-block decoders. Each canonical seed must be accepted,
 re-encode and decode to byte-stable canonical form. The mandatory engine then
 runs 4,096 stable cases per target using checksum-breaking bit flips,
 CRC-resealed payload changes, short inputs, bounded multi-byte overwrites and
@@ -120,13 +118,14 @@ caller obligations, outside these direct targets. Reserved-field controls use CR
 mask payload rejection.
 
 The snapshot-bearing checkpoint target starts with both registry and lifetime
-roots present in the 112-byte payload. It independently checks every decoded
+roots present in the 184-byte payload. It independently checks every decoded
 field, header/generation/UUID binding, root distinctness and structural ranges
 for an 8,192-block, two-region fixture. Literal allocatable ranges are
 `9..4096` and `4102..8192`; this oracle does not call the allocator geometry
-predicate. Resealed controls cover all payload lengths through 120 bytes,
+predicate. Resealed controls cover every payload length through 192 bytes,
 reserved-region and endpoint roots, equal/zero roots and generation mismatch.
-The 96-byte form stays decodable and the legacy seed identity is unchanged.
+Only the 184-byte length is admitted for that seed: under the 168-byte length
+its roots are a nonzero tail ([ADR-111](../adr/ADR-111-checkpoint-zero-tail.md)).
 
 The immutable feature bit is not an input to `Checkpoint::decode`.
 [Checkpoint binding](../spec/snapshot-records.md#checkpoint-binding) requires
@@ -556,23 +555,6 @@ captured view reads through the five snapshot readers and
 accessors of [the developer harness](developer-harness.md), whose bounds the
 [typed caller properties](#typed-caller-and-unicode-properties) and the crate
 tests own.
-
-## Legacy one-block reader oracles
-
-[legacy.rs](../fuzz/src/legacy.rs) supplies two-entry ordered seeds for the
-legacy directory, object map and retired list. Independent payload extraction
-checks exact counts and lengths, reserved-zero fields, ordering and invalid IDs
-or retirement generations. Directory checks include bounded key/name lengths,
-UTF-8 names, forbidden NUL/slash bytes and entry bounds. Truncation, resealed
-fields/lengths and exact-minimum encoder output complement deterministic mutations.
-
-Common-header verification is shared; no claim is made about an independently
-implemented checksum parser. The directory oracle preserves the executable
-legacy admission contract rather than applying current typed-tree Unicode-key
-rules. Volume geometry, referenced ownership and generic header/tail decisions
-are separate checks. Stable IDs 19–21 append fingerprints without changing
-IDs 1–18; saved case-47 inputs for all three readers are replayed by the gate.
-
 
 ## Typed caller and Unicode properties
 

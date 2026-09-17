@@ -52,7 +52,6 @@ use crate::header::{block_type, BlockHeader, HEADER_SIZE};
 use crate::{le, validate_name, FormatError, Timespec};
 
 const FIXED_PAYLOAD: usize = 32;
-const LEGACY_OP_FIXED: usize = 48;
 const OP_FIXED: usize = 64;
 const EXTENT_WIRE: usize = 12;
 const PREVIOUS_LOG_RECORD_VERSION: u16 = 2;
@@ -475,16 +474,19 @@ impl LogRecord {
                 "log record operation count out of range",
             ));
         }
+        // Version 0, the prototype record without an operation timestamp,
+        // is refused rather than read (ADR-115); the writer emits version 2
+        // for a namespace record and version 3 for a data update.
         let record_version = le::get_u16(&p[30..32]);
-        let op_fixed = match record_version {
-            0 => LEGACY_OP_FIXED,
-            PREVIOUS_LOG_RECORD_VERSION | LOG_RECORD_VERSION => OP_FIXED,
-            _ => {
-                return Err(FormatError::Invalid(
-                    "unsupported intent-log record version",
-                ))
-            }
-        };
+        if !matches!(
+            record_version,
+            PREVIOUS_LOG_RECORD_VERSION | LOG_RECORD_VERSION
+        ) {
+            return Err(FormatError::Invalid(
+                "unsupported intent-log record version",
+            ));
+        }
+        let op_fixed = OP_FIXED;
         let mut ops = Vec::with_capacity(op_count);
         let mut offset = FIXED_PAYLOAD;
         for _ in 0..op_count {
@@ -515,11 +517,7 @@ impl LogRecord {
             if p.len() - offset - op_fixed < variable {
                 return Err(FormatError::Invalid("log operation exceeds payload"));
             }
-            let timestamp = if record_version != 0 {
-                Timespec::read(&entry[48..60])?
-            } else {
-                Timespec::default()
-            };
+            let timestamp = Timespec::read(&entry[48..60])?;
             let op = match op_type {
                 1 => {
                     let mut extents = Vec::with_capacity(extent_count);
