@@ -11,11 +11,11 @@ use afsplus_vfs::{AccessMode, NodeKind, Vfs, VfsError};
 use fuser::{
     BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
     INodeNo, LockOwner, OpenAccMode, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow,
-    WriteFlags,
+    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr,
+    Request, TimeOrNow, WriteFlags,
 };
 
-use crate::{FuseAdapter, FuseAttributes, FuseConfig};
+use crate::{AttributeWriteMode, FuseAdapter, FuseAttributes, FuseConfig};
 
 const ATTRIBUTE_TTL: Duration = Duration::from_secs(1);
 const DIRECTORY_BATCH: usize = 128;
@@ -355,6 +355,58 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
         empty_reply(result, reply);
     }
 
+    fn setxattr(
+        &self,
+        _request: &Request,
+        inode: INodeNo,
+        name: &OsStr,
+        value: &[u8],
+        flags: i32,
+        position: u32,
+        reply: ReplyEmpty,
+    ) {
+        let result = xattr_write_mode(flags, position).and_then(|mode| {
+            self.lock().and_then(|mut adapter| {
+                adapter
+                    .set_attribute(inode.0, name.as_bytes(), value, mode, now())
+                    .map_err(xattr_errno)
+            })
+        });
+        empty_reply(result, reply);
+    }
+
+    fn getxattr(
+        &self,
+        _request: &Request,
+        inode: INodeNo,
+        name: &OsStr,
+        size: u32,
+        reply: ReplyXattr,
+    ) {
+        let result = self.lock().and_then(|mut adapter| {
+            adapter
+                .get_attribute(inode.0, name.as_bytes())
+                .map_err(xattr_errno)
+        });
+        xattr_reply(result, size, reply);
+    }
+
+    fn listxattr(&self, _request: &Request, inode: INodeNo, size: u32, reply: ReplyXattr) {
+        let result = self
+            .lock()
+            .and_then(|mut adapter| adapter.list_attributes(inode.0).map_err(xattr_errno));
+        xattr_reply(result, size, reply);
+    }
+
+    fn removexattr(&self, _request: &Request, inode: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let result = self.lock().and_then(|mut adapter| {
+            adapter
+                .remove_attribute(inode.0, name.as_bytes(), now())
+                .map_err(xattr_errno)
+        });
+        empty_reply(result, reply);
+    }
+
     fn opendir(&self, _request: &Request, inode: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let result = self
             .lock()
@@ -507,6 +559,53 @@ fn rename_replace(flags: RenameFlags) -> Result<bool, Errno> {
     }
 }
 
+/// `XATTR_CREATE` and `XATTR_REPLACE` as the host's `setxattr(2)` numbers
+/// them; the two hosts disagree.
+#[cfg(target_os = "macos")]
+const XATTR_FLAGS: (i32, i32) = (0x0002, 0x0004);
+#[cfg(not(target_os = "macos"))]
+const XATTR_FLAGS: (i32, i32) = (0x1, 0x2);
+
+/// The write mode of a `setxattr` request. A nonzero position addresses a
+/// part of a value, which only a resource fork uses and this volume does not
+/// store; any other flag bit is refused instead of ignored.
+fn xattr_write_mode(flags: i32, position: u32) -> Result<AttributeWriteMode, Errno> {
+    let (create, replace) = XATTR_FLAGS;
+    if position != 0 {
+        return Err(Errno::ENOTSUP);
+    }
+    match flags {
+        0 => Ok(AttributeWriteMode::Upsert),
+        bits if bits == create => Ok(AttributeWriteMode::Create),
+        bits if bits == replace => Ok(AttributeWriteMode::Replace),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+/// Attribute calls have their own words for absence and size.
+fn xattr_errno(error: VfsError) -> Errno {
+    match error {
+        VfsError::NotFound => Errno::NO_XATTR,
+        VfsError::Limit(_) => Errno::E2BIG,
+        VfsError::NotSupported => Errno::ENOTSUP,
+        other => errno(other),
+    }
+}
+
+/// The size-probing protocol of `getxattr` and `listxattr`: size zero asks
+/// for the length, a buffer too small is `ERANGE`, never a truncated value.
+fn xattr_reply(result: Result<Vec<u8>, Errno>, size: u32, reply: ReplyXattr) {
+    match result {
+        Err(error) => reply.error(error),
+        Ok(bytes) => match u32::try_from(bytes.len()) {
+            Err(_) => reply.error(Errno::E2BIG),
+            Ok(length) if size == 0 => reply.size(length),
+            Ok(length) if length > size => reply.error(Errno::ERANGE),
+            Ok(_) => reply.data(&bytes),
+        },
+    }
+}
+
 fn errno(error: VfsError) -> Errno {
     match error {
         VfsError::NotFound => Errno::ENOENT,
@@ -592,5 +691,33 @@ fn system_time(time: Timespec) -> SystemTime {
         UNIX_EPOCH
             .checked_add(Duration::new(time.seconds as u64, time.nanoseconds))
             .unwrap_or(UNIX_EPOCH)
+    }
+}
+
+#[cfg(test)]
+mod xattr_tests {
+    use super::*;
+
+    #[test]
+    fn setxattr_flags_follow_the_host_and_nothing_is_ignored() {
+        let (create, replace) = XATTR_FLAGS;
+        assert_eq!(xattr_write_mode(0, 0), Ok(AttributeWriteMode::Upsert));
+        assert_eq!(xattr_write_mode(create, 0), Ok(AttributeWriteMode::Create));
+        assert_eq!(
+            xattr_write_mode(replace, 0),
+            Ok(AttributeWriteMode::Replace)
+        );
+        assert_eq!(xattr_write_mode(create | replace, 0), Err(Errno::EINVAL));
+        assert_eq!(xattr_write_mode(0x4000, 0), Err(Errno::EINVAL));
+        assert_eq!(xattr_write_mode(0, 1), Err(Errno::ENOTSUP));
+    }
+
+    #[test]
+    fn attribute_errors_use_the_attribute_vocabulary() {
+        assert_eq!(xattr_errno(VfsError::NotFound), Errno::NO_XATTR);
+        assert_eq!(xattr_errno(VfsError::Limit("x")), Errno::E2BIG);
+        assert_eq!(xattr_errno(VfsError::NotSupported), Errno::ENOTSUP);
+        assert_eq!(xattr_errno(VfsError::AlreadyExists), Errno::EEXIST);
+        assert_eq!(xattr_errno(VfsError::ReadOnly), Errno::EROFS);
     }
 }

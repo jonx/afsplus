@@ -96,6 +96,85 @@ fn real_mount_runs_the_alpha_operation_matrix_and_leaves_a_clean_image() {
     fs::remove_dir_all(base).unwrap();
 }
 
+/// The host's own attribute tool against a real mount, then the image read
+/// back without the host: what the kernel sent is what the volume stores.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires a working host FUSE installation and AFSPLUS_FUSE_MOUNT_TEST=1"]
+fn real_mount_carries_extended_attributes() {
+    assert_eq!(
+        std::env::var("AFSPLUS_FUSE_MOUNT_TEST").as_deref(),
+        Ok("1"),
+        "set AFSPLUS_FUSE_MOUNT_TEST=1 to acknowledge the host mount"
+    );
+    let xattr = |arguments: &[&std::ffi::OsStr]| {
+        let output = Command::new("/usr/bin/xattr")
+            .args(arguments)
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+
+    let base = unique_test_directory();
+    let image = base.join("volume.afsp");
+    let mountpoint = unique_mountpoint(&base);
+    fs::create_dir_all(&base).unwrap();
+    if std::env::var_os("AFSPLUS_FUSE_MOUNT_ROOT").is_some() {
+        fs::create_dir_all(&mountpoint).unwrap();
+    }
+    create_image(&image);
+    let child = Command::new(env!("CARGO_BIN_EXE_afsplus-mount"))
+        .arg(&image)
+        .arg(&mountpoint)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut mounted = MountedChild::new(child, mountpoint.clone());
+    wait_until_mounted(&mut mounted, &mountpoint);
+
+    let seed = mountpoint.join("seed");
+    let seed = seed.as_os_str();
+    let os = std::ffi::OsStr::new;
+    assert!(xattr(&[os("-w"), os("org.afsplus.kind"), os("note"), seed]).0);
+    assert!(xattr(&[os("-w"), os("afsplus.aros.tooltype"), os("DONOTWAIT"), seed]).0);
+    let (ok, value) = xattr(&[os("-p"), os("org.afsplus.kind"), seed]);
+    assert!(ok);
+    assert_eq!(value.trim_end(), "note");
+    let (ok, names) = xattr(&[seed]);
+    assert!(ok);
+    let mut names: Vec<&str> = names.lines().collect();
+    // Finder and the kernel may add names of their own; ours must be there.
+    names.retain(|name| *name == "org.afsplus.kind" || *name == "afsplus.aros.tooltype");
+    names.sort_unstable();
+    assert_eq!(names, ["afsplus.aros.tooltype", "org.afsplus.kind"]);
+    assert!(xattr(&[os("-d"), os("org.afsplus.kind"), seed]).0);
+    assert!(!xattr(&[os("-p"), os("org.afsplus.kind"), seed]).0);
+    assert!(xattr(&[os("-w"), os("org.afsplus.kept"), os("stays"), seed]).0);
+
+    mounted.unmount().unwrap();
+    mounted.wait().unwrap();
+
+    let mut device = FileBackend::open(&image, DEFAULT_BLOCK_SIZE, TOTAL_BLOCKS).unwrap();
+    let report = check_device(&mut device);
+    assert!(report.is_clean(), "{:?}", report.errors);
+    let mut vfs = afsplus_vfs::Vfs::new(mount(device).unwrap());
+    let seed = vfs.lookup(vfs.root_object(), "seed").unwrap();
+    assert_eq!(
+        vfs.attribute(seed, "user.org.afsplus.kept").unwrap(),
+        Some(b"stays".to_vec())
+    );
+    assert_eq!(
+        vfs.attribute(seed, "aros.tooltype").unwrap(),
+        Some(b"DONOTWAIT".to_vec())
+    );
+    assert_eq!(vfs.attribute(seed, "user.org.afsplus.kind").unwrap(), None);
+    fs::remove_dir_all(base).unwrap();
+}
+
 fn create_image(path: &Path) {
     let timestamp = timestamp();
     let mut device = FileBackend::create(path, DEFAULT_BLOCK_SIZE, TOTAL_BLOCKS).unwrap();

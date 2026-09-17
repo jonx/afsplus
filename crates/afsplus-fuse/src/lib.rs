@@ -7,7 +7,9 @@
 use std::collections::BTreeMap;
 
 use afsplus_block::BlockDevice;
+use afsplus_format::attrs::ATTRIBUTE_VALUE_MAX_BYTES;
 use afsplus_format::{Timespec, OBJECT_ROOT};
+pub use afsplus_vfs::AttributeWriteMode;
 use afsplus_vfs::{AccessMode, Handle, NodeKind, ObjectId, Stat, StatFs, Vfs, VfsError};
 
 #[cfg(feature = "fuser-adapter")]
@@ -35,6 +37,83 @@ pub fn host_names<D: BlockDevice>(vfs: &Vfs<D>) -> HostNames {
     }
 }
 
+/// How the host spells attribute names. The volume stores names with a
+/// namespace (`user.`, `system.`, `security.`, `aros.`); every stored name has
+/// exactly one host spelling and every accepted host name exactly one stored
+/// name, so nothing is hidden and nothing collides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostAttributeNames {
+    /// Linux requires a namespace of its own. `user.` and `security.` names
+    /// are stored as they are; the stored `system.` and `aros.` namespaces
+    /// appear under `trusted.afsplus.`, which needs privilege on the host.
+    /// A Linux `system.` or other `trusted.` name is refused: the kernel
+    /// attaches meaning to them that this volume does not implement.
+    Linux,
+    /// macOS names are free-form (`com.apple.quarantine`), so a host name is
+    /// stored under `user.`. The other stored namespaces, and a stored user
+    /// name that itself begins with `afsplus.`, appear as `afsplus.` followed
+    /// by the stored name.
+    MacOs,
+}
+
+impl HostAttributeNames {
+    /// The convention of the host this was compiled for.
+    pub const fn native() -> Self {
+        if cfg!(target_os = "macos") {
+            HostAttributeNames::MacOs
+        } else {
+            HostAttributeNames::Linux
+        }
+    }
+
+    /// The stored name of a host name; [`VfsError::NotSupported`] for a name
+    /// this convention does not carry.
+    pub fn stored(self, host: &[u8]) -> Result<String, VfsError> {
+        let host = utf8_name(host)?;
+        match self {
+            HostAttributeNames::Linux => {
+                if host.starts_with("user.") || host.starts_with("security.") {
+                    Ok(host.to_owned())
+                } else if let Some(rest) = host.strip_prefix("trusted.afsplus.") {
+                    if rest.starts_with("system.") || rest.starts_with("aros.") {
+                        Ok(rest.to_owned())
+                    } else {
+                        Err(VfsError::NotSupported)
+                    }
+                } else {
+                    Err(VfsError::NotSupported)
+                }
+            }
+            HostAttributeNames::MacOs => match host.strip_prefix("afsplus.") {
+                // The user namespace has its plain spelling unless the rest
+                // would read as this escape again.
+                Some(rest) if rest.starts_with("user.") && !rest.starts_with("user.afsplus.") => {
+                    Err(VfsError::NotSupported)
+                }
+                Some(rest) => Ok(rest.to_owned()),
+                None => Ok(format!("user.{host}")),
+            },
+        }
+    }
+
+    /// The one host spelling of a stored name.
+    pub fn host(self, stored: &str) -> String {
+        match self {
+            HostAttributeNames::Linux => {
+                if stored.starts_with("user.") || stored.starts_with("security.") {
+                    stored.to_owned()
+                } else {
+                    format!("trusted.afsplus.{stored}")
+                }
+            }
+            HostAttributeNames::MacOs => match stored.strip_prefix("user.") {
+                Some(rest) if !rest.starts_with("afsplus.") => rest.to_owned(),
+                _ => format!("afsplus.{stored}"),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FuseConfig {
     pub uid: u32,
@@ -47,6 +126,16 @@ pub struct FuseConfig {
     /// `WRITE`/`SETATTR` but return from `fsync(2)` without sending FUSE
     /// `FSYNC`. It deliberately strengthens normal FUSE writeback semantics.
     pub durable_data_replies: bool,
+    pub attribute_names: HostAttributeNames,
+    /// Read a `SETXATTR` with an empty value as "make this attribute absent".
+    ///
+    /// A transport workaround like `durable_data_replies`: macFUSE's FSKit
+    /// backend never sends `REMOVEXATTR`; `removexattr(2)` arrives as a
+    /// `SETXATTR` with no bytes and no flags, so a removal and an empty
+    /// value are one request. With this set the removal works and an empty
+    /// value cannot be stored through that mount; it stays readable when
+    /// another host stored it.
+    pub empty_value_removes: bool,
 }
 
 impl Default for FuseConfig {
@@ -57,6 +146,8 @@ impl Default for FuseConfig {
             file_mode: 0o644,
             directory_mode: 0o755,
             durable_data_replies: false,
+            attribute_names: HostAttributeNames::native(),
+            empty_value_removes: false,
         }
     }
 }
@@ -339,6 +430,82 @@ impl<D: BlockDevice> FuseAdapter<D> {
             });
         }
         Ok(entries)
+    }
+
+    /// The value of a host-named attribute. An absent attribute and a name
+    /// the host convention does not carry are both [`VfsError::NotFound`]:
+    /// to a reader they are the same fact.
+    pub fn get_attribute(&mut self, object_id: ObjectId, name: &[u8]) -> Result<Vec<u8>, VfsError> {
+        let stored = match self.config.attribute_names.stored(name) {
+            Ok(stored) => stored,
+            Err(VfsError::NotSupported) => return Err(VfsError::NotFound),
+            Err(error) => return Err(error),
+        };
+        self.vfs
+            .attribute(object_id, &stored)?
+            .ok_or(VfsError::NotFound)
+    }
+
+    /// Every attribute name in host spelling, each followed by a NUL byte,
+    /// in the volume's byte order of stored names.
+    pub fn list_attributes(&mut self, object_id: ObjectId) -> Result<Vec<u8>, VfsError> {
+        let mut list = Vec::new();
+        for stored in self.vfs.attribute_names(object_id)? {
+            list.extend_from_slice(self.config.attribute_names.host(&stored).as_bytes());
+            list.push(0);
+        }
+        Ok(list)
+    }
+
+    /// Writes one attribute. A value beyond the format's bound is
+    /// [`VfsError::Limit`], which hosts report as too big, not as invalid.
+    pub fn set_attribute(
+        &mut self,
+        object_id: ObjectId,
+        name: &[u8],
+        value: &[u8],
+        mode: AttributeWriteMode,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        let stored = self.config.attribute_names.stored(name)?;
+        if value.is_empty() && self.config.empty_value_removes {
+            // "Absent" is the requested state, so an attribute that is
+            // already absent is success, as the host's removal of a name it
+            // just listed would be.
+            return match self.vfs.set_attributes(
+                object_id,
+                &[(stored.as_str(), None)],
+                AttributeWriteMode::Upsert,
+                now,
+            ) {
+                Err(VfsError::NotFound) => self.vfs.stat(object_id).map(|_| ()),
+                result => result,
+            };
+        }
+        if value.len() > ATTRIBUTE_VALUE_MAX_BYTES {
+            return Err(VfsError::Limit("attribute value exceeds the format bound"));
+        }
+        self.vfs
+            .set_attributes(object_id, &[(stored.as_str(), Some(value))], mode, now)
+    }
+
+    pub fn remove_attribute(
+        &mut self,
+        object_id: ObjectId,
+        name: &[u8],
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        let stored = match self.config.attribute_names.stored(name) {
+            Ok(stored) => stored,
+            Err(VfsError::NotSupported) => return Err(VfsError::NotFound),
+            Err(error) => return Err(error),
+        };
+        self.vfs.set_attributes(
+            object_id,
+            &[(stored.as_str(), None)],
+            AttributeWriteMode::Upsert,
+            now,
+        )
     }
 
     pub fn fsync(&mut self, handle: Handle) -> Result<(), VfsError> {

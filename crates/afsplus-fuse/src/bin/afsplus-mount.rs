@@ -79,6 +79,9 @@ fn run() -> Result<(), String> {
             // that the missing transport notification cannot lose an
             // acknowledged host durability point.
             durable_data_replies: cfg!(all(target_os = "macos", feature = "macfuse-mount")),
+            // The same backend sends removexattr(2) as a SETXATTR without
+            // bytes and never sends REMOVEXATTR.
+            empty_value_removes: cfg!(all(target_os = "macos", feature = "macfuse-mount")),
             ..FuseConfig::default()
         },
     );
