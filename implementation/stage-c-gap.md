@@ -25,7 +25,7 @@ summarise. Portable C work belongs to Stage D and is outside this list.
 - [C12. File-backed virtual block device](#c12-file-backed-virtual-block-device)
 - [C13. Native AROS benchmark runner](#c13-native-aros-benchmark-runner)
 - [C14. AROS handler qualification ladder](#c14-aros-handler-qualification-ladder)
-- [Stage B dependencies](#stage-b-dependencies)
+- [What Stage C still waits on elsewhere](#what-stage-c-still-waits-on-elsewhere)
 
 <!-- /toc -->
 
@@ -128,12 +128,21 @@ lands, the bytes stay and the divergence is marked, unless
 `AFSPLUS_AROS_MOUNT_FLAG_STRICT_SECURITY_PROJECTION` selects the refusal.
 Rename and hard link keep the object and its metadata.
 
-Lacking: the on-disk answer to the probe, which is the Stage B item B5 (the
-default probe answers no, which is exact for a format that stores protection
-bits only); preservation across clone and atomic replace, which follows the
-container's inheritance rule. The `Control` string of the DOSDriver selects
-the policy (`SECURITY=PRESERVE|STRICT|DOWNGRADE`), and the name encoding with
-it.
+The on-disk half arrived with the security preservation container
+([ADR-101](../adr/ADR-101-security-preservation-container.md)) and its
+admission rule ([ADR-105](../adr/ADR-105-security-reference-admission.md)): a
+descriptor is preserved across a classic protection write, and across a clone
+([ADR-102](../adr/ADR-102-clone-metadata-inheritance.md)). `RichSecurityProbe`
+stays the seam for metadata the projection cannot express and that is not a
+descriptor, of which this format has none, so its default answer of no is
+exact. The `Control` string of the DOSDriver selects the policy
+(`SECURITY=PRESERVE|STRICT|DOWNGRADE`).
+
+Lacking: nothing at L1 to L4 for what the format stores. The open question is
+policy, not code: who may read a historical view after live permissions
+change ([Q5](open-questions.md), format half closed, evaluation semantics and
+historical access open), which bounds what a v2 snapshot capability may
+advertise.
 
 ## C4. Filesystem API v2 and the modern 64-bit API
 
@@ -166,8 +175,12 @@ answering `ERROR_ACTION_NOT_KNOWN` on a volume without shared extents.
 falls back to a byte copy across handlers or without the capability; its
 target run is part of [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh).
 
-Lacking: the same choice inside `C:Copy`, which is an AROS change. Metadata inheritance follows the executable behavior
-until Q14 is answered.
+Lacking: the same choice inside `C:Copy`, which is an AROS change. Metadata
+inheritance is settled ([ADR-102](../adr/ADR-102-clone-metadata-inheritance.md),
+extended by [ADR-106](../adr/ADR-106-stored-object-comment.md) for the comment
+and [ADR-108](../adr/ADR-108-extended-attributes.md) for the attribute set):
+`CloneFile` carries the modification time, the protection word, the security
+descriptor, the comment and the attributes; `CloneRange` is a content write.
 
 ## C6. Access-intent and preallocation mapping
 
@@ -210,15 +223,18 @@ At L3 `ACTION_ADD_NOTIFY` and `ACTION_REMOVE_NOTIFY` pair each
 `NotifyRequest` with a watch and deliver fired watches through a callback of
 the packet configuration after every packet.
 
-The handler shell delivers through its own reply port (L4 source, type-checked
-against the SDK include tree, never run).
+The handler shell delivers through its own reply port, and that path ran on
+Hosted darwin-aarch64 on 2026-09-17 inside
+[`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh): against a
+real dos.library, no message arrives while one is unreplied, the change made
+in between arrives after the reply, and a second boot dismounts a volume
+whose notification was never replied, with the shell still running
+afterwards.
 
-Lacking: the target run of the delivery path, which must show a change made
-during an unreplied `NRF_WAIT_REPLY` message arriving after the reply, and a
-dismount succeeding with a message never replied; the v2 `watch` operation
-over the same table.
+Lacking: the v2 `watch` operation over the same table, which no extension
+operation exposes yet.
 
-Hosted and QEMU: all. Apple hardware: none.
+QEMU: all. Apple hardware: none.
 
 ## C9. Health reporting
 
@@ -231,7 +247,8 @@ orphans and block counts and flags a read-only view of an unreplayed log.
 Lacking: the remaining events of
 [docs/26 section 17](../docs/26-debug-observability.md#17-structured-healthevent-stream)
 that the core does not raise as errors (checkpoint fallback, reclaim backlog,
-free-count mismatch); a target query path (C4 transport).
+free-count mismatch). The target query path exists: `HEALTH_EVENTS` over the
+extension packet of C4 empties the ring and reports what it dropped.
 
 ## C10. Trace streaming and developer attachment
 
@@ -329,12 +346,13 @@ boot-volume selection, bootable priority, recorded bootstrap dependencies),
 S3 repeated boot and recovery, on every platform; the Apple hardware run with
 a reset-durable transport; the physical A500.
 
-## Stage B dependencies
+## What Stage C still waits on elsewhere
 
-| Need | Item | Question or stage item |
+Stage B is struck: the stored comment, the extended attribute set, the
+security container and the clone inheritance rule all landed, and the rows
+that named them are gone. One question remains, and it is policy rather than
+format or code.
+
+| Need | Item | Question |
 |---|---|---|
-| stored file comment or extended attribute record | C2 | metadata and xattr record, [docs/12](../docs/12-metadata-and-xattrs.md) |
-| security container presence query | C3 | B5 |
-| clone metadata inheritance | C5 | Q14 |
-| header-flag and extension admission, which decides how an unknown security or attribute extension is preserved by a classic writer | C2, C3 | Q13 |
-| ordinary-user access to historical views, which bounds what a v2 snapshot capability may advertise | C4 | Q5 |
+| ordinary-user access to historical views, which bounds what a v2 snapshot capability may advertise | C3, C4 | [Q5](open-questions.md), evaluation semantics and historical access |
