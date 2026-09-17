@@ -160,7 +160,6 @@ pub struct VolumePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ArosError {
-    CommentTooBig = 81,
     Unknown = 100,
     NoFreeStore = 103,
     BadNumber = 115,
@@ -176,6 +175,7 @@ pub enum ArosError {
     DiskWriteProtected = 214,
     DirectoryNotEmpty = 216,
     SeekError = 219,
+    CommentTooBig = 220,
     DiskFull = 221,
     WriteProtected = 223,
     NotDosDisk = 225,

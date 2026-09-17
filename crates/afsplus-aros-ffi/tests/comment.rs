@@ -123,7 +123,7 @@ fn refusals_carry_dos_codes_and_change_nothing() {
     create(filesystem, b"note");
     assert_eq!(set(filesystem, b"note", b"kept"), 0);
 
-    assert_eq!(set(filesystem, b"note", &[b'x'; 256]), 81);
+    assert_eq!(set(filesystem, b"note", &[b'x'; 256]), 220);
     assert_eq!(set(filesystem, b"absent", b"x"), 205);
     assert_eq!(set(filesystem, b"note", &[0xff]), 210);
     assert_eq!(get(filesystem, b"absent", 79), Err(205));

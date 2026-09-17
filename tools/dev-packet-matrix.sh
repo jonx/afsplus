@@ -67,6 +67,12 @@ run_matrix() {
 echo "[dev-packet] DosPacket translation matrix (source headers)"
 run_matrix packet-stub native/aros/afsplus_packet.c \
     native/aros/tests/packet_stub.c
+echo "[dev-packet] adapter error numbers against dos/dos.h (source headers)"
+clang -std=c11 -Wall -Wextra -Werror -nostdlibinc \
+    -D__WORDSIZE=64 -DAROS_FAST_BPTR=1 -DAROS_FAST_BSTR=1 \
+    -I "$work/include" -I "$stdc" -I "$stdc/aros/stdc" \
+    -I "$aros_source/compiler/include" -I native/aros/tests \
+    -fsyntax-only native/aros/tests/error_numbers.c
 echo "[dev-packet] trackdisk viewport matrix (source headers)"
 run_matrix trackdisk-stub native/aros/afsplus_trackdisk.c \
     native/aros/tests/trackdisk_stub.c

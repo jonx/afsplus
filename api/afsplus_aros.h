@@ -521,7 +521,7 @@ int32_t afsplus_aros_set_volume_label(struct AfsplusAros *filesystem,
 /* Group AFSPLUS_AROS_GROUP_DOS_COMMENT. A comment is text in the mount's
  * name encoding, addressed like set_protection: an empty name is the base
  * lock's own object. An empty comment removes the stored one; a comment whose
- * stored form exceeds 255 bytes is ERROR_COMMENT_TOO_BIG (81). comment() fills
+ * stored form exceeds 255 bytes is ERROR_COMMENT_TOO_BIG (220). comment() fills
  * at most comment_capacity bytes, cut at a character boundary, stores the
  * count in output_length and never fails on the comment's content: a
  * character the encoding lacks reads as '?'. No terminator is written. */

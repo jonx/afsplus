@@ -173,6 +173,14 @@ echo "[aros-ffi] AROS AArch64 C/DOS64 header ABI"
     -include dos/dos64.h -include afsplus_aros.h \
     -fsyntax-only -x c /dev/null
 
+echo "[aros-ffi] adapter error numbers against the target's dos/dos.h"
+# shellcheck disable=SC2086 -- the profile intentionally supplies separate flags.
+"$aros_clang" --target="$aros_target" $aros_arch_flags \
+    -std=c11 -Wall -Wextra -Werror \
+    -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
+    -I native/aros/tests -c native/aros/tests/error_numbers.c \
+    -o "$task_dir/error-numbers.o"
+
 echo "[aros-ffi] AROS AArch64 DosPacket translator"
 for dos64_flag in "" "-D__DOS64=1"; do
     # shellcheck disable=SC2086 -- profile and DOS64 flags are intentional words.
