@@ -218,6 +218,17 @@ def lifecycle_kinds(records):
 
 
 class ReplayTests(unittest.TestCase):
+    def test_api_method_bound_follows_the_rust_enum(self):
+        import re
+        source = (tool.ROOT / "crates/afsplus-core/src/flight.rs").read_text()
+        body = source[source.index("pub enum ApiMethod {"):]
+        body = body[:body.index("\n}")]
+        values = [int(v) for v in re.findall(r"^\s+\w+ = (\d+),", body, flags=re.M)]
+        # Literal floor: the four security methods of ADR-101 are 67 to 70.
+        self.assertGreaterEqual(max(values), 70)
+        self.assertEqual(values, list(range(1, max(values) + 1)))
+        self.assertEqual(tool.API_METHOD_MAX, max(values))
+
     def settle(self, value):
         records, _ = tool.execute(tool.encoded(value), BINARY)
         actual = json.loads(records["actual.json"])

@@ -15,6 +15,11 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
+# Highest ApiMethod discriminant of crates/afsplus-core/src/flight.rs. The test
+# suite of this tool compares it with the Rust enum, so it cannot lag behind.
+API_METHOD_MAX = 70
+
+
 def module(name, filename):
     spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(filename))
     result = importlib.util.module_from_spec(spec)
@@ -652,7 +657,7 @@ def selected_batch(flight, offset, previous, capacity, profile, index):
                 "<QQQHQI", flight[offset:offset + 38])
             offset += 38
             if ((span == 0 and (operation or parent or method))
-                    or (span and (not 1 <= method <= 66 or not 0 < operation <= span <= seq
+                    or (span and (not 1 <= method <= API_METHOD_MAX or not 0 < operation <= span <= seq
                                   or parent >= span or (parent == 0 and operation != span)
                                   or (parent and operation > parent)))
                     or (8 <= kind <= 11 and span == 0)
