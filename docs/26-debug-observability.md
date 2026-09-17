@@ -248,9 +248,9 @@ stay unattributed, which is what the committed state proves.
 [Its test](../crates/afsplus-check/tests/explain.rs) requires the explanation
 of every block of populated images to agree with the checker's committed
 state and leak findings, with the live bitmap and with the bytes the core
-reads at the attributed offsets. The placement of the allocation-root pool
-and of the intent-log slots comes from the core, because that rule exists in
-no codec or specification table. `ExplainObject`, `ExplainPath`, the remaining
+reads at the attributed offsets. The walk depends on `afsplus-format` alone:
+the placement of the allocation-root pool and of the intent-log slots is
+geometry ([disk layout](../spec/disk-layout.md)). `ExplainObject`, `ExplainPath`, the remaining
 operations and the versioned tool output are open.
 
 ## 6. Optional reverse-map index

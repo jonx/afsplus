@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Move the placement of the permanent areas into geometry](#2026-09-17--move-the-placement-of-the-permanent-areas-into-geometry)
 - [2026-09-17 — Give the extent-map item one codec](#2026-09-17--give-the-extent-map-item-one-codec)
 - [2026-09-17 — Explain one block with a walk that shares nothing with the checker](#2026-09-17--explain-one-block-with-a-walk-that-shares-nothing-with-the-checker)
 - [2026-09-17 — Accept the four Stage B decisions as ADR-100 to ADR-103](#2026-09-17--accept-the-four-stage-b-decisions-as-adr-100-to-adr-103)
@@ -184,6 +185,28 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-17 — Move the placement of the permanent areas into geometry
+
+The positions of the bootstrap metadata, the allocation-root pool and the
+intent-log slots are derived in `afsplus_format::geometry`
+(`allocation_root_logical_nodes`, `reserved_run`, `allocation_root_pool_lbas`,
+`intent_log_slot_lbas`) and written as a rule of the
+[disk layout](spec/disk-layout.md). ADR-035, ADR-036 and ADR-037 state the
+rule in prose and agree with the code: four bootstrap blocks since the
+reclaim-queue root, the `3N` pool after them, the log slots directly after the
+pool. The core's allocation-root and intent-log modules delegate to geometry
+and keep their error kinds; the explain walk dropped its import from the core
+and depends on `afsplus-format` only. The portable C reader keeps its own
+derivation of the log slots, which its gate compares against Rust images.
+
+`crates/afsplus-format/tests/placement.rs` pins literal positions: blocks 9 to
+12, 13 to 15 and 16 to 23 on a four-region volume of 512-block regions; a log
+run that leaves region 0 at block 15 and continues at 22, then at 38, on
+16-block regions; a pool of 9 blocks once the regions need a second leaf; and
+refusal on a volume too small. The pool-bounds and snapshot-allocator tests of
+the core, the 18 intent-log tests and the explain tests pass on it.
 
 ## 2026-09-17 — Give the extent-map item one codec
 

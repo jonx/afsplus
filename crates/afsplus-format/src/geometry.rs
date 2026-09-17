@@ -4,12 +4,21 @@
 //! physical slots for every logical bitmap page. Region 0 additionally starts
 //! with identification and the two checkpoint blocks.
 
+use alloc::vec::Vec;
+
 use crate::bitmap::BITMAP_PAGE_BLOCKS;
 use crate::FormatError;
 
 pub const BITMAP_SLOTS: u8 = 3;
 pub const DESCRIPTOR_SLOTS: u8 = 3;
 pub const BOOTSTRAP_BLOCKS: u64 = 3;
+/// Bootstrap metadata the formatter writes at the first allocatable blocks:
+/// root object record, root directory, object-map root and reclaim-queue
+/// root (ADR-035, shifted by one in ADR-036). The permanent areas follow.
+pub const BOOTSTRAP_METADATA_BLOCKS: usize = 4;
+/// Allocation-root record: four-byte region key, 16-byte value (ADR-035).
+pub const ALLOCATION_ROOT_KEY_BYTES: usize = 4;
+pub const ALLOCATION_ROOT_VALUE_BYTES: usize = 16;
 pub const MAX_REGION_BLOCKS: u32 = 262_144;
 pub const MIN_REGION_BLOCKS: u32 = 16;
 
@@ -176,5 +185,91 @@ impl Geometry {
                 0
             };
         offset >= reserved
+    }
+}
+
+/// Placement of the two permanently allocated areas. Both are runs of
+/// allocatable blocks counted from the start of the volume, skipping every
+/// region's reserved head: first the bootstrap metadata, then the
+/// allocation-root pool, then the intent-log slots. An implementation derives
+/// them from immutable geometry alone.
+impl Geometry {
+    /// Logical nodes `N` of the allocation-root tree in its bulk-packed
+    /// shape: one leaf per `leaf capacity` regions, and levels of internal
+    /// nodes of full fanout up to a single root.
+    pub fn allocation_root_logical_nodes(&self) -> Result<usize, FormatError> {
+        let leaf_capacity = crate::tree::TreeNode::fixed_item_capacity(
+            self.block_size,
+            ALLOCATION_ROOT_KEY_BYTES,
+            ALLOCATION_ROOT_VALUE_BYTES,
+        )?;
+        // An internal item is a separator key and a 16-byte child reference.
+        let fanout = crate::tree::TreeNode::fixed_item_capacity(
+            self.block_size,
+            ALLOCATION_ROOT_KEY_BYTES,
+            16,
+        )? + 1;
+        if leaf_capacity == 0 || fanout < 2 {
+            return Err(FormatError::Invalid(
+                "block cannot hold an allocation-root node",
+            ));
+        }
+        let mut level = (self.region_count() as usize).div_ceil(leaf_capacity);
+        let mut total = level;
+        while level > 1 {
+            level = level.div_ceil(fanout);
+            total = total
+                .checked_add(level)
+                .ok_or(FormatError::Overflow("allocation-root node count"))?;
+        }
+        Ok(total)
+    }
+
+    /// The `count` allocatable blocks that follow the first `skip`
+    /// allocatable blocks of the volume.
+    pub fn reserved_run(&self, skip: usize, count: usize) -> Result<Vec<u64>, FormatError> {
+        let mut to_skip = skip;
+        let mut run = Vec::with_capacity(count);
+        if count == 0 {
+            return Ok(run);
+        }
+        for lba in self.region0_reserved_blocks()..self.total_blocks {
+            if !self.is_allocatable(lba) {
+                continue;
+            }
+            if to_skip > 0 {
+                to_skip -= 1;
+                continue;
+            }
+            run.push(lba);
+            if run.len() == count {
+                return Ok(run);
+            }
+        }
+        Err(FormatError::Invalid(
+            "volume cannot hold its reserved metadata areas",
+        ))
+    }
+
+    /// The `3N` blocks of the allocation-root pool: three physical
+    /// generations of the `N` logical nodes (ADR-035).
+    pub fn allocation_root_pool_lbas(&self) -> Result<Vec<u64>, FormatError> {
+        let nodes = self.allocation_root_logical_nodes()?;
+        let blocks = nodes
+            .checked_mul(3)
+            .ok_or(FormatError::Overflow("allocation-root pool size"))?;
+        self.reserved_run(BOOTSTRAP_METADATA_BLOCKS, blocks)
+    }
+
+    /// The intent-log slots, directly after the pool (ADR-037).
+    pub fn intent_log_slot_lbas(&self, log_slots: u16) -> Result<Vec<u64>, FormatError> {
+        if log_slots == 0 {
+            return Ok(Vec::new());
+        }
+        let pool = self
+            .allocation_root_logical_nodes()?
+            .checked_mul(3)
+            .ok_or(FormatError::Overflow("allocation-root pool size"))?;
+        self.reserved_run(BOOTSTRAP_METADATA_BLOCKS + pool, log_slots as usize)
     }
 }

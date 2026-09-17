@@ -59,4 +59,19 @@ Rules:
    ([ADR-101](../adr/ADR-101-security-preservation-container.md)); the
    reference on a volume without the feature is corruption, and the first
    segment is bounds checked where the record is admitted
-10. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0
+10. the permanently allocated areas are consecutive runs of allocatable
+   blocks counted from the start of the volume, skipping every region's
+   reserved head ([geometry](../crates/afsplus-format/src/geometry.rs)):
+   first the four bootstrap metadata blocks the formatter writes (root object
+   record, root directory, object-map root, reclaim-queue root), then the
+   allocation-root pool of `3N` blocks
+   ([ADR-035](../adr/ADR-035-allocation-root-reserved-pool.md),
+   [ADR-036](../adr/ADR-036-reclaim-queue.md)), then the `log_slots`
+   intent-log slots ([ADR-037](../adr/ADR-037-intent-log.md)). `N` is the node
+   count of the bulk-packed allocation-root tree: one leaf per leaf capacity
+   of regions (four-byte key, 16-byte value), then levels of internal nodes
+   of full fanout (four-byte separator, 16-byte child reference, plus the
+   leftmost child) up to a single root. At 4 KiB blocks and 512-block regions
+   a four-region volume has its bootstrap metadata at blocks 9 to 12, its pool
+   at 13 to 15 and eight log slots at 16 to 23
+11. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0

@@ -17,16 +17,17 @@ use afsplus_format::crc32c::Hasher;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::intent_log::{LogOp, LogRecord};
 
-use crate::allocation_root;
 use crate::CoreError;
 
 /// Deterministic LBAs of the log area.
 pub fn log_slot_lbas(geo: &Geometry, log_slots: u16) -> Result<Vec<u64>, CoreError> {
-    if log_slots == 0 {
-        return Ok(Vec::new());
-    }
-    let skip = allocation_root::reserved_span_before_log(geo)?;
-    allocation_root::derive_reserved_lbas(geo, skip, log_slots as usize)
+    geo.intent_log_slot_lbas(log_slots)
+        .map_err(|error| match error {
+            afsplus_format::FormatError::Invalid(message) => {
+                CoreError::UnsupportedGeometry(message)
+            }
+            other => CoreError::Format(other),
+        })
 }
 
 pub struct ScannedLog {

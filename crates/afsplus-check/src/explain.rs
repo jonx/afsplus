@@ -8,12 +8,6 @@
 //! independently, and a disagreement between them is a finding about one of
 //! them.
 //!
-//! One thing is taken from `afsplus-core`: the placement of the two
-//! permanently allocated areas, the allocation-root pool and the intent-log
-//! slots. Their positions are a derived prototype rule that lives in the core
-//! and in no codec or specification table, so a second derivation here would
-//! be a copy, not a witness.
-//!
 //! The walk never writes and never repairs. A structure it cannot decode
 //! ends that branch and is reported in [`Explainer::problems`]; blocks behind
 //! it stay unattributed, which is what the committed state can prove.
@@ -398,7 +392,7 @@ impl Explainer {
         }
 
         // The two permanently allocated areas.
-        match afsplus_core::allocation_root::reserved_pool_lbas(&geo) {
+        match geo.allocation_root_pool_lbas() {
             Ok(pool) => {
                 for lba in pool {
                     walk.add(lba, BlockRole::AllocationRootPool);
@@ -406,7 +400,7 @@ impl Explainer {
             }
             Err(error) => walk.problems.push(format!("allocation-root pool: {error}")),
         }
-        match afsplus_core::intent_log::log_slot_lbas(&geo, ident.log_slots) {
+        match geo.intent_log_slot_lbas(ident.log_slots) {
             Ok(slots) => {
                 for (index, lba) in slots.into_iter().enumerate() {
                     walk.add(

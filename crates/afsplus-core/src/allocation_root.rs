@@ -19,9 +19,9 @@ use crate::tree::{lookup, visit_tree_nodes, TreeSpec, TreeSummary};
 use crate::CoreError;
 
 const VALUE_BYTES: usize = 16;
-/// Root record, root directory, object-map root, and reclaim-queue root
-/// written by mkfs at the first allocatable blocks; the pool starts after.
-const BOOTSTRAP_METADATA_BLOCKS: usize = 4;
+/// The placement rule of the permanent areas is format knowledge and lives
+/// in `afsplus_format::geometry`; this module applies it.
+use afsplus_format::geometry::BOOTSTRAP_METADATA_BLOCKS;
 
 pub struct LoadedAllocationRoot {
     pub records: Vec<RegionRecord>,
@@ -193,21 +193,22 @@ pub fn bulk_build(
 /// Deterministic permanent `3N` node pool for the fixed region-key topology,
 /// independent of the current record values.
 pub fn reserved_pool_lbas(geo: &Geometry) -> Result<Vec<u64>, CoreError> {
-    derive_pool_lbas(geo, reserved_pool_block_count(geo)?)
+    geo.allocation_root_pool_lbas().map_err(placement_error)
 }
 
 fn reserved_pool_block_count(geo: &Geometry) -> Result<usize, CoreError> {
-    let leaf_capacity = leaf_capacity(geo.block_size)?;
-    let internal_fanout = internal_fanout(geo.block_size)?;
-    let leaf_nodes = (geo.region_count() as usize).div_ceil(leaf_capacity);
-    let logical_nodes = logical_node_count(leaf_nodes, internal_fanout)?;
-    // The pool always carries exactly three physical generations. Checked
-    // additions retain the overflow proof without requiring multiplication.
-    let pool_blocks = logical_nodes
-        .checked_add(logical_nodes)
-        .and_then(|twice| twice.checked_add(logical_nodes))
-        .ok_or_else(|| CoreError::Corrupt("allocation-root pool size overflow".into()))?;
-    Ok(pool_blocks)
+    // The pool always carries exactly three physical generations.
+    geo.allocation_root_logical_nodes()
+        .map_err(placement_error)?
+        .checked_mul(3)
+        .ok_or_else(|| CoreError::Corrupt("allocation-root pool size overflow".into()))
+}
+
+fn placement_error(error: afsplus_format::FormatError) -> CoreError {
+    match error {
+        afsplus_format::FormatError::Invalid(message) => CoreError::UnsupportedGeometry(message),
+        other => CoreError::Format(other),
+    }
 }
 
 /// Half-open physical envelope of the permanent pool, without enumerating
@@ -279,17 +280,6 @@ fn internal_fanout(block_size: usize) -> Result<usize, CoreError> {
     Ok(fanout)
 }
 
-fn logical_node_count(mut leaves: usize, fanout: usize) -> Result<usize, CoreError> {
-    let mut total = leaves;
-    while leaves > 1 {
-        leaves = leaves.div_ceil(fanout);
-        total = total
-            .checked_add(leaves)
-            .ok_or_else(|| CoreError::Corrupt("allocation-root node count overflow".into()))?;
-    }
-    Ok(total)
-}
-
 fn balanced_groups(total: usize, maximum: usize) -> Result<Vec<usize>, CoreError> {
     if total == 0 || maximum == 0 {
         return Err(CoreError::Corrupt(
@@ -307,38 +297,6 @@ fn balanced_groups(total: usize, maximum: usize) -> Result<Vec<usize>, CoreError
     Ok((0..groups)
         .map(|index| base + usize::from(index < remainder))
         .collect())
-}
-
-fn derive_pool_lbas(geo: &Geometry, count: usize) -> Result<Vec<u64>, CoreError> {
-    derive_reserved_lbas(geo, BOOTSTRAP_METADATA_BLOCKS, count)
-}
-
-/// The `count` allocatable blocks after skipping the first `skip`
-/// allocatable ones — the deterministic placement rule shared by the
-/// bootstrap metadata, the allocation-root pool, and the intent-log area.
-pub(crate) fn derive_reserved_lbas(
-    geo: &Geometry,
-    skip: usize,
-    count: usize,
-) -> Result<Vec<u64>, CoreError> {
-    let mut to_skip = skip;
-    let mut out = Vec::with_capacity(count);
-    for lba in geo.region0_reserved_blocks()..geo.total_blocks {
-        if !geo.is_allocatable(lba) {
-            continue;
-        }
-        if to_skip > 0 {
-            to_skip -= 1;
-            continue;
-        }
-        out.push(lba);
-        if out.len() == count {
-            return Ok(out);
-        }
-    }
-    Err(CoreError::UnsupportedGeometry(
-        "volume cannot hold its reserved metadata areas",
-    ))
 }
 
 /// Allocatable blocks occupied by the bootstrap metadata plus the pool;
