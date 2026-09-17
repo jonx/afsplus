@@ -1154,6 +1154,250 @@ static void deliver_notifications(struct AfsplusArosPacketContext *context)
     } while (count == sizeof(fired) / sizeof(fired[0]));
 }
 
+/* A query struct in a caller buffer declares its own size in its first
+ * field; the entry point fills at most that much, so it must fit. */
+static int32_t sized_buffer(const struct AfsplusExtRequest *request)
+{
+    uint32_t declared;
+
+    if (request->buffer == NULL || request->buffer_size < sizeof(declared))
+        return ERROR_BAD_NUMBER;
+    memcpy(&declared, request->buffer, sizeof(declared));
+    return declared <= request->buffer_size ? 0 : ERROR_BAD_NUMBER;
+}
+
+static int32_t extension_file(struct AfsplusArosPacketContext *context,
+    uint64_t object, uint32_t writable, uint64_t *id)
+{
+    struct AfsplusArosNativeFile *file;
+
+    if (object > (uint64_t)UINTPTR_MAX)
+        return ERROR_INVALID_LOCK;
+    file = find_file(context, (BPTR)(uintptr_t)object);
+    if (file == NULL)
+        return ERROR_INVALID_LOCK;
+    /* The answer ACTION_WRITE gives on a handle opened for reading. */
+    if (writable && !file->writable)
+        return ERROR_DISK_WRITE_PROTECTED;
+    *id = file->id;
+    return 0;
+}
+
+static int32_t extension_lock(struct AfsplusArosPacketContext *context,
+    uint64_t object, uint64_t *id)
+{
+    if (object > (uint64_t)UINTPTR_MAX)
+        return ERROR_INVALID_LOCK;
+    return lock_id(context, (BPTR)(uintptr_t)object, id);
+}
+
+static int32_t extension_name(const uint8_t *name, uint32_t length)
+{
+    return length != 0 && name == NULL ? ERROR_BAD_NUMBER : 0;
+}
+
+/* ACTION_AFSPLUS_EXT: see api/afsplus_ext_packet.h. */
+static int32_t process_extension(struct AfsplusArosPacketContext *context,
+    struct AfsplusExtRequest *request)
+{
+    uint64_t first = 0;
+    uint64_t second = 0;
+    int64_t seconds = 0;
+    uint32_t nanoseconds = 0;
+    int32_t error;
+
+    if (request == NULL)
+        return ERROR_REQUIRED_ARG_MISSING;
+    if (request->magic != AFSPLUS_EXT_MAGIC
+        || request->version != AFSPLUS_EXT_VERSION
+        || request->header_size < sizeof(*request))
+        return ERROR_BAD_NUMBER;
+    request->output_count = 0;
+    request->output_flags = 0;
+    request->output_value = 0;
+
+    switch (request->operation)
+    {
+    case AFSPLUS_EXT_INTERFACE:
+        request->output_count = context->revision;
+        request->output_flags = AFSPLUS_AROS_PACKET_ABI_VERSION;
+        request->output_value = context->groups;
+        return 0;
+    case AFSPLUS_EXT_CAPABILITIES:
+        error = require_group(context, AFSPLUS_AROS_GROUP_INTERFACE_QUERY);
+        if (error == 0)
+            error = sized_buffer(request);
+        if (error == 0)
+            error = afsplus_aros_capabilities(context->filesystem,
+                (struct AfsplusArosCapabilities *)request->buffer);
+        return error;
+    case AFSPLUS_EXT_READ_AT:
+    case AFSPLUS_EXT_WRITE_AT:
+    {
+        uint32_t writing = request->operation == AFSPLUS_EXT_WRITE_AT;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_API_V2);
+        if (error == 0)
+            error = extension_file(context, request->object[0], writing,
+                &first);
+        if (error == 0 && request->buffer_size != 0
+            && request->buffer == NULL)
+            error = ERROR_BAD_NUMBER;
+        if (error == 0 && writing)
+            error = packet_now(context, &seconds, &nanoseconds);
+        if (error == 0 && writing)
+            error = afsplus_aros_write_at(context->filesystem, first,
+                request->offset[0], (const uint8_t *)request->buffer,
+                request->buffer_size, seconds, nanoseconds,
+                &request->output_count);
+        else if (error == 0)
+            error = afsplus_aros_read_at(context->filesystem, first,
+                request->offset[0], (uint8_t *)request->buffer,
+                request->buffer_size, &request->output_count);
+        return error;
+    }
+    case AFSPLUS_EXT_CLONE_FILE:
+        error = require_group(context, AFSPLUS_AROS_GROUP_API_V2);
+        if (error == 0 && request->object[0] == 0)
+            error = ERROR_INVALID_LOCK;
+        if (error == 0)
+            error = extension_lock(context, request->object[0], &first);
+        if (error == 0)
+            error = extension_lock(context, request->object[1], &second);
+        if (error == 0)
+            error = extension_name(request->name1, request->name_length[1]);
+        if (error == 0)
+            error = packet_now(context, &seconds, &nanoseconds);
+        if (error == 0)
+            error = afsplus_aros_clone_file(context->filesystem, first,
+                second, request->name1, request->name_length[1], seconds,
+                nanoseconds);
+        return error;
+    case AFSPLUS_EXT_CLONE_RANGE:
+        error = require_group(context, AFSPLUS_AROS_GROUP_API_V2);
+        if (error == 0)
+            error = extension_file(context, request->object[0], 0, &first);
+        if (error == 0)
+            error = extension_file(context, request->object[1], 1, &second);
+        if (error == 0)
+            error = packet_now(context, &seconds, &nanoseconds);
+        if (error == 0)
+            error = afsplus_aros_clone_range(context->filesystem, first,
+                request->offset[0], second, request->offset[1],
+                request->length, seconds, nanoseconds);
+        return error;
+    case AFSPLUS_EXT_PREALLOCATE:
+        error = require_group(context, AFSPLUS_AROS_GROUP_API_V2);
+        if (error == 0)
+            error = extension_file(context, request->object[0], 1, &first);
+        if (error == 0)
+            error = packet_now(context, &seconds, &nanoseconds);
+        if (error == 0)
+            error = afsplus_aros_preallocate(context->filesystem, first,
+                request->offset[0], request->length, seconds, nanoseconds);
+        return error;
+    case AFSPLUS_EXT_REPLACE:
+        error = require_group(context, AFSPLUS_AROS_GROUP_API_V2);
+        if (error == 0)
+            error = extension_lock(context, request->object[0], &first);
+        if (error == 0)
+            error = extension_lock(context, request->object[1], &second);
+        if (error == 0)
+            error = extension_name(request->name0, request->name_length[0]);
+        if (error == 0)
+            error = extension_name(request->name1, request->name_length[1]);
+        if (error == 0)
+            error = packet_now(context, &seconds, &nanoseconds);
+        if (error == 0)
+            error = afsplus_aros_replace(context->filesystem, first,
+                request->name0, request->name_length[0], second,
+                request->name1, request->name_length[1], seconds,
+                nanoseconds);
+        return error;
+    case AFSPLUS_EXT_ADVISE:
+        error = require_group(context, AFSPLUS_AROS_GROUP_API_V2);
+        if (error == 0)
+            error = extension_file(context, request->object[0], 0, &first);
+        if (error == 0)
+            error = afsplus_aros_advise(context->filesystem, first,
+                request->offset[0], request->length, request->flags,
+                &request->output_flags);
+        return error;
+    case AFSPLUS_EXT_INFO_JSON:
+    {
+        uint32_t required = 0;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_MANAGE);
+        if (error == 0 && request->buffer_size != 0
+            && request->buffer == NULL)
+            error = ERROR_BAD_NUMBER;
+        if (error == 0)
+            error = afsplus_aros_info_json(context->filesystem,
+                (uint8_t *)request->buffer, request->buffer_size, &required);
+        request->output_value = required;
+        return error;
+    }
+    case AFSPLUS_EXT_COUNTERS:
+        error = require_group(context, AFSPLUS_AROS_GROUP_COUNTERS);
+        if (error == 0)
+            error = sized_buffer(request);
+        if (error == 0)
+            error = afsplus_aros_counters(context->filesystem,
+                (struct AfsplusArosCounters *)request->buffer);
+        return error;
+    case AFSPLUS_EXT_HEALTH:
+        error = require_group(context, AFSPLUS_AROS_GROUP_OBSERVE);
+        if (error == 0)
+            error = sized_buffer(request);
+        if (error == 0)
+            error = afsplus_aros_health(context->filesystem,
+                (struct AfsplusArosHealth *)request->buffer);
+        return error;
+    case AFSPLUS_EXT_EXTENT_MAP:
+    {
+        uint32_t complete = 0;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_EXTENT_MAP);
+        if (error == 0)
+            error = extension_file(context, request->object[0], 0, &first);
+        if (error == 0 && request->buffer_size != 0
+            && request->buffer == NULL)
+            error = ERROR_BAD_NUMBER;
+        if (error == 0)
+            error = afsplus_aros_extent_map(context->filesystem, first,
+                request->offset[0], request->length,
+                (struct AfsplusArosExtent *)request->buffer,
+                request->buffer_size / (uint32_t)sizeof(
+                    struct AfsplusArosExtent),
+                &request->output_count, &complete, &request->output_value);
+        request->output_flags = complete;
+        return error;
+    }
+    case AFSPLUS_EXT_LOOKUP_ID:
+        error = require_group(context, AFSPLUS_AROS_GROUP_OBJECT_IDS);
+        if (error == 0)
+            error = extension_lock(context, request->object[0], &first);
+        if (error == 0)
+            error = extension_name(request->name0, request->name_length[0]);
+        if (error == 0)
+            error = afsplus_aros_lookup_id(context->filesystem, first,
+                request->name0, request->name_length[0],
+                &request->output_value);
+        return error;
+    case AFSPLUS_EXT_STAT_ID:
+        error = require_group(context, AFSPLUS_AROS_GROUP_OBJECT_IDS);
+        if (error == 0)
+            error = sized_buffer(request);
+        if (error == 0)
+            error = afsplus_aros_stat_id(context->filesystem,
+                request->offset[0],
+                (struct AfsplusArosStat *)request->buffer);
+        return error;
+    default:
+        return ERROR_BAD_NUMBER;
+    }
+}
+
 int32_t afsplus_aros_packet_process(
     struct AfsplusArosPacketContext *context, struct DosPacket *packet)
 {
@@ -2233,6 +2477,12 @@ int32_t afsplus_aros_packet_process(
             result = DOSTRUE;
         break;
     }
+    case ACTION_AFSPLUS_EXT:
+        error = process_extension(context,
+            (struct AfsplusExtRequest *)packet->dp_Arg1);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
     case ACTION_RENAME_DISK:
     {
         const uint8_t *name;

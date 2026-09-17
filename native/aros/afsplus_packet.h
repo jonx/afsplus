@@ -16,6 +16,7 @@
 #include <stdint.h>
 
 #include "afsplus_aros.h"
+#include "afsplus_ext_packet.h"
 
 #ifdef __cplusplus
 extern "C" {

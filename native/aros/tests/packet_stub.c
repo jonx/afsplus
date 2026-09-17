@@ -48,7 +48,7 @@ static uint32_t stub_removed_watches;
 static struct NotifyRequest second;
 static struct NotifyRequest *delivered[8];
 static uint32_t delivered_count;
-static uint64_t stub_groups = UINT64_C(0x662F);
+static uint64_t stub_groups = UINT64_C(0x7FFF);
 static uint32_t stub_revision = AFSPLUS_AROS_INTERFACE_REVISION;
 static uint32_t stub_protect;
 static uint32_t stub_protect_key;
@@ -644,6 +644,166 @@ int32_t afsplus_aros_set_volume_label(struct AfsplusAros *filesystem,
     return stub_label_error;
 }
 
+/* Fakes of the 64-bit groups the extension packet reaches. Each records the
+ * object it was given and echoes its scalar arguments into ext_seen. */
+static uint64_t ext_seen[5];
+static int32_t ext_error;
+
+static int32_t ext_call(char operation, uint64_t object, const uint8_t *name,
+    uint32_t name_length, uint64_t a, uint64_t b, uint64_t c, uint64_t d)
+{
+    record(operation, object, name, name_length, 0);
+    ext_seen[0] = a;
+    ext_seen[1] = b;
+    ext_seen[2] = c;
+    ext_seen[3] = d;
+    return ext_error;
+}
+
+int32_t afsplus_aros_capabilities(struct AfsplusAros *filesystem,
+    struct AfsplusArosCapabilities *output)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    output->mount_mode = 77;
+    return ext_call('1', 0, NULL, 0, output->struct_size, 0, 0, 0);
+}
+
+int32_t afsplus_aros_read_at(struct AfsplusAros *filesystem, uint64_t file,
+    uint64_t offset, uint8_t *destination, uint32_t length,
+    uint32_t *output_count)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    if (ext_error == 0 && length >= 2)
+    {
+        destination[0] = 'o';
+        destination[1] = 'k';
+        *output_count = 2;
+    }
+    return ext_call('2', file, NULL, 0, offset, length, 0, 0);
+}
+
+int32_t afsplus_aros_write_at(struct AfsplusAros *filesystem, uint64_t file,
+    uint64_t offset, const uint8_t *source, uint32_t length,
+    int64_t now_seconds, uint32_t now_nanoseconds, uint32_t *output_count)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    assert(now_nanoseconds == UINT32_C(40000000));
+    *output_count = length;
+    return ext_call('3', file, source, length, offset, length, 0, 0);
+}
+
+int32_t afsplus_aros_clone_file(struct AfsplusAros *filesystem,
+    uint64_t source_lock, uint64_t target_base_lock,
+    const uint8_t *target_name, uint32_t target_name_length,
+    int64_t now_seconds, uint32_t now_nanoseconds)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    (void)now_nanoseconds;
+    return ext_call('4', source_lock, target_name, target_name_length,
+        target_base_lock, 0, 0, 0);
+}
+
+int32_t afsplus_aros_clone_range(struct AfsplusAros *filesystem,
+    uint64_t source_file, uint64_t source_offset, uint64_t target_file,
+    uint64_t target_offset, uint64_t length, int64_t now_seconds,
+    uint32_t now_nanoseconds)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    (void)now_nanoseconds;
+    return ext_call('5', source_file, NULL, 0, source_offset, target_file,
+        target_offset, length);
+}
+
+int32_t afsplus_aros_preallocate(struct AfsplusAros *filesystem,
+    uint64_t file, uint64_t offset, uint64_t length, int64_t now_seconds,
+    uint32_t now_nanoseconds)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    (void)now_nanoseconds;
+    return ext_call('6', file, NULL, 0, offset, length, 0, 0);
+}
+
+int32_t afsplus_aros_replace(struct AfsplusAros *filesystem,
+    uint64_t source_base_lock, const uint8_t *source_name,
+    uint32_t source_name_length, uint64_t target_base_lock,
+    const uint8_t *target_name, uint32_t target_name_length,
+    int64_t now_seconds, uint32_t now_nanoseconds)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    (void)now_nanoseconds;
+    ext_seen[4] = target_name_length == 3
+        && memcmp(target_name, "new", 3) == 0;
+    return ext_call('7', source_base_lock, source_name, source_name_length,
+        target_base_lock, 0, 0, 0);
+}
+
+int32_t afsplus_aros_advise(struct AfsplusAros *filesystem, uint64_t file,
+    uint64_t offset, uint64_t length, uint32_t hint, uint32_t *output_effect)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    *output_effect = 9;
+    return ext_call('8', file, NULL, 0, offset, length, hint, 0);
+}
+
+int32_t afsplus_aros_info_json(struct AfsplusAros *filesystem,
+    uint8_t *buffer, uint32_t capacity, uint32_t *output_required)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    *output_required = 4;
+    if (capacity >= 4)
+        memcpy(buffer, "{\"a\"", 4);
+    return ext_call('9', 0, NULL, 0, capacity, 0, 0, 0);
+}
+
+int32_t afsplus_aros_counters(struct AfsplusAros *filesystem,
+    struct AfsplusArosCounters *output)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    return ext_call('a', 0, NULL, 0, output->struct_size, 0, 0, 0);
+}
+
+int32_t afsplus_aros_health(struct AfsplusAros *filesystem,
+    struct AfsplusArosHealth *output)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    return ext_call('b', 0, NULL, 0, output->struct_size, 0, 0, 0);
+}
+
+int32_t afsplus_aros_extent_map(struct AfsplusAros *filesystem,
+    uint64_t file, uint64_t offset, uint64_t length,
+    struct AfsplusArosExtent *extents, uint32_t capacity,
+    uint32_t *output_count, uint32_t *output_complete,
+    uint64_t *output_next_offset)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    (void)extents;
+    *output_count = capacity;
+    *output_complete = 1;
+    *output_next_offset = offset + length;
+    return ext_call('c', file, NULL, 0, offset, length, capacity, 0);
+}
+
+int32_t afsplus_aros_lookup_id(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint64_t *output_object_id)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    *output_object_id = UINT64_C(0x1122334455);
+    return ext_call('d', base_lock, name, name_length, 0, 0, 0, 0);
+}
+
+int32_t afsplus_aros_stat_id(struct AfsplusAros *filesystem,
+    uint64_t object_id, struct AfsplusArosStat *output)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    return ext_call('e', 0, NULL, 0, object_id, output->struct_size, 0, 0);
+}
+
 static struct DosPacket *completed[24];
 static size_t completed_count;
 
@@ -1082,6 +1242,205 @@ int main(void)
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res1 == -1
             && packet.dp_Res2 == ERROR_OBJECT_WRONG_TYPE);
+    }
+
+    /* C4: the extension packet. */
+    {
+        struct AfsplusExtRequest request;
+        struct FileHandle writable_file;
+        struct AfsplusArosCapabilities capabilities;
+        struct AfsplusArosExtent extents[3];
+        uint8_t data[8];
+        uint64_t file_object;
+        uint64_t root_id;
+
+        memset(&writable_file, 0, sizeof(writable_file));
+        initialize_packet(&packet, ACTION_FINDOUTPUT);
+        packet.dp_Arg1 = (SIPTR)MKBADDR(&writable_file);
+        packet.dp_Arg2 = (SIPTR)root;
+        packet.dp_Arg3 = packet_bstr("ext");
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE);
+        file_object = (uint64_t)writable_file.fh_Arg1;
+
+#define EXT_SEND(expected_res1, expected_res2) \
+    do { \
+        initialize_packet(&packet, ACTION_AFSPLUS_EXT); \
+        packet.dp_Arg1 = (SIPTR)&request; \
+        reset_events(); \
+        assert(afsplus_aros_packet_process(context, &packet) == 0); \
+        assert(packet.dp_Res1 == (expected_res1) \
+            && packet.dp_Res2 == (expected_res2)); \
+    } while (0)
+#define EXT_BEGIN(op) \
+    do { \
+        memset(&request, 0, sizeof(request)); \
+        request.magic = AFSPLUS_EXT_MAGIC; \
+        request.version = AFSPLUS_EXT_VERSION; \
+        request.header_size = sizeof(request); \
+        request.operation = (op); \
+    } while (0)
+
+        /* The envelope is checked before anything is touched. */
+        initialize_packet(&packet, ACTION_AFSPLUS_EXT);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res2 == ERROR_REQUIRED_ARG_MISSING);
+        EXT_BEGIN(AFSPLUS_EXT_INTERFACE);
+        request.magic ^= 1;
+        request.output_value = 0x7e7e;
+        EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+        assert(request.output_value == 0x7e7e);
+        EXT_BEGIN(AFSPLUS_EXT_INTERFACE);
+        request.version = 2;
+        EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+        EXT_BEGIN(AFSPLUS_EXT_INTERFACE);
+        request.header_size = sizeof(request) - 1;
+        EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+        EXT_BEGIN(99);
+        EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+        assert(event_count == 0);
+
+        /* A longer block from a newer client is served by its known part. */
+        EXT_BEGIN(AFSPLUS_EXT_INTERFACE);
+        request.header_size = sizeof(request) + 16;
+        EXT_SEND(DOSTRUE, 0);
+        assert(request.output_count == stub_revision);
+        assert(request.output_flags == AFSPLUS_AROS_PACKET_ABI_VERSION);
+        assert(request.output_value == stub_groups);
+
+        /* A struct buffer must hold the size it declares. */
+        memset(&capabilities, 0, sizeof(capabilities));
+        capabilities.struct_size = sizeof(capabilities);
+        EXT_BEGIN(AFSPLUS_EXT_CAPABILITIES);
+        request.buffer = &capabilities;
+        request.buffer_size = sizeof(capabilities) - 1;
+        EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+        assert(event_count == 0);
+        request.buffer_size = sizeof(capabilities);
+        EXT_SEND(DOSTRUE, 0);
+        assert(capabilities.mount_mode == 77);
+        assert(ext_seen[0] == sizeof(capabilities));
+
+        /* Positioned I/O on the application's fh_Arg1. */
+        EXT_BEGIN(AFSPLUS_EXT_READ_AT);
+        request.object[0] = file_object;
+        request.offset[0] = UINT64_C(0x500000000);
+        request.buffer = data;
+        request.buffer_size = sizeof(data);
+        EXT_SEND(DOSTRUE, 0);
+        assert(events[0].operation == '2' && events[0].base >= 100);
+        assert(ext_seen[0] == UINT64_C(0x500000000) && ext_seen[1] == 8);
+        assert(request.output_count == 2 && data[0] == 'o');
+        request.operation = AFSPLUS_EXT_WRITE_AT;
+        EXT_SEND(DOSTRUE, 0);
+        assert(events[0].operation == '3' && request.output_count == 8);
+        /* Not a file of this handler, and a lock is not a file. */
+        request.object[0] = (uint64_t)root;
+        EXT_SEND(DOSFALSE, ERROR_INVALID_LOCK);
+        request.object[0] = file_object;
+        request.buffer = NULL;
+        EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+        assert(event_count == 0);
+
+        /* Locks travel as BPTRs; zero is the root for a base, never for the
+         * clone source. */
+        initialize_packet(&packet, ACTION_LOCATE_OBJECT);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = packet_bstr("");
+        packet.dp_Arg3 = SHARED_LOCK;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        EXT_BEGIN(AFSPLUS_EXT_CLONE_FILE);
+        request.object[0] = (uint64_t)packet.dp_Res1;
+        request.name1 = (const uint8_t *)"copy";
+        request.name_length[1] = 4;
+        {
+            BPTR source = (BPTR)packet.dp_Res1;
+
+            EXT_SEND(DOSTRUE, 0);
+            assert_event(0, '4', "copy", 0);
+            root_id = events[0].base;
+            assert(root_id != 0 && ext_seen[0] == 0);
+            request.object[0] = 0;
+            EXT_SEND(DOSFALSE, ERROR_INVALID_LOCK);
+            request.object[0] = file_object;
+            EXT_SEND(DOSFALSE, ERROR_INVALID_LOCK);
+            assert(event_count == 0);
+            initialize_packet(&packet, ACTION_FREE_LOCK);
+            packet.dp_Arg1 = (SIPTR)source;
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+        }
+
+        EXT_BEGIN(AFSPLUS_EXT_CLONE_RANGE);
+        request.object[0] = file_object;
+        request.object[1] = file_object;
+        request.offset[0] = 4096;
+        request.offset[1] = 8192;
+        request.length = UINT64_C(0x100000000);
+        EXT_SEND(DOSTRUE, 0);
+        assert(events[0].operation == '5' && ext_seen[0] == 4096
+            && ext_seen[2] == 8192 && ext_seen[3] == UINT64_C(0x100000000));
+
+        EXT_BEGIN(AFSPLUS_EXT_PREALLOCATE);
+        request.object[0] = file_object;
+        request.offset[0] = 1;
+        request.length = 2;
+        EXT_SEND(DOSTRUE, 0);
+        assert(events[0].operation == '6' && ext_seen[1] == 2);
+
+        EXT_BEGIN(AFSPLUS_EXT_REPLACE);
+        request.name0 = (const uint8_t *)"tmp";
+        request.name_length[0] = 3;
+        request.name1 = (const uint8_t *)"new";
+        request.name_length[1] = 3;
+        EXT_SEND(DOSTRUE, 0);
+        assert_event(0, '7', "tmp", 0);
+        assert(ext_seen[4] == 1);
+        request.name1 = NULL;
+        EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+
+        EXT_BEGIN(AFSPLUS_EXT_ADVISE);
+        request.object[0] = file_object;
+        request.flags = 3;
+        EXT_SEND(DOSTRUE, 0);
+        assert(ext_seen[2] == 3 && request.output_flags == 9);
+
+        /* A short JSON buffer learns the size it needs. */
+        EXT_BEGIN(AFSPLUS_EXT_INFO_JSON);
+        EXT_SEND(DOSTRUE, 0);
+        assert(request.output_value == 4 && ext_seen[0] == 0);
+        request.buffer = data;
+        request.buffer_size = sizeof(data);
+        EXT_SEND(DOSTRUE, 0);
+        assert(data[0] == '{');
+
+        /* The extent array is sized in bytes; a partial element is unused. */
+        EXT_BEGIN(AFSPLUS_EXT_EXTENT_MAP);
+        request.object[0] = file_object;
+        request.offset[0] = 10;
+        request.length = 20;
+        request.buffer = extents;
+        request.buffer_size = sizeof(extents) - 1;
+        EXT_SEND(DOSTRUE, 0);
+        assert(ext_seen[2] == 2 && request.output_count == 2);
+        assert(request.output_flags == 1 && request.output_value == 30);
+
+        EXT_BEGIN(AFSPLUS_EXT_LOOKUP_ID);
+        request.name0 = (const uint8_t *)"ext";
+        request.name_length[0] = 3;
+        EXT_SEND(DOSTRUE, 0);
+        assert_event(0, 'd', "ext", 0);
+        assert(request.output_value == UINT64_C(0x1122334455));
+
+        /* A filesystem error travels in dp_Res2 and clears the outputs. */
+        ext_error = ERROR_OBJECT_NOT_FOUND;
+        request.output_value = 5;
+        EXT_SEND(DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+        ext_error = 0;
+
+        initialize_packet(&packet, ACTION_END);
+        packet.dp_Arg1 = writable_file.fh_Arg1;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        (void)root_id;
     }
 
     /* C2: ACTION_SET_COMMENT, and the comment in Examine, ExNext, ExamineFH
@@ -1854,13 +2213,36 @@ int main(void)
         assert(afsplus_aros_packet_process(old_context, &packet) == 0);
         assert(packet.dp_Res1 == DOSFALSE
             && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+        /* The extension packet itself is known; it reports which groups it
+         * can reach, and an operation of an absent group is unknown. */
+        {
+            struct AfsplusExtRequest request;
+            uint8_t byte;
+
+            memset(&request, 0, sizeof(request));
+            request.magic = AFSPLUS_EXT_MAGIC;
+            request.version = AFSPLUS_EXT_VERSION;
+            request.header_size = sizeof(request);
+            request.operation = AFSPLUS_EXT_INTERFACE;
+            initialize_packet(&packet, ACTION_AFSPLUS_EXT);
+            packet.dp_Arg1 = (SIPTR)&request;
+            assert(afsplus_aros_packet_process(old_context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE);
+            assert(request.output_value == AFSPLUS_AROS_GROUP_BASE);
+            request.operation = AFSPLUS_EXT_INFO_JSON;
+            request.buffer = &byte;
+            request.buffer_size = 1;
+            assert(afsplus_aros_packet_process(old_context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSFALSE
+                && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+        }
         assert(event_count == 0);
         assert(afsplus_aros_packet_destroy(old_context) == 0);
 
         stub_groups = 0;
         assert(afsplus_aros_packet_create(&config, &old_context)
             == ERROR_BAD_NUMBER);
-        stub_groups = UINT64_C(0x662F);
+        stub_groups = UINT64_C(0x7FFF);
 
         /* A handler shell without a delivery callback cannot notify, so the
          * request is an unknown action and no watch is created. */
