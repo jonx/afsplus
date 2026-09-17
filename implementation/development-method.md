@@ -63,6 +63,11 @@ same base commit. A lot:
   modeled counts, negative-control outcomes, log paths, defects found, and
   the exact list of what stays open with the reason.
 
+A missing tool, SDK, toolchain or emulator is work to do, not a limit to
+report. Install or build it, under the home directory and with a script that
+resumes after an interruption, then carry on with the target run. "Proven on
+the host only" is acceptable while that build is running, never instead of it.
+
 The integrator merges lots by cherry-pick, resolving documentation conflicts
 row by row, and runs nothing beyond a compile check until the milestone
 proof. One heavy run occupies the machine at a time; three agents plus a full
