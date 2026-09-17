@@ -311,15 +311,19 @@ the protection and start no orphan cleanup, which waits, visible in the
 health snapshot, until the volume is unprotected. `ACTION_DISK_INFO` reports
 the protected state, and nothing is written to the volume for it.
 
+The handler has one rule for every mount option, wherever it arrives from: a
+setting it does not understand fails the mount, it is never ignored, and a
+string it could not read to the end leaves the defaults rather than the part
+it had already applied. An option that looked applied and was not would be
+worse than none, because the mount would run under a policy nobody chose.
+
 The DOSDriver's `Control` string is where a mountlist names what the numeric
 fields cannot ([`afsplus_control.h`](../native/aros/afsplus_control.h)):
 `SECURITY=PRESERVE|STRICT|DOWNGRADE` selects the projection policy of the
 section above, and `ENCODING=UTF8|LATIN1` the encoding of names on the
-packet boundary. Settings are separated by spaces or commas, keyword and
-value are compared without regard to case, and a string this handler does not
-understand fails the mount: one that looked applied and was not would be
-worse than none. Both policies were reachable only from a program calling the
-C boundary directly before this.
+packet boundary. Settings are separated by spaces or commas, and keyword and
+value are compared without regard to case. Both policies were reachable only
+from a program calling the C boundary directly before this.
 
 Below the handler, `fdsk.device` answers `CMD_UPDATE` inside `BeginIO`, so on
 the stock device a write barrier is replied before the writes it was queued
