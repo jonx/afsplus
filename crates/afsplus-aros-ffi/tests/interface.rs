@@ -112,7 +112,7 @@ fn query(filesystem: *mut AfsplusAros) -> AfsplusArosCapabilities {
 }
 
 #[test]
-fn interface_query_needs_no_mount_and_names_revision_two() {
+fn interface_query_needs_no_mount_and_names_its_revision_and_groups() {
     let mut output = AfsplusArosInterface {
         struct_size: 24,
         ..Default::default()
@@ -123,9 +123,9 @@ fn interface_query_needs_no_mount_and_names_revision_two() {
         AfsplusArosInterface {
             struct_size: 24,
             abi_version: 1,
-            interface_revision: 2,
+            interface_revision: 3,
             reserved: 0,
-            groups: 0x3,
+            groups: 0xF,
         }
     );
     assert_eq!(afsplus_aros_interface(ptr::null_mut()), 210);
@@ -162,7 +162,7 @@ fn sized_output_refuses_short_callers_and_never_writes_past_a_long_one() {
         0
     );
     assert_eq!(future.known.struct_size, 24);
-    assert_eq!(future.known.interface_revision, 2);
+    assert_eq!(future.known.interface_revision, 3);
     assert_eq!(future.tail, [0x5A; 16]);
 }
 

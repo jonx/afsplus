@@ -23,10 +23,12 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(2)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(3)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
+#define AFSPLUS_AROS_GROUP_DOS_METADATA UINT64_C(0x4)
+#define AFSPLUS_AROS_GROUP_SOFT_LINKS UINT64_C(0x8)
 
 #define AFSPLUS_AROS_MOUNT_READ_WRITE UINT32_C(0)
 #define AFSPLUS_AROS_MOUNT_READ_ONLY UINT32_C(1)
@@ -240,6 +242,29 @@ int32_t afsplus_aros_rewind_directory(struct AfsplusAros *filesystem,
     uint64_t lock);
 int32_t afsplus_aros_disk_info(struct AfsplusAros *filesystem,
     struct AfsplusArosDiskInfo *output);
+
+/* Group AFSPLUS_AROS_GROUP_DOS_METADATA. An empty name addresses the object
+ * of base_lock itself. protection is the 32-bit DOS word, stored as given. */
+int32_t afsplus_aros_set_protection(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint32_t protection, int64_t now_seconds, uint32_t now_nanoseconds);
+int32_t afsplus_aros_set_modified(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    int64_t modified_seconds, uint32_t modified_nanoseconds,
+    int64_t now_seconds, uint32_t now_nanoseconds);
+
+/* Group AFSPLUS_AROS_GROUP_SOFT_LINKS. The target is an opaque path in the
+ * mount's name encoding. Locate and open answer ERROR_IS_SOFT_LINK for a
+ * link; the caller substitutes the target and retries. read_soft_link stores
+ * the target size in output_required; when it exceeds capacity the buffer is
+ * untouched and the call still succeeds. */
+int32_t afsplus_aros_make_soft_link(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    const uint8_t *target, uint32_t target_length,
+    int64_t now_seconds, uint32_t now_nanoseconds);
+int32_t afsplus_aros_read_soft_link(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint8_t *target, uint32_t target_capacity, uint32_t *output_required);
 
 /* Group AFSPLUS_AROS_GROUP_INTERFACE_QUERY. */
 int32_t afsplus_aros_capabilities(struct AfsplusAros *filesystem,

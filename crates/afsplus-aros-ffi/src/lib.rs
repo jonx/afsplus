@@ -21,9 +21,15 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 2;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 3;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
+pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
+pub const AFSPLUS_AROS_GROUP_SOFT_LINKS: u64 = 0x8;
+const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
+    | AFSPLUS_AROS_GROUP_INTERFACE_QUERY
+    | AFSPLUS_AROS_GROUP_DOS_METADATA
+    | AFSPLUS_AROS_GROUP_SOFT_LINKS;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -1001,7 +1007,7 @@ pub extern "C" fn afsplus_aros_interface(output: *mut AfsplusArosInterface) -> i
                 abi_version: AFSPLUS_AROS_ABI_VERSION,
                 interface_revision: AFSPLUS_AROS_INTERFACE_REVISION,
                 reserved: 0,
-                groups: AFSPLUS_AROS_GROUP_BASE | AFSPLUS_AROS_GROUP_INTERFACE_QUERY,
+                groups: AFSPLUS_AROS_GROUPS,
             },
             |value, size| value.struct_size = size,
         )
@@ -1037,6 +1043,100 @@ pub extern "C" fn afsplus_aros_capabilities(
                 available_blocks: policy.statfs.available_blocks,
             },
             |value, size| value.struct_size = size,
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_set_protection(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    protection: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    ffi_status(|| {
+        let name = input_bytes(name, name_length)?;
+        bridge_mut(filesystem)?.adapter.set_protection(
+            optional_lock(base_lock),
+            name,
+            protection,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn afsplus_aros_set_modified(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    modified_seconds: i64,
+    modified_nanoseconds: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    ffi_status(|| {
+        let name = input_bytes(name, name_length)?;
+        bridge_mut(filesystem)?.adapter.set_modified(
+            optional_lock(base_lock),
+            name,
+            timestamp(modified_seconds, modified_nanoseconds)?,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn afsplus_aros_make_soft_link(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    target: *const u8,
+    target_length: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    ffi_status(|| {
+        let name = input_bytes(name, name_length)?;
+        let target = input_bytes(target, target_length)?;
+        bridge_mut(filesystem)?.adapter.make_soft_link(
+            optional_lock(base_lock),
+            name,
+            target,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_read_soft_link(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    target: *mut u8,
+    target_capacity: u32,
+    output_required: *mut u32,
+) -> i32 {
+    ffi_status(|| {
+        require_output(output_required)?;
+        let name = input_bytes(name, name_length)?;
+        let target = output_slice(target, target_capacity)?;
+        let required = bridge_mut(filesystem)?.adapter.read_soft_link(
+            optional_lock(base_lock),
+            name,
+            target,
+        )?;
+        write_output(
+            output_required,
+            u32::try_from(required).map_err(|_| ArosError::ObjectTooLarge)?,
         )
     })
 }

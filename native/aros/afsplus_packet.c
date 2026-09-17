@@ -52,6 +52,7 @@ struct AfsplusArosPacketContext {
     struct AfsplusArosNativeFile *files;
     uint32_t inhibited;
     uint32_t quit;
+    uint64_t groups;
 };
 
 struct AfsplusPathOperation {
@@ -422,6 +423,144 @@ static int32_t resolve_parent(struct AfsplusArosPacketContext *context,
     return error;
 }
 
+static int32_t require_group(const struct AfsplusArosPacketContext *context,
+    uint64_t group)
+{
+    return (context->groups & group) != 0 ? 0 : ERROR_ACTION_NOT_KNOWN;
+}
+
+static int32_t datestamp_to_unix(const struct DateStamp *date,
+    int64_t *seconds, uint32_t *nanoseconds)
+{
+    if (date == NULL || date->ds_Days < 0 || date->ds_Minute < 0
+        || date->ds_Minute >= 24 * 60 || date->ds_Tick < 0
+        || date->ds_Tick >= 60 * (LONG)AFSPLUS_TICKS_PER_SECOND)
+        return ERROR_BAD_NUMBER;
+    *seconds = AFSPLUS_UNIX_TO_AMIGA_EPOCH
+        + (int64_t)date->ds_Days * AFSPLUS_SECONDS_PER_DAY
+        + (int64_t)date->ds_Minute * AFSPLUS_SECONDS_PER_MINUTE
+        + date->ds_Tick / (LONG)AFSPLUS_TICKS_PER_SECOND;
+    *nanoseconds = (uint32_t)(date->ds_Tick % (LONG)AFSPLUS_TICKS_PER_SECOND)
+        * UINT32_C(20000000);
+    return 0;
+}
+
+static uint32_t c_string_length(const uint8_t *text)
+{
+    uint32_t length = 0;
+
+    while (text[length] != 0 && length < UINT32_MAX)
+        length++;
+    return length;
+}
+
+/* Resolves the object named by a DOS path to a base lock plus leaf. An empty
+ * leaf ("", "VOL:" or "dir/") addresses the resolved lock's own object. */
+static int32_t resolve_named_object(struct AfsplusArosPacketContext *context,
+    uint64_t base, const uint8_t *path, uint32_t length,
+    struct AfsplusResolvedParent *result)
+{
+    int32_t error = resolve_parent(context, base, path, length, result);
+
+    if (error != ERROR_INVALID_COMPONENT_NAME)
+        return error;
+    result->leaf = path + length;
+    result->leaf_length = 0;
+    result->id = base;
+    result->owned = 0;
+    error = resolve_path_lock(context, base, path, length,
+        AFSPLUS_AROS_LOCK_SHARED, &result->id);
+    if (error == 0)
+        result->owned = result->id != 0;
+    return error;
+}
+
+/* ACTION_READ_LINK: finds the first soft link along path and writes the path
+ * that dos.library retries with: the components before the link, the link
+ * target, then the components after it. A target naming a volume replaces
+ * the prefix. Returns the length, -2 when the buffer is too small, or -1 with
+ * *error set. */
+static SIPTR read_link_path(struct AfsplusArosPacketContext *context,
+    uint64_t base, const uint8_t *path, uint32_t length, uint8_t *buffer,
+    uint32_t capacity, int32_t *error)
+{
+    struct AfsplusPathOperation operation;
+    uint32_t at = path_start(path, length);
+    uint64_t current = at != 0 ? 0 : base;
+    uint32_t owned = 0;
+
+    *error = 0;
+    for (;;)
+    {
+        uint32_t start = at;
+        uint64_t next = 0;
+        uint32_t required = 0;
+
+        if (!next_path_operation(path, length, &at, &operation))
+        {
+            *error = ERROR_OBJECT_WRONG_TYPE;
+            break;
+        }
+        if (operation.parent)
+        {
+            if (current != 0)
+                *error = afsplus_aros_parent_lock_with_access(
+                    context->filesystem, current, AFSPLUS_AROS_LOCK_SHARED,
+                    &next);
+        }
+        else
+        {
+            *error = afsplus_aros_read_soft_link(context->filesystem,
+                current, operation.name, operation.length, buffer, capacity,
+                &required);
+            if (*error == 0)
+            {
+                uint32_t rest = length - at;
+                uint32_t prefix = start;
+                uint32_t separator;
+                uint32_t total;
+                uint32_t i;
+
+                release_temporary_lock(context, current, owned);
+                if (required > capacity)
+                    return -2;
+                for (i = 0; i < required; i++)
+                    if (buffer[i] == ':')
+                        prefix = 0;
+                separator = rest != 0 && required != 0
+                    && buffer[required - 1] != '/'
+                    && buffer[required - 1] != ':';
+                if (required > UINT32_MAX - prefix
+                    || rest > UINT32_MAX - prefix - required - separator - 1)
+                    return -2;
+                total = prefix + required + separator + rest;
+                if (total + 1 > capacity)
+                    return -2;
+                memmove(buffer + prefix, buffer, required);
+                memcpy(buffer, path, prefix);
+                if (separator)
+                    buffer[prefix + required] = '/';
+                memcpy(buffer + prefix + required + separator, path + at,
+                    rest);
+                buffer[total] = 0;
+                return (SIPTR)total;
+            }
+            if (*error != ERROR_OBJECT_WRONG_TYPE)
+                break;
+            *error = afsplus_aros_locate(context->filesystem, current,
+                operation.name, operation.length, AFSPLUS_AROS_LOCK_SHARED,
+                &next);
+        }
+        if (*error != 0)
+            break;
+        release_temporary_lock(context, current, owned);
+        current = next;
+        owned = current != 0;
+    }
+    release_temporary_lock(context, current, owned);
+    return -1;
+}
+
 static void unix_to_datestamp(int64_t seconds, uint32_t nanoseconds,
     struct DateStamp *date)
 {
@@ -680,6 +819,20 @@ int32_t afsplus_aros_packet_create(
     context->allocate = config->allocate;
     context->free = config->free;
     context->now = config->now;
+    {
+        struct AfsplusArosInterface interface;
+
+        memset(&interface, 0, sizeof(interface));
+        interface.struct_size = sizeof(interface);
+        if (afsplus_aros_interface(&interface) != 0
+            || interface.abi_version != AFSPLUS_AROS_ABI_VERSION
+            || (interface.groups & AFSPLUS_AROS_GROUP_BASE) == 0)
+        {
+            config->free(config->callback_context, context, sizeof(*context));
+            return ERROR_BAD_NUMBER;
+        }
+        context->groups = interface.groups;
+    }
     *output = context;
     return 0;
 }
@@ -1298,12 +1451,18 @@ int32_t afsplus_aros_packet_process(
         struct AfsplusArosNativeLock *source;
         uint32_t parent_ready = 0;
 
+        uint32_t soft = (LONG)packet->dp_Arg4 == LINK_SOFT;
+
         error = lock_id(context, (BPTR)packet->dp_Arg1, &base);
-        source = find_lock(context, (BPTR)packet->dp_Arg3);
-        if (error == 0 && source == NULL)
-            error = ERROR_INVALID_LOCK;
-        if (error == 0 && (LONG)packet->dp_Arg4 != LINK_HARD)
+        source = soft ? NULL : find_lock(context, (BPTR)packet->dp_Arg3);
+        if (error == 0 && !soft && (LONG)packet->dp_Arg4 != LINK_HARD)
             error = ERROR_ACTION_NOT_KNOWN;
+        if (error == 0 && !soft && source == NULL)
+            error = ERROR_INVALID_LOCK;
+        if (error == 0 && soft)
+            error = require_group(context, AFSPLUS_AROS_GROUP_SOFT_LINKS);
+        if (error == 0 && soft && packet->dp_Arg3 == 0)
+            error = ERROR_REQUIRED_ARG_MISSING;
         if (error == 0)
             error = bstr_view(packet->dp_Arg2, &path, &path_length);
         if (error == 0)
@@ -1313,7 +1472,15 @@ int32_t afsplus_aros_packet_process(
         }
         if (error == 0)
             error = packet_now(context, &seconds, &nanoseconds);
-        if (error == 0)
+        if (error == 0 && soft)
+        {
+            const uint8_t *target = (const uint8_t *)packet->dp_Arg3;
+
+            error = afsplus_aros_make_soft_link(context->filesystem,
+                parent.id, parent.leaf, parent.leaf_length, target,
+                c_string_length(target), seconds, nanoseconds);
+        }
+        else if (error == 0)
             error = afsplus_aros_make_hard_link(context->filesystem,
                 parent.id, parent.leaf, parent.leaf_length, source->id,
                 seconds, nanoseconds);
@@ -1321,6 +1488,75 @@ int32_t afsplus_aros_packet_process(
             release_temporary_lock(context, parent.id, parent.owned);
         if (error == 0)
             result = DOSTRUE;
+        break;
+    }
+    case ACTION_SET_PROTECT:
+    case ACTION_SET_DATE:
+    {
+        const uint8_t *path;
+        uint32_t path_length = 0;
+        uint64_t base;
+        int64_t seconds;
+        uint32_t nanoseconds;
+        int64_t modified_seconds = 0;
+        uint32_t modified_nanoseconds = 0;
+        struct AfsplusResolvedParent object;
+        uint32_t object_ready = 0;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_DOS_METADATA);
+        if (error == 0)
+            error = lock_id(context, (BPTR)packet->dp_Arg2, &base);
+        if (error == 0)
+            error = bstr_view(packet->dp_Arg3, &path, &path_length);
+        if (error == 0 && packet->dp_Type == ACTION_SET_DATE)
+            error = datestamp_to_unix(
+                (const struct DateStamp *)packet->dp_Arg4,
+                &modified_seconds, &modified_nanoseconds);
+        if (error == 0)
+        {
+            error = resolve_named_object(context, base, path, path_length,
+                &object);
+            object_ready = error == 0;
+        }
+        if (error == 0)
+            error = packet_now(context, &seconds, &nanoseconds);
+        if (error == 0 && packet->dp_Type == ACTION_SET_PROTECT)
+            error = afsplus_aros_set_protection(context->filesystem,
+                object.id, object.leaf, object.leaf_length,
+                (uint32_t)packet->dp_Arg4, seconds, nanoseconds);
+        else if (error == 0)
+            error = afsplus_aros_set_modified(context->filesystem,
+                object.id, object.leaf, object.leaf_length, modified_seconds,
+                modified_nanoseconds, seconds, nanoseconds);
+        if (object_ready)
+            release_temporary_lock(context, object.id, object.owned);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
+    case ACTION_READ_LINK:
+    {
+        const uint8_t *path = (const uint8_t *)packet->dp_Arg2;
+        uint8_t *buffer = (uint8_t *)packet->dp_Arg3;
+        uint64_t base;
+
+        result = -1;
+        error = require_group(context, AFSPLUS_AROS_GROUP_SOFT_LINKS);
+        if (error == 0)
+            error = lock_id(context, (BPTR)packet->dp_Arg1, &base);
+        if (error == 0 && (path == NULL || buffer == NULL
+            || packet->dp_Arg4 <= 0))
+            error = ERROR_REQUIRED_ARG_MISSING;
+        if (error == 0)
+        {
+            uint32_t capacity = packet->dp_Arg4 > (SIPTR)UINT32_MAX
+                ? UINT32_MAX : (uint32_t)packet->dp_Arg4;
+
+            result = read_link_path(context, base, path,
+                c_string_length(path), buffer, capacity, &error);
+            if (result == -2)
+                error = ERROR_LINE_TOO_LONG;
+        }
         break;
     }
     case ACTION_EXAMINE_OBJECT:

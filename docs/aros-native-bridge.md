@@ -226,9 +226,26 @@ The usual packet mapping is direct:
 | seek and 64-bit position actions | `seek`, `file_position` |
 | set/get file size, including 64-bit actions | `set_file_size`, `file_size` |
 | create/delete/rename/link | corresponding namespace function |
+| set protect, set date | `set_protection`, `set_modified`; a path without a leaf addresses the resolved lock's object |
+| make link (soft), read link | `make_soft_link`, `read_soft_link` |
 | examine object/FH/next | corresponding examine function |
 | flush | `flush` |
 | info/disk info | `disk_info` |
+
+A file handle holds its object like a lock: `MODE_NEWFILE` exclusively, the
+other modes shared. A held object is not deletable, and `ACTION_COPY_DIR_FH`
+on an exclusive handle is `ERROR_OBJECT_IN_USE`, the behavior `NameFromFH`
+in dos.library is written around.
+
+Soft-link targets are opaque paths in the mount encoding. Locate and open
+answer `ERROR_IS_SOFT_LINK`; `ACTION_READ_LINK` walks the path to the first
+link and returns the path dos.library retries with: the components before the
+link, the target, then the remaining components, or the target alone followed
+by the remainder when the target names a volume. A buffer that cannot hold the
+result and its terminator yields -2 and never a truncated path. The packet
+layer asks `afsplus_aros_interface` at creation and answers
+`ERROR_ACTION_NOT_KNOWN` for an action whose entry-point group the linked
+library lacks.
 
 `ACTION_SEEK64`, size/position variants and `DosPacket64.dp_Res0 == DP64_INIT`
 are decoded and encoded in the C packet layer. The Rust ABI always receives the
