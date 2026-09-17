@@ -225,9 +225,6 @@ struct LockState {
     access: LockAccess,
     directory_handle: Option<Handle>,
     next_cookie: u64,
-    /// Stored spelling of the entry `ExNext` returned last, the resume point
-    /// when a commit invalidates the generation-bound cookie.
-    last_entry: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1701,22 +1698,16 @@ impl<D: BlockDevice> ArosAdapter<D> {
             }
         };
         // DOS lets a program create, delete and rename between ExNext calls
-        // (`Delete #?`). The VFS cookie is bound to one generation, so a
-        // stale cookie resumes after the entry returned last.
-        let page = match self.vfs.read_directory(handle, cookie, 1) {
-            Err(VfsError::Stale) => {
-                let last = self.lock_state(lock)?.last_entry.clone();
-                let cookie = self.vfs.resume_directory_after(handle, last.as_deref())?;
-                self.vfs.read_directory(handle, cookie, 1)?
-            }
-            other => other?,
-        };
+        // (`Delete #?`). The VFS handle resumes after the entry it returned
+        // last when a commit invalidates the cursor, so this walk no longer
+        // carries a rule of its own; it was the only implementation of it
+        // until the FUSE root proved every adapter needs the same one.
+        let page = self.vfs.read_directory(handle, cookie, 1)?;
         let Some(entry) = page.entries.into_iter().next() else {
             return Err(ArosError::NoMoreEntries);
         };
         let state = self.locks.get_mut(&lock).expect("validated lock");
         state.next_cookie = page.next_cookie;
-        state.last_entry = Some(entry.name.clone());
         let stat = self.vfs.stat(entry.object_id)?;
         let name = self.encode_name(&entry.name)?;
         self.known_parents
@@ -1732,7 +1723,6 @@ impl<D: BlockDevice> ArosAdapter<D> {
         let state = self.locks.get_mut(&lock).expect("validated lock");
         state.directory_handle = None;
         state.next_cookie = 0;
-        state.last_entry = None;
         Ok(())
     }
 
@@ -1968,7 +1958,6 @@ impl<D: BlockDevice> ArosAdapter<D> {
                 access,
                 directory_handle: None,
                 next_cookie: 0,
-                last_entry: None,
             },
         );
         Ok(lock)

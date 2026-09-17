@@ -607,3 +607,73 @@ fn symlink_vfs_preserves_targets_beside_logged_writes_and_unlinks_without_orphan
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
 }
+
+/// The defect this guards: on macOS the host keeps one directory handle on
+/// the root of the mount for the life of the mount, and a directory cursor
+/// is bound to the generation it was made in. So the first write anywhere on
+/// the volume made the next read of the root fail, which the FUSE adapter
+/// reported as ESTALE, and the top level of the volume became unlistable in
+/// Finder and in the shell while every subdirectory still worked, a
+/// subdirectory being opened afresh by each `ls`.
+#[test]
+fn a_directory_walk_continues_across_a_commit_between_its_pages() {
+    let mut vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let names = ["alpha", "bravo", "charlie", "delta", "echo"];
+    for (index, name) in names.iter().enumerate() {
+        vfs.create_file(OBJECT_ROOT, name, ts(index as i64 + 1))
+            .unwrap();
+    }
+    vfs.sync_filesystem().unwrap();
+
+    let root = vfs.open_directory(OBJECT_ROOT).unwrap();
+    let first = vfs.read_directory(root, 0, 2).unwrap();
+    assert_eq!(first.entries.len(), 2);
+
+    // A commit anywhere on the volume, which is what `ls` used to be unable
+    // to survive. It is in a different directory from the walk on purpose:
+    // the walk's own directory is not touched, and the cursor still dies.
+    let elsewhere = vfs.create_directory(OBJECT_ROOT, "zulu", ts(90)).unwrap();
+    vfs.create_file(elsewhere, "written", ts(91)).unwrap();
+    vfs.sync_filesystem().unwrap();
+
+    let mut seen: Vec<String> = first
+        .entries
+        .iter()
+        .map(|entry| String::from_utf8(entry.name.clone()).unwrap())
+        .collect();
+    let mut cookie = first.next_cookie;
+    loop {
+        let page = vfs.read_directory(root, cookie, 2).unwrap();
+        for entry in &page.entries {
+            seen.push(String::from_utf8(entry.name.clone()).unwrap());
+        }
+        if page.eof {
+            break;
+        }
+        cookie = page.next_cookie;
+    }
+
+    // Every name that existed when the walk started comes back exactly once.
+    // "zulu" was created mid-walk and orders after the entries already
+    // handed out, so it may or may not appear; nothing else may move.
+    let mut without_new: Vec<&String> = seen.iter().filter(|n| *n != "zulu").collect();
+    without_new.sort();
+    assert_eq!(
+        without_new,
+        ["alpha", "bravo", "charlie", "delta", "echo"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .iter()
+            .collect::<Vec<_>>()
+    );
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), seen.len(), "an entry was returned twice");
+
+    // And the symptom itself: the handle is still usable from its start.
+    let rewound = vfs.read_directory(root, 0, 16).unwrap();
+    assert!(rewound.entries.len() >= names.len());
+    vfs.close(root).unwrap();
+}

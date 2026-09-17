@@ -319,6 +319,12 @@ enum OpenHandle {
 pub struct Vfs<D: BlockDevice> {
     volume: Volume<D>,
     handles: BTreeMap<Handle, OpenHandle>,
+    /// Stored spelling of the entry each open directory handle returned last.
+    /// A directory cursor is bound to one generation, so any commit anywhere
+    /// on the volume invalidates it; this is the point enumeration resumes
+    /// from when that happens, and it belongs to the handle rather than to
+    /// an adapter, because every adapter needs it.
+    directory_resume: BTreeMap<Handle, Vec<u8>>,
     next_handle: Handle,
     idle_maintenance: bool,
 }
@@ -340,6 +346,7 @@ impl<D: BlockDevice> Vfs<D> {
         Vfs {
             volume,
             handles: BTreeMap::new(),
+            directory_resume: BTreeMap::new(),
             next_handle: 1,
             idle_maintenance: true,
         }
@@ -527,6 +534,7 @@ impl<D: BlockDevice> Vfs<D> {
 
     pub fn close(&mut self, handle: Handle) -> Result<(), VfsError> {
         let state = self.handles.remove(&handle).ok_or(VfsError::Stale)?;
+        self.directory_resume.remove(&handle);
         let OpenHandle::File { object_id, .. } = state else {
             return Ok(());
         };
@@ -621,14 +629,52 @@ impl<D: BlockDevice> Vfs<D> {
             Some(OpenHandle::File { .. }) => return Err(VfsError::NotDirectory),
             None => return Err(VfsError::Stale),
         };
-        let page = self.volume.read_directory_page(
+        // Cookie zero is a rewind: the caller is asking for the directory
+        // from its start, so there is nothing to resume after and a resume
+        // point left from an earlier pass would silently skip the entries
+        // before it.
+        if cookie == 0 {
+            self.directory_resume.remove(&handle);
+        }
+        // A cursor carries the generation it was made in, and the core
+        // refuses one the volume has moved past. That is right for the
+        // cursor and wrong as an answer to the caller: a host holding a
+        // long-lived handle on a directory would see every commit anywhere
+        // on the volume turn its next read into an error, and on macOS that
+        // is the root of the mount becoming unlistable after the first
+        // write. So a stale cursor is recovered here, once, by resuming
+        // after the entry this handle returned last, which is a stored name
+        // and not an ordinal and therefore survives the commit.
+        let page = match self.volume.read_directory_page(
             object_id,
             Some(DirectoryCursor {
                 generation,
                 ordinal: cookie,
             }),
             max_entries,
-        )?;
+        ) {
+            Err(CoreError::Stale) => {
+                let last = self.directory_resume.get(&handle).cloned();
+                let ordinal = self.resume_directory_after(handle, last.as_deref())?;
+                let generation = self.volume.generation();
+                self.volume.read_directory_page(
+                    object_id,
+                    Some(DirectoryCursor {
+                        generation,
+                        ordinal,
+                    }),
+                    max_entries,
+                )?
+            }
+            other => other?,
+        };
+        // The resume point is the last entry handed out, so a caller that
+        // stops mid-directory and comes back after a commit continues from
+        // where it stopped. An empty page leaves it alone: there was nothing
+        // new to resume after.
+        if let Some(last) = page.entries.last() {
+            self.directory_resume.insert(handle, last.name.clone());
+        }
         Ok(DirectoryPage {
             entries: page
                 .entries

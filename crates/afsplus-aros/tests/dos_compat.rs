@@ -362,18 +362,24 @@ fn exnext_continues_across_deletes_creates_and_renames() {
     }
     assert_eq!(rest, vec![b"e".to_vec(), b"h".to_vec()]);
 
-    // Control: the VFS cookie itself is generation-bound. The same sequence
-    // without the adapter's resume fails, so the pass above is the resume.
+    // What holds the pass above is the resume, and it now lives in the VFS
+    // handle rather than in this adapter, so that the FUSE path gets it too:
+    // a host keeping one handle on a directory used to see every commit
+    // anywhere on the volume turn its next read into ESTALE. This asserts
+    // the moved rule at its new home. The control that the rule is load
+    // bearing is in the VFS's own tests, where removing it fails the walk;
+    // asserting Stale here would only re-assert that the adapter no longer
+    // does the work.
     adapter.free_lock(root).unwrap();
     let mut vfs = adapter.into_vfs().unwrap();
     let handle = vfs.open_directory(vfs.root_object()).unwrap();
     let page = vfs.read_directory(handle, 0, 1).unwrap();
+    let first = page.entries[0].name.clone();
     vfs.create_file(vfs.root_object(), "z", timestamp(300))
         .unwrap();
-    assert_eq!(
-        vfs.read_directory(handle, page.next_cookie, 1),
-        Err(afsplus_vfs::VfsError::Stale)
-    );
+    let after = vfs.read_directory(handle, page.next_cookie, 1).unwrap();
+    assert_eq!(after.entries.len(), 1);
+    assert_ne!(after.entries[0].name, first, "an entry came back twice");
     assert_eq!(vfs.resume_directory_after(handle, Some(b"a")).unwrap(), 1);
     assert_eq!(vfs.resume_directory_after(handle, Some(b"zz")).unwrap(), 6);
     assert_eq!(vfs.resume_directory_after(handle, Some(b"0")).unwrap(), 0);

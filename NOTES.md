@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — The root of a mounted volume stopped listing after the first write](#2026-09-17--the-root-of-a-mounted-volume-stopped-listing-after-the-first-write)
 - [2026-09-17 — Answer what else renders wrong, having first been wrong about it](#2026-09-17--answer-what-else-renders-wrong-having-first-been-wrong-about-it)
 - [2026-09-17 — Read the tool index and the v2 document as a stranger](#2026-09-17--read-the-tool-index-and-the-v2-document-as-a-stranger)
 - [2026-09-17 — What a rebuilt AROS tree loses, written down and applied](#2026-09-17--what-a-rebuilt-aros-tree-loses-written-down-and-applied)
@@ -217,6 +218,46 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-17 — The root of a mounted volume stopped listing after the first write
+
+The owner asked for a volume to play with and got one that could not be
+listed. On macOS, `ls /Volumes/Playground` worked until any file was written
+anywhere on the volume, and from then on it answered `Stale NFS file handle`
+for ever, while every subdirectory still listed normally.
+
+The asymmetry is the whole diagnosis. A directory cursor carries the
+generation it was made in, and the core refuses one the volume has moved
+past. macOS keeps a single handle on the ROOT of a mount for the life of the
+mount, so the first commit anywhere invalidated it; a subdirectory survived
+only because `ls` opens it afresh each time. The VFS returned `Stale`, and the
+FUSE adapter mapped that faithfully to `ESTALE`.
+
+The rule that fixes it was already in this repository, written for `ExNext`,
+because DOS lets a program create and delete between enumeration calls: keep
+the stored name of the entry returned last and resume after it when the
+cursor dies. It sat in the AROS adapter, so the AROS path was correct and the
+FUSE path was not, in one tree. It now belongs to the VFS directory handle,
+where both paths get it and neither owns it, and the adapter's copy is gone.
+
+Measured on real macFUSE mounts, fresh image each time, same sequence both
+ways. Before: write succeeds, then `ls` exits 1 with the stale handle. After:
+write succeeds, `ls` exits 0, the data reads back. The unit control is the
+same statement without a mount: removing the resume makes the new test fail
+with `Stale` at the first page after a commit.
+
+One test changed rather than broke. The `ExNext` test asserted that the VFS
+itself answers `Stale` — a control for the adapter owning the rule. That is
+now the wrong assertion at the wrong level, so it states the moved rule
+instead, and the control that the rule is load bearing lives in the VFS
+tests.
+
+Found on the way and NOT fixed here, because it is a different question:
+`cp` onto the volume reports a failure while writing the bytes correctly. The
+FUSE `setattr` refuses any real mode change with `EOPNOTSUPP`, since AFS+
+does not persist a mode, and macOS renders that as "Operation not supported
+on socket". Whether a mode should be stored is a format decision, not a bug
+in this path.
 
 ## 2026-09-17 — Answer what else renders wrong, having first been wrong about it
 
