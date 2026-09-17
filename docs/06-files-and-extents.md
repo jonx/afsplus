@@ -13,7 +13,7 @@
 - [4. Preallocation](#4-preallocation)
 - [5. Truncation](#5-truncation)
 - [6. Shared extents/reflinks](#6-shared-extentsreflinks)
-- [7. Reserved optional user-data checksum association](#7-reserved-optional-user-data-checksum-association)
+- [7. Room for an optional user-data checksum association](#7-room-for-an-optional-user-data-checksum-association)
 - [8. Optional tiny-file storage](#8-optional-tiny-file-storage)
 - [9. Maximum file size](#9-maximum-file-size)
 
@@ -203,21 +203,20 @@ policy. The presence of the in-place option never weakens this section's
 shared-range COW requirement. See
 [`docs/08-transactions-and-journal.md`](08-transactions-and-journal.md).
 
-## 7. Reserved optional user-data checksum association
+## 7. Room for an optional user-data checksum association
 
-Full user-data checksumming is not required by the first production profile.
+Full user-data checksumming is not required by the first production profile,
+and no part of it is designed: not the algorithm, the granularity, the layout,
+the compatibility class, nor whether checksums sit inline or apart.
 
-However, the base extent flag namespace reserves a `DATA_CHECKSUM_PRESENT` association bit and the feature registry reserves `org.aros.afsplus:data-checksums` now.
-
-This reservation does **not** freeze:
-
-- checksum algorithm
-- checksum block/range granularity
-- checksum tree/layout
-- compatibility class
-- whether checksums are stored inline or separately
-
-It only guarantees that a later checksum feature can associate checksum metadata with extents/ranges without redefining the base extent record incompatibly.
+What the base format leaves is room, not a reservation. The extent value's
+flag word has spare bits, and the extent record has room for an association
+that a later feature can add without redefining it. Nothing is reserved in
+code: the extent codec admits exactly the flags it defines and refuses every
+other bit ([ADR-100](../adr/ADR-100-exact-object-record-admission.md) applies
+the same rule to the object record), so a checksum association arrives as a
+format change with its own decision, its own tests and its own feature
+identity ([ADR-116](../adr/ADR-116-registry-lists-what-exists.md)).
 
 ## 8. Optional tiny-file storage
 

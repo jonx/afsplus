@@ -46,10 +46,15 @@ A feature may be useful experimentally and later prove unnecessary. The format m
 Features use stable string IDs with reverse-DNS style ownership, for example:
 
 ```text
-org.aros.afsplus:catalog
-org.aros.afsplus:change-stream
-org.aros.afsplus:inline-data
+org.aros.afsplus:intent-log
+org.aros.afsplus:shared-extents
+org.aros.afsplus:data-policy
 ```
+
+An identity is registered when its bit, its class and its code land together
+([ADR-116](../adr/ADR-116-registry-lists-what-exists.md)). Base-format
+behaviour is not a feature and has no identity; a planned feature lives in its
+ADR or open question until it exists.
 
 The on-disk representation may use compact numeric IDs for standardized core features, but tools must retain a stable globally unique textual identity.
 
@@ -146,7 +151,7 @@ Examples:
 
 - global catalog: non-authoritative, rebuildable, discardable
 - persistent change stream: non-authoritative, **not rebuildable as history**, discardable with `RESCAN_REQUIRED`
-- xattrs: authoritative when active
+- extended attributes: authoritative, and base format rather than a feature ([ADR-108](../adr/ADR-108-extended-attributes.md))
 
 This distinction is part of the repair contract.
 

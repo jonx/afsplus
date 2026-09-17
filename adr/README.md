@@ -66,7 +66,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-035](ADR-035-allocation-root-reserved-pool.md) | Allocation-root tree in a reserved triple-version node pool | Accepted | — |
 | [ADR-036](ADR-036-reclaim-queue.md) | Segmented reclaim queue with bounded, resumable batches | Accepted | amended by [ADR-074](ADR-074-protect-previous-checkpoint.md), [ADR-110](ADR-110-exact-reclaim-admission.md), [ADR-115](ADR-115-retire-unwritten-surface.md) |
 | [ADR-037](ADR-037-intent-log.md) | Intent log for forced durability between checkpoints | Accepted | amended by [ADR-063](ADR-063-intent-log-epoch1.md) |
-| [ADR-038](ADR-038-mount-policy-and-feature-summary.md) | Explicit mount policy and identification feature summary | Accepted | amended by [ADR-115](ADR-115-retire-unwritten-surface.md) |
+| [ADR-038](ADR-038-mount-policy-and-feature-summary.md) | Explicit mount policy and identification feature summary | Accepted | amended by [ADR-115](ADR-115-retire-unwritten-surface.md), [ADR-116](ADR-116-registry-lists-what-exists.md) |
 | [ADR-039](ADR-039-portable-vfs-slice.md) | Portable handle API and generation-bound directory cookies | Accepted | — |
 | [ADR-040](ADR-040-fuse-protocol-boundary.md) | Testable FUSE protocol boundary and host mount entry point | Accepted | — |
 | [ADR-041](ADR-041-aros-dos-adapter.md) | Packet-neutral AROS DOS adapter | Accepted | — |
@@ -144,6 +144,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-113](ADR-113-checkpoint-flags-word.md) | The checkpoint's flags word is zero | Accepted | amended by [ADR-114](ADR-114-reserved-header-fields.md) |
 | [ADR-114](ADR-114-reserved-header-fields.md) | The common header's flags and owner belong to no kind that does not name them | Accepted | amends [ADR-113](ADR-113-checkpoint-flags-word.md) |
 | [ADR-115](ADR-115-retire-unwritten-surface.md) | A version or block kind nothing writes is refused, not read | Accepted | amends [ADR-036](ADR-036-reclaim-queue.md), [ADR-038](ADR-038-mount-policy-and-feature-summary.md) |
+| [ADR-116](ADR-116-registry-lists-what-exists.md) | The feature registry lists what exists | Accepted | amends [ADR-038](ADR-038-mount-policy-and-feature-summary.md) |
 
 <!-- /adr-index -->
 

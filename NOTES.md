@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — The feature registry lists what exists (ADR-116)](#2026-09-17--the-feature-registry-lists-what-exists-adr-116)
 - [2026-09-17 — Retire what nothing writes (ADR-115)](#2026-09-17--retire-what-nothing-writes-adr-115)
 - [2026-09-17 — The reserved header fields of the last five kinds (ADR-114)](#2026-09-17--the-reserved-header-fields-of-the-last-five-kinds-adr-114)
 - [2026-09-17 — A finite acceptance inventory for Stage B](#2026-09-17--a-finite-acceptance-inventory-for-stage-b)
@@ -221,6 +222,36 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — The feature registry lists what exists (ADR-116)
+
+The "tbd" class of `org.aros.afsplus:data-checksums` was the visible end of a
+larger drift. The registry held fourteen identities; the code assigns seven
+bits. Of the other seven, one had no class and no design (the class follows
+from a storage decision nobody has made), four were plans on paper, and two
+described behaviour that is not optional: `xattrs`, although ADR-108 put
+extended attributes in the base format with nothing gating them, and `sparse`,
+although a hole is an absent extent every reader handles. A line calling
+shipped base-format behaviour an optional feature is worse than a missing
+line: a second implementer would gate the field on a bit no image sets.
+
+The rule: an identity is registered when its bit, its class and its code land
+together; base-format behaviour gets no identity; a plan lives in its ADR or
+open question. Seven identities remain, `registry_version` is 6, and ADR-116
+records for each removed line where its subject now lives, so nothing is lost
+by deletion, only moved. docs/06 section 7 no longer claims the extent flag
+namespace "reserves" a checksum bit: extent.rs refuses every flag outside the
+two it defines, so what exists is room, not a reservation. docs/09 gave three
+examples of the identity syntax that were three of the removed lines; it now
+gives three that exist.
+
+Proof: `feature_registry` (3 tests) reads spec/feature-registry.toml and
+compares it with the constants of afsplus_format::ident in both directions,
+and checks no bit of a word is used twice. It is the point of the lot: without
+it the two drift again the moment nobody looks. Negative controls, each
+failing it: the class of one identity changed, and one registry line removed
+while its bit stays. Nothing else reads the registry; it is linked by two
+chapters and two qualification plans and parsed by no tool.
 
 ## 2026-09-17 — Retire what nothing writes (ADR-115)
 

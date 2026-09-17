@@ -1,4 +1,4 @@
-registry_version = 5
+registry_version = 6
 
 [[feature]]
 id = "org.aros.afsplus:intent-log"
@@ -21,83 +21,6 @@ authoritative = true
 rebuildable = false
 discardable = false
 description = "Intent-log version-3 write/truncate records may reference already durable replacement COW data. Requires org.aros.afsplus:intent-log; older namespace-only replay implementations must reject the volume (ADR-064)."
-
-[[feature]]
-id = "org.aros.afsplus:catalog"
-short = "catalog"
-class = "compat"
-state_model = "disabled-enabled-active"
-lifecycle = "experimental"
-authoritative = false
-rebuildable = true
-discardable = true
-description = "Rebuildable global link/object catalog for fast bulk enumeration."
-
-[[feature]]
-id = "org.aros.afsplus:change-stream"
-short = "change-stream"
-class = "compat"
-state_model = "disabled-enabled-active"
-lifecycle = "experimental"
-authoritative = false
-rebuildable = false
-discardable = true
-description = "Bounded persistent stream of committed changes. History cannot be reconstructed from current state; discard requires consumers to rescan."
-
-[[feature]]
-id = "org.aros.afsplus:inline-data"
-short = "inline-data"
-class = "incompat"
-state_model = "disabled-enabled-active"
-lifecycle = "experimental"
-authoritative = true
-rebuildable = false
-discardable = false
-description = "Permits small regular-file payloads inside object metadata."
-
-[[feature]]
-id = "org.aros.afsplus:xattrs"
-short = "xattrs"
-class = "ro_compat"
-state_model = "disabled-enabled-active"
-lifecycle = "experimental"
-authoritative = true
-rebuildable = false
-discardable = false
-description = "Extended attribute storage."
-
-[[feature]]
-id = "org.aros.afsplus:sparse"
-short = "sparse"
-class = "incompat"
-state_model = "disabled-enabled-active"
-lifecycle = "experimental"
-authoritative = true
-rebuildable = false
-discardable = false
-description = "Sparse logical file ranges."
-
-[[feature]]
-id = "org.aros.afsplus:discard"
-short = "discard"
-class = "compat"
-state_model = "disabled-enabled-active"
-lifecycle = "experimental"
-authoritative = false
-rebuildable = true
-discardable = true
-description = "Implementation may issue discard hints. No disk correctness semantics depend on support."
-
-[[feature]]
-id = "org.aros.afsplus:data-checksums"
-short = "data-checksums"
-class = "tbd"
-state_model = "disabled-enabled-active"
-lifecycle = "reserved"
-authoritative = false
-rebuildable = "tbd"
-discardable = "tbd"
-description = "Reserved feature identity for optional user-data checksum metadata. Exact compatibility class and storage are intentionally not frozen."
 
 [[feature]]
 id = "org.aros.afsplus:shared-extents"

@@ -1,7 +1,7 @@
 # ADR-038: Explicit mount policy and identification feature summary
 
 Status: Accepted
-Amended by: ADR-115
+Amended by: ADR-115, ADR-116
 
 ## Context
 
