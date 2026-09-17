@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — The checkpoint flags word is zero (ADR-113); Q10 closed](#2026-09-17--the-checkpoint-flags-word-is-zero-adr-113-q10-closed)
 - [2026-09-17 — A second reader for the snapshot records; Q15 closed](#2026-09-17--a-second-reader-for-the-snapshot-records-q15-closed)
 - [2026-09-17 — The zero tail, once, in the header verification (ADR-112)](#2026-09-17--the-zero-tail-once-in-the-header-verification-adr-112)
 - [2026-09-17 — Run the handler on AROS for the first time](#2026-09-17--run-the-handler-on-aros-for-the-first-time)
@@ -216,6 +217,19 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — The checkpoint flags word is zero (ADR-113); Q10 closed
+
+Q10 asked for the epoch-1 rule of the checkpoint's reserved `flags` word.
+Both readers already refused a nonzero word; ADR-113 records the rule and why
+the other two options lose: removing the field moves every later field for
+eight bytes, and a negotiated namespace has no customer, since what a reader
+must know before trusting a checkpoint belongs in the identification block's
+feature words. No code changed. The rule is held by `checkpoint_c` (the
+"nonzero flags word" image, both forms, both readers), by `roundtrip` and by
+the checkpoint fuzz oracle. Q10's wider demand stays with the M14 review for
+the identification block, the tree nodes, the bitmap pages, the region
+descriptors and the intent-log records.
 
 ## 2026-09-17 — A second reader for the snapshot records; Q15 closed
 
