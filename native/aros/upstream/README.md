@@ -24,10 +24,32 @@ Known and not patched here:
   reaches it cannot become a host `fsync`. With the patch above the device
   treats `ERROR_ACTION_NOT_KNOWN` as the previous behaviour, which is honest
   but means that on Hosted a completed barrier proves ordering inside AROS
-  and not that the bytes left the host's page cache. Closing it needs a
-  decision this project cannot take alone, because `ACTION_FLUSH` carries no
-  arguments and `emul-handler` keeps no list of its open files: either it
-  gains such a list and flushes them all, or the action gains a file
-  argument, which changes a generic DOS interface.
+  and not that the bytes left the host's page cache.
+
+  Closing it is a decision about a generic DOS interface, not about AFS+, so
+  it is written here for whoever takes it upstream rather than patched.
+  `ACTION_FLUSH` carries no arguments, and `emul-handler` keeps no list of
+  its open files (`struct emulbase`, `arch/all-hosted/filesys/emul_handler`),
+  so there are two ways and each costs something.
+
+  *The handler keeps its open files.* `ACTION_FLUSH` then means what it says,
+  flush everything, and no interface changes. It costs a list in
+  `struct emulbase` maintained by every path that makes or frees a
+  `struct filehandle` — three allocation and four release sites in
+  `emul_handler.c` today — where one unpaired path corrupts the list of the
+  filesystem the whole hosted system runs on. One barrier also `fsync`s every
+  open file of the volume, not the one the caller meant.
+
+  *The action takes a file.* `dp_Arg1` would name a file handle, zero keeping
+  the old meaning, and a handler would `fsync` exactly that file. It is
+  cheap and precise, but it gives an argument to a packet that has none in
+  every other implementation, and a handler that ignored the argument and
+  answered success would claim a durability it had not performed, which is
+  the failure mode the whole chain exists to avoid.
+
+  Either way the host side needs `fsync` in the libc symbol table of
+  `arch/all-unix/filesys/emul_handler` (`emul_host_unix.c` and the
+  `LibCInterface` of `emul_unix.h`, whose order must stay in step) and a
+  `DoFlush()` beside `DoWrite()` in each host backend.
 - Upstream `fdsk.device` has no `TD_READ64`, `TD_WRITE64` or `NSCMD_TD_*64`.
   MacAROS carries that fix; images beyond 4 GiB depend on it.

@@ -19,6 +19,7 @@ The files map to a runnable MacAROS tree as follows:
 | `AFSPlusDosProbe` | `AROS/C/AFSPlusDosProbe` |
 | `AFSPlusInfo` | `AROS/C/AFSPlusInfo`, the handler report tool |
 | `AFSPlusClone` | `AROS/C/AFSPlusClone`, clone inside an AFS+ volume, byte copy otherwise |
+| `FDSKUpdateProbe` | `AROS/C/FDSKUpdateProbe`, the device write-barrier probe of [check-aros-fdsk-ordering.sh](../tools/check-aros-fdsk-ordering.sh) |
 | `AFSPlusReplayProbe` | `AROS/C/AFSPlusReplayProbe` |
 | `AFSPlusS1Probe` | Stored only in the S1 AFS+ image |
 | `AFSPlusS1bProbe` | Stored only in the desktop S1b AFS+ image |

@@ -265,7 +265,11 @@ Lacking in the generic device, as upstream patches with regression probes:
    overtakes queued writes and the barrier never reaches the backing file.
    Both the defect and the fix are now shown on a target by
    [`fdsk_update_probe.c`](../native/aros/tests/fdsk_update_probe.c); the
-   patch is not applied in the gate tree. The second half, a host `fsync`,
+   patch is not applied in the gate tree, and
+   [`check-aros-fdsk-ordering.sh`](../tools/check-aros-fdsk-ordering.sh) is
+   the ONLY gate that requires a patched AROS: it applies the fix, rebuilds
+   that one device, proves the ordering and restores the tree. The second
+   half, a host `fsync`,
    waits on a generic AROS decision named in
    [`native/aros/upstream/README.md`](../native/aros/upstream/README.md);
 2. upstream has no `TD_READ64`, `TD_WRITE64` or `NSCMD_TD_*64`; MacAROS

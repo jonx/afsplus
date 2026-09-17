@@ -321,6 +321,19 @@ understand fails the mount: one that looked applied and was not would be
 worse than none. Both policies were reachable only from a program calling the
 C boundary directly before this.
 
+Below the handler, `fdsk.device` answers `CMD_UPDATE` inside `BeginIO`, so on
+the stock device a write barrier is replied before the writes it was queued
+behind. AFS+ has no defence against that and does not claim write ordering
+below itself on such a system: its own ordering is what the intent log and
+the checkpoint pair give it, and a completed barrier proves neither. The one
+gate that patches AROS,
+[`check-aros-fdsk-ordering.sh`](../tools/check-aros-fdsk-ordering.sh), applies
+[the fix](../native/aros/upstream/fdsk-cmd-update.patch), rebuilds that device
+alone, shows the ordering on a target with the AFS+ operation matrix over it,
+and puts the tree back. Every other gate runs against the device a user has.
+Even patched, a completed barrier on Hosted proves ordering inside AROS and
+not that the bytes left the host's page cache; see the upstream notes.
+
 A handler that cannot open one of its libraries fails its mount. The
 generated entry opens them before any AFS+ code runs; autoinit reports a
 failure through a requester when the process has no console, and the entry
