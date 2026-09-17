@@ -70,4 +70,30 @@ run_matrix packet-stub native/aros/afsplus_packet.c \
 echo "[dev-packet] trackdisk viewport matrix (source headers)"
 run_matrix trackdisk-stub native/aros/afsplus_trackdisk.c \
     native/aros/tests/trackdisk_stub.c
+# The handler shell calls Exec and DOS, so it needs the installed SDK include
+# tree of a running AROS build. Its generated proto headers arrive late in
+# that build; native/aros/tests/dev-proto stands in for the three the shell
+# uses. dos/dos64.h comes from the SDK when it is there, else from the AROS
+# source tree. This is a syntax and type check only.
+sdk=${AFSPLUS_AROS_SDK_ROOT:-"$HOME/aros-build/bin/darwin-aarch64"}
+if [ -f "$sdk/AROS/Developer/include/exec/execbase.h" ] \
+    && [ -f "$sdk/gen/include/aros/config.h" ]; then
+    echo "[dev-packet] handler shell type check (SDK include tree, stand-in proto headers)"
+    mkdir -p "$work/dos64/dos"
+    if [ -f "$sdk/AROS/Developer/include/dos/dos64.h" ]; then
+        ln -sf "$sdk/AROS/Developer/include/dos/dos64.h" "$work/dos64/dos/dos64.h"
+    else
+        ln -sf "$aros_source/compiler/include/dos/dos64.h" "$work/dos64/dos/dos64.h"
+    fi
+    clang -std=gnu11 -fsyntax-only -Wall -Wextra -Werror \
+        -Wno-unused-variable -Wno-unused-but-set-variable \
+        -Wno-unused-parameter -nostdlibinc -D__WORDSIZE=64 \
+        -I native/aros/tests/dev-proto \
+        -I "$sdk/AROS/Developer/include/aros/stdc" \
+        -I "$sdk/AROS/Developer/include" -I "$sdk/gen/include" \
+        -I "$work/dos64" -I api -I native/aros \
+        native/aros/afsplus_handler.c
+else
+    echo "[dev-packet] handler shell type check skipped: no SDK include tree at $sdk"
+fi
 echo "[dev-packet] PASS (development check, no qualification claim)"

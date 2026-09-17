@@ -20,6 +20,7 @@
 #include <dos/dos.h>
 #include <dos/dosextens.h>
 #include <dos/filehandler.h>
+#include <dos/notify.h>
 #include <exec/errors.h>
 #include <exec/execbase.h>
 #include <exec/memory.h>
@@ -78,6 +79,10 @@ struct AfsplusArosHandler {
     struct AfsplusArosDevice device;
     struct AfsplusAros *filesystem;
     struct AfsplusArosPacketContext *packets;
+    /* Reply port of the NotifyMessages this handler sent, and how many of
+     * them are still out. The port must outlive every one of them. */
+    struct MsgPort *notify_port;
+    uint32_t notify_outstanding;
     uint8_t *bounce;
     uintptr_t dma_mask;
     uint32_t bounce_size;
@@ -193,6 +198,66 @@ static void packet_free(void *context, void *allocation, size_t size)
 
     if (allocation != NULL && size != 0 && size <= UINT32_MAX)
         FreeMem(allocation, (ULONG)size);
+}
+
+/* Delivers one change notification as the AROS FAT handler does: a signal,
+ * or a NotifyMessage unless NRF_WAIT_REPLY holds it back while an earlier one
+ * is unreplied. A message that cannot be allocated is dropped; the watch
+ * fires again on the next change. */
+static void packet_notify(void *context, struct NotifyRequest *request)
+{
+    struct AfsplusArosHandler *handler = context;
+    struct ExecBase *SysBase = handler->SysBase;
+    struct NotifyMessage *message;
+
+    if ((request->nr_Flags & NRF_SEND_SIGNAL) != 0)
+    {
+        Signal(request->nr_stuff.nr_Signal.nr_Task,
+            1UL << request->nr_stuff.nr_Signal.nr_SignalNum);
+        return;
+    }
+    if ((request->nr_Flags & NRF_SEND_MESSAGE) == 0)
+        return;
+    if ((request->nr_Flags & NRF_WAIT_REPLY) != 0
+        && request->nr_MsgCount > 0)
+        return;
+    message = AllocMem(sizeof(*message), MEMF_PUBLIC | MEMF_CLEAR);
+    if (message == NULL)
+        return;
+    message->nm_ExecMessage.mn_ReplyPort = handler->notify_port;
+    message->nm_ExecMessage.mn_Length = sizeof(*message);
+    message->nm_Class = NOTIFY_CLASS;
+    message->nm_Code = NOTIFY_CODE;
+    message->nm_NReq = request;
+    request->nr_MsgCount++;
+    handler->notify_outstanding++;
+    PutMsg(request->nr_stuff.nr_Msg.nr_Port, &message->nm_ExecMessage);
+}
+
+/* Takes back replied NotifyMessages. After EndNotify the NotifyRequest is the
+ * application's again and may be gone, so its count is touched only while
+ * the request is still registered. */
+static void collect_notify_replies(struct AfsplusArosHandler *handler)
+{
+    struct ExecBase *SysBase = handler->SysBase;
+    struct NotifyMessage *message;
+
+    if (handler->notify_port == NULL)
+        return;
+    while ((message = (struct NotifyMessage *)GetMsg(handler->notify_port))
+        != NULL)
+    {
+        if (message->nm_Class != NOTIFY_CLASS
+            || message->nm_Code != NOTIFY_CODE)
+            continue;
+        if (afsplus_aros_packet_notify_registered(handler->packets,
+                message->nm_NReq)
+            && message->nm_NReq->nr_MsgCount > 0)
+            message->nm_NReq->nr_MsgCount--;
+        if (handler->notify_outstanding > 0)
+            handler->notify_outstanding--;
+        FreeMem(message, sizeof(*message));
+    }
 }
 
 static int32_t packet_now(void *context, int64_t *unix_seconds,
@@ -585,6 +650,10 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     packet_config.allocate = packet_allocate;
     packet_config.free = packet_free;
     packet_config.now = packet_now;
+    handler->notify_port = CreateMsgPort();
+    if (handler->notify_port == NULL)
+        return ERROR_NO_FREE_STORE;
+    packet_config.notify = packet_notify;
     set_startup_stage(handler, "packet-context");
     error = afsplus_aros_packet_create(&packet_config, &handler->packets);
     if (error == 0)
@@ -609,6 +678,14 @@ static void cleanup_handler(struct AfsplusArosHandler *handler)
     {
         (void)afsplus_aros_packet_destroy(handler->packets);
         handler->packets = NULL;
+    }
+    /* ACTION_DIE is refused while a NotifyMessage is out, so every message
+     * has come home by now. */
+    collect_notify_replies(handler);
+    if (handler->notify_port != NULL)
+    {
+        DeleteMsgPort(handler->notify_port);
+        handler->notify_port = NULL;
     }
     afsplus_aros_startup_trace(SysBase, UINT32_C(0x60000002));
     if (handler->volume_registered)
@@ -764,13 +841,28 @@ LONG handler(struct ExecBase *SysBase)
     while (!quit)
     {
         afsplus_aros_startup_trace(SysBase, UINT32_C(0x30200004));
-        WaitPort(port);
+        Wait((1UL << port->mp_SigBit)
+            | (1UL << state->notify_port->mp_SigBit));
         afsplus_aros_startup_trace(SysBase, UINT32_C(0x30200005));
+        collect_notify_replies(state);
         while (!quit && (message = GetMsg(port)) != NULL)
         {
             packet = (struct DosPacket *)message->mn_Node.ln_Name;
             if (packet == NULL)
                 continue;
+            /* A NotifyMessage still out would be replied to a deleted port
+             * after this handler is gone. */
+            if (packet->dp_Type == ACTION_DIE)
+            {
+                collect_notify_replies(state);
+                if (state->notify_outstanding != 0)
+                {
+                    packet->dp_Res1 = DOSFALSE;
+                    packet->dp_Res2 = ERROR_OBJECT_IN_USE;
+                    reply_packet(port, SysBase, packet);
+                    continue;
+                }
+            }
             afsplus_aros_startup_trace(SysBase, UINT32_C(0x40000000) |
                 ((uint32_t)packet->dp_Type & UINT32_C(0x0fffffff)));
             error = afsplus_aros_packet_process(state->packets, packet);

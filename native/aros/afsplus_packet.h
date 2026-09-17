@@ -77,6 +77,13 @@ int32_t afsplus_aros_packet_destroy(
 int32_t afsplus_aros_packet_process(
     struct AfsplusArosPacketContext *context, struct DosPacket *packet);
 
+/* 1 while request is registered through ACTION_ADD_NOTIFY. A handler asks
+ * this before it touches the NotifyRequest of a returning NotifyMessage: after
+ * EndNotify the application owns that memory again and may have freed it. */
+uint32_t afsplus_aros_packet_notify_registered(
+    const struct AfsplusArosPacketContext *context,
+    const struct NotifyRequest *request);
+
 uint32_t afsplus_aros_packet_should_quit(
     const struct AfsplusArosPacketContext *context);
 

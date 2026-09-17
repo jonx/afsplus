@@ -992,6 +992,20 @@ int32_t afsplus_aros_packet_destroy(
     return first_error;
 }
 
+uint32_t afsplus_aros_packet_notify_registered(
+    const struct AfsplusArosPacketContext *context,
+    const struct NotifyRequest *request)
+{
+    const struct AfsplusArosNativeNotify *node;
+
+    if (context == NULL || request == NULL)
+        return 0;
+    for (node = context->notifies; node != NULL; node = node->next)
+        if (node->request == request)
+            return 1;
+    return 0;
+}
+
 uint32_t afsplus_aros_packet_should_quit(
     const struct AfsplusArosPacketContext *context)
 {

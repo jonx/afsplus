@@ -197,9 +197,11 @@ At L3 `ACTION_ADD_NOTIFY` and `ACTION_REMOVE_NOTIFY` pair each
 `NotifyRequest` with a watch and deliver fired watches through a callback of
 the packet configuration after every packet.
 
-Lacking: the callback in the handler shell (`NotifyMessage` or `Signal`,
-`nr_MsgCount`, suppression while a message is unreplied under
-`NRF_WAIT_REPLY`), which is L4; the v2 `watch` operation over the same table.
+The handler shell delivers through its own reply port (L4 source, type-checked
+against the SDK include tree, never run).
+
+Lacking: the target run of the delivery path; the v2 `watch` operation over
+the same table.
 
 Hosted and QEMU: all. Apple hardware: none.
 

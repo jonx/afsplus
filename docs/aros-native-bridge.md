@@ -331,6 +331,13 @@ the layer drains the fired watches and calls the `notify` callback of the
 packet configuration once per request, and at once for `NRF_NOTIFY_INITIAL` on
 an existing object. The handler shell owns the delivery itself: the
 `NotifyMessage` or `Signal`, `nr_MsgCount` and `NRF_WAIT_REPLY` suppression.
+The shell sends messages from its own reply port, waits on that port next to
+the packet port, and takes replied messages back before each batch of
+packets. After `EndNotify` the `NotifyRequest` belongs to the application
+again, so a returning message touches `nr_MsgCount` only while
+`afsplus_aros_packet_notify_registered` still knows the request. The shell
+answers `ACTION_DIE` with `ERROR_OBJECT_IN_USE` while one of its messages is
+out, because the reply would reach a deleted port.
 `nr_Handler` names the handler port for `EndNotify`, so `ACTION_DIE` is
 `ERROR_OBJECT_IN_USE` while a request is registered and destroying the packet
 context clears `nr_Handler` of every request it still holds. A

@@ -1367,6 +1367,10 @@ int main(void)
         assert_event(1, 'W', "settings", 0);
         assert(delivered_count == 0);
 
+        assert(afsplus_aros_packet_notify_registered(context, &first) == 1);
+        assert(afsplus_aros_packet_notify_registered(context, &second) == 0);
+        assert(afsplus_aros_packet_notify_registered(context, NULL) == 0);
+
         /* The same request twice is refused. */
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res1 == DOSFALSE
@@ -1400,6 +1404,8 @@ int main(void)
         packet.dp_Arg1 = (SIPTR)&first;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res1 == DOSTRUE && stub_removed_watches == 1);
+        assert(afsplus_aros_packet_notify_registered(context, &first) == 0);
+        assert(afsplus_aros_packet_notify_registered(context, &second) == 1);
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res1 == DOSFALSE
             && packet.dp_Res2 == ERROR_OBJECT_NOT_FOUND);
