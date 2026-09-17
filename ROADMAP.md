@@ -200,15 +200,15 @@ Wire freeze and hardware acceptance belong to [\[M14\]](implementation/milestone
 ### B4. Core filesystem structures
 
 - ~~B+ tree directories~~ <!-- progress: roadmap-21 -->
-- normalized/versioned Unicode comparison keys while preserving original UTF-8 names
+- ~~normalized/versioned Unicode comparison keys while preserving original UTF-8 names~~ <!-- progress: roadmap-34 -->
 - ~~extent mapping~~ <!-- progress: roadmap-22 -->
 - ~~sparse files~~ <!-- progress: roadmap-23 -->
-- preallocation
+- ~~preallocation~~ <!-- progress: roadmap-35 -->
 - ~~shared-extent/reference prototype for reflinks~~ <!-- progress: roadmap-24 -->
 - ~~CloneFile/CloneRange semantics~~ <!-- progress: roadmap-25 -->
 - ~~deferred reclamation~~ <!-- progress: roadmap-26 -->
 - ~~checker~~ <!-- progress: roadmap-27 -->
-- explain APIs
+- explain APIs <!-- progress: roadmap-36 -->
 - semantic image diff
 
 ### B5. Security preservation container
