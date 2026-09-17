@@ -22,31 +22,42 @@ checklist and the invariants, this page owns the working rhythm.
 Add as many tests as the work needs. A test that proves nothing new is
 noise; a test that lowers a criterion to pass is a defect.
 
-## What is never run during development
+## What a test proves
 
-No test suite, whatever its length, after a change: no workspace run, no
-crate-wide run, no "quick" tier. Nothing has been released, so there is
-nothing to regress against. Non-regression tests enter the repository when a
+A test written by the author of the code, at the same time as the code, shows
+that the code does what its author had in mind. It does not show that what
+the author had in mind is correct, and a green run of such tests teaches
+nothing: the complete Stage A run, four and a half hours over 1,505 tests,
+found no failure. Every real defect of Stage A came from a check that did not
+share the author's assumptions:
+
+- a separate model of the expected state, as in the generated operation
+  families, which found the intent-log replay that reused a logged data run
+  and the refusals that poisoned an open window;
+- a second implementation, the portable C reader, reading what the Rust
+  code wrote;
+- a negative control, which shows that a check is able to fail;
+- a reviewer who reads the code paths without having written them;
+- the real target: the handler mounted under AROS, real programs, real power
+  cuts.
+
+Spend test effort there. Count a piece of work as proven when one of these
+independent checks covers it, not when its own tests are green.
+
+## What is never run, proposed or discussed
+
+No test suite, whatever its length: no workspace run, no crate-wide run, no
+"quick" tier, no closing proof at the end of a stage or milestone. Nothing
+has been released, so there is nothing to regress against. Do not propose
+such a run, do not plan one in a handoff, do not spend time making one
+faster or measuring it. Non-regression tests enter the repository when a
 real problem appears and needs pinning, with the reproducer that found it.
 
-## The milestone proof
-
-A stage, gate or release closes on one complete run over the final sources:
-formatting, the workspace tests, Clippy, the codec fuzz gate, the Python
-suites, the documentation checker and the whitespace check, followed by the
-generated-family campaigns. The run:
-
-- starts detached from the editing session and at normal priority, with its
-  output on disk under `build/<name>/`;
-- records the source identity before and after, so a change during the run
-  voids the verdict;
-- never stops early: `--no-fail-fast`, every step executed to the end, the
-  complete list of failing tests written to `failing-tests.txt`.
-
-On a red run: fix every listed failure at once, rerun only those tests, then
-run the complete proof once more. On a green run: the status cell in
-[milestones](milestones.md) cites the retained `build/` directory, the story
-goes to [NOTES.md](../NOTES.md), commit, push.
+A lot is integrated on three things: the named tests of what it built, run
+alone; formatting, Clippy and the documentation checker, which are compile
+and lint checks; and an independent check from the list above, done or
+named with its owner. The status cell in [milestones](milestones.md) cites
+those, the story goes to [NOTES.md](../NOTES.md), commit, push.
 
 ## Lots and agents
 
@@ -69,9 +80,9 @@ resumes after an interruption, then carry on with the target run. "Proven on
 the host only" is acceptable while that build is running, never instead of it.
 
 The integrator merges lots by cherry-pick, resolving documentation conflicts
-row by row, and runs nothing beyond a compile check until the milestone
-proof. One heavy run occupies the machine at a time; three agents plus a full
-run overload a 16 GB host.
+row by row, and runs the named tests of each lot on the combined sources,
+nothing more. One heavy build occupies the machine at a time; three agents
+plus a toolchain build overload a 16 GB host.
 
 ## Documentation
 

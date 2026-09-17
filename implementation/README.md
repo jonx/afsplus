@@ -7,7 +7,7 @@ measurement reports; the sequence of stages is [ROADMAP.md](../ROADMAP.md).
 | Document | Content |
 |---|---|
 | [milestones.md](milestones.md) | The milestone table: one status line per milestone with its design documents and test plans — the only status authority |
-| [development-method.md](development-method.md) | The working rhythm: code, its test, that test alone, fix, next piece; a commit per coherent phase; one complete proof per milestone |
+| [development-method.md](development-method.md) | The working rhythm: code, its test, that test alone, fix, next piece; a commit per coherent phase; no test suite and no closing proof; what an independent check is |
 | [open-questions.md](open-questions.md) | Deliberately unresolved decisions: question, options, what decides it |
 | [implementation-plan.md](implementation-plan.md) | The phased plan from reader-subset freeze to epoch 1 |
 | [peer-review-prototype-plan.md](peer-review-prototype-plan.md) | Corrections accepted after external review and the first executable prototype scope |

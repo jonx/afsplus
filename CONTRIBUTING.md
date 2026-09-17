@@ -35,14 +35,19 @@ Performance patches must include:
 ## Rust quality gate
 
 The repository has one root [`rustfmt.toml`](rustfmt.toml); format the entire workspace rather
-than individual crates. Before committing Rust changes, run:
+than individual crates. Before committing Rust changes, run the named tests of
+what changed (`cargo test -p CRATE --test FILE NAME`) and the compile and
+lint checks:
 
 ```sh
 cargo fmt --all -- --check
-cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-make rust-codec-fuzz-gate
 ```
+
+The workspace test suite is not part of this gate: see
+[the development method](implementation/development-method.md) for what
+counts as proof. A change to a codec also runs `make rust-codec-fuzz-gate`,
+which fuzzes that codec against inputs its author did not choose.
 
 `make rust-gate` includes the separate codec-fuzz workspace. Keeping that crate
 out of ordinary component builds does not exempt it from the host quality gate.
