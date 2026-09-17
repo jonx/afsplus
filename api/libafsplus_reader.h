@@ -40,6 +40,11 @@
 
 #define AFSPR_OBJECT_FLAG_EXTENT_TREE (UINT16_C(1) << 0)
 #define AFSPR_OBJECT_FLAG_DATA_IN_PLACE (UINT16_C(1) << 1)
+/* The record carries a security reference; the reader preserves and never
+ * evaluates it. */
+#define AFSPR_OBJECT_FLAG_SECURITY_REF (UINT16_C(1) << 2)
+#define AFSPR_SECURITY_REF_PROJECTION_DIVERGED (UINT16_C(1) << 0)
+#define AFSPR_MAX_SECURITY_DESCRIPTOR_BYTES UINT32_C(65536)
 /* Required on the volume when an object carries DATA_IN_PLACE. */
 #define AFSPR_COMPAT_DATA_POLICY (UINT64_C(1) << 0)
 #define AFSPR_RO_COMPAT_ORPHAN_DIRECTORY (UINT64_C(1) << 1)
@@ -210,6 +215,43 @@ int afspr_decode_symlink_record(const void *block, size_t block_size,
                                struct afspr_object *object,
                                const uint8_t **target, size_t *target_size,
                                uint64_t *generation);
+
+/* Security reference of an object record: where its opaque descriptor
+ * chain starts and how long it is. present is 0 for a record without one. */
+struct afspr_security_reference {
+    uint32_t present;
+    uint32_t total_len;
+    uint64_t first_block;
+    uint16_t segment_count;
+    uint16_t flags;
+    uint32_t reserved32;
+};
+
+/* One "AFSX" descriptor segment. The descriptor bytes are opaque. */
+struct afspr_security_segment {
+    uint64_t object_id;
+    uint32_t format;
+    uint32_t total_len;
+    uint16_t version;
+    uint16_t index;
+    uint16_t count;
+    uint16_t reserved16;
+    uint64_t next;
+};
+
+/* Validate one standalone file, directory or symlink record under exact
+ * admission and return its security reference. No I/O, no allocation;
+ * outputs are unchanged on error. Volume feature congruence and chain
+ * reachability belong to the volume paths. */
+int afspr_decode_security_reference(const void *block, size_t block_size,
+                                    struct afspr_security_reference *reference);
+
+/* Validate one standalone descriptor segment. On success bytes borrows
+ * block. Outputs are unchanged on error. */
+int afspr_decode_security_segment(const void *block, size_t block_size,
+                                  struct afspr_security_segment *segment,
+                                  const uint8_t **bytes, size_t *bytes_size,
+                                  uint64_t *generation);
 
 /*
  * Initial placeholder: no function writes this type. Its layout is retained

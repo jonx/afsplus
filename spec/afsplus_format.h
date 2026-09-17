@@ -40,6 +40,8 @@ enum afsp_feature_class {
 #define AFSP_INCOMPAT_INTENT_LOG_DATA_UPDATES (UINT64_C(1) << 1)
 /* ADR-072: readers without full snapshot ownership support must reject. */
 #define AFSP_INCOMPAT_PERSISTENT_SNAPSHOTS   (UINT64_C(1) << 2)
+/* Object records may carry AFSP_OBJECT_FLAG_SECURITY_REF and AFSX segments. */
+#define AFSP_INCOMPAT_SECURITY_DESCRIPTORS   (UINT64_C(1) << 3)
 
 enum afsp_object_type {
     AFSP_OBJECT_FILE = 1,
@@ -105,7 +107,8 @@ enum afsp_extent_flag {
  */
 enum afsp_object_flag {
     AFSP_OBJECT_FLAG_EXTENT_TREE = 1u << 0,
-    AFSP_OBJECT_FLAG_DATA_IN_PLACE = 1u << 1 /* ADR-065 */
+    AFSP_OBJECT_FLAG_DATA_IN_PLACE = 1u << 1, /* ADR-065 */
+    AFSP_OBJECT_FLAG_SECURITY_REF = 1u << 2   /* 16-byte security reference */
 };
 
 /*
