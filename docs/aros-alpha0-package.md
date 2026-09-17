@@ -16,6 +16,7 @@ The files map to a runnable MacAROS tree as follows:
 |---|---|
 | `afsplus-handler` | `AROS/L/afsplus-handler` |
 | `AFSPlusAlpha0Probe` | `AROS/C/AFSPlusAlpha0Probe` |
+| `AFSPlusDosProbe` | `AROS/C/AFSPlusDosProbe` |
 | `AFSPlusReplayProbe` | `AROS/C/AFSPlusReplayProbe` |
 | `AFSPlusS1Probe` | Stored only in the S1 AFS+ image |
 | `AFSPlusS1bProbe` | Stored only in the desktop S1b AFS+ image |
@@ -103,6 +104,23 @@ That gate generates modeled power-cut images, boots Hosted MacAROS once per
 fixture, runs `AFSPlusReplayProbe old|new`, and requires a clean checker with no
 pending intent-log record after every mount. See ADR-047 for the exact coverage
 and its limits.
+
+The DOS semantics beyond the Alpha-0 slice are automated by:
+
+```sh
+tools/check-hosted-aros-dos.sh
+```
+
+`AFSPlusDosProbe` drives the metadata setters, the comment, a soft link,
+`ExAll` with a continuation, `OpenFromLock`, `ChangeMode`, record locks,
+a `NRF_WAIT_REPLY` notification and `Relabel` through dos.library in one
+drawer that it removes. A change made while a notification message is
+unreplied must arrive after the reply, never before. The result keeps what
+the handler answers to a record lock overlapping the caller's own, as an
+observation. A second boot runs `AFSPlusDosProbe HOLD`, which leaves one
+message unreplied and its request registered, and requires the shutdown and
+the dismount to succeed and the shell to continue. The checker must find the
+image clean after each boot.
 
 The first post-bootstrap system pivot is automated by:
 
