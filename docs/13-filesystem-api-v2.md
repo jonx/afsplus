@@ -286,6 +286,18 @@ preallocation and the reports have no classic equivalent; the error is the
 signal to copy, to do without, or to report nothing. The library never sends
 objects of two handlers to one of them.
 
+Extended attributes ([ADR-108](../adr/ADR-108-extended-attributes.md)) travel
+as `GET_ATTRIBUTE`, `LIST_ATTRIBUTES` and `SET_ATTRIBUTE`. The size always
+comes back and the bytes only when they fit, so a zero capacity asks for the
+size. Every namespace is readable through the AROS handler; it writes `user.`
+and `aros.` and answers `ERROR_WRITE_PROTECTED` for `security.` and
+`system.`, which it preserves for the hosts that give them meaning. Through
+FUSE every stored name has exactly one host spelling: Linux keeps `user.` and
+`security.` and shows the other two under `trusted.afsplus.`; macOS, whose
+names are free-form, stores them under `user.` and shows the rest under
+`afsplus.`. macFUSE's FSKit backend sends `removexattr(2)` as a `SETXATTR`
+without bytes, so that mount reads an empty value as a removal.
+
 The handler counts the packets it answers by type, and its failures by error
 code, since it started; operation `PACKET_COUNTS` reads either table. Each
 holds sixty-four keys by name and sums further ones in one last record, so no

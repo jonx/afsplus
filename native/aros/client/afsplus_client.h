@@ -80,6 +80,18 @@ LONG afsplus_client_health(struct MsgPort *port,
 LONG afsplus_client_info_json(struct MsgPort *port, char *buffer,
     uint32_t capacity, uint32_t *required);
 
+/* Extended attributes of the object behind a lock. Names carry their
+ * namespace; this handler writes "user." and "aros.". get and list store the
+ * size in required and fill the buffer only when it fits, so a zero capacity
+ * asks for the size; list separates names with a NUL after each. mode is an
+ * AFSPLUS_AROS_ATTRIBUTE_* value of afsplus_aros.h; REMOVE takes no value. */
+LONG afsplus_client_get_attribute(BPTR lock, CONST_STRPTR attribute,
+    void *value, uint32_t capacity, uint32_t *required);
+LONG afsplus_client_list_attributes(BPTR lock, char *names,
+    uint32_t capacity, uint32_t *required);
+LONG afsplus_client_set_attribute(BPTR lock, CONST_STRPTR attribute,
+    const void *value, uint32_t length, uint32_t mode);
+
 /* Packets by type (AFSPLUS_EXT_COUNT_BY_ACTION) or failures by error code
  * (AFSPLUS_EXT_COUNT_BY_ERROR) since the handler started. stored records are
  * written; total is what the table holds, so a caller with too little room

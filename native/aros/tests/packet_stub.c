@@ -48,7 +48,7 @@ static uint32_t stub_removed_watches;
 static struct NotifyRequest second;
 static struct NotifyRequest *delivered[8];
 static uint32_t delivered_count;
-static uint64_t stub_groups = UINT64_C(0x7FFF);
+static uint64_t stub_groups = UINT64_C(0xFFFF);
 static uint32_t stub_revision = AFSPLUS_AROS_INTERFACE_REVISION;
 static uint32_t stub_protect;
 static uint32_t stub_protect_key;
@@ -846,6 +846,61 @@ static uint8_t *before_guard_page(size_t size)
     return region + STUB_GUARD_PAGE - size;
 }
 
+/* The attribute the fake volume holds, as afsplus_aros.h describes the
+ * calls: the size always, the bytes only when they fit. */
+static const uint8_t stub_attribute[] = "DONOTWAIT";
+static uint8_t stub_set_value[16];
+static uint32_t stub_set_length;
+static uint32_t stub_set_mode;
+
+int32_t afsplus_aros_get_attribute(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    const uint8_t *attribute, uint32_t attribute_length, uint8_t *value,
+    uint32_t value_capacity, uint32_t *output_required)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    record('g', base_lock, attribute, attribute_length, name_length);
+    (void)name;
+    if (ext_error != 0)
+        return ext_error;
+    *output_required = sizeof(stub_attribute) - 1;
+    if (value_capacity >= sizeof(stub_attribute) - 1)
+        memcpy(value, stub_attribute, sizeof(stub_attribute) - 1);
+    return 0;
+}
+
+int32_t afsplus_aros_list_attributes(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint8_t *names, uint32_t names_capacity, uint32_t *output_required)
+{
+    static const uint8_t list[] = "aros.tooltype\0user.kind";
+
+    assert(filesystem == STUB_FILESYSTEM);
+    record('l', base_lock, name, name_length, 0);
+    *output_required = sizeof(list);
+    if (names_capacity >= sizeof(list))
+        memcpy(names, list, sizeof(list));
+    return ext_error;
+}
+
+int32_t afsplus_aros_set_attribute(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    const uint8_t *attribute, uint32_t attribute_length,
+    const uint8_t *value, uint32_t value_length, uint32_t mode,
+    int64_t now_seconds, uint32_t now_nanoseconds)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    (void)now_nanoseconds;
+    (void)name;
+    record('s', base_lock, attribute, attribute_length, name_length);
+    assert(value_length <= sizeof(stub_set_value));
+    memcpy(stub_set_value, value, value_length);
+    stub_set_length = value_length;
+    stub_set_mode = mode;
+    return ext_error;
+}
+
 static struct DosPacket *completed[24];
 static size_t completed_count;
 
@@ -1565,6 +1620,63 @@ int main(void)
         EXT_SEND(DOSTRUE, 0);
         assert_event(0, 'd', "ext", 0);
         assert(request.output_value == UINT64_C(0x1122334455));
+
+        /* Attributes: the size always comes back, the bytes only when they
+         * fit, and the mode travels in flags, the one field it may use. */
+        {
+            uint8_t value[16];
+
+            memset(value, 0x7e, sizeof(value));
+            EXT_BEGIN(AFSPLUS_EXT_GET_ATTRIBUTE);
+            request.name0 = (const uint8_t *)"note";
+            request.name_length[0] = 4;
+            request.name1 = (const uint8_t *)"aros.tooltype";
+            request.name_length[1] = 13;
+            EXT_SEND(DOSTRUE, 0);
+            assert_event(0, 'g', "aros.tooltype", 4);
+            assert(request.output_value == 9);
+            request.buffer = value;
+            request.buffer_size = 8;
+            EXT_SEND(DOSTRUE, 0);
+            assert(request.output_value == 9 && value[0] == 0x7e);
+            request.buffer_size = 9;
+            EXT_SEND(DOSTRUE, 0);
+            assert(memcmp(value, "DONOTWAIT", 9) == 0 && value[9] == 0x7e);
+            request.name_length[1] = AFSPLUS_EXT_NAME_MAX + 1;
+            EXT_SEND(DOSFALSE, ERROR_INVALID_COMPONENT_NAME);
+            assert(event_count == 0);
+
+            EXT_BEGIN(AFSPLUS_EXT_LIST_ATTRIBUTES);
+            request.name0 = (const uint8_t *)"note";
+            request.name_length[0] = 4;
+            EXT_SEND(DOSTRUE, 0);
+            assert_event(0, 'l', "note", 0);
+            assert(request.output_value == 24);
+
+            EXT_BEGIN(AFSPLUS_EXT_SET_ATTRIBUTE);
+            request.name1 = (const uint8_t *)"user.kind";
+            request.name_length[1] = 9;
+            request.buffer = "text";
+            request.buffer_size = 4;
+            request.flags = AFSPLUS_AROS_ATTRIBUTE_CREATE;
+            EXT_SEND(DOSTRUE, 0);
+            assert_event(0, 's', "user.kind", 0);
+            assert(stub_set_mode == AFSPLUS_AROS_ATTRIBUTE_CREATE);
+            assert(stub_set_length == 4
+                && memcmp(stub_set_value, "text", 4) == 0);
+            request.buffer = NULL;
+            EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+            assert(event_count == 0);
+            /* flags still means nothing to a reader. */
+            EXT_BEGIN(AFSPLUS_EXT_LIST_ATTRIBUTES);
+            request.flags = 1;
+            EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+        }
+
+        /* The request the next case reuses. */
+        EXT_BEGIN(AFSPLUS_EXT_LOOKUP_ID);
+        request.name0 = (const uint8_t *)"ext";
+        request.name_length[0] = 3;
 
         /* A filesystem error travels in dp_Res2 and clears the outputs. */
         ext_error = ERROR_OBJECT_NOT_FOUND;
@@ -2461,7 +2573,7 @@ int main(void)
             {
                 struct AfsplusArosPacketContext *clockless = NULL;
 
-                stub_groups = UINT64_C(0x7FFF);
+                stub_groups = UINT64_C(0xFFFF);
                 config.now = NULL;
                 assert(afsplus_aros_packet_create(&config, &clockless) == 0);
                 config.now = packet_now;
@@ -2498,7 +2610,7 @@ int main(void)
         stub_groups = 0;
         assert(afsplus_aros_packet_create(&config, &old_context)
             == ERROR_BAD_NUMBER);
-        stub_groups = UINT64_C(0x7FFF);
+        stub_groups = UINT64_C(0xFFFF);
 
         /* A handler shell without a delivery callback cannot notify, so the
          * request is an unknown action and no watch is created. */

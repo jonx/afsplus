@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Carry extended attributes to FUSE and to AROS](#2026-09-17--carry-extended-attributes-to-fuse-and-to-aros)
 - [2026-09-17 — The checkpoint flags word is zero (ADR-113); Q10 closed](#2026-09-17--the-checkpoint-flags-word-is-zero-adr-113-q10-closed)
 - [2026-09-17 — A second reader for the snapshot records; Q15 closed](#2026-09-17--a-second-reader-for-the-snapshot-records-q15-closed)
 - [2026-09-17 — The zero tail, once, in the header verification (ADR-112)](#2026-09-17--the-zero-tail-once-in-the-header-verification-adr-112)
@@ -217,6 +218,25 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — Carry extended attributes to FUSE and to AROS
+
+The attribute set of ADR-108 got its two hosts. The portable interface passes
+it through and publishes a capability that a snapshot-bearing volume lacks.
+FUSE needed a naming rule, because Linux demands a namespace and macOS has
+none: each stored name has one spelling per host and back, so nothing is
+hidden and nothing collides, and the volume's other namespaces appear under a
+prefix of their own. A real macFUSE mount driven by the host's `xattr` tool
+showed that this backend never sends `REMOVEXATTR`: a removal arrives as a
+`SETXATTR` without bytes, indistinguishable from an empty value, so the mount
+has an explicit switch that reads it as a removal, the same kind of transport
+workaround as the durable replies. AROS has no attribute packets, so the
+attributes ride the extension packet: C boundary revision 15 with three entry
+points, three operations, three client calls. The classic side writes `user.`
+and `aros.` and only shows `security.` and `system.`, as it does with the
+security descriptor. On the target the DOS probe drives all of it through a
+real dos.library and leaves one attribute on the volume root, which the gate
+reads back from the image with `afsplus-explain`.
 
 ## 2026-09-17 — The checkpoint flags word is zero (ADR-113); Q10 closed
 

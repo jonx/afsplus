@@ -105,6 +105,11 @@ SIPTR DoPkt(struct MsgPort *port, LONG action, SIPTR arg1, SIPTR arg2,
     case AFSPLUS_EXT_INFO_JSON:
         request->output_value = 300;
         break;
+    case AFSPLUS_EXT_GET_ATTRIBUTE:
+        request->output_value = 9;
+        if (request->buffer_size >= 9)
+            memcpy(request->buffer, "DONOTWAIT", 9);
+        break;
     case AFSPLUS_EXT_PACKET_COUNTS:
         request->output_count = request->buffer_size / 24;
         request->output_value = 9;
@@ -332,6 +337,34 @@ int main(void)
     assert(afsplus_client_info_json(&handler_port, (char *)data,
         sizeof(data), &required) == 0);
     assert(required == 300);
+
+    /* Attributes address the lock's own object and carry the mode in flags;
+     * a lock of no handler sends nothing. */
+    {
+        uint8_t value[16];
+        uint32_t needed = 0;
+
+        memset(value, 0, sizeof(value));
+        assert(afsplus_client_get_attribute(MKBADDR(&lock),
+            (CONST_STRPTR)"aros.tooltype", value, sizeof(value), &needed)
+            == 0);
+        assert(needed == 9 && memcmp(value, "DONOTWAIT", 9) == 0);
+        assert(last_request.object[0] == (uint64_t)(uintptr_t)MKBADDR(&lock));
+        assert(last_request.name_length[0] == 0);
+        assert(last_request.name_length[1] == 13 && last_request.flags == 0);
+        assert(afsplus_client_set_attribute(MKBADDR(&lock),
+            (CONST_STRPTR)"user.kind", "text", 4,
+            AFSPLUS_AROS_ATTRIBUTE_REPLACE) == 0);
+        assert(last_request.operation == AFSPLUS_EXT_SET_ATTRIBUTE);
+        assert(last_request.flags == AFSPLUS_AROS_ATTRIBUTE_REPLACE);
+        assert(last_request.buffer_size == 4);
+        packets_sent = 0;
+        assert(afsplus_client_list_attributes(BNULL, NULL, 0, &needed)
+            == ERROR_INVALID_LOCK);
+        assert(afsplus_client_set_attribute(MKBADDR(&lock), NULL, "x", 1, 0)
+            == ERROR_REQUIRED_ARG_MISSING);
+        assert(packets_sent == 0);
+    }
 
     /* The record array is sized in bytes on the wire. */
     {

@@ -179,6 +179,14 @@ rm "$result/dos/clone.dst" "$result/dos/clone-ram.dst"
 cp "$result/dos/packets.out" "$result/packets.txt"
 grep -Eq '^packet 28 [1-9][0-9]* ' "$result/packets.txt"
 check_image "$result/check-after-dos.json"
+# The attribute the probe left on the volume root, read from the image by the
+# host: what travelled through the extension packet is what is stored.
+cargo run --quiet --release -p afsplus-tools --bin afsplus-explain -- \
+    --json "$image" path / >"$result/root-explain.json"
+python3 -c 'import json, sys
+document = json.load(open(sys.argv[1]))
+attributes = json.dumps(document["object"]["attributes"])
+assert "aros.probe" in attributes, attributes' "$result/root-explain.json"
 
 echo "[hosted-dos] a waiting record lock granted by another task's release"
 start_aros "$result/records" \

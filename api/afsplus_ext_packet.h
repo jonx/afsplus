@@ -55,6 +55,9 @@
 #define AFSPLUS_EXT_LOOKUP_ID UINT32_C(14)    /* OBJECT_IDS */
 #define AFSPLUS_EXT_STAT_ID UINT32_C(15)      /* OBJECT_IDS */
 #define AFSPLUS_EXT_PACKET_COUNTS UINT32_C(16) /* always */
+#define AFSPLUS_EXT_GET_ATTRIBUTE UINT32_C(17)   /* ATTRIBUTES */
+#define AFSPLUS_EXT_LIST_ATTRIBUTES UINT32_C(18) /* ATTRIBUTES */
+#define AFSPLUS_EXT_SET_ATTRIBUTE UINT32_C(19)   /* ATTRIBUTES */
 
 /* One record of AFSPLUS_EXT_PACKET_COUNTS. With flags 0 the key is a packet
  * type, count the packets of that type answered since the handler started
@@ -114,6 +117,14 @@ struct AfsplusExtPacketCount {
  *   LOOKUP_ID     object[0] base lock, name[0] -> output_value object ID
  *   STAT_ID       offset[0]: object ID, buffer: struct AfsplusArosStat,
  *                 struct_size set
+ *   GET_ATTRIBUTE object[0] base lock, name[0] object, name[1] attribute,
+ *                 buffer, buffer_size -> output_value bytes required; the
+ *                 buffer is filled only when the value fits
+ *   LIST_ATTRIBUTES object[0] base lock, name[0] object, buffer, buffer_size
+ *                 -> output_value bytes required; names each followed by NUL
+ *   SET_ATTRIBUTE object[0] base lock, name[0] object, name[1] attribute,
+ *                 buffer, buffer_size: the value, flags: an
+ *                 AFSPLUS_AROS_ATTRIBUTE_* mode of afsplus_aros.h
  *   PACKET_COUNTS flags: which table, buffer: array of struct
  *                 AfsplusExtPacketCount, buffer_size in bytes
  *                 -> output_count records stored, output_value records the

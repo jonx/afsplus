@@ -320,3 +320,61 @@ LONG afsplus_client_packet_counts(struct MsgPort *port, uint32_t which,
     }
     return error;
 }
+
+static LONG attribute_request(uint32_t operation, BPTR lock,
+    CONST_STRPTR attribute, void *buffer, uint32_t size, uint32_t mode,
+    uint32_t *required)
+{
+    struct AfsplusExtRequest request;
+    struct MsgPort *port = afsplus_client_lock_port(lock);
+    LONG error;
+
+    if (port == NULL)
+        return ERROR_INVALID_LOCK;
+    if (size != 0 && buffer == NULL)
+        return ERROR_REQUIRED_ARG_MISSING;
+    begin(&request, operation);
+    /* The lock's own object: an empty object name. */
+    request.object[0] = (uint64_t)(uintptr_t)lock;
+    if (attribute != NULL)
+    {
+        request.name1 = (const uint8_t *)attribute;
+        request.name_length[1] = (uint32_t)strlen((const char *)attribute);
+    }
+    request.buffer = buffer;
+    request.buffer_size = size;
+    request.flags = mode;
+    error = afsplus_client_send(port, &request);
+    if (error == 0 && required != NULL)
+        *required = (uint32_t)request.output_value;
+    return error;
+}
+
+LONG afsplus_client_get_attribute(BPTR lock, CONST_STRPTR attribute,
+    void *value, uint32_t capacity, uint32_t *required)
+{
+    if (attribute == NULL || required == NULL)
+        return ERROR_REQUIRED_ARG_MISSING;
+    *required = 0;
+    return attribute_request(AFSPLUS_EXT_GET_ATTRIBUTE, lock, attribute,
+        value, capacity, 0, required);
+}
+
+LONG afsplus_client_list_attributes(BPTR lock, char *names,
+    uint32_t capacity, uint32_t *required)
+{
+    if (required == NULL)
+        return ERROR_REQUIRED_ARG_MISSING;
+    *required = 0;
+    return attribute_request(AFSPLUS_EXT_LIST_ATTRIBUTES, lock, NULL, names,
+        capacity, 0, required);
+}
+
+LONG afsplus_client_set_attribute(BPTR lock, CONST_STRPTR attribute,
+    const void *value, uint32_t length, uint32_t mode)
+{
+    if (attribute == NULL)
+        return ERROR_REQUIRED_ARG_MISSING;
+    return attribute_request(AFSPLUS_EXT_SET_ATTRIBUTE, lock, attribute,
+        (void *)(uintptr_t)value, length, mode, NULL);
+}

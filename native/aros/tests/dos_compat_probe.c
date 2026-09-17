@@ -26,6 +26,8 @@
 
 #include <string.h>
 
+#include "../client/afsplus_client.h"
+
 #ifndef AFSPLUS_PROBE_VOLUME
 #define AFSPLUS_PROBE_VOLUME "AFSPLUS19"
 #endif
@@ -342,6 +344,67 @@ static int probe_handles(void)
     return RETURN_OK;
 }
 
+/* Extended attributes through the extension packet: the classic namespaces
+ * are written, the preserved ones refused, sizes are probed, and one
+ * attribute stays on the volume root for the host to find in the image. */
+static int probe_attributes(void)
+{
+    UBYTE value[16];
+    char names[64];
+    uint32_t required = 0;
+    BPTR lock = Lock(NOTE, SHARED_LOCK);
+    LONG error;
+
+    if (lock == BNULL)
+        return fail("Lock for attributes", DOSFALSE);
+    error = afsplus_client_set_attribute(lock, "user.kind", "text", 4,
+        AFSPLUS_AROS_ATTRIBUTE_CREATE);
+    if (error == 0)
+        error = afsplus_client_set_attribute(lock, "user.kind", "x", 1,
+            AFSPLUS_AROS_ATTRIBUTE_CREATE) == ERROR_OBJECT_EXISTS ? 0 : 1;
+    if (error == 0)
+        error = afsplus_client_get_attribute(lock, "user.kind", NULL, 0,
+            &required);
+    if (error == 0 && required != 4)
+        error = 2;
+    memset(value, 0, sizeof(value));
+    if (error == 0)
+        error = afsplus_client_get_attribute(lock, "user.kind", value,
+            sizeof(value), &required);
+    if (error == 0 && memcmp(value, "text", 5) != 0)
+        error = 3;
+    memset(names, 0x7e, sizeof(names));
+    if (error == 0)
+        error = afsplus_client_list_attributes(lock, names, sizeof(names),
+            &required);
+    if (error == 0 && (required != 10 || memcmp(names, "user.kind", 10) != 0))
+        error = 4;
+    if (error == 0
+        && afsplus_client_set_attribute(lock, "security.probe", "x", 1,
+            AFSPLUS_AROS_ATTRIBUTE_UPSERT) != ERROR_WRITE_PROTECTED)
+        error = 5;
+    if (error == 0)
+        error = afsplus_client_set_attribute(lock, "user.kind", NULL, 0,
+            AFSPLUS_AROS_ATTRIBUTE_REMOVE);
+    if (error == 0
+        && afsplus_client_get_attribute(lock, "user.kind", NULL, 0,
+            &required) != ERROR_OBJECT_NOT_FOUND)
+        error = 6;
+    UnLock(lock);
+    if (error != 0)
+        return fail("attributes", error);
+
+    lock = Lock(AFSPLUS_PROBE_VOLUME ":", SHARED_LOCK);
+    if (lock == BNULL)
+        return fail("Lock root for attributes", DOSFALSE);
+    error = afsplus_client_set_attribute(lock, "aros.probe", "kept", 4,
+        AFSPLUS_AROS_ATTRIBUTE_UPSERT);
+    UnLock(lock);
+    if (error != 0)
+        return fail("root attribute", error);
+    return RETURN_OK;
+}
+
 static int start_notify(struct NotifyRequest *request, struct MsgPort *port,
     STRPTR path)
 {
@@ -612,6 +675,8 @@ int main(int argc, char **argv)
     if (status == RETURN_OK)
         status = probe_handles();
     if (status == RETURN_OK)
+        status = probe_attributes();
+    if (status == RETURN_OK)
         status = probe_notify();
     if (status == RETURN_OK)
         status = probe_relabel();
@@ -624,6 +689,6 @@ int main(int argc, char **argv)
         status = fail("remove drawer", DOSFALSE);
     if (status == RETURN_OK)
         Printf("[AFSPLUS-DOS] PASS setters/comment/softlink/exall/"
-            "fromlock/changemode/records/notify/relabel\n");
+            "fromlock/changemode/records/attributes/notify/relabel\n");
     return status;
 }

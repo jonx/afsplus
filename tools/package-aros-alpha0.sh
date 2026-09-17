@@ -133,7 +133,8 @@ echo "[aros-package] build the target-side Alpha-0 probe"
 build_target_program native/aros/tests/alpha0_probe.c AFSPlusAlpha0Probe
 
 echo "[aros-package] build the target-side DOS semantics probe"
-build_target_program native/aros/tests/dos_compat_probe.c AFSPlusDosProbe
+build_target_program native/aros/tests/dos_compat_probe.c AFSPlusDosProbe \
+    native/aros/client/afsplus_client.c
 
 echo "[aros-package] build the target-side handler report tool"
 build_target_program native/aros/tools/afsplus_info.c AFSPlusInfo \

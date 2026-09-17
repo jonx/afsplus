@@ -1469,6 +1469,53 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
         if (error == 0)
             report_end(request, &report);
         return error;
+    case AFSPLUS_EXT_GET_ATTRIBUTE:
+    case AFSPLUS_EXT_LIST_ATTRIBUTES:
+    {
+        uint32_t required = 0;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_ATTRIBUTES);
+        if (error == 0)
+            error = extension_lock(context, request->object[0], &first);
+        if (error == 0)
+            error = extension_name(request->name0, request->name_length[0]);
+        if (error == 0
+            && request->operation == AFSPLUS_EXT_GET_ATTRIBUTE)
+            error = extension_name(request->name1, request->name_length[1]);
+        if (error == 0 && request->buffer_size != 0
+            && request->buffer == NULL)
+            error = ERROR_BAD_NUMBER;
+        if (error == 0 && request->operation == AFSPLUS_EXT_GET_ATTRIBUTE)
+            error = afsplus_aros_get_attribute(context->filesystem, first,
+                request->name0, request->name_length[0], request->name1,
+                request->name_length[1], (uint8_t *)request->buffer,
+                request->buffer_size, &required);
+        else if (error == 0)
+            error = afsplus_aros_list_attributes(context->filesystem, first,
+                request->name0, request->name_length[0],
+                (uint8_t *)request->buffer, request->buffer_size, &required);
+        request->output_value = required;
+        return error;
+    }
+    case AFSPLUS_EXT_SET_ATTRIBUTE:
+        error = require_group(context, AFSPLUS_AROS_GROUP_ATTRIBUTES);
+        if (error == 0)
+            error = extension_lock(context, request->object[0], &first);
+        if (error == 0)
+            error = extension_name(request->name0, request->name_length[0]);
+        if (error == 0)
+            error = extension_name(request->name1, request->name_length[1]);
+        if (error == 0 && request->buffer_size != 0
+            && request->buffer == NULL)
+            error = ERROR_BAD_NUMBER;
+        if (error == 0)
+            error = packet_now(context, &seconds, &nanoseconds);
+        if (error == 0)
+            error = afsplus_aros_set_attribute(context->filesystem, first,
+                request->name0, request->name_length[0], request->name1,
+                request->name_length[1], (const uint8_t *)request->buffer,
+                request->buffer_size, request->flags, seconds, nanoseconds);
+        return error;
     case AFSPLUS_EXT_PACKET_COUNTS:
     {
         const struct AfsplusArosCountTable *table;
@@ -1529,7 +1576,8 @@ static int32_t process_extension(struct AfsplusArosPacketContext *context,
      * there. Only ADVISE and PACKET_COUNTS read flags. */
     if (request.reserved != 0
         || (request.flags != 0 && request.operation != AFSPLUS_EXT_ADVISE
-            && request.operation != AFSPLUS_EXT_PACKET_COUNTS))
+            && request.operation != AFSPLUS_EXT_PACKET_COUNTS
+            && request.operation != AFSPLUS_EXT_SET_ATTRIBUTE))
         return ERROR_BAD_NUMBER;
     request.output_count = 0;
     request.output_flags = 0;
