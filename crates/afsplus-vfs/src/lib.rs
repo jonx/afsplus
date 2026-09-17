@@ -611,6 +611,13 @@ impl<D: BlockDevice> Vfs<D> {
         Ok(page.entries.into_iter().next().map(|entry| entry.key))
     }
 
+    /// Comparison key of a name under the mounted volume's name policy. Two
+    /// names address the same directory entry exactly when their keys match,
+    /// so an adapter can match names that do not exist yet.
+    pub fn name_key(&self, name: &str) -> Result<Vec<u8>, VfsError> {
+        Ok(comparison_key(self.volume.ident(), name.as_bytes())?)
+    }
+
     pub fn create_file(
         &mut self,
         parent: ObjectId,

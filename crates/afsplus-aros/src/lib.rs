@@ -16,6 +16,7 @@ use afsplus_vfs::{
 
 pub type LockId = u64;
 pub type FileHandleId = u64;
+pub type WatchId = u64;
 
 pub const DISK_TYPE_AFS_PLUS: i32 = i32::from_be_bytes(*b"AFS+");
 
@@ -40,6 +41,8 @@ pub struct ArosConfig {
     /// The handler is a single task; a larger request is `ObjectTooLarge`
     /// and the caller splits it.
     pub max_preallocate_blocks: u64,
+    /// Size of the notification watch table.
+    pub max_watches: usize,
 }
 
 impl Default for ArosConfig {
@@ -53,6 +56,7 @@ impl Default for ArosConfig {
             max_file_info_name_bytes: 107,
             allow_security_downgrade: false,
             max_preallocate_blocks: 4096,
+            max_watches: 256,
         }
     }
 }
@@ -207,6 +211,21 @@ struct FileState {
     name: Vec<u8>,
     position: u64,
     access: LockAccess,
+    /// Written or resized through this handle; DOS notifies at close.
+    dirty: bool,
+}
+
+/// One notification request. DOS watches names, including names that do not
+/// exist yet, so a watch is a parent directory plus a comparison key. A watch
+/// on a directory also fires when an entry inside it changes.
+#[derive(Debug, Clone)]
+struct Watch {
+    parent: ObjectId,
+    key: Vec<u8>,
+    /// Object the name resolved to when last seen, for directory watches.
+    object: Option<ObjectId>,
+    /// Coalesced: any number of changes since the last drain is one event.
+    pending: bool,
 }
 
 /// Answers whether an object carries security metadata that the classic
@@ -238,8 +257,10 @@ pub struct ArosAdapter<D: BlockDevice> {
     lock_counts: BTreeMap<ObjectId, LockCounts>,
     known_parents: BTreeMap<ObjectId, (Option<ObjectId>, Vec<u8>)>,
     files: BTreeMap<FileHandleId, FileState>,
+    watches: BTreeMap<WatchId, Watch>,
     next_lock: LockId,
     next_file: FileHandleId,
+    next_watch: WatchId,
 }
 
 impl<D: BlockDevice> ArosAdapter<D> {
@@ -254,8 +275,10 @@ impl<D: BlockDevice> ArosAdapter<D> {
             lock_counts: BTreeMap::new(),
             known_parents,
             files: BTreeMap::new(),
+            watches: BTreeMap::new(),
             next_lock: 1,
             next_file: 1,
+            next_watch: 1,
         }
     }
 
@@ -361,7 +384,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
             | (OpenMode::NewFile, Ok(object_id)) => object_id,
             (OpenMode::OldFile, Err(error)) => return Err(error.into()),
             (OpenMode::ReadWrite | OpenMode::NewFile, Err(VfsError::NotFound)) => {
-                self.vfs.create_file(parent, &decoded, now)?
+                let created = self.vfs.create_file(parent, &decoded, now)?;
+                self.touch(parent, &decoded);
+                created
             }
             (_, Err(error)) => return Err(error.into()),
         };
@@ -424,6 +449,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
                 name: name.to_vec(),
                 position: 0,
                 access: lock_access,
+                dirty: mode == OpenMode::NewFile,
             },
         );
         Ok(handle)
@@ -454,6 +480,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
     pub fn close(&mut self, handle: FileHandleId) -> Result<(), ArosError> {
         let state = self.files.remove(&handle).ok_or(ArosError::InvalidLock)?;
         self.release_object_lock(state.object_id, state.access);
+        if state.dirty {
+            self.touch_raw(state.parent, &state.name);
+        }
         Ok(self.vfs.close(state.vfs_handle)?)
     }
 
@@ -487,10 +516,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
             (state.vfs_handle, state.position)
         };
         let count = self.vfs.write(vfs_handle, position, source, now)?;
-        self.files
-            .get_mut(&handle)
-            .expect("validated handle")
-            .position = position
+        let state = self.files.get_mut(&handle).expect("validated handle");
+        state.dirty = true;
+        state.position = position
             .checked_add(count as u64)
             .ok_or(ArosError::SeekError)?;
         Ok(count)
@@ -544,6 +572,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         };
         let size = add_signed(base, offset)?;
         self.vfs.truncate(vfs_handle, size, now)?;
+        self.files.get_mut(&handle).expect("validated handle").dirty = true;
         Ok(size)
     }
 
@@ -568,7 +597,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
         now: Timespec,
     ) -> Result<usize, ArosError> {
         let vfs_handle = self.file_state(handle)?.vfs_handle;
-        Ok(self.vfs.write(vfs_handle, offset, source, now)?)
+        let count = self.vfs.write(vfs_handle, offset, source, now)?;
+        self.files.get_mut(&handle).expect("validated handle").dirty = true;
+        Ok(count)
     }
 
     /// `CloneFile`: a new file `name` that initially shares the source's
@@ -585,6 +616,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         let parent = self.lock_object_or_root(base)?;
         let decoded = self.decode_component(name)?;
         self.vfs.clone_file(source_object, parent, &decoded, now)?;
+        self.touch(parent, &decoded);
         Ok(())
     }
 
@@ -600,14 +632,19 @@ impl<D: BlockDevice> ArosAdapter<D> {
     ) -> Result<(), ArosError> {
         let source_handle = self.file_state(source)?.vfs_handle;
         let destination_handle = self.file_state(destination)?.vfs_handle;
-        Ok(self.vfs.clone_range(
+        self.vfs.clone_range(
             source_handle,
             source_offset,
             destination_handle,
             destination_offset,
             length,
             now,
-        )?)
+        )?;
+        self.files
+            .get_mut(&destination)
+            .expect("validated handle")
+            .dirty = true;
+        Ok(())
     }
 
     /// Reserves storage for a byte range without changing the file size.
@@ -672,6 +709,8 @@ impl<D: BlockDevice> ArosAdapter<D> {
         }
         self.vfs
             .rename(source_parent, &source, target_parent, &target, true, now)?;
+        self.touch(source_parent, &source);
+        self.touch(target_parent, &target);
         self.known_parents
             .insert(object_id, (Some(target_parent), target_name.to_vec()));
         Ok(())
@@ -696,6 +735,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         let parent = self.lock_object_or_root(base)?;
         let decoded = self.decode_component(name)?;
         let object_id = self.vfs.create_directory(parent, &decoded, now)?;
+        self.touch(parent, &decoded);
         self.known_parents
             .insert(object_id, (Some(parent), name.to_vec()));
         self.insert_lock(object_id, Some(parent), name.to_vec(), LockAccess::Shared)
@@ -716,12 +756,12 @@ impl<D: BlockDevice> ArosAdapter<D> {
         }
         match self.vfs.stat(object)?.kind {
             // The link itself is deleted, never its target.
-            NodeKind::File | NodeKind::Symlink => {
-                Ok(self.vfs.unlink_file(parent, &decoded, now)?)
-            }
-            NodeKind::Directory => Ok(self.vfs.remove_directory(parent, &decoded, now)?),
-            NodeKind::Internal => Err(ArosError::ObjectWrongType),
+            NodeKind::File | NodeKind::Symlink => self.vfs.unlink_file(parent, &decoded, now)?,
+            NodeKind::Directory => self.vfs.remove_directory(parent, &decoded, now)?,
+            NodeKind::Internal => return Err(ArosError::ObjectWrongType),
         }
+        self.touch(parent, &decoded);
+        Ok(())
     }
 
     pub fn rename(
@@ -739,6 +779,8 @@ impl<D: BlockDevice> ArosAdapter<D> {
         let object_id = self.vfs.lookup(source_parent, &source)?;
         self.vfs
             .rename(source_parent, &source, target_parent, &target, false, now)?;
+        self.touch(source_parent, &source);
+        self.touch(target_parent, &target);
         self.known_parents
             .insert(object_id, (Some(target_parent), target_name.to_vec()));
         Ok(())
@@ -757,9 +799,10 @@ impl<D: BlockDevice> ArosAdapter<D> {
             return Err(ArosError::ObjectWrongType);
         }
         let target = self.decode_component(target_name)?;
-        Ok(self
-            .vfs
-            .link_file(source_object, target_parent, &target, now)?)
+        self.vfs
+            .link_file(source_object, target_parent, &target, now)?;
+        self.touch(target_parent, &target);
+        Ok(())
     }
 
     /// `ACTION_SET_PROTECT`. An empty name addresses the base object. The
@@ -779,7 +822,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
         if !self.config.allow_security_downgrade && self.security.carries_rich_security(object)? {
             return Err(ArosError::WriteProtected);
         }
-        Ok(self.vfs.set_protection(object, protection, now)?)
+        self.vfs.set_protection(object, protection, now)?;
+        self.touch_named(base, name);
+        Ok(())
     }
 
     /// `ACTION_SET_DATE`.
@@ -791,7 +836,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
         now: Timespec,
     ) -> Result<(), ArosError> {
         let object = self.named_object(base, name)?;
-        Ok(self.vfs.set_modified(object, modified, now)?)
+        self.vfs.set_modified(object, modified, now)?;
+        self.touch_named(base, name);
+        Ok(())
     }
 
     /// `ACTION_MAKE_LINK` with `LINK_SOFT`. The target is an opaque DOS path
@@ -810,6 +857,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
             return Err(ArosError::InvalidComponentName);
         }
         self.vfs.create_symlink(parent, &decoded, &target, now)?;
+        self.touch(parent, &decoded);
         Ok(())
     }
 
@@ -843,6 +891,119 @@ impl<D: BlockDevice> ArosAdapter<D> {
         }
         let decoded = self.decode_component(name)?;
         Ok(self.vfs.lookup(base_object, &decoded)?)
+    }
+
+    /// `ACTION_ADD_NOTIFY`: watches the name `name` under `base`, which need
+    /// not exist. The table is bounded by `max_watches`.
+    pub fn add_watch(&mut self, base: Option<LockId>, name: &[u8]) -> Result<WatchId, ArosError> {
+        if self.watches.len() >= self.config.max_watches {
+            return Err(ArosError::NoFreeStore);
+        }
+        let (parent, key, object) = if name.is_empty() {
+            // The base object itself, watched under its own name.
+            let object = self.lock_object_or_root(base)?;
+            let (parent, stored) = self
+                .known_parents
+                .get(&object)
+                .cloned()
+                .ok_or(ArosError::InvalidLock)?;
+            match parent {
+                Some(parent) => {
+                    let decoded = self.decode_component(&stored)?;
+                    (parent, self.vfs.name_key(&decoded)?, Some(object))
+                }
+                // The root has no parent entry: only changes inside fire.
+                None => (OBJECT_ROOT, Vec::new(), Some(OBJECT_ROOT)),
+            }
+        } else {
+            let parent = self.lock_object_or_root(base)?;
+            let decoded = self.decode_component(name)?;
+            let object = match self.vfs.lookup(parent, &decoded) {
+                Ok(object) => Some(object),
+                Err(VfsError::NotFound) => None,
+                Err(error) => return Err(error.into()),
+            };
+            (parent, self.vfs.name_key(&decoded)?, object)
+        };
+        let watch = self.next_watch;
+        self.next_watch = self
+            .next_watch
+            .checked_add(1)
+            .ok_or(ArosError::NoFreeStore)?;
+        self.watches.insert(
+            watch,
+            Watch {
+                parent,
+                key,
+                object,
+                pending: false,
+            },
+        );
+        Ok(watch)
+    }
+
+    /// `ACTION_REMOVE_NOTIFY`. A pending event of the watch is discarded.
+    pub fn remove_watch(&mut self, watch: WatchId) -> Result<(), ArosError> {
+        self.watches
+            .remove(&watch)
+            .map(|_| ())
+            .ok_or(ArosError::ObjectNotFound)
+    }
+
+    /// Moves pending watch identifiers into `output`, lowest first, and
+    /// returns how many were written. Watches that did not fit stay pending,
+    /// so no event is lost and the table never grows with the change rate.
+    pub fn drain_watches(&mut self, output: &mut [WatchId]) -> usize {
+        let mut count = 0;
+        for (id, watch) in &mut self.watches {
+            if count == output.len() {
+                break;
+            }
+            if watch.pending {
+                watch.pending = false;
+                output[count] = *id;
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn touch(&mut self, parent: ObjectId, decoded_name: &str) {
+        let Ok(key) = self.vfs.name_key(decoded_name) else {
+            return;
+        };
+        let object = self.vfs.lookup(parent, decoded_name).ok();
+        for watch in self.watches.values_mut() {
+            let named = watch.parent == parent && watch.key == key && !watch.key.is_empty();
+            if named {
+                watch.object = object;
+            }
+            if named || watch.object == Some(parent) {
+                watch.pending = true;
+            }
+        }
+    }
+
+    fn touch_raw(&mut self, parent: ObjectId, raw_name: &[u8]) {
+        if let Ok(decoded) = self.decode_component(raw_name) {
+            self.touch(parent, &decoded);
+        }
+    }
+
+    fn touch_named(&mut self, base: Option<LockId>, name: &[u8]) {
+        if !name.is_empty() {
+            if let Ok(parent) = self.lock_object_or_root(base) {
+                self.touch_raw(parent, name);
+            }
+            return;
+        }
+        let Some(lock) = base.and_then(|id| self.locks.get(&id)) else {
+            return;
+        };
+        if let Some(parent) = lock.parent {
+            let stored = lock.name.clone();
+            self.touch_raw(parent, &stored);
+        }
     }
 
     pub fn examine_lock(&mut self, lock: LockId) -> Result<FileInfo, ArosError> {
