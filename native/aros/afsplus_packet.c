@@ -643,7 +643,7 @@ static uint32_t exall_append(uint8_t **cursor, uint8_t *end, LONG type,
     memcpy(strings, source->name, name_length);
     strings[name_length] = 0;
     if (type >= ED_TYPE)
-        entry->ed_Type = source->info.entry_type;
+        entry->ed_Type = source->info.directory_entry_type;
     if (type >= ED_SIZE)
     {
         if (sizeof(entry->ed_Size) == sizeof(uint32_t)

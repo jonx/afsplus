@@ -423,6 +423,10 @@ int32_t afsplus_aros_examine_next(struct AfsplusAros *filesystem,
         name[0] = 'e';
         name[1] = (uint8_t)('0' + stub_directory_at);
         output->name_length = 2;
+        /* ExNext reports fib_DirEntryType from directory_entry_type, and
+         * ExAll must agree with it; the two fields differ on purpose. */
+        output->directory_entry_type = ST_LINKFILE;
+        output->entry_type = ST_FILE;
         output->size = (uint64_t)stub_directory_at + 10;
         output->protection = UINT32_C(0x40) + (uint32_t)stub_directory_at;
         stub_directory_at++;
@@ -960,7 +964,7 @@ int main(void)
         assert(rewind_count == rewinds + 1);
         entry = (struct ExAllData *)buffer.bytes;
         assert(strcmp((char *)entry->ed_Name, "e0") == 0);
-        assert(entry->ed_Type == ST_FILE && entry->ed_Size == 10);
+        assert(entry->ed_Type == ST_LINKFILE && entry->ed_Size == 10);
         assert(entry->ed_Prot == 0x40);
         assert(entry->ed_Days == 1 && entry->ed_Mins == 1
             && entry->ed_Ticks == 52);
