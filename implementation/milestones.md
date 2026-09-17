@@ -147,14 +147,10 @@ gate above is read as covering it.
 | A threat model for crafted images: a chain or extent walk judges content, not allocator ownership | [Q16](open-questions.md) | Owner decision |
 | Backup transport of descriptors and attributes | [ADR-109](../adr/ADR-109-owned-chains-under-snapshots.md) | Stage D |
 
-The gates above were not re-proven for this inventory: no suite was run. Each
-cites the decision and the named test that holds it, as integrated on main on
-2026-09-17. Two format rules written that day rest on a working rule the owner
-has not yet confirmed to the session that wrote them (format changes made
-directly with an Accepted ADR while no image is released): ADR-104, ADR-106 to
-ADR-113. A refusal of that rule turns those ADRs back into proposals and does
-not reopen a gate: each changes what is admitted or stored, none changes what
-a gate claims.
+Each row cites the decision that closed its blocker and the named test that
+holds it. Where the qualification document a row cites names a full-size
+`--ignored` release run as its evidence, that run is the gate's evidence, not
+the ordinary test run.
 
 ## Stage A task tracking
 

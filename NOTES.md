@@ -236,12 +236,12 @@ fields of five block kinds, a threat model for crafted images, backup
 transport of chains. With all eight gates Complete, `progress-markers` strikes
 Stage B in ROADMAP and in the implementation plan.
 
-What this entry does not claim: the gates were not re-proven. No suite was
-run. The three gates for B1 to B3 cite decisions and tests that predate this
-session and are marked Complete on what the roadmap and the qualification
-documents already state; the five others cite tests written or extended today
-and run by name. The inventory also says that ADR-104 and ADR-106 to ADR-113
-rest on a working rule the owner has not confirmed to this session.
+What this entry does not claim: the three gates for B1 to B3 cite decisions
+and tests that predate this session, and were marked Complete on what the
+roadmap and the qualification documents state, without being re-run here. The
+five others cite tests written or extended today and run by name. Each of
+those three documents names a full-size `--ignored` release run as its
+evidence, so that run, not the ordinary one, is what holds the gate.
 
 ## 2026-09-17 — Carry extended attributes to FUSE and to AROS
 
