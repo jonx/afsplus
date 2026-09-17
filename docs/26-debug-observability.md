@@ -250,10 +250,16 @@ of every block of populated images to agree with the checker's committed
 state and leak findings, with the live bitmap and with the bytes the core
 reads at the attributed offsets. The walk depends on `afsplus-format` alone:
 the placement of the allocation-root pool and of the intent-log slots is
-geometry ([disk layout](../spec/disk-layout.md)). `ExplainObject`, `ExplainPath`, the remaining
-operations and the versioned tool output are open. The semantic image diff of
-[docs/28](28-virtual-images-and-viewports.md) walks two committed states the
-same way and reports what they differ by in filesystem terms.
+geometry ([disk layout](../spec/disk-layout.md)). `explain_object` states one object from the same walk: its record block
+and fields, its comment, a symlink's target, the node count of its own tree, a
+directory's entry count, the extents and the mapped, shared and unwritten
+blocks of a file, the state of its security descriptor chain (length, expected
+and consistent segments, format identity, divergence mark) and every directory
+entry that names it. `explain_path` resolves a path from the root by the
+spelling each directory stores and returns every component with the object it
+names; the walk reads the format alone, so it applies no case folding.
+`ExplainExtent`, `ExplainCheckpoint`, `ExplainReclaim`, `ExplainSpace`,
+`ExplainFeature` and the versioned tool output are open.
 
 ## 6. Optional reverse-map index
 

@@ -570,3 +570,216 @@ fn on_a_snapshot_volume_unowned_blocks_are_the_ones_a_retained_view_owns() {
         unowned.difference(&retained).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn explain_object_and_path_state_what_the_image_was_built_with() {
+    use afsplus_format::object::ObjectType;
+
+    let mut volume = mount(formatted(0)).unwrap();
+    let dir = volume
+        .create_directory(OBJECT_ROOT, "Docs", time(2))
+        .unwrap();
+    let sub = volume.create_directory(dir, "Été", time(2)).unwrap();
+    let file = volume
+        .create_file_in_directory(sub, "note.txt", &pattern(4096, 1), time(3))
+        .unwrap();
+    // Extent tree: a second, distant run; then one preallocated block.
+    volume
+        .write_file_at(file, 100 * BLOCK as u64, &pattern(2 * BLOCK, 2), time(4))
+        .unwrap();
+    volume.set_object_protection(file, 0x15, time(5)).unwrap();
+    volume.set_object_comment(file, "Résumé", time(6)).unwrap();
+    volume
+        .set_security_descriptor(file, 0x7fff_0009, 3, &pattern(5000, 7), time(7))
+        .unwrap();
+    volume
+        .link_file(file, OBJECT_ROOT, "alias", time(8))
+        .unwrap();
+    let clone = volume.clone_file(file, dir, "copy", time(9)).unwrap();
+    let link = volume
+        .create_symlink(dir, "shortcut", "Été/note.txt", time(9))
+        .unwrap();
+    let empty = volume
+        .create_file_in_directory(OBJECT_ROOT, "empty", b"", time(9))
+        .unwrap();
+    // Second witness: what the core itself answers.
+    let core_stat = volume.stat(file).unwrap().unwrap();
+    let core_comment = volume.object_comment(file).unwrap();
+    let mut dev = volume.into_device();
+
+    let explainer = Explainer::load(&mut dev).unwrap();
+    assert_eq!(explainer.problems, Vec::<String>::new());
+
+    let explained = explainer.explain_object(file).unwrap();
+    assert_eq!(explained.object_type, ObjectType::File);
+    assert_eq!(explained.link_count, 2);
+    assert_eq!(explained.size_bytes, 102 * BLOCK as u64);
+    assert_eq!(explained.allocated_bytes, 3 * BLOCK as u64);
+    assert_eq!(explained.protection, 0x15);
+    assert_eq!(explained.created, time(3));
+    assert_eq!(explained.modified, time(4));
+    assert_eq!(explained.changed, time(8));
+    assert!(explained.extent_tree && !explained.data_in_place);
+    assert_eq!(explained.comment, "Résumé");
+    assert_eq!(explained.symlink_target, None);
+    assert_eq!(explained.tree_nodes, 1);
+    assert_eq!(
+        (explained.data.extents, explained.data.mapped_blocks),
+        (2, 3)
+    );
+    // The clone shares all three blocks.
+    assert_eq!(explained.data.shared_blocks, 3);
+    assert_eq!(explained.data.unwritten_blocks, 0);
+    let security = explained.security.as_ref().unwrap();
+    assert_eq!(
+        (
+            security.total_len,
+            security.segments_expected,
+            security.segments_found,
+            security.format,
+            security.projection_diverged
+        ),
+        (5000, 2, 2, Some((0x7fff_0009, 3)), false)
+    );
+    let mut names = explained.names.clone();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            (OBJECT_ROOT, "alias".to_owned()),
+            (sub, "note.txt".to_owned())
+        ]
+    );
+    // Agreement with the core's own answers for the same object.
+    assert_eq!(
+        (
+            explained.size_bytes,
+            explained.allocated_bytes,
+            explained.link_count,
+            explained.protection,
+            explained.content_generation
+        ),
+        (
+            core_stat.size_bytes,
+            core_stat.allocated_bytes,
+            core_stat.link_count,
+            core_stat.protection,
+            core_stat.content_generation
+        )
+    );
+    assert_eq!(explained.comment, core_comment);
+
+    // The clone: own identity, copied comment and descriptor, one name.
+    let cloned = explainer.explain_object(clone).unwrap();
+    assert_eq!((cloned.link_count, cloned.comment.as_str()), (1, "Résumé"));
+    assert_eq!(cloned.security.as_ref().unwrap().segments_found, 2);
+    assert_eq!(cloned.names, vec![(dir, "copy".to_owned())]);
+    assert_ne!(cloned.record_block, explained.record_block);
+
+    let directory = explainer.explain_object(dir).unwrap();
+    assert_eq!(
+        (
+            directory.object_type,
+            directory.entries,
+            directory.tree_nodes
+        ),
+        (ObjectType::Directory, 3, 1)
+    );
+    assert_eq!(directory.names, vec![(OBJECT_ROOT, "Docs".to_owned())]);
+    let root = explainer.explain_object(OBJECT_ROOT).unwrap();
+    assert_eq!((root.entries, root.names.len()), (3, 0));
+    let shortcut = explainer.explain_object(link).unwrap();
+    assert_eq!(shortcut.symlink_target.as_deref(), Some("Été/note.txt"));
+    let nothing = explainer.explain_object(empty).unwrap();
+    assert_eq!(
+        (
+            nothing.size_bytes,
+            nothing.data,
+            nothing.tree_nodes,
+            &nothing.security
+        ),
+        (0, Default::default(), 0, &None)
+    );
+    assert!(explainer.explain_object(9999).is_err());
+
+    // Paths: every component with the object it names.
+    let path = explainer.explain_path("Docs/Été/note.txt").unwrap();
+    assert_eq!(
+        path.components,
+        vec![
+            ("Docs".to_owned(), dir),
+            ("Été".to_owned(), sub),
+            ("note.txt".to_owned(), file)
+        ]
+    );
+    assert_eq!(&path.object, explained);
+    assert_eq!(
+        explainer.explain_path("/alias").unwrap().object.object_id,
+        file
+    );
+    assert_eq!(
+        explainer.explain_path("").unwrap().object.object_id,
+        OBJECT_ROOT
+    );
+    // Refusals name the component that failed.
+    let missing = explainer.explain_path("Docs/été/note.txt").unwrap_err();
+    assert!(missing.contains("\"été\""), "{missing}");
+    let through_a_file = explainer.explain_path("alias/x").unwrap_err();
+    assert!(through_a_file.contains("\"x\""), "{through_a_file}");
+
+    // Negative control: reseal the clone's second segment under a foreign
+    // owner. The walk then finds one consistent segment of two, says why,
+    // and every other statement about the clone stands.
+    let second = (0..dev.total_blocks())
+        .find(|lba| {
+            explainer
+                .explain_block(&mut dev, *lba)
+                .unwrap()
+                .roles
+                .contains(&BlockRole::SecuritySegment {
+                    object_id: clone,
+                    index: 1,
+                })
+        })
+        .unwrap();
+    let mut damaged = dev.clone();
+    let mut block = vec![0u8; BLOCK];
+    damaged.read_block(second, &mut block).unwrap();
+    let header = BlockHeader::verify(&block, block_type::SECURITY_DESCRIPTOR).unwrap();
+    BlockHeader {
+        owner: 0xbad,
+        ..header
+    }
+    .seal(&mut block);
+    damaged.write_block(second, &block).unwrap();
+    let after = Explainer::load(&mut damaged).unwrap();
+    assert_eq!(after.problems.len(), 1, "{:?}", after.problems);
+    let summary = after
+        .explain_object(clone)
+        .unwrap()
+        .security
+        .clone()
+        .unwrap();
+    assert_eq!((summary.segments_found, summary.segments_expected), (1, 2));
+    assert_eq!(after.explain_object(clone).unwrap().comment, "Résumé");
+    assert_eq!(
+        after
+            .explain_object(file)
+            .unwrap()
+            .security
+            .as_ref()
+            .unwrap()
+            .segments_found,
+        2
+    );
+
+    // The record block explain_object names is the block explain_block
+    // attributes to that object.
+    assert_eq!(
+        explainer
+            .explain_block(&mut dev, explained.record_block)
+            .unwrap()
+            .roles,
+        vec![BlockRole::ObjectRecord { object_id: file }]
+    );
+}

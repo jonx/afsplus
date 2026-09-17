@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Explain one object and one path](#2026-09-17--explain-one-object-and-one-path)
 - [2026-09-17 — Diff two images in filesystem terms](#2026-09-17--diff-two-images-in-filesystem-terms)
 - [2026-09-17 — Read the object comment in the portable C reader](#2026-09-17--read-the-object-comment-in-the-portable-c-reader)
 - [2026-09-17 — Carry the object comment to DOS](#2026-09-17--carry-the-object-comment-to-dos)
@@ -198,6 +199,28 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-17 — Explain one object and one path
+
+The leaf value of a directory tree existed in three private copies: the core's
+directory adapter, the portable C reader and the image diff. It is one codec
+now, `encode_tree_entry_value` and `decode_tree_entry_value` in
+`afsplus_format::dir`, with a literal-byte test and nine malformed values; the
+core keeps its key check and its error kinds and delegates the shape, and the
+image diff decodes through it.
+
+On that codec the explain walk keeps, for every object of the object map, its
+record fields, comment, symlink target, tree node count, entry count, data
+summary and descriptor chain state, and the names that reach it.
+`explain_object` returns them and `explain_path` resolves a path component by
+component under the stored spelling. The walk's chain check follows ADR-105:
+one generation per chain. The test builds a file with an extent tree, a
+comment, a two-segment descriptor, two names and a clone, a symlink and an
+empty file, and compares every statement with a literal taken from how the
+image was built and with the core's own `stat` and comment; a segment resealed
+under a foreign owner gives one consistent segment of two and one reported
+problem.
 
 ## 2026-09-17 — Diff two images in filesystem terms
 

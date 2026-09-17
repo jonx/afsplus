@@ -20,11 +20,15 @@ use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::extent::{ExtentItem, EXTENT_SHARED, EXTENT_UNWRITTEN};
 use afsplus_format::header::{block_type, BlockHeader};
 use afsplus_format::ident::Identification;
-use afsplus_format::object::{ObjectRecord, ObjectType, OBJECT_FLAG_EXTENT_TREE};
+use afsplus_format::object::{
+    ObjectRecord, ObjectType, SymlinkRecord, OBJECT_FLAG_DATA_IN_PLACE, OBJECT_FLAG_EXTENT_TREE,
+    SECURITY_REF_PROJECTION_DIVERGED,
+};
 use afsplus_format::reclaim::{ReclaimEntry, ReclaimRoot, ReclaimSegment, ReclaimTable};
 use afsplus_format::region::RegionDescriptor;
 use afsplus_format::security::SecuritySegment;
 use afsplus_format::tree::{TreeKind, TreeNode};
+use afsplus_format::Timespec;
 
 /// Versioned structured-output schema of the explain records (ADR-025).
 pub const EXPLAIN_SCHEMA_VERSION: u32 = 1;
@@ -144,6 +148,66 @@ impl BlockExplanation {
     }
 }
 
+/// What the committed state says about the data of one file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DataSummary {
+    pub extents: u64,
+    pub mapped_blocks: u64,
+    pub shared_blocks: u64,
+    pub unwritten_blocks: u64,
+}
+
+/// What the committed state says about one object's security descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecuritySummary {
+    pub total_len: u32,
+    pub segments_expected: u16,
+    /// Segments consistent with the reference, from the first one.
+    pub segments_found: u16,
+    /// Format identity and version of the first consistent segment.
+    pub format: Option<(u32, u16)>,
+    pub projection_diverged: bool,
+}
+
+/// What the committed state believes about one object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectExplanation {
+    pub object_id: u64,
+    pub object_type: ObjectType,
+    pub record_block: u64,
+    pub link_count: u32,
+    pub size_bytes: u64,
+    pub allocated_bytes: u64,
+    pub protection: u32,
+    pub created: Timespec,
+    pub modified: Timespec,
+    pub changed: Timespec,
+    pub content_generation: u64,
+    pub extent_tree: bool,
+    pub data_in_place: bool,
+    /// Empty when the object has none.
+    pub comment: String,
+    /// Target of a symlink.
+    pub symlink_target: Option<String>,
+    /// Nodes of the object's own tree: directory tree or extent tree.
+    pub tree_nodes: u64,
+    /// Entries of a directory.
+    pub entries: u64,
+    pub data: DataSummary,
+    pub security: Option<SecuritySummary>,
+    /// Every directory entry that names the object: parent object and name.
+    /// Empty for the root, and for an object no directory reaches.
+    pub names: Vec<(u64, String)>,
+}
+
+/// One resolved path, component by component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathExplanation {
+    /// Each component with the object it names, from the root downwards.
+    pub components: Vec<(String, u64)>,
+    pub object: ObjectExplanation,
+}
+
 /// The ownership picture of one committed state.
 pub struct Explainer {
     pub generation: u64,
@@ -153,9 +217,13 @@ pub struct Explainer {
     pub has_snapshots: bool,
     /// Branches the walk could not decode.
     pub problems: Vec<String>,
+    pub root_object_id: u64,
     roles: BTreeMap<u64, Vec<BlockRole>>,
     bitmaps: BTreeMap<(u32, u32), BitmapPage>,
     ident: Identification,
+    objects: BTreeMap<u64, ObjectExplanation>,
+    /// Directory object -> original name -> child object.
+    children: BTreeMap<u64, BTreeMap<Vec<u8>, u64>>,
 }
 
 struct Walk<'a, D: BlockDevice> {
@@ -164,6 +232,10 @@ struct Walk<'a, D: BlockDevice> {
     max_generation: u64,
     roles: BTreeMap<u64, Vec<BlockRole>>,
     problems: Vec<String>,
+    objects: BTreeMap<u64, ObjectExplanation>,
+    children: BTreeMap<u64, BTreeMap<Vec<u8>, u64>>,
+    /// Tree nodes accepted so far, over every tree.
+    tree_nodes: u64,
 }
 
 impl<D: BlockDevice> Walk<'_, D> {
@@ -229,6 +301,7 @@ impl<D: BlockDevice> Walk<'_, D> {
                 }
             };
             self.add(lba, node_role(node.level));
+            self.tree_nodes += 1;
             if node.is_leaf() {
                 leaves.extend(node.items.into_iter().map(|item| (item.key, item.value)));
                 continue;
@@ -292,6 +365,9 @@ impl Explainer {
             max_generation: checkpoint.generation,
             roles: BTreeMap::new(),
             problems: Vec::new(),
+            objects: BTreeMap::new(),
+            children: BTreeMap::new(),
+            tree_nodes: 0,
         };
         walk.add(0, BlockRole::Identification);
         for slot in 0..2u8 {
@@ -470,16 +546,32 @@ impl Explainer {
         Self::reclaim_queue(&mut walk, checkpoint.reclaim_root_block);
 
         let Walk {
-            roles, problems, ..
+            roles,
+            problems,
+            mut objects,
+            children,
+            ..
         } = walk;
+        for (parent, entries) in &children {
+            for (name, child) in entries {
+                if let Some(object) = objects.get_mut(child) {
+                    object
+                        .names
+                        .push((*parent, String::from_utf8_lossy(name).into_owned()));
+                }
+            }
+        }
         Ok(Explainer {
             generation: checkpoint.generation,
             total_blocks: ident.total_blocks,
             has_snapshots: checkpoint.snapshot_roots.is_some(),
             problems,
+            root_object_id: checkpoint.root_object_id,
             roles,
             bitmaps,
             ident,
+            objects,
+            children,
         })
     }
 
@@ -502,16 +594,35 @@ impl Explainer {
             }
         };
         walk.add(record_lba, BlockRole::ObjectRecord { object_id });
+        let symlink_target = (record.object_type == ObjectType::Symlink)
+            .then(|| SymlinkRecord::decode(&walk.buf).ok())
+            .flatten()
+            .map(|(link, _)| link.target.to_owned());
+        let nodes_before = walk.tree_nodes;
+        let mut entries = 0u64;
+        let mut data = DataSummary::default();
 
         match record.object_type {
             ObjectType::Directory => {
-                walk.tree(
+                let leaves = walk.tree(
                     record.data_root,
                     TreeKind::Directory,
                     object_id,
                     &what,
                     &|level| BlockRole::DirectoryNode { object_id, level },
                 );
+                for (key, value) in leaves {
+                    match afsplus_format::dir::decode_tree_entry_value(&key, &value) {
+                        Ok(entry) => {
+                            entries += 1;
+                            walk.children
+                                .entry(object_id)
+                                .or_default()
+                                .insert(entry.name, entry.child_id);
+                        }
+                        Err(error) => walk.problems.push(format!("{what}: {error}")),
+                    }
+                }
             }
             ObjectType::File if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 => {
                 let extents = walk.tree(
@@ -533,6 +644,14 @@ impl Explainer {
                             continue;
                         }
                     };
+                    data.extents += 1;
+                    data.mapped_blocks += item.block_count;
+                    if item.flags & EXTENT_SHARED != 0 {
+                        data.shared_blocks += item.block_count;
+                    }
+                    if item.flags & EXTENT_UNWRITTEN != 0 {
+                        data.unwritten_blocks += item.block_count;
+                    }
                     for offset in 0..item.block_count {
                         walk.add(
                             item.physical_start + offset,
@@ -547,6 +666,8 @@ impl Explainer {
                 }
             }
             ObjectType::File => {
+                data.extents = u64::from(record.data_blocks > 0);
+                data.mapped_blocks = record.data_blocks;
                 for offset in 0..record.data_blocks {
                     walk.add(
                         record.data_root + offset,
@@ -561,11 +682,21 @@ impl Explainer {
             }
             ObjectType::Symlink | ObjectType::Internal => {}
         }
+        let tree_nodes = walk.tree_nodes - nodes_before;
 
         // Descriptor chain: one segment at a time, up to the first segment
         // that does not prove it belongs to this object.
+        let mut security = record.security.map(|reference| SecuritySummary {
+            total_len: reference.total_len,
+            segments_expected: reference.segment_count,
+            segments_found: 0,
+            format: None,
+            projection_diverged: reference.flags & SECURITY_REF_PROJECTION_DIVERGED != 0,
+        });
         if let Some(reference) = record.security {
             let mut lba = reference.first_block;
+            // One commit writes a whole chain (ADR-105).
+            let mut chain_generation = None;
             for index in 0..reference.segment_count {
                 if !walk.read(lba, &what) {
                     break;
@@ -577,8 +708,15 @@ impl Explainer {
                             && segment.count == reference.segment_count
                             && segment.total_len == reference.total_len
                             && generation != 0
-                            && generation <= walk.max_generation =>
+                            && generation <= walk.max_generation
+                            && *chain_generation.get_or_insert(generation) == generation =>
                     {
+                        if let Some(summary) = security.as_mut() {
+                            summary.segments_found += 1;
+                            summary
+                                .format
+                                .get_or_insert((segment.format, segment.version));
+                        }
                         Some(segment.next)
                     }
                     _ => None,
@@ -597,6 +735,61 @@ impl Explainer {
                 }
             }
         }
+        walk.objects.insert(
+            object_id,
+            ObjectExplanation {
+                object_id,
+                object_type: record.object_type,
+                record_block: record_lba,
+                link_count: record.link_count,
+                size_bytes: record.size_bytes,
+                allocated_bytes: record.allocated_bytes,
+                protection: record.protection,
+                created: record.created,
+                modified: record.modified,
+                changed: record.changed,
+                content_generation: record.content_generation,
+                extent_tree: record.flags & OBJECT_FLAG_EXTENT_TREE != 0,
+                data_in_place: record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0,
+                comment: record.comment.as_str().to_owned(),
+                symlink_target,
+                tree_nodes,
+                entries,
+                data,
+                security,
+                names: Vec::new(),
+            },
+        );
+    }
+
+    /// What the committed state believes about `object_id`.
+    pub fn explain_object(&self, object_id: u64) -> Result<&ObjectExplanation, String> {
+        self.objects
+            .get(&object_id)
+            .ok_or_else(|| format!("object {object_id} is not in the committed object map"))
+    }
+
+    /// Resolve `path` from the root directory, one `/`-separated component
+    /// at a time, by the original spelling of each name. The walk reads the
+    /// format alone, so it does not apply a volume's case folding: a path is
+    /// found under the spelling the directory stores.
+    pub fn explain_path(&self, path: &str) -> Result<PathExplanation, String> {
+        let mut current = self.root_object_id;
+        let mut components = Vec::new();
+        for component in path.split('/').filter(|part| !part.is_empty()) {
+            let directory = self
+                .children
+                .get(&current)
+                .ok_or_else(|| format!("{component:?}: object {current} has no entries"))?;
+            current = *directory
+                .get(component.as_bytes())
+                .ok_or_else(|| format!("{component:?} is not an entry of object {current}"))?;
+            components.push((component.to_owned(), current));
+        }
+        Ok(PathExplanation {
+            components,
+            object: self.explain_object(current)?.clone(),
+        })
     }
 
     fn reclaim_queue<D: BlockDevice>(walk: &mut Walk<'_, D>, root_lba: u64) {
