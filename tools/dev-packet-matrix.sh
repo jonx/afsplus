@@ -73,6 +73,9 @@ run_matrix trackdisk-stub native/aros/afsplus_trackdisk.c \
 echo "[dev-packet] extension-packet client matrix (source headers, faked dos.library)"
 run_matrix client-stub -I native/aros/tests/dev-proto \
     native/aros/client/afsplus_client.c native/aros/tests/client_stub.c
+echo "[dev-packet] byte-copy fallback matrix (source headers, faked dos.library)"
+run_matrix copy-stub -I native/aros/tests/dev-proto \
+    native/aros/client/afsplus_copy.c native/aros/tests/copy_stub.c
 # The handler shell calls Exec and DOS, so it needs the installed SDK include
 # tree of an AROS build. With the generated proto headers present it is
 # compiled as the gate compiles it: -D__NOLIBBASE__ makes every library call

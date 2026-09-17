@@ -13,6 +13,15 @@ SIPTR DoPkt(struct MsgPort *port, LONG action, SIPTR arg1, SIPTR arg2,
 LONG Seek(BPTR file, LONG position, LONG mode);
 LONG Read(BPTR file, APTR buffer, LONG length);
 LONG Write(BPTR file, CONST_APTR buffer, LONG length);
+BPTR Open(CONST_STRPTR name, LONG mode);
+LONG Close(BPTR file);
+BPTR Lock(CONST_STRPTR name, LONG mode);
+LONG UnLock(BPTR lock);
+BPTR DupLock(BPTR lock);
+BPTR OpenFromLock(BPTR lock);
+BPTR CurrentDir(BPTR lock);
+LONG Rename(CONST_STRPTR from, CONST_STRPTR to);
+LONG DeleteFile(CONST_STRPTR name);
 struct DateStamp *DateStamp(struct DateStamp *date);
 struct DosList *MakeDosEntry(CONST_STRPTR name, LONG type);
 LONG FreeDosEntry(struct DosList *dlist);

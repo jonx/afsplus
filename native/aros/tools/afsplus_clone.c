@@ -4,79 +4,21 @@
  * clone of the source when both live on one AFS+ volume whose handler can
  * clone, and a byte copy otherwise. The last line says which it was, so a
  * caller never mistakes a copy for shared storage. An existing target is
- * never replaced. */
+ * never replaced, and a failed attempt leaves nothing behind. */
 
 #include <dos/dos.h>
 #include <dos/dosextens.h>
-#include <exec/memory.h>
 #include <proto/dos.h>
-#include <proto/exec.h>
 
 #include <string.h>
 
 #include "../client/afsplus_client.h"
-
-#define COPY_BUFFER_BYTES 65536
+#include "../client/afsplus_copy.h"
 
 static int fail(const char *stage)
 {
     Printf("AFSPlusClone: %s: error %ld\n", stage, IoErr());
     return RETURN_FAIL;
-}
-
-/* Copies into a new file under directory. MODE_NEWFILE would replace an
- * existing target, so its absence is established first. */
-static int byte_copy(BPTR source_lock, BPTR directory, CONST_STRPTR name)
-{
-    UBYTE *buffer;
-    BPTR previous;
-    BPTR existing;
-    BPTR source;
-    BPTR target;
-    LONG count = 0;
-    int status = RETURN_OK;
-
-    previous = CurrentDir(directory);
-    existing = Lock(name, SHARED_LOCK);
-    if (existing != BNULL)
-    {
-        UnLock(existing);
-        CurrentDir(previous);
-        SetIoErr(ERROR_OBJECT_EXISTS);
-        return fail("target");
-    }
-    target = Open(name, MODE_NEWFILE);
-    CurrentDir(previous);
-    if (target == BNULL)
-        return fail("create target");
-    /* OpenFromLock consumes the lock it is given. */
-    source_lock = DupLock(source_lock);
-    source = source_lock != BNULL ? OpenFromLock(source_lock) : BNULL;
-    if (source == BNULL)
-    {
-        if (source_lock != BNULL)
-            UnLock(source_lock);
-        Close(target);
-        return fail("open source");
-    }
-    buffer = AllocVec(COPY_BUFFER_BYTES, MEMF_ANY);
-    if (buffer == NULL)
-    {
-        SetIoErr(ERROR_NO_FREE_STORE);
-        status = fail("buffer");
-    }
-    while (status == RETURN_OK
-        && (count = Read(source, buffer, COPY_BUFFER_BYTES)) > 0)
-        if (Write(target, buffer, count) != count)
-            status = fail("write target");
-    if (status == RETURN_OK && count < 0)
-        status = fail("read source");
-    if (buffer != NULL)
-        FreeVec(buffer);
-    Close(source);
-    if (!Close(target) && status == RETURN_OK)
-        status = fail("close target");
-    return status;
 }
 
 int main(int argc, char **argv)
@@ -108,9 +50,17 @@ int main(int argc, char **argv)
     if (error == ERROR_ACTION_NOT_KNOWN || error == ERROR_NOT_IMPLEMENTED
         || error == ERROR_RENAME_ACROSS_DEVICES)
     {
-        status = byte_copy(source, directory, (CONST_STRPTR)argv[3]);
-        if (status == RETURN_OK)
+        error = afsplus_copy_file(source, directory, (CONST_STRPTR)argv[3]);
+        if (error == 0)
+        {
+            status = RETURN_OK;
             Printf("AFSPlusClone: copied\n");
+        }
+        else
+        {
+            SetIoErr(error);
+            status = fail("copy");
+        }
     }
     else if (error != 0)
     {

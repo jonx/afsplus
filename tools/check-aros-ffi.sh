@@ -121,6 +121,16 @@ clang -std=c11 -Wall -Wextra -Werror \
     -o "$task_dir/client-stub"
 "$task_dir/client-stub"
 
+echo "[aros-ffi] host byte-copy fallback matrix"
+clang -std=c11 -Wall -Wextra -Werror \
+    -D__WORDSIZE=64 -DAROS_FAST_BPTR=1 -DAROS_FAST_BSTR=1 \
+    -I native/aros/tests/dev-proto \
+    -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
+    -I api -I native/aros \
+    native/aros/client/afsplus_copy.c native/aros/tests/copy_stub.c \
+    -o "$task_dir/copy-stub"
+"$task_dir/copy-stub"
+
 echo "[aros-ffi] AROS AArch64 profile: sdk=$sdk_platform target=$aros_target codegen=$aros_codegen_target"
 echo "[aros-ffi] AROS AArch64 Rust static library"
 PATH="$aros_crosstools/bin:$PATH" cargo "+$rust_toolchain" build \

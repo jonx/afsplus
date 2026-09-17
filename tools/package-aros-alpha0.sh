@@ -141,7 +141,7 @@ build_target_program native/aros/tools/afsplus_info.c AFSPlusInfo \
 
 echo "[aros-package] build the target-side clone-or-copy tool"
 build_target_program native/aros/tools/afsplus_clone.c AFSPlusClone \
-    native/aros/client/afsplus_client.c
+    native/aros/client/afsplus_client.c native/aros/client/afsplus_copy.c
 
 echo "[aros-package] build the target-side crash-replay probe"
 build_target_program native/aros/tests/replay_probe.c AFSPlusReplayProbe
