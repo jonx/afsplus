@@ -335,19 +335,29 @@ else
     echo "portable-c-reader static-analyzer=SKIP non-clang-compiler"
 fi
 
+# The AROS m68k cross compiler when it is built; otherwise a bare-metal
+# m68k-elf-gcc (Homebrew: m68k-elf-gcc), which has no C library headers and
+# takes the five <string.h> prototypes from tools/m68k-freestanding.
 m68k_compiler=${AFSPLUS_M68K_CC:-"$HOME/aros-m68k-build/bin/darwin-aarch64/tools/crosstools/m68k-aros-gcc"}
+m68k_flags=
+if [ ! -x "$m68k_compiler" ] && command -v m68k-elf-gcc >/dev/null 2>&1; then
+    m68k_compiler=$(command -v m68k-elf-gcc)
+    m68k_flags="-ffreestanding -isystem $repo/tools/m68k-freestanding"
+fi
 if [ -x "$m68k_compiler" ]; then
-    "$m68k_compiler" -std=c99 -Wall -Wextra -Werror \
+    # shellcheck disable=SC2086
+    "$m68k_compiler" -std=c99 -Wall -Wextra -Werror $m68k_flags \
         -I"$repo/api" -I"$repo/spec" \
         -c "$repo/portable/c/reader.c" -o "$work/reader-m68k.o"
-    "$m68k_compiler" -std=c99 -Wall -Wextra -Werror -fstack-usage \
+    # shellcheck disable=SC2086
+    "$m68k_compiler" -std=c99 -Wall -Wextra -Werror -fstack-usage $m68k_flags \
         -I"$repo/api" -I"$repo/spec" \
         -c "$repo/portable/c/writer.c" -o "$work/writer-m68k.o"
     writer_stack=$(awk -F '\t' \
         '$2 ~ /^[0-9]+$/ { if (!found || $2 > maximum) maximum = $2; found = 1 } \
          END { if (!found) exit 1; print maximum }' "$work/writer-m68k.su")
     test "$writer_stack" -le 1024
-    echo "portable-c-reader m68k-compile=PASS writer-max-frame=$writer_stack ceiling=1024"
+    echo "portable-c-reader m68k-compile=PASS compiler=$(basename "$m68k_compiler") writer-max-frame=$writer_stack ceiling=1024"
 else
     echo "portable-c-reader m68k-compile=SKIP compiler-not-found"
 fi
