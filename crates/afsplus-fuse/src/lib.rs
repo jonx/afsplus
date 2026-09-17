@@ -312,6 +312,33 @@ impl<D: BlockDevice> FuseAdapter<D> {
         Ok((self.attributes(object_id)?, handle))
     }
 
+    pub fn create_symlink(
+        &mut self,
+        parent: ObjectId,
+        name: &[u8],
+        target: &[u8],
+        now: Timespec,
+    ) -> Result<FuseAttributes, VfsError> {
+        let object_id =
+            self.vfs
+                .create_symlink(parent, utf8_name(name)?, utf8_name(target)?, now)?;
+        self.parents.insert(object_id, parent);
+        self.attributes(object_id)
+    }
+
+    /// The exact target bytes of a symlink.
+    ///
+    /// Asked for the length first: a buffer too short leaves the target unread
+    /// and answers with the count it needed, so guessing a size would silently
+    /// return nothing.
+    pub fn read_link(&mut self, object_id: ObjectId) -> Result<Vec<u8>, VfsError> {
+        let required = self.vfs.read_link(object_id, &mut [])?;
+        let mut target = vec![0u8; required];
+        let written = self.vfs.read_link(object_id, &mut target)?;
+        target.truncate(written);
+        Ok(target)
+    }
+
     pub fn create_directory(
         &mut self,
         parent: ObjectId,

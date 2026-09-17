@@ -734,10 +734,16 @@ impl<D: BlockDevice> Vfs<D> {
                 .map(|entry| DirectoryEntry {
                     name: entry.name,
                     object_id: entry.child_id,
-                    kind: if entry.child_type_hint == 1 {
-                        NodeKind::File
-                    } else {
-                        NodeKind::Directory
+                    // Three kinds, not two. Folding everything that was not a
+                    // file into a directory reported every symlink in every
+                    // listing as a directory. The format admits only 1, 2 and
+                    // 3 and refuses anything else when it decodes the entry,
+                    // so the last arm is the directory case rather than a
+                    // guess at an unknown one.
+                    kind: match entry.child_type_hint {
+                        1 => NodeKind::File,
+                        3 => NodeKind::Symlink,
+                        _ => NodeKind::Directory,
                     },
                 })
                 .collect(),

@@ -2,6 +2,7 @@
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -154,6 +155,45 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
             Ok(attributes) => {
                 reply.entry(&ATTRIBUTE_TTL, &file_attributes(&attributes), Generation(0))
             }
+            Err(error) => reply.error(error),
+        }
+    }
+
+    /// Both of these were missing, so the driver answered with the trait's
+    /// defaults: `ln -s` failed with EPERM and reading a link with ENOSYS,
+    /// while the core and the portable interface had done symlinks all along.
+    fn symlink(
+        &self,
+        _request: &Request,
+        parent: INodeNo,
+        link_name: &OsStr,
+        target: &Path,
+        reply: ReplyEntry,
+    ) {
+        let result = self.lock().and_then(|mut adapter| {
+            adapter
+                .create_symlink(
+                    parent.0,
+                    link_name.as_bytes(),
+                    target.as_os_str().as_bytes(),
+                    now(),
+                )
+                .map_err(errno)
+        });
+        match result {
+            Ok(attributes) => {
+                reply.entry(&ATTRIBUTE_TTL, &file_attributes(&attributes), Generation(0))
+            }
+            Err(error) => reply.error(error),
+        }
+    }
+
+    fn readlink(&self, _request: &Request, inode: INodeNo, reply: ReplyData) {
+        let result = self
+            .lock()
+            .and_then(|mut adapter| adapter.read_link(inode.0).map_err(errno));
+        match result {
+            Ok(target) => reply.data(&target),
             Err(error) => reply.error(error),
         }
     }
