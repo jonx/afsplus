@@ -126,7 +126,13 @@ the per-image agreement for these four. The reclaim queue of
 `afspr_reclaim_entry_at` to read the areas they validated; the reader does not
 walk the queue, since no read path needs it.
 [`reclaim_c.rs`](../../crates/afsplus-format/tests/reclaim_c.rs) holds their
-per-image agreement with the Rust codec. The reader preserves
+per-image agreement with the Rust codec. `afspr_decode_checkpoint_block`
+decodes one checkpoint slot against a volume UUID in both payload lengths, 168
+bytes and 184 with the snapshot roots, and refuses a nonzero byte after the
+payload ([ADR-111](../../adr/ADR-111-checkpoint-zero-tail.md)); the volume
+paths sit on top of it and still refuse a checkpoint with snapshot roots.
+[`checkpoint_c.rs`](../../crates/afsplus-format/tests/checkpoint_c.rs) holds
+its per-image agreement. The reader preserves
 these bytes and never evaluates them; the writer appends intent records only
 and rewrites no object record, so it cannot drop a reference.
 [`security_c.rs`](../../crates/afsplus-format/tests/security_c.rs) holds the

@@ -36,6 +36,7 @@
 /* 96 fixed bytes, then the label field: length (1), reserved (7), 64 bytes. */
 #define AFSPR_CHECKPOINT_LABEL_OFFSET AFSP_CHECKPOINT_LABEL_OFFSET
 #define AFSPR_CHECKPOINT_PAYLOAD AFSP_CHECKPOINT_PAYLOAD_BYTES
+#define AFSPR_CHECKPOINT_SNAPSHOT_PAYLOAD AFSP_CHECKPOINT_SNAPSHOT_PAYLOAD_BYTES
 #define AFSPR_OBJECT_FIRST_DYNAMIC UINT64_C(16)
 #define AFSPR_MIN_REGION_BLOCKS UINT32_C(16)
 #define AFSPR_MAX_REGION_BLOCKS UINT32_C(262144)
@@ -739,64 +740,109 @@ static int afspr_decode_ident(const uint8_t *block, size_t block_size,
     return AFSPR_OK;
 }
 
+int afspr_decode_checkpoint_block(const void *input, size_t block_size,
+                                  const uint8_t *volume_uuid,
+                                  struct afspr_checkpoint_view *view_out)
+{
+    const uint8_t *block = (const uint8_t *)input;
+    const uint8_t *p;
+    const uint8_t *field;
+    struct afspr_header header;
+    struct afspr_checkpoint_view view;
+    size_t i;
+    int status;
+
+    if (input == NULL || volume_uuid == NULL || view_out == NULL) {
+        return AFSPR_ERR_INVALID_ARGUMENT;
+    }
+    status = afspr_verify_header(block, block_size,
+                                 AFSPR_BLOCK_TYPE_CHECKPOINT, &header);
+    if (status != AFSPR_OK) return status;
+    if (header.flags != 0u || header.owner != 0u ||
+        (header.payload_len != AFSPR_CHECKPOINT_PAYLOAD &&
+         header.payload_len != AFSPR_CHECKPOINT_SNAPSHOT_PAYLOAD)) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    /* Nothing follows the payload (ADR-111): snapshot roots left behind a
+     * short payload length must not read as a checkpoint without them. */
+    for (i = AFSPR_HEADER_SIZE + (size_t)header.payload_len; i < block_size;
+         ++i) {
+        if (block[i] != 0u) return AFSPR_ERR_CORRUPT;
+    }
+    p = block + AFSPR_HEADER_SIZE;
+    if (memcmp(p, volume_uuid, 16u) != 0) return AFSPR_ERR_CORRUPT;
+    memset(&view, 0, sizeof(view));
+    view.generation = afspr_get_le64(p + 16);
+    if (view.generation == 0u || view.generation != header.generation ||
+        afspr_get_le64(p + 24) != AFSP_OBJECT_ROOT ||
+        afspr_get_le64(p + 80) != 0u) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    view.object_map_block = afspr_get_le64(p + 32);
+    view.allocation_root_block = afspr_get_le64(p + 40);
+    view.reclaim_root_block = afspr_get_le64(p + 48);
+    view.next_object_id = afspr_get_le64(p + 56);
+    view.committed_tx_id = afspr_get_le64(p + 64);
+    view.free_blocks_total = afspr_get_le64(p + 72);
+    view.shared_extent_root_block = afspr_get_le64(p + 88);
+    /* The label field is canonical: length, zero reserved bytes, NUL-free
+     * UTF-8 and zero padding. */
+    field = p + AFSPR_CHECKPOINT_LABEL_OFFSET;
+    view.label_len = field[0];
+    if (view.label_len > 64u ||
+        !afspr_valid_utf8(field + 8u, view.label_len) ||
+        memchr(field + 8u, 0, view.label_len) != NULL) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    for (i = 1u; i < 8u; ++i) {
+        if (field[i] != 0u) return AFSPR_ERR_CORRUPT;
+    }
+    for (i = view.label_len; i < 64u; ++i) {
+        if (field[8u + i] != 0u) return AFSPR_ERR_CORRUPT;
+    }
+    memcpy(view.label, field + 8u, view.label_len);
+    /* The snapshot roots of ADR-073 follow the label: both nonzero and
+     * distinct. */
+    if (header.payload_len == AFSPR_CHECKPOINT_SNAPSHOT_PAYLOAD) {
+        view.has_snapshot_roots = 1u;
+        view.snapshot_registry_block =
+            afspr_get_le64(p + AFSPR_CHECKPOINT_PAYLOAD);
+        view.snapshot_lifetimes_block =
+            afspr_get_le64(p + AFSPR_CHECKPOINT_PAYLOAD + 8u);
+        if (view.snapshot_registry_block == 0u ||
+            view.snapshot_lifetimes_block == 0u ||
+            view.snapshot_registry_block == view.snapshot_lifetimes_block) {
+            return AFSPR_ERR_CORRUPT;
+        }
+    }
+    *view_out = view;
+    return AFSPR_OK;
+}
+
+/* The volume path: the reader does not implement persistent snapshots, so a
+ * checkpoint that carries their roots is not one it selects. */
 static int afspr_decode_checkpoint(const uint8_t *block, size_t block_size,
                                    const struct afspr_ident *ident,
                                    struct afspr_checkpoint *checkpoint)
 {
-    struct afspr_header header;
-    const uint8_t *p;
-    uint64_t root_object;
-    int status = afspr_verify_header(block, block_size,
-                                     AFSPR_BLOCK_TYPE_CHECKPOINT, &header);
+    struct afspr_checkpoint_view view;
+    int status = afspr_decode_checkpoint_block(block, block_size, ident->uuid,
+                                               &view);
 
-    if (status != AFSPR_OK) {
-        return status;
-    }
-    if (header.flags != 0u || header.owner != 0u ||
-        header.payload_len != AFSPR_CHECKPOINT_PAYLOAD) {
-        return AFSPR_ERR_CORRUPT;
-    }
-    p = block + AFSPR_HEADER_SIZE;
-    if (memcmp(p, ident->uuid, sizeof(ident->uuid)) != 0) {
-        return AFSPR_ERR_CORRUPT;
-    }
-    checkpoint->generation = afspr_get_le64(p + 16);
-    root_object = afspr_get_le64(p + 24);
-    if (checkpoint->generation == 0u ||
-        checkpoint->generation != header.generation ||
-        root_object != AFSP_OBJECT_ROOT) {
-        return AFSPR_ERR_CORRUPT;
-    }
-    checkpoint->object_map_block = afspr_get_le64(p + 32);
-    checkpoint->allocation_root_block = afspr_get_le64(p + 40);
-    checkpoint->reclaim_root_block = afspr_get_le64(p + 48);
-    checkpoint->next_object_id = afspr_get_le64(p + 56);
-    checkpoint->committed_tx_id = afspr_get_le64(p + 64);
-    checkpoint->free_blocks_total = afspr_get_le64(p + 72);
-    checkpoint->shared_extent_root_block = afspr_get_le64(p + 88);
-    /* The label field is canonical: length, zero reserved bytes, NUL-free
-     * UTF-8 and zero padding. */
-    {
-        const uint8_t *field = p + AFSPR_CHECKPOINT_LABEL_OFFSET;
-        size_t i;
-        checkpoint->label_len = field[0];
-        if (checkpoint->label_len > 64u ||
-            !afspr_valid_utf8(field + 8u, checkpoint->label_len) ||
-            memchr(field + 8u, 0, checkpoint->label_len) != NULL) {
-            return AFSPR_ERR_CORRUPT;
-        }
-        for (i = 1u; i < 8u; ++i) {
-            if (field[i] != 0u) return AFSPR_ERR_CORRUPT;
-        }
-        for (i = checkpoint->label_len; i < 64u; ++i) {
-            if (field[8u + i] != 0u) return AFSPR_ERR_CORRUPT;
-        }
-        memset(checkpoint->label, 0, sizeof(checkpoint->label));
-        memcpy(checkpoint->label, field + 8u, checkpoint->label_len);
-        checkpoint->label[checkpoint->label_len] = '\0';
-    }
-    if (afspr_get_le64(p + 80) != 0u ||
-        !afspr_is_allocatable(ident, checkpoint->object_map_block) ||
+    if (status != AFSPR_OK) return status;
+    if (view.has_snapshot_roots != 0u) return AFSPR_ERR_CORRUPT;
+    checkpoint->generation = view.generation;
+    checkpoint->object_map_block = view.object_map_block;
+    checkpoint->allocation_root_block = view.allocation_root_block;
+    checkpoint->reclaim_root_block = view.reclaim_root_block;
+    checkpoint->next_object_id = view.next_object_id;
+    checkpoint->committed_tx_id = view.committed_tx_id;
+    checkpoint->free_blocks_total = view.free_blocks_total;
+    checkpoint->shared_extent_root_block = view.shared_extent_root_block;
+    checkpoint->label_len = view.label_len;
+    memset(checkpoint->label, 0, sizeof(checkpoint->label));
+    memcpy(checkpoint->label, view.label, view.label_len);
+    if (!afspr_is_allocatable(ident, checkpoint->object_map_block) ||
         !afspr_is_allocatable(ident, checkpoint->allocation_root_block) ||
         !afspr_is_allocatable(ident, checkpoint->reclaim_root_block) ||
         (checkpoint->shared_extent_root_block != 0u &&

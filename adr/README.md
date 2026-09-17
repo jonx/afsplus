@@ -101,7 +101,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-070](ADR-070-persistent-snapshot-priority.md) | Make the first consistent snapshots persistent | Accepted | amends [ADR-069](ADR-069-consistent-snapshots-first.md); amended by [ADR-071](ADR-071-snapshot-lifetime-prototype.md) |
 | [ADR-071](ADR-071-snapshot-lifetime-prototype.md) | Prototype persistent lifetime accounting and busy snapshot deletion | Accepted | amends [ADR-070](ADR-070-persistent-snapshot-priority.md); amended by [ADR-072](ADR-072-snapshot-record-codecs.md), [ADR-074](ADR-074-protect-previous-checkpoint.md) |
 | [ADR-072](ADR-072-snapshot-record-codecs.md) | Define experimental snapshot registry and lifetime record codecs | Accepted | amends [ADR-071](ADR-071-snapshot-lifetime-prototype.md); amended by [ADR-073](ADR-073-snapshot-checkpoint-roots.md) |
-| [ADR-073](ADR-073-snapshot-checkpoint-roots.md) | Bind snapshot roots through an incompatible checkpoint extension | Accepted | amends [ADR-072](ADR-072-snapshot-record-codecs.md) |
+| [ADR-073](ADR-073-snapshot-checkpoint-roots.md) | Bind snapshot roots through an incompatible checkpoint extension | Accepted | amended by [ADR-111](ADR-111-checkpoint-zero-tail.md); amends [ADR-072](ADR-072-snapshot-record-codecs.md) |
 | [ADR-074](ADR-074-protect-previous-checkpoint.md) | Preserve the previous checkpoint and its registered snapshots | Accepted | amended by [ADR-079](ADR-079-initialize-private-unwritten-reservations.md); amends [ADR-036](ADR-036-reclaim-queue.md), [ADR-071](ADR-071-snapshot-lifetime-prototype.md) |
 | [ADR-075](ADR-075-revocable-backup-capability.md) | Require revocable host authority for trusted snapshot backup | Accepted | amended by [ADR-094](ADR-094-scoped-symlink-transport.md) |
 | [ADR-076](ADR-076-pax-backup-interchange.md) | Use PAX tar with versioned backup preservation metadata | Accepted | amended by [ADR-078](ADR-078-backup-preservation-modes.md), [ADR-080](ADR-080-pax-completion-envelope.md), [ADR-081](ADR-081-ordinary-pax-completion-member.md), [ADR-082](ADR-082-backup-object-metadata.md), [ADR-084](ADR-084-opaque-backup-value-pairs.md), [ADR-087](ADR-087-sparse-archive-content.md) |
@@ -139,6 +139,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-108](ADR-108-extended-attributes.md) | Extended attributes are one owned chain per object | Accepted | amended by [ADR-109](ADR-109-owned-chains-under-snapshots.md); amends [ADR-102](ADR-102-clone-metadata-inheritance.md) |
 | [ADR-109](ADR-109-owned-chains-under-snapshots.md) | A retained snapshot keeps the owned chains it captured | Accepted | amends [ADR-101](ADR-101-security-preservation-container.md), [ADR-108](ADR-108-extended-attributes.md) |
 | [ADR-110](ADR-110-exact-reclaim-admission.md) | Reclaim queue blocks are admitted only in their canonical image | Accepted | amends [ADR-036](ADR-036-reclaim-queue.md) |
+| [ADR-111](ADR-111-checkpoint-zero-tail.md) | Nothing follows the payload of a checkpoint | Accepted | amends [ADR-073](ADR-073-snapshot-checkpoint-roots.md) |
 
 <!-- /adr-index -->
 

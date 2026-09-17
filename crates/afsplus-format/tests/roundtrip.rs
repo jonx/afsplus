@@ -1072,9 +1072,10 @@ fn snapshot_checkpoint_extension_matches_independent_block_images() {
         let mut header = BlockHeader::verify(&invalid, block_type::CHECKPOINT).unwrap();
         header.payload_len = length;
         header.seal(&mut invalid);
+        // Under the short length the roots are a nonzero tail (ADR-111).
         assert_eq!(
             Checkpoint::decode(&invalid, &[7; 16]).is_ok(),
-            length == 168 || length == 184
+            length == 184
         );
     }
     for size in 0..216 {

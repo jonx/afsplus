@@ -335,6 +335,34 @@ int afspr_validate_attribute_set(const void *set, size_t set_size,
 int afspr_attribute_set_next(const void *set, size_t set_size, size_t *cursor,
                              struct afspr_attribute *attribute);
 
+/* One checkpoint slot as the format states it, without the geometry of a
+ * volume: both payload lengths, with and without the snapshot roots of
+ * ADR-073. The volume paths of this reader select only checkpoints without
+ * snapshot roots. label holds label_len bytes and is not NUL-terminated
+ * when label_len is 64. */
+struct afspr_checkpoint_view {
+    uint64_t generation;
+    uint64_t object_map_block;
+    uint64_t allocation_root_block;
+    uint64_t reclaim_root_block;
+    uint64_t next_object_id;
+    uint64_t committed_tx_id;
+    uint64_t free_blocks_total;
+    uint64_t shared_extent_root_block;
+    uint64_t snapshot_registry_block;
+    uint64_t snapshot_lifetimes_block;
+    uint32_t has_snapshot_roots;
+    uint8_t label_len;
+    uint8_t reserved8[3];
+    char label[64];
+};
+
+/* Validate one standalone checkpoint block against the 16-byte volume UUID.
+ * No I/O, no allocation; view is unchanged on error. */
+int afspr_decode_checkpoint_block(const void *block, size_t block_size,
+                                  const uint8_t *volume_uuid,
+                                  struct afspr_checkpoint_view *view);
+
 /* Reclaim queue (ADR-036): standalone decoders of its three block kinds.
  * They validate one block and borrow it; walking the queue is the caller's.
  * No I/O, no allocation; outputs are unchanged on error. */

@@ -79,8 +79,11 @@ Rules:
 11. the current volume label is committed state in the checkpoint payload
    ([ADR-104](../adr/ADR-104-volume-label-in-checkpoint.md)): length at offset
    96, seven zero bytes, 64 bytes of NUL-free UTF-8 zero padded, payload of
-   168 bytes, or 184 with the snapshot roots after it; the identification
-   block keeps the format-time label and is never rewritten
+   168 bytes, or 184 with the snapshot roots after it (registry root at 168,
+   lifetime-ledger root at 176, both nonzero and distinct,
+   [ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md)); nothing follows
+   the payload ([ADR-111](../adr/ADR-111-checkpoint-zero-tail.md)); the
+   identification block keeps the format-time label and is never rewritten
 12. an object record may carry the 16-byte attribute reference (object flag
    bit 4) after the security reference and own a chain of `"AFSA"` segments,
    laid out as the `"AFSX"` segments are, whose content is the object's whole
@@ -88,6 +91,12 @@ Rules:
    bytes, at most 65,536 bytes
    ([ADR-108](../adr/ADR-108-extended-attributes.md)); no feature gates it
 13. the format descriptor records both the comparison-key algorithm and the Unicode normalization/casefold table version; prototype identification v3 uses Unicode 16.0.0
+
+<!-- toc -->
+
+- [Reclaim queue blocks](#reclaim-queue-blocks)
+
+<!-- /toc -->
 
 ## Reclaim queue blocks
 

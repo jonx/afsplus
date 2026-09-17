@@ -330,6 +330,10 @@ fn every_c_format_constant_equals_the_rust_codec() {
             payload_len(&checkpoint.encode(BS).unwrap()),
         ),
         (
+            "AFSPR_CHECKPOINT_SNAPSHOT_PAYLOAD",
+            payload_len(&with_roots.encode(BS).unwrap()),
+        ),
+        (
             "AFSPR_OBJECT_FIRST_DYNAMIC",
             afsplus_format::OBJECT_FIRST_DYNAMIC,
         ),

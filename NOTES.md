@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — A second reader for the snapshot checkpoint payload (ADR-111)](#2026-09-17--a-second-reader-for-the-snapshot-checkpoint-payload-adr-111)
 - [2026-09-17 — Exact admission for the reclaim queue blocks (ADR-110)](#2026-09-17--exact-admission-for-the-reclaim-queue-blocks-adr-110)
 - [2026-09-17 — A second reader for the reclaim queue blocks](#2026-09-17--a-second-reader-for-the-reclaim-queue-blocks)
 - [2026-09-17 — The remaining explain operations](#2026-09-17--the-remaining-explain-operations)
@@ -211,6 +212,31 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — A second reader for the snapshot checkpoint payload (ADR-111)
+
+Second item of Q15. The C reader's checkpoint decoder was private and knew
+the 168-byte payload only. It is now `afspr_decode_checkpoint_block`, public,
+format-level (no geometry), for both payload lengths; the volume path calls it
+and still refuses a checkpoint with snapshot roots, so an image with that
+feature does not probe, as before.
+
+The cross-read found a defect, not only slack. No reader looked past the
+payload, so a snapshot checkpoint resealed with length 168 was admitted by
+both readers as a plain checkpoint, its registry and ledger roots left in the
+tail. ADR-111 (decided by claude-main under the rule it relays from the
+owner): a nonzero byte after a checkpoint's payload is corrupt. Rust, C and
+the fuzz checkpoint oracle apply it. `roundtrip.rs` and the fuzz oracle's unit
+test had asserted the old reading and now assert the new one. No encoder
+wrote such a byte; no fixture or fingerprint moves.
+
+Proof: `checkpoint_c` in afsplus-format, 52 images, 104 verdicts over a strict
+and a sanitized build. Negative controls, each failing it: C without the tail
+scan, C admitting equal roots. Also run and passing: `roundtrip` (44),
+`c_constants`, fuzz unit tests (16), and in afsplus-check `corruption_corpus`
+(3), `snapshots` (1), `volume_label` (7), `security_c` (1), which go through
+the changed decoders. Correction to the two entries below: the checker's
+`reclaim` test has 8 tests and `corruption_corpus` 3; I had the counts swapped.
 
 ## 2026-09-17 — Exact admission for the reclaim queue blocks (ADR-110)
 

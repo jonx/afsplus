@@ -34,6 +34,13 @@ fn expected(input: &[u8]) -> Option<Checkpoint> {
     if h.flags != 0 || h.owner != 0 || !matches!(h.payload_len, 168 | 184) {
         return None;
     }
+    // Nothing follows the payload (ADR-111).
+    if input[HEADER_SIZE + h.payload_len as usize..]
+        .iter()
+        .any(|b| *b != 0)
+    {
+        return None;
+    }
     let p = &input[HEADER_SIZE..HEADER_SIZE + h.payload_len as usize];
     if p[..16] != UUID
         || word(p, 16) == 0
@@ -138,7 +145,9 @@ mod tests {
                 ..header
             }
             .seal(&mut changed);
-            assert_eq!(accepts(&changed), matches!(len, 168 | 184));
+            // The seed carries its roots: under the short length they are a
+            // nonzero tail, so only its own length is admitted.
+            assert_eq!(accepts(&changed), len == 184);
             exercise(&changed).unwrap();
         }
         for offset in [168, 176] {

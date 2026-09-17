@@ -192,6 +192,11 @@ impl Checkpoint {
         {
             return Err(FormatError::Invalid("checkpoint payload length mismatch"));
         }
+        // Nothing follows the payload (ADR-111): a checkpoint with snapshot
+        // roots resealed with the short length must not read as one without.
+        if block[HEADER_SIZE + p.len()..].iter().any(|byte| *byte != 0) {
+            return Err(FormatError::Invalid("checkpoint unused tail is nonzero"));
+        }
         let mut uuid = [0u8; 16];
         uuid.copy_from_slice(&p[0..16]);
         if &uuid != expected_uuid {
