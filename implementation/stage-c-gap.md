@@ -273,7 +273,7 @@ Present: the generic AROS `fdsk.device` carries S0 and S1 on Hosted; the
 external `afsram.device` carries native QEMU.
 
 [`native/aros/upstream`](../native/aros/upstream/README.md) holds a patch and
-a regression probe for item 1; neither has been compiled.
+a regression probe for item 1, both now built and run on a target.
 
 Lacking in the generic device, as upstream patches with regression probes:
 
@@ -289,7 +289,13 @@ Lacking in the generic device, as upstream patches with regression probes:
    waits on a generic AROS decision named in
    [`native/aros/upstream/README.md`](../native/aros/upstream/README.md);
 2. upstream has no `TD_READ64`, `TD_WRITE64` or `NSCMD_TD_*64`; MacAROS
-   carries that fix, and AFS+ images beyond 4 GiB depend on it;
+   carries that fix, and AFS+ images beyond 4 GiB depend on it. Without it
+   the handler does not misaddress such a volume, it refuses to mount it: the
+   startup probe finds neither the NSD commands nor `TD_READ64`, and the
+   trackdisk adapter answers `ERROR_OBJECT_TOO_LARGE` for a partition ending
+   above 4 GiB. Shown on Hosted with a DOSDriver of 1,099,999 cylinders of
+   4 KiB: `mount failed at trackdisk-adapter: error 207`, `List` fails with
+   `RETURN_FAIL`, no handler task is left and nothing traps;
 3. attach and detach of a unit to a named file at run time
    (`AttachDisk`-style), instead of the fixed `FDSK:Unit<N>` convention.
 
