@@ -61,7 +61,7 @@ No read/write handler work begins until a reader can parse reference images.
 
 ## Phase 1: portable reader
 
-> **Roadmap:** [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage D\]](../ROADMAP.md#stage-d-portability-and-host-tooling) · **Milestones:** [\[M01\]](milestones.md), [\[M12\]](milestones.md)
+> **Roadmap:** [~~Stage A~~](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage D\]](../ROADMAP.md#stage-d-portability-and-host-tooling) · **Milestones:** [\[M01\]](milestones.md), [\[M12\]](milestones.md)
 
 Implement:
 
@@ -82,7 +82,7 @@ Acceptance:
 
 ## Phase 2: formatter and image builder
 
-> **Roadmap:** [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable) · **Milestones:** [~~M02~~](milestones.md)
+> **Roadmap:** [~~Stage A~~](../ROADMAP.md#stage-a-make-the-core-executable) · **Milestones:** [~~M02~~](milestones.md)
 
 Implement `mkafsplus`.
 
@@ -94,7 +94,7 @@ Acceptance:
 
 ## Phase 3: allocator and mutations
 
-> **Roadmap:** [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) · **Milestones:** [\[M03\]](milestones.md)
+> **Roadmap:** [~~Stage A~~](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) · **Milestones:** [\[M03\]](milestones.md)
 
 Implement:
 
@@ -110,7 +110,7 @@ Initially run only against disposable images.
 
 ## Phase 4: journal
 
-> **Roadmap:** [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) · **Milestones:** [\[M04\]](milestones.md)
+> **Roadmap:** [~~Stage A~~](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage B\]](../ROADMAP.md#stage-b-resolve-the-epoch-1-architecture-blockers) · **Milestones:** [\[M04\]](milestones.md)
 
 Implement the checkpoint-COW/group-commit/intent-log contract of
 [ADR-063](../adr/ADR-063-intent-log-epoch1.md), with existing-file write/truncate
@@ -123,7 +123,7 @@ Acceptance:
 
 ## Phase 5: checker
 
-> **Roadmap:** [\[Stage A\]](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [\[M05\]](milestones.md)
+> **Roadmap:** [~~Stage A~~](../ROADMAP.md#stage-a-make-the-core-executable), [\[Stage F\]](../ROADMAP.md#stage-f-production-qualification) · **Milestones:** [\[M05\]](milestones.md)
 
 Implement `afsplus-check`.
 

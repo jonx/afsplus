@@ -9,8 +9,10 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Close a-cache and Stage A](#2026-09-17--close-a-cache-and-stage-a)
 - [2026-09-17 — Fix window refusals that poisoned an open deferred window](#2026-09-17--fix-window-refusals-that-poisoned-an-open-deferred-window)
 - [2026-09-16 — Fix intent-log replay reusing a logged data run](#2026-09-16--fix-intent-log-replay-reusing-a-logged-data-run)
+- [2026-09-16 — Close a-fuzz and a-flight](#2026-09-16--close-a-fuzz-and-a-flight)
 - [2026-09-16 — Integrate lifecycle observation, six generated families and the structure matrix](#2026-09-16--integrate-lifecycle-observation-six-generated-families-and-the-structure-matrix)
 - [2026-09-15 — Integrate the family-matrix driver and four more cache families](#2026-09-15--integrate-the-family-matrix-driver-and-four-more-cache-families)
 - [2026-09-15 — Integrate data-write cache families and generated operation families](#2026-09-15--integrate-data-write-cache-families-and-generated-operation-families)
@@ -170,6 +172,26 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+## 2026-09-17 — Close a-cache and Stage A
+
+Four residual lots finished the tiny-cache inventory: the data families gained
+sampled cut campaigns at four and eight pages with measured spills; the
+structure, clone and shared families gained their remaining evictions,
+refusals, retained views and reload failures; the deferred-window and
+snapshot families gained evictions of their recovery commits, the two update
+refusals, publication read failures, logging-phase faults, a planted registry
+exhaustion and a wrapping ledger scan; the tail lot added the mid-run reclaim
+cursor, a rotation-batch cut campaign in the core crate and the ambiguous
+runner over every remaining family. Every inventory row names either no open
+combination or a measured staged-node demand with its number.
+
+The final qualification in `build/stage-a-qualification-9918fe3` (1505/0/13), run once on the complete sources with
+`--no-fail-fast`, passed with every other gate; the nine generated families,
+eighteen controls and the version-1 baseline were rerun in
+`build/fuzz-campaigns-9918fe3`. With `a-cache` complete the eight finite gates
+of Stage A have their evidence. Native adapters, sustained workloads,
+platform qualification and the epoch-1 freeze keep their later owners.
+
 ## 2026-09-17 — Fix window refusals that poisoned an open deferred window
 
 The deferred-window residual families exposed a second defect. Any error
@@ -211,6 +233,28 @@ publication before it reads the registry, the rule the other entry points
 follow. The deferred, replay and snapshot family matrices (148 tests) and the
 intent-log, orphan and shared crash suites pass on the fix; the family that
 found it keeps the reproducer.
+
+## 2026-09-16 — Close a-fuzz and a-flight
+
+Version 8 of the semantic replay profile exports every diagnostic kind the
+recorder can emit, with a fixed payload area and an admission rule per
+payload class. Producing the failure kinds required three scenario
+commands: single-shot device faults counted from the operation they precede,
+a format fault whose partially written device is discarded before a fresh
+format, and one-byte image edits, plain or resealed through the block
+checksum so an invariant violation reaches the verifier. Sixty-three kinds
+come from host scenarios; `ApiUnwound` needs a panic through the API guard
+and stays with the core unwind test.
+
+The generator gained staged final unlinks inside deferred windows (the
+reserved directory receives every final unlink of a committed object, and a
+create cancelled by the same window leaves nothing), an exact model of
+CloneRange destination coverage and source change time, bounded write and
+truncation surfaces, and an audit of all 66 API methods against the
+generators. No filesystem bug appeared in either lot.
+
+The integrated qualification in `build/stage-a-qualification-9918fe3` (1505/0/13) with the nine generated families, eighteen controls and the version-1 baseline rerun in `build/fuzz-campaigns-9918fe3` passed with every other gate. With
+these lots `a-flight` and `a-fuzz` are complete; `a-cache` keeps Stage A open.
 
 ## 2026-09-16 — Integrate lifecycle observation, six generated families and the structure matrix
 

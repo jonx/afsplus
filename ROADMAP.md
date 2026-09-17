@@ -15,7 +15,7 @@ stage scope can coexist with a shared milestone awaiting later qualification.
 
 - [Stage and milestone map](#stage-and-milestone-map)
 - [Stage 0: Amiga-native design review](#stage-0-amiga-native-design-review)
-- [\[Stage A\]: make the core executable](#stage-a-make-the-core-executable)
+- [~~Stage A~~: make the core executable](#stage-a-make-the-core-executable)
 - [\[Stage B\]: resolve the epoch-1 architecture blockers](#stage-b-resolve-the-epoch-1-architecture-blockers)
   - [B1. Allocation state](#b1-allocation-state)
   - [B2. User-data update policy](#b2-user-data-update-policy)
@@ -40,7 +40,7 @@ is recorded only in [milestones](implementation/milestones.md).
 | Stage | Contributing milestones | Intended outcome |
 |---|---|---|
 | [Stage 0](#stage-0-amiga-native-design-review) | Ongoing design review, excluded from finite completion | Amiga filesystem design references |
-| [\[Stage A\]](#stage-a-make-the-core-executable) | [\[M01\]](implementation/milestones.md), [~~M02~~](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md), [\[M05\]](implementation/milestones.md) | Executable core and reader/format foundations |
+| [~~Stage A~~](#stage-a-make-the-core-executable) | [\[M01\]](implementation/milestones.md), [~~M02~~](implementation/milestones.md), [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md), [\[M05\]](implementation/milestones.md) | Executable core and reader/format foundations |
 | [\[Stage B\]](#stage-b-resolve-the-epoch-1-architecture-blockers) | [\[M03\]](implementation/milestones.md), [\[M04\]](implementation/milestones.md) | Allocation, update and durability architecture |
 | [\[Stage C\]](#stage-c-integrate-aros-and-begin-independent-c-portability) | [\[M06\]](implementation/milestones.md), [\[M07\]](implementation/milestones.md), [\[M12\]](implementation/milestones.md) | AROS adapters and independent C integration |
 | [\[Stage D\]](#stage-d-portability-and-host-tooling) | [\[M01\]](implementation/milestones.md), [~~M08~~](implementation/milestones.md), [\[M12\]](implementation/milestones.md) | Portable implementations and host tooling |
@@ -61,7 +61,7 @@ Milestones: none — the outcome is [docs/23](docs/23-pfs3-stage0-review.md). Su
 
 See [`implementation/peer-review-prototype-plan.md`](implementation/peer-review-prototype-plan.md).
 
-## \[Stage A\]: make the core executable
+## ~~Stage A~~: make the core executable
 
 <!-- stage-gates: Stage A = a-core,a-devices,a-checkpoint,a-accounting,a-replay,a-flight,a-cache,a-fuzz -->
 
@@ -123,10 +123,10 @@ Then add:
 
 - ~~SliceBackend for partition/disk-image viewports~~ <!-- progress: roadmap-18 -->
 - ~~OverlayBackend for cheap writable test branches~~ <!-- progress: roadmap-19 -->
-- structured flight recorder <!-- progress: roadmap-30 -->
+- ~~structured flight recorder~~ <!-- progress: roadmap-30 -->
 - ~~operation record/replay~~ <!-- progress: roadmap-20 -->
-- tiny-cache test matrix <!-- progress: roadmap-31 -->
-- fuzzing/property tests <!-- progress: roadmap-32 -->
+- ~~tiny-cache test matrix~~ <!-- progress: roadmap-31 -->
+- ~~fuzzing/property tests~~ <!-- progress: roadmap-32 -->
 
 Task-level status, origin and completion evidence:
 [structured flight recorder](implementation/milestones.md#structured-flight-recorder-tasks),
