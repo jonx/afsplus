@@ -15,6 +15,8 @@ extern void afsplus_aros_trace_stage(const char *stage);
 
 #include <dos/dos.h>
 #include <dos/dosextens.h>
+#include <dos/dosasl.h>
+#include <dos/exall.h>
 #include <aros/stdc/string.h>
 
 #define AFSPLUS_NATIVE_LOCK_MAGIC UINT32_C(0x41464c4b)
@@ -24,12 +26,22 @@ extern void afsplus_aros_trace_stage(const char *stage);
 #define AFSPLUS_SECONDS_PER_MINUTE INT64_C(60)
 #define AFSPLUS_TICKS_PER_SECOND UINT32_C(50)
 
+/* One directory entry read from the filesystem that did not fit the caller's
+ * ExAll buffer. It is returned first by the next ACTION_EXAMINE_ALL. */
+struct AfsplusArosPendingEntry {
+    struct AfsplusArosFileInfo info;
+    uint8_t name[MAXFILENAMELENGTH];
+};
+
 struct AfsplusArosNativeLock {
     struct FileLock public_lock;
     uint32_t magic;
     struct AfsplusArosPacketContext *owner;
     uint64_t id;
     struct AfsplusArosNativeLock *next;
+    /* Allocated by the first ACTION_EXAMINE_ALL on this lock. */
+    struct AfsplusArosPendingEntry *exall;
+    uint32_t exall_pending;
 };
 
 struct AfsplusArosNativeFile {
@@ -270,6 +282,9 @@ static void unlink_lock(struct AfsplusArosPacketContext *context,
         {
             *link = lock->next;
             lock->magic = 0;
+            if (lock->exall != NULL)
+                context->free(context->callback_context, lock->exall,
+                    sizeof(*lock->exall));
             context->free(context->callback_context, lock, sizeof(*lock));
             return;
         }
@@ -586,6 +601,76 @@ static void unix_to_datestamp(int64_t seconds, uint32_t nanoseconds,
     date->ds_Days = (LONG)days;
     date->ds_Minute = (LONG)minutes;
     date->ds_Tick = ticks > INT32_MAX ? INT32_MAX : (LONG)ticks;
+}
+
+static const size_t exall_fixed_size[] =
+{
+    0,
+    offsetof(struct ExAllData, ed_Type),
+    offsetof(struct ExAllData, ed_Size),
+    offsetof(struct ExAllData, ed_Prot),
+    offsetof(struct ExAllData, ed_Days),
+    offsetof(struct ExAllData, ed_Comment),
+    offsetof(struct ExAllData, ed_OwnerUID),
+    sizeof(struct ExAllData)
+};
+
+/* Appends one entry at *cursor when it fits before end. Strings follow the
+ * fixed part and the next entry starts pointer-aligned. */
+static uint32_t exall_append(uint8_t **cursor, uint8_t *end, LONG type,
+    const struct AfsplusArosPendingEntry *source, struct ExAllData **last)
+{
+    struct ExAllData *entry = (struct ExAllData *)*cursor;
+    size_t name_length = source->info.name_length;
+    size_t need = exall_fixed_size[type] + name_length + 1
+        + (type >= ED_COMMENT ? 1 : 0);
+    uint8_t *strings;
+
+    need = (need + sizeof(void *) - 1) & ~(sizeof(void *) - 1);
+    if (need > (size_t)(end - *cursor))
+        return 0;
+    strings = *cursor + exall_fixed_size[type];
+    entry->ed_Next = NULL;
+    entry->ed_Name = strings;
+    memcpy(strings, source->name, name_length);
+    strings[name_length] = 0;
+    if (type >= ED_TYPE)
+        entry->ed_Type = source->info.entry_type;
+    if (type >= ED_SIZE)
+    {
+        if (sizeof(entry->ed_Size) == sizeof(uint32_t)
+            && source->info.size > (uint64_t)INT32_MAX)
+            entry->ed_Size = INT32_MAX;
+        else
+            entry->ed_Size = source->info.size;
+    }
+    if (type >= ED_PROTECTION)
+        entry->ed_Prot = source->info.protection;
+    if (type >= ED_DATE)
+    {
+        struct DateStamp date;
+
+        unix_to_datestamp(source->info.modified_seconds,
+            source->info.modified_nanoseconds, &date);
+        entry->ed_Days = (ULONG)date.ds_Days;
+        entry->ed_Mins = (ULONG)date.ds_Minute;
+        entry->ed_Ticks = (ULONG)date.ds_Tick;
+    }
+    if (type >= ED_COMMENT)
+    {
+        entry->ed_Comment = strings + name_length + 1;
+        entry->ed_Comment[0] = 0;
+    }
+    if (type >= ED_OWNER)
+    {
+        entry->ed_OwnerUID = 0;
+        entry->ed_OwnerGID = 0;
+    }
+    if (*last != NULL)
+        (*last)->ed_Next = entry;
+    *last = entry;
+    *cursor += need;
+    return 1;
 }
 
 static int32_t fill_fib_name(UBYTE *destination, size_t capacity,
@@ -1600,6 +1685,10 @@ int32_t afsplus_aros_packet_process(
                 error = ERROR_INVALID_LOCK;
             else if (error == 0)
                 id = lock->id;
+            if (error == 0 && lock != NULL
+                && (packet->dp_Type == ACTION_EXAMINE_OBJECT
+                    || packet->dp_Type == ACTION_EXAMINE_OBJECT64))
+                lock->exall_pending = 0;
 
             if (error == 0 && (packet->dp_Type == ACTION_EXAMINE_OBJECT
                     || packet->dp_Type == ACTION_EXAMINE_OBJECT64))
@@ -1619,6 +1708,97 @@ int32_t afsplus_aros_packet_process(
         if (temporary_root != 0)
             (void)afsplus_aros_free_lock(context->filesystem,
                 temporary_root);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
+    case ACTION_EXAMINE_ALL:
+    {
+        struct AfsplusArosNativeLock *lock = find_lock(context,
+            (BPTR)packet->dp_Arg1);
+        uint8_t *cursor = (uint8_t *)packet->dp_Arg2;
+        LONG type = (LONG)packet->dp_Arg4;
+        struct ExAllControl *control = (struct ExAllControl *)packet->dp_Arg5;
+        struct ExAllData *last = NULL;
+        uint8_t *end;
+        uint32_t finished = 0;
+
+        if (lock == NULL)
+            error = ERROR_INVALID_LOCK;
+        else if (cursor == NULL || control == NULL || packet->dp_Arg3 <= 0)
+            error = ERROR_REQUIRED_ARG_MISSING;
+        else if (type < ED_NAME || type > ED_OWNER)
+            error = ERROR_BAD_NUMBER;
+        /* Pattern and hook matching need dos.library, which this layer never
+         * calls; dos.library then emulates ExAll through ExNext. */
+        else if (control->eac_MatchString != NULL
+            || control->eac_MatchFunc != NULL)
+            error = ERROR_ACTION_NOT_KNOWN;
+        if (error == 0 && lock->exall == NULL)
+        {
+            lock->exall = context->allocate(context->callback_context,
+                sizeof(*lock->exall));
+            if (lock->exall == NULL)
+                error = ERROR_NO_FREE_STORE;
+            lock->exall_pending = 0;
+        }
+        /* A zero key restarts the scan. */
+        if (error == 0 && control->eac_LastKey == 0)
+        {
+            lock->exall_pending = 0;
+            error = afsplus_aros_rewind_directory(context->filesystem,
+                lock->id);
+        }
+        if (error != 0)
+            break;
+
+        end = cursor + (size_t)packet->dp_Arg3;
+        control->eac_Entries = 0;
+        control->eac_LastKey = 1;
+        for (;;)
+        {
+            if (!lock->exall_pending)
+            {
+                memset(lock->exall, 0, sizeof(*lock->exall));
+                error = afsplus_aros_examine_next(context->filesystem,
+                    lock->id, &lock->exall->info, lock->exall->name,
+                    sizeof(lock->exall->name));
+                if (error == ERROR_NO_MORE_ENTRIES)
+                    finished = 1;
+                if (error != 0)
+                    break;
+                lock->exall_pending = 1;
+            }
+            if (!exall_append(&cursor, end, type, lock->exall, &last))
+            {
+                /* Kept for the next call. A buffer too small for one entry
+                 * is the caller's error. */
+                if (control->eac_Entries == 0)
+                    error = ERROR_BUFFER_OVERFLOW;
+                break;
+            }
+            lock->exall_pending = 0;
+            control->eac_Entries++;
+        }
+        if (finished)
+            error = ERROR_NO_MORE_ENTRIES;
+        else if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
+    case ACTION_EXAMINE_ALL_END:
+    {
+        struct AfsplusArosNativeLock *lock = find_lock(context,
+            (BPTR)packet->dp_Arg1);
+
+        if (lock == NULL)
+            error = ERROR_INVALID_LOCK;
+        else
+        {
+            lock->exall_pending = 0;
+            error = afsplus_aros_rewind_directory(context->filesystem,
+                lock->id);
+        }
         if (error == 0)
             result = DOSTRUE;
         break;

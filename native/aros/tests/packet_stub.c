@@ -2,6 +2,9 @@
 
 #include "afsplus_packet.h"
 
+#include <dos/dosasl.h>
+#include <dos/exall.h>
+
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +33,11 @@ static uint32_t close_count;
 static uint32_t examine_count;
 static uint32_t fail_allocations;
 static uint64_t created_lock_id;
+/* Negative: examine_next yields "entry" forever (the single-entry cases).
+ * Otherwise a directory of that many entries named e0, e1, ... */
+static int32_t stub_directory_size = -1;
+static int32_t stub_directory_at;
+static uint32_t rewind_count;
 static uint64_t stub_groups = UINT64_C(0xF);
 static const char *stub_link_target = "";
 static uint32_t stub_protection;
@@ -394,6 +402,21 @@ int32_t afsplus_aros_examine_next(struct AfsplusAros *filesystem,
 {
     assert(filesystem == STUB_FILESYSTEM);
     assert(lock != 0);
+    if (stub_directory_size >= 0)
+    {
+        int32_t error;
+
+        if (stub_directory_at >= stub_directory_size)
+            return ERROR_NO_MORE_ENTRIES;
+        error = examine_common(output, name, name_capacity);
+        name[0] = 'e';
+        name[1] = (uint8_t)('0' + stub_directory_at);
+        output->name_length = 2;
+        output->size = (uint64_t)stub_directory_at + 10;
+        output->protection = UINT32_C(0x40) + (uint32_t)stub_directory_at;
+        stub_directory_at++;
+        return error;
+    }
     return examine_common(output, name, name_capacity);
 }
 
@@ -402,6 +425,8 @@ int32_t afsplus_aros_rewind_directory(struct AfsplusAros *filesystem,
 {
     assert(filesystem == STUB_FILESYSTEM);
     assert(lock != 0);
+    rewind_count++;
+    stub_directory_at = 0;
     return 0;
 }
 
@@ -822,6 +847,103 @@ int main(void)
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res1 == -1
             && packet.dp_Res2 == ERROR_OBJECT_WRONG_TYPE);
+    }
+
+    /* C2: ACTION_EXAMINE_ALL over a five-entry directory. */
+    {
+        /* ED_DATE entry with a two-character name: fixed part up to
+         * ed_Comment plus "eN\0", pointer-aligned. */
+        const size_t one = (offsetof(struct ExAllData, ed_Comment) + 3
+            + sizeof(void *) - 1) & ~(sizeof(void *) - 1);
+        union { uint8_t bytes[256]; void *align; } buffer;
+        struct ExAllControl control;
+        struct ExAllData *entry;
+        uint32_t rewinds;
+
+        stub_directory_size = 5;
+        memset(&control, 0, sizeof(control));
+        memset(&buffer, 0x7e, sizeof(buffer));
+        rewinds = rewind_count;
+
+        /* Room for exactly two entries: the third is read, kept pending and
+         * must come back first on the next call, never be lost. */
+        initialize_packet(&packet, ACTION_EXAMINE_ALL);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = (SIPTR)buffer.bytes;
+        packet.dp_Arg3 = (SIPTR)(2 * one + one - 1);
+        packet.dp_Arg4 = ED_DATE;
+        packet.dp_Arg5 = (SIPTR)&control;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(control.eac_Entries == 2 && control.eac_LastKey != 0);
+        assert(rewind_count == rewinds + 1);
+        entry = (struct ExAllData *)buffer.bytes;
+        assert(strcmp((char *)entry->ed_Name, "e0") == 0);
+        assert(entry->ed_Type == ST_FILE && entry->ed_Size == 10);
+        assert(entry->ed_Prot == 0x40);
+        assert(entry->ed_Days == 1 && entry->ed_Mins == 1
+            && entry->ed_Ticks == 52);
+        assert((uint8_t *)entry->ed_Next == buffer.bytes + one);
+        entry = entry->ed_Next;
+        assert(strcmp((char *)entry->ed_Name, "e1") == 0);
+        assert(entry->ed_Size == 11 && entry->ed_Next == NULL);
+        /* Nothing was written past the second entry. */
+        assert(buffer.bytes[2 * one] == 0x7e);
+
+        /* Continuation: no rewind, e2 first, then e3 and e4, then the end. */
+        packet.dp_Arg3 = (SIPTR)sizeof(buffer);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_NO_MORE_ENTRIES);
+        assert(control.eac_Entries == 3);
+        assert(rewind_count == rewinds + 1);
+        entry = (struct ExAllData *)buffer.bytes;
+        assert(strcmp((char *)entry->ed_Name, "e2") == 0);
+        assert(strcmp((char *)entry->ed_Next->ed_Name, "e3") == 0);
+        assert(strcmp((char *)entry->ed_Next->ed_Next->ed_Name, "e4") == 0);
+        assert(entry->ed_Next->ed_Next->ed_Next == NULL);
+
+        /* ED_NAME entries carry the name only; a zero key restarts. */
+        control.eac_LastKey = 0;
+        packet.dp_Arg4 = ED_NAME;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res2 == ERROR_NO_MORE_ENTRIES);
+        assert(control.eac_Entries == 5 && rewind_count == rewinds + 2);
+        entry = (struct ExAllData *)buffer.bytes;
+        assert(strcmp((char *)entry->ed_Name, "e0") == 0);
+        assert((uint8_t *)entry->ed_Name
+            == buffer.bytes + offsetof(struct ExAllData, ed_Type));
+
+        /* A buffer too small for one entry keeps the entry and says so. */
+        control.eac_LastKey = 0;
+        packet.dp_Arg3 = 4;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_BUFFER_OVERFLOW);
+        assert(control.eac_Entries == 0);
+        packet.dp_Arg3 = (SIPTR)sizeof(buffer);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(control.eac_Entries == 5);
+        assert(strcmp((char *)((struct ExAllData *)buffer.bytes)->ed_Name,
+            "e0") == 0);
+
+        /* Patterns need dos.library: refused so that dos.library emulates.
+         * Unknown detail levels are ERROR_BAD_NUMBER. */
+        control.eac_MatchString = (UBYTE *)"#?";
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+        control.eac_MatchString = NULL;
+        packet.dp_Arg4 = ED_OWNER + 1;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res2 == ERROR_BAD_NUMBER);
+
+        initialize_packet(&packet, ACTION_EXAMINE_ALL_END);
+        packet.dp_Arg1 = (SIPTR)root;
+        rewinds = rewind_count;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && rewind_count == rewinds + 1);
+        stub_directory_size = -1;
     }
 
     /* C1 control: a library without the later groups makes the same packets

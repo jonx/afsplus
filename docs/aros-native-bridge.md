@@ -228,6 +228,7 @@ The usual packet mapping is direct:
 | create/delete/rename/link | corresponding namespace function |
 | set protect, set date | `set_protection`, `set_modified`; a path without a leaf addresses the resolved lock's object |
 | make link (soft), read link | `make_soft_link`, `read_soft_link` |
+| examine all, examine all end | `examine_next` per entry, `rewind_directory`; the packet layer packs `ExAllData` |
 | examine object/FH/next | corresponding examine function |
 | flush | `flush` |
 | info/disk info | `disk_info` |
@@ -255,6 +256,15 @@ reconciles. The mount flag
 `AFSPLUS_AROS_MOUNT_FLAG_STRICT_SECURITY_PROJECTION` selects the core's
 strict policy instead, where such a write is refused and nothing changes. Rename and hard link keep the object and
 therefore its security metadata.
+
+`ACTION_EXAMINE_ALL` packs as many entries as fit the caller's buffer at the
+requested detail level. An entry read from the filesystem that does not fit
+stays with the lock and is returned first by the next call, so a small buffer
+never loses an entry; a buffer too small for one entry is
+`ERROR_BUFFER_OVERFLOW`. A zero `eac_LastKey` restarts the scan. A request
+with a match string or match hook is answered `ERROR_ACTION_NOT_KNOWN`,
+because matching needs dos.library, and dos.library then emulates `ExAll`
+through `ExNext`.
 
 Soft-link targets are opaque paths in the mount encoding. Locate and open
 answer `ERROR_IS_SOFT_LINK`; `ACTION_READ_LINK` walks the path to the first
