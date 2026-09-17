@@ -22,4 +22,5 @@ Proposals:
   filesystem API v2 ABI and AROS handler transport (decisions D1–D8).
 
 - [`persistent-snapshot-prototype.md`](persistent-snapshot-prototype.md) — Q4 registry, retention accounting, mutation isolation and admission experiments (S1–S4).
+- [`adr-security-preservation-container.md`](adr-security-preservation-container.md) — B5 and the format half of Q5: opaque versioned security descriptors, the object security reference and the projection rule (decisions M1–M5).
 - [`adr-object-record-admission.md`](adr-object-record-admission.md) — Q13: exact admission of object header flags, payload length and unused tail (decisions M1–M3).

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Carry opaque security descriptors through every object rewrite](#2026-09-17--carry-opaque-security-descriptors-through-every-object-rewrite)
 - [2026-09-17 — Admit object records only in their canonical image](#2026-09-17--admit-object-records-only-in-their-canonical-image)
 - [2026-09-17 — Close a-cache and Stage A](#2026-09-17--close-a-cache-and-stage-a)
 - [2026-09-17 — Fix window refusals that poisoned an open deferred window](#2026-09-17--fix-window-refusals-that-poisoned-an-open-deferred-window)
@@ -172,6 +173,46 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-17 — Carry opaque security descriptors through every object rewrite
+
+The object record gains an optional 16-byte security reference behind object
+flag bit 2: first segment block, descriptor length, segment count and a flags
+word whose bit 0 marks a diverged projection. The descriptor itself is an
+opaque byte string of up to 65,536 bytes with a format identity and a format
+version, stored in a chain of `"AFSX"` segments that the object owns
+exclusively. The volume identity is INCOMPAT bit 3,
+`org.aros.afsplus:security-descriptors`, set by
+`mkfs_with_security_descriptors`; mount refuses it together with persistent
+snapshots.
+
+The reference is a field of `ObjectRecord`, so every read-modify-write path
+carries it; the one path that rebuilt the flags word, layout staging, keeps
+the bit. Objects die in two places, `remove_entry` and the window engine's
+`unlink_in_batch`, and both retire the chain. A protection edit on a
+descriptor-bearing object is refused under the default strict policy and,
+under the preserve policy, lands together with the divergence mark in one
+transaction. The checker claims every segment in the ownership set.
+
+Proof: 8 wire tests in `crates/afsplus-format/tests/security_container.rs`, 8
+end-to-end tests in `crates/afsplus-check/tests/security_container.rs`
+(size classes across remount, eleven rewrite paths, strict and preserve
+projection, five removal paths, orphan cleanup and intent-log replay, three
+resealed segment corruptions, feature absence and the refused snapshot
+combination) and a power-cut matrix of 2,334 modeled states over attach (626),
+replace (1,165), preserve-mode edit (197) and delete (346), each mounting to
+the state before or after the transition with a clean checker verdict. With
+the retirement call removed from `remove_entry`, the removal test fails on
+the checker's leak findings. The fuzz oracle models the reference
+independently. Clippy is clean on the format, core and VFS crates.
+
+The decision is proposed in
+[security preservation container](proposals/adr-security-preservation-container.md).
+Portable C parity, conformance images, the format-identity registry, backup
+transport, descriptors under persistent snapshots and every evaluation
+semantic are open there. The filesystem API consequences (three descriptor
+operations, a fidelity query and a new refusal of the protection setter)
+belong to the API work.
 
 ## 2026-09-17 — Admit object records only in their canonical image
 

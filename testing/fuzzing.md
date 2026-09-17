@@ -515,6 +515,15 @@ every mount. The volume-wide `SetDataUpdatePolicy` belongs to
 the persistent per-file policy of [ADR-065](../adr/ADR-065-persistent-data-update-policy.md)
 is the generated one.
 
+Four methods serve the proposed
+[security preservation container](../proposals/adr-security-preservation-container.md):
+`SetSecurityDescriptor` and `ClearSecurityDescriptor` mutate,
+`SecurityDescriptor` reads and `SetSecurityProjectionPolicy` sets a
+mount-lifetime policy. They have no wire command; the
+[container test](../crates/afsplus-check/tests/security_container.rs) owns
+their proof, and a generated family carries descriptors once the proposal is
+accepted.
+
 The remaining twenty-three methods read: `FileAllocationPage`,
 `FileDataPolicy`, `FirstOrphan`, `ListDirectory`, `ListRoot`,
 `LookupInDirectory`, `LookupRoot`, `OrphanCount`, `OrphanObject`,
