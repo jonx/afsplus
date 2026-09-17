@@ -36,7 +36,7 @@ m68k_cc="$aros_m68k_build/bin/darwin-aarch64/tools/crosstools/m68k-aros-gcc"
 m68k_include="$aros_m68k_build/bin/amiga-m68k/AROS/Developer/include"
 m68k_gen_include="$aros_m68k_build/bin/amiga-m68k/gen/include"
 m68k_stdc_include="$m68k_include/aros/stdc"
-archive=${AFSPLUS_AROS_RUST_ARCHIVE:-"$repo_root/target/$target_name/release/libafsplus_aros_ffi.a"}
+archive=${AFSPLUS_AROS_RUST_ARCHIVE:-"${CARGO_TARGET_DIR:-$repo_root/target}/$target_name/release/libafsplus_aros_ffi.a"}
 task_dir=$(mktemp -d "${TMPDIR:-/tmp}/afsplus-aros-ffi.XXXXXX")
 trap 'rm -r "$task_dir"' EXIT HUP INT TERM
 
