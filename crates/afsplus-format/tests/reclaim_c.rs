@@ -347,11 +347,9 @@ fn independent_c_decoders_agree_on_the_reclaim_queue_blocks() {
     broken[p + 9] ^= 1;
     push("segment with a broken checksum", "segment", broken, false);
 
-    // What admission does not look at today, stated so that neither reader
-    // drifts from the other: nonzero common-header flags and owner, bytes in
-    // the unused slots of a root area, a root payload longer than its areas,
-    // and bytes after the payload. The proposal
-    // `proposals/adr-exact-reclaim-admission.md` would refuse all five.
+    // Exact admission (ADR-110): common-header flags, an owner, bytes in the
+    // unused slots of a root area, a root payload longer than its areas and
+    // bytes after a payload are all refused, by both readers.
     for (kind, magic, good) in [
         ("root", block_type::RECLAIM_ROOT, &good),
         ("segment", block_type::RECLAIM_SEGMENT, &good_segment),
@@ -360,52 +358,40 @@ fn independent_c_decoders_agree_on_the_reclaim_queue_blocks() {
         let mut flags = good.clone();
         flags[6] = 1;
         reseal(&mut flags, magic, None);
-        push(
-            &format!("{kind} with header flags (admitted today)"),
-            kind,
-            flags,
-            true,
-        );
+        push(&format!("{kind} with header flags"), kind, flags, false);
         let mut owner = good.clone();
         owner[8] = 5;
         reseal(&mut owner, magic, None);
-        push(
-            &format!("{kind} with an owner (admitted today)"),
-            kind,
-            owner,
-            true,
-        );
+        push(&format!("{kind} with an owner"), kind, owner, false);
         let mut tail = good.clone();
         tail[SIZE - 1] = 1;
         reseal(&mut tail, magic, None);
+        push(&format!("{kind} with a nonzero tail"), kind, tail, false);
+    }
+    // One used item less than the capacity in each area: tables at 64,
+    // segments at 88, inline entries at 124.
+    for (area, offset) in [
+        ("table", 64 + 12),
+        ("segment", 88 + 24),
+        ("inline", 124 + 40),
+    ] {
+        let mut unused_slot = good.clone();
+        unused_slot[p + offset] = 0xee;
+        reseal(&mut unused_slot, block_type::RECLAIM_ROOT, None);
         push(
-            &format!("{kind} with a nonzero tail (admitted today)"),
-            kind,
-            tail,
-            true,
+            &format!("root with bytes in an unused {area} slot"),
+            "root",
+            unused_slot,
+            false,
         );
     }
-    let mut unused_slot = good.clone();
-    unused_slot[p + 64 + 12] = 0xee; // second table slot, count says one
-    reseal(&mut unused_slot, block_type::RECLAIM_ROOT, None);
-    push(
-        "root with bytes in an unused slot (admitted today)",
-        "root",
-        unused_slot,
-        true,
-    );
     let mut longer = good.clone();
     reseal(
         &mut longer,
         block_type::RECLAIM_ROOT,
         Some(64 + 24 + 36 + 60 + 9),
     );
-    push(
-        "root payload longer than its areas (admitted today)",
-        "root",
-        longer,
-        true,
-    );
+    push("root payload longer than its areas", "root", longer, false);
 
     let mut checked = 0;
     for sanitize in [false, true] {

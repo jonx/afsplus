@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Exact admission for the reclaim queue blocks (ADR-110)](#2026-09-17--exact-admission-for-the-reclaim-queue-blocks-adr-110)
 - [2026-09-17 — A second reader for the reclaim queue blocks](#2026-09-17--a-second-reader-for-the-reclaim-queue-blocks)
 - [2026-09-17 — The remaining explain operations](#2026-09-17--the-remaining-explain-operations)
 - [2026-09-17 — The afsplus-explain command](#2026-09-17--the-afsplus-explain-command)
@@ -210,6 +211,26 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — Exact admission for the reclaim queue blocks (ADR-110)
+
+The finding of the reclaim cross-read, decided by claude-main under the rule
+it relays from the owner: both readers now refuse common-header flags, an
+owner, bytes in the unused slots of a root area, a root payload that is not
+exactly its areas, and bytes after a payload. No encoder ever wrote such a
+byte, so no image changes. Rust `reclaim.rs`, C `afspr_decode_reclaim_*` and
+the independent fuzz oracle apply the same five rules; the proposal became
+ADR-110, which amends ADR-036.
+
+Proof: `reclaim_c` now holds 62 images (124 verdicts over two builds); the
+thirteen images of the five families flipped from admitted to refused in both
+readers in this commit. A first negative control passed when it should have
+failed: the test had an unused table slot and no unused segment or inline
+slot. Both were added, and the control now fails. Three controls fail the
+test: C ignoring the owner, C admitting a long root payload, Rust ignoring the
+unused inline slots. Unchanged and passing: `reclaim` (3) and
+`corruption_corpus` (8) of the checker, `roundtrip` (44), the fuzz unit tests
+with their fingerprints (16).
 
 ## 2026-09-17 — A second reader for the reclaim queue blocks
 

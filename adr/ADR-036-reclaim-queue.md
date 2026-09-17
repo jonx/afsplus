@@ -1,7 +1,7 @@
 # ADR-036: Segmented reclaim queue with bounded, resumable batches
 
 Status: Accepted
-Amended by: ADR-074
+Amended by: ADR-074, ADR-110
 
 <!-- toc -->
 

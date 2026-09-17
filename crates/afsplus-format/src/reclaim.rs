@@ -89,6 +89,24 @@ pub struct TableRef {
     pub ref_count: u32,
 }
 
+/// Exact admission of the block around a payload (ADR-110): the queue
+/// belongs to the volume, so the common header carries no flags and no
+/// owner, and nothing follows the payload.
+fn admit_envelope(block: &[u8], header: &BlockHeader) -> Result<(), FormatError> {
+    if header.flags != 0 || header.owner != 0 {
+        return Err(FormatError::Invalid(
+            "reclaim block header flags or owner are nonzero",
+        ));
+    }
+    if block[HEADER_SIZE + header.payload_len as usize..]
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err(FormatError::Invalid("reclaim block unused tail is nonzero"));
+    }
+    Ok(())
+}
+
 fn write_ref(buf: &mut [u8], lba: u64, count: u32) {
     le::put_u64(&mut buf[0..8], lba);
     le::put_u32(&mut buf[8..12], count);
@@ -255,6 +273,7 @@ impl ReclaimRoot {
 
     pub fn decode(block: &[u8]) -> Result<(ReclaimRoot, u64), FormatError> {
         let header = BlockHeader::verify(block, block_type::RECLAIM_ROOT)?;
+        admit_envelope(block, &header)?;
         let p = header.payload(block);
         if p.len() < ROOT_FIXED {
             return Err(FormatError::Invalid("reclaim root payload too short"));
@@ -272,9 +291,9 @@ impl ReclaimRoot {
         };
         // Bounds-first: capacities bound every later area read.
         caps.validate(block.len())?;
-        if p.len() < root_payload_len(caps)? {
+        if p.len() != root_payload_len(caps)? {
             return Err(FormatError::Invalid(
-                "reclaim root payload shorter than its areas",
+                "reclaim root payload length is not exact",
             ));
         }
         let table_count = le::get_u32(&p[52..56]) as usize;
@@ -312,6 +331,23 @@ impl ReclaimRoot {
         for _ in 0..inline_count {
             inline_entries.push(ReclaimEntry::read(&p[offset..offset + ENTRY_WIRE_SIZE])?);
             offset += ENTRY_WIRE_SIZE;
+        }
+        // The unused slots of each area are zero: a rewrite encodes the
+        // decoded items into a zeroed block and would drop anything else.
+        let table_end = ROOT_FIXED + caps.table_refs as usize * REF_WIRE_SIZE;
+        let segment_end = table_end + caps.segment_refs as usize * REF_WIRE_SIZE;
+        let unused = [
+            ROOT_FIXED + table_count * REF_WIRE_SIZE..table_end,
+            table_end + segment_count * REF_WIRE_SIZE..segment_end,
+            segment_end + inline_count * ENTRY_WIRE_SIZE..p.len(),
+        ];
+        if unused
+            .into_iter()
+            .any(|range| p[range].iter().any(|byte| *byte != 0))
+        {
+            return Err(FormatError::Invalid(
+                "reclaim root unused area slots are nonzero",
+            ));
         }
         let root = ReclaimRoot {
             pending_blocks: le::get_u64(&p[8..16]),
@@ -426,6 +462,7 @@ impl ReclaimSegment {
 
     pub fn decode(block: &[u8]) -> Result<(ReclaimSegment, u64), FormatError> {
         let header = BlockHeader::verify(block, block_type::RECLAIM_SEGMENT)?;
+        admit_envelope(block, &header)?;
         let p = header.payload(block);
         if p.len() < 8 {
             return Err(FormatError::Invalid("reclaim segment payload too short"));
@@ -499,6 +536,7 @@ impl ReclaimTable {
 
     pub fn decode(block: &[u8]) -> Result<(ReclaimTable, u64), FormatError> {
         let header = BlockHeader::verify(block, block_type::RECLAIM_TABLE)?;
+        admit_envelope(block, &header)?;
         let p = header.payload(block);
         if p.len() < 8 {
             return Err(FormatError::Invalid("reclaim table payload too short"));

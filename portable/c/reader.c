@@ -5875,6 +5875,29 @@ static int afspr_reclaim_entries_ok(const uint8_t *area, uint32_t count)
     return 1;
 }
 
+/* Exact admission around a payload (ADR-110): no header flags, no owner,
+ * nothing after the payload. */
+static int afspr_reclaim_envelope_ok(const uint8_t *block, size_t block_size,
+                                     const struct afspr_header *header)
+{
+    size_t i;
+    if (header->flags != 0u || header->owner != 0u) return 0;
+    for (i = AFSPR_HEADER_SIZE + (size_t)header->payload_len; i < block_size;
+         ++i) {
+        if (block[i] != 0u) return 0;
+    }
+    return 1;
+}
+
+static int afspr_all_zero(const uint8_t *bytes, size_t size)
+{
+    size_t i;
+    for (i = 0u; i < size; ++i) {
+        if (bytes[i] != 0u) return 0;
+    }
+    return 1;
+}
+
 static int afspr_reclaim_refs_ok(const uint8_t *area, uint32_t count,
                                  uint32_t cap)
 {
@@ -5906,7 +5929,8 @@ int afspr_decode_reclaim_root(const void *input, size_t block_size,
                                  AFSPR_BLOCK_TYPE_RECLAIM_ROOT, &header);
     if (status != AFSPR_OK) return status;
     p = block + AFSPR_HEADER_SIZE;
-    if (header.payload_len < AFSPR_RECLAIM_ROOT_FIXED ||
+    if (!afspr_reclaim_envelope_ok(block, block_size, &header) ||
+        header.payload_len < AFSPR_RECLAIM_ROOT_FIXED ||
         afspr_get_le32(p) != AFSPR_RECLAIM_ROOT_VERSION ||
         afspr_get_le32(p + 4u) != 0u || afspr_get_le16(p + 50u) != 0u) {
         return AFSPR_ERR_CORRUPT;
@@ -5934,7 +5958,7 @@ int afspr_decode_reclaim_root(const void *input, size_t block_size,
                 AFSPR_RECLAIM_REF_SIZE +
             (size_t)root.inline_capacity * AFSPR_RECLAIM_ENTRY_SIZE;
     if (areas > block_size - AFSPR_HEADER_SIZE ||
-        areas > (size_t)header.payload_len ||
+        areas != (size_t)header.payload_len ||
         root.table_count > root.table_capacity ||
         root.segment_count > root.segment_capacity ||
         root.inline_count > root.inline_capacity) {
@@ -5950,6 +5974,21 @@ int afspr_decode_reclaim_root(const void *input, size_t block_size,
         !afspr_reclaim_refs_ok(root.segments, root.segment_count,
                                AFSPR_RECLAIM_SEGMENT_ENTRY_CAP) ||
         !afspr_reclaim_entries_ok(root.inline_entries, root.inline_count)) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    /* Unused slots are zero: a rewrite would drop anything else. */
+    if (!afspr_all_zero(root.tables + (size_t)root.table_count *
+                                          AFSPR_RECLAIM_REF_SIZE,
+                        (size_t)(root.table_capacity - root.table_count) *
+                            AFSPR_RECLAIM_REF_SIZE) ||
+        !afspr_all_zero(root.segments + (size_t)root.segment_count *
+                                            AFSPR_RECLAIM_REF_SIZE,
+                        (size_t)(root.segment_capacity - root.segment_count) *
+                            AFSPR_RECLAIM_REF_SIZE) ||
+        !afspr_all_zero(root.inline_entries + (size_t)root.inline_count *
+                                                  AFSPR_RECLAIM_ENTRY_SIZE,
+                        (size_t)(root.inline_capacity - root.inline_count) *
+                            AFSPR_RECLAIM_ENTRY_SIZE)) {
         return AFSPR_ERR_CORRUPT;
     }
     /* The cursor names sealed blocks only, in FIFO order. */
@@ -5996,7 +6035,8 @@ static int afspr_decode_reclaim_sealed(const void *input, size_t block_size,
     status = afspr_verify_header(block, block_size, block_type, &header);
     if (status != AFSPR_OK) return status;
     p = block + AFSPR_HEADER_SIZE;
-    if (header.payload_len < AFSPR_RECLAIM_SEALED_FIXED ||
+    if (!afspr_reclaim_envelope_ok(block, block_size, &header) ||
+        header.payload_len < AFSPR_RECLAIM_SEALED_FIXED ||
         afspr_get_le32(p + 4u) != 0u) {
         return AFSPR_ERR_CORRUPT;
     }

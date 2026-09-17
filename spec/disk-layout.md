@@ -129,7 +129,7 @@ Root, `"AFSH"`:
 
 The three areas sit at their capacity offsets whatever their counts, and
 64 + 12 × (table + segment capacity) + 20 × inline capacity fits the block
-and the payload.
+and is the payload length.
 
 Sealed segment, `"AFSS"`, and sealed table, `"AFSL"`:
 
@@ -141,8 +141,8 @@ Sealed segment, `"AFSS"`, and sealed table, `"AFSL"`:
 
 The payload length of a sealed block is exactly 8 plus its items.
 
-Admission does not look at the common header's flags and owner, at the unused
-slots of a root area, at a root payload longer than its areas, or at the bytes
-after a payload. Both readers agree on that today, the cross-read test states
-it, and [a proposal](../proposals/adr-exact-reclaim-admission.md) would refuse
-all of them before the freeze.
+Admission is exact
+([ADR-110](../adr/ADR-110-exact-reclaim-admission.md)): zero flags and zero
+owner in the common header, a root payload of exactly 64 + 12 × (table +
+segment capacity) + 20 × inline capacity, zero bytes in the unused slots of
+each root area, and zero bytes after the payload.

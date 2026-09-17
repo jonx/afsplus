@@ -115,6 +115,13 @@ fn segment_ref(p: &[u8], at: usize) -> Option<SegmentRef> {
 fn expected(t: CodecTarget, input: &[u8]) -> Option<(Value, u64)> {
     let header = BlockHeader::verify(input, t.block_type()).ok()?;
     let p = &input[HEADER_SIZE..HEADER_SIZE + header.payload_len as usize];
+    // Exact admission (ADR-110): no header flags, no owner, a zero tail.
+    if header.flags != 0
+        || header.owner != 0
+        || input[HEADER_SIZE + p.len()..].iter().any(|&b| b != 0)
+    {
+        return None;
+    }
     let value = match t {
         CodecTarget::ReclaimRoot => {
             if p.len() < 64 || u32_at(p, 0) != 1 {
@@ -125,7 +132,8 @@ fn expected(t: CodecTarget, input: &[u8]) -> Option<(Value, u64)> {
             }
             let (ic, sc, tc) = (u16_at(p, 44), u16_at(p, 46), u16_at(p, 48));
             let size = 64 + usize::from(ic) * 20 + (usize::from(sc) + usize::from(tc)) * 12;
-            if ic == 0 || sc == 0 || tc == 0 || size > input.len() - HEADER_SIZE || size > p.len() {
+            if ic == 0 || sc == 0 || tc == 0 || size > input.len() - HEADER_SIZE || size != p.len()
+            {
                 return None;
             }
             let (tn, sn, en) = (u32_at(p, 52), u32_at(p, 56), u32_at(p, 60));
@@ -154,6 +162,17 @@ fn expected(t: CodecTarget, input: &[u8]) -> Option<(Value, u64)> {
                     p,
                     64 + (usize::from(tc) + usize::from(sc)) * 12 + i * 20,
                 )?);
+            }
+            // Unused slots of the three areas are zero.
+            let (t0, s0) = (
+                64 + usize::from(tc) * 12,
+                64 + (usize::from(tc) + usize::from(sc)) * 12,
+            );
+            if p[64 + tn as usize * 12..t0].iter().any(|&b| b != 0)
+                || p[t0 + sn as usize * 12..s0].iter().any(|&b| b != 0)
+                || p[s0 + en as usize * 20..].iter().any(|&b| b != 0)
+            {
+                return None;
             }
             let (hs, he, hb) = (u32_at(p, 32), u32_at(p, 36), u32_at(p, 40));
             if (tn == 0 && hs != 0)

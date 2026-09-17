@@ -64,7 +64,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-033](ADR-033-sealed-content.md) | Sealed immutable content | Proposed | — |
 | [ADR-034](ADR-034-bounded-cow-tree.md) | Shared bounded copy-on-write tree engine | Accepted | — |
 | [ADR-035](ADR-035-allocation-root-reserved-pool.md) | Allocation-root tree in a reserved triple-version node pool | Accepted | — |
-| [ADR-036](ADR-036-reclaim-queue.md) | Segmented reclaim queue with bounded, resumable batches | Accepted | amended by [ADR-074](ADR-074-protect-previous-checkpoint.md) |
+| [ADR-036](ADR-036-reclaim-queue.md) | Segmented reclaim queue with bounded, resumable batches | Accepted | amended by [ADR-074](ADR-074-protect-previous-checkpoint.md), [ADR-110](ADR-110-exact-reclaim-admission.md) |
 | [ADR-037](ADR-037-intent-log.md) | Intent log for forced durability between checkpoints | Accepted | amended by [ADR-063](ADR-063-intent-log-epoch1.md) |
 | [ADR-038](ADR-038-mount-policy-and-feature-summary.md) | Explicit mount policy and identification feature summary | Accepted | — |
 | [ADR-039](ADR-039-portable-vfs-slice.md) | Portable handle API and generation-bound directory cookies | Accepted | — |
@@ -138,6 +138,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-107](ADR-107-twelve-byte-timestamps.md) | Timestamps are twelve bytes on the wire | Accepted | — |
 | [ADR-108](ADR-108-extended-attributes.md) | Extended attributes are one owned chain per object | Accepted | amended by [ADR-109](ADR-109-owned-chains-under-snapshots.md); amends [ADR-102](ADR-102-clone-metadata-inheritance.md) |
 | [ADR-109](ADR-109-owned-chains-under-snapshots.md) | A retained snapshot keeps the owned chains it captured | Accepted | amends [ADR-101](ADR-101-security-preservation-container.md), [ADR-108](ADR-108-extended-attributes.md) |
+| [ADR-110](ADR-110-exact-reclaim-admission.md) | Reclaim queue blocks are admitted only in their canonical image | Accepted | amends [ADR-036](ADR-036-reclaim-queue.md) |
 
 <!-- /adr-index -->
 
