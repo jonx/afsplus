@@ -263,8 +263,9 @@ mkdir -p "$task_dir/module/include"
     writefiles afsplus handler
 patch -s "$task_dir/module/afsplus_start.c" \
     native/aros/afsplus-handler-autolibs.patch
-grep -q 'if (set_open_libraries())' "$task_dir/module/afsplus_start.c"
+grep -q 'if (set_open_libraries() && set_call_funcs' "$task_dir/module/afsplus_start.c"
 grep -q 'set_close_libraries();' "$task_dir/module/afsplus_start.c"
+grep -q 'afsplus_aros_refuse_startup(SysBase);' "$task_dir/module/afsplus_start.c"
 for source in afsplus_start afsplus_end; do
     # shellcheck disable=SC2086 -- profile and handler flags are separate words.
     "$aros_clang" --target="$aros_codegen_target" $aros_arch_flags \

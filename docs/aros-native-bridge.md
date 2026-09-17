@@ -311,6 +311,18 @@ the protection and start no orphan cleanup, which waits, visible in the
 health snapshot, until the volume is unprotected. `ACTION_DISK_INFO` reports
 the protected state, and nothing is written to the volume for it.
 
+A handler that cannot open one of its libraries fails its mount. The
+generated entry opens them before any AFS+ code runs; autoinit reports a
+failure through a requester when the process has no console, and the entry
+then returned without answering the startup packet, so the first access
+waited for ever. The module now carries its own `___showerror()`, which
+writes the reason to the debug log, and
+[`afsplus-handler-autolibs.patch`](../native/aros/afsplus-handler-autolibs.patch)
+makes the entry answer the startup packet with
+`ERROR_INVALID_RESIDENT_LIBRARY` when the libraries or the init set failed.
+On the target, with `posixc.library` removed, `List` fails within a second
+and no handler task remains.
+
 One handler instance serves a medium, whatever dos.library starts. `RunHandler()` does not serialise its callers, and Mount defers the
 start to the first access, so two tasks that make their first access together
 each get a handler process; on a target this happened in every run of the

@@ -100,7 +100,6 @@ Lacking, in the order classic software meets them:
 | Action | Missing piece | Layer where it starts |
 |---|---|---|
 | all of the above | target run: [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) with `AFSPlusDosProbe` exists and its package builds; it has not booted yet. QEMU and m68k sequences do not run it | L4 |
-| handler startup with a missing library | the generated entry opens its libraries before any AFS+ code runs, and a failure shows a requester that waits for a click: the first access hangs instead of failing the mount (seen with `posixc.library` absent). Open the libraries in the shell with a failure path, or start with `pr_WindowPtr` at -1 so no requester can block a handler | L4 |
 | one instance per unit on an SMP kernel | the claim relies on `Forbid()` for the port list | L4 |
 | `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |
 | `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |

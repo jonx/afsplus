@@ -2,18 +2,18 @@
 +++ afsplus_start.c
 @@ -72,0 +73 @@
 +DECLARESET(LIBS)
-@@ -94,3 +95,8 @@
+@@ -81,0 +83 @@
++LONG afsplus_aros_refuse_startup(struct ExecBase *sysBase);
+@@ -92 +94,4 @@
 -    if (set_call_funcs(SETNAME(INIT), 1, 1)) {
--        ret = handler(SysBase);
--        set_call_funcs(SETNAME(EXIT), -1, 0);
 +#if defined(AFSPLUS_AROS_DIAGNOSTIC_DIRECT_ENTRY)
 +    ret = handler(SysBase);
 +#else
-+    if (set_open_libraries()) {
-+        if (set_call_funcs(SETNAME(INIT), 1, 1)) {
-+            ret = handler(SysBase);
-+            set_call_funcs(SETNAME(EXIT), -1, 0);
-+        }
-@@ -97,0 +104,2 @@
++    if (set_open_libraries() && set_call_funcs(SETNAME(INIT), 1, 1)) {
+@@ -94,0 +100,3 @@
++    } else {
++        /* dos.library waits for an answer to the startup packet. */
++        ret = afsplus_aros_refuse_startup(SysBase);
+@@ -95,0 +104,2 @@
 +    set_close_libraries();
 +#endif

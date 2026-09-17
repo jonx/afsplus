@@ -29,6 +29,7 @@
 #include <proto/dos.h>
 #include <proto/exec.h>
 #include <proto/locale.h>
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -1087,6 +1088,50 @@ static LONG forward_to_claimed_instance(struct ExecBase *SysBase,
     (void)afsplus_claim_enroll(SysBase, claim_name, generation, self, 0);
     refuse_queued_packets(SysBase, port);
     return RETURN_OK;
+}
+
+/*
+ * A handler that cannot open a library must fail its mount, not hang.
+ *
+ * The generated entry opens the libraries this module was linked against
+ * before it calls handler(). autoinit reports a failure through
+ * ___showerror(), which for a process without a console is a requester that
+ * waits for a click, and the entry then returned without ever answering the
+ * startup packet: the task that made the first access waited for ever,
+ * behind a requester or not. This definition replaces autoinit's for the
+ * module, since the module's objects are linked before the archive, and
+ * writes to the debug log. afsplus-handler-autolibs.patch makes the entry
+ * call afsplus_aros_refuse_startup() when the libraries or the init set
+ * failed.
+ */
+void ___showerror(struct ExecBase *SysBase, const char *format, ...)
+{
+    va_list arguments;
+
+    (void)SysBase;
+    va_start(arguments, format);
+    bug("[AFSPLUS] startup: ");
+    vkprintf(format, arguments);
+    bug("\n");
+    va_end(arguments);
+}
+
+LONG afsplus_aros_refuse_startup(struct ExecBase *SysBase)
+{
+    struct Process *process = (struct Process *)FindTask(NULL);
+    struct MsgPort *port = &process->pr_MsgPort;
+    struct Message *message;
+    struct DosPacket *packet;
+
+    WaitPort(port);
+    message = GetMsg(port);
+    if (message == NULL || message->mn_Node.ln_Name == NULL)
+        return RETURN_FAIL;
+    packet = (struct DosPacket *)message->mn_Node.ln_Name;
+    packet->dp_Res1 = DOSFALSE;
+    packet->dp_Res2 = ERROR_INVALID_RESIDENT_LIBRARY;
+    reply_packet(port, SysBase, packet);
+    return RETURN_FAIL;
 }
 
 LONG handler(struct ExecBase *SysBase)
