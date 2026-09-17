@@ -199,3 +199,135 @@ fn c_boundary_carries_positioned_io_clone_preallocate_replace_and_advise() {
     assert_eq!(afsplus_aros_close(filesystem, source), 0);
     assert_eq!(afsplus_aros_unmount(filesystem), 0);
 }
+
+#[test]
+fn c_boundary_maps_extents_of_a_sparse_preallocated_file() {
+    let mut device = formatted(true);
+    let filesystem = mount(&mut device);
+    let file = open(filesystem, b"paged", AFSPLUS_AROS_OPEN_NEW_FILE);
+    let mut count = 0;
+    assert_eq!(
+        afsplus_aros_write_at(
+            filesystem,
+            file,
+            0x1_0000_0000,
+            [7u8; 4096].as_ptr(),
+            4096,
+            2,
+            0,
+            &mut count
+        ),
+        0
+    );
+    let mut extents = [AfsplusArosExtent::default(); 4];
+    let (mut stored, mut complete, mut resume) = (9, 9, 9);
+    // Unpublished write: refused by value, nothing stored.
+    assert_eq!(
+        afsplus_aros_extent_map(
+            filesystem,
+            file,
+            0,
+            u64::MAX,
+            extents.as_mut_ptr(),
+            4,
+            0,
+            &mut stored,
+            &mut complete,
+            &mut resume
+        ),
+        202
+    );
+    assert_eq!((stored, extents[0]), (9, AfsplusArosExtent::default()));
+    assert_eq!(afsplus_aros_flush(filesystem), 0);
+    assert_eq!(
+        afsplus_aros_preallocate(filesystem, file, 8192, 8192, 3, 0),
+        0
+    );
+
+    assert_eq!(
+        afsplus_aros_extent_map(
+            filesystem,
+            file,
+            4096,
+            u64::MAX - 4096,
+            extents.as_mut_ptr(),
+            4,
+            0,
+            &mut stored,
+            &mut complete,
+            &mut resume
+        ),
+        0
+    );
+    assert_eq!((stored, complete), (2, 1));
+    assert_eq!(
+        extents[..2],
+        [
+            AfsplusArosExtent {
+                offset: 8192,
+                length: 8192,
+                flags: AFSPLUS_AROS_EXTENT_UNWRITTEN,
+                reserved: 0,
+            },
+            AfsplusArosExtent {
+                offset: 0x1_0000_0000,
+                length: 4096,
+                flags: 0,
+                reserved: 0,
+            },
+        ]
+    );
+    assert_eq!(extents[2], AfsplusArosExtent::default());
+
+    // Capacity one: incomplete, and the resume value continues it.
+    assert_eq!(
+        afsplus_aros_extent_map(
+            filesystem,
+            file,
+            0,
+            u64::MAX,
+            extents.as_mut_ptr(),
+            1,
+            0,
+            &mut stored,
+            &mut complete,
+            &mut resume
+        ),
+        0
+    );
+    assert_eq!((stored, complete, extents[0].offset), (1, 0, 8192));
+    let next = extents[0].offset + extents[0].length;
+    assert_eq!(
+        afsplus_aros_extent_map(
+            filesystem,
+            file,
+            next,
+            u64::MAX - next,
+            extents.as_mut_ptr(),
+            1,
+            resume,
+            &mut stored,
+            &mut complete,
+            &mut resume
+        ),
+        0
+    );
+    assert_eq!((stored, complete, extents[0].offset), (1, 1, 0x1_0000_0000));
+    assert_eq!(
+        afsplus_aros_extent_map(
+            filesystem,
+            file,
+            0,
+            0,
+            extents.as_mut_ptr(),
+            1,
+            0,
+            &mut stored,
+            &mut complete,
+            &mut resume
+        ),
+        115
+    );
+    assert_eq!(afsplus_aros_close(filesystem, file), 0);
+    assert_eq!(afsplus_aros_unmount(filesystem), 0);
+}

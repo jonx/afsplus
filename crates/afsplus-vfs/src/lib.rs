@@ -96,6 +96,28 @@ impl From<ObjectMetadata> for Stat {
     }
 }
 
+/// One mapped piece of a file's byte space. Bytes between two ranges, and
+/// after the last one, are holes and read as zeros.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtentRange {
+    pub offset: u64,
+    pub length: u64,
+    /// Reserved storage that was never written: reads as zeros, and a write
+    /// into it allocates nothing.
+    pub unwritten: bool,
+}
+
+/// Answer of [`Vfs::extent_map`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtentMap {
+    pub ranges: Vec<ExtentRange>,
+    /// Every mapping that intersects the queried range is in `ranges`.
+    pub complete: bool,
+    /// When incomplete: pass as `resume` with an `offset` at or after the end
+    /// of the last returned range to continue without rescanning.
+    pub resume: u64,
+}
+
 /// Volume identity and negotiated feature masks for management output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeIdentity {
@@ -979,6 +1001,80 @@ impl<D: BlockDevice> Vfs<D> {
                 max_records: 64,
             },
         )?)
+    }
+
+    /// Committed mapping of `offset..offset + length`, clipped to that range,
+    /// without physical addresses: what a pager needs to plan faults and
+    /// transfers (written, reserved, or hole). At most `max_ranges` (1 to 64)
+    /// ranges per call. `resume` is zero or a value returned earlier for the
+    /// same file; it only saves work and never changes the answer for ranges
+    /// at or after the position it came from.
+    ///
+    /// The map describes committed state: with unpublished writes pending it
+    /// is `Busy` and performs no implicit commit; the caller syncs first. One
+    /// call reads at most 16 mapping pages and otherwise returns an
+    /// incomplete map, so a fragmented file cannot hold the caller unbounded.
+    pub fn extent_map(
+        &mut self,
+        handle: Handle,
+        offset: u64,
+        length: u64,
+        max_ranges: usize,
+        resume: u64,
+    ) -> Result<ExtentMap, VfsError> {
+        let object_id = match self.handles.get(&handle).copied() {
+            Some(OpenHandle::File { object_id, .. }) => object_id,
+            Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
+            None => return Err(VfsError::Stale),
+        };
+        let end = offset.checked_add(length).ok_or(VfsError::Invalid)?;
+        if length == 0 || max_ranges == 0 || max_ranges > 64 {
+            return Err(VfsError::Invalid);
+        }
+        let mut ranges = Vec::new();
+        let mut ordinal = resume;
+        for _ in 0..16 {
+            let page = self.volume.file_allocation_page(object_id, ordinal, 64)?;
+            for (index, range) in page.ranges.iter().enumerate() {
+                let range_end = range.offset.saturating_add(range.length);
+                if range_end <= offset {
+                    continue;
+                }
+                if range.offset >= end {
+                    return Ok(ExtentMap {
+                        ranges,
+                        complete: true,
+                        resume: ordinal + index as u64,
+                    });
+                }
+                if ranges.len() == max_ranges {
+                    return Ok(ExtentMap {
+                        ranges,
+                        complete: false,
+                        resume: ordinal + index as u64,
+                    });
+                }
+                let start = range.offset.max(offset);
+                ranges.push(ExtentRange {
+                    offset: start,
+                    length: range_end.min(end) - start,
+                    unwritten: range.unwritten,
+                });
+            }
+            ordinal = page.next;
+            if page.eof {
+                return Ok(ExtentMap {
+                    ranges,
+                    complete: true,
+                    resume: ordinal,
+                });
+            }
+        }
+        Ok(ExtentMap {
+            ranges,
+            complete: false,
+            resume: ordinal,
+        })
     }
 
     pub fn data_policy(&mut self, handle: Handle) -> Result<bool, VfsError> {

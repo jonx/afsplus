@@ -18,6 +18,7 @@ use afsplus_format::{Timespec, OBJECT_ROOT};
 use afsplus_vfs::{
     AccessMode, Capabilities, Handle, NodeKind, ObjectId, Stat, StatFs, Vfs, VfsError,
 };
+pub use afsplus_vfs::{ExtentMap, ExtentRange};
 
 pub type LockId = u64;
 pub type FileHandleId = u64;
@@ -878,6 +879,29 @@ impl<D: BlockDevice> ArosAdapter<D> {
             self.config.max_preallocate_blocks,
             now,
         )?)
+    }
+
+    /// Committed mapping of a byte range of an open file: written, reserved
+    /// or hole, clipped to the range, no physical addresses. A pager plans
+    /// faults and block-aligned transfers from it. With unpublished writes
+    /// pending it is `ObjectInUse` and commits nothing; the caller flushes
+    /// first. See [`Vfs::extent_map`] for `resume` and the per-call bounds.
+    pub fn extent_map(
+        &mut self,
+        handle: FileHandleId,
+        offset: u64,
+        length: u64,
+        max_ranges: usize,
+        resume: u64,
+    ) -> Result<ExtentMap, ArosError> {
+        let vfs_handle = self.file_state(handle)?.vfs_handle;
+        match self
+            .vfs
+            .extent_map(vfs_handle, offset, length, max_ranges, resume)
+        {
+            Err(VfsError::Invalid) => Err(ArosError::BadNumber),
+            other => Ok(other?),
+        }
     }
 
     /// Access-intent hint for a byte range. Every hint of

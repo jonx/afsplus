@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(11)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(12)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -39,6 +39,10 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_DOS_HANDLES UINT64_C(0x200)
 #define AFSPLUS_AROS_GROUP_DOS_RECORDS UINT64_C(0x400)
 #define AFSPLUS_AROS_GROUP_OBJECT_IDS UINT64_C(0x800)
+#define AFSPLUS_AROS_GROUP_EXTENT_MAP UINT64_C(0x1000)
+
+/* AfsplusArosExtent.flags. */
+#define AFSPLUS_AROS_EXTENT_UNWRITTEN UINT32_C(0x1)
 
 /* AfsplusArosStat.kind and AfsplusArosDirEntry.kind. */
 #define AFSPLUS_AROS_KIND_FILE UINT32_C(1)
@@ -257,6 +261,16 @@ struct AfsplusArosStat {
     uint32_t reserved1;
 };
 
+/* One mapped piece of a file's byte space; gaps are holes and read as zeros.
+ * UNWRITTEN is reserved storage: it reads as zeros and a write into it
+ * allocates nothing. */
+struct AfsplusArosExtent {
+    uint64_t offset;
+    uint64_t length;
+    uint32_t flags;
+    uint32_t reserved;
+};
+
 /* One packed record of dir_read. name_length UTF-8 bytes follow without a
  * terminator; the next record starts record_length bytes after this one,
  * 8-byte aligned. */
@@ -271,6 +285,8 @@ struct AfsplusArosDirEntry {
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(struct AfsplusArosStat) == 88,
     "AfsplusArosStat ABI drift");
+_Static_assert(sizeof(struct AfsplusArosExtent) == 24,
+    "AfsplusArosExtent ABI drift");
 _Static_assert(sizeof(struct AfsplusArosDirEntry) == 24,
     "AfsplusArosDirEntry ABI drift");
 _Static_assert(sizeof(struct AfsplusArosCounters) == 72,
@@ -462,6 +478,21 @@ int32_t afsplus_aros_dir_read(struct AfsplusAros *filesystem, uint64_t dir,
     uint8_t *buffer, uint32_t capacity, uint32_t max_entries,
     uint32_t *output_count, uint32_t *output_eof);
 int32_t afsplus_aros_dir_close(struct AfsplusAros *filesystem, uint64_t dir);
+
+/* Group AFSPLUS_AROS_GROUP_EXTENT_MAP: the committed mapping of
+ * offset..offset+length of an open file, clipped to that range, without
+ * physical addresses; what a pager needs to plan faults and block-aligned
+ * transfers. Stores up to capacity (1 to 64) extents and their count.
+ * output_complete is 1 when every mapping intersecting the range was stored;
+ * otherwise call again with an offset at or after the end of the last extent
+ * and the returned resume value, which only saves work. resume is 0 on a
+ * first call. With unpublished writes pending the answer is
+ * ERROR_OBJECT_IN_USE and nothing is committed; flush first. */
+int32_t afsplus_aros_extent_map(struct AfsplusAros *filesystem,
+    uint64_t file, uint64_t offset, uint64_t length,
+    struct AfsplusArosExtent *extents, uint32_t capacity, uint64_t resume,
+    uint32_t *output_count, uint32_t *output_complete,
+    uint64_t *output_resume);
 
 /* Group AFSPLUS_AROS_GROUP_SOFT_LINKS. The target is an opaque path in the
  * mount's name encoding. Locate and open answer ERROR_IS_SOFT_LINK for a

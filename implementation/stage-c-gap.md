@@ -67,7 +67,7 @@ older library must be able to refuse by value.
 
 ## C1. Rust/C integration boundary
 
-Present (L1 to L3): ABI version 1 with interface revision 11.
+Present (L1 to L3): ABI version 1 with interface revision 12.
 `afsplus_aros_interface` answers without a mount with the revision and a
 mask of entry-point groups; the packet layer asks it at creation and answers
 `ERROR_ACTION_NOT_KNOWN` for an action of a missing group.
@@ -171,15 +171,17 @@ and placement hints, which need allocator support; the extension packet of C4.
 
 ## C7. mmap-friendly large-file path
 
-Present: caller-buffer I/O, one logical block per device callback.
+Present (L1, L2): caller-buffer positioned I/O, and `ExtentMap`, the planning
+query of a pager: the committed mapping of a byte range as written, reserved
+or hole, clipped to the range, without physical addresses, bounded per call
+and resumable (`EXTENT_MAP` entry-point group).
 
 Lacking: a block-aligned multi-block read and write path that transfers
-whole extents without a bounce copy; an extent query by semantic range
-(offset, length, written or unwritten) that a pager can use to plan faults,
-reusing the shape of the restore allocation readback; a stable page-cache
-coherence rule between mapped pages and `ACTION_WRITE`. AROS has no
-file-backed memory mapping, so the target-side consumer is a pager probe; the
-contract is proven at L1 and L2 and its throughput only on hardware.
+whole extents without a bounce copy (the device boundary moves one logical
+block per callback); a stated page-cache coherence rule between mapped pages
+and `ACTION_WRITE`. AROS has no file-backed memory mapping, so the
+target-side consumer is a pager probe; the contract is proven at L1 and L2
+and its throughput only on hardware.
 
 Apple hardware: the zero-copy claim and its timing.
 

@@ -240,6 +240,16 @@ Classic APIs that accept signed 32-bit offsets retain their historical limits.
 
 The v2 API uses 64-bit offsets and lengths end to end.
 
+`ExtentMap(handle, offset, length)` is the planning query of the
+mmap-friendly path: the committed mapping of a byte range as written,
+reserved or hole, clipped to the range, without physical addresses, sharing
+hints or allocator state. It has the range shape of the backup and restore
+allocation readback. It describes committed state only: with unpublished
+writes pending it is `BUSY` and commits nothing, and the caller syncs first.
+One call returns at most 64 ranges and reads a bounded number of mapping
+pages; an incomplete answer carries a resume value that only saves work. The
+AROS C boundary carries it as the `EXTENT_MAP` entry-point group.
+
 ## 6. Rust
 
 The AROS Rust `std` port should bind to v2 for modern file operations.

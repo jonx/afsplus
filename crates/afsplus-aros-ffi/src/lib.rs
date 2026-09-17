@@ -25,7 +25,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 11;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 12;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -38,6 +38,8 @@ pub const AFSPLUS_AROS_GROUP_COUNTERS: u64 = 0x100;
 pub const AFSPLUS_AROS_GROUP_DOS_HANDLES: u64 = 0x200;
 pub const AFSPLUS_AROS_GROUP_DOS_RECORDS: u64 = 0x400;
 pub const AFSPLUS_AROS_GROUP_OBJECT_IDS: u64 = 0x800;
+pub const AFSPLUS_AROS_GROUP_EXTENT_MAP: u64 = 0x1000;
+pub const AFSPLUS_AROS_EXTENT_UNWRITTEN: u32 = 1;
 pub const AFSPLUS_AROS_DIR_RECORD_MAX: u32 = 280;
 pub const AFSPLUS_AROS_KIND_FILE: u32 = 1;
 pub const AFSPLUS_AROS_KIND_DIRECTORY: u32 = 2;
@@ -58,7 +60,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_COUNTERS
     | AFSPLUS_AROS_GROUP_DOS_HANDLES
     | AFSPLUS_AROS_GROUP_DOS_RECORDS
-    | AFSPLUS_AROS_GROUP_OBJECT_IDS;
+    | AFSPLUS_AROS_GROUP_OBJECT_IDS
+    | AFSPLUS_AROS_GROUP_EXTENT_MAP;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -417,6 +420,16 @@ pub struct AfsplusArosDirEntry {
     pub reserved: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AfsplusArosExtent {
+    pub offset: u64,
+    pub length: u64,
+    pub flags: u32,
+    pub reserved: u32,
+}
+
+const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosExtent>()];
 const _: [(); 88] = [(); std::mem::size_of::<AfsplusArosStat>()];
 const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosDirEntry>()];
 const _: [(); 72] = [(); std::mem::size_of::<AfsplusArosCounters>()];
@@ -2091,5 +2104,58 @@ pub extern "C" fn afsplus_aros_dir_read(
 pub extern "C" fn afsplus_aros_dir_close(filesystem: *mut AfsplusAros, dir: u64) -> i32 {
     bridge_status(filesystem, || {
         bridge_mut(filesystem)?.adapter.close_enumerator(dir)
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments, clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn afsplus_aros_extent_map(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    offset: u64,
+    length: u64,
+    extents: *mut AfsplusArosExtent,
+    capacity: u32,
+    resume: u64,
+    output_count: *mut u32,
+    output_complete: *mut u32,
+    output_resume: *mut u64,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_count)?;
+        require_output(output_complete)?;
+        require_output(output_resume)?;
+        if extents.is_null() {
+            return Err(ArosError::InvalidComponentName);
+        }
+        let map = bridge_mut(filesystem)?.adapter.extent_map(
+            file,
+            offset,
+            length,
+            capacity as usize,
+            resume,
+        )?;
+        for (index, range) in map.ranges.iter().enumerate() {
+            // SAFETY: the adapter returns at most `capacity` ranges and the
+            // caller provides that many aligned writable slots.
+            unsafe {
+                ptr::write(
+                    extents.add(index),
+                    AfsplusArosExtent {
+                        offset: range.offset,
+                        length: range.length,
+                        flags: if range.unwritten {
+                            AFSPLUS_AROS_EXTENT_UNWRITTEN
+                        } else {
+                            0
+                        },
+                        reserved: 0,
+                    },
+                );
+            }
+        }
+        write_output(output_count, map.ranges.len() as u32)?;
+        write_output(output_complete, u32::from(map.complete))?;
+        write_output(output_resume, map.resume)
     })
 }

@@ -359,6 +359,12 @@ directory fails with `ERROR_OBJECT_NOT_FOUND`. `dir_read` reads no more
 entries than its buffer is certain to hold, so none is taken from the walk
 and then dropped.
 
+`EXTENT_MAP` answers, for a byte range of an open file, which parts are
+written, which are reserved and which are holes, clipped to the range and
+without physical addresses: what a pager needs to plan faults and
+block-aligned transfers. It describes committed state, so with unpublished
+writes pending it is `ERROR_OBJECT_IN_USE` and commits nothing.
+
 `COUNTERS` reports completed and failed calls on the mounted instance and
 the block callbacks it issued: reads, writes, barriers, bytes each way and
 failures. A native benchmark runner reads them around a workload, as the
