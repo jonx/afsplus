@@ -3,6 +3,19 @@
 > **ADRs:** [ADR-064](../adr/ADR-064-intent-log-data-update-compatibility.md) · **Spec:** [disk layout](../spec/disk-layout.md) ·
 > **Tests:** [conformance](../testing/conformance.md) · **Milestones:** M00, M02
 
+<!-- toc -->
+
+- [1. Encoding](#1-encoding)
+- [2. Logical block size](#2-logical-block-size)
+- [3. Superblock placement](#3-superblock-placement)
+- [4. Superblock contents](#4-superblock-contents)
+- [5. Magic and identification](#5-magic-and-identification)
+- [6. Checksums](#6-checksums)
+- [7. Structure headers](#7-structure-headers)
+- [8. Format epoch versus feature flags](#8-format-epoch-versus-feature-flags)
+
+<!-- /toc -->
+
 ## 1. Encoding
 
 All multi-byte integer fields are little-endian.
@@ -51,7 +64,7 @@ Required information:
 - format epoch
 - structure size
 - filesystem UUID
-- volume label reference
+- volume label given at format time
 - logical block shift
 - total logical blocks
 - allocation region size
@@ -75,7 +88,7 @@ The identification region must contain enough data for:
 - filesystem name
 - format epoch
 - UUID
-- volume label or label reference
+- the current volume label
 - block size
 - feature summary
 - clean/dirty state
@@ -83,13 +96,25 @@ The identification region must contain enough data for:
 Prototype identification version 3 stores three 64-bit mount-time feature
 summaries (`COMPAT`, `RO_COMPAT`, `INCOMPAT`), the directory comparison-key
 algorithm and its three-byte Unicode table version. Unknown values are rejected
-before checkpoint replay or any other write. Version-1/2 prototype images
-remain readable and writable with their explicit legacy byte-identity key
-behavior; version 1 additionally derives its intent-log feature bit.
+before checkpoint replay or any other write. Version 3 is the only version:
+the prototype layouts 1 and 2 are refused, and neither number is ever reused
+([ADR-115](../adr/ADR-115-retire-unwritten-surface.md)).
 
-The experimental incompatible assignments include bit 0 for the base intent
-log, bit 1 for version-3 existing-file data updates, and bit 2 for persistent
-snapshot ownership. Bit 2 binds the registry/lifetime checkpoint extension in
+Every assigned bit, one per registered identity
+([feature registry](../spec/feature-registry.toml),
+[ADR-116](../adr/ADR-116-registry-lists-what-exists.md)):
+
+| Word | Bit | Identity |
+|---|---:|---|
+| `INCOMPAT` | 0 | base intent log |
+| `INCOMPAT` | 1 | version-3 existing-file data updates |
+| `INCOMPAT` | 2 | persistent snapshot ownership |
+| `INCOMPAT` | 3 | security descriptors ([ADR-101](../adr/ADR-101-security-preservation-container.md)) |
+| `RO_COMPAT` | 0 | shared extents |
+| `RO_COMPAT` | 1 | orphan directory |
+| `COMPAT` | 0 | per-file data-update policy |
+
+Bit 2 binds the registry/lifetime checkpoint extension in
 [ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md).
 Bit 1 requires bit 0. The split prevents an older namespace-only replay
 implementation from interpreting an unknown but valid data-update record as a

@@ -43,7 +43,7 @@ replayable without the original workstation.
 | Intent-log record and referenced data | All five v3 operation types; three-record prefix, binding, sequence, data reuse/range/CRC and exact read-termination controls | Rust-built v3 write/truncate/create prefix scan plus final namespace lookup | Broader native recovery qualification |
 | Snapshot registry, captured record, lifetime ledger and keys | Five direct targets; typed-tree ownership, ledger model and resealed cross-record snapshot checks | None | Portable C snapshot qualification |
 | Reclaim queue root, segment and table | Three direct targets; resealed cross-block count, generation, geometry, cursor and pending-total checks | None | Portable C reclaim qualification |
-| Xattr record | None | None | Add when the portable reader exposes xattrs |
+| Extended attribute reference and set | The reference is a field of the object-record target; the set blob has no direct target | Reference, `"AFSA"` segment and whole-set decoders, cross-read image by image | Add a direct target for the set blob |
 | Catalog record | None | None | Add with catalog implementation |
 | Change-stream record | None | None | Add with change-stream implementation |
 
@@ -538,6 +538,17 @@ fragmented file.
 ([ADR-106](../adr/ADR-106-stored-object-comment.md)). They have no wire
 command; [the comment test](../crates/afsplus-check/tests/object_comment.rs)
 owns their proof, power-cut matrix included.
+
+`SetAttributes` applies a batch of extended-attribute changes to one object in
+one commit, and `Attribute` and `AttributeNames` read them
+([ADR-108](../adr/ADR-108-extended-attributes.md)). `SnapshotAttribute`,
+`SnapshotAttributeNames` and `SnapshotSecurityDescriptor` read what a retained
+view captured ([ADR-109](../adr/ADR-109-owned-chains-under-snapshots.md)).
+They have no wire command;
+[the attribute test](../crates/afsplus-check/tests/extended_attributes.rs) and
+[the chains-under-snapshots test](../crates/afsplus-check/tests/chain_snapshots.rs)
+own their proof, power-cut matrices included; no generated family carries
+attributes yet.
 
 The remaining twenty-three methods read: `FileAllocationPage`,
 `FileDataPolicy`, `FirstOrphan`, `ListDirectory`, `ListRoot`,

@@ -1463,7 +1463,7 @@ no validation refusal.
 
 [Source registration](../crates/afsplus-core/tests/api_coverage.rs) proves that
 each guarded entry names its own `ApiMethod`. The execution test in the flight
-tests runs all 66 registered methods against one volume with persistent
+tests runs all 81 registered methods against one volume with persistent
 snapshots, shared extents, the data policy and an intent log, then requires each
 to appear as `ApiBegin` with its own identity and a matching outcome closing that
 span. A registered method which never executes fails the test, and so does an
