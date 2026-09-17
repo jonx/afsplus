@@ -1,0 +1,39 @@
+m68k: a library function that returns and takes a 64-bit integer cannot be called
+
+arch/m68k-all/include/gencall.c generates aros/m68k/libcall.h. Its QUAD
+argument macros place the 64-bit argument in a register pair and then call
+__AROS_LC<n>##t, where t is the declared return type. It emits the aliases for
+a LONG return (__AROS_LC2LONG and up) and for a double return, and none for a
+QUAD return. A function that both returns a 64-bit integer and takes one
+therefore pastes __AROS_LC4QUAD, which nothing defines; the preprocessor leaves
+the call as an identifier and the compiler reports
+
+  error: expected expression before 'QUAD'
+
+at the first argument, which is the return type rather than the real subject.
+No module in the tree returns a 64-bit integer by value, so nothing exercises
+it today.
+
+A 64-bit integer comes back in D0/D1. The ordinary call macro already describes
+that: it casts to a function pointer with the declared return type and lets the
+compiler place the result, exactly as it does for LONG. The aliases are the
+same four lines the LONG return has.
+
+--- a/arch/m68k-all/include/gencall.c
++++ b/arch/m68k-all/include/gencall.c
+@@ -514,6 +514,15 @@
+ "#define __AROS_LC3LONG   __AROS_LC3\n"
+ "#define __AROS_LC4LONG   __AROS_LC4\n"
+ "#define __AROS_LC5LONG   __AROS_LC5\n"
++/* A 64-bit integer comes back in D0/D1, which the ordinary call macro already
++   describes: it casts to a function pointer returning the declared type and
++   lets the compiler place the result. Without these aliases the QUAD argument
++   macros paste __AROS_LC<n>QUAD, which nothing defines, and a library function
++   that both returns and takes a 64-bit integer cannot be called at all. */
++"#define __AROS_LC2QUAD   __AROS_LC2\n"
++"#define __AROS_LC3QUAD   __AROS_LC3\n"
++"#define __AROS_LC4QUAD   __AROS_LC4\n"
++"#define __AROS_LC5QUAD   __AROS_LC5\n"
+ "\n"
+ "#   define AROS_LDDOUBLE1(t,n,q1,bt,bn,o,s) \\\n"
+ "        __AROS_LD_PREFIX t AROS_SLIB_ENTRY(n,s,o) ( \\\n"
