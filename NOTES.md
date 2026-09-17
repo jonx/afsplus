@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — A selected checkpoint in the wrong form refuses the volume, in C too](#2026-09-17--a-selected-checkpoint-in-the-wrong-form-refuses-the-volume-in-c-too)
 - [2026-09-17 — A second reader for the snapshot checkpoint payload (ADR-111)](#2026-09-17--a-second-reader-for-the-snapshot-checkpoint-payload-adr-111)
 - [2026-09-17 — Exact admission for the reclaim queue blocks (ADR-110)](#2026-09-17--exact-admission-for-the-reclaim-queue-blocks-adr-110)
 - [2026-09-17 — A second reader for the reclaim queue blocks](#2026-09-17--a-second-reader-for-the-reclaim-queue-blocks)
@@ -212,6 +213,27 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — A selected checkpoint in the wrong form refuses the volume, in C too
+
+Follow-up to ADR-111, asked by claude-main: bind the checkpoint's payload form
+to the persistent-snapshots feature. The core already did, for the selected
+checkpoint, and `mount_modes` holds that it never steps past such a slot to
+the older one. I first moved the check into candidate selection, which makes
+the core fall back, saw that test, and undid it: a valid newest checkpoint in
+the wrong form is not a torn write. The portable C reader was the one that
+differed: it treated the slot as corrupt and used the older checkpoint. It now
+keeps the slot as a candidate and refuses the volume when selection chooses
+it. `Explainer::load` refuses the same image. ADR-111, not yet pushed, states
+the rule and why a short-form checkpoint cannot exist on a snapshot volume
+(identification is immutable; the formatter writes the first checkpoint in the
+volume's form).
+
+Proof: `volume_label` `the_portable_c_reader_reports_the_same_label_and_the_same_fallback`
+now builds both images (wrong form in the newest slot: both readers refuse;
+in the older slot: both report the current state) and fails with the old C
+behaviour; `explain_more` holds explain to the core's verdict; `mount_modes`
+unchanged.
 
 ## 2026-09-17 — A second reader for the snapshot checkpoint payload (ADR-111)
 

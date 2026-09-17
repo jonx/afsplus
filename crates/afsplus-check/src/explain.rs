@@ -408,6 +408,17 @@ impl Explainer {
             (None, None) => return Err("no structurally valid checkpoint".into()),
         };
         let checkpoint = slots[selected].clone().expect("selected slot is present");
+        // The payload form belongs to the persistent-snapshots feature. A
+        // valid newest checkpoint in the other form is not a torn write, so
+        // it is not stepped past: the image has no committed state to explain.
+        let snapshots_enabled =
+            ident.features.incompat & afsplus_format::ident::INCOMPAT_PERSISTENT_SNAPSHOTS != 0;
+        if checkpoint.snapshot_roots.is_some() != snapshots_enabled {
+            return Err(format!(
+                "the selected checkpoint (generation {}) is in a form that disagrees with the persistent-snapshots feature",
+                checkpoint.generation
+            ));
+        }
 
         let mut walk = Walk {
             dev,

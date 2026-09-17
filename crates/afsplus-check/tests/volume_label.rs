@@ -236,6 +236,36 @@ fn the_portable_c_reader_reports_the_same_label_and_the_same_fallback() {
         assert_eq!(rust_view(&damaged), Some(fallback.clone()), "Rust: {what}");
         assert_eq!(c_view(&mut damaged), Some(fallback.clone()), "C: {what}");
     }
+    // A newest checkpoint that is valid and in the snapshot-bearing form, on
+    // a volume without that feature, is not a torn write. Neither reader
+    // steps past it to the older checkpoint: both refuse the volume.
+    let mut foreign = dev.clone();
+    foreign.read_block(newest, &mut block).unwrap();
+    let mut checkpoint = Checkpoint::decode(&block, &[0x1a; 16]).unwrap();
+    checkpoint.snapshot_roots = Some(afsplus_format::checkpoint::SnapshotRoots {
+        registry: 100,
+        lifetimes: 101,
+    });
+    foreign
+        .write_block(newest, &checkpoint.encode(4096).unwrap())
+        .unwrap();
+    assert_eq!(rust_view(&foreign), None, "Rust: snapshot form");
+    assert_eq!(c_view(&mut foreign), None, "C: snapshot form");
+    // The same form in the older slot is never selected and harms nothing.
+    let older = 3 - newest;
+    let mut stale = dev.clone();
+    stale.read_block(older, &mut block).unwrap();
+    let mut checkpoint = Checkpoint::decode(&block, &[0x1a; 16]).unwrap();
+    checkpoint.snapshot_roots = Some(afsplus_format::checkpoint::SnapshotRoots {
+        registry: 100,
+        lifetimes: 101,
+    });
+    stale
+        .write_block(older, &checkpoint.encode(4096).unwrap())
+        .unwrap();
+    let current = format!("{after_generation} Après 🜁");
+    assert_eq!(rust_view(&stale), Some(current.clone()), "Rust: stale form");
+    assert_eq!(c_view(&mut stale), Some(current), "C: stale form");
     let _ = std::fs::remove_dir_all(&scratch);
 }
 

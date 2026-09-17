@@ -319,6 +319,22 @@ fn checkpoint_reclaim_and_space_agree_with_the_core_and_the_checker() {
     assert_eq!(after.generation, explained.generation + 1);
     assert_ne!(after.slots[0].selected, explained.slots[0].selected);
 
+    // A valid newest checkpoint in the snapshot-bearing form, on a volume
+    // without the feature: the core refuses the volume, and so does explain.
+    let mut foreign = dev.clone();
+    let newest = usize::from(after.slots[1].selected);
+    foreign.read_block(1 + newest as u64, &mut block).unwrap();
+    let mut form = afsplus_format::checkpoint::Checkpoint::decode(&block, &[0xe9; 16]).unwrap();
+    form.snapshot_roots = Some(afsplus_format::checkpoint::SnapshotRoots {
+        registry: 100,
+        lifetimes: 101,
+    });
+    foreign
+        .write_block(1 + newest as u64, &form.encode(BLOCK).unwrap())
+        .unwrap();
+    assert!(select_checkpoint(&mut foreign, &ident).is_err());
+    assert!(Explainer::load(&mut foreign).is_err());
+
     // A freshly formatted volume has one slot that was never written.
     let mut fresh = MemoryBackend::new(BLOCK, 1024);
     mkfs(&mut fresh, &params()).unwrap();

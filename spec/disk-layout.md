@@ -82,7 +82,9 @@ Rules:
    168 bytes, or 184 with the snapshot roots after it (registry root at 168,
    lifetime-ledger root at 176, both nonzero and distinct,
    [ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md)); nothing follows
-   the payload ([ADR-111](../adr/ADR-111-checkpoint-zero-tail.md)); the
+   the payload, and the form belongs to the persistent-snapshots feature: a
+   selected checkpoint in the other form refuses the volume
+   ([ADR-111](../adr/ADR-111-checkpoint-zero-tail.md)); the
    identification block keeps the format-time label and is never rewritten
 12. an object record may carry the 16-byte attribute reference (object flag
    bit 4) after the security reference and own a chain of `"AFSA"` segments,

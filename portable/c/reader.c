@@ -138,6 +138,9 @@ struct afspr_checkpoint {
     uint64_t free_blocks_total;
     uint64_t shared_extent_root_block;
     uint8_t label_len;
+    /* The slot is in the snapshot-bearing form. The reader implements no
+     * snapshots; selection refuses such a slot instead of stepping past it. */
+    uint8_t has_snapshot_roots;
     char label[AFSPR_LABEL_CAPACITY];
 };
 
@@ -819,8 +822,11 @@ int afspr_decode_checkpoint_block(const void *input, size_t block_size,
     return AFSPR_OK;
 }
 
-/* The volume path: the reader does not implement persistent snapshots, so a
- * checkpoint that carries their roots is not one it selects. */
+/* The volume path: format-level decoding plus what the geometry decides. A
+ * slot in the snapshot-bearing form stays a candidate, so that selection can
+ * refuse it as the core does: a valid newest checkpoint whose form disagrees
+ * with the volume's features is never stepped past in favour of an older
+ * one. */
 static int afspr_decode_checkpoint(const uint8_t *block, size_t block_size,
                                    const struct afspr_ident *ident,
                                    struct afspr_checkpoint *checkpoint)
@@ -830,7 +836,12 @@ static int afspr_decode_checkpoint(const uint8_t *block, size_t block_size,
                                                &view);
 
     if (status != AFSPR_OK) return status;
-    if (view.has_snapshot_roots != 0u) return AFSPR_ERR_CORRUPT;
+    checkpoint->has_snapshot_roots = (uint8_t)view.has_snapshot_roots;
+    if (view.has_snapshot_roots != 0u &&
+        (!afspr_is_allocatable(ident, view.snapshot_registry_block) ||
+         !afspr_is_allocatable(ident, view.snapshot_lifetimes_block))) {
+        return AFSPR_ERR_CORRUPT;
+    }
     checkpoint->generation = view.generation;
     checkpoint->object_map_block = view.object_map_block;
     checkpoint->allocation_root_block = view.allocation_root_block;
@@ -1378,6 +1389,15 @@ int afspr_probe_detailed(const struct afspr_block_ops *ops,
                                         candidates[0].generation))
                    ? 1u
                    : 0u;
+    /* The payload form belongs to the persistent-snapshots feature, which
+     * this reader does not implement and its identification check refuses:
+     * a selected checkpoint in that form disagrees with the volume. */
+    if (candidates[selected].has_snapshot_roots != 0u) {
+        return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
+                            AFSPR_STAGE_CHECKPOINT_SELECTION,
+                            (int32_t)selected,
+                            ident.checkpoint_slots[selected]);
+    }
     if (candidates[selected].shared_extent_root_block != 0u &&
         (ident.ro_compat_features & AFSP_RO_COMPAT_SHARED_EXTENTS) == 0u) {
         return afspr_report(diagnostic, AFSPR_ERR_CORRUPT,
