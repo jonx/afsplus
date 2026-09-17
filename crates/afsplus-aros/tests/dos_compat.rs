@@ -303,3 +303,83 @@ fn open_modes_lock_like_dos_and_held_objects_cannot_be_deleted() {
     );
     remount(adapter);
 }
+
+fn names(prefix: &str, count: usize) -> Vec<Vec<u8>> {
+    (0..count)
+        .map(|index| format!("{prefix}{index:03}").into_bytes())
+        .collect()
+}
+
+#[test]
+fn exnext_continues_across_deletes_creates_and_renames() {
+    let mut adapter = adapter(formatted());
+    let all = names("f", 40);
+    for (index, name) in all.iter().enumerate() {
+        create(&mut adapter, name, b"x", 10 + index as i64);
+    }
+
+    // `Delete #?`: delete every entry right after ExNext returns it.
+    let root = adapter.locate(None, b"", LockAccess::Shared).unwrap();
+    let mut returned = Vec::new();
+    loop {
+        match adapter.examine_next(root) {
+            Ok(info) => {
+                adapter
+                    .delete_object(None, &info.name, timestamp(100))
+                    .unwrap();
+                returned.push(info.name);
+            }
+            Err(ArosError::NoMoreEntries) => break,
+            Err(error) => panic!("{error:?}"),
+        }
+    }
+    // Every name exactly once, in comparison-key order, none skipped.
+    assert_eq!(returned, all);
+    adapter.rewind_directory(root).unwrap();
+    assert_eq!(adapter.examine_next(root), Err(ArosError::NoMoreEntries));
+
+    // Mutations around the cursor: entries ordered after it appear once,
+    // entries created before it do not, a rename of the last entry is inert.
+    for name in [&b"b"[..], b"d", b"f", b"h"] {
+        create(&mut adapter, name, b"x", 200);
+    }
+    adapter.rewind_directory(root).unwrap();
+    assert_eq!(adapter.examine_next(root).unwrap().name, b"b");
+    assert_eq!(adapter.examine_next(root).unwrap().name, b"d");
+    create(&mut adapter, b"a", b"x", 201);
+    create(&mut adapter, b"e", b"x", 202);
+    adapter
+        .rename(None, b"d", None, b"c", timestamp(203))
+        .unwrap();
+    adapter.delete_object(None, b"f", timestamp(204)).unwrap();
+    let mut rest = Vec::new();
+    loop {
+        match adapter.examine_next(root) {
+            Ok(info) => rest.push(info.name),
+            Err(ArosError::NoMoreEntries) => break,
+            Err(error) => panic!("{error:?}"),
+        }
+    }
+    assert_eq!(rest, vec![b"e".to_vec(), b"h".to_vec()]);
+
+    // Control: the VFS cookie itself is generation-bound. The same sequence
+    // without the adapter's resume fails, so the pass above is the resume.
+    adapter.free_lock(root).unwrap();
+    let mut vfs = adapter.into_vfs().unwrap();
+    let handle = vfs.open_directory(vfs.root_object()).unwrap();
+    let page = vfs.read_directory(handle, 0, 1).unwrap();
+    vfs.create_file(vfs.root_object(), "z", timestamp(300))
+        .unwrap();
+    assert_eq!(
+        vfs.read_directory(handle, page.next_cookie, 1),
+        Err(afsplus_vfs::VfsError::Stale)
+    );
+    assert_eq!(vfs.resume_directory_after(handle, Some(b"a")).unwrap(), 1);
+    assert_eq!(vfs.resume_directory_after(handle, Some(b"zz")).unwrap(), 6);
+    assert_eq!(vfs.resume_directory_after(handle, Some(b"0")).unwrap(), 0);
+    assert_eq!(vfs.resume_directory_after(handle, None).unwrap(), 0);
+    vfs.close(handle).unwrap();
+    let mut device = vfs.into_volume().into_device();
+    let report = check_device(&mut device);
+    assert!(report.is_clean(), "{:?}", report.errors);
+}

@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use afsplus_block::BlockDevice;
+use afsplus_core::name_key::comparison_key;
 use afsplus_core::volume::{
     DataUpdatePolicy, DirectoryCursor, ObjectMetadata, PreservedMetadata, Volume,
 };
@@ -520,6 +521,90 @@ impl<D: BlockDevice> Vfs<D> {
             next_cookie: page.next.ordinal,
             eof: page.eof,
         })
+    }
+
+    /// Rebinds a directory handle to the current generation and returns the
+    /// cookie of the first entry ordered after `last_name` in the directory's
+    /// comparison-key order, or of the first entry when `last_name` is `None`.
+    ///
+    /// An adapter whose host contract lets enumeration continue across
+    /// namespace changes calls this after `read_directory` reports `Stale`.
+    /// Entries ordered after `last_name` are each returned once; an entry
+    /// created before that position during the enumeration is not returned.
+    /// The search reads O(log n) single-entry pages and keeps no list.
+    pub fn resume_directory_after(
+        &mut self,
+        handle: Handle,
+        last_name: Option<&[u8]>,
+    ) -> Result<u64, VfsError> {
+        let object_id = match self.handles.get(&handle).copied() {
+            Some(OpenHandle::Directory { object_id, .. }) => object_id,
+            Some(OpenHandle::File { .. }) => return Err(VfsError::NotDirectory),
+            None => return Err(VfsError::Stale),
+        };
+        if self.stat(object_id)?.kind != NodeKind::Directory {
+            return Err(VfsError::NotDirectory);
+        }
+        let generation = self.volume.generation();
+        self.handles.insert(
+            handle,
+            OpenHandle::Directory {
+                object_id,
+                generation,
+            },
+        );
+        let Some(last_name) = last_name else {
+            return Ok(0);
+        };
+        let target = comparison_key(self.volume.ident(), last_name)?;
+        // `low` counts entries known to order at or before the target.
+        let mut low = 0u64;
+        let mut step = 1u64;
+        let mut high;
+        loop {
+            let probe = low
+                .checked_add(step - 1)
+                .ok_or_else(|| VfsError::Corrupt("directory ordinal overflow".into()))?;
+            if self
+                .directory_key_at(object_id, generation, probe)?
+                .is_some_and(|key| key <= target)
+            {
+                low = probe + 1;
+                step = step.saturating_mul(2);
+            } else {
+                high = probe;
+                break;
+            }
+        }
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if self
+                .directory_key_at(object_id, generation, middle)?
+                .is_some_and(|key| key <= target)
+            {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        Ok(low)
+    }
+
+    fn directory_key_at(
+        &mut self,
+        object_id: ObjectId,
+        generation: u64,
+        ordinal: u64,
+    ) -> Result<Option<Vec<u8>>, VfsError> {
+        let page = self.volume.read_directory_page(
+            object_id,
+            Some(DirectoryCursor {
+                generation,
+                ordinal,
+            }),
+            1,
+        )?;
+        Ok(page.entries.into_iter().next().map(|entry| entry.key))
     }
 
     pub fn create_file(
