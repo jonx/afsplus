@@ -200,6 +200,29 @@ fn c_boundary_carries_positioned_io_clone_preallocate_replace_and_advise() {
     assert_eq!(afsplus_aros_unmount(filesystem), 0);
 }
 
+/// (status, extents stored, complete, next offset).
+fn map(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    offset: u64,
+    length: u64,
+    extents: &mut [AfsplusArosExtent],
+) -> (i32, u32, u32, u64) {
+    let (mut stored, mut complete, mut next) = (9, 9, 9);
+    let status = afsplus_aros_extent_map(
+        filesystem,
+        file,
+        offset,
+        length,
+        extents.as_mut_ptr(),
+        extents.len() as u32,
+        &mut stored,
+        &mut complete,
+        &mut next,
+    );
+    (status, stored, complete, next)
+}
+
 #[test]
 fn c_boundary_maps_extents_of_a_sparse_preallocated_file() {
     let mut device = formatted(true);
@@ -220,24 +243,12 @@ fn c_boundary_maps_extents_of_a_sparse_preallocated_file() {
         0
     );
     let mut extents = [AfsplusArosExtent::default(); 4];
-    let (mut stored, mut complete, mut resume) = (9, 9, 9);
     // Unpublished write: refused by value, nothing stored.
     assert_eq!(
-        afsplus_aros_extent_map(
-            filesystem,
-            file,
-            0,
-            u64::MAX,
-            extents.as_mut_ptr(),
-            4,
-            0,
-            &mut stored,
-            &mut complete,
-            &mut resume
-        ),
-        202
+        map(filesystem, file, 0, u64::MAX, &mut extents),
+        (202, 9, 9, 9)
     );
-    assert_eq!((stored, extents[0]), (9, AfsplusArosExtent::default()));
+    assert_eq!(extents[0], AfsplusArosExtent::default());
     assert_eq!(afsplus_aros_flush(filesystem), 0);
     assert_eq!(
         afsplus_aros_preallocate(filesystem, file, 8192, 8192, 3, 0),
@@ -245,21 +256,9 @@ fn c_boundary_maps_extents_of_a_sparse_preallocated_file() {
     );
 
     assert_eq!(
-        afsplus_aros_extent_map(
-            filesystem,
-            file,
-            4096,
-            u64::MAX - 4096,
-            extents.as_mut_ptr(),
-            4,
-            0,
-            &mut stored,
-            &mut complete,
-            &mut resume
-        ),
-        0
+        map(filesystem, file, 4096, u64::MAX - 4096, &mut extents),
+        (0, 2, 1, u64::MAX)
     );
-    assert_eq!((stored, complete), (2, 1));
     assert_eq!(
         extents[..2],
         [
@@ -279,55 +278,19 @@ fn c_boundary_maps_extents_of_a_sparse_preallocated_file() {
     );
     assert_eq!(extents[2], AfsplusArosExtent::default());
 
-    // Capacity one: incomplete, and the resume value continues it.
+    // Capacity one: incomplete, and the next offset continues it.
+    let mut one = [AfsplusArosExtent::default(); 1];
     assert_eq!(
-        afsplus_aros_extent_map(
-            filesystem,
-            file,
-            0,
-            u64::MAX,
-            extents.as_mut_ptr(),
-            1,
-            0,
-            &mut stored,
-            &mut complete,
-            &mut resume
-        ),
-        0
+        map(filesystem, file, 0, u64::MAX, &mut one),
+        (0, 1, 0, 16384)
     );
-    assert_eq!((stored, complete, extents[0].offset), (1, 0, 8192));
-    let next = extents[0].offset + extents[0].length;
+    assert_eq!(one[0].offset, 8192);
     assert_eq!(
-        afsplus_aros_extent_map(
-            filesystem,
-            file,
-            next,
-            u64::MAX - next,
-            extents.as_mut_ptr(),
-            1,
-            resume,
-            &mut stored,
-            &mut complete,
-            &mut resume
-        ),
-        0
+        map(filesystem, file, 16384, u64::MAX - 16384, &mut one),
+        (0, 1, 1, u64::MAX)
     );
-    assert_eq!((stored, complete, extents[0].offset), (1, 1, 0x1_0000_0000));
-    assert_eq!(
-        afsplus_aros_extent_map(
-            filesystem,
-            file,
-            0,
-            0,
-            extents.as_mut_ptr(),
-            1,
-            0,
-            &mut stored,
-            &mut complete,
-            &mut resume
-        ),
-        115
-    );
+    assert_eq!(one[0].offset, 0x1_0000_0000);
+    assert_eq!(map(filesystem, file, 0, 0, &mut one).0, 115);
     assert_eq!(afsplus_aros_close(filesystem, file), 0);
     assert_eq!(afsplus_aros_unmount(filesystem), 0);
 }

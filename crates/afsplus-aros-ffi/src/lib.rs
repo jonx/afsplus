@@ -2116,25 +2116,21 @@ pub extern "C" fn afsplus_aros_extent_map(
     length: u64,
     extents: *mut AfsplusArosExtent,
     capacity: u32,
-    resume: u64,
     output_count: *mut u32,
     output_complete: *mut u32,
-    output_resume: *mut u64,
+    output_next_offset: *mut u64,
 ) -> i32 {
     bridge_status(filesystem, || {
         require_output(output_count)?;
         require_output(output_complete)?;
-        require_output(output_resume)?;
+        require_output(output_next_offset)?;
         if extents.is_null() {
             return Err(ArosError::InvalidComponentName);
         }
-        let map = bridge_mut(filesystem)?.adapter.extent_map(
-            file,
-            offset,
-            length,
-            capacity as usize,
-            resume,
-        )?;
+        let map =
+            bridge_mut(filesystem)?
+                .adapter
+                .extent_map(file, offset, length, capacity as usize)?;
         for (index, range) in map.ranges.iter().enumerate() {
             // SAFETY: the adapter returns at most `capacity` ranges and the
             // caller provides that many aligned writable slots.
@@ -2156,6 +2152,6 @@ pub extern "C" fn afsplus_aros_extent_map(
         }
         write_output(output_count, map.ranges.len() as u32)?;
         write_output(output_complete, u32::from(map.complete))?;
-        write_output(output_resume, map.resume)
+        write_output(output_next_offset, map.next_offset)
     })
 }

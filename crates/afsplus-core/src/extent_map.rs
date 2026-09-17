@@ -427,6 +427,51 @@ pub fn read_window<D: BlockDevice>(
     }
 }
 
+/// Reads at most `limit` extents in logical order starting with the one that
+/// covers `start_block`, or the first one after it: one floor descent and one
+/// key page, whatever the file's fragmentation before that position. The
+/// second value tells whether the page was cut by `limit`.
+pub fn read_from<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    root: u64,
+    owner: u64,
+    generation: u64,
+    start_block: u64,
+    limit: usize,
+) -> Result<(Vec<Extent>, bool), CoreError> {
+    if limit == 0 || limit > 64 {
+        return Err(CoreError::PrototypeLimit("extent page limit out of range"));
+    }
+    let tree_spec = spec(owner, generation);
+    let (floor, _) = lookup_floor(dev, geo, root, tree_spec, &key_u64(start_block))?;
+    let low = floor.map_or_else(|| key_u64(start_block).to_vec(), |(key, _)| key);
+    // Two more than `limit`: the floor extent may end before `start_block`
+    // and be dropped, and one extent past the page tells whether it was cut.
+    let (page, _) = crate::tree::read_key_page(dev, geo, root, tree_spec, &low, limit + 2)?;
+    let mut extents: Vec<Extent> = Vec::with_capacity(limit);
+    let mut cut = false;
+    for (key, value) in page.items {
+        let extent = decode_extent(&key, &value, geo)?;
+        if extents.last().is_some_and(|previous| {
+            previous
+                .logical_end()
+                .is_ok_and(|last| last > extent.logical_start)
+        }) {
+            return Err(CoreError::Corrupt("logical extents overlap".into()));
+        }
+        if extent.logical_end()? <= start_block {
+            continue;
+        }
+        if extents.len() == limit {
+            cut = true;
+            break;
+        }
+        extents.push(extent);
+    }
+    Ok((extents, cut))
+}
+
 /// Reads a bounded ordinal page, including a predecessor check across pages.
 /// The caller supplies a bounded limit before this allocation.
 pub fn read_page<D: BlockDevice>(

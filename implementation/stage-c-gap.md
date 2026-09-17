@@ -173,8 +173,8 @@ and placement hints, which need allocator support; the extension packet of C4.
 
 Present (L1, L2): caller-buffer positioned I/O, and `ExtentMap`, the planning
 query of a pager: the committed mapping of a byte range as written, reserved
-or hole, clipped to the range, without physical addresses, bounded per call
-and resumable (`EXTENT_MAP` entry-point group).
+or hole, clipped to the range, without physical addresses, bounded per call,
+one tree descent wherever the offset lies (`EXTENT_MAP` entry-point group).
 
 Lacking: a block-aligned multi-block read and write path that transfers
 whole extents without a bounce copy (the device boundary moves one logical

@@ -1177,6 +1177,94 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
+    /// Committed semantic allocation from a byte offset: the range covering
+    /// `offset`, or the first one after it, and its successors, at most
+    /// `limit` (1 to 64). One tree descent wherever the offset lies, unlike
+    /// the ordinal cursor of [`Self::file_allocation_page`], whose contract it
+    /// shares. `next` is the ordinal-free resume point:
+    /// the byte offset after the last returned range. Refuses an open
+    /// mutation window with `Busy`.
+    pub fn file_allocation_from(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        limit: usize,
+    ) -> Result<FileAllocationPage, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::FileAllocationFrom, |volume| {
+            volume.file_allocation_from_untraced(object_id, offset, limit)
+        })
+    }
+
+    fn file_allocation_from_untraced(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        limit: usize,
+    ) -> Result<FileAllocationPage, CoreError> {
+        if limit == 0 || limit > 64 {
+            return Err(CoreError::PrototypeLimit(
+                "allocation page limit out of range",
+            ));
+        }
+        if self.window.is_some() {
+            return Err(CoreError::Busy);
+        }
+        let record = self.stat(object_id)?.ok_or(CoreError::NotFound)?;
+        if record.object_type != ObjectType::File {
+            return Err(CoreError::IsDirectory);
+        }
+        let geo = self.ident.geometry();
+        let block_size = geo.block_size as u64;
+        let start_block = offset / block_size;
+        let (extents, cut) = if record.flags & afsplus_format::object::OBJECT_FLAG_EXTENT_TREE != 0
+        {
+            extent_map::read_from(
+                &mut self.dev,
+                &geo,
+                record.data_root,
+                object_id,
+                self.checkpoint.generation,
+                start_block,
+                limit,
+            )?
+        } else if record.data_blocks > start_block {
+            (
+                vec![extent_map::Extent {
+                    logical_start: 0,
+                    physical_start: record.data_root,
+                    block_count: record.data_blocks,
+                    flags: 0,
+                }],
+                false,
+            )
+        } else {
+            (vec![], false)
+        };
+        let mut ranges = Vec::with_capacity(extents.len());
+        let mut next = offset;
+        for extent in extents {
+            let start = extent
+                .logical_start
+                .checked_mul(block_size)
+                .ok_or_else(|| CoreError::Corrupt("allocation byte offset overflows".into()))?;
+            let length = extent
+                .block_count
+                .checked_mul(block_size)
+                .ok_or_else(|| CoreError::Corrupt("allocation byte length overflows".into()))?;
+            next = start.saturating_add(length);
+            ranges.push(FileAllocationRange {
+                offset: start,
+                length,
+                unwritten: extent.flags & extent_map::EXTENT_UNWRITTEN != 0,
+            });
+        }
+        Ok(FileAllocationPage {
+            ranges,
+            next,
+            eof: !cut,
+        })
+    }
+
     fn file_allocation_page_untraced(
         &mut self,
         object_id: u64,

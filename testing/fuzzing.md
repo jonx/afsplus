@@ -528,6 +528,12 @@ their proof; no generated family carries descriptors yet.
 command; [the label test](../crates/afsplus-check/tests/volume_label.rs) owns
 its proof, power-cut matrix included.
 
+`FileAllocationFrom` reads the committed allocation of a file from a byte
+offset in one tree descent. It has no wire command;
+[the seek test](../crates/afsplus-core/tests/extent_seek.rs) owns its proof,
+including entry-for-entry agreement with `FileAllocationPage` over a
+fragmented file.
+
 The remaining twenty-three methods read: `FileAllocationPage`,
 `FileDataPolicy`, `FirstOrphan`, `ListDirectory`, `ListRoot`,
 `LookupInDirectory`, `LookupRoot`, `OrphanCount`, `OrphanObject`,

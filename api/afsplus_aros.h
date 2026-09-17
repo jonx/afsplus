@@ -482,17 +482,16 @@ int32_t afsplus_aros_dir_close(struct AfsplusAros *filesystem, uint64_t dir);
 /* Group AFSPLUS_AROS_GROUP_EXTENT_MAP: the committed mapping of
  * offset..offset+length of an open file, clipped to that range, without
  * physical addresses; what a pager needs to plan faults and block-aligned
- * transfers. Stores up to capacity (1 to 64) extents and their count.
- * output_complete is 1 when every mapping intersecting the range was stored;
- * otherwise call again with an offset at or after the end of the last extent
- * and the returned resume value, which only saves work. resume is 0 on a
- * first call. With unpublished writes pending the answer is
+ * transfers. Stores up to capacity (1 to 64) extents and their count, found
+ * in one tree descent wherever offset lies. output_complete is 1 when every
+ * mapping intersecting the range was stored; otherwise query again from
+ * output_next_offset. With unpublished writes pending the answer is
  * ERROR_OBJECT_IN_USE and nothing is committed; flush first. */
 int32_t afsplus_aros_extent_map(struct AfsplusAros *filesystem,
     uint64_t file, uint64_t offset, uint64_t length,
-    struct AfsplusArosExtent *extents, uint32_t capacity, uint64_t resume,
+    struct AfsplusArosExtent *extents, uint32_t capacity,
     uint32_t *output_count, uint32_t *output_complete,
-    uint64_t *output_resume);
+    uint64_t *output_next_offset);
 
 /* Group AFSPLUS_AROS_GROUP_SOFT_LINKS. The target is an opaque path in the
  * mount's name encoding. Locate and open answer ERROR_IS_SOFT_LINK for a
