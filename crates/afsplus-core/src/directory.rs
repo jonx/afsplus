@@ -5,15 +5,13 @@ use afsplus_format::dir::DirEntry;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::ident::Identification;
 use afsplus_format::tree::{TreeKind, TreeNode};
-use afsplus_format::{le, validate_name, OBJECT_INVALID};
+use afsplus_format::{validate_name, OBJECT_INVALID};
 
 use crate::name_key::{validate_entry_key, COMPARISON_KEY_MAX_BYTES};
 use crate::tree::{
     lookup, read_range, visit_tree_nodes, visit_tree_nodes_bounded, TreeSpec, TreeSummary,
 };
 use crate::CoreError;
-
-const VALUE_FIXED: usize = 16;
 
 pub struct LoadedDirectory {
     pub owner: u64,
@@ -39,16 +37,7 @@ pub fn encode_entry(
     entry: &DirEntry,
 ) -> Result<(Vec<u8>, Vec<u8>), CoreError> {
     validate_logical_entry(ident, entry)?;
-    if entry.name.len() > u16::MAX as usize {
-        return Err(CoreError::Corrupt(
-            "directory name exceeds wire length".into(),
-        ));
-    }
-    let mut value = vec![0u8; VALUE_FIXED + entry.name.len()];
-    le::put_u16(&mut value[0..2], entry.name.len() as u16);
-    value[2] = entry.child_type_hint;
-    le::put_u64(&mut value[8..16], entry.child_id);
-    value[VALUE_FIXED..].copy_from_slice(&entry.name);
+    let value = afsplus_format::dir::encode_tree_entry_value(entry).map_err(shape_error)?;
     Ok((entry.key.clone(), value))
 }
 
@@ -193,30 +182,22 @@ where
 }
 
 fn decode_entry(ident: &Identification, key: &[u8], encoded: &[u8]) -> Result<DirEntry, CoreError> {
-    if encoded.len() < VALUE_FIXED {
-        return Err(CoreError::Corrupt(
-            "directory leaf value is truncated".into(),
-        ));
-    }
-    let name_len = le::get_u16(&encoded[0..2]) as usize;
-    if encoded.len() != VALUE_FIXED + name_len {
-        return Err(CoreError::Corrupt(
-            "directory leaf name length mismatch".into(),
-        ));
-    }
-    if encoded[3..8] != [0; 5] {
-        return Err(CoreError::Corrupt(
-            "directory leaf reserved bytes are nonzero".into(),
-        ));
-    }
-    let entry = DirEntry {
-        key: key.to_vec(),
-        name: encoded[VALUE_FIXED..].to_vec(),
-        child_type_hint: encoded[2],
-        child_id: le::get_u64(&encoded[8..16]),
-    };
+    // The value's shape is the format crate's; the key's relation to the
+    // name under this volume's algorithm is checked here.
+    let entry = afsplus_format::dir::decode_tree_entry_value(key, encoded).map_err(shape_error)?;
     validate_logical_entry(ident, &entry)?;
     Ok(entry)
+}
+
+/// The codec's verdict with the error kinds this module has always reported:
+/// a malformed value is corruption, a malformed name is a format error.
+fn shape_error(error: afsplus_format::FormatError) -> CoreError {
+    match error {
+        afsplus_format::FormatError::Invalid(message) if message.starts_with("directory ") => {
+            CoreError::Corrupt(message.into())
+        }
+        other => CoreError::Format(other),
+    }
 }
 
 fn validate_logical_entry(ident: &Identification, entry: &DirEntry) -> Result<(), CoreError> {

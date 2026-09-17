@@ -734,13 +734,12 @@ impl<'a, D: BlockDevice> Image<'a, D> {
 /// Directory leaf value: name length, child type hint, child object ID, then
 /// the original UTF-8 name (`docs/05-directories-and-names.md`).
 fn decode_entry(value: &[u8]) -> Option<(u64, String)> {
-    if value.len() < 16 {
-        return None;
-    }
-    let name_len = u16::from_le_bytes(value[0..2].try_into().ok()?) as usize;
-    let child = u64::from_le_bytes(value[8..16].try_into().ok()?);
-    let name = value.get(16..16 + name_len)?;
-    Some((child, String::from_utf8_lossy(name).into_owned()))
+    // The key is not needed to read the child and the name.
+    let entry = afsplus_format::dir::decode_tree_entry_value(&[], value).ok()?;
+    Some((
+        entry.child_id,
+        String::from_utf8_lossy(&entry.name).into_owned(),
+    ))
 }
 
 /// The logical-to-physical map of one file, read forward only.
