@@ -19,6 +19,20 @@ use fuser::{
 use crate::{AttributeWriteMode, FuseAdapter, FuseAttributes, FuseConfig};
 
 const ATTRIBUTE_TTL: Duration = Duration::from_secs(1);
+
+/// The permission bits of a `mode_t`, without the file-type bits a caller of
+/// `mknod` or `create` also puts there. The kernel has already applied the
+/// process umask by the time the request reaches us.
+fn time_or_now(value: TimeOrNow) -> Timespec {
+    match value {
+        TimeOrNow::SpecificTime(time) => timespec(time),
+        TimeOrNow::Now => now(),
+    }
+}
+
+fn permission_bits(mode: u32) -> u16 {
+    (mode & 0o7777) as u16
+}
 const DIRECTORY_BATCH: usize = 128;
 
 pub struct FuserFilesystem<D: BlockDevice + Send> {
@@ -94,7 +108,7 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
         gid: Option<u32>,
         size: Option<u64>,
         _atime: Option<TimeOrNow>,
-        _mtime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
         _ctime: Option<SystemTime>,
         handle: Option<FileHandle>,
         _creation_time: Option<SystemTime>,
@@ -104,16 +118,34 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
         reply: ReplyAttr,
     ) {
         let result = self.lock().and_then(|mut adapter| {
-            let attributes = adapter.attributes(inode.0).map_err(errno)?;
-            // macOS follows create/mkdir with a SETATTR that repeats the mode,
-            // owner and empty BSD flags it just requested. AFS+ does not yet
-            // persist those fields, but acknowledging an exact no-op is safe.
-            let metadata_is_unchanged = mode
-                .is_none_or(|value| value & 0o7777 == u32::from(attributes.mode))
-                && uid.is_none_or(|value| value == attributes.uid)
-                && gid.is_none_or(|value| value == attributes.gid)
-                && flags.is_none_or(|value| value.is_empty());
-            if !metadata_is_unchanged {
+            // Every field here is now either stored or refused. What is no
+            // longer done is answering success and keeping nothing, which is
+            // what this function did with the times: `touch -t` returned 0
+            // and the modification time did not move.
+            //
+            // The access time is the one field with no write, and that is a
+            // declared property rather than a silent drop: this format keeps
+            // no access time and the volume reports the modification time in
+            // its place, so there is nothing to store and nothing claimed.
+            //
+            // The change time is not settable through POSIX. It follows any
+            // metadata write, which the core does on its own.
+            if let Some(mode) = mode {
+                adapter
+                    .set_posix_mode(inode.0, permission_bits(mode), now())
+                    .map_err(errno)?;
+            }
+            if uid.is_some() || gid.is_some() {
+                adapter.set_owner(inode.0, uid, gid, now()).map_err(errno)?;
+            }
+            if let Some(mtime) = mtime {
+                adapter
+                    .set_times(inode.0, time_or_now(mtime), now())
+                    .map_err(errno)?;
+            }
+            // BSD flags have no carrier. An empty set is a no-op; anything
+            // else is refused rather than dropped.
+            if flags.is_some_and(|value| !value.is_empty()) {
                 return Err(Errno::EOPNOTSUPP);
             }
             if let Some(size) = size {
@@ -121,7 +153,7 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
                     .truncate(inode.0, handle.map(|value| value.0), size, now())
                     .map_err(errno)
             } else {
-                Ok(attributes)
+                adapter.attributes(inode.0).map_err(errno)
             }
         });
         match result {
@@ -146,7 +178,13 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
         }
         let result = self.lock().and_then(|mut adapter| {
             let (attributes, handle) = adapter
-                .create_file(parent.0, name.as_bytes(), AccessMode::WriteOnly, now())
+                .create_file(
+                    parent.0,
+                    name.as_bytes(),
+                    AccessMode::WriteOnly,
+                    Some(permission_bits(mode)),
+                    now(),
+                )
                 .map_err(errno)?;
             adapter.close(handle).map_err(errno)?;
             Ok(attributes)
@@ -203,13 +241,18 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
         _request: &Request,
         parent: INodeNo,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         _umask: u32,
         reply: ReplyEntry,
     ) {
         let result = self.lock().and_then(|mut adapter| {
             adapter
-                .create_directory(parent.0, name.as_bytes(), now())
+                .create_directory(
+                    parent.0,
+                    name.as_bytes(),
+                    Some(permission_bits(mode)),
+                    now(),
+                )
                 .map_err(errno)
         });
         match result {
@@ -540,7 +583,7 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
         _request: &Request,
         parent: INodeNo,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         _umask: u32,
         flags: i32,
         reply: ReplyCreate,
@@ -548,7 +591,13 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
         let flags = OpenFlags(flags);
         let result = self.lock().and_then(|mut adapter| {
             adapter
-                .create_file(parent.0, name.as_bytes(), access_mode(flags), now())
+                .create_file(
+                    parent.0,
+                    name.as_bytes(),
+                    access_mode(flags),
+                    Some(permission_bits(mode)),
+                    now(),
+                )
                 .map_err(errno)
         });
         match result {

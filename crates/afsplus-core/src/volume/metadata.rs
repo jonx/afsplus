@@ -104,6 +104,43 @@ impl<D: BlockDevice> Volume<D> {
         self.commit_object_metadata(record)
     }
 
+    /// Set the modification time a caller names, as `utimes` does. The
+    /// metadata-change time becomes `now`, because changing the modification
+    /// time IS a metadata change; POSIX does not let a caller choose it.
+    ///
+    /// There is no access time in this format and none is invented here: the
+    /// adapters report the modification time for it, which is what a volume
+    /// that does not track access time has to say.
+    pub fn set_object_times(
+        &mut self,
+        object_id: u64,
+        modified: Timespec,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::SetObjectTimes, |volume| {
+            volume.set_object_times_untraced(object_id, modified, now)
+        })
+    }
+
+    fn set_object_times_untraced(
+        &mut self,
+        object_id: u64,
+        modified: Timespec,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.ensure_window_closed()?;
+        self.ensure_public_object_id(object_id)?;
+        validate_time(modified)?;
+        validate_time(now)?;
+        let mut record = self.metadata_target(object_id)?;
+        if record.modified == modified {
+            return Ok(());
+        }
+        record.modified = modified;
+        record.changed = now;
+        self.commit_object_metadata(record)
+    }
+
     /// Exact restoration of the existing protection and timestamp fields.
     /// Requires independently authorized host restore access before invocation.
     /// Unlike ordinary metadata edits, this preserves the archived change time.

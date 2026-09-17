@@ -79,6 +79,7 @@ fn write_to_a_read_only_volume(adapter: &mut FuseAdapter<MemoryBackend>) -> VfsE
             OBJECT_ROOT,
             b"note.txt",
             AccessMode::ReadWrite,
+            None,
             timestamp(1),
         )
         .map(|_| ())
@@ -183,6 +184,7 @@ fn a_recovered_refusal_is_reported_as_recovered_and_not_as_a_failure() {
             OBJECT_ROOT,
             b"note.txt",
             AccessMode::ReadWrite,
+            None,
             timestamp(1),
         )
         .unwrap();

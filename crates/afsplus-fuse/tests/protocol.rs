@@ -80,6 +80,7 @@ fn durable_data_replies_survive_without_a_fuse_fsync_request() {
             OBJECT_ROOT,
             b"host-file",
             AccessMode::ReadWrite,
+            None,
             timestamp(1),
         )
         .unwrap();
@@ -146,6 +147,7 @@ fn insensitive_protocol_lookup_rejects_folded_duplicates_and_preserves_spelling(
             OBJECT_ROOT,
             "Straße".as_bytes(),
             AccessMode::ReadWrite,
+            None,
             timestamp(1),
         )
         .unwrap();
@@ -155,7 +157,13 @@ fn insensitive_protocol_lookup_rejects_folded_duplicates_and_preserves_spelling(
         file.object_id
     );
     assert!(matches!(
-        fuse.create_file(OBJECT_ROOT, b"strasse", AccessMode::ReadWrite, timestamp(2)),
+        fuse.create_file(
+            OBJECT_ROOT,
+            b"strasse",
+            AccessMode::ReadWrite,
+            None,
+            timestamp(2)
+        ),
         Err(VfsError::AlreadyExists)
     ));
     fuse.rename(
@@ -183,7 +191,7 @@ fn insensitive_protocol_lookup_rejects_folded_duplicates_and_preserves_spelling(
 fn protocol_slice_survives_remount_and_checker() {
     let mut fuse = adapter();
     let work = fuse
-        .create_directory(OBJECT_ROOT, b"work", timestamp(1))
+        .create_directory(OBJECT_ROOT, b"work", None, timestamp(1))
         .unwrap();
     assert_eq!(work.kind, NodeKind::Directory);
     assert_eq!(work.uid, 501);
@@ -193,6 +201,7 @@ fn protocol_slice_survives_remount_and_checker() {
             work.object_id,
             b"draft",
             AccessMode::ReadWrite,
+            None,
             timestamp(2),
         )
         .unwrap();
@@ -222,6 +231,7 @@ fn protocol_slice_survives_remount_and_checker() {
             OBJECT_ROOT,
             b"replacement",
             AccessMode::WriteOnly,
+            None,
             timestamp(7),
         )
         .unwrap();
@@ -260,7 +270,7 @@ fn protocol_slice_survives_remount_and_checker() {
 fn directory_offsets_resume_without_duplicates_and_track_parent() {
     let mut fuse = adapter();
     let directory = fuse
-        .create_directory(OBJECT_ROOT, b"directory", timestamp(1))
+        .create_directory(OBJECT_ROOT, b"directory", None, timestamp(1))
         .unwrap();
     for (index, name) in [b"alpha".as_slice(), b"beta", b"gamma"]
         .into_iter()
@@ -271,6 +281,7 @@ fn directory_offsets_resume_without_duplicates_and_track_parent() {
                 directory.object_id,
                 name,
                 AccessMode::ReadOnly,
+                None,
                 timestamp(index as i64 + 2),
             )
             .unwrap();
@@ -312,12 +323,24 @@ fn directory_offsets_resume_without_duplicates_and_track_parent() {
 fn names_open_modes_and_stale_handles_fail_explicitly() {
     let mut fuse = adapter();
     assert!(matches!(
-        fuse.create_file(OBJECT_ROOT, b"\xff", AccessMode::ReadWrite, timestamp(1)),
+        fuse.create_file(
+            OBJECT_ROOT,
+            b"\xff",
+            AccessMode::ReadWrite,
+            None,
+            timestamp(1)
+        ),
         Err(VfsError::Invalid)
     ));
 
     let (file, handle) = fuse
-        .create_file(OBJECT_ROOT, b"file", AccessMode::ReadOnly, timestamp(2))
+        .create_file(
+            OBJECT_ROOT,
+            b"file",
+            AccessMode::ReadOnly,
+            None,
+            timestamp(2),
+        )
         .unwrap();
     assert!(matches!(
         fuse.write(handle, 0, b"x", timestamp(3)),

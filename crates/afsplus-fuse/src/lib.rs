@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use afsplus_block::BlockDevice;
 use afsplus_format::attrs::ATTRIBUTE_VALUE_MAX_BYTES;
+use afsplus_format::posix;
 use afsplus_format::{Timespec, OBJECT_ROOT};
 pub use afsplus_vfs::AttributeWriteMode;
 use afsplus_vfs::{AccessMode, Handle, NodeKind, ObjectId, Stat, StatFs, Vfs, VfsError};
@@ -228,6 +229,40 @@ impl<D: BlockDevice> FuseAdapter<D> {
         Ok(self.map_attributes(stat))
     }
 
+    /// Writes the POSIX permission bits, keeping the AmigaDOS-only bits of
+    /// the protection word. A bit this format cannot carry, sticky, is
+    /// refused by the VFS rather than dropped, and the refusal reaches the
+    /// caller as EOPNOTSUPP.
+    pub fn set_posix_mode(
+        &mut self,
+        object_id: ObjectId,
+        mode: u16,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        self.vfs.set_posix_mode(object_id, mode, now)
+    }
+
+    /// Sets either half of the owner; `None` leaves that half alone.
+    pub fn set_owner(
+        &mut self,
+        object_id: ObjectId,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        self.vfs.set_owner(object_id, uid, gid, now)
+    }
+
+    /// Sets the modification time, as `utimes` does.
+    pub fn set_times(
+        &mut self,
+        object_id: ObjectId,
+        modified: Timespec,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        self.vfs.set_times(object_id, modified, now)
+    }
+
     pub fn statfs(&self) -> StatFs {
         self.vfs.statfs()
     }
@@ -319,17 +354,44 @@ impl<D: BlockDevice> FuseAdapter<D> {
         self.attributes(object_id)
     }
 
+    /// `mode` is what the creator asked for, already reduced by its umask by
+    /// the kernel. `None` means the caller named none and the mount's
+    /// configured default applies.
     pub fn create_file(
         &mut self,
         parent: ObjectId,
         name: &[u8],
         access: AccessMode,
+        mode: Option<u16>,
         now: Timespec,
     ) -> Result<(FuseAttributes, Handle), VfsError> {
         let object_id = self.vfs.create_file(parent, utf8_name(name)?, now)?;
         self.parents.insert(object_id, parent);
+        self.apply_creation_mode(object_id, mode.unwrap_or(self.config.file_mode), now)?;
         let handle = self.vfs.open_file(object_id, access)?;
         Ok((self.attributes(object_id)?, handle))
+    }
+
+    /// Writes the mode an object is born with, and its creator's identity.
+    ///
+    /// A bit the format cannot carry does not fail the creation, as it does
+    /// not on any POSIX filesystem asked for one: the rest of the mode is
+    /// written and the missing bit is there for the caller to see absent.
+    /// What must NOT happen is leaving the word untouched, because an
+    /// untouched word reads as 0o700 and the file would be born with a mode
+    /// nobody chose.
+    fn apply_creation_mode(
+        &mut self,
+        object_id: ObjectId,
+        mode: u16,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        if let Err(VfsError::NotSupported) = self.vfs.set_posix_mode(object_id, mode, now) {
+            self.vfs
+                .set_posix_mode(object_id, mode & !posix::MODE_STICKY, now)?;
+        }
+        self.vfs
+            .set_owner(object_id, Some(self.config.uid), Some(self.config.gid), now)
     }
 
     pub fn create_symlink(
@@ -363,10 +425,12 @@ impl<D: BlockDevice> FuseAdapter<D> {
         &mut self,
         parent: ObjectId,
         name: &[u8],
+        mode: Option<u16>,
         now: Timespec,
     ) -> Result<FuseAttributes, VfsError> {
         let object_id = self.vfs.create_directory(parent, utf8_name(name)?, now)?;
         self.parents.insert(object_id, parent);
+        self.apply_creation_mode(object_id, mode.unwrap_or(self.config.directory_mode), now)?;
         self.attributes(object_id)
     }
 
@@ -588,12 +652,14 @@ impl<D: BlockDevice> FuseAdapter<D> {
             size: stat.size,
             blocks_512: stat.allocated_size.div_ceil(512),
             links: stat.links,
-            mode: match stat.kind {
-                NodeKind::Directory => self.config.directory_mode,
-                _ => self.config.file_mode,
-            },
-            uid: self.config.uid,
-            gid: self.config.gid,
+            // The STORED projection, not the mount's configured default.
+            // config.file_mode and config.directory_mode are what a new
+            // object is created with when its creator names no mode; once an
+            // object exists, its own protection word is the answer, or a
+            // chmod would report success and change nothing anybody can see.
+            mode: stat.mode,
+            uid: stat.owner_uid,
+            gid: stat.owner_gid,
             created: stat.created,
             modified: stat.modified,
             changed: stat.changed,

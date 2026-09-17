@@ -47,7 +47,7 @@ fn adapter(device: MemoryBackend, names: HostAttributeNames) -> FuseAdapter<Memo
 
 fn file(adapter: &mut FuseAdapter<MemoryBackend>) -> u64 {
     let (attributes, handle) = adapter
-        .create_file(OBJECT_ROOT, b"note", AccessMode::WriteOnly, at(1))
+        .create_file(OBJECT_ROOT, b"note", AccessMode::WriteOnly, None, at(1))
         .unwrap();
     adapter.close(handle).unwrap();
     attributes.object_id

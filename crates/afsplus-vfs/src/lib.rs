@@ -1241,6 +1241,24 @@ impl<D: BlockDevice> Vfs<D> {
         Ok(self.volume.set_object_owner(object_id, uid, gid, now)?)
     }
 
+    /// Sets the modification time, as `utimes` does.
+    ///
+    /// This format keeps no access time, so there is nothing to set for one
+    /// and the adapters report the modification time in its place. That is a
+    /// declared property of the volume, not a write quietly dropped: a
+    /// modification time a caller names IS stored, which is what `touch -t`
+    /// asks for and what used to be answered with success and no change.
+    pub fn set_times(
+        &mut self,
+        object_id: ObjectId,
+        modified: Timespec,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        self.stat(object_id)?;
+        self.checkpoint_data_window(now)?;
+        Ok(self.volume.set_object_times(object_id, modified, now)?)
+    }
+
     /// The value of the attribute `name`, or `None` when the object has no
     /// such attribute. Names carry their namespace (`user.`, `system.`,
     /// `security.`, `aros.`); which of them a caller may touch is the host
