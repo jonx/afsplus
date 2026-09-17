@@ -896,14 +896,29 @@ impl<D: BlockDevice> Vfs<D> {
                         now,
                     )?);
                 }
+                Ok(self.volume.rename_replace(
+                    source_parent,
+                    source_name,
+                    target_parent,
+                    target_name,
+                    now,
+                )?)
+            } else {
+                // Nothing to replace, so the plain rename is the whole job, and
+                // it is the only one of the two that moves a directory or a
+                // symlink: the batched form supports files only. POSIX rename
+                // replaces by default, so without this every `mv` of a directory
+                // took the batched path and failed. Reading the target and then
+                // renaming is not a race here: one adapter holds the volume for
+                // the whole operation.
+                Ok(self.volume.rename(
+                    source_parent,
+                    source_name,
+                    target_parent,
+                    target_name,
+                    now,
+                )?)
             }
-            Ok(self.volume.rename_replace(
-                source_parent,
-                source_name,
-                target_parent,
-                target_name,
-                now,
-            )?)
         } else {
             Ok(self
                 .volume
