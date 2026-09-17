@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Explain one block with a walk that shares nothing with the checker](#2026-09-17--explain-one-block-with-a-walk-that-shares-nothing-with-the-checker)
 - [2026-09-17 — Accept the four Stage B decisions as ADR-100 to ADR-103](#2026-09-17--accept-the-four-stage-b-decisions-as-adr-100-to-adr-103)
 - [2026-09-17 — Bring the portable C reader to exact admission and the security container](#2026-09-17--bring-the-portable-c-reader-to-exact-admission-and-the-security-container)
 - [2026-09-17 — Grow the AROS C boundary to interface revision 7](#2026-09-17--grow-the-aros-c-boundary-to-interface-revision-7)
@@ -180,6 +181,38 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-17 — Explain one block with a walk that shares nothing with the checker
+
+`afsplus_check::explain` answers `ExplainBlock` for the committed state: the
+allocation bit, every role of the block and the block's own identity. Its walk
+selects the checkpoint, descends the allocation root, the object map, every
+directory and extent tree, the shared-extent and snapshot trees, every
+security descriptor chain segment by segment, and the reclaim queue with its
+head cursor, using the format codecs only.
+
+Three tests in `crates/afsplus-check/tests/explain.rs`. On an image holding a
+direct file, a sparse extent-tree file, a 300-entry directory, a symlink, a
+clone with shared data and a copied three-segment descriptor chain, an orphan
+in directory 2, a reclaim quarantine and a file unlinked over a damaged chain,
+the explanation of each of the 2,048 blocks agrees with the checker's data,
+metadata and quarantine sets, with the live bitmap, and the unowned blocks are
+exactly the checker's two leak findings, both still `"AFSX"` blocks; the 12
+written data blocks of four files hold the bytes the core reads at the
+attributed offsets; both owners appear on each of the four shared blocks. A
+record resealed under a foreign owner makes the walk report one problem and
+leave the lost directory tree unowned. On a snapshot volume the unowned blocks
+are a subset of the blocks the checker says a retained view owns.
+
+The first run of the comparison found two facts about where format knowledge
+lives, and no defect in the checker. The positions of the allocation-root pool
+and of the intent-log slots are derived by formulas in `afsplus-core` and
+appear in no codec and no specification table, so explain takes them from the
+core. The extent-map value (physical start, block count, flags, with unwritten
+as bit 0 and shared as bit 1) is encoded in `afsplus-core` and in the portable
+C reader and has no codec in `afsplus-format`; the walk first had the two bits
+reversed, and the shared-block assertion of its own test caught it.
 
 ## 2026-09-17 — Accept the four Stage B decisions as ADR-100 to ADR-103
 

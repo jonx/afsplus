@@ -17,6 +17,7 @@
 //! stricter than normal mounts; this prototype checker is verify-only).
 
 pub mod crash_replay;
+pub mod explain;
 pub mod replay_trace;
 pub mod scenario;
 

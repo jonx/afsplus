@@ -231,6 +231,28 @@ checksum: valid
 
 The tool must never need private pointer addresses or an ad-hoc debugger script to answer basic ownership questions.
 
+`ExplainBlock` is executable as a host-side module,
+[`afsplus_check::explain`](../crates/afsplus-check/src/explain.rs). It walks
+the committed state with the block codecs only, shares no traversal or claim
+set with the checker, and answers for one block: its allocation bit, every
+role the committed state gives it (reserved slot and whether it is live,
+allocation-root pool, intent-log slot, volume tree node, object record,
+directory or extent node of an object, file data with its logical block and
+its shared and unwritten marks, security descriptor segment with its index,
+reclaim structure, or quarantined with its retire generation) and what the
+block says about itself (magic, owner, generation, checksum validity). A block
+that is allocated and has no role is owned by nothing the live state reaches:
+a leak on an ordinary volume, a block kept by a retained view on a snapshot
+volume. A branch the walk cannot decode is reported and the blocks behind it
+stay unattributed, which is what the committed state proves.
+[Its test](../crates/afsplus-check/tests/explain.rs) requires the explanation
+of every block of populated images to agree with the checker's committed
+state and leak findings, with the live bitmap and with the bytes the core
+reads at the attributed offsets. The placement of the allocation-root pool
+and of the intent-log slots comes from the core, because that rule exists in
+no codec or specification table. `ExplainObject`, `ExplainPath`, the remaining
+operations and the versioned tool output are open.
+
 ## 6. Optional reverse-map index
 
 A rebuildable reverse map makes `ExplainBlock` and targeted repair dramatically stronger.
