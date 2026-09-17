@@ -2,15 +2,22 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use afsplus_block::{BlockDevice, FileBackend};
 use afsplus_core::{MountMode, MountOptions};
 use afsplus_format::ident::Identification;
 use afsplus_format::DEFAULT_BLOCK_SIZE;
+use afsplus_fuse::diagnostics::{self, Diagnostics};
 use afsplus_fuse::fuser_adapter::FuserFilesystem;
 use afsplus_fuse::{host_names, FuseConfig};
 use afsplus_vfs::Vfs;
 use fuser::{Config, MountOption, SessionACL};
+
+/// How often the diagnostics report is rewritten while the volume is mounted.
+/// A reader gets a report at most this old, without stopping the filesystem.
+const DIAGNOSTICS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn main() -> ExitCode {
     init_logging();
@@ -55,11 +62,11 @@ fn init_logging() {
 }
 
 fn run() -> Result<(), String> {
-    let (mode, image, mountpoint) = arguments()?;
+    let (mode, image, mountpoint, diagnostics_path) = arguments()?;
     let (uid, gid) = mount_ownership(&image, &mountpoint)?;
 
     let device = open_image(&image)?;
-    let vfs = Vfs::mount(
+    let mut vfs = Vfs::mount(
         device,
         MountOptions {
             mode,
@@ -67,6 +74,16 @@ fn run() -> Result<(), String> {
         },
     )
     .map_err(|error| format!("cannot mount {}: {error}", image.display()))?;
+    // Observation is installed before the volume moves into the filesystem,
+    // and only when asked for: an unobserved mount pays nothing.
+    let observed = match &diagnostics_path {
+        Some(path) => {
+            let shared = diagnostics::install(&mut vfs)
+                .map_err(|error| format!("cannot install diagnostics: {error}"))?;
+            Some((Arc::clone(&shared), path.clone()))
+        }
+        None => None,
+    };
     // Named after the committed label, read from the mounted volume.
     let names = host_names(&vfs);
     let filesystem = FuserFilesystem::new(
@@ -104,7 +121,15 @@ fn run() -> Result<(), String> {
         },
     ];
 
-    mount_session(filesystem, &mountpoint, config, &names.volume, mode).map_err(|error| {
+    let reporter = observed.map(|(shared, path)| Reporter::start(shared, path));
+
+    let outcome = mount_session(filesystem, &mountpoint, config, &names.volume, mode);
+    if let Some(reporter) = reporter {
+        // The last report outlives the mount: what a volume did before it went
+        // away is exactly what a person asks about afterwards.
+        reporter.stop();
+    }
+    outcome.map_err(|error| {
         #[cfg(all(target_os = "macos", not(feature = "macfuse-mount")))]
         return format!(
             "FUSE mount failed: {error}. Install macFUSE and rebuild with --features macfuse-mount"
@@ -158,6 +183,71 @@ fn mount_session(
     result
 }
 
+/// Writes the mount's diagnostics where a person can read them, while the
+/// volume is mounted and once more after it is gone.
+///
+/// The report is a file rather than a signal because `unsafe_code` is
+/// forbidden across this workspace, so the driver installs no signal handler.
+/// A file costs a reader nothing to find, survives the mount, and needs no
+/// terminal: `cat` answers the question at any moment.
+struct Reporter {
+    shared: Arc<Diagnostics>,
+    path: PathBuf,
+    stopping: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Reporter {
+    fn start(shared: Arc<Diagnostics>, path: PathBuf) -> Self {
+        eprintln!(
+            "afsplus-mount: diagnostics written to {} every {} seconds; read it with cat",
+            path.display(),
+            DIAGNOSTICS_INTERVAL.as_secs()
+        );
+        let stopping = Arc::new(AtomicBool::new(false));
+        let thread = std::thread::spawn({
+            let shared = Arc::clone(&shared);
+            let stopping = Arc::clone(&stopping);
+            let path = path.clone();
+            move || {
+                while !stopping.load(Ordering::Relaxed) {
+                    write_report(&path, &shared.report());
+                    std::thread::sleep(DIAGNOSTICS_INTERVAL);
+                }
+            }
+        });
+        Self {
+            shared,
+            path,
+            stopping,
+            thread,
+        }
+    }
+
+    fn stop(self) {
+        self.stopping.store(true, Ordering::Relaxed);
+        // A failed join means the reporting thread died; the mount does not
+        // depend on it, and the final report is still written here.
+        let _ = self.thread.join();
+        write_report(&self.path, &self.shared.report());
+    }
+}
+
+/// Replaces the report in one step, so a reader never sees half of one.
+/// A diagnostics failure is reported and never fails the mount: the volume is
+/// the thing the user needs, and losing its report must not lose it.
+fn write_report(path: &Path, report: &str) {
+    let temporary = path.with_extension("writing");
+    if let Err(error) =
+        std::fs::write(&temporary, report).and_then(|()| std::fs::rename(&temporary, path))
+    {
+        eprintln!(
+            "afsplus-mount: cannot write diagnostics to {}: {error}",
+            path.display()
+        );
+    }
+}
+
 fn mount_ownership(image: &Path, mountpoint: &Path) -> Result<(u32, u32), String> {
     match std::fs::metadata(mountpoint) {
         Ok(metadata) if metadata.is_dir() => Ok((metadata.uid(), metadata.gid())),
@@ -195,8 +285,9 @@ fn mount_session(
     fuser::mount(filesystem, mountpoint, &config)
 }
 
-fn arguments() -> Result<(MountMode, PathBuf, PathBuf), String> {
+fn arguments() -> Result<(MountMode, PathBuf, PathBuf, Option<PathBuf>), String> {
     let mut mode = MountMode::ReadWrite;
+    let mut diagnostics = None;
     let mut paths = Vec::new();
     for argument in std::env::args().skip(1) {
         match argument.as_str() {
@@ -204,6 +295,13 @@ fn arguments() -> Result<(MountMode, PathBuf, PathBuf), String> {
             "--no-changes" => mode = MountMode::NoChanges,
             "--recovery" => mode = MountMode::Recovery,
             "--help" | "-h" => return Err(usage().into()),
+            value if value.starts_with("--diagnostics=") => {
+                let path = value.trim_start_matches("--diagnostics=");
+                if path.is_empty() {
+                    return Err(format!("--diagnostics needs a path\n{}", usage()));
+                }
+                diagnostics = Some(PathBuf::from(path));
+            }
             value if value.starts_with('-') => {
                 return Err(format!("unknown option {value}\n{}", usage()));
             }
@@ -213,11 +311,12 @@ fn arguments() -> Result<(MountMode, PathBuf, PathBuf), String> {
     if paths.len() != 2 {
         return Err(usage().into());
     }
-    Ok((mode, paths.remove(0), paths.remove(0)))
+    Ok((mode, paths.remove(0), paths.remove(0), diagnostics))
 }
 
 fn usage() -> &'static str {
-    "usage: afsplus-mount [--read-only|--no-changes|--recovery] <image> <mountpoint>"
+    "usage: afsplus-mount [--read-only|--no-changes|--recovery] \
+     [--diagnostics=<file>] <image> <mountpoint>"
 }
 
 fn open_image(path: &Path) -> Result<FileBackend, String> {

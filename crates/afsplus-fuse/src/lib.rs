@@ -12,6 +12,7 @@ use afsplus_format::{Timespec, OBJECT_ROOT};
 pub use afsplus_vfs::AttributeWriteMode;
 use afsplus_vfs::{AccessMode, Handle, NodeKind, ObjectId, Stat, StatFs, Vfs, VfsError};
 
+pub mod diagnostics;
 #[cfg(feature = "fuser-adapter")]
 pub mod fuser_adapter;
 
