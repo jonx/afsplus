@@ -14,6 +14,7 @@
 #define AFSPR_BLOCK_TYPE_CHECKPOINT UINT32_C(0x43534641)
 #define AFSPR_BLOCK_TYPE_OBJECT UINT32_C(0x4f534641)
 #define AFSPR_BLOCK_TYPE_SECURITY UINT32_C(0x58534641)
+#define AFSPR_BLOCK_TYPE_ATTRIBUTES UINT32_C(0x41534641)
 #define AFSPR_BLOCK_TYPE_TREE UINT32_C(0x54534641)
 #define AFSPR_BLOCK_TYPE_INTENT UINT32_C(0x4a534641)
 #define AFSPR_BLOCK_TYPE_BITMAP UINT32_C(0x42534641)
@@ -52,8 +53,10 @@
 #define AFSPR_OBJECT_PAYLOAD 96u
 #define AFSPR_SECURITY_REF_SIZE 16u
 /* Flags the reader carries and never interprets. */
+#define AFSPR_ATTRIBUTE_REF_SIZE 16u
 #define AFSPR_OBJECT_PRESERVED_FLAGS                                        \
-    (AFSPR_OBJECT_FLAG_SECURITY_REF | AFSPR_OBJECT_FLAG_COMMENT)
+    (AFSPR_OBJECT_FLAG_SECURITY_REF | AFSPR_OBJECT_FLAG_COMMENT |           \
+     AFSPR_OBJECT_FLAG_ATTRIBUTES)
 #define AFSPR_SECURITY_SEGMENT_FIXED 24u
 #define AFSPR_MAX_DIRECT_BLOCKS UINT64_C(4096)
 /* The extent item layout and its flag bits are the spec header's. */
@@ -1392,20 +1395,22 @@ static int afspr_decode_timespec(const uint8_t *encoded,
  * the security-reference flag defines, a well-formed reference and a zero
  * tail. A rewrite re-encodes decoded fields into a zeroed block, so a byte
  * admitted without a field would be lost. */
-static int afspr_object_shape(const uint8_t *block, size_t block_size,
-                              const struct afspr_header *header,
-                              size_t *fixed,
-                              struct afspr_security_reference *reference,
-                              const uint8_t **comment, size_t *comment_size)
+static int afspr_object_shape_full(
+    const uint8_t *block, size_t block_size, const struct afspr_header *header,
+    size_t *fixed, struct afspr_security_reference *reference,
+    struct afspr_attribute_reference *attributes, const uint8_t **comment,
+    size_t *comment_size)
 {
     const uint8_t *p = block + AFSPR_HEADER_SIZE;
     size_t payload = (size_t)header->payload_len;
     size_t security_end = AFSPR_OBJECT_PAYLOAD;
+    size_t attributes_at;
     size_t capacity;
     size_t i;
     uint16_t flags;
 
     memset(reference, 0, sizeof(*reference));
+    memset(attributes, 0, sizeof(*attributes));
     *fixed = AFSPR_OBJECT_PAYLOAD;
     *comment = NULL;
     *comment_size = 0u;
@@ -1422,6 +1427,12 @@ static int afspr_object_shape(const uint8_t *block, size_t block_size,
     }
     if ((flags & AFSPR_OBJECT_FLAG_SECURITY_REF) != 0u) {
         security_end += AFSPR_SECURITY_REF_SIZE;
+    }
+    /* The attribute reference follows the security reference. From here
+     * on security_end names the end of both. */
+    attributes_at = security_end;
+    if ((flags & AFSPR_OBJECT_FLAG_ATTRIBUTES) != 0u) {
+        security_end += AFSPR_ATTRIBUTE_REF_SIZE;
     }
     if (payload < security_end) {
         return AFSPR_ERR_CORRUPT;
@@ -1455,6 +1466,23 @@ static int afspr_object_shape(const uint8_t *block, size_t block_size,
         return AFSPR_ERR_CORRUPT;
     }
     capacity = block_size - AFSPR_HEADER_SIZE - AFSPR_SECURITY_SEGMENT_FIXED;
+    if ((flags & AFSPR_OBJECT_FLAG_ATTRIBUTES) != 0u) {
+        const uint8_t *a = p + attributes_at;
+        attributes->present = 1u;
+        attributes->first_block = afspr_get_le64(a);
+        attributes->total_len = afspr_get_le32(a + 8u);
+        attributes->segment_count = afspr_get_le16(a + 12u);
+        if (attributes->first_block == 0u || attributes->total_len == 0u ||
+            attributes->total_len > AFSPR_MAX_ATTRIBUTE_SET_BYTES ||
+            ((size_t)attributes->total_len + capacity - 1u) / capacity !=
+                (size_t)attributes->segment_count ||
+            afspr_get_le16(a + 14u) != 0u) {
+            return AFSPR_ERR_CORRUPT;
+        }
+    }
+    if ((flags & AFSPR_OBJECT_FLAG_SECURITY_REF) == 0u) {
+        return AFSPR_OK;
+    }
     reference->present = 1u;
     reference->first_block = afspr_get_le64(p + 96u);
     reference->total_len = afspr_get_le32(p + 104u);
@@ -1468,6 +1496,17 @@ static int afspr_object_shape(const uint8_t *block, size_t block_size,
         return AFSPR_ERR_CORRUPT;
     }
     return AFSPR_OK;
+}
+
+static int afspr_object_shape(const uint8_t *block, size_t block_size,
+                              const struct afspr_header *header,
+                              size_t *fixed,
+                              struct afspr_security_reference *reference,
+                              const uint8_t **comment, size_t *comment_size)
+{
+    struct afspr_attribute_reference attributes;
+    return afspr_object_shape_full(block, block_size, header, fixed, reference,
+                                   &attributes, comment, comment_size);
 }
 
 int afspr_decode_symlink_record(const void *input, size_t block_size,
@@ -1590,10 +1629,11 @@ int afspr_decode_object_comment(const void *input, size_t block_size,
     return AFSPR_OK;
 }
 
-int afspr_decode_security_segment(const void *input, size_t block_size,
-                                  struct afspr_security_segment *segment,
-                                  const uint8_t **bytes, size_t *bytes_size,
-                                  uint64_t *generation)
+static int afspr_decode_chain_segment(const void *input, size_t block_size,
+                                      uint32_t block_type, uint32_t max_bytes,
+                                      struct afspr_security_segment *segment,
+                                      const uint8_t **bytes,
+                                      size_t *bytes_size, uint64_t *generation)
 {
     const uint8_t *block = (const uint8_t *)input;
     const uint8_t *p;
@@ -1607,8 +1647,7 @@ int afspr_decode_security_segment(const void *input, size_t block_size,
         bytes_size == NULL || generation == NULL) {
         return AFSPR_ERR_INVALID_ARGUMENT;
     }
-    status = afspr_verify_header(block, block_size, AFSPR_BLOCK_TYPE_SECURITY,
-                                 &header);
+    status = afspr_verify_header(block, block_size, block_type, &header);
     if (status != AFSPR_OK) return status;
     if (header.flags != 0u ||
         header.payload_len < AFSPR_SECURITY_SEGMENT_FIXED ||
@@ -1628,7 +1667,7 @@ int afspr_decode_security_segment(const void *input, size_t block_size,
     decoded.next = afspr_get_le64(p + 16u);
     if (afspr_get_le16(p + 6u) != 0u || decoded.object_id == 0u ||
         decoded.format == 0u || decoded.total_len == 0u ||
-        decoded.total_len > AFSPR_MAX_SECURITY_DESCRIPTOR_BYTES) {
+        decoded.total_len > max_bytes) {
         return AFSPR_ERR_CORRUPT;
     }
     count = ((size_t)decoded.total_len + capacity - 1u) / capacity;
@@ -1649,6 +1688,163 @@ int afspr_decode_security_segment(const void *input, size_t block_size,
     *bytes = p + AFSPR_SECURITY_SEGMENT_FIXED;
     *bytes_size = length;
     *generation = header.generation;
+    return AFSPR_OK;
+}
+
+int afspr_decode_security_segment(const void *input, size_t block_size,
+                                  struct afspr_security_segment *segment,
+                                  const uint8_t **bytes, size_t *bytes_size,
+                                  uint64_t *generation)
+{
+    return afspr_decode_chain_segment(input, block_size,
+                                      AFSPR_BLOCK_TYPE_SECURITY,
+                                      AFSPR_MAX_SECURITY_DESCRIPTOR_BYTES,
+                                      segment, bytes, bytes_size, generation);
+}
+
+int afspr_decode_attribute_segment(const void *input, size_t block_size,
+                                   struct afspr_security_segment *segment,
+                                   const uint8_t **bytes, size_t *bytes_size,
+                                   uint64_t *generation)
+{
+    return afspr_decode_chain_segment(input, block_size,
+                                      AFSPR_BLOCK_TYPE_ATTRIBUTES,
+                                      AFSPR_MAX_ATTRIBUTE_SET_BYTES, segment,
+                                      bytes, bytes_size, generation);
+}
+
+int afspr_decode_attribute_reference(
+    const void *input, size_t block_size,
+    struct afspr_attribute_reference *reference)
+{
+    const uint8_t *block = (const uint8_t *)input;
+    struct afspr_header header;
+    struct afspr_security_reference security;
+    struct afspr_attribute_reference decoded;
+    size_t fixed;
+    const uint8_t *comment;
+    size_t comment_size;
+    int status;
+
+    if (input == NULL || reference == NULL) {
+        return AFSPR_ERR_INVALID_ARGUMENT;
+    }
+    status = afspr_verify_header(block, block_size, AFSPR_BLOCK_TYPE_OBJECT,
+                                 &header);
+    if (status != AFSPR_OK) return status;
+    if (afspr_object_shape_full(block, block_size, &header, &fixed, &security,
+                                &decoded, &comment, &comment_size) !=
+            AFSPR_OK ||
+        afspr_get_le64(block + AFSPR_HEADER_SIZE) != header.owner ||
+        header.owner == 0u || block[AFSPR_HEADER_SIZE + 9u] != 0u ||
+        block[AFSPR_HEADER_SIZE + 8u] < AFSPR_OBJECT_FILE ||
+        block[AFSPR_HEADER_SIZE + 8u] > AFSPR_OBJECT_SYMLINK) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    *reference = decoded;
+    return AFSPR_OK;
+}
+
+/* Namespace prefixes of attribute names (ADR-108). */
+static int afspr_attribute_name_ok(const uint8_t *name, size_t size)
+{
+    static const struct {
+        const char *text;
+        size_t length;
+    } prefixes[] = {{"user.", 5u}, {"system.", 7u}, {"security.", 9u},
+                    {"aros.", 5u}};
+    size_t i;
+
+    if (size == 0u || size > 255u || !afspr_valid_utf8(name, size) ||
+        memchr(name, 0, size) != NULL) {
+        return 0;
+    }
+    for (i = 0u; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
+        if (size > prefixes[i].length &&
+            memcmp(name, prefixes[i].text, prefixes[i].length) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Entry at offset at, bounds-checked; next receives the following offset. */
+static int afspr_attribute_entry(const uint8_t *set, size_t size, size_t at,
+                                 struct afspr_attribute *entry, size_t *next)
+{
+    size_t name_size, value_size;
+
+    if (at > size || size - at < 4u) return AFSPR_ERR_CORRUPT;
+    name_size = set[at];
+    value_size = afspr_get_le16(set + at + 2u);
+    if (name_size == 0u || set[at + 1u] != 0u ||
+        size - at - 4u < name_size + value_size) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    entry->name = set + at + 4u;
+    entry->value = entry->name + name_size;
+    entry->name_size = (uint16_t)name_size;
+    entry->value_size = (uint16_t)value_size;
+    *next = at + 4u + name_size + value_size;
+    return AFSPR_OK;
+}
+
+int afspr_validate_attribute_set(const void *input, size_t set_size,
+                                 uint32_t *count_out)
+{
+    const uint8_t *set = (const uint8_t *)input;
+    struct afspr_attribute previous, entry;
+    size_t at = 4u;
+    uint32_t count, i;
+
+    if (input == NULL || count_out == NULL) return AFSPR_ERR_INVALID_ARGUMENT;
+    if (set_size < 4u || set_size > AFSPR_MAX_ATTRIBUTE_SET_BYTES) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    count = afspr_get_le16(set);
+    if (count == 0u || afspr_get_le16(set + 2u) != 0u) return AFSPR_ERR_CORRUPT;
+    memset(&previous, 0, sizeof(previous));
+    for (i = 0u; i < count; ++i) {
+        if (afspr_attribute_entry(set, set_size, at, &entry, &at) != AFSPR_OK ||
+            !afspr_attribute_name_ok(entry.name, entry.name_size)) {
+            return AFSPR_ERR_CORRUPT;
+        }
+        if (i != 0u) {
+            /* Strictly ascending by bytes; a proper prefix sorts first. */
+            size_t common = previous.name_size < entry.name_size
+                                ? previous.name_size
+                                : entry.name_size;
+            int order = memcmp(previous.name, entry.name, common);
+            if (order > 0 ||
+                (order == 0 && previous.name_size >= entry.name_size)) {
+                return AFSPR_ERR_CORRUPT;
+            }
+        }
+        previous = entry;
+    }
+    if (at != set_size) return AFSPR_ERR_CORRUPT;
+    *count_out = count;
+    return AFSPR_OK;
+}
+
+int afspr_attribute_set_next(const void *input, size_t set_size,
+                             size_t *cursor, struct afspr_attribute *attribute)
+{
+    const uint8_t *set = (const uint8_t *)input;
+    struct afspr_attribute entry;
+    size_t at, next;
+
+    if (input == NULL || cursor == NULL || attribute == NULL) {
+        return AFSPR_ERR_INVALID_ARGUMENT;
+    }
+    if (set_size < 4u) return AFSPR_ERR_CORRUPT;
+    at = *cursor == 0u ? 4u : *cursor;
+    if (at == set_size) return AFSPR_ERR_NOT_FOUND;
+    if (afspr_attribute_entry(set, set_size, at, &entry, &next) != AFSPR_OK) {
+        return AFSPR_ERR_CORRUPT;
+    }
+    *attribute = entry;
+    *cursor = next;
     return AFSPR_OK;
 }
 

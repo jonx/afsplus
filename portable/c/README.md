@@ -107,7 +107,19 @@ reference of a record and for one `"AFSX"` segment. The comment of
 the shared shape check validates its length byte, its NUL-free UTF-8 and the
 exact payload length it implies, `afspr_decode_object_comment` returns it, and
 an unassigned object flag bit refuses the record in every decoder, the
-standalone ones included. The reader preserves
+standalone ones included. The attribute reference of
+[ADR-108](../../adr/ADR-108-extended-attributes.md) sits between the security
+reference and the comment: the shape check validates its nonzero first block,
+its length of 1 to 65,536 bytes, the segment count that length implies and its
+zero reserved field. `afspr_decode_attribute_reference` returns it,
+`afspr_decode_attribute_segment` decodes one `"AFSA"` segment with the code of
+the `"AFSX"` decoder under its own block type and bound,
+`afspr_validate_attribute_set` admits a whole set under the exact rules of the
+Rust codec, and `afspr_attribute_set_next` steps through an admitted set
+without copying. The reader has no volume-level attribute read: a caller walks
+the chain with the segment decoder into its own buffer.
+[`attributes_c.rs`](../../crates/afsplus-format/tests/attributes_c.rs) holds
+the per-image agreement for these four. The reader preserves
 these bytes and never evaluates them; the writer appends intent records only
 and rewrites no object record, so it cannot drop a reference.
 [`security_c.rs`](../../crates/afsplus-format/tests/security_c.rs) holds the

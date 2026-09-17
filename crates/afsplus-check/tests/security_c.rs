@@ -219,13 +219,31 @@ fn c_and_rust_agree_on_objects_of_real_images() {
     volume
         .set_object_comment(commented, &"é".repeat(127), time(5))
         .unwrap();
+    // Extended attributes (ADR-108): beside the descriptor and the comment
+    // on the file, beside the descriptor on the symlink, alone on a third
+    // file; the C lookup carries flag bit 4 and reads on.
+    let attributed = volume
+        .create_file_in_directory(OBJECT_ROOT, "attributed", b"", time(6))
+        .unwrap();
+    let value: Vec<u8> = (0..9000u32).map(|i| (i * 7) as u8).collect();
+    for id in [file, link, attributed] {
+        volume
+            .set_attributes(
+                id,
+                &[("user.note", Some(b"hello")), ("aros.icon", Some(&value))],
+                afsplus_core::AttributeWriteMode::Create,
+                time(6),
+            )
+            .unwrap();
+    }
     let secured = image(&mut volume.into_device());
 
     for (label, id, kind, flags, protection) in [
-        ("secured and commented file", file, 1, 12, 0x11),
+        ("secured, attributed and commented file", file, 1, 28, 0x11),
+        ("attributed plain file", attributed, 1, 16, 0),
         ("commented plain file", commented, 1, 8, 0),
         ("secured directory", dir, 2, 4, 0x22),
-        ("secured symlink", link, 3, 4, 0),
+        ("secured and attributed symlink", link, 3, 20, 0),
         ("secured root", OBJECT_ROOT, 2, 4, 0),
         ("plain file beside them", plain, 1, 0, 0x33),
     ] {
@@ -282,9 +300,22 @@ fn c_and_rust_agree_on_objects_of_real_images() {
         file,
         Verdict::Object {
             kind: 1,
-            flags: 12,
+            flags: 28,
             protection: 0x11,
         },
+    );
+    // A malformed attribute reference is not chain state: both refuse it.
+    let at = record_offset(&secured, attributed);
+    let mut zero_first = secured.clone();
+    zero_first[at + HEADER_SIZE + 96..at + HEADER_SIZE + 104].fill(0);
+    reseal(&mut zero_first[at..at + BLOCK], 112);
+    agree(
+        &probe,
+        &scratch,
+        "attribute reference with a zero first block",
+        &zero_first,
+        attributed,
+        Verdict::Corrupt,
     );
 
     // A volume without the feature: a record that carries a reference is

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Read extended attributes in the portable C reader](#2026-09-17--read-extended-attributes-in-the-portable-c-reader)
 - [2026-09-17 — Extended attributes in the core (ADR-108)](#2026-09-17--extended-attributes-in-the-core-adr-108)
 - [2026-09-17 — Reach the 64-bit groups from an application](#2026-09-17--reach-the-64-bit-groups-from-an-application)
 - [2026-09-17 — Codecs for the extended attribute set and its reference](#2026-09-17--codecs-for-the-extended-attribute-set-and-its-reference)
@@ -204,6 +205,37 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — Read extended attributes in the portable C reader
+
+The C reader refused object flag bit 4 until now. `afspr_object_shape` admits
+the 16-byte attribute reference between the security reference and the
+comment, under the rules of the Rust codec. New public decoders in
+`api/libafsplus_reader.h`: `afspr_decode_attribute_reference`,
+`afspr_decode_attribute_segment` (the `"AFSX"` segment decoder, now one
+function parameterised by block type and bound), `afspr_validate_attribute_set`
+and `afspr_attribute_set_next`. No heap, no `strlen`: the m68k freestanding
+step of the gate compiles it. `spec/afsplus_format.h` gained the flag and the
+attribute limits; `c_constants` pins ten new constants against the Rust ones.
+There is no volume-level attribute read in C: the caller walks the chain.
+
+Proof: `attributes_c` (new; 136 image verdicts over a strict and a sanitized
+build: references on the three object types, the eight combinations of the
+three optional fields through their three decoders, segments, sets; each equal
+to the Rust verdict and to a literal). Negative controls, each failing the
+test: C admits a duplicate name, C ignores the reserved field of the
+reference, C admits a count below the entries present. `security_c` in
+afsplus-check now carries attributed objects of a real image through the C
+volume lookup (flags 28, 20 and 16) and a resealed zero first block refused by
+both. `c_constants`, `tools/check-portable-c-reader.sh` PASS with the m68k
+step.
+
+While answering claude-main's question on unreadable chains: explain already
+separates absent, present and unprovable for both kinds (`segments_found`
+below `segments_expected` plus a problem), and its descriptor walk did not
+require one format identity per chain as the core does. It does now;
+`a_descriptor_chain_with_two_format_identities_is_not_proven` in the explain
+test fails without the guard.
 
 ## 2026-09-17 — Extended attributes in the core (ADR-108)
 

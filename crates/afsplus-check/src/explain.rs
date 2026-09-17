@@ -729,6 +729,11 @@ impl Explainer {
                             && segment.index == index
                             && segment.count == reference.segment_count
                             && segment.total_len == reference.total_len
+                            // One descriptor has one format identity.
+                            && security
+                                .as_ref()
+                                .and_then(|summary| summary.format)
+                                .is_none_or(|first| first == (segment.format, segment.version))
                             && generation != 0
                             && generation <= walk.max_generation
                             && *chain_generation.get_or_insert(generation) == generation =>

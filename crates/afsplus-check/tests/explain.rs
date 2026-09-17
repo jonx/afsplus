@@ -787,3 +787,47 @@ fn explain_object_and_path_state_what_the_image_was_built_with() {
         vec![BlockRole::ObjectRecord { object_id: file }]
     );
 }
+
+#[test]
+fn a_descriptor_chain_with_two_format_identities_is_not_proven() {
+    use afsplus_format::security::SecuritySegment;
+    let mut volume = mount(formatted(4)).unwrap();
+    let file = volume
+        .create_file_in_directory(OBJECT_ROOT, "file", b"x", time(2))
+        .unwrap();
+    volume
+        .set_security_descriptor(file, 0x7fff_0001, 1, &pattern(9000, 3), time(3))
+        .unwrap();
+    let mut dev = volume.into_device();
+    let explainer = Explainer::load(&mut dev).unwrap();
+    let summary = explainer.explain_object(file).unwrap().security.clone();
+    assert_eq!(summary.unwrap().segments_found, 3);
+
+    // Rewrite the middle segment under another format version, same
+    // generation, valid checksum.
+    let mut block = vec![0u8; 4096];
+    let middle = (0..dev.total_blocks())
+        .find(|lba| {
+            dev.read_block(*lba, &mut block).unwrap();
+            SecuritySegment::decode(&block).is_ok_and(|(s, _)| s.object_id == file && s.index == 1)
+        })
+        .unwrap();
+    let (segment, generation) = SecuritySegment::decode(&block).unwrap();
+    let forged = SecuritySegment {
+        version: segment.version + 1,
+        ..segment
+    }
+    .encode(4096, generation)
+    .unwrap();
+    dev.write_block(middle, &forged).unwrap();
+
+    let explainer = Explainer::load(&mut dev).unwrap();
+    let summary = explainer.explain_object(file).unwrap().security.clone();
+    assert_eq!(summary.unwrap().segments_found, 1);
+    assert!(explainer
+        .explain_block(&mut dev, middle)
+        .unwrap()
+        .is_unowned());
+    // The checker, through the core's walk, refuses the same chain.
+    assert!(!check_device(&mut dev).errors.is_empty());
+}

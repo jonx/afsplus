@@ -27,6 +27,15 @@
 #define AFSP_LABEL_MAX_UTF8_BYTES  64u
 /* Object comment: one length byte, then at most 255 bytes of NUL-free UTF-8. */
 #define AFSP_COMMENT_MAX_UTF8_BYTES 255u
+/* Extended attributes (ADR-108): the whole set of an object is the content
+ * of a chain of "AFSA" blocks, laid out as the "AFSX" segments are. The set
+ * is a 16-bit count, 16 reserved zero bits, then entries in strictly
+ * ascending order of name bytes: name length (8 bits, nonzero), reserved
+ * (8, zero), value length (16), name, value. */
+#define AFSP_ATTRIBUTE_NAME_MAX_UTF8_BYTES 255u
+#define AFSP_ATTRIBUTE_VALUE_MAX_BYTES 65535u
+#define AFSP_ATTRIBUTE_SET_MAX_BYTES 65536u
+#define AFSP_ATTRIBUTE_SET_FORMAT 1u
 #define AFSP_CHECKPOINT_LABEL_OFFSET 96u
 #define AFSP_CHECKPOINT_PAYLOAD_BYTES 168u
 #define AFSP_CHECKPOINT_SNAPSHOT_PAYLOAD_BYTES 184u
@@ -138,7 +147,8 @@ enum afsp_object_flag {
     AFSP_OBJECT_FLAG_EXTENT_TREE = 1u << 0,
     AFSP_OBJECT_FLAG_DATA_IN_PLACE = 1u << 1, /* ADR-065 */
     AFSP_OBJECT_FLAG_SECURITY_REF = 1u << 2,  /* 16-byte security reference */
-    AFSP_OBJECT_FLAG_COMMENT = 1u << 3        /* length byte + UTF-8, ADR-106 */
+    AFSP_OBJECT_FLAG_COMMENT = 1u << 3,       /* length byte + UTF-8, ADR-106 */
+    AFSP_OBJECT_FLAG_ATTRIBUTES = 1u << 4     /* 16-byte attribute reference */
 };
 
 /*

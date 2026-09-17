@@ -45,6 +45,11 @@
 #define AFSPR_OBJECT_FLAG_SECURITY_REF (UINT16_C(1) << 2)
 /* The record carries a comment of 1 to 255 bytes of UTF-8 (ADR-106). */
 #define AFSPR_OBJECT_FLAG_COMMENT (UINT16_C(1) << 3)
+/* The record carries a reference to its extended attribute set (ADR-108);
+ * the reader preserves it. */
+#define AFSPR_OBJECT_FLAG_ATTRIBUTES (UINT16_C(1) << 4)
+#define AFSPR_MAX_ATTRIBUTE_SET_BYTES UINT32_C(65536)
+#define AFSPR_ATTRIBUTE_SET_FORMAT UINT32_C(1)
 #define AFSPR_SECURITY_REF_PROJECTION_DIVERGED (UINT16_C(1) << 0)
 #define AFSPR_MAX_SECURITY_DESCRIPTOR_BYTES UINT32_C(65536)
 /* Required on the volume when an object carries DATA_IN_PLACE. */
@@ -278,6 +283,57 @@ int afspr_decode_security_segment(const void *block, size_t block_size,
                                   struct afspr_security_segment *segment,
                                   const uint8_t **bytes, size_t *bytes_size,
                                   uint64_t *generation);
+
+/* Attribute reference of an object record: where the chain that holds its
+ * attribute set starts and how long the set is. present is 0 for a record
+ * without attributes. */
+struct afspr_attribute_reference {
+    uint32_t present;
+    uint32_t total_len;
+    uint64_t first_block;
+    uint16_t segment_count;
+    uint16_t reserved16;
+    uint32_t reserved32;
+};
+
+/* One attribute of a set. name and value borrow the set and are not
+ * NUL-terminated. */
+struct afspr_attribute {
+    const uint8_t *name;
+    const uint8_t *value;
+    uint16_t name_size;
+    uint16_t value_size;
+};
+
+/* Validate one standalone file, directory or symlink record under exact
+ * admission and return its attribute reference. No I/O, no allocation;
+ * outputs are unchanged on error. */
+int afspr_decode_attribute_reference(
+    const void *block, size_t block_size,
+    struct afspr_attribute_reference *reference);
+
+/* Validate one standalone "AFSA" attribute segment: the layout of a
+ * descriptor segment under its own block type and bound. On success bytes
+ * borrows block. Outputs are unchanged on error. */
+int afspr_decode_attribute_segment(const void *block, size_t block_size,
+                                   struct afspr_security_segment *segment,
+                                   const uint8_t **bytes, size_t *bytes_size,
+                                   uint64_t *generation);
+
+/* Validate a whole attribute set, the concatenated content of a chain:
+ * nonzero count, zero reserved fields, names of 1 to 255 bytes of NUL-free
+ * UTF-8 in a known namespace, strictly ascending by bytes, entries ending
+ * where the set ends. count receives the number of attributes and is
+ * unchanged on error. */
+int afspr_validate_attribute_set(const void *set, size_t set_size,
+                                 uint32_t *count);
+
+/* Step through a set afspr_validate_attribute_set accepted. Start with
+ * *cursor == 0; returns AFSPR_OK with one attribute and an advanced cursor,
+ * AFSPR_ERR_NOT_FOUND after the last one, AFSPR_ERR_CORRUPT when the cursor
+ * does not sit on an entry. Outputs are unchanged unless AFSPR_OK. */
+int afspr_attribute_set_next(const void *set, size_t set_size, size_t *cursor,
+                             struct afspr_attribute *attribute);
 
 /*
  * Initial placeholder: no function writes this type. Its layout is retained

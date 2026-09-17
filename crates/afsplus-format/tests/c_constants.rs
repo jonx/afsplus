@@ -10,7 +10,7 @@ use afsplus_format::ident::{self, FeatureFlags, Identification, NameKeyAlgorithm
 use afsplus_format::object::{self, ObjectRecord, ObjectType, SecurityRef};
 use afsplus_format::security::{segment_capacity, MAX_SECURITY_DESCRIPTOR_BYTES};
 use afsplus_format::tree::{TreeItem, TreeKind, TreeNode, MAX_TREE_KEY_BYTES, MAX_TREE_LEVEL};
-use afsplus_format::{bitmap, extent, geometry, intent_log, Timespec};
+use afsplus_format::{attrs, bitmap, extent, geometry, intent_log, Timespec};
 use std::collections::BTreeMap;
 use std::{fs, path::PathBuf, process::Command};
 
@@ -151,6 +151,11 @@ fn every_c_format_constant_equals_the_rust_codec() {
         segment_count: 1,
         flags: 0,
     }));
+    let attributed = file_record().with_attributes(Some(object::AttributeRef {
+        first_block: 77,
+        total_len: 1,
+        segment_count: 1,
+    }));
     let empty_leaf = TreeNode::leaf(TreeKind::ObjectMap, 0);
     let mut one_item = empty_leaf.clone();
     one_item.items.push(TreeItem {
@@ -249,6 +254,26 @@ fn every_c_format_constant_equals_the_rust_codec() {
         (
             "AFSP_COMMENT_MAX_UTF8_BYTES",
             object::COMMENT_MAX_BYTES as u64,
+        ),
+        (
+            "AFSP_OBJECT_FLAG_ATTRIBUTES",
+            u64::from(object::OBJECT_FLAG_ATTRIBUTES),
+        ),
+        (
+            "AFSP_ATTRIBUTE_NAME_MAX_UTF8_BYTES",
+            attrs::ATTRIBUTE_NAME_MAX_BYTES as u64,
+        ),
+        (
+            "AFSP_ATTRIBUTE_VALUE_MAX_BYTES",
+            attrs::ATTRIBUTE_VALUE_MAX_BYTES as u64,
+        ),
+        (
+            "AFSP_ATTRIBUTE_SET_MAX_BYTES",
+            u64::from(attrs::MAX_ATTRIBUTE_SET_BYTES),
+        ),
+        (
+            "AFSP_ATTRIBUTE_SET_FORMAT",
+            u64::from(attrs::ATTRIBUTE_SET_FORMAT),
         ),
         ("sizeof_afsp_timespec_wire", Timespec::WIRE_SIZE as u64),
         (
@@ -361,6 +386,26 @@ fn every_c_format_constant_equals_the_rust_codec() {
         (
             "AFSPR_MAX_SECURITY_DESCRIPTOR_BYTES",
             u64::from(MAX_SECURITY_DESCRIPTOR_BYTES),
+        ),
+        (
+            "AFSPR_BLOCK_TYPE_ATTRIBUTES",
+            u64::from(block_type::ATTRIBUTE_SET),
+        ),
+        (
+            "AFSPR_ATTRIBUTE_REF_SIZE",
+            payload_len(&attributed.encode(BS, 1).unwrap()) - object_payload,
+        ),
+        (
+            "AFSPR_OBJECT_FLAG_ATTRIBUTES",
+            u64::from(object::OBJECT_FLAG_ATTRIBUTES),
+        ),
+        (
+            "AFSPR_MAX_ATTRIBUTE_SET_BYTES",
+            u64::from(attrs::MAX_ATTRIBUTE_SET_BYTES),
+        ),
+        (
+            "AFSPR_ATTRIBUTE_SET_FORMAT",
+            u64::from(attrs::ATTRIBUTE_SET_FORMAT),
         ),
     ];
 
