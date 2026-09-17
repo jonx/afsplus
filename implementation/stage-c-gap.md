@@ -260,8 +260,12 @@ a regression probe for item 1; neither has been compiled.
 Lacking in the generic device, as upstream patches with regression probes:
 
 1. `CMD_UPDATE` and `ETD_UPDATE` are answered inside `BeginIO`, so the reply
-   overtakes queued writes and the barrier never reaches the backing file;
-   the hosted `emul-handler` in turn implements no `ACTION_FLUSH`;
+   overtakes queued writes and the barrier never reaches the backing file.
+   Both the defect and the fix are now shown on a target by
+   [`fdsk_update_probe.c`](../native/aros/tests/fdsk_update_probe.c); the
+   patch is not applied in the gate tree. The second half, a host `fsync`,
+   waits on a generic AROS decision named in
+   [`native/aros/upstream/README.md`](../native/aros/upstream/README.md);
 2. upstream has no `TD_READ64`, `TD_WRITE64` or `NSCMD_TD_*64`; MacAROS
    carries that fix, and AFS+ images beyond 4 GiB depend on it;
 3. attach and detach of a unit to a named file at run time
