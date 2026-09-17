@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(10)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(11)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -38,6 +38,16 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_COUNTERS UINT64_C(0x100)
 #define AFSPLUS_AROS_GROUP_DOS_HANDLES UINT64_C(0x200)
 #define AFSPLUS_AROS_GROUP_DOS_RECORDS UINT64_C(0x400)
+#define AFSPLUS_AROS_GROUP_OBJECT_IDS UINT64_C(0x800)
+
+/* AfsplusArosStat.kind and AfsplusArosDirEntry.kind. */
+#define AFSPLUS_AROS_KIND_FILE UINT32_C(1)
+#define AFSPLUS_AROS_KIND_DIRECTORY UINT32_C(2)
+#define AFSPLUS_AROS_KIND_SYMLINK UINT32_C(3)
+
+/* Largest packed directory record: header, 255 name bytes, padding. A
+ * dir_read buffer holds at least one of these. */
+#define AFSPLUS_AROS_DIR_RECORD_MAX UINT32_C(280)
 
 /* AfsplusArosHealth.flags. Disk-full is counted and is not a degraded state. */
 #define AFSPLUS_AROS_HEALTH_DEVICE_ERROR UINT32_C(0x1)
@@ -228,7 +238,41 @@ struct AfsplusArosCounters {
     uint64_t device_failures;
 };
 
+/* Sized query structure; see AfsplusArosInterface for the growth rule. */
+struct AfsplusArosStat {
+    uint32_t struct_size;
+    uint32_t kind;
+    uint64_t object_id;
+    uint64_t size;
+    uint64_t allocated_size;
+    uint64_t protection;
+    uint32_t links;
+    uint32_t reserved0;
+    int64_t created_seconds;
+    int64_t modified_seconds;
+    int64_t changed_seconds;
+    uint32_t created_nanoseconds;
+    uint32_t modified_nanoseconds;
+    uint32_t changed_nanoseconds;
+    uint32_t reserved1;
+};
+
+/* One packed record of dir_read. name_length UTF-8 bytes follow without a
+ * terminator; the next record starts record_length bytes after this one,
+ * 8-byte aligned. */
+struct AfsplusArosDirEntry {
+    uint64_t object_id;
+    uint32_t kind;
+    uint32_t name_length;
+    uint32_t record_length;
+    uint32_t reserved;
+};
+
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(struct AfsplusArosStat) == 88,
+    "AfsplusArosStat ABI drift");
+_Static_assert(sizeof(struct AfsplusArosDirEntry) == 24,
+    "AfsplusArosDirEntry ABI drift");
 _Static_assert(sizeof(struct AfsplusArosCounters) == 72,
     "AfsplusArosCounters ABI drift");
 _Static_assert(sizeof(struct AfsplusArosHealth) == 112,
@@ -391,6 +435,33 @@ int32_t afsplus_aros_lock_record(struct AfsplusAros *filesystem,
     uint64_t file, uint64_t offset, uint64_t length, uint32_t exclusive);
 int32_t afsplus_aros_free_record(struct AfsplusAros *filesystem,
     uint64_t file, uint64_t offset, uint64_t length);
+
+/* Group AFSPLUS_AROS_GROUP_OBJECT_IDS: the object-ID operations of the v2
+ * API. Names are UTF-8 whatever the mount's DOS encoding. lookup_id takes no
+ * lock and never follows a link. stat_id answers ERROR_OBJECT_NOT_FOUND for a
+ * deleted object and for a guessed identifier.
+ *
+ * dir_open starts a paged walk of the directory of base_lock, independent of
+ * the lock and of its ExNext cursor afterwards; the table of walks is
+ * bounded. dir_read packs up to max_entries (1 to 64) AfsplusArosDirEntry
+ * records; it reads no more entries than the buffer is certain to hold, so
+ * capacity is at least AFSPLUS_AROS_DIR_RECORD_MAX (ERROR_BAD_NUMBER
+ * otherwise) and none is lost. The position is the last returned name: every
+ * entry ordered after it is returned once, whatever was created, deleted or
+ * renamed between two calls, and one call is one consistent view. A deleted
+ * directory is ERROR_OBJECT_NOT_FOUND. After the end every call stores zero
+ * records and output_eof 1. */
+int32_t afsplus_aros_lookup_id(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint64_t *output_object_id);
+int32_t afsplus_aros_stat_id(struct AfsplusAros *filesystem,
+    uint64_t object_id, struct AfsplusArosStat *output);
+int32_t afsplus_aros_dir_open(struct AfsplusAros *filesystem,
+    uint64_t base_lock, uint64_t *output_dir);
+int32_t afsplus_aros_dir_read(struct AfsplusAros *filesystem, uint64_t dir,
+    uint8_t *buffer, uint32_t capacity, uint32_t max_entries,
+    uint32_t *output_count, uint32_t *output_eof);
+int32_t afsplus_aros_dir_close(struct AfsplusAros *filesystem, uint64_t dir);
 
 /* Group AFSPLUS_AROS_GROUP_SOFT_LINKS. The target is an opaque path in the
  * mount's name encoding. Locate and open answer ERROR_IS_SOFT_LINK for a

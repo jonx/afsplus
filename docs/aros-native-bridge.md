@@ -346,6 +346,19 @@ preallocated queue. `afsplus_aros_trace_counters` reports delivered, missed,
 filtered and dropped counts, so a slow consumer costs counted loss and never
 blocks the filesystem.
 
+`OBJECT_IDS` carries the object-ID operations of the v2 API with UTF-8
+names whatever the mount's DOS encoding. `lookup_id` takes no lock and never
+follows a link; `stat_id` names the object through renames and answers
+`ERROR_OBJECT_NOT_FOUND` for a deleted object or a guessed identifier.
+`dir_open`, `dir_read` and `dir_close` are a paged directory walk in a bounded
+table, independent of the lock it started from and of that lock's `ExNext`
+cursor. Its position is the last returned name instead of an ordinal: every
+entry ordered after it is returned once whatever was created, deleted or
+renamed between two pages, one page is one consistent view, and a deleted
+directory fails with `ERROR_OBJECT_NOT_FOUND`. `dir_read` reads no more
+entries than its buffer is certain to hold, so none is taken from the walk
+and then dropped.
+
 `COUNTERS` reports completed and failed calls on the mounted instance and
 the block callbacks it issued: reads, writes, barriers, bytes each way and
 failures. A native benchmark runner reads them around a workload, as the

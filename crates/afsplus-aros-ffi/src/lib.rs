@@ -25,7 +25,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 10;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 11;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -37,6 +37,11 @@ pub const AFSPLUS_AROS_GROUP_MANAGE: u64 = 0x80;
 pub const AFSPLUS_AROS_GROUP_COUNTERS: u64 = 0x100;
 pub const AFSPLUS_AROS_GROUP_DOS_HANDLES: u64 = 0x200;
 pub const AFSPLUS_AROS_GROUP_DOS_RECORDS: u64 = 0x400;
+pub const AFSPLUS_AROS_GROUP_OBJECT_IDS: u64 = 0x800;
+pub const AFSPLUS_AROS_DIR_RECORD_MAX: u32 = 280;
+pub const AFSPLUS_AROS_KIND_FILE: u32 = 1;
+pub const AFSPLUS_AROS_KIND_DIRECTORY: u32 = 2;
+pub const AFSPLUS_AROS_KIND_SYMLINK: u32 = 3;
 pub const AFSPLUS_AROS_HEALTH_DEVICE_ERROR: u32 = afsplus_aros::health::HEALTH_DEVICE_ERROR;
 pub const AFSPLUS_AROS_HEALTH_CORRUPTION: u32 = afsplus_aros::health::HEALTH_CORRUPTION;
 pub const AFSPLUS_AROS_HEALTH_REPLAY_PENDING: u32 = afsplus_aros::health::HEALTH_REPLAY_PENDING;
@@ -52,7 +57,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_MANAGE
     | AFSPLUS_AROS_GROUP_COUNTERS
     | AFSPLUS_AROS_GROUP_DOS_HANDLES
-    | AFSPLUS_AROS_GROUP_DOS_RECORDS;
+    | AFSPLUS_AROS_GROUP_DOS_RECORDS
+    | AFSPLUS_AROS_GROUP_OBJECT_IDS;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -381,6 +387,38 @@ pub struct AfsplusArosCounters {
     pub device_failures: u64,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AfsplusArosStat {
+    pub struct_size: u32,
+    pub kind: u32,
+    pub object_id: u64,
+    pub size: u64,
+    pub allocated_size: u64,
+    pub protection: u64,
+    pub links: u32,
+    pub reserved0: u32,
+    pub created_seconds: i64,
+    pub modified_seconds: i64,
+    pub changed_seconds: i64,
+    pub created_nanoseconds: u32,
+    pub modified_nanoseconds: u32,
+    pub changed_nanoseconds: u32,
+    pub reserved1: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AfsplusArosDirEntry {
+    pub object_id: u64,
+    pub kind: u32,
+    pub name_length: u32,
+    pub record_length: u32,
+    pub reserved: u32,
+}
+
+const _: [(); 88] = [(); std::mem::size_of::<AfsplusArosStat>()];
+const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosDirEntry>()];
 const _: [(); 72] = [(); std::mem::size_of::<AfsplusArosCounters>()];
 const _: [(); 112] = [(); std::mem::size_of::<AfsplusArosHealth>()];
 const _: [(); 16] = [(); std::mem::size_of::<AfsplusArosHealthEvent>()];
@@ -1922,5 +1960,136 @@ pub extern "C" fn afsplus_aros_free_record(
         bridge_mut(filesystem)?
             .adapter
             .free_record(file, offset, length)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_lookup_id(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    output_object_id: *mut u64,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_object_id)?;
+        let name = std::str::from_utf8(input_bytes(name, name_length)?)
+            .map_err(|_| ArosError::InvalidComponentName)?;
+        let object = bridge_mut(filesystem)?
+            .adapter
+            .lookup_id(optional_lock(base_lock), name)?;
+        write_output(output_object_id, object)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_stat_id(
+    filesystem: *mut AfsplusAros,
+    object_id: u64,
+    output: *mut AfsplusArosStat,
+) -> i32 {
+    bridge_status(filesystem, || {
+        let stat = bridge_mut(filesystem)?.adapter.stat_id(object_id)?;
+        write_sized_output(
+            output,
+            std::mem::size_of::<AfsplusArosStat>(),
+            AfsplusArosStat {
+                struct_size: 0,
+                kind: stat.kind as u32,
+                object_id: stat.object_id,
+                size: stat.size,
+                allocated_size: stat.allocated_size,
+                protection: stat.protection,
+                links: stat.links,
+                reserved0: 0,
+                created_seconds: stat.created.seconds,
+                modified_seconds: stat.modified.seconds,
+                changed_seconds: stat.changed.seconds,
+                created_nanoseconds: stat.created.nanoseconds,
+                modified_nanoseconds: stat.modified.nanoseconds,
+                changed_nanoseconds: stat.changed.nanoseconds,
+                reserved1: 0,
+            },
+            |value, size| value.struct_size = size,
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_dir_open(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    output_dir: *mut u64,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_dir)?;
+        let enumerator = bridge_mut(filesystem)?
+            .adapter
+            .open_enumerator(optional_lock(base_lock))?;
+        write_output(output_dir, enumerator)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_dir_read(
+    filesystem: *mut AfsplusAros,
+    dir: u64,
+    buffer: *mut u8,
+    capacity: u32,
+    max_entries: u32,
+    output_count: *mut u32,
+    output_eof: *mut u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_count)?;
+        require_output(output_eof)?;
+        // Read no more entries than the buffer is certain to hold: an entry
+        // taken from the walk and then not delivered would be lost.
+        let certain = capacity / AFSPLUS_AROS_DIR_RECORD_MAX;
+        if certain == 0 || max_entries == 0 {
+            return Err(ArosError::BadNumber);
+        }
+        let limit = max_entries.min(certain).min(64) as usize;
+        let destination = output_slice(buffer, capacity)?;
+        let page = bridge_mut(filesystem)?
+            .adapter
+            .read_enumerator(dir, limit)?;
+        let header = std::mem::size_of::<AfsplusArosDirEntry>();
+        let mut at = 0usize;
+        for entry in &page.entries {
+            let record = (header + entry.name.len() + 7) & !7;
+            let fixed = AfsplusArosDirEntry {
+                object_id: entry.object_id,
+                kind: entry.kind as u32,
+                name_length: entry.name.len() as u32,
+                record_length: record as u32,
+                reserved: 0,
+            };
+            let slot = destination
+                .get_mut(at..at + record)
+                .ok_or(ArosError::ObjectTooLarge)?;
+            slot.fill(0);
+            // SAFETY: `slot` holds at least `header` bytes and `fixed` is a
+            // plain `repr(C)` value; the copy is byte-wise, so the caller's
+            // buffer alignment does not matter.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    ptr::from_ref(&fixed).cast::<u8>(),
+                    slot.as_mut_ptr(),
+                    header,
+                );
+            }
+            slot[header..header + entry.name.len()].copy_from_slice(&entry.name);
+            at += record;
+        }
+        write_output(output_count, page.entries.len() as u32)?;
+        write_output(output_eof, u32::from(page.eof))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_dir_close(filesystem: *mut AfsplusAros, dir: u64) -> i32 {
+    bridge_status(filesystem, || {
+        bridge_mut(filesystem)?.adapter.close_enumerator(dir)
     })
 }

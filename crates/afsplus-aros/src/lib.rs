@@ -22,6 +22,7 @@ use afsplus_vfs::{
 pub type LockId = u64;
 pub type FileHandleId = u64;
 pub type WatchId = u64;
+pub type EnumeratorId = u64;
 
 pub const DISK_TYPE_AFS_PLUS: i32 = i32::from_be_bytes(*b"AFS+");
 
@@ -59,6 +60,8 @@ pub struct ArosConfig {
     pub health_event_capacity: usize,
     /// Size of the byte-range record lock table of the mount.
     pub max_record_locks: usize,
+    /// Simultaneously open v2 directory enumerators.
+    pub max_enumerators: usize,
 }
 
 impl Default for ArosConfig {
@@ -76,6 +79,7 @@ impl Default for ArosConfig {
             max_watches: 256,
             health_event_capacity: 32,
             max_record_locks: 256,
+            max_enumerators: 64,
         }
     }
 }
@@ -236,6 +240,56 @@ struct FileState {
     dirty: bool,
 }
 
+/// Object kind of the v2 group, the `type` values of `filesystem_v2.h`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum V2Kind {
+    File = 1,
+    Directory = 2,
+    Symlink = 3,
+}
+
+/// Filesystem-neutral metadata by object ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V2Stat {
+    pub object_id: ObjectId,
+    pub kind: V2Kind,
+    pub size: u64,
+    pub allocated_size: u64,
+    pub links: u32,
+    pub protection: u64,
+    pub created: Timespec,
+    pub modified: Timespec,
+    pub changed: Timespec,
+}
+
+/// One enumerated entry; the name is the stored UTF-8 spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V2Entry {
+    pub object_id: ObjectId,
+    pub kind: V2Kind,
+    pub name: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V2Page {
+    pub entries: Vec<V2Entry>,
+    pub eof: bool,
+}
+
+/// Largest page one `read_enumerator` call returns.
+pub const V2_MAX_PAGE_ENTRIES: usize = 64;
+
+/// A paged directory walk. The position is the stored name returned last,
+/// not an ordinal, so it holds across any namespace change between pages.
+#[derive(Debug)]
+struct Enumerator {
+    directory: Handle,
+    cookie: u64,
+    last_name: Option<Vec<u8>>,
+    finished: bool,
+}
+
 /// One `LockRecord` byte range. Advisory, in memory, owned by a file handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecordLock {
@@ -290,6 +344,8 @@ pub struct ArosAdapter<D: BlockDevice> {
     known_parents: BTreeMap<ObjectId, (Option<ObjectId>, Vec<u8>)>,
     files: BTreeMap<FileHandleId, FileState>,
     records: Vec<RecordLock>,
+    enumerators: BTreeMap<EnumeratorId, Enumerator>,
+    next_enumerator: EnumeratorId,
     /// `ACTION_WRITE_PROTECT` state: the pass key while protected.
     write_protect: Option<u32>,
     watches: BTreeMap<WatchId, Watch>,
@@ -320,6 +376,8 @@ impl<D: BlockDevice> ArosAdapter<D> {
             known_parents,
             files: BTreeMap::new(),
             records: Vec::new(),
+            enumerators: BTreeMap::new(),
+            next_enumerator: 1,
             write_protect: None,
             watches: BTreeMap::new(),
             next_lock: 1,
@@ -872,6 +930,143 @@ impl<D: BlockDevice> ArosAdapter<D> {
         self.known_parents
             .insert(object_id, (Some(target_parent), target_name.to_vec()));
         Ok(())
+    }
+
+    /// v2 lookup: the object ID of `name` (UTF-8, whatever the mount's DOS
+    /// encoding) under `base`. No lock is taken and a link is never followed.
+    pub fn lookup_id(&mut self, base: Option<LockId>, name: &str) -> Result<ObjectId, ArosError> {
+        let parent = self.lock_object_or_root(base)?;
+        if name.is_empty() || name.bytes().any(|byte| matches!(byte, 0 | b'/' | b':')) {
+            return Err(ArosError::InvalidComponentName);
+        }
+        Ok(self.vfs.lookup(parent, name)?)
+    }
+
+    /// v2 stat by object ID. The ID names the object through renames; a
+    /// deleted object and a guessed identifier are `ObjectNotFound`.
+    pub fn stat_id(&mut self, object_id: ObjectId) -> Result<V2Stat, ArosError> {
+        let stat = match self.vfs.stat(object_id) {
+            Ok(stat) => stat,
+            Err(VfsError::NotFound | VfsError::Invalid) => return Err(ArosError::ObjectNotFound),
+            Err(error) => return Err(error.into()),
+        };
+        Ok(V2Stat {
+            object_id: stat.object_id,
+            kind: v2_kind(stat.kind)?,
+            size: stat.size,
+            allocated_size: stat.allocated_size,
+            links: stat.links,
+            protection: stat.protection,
+            created: stat.created,
+            modified: stat.modified,
+            changed: stat.changed,
+        })
+    }
+
+    /// Opens a paged walk of the directory of `base` (the root for `None`).
+    /// It is independent of the lock afterwards and of the lock's `ExNext`
+    /// cursor. The table is bounded by `max_enumerators`.
+    pub fn open_enumerator(&mut self, base: Option<LockId>) -> Result<EnumeratorId, ArosError> {
+        if self.enumerators.len() >= self.config.max_enumerators {
+            return Err(ArosError::NoFreeStore);
+        }
+        let object = self.lock_object_or_root(base)?;
+        let directory = self.vfs.open_directory(object)?;
+        let id = self.next_enumerator;
+        self.next_enumerator = match self.next_enumerator.checked_add(1) {
+            Some(next) => next,
+            None => {
+                let _ = self.vfs.close(directory);
+                return Err(ArosError::NoFreeStore);
+            }
+        };
+        self.enumerators.insert(
+            id,
+            Enumerator {
+                directory,
+                cookie: 0,
+                last_name: None,
+                finished: false,
+            },
+        );
+        Ok(id)
+    }
+
+    /// The next page of at most `limit` entries (1 to 64). Entries ordered
+    /// after the last returned name are each returned once, whatever was
+    /// created, deleted or renamed since the previous page; one page is one
+    /// consistent view. After the end every call returns an empty final page.
+    pub fn read_enumerator(
+        &mut self,
+        enumerator: EnumeratorId,
+        limit: usize,
+    ) -> Result<V2Page, ArosError> {
+        let state = self
+            .enumerators
+            .get(&enumerator)
+            .ok_or(ArosError::InvalidLock)?;
+        if limit == 0 || limit > V2_MAX_PAGE_ENTRIES {
+            return Err(ArosError::BadNumber);
+        }
+        let (directory, cookie, last_name, finished) = (
+            state.directory,
+            state.cookie,
+            state.last_name.clone(),
+            state.finished,
+        );
+        if finished {
+            return Ok(V2Page {
+                entries: Vec::new(),
+                eof: true,
+            });
+        }
+        let page = match self.vfs.read_directory(directory, cookie, limit) {
+            Err(VfsError::Stale) => {
+                let resumed = match self
+                    .vfs
+                    .resume_directory_after(directory, last_name.as_deref())
+                {
+                    Ok(resumed) => resumed,
+                    // The directory itself is gone.
+                    Err(VfsError::NotFound | VfsError::NotDirectory) => {
+                        return Err(ArosError::ObjectNotFound);
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                self.vfs.read_directory(directory, resumed, limit)?
+            }
+            other => other?,
+        };
+        let mut entries = Vec::with_capacity(page.entries.len());
+        for entry in page.entries {
+            let kind = v2_kind(self.vfs.stat(entry.object_id)?.kind)?;
+            entries.push(V2Entry {
+                object_id: entry.object_id,
+                kind,
+                name: entry.name,
+            });
+        }
+        let state = self
+            .enumerators
+            .get_mut(&enumerator)
+            .expect("validated enumerator");
+        state.cookie = page.next_cookie;
+        state.finished = page.eof;
+        if let Some(last) = entries.last() {
+            state.last_name = Some(last.name.clone());
+        }
+        Ok(V2Page {
+            entries,
+            eof: page.eof,
+        })
+    }
+
+    pub fn close_enumerator(&mut self, enumerator: EnumeratorId) -> Result<(), ArosError> {
+        let state = self
+            .enumerators
+            .remove(&enumerator)
+            .ok_or(ArosError::InvalidLock)?;
+        Ok(self.vfs.close(state.directory)?)
     }
 
     /// `ACTION_LOCK_RECORD` without waiting. Ranges are advisory and never
@@ -1428,6 +1623,10 @@ impl<D: BlockDevice> ArosAdapter<D> {
         for lock in lock_ids {
             self.free_lock(lock)?;
         }
+        let enumerator_ids: Vec<_> = self.enumerators.keys().copied().collect();
+        for enumerator in enumerator_ids {
+            self.close_enumerator(enumerator)?;
+        }
         Ok(self.vfs)
     }
 
@@ -1614,6 +1813,15 @@ impl<D: BlockDevice> ArosAdapter<D> {
             .checked_add(1)
             .ok_or(ArosError::NoFreeStore)?;
         Ok(handle)
+    }
+}
+
+fn v2_kind(kind: NodeKind) -> Result<V2Kind, ArosError> {
+    match kind {
+        NodeKind::File => Ok(V2Kind::File),
+        NodeKind::Directory => Ok(V2Kind::Directory),
+        NodeKind::Symlink => Ok(V2Kind::Symlink),
+        NodeKind::Internal => Err(ArosError::ObjectNotFound),
     }
 }
 

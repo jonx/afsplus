@@ -67,7 +67,7 @@ older library must be able to refuse by value.
 
 ## C1. Rust/C integration boundary
 
-Present (L1 to L3): ABI version 1 with interface revision 10.
+Present (L1 to L3): ABI version 1 with interface revision 11.
 `afsplus_aros_interface` answers without a mount with the revision and a
 mask of entry-point groups; the packet layer asks it at creation and answers
 `ERROR_ACTION_NOT_KNOWN` for an action of a missing group.
@@ -102,6 +102,7 @@ Lacking, in the order classic software meets them:
 | all of the above | target run: a probe extension for the S0 matrix on Hosted, QEMU and m68k | L4 |
 | `ACTION_SET_COMMENT`, comment in `FileInfoBlock` | a stored comment attribute; the format has no comment or extended-attribute record ([docs/12](../docs/12-metadata-and-xattrs.md)) | Stage B decision |
 | `ACTION_RENAME_DISK` | label rewrite in the identity block; needs a core label setter | L1, core |
+| record lock self-overlap | a handle does not collide with its own range; unverified against rom/dos `LockRecord` and a reference handler until a target run | L4 |
 | `ACTION_LOCK_RECORD` waiting modes | honouring the `dp_Arg5` timeout: a queue of deferred packets in the handler loop, retried when a range is freed | L4 |
 | `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |
 | `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |
@@ -131,17 +132,17 @@ container's inheritance rule; a DOSDriver keyword that sets the mount flag.
 Present (L1, L2): the `API_V2` entry-point group on the same locks and
 handles as the DOS calls: positioned 64-bit read and write that leave the DOS
 position alone, atomic replace over an unheld target, and the capability and
-limits query of C1 with one published numbering (`FSV2_CAP_*`).
+limits query of C1 with one published numbering (`FSV2_CAP_*`), and the
+`OBJECT_IDS` group: lookup and stat by object ID and a paged directory walk
+whose position survives namespace changes between pages.
 
 Lacking:
 
-1. object-ID operations at the C boundary: stat by ID, lookup returning the
-   ID, paged directory read with opaque cookies and more than one entry;
-2. a transport that reaches a running handler from an application: a
+1. a transport that reaches a running handler from an application: a
    versioned extension packet that older handlers refuse for free
    (`ERROR_ACTION_NOT_KNOWN`), its packet-layer cases, and a client library
    that falls back. The packet number is an AROS-wide allocation;
-3. a consumer: the AROS Rust `std` port binding to the group.
+2. a consumer: the AROS Rust `std` port binding to the group.
 
 Hosted and QEMU: all. Apple hardware: none.
 
