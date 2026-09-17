@@ -35,6 +35,8 @@ static uint8_t file_bytes[64];
 static LONG file_position;
 static uint32_t seeks;
 static LONG fail_transfer;
+/* Fails the n-th Seek from now (1: the next one); 0: none. */
+static uint32_t fail_seek_in;
 
 static int forbid_depth;
 
@@ -130,6 +132,11 @@ LONG Seek(BPTR file, LONG position, LONG mode)
     (void)file;
     assert(mode == OFFSET_BEGINNING);
     seeks++;
+    if (fail_seek_in != 0 && --fail_seek_in == 0)
+    {
+        io_error = ERROR_DISK_NOT_VALIDATED;
+        return -1;
+    }
     if (position < 0 || position > (LONG)sizeof(file_bytes))
     {
         io_error = ERROR_SEEK_ERROR;
@@ -263,7 +270,18 @@ int main(void)
     assert(afsplus_client_write_at(file, 3, data, 1, &count)
         == ERROR_DISK_FULL);
     assert(count == 0 && file_position == 7);
+    /* A position that cannot be restored is reported as such, also when the
+     * transfer failed too: that error must not hide the lost position. */
+    fail_seek_in = 2;
+    assert(afsplus_client_write_at(file, 3, data, 1, &count)
+        == ERROR_SEEK_ERROR);
+    assert(count == 0 && file_position == 3);
     fail_transfer = 0;
+    fail_seek_in = 2;
+    assert(afsplus_client_read_at(file, 40, data, 4, &count)
+        == ERROR_SEEK_ERROR);
+    assert(count == 4 && data[0] == 40 && io_error == 0);
+    file_position = 7;
     /* Beyond what a classic Seek expresses nothing is attempted. */
     seeks = 0;
     assert(afsplus_client_read_at(file, UINT64_C(0x80000000), data, 1,

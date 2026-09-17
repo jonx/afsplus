@@ -116,8 +116,9 @@ static uint64_t file_object(BPTR file)
     return handle != NULL ? (uint64_t)(uintptr_t)handle->fh_Arg1 : 0;
 }
 
-/* Seek there, transfer, seek back. The first error wins, but the position is
- * restored whenever the first seek succeeded. */
+/* Seek there, transfer, seek back. A position that could not be restored is
+ * the error the caller must hear whatever the transfer did, because the
+ * promise of these calls is then broken: ERROR_SEEK_ERROR. */
 static LONG classic_at(BPTR file, uint64_t offset, void *buffer,
     uint32_t length, uint32_t writing, uint32_t *count)
 {
@@ -137,8 +138,8 @@ static LONG classic_at(BPTR file, uint64_t offset, void *buffer,
         error = (LONG)IoErr() != 0 ? (LONG)IoErr() : ERROR_UNKNOWN;
     else
         *count = (uint32_t)moved;
-    if (Seek(file, previous, OFFSET_BEGINNING) < 0 && error == 0)
-        error = (LONG)IoErr() != 0 ? (LONG)IoErr() : ERROR_SEEK_ERROR;
+    if (Seek(file, previous, OFFSET_BEGINNING) < 0)
+        error = ERROR_SEEK_ERROR;
     SetIoErr(0);
     return error;
 }

@@ -50,7 +50,9 @@ LONG afsplus_client_interface(struct MsgPort *port, uint32_t *revision,
  * transport the position is never touched. The fallback seeks, transfers and
  * seeks back, so it is not safe against another user of the same handle, and
  * it reaches only offsets a classic Seek can express: beyond that it answers
- * ERROR_OBJECT_TOO_LARGE. */
+ * ERROR_OBJECT_TOO_LARGE. If the seek back fails the position is lost and
+ * the call answers ERROR_SEEK_ERROR, whatever the transfer did; count still
+ * says what was transferred. */
 LONG afsplus_client_read_at(BPTR file, uint64_t offset, void *buffer,
     uint32_t length, uint32_t *count);
 LONG afsplus_client_write_at(BPTR file, uint64_t offset, const void *buffer,
