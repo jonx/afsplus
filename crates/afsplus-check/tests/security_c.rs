@@ -258,14 +258,19 @@ fn c_and_rust_agree_on_objects_of_real_images() {
     let mut outside = secured.clone();
     outside[at + HEADER_SIZE + 96..at + HEADER_SIZE + 104].copy_from_slice(&u64::MAX.to_le_bytes());
     reseal(&mut outside[at..at + BLOCK], 112);
-    // Both readers bound the first segment where they admit the record.
+    // Where a well-formed reference points is chain state: both readers
+    // admit the record, so the object stays reachable and deletable.
     agree(
         &probe,
         &scratch,
         "reference outside the volume",
         &outside,
         file,
-        Verdict::Corrupt,
+        Verdict::Object {
+            kind: 1,
+            flags: 4,
+            protection: 0x11,
+        },
     );
 
     // A volume without the feature: a record that carries a reference is

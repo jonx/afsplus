@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Admit a well-formed security reference wherever it points](#2026-09-17--admit-a-well-formed-security-reference-wherever-it-points)
 - [2026-09-17 — Pass a relabel's label as a value, never as volume state](#2026-09-17--pass-a-relabels-label-as-a-value-never-as-volume-state)
 - [2026-09-17 — Make the volume label committed checkpoint state](#2026-09-17--make-the-volume-label-committed-checkpoint-state)
 - [2026-09-17 — Pin the C statements of the format against the Rust codecs](#2026-09-17--pin-the-c-statements-of-the-format-against-the-rust-codecs)
@@ -192,6 +193,33 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+
+## 2026-09-17 — Admit a well-formed security reference wherever it points
+
+An independent reading of the security follow-ups found two things, recorded
+in [ADR-105](adr/ADR-105-security-reference-admission.md). The lookup bound on
+the first segment block made an object with a reference one block past the
+volume undeletable, while a reference into in-range garbage left it deletable.
+Record admission now judges the shape of the reference only, in the Rust read
+path and in the portable C reader; where it points is chain state. And the
+chain walk accepted a stale segment of an earlier descriptor of the same
+object and size, since every field it compared matched: through a forged,
+resealed next pointer the descriptor read returned a mixture of two
+descriptors and retirement freed blocks the replacement had already retired.
+Every segment of a chain now carries the generation of its first segment,
+which one commit guarantees.
+
+`crates/afsplus-check/tests/security_container.rs`: the out-of-volume
+reference is admitted, the object stats, reads and deletes, its descriptor
+read is corrupt, and the one real segment is the checker's only leak; the
+stale-segment image ends the walk at the forged link, deletion frees the first
+live segment and leaks the two behind it. With the generation comparison
+disabled that test fails on the descriptor read, which returns data.
+`crates/afsplus-check/tests/security_c.rs` requires both readers to admit the
+out-of-volume reference. The remaining limit, a data block that holds a valid
+segment image behind a forged link, is Q16 in
+[open questions](implementation/open-questions.md).
 
 ## 2026-09-17 — Pass a relabel's label as a value, never as volume state
 

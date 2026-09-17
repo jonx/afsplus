@@ -975,7 +975,7 @@ fn every_removal_and_replacement_path_survives_a_damaged_chain() {
 }
 
 #[test]
-fn a_security_reference_outside_the_allocatable_bounds_is_refused_at_lookup() {
+fn a_security_reference_outside_the_volume_is_chain_damage_and_the_object_stays_deletable() {
     let bytes = blob(100, 31);
     let mut volume = mount(formatted()).unwrap();
     let file = volume
@@ -1018,31 +1018,152 @@ fn a_security_reference_outside_the_allocatable_bounds_is_refused_at_lookup() {
     header.seal(&mut block);
     damaged.write_block(record_lba, &block).unwrap();
 
-    // Lookup refuses the object, the same verdict the portable C reader
-    // gives, instead of admitting the record and failing at the first
-    // descriptor read.
-    let mut volume = mount(damaged).unwrap();
-    for result in [
-        volume.stat(file).err(),
-        volume.security_descriptor(file).err(),
-        volume.delete_file(OBJECT_ROOT, "file", time(4)).err(),
-    ] {
-        match result {
-            Some(CoreError::Corrupt(message)) => assert!(
-                message.contains("security reference first block"),
-                "{message}"
-            ),
-            other => panic!("{other:?}"),
-        }
-    }
-    // The record itself is inadmissible, so no ordinary operation edits the
-    // object and nothing of its chain is freed. Repair belongs to the
-    // checker, which reports the same reference as corruption.
-    let mut device = volume.into_device();
-    let report = check_device(&mut device);
+    // The record is admitted: where a well-formed reference points is chain
+    // state. The object is reachable, its descriptor reads as corrupt, and
+    // the checker reports the reference.
+    let mut report_device = damaged.clone();
+    let report = check_device(&mut report_device);
     assert!(
         report.errors.iter().any(|error| error.contains("security")),
         "{:?}",
         report.errors
     );
+    let mut volume = mount(damaged).unwrap();
+    assert_eq!(volume.stat(file).unwrap().unwrap().protection, 0);
+    assert_eq!(volume.read_file(file).unwrap(), b"x");
+    assert!(matches!(
+        volume.security_descriptor(file),
+        Err(CoreError::Corrupt(_))
+    ));
+    // An object must stay deletable whatever its reference points at. The
+    // chain is damaged from its first link, so nothing of it is freed: the
+    // one real segment is left to the checker as a leak.
+    volume.delete_file(OBJECT_ROOT, "file", time(4)).unwrap();
+    assert!(volume
+        .lookup_in_directory(OBJECT_ROOT, "file")
+        .unwrap()
+        .is_none());
+    let mut device = volume.into_device();
+    let report = check_device(&mut device);
+    let leaks: Vec<_> = report
+        .errors
+        .iter()
+        .chain(&report.warnings)
+        .filter(|finding| finding.ends_with("owned by nothing (leak)"))
+        .collect();
+    assert_eq!(leaks.len(), 1, "{:?} {:?}", report.errors, report.warnings);
+    // The older retained checkpoint still holds the damaged object, which
+    // the checker's shadow verification reports as a warning. Nothing else.
+    assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    assert!(
+        report.warnings[0].contains("security segment 0 at invalid block"),
+        "{:?}",
+        report.warnings
+    );
+}
+
+#[test]
+fn a_stale_segment_of_the_same_object_stops_the_chain_walk() {
+    use afsplus_check::explain::{BlockRole, Explainer};
+
+    fn chain(dev: &mut MemoryBackend, object: u64) -> Vec<u64> {
+        let explainer = Explainer::load(dev).unwrap();
+        let mut blocks = std::collections::BTreeMap::new();
+        for lba in 0..dev.total_blocks() {
+            for role in explainer.explain_block(dev, lba).unwrap().roles {
+                if let BlockRole::SecuritySegment { object_id, index } = role {
+                    if object_id == object {
+                        blocks.insert(index, lba);
+                    }
+                }
+            }
+        }
+        blocks.into_values().collect()
+    }
+
+    // Two descriptors of the same object, format, version and size, written
+    // by two commits: the first chain is retired, and its bytes stay valid.
+    let old_bytes = blob(9000, 41);
+    let new_bytes = blob(9000, 42);
+    let mut volume = mount(formatted()).unwrap();
+    let file = volume
+        .create_file_in_directory(OBJECT_ROOT, "file", b"x", time(2))
+        .unwrap();
+    volume
+        .set_security_descriptor(file, UNKNOWN_FORMAT, 1, &old_bytes, time(3))
+        .unwrap();
+    let mut dev = volume.into_device();
+    let stale = chain(&mut dev, file);
+    let mut volume = mount(dev).unwrap();
+    volume
+        .set_security_descriptor(file, UNKNOWN_FORMAT, 1, &new_bytes, time(4))
+        .unwrap();
+    let mut dev = checked(volume);
+    let live = chain(&mut dev, file);
+    assert_eq!((stale.len(), live.len()), (3, 3));
+    assert!(stale.iter().all(|lba| !live.contains(lba)));
+
+    // The stale middle segment matches the live reference in every field
+    // but its generation. That is the premise of this test.
+    let mut block = vec![0u8; dev.block_size()];
+    dev.read_block(stale[1], &mut block).unwrap();
+    let (old_middle, old_generation) = SecuritySegment::decode(&block).unwrap();
+    let mut other = vec![0u8; dev.block_size()];
+    dev.read_block(live[1], &mut other).unwrap();
+    let (new_middle, new_generation) = SecuritySegment::decode(&other).unwrap();
+    assert_eq!(
+        (
+            old_middle.object_id,
+            old_middle.index,
+            old_middle.count,
+            old_middle.total_len,
+            old_middle.format,
+            old_middle.version
+        ),
+        (
+            new_middle.object_id,
+            new_middle.index,
+            new_middle.count,
+            new_middle.total_len,
+            new_middle.format,
+            new_middle.version
+        )
+    );
+    assert!(old_generation < new_generation);
+
+    // Forge the first live segment's next pointer to the stale middle
+    // segment and reseal it, so every checksum still holds.
+    dev.read_block(live[0], &mut block).unwrap();
+    let header = BlockHeader::verify(&block, block_type::SECURITY_DESCRIPTOR).unwrap();
+    block[HEADER_SIZE + 16..HEADER_SIZE + 24].copy_from_slice(&stale[1].to_le_bytes());
+    header.seal(&mut block);
+    dev.write_block(live[0], &block).unwrap();
+
+    // The walk stops at the stale segment: the descriptor is not returned as
+    // a mixture of two descriptors, and the object stays deletable.
+    let mut volume = mount(dev).unwrap();
+    assert!(matches!(
+        volume.security_descriptor(file),
+        Err(CoreError::Corrupt(_))
+    ));
+    volume.delete_file(OBJECT_ROOT, "file", time(5)).unwrap();
+    let mut dev = volume.into_device();
+    let report = check_device(&mut dev);
+    let leaks: std::collections::BTreeSet<u64> = report
+        .errors
+        .iter()
+        .chain(&report.warnings)
+        .filter_map(|finding| {
+            finding
+                .strip_prefix("block ")?
+                .strip_suffix(" is allocated but owned by nothing (leak)")?
+                .parse()
+                .ok()
+        })
+        .collect();
+    // Only the first live segment was consistent and is freed. The two live
+    // segments behind the forged link leak, and the stale chain, already
+    // retired by the replacement, is not freed a second time.
+    assert_eq!(leaks, [live[1], live[2]].into_iter().collect());
 }

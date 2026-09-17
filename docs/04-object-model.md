@@ -110,7 +110,11 @@ count and a flags word whose bit 0 marks a diverged classic projection. The
 descriptor is an opaque byte string of 1 to 65,536 bytes with a format
 identity and a format version, stored in a chain of `"AFSX"` segments owned
 by that object alone. The filesystem stores, returns, copies on `CloneFile`
-and removes it, and never evaluates it. The projection rule for protection
+and removes it, and never evaluates it. A record whose reference is well
+formed is admitted wherever its first block points
+([ADR-105](../adr/ADR-105-security-reference-admission.md)): the object stays
+reachable and deletable, a damaged chain makes the descriptor unreadable, and
+the checker reports it. The projection rule for protection
 edits is in [docs/30](30-portable-security-model.md#9-classic-amiga-compatibility-profile).
 
 ## 4. Object identity invariants

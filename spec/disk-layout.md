@@ -57,8 +57,9 @@ Rules:
    own a chain of `"AFSX"` descriptor segments of 24 fixed bytes plus
    descriptor bytes, every segment but the last full
    ([ADR-101](../adr/ADR-101-security-preservation-container.md)); the
-   reference on a volume without the feature is corruption, and the first
-   segment is bounds checked where the record is admitted
+   reference on a volume without the feature is corruption; where a
+   well-formed reference points is chain state, judged when the chain is
+   walked ([ADR-105](../adr/ADR-105-security-reference-admission.md))
 10. the permanently allocated areas are consecutive runs of allocatable
    blocks counted from the start of the volume, skipping every region's
    reserved head ([geometry](../crates/afsplus-format/src/geometry.rs)):

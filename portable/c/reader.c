@@ -1604,10 +1604,11 @@ static int afspr_decode_object(const uint8_t *block, size_t block_size,
         header.generation == 0u || header.generation > max_generation ||
         afspr_object_shape(block, block_size, &header, &fixed, &reference) !=
             AFSPR_OK ||
+        /* Where a well-formed reference points is chain state, not record
+         * admission: the object stays reachable and deletable. */
         (reference.present != 0u &&
-         ((ident->incompat_features & AFSP_INCOMPAT_SECURITY_DESCRIPTORS) ==
-              0u ||
-          !afspr_is_allocatable(ident, reference.first_block)))) {
+         (ident->incompat_features & AFSP_INCOMPAT_SECURITY_DESCRIPTORS) ==
+             0u)) {
         return AFSPR_ERR_CORRUPT;
     }
     p = block + AFSPR_HEADER_SIZE;

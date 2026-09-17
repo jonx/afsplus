@@ -32,10 +32,15 @@ pub struct SecurityDescriptor {
 
 /// One walk of a descriptor chain.
 pub(crate) struct ChainWalk {
-    /// Segments proven to belong to this object's chain: valid magic and
-    /// checksum, this owner, the expected position, matching identity and a
-    /// committed generation, from the first segment up to the first invalid
-    /// link. A block past that point is never proven, whoever else may own it.
+    /// Segments whose content is consistent with this object's reference:
+    /// valid magic and checksum, this owner, the expected position, matching
+    /// identity, a committed generation and the generation of the first
+    /// segment, from the first segment up to the first inconsistent link. A
+    /// block past that point is never accepted, whoever else may own it. The
+    /// walk judges bytes, not allocator ownership: a data block that holds a
+    /// valid segment image, reached through a forged and resealed next
+    /// pointer, passes. That needs a crafted image, and is the trust level
+    /// the extent trees have.
     pub blocks: Vec<u64>,
     /// Present only when every segment of the chain was proven.
     pub descriptor: Option<SecurityDescriptor>,
@@ -57,6 +62,10 @@ pub(crate) fn walk_descriptor_chain<D: BlockDevice>(
     let mut blocks = Vec::with_capacity(reference.segment_count as usize);
     let mut bytes = Vec::with_capacity(reference.total_len as usize);
     let mut identity = None;
+    // One commit writes every segment of a chain, so they all carry the
+    // generation of the first. A stale segment of an earlier descriptor of
+    // the same object and size matches every other field and not this one.
+    let mut chain_generation = None;
     let mut lba = reference.first_block;
     for index in 0..reference.segment_count {
         if !geometry.is_allocatable(lba) || blocks.contains(&lba) {
@@ -79,7 +88,8 @@ pub(crate) fn walk_descriptor_chain<D: BlockDevice>(
                     && segment.total_len == reference.total_len
                     && (segment.format, segment.version) == first
                     && generation != 0
-                    && generation <= max_generation;
+                    && generation <= max_generation
+                    && *chain_generation.get_or_insert(generation) == generation;
                 if ok {
                     blocks.push(lba);
                     bytes.extend_from_slice(segment.bytes);
@@ -283,8 +293,11 @@ impl<D: BlockDevice> Volume<D> {
     /// A damaged chain never blocks the operation: an object must stay
     /// deletable whatever the bytes it points at look like, or a single
     /// corrupt segment would pin its name, its records and its data
-    /// forever. Only the segments proven to belong to this chain are freed;
-    /// the unproven remainder stays allocated, where the checker reports it
+    /// forever. That includes a first segment outside the volume: the record
+    /// is admitted and the chain is damaged from its first link. Only the
+    /// segments consistent with the reference are freed (see [`ChainWalk`]
+    /// for what that judgement covers and what it leaves to a crafted
+    /// image); the remainder stays allocated, where the checker reports it
     /// as a block owned by nothing. Leaking beats freeing a block that may
     /// still belong to something else: on uncertainty, ADR-021 quarantines
     /// or leaks rather than reusing early.

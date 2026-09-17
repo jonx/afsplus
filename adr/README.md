@@ -129,10 +129,11 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-098](ADR-098-bound-block-replay-traces.md) | Bind persistent block replay traces to their base image | Accepted | — |
 | [ADR-099](ADR-099-semantic-replay-bundles.md) | Bind semantic scenarios and replay results in complete bundles | Proposed | — |
 | [ADR-100](ADR-100-exact-object-record-admission.md) | Exact admission of object records | Accepted | — |
-| [ADR-101](ADR-101-security-preservation-container.md) | Security preservation container | Accepted | amends [ADR-031](ADR-031-portable-security-acls.md) |
+| [ADR-101](ADR-101-security-preservation-container.md) | Security preservation container | Accepted | amended by [ADR-105](ADR-105-security-reference-admission.md); amends [ADR-031](ADR-031-portable-security-acls.md) |
 | [ADR-102](ADR-102-clone-metadata-inheritance.md) | Metadata inheritance of CloneFile and CloneRange | Accepted | amends [ADR-027](ADR-027-reflink-clones.md) |
 | [ADR-103](ADR-103-change-record-actor.md) | Reserved actor field in the change record | Accepted | amends [ADR-013](ADR-013-change-stream-bounded.md) |
 | [ADR-104](ADR-104-volume-label-in-checkpoint.md) | The volume label is committed checkpoint state | Accepted | — |
+| [ADR-105](ADR-105-security-reference-admission.md) | A well-formed security reference is admitted wherever it points | Accepted | amends [ADR-101](ADR-101-security-preservation-container.md) |
 
 <!-- /adr-index -->
 
