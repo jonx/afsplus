@@ -9,11 +9,10 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
-- [2026-09-17 — Read today's ADRs as a stranger: which claims nothing held](#2026-09-17--read-todays-adrs-as-a-stranger-which-claims-nothing-held)
-- [2026-09-17 — Hold the claim ADR-115 made about explain](#2026-09-17--hold-the-claim-adr-115-made-about-explain)
-
 - [2026-09-17 — What a rebuilt AROS tree loses, written down and applied](#2026-09-17--what-a-rebuilt-aros-tree-loses-written-down-and-applied)
 - [2026-09-17 — A round of handler work costs nothing](#2026-09-17--a-round-of-handler-work-costs-nothing)
+- [2026-09-17 — Read today's ADRs as a stranger: which claims nothing held](#2026-09-17--read-todays-adrs-as-a-stranger-which-claims-nothing-held)
+- [2026-09-17 — Hold the claim ADR-115 made about explain](#2026-09-17--hold-the-claim-adr-115-made-about-explain)
 - [2026-09-17 — The feature registry lists what exists (ADR-116)](#2026-09-17--the-feature-registry-lists-what-exists-adr-116)
 - [2026-09-17 — Retire what nothing writes (ADR-115)](#2026-09-17--retire-what-nothing-writes-adr-115)
 - [2026-09-17 — The reserved header fields of the last five kinds (ADR-114)](#2026-09-17--the-reserved-header-fields-of-the-last-five-kinds-adr-114)
