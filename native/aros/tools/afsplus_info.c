@@ -2,7 +2,11 @@
 
 /* AFSPlusInfo <path>: prints the structured report of the AFS+ handler that
  * serves path, as the JSON document of schema afsplus-handler-info. A handler
- * without the extension transport is reported as such with RETURN_WARN. */
+ * without the extension transport is reported as such with RETURN_WARN.
+ *
+ * AFSPlusInfo <path> PACKETS prints what the handler has answered since it
+ * started, one line per packet type ("packet <type> <count> <failed>") and
+ * one per error code ("error <code> <count>"), in decimal. */
 
 #include <dos/dos.h>
 #include <dos/dosextens.h>
@@ -13,6 +17,35 @@
 #include <string.h>
 
 #include "../client/afsplus_client.h"
+
+#define COUNT_RECORDS 66
+
+static LONG print_counts(struct MsgPort *port, uint32_t which)
+{
+    static struct AfsplusExtPacketCount records[COUNT_RECORDS];
+    uint32_t stored = 0;
+    uint32_t total = 0;
+    uint32_t index;
+    LONG error = afsplus_client_packet_counts(port, which, records,
+        COUNT_RECORDS, &stored, &total);
+
+    for (index = 0; error == 0 && index < stored; index++)
+    {
+        /* Counts are printed in 32 bits; a handler does not live that long
+         * in a test, and a saturated value says so. */
+        ULONG count = records[index].count > 0xFFFFFFFFULL
+            ? 0xFFFFFFFFUL : (ULONG)records[index].count;
+        ULONG failed = records[index].failed > 0xFFFFFFFFULL
+            ? 0xFFFFFFFFUL : (ULONG)records[index].failed;
+
+        if (which == AFSPLUS_EXT_COUNT_BY_ACTION)
+            Printf("packet %ld %lu %lu\n", (LONG)records[index].key, count,
+                failed);
+        else
+            Printf("error %ld %lu\n", (LONG)records[index].key, count);
+    }
+    return error;
+}
 
 int main(int argc, char **argv)
 {
@@ -26,9 +59,9 @@ int main(int argc, char **argv)
     LONG error;
     int attempt;
 
-    if (argc != 2)
+    if (argc != 2 && !(argc == 3 && strcmp(argv[2], "PACKETS") == 0))
     {
-        Printf("usage: AFSPlusInfo <volume or path>\n");
+        Printf("usage: AFSPlusInfo <volume or path> [PACKETS]\n");
         return RETURN_ERROR;
     }
     process = GetDeviceProc((CONST_STRPTR)argv[1], NULL);
@@ -45,6 +78,19 @@ int main(int argc, char **argv)
         Printf("AFSPlusInfo: %s is not served by an AFS+ handler with the "
             "extension transport\n", argv[1]);
         return RETURN_WARN;
+    }
+    if (error == 0 && argc == 3)
+    {
+        error = print_counts(port, AFSPLUS_EXT_COUNT_BY_ACTION);
+        if (error == 0)
+            error = print_counts(port, AFSPLUS_EXT_COUNT_BY_ERROR);
+        FreeDeviceProc(process);
+        if (error != 0)
+        {
+            Printf("AFSPlusInfo: error %ld\n", error);
+            return RETURN_FAIL;
+        }
+        return RETURN_OK;
     }
     /* The document can grow between the sizing call and the read. */
     for (attempt = 0; error == 0 && attempt < 4; attempt++)

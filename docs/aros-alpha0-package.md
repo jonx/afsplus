@@ -126,7 +126,11 @@ the shutdown and the dismount to succeed and the shell to continue. The first bo
 `afsplus-handler-info` schema, and against `SYS:`, which must be recognised
 as a handler without the extension transport. `AFSPlusClone` must clone a
 file inside the volume, refuse to replace the existing target, and fall back
-to a byte copy towards `RAM:`; both results must equal the source. A request
+to a byte copy towards `RAM:`; both results must equal the source. The boot ends with
+`AFSPlusInfo AFSPLUS19: PACKETS`, the handler's own table of what dos.library
+sent it by packet type and of its failures by error code; the result keeps it
+as `packets.txt` and requires that the comment arrived as
+`ACTION_SET_COMMENT`. A request
 that is still registered refuses `ACTION_DIE` by design. The checker must find the
 image clean after each boot.
 
