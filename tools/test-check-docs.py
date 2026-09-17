@@ -75,14 +75,51 @@ class IndexTableTests(unittest.TestCase):
             self.HEADER + "| [a.sh](a.sh) | one | [d.md](d.md) |\n"
             "| [b.sh](b.sh) | two | [d.md](d.md) |\n"), [])
 
-    def test_a_blank_line_orphans_every_row_below_it(self):
+    def test_a_blank_line_orphans_the_rows_below_it(self):
+        """One problem per break, naming the first row that stopped rendering.
+
+        The rows under it are then a paragraph continuing, which is what
+        they render as, so reporting each of them separately would say the
+        same break several times.
+        """
         found = self.problems(
             self.HEADER + "| [a.sh](a.sh) | one | [d.md](d.md) |\n\n"
             "| [b.sh](b.sh) | two | [d.md](d.md) |\n"
             "| [c.sh](c.sh) | three | [d.md](d.md) |\n")
-        self.assertEqual(len(found), 2)
+        self.assertEqual(len(found), 1)
         self.assertIn("index.md:5", found[0])
-        self.assertIn("index.md:6", found[1])
+
+    def test_a_spaced_separator_still_opens_a_table(self):
+        self.assertEqual(self.problems(
+            "| Offset | Width | Field |\n| --- | --- | --- |\n"
+            "| 0 | u8 | tag |\n| 1 | u8 | mode |\n"), [])
+
+    def test_a_paragraph_continuing_with_a_pipe_is_not_a_row(self):
+        self.assertEqual(self.problems(
+            "The command is `afsplus-explain (block <number> | object <id>\n"
+            "| path <path> | feature [<id>])`, in afsplus-tools.\n"), [])
+
+    def test_a_row_short_of_a_column_is_reported(self):
+        found = self.problems(
+            self.HEADER + "| [a.sh](a.sh) | one | [d.md](d.md) |\n"
+            "| [b.sh](b.sh) | two |\n")
+        self.assertEqual(len(found), 1)
+        self.assertIn("index.md:4", found[0])
+        self.assertIn("2 cells", found[0])
+
+    def test_a_pipe_in_inline_code_is_not_a_column(self):
+        self.assertEqual(self.problems(
+            self.HEADER
+            + "| [a.sh](a.sh) | `block | object | path` | [d.md](d.md) |\n"
+            "| [b.sh](b.sh) | a \\| b | [d.md](d.md) |\n"), [])
+
+    def test_a_table_below_a_fence_names_the_line_of_the_file(self):
+        found = self.problems(
+            "```text\nfirst\nsecond\nthird\n```\n\n"
+            + self.HEADER + "| [a.sh](a.sh) | one | [d.md](d.md) |\n\n"
+            "| [b.sh](b.sh) | two | [d.md](d.md) |\n")
+        self.assertEqual(len(found), 1)
+        self.assertIn("index.md:11", found[0])
 
     def test_a_second_table_of_its_own_is_accepted(self):
         self.assertEqual(self.problems(

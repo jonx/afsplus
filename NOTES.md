@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Answer what else renders wrong, having first been wrong about it](#2026-09-17--answer-what-else-renders-wrong-having-first-been-wrong-about-it)
 - [2026-09-17 — Read the tool index and the v2 document as a stranger](#2026-09-17--read-the-tool-index-and-the-v2-document-as-a-stranger)
 - [2026-09-17 — What a rebuilt AROS tree loses, written down and applied](#2026-09-17--what-a-rebuilt-aros-tree-loses-written-down-and-applied)
 - [2026-09-17 — A round of handler work costs nothing](#2026-09-17--a-round-of-handler-work-costs-nothing)
@@ -216,6 +217,49 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-17 — Answer what else renders wrong, having first been wrong about it
+
+The broken-table check written earlier today ran over four index files. The
+question worth answering was the whole repository, so it now runs over every
+document, and answering it found three defects in the check itself first.
+
+Its line numbers were wrong. It read `strip_fences()` output, and that helper
+drops the fenced lines instead of blanking them, so in any document with a
+code fence above the finding every number named the wrong line. It reads the
+raw document now and tracks fences as it goes.
+
+It did not recognise a separator written `| --- | --- |`, because the spaces
+are not in the set of characters a separator may hold. That is a real table
+opener, and thirty-five rows of the developer harness were reported as
+orphans on the strength of it.
+
+It called a paragraph broken when a line of it began with a pipe, which is
+how a command synopsis wraps. A row only stops rendering when it begins a
+block, so the check now asks whether the line above is blank. That also makes
+it report one problem per break rather than one per row below the break,
+which is what a break is.
+
+With all three fixed, the answer to the question: of 228 documents, none.
+The three index files repaired earlier were the only broken tables in the
+repository, and the check now runs on every document so the answer stays
+true. A break reopened by hand in the tool index is caught.
+
+The index rule was widened at the same time to cover the directories under
+`tools/`, not only the files, because `tools/m68k-freestanding` supplies the
+five `<string.h>` prototypes the portable C reader gate compiles against on a
+bare-metal m68k and no document named it.
+
+A second render rule joined it, from a check claude-b had run by hand in the
+same sweep: a row whose column count differs from its header's. Nothing in
+the repository has one, and now nothing can acquire one. Inline code and
+escaped pipes are neutralised before the cells are counted, so a synopsis
+holding a pipe is not miscounted.
+
+`build/` stays outside all of it, and the reason is written where the
+exclusion is: it holds retained evidence, documents as a past tree wrote
+them. A checker that repaired the record of what was true at the time would
+be worse than no checker.
 
 ## 2026-09-17 — Read the tool index and the v2 document as a stranger
 

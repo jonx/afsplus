@@ -45,6 +45,12 @@ import sys
 from urllib.parse import unquote
 
 
+# "build" holds retained evidence: copies of documents as a past tree wrote
+# them, kept so a result can be read back later. They are excluded from every
+# rule here, and deliberately so for the table rules, which a checker could
+# otherwise "fix" by editing the record of what was true at the time. A gate
+# that rewrites evidence to please itself is worse than no gate. The rest are
+# source or output trees whose Markdown is not this documentation.
 EXCLUDED_TREES = {".git", "build", "crates", "native", "target", "vendor"}
 TOC_MIN_LINES = 150
 README_STATUS_MAX_ROWS = 5
@@ -139,6 +145,9 @@ def headings(lines: list[str]) -> list[tuple[int, int, str, str]]:
 
 def heading_anchors(path: Path) -> set[str]:
     return {anchor for _, _, _, anchor in headings(read_lines(path))}
+
+
+INLINE_CODE = re.compile(r"`[^`]*`")
 
 
 def strip_fences(text: str) -> str:
@@ -377,37 +386,60 @@ def check_index_rows(root: Path, index: Path, members: list[Path],
         if member.name not in text:
             problems.append(
                 f"{label} has no row for {member.relative_to(root)}")
-    check_index_rows_render(label, text, problems)
 
 
-def check_index_rows_render(label: Path, text: str,
+def check_index_rows_render(label: Path, raw: str,
                             problems: list[str]) -> None:
     """A row is only a row while its table is unbroken.
 
     A blank line ends a Markdown table, so every row after it renders as
-    literal pipe text with no header. Naming the file is what the check
-    above wants; being read is what the row is for, and a member can be
-    named in a line that nobody sees as a row.
+    literal pipe text with no header. The index check above asks whether a
+    file is named; this asks whether the line naming it is one a reader
+    sees as a row. It runs over every document, because a broken table is
+    not a property of indexes.
+
+    This reads the raw document rather than strip_fences() output, because
+    that helper drops the fenced lines instead of blanking them and every
+    line number after a fence would name the wrong line.
     """
-    lines = text.splitlines()
+    lines = raw.splitlines()
 
     def is_separator(line: str) -> bool:
         stripped = line.strip()
         return bool(stripped) and "-" in stripped and set(stripped) <= {
-            "|", "-", ":"}
+            "|", "-", ":", " "}
 
+    def columns(line: str) -> int:
+        """Cells of a row, with inline code and escaped pipes neutralised."""
+        text = INLINE_CODE.sub("code", line).replace("\\|", "escaped").strip()
+        return len(text.strip("|").split("|"))
+
+    in_fence = False
     in_table = False
+    header = 0
     for number, line in enumerate(lines, start=1):
-        if not line.startswith("|"):
+        if FENCE.match(line):
+            in_fence = not in_fence
+            in_table = False
+            continue
+        if in_fence or not line.startswith("|"):
             in_table = False
             continue
         if is_separator(line):
             in_table = True
             continue
         if in_table:
+            if header and columns(line) != header:
+                problems.append(
+                    f"{label}:{number} has {columns(line)} cells where its "
+                    f"table's header has {header}")
             continue
-        if number < len(lines) and is_separator(lines[number]):
+        following = lines[number] if number < len(lines) else ""
+        if is_separator(following):
+            header = columns(line)
             continue  # a header row, whose separator follows it
+        if number > 1 and lines[number - 2].strip():
+            continue  # a paragraph continuing, which renders as its prose
         problems.append(
             f"{label}:{number} starts a row outside any table "
             "(a blank line above it ended the previous one)")
@@ -579,14 +611,20 @@ def main() -> int:
                     f"{path.relative_to(root)} -> M{match.group(1)} "
                     "(no such row in implementation/milestones.md)")
 
-    # 6. Navigation blocks.
+    # 6. Navigation blocks, and that every table in every document is whole.
     nav_files = sum(check_nav_block(path, root, problems) for path in files)
+    for path in files:
+        check_index_rows_render(path.relative_to(root),
+                                path.read_text(encoding="utf-8"), problems)
 
     # 7. Index coverage.
     tools_dir = root / "tools"
+    # Directories too: a header set the gates compile against is as much a
+    # tool as a script, and nothing else in the repository names it.
     check_index_rows(root, tools_dir / "README.md", sorted(
         path for path in tools_dir.iterdir()
-        if path.is_file() and path.name != "README.md"), problems)
+        if path.name != "README.md" and not path.name.startswith(".")),
+        problems)
     for folder in ("testing", "docs", "implementation"):
         directory = root / folder
         check_index_rows(root, directory / "README.md", sorted(

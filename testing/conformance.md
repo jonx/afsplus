@@ -97,7 +97,10 @@ the selected newest checkpoint must fail instead of being hidden by fallback.
 Structured diagnostics must identify the failing stage, block and per-slot
 status. The gate also runs AddressSanitizer and UndefinedBehaviorSanitizer when
 supported, compiles the public example through CMake, and compiles the
-freestanding reader for AROS m68k when that toolchain is available.
+freestanding reader for AROS m68k when that toolchain is available, falling
+back to a bare-metal `m68k-elf-gcc` with the `<string.h>` prototypes of
+[`tools/m68k-freestanding`](../tools/m68k-freestanding/), which has no C
+library headers of its own.
 
 The same Rust-built fixture contains more than 300 files so both the object map
 and root directory require internal nodes. C walks the directory by ordinal,
