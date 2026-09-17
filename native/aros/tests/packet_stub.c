@@ -38,6 +38,8 @@ static uint64_t created_lock_id;
 static int32_t stub_directory_size = -1;
 static int32_t stub_directory_at;
 static uint32_t rewind_count;
+/* Index at which examine_next fails once with ERROR_SEEK_ERROR, or -1. */
+static int32_t stub_directory_fail_at = -1;
 static uint64_t stub_next_watch = 500;
 static uint64_t stub_fired[4];
 static uint32_t stub_fired_count;
@@ -419,6 +421,11 @@ int32_t afsplus_aros_examine_next(struct AfsplusAros *filesystem,
 
         if (stub_directory_at >= stub_directory_size)
             return ERROR_NO_MORE_ENTRIES;
+        if (stub_directory_at == stub_directory_fail_at)
+        {
+            stub_directory_fail_at = -1;
+            return ERROR_SEEK_ERROR;
+        }
         error = examine_common(output, name, name_capacity);
         name[0] = 'e';
         name[1] = (uint8_t)('0' + stub_directory_at);
@@ -955,7 +962,9 @@ int main(void)
         initialize_packet(&packet, ACTION_EXAMINE_ALL);
         packet.dp_Arg1 = (SIPTR)root;
         packet.dp_Arg2 = (SIPTR)buffer.bytes;
-        packet.dp_Arg3 = (SIPTR)(2 * one + one - 1);
+        /* One byte short of the third entry's own bytes. */
+        packet.dp_Arg3 = (SIPTR)(2 * one
+            + offsetof(struct ExAllData, ed_Comment) + 3 - 1);
         packet.dp_Arg4 = ED_DATE;
         packet.dp_Arg5 = (SIPTR)&control;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
@@ -1022,6 +1031,40 @@ int main(void)
         packet.dp_Arg4 = ED_OWNER + 1;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res2 == ERROR_BAD_NUMBER);
+
+        /* An entry whose own bytes exactly fill the buffer fits, although
+         * its alignment padding would not: two pointers plus "e0" and NUL. */
+        memset(&buffer, 0x7e, sizeof(buffer));
+        control.eac_LastKey = 0;
+        control.eac_Entries = 7;
+        packet.dp_Arg3 = (SIPTR)(offsetof(struct ExAllData, ed_Type) + 3);
+        packet.dp_Arg4 = ED_NAME;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && control.eac_Entries == 1);
+        assert(strcmp((char *)((struct ExAllData *)buffer.bytes)->ed_Name,
+            "e0") == 0);
+        assert(buffer.bytes[offsetof(struct ExAllData, ed_Type) + 3] == 0x7e);
+
+        /* An error return reports zero entries, never the previous count. */
+        control.eac_Entries = 7;
+        packet.dp_Arg4 = ED_OWNER + 1;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res2 == ERROR_BAD_NUMBER && control.eac_Entries == 0);
+
+        /* A read failure after two packed entries returns those two; the
+         * failure surfaces on the next call with an empty result. */
+        control.eac_LastKey = 0;
+        stub_directory_fail_at = 2;
+        packet.dp_Arg3 = (SIPTR)sizeof(buffer);
+        packet.dp_Arg4 = ED_NAME;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(control.eac_Entries == 2);
+        stub_directory_fail_at = 2;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_SEEK_ERROR);
+        assert(control.eac_Entries == 0);
 
         /* One lock has one directory cursor. A second sequence takes it
          * over, and the first one's continuation is refused by value rather
@@ -1182,7 +1225,8 @@ int main(void)
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
         assert(first.nr_Handler == config.handler_port);
-        assert(first.nr_MsgCount == 0);
+        /* The requester's message count is not the handler's to reset. */
+        assert(first.nr_MsgCount == 9);
         /* Parent resolved from the volume root, leaf watched by name. */
         assert_event(0, 'L', "Prefs", AFSPLUS_AROS_LOCK_SHARED);
         assert_event(1, 'W', "settings", 0);

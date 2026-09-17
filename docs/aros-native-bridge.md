@@ -262,7 +262,14 @@ therefore its security metadata.
 requested detail level. An entry read from the filesystem that does not fit
 stays with the lock and is returned first by the next call, so a small buffer
 never loses an entry; a buffer too small for one entry is
-`ERROR_BUFFER_OVERFLOW`. A zero `eac_LastKey` restarts the scan. A request
+`ERROR_BUFFER_OVERFLOW`, and an entry fits when its own bytes fit, whatever
+its alignment padding. A lock has one directory cursor: a zero `eac_LastKey`
+starts a sequence, which takes the cursor and receives its own key, and a
+continuation whose key no longer owns the cursor is `ERROR_OBJECT_IN_USE`.
+Examine, `ExNext`, the last entry and `ACTION_EXAMINE_ALL_END` end the
+sequence. A read that fails after entries were packed returns those entries
+and surfaces on the next call; `ed_Type` is the directory entry type that
+`ExNext` reports. A request
 with a match string or match hook is answered `ERROR_ACTION_NOT_KNOWN`,
 because matching needs dos.library, and dos.library then emulates `ExAll`
 through `ExNext`.
@@ -298,7 +305,10 @@ keeps the request-to-watch pairing in the packet context;
 the layer drains the fired watches and calls the `notify` callback of the
 packet configuration once per request, and at once for `NRF_NOTIFY_INITIAL` on
 an existing object. The handler shell owns the delivery itself: the
-`NotifyMessage` or `Signal`, `nr_MsgCount` and `NRF_WAIT_REPLY` suppression. A
+`NotifyMessage` or `Signal`, `nr_MsgCount` and `NRF_WAIT_REPLY` suppression.
+`nr_Handler` names the handler port for `EndNotify`, so `ACTION_DIE` is
+`ERROR_OBJECT_IN_USE` while a request is registered and destroying the packet
+context clears `nr_Handler` of every request it still holds. A
 shell that supplies no callback answers `ERROR_ACTION_NOT_KNOWN`.
 
 `OBSERVE` carries health and tracing. Every failed call on a mounted instance

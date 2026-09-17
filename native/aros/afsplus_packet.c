@@ -638,9 +638,13 @@ static uint32_t exall_append(uint8_t **cursor, uint8_t *end, LONG type,
         + (type >= ED_COMMENT ? 1 : 0);
     uint8_t *strings;
 
-    need = (need + sizeof(void *) - 1) & ~(sizeof(void *) - 1);
+    /* The entry's own bytes decide whether it fits; the padding only places
+     * the next entry and may run past a buffer this entry exactly fills. */
     if (need > (size_t)(end - *cursor))
         return 0;
+    need = (need + sizeof(void *) - 1) & ~(sizeof(void *) - 1);
+    if (need > (size_t)(end - *cursor))
+        need = (size_t)(end - *cursor);
     strings = *cursor + exall_fixed_size[type];
     entry->ed_Next = NULL;
     entry->ed_Name = strings;
@@ -650,9 +654,10 @@ static uint32_t exall_append(uint8_t **cursor, uint8_t *end, LONG type,
         entry->ed_Type = source->info.directory_entry_type;
     if (type >= ED_SIZE)
     {
+        /* ed_Size is unsigned: a 32-bit record saturates at its maximum. */
         if (sizeof(entry->ed_Size) == sizeof(uint32_t)
-            && source->info.size > (uint64_t)INT32_MAX)
-            entry->ed_Size = INT32_MAX;
+            && source->info.size > (uint64_t)UINT32_MAX)
+            entry->ed_Size = UINT32_MAX;
         else
             entry->ed_Size = source->info.size;
     }
@@ -1786,6 +1791,9 @@ int32_t afsplus_aros_packet_process(
         uint8_t *end;
         uint32_t finished = 0;
 
+        /* Every return, errors included, reports its own entry count. */
+        if (control != NULL)
+            control->eac_Entries = 0;
         if (lock == NULL)
             error = ERROR_INVALID_LOCK;
         else if (cursor == NULL || control == NULL || packet->dp_Arg3 <= 0)
@@ -1828,7 +1836,6 @@ int32_t afsplus_aros_packet_process(
             break;
 
         end = cursor + (size_t)packet->dp_Arg3;
-        control->eac_Entries = 0;
         for (;;)
         {
             if (!lock->exall_pending)
@@ -1859,7 +1866,13 @@ int32_t afsplus_aros_packet_process(
             error = ERROR_NO_MORE_ENTRIES;
             lock->exall_key = 0;
         }
-        else if (error == 0)
+        /* A read that fails after entries were packed must not discard
+         * them: they are returned, and the next call meets the failure with
+         * an empty buffer. */
+        else if (error != 0 && error != ERROR_BUFFER_OVERFLOW
+            && control->eac_Entries != 0)
+            error = 0;
+        if (error == 0)
             result = DOSTRUE;
         break;
     }
@@ -2062,7 +2075,10 @@ int32_t afsplus_aros_packet_process(
             for (known = context->notifies; known != NULL;
                 known = known->next)
                 if (known->request == request)
+                {
                     error = ERROR_OBJECT_IN_USE;
+                    break;
+                }
         }
         if (error == 0)
         {
@@ -2093,8 +2109,8 @@ int32_t afsplus_aros_packet_process(
         node->request = request;
         node->next = context->notifies;
         context->notifies = node;
+        /* nr_MsgCount belongs to the requester and the delivery side. */
         request->nr_Handler = context->handler_port;
-        request->nr_MsgCount = 0;
         result = DOSTRUE;
         if ((request->nr_Flags & NRF_NOTIFY_INITIAL) != 0)
         {
