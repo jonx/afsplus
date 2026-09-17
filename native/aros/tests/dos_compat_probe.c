@@ -10,6 +10,10 @@
  * which a following dismount has to succeed. A request that is still
  * registered keeps the handler alive by design, so it is ended first.
  *
+ * STEADY <rounds> repeats one fixed set of operations and reports the free
+ * memory after each round, so a handler that keeps something per operation
+ * shows as a falling line instead of a flat one.
+ *
  * RECORD-HOLDER and RECORD-WAITER run as two tasks: the holder keeps a record
  * for three seconds, the waiter asks for it with a ten-second timeout and must
  * get it from the release, neither at once nor by expiry. */
@@ -926,11 +930,129 @@ static int wait_for_record(void)
     return RETURN_OK;
 }
 
+/*
+ * One round of the operations a handler is asked for all day, each one
+ * paired with what releases it. Nothing here is meant to fail.
+ */
+static int steady_round(void)
+{
+    struct FileInfoBlock *fib;
+    struct NotifyRequest request;
+    struct MsgPort *port;
+    BPTR lock;
+    BPTR file;
+    UBYTE buffer[sizeof(content)];
+
+    if (!write_file(NOTE, MODE_NEWFILE))
+        return fail("STEADY create", DOSFALSE);
+    file = Open(NOTE, MODE_OLDFILE);
+    if (file == BNULL)
+        return fail("STEADY open", DOSFALSE);
+    if (Read(file, buffer, sizeof(buffer)) < 0)
+    {
+        Close(file);
+        return fail("STEADY read", DOSFALSE);
+    }
+    if (!LockRecord(file, 0, 4, REC_EXCLUSIVE_IMMED, 0)
+        || !UnLockRecord(file, 0, 4))
+    {
+        Close(file);
+        return fail("STEADY record", DOSFALSE);
+    }
+    if (!Close(file))
+        return fail("STEADY close", DOSFALSE);
+
+    lock = Lock(NOTE, SHARED_LOCK);
+    if (lock == BNULL)
+        return fail("STEADY lock", DOSFALSE);
+    fib = AllocDosObject(DOS_FIB, NULL);
+    if (fib == NULL)
+    {
+        UnLock(lock);
+        return fail("STEADY AllocDosObject", DOSFALSE);
+    }
+    if (!Examine(lock, fib))
+    {
+        FreeDosObject(DOS_FIB, fib);
+        UnLock(lock);
+        return fail("STEADY examine", DOSFALSE);
+    }
+    FreeDosObject(DOS_FIB, fib);
+    UnLock(lock);
+
+    /* A watch taken and given back: the table must not grow. */
+    port = CreateMsgPort();
+    if (port == NULL)
+        return fail("STEADY CreateMsgPort", DOSFALSE);
+    if (!start_notify(&request, port, NOTE))
+    {
+        DeleteMsgPort(port);
+        return fail("STEADY StartNotify", DOSFALSE);
+    }
+    EndNotify(&request);
+    DeleteMsgPort(port);
+
+    if (!SetComment(NOTE, "round") || !SetProtection(NOTE, FIBF_ARCHIVE))
+        return fail("STEADY metadata", DOSFALSE);
+    if (!DeleteFile(NOTE))
+        return fail("STEADY delete", DOSFALSE);
+    return RETURN_OK;
+}
+
+#define STEADY_ALLOWANCE 1024
+
+static int probe_steady(const char *rounds_text)
+{
+    ULONG rounds = 0;
+    ULONG round;
+    ULONG before;
+    ULONG after = 0;
+    int status;
+
+    while (*rounds_text >= '0' && *rounds_text <= '9')
+        rounds = rounds * 10 + (ULONG)(*rounds_text++ - '0');
+    if (*rounds_text != 0 || rounds == 0 || rounds > 1000)
+        return fail("STEADY rounds", (SIPTR)rounds);
+    {
+        BPTR drawer = CreateDir(DRAWER);
+
+        if (drawer == BNULL)
+            return fail("STEADY CreateDir", DOSFALSE);
+        UnLock(drawer);
+    }
+    /* One round first, so one-off allocations of the first use of each
+     * operation are not read as a leak. */
+    status = steady_round();
+    before = (ULONG)AvailMem(MEMF_ANY);
+    for (round = 0; status == RETURN_OK && round < rounds; round++)
+    {
+        status = steady_round();
+        after = (ULONG)AvailMem(MEMF_ANY);
+    }
+    DeleteFile(DRAWER);
+    if (status != RETURN_OK)
+        return status;
+    Printf("[AFSPLUS-DOS] STEADY rounds %lu free before %lu after %lu\n",
+        rounds, before, after);
+    /* Every operation of a round is paired with what releases it, so a round
+     * must cost nothing. Measured on Hosted the two numbers are equal to the
+     * byte over 20 and over 100 rounds. The bound is not zero because
+     * another task on the system may allocate while this runs; it is small
+     * enough that a leak of one allocation per round, which cannot be less
+     * than a few bytes, fails a run of fifty rounds or more. */
+    if (before > after && before - after > STEADY_ALLOWANCE)
+        return fail("memory lost over the rounds",
+            (SIPTR)(before - after));
+    return RETURN_OK;
+}
+
 int main(int argc, char **argv)
 {
     struct FileInfoBlock *fib;
     int status;
 
+    if (argc > 2 && strcmp(argv[1], "STEADY") == 0)
+        return probe_steady(argv[2]);
     if (argc > 1 && strcmp(argv[1], "RECORD-HOLDER") == 0)
         return hold_record();
     if (argc > 1 && strcmp(argv[1], "RECORD-WAITER") == 0)

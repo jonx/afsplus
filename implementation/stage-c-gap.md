@@ -331,7 +331,15 @@ The packet layer counts answered packets by type and failures by error code
 in bounded tables (L3), read through the transport of C4 with
 `afsplus_client_packet_counts`.
 
-Lacking: peak and steady handler memory; a target
+`STEADY <rounds>` of the DOS probe (L4) runs a round of paired operations —
+create, open, read, lock and unlock a record, close, lock, examine, unlock,
+start and end a notification, set the comment and the protection, delete —
+and reports the system's free memory before and after. A hundred rounds under
+[`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) leave it
+equal to the byte, and the probe fails a run that loses more than a
+kilobyte, so a round that costs one allocation cannot pass.
+
+Lacking: peak handler memory; a target
 runner executing a fixed operation trace against AFS+ and the AFS/FFS
 baseline with manifest verification before and structural check after; a
 result bundle in the contract format. Hosted gives software cost; the

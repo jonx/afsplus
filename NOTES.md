@@ -11,6 +11,8 @@ Entry format: `## YYYY-MM-DD — title`.
 
 - [2026-09-17 — Read today's ADRs as a stranger: which claims nothing held](#2026-09-17--read-todays-adrs-as-a-stranger-which-claims-nothing-held)
 - [2026-09-17 — Hold the claim ADR-115 made about explain](#2026-09-17--hold-the-claim-adr-115-made-about-explain)
+
+- [2026-09-17 — A round of handler work costs nothing](#2026-09-17--a-round-of-handler-work-costs-nothing)
 - [2026-09-17 — The feature registry lists what exists (ADR-116)](#2026-09-17--the-feature-registry-lists-what-exists-adr-116)
 - [2026-09-17 — Retire what nothing writes (ADR-115)](#2026-09-17--retire-what-nothing-writes-adr-115)
 - [2026-09-17 — The reserved header fields of the last five kinds (ADR-114)](#2026-09-17--the-reserved-header-fields-of-the-last-five-kinds-adr-114)
@@ -213,17 +215,31 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+## 2026-09-17 — A round of handler work costs nothing
 
+The handler's memory over time had never been measured. The DOS probe grew a
+`STEADY <rounds>` mode: one round creates a file, opens it, reads it, locks
+and unlocks a record, closes it, locks and examines the file, starts and ends
+a notification, sets the comment and the protection, and deletes the file —
+every operation paired with what releases it. A warm-up round runs first, so
+what a first use allocates once is not counted; then the free memory of the
+system is taken, the rounds run, and it is taken again.
 
+Twenty rounds and a hundred rounds each left the free memory equal to the
+byte: 239833360 before and after, 239833280 before and after, and 239654960
+in the gate. Nothing is retained per operation by the handler, the packet
+layer, the adapter or the core beneath them.
 
+The probe does not merely report the two numbers, it fails a run that loses
+more than a kilobyte. The bound is not zero because another task on the
+system may allocate while the probe runs; it is small enough that a leak of
+one allocation per round, which cannot be less than a few bytes, fails a run
+of fifty rounds or more. `check-hosted-aros-dos.sh` runs a hundred rounds and
+keeps the line as `steady.txt`, so the flat line is now a gate condition and
+not an observation.
 
-
-
-
-
-
-
-
+Peak memory remains unmeasured, and so does the benchmark runner C13 asks
+for; what is gone from that entry is the steady half.
 
 ## 2026-09-17 — Read today's ADRs as a stranger: which claims nothing held
 

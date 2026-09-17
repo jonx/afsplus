@@ -140,6 +140,7 @@ C:AFSPlusClone AFSPLUS19:clone.src AFSPLUS19: clone.dst >MacRW:clone-again.out
 C:AFSPlusClone AFSPLUS19:clone.src RAM: clone.dst >MacRW:clone-ram.out
 C:Copy AFSPLUS19:clone.dst MacRW:clone.dst >MacRW:clone-copy.out
 C:Copy RAM:clone.dst MacRW:clone-ram.dst >MacRW:clone-ram-copy.out
+C:AFSPlusDosProbe STEADY 100 >MacRW:steady.out
 C:AFSPlusInfo AFSPLUS19: PACKETS >MacRW:packets.out
 C:Mount AFSPLUS19: SHUTDOWN >MacRW:shutdown.out
 If WARN
@@ -176,6 +177,9 @@ rm "$result/dos/clone.dst" "$result/dos/clone-ram.dst"
 # What dos.library really sent, by packet type and by error code, kept as an
 # observation next to the probe's own view. One fact is required of it: the
 # comment travelled as ACTION_SET_COMMENT (28), not through an emulation.
+# A hundred rounds of paired operations must cost the system nothing.
+grep -q '^\[AFSPLUS-DOS\] STEADY rounds 100 ' "$result/dos/steady.out"
+cp "$result/dos/steady.out" "$result/steady.txt"
 cp "$result/dos/packets.out" "$result/packets.txt"
 grep -Eq '^packet 28 [1-9][0-9]* ' "$result/packets.txt"
 check_image "$result/check-after-dos.json"
@@ -238,7 +242,7 @@ cp "$package/SHA256SUMS" "$result/package-SHA256SUMS"
     cd "$result"
     shasum -a 256 check-after-dos.json check-after-records.json \
         check-after-hold.json \
-        record-self-overlap.txt packets.txt handler-info.json \
+        record-self-overlap.txt packets.txt steady.txt handler-info.json \
         guest-failure-requester.txt >SHA256SUMS
 )
 
