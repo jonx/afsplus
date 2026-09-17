@@ -661,6 +661,8 @@ static int afspr_decode_ident(const uint8_t *block, size_t block_size,
         return status;
     }
     p = block + AFSPR_HEADER_SIZE;
+    /* The block belongs to the volume and has no flag namespace (ADR-114). */
+    if (header.flags != 0u || header.owner != 0u) return AFSPR_ERR_CORRUPT;
     if (header.payload_len < AFSPR_IDENT_LEGACY_PAYLOAD ||
         afspr_get_le64(p) != AFSP_MAGIC_U64 ||
         afspr_get_le32(p + 8) != AFSP_FORMAT_EPOCH) {
@@ -676,7 +678,10 @@ static int afspr_decode_ident(const uint8_t *block, size_t block_size,
     } else {
         return AFSPR_ERR_UNSUPPORTED;
     }
-    if ((size_t)header.payload_len < minimum_payload) {
+    /* Exact for its version: a byte past the last field belongs to no field,
+     * and a later layout arrives as a new version, not as a longer payload of
+     * this one (ADR-114). */
+    if ((size_t)header.payload_len != minimum_payload) {
         return AFSPR_ERR_CORRUPT;
     }
 
@@ -3012,7 +3017,10 @@ static int afspr_decode_log_record(
     int status = afspr_verify_header(block, block_size,
                                      AFSPR_BLOCK_TYPE_INTENT, &header);
 
-    if (status != AFSPR_OK || header.payload_len < AFSPR_LOG_FIXED_PAYLOAD) {
+    /* The record belongs to the volume and has no flag namespace
+     * (ADR-114). */
+    if (status != AFSPR_OK || header.flags != 0u || header.owner != 0u ||
+        header.payload_len < AFSPR_LOG_FIXED_PAYLOAD) {
         return status == AFSPR_OK ? AFSPR_ERR_CORRUPT : status;
     }
     payload = block + AFSPR_HEADER_SIZE;

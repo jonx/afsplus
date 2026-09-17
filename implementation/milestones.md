@@ -143,7 +143,7 @@ gate above is read as covering it.
 | Qualification through the AROS handler on a target, and the API documents for descriptors, attributes, comment and snapshot readers | B2, B3, B5 | [\[Stage C\]](../ROADMAP.md#stage-c-integrate-aros-and-begin-independent-c-portability) |
 | CPU, RAM and latency claims on hardware; the host measurements are algorithm evidence | B2 | Stage F |
 | Descriptor formats, their registry and evaluation; who may read a captured descriptor | B5 | [Q5](open-questions.md) |
-| A rule for the reserved fields of the identification block, tree nodes, bitmap pages, region descriptors and intent-log records | [ADR-113](../adr/ADR-113-checkpoint-flags-word.md) | M14 format review |
+| The byte offsets of every structure, once its fields are decided | [ADR-113](../adr/ADR-113-checkpoint-flags-word.md), [ADR-114](../adr/ADR-114-reserved-header-fields.md) closed the reserved fields of the five remaining kinds | M14 format review |
 | A threat model for crafted images: a chain or extent walk judges content, not allocator ownership | [Q16](open-questions.md) | Owner decision |
 | Backup transport of descriptors and attributes | [ADR-109](../adr/ADR-109-owned-chains-under-snapshots.md) | Stage D |
 

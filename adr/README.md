@@ -141,7 +141,8 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-110](ADR-110-exact-reclaim-admission.md) | Reclaim queue blocks are admitted only in their canonical image | Accepted | amended by [ADR-112](ADR-112-block-zero-tail.md); amends [ADR-036](ADR-036-reclaim-queue.md) |
 | [ADR-111](ADR-111-checkpoint-zero-tail.md) | Nothing follows the payload of a checkpoint | Accepted | amended by [ADR-112](ADR-112-block-zero-tail.md); amends [ADR-073](ADR-073-snapshot-checkpoint-roots.md) |
 | [ADR-112](ADR-112-block-zero-tail.md) | A metadata block ends where its payload ends | Accepted | amends [ADR-100](ADR-100-exact-object-record-admission.md), [ADR-110](ADR-110-exact-reclaim-admission.md), [ADR-111](ADR-111-checkpoint-zero-tail.md) |
-| [ADR-113](ADR-113-checkpoint-flags-word.md) | The checkpoint's flags word is zero | Accepted | — |
+| [ADR-113](ADR-113-checkpoint-flags-word.md) | The checkpoint's flags word is zero | Accepted | amended by [ADR-114](ADR-114-reserved-header-fields.md) |
+| [ADR-114](ADR-114-reserved-header-fields.md) | The common header's flags and owner belong to no kind that does not name them | Accepted | amends [ADR-113](ADR-113-checkpoint-flags-word.md) |
 
 <!-- /adr-index -->
 

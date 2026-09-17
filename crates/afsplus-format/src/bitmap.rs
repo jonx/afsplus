@@ -128,6 +128,11 @@ impl BitmapPage {
     pub fn decode(block: &[u8]) -> Result<(BitmapPage, u64), FormatError> {
         let header = BlockHeader::verify(block, block_type::BITMAP)?;
         let p = header.payload(block);
+        // No flag namespace (ADR-114); the portable C reader already
+        // refused a flagged page.
+        if header.flags != 0 {
+            return Err(FormatError::Invalid("bitmap header flags are nonzero"));
+        }
         if p.len() < BITMAP_FIXED_PAYLOAD {
             return Err(FormatError::Invalid("bitmap payload too short"));
         }

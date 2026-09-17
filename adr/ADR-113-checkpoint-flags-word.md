@@ -1,6 +1,7 @@
 # ADR-113: The checkpoint's flags word is zero
 
 Status: Accepted
+Amended by: ADR-114
 
 ## Context
 
@@ -48,6 +49,5 @@ snapshot-bearing form; by `checkpoint_rejects_every_reserved_field` in
   explicit rule before the wire freeze, is met for the structures with exact
   admission: object records (ADR-100), owned-chain segments (ADR-101), reclaim
   blocks (ADR-110), the checkpoint (ADR-111 and this ADR), and the tail of
-  every block (ADR-112). The M14 format review still owns the same question
-  for the identification block, the tree nodes, the bitmap pages, the region
-  descriptors and the intent-log records.
+  every block (ADR-112). The five kinds this ADR left open are closed by
+  [ADR-114](ADR-114-reserved-header-fields.md).

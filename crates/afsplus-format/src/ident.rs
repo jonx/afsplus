@@ -213,6 +213,13 @@ impl Identification {
     pub fn decode(block: &[u8]) -> Result<Identification, FormatError> {
         let header = BlockHeader::verify(block, block_type::IDENTIFICATION)?;
         let p = header.payload(block);
+        // The block belongs to the volume, not to an object, and it has no
+        // flag namespace (ADR-114).
+        if header.flags != 0 || header.owner != 0 {
+            return Err(FormatError::Invalid(
+                "identification header flags or owner are nonzero",
+            ));
+        }
         if p.len() < LEGACY_PAYLOAD_LEN {
             return Err(FormatError::Invalid("identification payload too short"));
         }
@@ -235,9 +242,11 @@ impl Identification {
             IDENT_VERSION_FEATURES => FEATURE_PAYLOAD_LEN,
             _ => LEGACY_PAYLOAD_LEN,
         };
-        if p.len() < minimum_payload {
+        // Exact for its version: a byte past the last field belongs to no
+        // field, and the formatter writes none (ADR-114).
+        if p.len() != minimum_payload {
             return Err(FormatError::Invalid(
-                "identification payload is truncated for its version",
+                "identification payload length is not exact for its version",
             ));
         }
         let mut uuid = [0u8; 16];

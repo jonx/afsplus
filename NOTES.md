@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — The reserved header fields of the last five kinds (ADR-114)](#2026-09-17--the-reserved-header-fields-of-the-last-five-kinds-adr-114)
 - [2026-09-17 — A finite acceptance inventory for Stage B](#2026-09-17--a-finite-acceptance-inventory-for-stage-b)
 - [2026-09-17 — Carry extended attributes to FUSE and to AROS](#2026-09-17--carry-extended-attributes-to-fuse-and-to-aros)
 - [2026-09-17 — The checkpoint flags word is zero (ADR-113); Q10 closed](#2026-09-17--the-checkpoint-flags-word-is-zero-adr-113-q10-closed)
@@ -219,6 +220,40 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — The reserved header fields of the last five kinds (ADR-114)
+
+The question ADR-113 left open. Survey first, reported before any decoder
+changed: probes that reseal a valid block with a valid checksum and a zero
+tail, so ADR-112 does not decide them. Eight findings over four kinds. The
+identification block admitted nonzero flags, a nonzero owner although it
+always writes zero, a payload longer than its version's layout, and nonzero
+bytes past its last field inside that longer payload; the intent-log record
+admitted nonzero flags and a nonzero owner; the bitmap page and the region
+descriptor admitted nonzero flags. The tree node was already clean.
+
+One finding was a divergence, and the portable C reader was the stricter of
+the two: it refuses a flagged bitmap page and a flagged region descriptor
+where the core admitted them. Fourth divergence of the day, so the survey is
+kept as a test that asks BOTH readers on every probe, through the entry point
+that reaches each kind: `afspr_probe`, `afspr_lookup_object`,
+`afspr_scan_intent_log`, and the writer's allocation search for the two kinds
+the public reader never reads. The live bitmap page and region descriptor are
+chosen by their explain role, because only the bound slot of three is read,
+and the first attempt edited a dead slot and proved nothing.
+
+ADR-114: zero flags on all five, zero owner on the two that belong to the
+volume, and an identification payload exactly its version's layout. It also
+answers what a later layout does, since a longer payload is how one would
+arrive: it arrives as a new version with its own exact length, and a reader
+that meets an unknown version refuses the volume rather than reading the
+prefix it recognises.
+
+Proof: `reserved_fields` in afsplus-check, nine probes, both readers, plus
+the clean volume accepted through all five entry points. No existing assertion
+moved: every test of afsplus-format, the fuzz unit tests (16), the Rust codec
+fuzz gate (4,096 runs per target) and the portable C reader gate pass
+unchanged.
 
 ## 2026-09-17 — A finite acceptance inventory for Stage B
 

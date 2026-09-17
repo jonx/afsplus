@@ -77,6 +77,13 @@ impl RegionDescriptor {
     pub fn decode(block: &[u8]) -> Result<(RegionDescriptor, u64), FormatError> {
         let header = BlockHeader::verify(block, block_type::REGION_DESCRIPTOR)?;
         let p = header.payload(block);
+        // No flag namespace (ADR-114); the portable C reader already
+        // refused a flagged descriptor.
+        if header.flags != 0 {
+            return Err(FormatError::Invalid(
+                "region descriptor header flags are nonzero",
+            ));
+        }
         if p.len() < FIXED_PAYLOAD {
             return Err(FormatError::Invalid("region descriptor payload too short"));
         }

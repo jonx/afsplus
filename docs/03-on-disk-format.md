@@ -127,6 +127,13 @@ refuses a nonzero byte after the payload length it states
 ([ADR-112](../adr/ADR-112-block-zero-tail.md)). Every encoder seals a zeroed
 block, so a byte past the payload belongs to no field.
 
+The header's `flags` word is zero on every kind that assigns it no meaning,
+and its `owner` is zero on the kinds that belong to the volume rather than to
+an object ([ADR-114](../adr/ADR-114-reserved-header-fields.md)). A structure
+whose payload is a fixed layout for a stated version is admitted only at
+exactly that length; a later layout arrives as a new version, not as bytes
+appended to a version already defined.
+
 ## 8. Format epoch versus feature flags
 
 The format epoch changes only for transformations that cannot reasonably be negotiated through feature flags.

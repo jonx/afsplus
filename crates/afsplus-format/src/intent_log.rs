@@ -449,6 +449,13 @@ impl LogRecord {
     pub fn decode(block: &[u8]) -> Result<LogRecord, FormatError> {
         let header = BlockHeader::verify(block, block_type::INTENT_LOG)?;
         let p = header.payload(block);
+        // The record belongs to the volume and has no flag namespace
+        // (ADR-114).
+        if header.flags != 0 || header.owner != 0 {
+            return Err(FormatError::Invalid(
+                "log record header flags or owner are nonzero",
+            ));
+        }
         if p.len() < FIXED_PAYLOAD {
             return Err(FormatError::Invalid("log record payload too short"));
         }
