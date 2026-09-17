@@ -30,6 +30,16 @@
 //! 80     8    data root LBA (directory: tree root; file: extent start)
 //! 88     8    data extent length in blocks (files; 0 = empty file)
 //! ```
+//!
+//! With [`OBJECT_FLAG_SECURITY_REF`] the fixed payload is 112 bytes: a
+//! security reference follows, before any inline symlink target.
+//!
+//! ```text
+//! 96     8    first security descriptor segment LBA (nonzero)
+//! 104    4    descriptor length in bytes
+//! 108    2    descriptor segment count
+//! 110    2    reference flags (bit 0: projection diverged)
+//! ```
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -53,6 +63,40 @@ pub const OBJECT_FLAG_EXTENT_TREE: u16 = 1 << 0;
 /// enforced by the contextual read paths and the checker, exactly like the
 /// shared-extent marker.
 pub const OBJECT_FLAG_DATA_IN_PLACE: u16 = 1 << 1;
+
+/// The fixed payload carries a [`SecurityRef`]. Legal only on a volume whose
+/// identification carries `INCOMPAT_SECURITY_DESCRIPTORS`; the contextual
+/// read paths and the checker enforce that congruence.
+pub const OBJECT_FLAG_SECURITY_REF: u16 = 1 << 2;
+
+/// The protection field was edited by a host that did not evaluate the
+/// descriptor, so the classic projection and the descriptor may disagree.
+pub const SECURITY_REF_PROJECTION_DIVERGED: u16 = 1 << 0;
+
+const SECURITY_REF_LEN: usize = 16;
+
+/// Reference from an object record to its security descriptor chain
+/// (`security.rs`). The record owns the chain exclusively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecurityRef {
+    pub first_block: u64,
+    pub total_len: u32,
+    pub segment_count: u16,
+    pub flags: u16,
+}
+
+impl SecurityRef {
+    fn validate(&self, block_size: usize) -> Result<(), FormatError> {
+        if self.first_block == 0
+            || self.flags & !SECURITY_REF_PROJECTION_DIVERGED != 0
+            || crate::security::segment_count(self.total_len, block_size)
+                != Some(self.segment_count)
+        {
+            return Err(FormatError::Invalid("invalid security reference"));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectType {
@@ -98,15 +142,38 @@ pub struct ObjectRecord {
     pub content_generation: u64,
     pub data_root: u64,
     pub data_blocks: u64,
+    /// Present exactly when `flags` carries [`OBJECT_FLAG_SECURITY_REF`].
+    pub security: Option<SecurityRef>,
 }
 
 impl ObjectRecord {
+    /// Length of the fixed payload, before any inline symlink target.
+    pub fn fixed_payload_len(&self) -> usize {
+        if self.security.is_some() {
+            PAYLOAD_LEN + SECURITY_REF_LEN
+        } else {
+            PAYLOAD_LEN
+        }
+    }
+
+    /// The same record with `security` attached or removed; keeps the flag
+    /// and the field congruent.
+    pub fn with_security(mut self, security: Option<SecurityRef>) -> Self {
+        self.security = security;
+        if security.is_some() {
+            self.flags |= OBJECT_FLAG_SECURITY_REF;
+        } else {
+            self.flags &= !OBJECT_FLAG_SECURITY_REF;
+        }
+        self
+    }
+
     pub fn encode(
         &self,
         block_size: usize,
         transaction_generation: u64,
     ) -> Result<Vec<u8>, FormatError> {
-        let minimum = HEADER_SIZE + PAYLOAD_LEN;
+        let minimum = HEADER_SIZE + self.fixed_payload_len();
         if block_size < minimum {
             return Err(FormatError::WrongBufferSize {
                 expected: minimum,
@@ -116,7 +183,7 @@ impl ObjectRecord {
         self.validate(block_size)?;
         let mut block = vec![0u8; block_size];
         self.write_fields(&mut block);
-        self.seal_record(&mut block, transaction_generation, PAYLOAD_LEN);
+        self.seal_record(&mut block, transaction_generation, self.fixed_payload_len());
         Ok(block)
     }
 
@@ -135,6 +202,12 @@ impl ObjectRecord {
         le::put_u64(&mut p[72..80], self.content_generation);
         le::put_u64(&mut p[80..88], self.data_root);
         le::put_u64(&mut p[88..96], self.data_blocks);
+        if let Some(security) = self.security {
+            le::put_u64(&mut p[96..104], security.first_block);
+            le::put_u32(&mut p[104..108], security.total_len);
+            le::put_u16(&mut p[108..110], security.segment_count);
+            le::put_u16(&mut p[110..112], security.flags);
+        }
     }
 
     fn seal_record(&self, block: &mut [u8], generation: u64, payload_len: usize) {
@@ -191,7 +264,14 @@ impl ObjectRecord {
         if p[9] != 0 {
             return Err(FormatError::Invalid("object reserved byte is nonzero"));
         }
-        if p[8] != ObjectType::Symlink.to_wire() && p.len() != PAYLOAD_LEN {
+        let flags = le::get_u16(&p[10..12]);
+        let fixed = if flags & OBJECT_FLAG_SECURITY_REF != 0 {
+            PAYLOAD_LEN + SECURITY_REF_LEN
+        } else {
+            PAYLOAD_LEN
+        };
+        let is_symlink = p[8] == ObjectType::Symlink.to_wire();
+        if p.len() < fixed || (!is_symlink && p.len() != fixed) {
             return Err(FormatError::Invalid("object payload length is not exact"));
         }
         if block[HEADER_SIZE + p.len()..].iter().any(|b| *b != 0) {
@@ -200,7 +280,7 @@ impl ObjectRecord {
         let record = ObjectRecord {
             object_id: le::get_u64(&p[0..8]),
             object_type: ObjectType::from_wire(p[8])?,
-            flags: le::get_u16(&p[10..12]),
+            flags,
             link_count: le::get_u32(&p[12..16]),
             size_bytes: le::get_u64(&p[16..24]),
             allocated_bytes: le::get_u64(&p[24..32]),
@@ -211,6 +291,12 @@ impl ObjectRecord {
             content_generation: le::get_u64(&p[72..80]),
             data_root: le::get_u64(&p[80..88]),
             data_blocks: le::get_u64(&p[88..96]),
+            security: (fixed != PAYLOAD_LEN).then(|| SecurityRef {
+                first_block: le::get_u64(&p[96..104]),
+                total_len: le::get_u32(&p[104..108]),
+                segment_count: le::get_u16(&p[108..110]),
+                flags: le::get_u16(&p[110..112]),
+            }),
         };
         if record.object_id != header.owner {
             return Err(FormatError::Invalid("object ID does not match block owner"));
@@ -218,7 +304,7 @@ impl ObjectRecord {
         Ok((record, header))
     }
 
-    fn validate_common(&self) -> Result<(), FormatError> {
+    fn validate_common(&self, block_size: usize) -> Result<(), FormatError> {
         self.created.validate()?;
         self.modified.validate()?;
         self.changed.validate()?;
@@ -230,17 +316,28 @@ impl ObjectRecord {
                 "link count zero without orphan support",
             ));
         }
-        if self.flags & !(OBJECT_FLAG_EXTENT_TREE | OBJECT_FLAG_DATA_IN_PLACE) != 0 {
+        if self.flags
+            & !(OBJECT_FLAG_EXTENT_TREE | OBJECT_FLAG_DATA_IN_PLACE | OBJECT_FLAG_SECURITY_REF)
+            != 0
+        {
             return Err(FormatError::Invalid("object has unsupported flags"));
+        }
+        if (self.flags & OBJECT_FLAG_SECURITY_REF != 0) != self.security.is_some() {
+            return Err(FormatError::Invalid(
+                "security reference flag and field disagree",
+            ));
+        }
+        if let Some(security) = self.security {
+            security.validate(block_size)?;
         }
         Ok(())
     }
 
     fn validate(&self, block_size: usize) -> Result<(), FormatError> {
-        self.validate_common()?;
+        self.validate_common(block_size)?;
         match self.object_type {
             ObjectType::Directory => {
-                if self.flags != 0 {
+                if self.flags & !OBJECT_FLAG_SECURITY_REF != 0 {
                     return Err(FormatError::Invalid("directory has file extent flags"));
                 }
                 if self.data_root == 0 {
@@ -307,22 +404,25 @@ pub struct SymlinkRecord<'a> {
 }
 
 impl<'a> SymlinkRecord<'a> {
+    /// Longest target of a symlink without a security reference. A reference
+    /// takes 16 of these bytes.
     pub fn maximum_target_bytes(block_size: usize) -> usize {
         block_size.saturating_sub(HEADER_SIZE + PAYLOAD_LEN)
     }
 
     fn validate(&self, block_size: usize) -> Result<(), FormatError> {
-        self.record.validate_common()?;
+        self.record.validate_common(block_size)?;
+        let fixed = self.record.fixed_payload_len();
         if self.record.object_type != ObjectType::Symlink
-            || self.record.flags != 0
+            || self.record.flags & !OBJECT_FLAG_SECURITY_REF != 0
             || self.record.data_root != 0
             || self.record.data_blocks != 0
             || self.record.allocated_bytes != 0
             || self.record.size_bytes != self.target.len() as u64
             || self.target.is_empty()
             || self.target.as_bytes().contains(&0)
-            || self.target.len() > Self::maximum_target_bytes(block_size)
-            || self.target.len() > u32::MAX as usize - PAYLOAD_LEN
+            || self.target.len() > block_size.saturating_sub(HEADER_SIZE + fixed)
+            || self.target.len() > u32::MAX as usize - fixed
         {
             return Err(FormatError::Invalid("invalid inline symlink record"));
         }
@@ -331,10 +431,11 @@ impl<'a> SymlinkRecord<'a> {
 
     pub fn encode(&self, block_size: usize, generation: u64) -> Result<Vec<u8>, FormatError> {
         self.validate(block_size)?;
-        let payload_len = PAYLOAD_LEN + self.target.len();
+        let fixed = self.record.fixed_payload_len();
+        let payload_len = fixed + self.target.len();
         let mut block = vec![0; block_size];
         self.record.write_fields(&mut block);
-        block[HEADER_SIZE + PAYLOAD_LEN..HEADER_SIZE + payload_len]
+        block[HEADER_SIZE + fixed..HEADER_SIZE + payload_len]
             .copy_from_slice(self.target.as_bytes());
         self.record.seal_record(&mut block, generation, payload_len);
         Ok(block)
@@ -357,7 +458,7 @@ impl<'a> SymlinkRecord<'a> {
         if header.flags != 0 || payload[9] != 0 {
             return Err(FormatError::Invalid("symlink reserved fields are nonzero"));
         }
-        let target = core::str::from_utf8(&payload[PAYLOAD_LEN..])
+        let target = core::str::from_utf8(&payload[record.fixed_payload_len()..])
             .map_err(|_| FormatError::Invalid("symlink target is not UTF-8"))?;
         let result = Self { record, target };
         result.validate(block.len())?;

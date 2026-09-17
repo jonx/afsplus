@@ -6,6 +6,7 @@ fn every_mutable_operational_entry_has_a_registered_outer_guard() {
     let sources = [
         include_str!("../src/volume.rs"),
         include_str!("../src/volume/metadata.rs"),
+        include_str!("../src/volume/security.rs"),
         include_str!("../src/volume/snapshots.rs"),
     ];
     let mut guarded = BTreeSet::new();

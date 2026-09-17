@@ -82,6 +82,7 @@ fn independent_c_symlink_codec_matches_valid_and_malformed_rust_records() {
                 content_generation: 5,
                 data_root: 0,
                 data_blocks: 0,
+                security: None,
             };
             let valid = SymlinkRecord { record, target }.encode(4096, 7).unwrap();
             let block_path = scratch.0.join("record.bin");

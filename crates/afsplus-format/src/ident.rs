@@ -55,6 +55,11 @@ pub const INCOMPAT_INTENT_LOG_DATA_UPDATES: u64 = 1 << 1;
 /// Persistent snapshot ownership (ADR-072). Codecs alone do not authorize
 /// mounting this feature; the core must qualify the complete lifetime protocol.
 pub const INCOMPAT_PERSISTENT_SNAPSHOTS: u64 = 1 << 2;
+/// Object records may carry `OBJECT_FLAG_SECURITY_REF` and reference
+/// `"AFSX"` descriptor segments. An implementation without the container
+/// cannot decode such a record and would drop the reference on rewrite, so
+/// the identity is INCOMPAT.
+pub const INCOMPAT_SECURITY_DESCRIPTORS: u64 = 1 << 3;
 
 /// Shared data extents (ADR-061): reference counts must be honoured on every
 /// write and free, so an implementation without support mounts read-only.

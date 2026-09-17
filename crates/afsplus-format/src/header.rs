@@ -50,6 +50,8 @@ pub mod block_type {
     pub const RECLAIM_SEGMENT: u32 = u32::from_le_bytes(*b"AFSS");
     /// Sealed reclaim table, `"AFSL"`.
     pub const RECLAIM_TABLE: u32 = u32::from_le_bytes(*b"AFSL");
+    /// Security descriptor segment, `"AFSX"`.
+    pub const SECURITY_DESCRIPTOR: u32 = u32::from_le_bytes(*b"AFSX");
     /// Intent-log record, `"AFSJ"`.
     pub const INTENT_LOG: u32 = u32::from_le_bytes(*b"AFSJ");
 }

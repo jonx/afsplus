@@ -16,7 +16,8 @@ use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::ident::{
     Identification, INCOMPAT_INTENT_LOG, INCOMPAT_INTENT_LOG_DATA_UPDATES,
-    INCOMPAT_PERSISTENT_SNAPSHOTS, RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
+    INCOMPAT_PERSISTENT_SNAPSHOTS, INCOMPAT_SECURITY_DESCRIPTORS, RO_COMPAT_ORPHAN_DIRECTORY,
+    RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::{FormatError, DEFAULT_BLOCK_SIZE};
 
@@ -53,7 +54,8 @@ pub struct MountOptions {
     pub tree_cache_pages: Option<std::num::NonZeroUsize>,
 }
 
-pub const SUPPORTED_INCOMPAT_FEATURES: u64 = INCOMPAT_INTENT_LOG | INCOMPAT_INTENT_LOG_DATA_UPDATES;
+pub const SUPPORTED_INCOMPAT_FEATURES: u64 =
+    INCOMPAT_INTENT_LOG | INCOMPAT_INTENT_LOG_DATA_UPDATES | INCOMPAT_SECURITY_DESCRIPTORS;
 pub const SUPPORTED_RO_COMPAT_FEATURES: u64 = RO_COMPAT_SHARED_EXTENTS | RO_COMPAT_ORPHAN_DIRECTORY;
 
 fn negotiate_features(
@@ -70,6 +72,12 @@ fn negotiate_features(
     let unknown_incompat = ident.features.incompat & !supported;
     if unknown_incompat != 0 {
         return Err(CoreError::UnsupportedIncompatFeatures(unknown_incompat));
+    }
+    // Descriptor ownership under retained snapshots is unqualified: the
+    // combination is refused instead of mounted on an unproven lifetime rule.
+    let combined = INCOMPAT_SECURITY_DESCRIPTORS | INCOMPAT_PERSISTENT_SNAPSHOTS;
+    if ident.features.incompat & combined == combined {
+        return Err(CoreError::UnsupportedIncompatFeatures(combined));
     }
     let unknown_ro_compat = ident.features.ro_compat & !SUPPORTED_RO_COMPAT_FEATURES;
     if unknown_ro_compat != 0 && mode.writes_during_mount() {

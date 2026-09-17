@@ -26,6 +26,7 @@ fn record(kind: ObjectType) -> ObjectRecord {
             0
         },
         data_blocks: 0,
+        security: None,
     }
 }
 

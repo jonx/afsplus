@@ -68,9 +68,35 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
     if h.flags != 0 || input[HEADER_SIZE + p.len()..].iter().any(|b| *b != 0) {
         return None;
     }
-    if p[8] != 3 && p.len() != 96 {
+    // Flag bit 2 adds the 16-byte security reference to the fixed record.
+    let fixed = if u16_at(p, 10) & 4 != 0 { 112 } else { 96 };
+    if p.len() < fixed || (p[8] != 3 && p.len() != fixed) {
         return None;
     }
+    let security = if fixed == 112 {
+        let total = u32::from_le_bytes(p[104..108].try_into().unwrap());
+        let count = u16_at(p, 108);
+        let capacity = input
+            .len()
+            .checked_sub(HEADER_SIZE + 24)
+            .filter(|c| *c > 0)?;
+        if u64_at(p, 96) == 0
+            || total == 0
+            || total > 65_536
+            || (total as usize).div_ceil(capacity) != count as usize
+            || u16_at(p, 110) > 1
+        {
+            return None;
+        }
+        Some(afsplus_format::object::SecurityRef {
+            first_block: u64_at(p, 96),
+            total_len: total,
+            segment_count: count,
+            flags: u16_at(p, 110),
+        })
+    } else {
+        None
+    };
     let kind = match p[8] {
         1 => ObjectType::File,
         2 => ObjectType::Directory,
@@ -91,17 +117,18 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
         content_generation: u64_at(p, 72),
         data_root: u64_at(p, 80),
         data_blocks: u64_at(p, 88),
+        security,
     };
     let r = &record;
-    if r.object_id == 0 || r.object_id != h.owner || r.link_count == 0 || r.flags & !3 != 0 {
+    if r.object_id == 0 || r.object_id != h.owner || r.link_count == 0 || r.flags & !7 != 0 {
         return None;
     }
     let target = match kind {
         ObjectType::Symlink => {
-            let target = std::str::from_utf8(&p[96..]).ok()?;
+            let target = std::str::from_utf8(&p[fixed..]).ok()?;
             if h.flags != 0
                 || p[9] != 0
-                || r.flags != 0
+                || r.flags & !4 != 0
                 || r.data_root != 0
                 || r.data_blocks != 0
                 || r.allocated_bytes != 0
@@ -115,7 +142,7 @@ fn expected(input: &[u8]) -> Option<(ObjectRecord, u64, Option<&str>)> {
             Some(target)
         }
         ObjectType::Directory => {
-            if r.flags != 0 || r.data_root == 0 || r.size_bytes != 0 || r.data_blocks != 0 {
+            if r.flags & !4 != 0 || r.data_root == 0 || r.size_bytes != 0 || r.data_blocks != 0 {
                 return None;
             }
             None
@@ -183,7 +210,7 @@ pub(super) fn exercise(t: CodecTarget, input: &[u8]) -> Result<(), String> {
     if let Some((record, generation, target)) = wanted {
         let bytes = if let Some(target) = target {
             let (link, _) = borrowed.unwrap();
-            if link.target.as_ptr() != input[HEADER_SIZE + 96..].as_ptr() {
+            if link.target.as_ptr() != input[HEADER_SIZE + record.fixed_payload_len()..].as_ptr() {
                 return Err("symlink target is not borrowed from payload".into());
             }
             SymlinkRecord { record, target }.encode(input.len(), generation)
@@ -298,13 +325,30 @@ mod tests {
         tree.size_bytes = 8192;
         let mut policy = file;
         policy.flags = 2;
-        for record in [file, directory, empty, tree, policy] {
+        let reference = afsplus_format::object::SecurityRef {
+            first_block: 77,
+            total_len: 5000,
+            segment_count: 2,
+            flags: 1,
+        };
+        let secured_file = file.with_security(Some(reference));
+        let secured_directory = directory.with_security(Some(reference));
+        for record in [
+            file,
+            directory,
+            empty,
+            tree,
+            policy,
+            secured_file,
+            secured_directory,
+        ] {
             let bytes = record.encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
             exercise(CodecTarget::ObjectMetadata, &bytes).unwrap();
+            assert!(accepts(CodecTarget::ObjectMetadata, &bytes));
             for size in 0..128 {
                 assert!(record.encode(size, 7).is_err());
             }
-            for offset in [8, 9, 10, 12, 40, 52, 64, 80, 88] {
+            for offset in [8, 9, 10, 12, 40, 52, 64, 80, 88, 96, 104, 108, 110, 111] {
                 let mut changed = bytes.clone();
                 changed[HEADER_SIZE + offset] ^= 0xff;
                 reseal(&mut changed);

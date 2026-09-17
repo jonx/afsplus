@@ -96,7 +96,13 @@ pub fn mkfs_observed<D: BlockDevice>(
     options: MkfsOptions,
     recorder: &mut FlightRecorder,
 ) -> Result<(), CoreError> {
-    mkfs_observed_impl(dev, params, options.persistent_snapshots, Some(recorder))
+    mkfs_observed_impl(
+        dev,
+        params,
+        options.persistent_snapshots,
+        false,
+        Some(recorder),
+    )
 }
 
 /// Format a new image with explicit options. This is not an in-place conversion.
@@ -107,7 +113,19 @@ pub fn mkfs_with_options<D: BlockDevice>(
     params: &MkfsParams,
     options: MkfsOptions,
 ) -> Result<(), CoreError> {
-    mkfs_observed_impl(dev, params, options.persistent_snapshots, None)
+    mkfs_observed_impl(dev, params, options.persistent_snapshots, false, None)
+}
+
+/// Format a new image whose objects may carry security descriptors
+/// (`INCOMPAT_SECURITY_DESCRIPTORS`). Identification is immutable, so the
+/// choice is made here. The combination with persistent snapshots is
+/// unqualified and is a separate entry point by design: this one never
+/// enables snapshots.
+pub fn mkfs_with_security_descriptors<D: BlockDevice>(
+    dev: &mut D,
+    params: &MkfsParams,
+) -> Result<(), CoreError> {
+    mkfs_observed_impl(dev, params, false, true, None)
 }
 
 /// Emit one formatter observation. Only an entry point supplied with a
@@ -138,6 +156,7 @@ fn mkfs_observed_impl<D: BlockDevice>(
     dev: &mut D,
     params: &MkfsParams,
     snapshots: bool,
+    security_descriptors: bool,
     mut recorder: Option<&mut FlightRecorder>,
 ) -> Result<(), CoreError> {
     let total_blocks = dev.total_blocks();
@@ -153,6 +172,7 @@ fn mkfs_observed_impl<D: BlockDevice>(
         dev,
         params,
         snapshots,
+        security_descriptors,
         recorder.as_deref_mut(),
         &mut stage,
         total_blocks,
@@ -177,6 +197,7 @@ fn mkfs_impl<D: BlockDevice>(
     dev: &mut D,
     params: &MkfsParams,
     snapshots: bool,
+    security_descriptors: bool,
     mut recorder: Option<&mut FlightRecorder>,
     stage: &mut FormatStage,
     total_blocks: u64,
@@ -220,6 +241,7 @@ fn mkfs_impl<D: BlockDevice>(
         content_generation: generation,
         data_root: root_dir_lba,
         data_blocks: 0,
+        security: None,
     };
     let root_dir = directory::empty_leaf(OBJECT_ROOT);
     let omap = object_map::initial_leaf(OBJECT_ROOT, root_record_lba)?;
@@ -389,6 +411,10 @@ fn mkfs_impl<D: BlockDevice>(
                 0
             }) | if snapshots {
                 afsplus_format::ident::INCOMPAT_PERSISTENT_SNAPSHOTS
+            } else {
+                0
+            } | if security_descriptors {
+                afsplus_format::ident::INCOMPAT_SECURITY_DESCRIPTORS
             } else {
                 0
             },

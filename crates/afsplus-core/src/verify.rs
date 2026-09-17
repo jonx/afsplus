@@ -21,7 +21,8 @@ use afsplus_format::bitmap::BitmapPage;
 use afsplus_format::checkpoint::Checkpoint;
 use afsplus_format::geometry::{Geometry, DESCRIPTOR_SLOTS};
 use afsplus_format::ident::{
-    Identification, COMPAT_DATA_POLICY, RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
+    Identification, COMPAT_DATA_POLICY, INCOMPAT_SECURITY_DESCRIPTORS, RO_COMPAT_ORPHAN_DIRECTORY,
+    RO_COMPAT_SHARED_EXTENTS,
 };
 use afsplus_format::object::{
     ObjectRecord, ObjectType, OBJECT_FLAG_DATA_IN_PLACE, OBJECT_FLAG_EXTENT_TREE,
@@ -550,6 +551,25 @@ fn load_committed_state_inner<D: BlockDevice>(
                 "object {} carries OBJECT_FLAG_DATA_IN_PLACE without the data-policy feature",
                 entry.object_id
             )));
+        }
+        if let Some(reference) = record.security {
+            if ident.features.incompat & INCOMPAT_SECURITY_DESCRIPTORS == 0 {
+                return Err(CoreError::Corrupt(format!(
+                    "object {} carries a security reference without the security-descriptors feature",
+                    entry.object_id
+                )));
+            }
+            let (segments, _) = crate::volume::load_descriptor_chain(
+                dev,
+                &geo,
+                entry.object_id,
+                reference,
+                checkpoint.generation,
+            )?;
+            for lba in segments {
+                claim(lba, &mut claimed)?;
+                metadata_blocks.push(lba);
+            }
         }
         if record.object_id != entry.object_id {
             return Err(CoreError::Corrupt(format!(

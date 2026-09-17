@@ -350,6 +350,10 @@ pub enum ApiMethod {
     WindowWriteFileAt = 64,
     WriteFileAt = 65,
     WriteFileAtBounded = 66,
+    ClearSecurityDescriptor = 67,
+    SecurityDescriptor = 68,
+    SetSecurityDescriptor = 69,
+    SetSecurityProjectionPolicy = 70,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

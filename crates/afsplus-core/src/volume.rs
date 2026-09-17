@@ -17,6 +17,9 @@
 
 mod metadata;
 pub use metadata::PreservedMetadata;
+mod security;
+pub(crate) use security::load_descriptor_chain;
+pub use security::{SecurityDescriptor, SecurityProjectionPolicy};
 mod snapshots;
 use snapshots::SnapshotRegistryChange;
 pub use snapshots::{
@@ -37,7 +40,8 @@ use afsplus_format::ident::{
 };
 use afsplus_format::intent_log::{LogOp, LogRecord, MAX_LOG_OPS};
 use afsplus_format::object::{
-    ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_DATA_IN_PLACE, OBJECT_FLAG_EXTENT_TREE,
+    ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_DATA_IN_PLACE,
+    OBJECT_FLAG_EXTENT_TREE, OBJECT_FLAG_SECURITY_REF,
 };
 use afsplus_format::{validate_name, FormatError, Timespec, OBJECT_ORPHAN_DIRECTORY, OBJECT_ROOT};
 
@@ -384,6 +388,8 @@ pub struct Volume<D: BlockDevice> {
     /// Region where the last allocation succeeded; the next transaction
     /// starts its search there instead of rescanning from region zero.
     alloc_rover_region: u32,
+    /// Host policy for protection edits of descriptor-bearing objects.
+    security_projection: SecurityProjectionPolicy,
     window: Option<OpenWindow>,
     window_poisoned: bool,
     last_commit: Option<CommitStats>,
@@ -500,6 +506,7 @@ impl<D: BlockDevice> Volume<D> {
             orphan_cleanup_extent_budget: DEFAULT_ORPHAN_CLEANUP_EXTENTS,
             allocation_tree_cache: None,
             alloc_rover_region: 0,
+            security_projection: SecurityProjectionPolicy::default(),
             window: None,
             window_poisoned: false,
             last_commit: None,
@@ -2337,6 +2344,7 @@ impl<D: BlockDevice> Volume<D> {
             content_generation: generation,
             data_root: dest_data_root,
             data_blocks: dest_data_blocks,
+            security: None,
         };
 
         // Namespace: one new directory entry, parent record COW'd.
@@ -2904,6 +2912,7 @@ impl<D: BlockDevice> Volume<D> {
             content_generation: generation,
             data_root: data_start,
             data_blocks: data_block_count,
+            security: None,
         };
 
         let directory_entry = DirEntry {
@@ -3083,6 +3092,7 @@ impl<D: BlockDevice> Volume<D> {
             content_generation: generation,
             data_root: directory_root_lba,
             data_blocks: 0,
+            security: None,
         };
 
         let entry = DirEntry {
@@ -3633,6 +3643,7 @@ impl<D: BlockDevice> Volume<D> {
             content_generation: generation,
             data_root: directory_root_lba,
             data_blocks: 0,
+            security: None,
         };
         let map_key = object_map::key(OBJECT_ORPHAN_DIRECTORY);
         let map_value = object_map::value(directory_record_lba)?;
@@ -3796,6 +3807,7 @@ impl<D: BlockDevice> Volume<D> {
             .ok_or_else(|| CoreError::Corrupt("victim missing from object map".into()))?;
         tx.retire(&mut self.dev, victim_record_lba)?;
         if !keep_file_object {
+            self.retire_security_descriptor(&mut tx, &victim)?;
             if let Some(map) = victim_extent_map {
                 for lba in map.tree_blocks {
                     tx.retire(&mut self.dev, lba)?;
@@ -4503,7 +4515,7 @@ impl<D: BlockDevice> Volume<D> {
         let new_record = ObjectRecord {
             // Layout staging owns the layout flag; the persistent data-update
             // policy (ADR-065) travels with the record across every rewrite.
-            flags: flags | (record.flags & OBJECT_FLAG_DATA_IN_PLACE),
+            flags: flags | (record.flags & (OBJECT_FLAG_DATA_IN_PLACE | OBJECT_FLAG_SECURITY_REF)),
             size_bytes: new_size,
             allocated_bytes: allocated_blocks
                 .checked_mul(block_size as u64)
@@ -4996,6 +5008,7 @@ impl<D: BlockDevice> Volume<D> {
                 content_generation: generation,
                 data_root: root_lba,
                 data_blocks: 0,
+                security: None,
             }),
         );
         pending.created_directories.insert(OBJECT_ORPHAN_DIRECTORY);
@@ -5427,6 +5440,7 @@ impl<D: BlockDevice> Volume<D> {
                         content_generation: generation,
                         data_root: data_start,
                         data_blocks: data_block_count,
+                        security: None,
                     }),
                 );
                 pending.dir_changes.entry(*parent_id).or_default().insert(
@@ -5652,6 +5666,7 @@ impl<D: BlockDevice> Volume<D> {
         let committed_lba = pending.committed_record_lbas[&object_id];
         tx.retire(&mut self.dev, committed_lba)?;
         pending.committed_record_lbas.remove(&object_id);
+        self.retire_security_descriptor(tx, &victim)?;
         self.retire_file_storage(tx, generation, &victim)?;
         pending.records.insert(object_id, None);
         Ok(())
@@ -6970,6 +6985,7 @@ impl<D: BlockDevice> Volume<D> {
                 link_count: 1,
                 size_bytes,
                 allocated_bytes: data_blocks * block_size as u64,
+                security: None,
                 created: now,
                 modified: now,
                 changed: now,
@@ -7339,6 +7355,11 @@ impl<D: BlockDevice> Volume<D> {
         if record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0 && !self.data_policy_enabled() {
             return Err(CoreError::Corrupt(format!(
                 "object {object_id} carries OBJECT_FLAG_DATA_IN_PLACE without the data-policy feature"
+            )));
+        }
+        if record.security.is_some() && !self.security_descriptors_enabled() {
+            return Err(CoreError::Corrupt(format!(
+                "object {object_id} carries a security reference without the security-descriptors feature"
             )));
         }
         if record.object_id != object_id {

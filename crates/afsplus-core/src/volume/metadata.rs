@@ -62,7 +62,7 @@ impl<D: BlockDevice> Volume<D> {
         if record.protection == protection {
             return Ok(());
         }
-        record.protection = protection;
+        self.project_protection(&mut record, protection)?;
         record.changed = now;
         self.commit_object_metadata(record)
     }
@@ -92,7 +92,7 @@ impl<D: BlockDevice> Volume<D> {
         if PreservedMetadata::from(ObjectMetadata::from(record)) == metadata {
             return Ok(());
         }
-        record.protection = metadata.protection;
+        self.project_protection(&mut record, metadata.protection)?;
         record.created = metadata.created;
         record.modified = metadata.modified;
         record.changed = metadata.changed;

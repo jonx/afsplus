@@ -239,6 +239,7 @@ fn object_seed() -> Result<Vec<u8>, String> {
         content_generation: 4,
         data_root: 128,
         data_blocks: 1,
+        security: None,
     }
     .encode(DEFAULT_BLOCK_SIZE, 7)
     .map_err(|error| format!("object seed: {error}"))

@@ -88,6 +88,7 @@ fn sample_record() -> ObjectRecord {
         content_generation: 5,
         data_root: 100,
         data_blocks: 2,
+        security: None,
     }
 }
 

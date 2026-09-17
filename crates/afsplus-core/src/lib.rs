@@ -48,12 +48,16 @@ use std::fmt;
 use afsplus_block::BlockError;
 use afsplus_format::FormatError;
 
-pub use mkfs::{mkfs, mkfs_observed, mkfs_with_options, MkfsOptions, MkfsParams, NamePolicy};
+pub use mkfs::{
+    mkfs, mkfs_observed, mkfs_with_options, mkfs_with_security_descriptors, MkfsOptions,
+    MkfsParams, NamePolicy,
+};
 pub use mount::{
     mount, mount_observed, mount_observed_with_snapshot_limits, mount_with_options,
     mount_with_snapshot_limits, MountMode, MountOptions, RefusedMount,
 };
 pub use volume::Volume;
+pub use volume::{SecurityDescriptor, SecurityProjectionPolicy};
 
 /// Fixed prototype placement (`spec/disk-layout.md` marks exact offsets TBD;
 /// these are prototype constants, not frozen format commitments). Region
@@ -124,6 +128,9 @@ pub enum CoreError {
     UnsupportedIncompatFeatures(u64),
     /// Unknown RO_COMPAT bits require a read-only or NO_CHANGES mount.
     ReadOnlyRequiredFeatures(u64),
+    /// A protection edit was refused because the object carries a security
+    /// descriptor this host does not evaluate (strict projection policy).
+    SecurityProjectionRefused,
 }
 
 impl fmt::Display for CoreError {
@@ -174,6 +181,10 @@ impl fmt::Display for CoreError {
                 )
             }
             CoreError::FeatureDisabled(detail) => write!(f, "feature disabled: {detail}"),
+            CoreError::SecurityProjectionRefused => write!(
+                f,
+                "protection edit refused: the object carries a security descriptor this host does not evaluate"
+            ),
             CoreError::ReadOnlyRequiredFeatures(bits) => write!(
                 f,
                 "filesystem features {bits:#018x} are unsupported for a writable mount"

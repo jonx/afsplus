@@ -221,7 +221,8 @@ impl From<CoreError> for VfsError {
             CoreError::UnsupportedGeometry(_)
             | CoreError::UnsupportedIncompatFeatures(_)
             | CoreError::ReadOnlyRequiredFeatures(_)
-            | CoreError::FeatureDisabled(_) => VfsError::NotSupported,
+            | CoreError::FeatureDisabled(_)
+            | CoreError::SecurityProjectionRefused => VfsError::NotSupported,
             CoreError::PrototypeLimit(detail) => VfsError::Limit(detail),
             CoreError::Block(error) => VfsError::Io(error.to_string()),
             CoreError::Format(error) => VfsError::Corrupt(error.to_string()),

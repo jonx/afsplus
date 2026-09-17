@@ -22,6 +22,7 @@ fn generic_and_metadata_readers_reject_reserved_object_byte() {
                 0
             },
             data_blocks: 0,
+            security: None,
         };
         let bytes = record.encode(DEFAULT_BLOCK_SIZE, 7).unwrap();
         let header = BlockHeader::verify(&bytes, block_type::OBJECT).unwrap();
