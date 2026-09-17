@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 # DOS semantics beyond the Alpha-0 slice through a real dos.library on Hosted
-# MacAROS, then a dismount with a notification message never replied.
+# MacAROS, then a dismount after a notification message that is never replied.
 
 set -eu
 

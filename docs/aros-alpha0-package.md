@@ -117,9 +117,10 @@ a `NRF_WAIT_REPLY` notification and `Relabel` through dos.library in one
 drawer that it removes. A change made while a notification message is
 unreplied must arrive after the reply, never before. The result keeps what
 the handler answers to a record lock overlapping the caller's own, as an
-observation. A second boot runs `AFSPlusDosProbe HOLD`, which leaves one
-message unreplied and its request registered, and requires the shutdown and
-the dismount to succeed and the shell to continue. The checker must find the
+observation. A second boot runs `AFSPlusDosProbe HOLD`, which ends a request
+while one of its messages is still unreplied and never replies, and requires
+the shutdown and the dismount to succeed and the shell to continue. A request
+that is still registered refuses `ACTION_DIE` by design. The checker must find the
 image clean after each boot.
 
 The first post-bootstrap system pivot is automated by:

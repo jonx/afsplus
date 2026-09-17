@@ -5,9 +5,10 @@
  * OpenFromLock, ChangeMode, record locks, notification and Relabel. It works
  * in one drawer and removes it, so the volume's namespace is as it found it.
  *
- * With the argument HOLD it instead leaves one notification message
- * unreplied and its request registered, then exits: the state in which a
- * following dismount has to succeed. */
+ * With the argument HOLD it instead ends a notification request while one of
+ * its messages is still unreplied, never replies, and exits: the state in
+ * which a following dismount has to succeed. A request that is still
+ * registered keeps the handler alive by design, so it is ended first. */
 
 #include <dos/dos.h>
 #include <dos/dosextens.h>
@@ -444,9 +445,8 @@ static int probe_relabel(void)
     return RETURN_OK;
 }
 
-/* Leaves a registered WAIT_REPLY request with one message never replied.
- * The port and the request stay allocated: the handler may still touch them
- * until it is gone. */
+/* Ends a WAIT_REPLY request whose one message is never replied. The port
+ * stays allocated: the message on it belongs to the handler. */
 static int hold_notification(void)
 {
     struct NotifyRequest *request = AllocMem(sizeof(*request),
@@ -463,6 +463,9 @@ static int hold_notification(void)
         return fail("HOLD write", DOSFALSE);
     if (await_message(port) == NULL)
         return fail("HOLD notification", DOSFALSE);
+    EndNotify(request);
+    if (!DeleteFile(HELD))
+        return fail("HOLD remove", DOSFALSE);
     Printf("[AFSPLUS-DOS] HOLD one notification left unreplied\n");
     return RETURN_OK;
 }
