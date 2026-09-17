@@ -91,18 +91,12 @@ pub struct TableRef {
 
 /// Exact admission of the block around a payload (ADR-110): the queue
 /// belongs to the volume, so the common header carries no flags and no
-/// owner, and nothing follows the payload.
-fn admit_envelope(block: &[u8], header: &BlockHeader) -> Result<(), FormatError> {
+/// owner. The zero tail is the header verification's (ADR-112).
+fn admit_envelope(header: &BlockHeader) -> Result<(), FormatError> {
     if header.flags != 0 || header.owner != 0 {
         return Err(FormatError::Invalid(
             "reclaim block header flags or owner are nonzero",
         ));
-    }
-    if block[HEADER_SIZE + header.payload_len as usize..]
-        .iter()
-        .any(|byte| *byte != 0)
-    {
-        return Err(FormatError::Invalid("reclaim block unused tail is nonzero"));
     }
     Ok(())
 }
@@ -273,7 +267,7 @@ impl ReclaimRoot {
 
     pub fn decode(block: &[u8]) -> Result<(ReclaimRoot, u64), FormatError> {
         let header = BlockHeader::verify(block, block_type::RECLAIM_ROOT)?;
-        admit_envelope(block, &header)?;
+        admit_envelope(&header)?;
         let p = header.payload(block);
         if p.len() < ROOT_FIXED {
             return Err(FormatError::Invalid("reclaim root payload too short"));
@@ -462,7 +456,7 @@ impl ReclaimSegment {
 
     pub fn decode(block: &[u8]) -> Result<(ReclaimSegment, u64), FormatError> {
         let header = BlockHeader::verify(block, block_type::RECLAIM_SEGMENT)?;
-        admit_envelope(block, &header)?;
+        admit_envelope(&header)?;
         let p = header.payload(block);
         if p.len() < 8 {
             return Err(FormatError::Invalid("reclaim segment payload too short"));
@@ -536,7 +530,7 @@ impl ReclaimTable {
 
     pub fn decode(block: &[u8]) -> Result<(ReclaimTable, u64), FormatError> {
         let header = BlockHeader::verify(block, block_type::RECLAIM_TABLE)?;
-        admit_envelope(block, &header)?;
+        admit_envelope(&header)?;
         let p = header.payload(block);
         if p.len() < 8 {
             return Err(FormatError::Invalid("reclaim table payload too short"));

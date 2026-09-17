@@ -292,6 +292,7 @@ static int afspr_verify_header(const uint8_t *block, size_t block_size,
                                struct afspr_header *header)
 {
     uint32_t stored;
+    size_t tail;
 
     if (block_size < AFSPR_HEADER_SIZE) {
         return AFSPR_ERR_CORRUPT;
@@ -312,6 +313,12 @@ static int afspr_verify_header(const uint8_t *block, size_t block_size,
     header->payload_len = afspr_get_le32(block + 24);
     if ((size_t)header->payload_len > block_size - AFSPR_HEADER_SIZE) {
         return AFSPR_ERR_CORRUPT;
+    }
+    /* A block ends where its payload ends (ADR-112): every encoder seals a
+     * zeroed block, and a byte past the payload belongs to no field. */
+    for (tail = AFSPR_HEADER_SIZE + (size_t)header->payload_len;
+         tail < block_size; ++tail) {
+        if (block[tail] != 0u) return AFSPR_ERR_CORRUPT;
     }
     return AFSPR_OK;
 }
@@ -766,12 +773,9 @@ int afspr_decode_checkpoint_block(const void *input, size_t block_size,
          header.payload_len != AFSPR_CHECKPOINT_SNAPSHOT_PAYLOAD)) {
         return AFSPR_ERR_CORRUPT;
     }
-    /* Nothing follows the payload (ADR-111): snapshot roots left behind a
-     * short payload length must not read as a checkpoint without them. */
-    for (i = AFSPR_HEADER_SIZE + (size_t)header.payload_len; i < block_size;
-         ++i) {
-        if (block[i] != 0u) return AFSPR_ERR_CORRUPT;
-    }
+    /* Nothing follows the payload: the header verification refused it
+     * (ADR-112), so snapshot roots left behind a short payload length do not
+     * read as a checkpoint without them (ADR-111). */
     p = block + AFSPR_HEADER_SIZE;
     if (memcmp(p, volume_uuid, 16u) != 0) return AFSPR_ERR_CORRUPT;
     memset(&view, 0, sizeof(view));
@@ -1482,7 +1486,6 @@ static int afspr_object_shape_full(
     size_t security_end = AFSPR_OBJECT_PAYLOAD;
     size_t attributes_at;
     size_t capacity;
-    size_t i;
     uint16_t flags;
 
     memset(reference, 0, sizeof(*reference));
@@ -1531,9 +1534,6 @@ static int afspr_object_shape_full(
     }
     if (p[8] != AFSPR_OBJECT_SYMLINK && payload != *fixed) {
         return AFSPR_ERR_CORRUPT;
-    }
-    for (i = AFSPR_HEADER_SIZE + payload; i < block_size; ++i) {
-        if (block[i] != 0u) return AFSPR_ERR_CORRUPT;
     }
     if (security_end == AFSPR_OBJECT_PAYLOAD) {
         return AFSPR_OK;
@@ -1715,7 +1715,7 @@ static int afspr_decode_chain_segment(const void *input, size_t block_size,
     const uint8_t *p;
     struct afspr_header header;
     struct afspr_security_segment decoded;
-    size_t capacity, length, expected, count, i;
+    size_t capacity, length, expected, count;
     int last;
     int status;
 
@@ -1755,10 +1755,6 @@ static int afspr_decode_chain_segment(const void *input, size_t block_size,
                     : capacity;
     if (last != (decoded.next == 0u) || length != expected) {
         return AFSPR_ERR_CORRUPT;
-    }
-    for (i = AFSPR_HEADER_SIZE + (size_t)header.payload_len; i < block_size;
-         ++i) {
-        if (block[i] != 0u) return AFSPR_ERR_CORRUPT;
     }
     *segment = decoded;
     *bytes = p + AFSPR_SECURITY_SEGMENT_FIXED;
@@ -5941,18 +5937,11 @@ static int afspr_reclaim_entries_ok(const uint8_t *area, uint32_t count)
     return 1;
 }
 
-/* Exact admission around a payload (ADR-110): no header flags, no owner,
- * nothing after the payload. */
-static int afspr_reclaim_envelope_ok(const uint8_t *block, size_t block_size,
-                                     const struct afspr_header *header)
+/* Exact admission around a payload (ADR-110): no header flags, no owner.
+ * The zero tail is the header verification's (ADR-112). */
+static int afspr_reclaim_envelope_ok(const struct afspr_header *header)
 {
-    size_t i;
-    if (header->flags != 0u || header->owner != 0u) return 0;
-    for (i = AFSPR_HEADER_SIZE + (size_t)header->payload_len; i < block_size;
-         ++i) {
-        if (block[i] != 0u) return 0;
-    }
-    return 1;
+    return header->flags == 0u && header->owner == 0u;
 }
 
 static int afspr_all_zero(const uint8_t *bytes, size_t size)
@@ -5995,7 +5984,7 @@ int afspr_decode_reclaim_root(const void *input, size_t block_size,
                                  AFSPR_BLOCK_TYPE_RECLAIM_ROOT, &header);
     if (status != AFSPR_OK) return status;
     p = block + AFSPR_HEADER_SIZE;
-    if (!afspr_reclaim_envelope_ok(block, block_size, &header) ||
+    if (!afspr_reclaim_envelope_ok(&header) ||
         header.payload_len < AFSPR_RECLAIM_ROOT_FIXED ||
         afspr_get_le32(p) != AFSPR_RECLAIM_ROOT_VERSION ||
         afspr_get_le32(p + 4u) != 0u || afspr_get_le16(p + 50u) != 0u) {
@@ -6101,7 +6090,7 @@ static int afspr_decode_reclaim_sealed(const void *input, size_t block_size,
     status = afspr_verify_header(block, block_size, block_type, &header);
     if (status != AFSPR_OK) return status;
     p = block + AFSPR_HEADER_SIZE;
-    if (!afspr_reclaim_envelope_ok(block, block_size, &header) ||
+    if (!afspr_reclaim_envelope_ok(&header) ||
         header.payload_len < AFSPR_RECLAIM_SEALED_FIXED ||
         afspr_get_le32(p + 4u) != 0u) {
         return AFSPR_ERR_CORRUPT;

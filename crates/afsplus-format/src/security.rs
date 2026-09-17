@@ -48,7 +48,6 @@ pub const SECURITY_CHAIN: ChainKind = ChainKind {
     flags_nonzero: "security segment header flags are nonzero",
     payload_too_short: "security segment payload too short",
     reserved_nonzero: "security segment reserved field is nonzero",
-    tail_nonzero: "security segment unused tail is nonzero",
 };
 
 /// Descriptor bytes one segment holds at `block_size`.

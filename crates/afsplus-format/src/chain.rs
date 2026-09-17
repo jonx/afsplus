@@ -35,7 +35,6 @@ pub struct ChainKind {
     pub flags_nonzero: &'static str,
     pub payload_too_short: &'static str,
     pub reserved_nonzero: &'static str,
-    pub tail_nonzero: &'static str,
 }
 
 /// Content bytes one segment holds at `block_size`.
@@ -131,9 +130,6 @@ impl<'a> ChainSegment<'a> {
         }
         if le::get_u16(&p[6..8]) != 0 {
             return Err(FormatError::Invalid(kind.reserved_nonzero));
-        }
-        if block[HEADER_SIZE + p.len()..].iter().any(|b| *b != 0) {
-            return Err(FormatError::Invalid(kind.tail_nonzero));
         }
         let segment = ChainSegment {
             object_id: header.owner,

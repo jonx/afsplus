@@ -317,9 +317,7 @@ fn descriptor_segment_admission_is_exact() {
     reseal(&mut dirty_tail, block_type::SECURITY_DESCRIPTOR, 16, 27);
     assert_eq!(
         SecuritySegment::decode(&dirty_tail).map(|_| ()),
-        Err(FormatError::Invalid(
-            "security segment unused tail is nonzero"
-        ))
+        Err(FormatError::Invalid("block unused tail is nonzero"))
     );
     let mut longer = clean.clone();
     reseal(&mut longer, block_type::SECURITY_DESCRIPTOR, 16, 28);

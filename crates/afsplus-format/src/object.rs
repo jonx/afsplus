@@ -464,9 +464,6 @@ impl ObjectRecord {
         if !is_symlink && p.len() != fixed {
             return Err(FormatError::Invalid("object payload length is not exact"));
         }
-        if block[HEADER_SIZE + p.len()..].iter().any(|b| *b != 0) {
-            return Err(FormatError::Invalid("object unused tail is nonzero"));
-        }
         let record = ObjectRecord {
             object_id: le::get_u64(&p[0..8]),
             object_type: ObjectType::from_wire(p[8])?,
@@ -669,9 +666,6 @@ impl<'a> SymlinkRecord<'a> {
             .map_err(|_| FormatError::Invalid("symlink target is not UTF-8"))?;
         let result = Self { record, target };
         result.validate(block.len())?;
-        if block[HEADER_SIZE + payload.len()..].iter().any(|b| *b != 0) {
-            return Err(FormatError::Invalid("symlink unused tail is nonzero"));
-        }
         Ok(result)
     }
 }

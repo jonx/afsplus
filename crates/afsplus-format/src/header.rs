@@ -88,6 +88,20 @@ impl BlockHeader {
     /// Validates and reads the header of `block`, verifying the checksum over
     /// the entire block first. A checksum mismatch is an integrity failure and
     /// the block must not be interpreted further.
+    /// Whether the stored checksum matches the block, and nothing else: a
+    /// diagnostic question, not admission. `verify` is admission.
+    pub fn checksum_matches(block: &[u8]) -> bool {
+        if block.len() < HEADER_SIZE {
+            return false;
+        }
+        let stored = le::get_u32(&block[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4]);
+        let mut hasher = crate::crc32c::Hasher::new();
+        hasher.update(&block[..CHECKSUM_OFFSET]);
+        hasher.update(&[0u8; 4]);
+        hasher.update(&block[CHECKSUM_OFFSET + 4..]);
+        stored == hasher.finalize()
+    }
+
     pub fn verify(block: &[u8], expected_type: u32) -> Result<BlockHeader, FormatError> {
         if block.len() < HEADER_SIZE {
             return Err(FormatError::WrongBufferSize {
@@ -121,6 +135,15 @@ impl BlockHeader {
         let max = block.len() - HEADER_SIZE;
         if payload_len as usize > max {
             return Err(FormatError::PayloadTooLarge { payload_len, max });
+        }
+        // A block ends where its payload ends (ADR-112). Every encoder seals
+        // a zeroed block; a byte past the payload belongs to no field, so a
+        // rewrite would drop it and two readers could disagree about it.
+        if block[HEADER_SIZE + payload_len as usize..]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            return Err(FormatError::Invalid("block unused tail is nonzero"));
         }
         Ok(BlockHeader {
             block_type,

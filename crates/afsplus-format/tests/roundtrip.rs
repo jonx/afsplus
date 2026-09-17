@@ -285,7 +285,10 @@ fn checkpoint_rejects_every_reserved_field() {
             flags,
             owner,
             generation: checkpoint.generation,
-            payload_len: 96,
+            // The real payload length. This test sealed 96, the length of
+            // the layout before the label field, and passed only because
+            // the header fields were judged before the length.
+            payload_len: 168,
         }
         .seal(&mut block);
         assert!(matches!(

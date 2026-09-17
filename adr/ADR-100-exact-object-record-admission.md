@@ -1,6 +1,7 @@
 # ADR-100: Exact admission of object records
 
 Status: Accepted
+Amended by: ADR-112
 
 ## Context
 

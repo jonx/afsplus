@@ -1,6 +1,7 @@
 # ADR-111: Nothing follows the payload of a checkpoint
 
 Status: Accepted
+Amended by: ADR-112
 Amends: ADR-073
 
 ## Context

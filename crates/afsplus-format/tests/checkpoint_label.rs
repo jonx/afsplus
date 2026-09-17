@@ -100,9 +100,18 @@ fn bounds_and_refusals() {
             ..header
         }
         .seal(&mut block);
+        // A length below the real one leaves payload bytes behind it, and
+        // the header verification refuses them first (ADR-112).
+        let left_behind = clean[32 + length as usize..].iter().any(|byte| *byte != 0);
+        let reason = if left_behind {
+            "block unused tail is nonzero"
+        } else {
+            "checkpoint payload length mismatch"
+        };
         assert_eq!(
             Checkpoint::decode(&block, &[9; 16]),
-            Err(FormatError::Invalid("checkpoint payload length mismatch"))
+            Err(FormatError::Invalid(reason)),
+            "payload length {length}"
         );
     }
 }

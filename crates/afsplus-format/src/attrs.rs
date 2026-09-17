@@ -57,7 +57,6 @@ pub const ATTRIBUTE_CHAIN: ChainKind = ChainKind {
     flags_nonzero: "attribute segment header flags are nonzero",
     payload_too_short: "attribute segment payload too short",
     reserved_nonzero: "attribute segment reserved field is nonzero",
-    tail_nonzero: "attribute segment unused tail is nonzero",
 };
 
 /// Segments a set of `total_len` bytes occupies, or `None` when the length is

@@ -122,6 +122,11 @@ checksum
 
 This permits repair tools to classify blocks without relying entirely on external context.
 
+A block ends where its payload ends: the header verification of every reader
+refuses a nonzero byte after the payload length it states
+([ADR-112](../adr/ADR-112-block-zero-tail.md)). Every encoder seals a zeroed
+block, so a byte past the payload belongs to no field.
+
 ## 8. Format epoch versus feature flags
 
 The format epoch changes only for transformations that cannot reasonably be negotiated through feature flags.

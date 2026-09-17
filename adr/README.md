@@ -128,7 +128,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-097](ADR-097-bounded-memory-overlay-branches.md) | Share immutable bases across bounded memory overlay branches | Accepted | — |
 | [ADR-098](ADR-098-bound-block-replay-traces.md) | Bind persistent block replay traces to their base image | Accepted | — |
 | [ADR-099](ADR-099-semantic-replay-bundles.md) | Bind semantic scenarios and replay results in complete bundles | Proposed | — |
-| [ADR-100](ADR-100-exact-object-record-admission.md) | Exact admission of object records | Accepted | — |
+| [ADR-100](ADR-100-exact-object-record-admission.md) | Exact admission of object records | Accepted | amended by [ADR-112](ADR-112-block-zero-tail.md) |
 | [ADR-101](ADR-101-security-preservation-container.md) | Security preservation container | Accepted | amended by [ADR-105](ADR-105-security-reference-admission.md), [ADR-109](ADR-109-owned-chains-under-snapshots.md); amends [ADR-031](ADR-031-portable-security-acls.md) |
 | [ADR-102](ADR-102-clone-metadata-inheritance.md) | Metadata inheritance of CloneFile and CloneRange | Accepted | amended by [ADR-106](ADR-106-stored-object-comment.md), [ADR-108](ADR-108-extended-attributes.md); amends [ADR-027](ADR-027-reflink-clones.md) |
 | [ADR-103](ADR-103-change-record-actor.md) | Reserved actor field in the change record | Accepted | amends [ADR-013](ADR-013-change-stream-bounded.md) |
@@ -138,8 +138,9 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-107](ADR-107-twelve-byte-timestamps.md) | Timestamps are twelve bytes on the wire | Accepted | — |
 | [ADR-108](ADR-108-extended-attributes.md) | Extended attributes are one owned chain per object | Accepted | amended by [ADR-109](ADR-109-owned-chains-under-snapshots.md); amends [ADR-102](ADR-102-clone-metadata-inheritance.md) |
 | [ADR-109](ADR-109-owned-chains-under-snapshots.md) | A retained snapshot keeps the owned chains it captured | Accepted | amends [ADR-101](ADR-101-security-preservation-container.md), [ADR-108](ADR-108-extended-attributes.md) |
-| [ADR-110](ADR-110-exact-reclaim-admission.md) | Reclaim queue blocks are admitted only in their canonical image | Accepted | amends [ADR-036](ADR-036-reclaim-queue.md) |
-| [ADR-111](ADR-111-checkpoint-zero-tail.md) | Nothing follows the payload of a checkpoint | Accepted | amends [ADR-073](ADR-073-snapshot-checkpoint-roots.md) |
+| [ADR-110](ADR-110-exact-reclaim-admission.md) | Reclaim queue blocks are admitted only in their canonical image | Accepted | amended by [ADR-112](ADR-112-block-zero-tail.md); amends [ADR-036](ADR-036-reclaim-queue.md) |
+| [ADR-111](ADR-111-checkpoint-zero-tail.md) | Nothing follows the payload of a checkpoint | Accepted | amended by [ADR-112](ADR-112-block-zero-tail.md); amends [ADR-073](ADR-073-snapshot-checkpoint-roots.md) |
+| [ADR-112](ADR-112-block-zero-tail.md) | A metadata block ends where its payload ends | Accepted | amends [ADR-100](ADR-100-exact-object-record-admission.md), [ADR-110](ADR-110-exact-reclaim-admission.md), [ADR-111](ADR-111-checkpoint-zero-tail.md) |
 
 <!-- /adr-index -->
 

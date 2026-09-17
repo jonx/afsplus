@@ -1,6 +1,7 @@
 # ADR-110: Reclaim queue blocks are admitted only in their canonical image
 
 Status: Accepted
+Amended by: ADR-112
 Amends: ADR-036
 
 ## Context

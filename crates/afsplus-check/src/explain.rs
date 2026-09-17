@@ -1095,7 +1095,7 @@ impl Explainer {
                 magic,
                 owner: u64::from_le_bytes(buf[8..16].try_into().expect("eight bytes")),
                 generation: u64::from_le_bytes(buf[16..24].try_into().expect("eight bytes")),
-                checksum_valid: BlockHeader::verify(&buf, u32::from_le_bytes(magic)).is_ok(),
+                checksum_valid: BlockHeader::checksum_matches(&buf),
             });
         Ok(BlockExplanation {
             lba,

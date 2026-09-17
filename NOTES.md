@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — The zero tail, once, in the header verification (ADR-112)](#2026-09-17--the-zero-tail-once-in-the-header-verification-adr-112)
 - [2026-09-17 — Run the handler on AROS for the first time](#2026-09-17--run-the-handler-on-aros-for-the-first-time)
 - [2026-09-17 — A selected checkpoint in the wrong form refuses the volume, in C too](#2026-09-17--a-selected-checkpoint-in-the-wrong-form-refuses-the-volume-in-c-too)
 - [2026-09-17 — A second reader for the snapshot checkpoint payload (ADR-111)](#2026-09-17--a-second-reader-for-the-snapshot-checkpoint-payload-adr-111)
@@ -214,6 +215,44 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — The zero tail, once, in the header verification (ADR-112)
+
+Asked by claude-main after ADR-111: stop finding the zero-tail rule one block
+kind at a time. Survey first, reported before any decoder changed: three built
+volumes with all twelve block kinds in use (667 blocks with a valid checksum),
+the four static fixtures, and a reading of the fourteen block encoders of the
+format crate and the three of the C writer. No encoder writes past its
+payload, so no image flips.
+
+The rule now lives in `BlockHeader::verify` and `afspr_verify_header`. The
+per-kind scans of the object record, the symlink record, the chain segments,
+the checkpoint and the reclaim blocks are gone from both readers, with the
+`tail_nonzero` message of `ChainKind`. `BlockHeader::checksum_matches` answers
+the diagnostic question on its own, so explain still reports a dirty-tail
+block as having a valid checksum. The independent fuzz oracles call the shared
+header verification and inherit the rule; its second statement is the C
+reader.
+
+Four tests changed and no image did. Two named a per-kind message. One
+resealed a checkpoint shorter, which now leaves payload bytes behind as a
+tail. The fourth is a finding: `roundtrip`'s
+`checkpoint_rejects_every_reserved_field` sealed a payload length of 96, the
+layout before the label field, and had passed only because the header fields
+were judged before the length; it seals 168 now.
+
+Proof: `zero_tail` in afsplus-check (2 tests): the survey as a permanent test
+that asserts every kind was seen, and one resealed byte after the payload of
+the identification block, both checkpoint slots, the object-map node and the
+object record of a real volume, each refused by the core and by the C reader.
+Negative controls: without the check in the C header verification that test
+and the four cross-read tests (`security_c`, `reclaim_c`, `checkpoint_c`,
+`attributes_c`) fail; without it in the Rust one the lookup-path test fails.
+Also run and passing: every test of afsplus-format (22 binaries), the fuzz
+unit tests (16), and in afsplus-check `explain`, `explain_more`,
+`security_container`, `security_c`, `corruption_corpus`, `volume_label`,
+`chain_snapshots`, `extended_attributes`, `object_comment`, `mount_modes`,
+`reclaim`.
 
 ## 2026-09-17 — Run the handler on AROS for the first time
 

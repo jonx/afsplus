@@ -41,7 +41,12 @@ fn reseal(block: &mut [u8], flags: u16, payload_len: u32) {
         payload_len,
     }
     .seal(block);
-    BlockHeader::verify(block, block_type::OBJECT).unwrap();
+    // The checksum is valid; whether the block is admitted is the test's
+    // question (a dirty tail is refused by the header verification itself).
+    assert!(!matches!(
+        BlockHeader::verify(block, block_type::OBJECT),
+        Err(FormatError::ChecksumMismatch { .. })
+    ));
 }
 
 fn rejected_by_all_readers(block: &[u8], reason: &'static str) {
@@ -102,7 +107,7 @@ fn a_nonzero_unused_tail_is_rejected_at_every_position_class() {
             let mut block = clean.clone();
             block[offset] = 1;
             reseal(&mut block, 0, FIXED_PAYLOAD as u32);
-            rejected_by_all_readers(&block, "object unused tail is nonzero");
+            rejected_by_all_readers(&block, "block unused tail is nonzero");
         }
     }
 }
