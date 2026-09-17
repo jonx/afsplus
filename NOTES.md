@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Grow the AROS C boundary to interface revision 7](#2026-09-17--grow-the-aros-c-boundary-to-interface-revision-7)
 - [2026-09-17 — Decide clone metadata inheritance and leave the clone source untouched](#2026-09-17--decide-clone-metadata-inheritance-and-leave-the-clone-source-untouched)
 - [2026-09-17 — Carry opaque security descriptors through every object rewrite](#2026-09-17--carry-opaque-security-descriptors-through-every-object-rewrite)
 - [2026-09-17 — Reserve an actor field in the epoch-1 change record](#2026-09-17--reserve-an-actor-field-in-the-epoch-1-change-record)
@@ -175,6 +176,55 @@ Entry format: `## YYYY-MM-DD — title`.
 <!-- /toc -->
 
 
+
+## 2026-09-17 — Grow the AROS C boundary to interface revision 7
+
+The Stage C inventory is [implementation/stage-c-gap.md](implementation/stage-c-gap.md):
+per item, what the external handler carries at each of four layers (adapter,
+C boundary, packet translation, target runtime) and what it lacks. The
+development host that built this step has stable Rust, Clang and the AROS
+source tree and no built AROS SDK, QEMU, FS-UAE or target Rust toolchain, so
+every result below is a host result and the target gates were not run.
+[`tools/dev-packet-matrix.sh`](tools/dev-packet-matrix.sh) keeps the packet
+layer testable there by compiling the host matrices against the AROS source
+headers with a synthesised `aros/config.h`; it makes no qualification claim.
+
+ABI version 1 had no way to ask a static library what it carries. The
+boundary grows by entry-point groups: `afsplus_aros_interface` answers
+without a mount, the packet layer asks it at creation and turns an action of
+a missing group into `ERROR_ACTION_NOT_KNOWN`, and query structures negotiate
+their size. Revision 7 carries capability query, DOS metadata, soft links,
+the API v2 group (positioned 64-bit I/O, clone, preallocate, atomic replace,
+advise), watches, health and trace sink, the versioned info document and
+counters. The Rust capability mask and the published `FSV2_CAP_*` identities
+are separate numberings joined by one table.
+
+Two defects surfaced. The VFS directory cookie is bound to one checkpoint
+generation, so `ExNext` answered `ERROR_INVALID_LOCK` after any commit and
+`Delete #?` could not work; `resume_directory_after` finds the position after
+the last returned name by a galloping binary search over single-entry pages.
+Five one-line C entry points bypassed the status wrapper, so their failures
+never reached the health log; a literal call count in the counters test
+exposed it.
+
+File handles hold their object like DOS locks (`MODE_NEWFILE` exclusive), a
+held object is not deletable and `DupLockFromFH` on an exclusive handle is
+refused, the behavior `NameFromFH` in dos.library is written around. Two host
+matrices that deleted a name while holding its lock assert
+`ERROR_OBJECT_IN_USE` first. The Hosted S0 and S1 probes have not run against
+this rule.
+
+The classic security adapter is a seam: one probe question, refusal with
+`ERROR_WRITE_PROTECTED`, an explicit downgrade mount flag. Its on-disk answer
+waits on the security preservation container. File comments wait on a stored
+attribute record, clone metadata inheritance on Q14.
+
+Generic AROS findings: `fdsk.device` answers `CMD_UPDATE` inside `BeginIO`,
+so the barrier reply overtakes queued writes and never reaches the backing
+file, and the hosted `emul-handler` implements no `ACTION_FLUSH`.
+[`native/aros/upstream`](native/aros/upstream/README.md) holds the focused
+`fdsk` patch, which applies to the AROS tree, and its probe; neither has been
+compiled.
 
 ## 2026-09-17 — Decide clone metadata inheritance and leave the clone source untouched
 

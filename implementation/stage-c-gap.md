@@ -40,6 +40,11 @@ Every item crosses the same four layers, and each layer has its own proof:
 | L3 packet translation | [`native/aros/afsplus_packet.c`](../native/aros/afsplus_packet.c) | host `DosPacket` matrix ([`packet_stub.c`](../native/aros/tests/packet_stub.c)) compiled with AROS headers | AROS SDK headers, or the AROS source headers through [`tools/dev-packet-matrix.sh`](../tools/dev-packet-matrix.sh) |
 | L4 target runtime | [`native/aros/afsplus_handler.c`](../native/aros/afsplus_handler.c), target probes under [`native/aros/tests`](../native/aros/tests) | the gates of [aros-system-volume-qualification](../testing/aros-system-volume-qualification.md) | built Hosted MacAROS, QEMU with the `apple-aarch64` SDK, FS-UAE with the m68k SDK, `nightly-2026-06-27` |
 
+The "Present" paragraph of an item names the layers that carry it. A piece
+present at L1 to L3 and absent at L4 is built and proven on the development
+host and waits for a target run; nothing in this list is a target claim
+beyond the gates of the qualification document.
+
 L1 to L3 are provable on a development host that carries only stable Rust,
 Clang and the AROS source tree. L4 needs the MacAROS development machine
 named in [aros-native-bridge](../docs/aros-native-bridge.md). Apple hardware is
@@ -57,45 +62,43 @@ C1 boundary v2 ──> C2 DOS compatibility ──> C3 classic security adapter
       └──> C12 block device ──> C13 benchmark runner ──> C14 ladder S2, S3
 ```
 
-C1 comes first because ABI version 1 has no capability query and no way to
-add an entry point that an older handler shell can refuse cleanly.
+C1 comes first because every later entry point is an additive group that an
+older library must be able to refuse by value.
 
 ## C1. Rust/C integration boundary
 
-Present: ABI version 1, 29 exported functions, size-checked structures,
-allocation-free calls, numeric 64-bit lock and file identifiers.
+Present (L1 to L3): ABI version 1 with interface revision 7.
+`afsplus_aros_interface` answers without a mount with the revision and a
+mask of entry-point groups; the packet layer asks it at creation and answers
+`ERROR_ACTION_NOT_KNOWN` for an action of a missing group.
+`afsplus_aros_capabilities` reports the published `FSV2_CAP_*` mask, mount
+mode, name limit, case policy, Unicode version, pending intent records and
+block counts. Query structures share one size-negotiated growth rule. The
+Rust mask and the C identities are separate numberings joined by one table.
 
 Lacking:
 
-1. a version and capability query callable before mount, so a packet layer
-   built against a newer header refuses an older static library by value
-   instead of by link failure;
-2. a per-mount capability and limits query (the Rust `Capabilities` mask,
-   `StatFs` name limit, case policy and Unicode version never cross the
-   boundary);
-3. a stable mapping from `VfsError` to a structured result for callers that
-   are not DOS packets: every error is folded into an `ERROR_*` value, and
-   `Limit`, `Corrupt` and `Io` lose their category;
-4. a rule for additive growth: which functions a version-1 caller may rely
-   on, and how `struct_size` admits a longer structure.
-
-Hosted and QEMU: all four, L1 to L3 on the development host, L4 by relinking
-the existing S0 gates. Apple hardware: none.
+1. L4: the Hosted, QEMU and m68k gates relinked against revision 7, with the
+   exported-symbol list of [`check-aros-ffi.sh`](../tools/check-aros-ffi.sh);
+2. a structured result for callers that are not DOS packets: every error is
+   an `ERROR_*` value, and `Limit`, `Corrupt` and `Io` share codes with
+   ordinary results.
 
 ## C2. DOS compatibility
 
-Present: the 40 actions listed in the
-[packet mapping](../docs/aros-native-bridge.md#native-lifecycle), which carry
-the S0 matrix and the S1 desktop session.
+Present: the 40 actions of the Alpha-0 and S1 gates (L1 to L4), and at L1 to
+L3 `ACTION_SET_PROTECT`, `ACTION_SET_DATE`, soft `ACTION_MAKE_LINK`,
+`ACTION_READ_LINK` with `ERROR_IS_SOFT_LINK` on traversal, DOS open-mode
+locking (`MODE_NEWFILE` exclusive, held objects not deletable, refused
+`DupLockFromFH` on an exclusive handle) and `ExNext` that continues across
+namespace changes.
 
 Lacking, in the order classic software meets them:
 
 | Action | Missing piece | Layer where it starts |
 |---|---|---|
-| `ACTION_SET_PROTECT` | VFS and adapter setter over `Volume::set_object_protection`; DOS inverted RWED bits pass through as stored | L1 |
-| `ACTION_SET_DATE` | VFS setter for the modification time; `DateStamp` to Unix conversion in the packet layer | L1 |
+| all of the above | target run: a probe extension for the S0 matrix on Hosted, QEMU and m68k | L4 |
 | `ACTION_SET_COMMENT`, comment in `FileInfoBlock` | a stored comment attribute; the format has no comment or extended-attribute record ([docs/12](../docs/12-metadata-and-xattrs.md)) | Stage B decision |
-| `ACTION_MAKE_LINK` soft, `ACTION_READ_LINK` | adapter calls over `Vfs::create_symlink` and `read_link`; `ERROR_IS_SOFT_LINK` on traversal; soft-link delete | L1 |
 | `ACTION_FH_FROM_LOCK`, `ACTION_CHANGE_MODE` | handle from lock, shared/exclusive conversion with conflict check | L1 |
 | `ACTION_EXAMINE_ALL`, `ACTION_EXAMINE_ALL_END` | paged fill of `ExAllData` from `read_directory` with more than one entry per call | L3 |
 | `ACTION_RENAME_DISK` | label rewrite in the identity block; needs a core label setter | L1, core |
@@ -103,76 +106,66 @@ Lacking, in the order classic software meets them:
 | `ACTION_LOCK_RECORD`, `ACTION_FREE_RECORD` | byte-range record table per object, with timeout handled by the handler loop | L1, L4 |
 | `ACTION_ADD_NOTIFY`, `ACTION_REMOVE_NOTIFY` | C8 | C8 |
 | `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |
-| exclusive-lock and open-mode interaction | `FINDINPUT` on an exclusively locked object, delete of an open file mapped to `ERROR_OBJECT_IN_USE` or to the orphan path by policy | L1 |
-| directory enumeration across a commit | `STALE` cookie maps to `ERROR_INVALID_LOCK`; DOS expects `ExNext` to continue | L1 |
+| `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |
 
 Hosted and QEMU: every row except the comment. Apple hardware: none.
 
 ## C3. Classic single-user security preservation adapter
 
-Present: protection bits are stored and returned unmodified; no code path
-inspects a security container.
+Present (L1, L2): the policy seam of
+[docs/30 section 9](../docs/30-portable-security-model.md#9-classic-amiga-compatibility-profile).
+The adapter asks one question through `RichSecurityProbe`; a protection write
+on an object carrying metadata the classic projection cannot express is
+`ERROR_WRITE_PROTECTED` with the stored state untouched, and the mount flag
+`AFSPLUS_AROS_MOUNT_FLAG_SECURITY_DOWNGRADE` is the explicit downgrade.
+Rename and hard link keep the object and its metadata.
 
-Lacking: the adapter of
-[docs/30 section 9](../docs/30-portable-security-model.md#9-classic-amiga-compatibility-profile):
-the local session maps to the owner, the classic bits are a projection, and a
-protection write that would drop richer metadata is refused unless the caller
-requests the downgrade. The adapter needs (1) a VFS query "this object
-carries security metadata the classic view cannot express", (2) the refusal
-path in `ACTION_SET_PROTECT`, (3) preservation across rename, link, clone and
-replace, (4) a mount option for the explicit downgrade.
-
-The container is the Stage B item B5. Against the current executable
-contract no object can carry such metadata, so the buildable part is the
-policy seam and its refusal test driven by a test double; the on-disk query
-waits on B5.
+Lacking: the on-disk answer to the probe, which is the Stage B item B5 (the
+default probe answers no, which is exact for a format that stores protection
+bits only); preservation across clone and atomic replace, which follows the
+container's inheritance rule; a DOSDriver keyword that sets the mount flag.
 
 ## C4. Filesystem API v2 and the modern 64-bit API
 
-Present: the Rust VFS subset of [docs/13](../docs/13-filesystem-api-v2.md);
-[`api/filesystem_v2.h`](../api/filesystem_v2.h) declares types and no
-functions; the C boundary exposes DOS-shaped calls only.
+Present (L1, L2): the `API_V2` entry-point group on the same locks and
+handles as the DOS calls: positioned 64-bit read and write that leave the DOS
+position alone, atomic replace over an unheld target, and the capability and
+limits query of C1 with one published numbering (`FSV2_CAP_*`).
 
 Lacking:
 
-1. positioned 64-bit read and write at the C boundary (the DOS calls carry an
-   implicit position and a 32-bit count);
-2. object-ID operations: stat by ID, lookup returning the ID, paged directory
-   read with opaque cookies and more than one entry;
-3. `statfs64` with case policy and Unicode version;
-4. atomic replace (the adapter always passes `replace = false`);
-5. capability and limits query (C1);
-6. a transport that reaches a running handler from an application: a
-   versioned extension packet with a refusal that older handlers give for
-   free (`ERROR_ACTION_NOT_KNOWN`), and a client library that falls back;
-7. the capability numbering: the Rust mask and `FSV2_Capability` assign
-   different bits to the same capability, and one published numbering must
-   win before any application reads it.
+1. object-ID operations at the C boundary: stat by ID, lookup returning the
+   ID, paged directory read with opaque cookies and more than one entry;
+2. a transport that reaches a running handler from an application: a
+   versioned extension packet that older handlers refuse for free
+   (`ERROR_ACTION_NOT_KNOWN`), its packet-layer cases, and a client library
+   that falls back. The packet number is an AROS-wide allocation;
+3. a consumer: the AROS Rust `std` port binding to the group.
 
 Hosted and QEMU: all. Apple hardware: none.
 
 ## C5. Clone and reflink capability API
 
-Present: `Vfs::clone_file` and `clone_range` behind `CLONE_FILE` and
-`CLONE_RANGE`.
+Present (L1, L2): `afsplus_aros_clone_file` from a lock and
+`afsplus_aros_clone_range` between two handles, advertised separately and
+answering `ERROR_ACTION_NOT_KNOWN` on a volume without shared extents.
 
-Lacking: adapter and C entry points taking DOS locks and handles; the
-extension packet of C4; a `Copy CLONE`-style consumer that falls back to a
-byte copy on `NOT_SUPPORTED`; exclusive-lock and open-handle rules for the
-destination. Metadata inheritance follows the executable behavior until
-Q14 is answered.
+Lacking: the extension packet of C4; a `Copy CLONE`-style consumer that falls
+back to a byte copy. Metadata inheritance follows the executable behavior
+until Q14 is answered.
 
 ## C6. Access-intent and preallocation mapping
 
-Present: `Volume::preallocate_file` and its bounded form;
-[`api/performance_hints.h`](../api/performance_hints.h) is a draft with
-`void *` handles.
+Present (L1, L2): `Vfs::preallocate` behind the `PREALLOCATE` capability with
+a caller-supplied block budget and the 64-record edit limit;
+`afsplus_aros_preallocate` with the budget as a mount setting, an oversized
+request reserving nothing; `afsplus_aros_advise` admitting every hint of
+[`performance_hints.h`](../api/performance_hints.h) and returning the effect
+it had, which is none.
 
-Lacking: a VFS `preallocate` behind a capability bit; adapter and C entry
-points; a defined mapping of each access hint to an effect or to an explicit
-"accepted, no effect" result, so callers never see a hint silently change
-durability; the bounded edit limits of the restore provider applied to the
-handler so one packet cannot hold the single handler task unbounded.
+Lacking: hints with an effect (sequential read-ahead, temporary-file
+placement) once a cache exists to steer; `AFSPLUS_PREALLOC_CONTIGUOUS_PREFERRED`
+and placement hints, which need allocator support; the extension packet of C4.
 
 ## C7. mmap-friendly large-file path
 
@@ -190,62 +183,71 @@ Apple hardware: the zero-copy claim and its timing.
 
 ## C8. Notifications
 
-Present: none; the change stream (M10) is not started and is not a
-dependency of DOS notification.
+Present (L1, L2): a bounded watch table keyed by parent directory and
+comparison key, covering names that do not exist yet and directory watches;
+one pending flag per watch, so events coalesce and memory does not follow the
+change rate; writes reported at close; `watch_add`, `watch_remove` and
+`watch_drain` at the C boundary.
 
-Lacking: a bounded in-memory watch table in the adapter keyed by object and
-by parent plus name (DOS notifies on names that do not exist yet); event
-generation at each mutating adapter call; coalescing so one packet produces
-at most one event per watch; a drain call at the C boundary; the packet layer
-turning events into `NotifyMessage` or `Signal`, including
-`NRF_NOTIFY_INITIAL` and the rule that an unreplied message suppresses the
-next one; overflow reported as a rescan event. The v2 `watch` operation uses
-the same table.
+Lacking: `ACTION_ADD_NOTIFY` and `ACTION_REMOVE_NOTIFY` in the packet layer
+(`NotifyRequest` to watch identifier, `nr_FullName` resolution); delivery in
+the handler loop after each packet (`NotifyMessage` or `Signal`,
+`NRF_NOTIFY_INITIAL`, suppression while a message is unreplied), which needs
+a delivery callback in the packet configuration; the v2 `watch` operation
+over the same table.
 
 Hosted and QEMU: all. Apple hardware: none.
 
 ## C9. Health reporting
 
-Present: the core flight recorder and checker findings; nothing reaches the
-handler boundary.
+Present (L1, L2): every failed call on a mounted instance that describes the
+volume or its device enters a health log with counters, degraded-state flags
+and a bounded event ring whose sequence numbers expose loss;
+`afsplus_aros_health` adds generation, pending intent records, pending
+orphans and block counts and flags a read-only view of an unreplayed log.
 
-Lacking: a fixed-size health snapshot (mount mode, generation, pending
-intent records, pending orphans, free and available blocks, last device
-error, degraded flags from
-[docs/26 section 17](../docs/26-debug-observability.md#17-structured-healthevent-stream));
-a bounded health event ring with loss counter; C entry points; a target
-query path (C4 transport).
+Lacking: the remaining events of
+[docs/26 section 17](../docs/26-debug-observability.md#17-structured-healthevent-stream)
+that the core does not raise as errors (checkpoint fallback, reclaim backlog,
+free-count mismatch); a target query path (C4 transport).
 
 ## C10. Trace streaming and developer attachment
 
-Present: `FlightRecorder` with `LiveSink`, categories and loss counters on
-the host; the trackdisk activity sink.
+Present (L1, L2): `afsplus_aros_set_trace_sink` attaches the core flight
+recorder to a callback of
+[`debug_observability.h`](../api/debug_observability.h) with a run-time
+category mask; `afsplus_aros_trace_counters` reports delivered, missed,
+filtered and dropped.
 
-Lacking: a C trace sink matching
-[`api/debug_observability.h`](../api/debug_observability.h) installed through
-the boundary; category selection at run time; a target front-end (message
-port for a following tool, serial for QEMU and m68k); the rule that a slow
-consumer costs only counted loss. Forwarding from the M1 target to a
+Lacking: a timestamp source (the core has no clock, so the field is zero); a
+target front-end that owns the preallocated queue (message port for a
+following tool, serial for QEMU and m68k); stable event codes (the draft
+header publishes the core's event order). Forwarding from the M1 target to a
 development host needs the hardware.
 
 ## C11. Structured management APIs
 
-Present: `afsplus-check --json` schema 5 on the host.
+Present (L1, L2): `afsplus_aros_info_json` serves one versioned JSON
+document (`afsplus-handler-info`, version 1) from the mounted instance:
+identity, feature masks, mount state, capability names, health, handle usage.
 
-Lacking: a versioned info structure served by the running handler (volume
-identity, features, capabilities, health), a target `afsplus-info` that prints
-it as JSON with its schema version, and machine-readable error codes. Tools
-are thin clients of C9 and C4.
+Lacking: the target `afsplus-info` client and its transport (C4);
+machine-readable error documents for failed management calls; dry-run
+planning for destructive operations, which starts with `ACTION_FORMAT`.
 
 ## C12. File-backed virtual block device
 
 Present: the generic AROS `fdsk.device` carries S0 and S1 on Hosted; the
 external `afsram.device` carries native QEMU.
 
+[`native/aros/upstream`](../native/aros/upstream/README.md) holds a patch and
+a regression probe for item 1; neither has been compiled.
+
 Lacking in the generic device, as upstream patches with regression probes:
 
-1. `CMD_UPDATE` and `ETD_UPDATE` are accepted and ignored, so a filesystem
-   barrier never reaches the backing file;
+1. `CMD_UPDATE` and `ETD_UPDATE` are answered inside `BeginIO`, so the reply
+   overtakes queued writes and the barrier never reaches the backing file;
+   the hosted `emul-handler` in turn implements no `ACTION_FLUSH`;
 2. upstream has no `TD_READ64`, `TD_WRITE64` or `NSCMD_TD_*64`; MacAROS
    carries that fix, and AFS+ images beyond 4 GiB depend on it;
 3. attach and detach of a unit to a named file at run time
@@ -259,8 +261,11 @@ replaces the retained-RAM transport.
 Present: the host measurement harness and
 [benchmark-contract](../testing/benchmark-contract.md).
 
-Lacking: handler counters (DOS packets by action, failures by code, device
-reads, writes, bytes, barriers, peak and steady memory) behind C9; a target
+`afsplus_aros_counters` (L1, L2) reports completed and failed calls and
+device reads, writes, barriers, bytes and failures since mount.
+
+Lacking: DOS packets by action and failures by code, which belong to the
+packet layer; peak and steady handler memory; a target
 runner executing a fixed operation trace against AFS+ and the AFS/FFS
 baseline with manifest verification before and structural check after; a
 result bundle in the contract format. Hosted gives software cost; the
