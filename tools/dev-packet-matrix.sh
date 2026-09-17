@@ -64,6 +64,9 @@ run_matrix() {
     "$work/$name"
 }
 
+echo "[dev-packet] every boundary entry point is reachable from a target"
+"$repo_root/tools/check-boundary-reachable.py"
+
 echo "[dev-packet] DosPacket translation matrix (source headers)"
 run_matrix packet-stub native/aros/afsplus_packet.c \
     native/aros/tests/packet_stub.c

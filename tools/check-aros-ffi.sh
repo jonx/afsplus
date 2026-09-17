@@ -64,6 +64,7 @@ require_executable "$aros_nm"
 require_executable "$aros_objdump"
 require_executable "$aros_genmodule"
 require_executable "$repo_root/tools/check-aros-aarch64-abi.py"
+require_executable "$repo_root/tools/check-boundary-reachable.py"
 require_file "$aros_lib/libstdc.static.a"
 require_file "$aros_cross_lib/libclang_rt.builtins-aarch64.a"
 sdk_platform=$(awk '
@@ -88,6 +89,9 @@ cd "$repo_root"
 
 echo "[aros-ffi] host Rust operation matrix"
 cargo test -p afsplus-aros-ffi --all-features
+
+echo "[aros-ffi] every boundary entry point is reachable from a target"
+"$repo_root/tools/check-boundary-reachable.py"
 
 echo "[aros-ffi] host C11 header"
 clang -std=c11 -Wall -Wextra -Werror -I api \

@@ -311,6 +311,16 @@ the protection and start no orphan cleanup, which waits, visible in the
 health snapshot, until the volume is unprotected. `ACTION_DISK_INFO` reports
 the protected state, and nothing is written to the volume for it.
 
+An entry point of [`afsplus_aros.h`](../api/afsplus_aros.h) that nothing a
+target runs can call is not a capability: no program on AROS could use it,
+and a host test that calls it proves the library works, not the system.
+[`check-boundary-reachable.py`](../tools/check-boundary-reachable.py) reads
+the header against the packet layer, the client library, the handler shell
+and the target tools, and fails when an export is reachable from none of
+them. Six were in that state when the check was first run by hand, among
+them the whole paged directory walk; they were reached rather than excused,
+and its allow list is empty.
+
 The handler has one rule for every mount option, wherever it arrives from: a
 setting it does not understand fails the mount, it is never ignored, and a
 string it could not read to the end leaves the defaults rather than the part
