@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(14)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(15)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -42,6 +42,7 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_EXTENT_MAP UINT64_C(0x1000)
 #define AFSPLUS_AROS_GROUP_VOLUME_LABEL UINT64_C(0x2000)
 #define AFSPLUS_AROS_GROUP_DOS_COMMENT UINT64_C(0x4000)
+#define AFSPLUS_AROS_GROUP_ATTRIBUTES UINT64_C(0x8000)
 
 /* AfsplusArosExtent.flags. */
 #define AFSPLUS_AROS_EXTENT_UNWRITTEN UINT32_C(0x1)
@@ -536,6 +537,39 @@ int32_t afsplus_aros_comment(struct AfsplusAros *filesystem,
 int32_t afsplus_aros_file_comment(struct AfsplusAros *filesystem,
     uint64_t file, uint8_t *comment, uint32_t comment_capacity,
     uint32_t *output_length);
+
+/* Group AFSPLUS_AROS_GROUP_ATTRIBUTES: extended attributes of the object
+ * name under base_lock, an empty name being the base lock's own object.
+ * Attribute names carry their namespace ("user.", "aros.", "system.",
+ * "security.") and are text in the mount's name encoding, at most 255 bytes
+ * stored; values are bytes, at most 65,535, and an object's whole set at
+ * most 64 KiB (ERROR_OBJECT_TOO_LARGE). Every namespace is readable; this
+ * boundary writes "user." and "aros." and answers ERROR_WRITE_PROTECTED for
+ * the two it only preserves. A volume that cannot store attributes answers
+ * ERROR_ACTION_NOT_KNOWN and lacks FSV2_CAP_XATTRS.
+ *
+ * get and list store the size in output_required and fill the buffer only
+ * when it fits, so a zero capacity asks for the size. An absent attribute is
+ * ERROR_OBJECT_NOT_FOUND. list separates names with a NUL after each, in the
+ * volume's byte order of stored names. set writes under mode; CREATE answers
+ * ERROR_OBJECT_EXISTS, REPLACE and REMOVE ERROR_OBJECT_NOT_FOUND; REMOVE
+ * takes no value. */
+#define AFSPLUS_AROS_ATTRIBUTE_UPSERT UINT32_C(0)
+#define AFSPLUS_AROS_ATTRIBUTE_CREATE UINT32_C(1)
+#define AFSPLUS_AROS_ATTRIBUTE_REPLACE UINT32_C(2)
+#define AFSPLUS_AROS_ATTRIBUTE_REMOVE UINT32_C(3)
+int32_t afsplus_aros_get_attribute(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    const uint8_t *attribute, uint32_t attribute_length,
+    uint8_t *value, uint32_t value_capacity, uint32_t *output_required);
+int32_t afsplus_aros_list_attributes(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint8_t *names, uint32_t names_capacity, uint32_t *output_required);
+int32_t afsplus_aros_set_attribute(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    const uint8_t *attribute, uint32_t attribute_length,
+    const uint8_t *value, uint32_t value_length, uint32_t mode,
+    int64_t now_seconds, uint32_t now_nanoseconds);
 
 /* Group AFSPLUS_AROS_GROUP_SOFT_LINKS. The target is an opaque path in the
  * mount's name encoding. Locate and open answer ERROR_IS_SOFT_LINK for a

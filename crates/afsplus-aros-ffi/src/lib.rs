@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use afsplus_aros::health::HealthEvent;
 use afsplus_aros::{
-    ArosAdapter, ArosConfig, ArosError, DiskInfo, FileInfo, LockAccess, NameEncoding, OpenMode,
-    SeekMode,
+    ArosAdapter, ArosConfig, ArosError, AttributeWriteMode, DiskInfo, FileInfo, LockAccess,
+    NameEncoding, OpenMode, SeekMode,
 };
 use afsplus_block::{BlockDevice, BlockError};
 use afsplus_core::flight::{Categories, Category, Event, FlightRecorder, LiveSink, SinkResult};
@@ -25,7 +25,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 14;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 15;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -41,6 +41,7 @@ pub const AFSPLUS_AROS_GROUP_OBJECT_IDS: u64 = 0x800;
 pub const AFSPLUS_AROS_GROUP_EXTENT_MAP: u64 = 0x1000;
 pub const AFSPLUS_AROS_GROUP_VOLUME_LABEL: u64 = 0x2000;
 pub const AFSPLUS_AROS_GROUP_DOS_COMMENT: u64 = 0x4000;
+pub const AFSPLUS_AROS_GROUP_ATTRIBUTES: u64 = 0x8000;
 pub const AFSPLUS_AROS_EXTENT_UNWRITTEN: u32 = 1;
 pub const AFSPLUS_AROS_DIR_RECORD_MAX: u32 = 280;
 pub const AFSPLUS_AROS_KIND_FILE: u32 = 1;
@@ -65,7 +66,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_OBJECT_IDS
     | AFSPLUS_AROS_GROUP_EXTENT_MAP
     | AFSPLUS_AROS_GROUP_VOLUME_LABEL
-    | AFSPLUS_AROS_GROUP_DOS_COMMENT;
+    | AFSPLUS_AROS_GROUP_DOS_COMMENT
+    | AFSPLUS_AROS_GROUP_ATTRIBUTES;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -90,7 +92,8 @@ pub const FSV2_CAP_PREALLOCATE: u64 = 1 << 17;
 
 /// Rust capability bit to published C identity. A Rust bit without a row is
 /// not advertised at the C boundary.
-const CAPABILITY_MAP: [(u64, u64); 15] = [
+const CAPABILITY_MAP: [(u64, u64); 16] = [
+    (Capabilities::EXTENDED_ATTRIBUTES, FSV2_CAP_XATTRS),
     (Capabilities::PREALLOCATE, FSV2_CAP_PREALLOCATE),
     (Capabilities::IO_64BIT, FSV2_CAP_64BIT_IO),
     (Capabilities::UTF8_NAMES, FSV2_CAP_UTF8_NAMES),
@@ -1582,6 +1585,115 @@ pub extern "C" fn afsplus_aros_file_comment(
             .file_comment(file, destination.len())?;
         destination[..text.len()].copy_from_slice(&text);
         write_output(output_length, text.len() as u32)
+    })
+}
+
+/// `mode` of `afsplus_aros_set_attribute`.
+pub const AFSPLUS_AROS_ATTRIBUTE_UPSERT: u32 = 0;
+pub const AFSPLUS_AROS_ATTRIBUTE_CREATE: u32 = 1;
+pub const AFSPLUS_AROS_ATTRIBUTE_REPLACE: u32 = 2;
+pub const AFSPLUS_AROS_ATTRIBUTE_REMOVE: u32 = 3;
+
+/// Stores the size in `output_required`; fills `buffer` only when it fits.
+fn sized_bytes(
+    bytes: &[u8],
+    buffer: *mut u8,
+    capacity: u32,
+    output_required: *mut u32,
+) -> Result<(), ArosError> {
+    let destination = output_slice(buffer, capacity)?;
+    if bytes.len() <= destination.len() {
+        destination[..bytes.len()].copy_from_slice(bytes);
+    }
+    write_output(
+        output_required,
+        u32::try_from(bytes.len()).map_err(|_| ArosError::ObjectTooLarge)?,
+    )
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn afsplus_aros_get_attribute(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    attribute: *const u8,
+    attribute_length: u32,
+    value: *mut u8,
+    value_capacity: u32,
+    output_required: *mut u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_required)?;
+        let name = input_bytes(name, name_length)?;
+        let attribute = input_bytes(attribute, attribute_length)?;
+        // A caller's bad buffer is its error whatever the volume holds.
+        output_slice(value, value_capacity)?;
+        let found = bridge_mut(filesystem)?
+            .adapter
+            .attribute(optional_lock(base_lock), name, attribute)?
+            .ok_or(ArosError::ObjectNotFound)?;
+        sized_bytes(&found, value, value_capacity, output_required)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_list_attributes(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    names: *mut u8,
+    names_capacity: u32,
+    output_required: *mut u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_required)?;
+        let name = input_bytes(name, name_length)?;
+        output_slice(names, names_capacity)?;
+        let list = bridge_mut(filesystem)?
+            .adapter
+            .attribute_names(optional_lock(base_lock), name)?;
+        sized_bytes(&list, names, names_capacity, output_required)
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn afsplus_aros_set_attribute(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    attribute: *const u8,
+    attribute_length: u32,
+    value: *const u8,
+    value_length: u32,
+    mode: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        let name = input_bytes(name, name_length)?;
+        let attribute = input_bytes(attribute, attribute_length)?;
+        let value = input_bytes(value, value_length)?;
+        let (value, mode) = match mode {
+            AFSPLUS_AROS_ATTRIBUTE_UPSERT => (Some(value), AttributeWriteMode::Upsert),
+            AFSPLUS_AROS_ATTRIBUTE_CREATE => (Some(value), AttributeWriteMode::Create),
+            AFSPLUS_AROS_ATTRIBUTE_REPLACE => (Some(value), AttributeWriteMode::Replace),
+            // A removal carries no value; one that does is a caller's error.
+            AFSPLUS_AROS_ATTRIBUTE_REMOVE if value.is_empty() => (None, AttributeWriteMode::Upsert),
+            _ => return Err(ArosError::BadNumber),
+        };
+        bridge_mut(filesystem)?.adapter.set_attribute(
+            optional_lock(base_lock),
+            name,
+            attribute,
+            value,
+            mode,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )
     })
 }
 

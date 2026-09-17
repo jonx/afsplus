@@ -167,7 +167,9 @@ for symbol in \
     afsplus_aros_dir_open afsplus_aros_dir_read afsplus_aros_dir_close \
     afsplus_aros_extent_map afsplus_aros_volume_label \
     afsplus_aros_set_volume_label afsplus_aros_set_comment \
-    afsplus_aros_comment afsplus_aros_file_comment
+    afsplus_aros_comment afsplus_aros_file_comment \
+    afsplus_aros_get_attribute afsplus_aros_list_attributes \
+    afsplus_aros_set_attribute
 do
     "$aros_nm" --defined-only "$archive" | grep -Eq "[[:space:]]$symbol$" || {
         echo "Missing exported symbol: $symbol" >&2
