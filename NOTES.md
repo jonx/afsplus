@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Read today's ADRs as a stranger: which claims nothing held](#2026-09-17--read-todays-adrs-as-a-stranger-which-claims-nothing-held)
 - [2026-09-17 — Hold the claim ADR-115 made about explain](#2026-09-17--hold-the-claim-adr-115-made-about-explain)
 - [2026-09-17 — The feature registry lists what exists (ADR-116)](#2026-09-17--the-feature-registry-lists-what-exists-adr-116)
 - [2026-09-17 — Retire what nothing writes (ADR-115)](#2026-09-17--retire-what-nothing-writes-adr-115)
@@ -223,6 +224,45 @@ Entry format: `## YYYY-MM-DD — title`.
 
 
 
+
+## 2026-09-17 — Read today's ADRs as a stranger: which claims nothing held
+
+A sweep of the twelve ADRs written today (104, 106 to 116) for statements no
+test could break. Most were already held, several by construction: ADR-104's
+"the identification block is never rewritten" and its unchanged-label no-op
+are in `volume_label`; ADR-106's "a directory listing reads the comment with
+the record it already reads" follows from the comment living inside the record
+block, which the golden-byte test holds; ADR-108's 17-block bound is held by
+the largest-set reference of `attributes_c`; ADR-115's explain claim was held
+this morning.
+
+Three were not, and are now, each with a negative control that fails the test.
+ADR-108 decision 3: "One set has one encoding, so two implementations that
+hold the same attributes write the same bytes." `object_attributes` now
+encodes what each accepted image decodes to and requires the image back, byte
+for byte; a single pad byte appended by the encoder breaks it. ADR-112: "explain
+reports a block with a dirty tail as having a valid checksum, which it has",
+the sentence that separates the diagnostic from admission; `zero_tail` now
+asserts it for every kind whose damage still leaves a walkable state, and
+conflating the two in `explain.rs` breaks it. ADR-106 decision 2: "A symlink's
+longest target shrinks by the comment's wire length"; `object_comment` now
+takes the exact room for an empty, a 4-byte and a 255-byte comment and one
+byte past it.
+
+One claim is held only indirectly and the entry says so rather than pretending:
+ADR-109's "a metadata block's header generation equals its ledger birth covers
+chain segments". A segment whose generation disagrees fails the view walk
+before that rule is reached, so the checker errors either way; the test proves
+the error, not which rule produced it.
+
+Alignment after ADR-115 and ADR-116 removed things: the milestone row for M01
+said "remaining wire surfaces open", which Q15's closure made false, and now
+names what is actually open (Unicode keys, the C writer's allocation and data
+emission). The Stage B inventory had two rows about byte offsets, because the
+reserved-field row I rewrote became a duplicate of the first; they are one row
+that says the FIELDS are decided by ADR-110 to ADR-114 and the offsets are
+not. The stale codec-target counts and the removed codecs' audit row went with
+their own lots.
 
 ## 2026-09-17 — Hold the claim ADR-115 made about explain
 

@@ -311,6 +311,24 @@ fn both_readers_refuse_a_dirty_tail_in_every_kind_on_the_lookup_path() {
         }
         let rust = mount(dirty.clone()).and_then(|mut volume| volume.stat(file));
         assert!(rust.is_err(), "Rust admitted a dirty tail in the {what}");
+        // ADR-112 keeps the diagnostic apart from admission: such a block
+        // HAS a valid checksum and explain says so, while no reader admits
+        // it. A reader that conflated the two would report a torn write.
+        // A damaged identification or checkpoint leaves no committed state
+        // to walk, so there is no explanation to ask for.
+        if let Ok(explainer) = Explainer::load(&mut dirty) {
+            for lba in &lbas {
+                let identity = explainer
+                    .explain_block(&mut dirty, *lba)
+                    .unwrap()
+                    .identity
+                    .unwrap_or_else(|| panic!("{what}: no identity for a resealed block"));
+                assert!(
+                    identity.checksum_valid,
+                    "{what}: explain calls a resealed block's checksum invalid"
+                );
+            }
+        }
         assert_eq!(
             c_verdict(&image_of(&mut dirty), expectation),
             Some(0),

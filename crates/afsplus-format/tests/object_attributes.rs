@@ -250,6 +250,39 @@ fn the_set_has_one_encoding() {
     );
 }
 
+/// ADR-108: "One set has one encoding, so two implementations that hold the
+/// same attributes write the same bytes." Encoding what a set decodes to must
+/// give the bytes back, for every image the decoder accepts.
+#[test]
+fn every_accepted_set_is_the_only_encoding_of_its_attributes() {
+    let value = vec![9u8; 300];
+    let sets: [Vec<(&str, &[u8])>; 4] = [
+        vec![("user.a", b"1")],
+        vec![
+            ("aros.icon", &value),
+            ("user.empty", b""),
+            ("user.note", b"hello"),
+        ],
+        // A name that is a proper prefix of the next, and the empty value.
+        vec![("user.a", b""), ("user.ab", b"")],
+        // Every namespace, in the order their bytes impose.
+        vec![
+            ("aros.x", b"1"),
+            ("security.x", b"2"),
+            ("system.x", b"3"),
+            ("user.x", b"4"),
+        ],
+    ];
+    for entries in &sets {
+        let bytes = encode_attribute_set(entries).unwrap();
+        let decoded = decode_attribute_set(&bytes).unwrap();
+        assert_eq!(&decoded, entries);
+        // The round trip the other way: encoding what the image decodes to
+        // reproduces the image byte for byte.
+        assert_eq!(encode_attribute_set(&decoded).unwrap(), bytes);
+    }
+}
+
 #[test]
 fn a_set_out_of_order_or_out_of_bounds_is_refused_by_both_directions() {
     let unsorted: [(&str, &[u8]); 2] = [("user.b", b"1"), ("user.a", b"2")];

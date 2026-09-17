@@ -108,6 +108,40 @@ fn a_symlink_keeps_its_target_after_the_comment() {
         ObjectRecord::decode_metadata_with_generation(&block),
         Ok((link, 7))
     );
+
+    // ADR-106: "A symlink's longest target shrinks by the comment's wire
+    // length." Five bytes of comment cost five bytes of target, exactly.
+    let room = SymlinkRecord::maximum_target_bytes(DEFAULT_BLOCK_SIZE);
+    for (comment, wire) in [("", 0usize), ("note", 5), (&"x".repeat(255), 256)] {
+        let mut record = file();
+        record.object_type = ObjectType::Symlink;
+        let record = record.with_comment(Comment::new(comment).unwrap());
+        let longest = "t".repeat(room - wire);
+        let mut fits = record;
+        fits.size_bytes = longest.len() as u64;
+        assert!(
+            SymlinkRecord {
+                record: fits,
+                target: &longest,
+            }
+            .encode(DEFAULT_BLOCK_SIZE, 7)
+            .is_ok(),
+            "a target of {} bytes with a {wire}-byte comment field",
+            longest.len()
+        );
+        let one_more = "t".repeat(room - wire + 1);
+        let mut over = record;
+        over.size_bytes = one_more.len() as u64;
+        assert!(
+            SymlinkRecord {
+                record: over,
+                target: &one_more,
+            }
+            .encode(DEFAULT_BLOCK_SIZE, 7)
+            .is_err(),
+            "one byte past the room a {wire}-byte comment field leaves"
+        );
+    }
 }
 
 #[test]
