@@ -11,6 +11,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 - [2026-09-17 — What a rebuilt AROS tree loses, written down and applied](#2026-09-17--what-a-rebuilt-aros-tree-loses-written-down-and-applied)
 - [2026-09-17 — A round of handler work costs nothing](#2026-09-17--a-round-of-handler-work-costs-nothing)
+- [2026-09-17 — Documents that contradicted the code, and documents that omitted it](#2026-09-17--documents-that-contradicted-the-code-and-documents-that-omitted-it)
 - [2026-09-17 — Read today's ADRs as a stranger: which claims nothing held](#2026-09-17--read-todays-adrs-as-a-stranger-which-claims-nothing-held)
 - [2026-09-17 — Hold the claim ADR-115 made about explain](#2026-09-17--hold-the-claim-adr-115-made-about-explain)
 - [2026-09-17 — The feature registry lists what exists (ADR-116)](#2026-09-17--the-feature-registry-lists-what-exists-adr-116)
@@ -269,6 +270,58 @@ not an observation.
 
 Peak memory remains unmeasured, and so does the benchmark runner C13 asks
 for; what is gone from that entry is the steady half.
+
+## 2026-09-17 — Documents that contradicted the code, and documents that omitted it
+
+A verification pass found rot in the documents today's lots changed. Two lots.
+
+What was WRONG, where a newcomer building a reader from the text would have
+shipped the wrong one: docs/03 said the retired identification versions 1 and 2
+"remain readable and writable"; it listed three INCOMPAT bits and omitted bit 3
+and both other words, so it now carries a table of all seven, one per
+registered identity; and it called the identification label a "reference",
+although the block carries the label inline and the mutable one lives in the
+checkpoint. testing/fuzzing.md said the portable reader does not expose
+attributes, which it has since the C parity lot. Its executable surface audit
+claims every ApiMethod belongs to exactly one line; ApiMethod has 81 and the
+audit named 75, missing the six I added in the attribute and snapshot-reader
+lots, which is my omission and is now closed and counted. developer-harness
+said 66 registered methods. milestones said twenty-one codec targets in a
+requirement row and eighteen in another, so the requirement row reads 18.
+open-questions had a blank line splitting its table in two with Q15 and Q16
+between Q10 and Q11; the rows are one table in order again, and the future-work
+columns of Q10 and Q13, which still sent the reserved fields and the checkpoint
+flags word to M14, now say which ADR closed each and that M14 keeps the byte
+offsets.
+
+What was STALE, where the document simply had not caught up: docs/04 listed an
+"attribute-root" where the record carries a 16-byte attribute reference, and
+omitted the security reference and the comment. docs/12 declared no spec and no
+tests although both exist, and sent the namespaces to a registry ADR-116
+emptied; it now opens by saying what attributes ARE. docs/17 never mentioned
+the checkpoint, reclaim, snapshot-record, security or attribute decoders that
+closed Q15, nor that admission is exact and where those rules live. docs/21 is
+the chapter a parser author reads, and it predated the whole exact-admission
+regime: it has a section on one image per value, zero tails, reserved fields,
+validated namespaces and retired surface. tools-spec had no section for
+afsplus-explain or afsplus-image-diff, both of which are binaries; and the
+explain command's own --help still described three questions when it answers
+eight.
+
+Two items of the list were not what they looked like, and the reasoning is in
+the board thread. The "typed object-map payloads" of the fuzz table are not
+stale: ADR-115 retired the legacy single-block map, while the object map is a
+typed AFST tree and the tree-node target's seed is an ObjectMap leaf. The
+milestone row citing legacy targets 19-21 records qualification runs that
+happened, so it keeps its retained artifact names and now says those targets
+were retired and the gate runs 18, rather than deleting evidence.
+
+ADR-116 sent the removed discard identity to docs/09 section 6, which is
+"discardable" as a property of feature state, where the subject is docs/07
+section 7. A decision record is immutable except for its status and relation
+lines, and that rule holds for an author correcting their own error, so the
+correction is ADR-117 rather than a quiet edit, and docs/07 section 7 states
+the subject.
 
 ## 2026-09-17 — Read today's ADRs as a stranger: which claims nothing held
 

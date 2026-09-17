@@ -1,6 +1,7 @@
 # 17. Portability
 
-> **ADRs:** none · **Spec:** none ·
+> **ADRs:** [ADR-100](../adr/ADR-100-exact-object-record-admission.md), [ADR-111](../adr/ADR-111-checkpoint-zero-tail.md), [ADR-112](../adr/ADR-112-block-zero-tail.md), [ADR-114](../adr/ADR-114-reserved-header-fields.md), [ADR-115](../adr/ADR-115-retire-unwritten-surface.md) ·
+> **Spec:** [format header](../spec/afsplus_format.h), [disk layout](../spec/disk-layout.md) ·
 > **Tests:** [aros-system-volume-qualification](../testing/aros-system-volume-qualification.md),
 > [conformance](../testing/conformance.md), [fuzzing](../testing/fuzzing.md) · **Milestones:** M01, M08
 
@@ -72,6 +73,29 @@ into caller-owned buffers. It does not share codecs with Rust;
 interoperability is established by consuming Rust-produced images and matching
 the corruption/fallback oracle in the
 [conformance gate](../testing/conformance.md#portable-c-bootstrap-gate).
+
+Every wire layout the Rust codec states has a decoder here, and each is held
+to the same verdict image by image against the Rust one. Besides the
+identification block, the object record and the trees the lookup path needs,
+the reader decodes: one checkpoint slot in both payload forms
+(`afspr_decode_checkpoint_block`); the security reference, an `"AFSX"`
+descriptor segment and an object comment; the attribute reference, an `"AFSA"`
+segment, a whole attribute set and its iterator; the reclaim root, sealed
+segment and sealed table; and the snapshot registry and lifetime records with
+their keys. It decodes those last two families without walking either
+structure, because it implements neither reclamation nor snapshots. The
+cross-read tests are named in [fuzzing](../testing/fuzzing.md) and in
+[the portable reader's README](../portable/c/README.md).
+
+Admission is exact, and the rules live where every kind passes through them.
+`afspr_verify_header` refuses a nonzero byte after the payload for every block
+kind ([ADR-112](../adr/ADR-112-block-zero-tail.md)); the common header's flags
+and owner are zero on the kinds that assign them no meaning
+([ADR-114](../adr/ADR-114-reserved-header-fields.md)); identification version 3
+is the only version and the retired prototype layouts are refused, not read
+([ADR-115](../adr/ADR-115-retire-unwritten-surface.md)). A reader written from
+this chapter that admitted more would accept images the filesystem calls
+corrupt.
 
 The reader also scans the fsynced intent-log prefix and exposes a read-only
 checkpoint-plus-log namespace and file view. Its bounded lookup and

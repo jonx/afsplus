@@ -1,6 +1,7 @@
 # ADR-116: The feature registry lists what exists
 
 Status: Accepted
+Amended by: ADR-117
 Amends: ADR-038
 
 ## Context

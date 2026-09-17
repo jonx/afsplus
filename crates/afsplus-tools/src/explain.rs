@@ -44,8 +44,8 @@ where
         Ok(ParseResult::Options(options)) => options,
         Ok(ParseResult::Help) => {
             println!("{USAGE}");
-            println!("Say what the committed state of an image believes about one block,");
-            println!("one object or one path. The image is opened read-only.");
+            println!("Say what the committed state of an image believes. The image is");
+            println!("opened read-only.");
             println!("A path is absolute inside the volume, with / between components.");
             println!("extent asks where one byte offset of a file lives; reclaim with a block");
             println!("asks for the pending run that holds it; feature takes a registry identity.");

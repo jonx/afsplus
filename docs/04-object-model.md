@@ -57,7 +57,12 @@ The core record contains only fields required by almost every implementation:
 - metadata-change timestamp
 - AROS protection flags
 - extent-root or inline extent data
-- attribute-root
+- a 16-byte security reference when the object carries a descriptor
+  ([ADR-101](../adr/ADR-101-security-preservation-container.md))
+- a 16-byte attribute reference when the object carries extended attributes
+  ([ADR-108](../adr/ADR-108-extended-attributes.md))
+- the comment, inline, when the object has one
+  ([ADR-106](../adr/ADR-106-stored-object-comment.md))
 - generation
 - checksum
 

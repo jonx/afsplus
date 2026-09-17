@@ -1,15 +1,22 @@
 # 12. Metadata and Extended Attributes
 
-> **ADRs:** [ADR-106](../adr/ADR-106-stored-object-comment.md), [ADR-108](../adr/ADR-108-extended-attributes.md) · **Spec:** none ·
-> **Tests:** none · **Milestones:** none
+> **ADRs:** [ADR-106](../adr/ADR-106-stored-object-comment.md), [ADR-108](../adr/ADR-108-extended-attributes.md), [ADR-109](../adr/ADR-109-owned-chains-under-snapshots.md) ·
+> **Spec:** [format header](../spec/afsplus_format.h), [disk layout](../spec/disk-layout.md) ·
+> **Tests:** [extended attributes](../crates/afsplus-check/tests/extended_attributes.rs), [chains under snapshots](../crates/afsplus-check/tests/chain_snapshots.rs), [wire image](../crates/afsplus-format/tests/object_attributes.rs), [C cross-read](../crates/afsplus-format/tests/attributes_c.rs) · **Milestones:** M03
 
 ## 1. Core versus extensible metadata
 
-Frequently required fields stay in the core object record.
+Extended attributes exist: an object carries a set of named opaque values,
+stored as one blob in a chain of `"AFSA"` blocks it owns, named by a 16-byte
+reference in its record ([ADR-108](../adr/ADR-108-extended-attributes.md)).
+The core reads and writes them through `attribute`, `attribute_names` and
+`set_attributes`, a clone copies them, deleting the object frees them, and a
+retained snapshot keeps the set it captured
+([ADR-109](../adr/ADR-109-owned-chains-under-snapshots.md)).
 
-Less common metadata uses typed attributes.
-
-This avoids repeatedly expanding the core on-disk object format.
+Frequently required fields stay in the core object record; less common
+metadata uses attributes, so the core on-disk object format does not grow for
+each of them.
 
 ## 2. Attribute naming
 
@@ -30,7 +37,12 @@ security.*
 system.*
 ```
 
-The exact standardized registry belongs in the feature registry.
+No feature gates attributes: the reference is an object flag every
+implementation of the format knows, so there is no identity for them in the
+[feature registry](../spec/feature-registry.toml), which lists only negotiated
+features ([ADR-116](../adr/ADR-116-registry-lists-what-exists.md)). The four
+namespaces above are the whole namespace rule; a standardized name within one
+is host convention, not format.
 
 ## 3. AROS comments
 

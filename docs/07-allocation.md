@@ -260,6 +260,13 @@ Discard/TRIM is issued through the block provider only after deallocation become
 
 Discard failure does not make the filesystem inconsistent.
 
+Discard is a hint on which no on-disk correctness semantics depend, so the
+feature registry carries no identity for it: an identity is registered when
+its bit, its class and its code land together
+([ADR-116](../adr/ADR-116-registry-lists-what-exists.md),
+[ADR-117](../adr/ADR-117-correct-the-discard-pointer.md)). One returns here
+with the implementation.
+
 ## 8. Allocation integrity
 
 No committed allocation state may allow two live objects to own the same physical block unless an explicitly enabled shared-extent feature defines and accounts for that sharing.

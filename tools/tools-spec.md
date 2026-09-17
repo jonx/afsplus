@@ -10,6 +10,8 @@ qualification scripts are indexed separately in [README.md](README.md).
 - [afsplus-info](#afsplus-info)
 - [afsplus-dump](#afsplus-dump)
 - [afsplus-extract](#afsplus-extract)
+- [afsplus-explain](#afsplus-explain)
+- [afsplus-image-diff](#afsplus-image-diff)
 - [afsplus-check](#afsplus-check)
 - [afsplus-resize](#afsplus-resize)
 - [afsplus-catalog](#afsplus-catalog)
@@ -171,6 +173,46 @@ accepting a complete traversal. Missing/truncated summaries and `.partial`
 files preserve evidence of interrupted work. The manifest documents extraction;
 full metadata-preserving backup/restore is qualified separately under Q11.
 See the [extraction gate](../testing/extraction-qualification.md).
+
+## afsplus-explain
+
+```text
+afsplus-explain [--json] <image> (block <number> | object <id> | path <path>
+                                 | extent <id> <offset> | checkpoint
+                                 | reclaim [<block>] | space <region>
+                                 | feature [<id>])
+```
+
+Says what the committed state of an image believes, from a walk that shares no
+traversal with the checker and reads the block codecs only. It opens the host
+file read-only. `block` gives a block's allocation state, every role the
+committed state gives it, what the block says about itself and a one-word
+verdict; `object` and `path` give one object's fields, its comment, a symlink's
+target, its data summary, the state of its security and attribute chains and
+every directory entry that names it; `extent` says where one byte offset lives;
+`checkpoint` gives both slots and the selected checkpoint's fields; `reclaim`
+summarises the queue and, with a block, the pending run that holds it; `space`
+counts one region; `feature` lists the feature bits.
+
+The JSON schema version is 2. Every document carries the generation it
+answers for, whether the volume keeps snapshots, and whether the walk could
+decode every branch. Status 0 is an answer from a complete walk, 1 an answer
+from a partial walk or a question about something the image does not hold, 2 a
+usage or host I/O failure.
+
+## afsplus-image-diff
+
+```text
+afsplus-image-diff [--json] [--metadata] <before> <after>
+```
+
+Reports what the second image differs by from the first in filesystem terms
+rather than in blocks: objects created, removed and changed, links added and
+removed, renames, orphan changes, allocation totals and, unless `--metadata`
+is given, the byte ranges of changed file content. Both images are opened
+read-only. The JSON schema version is 3. A reported difference is a normal
+result with status 0; an image that could only be compared in part gives the
+media status and names the branch in `problems`.
 
 ## afsplus-check
 

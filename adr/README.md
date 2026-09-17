@@ -144,7 +144,8 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-113](ADR-113-checkpoint-flags-word.md) | The checkpoint's flags word is zero | Accepted | amended by [ADR-114](ADR-114-reserved-header-fields.md) |
 | [ADR-114](ADR-114-reserved-header-fields.md) | The common header's flags and owner belong to no kind that does not name them | Accepted | amends [ADR-113](ADR-113-checkpoint-flags-word.md) |
 | [ADR-115](ADR-115-retire-unwritten-surface.md) | A version or block kind nothing writes is refused, not read | Accepted | amends [ADR-036](ADR-036-reclaim-queue.md), [ADR-038](ADR-038-mount-policy-and-feature-summary.md) |
-| [ADR-116](ADR-116-registry-lists-what-exists.md) | The feature registry lists what exists | Accepted | amends [ADR-038](ADR-038-mount-policy-and-feature-summary.md) |
+| [ADR-116](ADR-116-registry-lists-what-exists.md) | The feature registry lists what exists | Accepted | amended by [ADR-117](ADR-117-correct-the-discard-pointer.md); amends [ADR-038](ADR-038-mount-policy-and-feature-summary.md) |
+| [ADR-117](ADR-117-correct-the-discard-pointer.md) | Correct where ADR-116 sends the discard identity | Accepted | amends [ADR-116](ADR-116-registry-lists-what-exists.md) |
 
 <!-- /adr-index -->
 
