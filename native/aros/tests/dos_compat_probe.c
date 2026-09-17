@@ -475,6 +475,15 @@ static int hold_notification(void)
     return RETURN_OK;
 }
 
+/* Ticks since midnight, to order what two tasks print. */
+static LONG now_ticks(void)
+{
+    struct DateStamp stamp;
+
+    DateStamp(&stamp);
+    return stamp.ds_Minute * 3000 + stamp.ds_Tick;
+}
+
 static int hold_record(void)
 {
     BPTR file = Open(RECORDS, MODE_READWRITE);
@@ -486,6 +495,8 @@ static int hold_record(void)
         Close(file);
         return fail("HOLDER LockRecord", DOSFALSE);
     }
+    Printf("[AFSPLUS-DOS] HOLDER holds the record at tick %ld\n",
+        now_ticks());
     Delay(150);
     if (!UnLockRecord(file, 0, 10))
     {
@@ -493,6 +504,8 @@ static int hold_record(void)
         return fail("HOLDER UnLockRecord", DOSFALSE);
     }
     Close(file);
+    Printf("[AFSPLUS-DOS] HOLDER released the record at tick %ld\n",
+        now_ticks());
     return RETURN_OK;
 }
 
@@ -514,15 +527,18 @@ static int wait_for_record(void)
 
     if (file == BNULL)
         return fail("WAITER open", DOSFALSE);
+    Printf("[AFSPLUS-DOS] WAITER starts polling at tick %ld\n", now_ticks());
     /* Until the holder task has the record, an immediate request succeeds. */
-    for (tries = 0; tries < 100; tries++)
+    for (tries = 0; tries < 400; tries++)
     {
         if (!LockRecord(file, 0, 10, REC_EXCLUSIVE_IMMED, 0))
             break;
         UnLockRecord(file, 0, 10);
         Delay(2);
     }
-    if (tries == 100 || IoErr() != ERROR_LOCK_COLLISION)
+    Printf("[AFSPLUS-DOS] WAITER stops polling at tick %ld after %ld tries\n",
+        now_ticks(), (LONG)tries);
+    if (tries == 400 || IoErr() != ERROR_LOCK_COLLISION)
     {
         Close(file);
         return fail("WAITER never saw the holder", (SIPTR)tries);
