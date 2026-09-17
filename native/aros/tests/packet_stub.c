@@ -1361,6 +1361,14 @@ int main(void)
                 && packet.dp_Res2 == ERROR_BAD_NUMBER);
         }
 
+        /* Bits without a meaning are refused, so they can get one later. */
+        EXT_BEGIN(AFSPLUS_EXT_INTERFACE);
+        request.reserved = 1;
+        EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+        EXT_BEGIN(AFSPLUS_EXT_INTERFACE);
+        request.flags = 1;
+        EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+
         /* A longer block from a newer client is served by its known part. */
         EXT_BEGIN(AFSPLUS_EXT_INTERFACE);
         request.header_size = sizeof(request) + 16;

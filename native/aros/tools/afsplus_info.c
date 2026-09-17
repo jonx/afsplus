@@ -99,6 +99,12 @@ int main(int argc, char **argv)
             &required);
         if (error != 0 || (required != 0 && required <= capacity))
             break;
+        /* A report is never empty; asking again would not change that. */
+        if (required == 0)
+        {
+            error = ERROR_OBJECT_WRONG_TYPE;
+            break;
+        }
         if (document != NULL)
             FreeVec(document);
         capacity = required + 256;

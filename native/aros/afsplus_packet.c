@@ -1524,6 +1524,13 @@ static int32_t process_extension(struct AfsplusArosPacketContext *context,
     memcpy((uint8_t *)&request + AFSPLUS_EXT_PREFIX_BYTES,
         (const uint8_t *)shared + AFSPLUS_EXT_PREFIX_BYTES,
         sizeof(request) - AFSPLUS_EXT_PREFIX_BYTES);
+    /* A field that means nothing today must be zero, or it could never
+     * mean anything tomorrow: a sender's stray bits would already be out
+     * there. Only ADVISE and PACKET_COUNTS read flags. */
+    if (request.reserved != 0
+        || (request.flags != 0 && request.operation != AFSPLUS_EXT_ADVISE
+            && request.operation != AFSPLUS_EXT_PACKET_COUNTS))
+        return ERROR_BAD_NUMBER;
     request.output_count = 0;
     request.output_flags = 0;
     request.output_value = 0;

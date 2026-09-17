@@ -253,6 +253,13 @@ clock, is `ERROR_NOT_IMPLEMENTED`: `ERROR_ACTION_NOT_KNOWN` never comes out
 of the transport, because that value is how a client recognises a handler
 without it.
 
+`STAT_ID` and the object-ID walk answer any task that can send a packet to
+the handler, without a lock on the object. That is the AROS model, not an
+omission: there is one address space and no user boundary, every task can
+already open every file, and the classic security adapter projects, it does
+not enforce. A system that adds users adds the check in the handler, behind
+the same operations.
+
 Objects travel as the application holds them: a lock as its `BPTR`, a file as
 the `fh_Arg1` of its `FileHandle`. Names are single components; the transport
 resolves no path. A report struct in a caller buffer declares its size in its

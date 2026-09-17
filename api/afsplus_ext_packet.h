@@ -80,7 +80,9 @@ struct AfsplusExtPacketCount {
 
 /*
  * One block for every operation; an operation reads the fields listed for
- * it and ignores the rest. The sender clears the block, fills magic, version
+ * it. reserved, and flags where the operation does not list it, must be zero
+ * (ERROR_BAD_NUMBER), so that they can be given a meaning later; the other
+ * unlisted fields are ignored. The sender clears the block, fills magic, version
  * and header_size = sizeof(struct AfsplusExtRequest), and the inputs.
  *
  * object[]: a lock as the BPTR the application holds (0: the volume root),
