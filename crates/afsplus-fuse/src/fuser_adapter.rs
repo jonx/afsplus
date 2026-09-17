@@ -661,6 +661,12 @@ fn errno(error: VfsError) -> Errno {
         VfsError::NotSupported => Errno::EOPNOTSUPP,
         VfsError::Corrupt(_) | VfsError::Io(_) => Errno::EIO,
         VfsError::Limit(_) => Errno::EOVERFLOW,
+        // Staged writes could not be published and were abandoned so the
+        // volume stays usable. EIO is the truthful errno: data a caller was
+        // told had been written is gone. How much is in the diagnostics
+        // report, which is where a person can read a reason rather than a
+        // three-letter code.
+        VfsError::WindowLost(_) => Errno::EIO,
     }
 }
 
