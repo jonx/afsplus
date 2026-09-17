@@ -18,9 +18,58 @@ use afsplus_aros::{
 use afsplus_block::{BlockDevice, BlockError};
 use afsplus_core::{MountMode, MountOptions};
 use afsplus_format::Timespec;
-use afsplus_vfs::Vfs;
+use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 2;
+pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
+pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
+
+// Published C capability identities of `api/filesystem_v2.h`. They are
+// independent of the Rust mask and never renumbered.
+pub const FSV2_CAP_64BIT_IO: u64 = 1 << 0;
+pub const FSV2_CAP_UTF8_NAMES: u64 = 1 << 1;
+pub const FSV2_CAP_SYMLINKS: u64 = 1 << 2;
+pub const FSV2_CAP_HARDLINKS: u64 = 1 << 3;
+pub const FSV2_CAP_XATTRS: u64 = 1 << 4;
+pub const FSV2_CAP_ATOMIC_REPLACE: u64 = 1 << 5;
+pub const FSV2_CAP_OBJECT_IDS: u64 = 1 << 6;
+pub const FSV2_CAP_FAST_ENUMERATION: u64 = 1 << 7;
+pub const FSV2_CAP_CHANGE_STREAM: u64 = 1 << 8;
+pub const FSV2_CAP_SPARSE: u64 = 1 << 9;
+pub const FSV2_CAP_FSYNC: u64 = 1 << 10;
+pub const FSV2_CAP_CLONE_FILE: u64 = 1 << 11;
+pub const FSV2_CAP_CLONE_RANGE: u64 = 1 << 12;
+pub const FSV2_CAP_LOGGED_DATA_FSYNC: u64 = 1 << 13;
+pub const FSV2_CAP_DATA_POLICY: u64 = 1 << 14;
+pub const FSV2_CAP_OPEN_UNLINKED: u64 = 1 << 15;
+pub const FSV2_CAP_PAGED_DIRECTORIES: u64 = 1 << 16;
+
+/// Rust capability bit to published C identity. A Rust bit without a row is
+/// not advertised at the C boundary.
+const CAPABILITY_MAP: [(u64, u64); 14] = [
+    (Capabilities::IO_64BIT, FSV2_CAP_64BIT_IO),
+    (Capabilities::UTF8_NAMES, FSV2_CAP_UTF8_NAMES),
+    (Capabilities::HARD_LINKS, FSV2_CAP_HARDLINKS),
+    (Capabilities::ATOMIC_REPLACE, FSV2_CAP_ATOMIC_REPLACE),
+    (Capabilities::OBJECT_IDS, FSV2_CAP_OBJECT_IDS),
+    (Capabilities::PAGED_DIRECTORIES, FSV2_CAP_PAGED_DIRECTORIES),
+    (Capabilities::SPARSE_FILES, FSV2_CAP_SPARSE),
+    (Capabilities::FSYNC, FSV2_CAP_FSYNC),
+    (Capabilities::CLONE_FILE, FSV2_CAP_CLONE_FILE),
+    (Capabilities::CLONE_RANGE, FSV2_CAP_CLONE_RANGE),
+    (Capabilities::LOGGED_DATA_FSYNC, FSV2_CAP_LOGGED_DATA_FSYNC),
+    (Capabilities::DATA_POLICY, FSV2_CAP_DATA_POLICY),
+    (Capabilities::OPEN_UNLINKED, FSV2_CAP_OPEN_UNLINKED),
+    (Capabilities::SYMLINKS, FSV2_CAP_SYMLINKS),
+];
+
+fn published_capabilities(capabilities: Capabilities) -> u64 {
+    CAPABILITY_MAP
+        .iter()
+        .filter(|(rust, _)| capabilities.contains(*rust))
+        .fold(0, |bits, (_, published)| bits | published)
+}
 pub const AFSPLUS_AROS_MOUNT_READ_WRITE: u32 = 0;
 pub const AFSPLUS_AROS_MOUNT_READ_ONLY: u32 = 1;
 pub const AFSPLUS_AROS_MOUNT_NO_CHANGES: u32 = 2;
@@ -96,6 +145,38 @@ pub struct AfsplusArosDiskInfo {
     pub in_use: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AfsplusArosInterface {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub interface_revision: u32,
+    pub reserved: u32,
+    pub groups: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AfsplusArosCapabilities {
+    pub struct_size: u32,
+    pub mount_mode: u32,
+    pub capabilities: u64,
+    pub block_size: u32,
+    pub max_name_bytes: u32,
+    pub case_sensitive: u32,
+    pub unicode_version_major: u8,
+    pub unicode_version_minor: u8,
+    pub unicode_version_patch: u8,
+    pub reserved0: u8,
+    pub pending_intent_records: u32,
+    pub reserved1: u32,
+    pub total_blocks: u64,
+    pub free_blocks: u64,
+    pub available_blocks: u64,
+}
+
+const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosInterface>()];
+const _: [(); 64] = [(); std::mem::size_of::<AfsplusArosCapabilities>()];
 const _: [(); 64] = [(); std::mem::size_of::<AfsplusArosFileInfo>()];
 const _: [(); 32] = [(); std::mem::size_of::<AfsplusArosDiskInfo>()];
 #[cfg(target_pointer_width = "64")]
@@ -304,6 +385,45 @@ fn write_output<T>(output: *mut T, value: T) -> Result<(), ArosError> {
     // SAFETY: the C caller provides an aligned, writable `T` output slot.
     unsafe { ptr::write(output, value) };
     Ok(())
+}
+
+/// Growth rule of the query structures: read the caller's size from the
+/// leading `u32`, refuse a size below the first published layout, copy at most
+/// that many bytes and report the count written in the same field.
+fn write_sized_output<T: Copy>(
+    output: *mut T,
+    minimum: usize,
+    mut value: T,
+    set_size: impl Fn(&mut T, u32),
+) -> Result<(), ArosError> {
+    require_output(output)?;
+    // SAFETY: every query structure starts with its `u32` size, and the
+    // caller provides at least that aligned field.
+    let caller = unsafe { ptr::read(output.cast::<u32>()) } as usize;
+    if caller < minimum {
+        return Err(ArosError::BadNumber);
+    }
+    let count = caller.min(std::mem::size_of::<T>());
+    set_size(&mut value, count as u32);
+    // SAFETY: the caller declared `caller >= count` writable bytes; `value`
+    // is a plain `repr(C)` structure without padding-sensitive invariants.
+    unsafe {
+        ptr::copy_nonoverlapping(
+            ptr::from_ref(&value).cast::<u8>(),
+            output.cast::<u8>(),
+            count,
+        );
+    }
+    Ok(())
+}
+
+fn mount_mode_value(mode: MountMode) -> u32 {
+    match mode {
+        MountMode::ReadWrite => AFSPLUS_AROS_MOUNT_READ_WRITE,
+        MountMode::ReadOnly => AFSPLUS_AROS_MOUNT_READ_ONLY,
+        MountMode::NoChanges => AFSPLUS_AROS_MOUNT_NO_CHANGES,
+        MountMode::Recovery => AFSPLUS_AROS_MOUNT_RECOVERY,
+    }
 }
 
 fn copy_file_info(
@@ -866,5 +986,57 @@ pub extern "C" fn afsplus_aros_disk_info(
     ffi_status(|| {
         require_output(output)?;
         copy_disk_info(bridge_mut(filesystem)?.adapter.disk_info(), output)
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn afsplus_aros_interface(output: *mut AfsplusArosInterface) -> i32 {
+    ffi_status(|| {
+        write_sized_output(
+            output,
+            std::mem::size_of::<AfsplusArosInterface>(),
+            AfsplusArosInterface {
+                struct_size: 0,
+                abi_version: AFSPLUS_AROS_ABI_VERSION,
+                interface_revision: AFSPLUS_AROS_INTERFACE_REVISION,
+                reserved: 0,
+                groups: AFSPLUS_AROS_GROUP_BASE | AFSPLUS_AROS_GROUP_INTERFACE_QUERY,
+            },
+            |value, size| value.struct_size = size,
+        )
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn afsplus_aros_capabilities(
+    filesystem: *mut AfsplusAros,
+    output: *mut AfsplusArosCapabilities,
+) -> i32 {
+    ffi_status(|| {
+        let policy = bridge_mut(filesystem)?.adapter.volume_policy();
+        write_sized_output(
+            output,
+            std::mem::size_of::<AfsplusArosCapabilities>(),
+            AfsplusArosCapabilities {
+                struct_size: 0,
+                mount_mode: mount_mode_value(policy.mount_mode),
+                capabilities: published_capabilities(policy.capabilities),
+                block_size: policy.statfs.block_size,
+                max_name_bytes: policy.statfs.max_name_bytes,
+                case_sensitive: u32::from(policy.statfs.case_sensitive),
+                unicode_version_major: policy.statfs.unicode_version[0],
+                unicode_version_minor: policy.statfs.unicode_version[1],
+                unicode_version_patch: policy.statfs.unicode_version[2],
+                reserved0: 0,
+                pending_intent_records: policy.pending_intent_records,
+                reserved1: 0,
+                total_blocks: policy.statfs.total_blocks,
+                free_blocks: policy.statfs.free_blocks,
+                available_blocks: policy.statfs.available_blocks,
+            },
+            |value, size| value.struct_size = size,
+        )
     })
 }

@@ -187,6 +187,17 @@ The handler keeps its device state alive, fills `AfsplusArosDevice` and
 on success and a non-zero native I/O status on failure. They receive exactly
 one logical AFS+ block per call.
 
+The boundary grows additively inside ABI version 1.
+`afsplus_aros_interface` needs no mount and returns the interface revision
+plus a mask of entry-point groups; a packet layer built against a newer header
+asks it before calling a function of a later group and answers
+`ERROR_ACTION_NOT_KNOWN` for a missing one. `afsplus_aros_capabilities`
+returns the mounted volume's published `FSV2_CAP_*` mask, mount mode, name
+limit, case policy, Unicode version, pending intent records and block counts.
+Both use one growth rule: the caller stores its structure size in
+`struct_size`, the library fills at most that many bytes and stores the count
+it filled, and a size below the first published layout is `ERROR_BAD_NUMBER`.
+
 Lock value zero represents the DOS null lock/root at the C boundary. A native
 `FileLock` or file-handle wrapper stores the returned 64-bit ID; on m68k it must
 not be squeezed into the 32-bit `fl_Key`/`fh_Arg1` scalar itself. Those fields

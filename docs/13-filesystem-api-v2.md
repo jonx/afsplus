@@ -169,9 +169,13 @@ images.
 
 `LOGGED_DATA_FSYNC` is additive bit 10 in the Rust capability mask; it changes
 no existing operation signature or on-disk identity. FUSE and the AROS Rust
-adapter inherit it through the shared VFS. The version-1 AROS C bridge has no
-capability-query structure to extend and keeps its ABI unchanged: its existing
-write/truncate/fsync entry points receive the same semantics transparently.
+adapter inherit it through the shared VFS. The AROS C bridge keeps its
+existing write/truncate/fsync entry points, which receive the same semantics
+transparently, and reports the capability through
+[`afsplus_aros_capabilities`](../api/afsplus_aros.h) under the published
+`FSV2_CAP_LOGGED_DATA_FSYNC` identity. The Rust mask and the C identities of
+[`filesystem_v2.h`](../api/filesystem_v2.h) are separate numberings; the bridge
+translates, and a Rust bit without a C identity is not advertised to C callers.
 An independent portable-C filesystem implementation must negotiate the on-disk
 feature and cross-read the conformance corpus before claiming parity.
 

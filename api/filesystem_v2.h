@@ -35,7 +35,14 @@ enum FSV2_Capability {
     FSV2_CAP_FAST_ENUMERATION  = UINT64_C(1) << 7,
     FSV2_CAP_CHANGE_STREAM     = UINT64_C(1) << 8,
     FSV2_CAP_SPARSE            = UINT64_C(1) << 9,
-    FSV2_CAP_FSYNC             = UINT64_C(1) << 10
+    FSV2_CAP_FSYNC             = UINT64_C(1) << 10,
+    /* Additive identities. A number is never reused or renumbered. */
+    FSV2_CAP_CLONE_FILE        = UINT64_C(1) << 11,
+    FSV2_CAP_CLONE_RANGE       = UINT64_C(1) << 12,
+    FSV2_CAP_LOGGED_DATA_FSYNC = UINT64_C(1) << 13,
+    FSV2_CAP_DATA_POLICY       = UINT64_C(1) << 14,
+    FSV2_CAP_OPEN_UNLINKED     = UINT64_C(1) << 15,
+    FSV2_CAP_PAGED_DIRECTORIES = UINT64_C(1) << 16
 };
 
 struct FSV2_String {

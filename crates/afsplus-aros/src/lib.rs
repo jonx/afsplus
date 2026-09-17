@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 use afsplus_block::BlockDevice;
 use afsplus_core::MountMode;
 use afsplus_format::{Timespec, OBJECT_ROOT};
-use afsplus_vfs::{AccessMode, Handle, NodeKind, ObjectId, Stat, Vfs, VfsError};
+use afsplus_vfs::{
+    AccessMode, Capabilities, Handle, NodeKind, ObjectId, Stat, StatFs, Vfs, VfsError,
+};
 
 pub type LockId = u64;
 pub type FileHandleId = u64;
@@ -97,12 +99,21 @@ pub struct DiskInfo {
     pub in_use: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VolumePolicy {
+    pub capabilities: Capabilities,
+    pub statfs: StatFs,
+    pub mount_mode: MountMode,
+    pub pending_intent_records: u32,
+}
+
 /// AROS DOS secondary result values used by the Alpha-0 packet bridge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ArosError {
     Unknown = 100,
     NoFreeStore = 103,
+    BadNumber = 115,
     ObjectInUse = 202,
     ObjectExists = 203,
     DirectoryNotFound = 204,
@@ -583,6 +594,17 @@ impl<D: BlockDevice> ArosAdapter<D> {
             bytes_per_block: stat.block_size,
             disk_type: DISK_TYPE_AFS_PLUS,
             in_use: !self.files.is_empty() || !self.locks.is_empty(),
+        }
+    }
+
+    /// The mounted volume's filesystem-neutral policy, for callers that must
+    /// not infer it from the handler name.
+    pub fn volume_policy(&self) -> VolumePolicy {
+        VolumePolicy {
+            capabilities: self.vfs.capabilities(),
+            statfs: self.vfs.statfs(),
+            mount_mode: self.vfs.mount_mode(),
+            pending_intent_records: self.vfs.pending_intent_records(),
         }
     }
 

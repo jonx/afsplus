@@ -18,6 +18,16 @@ extern "C" {
 
 #define AFSPLUS_AROS_ABI_VERSION UINT32_C(1)
 
+/* Additive growth inside ABI version 1. The revision counts the entry-point
+ * groups a library carries; every revision keeps all earlier functions and
+ * structure layouts. A caller built against a newer header asks
+ * afsplus_aros_interface() before it calls a function of a later group and
+ * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(2)
+
+#define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
+#define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
+
 #define AFSPLUS_AROS_MOUNT_READ_WRITE UINT32_C(0)
 #define AFSPLUS_AROS_MOUNT_READ_ONLY UINT32_C(1)
 #define AFSPLUS_AROS_MOUNT_NO_CHANGES UINT32_C(2)
@@ -93,7 +103,42 @@ struct AfsplusArosDiskInfo {
     uint32_t in_use;
 };
 
+/* Query structures use one growth rule. The caller stores the size of its
+ * own structure in struct_size. The library fills the fields that fit, never
+ * writes past that size, and stores the number of bytes it filled. A size
+ * below the revision-2 layout is refused with ERROR_BAD_NUMBER (115). */
+struct AfsplusArosInterface {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t interface_revision;
+    uint32_t reserved;
+    uint64_t groups;
+};
+
+/* capabilities uses the FSV2_CAP_* identities of filesystem_v2.h. */
+struct AfsplusArosCapabilities {
+    uint32_t struct_size;
+    uint32_t mount_mode;
+    uint64_t capabilities;
+    uint32_t block_size;
+    uint32_t max_name_bytes;
+    uint32_t case_sensitive;
+    uint8_t unicode_version_major;
+    uint8_t unicode_version_minor;
+    uint8_t unicode_version_patch;
+    uint8_t reserved0;
+    uint32_t pending_intent_records;
+    uint32_t reserved1;
+    uint64_t total_blocks;
+    uint64_t free_blocks;
+    uint64_t available_blocks;
+};
+
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(struct AfsplusArosInterface) == 24,
+    "AfsplusArosInterface ABI drift");
+_Static_assert(sizeof(struct AfsplusArosCapabilities) == 64,
+    "AfsplusArosCapabilities ABI drift");
 _Static_assert(sizeof(struct AfsplusArosFileInfo) == 64,
     "AfsplusArosFileInfo ABI drift");
 _Static_assert(sizeof(struct AfsplusArosDiskInfo) == 32,
@@ -110,6 +155,9 @@ _Static_assert(sizeof(struct AfsplusArosMountConfig) == 40,
     "AfsplusArosMountConfig 32-bit ABI drift");
 #endif
 #endif
+
+/* Callable without a mounted filesystem. */
+int32_t afsplus_aros_interface(struct AfsplusArosInterface *output);
 
 int32_t afsplus_aros_mount(const struct AfsplusArosDevice *device,
     const struct AfsplusArosMountConfig *config,
@@ -192,6 +240,10 @@ int32_t afsplus_aros_rewind_directory(struct AfsplusAros *filesystem,
     uint64_t lock);
 int32_t afsplus_aros_disk_info(struct AfsplusAros *filesystem,
     struct AfsplusArosDiskInfo *output);
+
+/* Group AFSPLUS_AROS_GROUP_INTERFACE_QUERY. */
+int32_t afsplus_aros_capabilities(struct AfsplusAros *filesystem,
+    struct AfsplusArosCapabilities *output);
 
 #ifdef __cplusplus
 }
