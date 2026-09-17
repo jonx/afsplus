@@ -139,6 +139,10 @@ echo "[aros-package] build the target-side handler report tool"
 build_target_program native/aros/tools/afsplus_info.c AFSPlusInfo \
     native/aros/client/afsplus_client.c
 
+echo "[aros-package] build the target-side clone-or-copy tool"
+build_target_program native/aros/tools/afsplus_clone.c AFSPlusClone \
+    native/aros/client/afsplus_client.c
+
 echo "[aros-package] build the target-side crash-replay probe"
 build_target_program native/aros/tests/replay_probe.c AFSPlusReplayProbe
 
@@ -193,7 +197,7 @@ cp docs/aros-alpha0-package.md "$staging/README.md"
 (
     cd "$staging"
     shasum -a 256 afsplus-handler AFSPlusAlpha0Probe AFSPlusDosProbe \
-        AFSPlusInfo \
+        AFSPlusInfo AFSPlusClone \
         AFSPlusReplayProbe \
         AFSPlusS1Probe AFSPlusS1bProbe AFSPlusS1Pivot AFSPLUS19 Unit19 \
         abi-report.txt build-profile.txt check-before.json README.md \

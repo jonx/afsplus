@@ -152,8 +152,11 @@ Present (L1, L2): `afsplus_aros_clone_file` from a lock and
 `afsplus_aros_clone_range` between two handles, advertised separately and
 answering `ERROR_ACTION_NOT_KNOWN` on a volume without shared extents.
 
-Lacking: a `Copy CLONE`-style consumer of `afsplus_client_clone_file` that
-falls back to a byte copy. Metadata inheritance follows the executable behavior
+`AFSPlusClone` (L3, cross-compiled) clones through the transport of C4 and
+falls back to a byte copy across handlers or without the capability; its
+target run is part of [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh).
+
+Lacking: the same choice inside `C:Copy`, which is an AROS change. Metadata inheritance follows the executable behavior
 until Q14 is answered.
 
 ## C6. Access-intent and preallocation mapping

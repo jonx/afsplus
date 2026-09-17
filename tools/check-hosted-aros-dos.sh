@@ -21,6 +21,7 @@ installed=0
 handler="$aros_tree/L/afsplus-handler"
 probe="$aros_tree/C/AFSPlusDosProbe"
 info="$aros_tree/C/AFSPlusInfo"
+clone="$aros_tree/C/AFSPlusClone"
 dosdriver="$aros_tree/Devs/DOSDrivers/AFSPLUS19"
 image="$aros_tree/DiskImages/Unit19"
 
@@ -33,6 +34,7 @@ cleanup() {
         [ ! -e "$handler" ] || unlink "$handler"
         [ ! -e "$probe" ] || unlink "$probe"
         [ ! -e "$info" ] || unlink "$info"
+        [ ! -e "$clone" ] || unlink "$clone"
         [ ! -e "$dosdriver" ] || unlink "$dosdriver"
         [ ! -e "$image" ] || unlink "$image"
     fi
@@ -98,7 +100,7 @@ require_file "$aros_tree/C/Assign"
     echo "Refusing to replace existing result: $output" >&2
     exit 73
 }
-for target in "$handler" "$probe" "$info" "$dosdriver" "$image"; do
+for target in "$handler" "$probe" "$info" "$clone" "$dosdriver" "$image"; do
     [ ! -e "$target" ] || {
         echo "Refusing to replace Hosted MacAROS artifact: $target" >&2
         exit 73
@@ -119,6 +121,7 @@ installed=1
 cp "$package/afsplus-handler" "$handler"
 cp "$package/AFSPlusDosProbe" "$probe"
 cp "$package/AFSPlusInfo" "$info"
+cp "$package/AFSPlusClone" "$clone"
 cp "$package/AFSPLUS19" "$dosdriver"
 cp "$package/Unit19" "$image"
 
@@ -131,6 +134,12 @@ C:AFSPlusDosProbe >MacRW:probe.out
 C:List AFSPLUS19: ALL >MacRW:list-after.out
 C:AFSPlusInfo AFSPLUS19: >MacRW:info.json
 C:AFSPlusInfo SYS: >MacRW:info-foreign.out
+C:Copy C:Mount AFSPLUS19:clone.src >MacRW:clone-source.out
+C:AFSPlusClone AFSPLUS19:clone.src AFSPLUS19: clone.dst >MacRW:clone.out
+C:AFSPlusClone AFSPLUS19:clone.src AFSPLUS19: clone.dst >MacRW:clone-again.out
+C:AFSPlusClone AFSPLUS19:clone.src RAM: clone.dst >MacRW:clone-ram.out
+C:Copy AFSPLUS19:clone.dst MacRW:clone.dst >MacRW:clone-copy.out
+C:Copy RAM:clone.dst MacRW:clone-ram.dst >MacRW:clone-ram-copy.out
 C:Mount AFSPLUS19: SHUTDOWN >MacRW:shutdown.out
 If WARN
     C:Echo fail >MacRW:shutdown.status
@@ -154,6 +163,15 @@ assert document["schema"] == "afsplus-handler-info", document
 assert document["schema_version"] == 1, document' "$result/dos/info.json"
 cp "$result/dos/info.json" "$result/handler-info.json"
 grep -q 'not served by an AFS+ handler' "$result/dos/info-foreign.out"
+# One tool, three answers: a clone inside the volume, a refusal to replace,
+# and a byte copy to a handler without the transport. Both results carry the
+# source's bytes; the checker below judges the shared extents.
+grep -q '^AFSPlusClone: cloned$' "$result/dos/clone.out"
+grep -q 'error 203$' "$result/dos/clone-again.out"
+grep -q '^AFSPlusClone: copied$' "$result/dos/clone-ram.out"
+cmp "$aros_tree/C/Mount" "$result/dos/clone.dst"
+cmp "$aros_tree/C/Mount" "$result/dos/clone-ram.dst"
+rm "$result/dos/clone.dst" "$result/dos/clone-ram.dst"
 check_image "$result/check-after-dos.json"
 
 echo "[hosted-dos] dismount with an unreplied notification"

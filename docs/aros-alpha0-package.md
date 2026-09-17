@@ -18,6 +18,7 @@ The files map to a runnable MacAROS tree as follows:
 | `AFSPlusAlpha0Probe` | `AROS/C/AFSPlusAlpha0Probe` |
 | `AFSPlusDosProbe` | `AROS/C/AFSPlusDosProbe` |
 | `AFSPlusInfo` | `AROS/C/AFSPlusInfo`, the handler report tool |
+| `AFSPlusClone` | `AROS/C/AFSPlusClone`, clone inside an AFS+ volume, byte copy otherwise |
 | `AFSPlusReplayProbe` | `AROS/C/AFSPlusReplayProbe` |
 | `AFSPlusS1Probe` | Stored only in the S1 AFS+ image |
 | `AFSPlusS1bProbe` | Stored only in the desktop S1b AFS+ image |
@@ -123,7 +124,9 @@ while one of its messages is still unreplied and never replies, and requires
 the shutdown and the dismount to succeed and the shell to continue. The first boot also runs
 `AFSPlusInfo` against the AFS+ volume, whose JSON report must carry the
 `afsplus-handler-info` schema, and against `SYS:`, which must be recognised
-as a handler without the extension transport. A request
+as a handler without the extension transport. `AFSPlusClone` must clone a
+file inside the volume, refuse to replace the existing target, and fall back
+to a byte copy towards `RAM:`; both results must equal the source. A request
 that is still registered refuses `ACTION_DIE` by design. The checker must find the
 image clean after each boot.
 
