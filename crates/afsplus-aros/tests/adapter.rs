@@ -64,10 +64,17 @@ fn dos_semantics_cover_the_mountable_alpha_operation_slice() {
     let parent = adapter.parent_of_file(draft).unwrap();
     assert!(adapter.same_lock(Some(work), Some(parent)).unwrap());
     adapter.free_lock(parent).unwrap();
-    let draft_lock = adapter.lock_from_file(draft).unwrap();
+    // MODE_NEWFILE holds the object exclusively, so DupLockFromFH is refused
+    // exactly as dos.library documents; a shared handle yields the lock.
+    assert_eq!(adapter.lock_from_file(draft), Err(ArosError::ObjectInUse));
+    adapter.close(draft).unwrap();
+    let reopened = adapter
+        .open(Some(work), b"draft", OpenMode::OldFile, timestamp(5))
+        .unwrap();
+    let draft_lock = adapter.lock_from_file(reopened).unwrap();
     assert_eq!(adapter.examine_lock(draft_lock).unwrap().name, b"draft");
     adapter.free_lock(draft_lock).unwrap();
-    adapter.close(draft).unwrap();
+    adapter.close(reopened).unwrap();
 
     adapter
         .rename(Some(work), b"draft", None, b"final", timestamp(6))
@@ -76,6 +83,11 @@ fn dos_semantics_cover_the_mountable_alpha_operation_slice() {
     adapter
         .make_hard_link(Some(work), b"linked", final_lock, timestamp(7))
         .unwrap();
+    assert_eq!(
+        adapter.delete_object(None, b"final", timestamp(8)),
+        Err(ArosError::ObjectInUse)
+    );
+    adapter.free_lock(final_lock).unwrap();
     adapter.delete_object(None, b"final", timestamp(8)).unwrap();
 
     let linked = adapter
@@ -100,7 +112,6 @@ fn dos_semantics_cover_the_mountable_alpha_operation_slice() {
     assert!(disk.in_use);
     assert_eq!(disk.bytes_per_block, BLOCK_SIZE as u32);
     adapter.flush().unwrap();
-    adapter.free_lock(final_lock).unwrap();
     adapter.free_lock(work).unwrap();
 
     let vfs = adapter.into_vfs().unwrap();

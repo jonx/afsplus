@@ -129,6 +129,7 @@ pub enum ArosError {
     DiskFull = 221,
     NotDosDisk = 225,
     NoMoreEntries = 232,
+    IsSoftLink = 233,
 }
 
 impl ArosError {
@@ -180,6 +181,7 @@ struct FileState {
     parent: ObjectId,
     name: Vec<u8>,
     position: u64,
+    access: LockAccess,
 }
 
 pub struct ArosAdapter<D: BlockDevice> {
@@ -230,6 +232,11 @@ impl<D: BlockDevice> ArosAdapter<D> {
         } else {
             let decoded = self.decode_component(name)?;
             let object_id = self.vfs.lookup(base_object, &decoded)?;
+            // dos.library resolves the link through ACTION_READ_LINK and
+            // retries with the substituted path.
+            if self.vfs.stat(object_id)?.kind == NodeKind::Symlink {
+                return Err(ArosError::IsSoftLink);
+            }
             self.known_parents
                 .insert(object_id, (Some(base_object), name.to_vec()));
             (object_id, Some(base_object), name.to_vec())
@@ -304,9 +311,37 @@ impl<D: BlockDevice> ArosAdapter<D> {
             }
             (_, Err(error)) => return Err(error.into()),
         };
-        if self.vfs.stat(object_id)?.kind != NodeKind::File {
-            return Err(ArosError::ObjectWrongType);
+        match self.vfs.stat(object_id)?.kind {
+            NodeKind::File => {}
+            NodeKind::Symlink => return Err(ArosError::IsSoftLink),
+            _ => return Err(ArosError::ObjectWrongType),
         }
+        // MODE_NEWFILE holds the object exclusively; MODE_OLDFILE and
+        // MODE_READWRITE share it, exactly like the corresponding lock.
+        let lock_access = if mode == OpenMode::NewFile {
+            LockAccess::Exclusive
+        } else {
+            LockAccess::Shared
+        };
+        self.acquire_object_lock(object_id, lock_access)?;
+        match self.open_locked(object_id, parent, name, mode, lock_access, now) {
+            Ok(handle) => Ok(handle),
+            Err(error) => {
+                self.release_object_lock(object_id, lock_access);
+                Err(error)
+            }
+        }
+    }
+
+    fn open_locked(
+        &mut self,
+        object_id: ObjectId,
+        parent: ObjectId,
+        name: &[u8],
+        mode: OpenMode,
+        lock_access: LockAccess,
+        now: Timespec,
+    ) -> Result<FileHandleId, ArosError> {
         let access = if mode == OpenMode::OldFile {
             AccessMode::ReadOnly
         } else {
@@ -319,7 +354,13 @@ impl<D: BlockDevice> ArosAdapter<D> {
                 return Err(error.into());
             }
         }
-        let handle = self.allocate_file_id()?;
+        let handle = match self.allocate_file_id() {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = self.vfs.close(vfs_handle);
+                return Err(error);
+            }
+        };
         self.files.insert(
             handle,
             FileState {
@@ -328,6 +369,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
                 parent,
                 name: name.to_vec(),
                 position: 0,
+                access: lock_access,
             },
         );
         Ok(handle)
@@ -357,6 +399,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
 
     pub fn close(&mut self, handle: FileHandleId) -> Result<(), ArosError> {
         let state = self.files.remove(&handle).ok_or(ArosError::InvalidLock)?;
+        self.release_object_lock(state.object_id, state.access);
         Ok(self.vfs.close(state.vfs_handle)?)
     }
 
@@ -483,10 +526,17 @@ impl<D: BlockDevice> ArosAdapter<D> {
         let parent = self.lock_object_or_root(base)?;
         let decoded = self.decode_component(name)?;
         let object = self.vfs.lookup(parent, &decoded)?;
+        // DOS refuses to delete an object that a lock or file handle holds.
+        if self.lock_counts.contains_key(&object) {
+            return Err(ArosError::ObjectInUse);
+        }
         match self.vfs.stat(object)?.kind {
-            NodeKind::File => Ok(self.vfs.unlink_file(parent, &decoded, now)?),
+            // The link itself is deleted, never its target.
+            NodeKind::File | NodeKind::Symlink => {
+                Ok(self.vfs.unlink_file(parent, &decoded, now)?)
+            }
             NodeKind::Directory => Ok(self.vfs.remove_directory(parent, &decoded, now)?),
-            _ => Err(ArosError::ActionNotKnown),
+            NodeKind::Internal => Err(ArosError::ObjectWrongType),
         }
     }
 
@@ -526,6 +576,83 @@ impl<D: BlockDevice> ArosAdapter<D> {
         Ok(self
             .vfs
             .link_file(source_object, target_parent, &target, now)?)
+    }
+
+    /// `ACTION_SET_PROTECT`. An empty name addresses the base object. The
+    /// 32-bit DOS protection word is stored as given; its inverted RWED sense
+    /// is a DOS convention that the format does not reinterpret.
+    pub fn set_protection(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+        protection: u32,
+        now: Timespec,
+    ) -> Result<(), ArosError> {
+        let object = self.named_object(base, name)?;
+        Ok(self.vfs.set_protection(object, protection, now)?)
+    }
+
+    /// `ACTION_SET_DATE`.
+    pub fn set_modified(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+        modified: Timespec,
+        now: Timespec,
+    ) -> Result<(), ArosError> {
+        let object = self.named_object(base, name)?;
+        Ok(self.vfs.set_modified(object, modified, now)?)
+    }
+
+    /// `ACTION_MAKE_LINK` with `LINK_SOFT`. The target is an opaque DOS path
+    /// in the mount's name encoding and is stored without resolution.
+    pub fn make_soft_link(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+        target: &[u8],
+        now: Timespec,
+    ) -> Result<(), ArosError> {
+        let parent = self.lock_object_or_root(base)?;
+        let decoded = self.decode_component(name)?;
+        let target = self.decode_text(target)?;
+        if target.is_empty() {
+            return Err(ArosError::InvalidComponentName);
+        }
+        self.vfs.create_symlink(parent, &decoded, &target, now)?;
+        Ok(())
+    }
+
+    /// Target bytes of the soft link `name` in the mount's name encoding.
+    /// Returns the required byte count; a short buffer is left unchanged.
+    pub fn read_soft_link(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize, ArosError> {
+        let parent = self.lock_object_or_root(base)?;
+        let decoded = self.decode_component(name)?;
+        let object = self.vfs.lookup(parent, &decoded)?;
+        if self.vfs.stat(object)?.kind != NodeKind::Symlink {
+            return Err(ArosError::ObjectWrongType);
+        }
+        let mut stored = vec![0u8; self.vfs.read_link(object, &mut [])?];
+        let length = self.vfs.read_link(object, &mut stored)?;
+        let encoded = self.encode_text(&stored[..length])?;
+        if encoded.len() <= output.len() {
+            output[..encoded.len()].copy_from_slice(&encoded);
+        }
+        Ok(encoded.len())
+    }
+
+    fn named_object(&mut self, base: Option<LockId>, name: &[u8]) -> Result<ObjectId, ArosError> {
+        let base_object = self.lock_object_or_root(base)?;
+        if name.is_empty() {
+            return Ok(base_object);
+        }
+        let decoded = self.decode_component(name)?;
+        Ok(self.vfs.lookup(base_object, &decoded)?)
     }
 
     pub fn examine_lock(&mut self, lock: LockId) -> Result<FileInfo, ArosError> {
@@ -657,6 +784,31 @@ impl<D: BlockDevice> ArosAdapter<D> {
         }
     }
 
+    fn decode_text(&self, bytes: &[u8]) -> Result<String, ArosError> {
+        if bytes.contains(&0) {
+            return Err(ArosError::InvalidComponentName);
+        }
+        match self.config.name_encoding {
+            NameEncoding::Utf8 => std::str::from_utf8(bytes)
+                .map(str::to_owned)
+                .map_err(|_| ArosError::InvalidComponentName),
+            NameEncoding::Latin1 => Ok(bytes.iter().map(|byte| char::from(*byte)).collect()),
+        }
+    }
+
+    fn encode_text(&self, utf8: &[u8]) -> Result<Vec<u8>, ArosError> {
+        match self.config.name_encoding {
+            NameEncoding::Utf8 => Ok(utf8.to_vec()),
+            NameEncoding::Latin1 => std::str::from_utf8(utf8)
+                .map_err(|_| ArosError::NotDosDisk)?
+                .chars()
+                .map(|character| {
+                    u8::try_from(u32::from(character)).map_err(|_| ArosError::ObjectTooLarge)
+                })
+                .collect(),
+        }
+    }
+
     fn encode_name(&self, utf8: &[u8]) -> Result<Vec<u8>, ArosError> {
         let encoded = match self.config.name_encoding {
             NameEncoding::Utf8 => utf8.to_vec(),
@@ -712,15 +864,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         name: Vec<u8>,
         access: LockAccess,
     ) -> Result<LockId, ArosError> {
-        let counts = self.lock_counts.entry(object_id).or_default();
-        match access {
-            LockAccess::Shared if counts.exclusive => return Err(ArosError::ObjectInUse),
-            LockAccess::Exclusive if counts.exclusive || counts.shared != 0 => {
-                return Err(ArosError::ObjectInUse);
-            }
-            LockAccess::Shared => counts.shared += 1,
-            LockAccess::Exclusive => counts.exclusive = true,
-        }
+        self.acquire_object_lock(object_id, access)?;
         let lock = self.next_lock;
         self.next_lock = match self.next_lock.checked_add(1) {
             Some(next) => next,
@@ -741,6 +885,29 @@ impl<D: BlockDevice> ArosAdapter<D> {
             },
         );
         Ok(lock)
+    }
+
+    fn acquire_object_lock(
+        &mut self,
+        object_id: ObjectId,
+        access: LockAccess,
+    ) -> Result<(), ArosError> {
+        let counts = self.lock_counts.entry(object_id).or_default();
+        let refused = match access {
+            LockAccess::Shared => counts.exclusive,
+            LockAccess::Exclusive => counts.exclusive || counts.shared != 0,
+        };
+        if refused {
+            if counts.shared == 0 && !counts.exclusive {
+                self.lock_counts.remove(&object_id);
+            }
+            return Err(ArosError::ObjectInUse);
+        }
+        match access {
+            LockAccess::Shared => counts.shared += 1,
+            LockAccess::Exclusive => counts.exclusive = true,
+        }
+        Ok(())
     }
 
     fn release_object_lock(&mut self, object_id: ObjectId, access: LockAccess) {

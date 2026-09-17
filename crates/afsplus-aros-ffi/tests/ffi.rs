@@ -221,6 +221,12 @@ fn c_boundary_runs_the_alpha_matrix_and_remounts_cleanly() {
         afsplus_aros_make_hard_link(filesystem, work, b"linked".as_ptr(), 6, final_lock, 7, 0,),
         0
     );
+    // A held object is not deletable; ERROR_OBJECT_IN_USE until released.
+    assert_eq!(
+        afsplus_aros_delete_object(filesystem, 0, b"final".as_ptr(), 5, 8, 0),
+        202
+    );
+    assert_eq!(afsplus_aros_free_lock(filesystem, final_lock), 0);
     assert_eq!(
         afsplus_aros_delete_object(filesystem, 0, b"final".as_ptr(), 5, 8, 0),
         0
@@ -316,7 +322,6 @@ fn c_boundary_runs_the_alpha_matrix_and_remounts_cleanly() {
     assert_eq!(disk_info.write_protected, 0);
     assert_eq!(disk_info.in_use, 1);
     assert_eq!(afsplus_aros_flush(filesystem), 0);
-    assert_eq!(afsplus_aros_free_lock(filesystem, final_lock), 0);
     assert_eq!(afsplus_aros_free_lock(filesystem, work), 0);
     assert_eq!(afsplus_aros_unmount(filesystem), 0);
 

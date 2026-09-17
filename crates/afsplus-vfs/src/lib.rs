@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use afsplus_block::BlockDevice;
-use afsplus_core::volume::{DataUpdatePolicy, DirectoryCursor, ObjectMetadata, Volume};
+use afsplus_core::volume::{
+    DataUpdatePolicy, DirectoryCursor, ObjectMetadata, PreservedMetadata, Volume,
+};
 use afsplus_core::{mount_with_options, CoreError, MountMode, MountOptions};
 use afsplus_format::ident::{
     NameKeyAlgorithm, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG_DATA_UPDATES,
@@ -717,6 +719,45 @@ impl<D: BlockDevice> Vfs<D> {
 
     /// The persistent per-file data-update policy (ADR-065): `true` when the
     /// file is opted into private in-place updates.
+    /// Replaces the stored protection word. The host adapter evaluates
+    /// permission and owns the meaning of the bits; the change time is `now`.
+    pub fn set_protection(
+        &mut self,
+        object_id: ObjectId,
+        protection: u32,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        self.stat(object_id)?;
+        self.checkpoint_data_window(now)?;
+        Ok(self
+            .volume
+            .set_object_protection(object_id, protection, now)?)
+    }
+
+    /// Sets the modification time chosen by the caller. Creation time and
+    /// protection are kept and the change time is `now`.
+    pub fn set_modified(
+        &mut self,
+        object_id: ObjectId,
+        modified: Timespec,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        self.stat(object_id)?;
+        self.checkpoint_data_window(now)?;
+        let current = self.stat(object_id)?;
+        let protection = u32::try_from(current.protection)
+            .map_err(|_| VfsError::Corrupt("protection exceeds 32 bits".into()))?;
+        Ok(self.volume.restore_object_metadata(
+            object_id,
+            PreservedMetadata {
+                protection,
+                created: current.created,
+                modified,
+                changed: now,
+            },
+        )?)
+    }
+
     pub fn data_policy(&mut self, handle: Handle) -> Result<bool, VfsError> {
         let object_id = match self.handles.get(&handle).copied() {
             Some(OpenHandle::File { object_id, .. }) => object_id,
