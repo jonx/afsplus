@@ -177,7 +177,10 @@ python3 tools/check-docs.py --journey # advisory journey-word counts
 [`tools/check-docs.py`](../tools/check-docs.py) verifies relative links and `#anchors` (GitHub slug
 rules, fenced code ignored); generates and verifies the TOC blocks; resolves
 `ADR-NNN` and `MNN` mentions; generates and verifies the ADR index; requires
-the navigation block; requires the index rows; and enforces the status rules
+the navigation block; requires the index rows, and that each one still sits
+inside its table, since a blank line ends a Markdown table and every row
+below it then renders as literal text under no header; and enforces the
+status rules
 of section 3 (`Status:` lines only in ADRs, five README status rows, one-line
 milestone status cells). It exits non-zero with one problem per line after a
 single summary line. It ignores `crates/`, `native/`, `vendor/`, `target/`

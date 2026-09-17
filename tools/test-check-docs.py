@@ -60,6 +60,43 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual({path.name: path.read_text() for path in root.iterdir()}, {name: name for name in ["z.md", "a.md", "ignore.txt"]})
 
 
+class IndexTableTests(unittest.TestCase):
+    """A row is only a row while its table is unbroken."""
+
+    HEADER = "| Tool | What it does | Owned by |\n|---|---|---|\n"
+
+    def problems(self, body):
+        found = []
+        checker.check_index_rows_render(Path("index.md"), body, found)
+        return found
+
+    def test_an_unbroken_table_is_accepted(self):
+        self.assertEqual(self.problems(
+            self.HEADER + "| [a.sh](a.sh) | one | [d.md](d.md) |\n"
+            "| [b.sh](b.sh) | two | [d.md](d.md) |\n"), [])
+
+    def test_a_blank_line_orphans_every_row_below_it(self):
+        found = self.problems(
+            self.HEADER + "| [a.sh](a.sh) | one | [d.md](d.md) |\n\n"
+            "| [b.sh](b.sh) | two | [d.md](d.md) |\n"
+            "| [c.sh](c.sh) | three | [d.md](d.md) |\n")
+        self.assertEqual(len(found), 2)
+        self.assertIn("index.md:5", found[0])
+        self.assertIn("index.md:6", found[1])
+
+    def test_a_second_table_of_its_own_is_accepted(self):
+        self.assertEqual(self.problems(
+            self.HEADER + "| [a.sh](a.sh) | one | [d.md](d.md) |\n\n"
+            "Prose between them.\n\n"
+            + self.HEADER + "| [b.sh](b.sh) | two | [d.md](d.md) |\n"), [])
+
+    def test_prose_beginning_with_a_pipe_after_a_table_is_reported(self):
+        found = self.problems(
+            self.HEADER + "| [a.sh](a.sh) | one | [d.md](d.md) |\n\n"
+            "| this line looks like a row and renders as text\n")
+        self.assertEqual(len(found), 1)
+
+
 class LegacyProgressTests(unittest.TestCase):
     def test_decorated_ids_remain_valid_milestone_rows(self):
         for token in ['M01', r'\[M01\]', '~~M01~~']:

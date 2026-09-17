@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-17 — Read the tool index and the v2 document as a stranger](#2026-09-17--read-the-tool-index-and-the-v2-document-as-a-stranger)
 - [2026-09-17 — What a rebuilt AROS tree loses, written down and applied](#2026-09-17--what-a-rebuilt-aros-tree-loses-written-down-and-applied)
 - [2026-09-17 — A round of handler work costs nothing](#2026-09-17--a-round-of-handler-work-costs-nothing)
 - [2026-09-17 — Documents that contradicted the code, and documents that omitted it](#2026-09-17--documents-that-contradicted-the-code-and-documents-that-omitted-it)
@@ -215,6 +216,43 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-17 — Read the tool index and the v2 document as a stranger
+
+Two documents were read against what the code does rather than against
+memory of it, the tool index row by row and the v2 API document end to end.
+
+The tool index had nine rows that were not rows. Three blank lines had ended
+the Markdown table three times, so everything below the first of them
+rendered as literal pipe text under no header; two more index files had the
+same break. The checker never saw it, because it asked only whether each
+file was named somewhere in the index, and a name inside a line nobody reads
+as a row satisfies that. It now also asks whether the row is still inside a
+table, `test-check-docs.py` holds the rule with four fixtures, and without
+the check two of them fail.
+
+Eleven rows described a tool that had since grown or pointed at a document
+that does not own it. `fuzz-semantic.py` named three of its nine families;
+`check-portable-c-reader.sh` named the C rename when the gate now drives
+create, write, truncate, rename, delete and replace; `check-hosted-aros-dos.sh`
+named two of its three sessions; `progress-markers.py` claimed to read the
+milestone table when it also reads the roadmap stage-gate inventory;
+`test-check-docs.py` was described by the one of its five test classes that
+tests the checker. Four rows pointed at a specification that says in its own
+text that the qualification document owns its gates.
+
+In the v2 document the required-categories list of section 3 reads as an
+inventory of what exists, and three of its entries do not.
+`FSV2_CAP_CHANGE_STREAM` and `FSV2_CAP_FAST_ENUMERATION` are reserved
+identities nothing sets and no entry point serves, and they belong to M10 and
+M09 in Stage E, not here. `watch` was nearly called fiction and is not: it is
+the `NOTIFY` entry-point group, which the handler reaches for `StartNotify`
+and `EndNotify`; what does not exist is a transport operation, so no
+application can add a watch and drain it. Capabilities and limits were two
+bullets and are one query. The extent map was missing from the list
+altogether, and section 5 already described it correctly, so it gained a
+category and a pointer rather than a second description to drift from the
+first.
 
 ## 2026-09-17 — What a rebuilt AROS tree loses, written down and applied
 

@@ -4,7 +4,8 @@ Two kinds of file live here and must not be confused:
 
 - [tools-spec.md](tools-spec.md) specifies the **official CLI tools** that
   ship with AFS+ (`mkafsplus`, `afsplus-info`, `afsplus-check`,
-  `afsplus-resize`, `afsplus-dump`, `afsplus-catalog`, `afsplus-fuse`). None of
+  `afsplus-resize`, `afsplus-dump`, `afsplus-catalog`, `afsplus-extract`,
+  `afsplus-fuse`). None of
   the scripts below is one of them.
 - `check-*.sh` and the helper scripts are **qualification gates and build
   helpers** for the development machines. They produce evidence sets under
@@ -30,19 +31,19 @@ enforces that.
 | [test-replay-bundle.py](test-replay-bundle.py) | Temporary-fixture publication, interruption, integrity and role-admission checks | [developer harness](../testing/developer-harness.md) |
 | [replay-scenario.py](replay-scenario.py) | Strict bounded semantic scenario admission for the replay runner | [developer harness](../testing/developer-harness.md) |
 | [test-replay-scenario.py](test-replay-scenario.py) | Scenario operation, label, payload, geometry and versioned cache-profile admission fixtures | [developer harness](../testing/developer-harness.md) |
-| [tools-spec.md](tools-spec.md) | Specification of the official CLI tools | [docs/README.md](../docs/README.md) |
-| [progress-markers.py](progress-markers.py) | Generate and verify milestone/stage navigation labels from the milestone table | [documentation rules](../docs/DOCUMENTATION.md) |
-| [check-docs.py](check-docs.py) | Documentation contract checker: links, anchors, TOCs, ADR index, navigation blocks, index rows, status rules | [docs/DOCUMENTATION.md](../docs/DOCUMENTATION.md) |
-| [test-check-docs.py](test-check-docs.py) | Temporary-fixture tests for discovery, excluded-tree pruning and finite/ongoing progress aggregation | [docs/DOCUMENTATION.md](../docs/DOCUMENTATION.md) |
+| [tools-spec.md](tools-spec.md) | Specification of the official CLI tools | [README.md](../README.md), [docs/DOCUMENTATION.md](../docs/DOCUMENTATION.md) |
+| [progress-markers.py](progress-markers.py) | Generate and verify milestone, stage and list-item progress labels from the milestone table, the roadmap stage-gate inventory and the roadmap/plan item lists | [documentation rules](../docs/DOCUMENTATION.md) |
+| [check-docs.py](check-docs.py) | Documentation contract checker: links, anchors, TOCs, ADR index, navigation blocks, index rows and the tables that carry them, status rules | [docs/DOCUMENTATION.md](../docs/DOCUMENTATION.md) |
+| [test-check-docs.py](test-check-docs.py) | Temporary-fixture tests for documentation discovery, excluded-tree pruning and unbroken index tables, and for milestone, list-item and scoped stage-gate progress generation | [docs/DOCUMENTATION.md](../docs/DOCUMENTATION.md) |
 | [check-reservation-portability.sh](check-reservation-portability.sh) | Strict/sanitized portable C reads of original, initialized and fallback reservation images with explicit scratch bounds and optional m68000 compile | [testing/data-policy-qualification.md](../testing/data-policy-qualification.md) |
-| [check-portable-c-reader.sh](check-portable-c-reader.sh) | Strict-C99 Rust↔C checkpoint/object/directory/file and durable intent-view cross-read, one-write/one-flush C rename with Rust replay, fault diagnostics, sanitizer, CMake and optional AROS-m68k compile gate | [testing/conformance.md](../testing/conformance.md) |
+| [check-portable-c-reader.sh](check-portable-c-reader.sh) | Strict-C99 Rust↔C checkpoint/object/directory/file and durable intent-view cross-read, one-write/one-flush C create, write, truncate, rename, delete and replace with Rust replay, fault diagnostics, sanitizer, CMake and optional AROS-m68k compile gate | [testing/conformance.md](../testing/conformance.md) |
 | [check-portable-c-fuzz.sh](check-portable-c-fuzz.sh) | Records compact Rust-to-C reader and intent-scan paths, runs deterministic ASan/UBSan mutations, exports exact replay artifacts and opportunistically runs libFuzzer | [testing/fuzzing.md](../testing/fuzzing.md) |
 | [check-rust-codec-fuzz.sh](check-rust-codec-fuzz.sh) | Runs deterministic raw/resealed/truncated Rust codec mutations, canonical round trips and exact `.afrf` artifact replay | [testing/fuzzing.md](../testing/fuzzing.md) |
 | [check-mountable-alpha0.sh](check-mountable-alpha0.sh) | Composite Mountable Alpha-0 completion gate: portable API tests, real macFUSE round trip, Hosted and native AROS matrices, twelve replay cases, one checksummed result set | [ADR-060](../adr/ADR-060-mountable-alpha0-completion-gate.md), M08 |
 | [check-hosted-aros-alpha0.sh](check-hosted-aros-alpha0.sh) | S0 bidirectional same-image gate: Hosted MacAROS → host mount → Hosted MacAROS | [testing/aros-system-volume-qualification.md](../testing/aros-system-volume-qualification.md), [ADR-046](../adr/ADR-046-hosted-aros-same-image.md) |
 | [check-aros-fdsk-ordering.sh](check-aros-fdsk-ordering.sh) | The one gate that patches AROS: applies the `fdsk.device` write-barrier fix, shows the ordering on a target and puts the tree back | [native/aros/upstream/README.md](../native/aros/upstream/README.md) |
 | [prepare-hosted-aros.sh](prepare-hosted-aros.sh) | Brings a built Hosted AROS tree to the state the Hosted gates need: the one fork-clone change, posixc, fdsk, two directories and a Mount that understands SHUTDOWN | [docs/aros-native-bridge.md](../docs/aros-native-bridge.md) |
-| [check-hosted-aros-dos.sh](check-hosted-aros-dos.sh) | DOS semantics beyond Alpha-0 through dos.library on Hosted MacAROS, then a dismount with a notification message never replied | [docs/aros-alpha0-package.md](../docs/aros-alpha0-package.md) |
+| [check-hosted-aros-dos.sh](check-hosted-aros-dos.sh) | DOS semantics beyond Alpha-0 through dos.library on Hosted MacAROS, the extension-packet report, clone and attribute paths, a record lock granted by another task's release, a hundred rounds that must cost no memory, and a dismount with a notification message never replied | [docs/aros-alpha0-package.md](../docs/aros-alpha0-package.md) |
 | [check-hosted-aros-crash-replay.sh](check-hosted-aros-crash-replay.sh) | Replays the deterministic intent-log power-cut images through the Hosted MacAROS handler | [testing/aros-system-volume-qualification.md](../testing/aros-system-volume-qualification.md), [ADR-047](../adr/ADR-047-hosted-aros-crash-replay.md) |
 | [check-hosted-aros-s1.sh](check-hosted-aros-s1.sh) | S1a: post-bootstrap `SYS:` pivot onto a manifested AFS+ system subset | [testing/aros-system-volume-qualification.md](../testing/aros-system-volume-qualification.md), [ADR-048](../adr/ADR-048-hosted-aros-system-pivot.md) |
 | [check-hosted-aros-s1b.sh](check-hosted-aros-s1b.sh) | S1b: desktop, preferences and application session after the `SYS:` pivot | [testing/aros-system-volume-qualification.md](../testing/aros-system-volume-qualification.md), [ADR-049](../adr/ADR-049-hosted-aros-desktop-pivot.md) |
@@ -60,19 +61,16 @@ enforces that.
 | [build-aros-s1-image.sh](build-aros-s1-image.sh) | Builds the manifested AFS+ system image (`core` or `desktop` profile) for the post-bootstrap S1 pivot | [docs/aros-s1-image.md](../docs/aros-s1-image.md) |
 | [build-macaros-afsram-device.sh](build-macaros-afsram-device.sh) | Builds the external writable retained-image device for native MacAROS QEMU | [ADR-053](../adr/ADR-053-native-macaros-retained-image-transport.md) |
 | [make-macaros-afsram-image.py](make-macaros-afsram-image.py) | Builds the retained MacAROS FAT, AROS-handler and AFS+ RAM image consumed by the native gates | [ADR-053](../adr/ADR-053-native-macaros-retained-image-transport.md) |
-| [make-macaros-afsplus-system.py](make-macaros-afsplus-system.py) | Builds the bounded 16-MiB FAT12 bootstrap for native AFS+ QEMU tests | [docs/aros-native-bridge.md](../docs/aros-native-bridge.md) |
+| [make-macaros-afsplus-system.py](make-macaros-afsplus-system.py) | Builds the bounded 16-MiB FAT12 bootstrap for native AFS+ QEMU tests | [ADR-053](../adr/ADR-053-native-macaros-retained-image-transport.md) |
 | [inject-fat12-file.py](inject-fat12-file.py) | Injects one deterministic 8.3 file into a FAT12 root or subdirectory | [docs/aros-native-bridge.md](../docs/aros-native-bridge.md) |
 | [extract-macaros-afsram.py](extract-macaros-afsram.py) | Extracts the unique AFS+ payload from file-backed MacAROS guest RAM for host-side checking | [ADR-054](../adr/ADR-054-native-macaros-crash-replay-extraction.md) |
 | [qemu-file-backed-memory.sh](qemu-file-backed-memory.sh) | QEMU wrapper that adds a shared file-backed RAM object to an otherwise standard command line | [ADR-054](../adr/ADR-054-native-macaros-crash-replay-extraction.md) |
 | [macos-fskit-modules.sh](macos-fskit-modules.sh) | Inspects and, reversibly, enables the macFUSE FSKit modules when the System Settings switches are inert | [docs/macos-fskit-activation.md](../docs/macos-fskit-activation.md) |
 | [third-party-probe-example.c](third-party-probe-example.c) | Pseudocode example of how a generic disk utility identifies an AFS+ volume | [docs/18-third-party-integration.md](../docs/18-third-party-integration.md) |
-
 | [check-backup-tar.sh](check-backup-tar.sh) | Cross-read ordinary tar framing with Python and bsdtar, reproduce the fixture and reject changed payloads in the oracle | [backup archive qualification](../testing/backup-archive-qualification.md) |
-| [check-backup-sparse.sh](check-backup-sparse.sh) | Cross-read sparse content with Python/libarchive and verify wide raw size encodings | [sparse archive](../spec/backup-sparse.md) |
-
-| [check-backup-envelope.sh](check-backup-envelope.sh) | Verify envelope hashes/counts independently with OpenSSL and recover body files through Python/bsdtar | [archive envelope](../spec/backup-envelope.md) |
+| [check-backup-sparse.sh](check-backup-sparse.sh) | Cross-read sparse content with Python/libarchive and verify wide raw size encodings | [backup archive qualification](../testing/backup-archive-qualification.md#sparse-content-consumer) |
+| [check-backup-envelope.sh](check-backup-envelope.sh) | Verify envelope hashes/counts independently with OpenSSL and recover body files through Python/bsdtar | [backup archive qualification](../testing/backup-archive-qualification.md) |
 | [test-allocation-origins.py](test-allocation-origins.py) | Compare tagged and ordinary workloads, origin balance, tracking cost and retained oracle lifetime | [allocation origins](../testing/benchmark-contract.md#allocation-origins-and-instrumentation-cost) |
 | [test-measure-workload.py](test-measure-workload.py) | Check phase heap balance, repeatable I/O, forced cache-profile spills, payload denominators and memory-only argument admission | [benchmark contract](../testing/benchmark-contract.md#phased-requested-heap-workload) |
-
-| [fuzz-semantic.py](fuzz-semantic.py) | Generate seeded namespace/content properties and window, snapshot and linked-namespace families, probe prefixes across four cache profiles, preserve complete replay bundles, reproduce negative controls and replay retained cases | [semantic properties](../testing/fuzzing.md#generated-operation-families) |
+| [fuzz-semantic.py](fuzz-semantic.py) | Generate seeded namespace/content properties and nine operation families from window and snapshot to batch, maintenance and captured views, probe prefixes across four cache profiles, preserve complete replay bundles, reproduce negative controls and replay retained cases | [semantic properties](../testing/fuzzing.md#generated-operation-families) |
 | [test-fuzz-semantic.py](test-fuzz-semantic.py) | Independent byte, window and object-graph model examples, golden generators, bounds, negative controls and publication/replay controls | [semantic properties](../testing/fuzzing.md#generated-operation-families) |

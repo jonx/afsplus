@@ -48,9 +48,7 @@ format and the writing rules are in [DOCUMENTATION.md](DOCUMENTATION.md).
 | [30 Portable Multi-User Security Model](30-portable-security-model.md) | Security descriptor container and canonical ACL candidate |
 | [31 Extreme Workloads](31-extreme-workloads.md) | Streaming, Git-scale trees, AI/LLM access patterns |
 | [32 Reflink and Clone Semantics](32-reflink-clone-semantics.md) | `CloneFile`/`CloneRange` and shared-extent rules |
-
 | [33 Practical File System Design review](33-practical-filesystem-design-review.md) | Complete chapter review, corrected comparisons and executable/future qualification requirements |
-
 ## Platform integration documents
 
 | Document | Summary |

@@ -28,7 +28,5 @@ The qualification scripts themselves are listed in
 | [security-model-conformance.md](security-model-conformance.md) | Identity round-trip, ACL evaluation and simple-host preservation before the security format freezes | no harness; the security container is a design proposal | M14 |
 | [security-scanning-benchmarks.md](security-scanning-benchmarks.md) | Scan-once-per-content-generation cost against rescan baselines | no harness; depends on the change stream | M10 |
 | [book-review-qualification.md](book-review-qualification.md) | Fragmented allocation, seeded mixed I/O and book-derived integration gates | `cargo test -p afsplus-core fragmented_allocation`; `cargo test -p afsplus-check --test streaming_api` | M03, M05, M09, M10, M13, M14 |
-
 | [extraction-qualification.md](extraction-qualification.md) | Read-only checkpoint extraction, corruption isolation, explicit loss and resource limits | `cargo test -p afsplus-tools` | M05, M13 |
-
 | [backup-archive-qualification.md](backup-archive-qualification.md) | Bounded PAX records and complete archive/restore acceptance | `cargo test -p afsplus-backup`; consumer integration gates | M13, M14 |

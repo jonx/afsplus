@@ -16,6 +16,7 @@
   - [synchronization](#synchronization)
   - [cloning](#cloning)
   - [preallocation and access intent](#preallocation-and-access-intent)
+  - [extent map](#extent-map)
   - [observation](#observation)
 - [4. Compatibility adapters](#4-compatibility-adapters)
   - [The AROS transport](#the-aros-transport)
@@ -143,6 +144,16 @@ until accepted.
 - full-volume object iterator
 - change-stream iterator
 
+Of the three, the directory iterator exists: paged in the Rust VFS, as
+`ACTION_EXAMINE_ALL` in the classic adapter, and through the transport as the
+`DIR_OPEN`, `DIR_READ`, `DIR_CLOSE` walk of the object-ID group described
+below. The other two are the API's surface and nothing implements them:
+`FSV2_CAP_CHANGE_STREAM` (bit 8) and `FSV2_CAP_FAST_ENUMERATION` (bit 7) are
+reserved identities in [`filesystem_v2.h`](../api/filesystem_v2.h) that no
+volume advertises and no entry point serves. The change stream is
+[M10](../implementation/milestones.md), not started, in Stage E; bit 7 waits
+on the catalog fast path of [M09](../implementation/milestones.md) beside it.
+
 Directory cookies are opaque to OS adapters. The AFS+ implementation
 binds an ordinal to the checkpoint generation and returns `STALE` after any
 commit, requiring enumeration to restart rather than mixing namespace views.
@@ -221,11 +232,39 @@ entry-point group of [`afsplus_aros.h`](../api/afsplus_aros.h). They operate
 on the same locks and file handles as the DOS calls, and the positioned calls
 neither use nor move the DOS file position.
 
+### extent map
+
+- `ExtentMap(handle, offset, length, caller_buffer)` returns the committed
+  mapping of that byte range as written, reserved or hole, which is what a
+  pager needs to plan faults and block-aligned transfers.
+
+It is the `EXTENT_MAP` entry-point group of
+[`afsplus_aros.h`](../api/afsplus_aros.h) and the `EXTENT_MAP` operation of
+the transport. [Section 5](#5-large-files) states its bounds and its
+committed-state rule, which are what a caller has to plan around.
+
 ### observation
 
 - watch
-- query capabilities
-- query limits
+- query capabilities and limits
+
+`watch` exists at the AROS C boundary as the `NOTIFY` entry-point group, a
+bounded watch table whose pending state is one flag per watch, so any number
+of changes between two drains is one event. The handler reaches it for the
+classic `StartNotify` and `EndNotify`; it is how the DOS notification
+requests are served. It is **not** among the transport's operations, so an
+application cannot today add a watch through `ACTION_AFSPLUS_EXT` and drain
+it: that operation is open, and its owner is the AROS handler work of Stage C.
+
+Capabilities and limits are one query, not two: `CAPABILITIES` returns the
+advertised mask together with the block size, the longest name in bytes, the
+case-sensitivity of the namespace, the three-part Unicode table version, the
+pending intent-record count and the three block counts. The other reports of
+the running handler are the `OBSERVE`, `MANAGE` and `COUNTERS` groups:
+`HEALTH` and its event ring, the recorder's trace events and trace counters,
+`INFO_JSON`, and the adapter's completed and failed calls and device
+transfers since mount. The transport section below says what each returns and
+which of the three counters is trace loss.
 
 ## 4. Compatibility adapters
 

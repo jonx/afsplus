@@ -377,6 +377,40 @@ def check_index_rows(root: Path, index: Path, members: list[Path],
         if member.name not in text:
             problems.append(
                 f"{label} has no row for {member.relative_to(root)}")
+    check_index_rows_render(label, text, problems)
+
+
+def check_index_rows_render(label: Path, text: str,
+                            problems: list[str]) -> None:
+    """A row is only a row while its table is unbroken.
+
+    A blank line ends a Markdown table, so every row after it renders as
+    literal pipe text with no header. Naming the file is what the check
+    above wants; being read is what the row is for, and a member can be
+    named in a line that nobody sees as a row.
+    """
+    lines = text.splitlines()
+
+    def is_separator(line: str) -> bool:
+        stripped = line.strip()
+        return bool(stripped) and "-" in stripped and set(stripped) <= {
+            "|", "-", ":"}
+
+    in_table = False
+    for number, line in enumerate(lines, start=1):
+        if not line.startswith("|"):
+            in_table = False
+            continue
+        if is_separator(line):
+            in_table = True
+            continue
+        if in_table:
+            continue
+        if number < len(lines) and is_separator(lines[number]):
+            continue  # a header row, whose separator follows it
+        problems.append(
+            f"{label}:{number} starts a row outside any table "
+            "(a blank line above it ended the previous one)")
 
 
 def check_status_rules(root: Path, files: list[Path],
