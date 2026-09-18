@@ -61,9 +61,12 @@ struct AfsplusArosNativeFile {
     struct AfsplusArosNativeFile *next;
 };
 
+/* A NotifyRequest's watch, or with request NULL a watch of the extension
+ * transport, which records that it fired until WATCH_TAKE reads it. */
 struct AfsplusArosNativeNotify {
     struct NotifyRequest *request;
     uint64_t watch;
+    uint32_t fired;
     struct AfsplusArosNativeNotify *next;
 };
 
@@ -1140,7 +1143,8 @@ int32_t afsplus_aros_packet_destroy(
         context->notifies = node->next;
         /* EndNotify skips a request without a handler instead of sending a
          * packet to a port that is gone. */
-        node->request->nr_Handler = NULL;
+        if (node->request != NULL)
+            node->request->nr_Handler = NULL;
         (void)afsplus_aros_watch_remove(context->filesystem, node->watch);
         context->free(context->callback_context, node, sizeof(*node));
     }
@@ -1172,6 +1176,29 @@ uint32_t afsplus_aros_packet_should_quit(
     return context != NULL ? context->quit : 0;
 }
 
+static uint32_t has_notify_request(
+    const struct AfsplusArosPacketContext *context)
+{
+    const struct AfsplusArosNativeNotify *node;
+
+    for (node = context->notifies; node != NULL; node = node->next)
+        if (node->request != NULL)
+            return 1;
+    return 0;
+}
+
+/* The extension watch of this identifier; a NotifyRequest's is not one. */
+static struct AfsplusArosNativeNotify **extension_watch(
+    struct AfsplusArosPacketContext *context, uint64_t watch)
+{
+    struct AfsplusArosNativeNotify **link;
+
+    for (link = &context->notifies; *link != NULL; link = &(*link)->next)
+        if ((*link)->request == NULL && (*link)->watch == watch)
+            return link;
+    return NULL;
+}
+
 /* Turns the watches that fired during this packet into deliveries. The
  * filesystem coalesces per watch, so one packet yields at most one delivery
  * per request. */
@@ -1181,7 +1208,7 @@ static void deliver_notifications(struct AfsplusArosPacketContext *context)
     uint32_t count;
     uint32_t i;
 
-    if (context->notify == NULL || context->notifies == NULL)
+    if (context->notifies == NULL)
         return;
     do
     {
@@ -1196,8 +1223,11 @@ static void deliver_notifications(struct AfsplusArosPacketContext *context)
             for (node = context->notifies; node != NULL; node = node->next)
                 if (node->watch == fired[i])
                 {
-                    context->notify(context->callback_context,
-                        node->request);
+                    if (node->request == NULL)
+                        node->fired = 1;
+                    else if (context->notify != NULL)
+                        context->notify(context->callback_context,
+                            node->request);
                     break;
                 }
         }
@@ -1519,6 +1549,72 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
                 request->name_length[1], (const uint8_t *)request->buffer,
                 request->buffer_size, request->flags, seconds, nanoseconds);
         return error;
+    case AFSPLUS_EXT_WATCH_ADD:
+    {
+        struct AfsplusArosNativeNotify *node = NULL;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_NOTIFY);
+        if (error == 0)
+            error = extension_lock(context, request->object[0], &first);
+        if (error == 0)
+            error = extension_name(request->name0, request->name_length[0]);
+        if (error == 0)
+        {
+            node = context->allocate(context->callback_context,
+                sizeof(*node));
+            if (node == NULL)
+                error = ERROR_NO_FREE_STORE;
+        }
+        if (error == 0)
+            error = afsplus_aros_watch_add(context->filesystem, first,
+                request->name0, request->name_length[0], &node->watch);
+        if (error != 0)
+        {
+            if (node != NULL)
+                context->free(context->callback_context, node,
+                    sizeof(*node));
+            return error;
+        }
+        node->request = NULL;
+        node->fired = 0;
+        node->next = context->notifies;
+        context->notifies = node;
+        request->output_value = node->watch;
+        return 0;
+    }
+    case AFSPLUS_EXT_WATCH_TAKE:
+    {
+        struct AfsplusArosNativeNotify **link;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_NOTIFY);
+        if (error != 0)
+            return error;
+        /* What fired since the last packet reaches the flag first. */
+        deliver_notifications(context);
+        link = extension_watch(context, request->offset[0]);
+        if (link == NULL)
+            return ERROR_OBJECT_NOT_FOUND;
+        request->output_flags = (*link)->fired;
+        (*link)->fired = 0;
+        return 0;
+    }
+    case AFSPLUS_EXT_WATCH_REMOVE:
+    {
+        struct AfsplusArosNativeNotify **link;
+        struct AfsplusArosNativeNotify *node;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_NOTIFY);
+        if (error != 0)
+            return error;
+        link = extension_watch(context, request->offset[0]);
+        if (link == NULL)
+            return ERROR_OBJECT_NOT_FOUND;
+        node = *link;
+        *link = node->next;
+        error = afsplus_aros_watch_remove(context->filesystem, node->watch);
+        context->free(context->callback_context, node, sizeof(*node));
+        return error;
+    }
     case AFSPLUS_EXT_DIR_OPEN:
         error = require_group(context, AFSPLUS_AROS_GROUP_OBJECT_IDS);
         if (error == 0)
@@ -2676,7 +2772,7 @@ int32_t afsplus_aros_packet_process(
          * nr_Handler; EndNotify sends ACTION_REMOVE_NOTIFY there. The port
          * must outlive every registration. */
         if (context->locks != NULL || context->files != NULL
-            || context->notifies != NULL)
+            || has_notify_request(context))
             error = ERROR_OBJECT_IN_USE;
         else
         {
@@ -2981,7 +3077,7 @@ int32_t afsplus_aros_packet_process(
 
         error = ERROR_OBJECT_NOT_FOUND;
         for (link = &context->notifies; *link != NULL; link = &(*link)->next)
-            if ((*link)->request == request)
+            if (request != NULL && (*link)->request == request)
             {
                 struct AfsplusArosNativeNotify *node = *link;
 

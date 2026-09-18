@@ -105,6 +105,18 @@ LONG afsplus_client_dir_read(BPTR lock, uint64_t walk, void *records,
     uint32_t capacity, uint32_t limit, uint32_t *count, uint32_t *eof);
 LONG afsplus_client_dir_close(BPTR lock, uint64_t walk);
 
+/* A watch of the entry name under the directory behind lock, which need not
+ * exist yet, or with name NULL or empty of the lock's own object; a watched
+ * directory also changes when an entry in it does. take sets changed to 1
+ * when a change happened since the watch was added or last taken, and clears
+ * it; changes between two takes are one. The watch belongs to the handler of
+ * lock's port until removed. */
+LONG afsplus_client_watch_add(BPTR lock, CONST_STRPTR name,
+    uint64_t *watch);
+LONG afsplus_client_watch_take(struct MsgPort *port, uint64_t watch,
+    uint32_t *changed);
+LONG afsplus_client_watch_remove(struct MsgPort *port, uint64_t watch);
+
 /* Trace events the handler's ring holds, oldest first; the call empties what
  * it hands over and reports how many the ring has dropped since the mount. A
  * mount whose Control string did not ask for a ring answers

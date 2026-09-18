@@ -252,9 +252,13 @@ committed-state rule, which are what a caller has to plan around.
 bounded watch table whose pending state is one flag per watch, so any number
 of changes between two drains is one event. The handler reaches it for the
 classic `StartNotify` and `EndNotify`; it is how the DOS notification
-requests are served. It is **not** among the transport's operations, so an
-application cannot today add a watch through `ACTION_AFSPLUS_EXT` and drain
-it: that operation is open, and its owner is the AROS handler work of Stage C.
+requests are served. An application reaches the same table through
+`ACTION_AFSPLUS_EXT`: `WATCH_ADD` names an entry, which need not exist, or
+the object of a lock; `WATCH_TAKE` answers whether it changed since the last
+take and clears that; `WATCH_REMOVE` ends it. The handler's own drain after
+every packet is what marks a watch, so an application sees a change at its
+next take, and the transport cannot read or end a watch a NotifyRequest
+holds.
 
 Capabilities and limits are one query, not two: `CAPABILITIES` returns the
 advertised mask together with the block size, the longest name in bytes, the

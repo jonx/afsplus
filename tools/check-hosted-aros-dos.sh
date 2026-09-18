@@ -150,6 +150,7 @@ Else
 EndIf'
 stop_aros "$result/dos"
 grep -q '^\[AFSPLUS-DOS\] PASS ' "$result/dos/probe.out"
+grep -q '^\[AFSPLUS-DOS\] v2 watch taken 1 then 0, removed$' "$result/dos/probe.out"
 grep '^\[AFSPLUS-DOS\] self-overlap ' "$result/dos/probe.out" \
     >"$result/record-self-overlap.txt"
 [ "$(cat "$result/dos/shutdown.status")" = pass ]

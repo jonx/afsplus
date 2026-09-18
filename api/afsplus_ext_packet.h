@@ -64,6 +64,9 @@
 #define AFSPLUS_EXT_HEALTH_EVENTS UINT32_C(23)   /* OBSERVE */
 #define AFSPLUS_EXT_TRACE_EVENTS UINT32_C(24)    /* OBSERVE */
 #define AFSPLUS_EXT_TRACE_COUNTERS UINT32_C(25)  /* OBSERVE */
+#define AFSPLUS_EXT_WATCH_ADD UINT32_C(26)       /* NOTIFY */
+#define AFSPLUS_EXT_WATCH_TAKE UINT32_C(27)      /* NOTIFY */
+#define AFSPLUS_EXT_WATCH_REMOVE UINT32_C(28)    /* NOTIFY */
 
 /* One record of AFSPLUS_EXT_PACKET_COUNTS. With flags 0 the key is a packet
  * type, count the packets of that type answered since the handler started
@@ -145,6 +148,18 @@ struct AfsplusExtPacketCount {
  *                 mount that did not ask for a ring answers
  *                 ERROR_NOT_IMPLEMENTED.
  *   TRACE_COUNTERS buffer: struct AfsplusArosTraceCounters, struct_size set
+ *   WATCH_ADD     object[0] base lock, name[0]: an entry that need not
+ *                 exist, or empty for the object of the lock
+ *                 -> output_value the watch
+ *   WATCH_TAKE    offset[0] the watch -> output_flags 1 when the object, or
+ *                 an entry of a watched directory, changed since the watch
+ *                 was added or last taken; taking clears it. Changes between
+ *                 two takes are one.
+ *   WATCH_REMOVE  offset[0] the watch
+ *                 A watch belongs to the handler until removed, whoever
+ *                 added it. A NotifyRequest's watch is not one of these:
+ *                 WATCH_TAKE and WATCH_REMOVE answer ERROR_OBJECT_NOT_FOUND
+ *                 for it. ACTION_DIE discards the remaining ones.
  *   PACKET_COUNTS flags: which table, buffer: array of struct
  *                 AfsplusExtPacketCount, buffer_size in bytes
  *                 -> output_count records stored, output_value records the

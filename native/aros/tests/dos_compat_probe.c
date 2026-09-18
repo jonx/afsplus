@@ -519,6 +519,57 @@ static int probe_dir_walk(void)
     return status;
 }
 
+/* The v2 watch: a name that does not exist yet under the drawer, taken
+ * before, after and again after its creation, and gone once removed. */
+static int probe_watch(void)
+{
+    BPTR drawer;
+    struct MsgPort *port;
+    uint64_t watch = 0;
+    uint32_t changed = 7;
+    LONG error;
+    int status = RETURN_OK;
+
+    drawer = Lock(DRAWER, SHARED_LOCK);
+    if (drawer == BNULL)
+        return fail("Lock watch drawer", DOSFALSE);
+    port = afsplus_client_lock_port(drawer);
+    error = afsplus_client_watch_add(drawer, (CONST_STRPTR)"watched", &watch);
+    if (error != 0)
+    {
+        UnLock(drawer);
+        return fail("watch_add", error);
+    }
+    error = afsplus_client_watch_take(port, watch, &changed);
+    if (error != 0)
+        status = fail("watch_take", error);
+    else if (changed != 0)
+        status = fail("a watch changed before anything did", (SIPTR)changed);
+    if (status == RETURN_OK && !write_file(DRAWER "/watched", MODE_NEWFILE))
+        status = fail("create watched", DOSFALSE);
+    if (status == RETURN_OK
+        && ((error = afsplus_client_watch_take(port, watch, &changed)) != 0
+            || changed != 1))
+        status = fail("the created name was not seen", error ? error
+            : (SIPTR)changed);
+    if (status == RETURN_OK
+        && ((error = afsplus_client_watch_take(port, watch, &changed)) != 0
+            || changed != 0))
+        status = fail("a take did not clear", error ? error : (SIPTR)changed);
+    error = afsplus_client_watch_remove(port, watch);
+    if (status == RETURN_OK && error != 0)
+        status = fail("watch_remove", error);
+    if (status == RETURN_OK
+        && afsplus_client_watch_take(port, watch, &changed)
+            != ERROR_OBJECT_NOT_FOUND)
+        status = fail("a removed watch still answered", DOSTRUE);
+    UnLock(drawer);
+    DeleteFile(DRAWER "/watched");
+    if (status == RETURN_OK)
+        Printf("[AFSPLUS-DOS] v2 watch taken 1 then 0, removed\n");
+    return status;
+}
+
 static int probe_handles(void)
 {
     UBYTE readback[4];
@@ -1086,6 +1137,8 @@ int main(int argc, char **argv)
         status = probe_exall_pages();
     if (status == RETURN_OK)
         status = probe_dir_walk();
+    if (status == RETURN_OK)
+        status = probe_watch();
     if (status == RETURN_OK)
         status = probe_handles();
     if (status == RETURN_OK)

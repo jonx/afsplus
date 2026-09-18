@@ -437,6 +437,57 @@ LONG afsplus_client_dir_close(BPTR lock, uint64_t walk)
     return afsplus_client_send(port, &request);
 }
 
+LONG afsplus_client_watch_add(BPTR lock, CONST_STRPTR name,
+    uint64_t *watch)
+{
+    struct AfsplusExtRequest request;
+    struct MsgPort *port = afsplus_client_lock_port(lock);
+    size_t length = name != NULL ? strlen((const char *)name) : 0;
+    LONG error;
+
+    if (watch == NULL)
+        return ERROR_REQUIRED_ARG_MISSING;
+    *watch = 0;
+    if (port == NULL)
+        return ERROR_INVALID_LOCK;
+    if (length > AFSPLUS_EXT_NAME_MAX)
+        return ERROR_INVALID_COMPONENT_NAME;
+    begin(&request, AFSPLUS_EXT_WATCH_ADD);
+    request.object[0] = (uint64_t)(uintptr_t)lock;
+    request.name0 = (const uint8_t *)name;
+    request.name_length[0] = (uint32_t)length;
+    error = afsplus_client_send(port, &request);
+    if (error == 0)
+        *watch = request.output_value;
+    return error;
+}
+
+LONG afsplus_client_watch_take(struct MsgPort *port, uint64_t watch,
+    uint32_t *changed)
+{
+    struct AfsplusExtRequest request;
+    LONG error;
+
+    if (changed == NULL)
+        return ERROR_REQUIRED_ARG_MISSING;
+    *changed = 0;
+    begin(&request, AFSPLUS_EXT_WATCH_TAKE);
+    request.offset[0] = watch;
+    error = afsplus_client_send(port, &request);
+    if (error == 0)
+        *changed = request.output_flags;
+    return error;
+}
+
+LONG afsplus_client_watch_remove(struct MsgPort *port, uint64_t watch)
+{
+    struct AfsplusExtRequest request;
+
+    begin(&request, AFSPLUS_EXT_WATCH_REMOVE);
+    request.offset[0] = watch;
+    return afsplus_client_send(port, &request);
+}
+
 LONG afsplus_client_health_events(struct MsgPort *port,
     struct AfsplusArosHealthEvent *events, uint32_t capacity,
     uint32_t *count, uint64_t *lost)

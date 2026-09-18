@@ -235,8 +235,15 @@ in between arrives after the reply, and a second boot dismounts a volume
 whose notification was never replied, with the shell still running
 afterwards.
 
-Lacking: the v2 `watch` operation over the same table, which no extension
-operation exposes yet.
+The v2 watch travels as `WATCH_ADD`, `WATCH_TAKE` and `WATCH_REMOVE` of
+the extension packet ([`afsplus_ext_packet.h`](../api/afsplus_ext_packet.h)),
+over the same table: the handler's drain after every packet marks an
+extension watch as fired, and a take reads and clears the mark, so changes
+between two takes are one. A NotifyRequest's watch is out of the transport's
+reach, and an extension watch holds no port, so `ACTION_DIE` discards what
+is left. The packet matrix proves the separation both ways, and
+[`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) runs a watch
+of a name created after it through a real dos.library.
 
 QEMU: all. Apple hardware: none.
 

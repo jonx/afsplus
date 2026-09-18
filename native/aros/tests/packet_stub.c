@@ -2626,6 +2626,90 @@ int main(void)
         /* "second" stays registered for the ACTION_DIE cases below. */
     }
 
+    /* C8 through the transport: an extension watch records that it fired
+     * until WATCH_TAKE reads it, and no NotifyRequest delivery sees it. */
+    {
+        struct AfsplusExtRequest request;
+        uint32_t removed = stub_removed_watches;
+        uint64_t watch;
+
+        EXT_BEGIN(AFSPLUS_EXT_WATCH_ADD);
+        request.name0 = (const uint8_t *)"Prefs";
+        request.name_length[0] = 5;
+        EXT_SEND(DOSTRUE, 0);
+        assert_event(0, 'W', "Prefs", 0);
+        watch = request.output_value;
+        assert(watch == 502);
+
+        EXT_BEGIN(AFSPLUS_EXT_WATCH_TAKE);
+        request.offset[0] = watch;
+        request.output_flags = 7;
+        EXT_SEND(DOSTRUE, 0);
+        assert(request.output_flags == 0);
+
+        /* Fired with the NotifyRequest's 501 during an unrelated packet:
+         * the request is delivered, the extension watch only flagged. */
+        delivered_count = 0;
+        stub_fired[0] = 502;
+        stub_fired[1] = 501;
+        stub_fired_count = 2;
+        initialize_packet(&packet, ACTION_IS_FILESYSTEM);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(delivered_count == 1 && delivered[0] == &second);
+        EXT_SEND(DOSTRUE, 0);
+        assert(request.output_flags == 1);
+        /* Taking clears it. */
+        EXT_SEND(DOSTRUE, 0);
+        assert(request.output_flags == 0);
+
+        /* Two changes between takes are one. */
+        stub_fired[0] = 502;
+        stub_fired_count = 1;
+        initialize_packet(&packet, ACTION_IS_FILESYSTEM);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        stub_fired[0] = 502;
+        stub_fired_count = 1;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        EXT_SEND(DOSTRUE, 0);
+        assert(request.output_flags == 1);
+        EXT_SEND(DOSTRUE, 0);
+        assert(request.output_flags == 0);
+        /* A change still undrained when the take arrives is seen by it. */
+        stub_fired[0] = 502;
+        stub_fired_count = 1;
+        EXT_SEND(DOSTRUE, 0);
+        assert(request.output_flags == 1);
+
+        /* A NotifyRequest's watch is not the transport's to read or drop,
+         * and an unknown one is not found. */
+        request.offset[0] = 501;
+        EXT_SEND(DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+        EXT_BEGIN(AFSPLUS_EXT_WATCH_REMOVE);
+        request.offset[0] = 501;
+        EXT_SEND(DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+        assert(stub_removed_watches == removed);
+        assert(afsplus_aros_packet_notify_registered(context, &second) == 1);
+        request.offset[0] = 999;
+        EXT_SEND(DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+
+        /* ACTION_REMOVE_NOTIFY with no request does not reach it either. */
+        initialize_packet(&packet, ACTION_REMOVE_NOTIFY);
+        packet.dp_Arg1 = 0;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_OBJECT_NOT_FOUND);
+
+        request.offset[0] = watch;
+        EXT_SEND(DOSTRUE, 0);
+        assert(stub_removed_watches == removed + 1);
+        EXT_SEND(DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+        EXT_BEGIN(AFSPLUS_EXT_WATCH_TAKE);
+        request.offset[0] = watch;
+        EXT_SEND(DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+        /* Removing it restored the count the ACTION_DIE cases expect. */
+        stub_removed_watches = removed;
+    }
+
     /* C1 control: a library without the later groups makes the same packets
      * unknown actions, and no boundary function is reached. */
     {
@@ -2923,6 +3007,17 @@ int main(void)
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res1 == DOSTRUE && stub_removed_watches == 2);
 
+    /* An extension watch names no port: it does not hold the handler, and
+     * the handler's end removes it. */
+    {
+        struct AfsplusExtRequest request;
+
+        EXT_BEGIN(AFSPLUS_EXT_WATCH_ADD);
+        request.name0 = (const uint8_t *)"left";
+        request.name_length[0] = 4;
+        EXT_SEND(DOSTRUE, 0);
+    }
+
     /* A context destroyed with a live registration detaches the request, so
      * a later EndNotify sends nothing to the vanished port. */
     {
@@ -2971,7 +3066,7 @@ int main(void)
     assert(flush_count == 3);
 
     assert(afsplus_aros_packet_destroy(context) == 0);
-    assert(stub_removed_watches == 3);
+    assert(stub_removed_watches == 4);
     puts("afsplus packet stub: PASS");
     return 0;
 }
