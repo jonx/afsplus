@@ -248,7 +248,15 @@ fn mkfs_impl<D: BlockDevice>(
         created: params.timestamp,
         modified: params.timestamp,
         changed: params.timestamp,
-        protection: 0,
+        // A root anyone can enter and list, and only its owner can write.
+        //
+        // Zero is not "no opinion": read as a POSIX mode it says 0o700, so a
+        // freshly formatted volume mounted on macOS showed as drwx------ and
+        // nobody but its owner could even look inside. The protection word has
+        // been the carrier of the mode since ADR-118, so a volume has to be
+        // born with a mode somebody chose.
+        protection: afsplus_format::posix::protection_for_mode(0o755)
+            .expect("0o755 is representable"),
         content_generation: generation,
         data_root: root_dir_lba,
         data_blocks: 0,

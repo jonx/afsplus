@@ -238,3 +238,17 @@ fn how_long_the_space_of_a_big_delete_takes_to_come_back() {
         "it must all come back in the end"
     );
 }
+
+#[test]
+fn a_new_volume_has_a_root_somebody_chose() {
+    // Zero in the protection word reads as 0o700, so a freshly formatted
+    // volume used to mount as drwx------ and nobody but its owner could look
+    // inside. The word carries the mode now, so mkfs has to write one.
+    let mut vfs = mounted();
+    let root = vfs.stat(OBJECT_ROOT).unwrap();
+    assert_eq!(
+        afsplus_format::posix::mode_of(root.protection as u32),
+        0o755,
+        "a new volume's root must be enterable and listable by anyone"
+    );
+}
