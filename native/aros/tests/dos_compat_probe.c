@@ -1051,6 +1051,22 @@ static int steady_round(void)
 }
 
 #define STEADY_ALLOWANCE 1024
+#define STEADY_WARMUP 5
+
+/* The handler library's heap counters, through the transport. */
+static int steady_heap(struct MsgPort *port,
+    struct AfsplusArosCounters *counters)
+{
+    LONG error;
+
+    memset(counters, 0, sizeof(*counters));
+    error = afsplus_client_counters(port, counters);
+    if (error != 0)
+        return fail("STEADY counters", error);
+    if (counters->struct_size < sizeof(*counters))
+        return fail("STEADY counters without the heap", counters->struct_size);
+    return RETURN_OK;
+}
 
 static int probe_steady(const char *rounds_text)
 {
@@ -1058,33 +1074,57 @@ static int probe_steady(const char *rounds_text)
     ULONG round;
     ULONG before;
     ULONG after = 0;
+    struct AfsplusArosCounters warm;
+    struct AfsplusArosCounters done;
+    struct MsgPort *port;
+    BPTR drawer;
     int status;
 
     while (*rounds_text >= '0' && *rounds_text <= '9')
         rounds = rounds * 10 + (ULONG)(*rounds_text++ - '0');
     if (*rounds_text != 0 || rounds == 0 || rounds > 1000)
         return fail("STEADY rounds", (SIPTR)rounds);
-    {
-        BPTR drawer = CreateDir(DRAWER);
-
-        if (drawer == BNULL)
-            return fail("STEADY CreateDir", DOSFALSE);
-        UnLock(drawer);
-    }
-    /* One round first, so one-off allocations of the first use of each
-     * operation are not read as a leak. */
-    status = steady_round();
+    drawer = CreateDir(DRAWER);
+    if (drawer == BNULL)
+        return fail("STEADY CreateDir", DOSFALSE);
+    /* The handler's port, and no lock held while measuring: with nothing
+     * open the handler keeps no per-object state, so the heap is exact. */
+    port = afsplus_client_lock_port(drawer);
+    UnLock(drawer);
+    status = RETURN_OK;
+    /* Rounds first, so one-off allocations of the first use of each
+     * operation, and structures growing to their working size, are not
+     * read as a leak: at the C boundary the heap settles by the third. */
+    for (round = 0; status == RETURN_OK && round < STEADY_WARMUP; round++)
+        status = steady_round();
+    if (status == RETURN_OK)
+        status = steady_heap(port, &warm);
     before = (ULONG)AvailMem(MEMF_ANY);
     for (round = 0; status == RETURN_OK && round < rounds; round++)
     {
         status = steady_round();
         after = (ULONG)AvailMem(MEMF_ANY);
     }
+    if (status == RETURN_OK)
+        status = steady_heap(port, &done);
     DeleteFile(DRAWER);
     if (status != RETURN_OK)
         return status;
     Printf("[AFSPLUS-DOS] STEADY rounds %lu free before %lu after %lu\n",
         rounds, before, after);
+    Printf("[AFSPLUS-DOS] STEADY heap before %lu after %lu peak before %lu"
+        " after %lu\n", (ULONG)warm.heap_bytes, (ULONG)done.heap_bytes,
+        (ULONG)warm.heap_peak_bytes, (ULONG)done.heap_peak_bytes);
+    /* The handler library's own view, exact to the byte and blind to other
+     * tasks: after the warm-up, further rounds hold nothing more and
+     * need no more at once, so the peak is a property of the operations and
+     * not of how often they run. */
+    if (done.heap_bytes != warm.heap_bytes)
+        return fail("heap held over the rounds",
+            (SIPTR)(done.heap_bytes - warm.heap_bytes));
+    if (done.heap_peak_bytes != warm.heap_peak_bytes)
+        return fail("heap peak grew over the rounds",
+            (SIPTR)(done.heap_peak_bytes - warm.heap_peak_bytes));
     /* Every operation of a round is paired with what releases it, so a round
      * must cost nothing. Measured on Hosted the two numbers are equal to the
      * byte over 20 and over 100 rounds. The bound is not zero because

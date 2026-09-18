@@ -346,19 +346,26 @@ The packet layer counts answered packets by type and failures by error code
 in bounded tables (L3), read through the transport of C4 with
 `afsplus_client_packet_counts`.
 
+`afsplus_aros_counters` also reports the library's Rust heap: the bytes its
+allocations hold and the most they held at once since it started, counted by
+a metering allocator around the system one.
+
 `STEADY <rounds>` of the DOS probe (L4) runs a round of paired operations —
 create, open, read, lock and unlock a record, close, lock, examine, unlock,
 start and end a notification, set the comment and the protection, delete —
-and reports the system's free memory before and after. A hundred rounds under
-[`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) leave it
-equal to the byte, and the probe fails a run that loses more than a
-kilobyte, so a round that costs one allocation cannot pass.
+five times as a warm-up, then the given number of times, and reports the
+system's free memory and the handler's heap before and after. With no lock
+held the handler keeps no per-object state, so under
+[`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) a hundred
+rounds leave the heap and its peak equal to the byte, and the probe fails a
+run where either moved. System free memory alone cannot show this: the
+allocator's pools absorb a small leak, and a cache of parents that grew by
+about 94 bytes a round passed that check until the heap counters found it.
 
-Lacking: peak handler memory; a target
-runner executing a fixed operation trace against AFS+ and the AFS/FFS
-baseline with manifest verification before and structural check after; a
-result bundle in the contract format. Hosted gives software cost; the
-emulators give determinism; the budget of
+Lacking: a target runner executing a fixed operation trace against AFS+ and
+the AFS/FFS baseline with manifest verification before and structural check
+after; a result bundle in the contract format. Hosted gives software cost;
+the emulators give determinism; the budget of
 [section 2](../testing/aros-system-volume-qualification.md#2-what-macaros-performance-proves)
 needs the M1 and the A500.
 

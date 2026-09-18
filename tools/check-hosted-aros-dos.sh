@@ -87,6 +87,15 @@ check_image() {
     grep -q '"clean":true' "$1"
 }
 
+# A probe prints its verdict line and may still print a FAIL after it, as
+# STEADY does when its bound is crossed; a FAIL anywhere fails the gate.
+no_probe_failure() {
+    if grep -q '^\[AFSPLUS-DOS\] FAIL ' "$1"; then
+        grep '^\[AFSPLUS-DOS\] FAIL ' "$1" >&2
+        exit 1
+    fi
+}
+
 require_executable "$control"
 require_executable "$repo_root/tools/check-aros-serial-log.sh"
 require_file "$aros_tree/Devs/fdsk.device"
@@ -149,6 +158,7 @@ Else
     C:Echo pass >MacRW:shutdown.status
 EndIf'
 stop_aros "$result/dos"
+no_probe_failure "$result/dos/probe.out"
 grep -q '^\[AFSPLUS-DOS\] PASS ' "$result/dos/probe.out"
 grep -q '^\[AFSPLUS-DOS\] v2 watch taken 1 then 0, removed$' "$result/dos/probe.out"
 grep '^\[AFSPLUS-DOS\] self-overlap ' "$result/dos/probe.out" \
@@ -179,7 +189,9 @@ rm "$result/dos/clone.dst" "$result/dos/clone-ram.dst"
 # observation next to the probe's own view. One fact is required of it: the
 # comment travelled as ACTION_SET_COMMENT (28), not through an emulation.
 # A hundred rounds of paired operations must cost the system nothing.
+no_probe_failure "$result/dos/steady.out"
 grep -q '^\[AFSPLUS-DOS\] STEADY rounds 100 ' "$result/dos/steady.out"
+grep -q '^\[AFSPLUS-DOS\] STEADY heap before [1-9][0-9]* ' "$result/dos/steady.out"
 cp "$result/dos/steady.out" "$result/steady.txt"
 cp "$result/dos/packets.out" "$result/packets.txt"
 grep -Eq '^packet 28 [1-9][0-9]* ' "$result/packets.txt"
@@ -207,6 +219,7 @@ Else
     C:Echo pass >MacRW:shutdown.status
 EndIf'
 stop_aros "$result/records"
+no_probe_failure "$result/records/records.out"
 grep -q '^\[AFSPLUS-DOS\] RECORDS granted after ' "$result/records/records.out"
 [ "$(cat "$result/records/shutdown.status")" = pass ]
 check_image "$result/check-after-records.json"
@@ -231,6 +244,7 @@ Else
 EndIf
 C:Echo alive >MacRW:after-dismount.status'
 stop_aros "$result/hold"
+no_probe_failure "$result/hold/hold.out"
 grep -q '^\[AFSPLUS-DOS\] HOLD ' "$result/hold/hold.out"
 [ "$(cat "$result/hold/shutdown.status")" = pass ]
 [ "$(cat "$result/hold/dismount.status")" = pass ]
