@@ -25,10 +25,15 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 work=$(mktemp -d /tmp/afsplus-usage.XXXXXX)
 image="$work/usage.img"
-# One mountpoint per run. A previous run whose driver died leaves the name
-# behind as a path that hangs rather than as a mount, and reusing it wedges the
-# next run instead of reporting anything.
-mountpoint=${AFSPLUS_USAGE_MOUNTPOINT:-/Volumes/AfsplusUsage-$$}
+# A mountpoint of our own, OUTSIDE /Volumes, in this run's work directory.
+#
+# Anything under /Volumes is a volume to the rest of the desktop: the Finder
+# walks it, Spotlight indexes it, and a run leaves an entry there that the
+# Finder will visit long after the run is over. Three of those from one evening
+# were enough to stop the Finder starting at all, because it blocks on the
+# first one that does not answer. A battery must be invisible to the machine it
+# runs on. macFUSE mounts on any existing directory, so this costs nothing.
+mountpoint=${AFSPLUS_USAGE_MOUNTPOINT:-$work/mnt}
 report="$work/diagnostics.txt"
 size_mib=${AFSPLUS_USAGE_SIZE_MIB:-64}
 keep=${AFSPLUS_USAGE_KEEP:-0}
@@ -189,8 +194,9 @@ say "making a ${size_mib} MiB volume and mounting it at $mountpoint"
 if mount | grep -q " on $mountpoint "; then
     fatal "$mountpoint is already mounted; this battery only uses a volume it made"
 fi
-if ! path_responds "$(dirname "$mountpoint")"; then
-    fatal "$(dirname "$mountpoint") does not answer; a wedged mountpoint elsewhere is blocking it"
+mkdir -p "$mountpoint" || fatal "cannot make $mountpoint"
+if ! path_responds "$mountpoint"; then
+    fatal "$mountpoint does not answer; a mount left behind there is blocking it"
 fi
 
 "$afsplus_mount" --diagnostics="$report" "$image" "$mountpoint" >"$mount_log" 2>&1 &

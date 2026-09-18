@@ -61,6 +61,19 @@ impl<D: BlockDevice + Send> FuserFilesystem<D> {
     fn lock(&self) -> Result<MutexGuard<'_, FuseAdapter<D>>, Errno> {
         self.adapter.lock().map_err(|_| Errno::EIO)
     }
+
+    /// Closing a file is where the mount catches up on maintenance.
+    ///
+    /// It used to happen when a host asked how much space was free, which read
+    /// well and was wrong: the Finder asks that many times a second, each call
+    /// did up to sixteen checkpoint commits, and the volume became unusable to
+    /// look at. A close is a person finishing something, it is not polled, and
+    /// it happens often enough for the backlog to drain.
+    fn release_maintenance(&self) {
+        if let Ok(mut adapter) = self.lock() {
+            adapter.run_maintenance(now());
+        }
+    }
 }
 
 impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
@@ -421,6 +434,9 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
         let result = self
             .lock()
             .and_then(|mut adapter| adapter.close(handle.0).map_err(errno));
+        if result.is_ok() {
+            self.release_maintenance();
+        }
         empty_reply(result, reply);
     }
 
@@ -561,8 +577,8 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
 
     fn statfs(&self, _request: &Request, _inode: INodeNo, reply: ReplyStatfs) {
         match self.lock() {
-            Ok(mut adapter) => {
-                let stats = adapter.statfs_after_maintenance(now());
+            Ok(adapter) => {
+                let stats = adapter.statfs();
                 reply.statfs(
                     stats.total_blocks,
                     stats.free_blocks,

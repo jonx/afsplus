@@ -116,9 +116,9 @@ impl HostAttributeNames {
     }
 }
 
-/// Maintenance steps run when a host asks how much space is free. Each loop
-/// stops as soon as a step makes no progress, so a tidy volume pays nothing.
-const MAINTENANCE_STEPS_PER_STATFS: usize = 16;
+/// Maintenance steps run when a person finishes with a file. Each loop stops
+/// as soon as a step makes no progress, so a tidy volume pays nothing.
+const MAINTENANCE_STEPS_PER_PAUSE: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FuseConfig {
@@ -267,20 +267,20 @@ impl<D: BlockDevice> FuseAdapter<D> {
         self.vfs.statfs()
     }
 
-    /// Resume the maintenance bounded operations leave behind, then answer.
+    /// Resume the maintenance bounded operations leave behind.
     ///
     /// A delete does not finish cleaning a large fragmented file: that work is
     /// proportional to the file and a delete stays bounded, so the remainder is
-    /// left resumable. Nothing resumed it here. A filesystem sync would, and
-    /// the macOS driver only sees one at unmount, so a fragmented file's space
-    /// stayed outstanding for the whole life of the mount.
+    /// left resumable, and something has to resume it.
     ///
-    /// Asking how much room is left is the right moment to make the answer
-    /// true, and it is the one question a host repeats on its own. The work is
-    /// bounded per call, so a caller waits for a few transactions at most.
-    pub fn statfs_after_maintenance(&mut self, now: Timespec) -> StatFs {
-        let _ = self.vfs.run_maintenance(MAINTENANCE_STEPS_PER_STATFS, now);
-        self.vfs.statfs()
+    /// NOT on the call that reports free space, which is where this was first
+    /// put. That read well, since making the answer true before giving it is
+    /// the right idea, and it was wrong for a reason a person feels
+    /// immediately: a file browser asks how much space is free many times a
+    /// second, each call did up to sixteen checkpoint commits, and the volume
+    /// became too slow to look at. Reporting free space must cost nothing.
+    pub fn run_maintenance(&mut self, now: Timespec) {
+        let _ = self.vfs.run_maintenance(MAINTENANCE_STEPS_PER_PAUSE, now);
     }
 
     pub fn open_file(
