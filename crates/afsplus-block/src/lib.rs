@@ -10,6 +10,7 @@
 //! of that tail plus representative torn-write states.
 
 pub mod activity;
+pub mod cache;
 pub mod fault;
 pub mod file;
 pub mod memory;
@@ -23,6 +24,7 @@ use std::fmt;
 pub use activity::{
     ActivityBackend, ActivityEvent, ActivityOperation, ActivityPhase, ActivitySink,
 };
+pub use cache::{CacheControl, CacheStats, CachedDevice};
 pub use fault::{FaultBackend, FaultPlan};
 pub use file::FileBackend;
 pub use memory::MemoryBackend;

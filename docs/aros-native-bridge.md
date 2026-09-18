@@ -386,6 +386,15 @@ events, which it has not got by default. Settings are separated by spaces or com
 value are compared without regard to case. Both policies were reachable only
 from a program calling the C boundary directly before this.
 
+The DOSDriver's `Buffers` sizes the read cache, in device blocks, as it does
+for the classic file systems, and `AddBuffers` grows or shrinks it while the
+volume is mounted (`ACTION_MORE_CACHE`, through the `CACHE` entry-point group).
+The cache writes through: every write reaches the device before the call
+returns, so its size changes what is read from the device and nothing the
+device keeps. On the Hosted benchmark 64 blocks served 99 % of the reads and
+took the run from 55.8 s to 35.5 s; 1,024 or 16,384 blocks gained nothing
+more there, so the remaining time is the work of each operation, not reading.
+
 Below the handler, `fdsk.device` answers `CMD_UPDATE` inside `BeginIO`, so on
 the stock device a write barrier is replied before the writes it was queued
 behind. AFS+ has no defence against that and does not claim write ordering

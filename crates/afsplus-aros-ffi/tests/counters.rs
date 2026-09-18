@@ -115,7 +115,7 @@ fn counters_match_the_device_and_count_calls_and_failures() {
 
     // Mount traffic is already counted; no call has completed yet.
     let mounted = counters(filesystem);
-    assert_eq!(mounted.struct_size, 88);
+    assert_eq!(mounted.struct_size, 112);
     assert_eq!((mounted.calls, mounted.failed_calls), (0, 0));
     assert!(mounted.device_reads > 0);
     assert_eq!(mounted.device_reads, counting.seen.reads);
@@ -192,5 +192,51 @@ fn counters_match_the_device_and_count_calls_and_failures() {
     assert!(failed.device_failures >= 1);
     assert_eq!(failed.device_writes, counting.seen.writes);
     counting.fail_writes = false;
+    let _ = afsplus_aros_unmount(filesystem);
+}
+
+/// The read cache through the boundary: a mount starts without one, a size
+/// is bounded by the volume, and once sized, rereading what was read comes
+/// from the cache and not the device.
+#[test]
+fn the_read_cache_is_sized_through_the_boundary_and_serves_rereads() {
+    let mut device = common::formatted(true);
+    let filesystem = common::mount(&mut device);
+    let first = counters(filesystem);
+    assert_eq!((first.cache_blocks, first.cache_hits), (0, 0));
+    let mut granted = 0;
+    assert_eq!(
+        afsplus_aros_set_cache_blocks(filesystem, u32::MAX, &mut granted),
+        0
+    );
+    assert_eq!(granted, 8192, "bounded by the volume");
+    assert_eq!(
+        afsplus_aros_set_cache_blocks(filesystem, 256, &mut granted),
+        0
+    );
+    assert_eq!(granted, 256);
+    assert_eq!(
+        afsplus_aros_set_cache_blocks(filesystem, 256, ptr::null_mut()),
+        210
+    );
+
+    let lookup = |filesystem| {
+        let mut lock = 0;
+        assert_eq!(
+            afsplus_aros_locate(filesystem, 0, b"absent".as_ptr(), 6, 0, &mut lock),
+            205
+        );
+    };
+    lookup(filesystem);
+    let warm = counters(filesystem);
+    assert_eq!(warm.cache_blocks, 256);
+    lookup(filesystem);
+    let again = counters(filesystem);
+    assert!(again.cache_hits > warm.cache_hits, "a reread is a hit");
+    assert_eq!(
+        again.device_reads, warm.device_reads,
+        "and not a device read"
+    );
+    assert_eq!(again.cache_misses, warm.cache_misses);
     let _ = afsplus_aros_unmount(filesystem);
 }

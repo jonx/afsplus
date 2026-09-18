@@ -855,6 +855,23 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
             return error;
     }
 
+    /* The DOSDriver's Buffers become the read cache, in device blocks, as
+     * the classic file systems take them; AddBuffers resizes it later
+     * (ACTION_MORE_CACHE). */
+    set_startup_stage(handler, "read-cache");
+    {
+        uint32_t granted = 0;
+        uint32_t buffers = (SIPTR)handler->environment->de_TableSize
+                >= DE_NUMBUFFERS
+                && (SIPTR)handler->environment->de_NumBuffers > 0
+            ? (uint32_t)handler->environment->de_NumBuffers : 0;
+
+        error = afsplus_aros_set_cache_blocks(handler->filesystem, buffers,
+            &granted);
+        if (error != 0)
+            return error;
+    }
+
     set_startup_stage(handler, "disk-info");
     error = afsplus_aros_disk_info(handler->filesystem, &disk_info);
     if (error != 0)

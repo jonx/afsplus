@@ -2767,6 +2767,36 @@ int32_t afsplus_aros_packet_process(
     case ACTION_IS_FILESYSTEM:
         result = DOSTRUE;
         break;
+    case ACTION_MORE_CACHE:
+    {
+        /* dp_Arg1 buffers more, or fewer when negative; dp_Res1 the read
+         * cache now asked for, in blocks. */
+        struct AfsplusArosCounters counters;
+        uint32_t granted = 0;
+
+        error = require_group(context, AFSPLUS_AROS_GROUP_CACHE);
+        if (error == 0)
+        {
+            memset(&counters, 0, sizeof(counters));
+            counters.struct_size = sizeof(counters);
+            error = afsplus_aros_counters(context->filesystem, &counters);
+        }
+        if (error == 0)
+        {
+            int64_t wanted = (int64_t)counters.cache_blocks
+                + (int64_t)(LONG)packet->dp_Arg1;
+
+            if (wanted < 0)
+                wanted = 0;
+            if (wanted > (int64_t)UINT32_MAX)
+                wanted = (int64_t)UINT32_MAX;
+            error = afsplus_aros_set_cache_blocks(context->filesystem,
+                (uint32_t)wanted, &granted);
+        }
+        if (error == 0)
+            result = (SIPTR)granted;
+        break;
+    }
     case ACTION_DIE:
         /* A registered NotifyRequest points at the handler port through
          * nr_Handler; EndNotify sends ACTION_REMOVE_NOTIFY there. The port

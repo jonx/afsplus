@@ -81,7 +81,9 @@ def run(path):
         measured["counters_before"] = before
         measured["counters_after"] = after
         measured["counters_delta"] = {
-            key: after[key] - before[key] for key in after if key not in ("heap", "heap_peak")
+            key: after[key] - before[key]
+            for key in after
+            if key not in ("heap", "heap_peak", "cache_blocks")
         }
         written = measured["counters_delta"]["written_bytes"]
         measured["write_amplification"] = round(written / workload["payload_bytes"], 3)
@@ -101,6 +103,7 @@ def main():
     parser.add_argument("--repo", required=True)
     parser.add_argument("--mountlist", required=True)
     parser.add_argument("--baseline-mountlist", required=True)
+    parser.add_argument("--added-buffers", type=int, default=0)
     arguments = parser.parse_args()
     result = Path(arguments.result)
 
@@ -138,7 +141,9 @@ def main():
             "workload": afsplus["workload"],
             "afsplus_mount": mountlist(arguments.mountlist),
             "baseline_mount": mountlist(arguments.baseline_mountlist),
-            "cache": "handler Buffers as mounted; no host cache control",
+            "afsplus_added_buffers": arguments.added_buffers,
+            "cache": "AFS+ read cache: the DOSDriver Buffers plus AddBuffers, in blocks;"
+            " the counters give the size in force",
         },
         "verification": {
             "before": {"package_manifest": "verified", "afsplus_image_clean": check_before.get("clean")},

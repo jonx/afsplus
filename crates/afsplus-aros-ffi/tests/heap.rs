@@ -26,7 +26,7 @@ fn heap_counters_follow_what_is_held_and_keep_the_peak() {
     let filesystem = mount(&mut device);
 
     let mounted = counters(filesystem);
-    assert_eq!(mounted.struct_size, 88);
+    assert_eq!(mounted.struct_size, 112);
     assert!(mounted.heap_bytes > 0, "a mounted volume holds memory");
     assert!(mounted.heap_peak_bytes >= mounted.heap_bytes);
 

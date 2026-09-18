@@ -48,7 +48,7 @@ static uint32_t stub_removed_watches;
 static struct NotifyRequest second;
 static struct NotifyRequest *delivered[8];
 static uint32_t delivered_count;
-static uint64_t stub_groups = UINT64_C(0xFFFF);
+static uint64_t stub_groups = UINT64_C(0x1FFFF);
 static uint32_t stub_revision = AFSPLUS_AROS_INTERFACE_REVISION;
 static uint32_t stub_protect;
 static uint32_t stub_protect_key;
@@ -776,11 +776,26 @@ int32_t afsplus_aros_info_json(struct AfsplusAros *filesystem,
     return ext_call('9', 0, NULL, 0, capacity, 0, 0, 0);
 }
 
+static uint32_t stub_cache_blocks = 64;
+static uint32_t stub_cache_calls;
+
 int32_t afsplus_aros_counters(struct AfsplusAros *filesystem,
     struct AfsplusArosCounters *output)
 {
     assert(filesystem == STUB_FILESYSTEM);
+    output->cache_blocks = stub_cache_blocks;
     return ext_call('a', 0, NULL, 0, output->struct_size, 0, 0, 0);
+}
+
+int32_t afsplus_aros_set_cache_blocks(struct AfsplusAros *filesystem,
+    uint32_t blocks, uint32_t *output_blocks)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    stub_cache_calls++;
+    /* The library bounds a request by the volume size. */
+    stub_cache_blocks = blocks > 8192 ? 8192 : blocks;
+    *output_blocks = stub_cache_blocks;
+    return 0;
 }
 
 static uint64_t stub_health_dropped = 7;
@@ -2710,6 +2725,26 @@ int main(void)
         stub_removed_watches = removed;
     }
 
+    /* AddBuffers: ACTION_MORE_CACHE grows or shrinks the read cache from
+     * what is in force, never below zero, and answers the new size. */
+    {
+        uint32_t calls = stub_cache_calls;
+
+        initialize_packet(&packet, ACTION_MORE_CACHE);
+        packet.dp_Arg1 = 100;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == 164 && packet.dp_Res2 == 0);
+        assert(stub_cache_blocks == 164 && stub_cache_calls == calls + 1);
+        packet.dp_Arg1 = -1000;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == 0 && packet.dp_Res2 == 0);
+        assert(stub_cache_blocks == 0);
+        packet.dp_Arg1 = 100000;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == 8192);
+        stub_cache_blocks = 64;
+    }
+
     /* C1 control: a library without the later groups makes the same packets
      * unknown actions, and no boundary function is reached. */
     {
@@ -2841,7 +2876,7 @@ int main(void)
             {
                 struct AfsplusArosPacketContext *clockless = NULL;
 
-                stub_groups = UINT64_C(0xFFFF);
+                stub_groups = UINT64_C(0x1FFFF);
                 config.now = NULL;
                 assert(afsplus_aros_packet_create(&config, &clockless) == 0);
                 config.now = packet_now;

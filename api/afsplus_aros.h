@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(15)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(16)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -43,6 +43,7 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_VOLUME_LABEL UINT64_C(0x2000)
 #define AFSPLUS_AROS_GROUP_DOS_COMMENT UINT64_C(0x4000)
 #define AFSPLUS_AROS_GROUP_ATTRIBUTES UINT64_C(0x8000)
+#define AFSPLUS_AROS_GROUP_CACHE UINT64_C(0x10000)
 
 /* AfsplusArosExtent.flags. */
 #define AFSPLUS_AROS_EXTENT_UNWRITTEN UINT32_C(0x1)
@@ -245,7 +246,9 @@ struct AfsplusArosTraceCounters {
  * heap_bytes is what the library's Rust allocations hold now, heap_peak_bytes
  * the most they held at once since the library started; both are the
  * library's, shared by the instances one copy of it serves, and leave out the
- * handler's own allocations and allocator overhead. */
+ * handler's own allocations and allocator overhead. cache_blocks is the
+ * read cache in force (group CACHE), cache_hits and cache_misses the reads it
+ * served and the reads that went to the device, since the mount. */
 struct AfsplusArosCounters {
     uint32_t struct_size;
     uint32_t reserved;
@@ -259,6 +262,9 @@ struct AfsplusArosCounters {
     uint64_t device_failures;
     uint64_t heap_bytes;
     uint64_t heap_peak_bytes;
+    uint64_t cache_blocks;
+    uint64_t cache_hits;
+    uint64_t cache_misses;
 };
 
 /* Sized query structure; see AfsplusArosInterface for the growth rule. */
@@ -308,7 +314,7 @@ _Static_assert(sizeof(struct AfsplusArosExtent) == 24,
     "AfsplusArosExtent ABI drift");
 _Static_assert(sizeof(struct AfsplusArosDirEntry) == 24,
     "AfsplusArosDirEntry ABI drift");
-_Static_assert(sizeof(struct AfsplusArosCounters) == 88,
+_Static_assert(sizeof(struct AfsplusArosCounters) == 112,
     "AfsplusArosCounters ABI drift");
 _Static_assert(sizeof(struct AfsplusArosHealth) == 112,
     "AfsplusArosHealth ABI drift");
@@ -543,6 +549,16 @@ int32_t afsplus_aros_comment(struct AfsplusAros *filesystem,
 int32_t afsplus_aros_file_comment(struct AfsplusAros *filesystem,
     uint64_t file, uint8_t *comment, uint32_t comment_capacity,
     uint32_t *output_length);
+
+/* Group AFSPLUS_AROS_GROUP_CACHE: a read cache of device blocks in front of
+ * the block callbacks. Every write reaches the device before the call
+ * returns, so the cache changes what is read from the device and nothing it
+ * keeps. set_cache_blocks asks for blocks (zero: none), bounded by the volume
+ * size and 1 << 20, and stores the bounded size in output_blocks; the cache
+ * takes the memory at its next device access and keeps its size when the
+ * memory cannot be had. A mount starts without one. */
+int32_t afsplus_aros_set_cache_blocks(struct AfsplusAros *filesystem,
+    uint32_t blocks, uint32_t *output_blocks);
 
 /* Group AFSPLUS_AROS_GROUP_ATTRIBUTES: extended attributes of the object
  * name under base_lock, an empty name being the base lock's own object.

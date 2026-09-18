@@ -243,7 +243,7 @@ static const char *decimal(char *out, uint64_t value)
 static void print_counters(const char *when, struct MsgPort *port)
 {
     struct AfsplusArosCounters counters;
-    char text[9][21];
+    char text[12][21];
 
     memset(&counters, 0, sizeof(counters));
     if (port == NULL || afsplus_client_counters(port, &counters) != 0)
@@ -253,7 +253,8 @@ static void print_counters(const char *when, struct MsgPort *port)
     }
     Printf("[AFSPLUS-BENCH] counters %s calls %s failed %s reads %s"
         " writes %s flushes %s read_bytes %s written_bytes %s"
-        " heap %s heap_peak %s\n", when, decimal(text[0], counters.calls),
+        " heap %s heap_peak %s cache_blocks %s cache_hits %s cache_misses %s\n",
+        when, decimal(text[0], counters.calls),
         decimal(text[1], counters.failed_calls),
         decimal(text[2], counters.device_reads),
         decimal(text[3], counters.device_writes),
@@ -261,7 +262,10 @@ static void print_counters(const char *when, struct MsgPort *port)
         decimal(text[5], counters.device_read_bytes),
         decimal(text[6], counters.device_written_bytes),
         decimal(text[7], counters.heap_bytes),
-        decimal(text[8], counters.heap_peak_bytes));
+        decimal(text[8], counters.heap_peak_bytes),
+        decimal(text[9], counters.cache_blocks),
+        decimal(text[10], counters.cache_hits),
+        decimal(text[11], counters.cache_misses));
 }
 
 static uint32_t parse_number(const char *text, int *ok)

@@ -12,6 +12,8 @@
 #   AFSPLUS_BENCH_TREES    trees of 256 files each phase runs over (default 10)
 #   AFSPLUS_BENCH_OUTPUT   where the bundle goes (default build/bench-hosted-aros)
 #   AFSPLUS_BENCH_TIMEOUT  seconds the boot may take (default 900)
+#   AFSPLUS_BENCH_BUFFERS  blocks AddBuffers adds to the AFS+ read cache
+#                          before the run (default 0: the DOSDriver's Buffers)
 
 set -eu
 
@@ -23,6 +25,7 @@ control="$macaros_root/graft/aros-ctl"
 seed=${AFSPLUS_BENCH_SEED:-1}
 trees=${AFSPLUS_BENCH_TREES:-10}
 timeout=${AFSPLUS_BENCH_TIMEOUT:-900}
+buffers=${AFSPLUS_BENCH_BUFFERS:-0}
 output=${AFSPLUS_BENCH_OUTPUT:-"$repo_root/build/bench-hosted-aros"}
 work=$(mktemp -d "${TMPDIR:-/tmp}/afsplus-bench.XXXXXX")
 package="$work/package"
@@ -56,7 +59,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-for number in "$seed" "$trees" "$timeout"; do
+for number in "$seed" "$trees" "$timeout" "$buffers"; do
     case $number in
         ''|*[!0-9]*) echo "seed, trees and timeout must be decimal numbers" >&2; exit 64 ;;
     esac
@@ -115,6 +118,7 @@ Assign \"FDSK:\" \"SYS:DiskImages\"
 C:Mount DEVS:DOSDrivers/AFSPLUS19 >MacRW:mount.out
 C:Mount DEVS:DOSDrivers/BASE20 >MacRW:mount-base.out
 C:AFSPlusBench FORMAT BASE20: Baseline >MacRW:format.out
+C:AddBuffers AFSPLUS19: $buffers >MacRW:addbuffers.out
 C:AFSPlusBench AFSPLUS19:bench $seed $trees >MacRW:afsplus.out
 C:AFSPlusBench BASE20:bench $seed $trees >MacRW:baseline.out
 C:Mount AFSPLUS19: SHUTDOWN >MacRW:shutdown.out
@@ -166,7 +170,8 @@ cp "$package/build-profile.txt" "$result/build-profile.txt"
 cp "$package/check-before.json" "$result/check-before.json"
 python3 tools/bench-bundle.py --result "$result" --seed "$seed" \
     --repo "$repo_root" --mountlist "$package/AFSPLUS19" \
-    --baseline-mountlist "$package/BASE20" >"$result/results.json"
+    --baseline-mountlist "$package/BASE20" --added-buffers "$buffers" \
+    >"$result/results.json"
 
 mkdir -p "$(dirname -- "$output")"
 mv "$result" "$output"

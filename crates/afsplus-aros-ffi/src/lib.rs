@@ -20,14 +20,14 @@ use afsplus_aros::{
     ArosAdapter, ArosConfig, ArosError, AttributeWriteMode, DiskInfo, FileInfo, LockAccess,
     NameEncoding, OpenMode, SeekMode,
 };
-use afsplus_block::{BlockDevice, BlockError};
+use afsplus_block::{BlockDevice, BlockError, CacheControl, CachedDevice};
 use afsplus_core::flight::{Categories, Category, Event, FlightRecorder, LiveSink, SinkResult};
 use afsplus_core::{MountMode, MountOptions};
 use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 15;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 16;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -44,6 +44,7 @@ pub const AFSPLUS_AROS_GROUP_EXTENT_MAP: u64 = 0x1000;
 pub const AFSPLUS_AROS_GROUP_VOLUME_LABEL: u64 = 0x2000;
 pub const AFSPLUS_AROS_GROUP_DOS_COMMENT: u64 = 0x4000;
 pub const AFSPLUS_AROS_GROUP_ATTRIBUTES: u64 = 0x8000;
+pub const AFSPLUS_AROS_GROUP_CACHE: u64 = 0x10000;
 pub const AFSPLUS_AROS_EXTENT_UNWRITTEN: u32 = 1;
 pub const AFSPLUS_AROS_DIR_RECORD_MAX: u32 = 280;
 pub const AFSPLUS_AROS_KIND_FILE: u32 = 1;
@@ -69,7 +70,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_EXTENT_MAP
     | AFSPLUS_AROS_GROUP_VOLUME_LABEL
     | AFSPLUS_AROS_GROUP_DOS_COMMENT
-    | AFSPLUS_AROS_GROUP_ATTRIBUTES;
+    | AFSPLUS_AROS_GROUP_ATTRIBUTES
+    | AFSPLUS_AROS_GROUP_CACHE;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -399,6 +401,9 @@ pub struct AfsplusArosCounters {
     pub device_failures: u64,
     pub heap_bytes: u64,
     pub heap_peak_bytes: u64,
+    pub cache_blocks: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
 }
 
 #[repr(C)]
@@ -443,7 +448,7 @@ pub struct AfsplusArosExtent {
 const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosExtent>()];
 const _: [(); 88] = [(); std::mem::size_of::<AfsplusArosStat>()];
 const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosDirEntry>()];
-const _: [(); 88] = [(); std::mem::size_of::<AfsplusArosCounters>()];
+const _: [(); 112] = [(); std::mem::size_of::<AfsplusArosCounters>()];
 const _: [(); 112] = [(); std::mem::size_of::<AfsplusArosHealth>()];
 const _: [(); 16] = [(); std::mem::size_of::<AfsplusArosHealthEvent>()];
 const _: [(); 40] = [(); std::mem::size_of::<AfsplusArosTraceCounters>()];
@@ -579,7 +584,8 @@ impl CallbackDevice {
 }
 
 struct NativeBridge {
-    adapter: ArosAdapter<CallbackDevice>,
+    adapter: ArosAdapter<CachedDevice<CallbackDevice>>,
+    cache: CacheControl,
     max_file_info_name_bytes: usize,
     device: Arc<DeviceCounters>,
     calls: u64,
@@ -922,8 +928,11 @@ pub extern "C" fn afsplus_aros_mount(
             write_block: device.write_block,
             flush: device.flush,
         };
+        // No cache until the handler sizes it (afsplus_aros_set_cache_blocks).
+        let cached_device = CachedDevice::new(callback_device, 0);
+        let cache = cached_device.control();
         let vfs = Vfs::mount(
-            callback_device,
+            cached_device,
             MountOptions {
                 mode,
                 ..Default::default()
@@ -947,6 +956,7 @@ pub extern "C" fn afsplus_aros_mount(
         );
         let raw = Box::into_raw(Box::new(NativeBridge {
             adapter,
+            cache,
             max_file_info_name_bytes,
             device: counters,
             calls: 0,
@@ -2088,6 +2098,8 @@ pub extern "C" fn afsplus_aros_counters(
         let bridge = bridge_mut(filesystem)?;
         let device = &bridge.device;
         let (heap_bytes, heap_peak_bytes) = heap::sample();
+        let cache = bridge.cache.stats();
+        let cache_blocks = bridge.cache.capacity() as u64;
         write_sized_output(
             output,
             AFSPLUS_AROS_COUNTERS_FIRST_LAYOUT,
@@ -2104,9 +2116,35 @@ pub extern "C" fn afsplus_aros_counters(
                 device_failures: device.failures.load(Ordering::Relaxed),
                 heap_bytes,
                 heap_peak_bytes,
+                cache_blocks,
+                cache_hits: cache.hits,
+                cache_misses: cache.misses,
             },
             |value, size| value.struct_size = size,
         )
+    })
+}
+
+/// Largest read cache a mount takes, in blocks, whatever is asked.
+const CACHE_BLOCKS_MAX: u64 = 1 << 20;
+
+/// Group CACHE: asks for a read cache of `blocks` device blocks, at most the
+/// volume's size and `CACHE_BLOCKS_MAX`; zero turns it off. The cache takes
+/// its memory at the next device access, and keeps its size when the memory
+/// cannot be had. `output_blocks` receives the size asked for, after those
+/// bounds; the counters report the size in force.
+#[no_mangle]
+pub extern "C" fn afsplus_aros_set_cache_blocks(
+    filesystem: *mut AfsplusAros,
+    blocks: u32,
+    output_blocks: *mut u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        let bridge = bridge_mut(filesystem)?;
+        let total = bridge.adapter.disk_info().total_blocks;
+        let bounded = u64::from(blocks).min(total).min(CACHE_BLOCKS_MAX);
+        bridge.cache.request_capacity(bounded as usize);
+        write_output(output_blocks, bounded as u32)
     })
 }
 
