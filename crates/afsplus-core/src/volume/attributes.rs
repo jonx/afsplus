@@ -87,7 +87,7 @@ impl<D: BlockDevice> Volume<D> {
 
     fn attribute_target(&mut self, object_id: u64) -> Result<ObjectRecord, CoreError> {
         self.ensure_public_object_id(object_id)?;
-        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        let record = self.visible_record(object_id)?.ok_or(CoreError::NotFound)?;
         if record.object_type == ObjectType::Internal {
             return Err(CoreError::NotFound);
         }

@@ -275,3 +275,27 @@ fn every_crash_state_of_committing_a_rename_and_a_delete_is_all_or_nothing() {
         },
     );
 }
+
+#[test]
+fn a_file_the_window_created_answers_for_its_comment_and_attributes() {
+    let mut vol = mount(formatted()).unwrap();
+    let id = vol.window_op(&create("c", b"x"), ts(1)).unwrap().unwrap();
+    assert_eq!(vol.object_comment(id).unwrap(), "");
+    assert_eq!(vol.attribute_names(id).unwrap(), Vec::<String>::new());
+    assert_eq!(vol.attribute(id, "user.any").unwrap(), None);
+    // A committed file the window renamed keeps what it had.
+    vol.window_commit(ts(2)).unwrap();
+    vol.set_object_comment(id, "noted", ts(3)).unwrap();
+    vol.window_op(
+        &BatchOp::Rename {
+            source_parent_id: OBJECT_ROOT,
+            source_name: "c",
+            target_parent_id: OBJECT_ROOT,
+            target_name: "d",
+            replace: false,
+        },
+        ts(4),
+    )
+    .unwrap();
+    assert_eq!(vol.object_comment(id).unwrap(), "noted");
+}

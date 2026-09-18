@@ -5325,6 +5325,21 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
+    /// The object record every caller sees: the open window's when it holds
+    /// the object, the committed one otherwise. A mutation commits the
+    /// window before it reads, so this matters only to readers.
+    pub(crate) fn visible_record(
+        &mut self,
+        object_id: u64,
+    ) -> Result<Option<ObjectRecord>, CoreError> {
+        if let Some(window) = self.window.as_ref() {
+            if let Some(record) = window.pending.records.get(&object_id) {
+                return Ok(*record);
+            }
+        }
+        self.read_object(object_id)
+    }
+
     /// Whether a window is open.
     pub fn window_open(&self) -> bool {
         self.window.is_some()
