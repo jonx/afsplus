@@ -68,6 +68,7 @@ version = "0.0.1"
 name = "afsplus-fuse"
 version = "0.0.1"
 dependencies = [
+ "afsplus-aros",
  "afsplus-block",
  "afsplus-check",
  "afsplus-core",

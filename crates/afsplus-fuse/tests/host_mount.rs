@@ -155,6 +155,51 @@ fn real_mount_carries_extended_attributes() {
     assert!(!xattr(&[os("-p"), os("org.afsplus.kind"), seed]).0);
     assert!(xattr(&[os("-w"), os("org.afsplus.kept"), os("stays"), seed]).0);
 
+    // The comment and the protection word (ADR-120): written from the host,
+    // listed by `xattr -l`, and a refused word changes nothing.
+    assert!(
+        xattr(&[
+            os("-w"),
+            os("afsplus.aros.comment"),
+            os("Read me first"),
+            seed
+        ])
+        .0
+    );
+    assert!(
+        xattr(&[
+            os("-w"),
+            os("afsplus.aros.protection"),
+            os("0x00000071"),
+            seed
+        ])
+        .0
+    );
+    assert!(!xattr(&[os("-w"), os("afsplus.aros.protection"), os("0x1g"), seed]).0);
+    assert!(
+        !xattr(&[
+            os("-w"),
+            os("afsplus.aros.protection"),
+            os("0x100000000"),
+            seed
+        ])
+        .0
+    );
+    let (ok, listing) = xattr(&[os("-l"), seed]);
+    assert!(ok);
+    assert!(
+        listing
+            .lines()
+            .any(|line| line == "afsplus.aros.comment: Read me first"),
+        "{listing}"
+    );
+    assert!(
+        listing
+            .lines()
+            .any(|line| line == "afsplus.aros.protection: 0x00000071"),
+        "{listing}"
+    );
+
     mounted.unmount().unwrap();
     mounted.wait().unwrap();
 
@@ -172,6 +217,8 @@ fn real_mount_carries_extended_attributes() {
         Some(b"DONOTWAIT".to_vec())
     );
     assert_eq!(vfs.attribute(seed, "user.org.afsplus.kind").unwrap(), None);
+    assert_eq!(vfs.comment(seed).unwrap(), "Read me first");
+    assert_eq!(vfs.stat(seed).unwrap().protection, 0x71);
     fs::remove_dir_all(base).unwrap();
 }
 

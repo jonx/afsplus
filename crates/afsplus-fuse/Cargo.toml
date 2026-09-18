@@ -32,6 +32,7 @@ fuser = { version = "0.18", optional = true, features = ["macfuse-4-compat", "ma
 fuser = { version = "0.18", optional = true }
 
 [dev-dependencies]
+afsplus-aros = { path = "../afsplus-aros" }
 afsplus-check = { path = "../afsplus-check" }
 
 [lints]

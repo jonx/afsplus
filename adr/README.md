@@ -136,7 +136,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-105](ADR-105-security-reference-admission.md) | A well-formed security reference is admitted wherever it points | Accepted | amends [ADR-101](ADR-101-security-preservation-container.md) |
 | [ADR-106](ADR-106-stored-object-comment.md) | The object comment is a field of the object record | Accepted | amends [ADR-102](ADR-102-clone-metadata-inheritance.md) |
 | [ADR-107](ADR-107-twelve-byte-timestamps.md) | Timestamps are twelve bytes on the wire | Accepted | — |
-| [ADR-108](ADR-108-extended-attributes.md) | Extended attributes are one owned chain per object | Accepted | amended by [ADR-109](ADR-109-owned-chains-under-snapshots.md); amends [ADR-102](ADR-102-clone-metadata-inheritance.md) |
+| [ADR-108](ADR-108-extended-attributes.md) | Extended attributes are one owned chain per object | Accepted | amended by [ADR-109](ADR-109-owned-chains-under-snapshots.md), [ADR-120](ADR-120-comment-and-protection-as-host-attributes.md); amends [ADR-102](ADR-102-clone-metadata-inheritance.md) |
 | [ADR-109](ADR-109-owned-chains-under-snapshots.md) | A retained snapshot keeps the owned chains it captured | Accepted | amends [ADR-101](ADR-101-security-preservation-container.md), [ADR-108](ADR-108-extended-attributes.md) |
 | [ADR-110](ADR-110-exact-reclaim-admission.md) | Reclaim queue blocks are admitted only in their canonical image | Accepted | amended by [ADR-112](ADR-112-block-zero-tail.md); amends [ADR-036](ADR-036-reclaim-queue.md) |
 | [ADR-111](ADR-111-checkpoint-zero-tail.md) | Nothing follows the payload of a checkpoint | Accepted | amended by [ADR-112](ADR-112-block-zero-tail.md); amends [ADR-073](ADR-073-snapshot-checkpoint-roots.md) |
@@ -148,6 +148,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-117](ADR-117-correct-the-discard-pointer.md) | Correct where ADR-116 sends the discard identity | Accepted | amends [ADR-116](ADR-116-registry-lists-what-exists.md) |
 | [ADR-118](ADR-118-posix-permission-projection.md) | The POSIX mode is a projection of the protection word | Accepted | — |
 | [ADR-119](ADR-119-backup-carries-comment-and-owner.md) | A backup carries the comment and the owner | Accepted | amends [ADR-082](ADR-082-backup-object-metadata.md) |
+| [ADR-120](ADR-120-comment-and-protection-as-host-attributes.md) | The comment and the protection word are host attributes | Accepted | amends [ADR-108](ADR-108-extended-attributes.md) |
 
 <!-- /adr-index -->
 

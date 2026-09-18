@@ -68,6 +68,16 @@ impl AccessMode {
     }
 }
 
+/// Stored attribute names no one may write. A FUSE host sees the object's
+/// comment and protection word as attributes of these names (ADR-120), so an
+/// attribute stored under one of them would sit hidden behind the field.
+pub const FIELD_ATTRIBUTE_NAMES: [&str; 4] = [
+    "aros.comment",
+    "aros.protection",
+    "user.afsplus.aros.comment",
+    "user.afsplus.aros.protection",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stat {
     pub object_id: ObjectId,
@@ -1380,7 +1390,8 @@ impl<D: BlockDevice> Vfs<D> {
     /// Applies `changes` in one commit: every change or none survives a
     /// power cut. `Some(value)` writes under `mode`, `None` removes and is
     /// [`VfsError::NotFound`] for an absent attribute. A retained snapshot
-    /// keeps what it captured (ADR-109); the change time is `now`.
+    /// keeps what it captured (ADR-109); the change time is `now`. A name of
+    /// [`FIELD_ATTRIBUTE_NAMES`] is [`VfsError::Invalid`].
     pub fn set_attributes(
         &mut self,
         object_id: ObjectId,
@@ -1389,6 +1400,12 @@ impl<D: BlockDevice> Vfs<D> {
         now: Timespec,
     ) -> Result<(), VfsError> {
         self.stat(object_id)?;
+        if changes
+            .iter()
+            .any(|(name, _)| FIELD_ATTRIBUTE_NAMES.contains(name))
+        {
+            return Err(VfsError::Invalid);
+        }
         self.checkpoint_data_window(now)?;
         Ok(self.volume.set_attributes(object_id, changes, mode, now)?)
     }

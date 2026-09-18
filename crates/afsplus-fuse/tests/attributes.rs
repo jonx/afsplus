@@ -159,7 +159,10 @@ fn a_transport_without_removexattr_removes_through_an_empty_value() {
 fn macos_names_round_trip_and_are_seen_from_linux() {
     let mut mac = adapter(formatted(), HostAttributeNames::MacOs);
     let note = file(&mut mac);
-    assert_eq!(mac.list_attributes(note).unwrap(), b"");
+    assert_eq!(
+        mac.list_attributes(note).unwrap(),
+        b"afsplus.aros.protection\0"
+    );
     assert_eq!(
         mac.get_attribute(note, b"com.apple.quarantine"),
         Err(VfsError::NotFound)
@@ -202,7 +205,7 @@ fn macos_names_round_trip_and_are_seen_from_linux() {
     // Stored byte order: "aros.tooltype" before "user.com.apple.quarantine".
     assert_eq!(
         mac.list_attributes(note).unwrap(),
-        b"afsplus.aros.tooltype\0com.apple.quarantine\0"
+        b"afsplus.aros.tooltype\0com.apple.quarantine\0afsplus.aros.protection\0"
     );
 
     // A value past the format's bound is "too big", never "invalid", and
@@ -238,7 +241,7 @@ fn macos_names_round_trip_and_are_seen_from_linux() {
     let note = linux.lookup(OBJECT_ROOT, b"note").unwrap().object_id;
     assert_eq!(
         linux.list_attributes(note).unwrap(),
-        b"trusted.afsplus.aros.tooltype\0user.com.apple.quarantine\0"
+        b"trusted.afsplus.aros.tooltype\0user.com.apple.quarantine\0user.afsplus.aros.protection\0"
     );
     assert_eq!(
         linux

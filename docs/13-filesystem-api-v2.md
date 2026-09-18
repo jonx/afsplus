@@ -370,6 +370,17 @@ names are free-form, stores them under `user.` and shows the rest under
 `afsplus.`. macFUSE's FSKit backend sends `removexattr(2)` as a `SETXATTR`
 without bytes, so that mount reads an empty value as a removal.
 
+FUSE also shows two fields of the object record as attributes
+([ADR-120](../adr/ADR-120-comment-and-protection-as-host-attributes.md)): the
+comment as `afsplus.aros.comment` and the protection word, in hex, as
+`afsplus.aros.protection`; Linux spells them `user.afsplus.aros.comment` and
+`user.afsplus.aros.protection`. Writing either one changes what AROS sees. A
+malformed word, one above 32 bits, or a removal of the word is `EINVAL` and
+changes nothing. A copy tool that keeps extended attributes carries both. A
+Finder copy to FAT or exFAT does not: those file systems store no extended
+attributes, and the AppleDouble file the Finder writes instead is lost to
+every other system.
+
 The handler counts the packets it answers by type, and its failures by error
 code, since it started; operation `PACKET_COUNTS` reads either table. Each
 holds sixty-four keys by name and sums further ones in one last record, so no

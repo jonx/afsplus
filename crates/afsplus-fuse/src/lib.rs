@@ -98,6 +98,29 @@ impl HostAttributeNames {
         }
     }
 
+    /// The host names of the object's comment and protection word, which
+    /// are fields of the object record, not stored attributes (ADR-120).
+    pub const fn field_names(self) -> [(&'static str, ObjectField); 2] {
+        match self {
+            HostAttributeNames::Linux => [
+                ("user.afsplus.aros.comment", ObjectField::Comment),
+                ("user.afsplus.aros.protection", ObjectField::Protection),
+            ],
+            HostAttributeNames::MacOs => [
+                ("afsplus.aros.comment", ObjectField::Comment),
+                ("afsplus.aros.protection", ObjectField::Protection),
+            ],
+        }
+    }
+
+    /// The object field a host name addresses, if it addresses one.
+    pub fn field(self, host: &[u8]) -> Option<ObjectField> {
+        self.field_names()
+            .into_iter()
+            .find(|(name, _)| name.as_bytes() == host)
+            .map(|(_, field)| field)
+    }
+
     /// The one host spelling of a stored name.
     pub fn host(self, stored: &str) -> String {
         match self {
@@ -114,6 +137,30 @@ impl HostAttributeNames {
             },
         }
     }
+}
+
+/// A field of the object record a host reads and writes as an attribute.
+/// The comment is its UTF-8 text and absent when empty; the protection word
+/// is always present, as `0x` and eight upper-case hex digits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectField {
+    Comment,
+    Protection,
+}
+
+/// The protection word a host wrote: `0x` optional, then one to sixteen hex
+/// digits, nothing else. A value beyond 32 bits names bits the word does not
+/// have, and is refused like malformed text.
+pub fn parse_protection(value: &[u8]) -> Option<u32> {
+    let digits = value
+        .strip_prefix(b"0x")
+        .or_else(|| value.strip_prefix(b"0X"))
+        .unwrap_or(value);
+    if digits.is_empty() || digits.len() > 16 || !digits.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let word = u64::from_str_radix(std::str::from_utf8(digits).ok()?, 16).ok()?;
+    u32::try_from(word).ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -546,6 +593,17 @@ impl<D: BlockDevice> FuseAdapter<D> {
     /// the host convention does not carry are both [`VfsError::NotFound`]:
     /// to a reader they are the same fact.
     pub fn get_attribute(&mut self, object_id: ObjectId, name: &[u8]) -> Result<Vec<u8>, VfsError> {
+        if let Some(field) = self.config.attribute_names.field(name) {
+            return match field {
+                ObjectField::Comment => match self.vfs.comment(object_id)? {
+                    comment if comment.is_empty() => Err(VfsError::NotFound),
+                    comment => Ok(comment.into_bytes()),
+                },
+                ObjectField::Protection => {
+                    Ok(format!("0x{:08X}", self.vfs.stat(object_id)?.protection).into_bytes())
+                }
+            };
+        }
         let stored = match self.config.attribute_names.stored(name) {
             Ok(stored) => stored,
             Err(VfsError::NotSupported) => return Err(VfsError::NotFound),
@@ -557,14 +615,89 @@ impl<D: BlockDevice> FuseAdapter<D> {
     }
 
     /// Every attribute name in host spelling, each followed by a NUL byte,
-    /// in the volume's byte order of stored names.
+    /// in the volume's byte order of stored names, then the object fields
+    /// that are present: the protection word always, the comment when set.
     pub fn list_attributes(&mut self, object_id: ObjectId) -> Result<Vec<u8>, VfsError> {
         let mut list = Vec::new();
         for stored in self.vfs.attribute_names(object_id)? {
             list.extend_from_slice(self.config.attribute_names.host(&stored).as_bytes());
             list.push(0);
         }
+        let has_comment = !self.vfs.comment(object_id)?.is_empty();
+        for (name, field) in self.config.attribute_names.field_names() {
+            if field == ObjectField::Protection || has_comment {
+                list.extend_from_slice(name.as_bytes());
+                list.push(0);
+            }
+        }
         Ok(list)
+    }
+
+    /// Writes an object field under the rules of an attribute: `Create`
+    /// finds a present field existing, `Replace` needs it present. A value
+    /// the field cannot take is [`VfsError::Invalid`] and changes nothing.
+    fn set_field(
+        &mut self,
+        object_id: ObjectId,
+        field: ObjectField,
+        value: &[u8],
+        mode: AttributeWriteMode,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        if value.is_empty() && self.config.empty_value_removes {
+            return match self.remove_field(object_id, field, now) {
+                Err(VfsError::NotFound) => self.vfs.stat(object_id).map(|_| ()),
+                result => result,
+            };
+        }
+        let present = match field {
+            ObjectField::Comment => !self.vfs.comment(object_id)?.is_empty(),
+            ObjectField::Protection => {
+                self.vfs.stat(object_id)?;
+                true
+            }
+        };
+        match (mode, present) {
+            (AttributeWriteMode::Create, true) => return Err(VfsError::AlreadyExists),
+            (AttributeWriteMode::Replace, false) => return Err(VfsError::NotFound),
+            _ => {}
+        }
+        match field {
+            ObjectField::Comment => {
+                // The classic API carries a comment as a NUL-terminated string.
+                let comment = std::str::from_utf8(value).map_err(|_| VfsError::Invalid)?;
+                if comment.contains('\0') {
+                    return Err(VfsError::Invalid);
+                }
+                self.vfs.set_comment(object_id, comment, now)
+            }
+            ObjectField::Protection => {
+                let word = parse_protection(value).ok_or(VfsError::Invalid)?;
+                self.vfs.set_protection(object_id, word, now)
+            }
+        }
+    }
+
+    /// Removing the comment clears it; the protection word always exists,
+    /// so removing it is [`VfsError::Invalid`].
+    fn remove_field(
+        &mut self,
+        object_id: ObjectId,
+        field: ObjectField,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        match field {
+            ObjectField::Comment => {
+                if self.vfs.comment(object_id)?.is_empty() {
+                    return Err(VfsError::NotFound);
+                }
+                self.vfs.set_comment(object_id, "", now)
+            }
+            ObjectField::Protection => {
+                self.vfs.stat(object_id)?;
+                Err(VfsError::Invalid)
+            }
+        }
     }
 
     /// Writes one attribute. A value beyond the format's bound is
@@ -577,6 +710,9 @@ impl<D: BlockDevice> FuseAdapter<D> {
         mode: AttributeWriteMode,
         now: Timespec,
     ) -> Result<(), VfsError> {
+        if let Some(field) = self.config.attribute_names.field(name) {
+            return self.set_field(object_id, field, value, mode, now);
+        }
         let stored = self.config.attribute_names.stored(name)?;
         if value.is_empty() && self.config.empty_value_removes {
             // "Absent" is the requested state, so an attribute that is
@@ -605,6 +741,9 @@ impl<D: BlockDevice> FuseAdapter<D> {
         name: &[u8],
         now: Timespec,
     ) -> Result<(), VfsError> {
+        if let Some(field) = self.config.attribute_names.field(name) {
+            return self.remove_field(object_id, field, now);
+        }
         let stored = match self.config.attribute_names.stored(name) {
             Ok(stored) => stored,
             Err(VfsError::NotSupported) => return Err(VfsError::NotFound),
