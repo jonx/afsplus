@@ -218,13 +218,19 @@ rounds while a program writes, fsyncs and pauses, then requires the checker
 to pass and every file reported after its `fsync` to read back byte for byte
 on the next mount. A driver that commits nothing before unmounting fails it.
 
-macFUSE's relay never completes the unmount of a volume whose driver died
-while no request was in flight: `umount` waits for ever. The supervisor then
-terminates the relay, which releases the mount, but macOS keeps its record of
-that path and refuses a new mount there, with a macFUSE alert, until its file
-system daemon restarts. A mount at any other path works. The kill test mounts
-at a new path every time for that reason and reports how many records were
-left.
+macFUSE's relay does not notice that the process serving a volume has died:
+`umount` and every access then wait for ever (reported upstream as
+[macfuse/macfuse#1201](https://github.com/macfuse/macfuse/issues/1201)). The
+supervisor therefore terminates the relay when the unmount does not finish,
+and gives it thirty seconds to end on its own before killing it: a relay that
+ends normally has macOS forget the mount, while one killed first can leave the
+path recorded, and macOS then refuses the next mount there until its file
+system daemon restarts. macOS also forgets most records some time after the
+relay has gone. The kill test mounts at a new path every time and reports how
+many records are still there half a minute after each kill.
+
+A panic in the driver unwinds: the request that met it is answered with an
+error, the channel closes, and the volume is unmounted with nothing recorded.
 
 ## macFUSE releases
 

@@ -615,7 +615,10 @@ mod supervisor {
         }
         eprintln!("afsplus-mount: releasing the macFUSE relay (pid {pid}) so that programs waiting on the volume are not left blocked");
         let _ = kill(pid, Signal::SIGTERM);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Time to finish on its own: a relay that ends normally tells macOS
+        // to forget the mount, and one killed before it has done so leaves
+        // the mount recorded, which refuses the next mount at that path.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if kill(pid, None).is_err() {
                 return;

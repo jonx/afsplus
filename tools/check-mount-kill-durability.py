@@ -229,13 +229,11 @@ try:
                   + ("is still running" if supervisor.poll() is None else f"ended with {supervisor.poll()}")
                   + ", mounted" * mounted(mnt) + "; it said: " + said.read().strip().replace("\n", " | ")[-400:])
         print(f"        released after {time.time() - released_at:.1f} s")
-        if not wait_for(lambda: not recorded(mnt), 5):
-            # macFUSE's relay never completes the unmount of a volume whose
-            # process died while nothing was in flight; terminating it
-            # releases the mount but leaves macOS's record of the path. See
-            # testing/mounted-volume-testing.md. Reported, not failed: data
-            # safety is what this check holds, and every mount here has a
-            # path of its own.
+        if not wait_for(lambda: not recorded(mnt), 30):
+            # macOS can keep its record of a mount whose relay had to be
+            # terminated; see testing/mounted-volume-testing.md. Reported,
+            # not failed: data safety is what this check holds, and every
+            # mount here has a path of its own.
             left_recorded.append(mnt)
         if not wait_for(lambda: writer.poll() is not None, 10):
             writer.kill()
