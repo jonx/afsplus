@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use afsplus_aros::health::HealthEvent;
 use afsplus_aros::{
-    ArosAdapter, ArosConfig, ArosError, AttributeWriteMode, DiskInfo, FileInfo, LockAccess,
-    NameEncoding, OpenMode, SeekMode,
+    ArosAdapter, ArosConfig, ArosError, AttributeWriteMode, DiskInfo, Durability, FileInfo,
+    LockAccess, NameEncoding, OpenMode, SeekMode,
 };
 use afsplus_block::{BlockDevice, BlockError, CacheControl, CachedDevice};
 use afsplus_core::flight::{Categories, Category, Event, FlightRecorder, LiveSink, SinkResult};
@@ -27,7 +27,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 16;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 17;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -45,6 +45,7 @@ pub const AFSPLUS_AROS_GROUP_VOLUME_LABEL: u64 = 0x2000;
 pub const AFSPLUS_AROS_GROUP_DOS_COMMENT: u64 = 0x4000;
 pub const AFSPLUS_AROS_GROUP_ATTRIBUTES: u64 = 0x8000;
 pub const AFSPLUS_AROS_GROUP_CACHE: u64 = 0x10000;
+pub const AFSPLUS_AROS_GROUP_COMMIT: u64 = 0x20000;
 pub const AFSPLUS_AROS_EXTENT_UNWRITTEN: u32 = 1;
 pub const AFSPLUS_AROS_DIR_RECORD_MAX: u32 = 280;
 pub const AFSPLUS_AROS_KIND_FILE: u32 = 1;
@@ -71,7 +72,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_VOLUME_LABEL
     | AFSPLUS_AROS_GROUP_DOS_COMMENT
     | AFSPLUS_AROS_GROUP_ATTRIBUTES
-    | AFSPLUS_AROS_GROUP_CACHE;
+    | AFSPLUS_AROS_GROUP_CACHE
+    | AFSPLUS_AROS_GROUP_COMMIT;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -2122,6 +2124,58 @@ pub extern "C" fn afsplus_aros_counters(
             },
             |value, size| value.struct_size = size,
         )
+    })
+}
+
+/// Longest a delayed change may wait, in milliseconds, whatever is asked.
+const COMMIT_MAX_AGE_MS_MAX: u32 = 60_000;
+
+/// Group COMMIT (ADR-121): `max_age_ms` zero makes every change durable
+/// when it returns; otherwise changes gather and are committed together once
+/// the volume has been idle `idle_ms`, once the oldest is `max_age_ms` old,
+/// at the window's bound, or when anything asks for durability. `idle_ms`
+/// is 1 to `max_age_ms`, and `max_age_ms` at most 60 000. A mount starts
+/// with every change durable at once. A volume without the intent log's data
+/// updates cannot delay: ERROR_ACTION_NOT_KNOWN.
+#[no_mangle]
+pub extern "C" fn afsplus_aros_set_commit_policy(
+    filesystem: *mut AfsplusAros,
+    max_age_ms: u32,
+    idle_ms: u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        let bridge = bridge_mut(filesystem)?;
+        let durability = if max_age_ms == 0 {
+            Durability::Sync
+        } else {
+            if max_age_ms > COMMIT_MAX_AGE_MS_MAX || idle_ms == 0 || idle_ms > max_age_ms {
+                return Err(ArosError::BadNumber);
+            }
+            Durability::Delayed {
+                idle_ms,
+                max_age_ms,
+            }
+        };
+        bridge.adapter.set_durability(durability)
+    })
+}
+
+/// Group COMMIT: commits the delayed changes when `now` makes them due.
+/// `output_pending` becomes 1 while changes still wait, which is when the
+/// handler must call again; a volume whose changes are durable at once
+/// always answers 0.
+#[no_mangle]
+pub extern "C" fn afsplus_aros_commit_due(
+    filesystem: *mut AfsplusAros,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+    output_pending: *mut u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        let bridge = bridge_mut(filesystem)?;
+        let now = timestamp(now_seconds, now_nanoseconds)?;
+        let pending = bridge.adapter.commit_if_due(now)?;
+        write_output(output_pending, u32::from(pending))
     })
 }
 

@@ -93,6 +93,13 @@ struct AfsplusArosHandler {
     struct timerequest *timer_request;
     uint32_t timer_open;
     uint32_t timer_pending;
+    /* Delayed commit (ADR-121): the longest a change waits, 0 for SYNC,
+     * whether the Control string named it, whether the library delays, and
+     * whether changes wait now, which keeps the timer running. */
+    uint32_t commit_seconds;
+    uint32_t commit_named;
+    uint32_t commit_delayed;
+    uint32_t commit_pending;
     uint8_t *bounce;
     uintptr_t dma_mask;
     uint32_t bounce_size;
@@ -269,7 +276,11 @@ static void close_wait_timer(struct AfsplusArosHandler *handler)
     handler->timer_port = NULL;
 }
 
-/* Collects an expired step and keeps one step running while a packet waits. */
+static int32_t packet_now(void *context, int64_t *unix_seconds,
+    uint32_t *nanoseconds);
+
+/* Collects an expired step, commits delayed changes that are due, and keeps
+ * one step running while a packet or a change waits. */
 static void run_wait_timer(struct AfsplusArosHandler *handler)
 {
     struct ExecBase *SysBase = handler->SysBase;
@@ -284,8 +295,22 @@ static void run_wait_timer(struct AfsplusArosHandler *handler)
         afsplus_aros_packet_elapsed(handler->packets,
             AFSPLUS_AROS_WAIT_STEP_TICKS);
     }
+    if (handler->commit_delayed)
+    {
+        int64_t seconds;
+        uint32_t nanoseconds;
+        uint32_t pending = 1;
+
+        /* A commit that fails is in the health log; the changes still
+         * wait, and the next step tries again. */
+        if (packet_now(handler, &seconds, &nanoseconds) == 0)
+            (void)afsplus_aros_commit_due(handler->filesystem, seconds,
+                nanoseconds, &pending);
+        handler->commit_pending = pending;
+    }
     if (!handler->timer_pending
-        && afsplus_aros_packet_waiting(handler->packets) != 0)
+        && (afsplus_aros_packet_waiting(handler->packets) != 0
+            || handler->commit_pending))
     {
         handler->timer_request->tr_node.io_Command = TR_ADDREQUEST;
         handler->timer_request->tr_time.tv_secs = 0;
@@ -808,6 +833,8 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
         handler->mount_flags = control.mount_flags;
         handler->name_encoding = control.name_encoding;
         handler->trace_capacity = control.trace_events;
+        handler->commit_seconds = control.commit_seconds;
+        handler->commit_named = control.commit_named;
     }
 
     memset(&mount_config, 0, sizeof(mount_config));
@@ -945,6 +972,26 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     open_wait_timer(handler);
     if (handler->timer_open)
         packet_config.complete = packet_complete;
+    /* Delayed commit needs the timer that wakes the handler to commit. A
+     * volume that cannot delay stays SYNC unless the Control string asked
+     * for a delay, which then fails the mount rather than look applied. */
+    set_startup_stage(handler, "commit-policy");
+    if (handler->commit_seconds != 0)
+    {
+        if (!handler->timer_open)
+            error = handler->commit_named ? ERROR_NO_FREE_STORE : 0;
+        else
+        {
+            error = afsplus_aros_set_commit_policy(handler->filesystem,
+                handler->commit_seconds * UINT32_C(1000), UINT32_C(1000));
+            if (error == 0)
+                handler->commit_delayed = 1;
+            else if (error == ERROR_ACTION_NOT_KNOWN && !handler->commit_named)
+                error = 0;
+        }
+        if (error != 0)
+            return error;
+    }
     set_startup_stage(handler, "packet-context");
     error = afsplus_aros_packet_create(&packet_config, &handler->packets);
     if (error == 0)

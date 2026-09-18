@@ -18,7 +18,7 @@ use afsplus_format::{Timespec, NAME_MAX_UTF8_BYTES, OBJECT_ROOT};
 use afsplus_vfs::{
     AccessMode, Capabilities, Handle, NodeKind, ObjectId, Stat, StatFs, Vfs, VfsError,
 };
-pub use afsplus_vfs::{AttributeWriteMode, ExtentMap, ExtentRange};
+pub use afsplus_vfs::{AttributeWriteMode, Durability, ExtentMap, ExtentRange};
 
 pub type LockId = u64;
 pub type FileHandleId = u64;
@@ -1310,6 +1310,17 @@ impl<D: BlockDevice> ArosAdapter<D> {
 
     pub fn flush(&mut self) -> Result<(), ArosError> {
         Ok(self.vfs.sync_filesystem()?)
+    }
+
+    /// When changes reach the disk (ADR-121); see [`Durability`].
+    pub fn set_durability(&mut self, durability: Durability) -> Result<(), ArosError> {
+        Ok(self.vfs.set_durability(durability)?)
+    }
+
+    /// Commits the delayed changes when `now` makes them due; returns
+    /// whether changes still wait, so the handler keeps its clock running.
+    pub fn commit_if_due(&mut self, now: Timespec) -> Result<bool, ArosError> {
+        Ok(self.vfs.commit_if_due(now)?)
     }
 
     pub fn create_directory(

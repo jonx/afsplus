@@ -62,11 +62,14 @@ uint32_t afsplus_control_parse(const char *text, uint32_t length,
     uint32_t seen_security = 0;
     uint32_t seen_encoding = 0;
     uint32_t seen_trace = 0;
+    uint32_t seen_commit = 0;
     uint32_t at = 0;
 
     parsed.mount_flags = 0;
     parsed.name_encoding = AFSPLUS_AROS_ENCODING_UTF8;
     parsed.trace_events = 0;
+    parsed.commit_seconds = AFSPLUS_CONTROL_COMMIT_DEFAULT;
+    parsed.commit_named = 0;
     *output = parsed;
     if (text == NULL)
         return AFSPLUS_CONTROL_OK;
@@ -133,6 +136,17 @@ uint32_t afsplus_control_parse(const char *text, uint32_t length,
                 ;
             else if (!parse_count(value, at - value_start,
                 AFSPLUS_CONTROL_TRACE_MAX, &parsed.trace_events))
+                return AFSPLUS_CONTROL_UNKNOWN_VALUE;
+        }
+        else if (same_word(keyword, keyword_length, "COMMIT"))
+        {
+            if (seen_commit++)
+                return AFSPLUS_CONTROL_REPEATED_KEYWORD;
+            parsed.commit_named = 1;
+            if (same_word(value, at - value_start, "SYNC"))
+                parsed.commit_seconds = 0;
+            else if (!parse_count(value, at - value_start,
+                AFSPLUS_CONTROL_COMMIT_MAX, &parsed.commit_seconds))
                 return AFSPLUS_CONTROL_UNKNOWN_VALUE;
         }
         else

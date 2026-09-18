@@ -386,6 +386,16 @@ events, which it has not got by default. Settings are separated by spaces or com
 value are compared without regard to case. Both policies were reachable only
 from a program calling the C boundary directly before this.
 
+`COMMIT=<seconds>` and `COMMIT=SYNC` choose when changes reach the disk
+([ADR-121](../adr/ADR-121-delayed-group-commit.md)). By default changes
+gather and are committed together after one idle second, or once the oldest
+is five seconds old: the handler's timer calls `afsplus_aros_commit_due` with
+its clock, and `ACTION_FLUSH`, inhibit, dismount and fsync commit at once. A
+crash loses at most the waiting changes, whole and in order. `COMMIT=SYNC`
+makes every change durable before its packet is answered. A volume without
+the intent log's data updates, or a handler without its timer, stays `SYNC`
+unless the string asked for a delay, which then fails the mount.
+
 The DOSDriver's `Buffers` sizes the read cache, in device blocks, as it does
 for the classic file systems, and `AddBuffers` grows or shrinks it while the
 volume is mounted (`ACTION_MORE_CACHE`, through the `CACHE` entry-point group).

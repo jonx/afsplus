@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(16)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(17)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -44,6 +44,7 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_DOS_COMMENT UINT64_C(0x4000)
 #define AFSPLUS_AROS_GROUP_ATTRIBUTES UINT64_C(0x8000)
 #define AFSPLUS_AROS_GROUP_CACHE UINT64_C(0x10000)
+#define AFSPLUS_AROS_GROUP_COMMIT UINT64_C(0x20000)
 
 /* AfsplusArosExtent.flags. */
 #define AFSPLUS_AROS_EXTENT_UNWRITTEN UINT32_C(0x1)
@@ -559,6 +560,22 @@ int32_t afsplus_aros_file_comment(struct AfsplusAros *filesystem,
  * memory cannot be had. A mount starts without one. */
 int32_t afsplus_aros_set_cache_blocks(struct AfsplusAros *filesystem,
     uint32_t blocks, uint32_t *output_blocks);
+
+/* Group AFSPLUS_AROS_GROUP_COMMIT (ADR-121): when changes reach the disk.
+ * set_commit_policy with max_age_ms 0 makes every change durable when it
+ * returns, as a mount starts. Otherwise changes gather and are committed
+ * together once the volume has been idle idle_ms (1 to max_age_ms), once the
+ * oldest is max_age_ms old (at most 60000), at the window's bound, or when
+ * anything asks for durability: fsync, ACTION_FLUSH, inhibit, dismount. A
+ * volume without the intent log's data updates cannot delay and answers
+ * ERROR_ACTION_NOT_KNOWN. commit_due commits when now makes the changes due
+ * and sets output_pending to 1 while changes still wait: the handler calls it
+ * after its packets and on its clock until it answers 0. A crash loses at
+ * most the waiting changes, whole and in order. */
+int32_t afsplus_aros_set_commit_policy(struct AfsplusAros *filesystem,
+    uint32_t max_age_ms, uint32_t idle_ms);
+int32_t afsplus_aros_commit_due(struct AfsplusAros *filesystem,
+    int64_t now_seconds, uint32_t now_nanoseconds, uint32_t *output_pending);
 
 /* Group AFSPLUS_AROS_GROUP_ATTRIBUTES: extended attributes of the object
  * name under base_lock, an empty name being the base lock's own object.

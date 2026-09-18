@@ -38,6 +38,8 @@ static void refuses(const char *text, uint32_t reason)
     check(control.mount_flags == 0);
     check(control.name_encoding == AFSPLUS_AROS_ENCODING_UTF8);
     check(control.trace_events == 0);
+    check(control.commit_seconds == AFSPLUS_CONTROL_COMMIT_DEFAULT
+        && control.commit_named == 0);
 }
 
 int main(void)
@@ -102,6 +104,21 @@ int main(void)
     refuses("TRACE=99999999999", AFSPLUS_CONTROL_UNKNOWN_VALUE);
     refuses("TRACE=ON", AFSPLUS_CONTROL_UNKNOWN_VALUE);
     refuses("TRACE=256 TRACE=256", AFSPLUS_CONTROL_REPEATED_KEYWORD);
+
+    /* Delayed commit: five seconds unless the string says otherwise. */
+    check(parse(NULL, &control) == AFSPLUS_CONTROL_OK);
+    check(control.commit_seconds == 5 && control.commit_named == 0);
+    check(parse("COMMIT=SYNC", &control) == AFSPLUS_CONTROL_OK);
+    check(control.commit_seconds == 0 && control.commit_named == 1);
+    check(parse("commit=30 trace=8", &control) == AFSPLUS_CONTROL_OK);
+    check(control.commit_seconds == 30 && control.commit_named == 1
+        && control.trace_events == 8);
+    check(parse("COMMIT=60", &control) == AFSPLUS_CONTROL_OK);
+    check(control.commit_seconds == 60);
+    refuses("COMMIT=61", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("COMMIT=0", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("COMMIT=NEVER", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("COMMIT=5 COMMIT=SYNC", AFSPLUS_CONTROL_REPEATED_KEYWORD);
 
     /* What a mountlist may not say without being told. */
     refuses("SECURITY=NONE", AFSPLUS_CONTROL_UNKNOWN_VALUE);

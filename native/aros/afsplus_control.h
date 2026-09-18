@@ -33,15 +33,24 @@
  *                       event.
  *   TRACE=<n>           keep a ring of n events, 1 to 4096, which a tool
  *                       drains through the extension packet.
+ *   COMMIT=<seconds>    changes gather and are committed together after one
+ *                       idle second, or when the oldest is this old, 1 to
+ *                       60 (ADR-121); a crash loses at most those changes,
+ *                       whole. COMMIT=5 is the default.
+ *   COMMIT=SYNC         every change is durable when its packet is answered.
  */
 #include <stdint.h>
 
 #define AFSPLUS_CONTROL_TRACE_MAX 4096
+#define AFSPLUS_CONTROL_COMMIT_MAX 60
+#define AFSPLUS_CONTROL_COMMIT_DEFAULT 5
 
 struct AfsplusArosControl {
     uint32_t mount_flags;   /* AFSPLUS_AROS_MOUNT_FLAG_* of afsplus_aros.h */
     uint32_t name_encoding; /* AFSPLUS_AROS_ENCODING_* of afsplus_aros.h */
     uint32_t trace_events;  /* ring size, 0 for no trace ring */
+    uint32_t commit_seconds; /* longest a change waits, 0 for SYNC */
+    uint32_t commit_named;   /* 1 when the string said COMMIT= */
 };
 
 #define AFSPLUS_CONTROL_OK 0

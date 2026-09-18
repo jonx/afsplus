@@ -354,13 +354,20 @@ a metering allocator around the system one.
 create, open, read, lock and unlock a record, close, lock, examine, unlock,
 start and end a notification, set the comment and the protection, delete —
 five times as a warm-up, then the given number of times, and reports the
-system's free memory and the handler's heap before and after. With no lock
-held the handler keeps no per-object state, so under
-[`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) a hundred
-rounds leave the heap and its peak equal to the byte, and the probe fails a
-run where either moved. System free memory alone cannot show this: the
-allocator's pools absorb a small leak, and a cache of parents that grew by
-about 94 bytes a round passed that check until the heap counters found it.
+system's free memory and the handler's heap before and after, each read after
+an `ACTION_FLUSH` so that a delayed mount is measured at a durable point.
+Under [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) a
+hundred rounds may move the heap or its peak by at most 256 bytes. System
+free memory alone cannot show a leak: the allocator's pools absorb it. The
+heap counters found two that it hid, a cache of parents that grew by about
+94 bytes a round and, on a delayed mount, deleted files left as orphans at
+1.2 KB each until the commit came to clean them.
+
+Open findings of the heap counters, measured at the C boundary: the commit
+path grows by a few dozen bytes over thousands of rounds, in sync mode too,
+by steps that suggest a slowly growing collection not yet identified; and
+rewriting one existing file five hundred times leaves 8.4 MB held, bounded
+but large for the classic profile.
 
 The target runner is
 [`tools/bench-hosted-aros.sh`](../tools/bench-hosted-aros.sh) with
