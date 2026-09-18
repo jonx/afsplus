@@ -111,6 +111,17 @@ at no cache, 16 blocks and an unbounded one and requires the same writes and
 barriers in the same order and the same image from all three; the reads fall
 from 8,731 to 1,736 to 11.
 
+A cached block may also keep its decoded tree node or object record beside
+its bytes; any write of the block, a refused one included, and its eviction
+drop it. Tree lookups and record reads use the kept form as it is: it was
+checked when it was decoded, and checking the bytes again would cover only
+the copy beside it, not the decoded form that is used. The
+`verify-cached-metadata` feature of `afsplus-core` checks the bytes again on
+every reuse, at the cost of a CRC32C per read; it is compiled in or out, so
+the default build carries no test of it. A kept form damaged in memory could
+steer a lookup that a change then follows. Having every change find its
+objects through checked bytes is a further step, not taken.
+
 Native VM integration must state which callbacks may allocate or page-fault
 and test reclaim reentrancy under memory pressure. The
 [book review](33-practical-filesystem-design-review.md) and

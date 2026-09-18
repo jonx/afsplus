@@ -8216,8 +8216,9 @@ struct KeptRecord {
 }
 
 /// Decodes the object record in `buf`, the bytes just read from block `lba`.
-/// The checksum is checked on every read; when the device kept the record
-/// decoded from these same bytes, that spares the decoding.
+/// A record decoded here was checked when it was decoded; when the device
+/// kept it, it is used as it is, and with the `verify-cached-metadata`
+/// feature the bytes are checked again first.
 fn decode_record<D: BlockDevice>(
     dev: &mut D,
     lba: u64,
@@ -8227,10 +8228,12 @@ fn decode_record<D: BlockDevice>(
         .attached(lba)
         .and_then(|value| value.downcast::<KeptRecord>().ok())
     {
-        afsplus_format::header::BlockHeader::verify(
-            buf,
-            afsplus_format::header::block_type::OBJECT,
-        )?;
+        if cfg!(feature = "verify-cached-metadata") {
+            afsplus_format::header::BlockHeader::verify(
+                buf,
+                afsplus_format::header::block_type::OBJECT,
+            )?;
+        }
         return Ok((kept.record, kept.generation));
     }
     let (record, generation) = ObjectRecord::decode_metadata_with_generation(buf)?;

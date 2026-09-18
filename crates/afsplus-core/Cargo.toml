@@ -8,6 +8,10 @@ repository.workspace = true
 
 [features]
 allocation-tracing = []
+# Check the CRC32C of a cached block's bytes again every time its kept
+# decoded form is reused. Off by default: the decoded form is what is used,
+# and the check covers only the bytes beside it (docs/20-performance.md).
+verify-cached-metadata = []
 
 [dependencies]
 afsplus-format = { path = "../afsplus-format" }

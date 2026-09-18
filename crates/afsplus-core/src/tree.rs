@@ -46,9 +46,11 @@ struct KeptNode {
     generation: u64,
 }
 
-/// Decodes tree node `lba` from `buf`, the bytes just read from it. The
-/// block's checksum is checked on every read; when the device kept the node
-/// decoded from these same bytes, that spares the decoding.
+/// Decodes tree node `lba` from `buf`, the bytes just read from it. A block
+/// decoded here was checked when it was decoded; when the device kept that
+/// decoded node, it is used as it is. With the `verify-cached-metadata`
+/// feature the bytes are checked again first, at the cost of a CRC32C of
+/// the block on every read.
 pub(crate) fn decode_node<D: BlockDevice>(
     dev: &mut D,
     lba: u64,
@@ -58,8 +60,10 @@ pub(crate) fn decode_node<D: BlockDevice>(
         .attached(lba)
         .and_then(|value| value.downcast::<KeptNode>().ok())
     {
-        BlockHeader::verify(buf, block_type::TREE_NODE)
-            .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        if cfg!(feature = "verify-cached-metadata") {
+            BlockHeader::verify(buf, block_type::TREE_NODE)
+                .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        }
         return Ok((Arc::clone(&kept.node), kept.generation));
     }
     let (node, generation) = TreeNode::decode(buf)
@@ -935,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_node_is_used_only_after_its_bytes_pass_the_checksum() {
+    fn a_kept_node_answers_and_is_rechecked_only_when_asked() {
         let geo = Geometry {
             block_size: 4096,
             total_blocks: 128,
@@ -961,13 +965,20 @@ mod tests {
         // The kept node answers again for the same bytes.
         let (value, _) = lookup(&mut dev, &geo, 20, spec, &key_u64(3)).unwrap();
         assert_eq!(u64::from_le_bytes(value.unwrap().try_into().unwrap()), 1003);
-        // Damage the bytes behind the kept node: the read fails, it does not
-        // answer from the kept node.
+        // Damage the bytes behind the kept node. By default the kept node,
+        // checked when it was decoded, still answers; with
+        // verify-cached-metadata the read fails instead.
         let mut block = vec![0u8; 4096];
         dev.inner.read_block(20, &mut block).unwrap();
         block[100] ^= 0x40;
         dev.inner.write_block(20, &block).unwrap();
-        assert!(lookup(&mut dev, &geo, 20, spec, &key_u64(2)).is_err());
+        let answer = lookup(&mut dev, &geo, 20, spec, &key_u64(2));
+        if cfg!(feature = "verify-cached-metadata") {
+            assert!(answer.is_err());
+        } else {
+            let (value, _) = answer.unwrap();
+            assert_eq!(u64::from_le_bytes(value.unwrap().try_into().unwrap()), 1002);
+        }
     }
 
     #[test]
