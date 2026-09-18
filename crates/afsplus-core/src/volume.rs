@@ -357,7 +357,14 @@ struct OpenWindow {
     generation: u64,
     unlogged: Vec<LogOp>,
     logged_records: u32,
+    /// The window holds a change no log record describes, such as a write
+    /// to a file it created: an fsync must commit it, never log it.
+    unloggable: bool,
 }
+
+/// Largest file created in a window that later writes may still rewrite in
+/// place of a commit; beyond it the caller commits the window first.
+pub const WINDOW_CREATED_REWRITE_MAX: u64 = 256 * 1024;
 
 /// Explicit reservation transaction admission; independent of disk encoding.
 #[derive(Debug, Clone, Copy)]
@@ -1010,6 +1017,15 @@ impl<D: BlockDevice> Volume<D> {
     ) -> Result<Option<u64>, CoreError> {
         self.ensure_public_object_id(directory_id)?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+        // Changes waiting in the open window are part of the namespace every
+        // caller sees.
+        if let Some(window) = self.window.take() {
+            let result = self
+                .comparison_key(name.as_bytes())
+                .and_then(|key| self.batch_lookup(&window.pending, directory_id, &key));
+            self.window = Some(window);
+            return result.map(|entry| entry.map(|entry| entry.child_id));
+        }
         let directory_record = self.read_object(directory_id)?.ok_or(CoreError::NotFound)?;
         if directory_record.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
@@ -1490,7 +1506,12 @@ impl<D: BlockDevice> Volume<D> {
                 .get(&object_id)
                 .map(|layout| layout.extents.clone())
         });
-        let committed_record = if pending_layout.is_none() {
+        // A file the window created lives in one run until the commit.
+        let created_run = self
+            .window
+            .as_ref()
+            .and_then(|window| window.pending.created_data.get(&object_id).copied());
+        let committed_record = if pending_layout.is_none() && created_run.is_none() {
             Some(self.read_object(object_id)?.ok_or(CoreError::NotFound)?)
         } else {
             None
@@ -1501,6 +1522,8 @@ impl<D: BlockDevice> Volume<D> {
                 extent_at(extents, logical_block)
                     .filter(|extent| extent.flags & EXTENT_UNWRITTEN == 0)
                     .map(|extent| extent.physical_start + logical_block - extent.logical_start)
+            } else if let Some((start, blocks)) = created_run {
+                (logical_block < blocks).then_some(start + logical_block)
             } else {
                 let record = committed_record
                     .as_ref()
@@ -5161,6 +5184,152 @@ impl<D: BlockDevice> Volume<D> {
         Ok(())
     }
 
+    /// Writes or truncates a file the open window created: its content is
+    /// read, changed and written to a new run, and the old run released, or
+    /// quarantined when a durable log record still names it. Only a file up
+    /// to [`WINDOW_CREATED_REWRITE_MAX`] qualifies; a larger one is a
+    /// `PrototypeLimit` the caller answers by committing the window. Returns
+    /// whether anything was changed, for [`Self::finish_created_rewrite`].
+    fn rewrite_created_file(
+        &mut self,
+        window: &mut OpenWindow,
+        object_id: u64,
+        now: Timespec,
+        change: impl FnOnce(&mut Vec<u8>) -> Result<(), CoreError>,
+    ) -> Result<bool, (bool, CoreError)> {
+        let block_size = self.dev.block_size() as u64;
+        let (old_start, old_blocks) = window.pending.created_data[&object_id];
+        let record = match window.pending.records.get(&object_id) {
+            Some(Some(record)) => *record,
+            _ => {
+                return Err((
+                    false,
+                    CoreError::Corrupt(format!("created object {object_id} has no record")),
+                ))
+            }
+        };
+        let mut bytes = vec![0u8; record.size_bytes as usize];
+        let mut block = vec![0u8; block_size as usize];
+        for index in 0..old_blocks {
+            let at = (index * block_size) as usize;
+            if at >= bytes.len() {
+                break;
+            }
+            self.dev
+                .read_block(old_start + index, &mut block)
+                .map_err(|error| (false, error.into()))?;
+            let end = bytes.len().min(at + block_size as usize);
+            bytes[at..end].copy_from_slice(&block[..end - at]);
+        }
+        change(&mut bytes).map_err(|error| (false, error))?;
+        let new_size = bytes.len() as u64;
+        if new_size > WINDOW_CREATED_REWRITE_MAX {
+            return Err((
+                false,
+                CoreError::PrototypeLimit("created file past the window rewrite bound"),
+            ));
+        }
+        let new_blocks = new_size.div_ceil(block_size);
+        let new_start = if new_blocks > 0 {
+            window
+                .tx
+                .allocate_run(&mut self.dev, new_blocks)
+                .map_err(|error| (false, error))?
+        } else {
+            0
+        };
+        // From here the window has changed.
+        for index in 0..new_blocks {
+            let at = (index * block_size) as usize;
+            let end = bytes.len().min(at + block_size as usize);
+            block.fill(0);
+            block[..end - at].copy_from_slice(&bytes[at..end]);
+            self.dev
+                .write_block(new_start + index, &block)
+                .map_err(|error| (true, error.into()))?;
+        }
+        window.pending.prewritten_data_blocks = window
+            .pending
+            .prewritten_data_blocks
+            .checked_add(new_blocks)
+            .ok_or((
+                true,
+                CoreError::PrototypeLimit("window data accounting overflow"),
+            ))?;
+        if window.pending.logged_created.remove(&object_id) {
+            if old_blocks > 0 {
+                window.pending.sacrificed.push((old_start, old_blocks));
+            }
+        } else {
+            for lba in old_start..old_start + old_blocks {
+                window
+                    .tx
+                    .release_uncommitted(&mut self.dev, lba)
+                    .map_err(|error| (true, error))?;
+            }
+        }
+        window
+            .pending
+            .created_data
+            .insert(object_id, (new_start, new_blocks));
+        window.pending.records.insert(
+            object_id,
+            Some(ObjectRecord {
+                size_bytes: new_size,
+                allocated_bytes: new_blocks * block_size,
+                data_root: new_start,
+                data_blocks: new_blocks,
+                modified: now,
+                changed: now,
+                content_generation: window.generation,
+                ..record
+            }),
+        );
+        window.unloggable = true;
+        Ok(true)
+    }
+
+    /// Puts the window back after [`Self::rewrite_created_file`]: a refusal
+    /// before any change keeps it, a failure after one poisons it as every
+    /// other window mutation does.
+    fn finish_created_rewrite(
+        &mut self,
+        window: OpenWindow,
+        result: Result<bool, (bool, CoreError)>,
+    ) -> Result<(), CoreError> {
+        let generation = window.generation;
+        match result {
+            Ok(_) => {
+                self.window = Some(window);
+                Ok(())
+            }
+            Err((false, error)) => {
+                self.window = Some(window);
+                Err(error)
+            }
+            Err((true, error)) => {
+                self.window_poisoned = true;
+                self.flight_window_event(generation, crate::flight::EventKind::WindowFailed, None);
+                self.flight_window_event(generation, crate::flight::EventKind::WindowClosed, None);
+                Err(error)
+            }
+        }
+    }
+
+    /// Whether the open window changes the entries of `directory_id`, so that
+    /// a directory listing must commit it first.
+    pub fn window_changes_directory(&self, directory_id: u64) -> bool {
+        self.window.as_ref().is_some_and(|window| {
+            window.pending.dir_changes.contains_key(&directory_id)
+                || window.pending.created_directories.contains(&directory_id)
+        })
+    }
+
+    /// Whether a window is open.
+    pub fn window_open(&self) -> bool {
+        self.window.is_some()
+    }
+
     fn ensure_pending_file_layout(
         &mut self,
         pending: &mut PendingBatch,
@@ -6084,6 +6253,7 @@ impl<D: BlockDevice> Volume<D> {
             generation,
             unlogged: Vec::new(),
             logged_records: 0,
+            unloggable: false,
         })
     }
 
@@ -6226,6 +6396,19 @@ impl<D: BlockDevice> Volume<D> {
             .checked_add(content_len)
             .ok_or(CoreError::PrototypeLimit("file size limit reached"))?;
         let mut window = self.take_or_open_window()?;
+        if window.pending.created_data.contains_key(&object_id) {
+            let result = self.rewrite_created_file(&mut window, object_id, now, |bytes| {
+                let start = usize::try_from(offset)
+                    .map_err(|_| CoreError::PrototypeLimit("write offset is too large"))?;
+                let end = start + content.len();
+                if bytes.len() < end {
+                    bytes.resize(end, 0);
+                }
+                bytes[start..end].copy_from_slice(content);
+                Ok(())
+            });
+            return self.finish_created_rewrite(window, result);
+        }
         if let Err(error) = self.ensure_pending_file_layout(&mut window.pending, object_id) {
             self.window = Some(window);
             return Err(error);
@@ -6417,6 +6600,20 @@ impl<D: BlockDevice> Volume<D> {
             return Err(CoreError::FeatureDisabled(
                 "intent-log existing-file data updates",
             ));
+        }
+        if self
+            .window
+            .as_ref()
+            .is_some_and(|window| window.pending.created_data.contains_key(&object_id))
+        {
+            let mut window = self.take_or_open_window()?;
+            let result = self.rewrite_created_file(&mut window, object_id, now, |bytes| {
+                let size = usize::try_from(new_size)
+                    .map_err(|_| CoreError::PrototypeLimit("file size limit reached"))?;
+                bytes.resize(size, 0);
+                Ok(())
+            });
+            return self.finish_created_rewrite(window, result);
         }
         let pending_size = self.window.as_ref().and_then(|window| {
             window
@@ -6675,6 +6872,11 @@ impl<D: BlockDevice> Volume<D> {
             return Ok(());
         };
         let generation = window.generation;
+        if window.unloggable {
+            return Err(CoreError::PrototypeLimit(
+                "the window holds changes the log cannot record; commit the window",
+            ));
+        }
         if window.unlogged.is_empty() {
             self.dev.flush()?;
             self.flight_intent_io_event(crate::flight::EventKind::IntentEmptyFlush, generation);
