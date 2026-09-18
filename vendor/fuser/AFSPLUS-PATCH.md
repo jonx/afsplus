@@ -13,9 +13,12 @@ The local changes:
 - reject descriptor-specific passthrough and clone operations on custom
   transports;
 - remove descriptor-only trait implementations from transport-backed sessions;
+- stop requesting `FUSE_CASE_INSENSITIVE` for every macOS filesystem, which
+  made a case-sensitive volume report itself case-insensitive; the filesystem
+  requests it from `init` when its names fold case;
 - silence upstream-only dead-code diagnostics caused by building this reduced
   vendored source set.
 
-Device-backed Linux, FreeBSD and macOS paths retain their existing behavior.
+Device-backed Linux and FreeBSD paths retain their existing behavior.
 The patch should be proposed upstream or removed when fuser provides an
 equivalent stable message-transport boundary.

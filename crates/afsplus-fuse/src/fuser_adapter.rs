@@ -133,9 +133,10 @@ impl<D: BlockDevice + Send> Drop for FuserFilesystem<D> {
 }
 
 impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
-    fn init(&mut self, _request: &Request, _config: &mut KernelConfig) -> std::io::Result<()> {
+    fn init(&mut self, _request: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
         if let Ok(mut adapter) = self.adapter.lock() {
             adapter.set_inline_maintenance(false);
+            declare_name_policy(config, adapter.statfs().case_sensitive);
         }
         self.maintainer = Some(Maintainer::start(Arc::clone(&self.adapter)));
         Ok(())
@@ -818,6 +819,20 @@ fn file_attributes(attributes: &FuseAttributes) -> FileAttr {
         flags: 0,
     }
 }
+
+/// Tell the host whether names fold case, so that what it reports to
+/// programs (`pathconf`'s `_PC_CASE_SENSITIVE`, the volume capabilities) is
+/// what the volume does. Only macOS has a flag for it; a kernel that does
+/// not offer it keeps its default, which is case-sensitive.
+#[cfg(target_os = "macos")]
+fn declare_name_policy(config: &mut KernelConfig, case_sensitive: bool) {
+    if !case_sensitive {
+        let _ = config.add_capabilities(fuser::InitFlags::FUSE_CASE_INSENSITIVE);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn declare_name_policy(_config: &mut KernelConfig, _case_sensitive: bool) {}
 
 /// The inode number a directory listing carries for an entry.
 ///

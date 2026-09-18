@@ -4,6 +4,7 @@
 > **Tests:** [tools/check-mounted-usage.sh](../tools/check-mounted-usage.sh),
 > [tools/check-mount-driver-death.py](../tools/check-mount-driver-death.py),
 > [tools/check-mount-responsiveness.py](../tools/check-mount-responsiveness.py),
+> [tools/check-mount-name-policy.py](../tools/check-mount-name-policy.py),
 > [crates/afsplus-vfs/tests/background_maintenance.rs](../crates/afsplus-vfs/tests/background_maintenance.rs) ·
 > **Milestones:** M08
 
@@ -161,6 +162,16 @@ total, free and available space the driver gives it, but leaves the used
 space at zero for every filesystem it serves: a minimal libfuse filesystem
 that reports half its blocks free shows the same zero. The battery measures
 used space from `statfs`, which is the figure the driver answers for.
+
+**Whether names fold case is declared at mount.** The kernel learns it from a
+flag in the reply to its first request and passes it on to programs through
+`pathconf(_PC_CASE_SENSITIVE)`. fuser set that flag for every macOS
+filesystem, so a case-sensitive volume, which keeps `Name.txt` and
+`NAME.TXT` apart, reported the opposite. The driver now sets it only for a
+case-insensitive volume;
+[tools/check-mount-name-policy.py](../tools/check-mount-name-policy.py)
+mounts one volume of each policy and requires the answer and the behaviour to
+agree.
 
 ## What belongs below the mount
 

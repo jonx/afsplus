@@ -110,11 +110,11 @@ mod transport;
 const INIT_FLAGS: InitFlags = InitFlags::FUSE_ASYNC_READ.union(InitFlags::FUSE_BIG_WRITES);
 // TODO: Add FUSE_EXPORT_SUPPORT
 
-/// On macOS, we additionally support case insensitiveness, volume renames and xtimes
-/// TODO: we should eventually let the filesystem implementation decide which flags to set
+/// On macOS, we additionally support volume renames and xtimes. Case
+/// insensitivity is a property of the volume, not of the library: the
+/// filesystem requests `FUSE_CASE_INSENSITIVE` in `init` when it folds case.
 #[cfg(target_os = "macos")]
 const INIT_FLAGS: InitFlags = InitFlags::FUSE_ASYNC_READ
-    .union(InitFlags::FUSE_CASE_INSENSITIVE)
     .union(InitFlags::FUSE_VOL_RENAME)
     .union(InitFlags::FUSE_XTIMES);
 // TODO: Add FUSE_EXPORT_SUPPORT and FUSE_BIG_WRITES (requires ABI 7.10)
