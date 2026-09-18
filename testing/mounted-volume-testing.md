@@ -6,6 +6,8 @@
 > [tools/check-mount-responsiveness.py](../tools/check-mount-responsiveness.py),
 > [tools/check-mount-name-policy.py](../tools/check-mount-name-policy.py),
 > [tools/check-mount-kill-durability.py](../tools/check-mount-kill-durability.py),
+> [tools/check-mount-endurance.py](../tools/check-mount-endurance.py),
+> [crates/afsplus-vfs/tests/space_under_load.rs](../crates/afsplus-vfs/tests/space_under_load.rs),
 > [crates/afsplus-fuse/tests/process_death.rs](../crates/afsplus-fuse/tests/process_death.rs),
 > [crates/afsplus-vfs/tests/background_maintenance.rs](../crates/afsplus-vfs/tests/background_maintenance.rs) ·
 > **Milestones:** M08
@@ -26,6 +28,7 @@ with it, which is the harder half.
 - [What leaves a dead mount behind, and what clears it](#what-leaves-a-dead-mount-behind-and-what-clears-it)
 - [Simulating a filesystem that stops answering](#simulating-a-filesystem-that-stops-answering)
 - [One request at a time](#one-request-at-a-time)
+- [Hours of use by several programs](#hours-of-use-by-several-programs)
 - [What a killed driver keeps](#what-a-killed-driver-keeps)
 - [macFUSE releases](#macfuse-releases)
 - [What macFUSE's FSKit backend does to a listing and to `df`](#what-macfuses-fskit-backend-does-to-a-listing-and-to-df)
@@ -157,6 +160,43 @@ A request that blocks inside the driver itself still stops the whole volume;
 only more serving threads would change that, and fuser offers them on Linux
 only.
 
+## Hours of use by several programs
+
+The checks above last seconds each. Leaks, drift and contention between
+programs show only over time, so
+[tools/check-mount-endurance.py](../tools/check-mount-endurance.py) keeps
+three programs at work on one volume for half an hour: one writes, rereads,
+renames and deletes files of 5 to 40 MiB, one builds and reshuffles folders of
+small files, one lists and reads everything the way a file browser does. Every
+file's bytes follow from its name, so every read is checked. It requires no
+error in any program, a worst wait under a second for one listing, stat or
+small read, the space of everything deleted back, and a clean image.
+
+Its first runs found three faults that no short check could.
+
+- Maintenance was starved. It cannot run beside an open data window, and a
+  driver that makes every write durable keeps one open whenever anybody
+  writes, so orphan cleanup was refused for as long as writing went on.
+  Maintenance now publishes the window first when it has work, and the
+  maintenance thread queues for the lock instead of waiting for a free
+  moment.
+- Deleted space ran out before it came back. Free space swung between four
+  hundred and forty megabytes, and a write in the trough failed for want of
+  space that was only waiting to be reclaimed, which also lost the data
+  window. An operation that needs space now reclaims toward a low-water mark
+  first, a few transactions at a time, with room kept for publishing the
+  window; a write that still finds no space reclaims everything and tries
+  once more.
+  [crates/afsplus-vfs/tests/space_under_load.rs](../crates/afsplus-vfs/tests/space_under_load.rs)
+  holds this below the mount.
+- One request carried up to sixteen megabytes, committed before it was
+  answered, and every other program waited behind it. Requests now carry at
+  most a megabyte.
+
+Listings were the last to wait: FSKit looked up every name a listing returned,
+one request each behind the writes in flight, until listings carried inode
+numbers again (see below).
+
 ## What a killed driver keeps
 
 A program that calls `fsync` and gets success is owed its data. On macOS the
@@ -202,16 +242,15 @@ with a truncation can produce, with an I/O error.
 Two things a person sees on the mounted volume come from the relay rather
 than from the volume, and each was first taken for a driver fault.
 
-**A directory listing carries no inode numbers.** The relay answers a listing
-by looking up every name it receives. When the listing also carried each
-entry's inode number, it handed every entry to the kernel twice. `ls` did not
-show it, because it reads folders through the attribute interface, but
-`readdir` did: Python listed every name twice, tar archived every file twice
-and failed on the second copy of a hard-linked one, and git refused a
-repository whose `refs/heads` it saw twice. The driver now sends the unknown
-inode number in listings on macOS, as macFUSE's own libfuse does, and the
-relay takes the real number from the lookup. The battery checks that a
-program reading a folder sees each name once.
+**A listing must carry each entry's inode number.** macFUSE 5.3's relay
+handed every entry that carried one to the kernel twice, and the driver sent
+the unknown inode number instead, as macFUSE's own libfuse does. That made the
+relay look up every name of every listing, one request each, and under load
+each of those waited behind the durable writes in flight: a folder of a few
+hundred files took seconds to list, long enough for entries to go missing
+from what a program saw. macFUSE 5.4 lists each entry once, and a listing
+with inode numbers needs no lookups at all, so the driver sends them. The
+battery checks that a program reading a folder sees each name once.
 
 **`df` shows nothing used.** macOS `df` takes its Used column from the volume
 attribute `ATTR_VOL_SPACEUSED`, not from `statfs`. The relay reports the

@@ -94,3 +94,36 @@ fn with_inline_maintenance_off_no_operation_does_maintenance_and_steps_drain_it(
     // The work was cut into many short transactions, not done in one.
     assert!(steps > 1, "{steps} steps");
 }
+
+#[test]
+fn maintenance_makes_progress_while_another_file_is_being_written() {
+    let mut vfs = mounted();
+    vfs.set_inline_maintenance(false);
+    write_fragmented(&mut vfs);
+    drain(&mut vfs);
+    let written = vfs.statfs().free_blocks;
+    vfs.unlink_file(OBJECT_ROOT, "big", at(3)).unwrap();
+
+    // A writer that keeps its data window open, as one making every write
+    // durable does.
+    let id = vfs.create_file(OBJECT_ROOT, "busy", at(4)).unwrap();
+    let handle = vfs.open_file(id, AccessMode::WriteOnly).unwrap();
+    vfs.write(handle, 0, &[3u8; 20_000], at(5)).unwrap();
+    vfs.fsync(handle).unwrap();
+
+    let steps = drain(&mut vfs);
+    assert!(
+        steps > 0,
+        "maintenance was refused while the window was open"
+    );
+    assert_eq!(vfs.pending_orphans().unwrap(), 0);
+    assert!(vfs.statfs().free_blocks >= written + BLOCKS - 10);
+
+    vfs.write(handle, 20_000, &[4u8; 1_000], at(6)).unwrap();
+    vfs.close(handle).unwrap();
+    let handle = vfs.open_file(id, AccessMode::ReadOnly).unwrap();
+    let mut data = vec![0u8; 21_000];
+    assert_eq!(vfs.read(handle, 0, &mut data).unwrap(), 21_000);
+    assert!(data[..20_000].iter().all(|&byte| byte == 3));
+    assert!(data[20_000..].iter().all(|&byte| byte == 4));
+}

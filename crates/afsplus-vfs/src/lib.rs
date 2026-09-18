@@ -129,6 +129,15 @@ pub struct ExtentMap {
     pub next_offset: u64,
 }
 
+/// Blocks an operation keeps free beyond its own data, for the metadata
+/// that publishing the data window rewrites. Reclaiming deleted space
+/// publishes that window first, so this is also what makes reclaiming
+/// possible at all when space runs short.
+const ROOM_FOR_METADATA_BLOCKS: u64 = 1024;
+/// Maintenance transactions one operation runs toward the low-water mark
+/// when it already fits; see `Vfs::keep_room`.
+const ROOM_STEPS_PER_OPERATION: u32 = 4;
+
 /// Volume identity and negotiated feature masks for management output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeIdentity {
@@ -681,13 +690,32 @@ impl<D: BlockDevice> Vfs<D> {
         if !access.can_write() {
             return Err(VfsError::ReadOnly);
         }
+        self.keep_room(source.len() as u64, now)?;
+        match self.write_at(object_id, offset, source, now) {
+            // The estimate fell short: whatever is still waiting to be
+            // reclaimed is reclaimed, and the write tried once more.
+            Err(VfsError::NoSpace) if self.reclaim_everything(now)? => {
+                self.write_at(object_id, offset, source, now)?
+            }
+            result => result?,
+        }
+        Ok(source.len())
+    }
+
+    fn write_at(
+        &mut self,
+        object_id: ObjectId,
+        offset: u64,
+        source: &[u8],
+        now: Timespec,
+    ) -> Result<(), VfsError> {
         if self.logged_data_fsync_enabled() {
             self.volume
                 .window_write_file_at(object_id, offset, source, now)?;
         } else {
             self.volume.write_file_at(object_id, offset, source, now)?;
         }
-        Ok(source.len())
+        Ok(())
     }
 
     pub fn truncate(&mut self, handle: Handle, size: u64, now: Timespec) -> Result<(), VfsError> {
@@ -968,6 +996,49 @@ impl<D: BlockDevice> Vfs<D> {
         let _ = self.reclaim_space(RECLAIM_STEPS_PER_RELEASE, now);
     }
 
+    /// Reclaim deleted space while it runs short, before an operation that
+    /// needs `bytes` of it.
+    ///
+    /// A host that runs maintenance in the background returns a deleted
+    /// file's blocks some time after the delete, and under steady load that
+    /// time grows: three programs on one mounted volume drove its free space
+    /// from four hundred megabytes to forty, and a write in the trough failed
+    /// for want of space that was only waiting to be reclaimed, which also
+    /// cost the write window. While deleted space is waiting, the operation
+    /// that needs space keeps an eighth of the volume available, or what it
+    /// needs if that is more, reclaiming one transaction at a time. Nothing
+    /// else waits for it, and a volume with nothing to reclaim pays nothing.
+    fn keep_room(&mut self, bytes: u64, now: Timespec) -> Result<(), VfsError> {
+        let stats = self.statfs();
+        let needed = bytes.div_ceil(u64::from(stats.block_size.max(1))) + ROOM_FOR_METADATA_BLOCKS;
+        let low_water = needed.max(stats.total_blocks / 32);
+        // A few steps toward the low-water mark per operation, so that no
+        // one operation holds up the volume for long; as many as it takes
+        // when the operation itself would not fit otherwise.
+        let mut steps = 0;
+        loop {
+            let available = self.statfs().available_blocks;
+            if available >= low_water || (available >= needed && steps >= ROOM_STEPS_PER_OPERATION)
+            {
+                break;
+            }
+            if !self.maintenance_step(now)? {
+                break;
+            }
+            steps += 1;
+        }
+        Ok(())
+    }
+
+    /// Reclaim everything deleted, and say whether anything was.
+    fn reclaim_everything(&mut self, now: Timespec) -> Result<bool, VfsError> {
+        let mut reclaimed = false;
+        while self.maintenance_step(now)? {
+            reclaimed = true;
+        }
+        Ok(reclaimed)
+    }
+
     /// Exactly one transaction of maintenance, and whether more remains.
     ///
     /// The smallest unit a host that runs maintenance in the background can
@@ -979,6 +1050,15 @@ impl<D: BlockDevice> Vfs<D> {
         if self.volume.mount_mode() != MountMode::ReadWrite || !self.idle_maintenance {
             return Ok(false);
         }
+        if self.volume.first_orphan()?.is_none() && self.volume.reclaim_pending_blocks() == 0 {
+            return Ok(false);
+        }
+        // Maintenance cannot run beside an open data window, and a writer
+        // that makes every write durable keeps one open almost all the time:
+        // maintenance was refused for as long as anybody wrote, and deleted
+        // space stopped coming back. With work waiting, the window is
+        // published first.
+        self.checkpoint_data_window(now)?;
         if self.cleanup_orphans(1, now)? > 0 {
             return Ok(true);
         }
@@ -1500,6 +1580,9 @@ impl<D: BlockDevice> Vfs<D> {
         if self.volume.mount_mode() != MountMode::ReadWrite || !self.logged_data_fsync_enabled() {
             return Ok(self.volume.sync()?);
         }
+        // Publishing the window needs space too; see `keep_room`. Timeless,
+        // as the commit a close performs.
+        self.keep_room(0, Timespec::default())?;
         match self.volume.window_fsync() {
             Ok(()) => Ok(()),
             Err(CoreError::PrototypeLimit(_)) => {

@@ -56,9 +56,10 @@ pub struct FuserFilesystem<D: BlockDevice + Send> {
 /// the volume. Orphan cleanup and the return of freed blocks used to run
 /// inside unlink and inside a last close; a file browser closing a thumbnail
 /// then waited behind somebody else's delete. They run here instead, one
-/// bounded step at a time. The thread never waits for the lock: when a
-/// request holds it, the step is simply tried again later. A request that
-/// arrives during a step waits for that one step and no more.
+/// bounded step at a time. When a request holds the lock and nothing is
+/// waiting, the step is simply tried again later; while work waits, the
+/// thread queues and takes its turn between requests. A request that arrives
+/// during a step waits for that one step and no more.
 struct Maintainer {
     stop: Arc<AtomicBool>,
     thread: JoinHandle<()>,
@@ -69,13 +70,26 @@ impl Maintainer {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
+            let mut more = true;
             while !stopping.load(Ordering::Acquire) {
-                let more = match adapter.try_lock() {
-                    Ok(mut adapter) => adapter.maintenance_step(now()),
-                    // A request holds the lock: it goes first.
-                    Err(TryLockError::WouldBlock) => true,
-                    // Requests already answer EIO on a poisoned lock.
-                    Err(TryLockError::Poisoned(_)) => break,
+                // While work is waiting, the thread queues for the lock and
+                // takes its turn between requests: waiting for the lock to
+                // be free by chance starved it under steady load, and the
+                // space of deleted files stopped coming back. A request then
+                // waits for at most one transaction. Idle, it only looks.
+                more = if more {
+                    match adapter.lock() {
+                        Ok(mut adapter) => adapter.maintenance_step(now()),
+                        // Requests already answer EIO on a poisoned lock.
+                        Err(_) => break,
+                    }
+                } else {
+                    match adapter.try_lock() {
+                        Ok(mut adapter) => adapter.maintenance_step(now()),
+                        // A request holds the lock: it goes first.
+                        Err(TryLockError::WouldBlock) => false,
+                        Err(TryLockError::Poisoned(_)) => break,
+                    }
                 };
                 std::thread::sleep(if more {
                     MAINTENANCE_STEP_PAUSE
@@ -138,6 +152,12 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
             adapter.set_inline_maintenance(false);
             declare_name_policy(config, adapter.statfs().case_sensitive);
         }
+        // One request is one turn of the lock every other program waits
+        // behind, and a durable write is committed before it is answered: a
+        // sixteen-megabyte write kept a listing waiting over half a second.
+        // Cut into megabytes, a large copy takes turns with everyone else.
+        let _ = config.set_max_write(LARGEST_REQUEST);
+        let _ = config.set_max_readahead(LARGEST_REQUEST);
         self.maintainer = Some(Maintainer::start(Arc::clone(&self.adapter)));
         Ok(())
     }
@@ -601,7 +621,7 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
             Ok(entries) => {
                 for entry in entries {
                     if reply.add(
-                        listed_inode(entry.object_id),
+                        INodeNo(entry.object_id),
                         entry.next_offset,
                         file_type(entry.kind),
                         OsStr::from_bytes(&entry.name),
@@ -831,6 +851,9 @@ fn file_attributes(attributes: &FuseAttributes) -> FileAttr {
 /// answer there.
 const EMPTY_READ_IS_MISREPORTED: bool = cfg!(target_os = "macos");
 
+/// The most data one read or write request carries; see `init`.
+const LARGEST_REQUEST: u32 = 1 << 20;
+
 /// Tell the host whether names fold case, so that what it reports to
 /// programs (`pathconf`'s `_PC_CASE_SENSITIVE`, the volume capabilities) is
 /// what the volume does. Only macOS has a flag for it; a kernel that does
@@ -844,27 +867,6 @@ fn declare_name_policy(config: &mut KernelConfig, case_sensitive: bool) {
 
 #[cfg(not(target_os = "macos"))]
 fn declare_name_policy(_config: &mut KernelConfig, _case_sensitive: bool) {}
-
-/// The inode number a directory listing carries for an entry.
-///
-/// macFUSE's FSKit relay answers a listing by looking up every name it
-/// receives, and when the listing already carried the entry's inode number it
-/// also hands the entry to the kernel a second time: every program that reads
-/// the directory saw each name twice, and tar archived every file twice, the
-/// second copy of a hard-linked one as a link to itself. Its own libfuse sends
-/// the unknown inode number there, and the relay then takes the number from the
-/// lookup, so `d_ino` stays right. Elsewhere the kernel passes the listed
-/// number straight to the program, so it has to be the real one.
-#[cfg(target_os = "macos")]
-fn listed_inode(_object_id: u64) -> INodeNo {
-    const FUSE_UNKNOWN_INO: u64 = 0xffff_ffff;
-    INodeNo(FUSE_UNKNOWN_INO)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn listed_inode(object_id: u64) -> INodeNo {
-    INodeNo(object_id)
-}
 
 fn file_type(kind: NodeKind) -> FileType {
     match kind {
