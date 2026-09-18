@@ -1078,6 +1078,8 @@ const PROTECTION: u32 = 0x8000_00ff;
 fn wanted() -> PreservedMetadata {
     PreservedMetadata {
         protection: PROTECTION,
+        owner_uid: 0,
+        owner_gid: 0,
         created: Timespec {
             seconds: 11,
             nanoseconds: 12,

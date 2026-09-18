@@ -35,6 +35,8 @@ impl std::error::Error for RestoreError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestoreMetadata {
     pub protection: u64,
+    pub owner_uid: u32,
+    pub owner_gid: u32,
     pub created: Timespec,
     pub modified: Timespec,
     pub changed: Timespec,
@@ -121,6 +123,22 @@ pub trait RestoreBackend {
         object: &Self::Object,
         metadata: RestoreMetadata,
     ) -> Result<(), VfsError>;
+    /// Store the object's comment. A destination that cannot keep a comment
+    /// refuses: under ADR-076 a comment is preserved or the restore refused,
+    /// never dropped.
+    fn set_comment(
+        &mut self,
+        _object: &Self::Object,
+        _comment: &str,
+        _now: Timespec,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::NotSupported)
+    }
+    /// The object's comment, empty when it has none, so a restore can verify
+    /// what it stored.
+    fn comment(&mut self, _object: &Self::Object) -> Result<String, VfsError> {
+        Err(VfsError::NotSupported)
+    }
     /// Committed semantic allocation, with entry-ordinal cursors. Unsupported
     /// enumeration is not evidence of an empty allocation inventory.
     fn allocations(
@@ -484,6 +502,20 @@ impl<P: RestoreBackend> RestoreService<P> {
         let _permit = self.admit(&object.0.grant)?;
         Ok(self.backend.stat(&object.0.object)?)
     }
+    pub fn set_comment(
+        &mut self,
+        object: &RestoreObject<P::Object>,
+        comment: &str,
+        now: Timespec,
+    ) -> Result<(), RestoreError> {
+        let _permit = self.admit(&object.0.grant)?;
+        now.validate().map_err(|_| VfsError::Invalid)?;
+        Ok(self.backend.set_comment(&object.0.object, comment, now)?)
+    }
+    pub fn comment(&mut self, object: &RestoreObject<P::Object>) -> Result<String, RestoreError> {
+        let _permit = self.admit(&object.0.grant)?;
+        Ok(self.backend.comment(&object.0.object)?)
+    }
     pub fn read(
         &mut self,
         object: &RestoreObject<P::Object>,
@@ -716,6 +748,17 @@ impl<P: RestoreBackend> RestoreClient<'_, P> {
     pub fn stat(&mut self, object: &RestoreObject<P::Object>) -> Result<Stat, RestoreError> {
         self.0.stat(object)
     }
+    pub fn set_comment(
+        &mut self,
+        object: &RestoreObject<P::Object>,
+        comment: &str,
+        now: Timespec,
+    ) -> Result<(), RestoreError> {
+        self.0.set_comment(object, comment, now)
+    }
+    pub fn comment(&mut self, object: &RestoreObject<P::Object>) -> Result<String, RestoreError> {
+        self.0.comment(object)
+    }
     pub fn read(
         &mut self,
         object: &RestoreObject<P::Object>,
@@ -872,11 +915,19 @@ impl<D: afsplus_block::BlockDevice> RestoreBackend for AfsRestoreDestination<D> 
             *object,
             afsplus_core::volume::PreservedMetadata {
                 protection,
+                owner_uid: metadata.owner_uid,
+                owner_gid: metadata.owner_gid,
                 created: metadata.created,
                 modified: metadata.modified,
                 changed: metadata.changed,
             },
         )?)
+    }
+    fn set_comment(&mut self, object: &u64, comment: &str, now: Timespec) -> Result<(), VfsError> {
+        Ok(self.volume.set_object_comment(*object, comment, now)?)
+    }
+    fn comment(&mut self, object: &u64) -> Result<String, VfsError> {
+        Ok(self.volume.object_comment(*object)?)
     }
     fn allocations(
         &mut self,

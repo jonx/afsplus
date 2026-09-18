@@ -116,6 +116,12 @@ pub trait SnapshotBackend {
     fn open(&mut self, id: u64) -> Result<Self::View, VfsError>;
     fn info(&mut self, view: &Self::View) -> Result<ViewInfo, VfsError>;
     fn stat(&mut self, view: &Self::View, object: ObjectId) -> Result<Stat, VfsError>;
+    /// The captured object's comment, empty when it has none. A provider that
+    /// cannot say refuses, and so does the backup: under ADR-076 a comment is
+    /// preserved or the export refused, never dropped.
+    fn comment(&mut self, _view: &Self::View, _object: ObjectId) -> Result<String, VfsError> {
+        Err(VfsError::NotSupported)
+    }
     /// Inspect the captured object's inventory knowledge. Missing enumeration
     /// never implies absence. The fallback validates object/view through stat.
     fn metadata_inventory(
@@ -330,6 +336,14 @@ impl<P: SnapshotBackend> BackupService<P> {
         let _permit = self.reader_permit(reader)?;
         Ok(self.backend.stat(&reader.0.view, object)?)
     }
+    pub fn comment(
+        &mut self,
+        reader: &BackupReader<P::View>,
+        object: ObjectId,
+    ) -> Result<String, BackupError> {
+        let _permit = self.reader_permit(reader)?;
+        Ok(self.backend.comment(&reader.0.view, object)?)
+    }
     pub fn metadata_inventory(
         &mut self,
         reader: &BackupReader<P::View>,
@@ -491,6 +505,10 @@ impl<D: afsplus_block::BlockDevice> SnapshotBackend for afsplus_core::Volume<D> 
             .ok_or(VfsError::NotFound)?
             .into())
     }
+    fn comment(&mut self, view: &Self::View, object: ObjectId) -> Result<String, VfsError> {
+        self.snapshot_object_comment(view, object)?
+            .ok_or(VfsError::NotFound)
+    }
     fn read_link(
         &mut self,
         view: &Self::View,
@@ -602,6 +620,13 @@ impl<P: SnapshotBackend> BackupClient<'_, P> {
         object: ObjectId,
     ) -> Result<Stat, BackupError> {
         self.0.stat(reader, object)
+    }
+    pub fn comment(
+        &mut self,
+        reader: &BackupReader<P::View>,
+        object: ObjectId,
+    ) -> Result<String, BackupError> {
+        self.0.comment(reader, object)
     }
     pub fn metadata_inventory(
         &mut self,

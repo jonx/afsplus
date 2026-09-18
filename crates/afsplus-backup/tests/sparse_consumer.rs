@@ -907,6 +907,8 @@ fn captured_afs_file_group_recovers_exact_metadata_with_explicit_unknown_invento
     source.truncate_file(id, (1 << 40) + 23, time()).unwrap();
     let preserved = afsplus_core::volume::PreservedMetadata {
         protection: 0xa5a5,
+        owner_uid: 0,
+        owner_gid: 0,
         created: Timespec {
             seconds: -1234,
             nanoseconds: 987654321,
@@ -1063,6 +1065,8 @@ fn captured_directory_file_and_alias_groups_restore_identity_and_final_metadata(
         .unwrap();
     let file_meta = afsplus_core::volume::PreservedMetadata {
         protection: 0x1234,
+        owner_uid: 0,
+        owner_gid: 0,
         created: Timespec {
             seconds: -111,
             nanoseconds: 123,
@@ -1075,6 +1079,8 @@ fn captured_directory_file_and_alias_groups_restore_identity_and_final_metadata(
     };
     let dir_meta = afsplus_core::volume::PreservedMetadata {
         protection: 0x5678,
+        owner_uid: 0,
+        owner_gid: 0,
         created: Timespec {
             seconds: -333,
             nanoseconds: 456,
@@ -1295,6 +1301,8 @@ fn captured_directory_file_and_alias_groups_restore_identity_and_final_metadata(
         &directory,
         RestoreMetadata {
             protection: dir_meta.protection as u64,
+            owner_uid: 0,
+            owner_gid: 0,
             created: dir_meta.created,
             modified: dir_meta.modified,
             changed: dir_meta.changed,
@@ -1418,6 +1426,8 @@ fn alias_conflicts_and_resource_refusal_do_not_create_a_link() {
                 &primary,
                 afsplus_vfs::restore::RestoreMetadata {
                     protection: 1,
+                    owner_uid: 0,
+                    owner_gid: 0,
                     created: time(),
                     modified: time(),
                     changed: time(),
@@ -1602,7 +1612,11 @@ fn captured_symlink_archive_restores_exact_opaque_targets_and_metadata() {
         io::Write,
         process::{Command, Stdio},
     };
-    let maximum = "x".repeat(3968);
+    // The longest target a record holds, from the format: the record grows
+    // as fields are added (the owner, ADR-118), so a literal goes stale.
+    let maximum = "x".repeat(afsplus_format::object::SymlinkRecord::maximum_target_bytes(
+        afsplus_format::DEFAULT_BLOCK_SIZE,
+    ));
     for target in [
         "../missing",
         "/outside//path",
@@ -1753,5 +1767,252 @@ fn symlink_archive_refusals_do_not_create_destination_entries() {
                 .unwrap(),
             None
         );
+    }
+}
+
+/// Everything a backup used to drop without a word: a comment, an owner other
+/// than root, and the Amiga-only protection bits (Script, Pure, Archive, with
+/// Write forbidden and Delete allowed). ADR-119.
+const AMIGA_BITS: u32 = 0x40 | 0x20 | 0x10 | 0x04;
+const COMMENT: &str = "Réglé à 100 %, voir la note";
+const OWNER: (u32, u32) = (501, 20);
+
+fn metadata_file_limits() -> afsplus_backup::file::Limits {
+    afsplus_backup::file::Limits {
+        contents: consumer::Options {
+            map: limits(),
+            records: records(),
+            page_entries: 1,
+        },
+        inventory: afsplus_backup::inventory::Limits {
+            values: 16,
+            value_bytes: 4096,
+            page_entries: 1,
+            records: records(),
+        },
+    }
+}
+
+fn metadata_preserved() -> afsplus_core::volume::PreservedMetadata {
+    afsplus_core::volume::PreservedMetadata {
+        protection: AMIGA_BITS,
+        owner_uid: OWNER.0,
+        owner_gid: OWNER.1,
+        created: Timespec {
+            seconds: 1_000_000,
+            nanoseconds: 5,
+        },
+        modified: time(),
+        changed: Timespec {
+            seconds: 2_000_000,
+            nanoseconds: 7,
+        },
+    }
+}
+
+/// An archive of one file carrying a comment, an owner and Amiga-only bits,
+/// captured from a real volume through its snapshot.
+fn archive_with_comment_and_owner() -> Vec<u8> {
+    use afsplus_backup::file;
+    let mut source = volume();
+    let id = source.create_file_in_root("source", &[], time()).unwrap();
+    source.write_file_at(id, 0, b"payload", time()).unwrap();
+    source.set_object_comment(id, COMMENT, time()).unwrap();
+    source
+        .restore_object_metadata(id, metadata_preserved())
+        .unwrap();
+    let snapshot = source.snapshot_create(time()).unwrap();
+    let source =
+        mount_with_snapshot_limits(source.into_device(), MountOptions::default(), work()).unwrap();
+    let (mut source, authority) = BackupService::new(source, 1).unwrap();
+    let grant = authority.grant();
+    let view = source.open(&grant, snapshot).unwrap();
+    let mut writer = envelope::Writer::new(Vec::new(), framing()).unwrap();
+    file::export(
+        &mut Captured {
+            client: &mut source.client(),
+            reader: &view,
+            object: id,
+        },
+        &mut writer,
+        (u64::MAX - 2, "files/captured"),
+        file::Mode::Recovery,
+        &mut [0; 512],
+        metadata_file_limits(),
+    )
+    .unwrap();
+    writer.finish().unwrap().0
+}
+
+/// Restore that archive into a fresh file of `backend`, and hand the backend
+/// back with the restored object's identity.
+fn restore_with_comment_and_owner<B>(
+    backend: B,
+    wire: &[u8],
+) -> (
+    Result<afsplus_backup::file::Report, afsplus_backup::file::Error>,
+    B,
+    u64,
+)
+where
+    B: afsplus_vfs::restore::OpaqueRestoreBackend<Object = u64>,
+{
+    use afsplus_backup::{allocation, file};
+    let mut spool = spool::Verified::capture_sparse(
+        wire,
+        Cursor::new(Vec::new()),
+        spool::Limits {
+            chunk_bytes: 512,
+            archive_bytes: wire.len() as u64,
+            store_bytes: wire.len() as u64 * 2,
+        },
+        framing(),
+        records(),
+    )
+    .unwrap();
+    let mut reader = spool.reader(framing(), records()).unwrap();
+    let (mut dest, authority) = RestoreService::new(backend, 2).unwrap();
+    let grant = authority.grant();
+    let root = dest.root(&grant).unwrap();
+    let restored = dest
+        .create_file(&root, "restored", Timespec::default())
+        .unwrap();
+    let limits = metadata_file_limits();
+    let result = file::restore(
+        &mut reader,
+        &mut dest.client(),
+        &afsplus_backup::attachment::Target {
+            ordinal: u64::MAX - 2,
+            path: "files/captured",
+            object: &restored,
+        },
+        &mut [0; 512],
+        file::RestoreOptions {
+            mode: file::Mode::Recovery,
+            allocation: allocation::RestoreOptions {
+                limits: limits.contents,
+                mode: allocation::Mode::RecoverContents,
+                reservation_chunk: 0,
+                reservation_bytes: 0,
+                readback_entries: 0,
+            },
+            inventory: limits.inventory,
+        },
+        Timespec::default(),
+    );
+    if result.is_ok() {
+        dest.client().sync(&grant).unwrap();
+    }
+    let id = dest.stat(&restored).unwrap().object_id;
+    (result, dest.into_backend(), id)
+}
+
+#[test]
+fn a_restored_file_keeps_its_comment_owner_and_amiga_only_bits() {
+    let wire = archive_with_comment_and_owner();
+    let backend = AfsRestoreDestination::new(volume(), afsplus_format::OBJECT_ROOT).unwrap();
+    let (result, backend, id) = restore_with_comment_and_owner(backend, &wire);
+    result.unwrap();
+    let mut restored = mount_with_snapshot_limits(
+        backend.into_volume().into_device(),
+        MountOptions::default(),
+        work(),
+    )
+    .unwrap();
+    let stat = restored.stat(id).unwrap().unwrap();
+    let expected = metadata_preserved();
+    assert_eq!(stat.protection, AMIGA_BITS, "the Amiga-only bits");
+    assert_eq!((stat.owner_uid, stat.owner_gid), OWNER, "the owner");
+    assert_eq!(
+        (stat.created, stat.modified, stat.changed),
+        (expected.created, expected.modified, expected.changed),
+        "the times, the change time included although the comment was set first"
+    );
+    assert_eq!(restored.object_comment(id).unwrap(), COMMENT, "the comment");
+    let mut bytes = [0; 7];
+    restored.read_file_at(id, 0, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"payload");
+}
+
+/// A destination identical to AFS+ except that it has nowhere to keep a
+/// comment.
+struct NoComments(AfsRestoreDestination<MemoryBackend>);
+impl afsplus_vfs::restore::RestoreBackend for NoComments {
+    type Object = u64;
+    fn root(&mut self) -> Result<u64, afsplus_vfs::VfsError> {
+        self.0.root()
+    }
+    fn create_file(&mut self, p: &u64, n: &str, t: Timespec) -> Result<u64, afsplus_vfs::VfsError> {
+        self.0.create_file(p, n, t)
+    }
+    fn create_directory(
+        &mut self,
+        p: &u64,
+        n: &str,
+        t: Timespec,
+    ) -> Result<u64, afsplus_vfs::VfsError> {
+        self.0.create_directory(p, n, t)
+    }
+    fn write(
+        &mut self,
+        o: &u64,
+        off: u64,
+        b: &[u8],
+        t: Timespec,
+    ) -> Result<(), afsplus_vfs::VfsError> {
+        self.0.write(o, off, b, t)
+    }
+    fn resize(&mut self, o: &u64, size: u64, t: Timespec) -> Result<(), afsplus_vfs::VfsError> {
+        self.0.resize(o, size, t)
+    }
+    fn link(
+        &mut self,
+        o: &u64,
+        p: &u64,
+        n: &str,
+        t: Timespec,
+    ) -> Result<(), afsplus_vfs::VfsError> {
+        self.0.link(o, p, n, t)
+    }
+    fn metadata(
+        &mut self,
+        o: &u64,
+        m: afsplus_vfs::restore::RestoreMetadata,
+    ) -> Result<(), afsplus_vfs::VfsError> {
+        self.0.metadata(o, m)
+    }
+    fn allocations(
+        &mut self,
+        o: &u64,
+        start: u64,
+        limit: usize,
+    ) -> Result<afsplus_vfs::backup::AllocationPage, afsplus_vfs::VfsError> {
+        self.0.allocations(o, start, limit)
+    }
+    fn stat(&mut self, o: &u64) -> Result<afsplus_vfs::Stat, afsplus_vfs::VfsError> {
+        self.0.stat(o)
+    }
+    fn read(&mut self, o: &u64, off: u64, out: &mut [u8]) -> Result<usize, afsplus_vfs::VfsError> {
+        self.0.read(o, off, out)
+    }
+    fn sync(&mut self) -> Result<(), afsplus_vfs::VfsError> {
+        self.0.sync()
+    }
+}
+impl afsplus_vfs::restore::OpaqueRestoreBackend for NoComments {
+    type Upload = ();
+}
+
+#[test]
+fn a_destination_that_cannot_keep_the_comment_refuses_naming_the_file() {
+    let wire = archive_with_comment_and_owner();
+    let backend =
+        NoComments(AfsRestoreDestination::new(volume(), afsplus_format::OBJECT_ROOT).unwrap());
+    let (result, _, _) = restore_with_comment_and_owner(backend, &wire);
+    match result {
+        Err(afsplus_backup::file::Error::Unpreservable { path, what }) => {
+            assert_eq!((path.as_str(), what), ("files/captured", "comment"));
+        }
+        other => panic!("the restore went on without the comment: {other:?}"),
     }
 }

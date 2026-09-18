@@ -1,12 +1,17 @@
 //! Trusted metadata mutation and exact restoration using the common COW tail.
 use super::*;
 
-/// Existing protection and timestamp fields that can be preserved on restore.
-/// Object identity, data layout, link count and content generation are managed
-/// by destination operations and cannot be supplied through this structure.
+/// Existing protection, owner and timestamp fields that can be preserved on
+/// restore. The comment is restored on its own, through
+/// `set_object_comment`, before these fields, so that the change time it
+/// advances is then restored too. Object identity, data layout, link count and
+/// content generation are managed by destination operations and cannot be
+/// supplied through this structure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreservedMetadata {
     pub protection: u32,
+    pub owner_uid: u32,
+    pub owner_gid: u32,
     pub created: Timespec,
     pub modified: Timespec,
     pub changed: Timespec,
@@ -15,6 +20,8 @@ impl From<ObjectMetadata> for PreservedMetadata {
     fn from(record: ObjectMetadata) -> Self {
         Self {
             protection: record.protection,
+            owner_uid: record.owner_uid,
+            owner_gid: record.owner_gid,
             created: record.created,
             modified: record.modified,
             changed: record.changed,
@@ -141,7 +148,7 @@ impl<D: BlockDevice> Volume<D> {
         self.commit_object_metadata(record)
     }
 
-    /// Exact restoration of the existing protection and timestamp fields.
+    /// Exact restoration of the existing protection, owner and timestamp fields.
     /// Requires independently authorized host restore access before invocation.
     /// Unlike ordinary metadata edits, this preserves the archived change time.
     pub fn restore_object_metadata(
@@ -167,6 +174,8 @@ impl<D: BlockDevice> Volume<D> {
             return Ok(());
         }
         self.project_protection(&mut record, metadata.protection)?;
+        record.owner_uid = metadata.owner_uid;
+        record.owner_gid = metadata.owner_gid;
         record.created = metadata.created;
         record.modified = metadata.modified;
         record.changed = metadata.changed;

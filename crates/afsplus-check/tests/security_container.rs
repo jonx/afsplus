@@ -218,6 +218,8 @@ fn an_unknown_descriptor_survives_every_rewrite_of_its_object() {
             file,
             PreservedMetadata {
                 protection: stat.protection,
+                owner_uid: 0,
+                owner_gid: 0,
                 created: time(-5),
                 modified: time(-4),
                 changed: time(-3),
@@ -303,6 +305,8 @@ fn a_protection_edit_cannot_destroy_or_silently_contradict_a_descriptor() {
             file,
             PreservedMetadata {
                 protection: 0,
+                owner_uid: 0,
+                owner_gid: 0,
                 created: stat.created,
                 modified: stat.modified,
                 changed: stat.changed,
@@ -1001,7 +1005,9 @@ fn a_security_reference_outside_the_volume_is_chain_damage_and_the_object_stays_
     let record_lba = record_lba.unwrap();
     damaged.read_block(record_lba, &mut block).unwrap();
     let header = BlockHeader::verify(&block, block_type::OBJECT).unwrap();
-    block[HEADER_SIZE + 96..HEADER_SIZE + 104].copy_from_slice(&past_the_end.to_le_bytes());
+    // The first security segment LBA sits at payload offset 104, after the
+    // owner fields at 96 (afsplus-format object.rs layout table, ADR-118).
+    block[HEADER_SIZE + 104..HEADER_SIZE + 112].copy_from_slice(&past_the_end.to_le_bytes());
     header.seal(&mut block);
     damaged.write_block(record_lba, &block).unwrap();
 

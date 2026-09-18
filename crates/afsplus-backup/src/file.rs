@@ -6,8 +6,11 @@ use crate::{
 use afsplus_format::Timespec;
 use afsplus_vfs::{
     backup::{BackupError, InventoryKnowledge, MetadataInventory, SnapshotBackend},
-    restore::{OpaqueRestoreBackend, RestoreClient, RestoreError, RestoreMetadata},
-    NodeKind,
+    restore::{
+        OpaqueRestoreBackend, RestoreBackend, RestoreClient, RestoreError, RestoreMetadata,
+        RestoreObject,
+    },
+    NodeKind, Stat, VfsError,
 };
 use std::io::{Read, Write};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +42,12 @@ pub enum Error {
     Destination(RestoreError),
     Allocation(sparse::Error),
     Inventory(attachment::Error),
+    /// The destination cannot keep a value the archive carries for this
+    /// object, so the restore refuses rather than drop it (ADR-076).
+    Unpreservable {
+        path: String,
+        what: &'static str,
+    },
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum OpaqueDisposition {
@@ -64,6 +73,68 @@ pub struct Report {
     pub allocation: allocation::Report,
     pub opaque: OpaqueDisposition,
 }
+/// What the archive says about an object's protection, owner and times.
+pub(crate) fn preserved(object: &metadata::Object<'_>) -> RestoreMetadata {
+    RestoreMetadata {
+        protection: object.protection,
+        owner_uid: object.uid,
+        owner_gid: object.gid,
+        created: timespec(object.created),
+        modified: timespec(object.modified),
+        changed: timespec(object.changed),
+    }
+}
+
+/// Store an object's archived metadata: the comment first, since setting it
+/// advances the change time, then protection, owner and times. A destination
+/// that cannot keep the comment refuses, naming the object.
+pub(crate) fn restore_preserved<P: RestoreBackend>(
+    client: &mut RestoreClient<'_, P>,
+    target: &RestoreObject<P::Object>,
+    path: &str,
+    object: &metadata::Object<'_>,
+) -> Result<(), Error> {
+    if !object.comment.is_empty() {
+        match client.set_comment(target, object.comment, timespec(object.changed)) {
+            Ok(()) => {}
+            Err(RestoreError::Filesystem(VfsError::NotSupported | VfsError::Invalid)) => {
+                return Err(Error::Unpreservable {
+                    path: path.to_owned(),
+                    what: "comment",
+                })
+            }
+            Err(error) => return Err(Error::Destination(error)),
+        }
+    }
+    client
+        .metadata(target, preserved(object))
+        .map_err(Error::Destination)
+}
+
+/// Whether the destination now holds exactly what the archive says. A
+/// destination without comments satisfies an empty comment and nothing else.
+pub(crate) fn same_preserved<P: RestoreBackend>(
+    client: &mut RestoreClient<'_, P>,
+    target: &RestoreObject<P::Object>,
+    stat: &Stat,
+    object: &metadata::Object<'_>,
+) -> Result<bool, Error> {
+    let comment = match client.comment(target) {
+        Ok(comment) => comment,
+        Err(RestoreError::Filesystem(VfsError::NotSupported)) if object.comment.is_empty() => {
+            String::new()
+        }
+        Err(error) => return Err(Error::Destination(error)),
+    };
+    Ok(stat.protection == object.protection
+        && stat.owner_uid == object.uid
+        && stat.owner_gid == object.gid
+        && timestamp(stat.created) == object.created
+        && timestamp(stat.modified) == object.modified
+        && timestamp(stat.changed) == object.changed
+        && comment == object.comment)
+}
+
 fn name(mode: Mode, ordinal: u64) -> String {
     format!(
         "_AROS_BACKUP/metadata/file-v1-{}-{ordinal}.pax",
@@ -157,10 +228,17 @@ fn export_inner<P: SnapshotBackend, W: Write>(
     if mode == Mode::Full && !inspected(captured) {
         return Err(Error::Unsupported);
     }
+    let comment = source
+        .client
+        .comment(source.reader, source.object)
+        .map_err(Error::Source)?;
     let object = metadata::Object {
         path,
         kind: tar::Kind::File,
         protection: stat.protection,
+        comment: &comment,
+        uid: stat.owner_uid,
+        gid: stat.owner_gid,
         created: timestamp(stat.created),
         modified: timestamp(stat.modified),
         changed: timestamp(stat.changed),
@@ -352,22 +430,11 @@ fn restore_inner<R: Read, P: OpaqueRestoreBackend>(
     } else {
         None
     };
-    let metadata = RestoreMetadata {
-        protection: object.protection,
-        created: timespec(object.created),
-        modified: timespec(object.modified),
-        changed: timespec(object.changed),
-    };
-    client
-        .metadata(target.object, metadata)
-        .map_err(Error::Destination)?;
+    restore_preserved(client, target.object, target.path, &object)?;
     let actual = client.stat(target.object).map_err(Error::Destination)?;
     if actual.kind != NodeKind::File
         || actual.size != allocation.logical_bytes
-        || actual.protection != object.protection
-        || actual.created != timespec(object.created)
-        || actual.modified != timespec(object.modified)
-        || actual.changed != timespec(object.changed)
+        || !same_preserved(client, target.object, &actual, &object)?
     {
         return Err(Error::Invalid);
     }

@@ -7,11 +7,8 @@ use crate::{
 use afsplus_format::Timespec;
 use afsplus_vfs::{
     backup::{MetadataInventory, SnapshotBackend},
-    restore::{
-        OpaqueRestoreBackend, RestoreBackend, RestoreClient, RestoreError, RestoreMetadata,
-        RestoreObject,
-    },
-    NodeKind, Stat, VfsError,
+    restore::{OpaqueRestoreBackend, RestoreBackend, RestoreClient, RestoreError, RestoreObject},
+    NodeKind, VfsError,
 };
 use std::io::{Read, Write};
 #[derive(Clone, Copy)]
@@ -214,10 +211,17 @@ fn export_inner<P: SnapshotBackend, W: Write>(
     if mode == Mode::Full && !file::inspected(knowledge) {
         return Err(Error::Unsupported);
     }
+    let comment = source
+        .client
+        .comment(source.reader, source.object)
+        .map_err(Error::Source)?;
     let object = metadata::Object {
         path: binding.path,
         kind,
         protection: stat.protection,
+        comment: &comment,
+        uid: stat.owner_uid,
+        gid: stat.owner_gid,
         created: file::timestamp(stat.created),
         modified: file::timestamp(stat.modified),
         changed: file::timestamp(stat.changed),
@@ -373,20 +377,6 @@ fn read_body<R: Read>(
     }
     Ok(target)
 }
-fn core_metadata(object: &metadata::Object<'_>) -> RestoreMetadata {
-    RestoreMetadata {
-        protection: object.protection,
-        created: file::timespec(object.created),
-        modified: file::timespec(object.modified),
-        changed: file::timespec(object.changed),
-    }
-}
-fn same_metadata(stat: &Stat, object: &metadata::Object<'_>) -> bool {
-    stat.protection == object.protection
-        && file::timestamp(stat.created) == object.created
-        && file::timestamp(stat.modified) == object.modified
-        && file::timestamp(stat.changed) == object.changed
-}
 pub fn restore_directory<R: Read, P: OpaqueRestoreBackend>(
     reader: &mut stream::Reader<R>,
     client: &mut RestoreClient<'_, P>,
@@ -470,11 +460,11 @@ fn restore_directory_inner<R: Read, P: OpaqueRestoreBackend>(
     } else {
         None
     };
-    client
-        .metadata(target.object, core_metadata(&object))
-        .map_err(Error::Destination)?;
+    file::restore_preserved(client, target.object, target.path, &object)?;
     let stat = client.stat(target.object).map_err(Error::Destination)?;
-    if stat.kind != NodeKind::Directory || !same_metadata(&stat, &object) {
+    if stat.kind != NodeKind::Directory
+        || !file::same_preserved(client, target.object, &stat, &object)?
+    {
         return Err(Error::Invalid);
     }
     let next_ordinal = inventory
@@ -547,7 +537,9 @@ fn restore_alias_inner<R: Read, P: RestoreBackend>(
     let before = client
         .stat(target.primary.object)
         .map_err(Error::Destination)?;
-    if before.kind != NodeKind::File || !same_metadata(&before, &object) {
+    if before.kind != NodeKind::File
+        || !file::same_preserved(client, target.primary.object, &before, &object)?
+    {
         return Err(Error::Invalid);
     }
     let links = before.links.checked_add(1).ok_or(Error::Limit)?;
@@ -569,7 +561,7 @@ fn restore_alias_inner<R: Read, P: RestoreBackend>(
         .lookup_created(target.parent, target.name)
         .map_err(Error::Destination)?;
     client
-        .metadata(target.primary.object, core_metadata(&object))
+        .metadata(target.primary.object, file::preserved(&object))
         .map_err(Error::Destination)?;
     let after = client.stat(&alias).map_err(Error::Destination)?;
     if after.kind != NodeKind::File
@@ -577,7 +569,7 @@ fn restore_alias_inner<R: Read, P: RestoreBackend>(
         || after.size != before.size
         || after.allocated_size != before.allocated_size
         || after.links != links
-        || !same_metadata(&after, &object)
+        || !file::same_preserved(client, &alias, &after, &object)?
     {
         return Err(Error::Invalid);
     }
@@ -677,14 +669,12 @@ fn restore_symlink_inner<R: Read, P: OpaqueRestoreBackend>(
     } else {
         None
     };
-    client
-        .metadata(&created, core_metadata(&object))
-        .map_err(Error::Destination)?;
+    file::restore_preserved(client, &created, target.path, &object)?;
     let stat = client.stat(&created).map_err(Error::Destination)?;
     if stat.kind != NodeKind::Symlink
         || stat.size != link.len() as u64
         || stat.links != 1
-        || !same_metadata(&stat, &object)
+        || !file::same_preserved(client, &created, &stat, &object)?
     {
         return Err(Error::Invalid);
     }

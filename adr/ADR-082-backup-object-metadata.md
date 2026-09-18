@@ -1,6 +1,7 @@
 # ADR-082: Carry explicit object metadata and inventory knowledge in backups
 
 Status: Accepted
+Amended by: ADR-119
 Amended by: ADR-083, ADR-084, ADR-086, ADR-091, ADR-093
 Amends: ADR-076
 

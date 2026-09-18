@@ -1795,6 +1795,8 @@ impl Plan {
                                 get(label)?.0,
                                 PreservedMetadata {
                                     protection: *protection,
+                                    owner_uid: 0,
+                                    owner_gid: 0,
                                     created: stamp(*created),
                                     modified: stamp(*modified),
                                     changed: stamp(*changed),

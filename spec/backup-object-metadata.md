@@ -1,7 +1,8 @@
-# Backup object metadata payload version 1
+# Backup object metadata payload version 2
 
 [ADR-082](../adr/ADR-082-backup-object-metadata.md) defines the preservation
-metadata decision. The [archive qualification](../testing/backup-archive-qualification.md)
+metadata decision, and [ADR-119](../adr/ADR-119-backup-carries-comment-and-owner.md)
+adds the comment and the owner. The [archive qualification](../testing/backup-archive-qualification.md)
 contains its executable admission gates.
 
 ## Required records
@@ -10,7 +11,7 @@ The payload is a unique-key UTF-8 PAX record block with exactly these fields:
 
 | Keyword | Value |
 |---|---|
-| `AROS.object.version` | `1` |
+| `AROS.object.version` | `2` |
 | `AROS.object.path` | Exact canonical source path under `files/`, or root directory `files` |
 | `AROS.object.kind` | `file`, `directory`, `symlink` or `hardlink` |
 | `AROS.object.protection` | Canonical unsigned 64-bit decimal preservation value |
@@ -19,12 +20,17 @@ The payload is a unique-key UTF-8 PAX record block with exactly these fields:
 | `AROS.object.changed` | Exact signed decimal metadata-change timestamp |
 | `AROS.object.attributes` | `empty`, `present` or `uninspected` |
 | `AROS.object.security` | `empty`, `present` or `uninspected` |
+| `AROS.object.comment` | The object comment as UTF-8 without NUL; empty when it has none |
+| `AROS.object.uid` | Owner user ID, canonical decimal from 0 to 4294967295 |
+| `AROS.object.gid` | Owner group ID, canonical decimal from 0 to 4294967295 |
 
 All fields are required. Unknown versions, fields and inventory states are
 refused. Record order is immaterial. Decimal timestamps follow the exact
 [ordinary-member contract](backup-envelope.md#effective-ordinary-member-fields).
-Protection is independent of tar mode bits and does not itself authorize
-restoration. Paths preserve UTF-8 spelling and obey the envelope's canonical
+Protection and owner are independent of tar mode bits and tar owner fields,
+which stay fixed, and do not themselves authorize restoration. A restore sets
+the comment before the other fields and refuses, naming the path, when the
+destination cannot keep a non-empty comment. Paths preserve UTF-8 spelling and obey the envelope's canonical
 component rules; only directories may have a trailing slash. Metadata cannot
 name the auxiliary archive namespace.
 

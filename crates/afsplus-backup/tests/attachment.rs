@@ -50,6 +50,9 @@ impl SnapshotBackend for Source {
     fn info(&mut self, _: &Self::View) -> Result<ViewInfo, VfsError> {
         unimplemented!()
     }
+    fn comment(&mut self, _: &Self::View, _: u64) -> Result<String, VfsError> {
+        Ok(String::new())
+    }
     fn stat(&mut self, view: &Self::View, _: u64) -> Result<Stat, VfsError> {
         let mut stat = file_stat();
         if view.directory {
@@ -308,11 +311,15 @@ impl RestoreBackend for Destination {
         stat.allocated_size = self.ranges.iter().map(|r| r.length).sum();
         let metadata = self.core_metadata.unwrap_or(RestoreMetadata {
             protection: 0,
+            owner_uid: 0,
+            owner_gid: 0,
             created: Timespec::default(),
             modified: Timespec::default(),
             changed: Timespec::default(),
         });
         stat.protection = metadata.protection;
+        stat.owner_uid = metadata.owner_uid;
+        stat.owner_gid = metadata.owner_gid;
         stat.created = metadata.created;
         stat.modified = metadata.modified;
         stat.changed = metadata.changed;
@@ -986,6 +993,9 @@ fn file_stat() -> Stat {
         allocated_size: 4100,
         links: 1,
         protection: u64::MAX,
+        mode: 0,
+        owner_uid: 0,
+        owner_gid: 0,
         created: Timespec {
             seconds: i64::MIN,
             nanoseconds: 999999999,

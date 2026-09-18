@@ -28,6 +28,8 @@ fn time(seconds: i64) -> Timespec {
 fn wanted() -> PreservedMetadata {
     PreservedMetadata {
         protection: 0x8000_00ff,
+        owner_uid: 0,
+        owner_gid: 0,
         created: time(-3),
         modified: time(7),
         changed: time(9),

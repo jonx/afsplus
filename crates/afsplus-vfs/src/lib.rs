@@ -1419,8 +1419,8 @@ impl<D: BlockDevice> Vfs<D> {
         Ok(self.volume.set_object_comment(object_id, comment, now)?)
     }
 
-    /// Sets the modification time chosen by the caller. Creation time and
-    /// protection are kept and the change time is `now`.
+    /// Sets the modification time chosen by the caller. Creation time,
+    /// protection and owner are kept and the change time is `now`.
     pub fn set_modified(
         &mut self,
         object_id: ObjectId,
@@ -1436,6 +1436,8 @@ impl<D: BlockDevice> Vfs<D> {
             object_id,
             PreservedMetadata {
                 protection,
+                owner_uid: current.owner_uid,
+                owner_gid: current.owner_gid,
                 created: current.created,
                 modified,
                 changed: now,

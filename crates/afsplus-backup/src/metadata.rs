@@ -36,6 +36,11 @@ pub struct Object<'a> {
     pub path: &'a str,
     pub kind: tar::Kind,
     pub protection: u64,
+    /// The AROS comment, empty when the object has none (ADR-106, ADR-119).
+    pub comment: &'a str,
+    /// The owner, which tar headers of this archive never carry (ADR-118, ADR-119).
+    pub uid: u32,
+    pub gid: u32,
     pub created: Timestamp,
     pub modified: Timestamp,
     pub changed: Timestamp,
@@ -56,6 +61,7 @@ impl Object<'_> {
         kind_text(self.kind)?;
         if !envelope::canonical(self.path, self.kind == tar::Kind::Directory, false)
             || self.path.contains('\0')
+            || self.comment.contains('\0')
             || [self.created, self.modified, self.changed]
                 .iter()
                 .any(|t| t.nanos >= 1_000_000_000)
@@ -65,7 +71,10 @@ impl Object<'_> {
         Ok(())
     }
 }
-const KEYS: [&str; 9] = [
+/// The payload version this build writes and the only one it reads: version
+/// 1 carried no comment and no owner, and there is no legacy (ADR-119).
+const VERSION: &str = "2";
+const KEYS: [&str; 12] = [
     "AROS.object.version",
     "AROS.object.path",
     "AROS.object.kind",
@@ -75,6 +84,9 @@ const KEYS: [&str; 9] = [
     "AROS.object.changed",
     "AROS.object.attributes",
     "AROS.object.security",
+    "AROS.object.comment",
+    "AROS.object.uid",
+    "AROS.object.gid",
 ];
 
 pub fn decode(input: &[u8], limits: pax::Limits) -> Result<Object<'_>, Error> {
@@ -92,7 +104,7 @@ pub fn decode(input: &[u8], limits: pax::Limits) -> Result<Object<'_>, Error> {
             .map(|r| r.value)
             .ok_or(Error::Invalid)
     };
-    if field(0)? != "1" {
+    if field(0)? != VERSION {
         return Err(Error::Unsupported);
     }
     let kind = match field(2)? {
@@ -111,9 +123,18 @@ pub fn decode(input: &[u8], limits: pax::Limits) -> Result<Object<'_>, Error> {
         changed: Timestamp::parse(field(6)?).map_err(|_| Error::Invalid)?,
         attributes: Inventory::parse(field(7)?)?,
         security: Inventory::parse(field(8)?)?,
+        comment: field(9)?,
+        uid: identity(field(10)?)?,
+        gid: identity(field(11)?)?,
     };
     object.validate()?;
     Ok(object)
+}
+
+/// A canonical decimal owner identity: 0 to 4294967295, no sign, no leading zero.
+fn identity(text: &str) -> Result<u32, Error> {
+    let value = member::unsigned(text).map_err(|_| Error::Invalid)?;
+    u32::try_from(value).map_err(|_| Error::Invalid)
 }
 
 pub fn encode(object: &Object<'_>, limits: pax::Limits) -> Result<Vec<u8>, Error> {
@@ -122,8 +143,10 @@ pub fn encode(object: &Object<'_>, limits: pax::Limits) -> Result<Vec<u8>, Error
     let created = object.created.decimal().map_err(|_| Error::Invalid)?;
     let modified = object.modified.decimal().map_err(|_| Error::Invalid)?;
     let changed = object.changed.decimal().map_err(|_| Error::Invalid)?;
+    let uid = object.uid.to_string();
+    let gid = object.gid.to_string();
     let values = [
-        "1",
+        VERSION,
         object.path,
         kind_text(object.kind)?,
         &protection,
@@ -132,8 +155,11 @@ pub fn encode(object: &Object<'_>, limits: pax::Limits) -> Result<Vec<u8>, Error
         &changed,
         object.attributes.text(),
         object.security.text(),
+        object.comment,
+        &uid,
+        &gid,
     ];
-    let records: [pax::Record<'_>; 9] = std::array::from_fn(|i| pax::Record {
+    let records: [pax::Record<'_>; 12] = std::array::from_fn(|i| pax::Record {
         key: KEYS[i],
         value: values[i],
     });
@@ -170,6 +196,9 @@ mod tests {
             },
             attributes: Inventory::Uninspected,
             security: Inventory::Present,
+            comment: "Réglé à 100%, voir la note",
+            uid: u32::MAX,
+            gid: 20,
         }
     }
     #[test]
@@ -208,7 +237,11 @@ mod tests {
             );
         }
         for (index, value, expected) in [
-            (0, "2", Error::Unsupported),
+            (0, "1", Error::Unsupported),
+            (0, "3", Error::Unsupported),
+            (10, "4294967296", Error::Invalid),
+            (11, "-1", Error::Invalid),
+            (10, "007", Error::Invalid),
             (2, "device", Error::Unsupported),
             (3, "01", Error::Invalid),
             (7, "", Error::Invalid),

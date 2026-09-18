@@ -17,6 +17,8 @@ fn now(n: i64) -> Timespec {
 fn metadata() -> RestoreMetadata {
     RestoreMetadata {
         protection: 0x8000_0001,
+        owner_uid: 0,
+        owner_gid: 0,
         created: now(-50),
         modified: now(70),
         changed: now(-20),
