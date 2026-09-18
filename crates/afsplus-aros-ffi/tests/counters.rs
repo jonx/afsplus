@@ -115,7 +115,7 @@ fn counters_match_the_device_and_count_calls_and_failures() {
 
     // Mount traffic is already counted; no call has completed yet.
     let mounted = counters(filesystem);
-    assert_eq!(mounted.struct_size, 72);
+    assert_eq!(mounted.struct_size, 88);
     assert_eq!((mounted.calls, mounted.failed_calls), (0, 0));
     assert!(mounted.device_reads > 0);
     assert_eq!(mounted.device_reads, counting.seen.reads);

@@ -241,7 +241,11 @@ struct AfsplusArosTraceCounters {
 
 /* Sized query structure. calls counts completed entries on the mounted
  * instance before this one; device_* counts block callbacks. The benchmark
- * contract reads these instead of inferring traffic from elapsed time. */
+ * contract reads these instead of inferring traffic from elapsed time.
+ * heap_bytes is what the library's Rust allocations hold now, heap_peak_bytes
+ * the most they held at once since the library started; both are the
+ * library's, shared by the instances one copy of it serves, and leave out the
+ * handler's own allocations and allocator overhead. */
 struct AfsplusArosCounters {
     uint32_t struct_size;
     uint32_t reserved;
@@ -253,6 +257,8 @@ struct AfsplusArosCounters {
     uint64_t device_read_bytes;
     uint64_t device_written_bytes;
     uint64_t device_failures;
+    uint64_t heap_bytes;
+    uint64_t heap_peak_bytes;
 };
 
 /* Sized query structure; see AfsplusArosInterface for the growth rule. */
@@ -302,7 +308,7 @@ _Static_assert(sizeof(struct AfsplusArosExtent) == 24,
     "AfsplusArosExtent ABI drift");
 _Static_assert(sizeof(struct AfsplusArosDirEntry) == 24,
     "AfsplusArosDirEntry ABI drift");
-_Static_assert(sizeof(struct AfsplusArosCounters) == 72,
+_Static_assert(sizeof(struct AfsplusArosCounters) == 88,
     "AfsplusArosCounters ABI drift");
 _Static_assert(sizeof(struct AfsplusArosHealth) == 112,
     "AfsplusArosHealth ABI drift");

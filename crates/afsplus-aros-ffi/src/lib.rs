@@ -5,6 +5,8 @@
 //! handler supplies a block device through callbacks and keeps the returned
 //! instance on its single packet-processing task.
 
+mod heap;
+
 use std::ffi::c_void;
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -395,6 +397,8 @@ pub struct AfsplusArosCounters {
     pub device_read_bytes: u64,
     pub device_written_bytes: u64,
     pub device_failures: u64,
+    pub heap_bytes: u64,
+    pub heap_peak_bytes: u64,
 }
 
 #[repr(C)]
@@ -439,7 +443,7 @@ pub struct AfsplusArosExtent {
 const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosExtent>()];
 const _: [(); 88] = [(); std::mem::size_of::<AfsplusArosStat>()];
 const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosDirEntry>()];
-const _: [(); 72] = [(); std::mem::size_of::<AfsplusArosCounters>()];
+const _: [(); 88] = [(); std::mem::size_of::<AfsplusArosCounters>()];
 const _: [(); 112] = [(); std::mem::size_of::<AfsplusArosHealth>()];
 const _: [(); 16] = [(); std::mem::size_of::<AfsplusArosHealthEvent>()];
 const _: [(); 40] = [(); std::mem::size_of::<AfsplusArosTraceCounters>()];
@@ -2083,6 +2087,7 @@ pub extern "C" fn afsplus_aros_counters(
     bridge_status(filesystem, || {
         let bridge = bridge_mut(filesystem)?;
         let device = &bridge.device;
+        let (heap_bytes, heap_peak_bytes) = heap::sample();
         write_sized_output(
             output,
             AFSPLUS_AROS_COUNTERS_FIRST_LAYOUT,
@@ -2097,6 +2102,8 @@ pub extern "C" fn afsplus_aros_counters(
                 device_read_bytes: device.read_bytes.load(Ordering::Relaxed),
                 device_written_bytes: device.written_bytes.load(Ordering::Relaxed),
                 device_failures: device.failures.load(Ordering::Relaxed),
+                heap_bytes,
+                heap_peak_bytes,
             },
             |value, size| value.struct_size = size,
         )
