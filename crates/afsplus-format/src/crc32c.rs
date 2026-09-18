@@ -1,5 +1,8 @@
 //! CRC32C (Castagnoli), the initial metadata checksum proposal
-//! (`docs/03-on-disk-format.md` §6). Table-driven, dependency-free.
+//! (`docs/03-on-disk-format.md` §6). Table-driven, dependency-free: eight
+//! bytes a step through eight tables (slicing-by-8), then byte by byte. The
+//! words are read little-endian explicitly, so a big-endian CPU computes the
+//! same value; the tables take 8 KiB.
 //!
 //! The checksum algorithm identifier remains an explicit format field so a
 //! later epoch can negotiate alternatives.
@@ -10,6 +13,26 @@ pub const CHECKSUM_CRC32C: u8 = 1;
 const POLY_REFLECTED: u32 = 0x82F6_3B78;
 
 const TABLE: [u32; 256] = build_table();
+
+/// `TABLES[k][i]` is the CRC of byte `i` followed by `k` zero bytes, so eight
+/// lookups advance the state by eight bytes at once.
+const TABLES: [[u32; 256]; 8] = build_tables();
+
+const fn build_tables() -> [[u32; 256]; 8] {
+    let mut tables = [[0u32; 256]; 8];
+    tables[0] = TABLE;
+    let mut k = 1;
+    while k < 8 {
+        let mut i = 0;
+        while i < 256 {
+            let previous = tables[k - 1][i];
+            tables[k][i] = (previous >> 8) ^ TABLE[(previous & 0xFF) as usize];
+            i += 1;
+        }
+        k += 1;
+    }
+    tables
+}
 
 const fn build_table() -> [u32; 256] {
     let mut table = [0u32; 256];
@@ -51,7 +74,20 @@ impl Hasher {
 
     pub fn update(&mut self, data: &[u8]) {
         let mut crc = self.state;
-        for &byte in data {
+        let (chunks, rest) = data.as_chunks::<8>();
+        for chunk in chunks {
+            let low = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) ^ crc;
+            let high = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+            crc = TABLES[7][(low & 0xFF) as usize]
+                ^ TABLES[6][((low >> 8) & 0xFF) as usize]
+                ^ TABLES[5][((low >> 16) & 0xFF) as usize]
+                ^ TABLES[4][(low >> 24) as usize]
+                ^ TABLES[3][(high & 0xFF) as usize]
+                ^ TABLES[2][((high >> 8) & 0xFF) as usize]
+                ^ TABLES[1][((high >> 16) & 0xFF) as usize]
+                ^ TABLES[0][(high >> 24) as usize];
+        }
+        for &byte in rest {
             crc = (crc >> 8) ^ TABLE[((crc ^ byte as u32) & 0xFF) as usize];
         }
         self.state = crc;
@@ -70,7 +106,48 @@ impl Default for Hasher {
 
 #[cfg(test)]
 mod tests {
-    use super::crc32c;
+    use super::{crc32c, Hasher, TABLE};
+
+    /// The byte-at-a-time definition the sliced form must equal.
+    fn reference(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in data {
+            crc = (crc >> 8) ^ TABLE[((crc ^ byte as u32) & 0xFF) as usize];
+        }
+        !crc
+    }
+
+    #[test]
+    fn eight_bytes_a_step_equals_one_byte_a_step() {
+        let mut state = 0x9E37_79B9u32;
+        let data: Vec<u8> = (0..9000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+        // Every length and start around the eight-byte step, and a block.
+        for start in 0..9 {
+            for length in (0..70).chain([4096, 4097, 8191]) {
+                let slice = &data[start..start + length];
+                assert_eq!(
+                    crc32c(slice),
+                    reference(slice),
+                    "start {start} length {length}"
+                );
+            }
+        }
+        // Spans of any size streamed through one hasher.
+        for split in [1, 3, 7, 8, 9, 100] {
+            let mut hasher = Hasher::new();
+            for piece in data[..4096].chunks(split) {
+                hasher.update(piece);
+            }
+            assert_eq!(hasher.finalize(), reference(&data[..4096]), "split {split}");
+        }
+    }
 
     #[test]
     fn known_vectors() {
