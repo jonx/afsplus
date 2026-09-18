@@ -359,15 +359,18 @@ an `ACTION_FLUSH` so that a delayed mount is measured at a durable point.
 Under [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) a
 hundred rounds may move the heap or its peak by at most 256 bytes. System
 free memory alone cannot show a leak: the allocator's pools absorb it. The
-heap counters found two that it hid, a cache of parents that grew by about
-94 bytes a round and, on a delayed mount, deleted files left as orphans at
-1.2 KB each until the commit came to clean them.
+heap counters found one it hid, a cache of parents that grew by about 94
+bytes a round.
 
-Open findings of the heap counters, measured at the C boundary: the commit
-path grows by a few dozen bytes over thousands of rounds, in sync mode too,
-by steps that suggest a slowly growing collection not yet identified; and
-rewriting one existing file five hundred times leaves 8.4 MB held, bounded
-but large for the classic profile.
+The meter is the library's allocator, and at the C boundary the tests' disk
+is a sparse in-memory device that allocates each block the first time it is
+written: a test that makes the volume write new blocks sees them in the heap.
+Two earlier findings were that device and not the library, and a disk whose
+blocks all exist beforehand shows neither: pending orphans cost no memory,
+and rewriting one file 1,500 times holds the same heap throughout. What
+remains open is a growth of a few dozen bytes over thousands of commits, in
+sync mode too, by steps that suggest a slowly growing collection not yet
+identified.
 
 The target runner is
 [`tools/bench-hosted-aros.sh`](../tools/bench-hosted-aros.sh) with
