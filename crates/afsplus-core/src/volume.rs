@@ -7006,6 +7006,13 @@ impl<D: BlockDevice> Volume<D> {
     /// swallowed; the caller says so. Losing it is what already happened. The
     /// choice this makes is only whether the volume stays usable afterwards.
     pub fn window_discard(&mut self) -> u32 {
+        self.trace_api(crate::flight::ApiMethod::WindowDiscard, |volume| {
+            Ok::<_, std::convert::Infallible>(volume.window_discard_untraced())
+        })
+        .unwrap_or_else(|never| match never {})
+    }
+
+    fn window_discard_untraced(&mut self) -> u32 {
         let Some(window) = self.window.take() else {
             self.window_poisoned = false;
             return 0;

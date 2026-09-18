@@ -3222,6 +3222,7 @@ fn every_registered_api_method_executes_under_its_own_guard() {
     volume.window_write_file_at(file, 0, b"logged", now).ok();
     volume.window_truncate_file(file, 2, now).ok();
     volume.window_commit(now).ok();
+    volume.window_discard();
     volume.snapshot_stat(&handle, file).ok();
     volume.snapshot_allocation_page(&handle, file, 0, 2).ok();
     volume.snapshot_read_link(&handle, symlink, &mut bytes).ok();
