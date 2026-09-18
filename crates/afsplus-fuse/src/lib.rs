@@ -116,10 +116,6 @@ impl HostAttributeNames {
     }
 }
 
-/// Maintenance steps run when a person finishes with a file. Each loop stops
-/// as soon as a step makes no progress, so a tidy volume pays nothing.
-const MAINTENANCE_STEPS_PER_PAUSE: usize = 16;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FuseConfig {
     pub uid: u32,
@@ -267,20 +263,22 @@ impl<D: BlockDevice> FuseAdapter<D> {
         self.vfs.statfs()
     }
 
-    /// Resume the maintenance bounded operations leave behind.
+    /// Leave the maintenance an unlink or a last close would do for the host
+    /// to run itself; see [`Vfs::set_inline_maintenance`].
+    pub fn set_inline_maintenance(&mut self, enabled: bool) {
+        self.vfs.set_inline_maintenance(enabled);
+    }
+
+    /// One transaction of the maintenance operations leave behind; see
+    /// [`Vfs::maintenance_step`]. True while more remains.
     ///
-    /// A delete does not finish cleaning a large fragmented file: that work is
-    /// proportional to the file and a delete stays bounded, so the remainder is
-    /// left resumable, and something has to resume it.
-    ///
-    /// NOT on the call that reports free space, which is where this was first
-    /// put. That read well, since making the answer true before giving it is
-    /// the right idea, and it was wrong for a reason a person feels
-    /// immediately: a file browser asks how much space is free many times a
-    /// second, each call did up to sixteen checkpoint commits, and the volume
-    /// became too slow to look at. Reporting free space must cost nothing.
-    pub fn run_maintenance(&mut self, now: Timespec) {
-        let _ = self.vfs.run_maintenance(MAINTENANCE_STEPS_PER_PAUSE, now);
+    /// Not on the call that reports free space, where it was first put: a
+    /// file browser asks that many times a second. Not inside unlink or close
+    /// either, because the macOS driver answers one request at a time and
+    /// every other program waits behind whatever a request does. The driver
+    /// calls this from a thread of its own.
+    pub fn maintenance_step(&mut self, now: Timespec) -> bool {
+        self.vfs.maintenance_step(now).unwrap_or(false)
     }
 
     pub fn open_file(

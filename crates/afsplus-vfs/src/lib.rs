@@ -366,6 +366,7 @@ pub struct Vfs<D: BlockDevice> {
     directory_resume: BTreeMap<Handle, Vec<u8>>,
     next_handle: Handle,
     idle_maintenance: bool,
+    inline_maintenance: bool,
 }
 
 impl<D: BlockDevice> Vfs<D> {
@@ -388,6 +389,7 @@ impl<D: BlockDevice> Vfs<D> {
             directory_resume: BTreeMap::new(),
             next_handle: 1,
             idle_maintenance: true,
+            inline_maintenance: true,
         }
     }
 
@@ -637,7 +639,7 @@ impl<D: BlockDevice> Vfs<D> {
         {
             return Ok(());
         }
-        if !self.idle_maintenance {
+        if !self.idle_maintenance || !self.inline_maintenance {
             // Accepted writes are still published; the orphan, if this was
             // one, stays pending for a later resume.
             return self.checkpoint_data_window(Timespec::default());
@@ -959,11 +961,28 @@ impl<D: BlockDevice> Vfs<D> {
     /// ledger, and draining the ledger returns the blocks to the free pool.
     /// Driving only the last of the three returns nothing.
     fn reclaim_after_release(&mut self, now: Timespec) {
-        if !self.idle_maintenance {
+        if !self.idle_maintenance || !self.inline_maintenance {
             return;
         }
         let _ = self.cleanup_orphans(ORPHAN_STEPS_PER_RELEASE, now);
         let _ = self.reclaim_space(RECLAIM_STEPS_PER_RELEASE, now);
+    }
+
+    /// Exactly one transaction of maintenance, and whether more remains.
+    ///
+    /// The smallest unit a host that runs maintenance in the background can
+    /// hold its lock for: one orphan cleanup step if an orphan is waiting and
+    /// nobody has it open, otherwise one reclaim step. Orphans first, because
+    /// cleaning them is what fills the reclaim ledger. Stopped by write
+    /// protection like every other maintenance.
+    pub fn maintenance_step(&mut self, now: Timespec) -> Result<bool, VfsError> {
+        if self.volume.mount_mode() != MountMode::ReadWrite || !self.idle_maintenance {
+            return Ok(false);
+        }
+        if self.cleanup_orphans(1, now)? > 0 {
+            return Ok(true);
+        }
+        Ok(self.reclaim_space(1, now)? > 0)
     }
 
     /// Resume the maintenance that bounded operations leave behind, and say
@@ -1508,6 +1527,20 @@ impl<D: BlockDevice> Vfs<D> {
     /// contract forbids new changes to the volume: a sync then only publishes
     /// writes it already accepted, and pending orphans wait. They stay
     /// visible through `pending_orphans` and are resumed once it is on again.
+    /// Whether an unlink or a last close runs the maintenance it leaves
+    /// behind before it returns. On by default.
+    ///
+    /// A host that runs maintenance itself turns it off. The macOS driver
+    /// answers one request at a time, so any work a request does beyond what
+    /// its caller asked for is work every other program on the volume waits
+    /// behind: a file browser closing a thumbnail paid for somebody else's
+    /// delete. With this off, those operations leave the orphan and the
+    /// reclaim ledger for [`Self::run_maintenance`], which the driver calls
+    /// from a thread of its own, one bounded step at a time.
+    pub fn set_inline_maintenance(&mut self, enabled: bool) {
+        self.inline_maintenance = enabled;
+    }
+
     pub fn set_idle_maintenance(&mut self, enabled: bool) {
         self.idle_maintenance = enabled;
     }

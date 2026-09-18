@@ -3,7 +3,9 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use afsplus_block::BlockDevice;
@@ -11,9 +13,9 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{AccessMode, NodeKind, Vfs, VfsError};
 use fuser::{
     BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, LockOwner, OpenAccMode, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr,
-    Request, TimeOrNow, WriteFlags,
+    INodeNo, KernelConfig, LockOwner, OpenAccMode, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate,
+    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite,
+    ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 
 use crate::{AttributeWriteMode, FuseAdapter, FuseAttributes, FuseConfig};
@@ -35,25 +37,84 @@ fn permission_bits(mode: u32) -> u16 {
 }
 const DIRECTORY_BATCH: usize = 128;
 
+/// Pause after a maintenance step that did something, so that requests get
+/// the lock between steps rather than after a whole drain.
+const MAINTENANCE_STEP_PAUSE: Duration = Duration::from_millis(5);
+
+/// How often an idle volume looks for maintenance to do.
+const MAINTENANCE_IDLE_PAUSE: Duration = Duration::from_millis(200);
+
 pub struct FuserFilesystem<D: BlockDevice + Send> {
-    adapter: Mutex<FuseAdapter<D>>,
+    adapter: Arc<Mutex<FuseAdapter<D>>>,
+    maintainer: Option<Maintainer>,
+}
+
+/// The thread that does the maintenance requests leave behind.
+///
+/// fuser answers one request at a time on macOS, so anything a request does
+/// beyond what its caller asked for is paid by every other program waiting on
+/// the volume. Orphan cleanup and the return of freed blocks used to run
+/// inside unlink and inside a last close; a file browser closing a thumbnail
+/// then waited behind somebody else's delete. They run here instead, one
+/// bounded step at a time. The thread never waits for the lock: when a
+/// request holds it, the step is simply tried again later. A request that
+/// arrives during a step waits for that one step and no more.
+struct Maintainer {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
+}
+
+impl Maintainer {
+    fn start<D: BlockDevice + Send + 'static>(adapter: Arc<Mutex<FuseAdapter<D>>>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            while !stopping.load(Ordering::Acquire) {
+                let more = match adapter.try_lock() {
+                    Ok(mut adapter) => adapter.maintenance_step(now()),
+                    // A request holds the lock: it goes first.
+                    Err(TryLockError::WouldBlock) => true,
+                    // Requests already answer EIO on a poisoned lock.
+                    Err(TryLockError::Poisoned(_)) => break,
+                };
+                std::thread::sleep(if more {
+                    MAINTENANCE_STEP_PAUSE
+                } else {
+                    MAINTENANCE_IDLE_PAUSE
+                });
+            }
+        });
+        Maintainer { stop, thread }
+    }
+
+    fn stop(self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = self.thread.join();
+    }
 }
 
 impl<D: BlockDevice + Send> FuserFilesystem<D> {
     pub fn new(vfs: Vfs<D>, config: FuseConfig) -> Self {
-        FuserFilesystem {
-            adapter: Mutex::new(FuseAdapter::new(vfs, config)),
-        }
+        Self::from_adapter(FuseAdapter::new(vfs, config))
     }
 
     pub fn from_adapter(adapter: FuseAdapter<D>) -> Self {
         FuserFilesystem {
-            adapter: Mutex::new(adapter),
+            adapter: Arc::new(Mutex::new(adapter)),
+            maintainer: None,
         }
     }
 
-    pub fn into_adapter(self) -> Result<FuseAdapter<D>, VfsError> {
-        self.adapter
+    pub fn into_adapter(mut self) -> Result<FuseAdapter<D>, VfsError> {
+        if let Some(maintainer) = self.maintainer.take() {
+            maintainer.stop();
+        }
+        // With the maintainer stopped, dropping self leaves this clone as the
+        // only owner.
+        let adapter = Arc::clone(&self.adapter);
+        drop(self);
+        Arc::try_unwrap(adapter)
+            .map_err(|_| VfsError::Io("FUSE adapter still shared".into()))?
             .into_inner()
             .map_err(|_| VfsError::Io("FUSE adapter mutex poisoned".into()))
     }
@@ -61,24 +122,30 @@ impl<D: BlockDevice + Send> FuserFilesystem<D> {
     fn lock(&self) -> Result<MutexGuard<'_, FuseAdapter<D>>, Errno> {
         self.adapter.lock().map_err(|_| Errno::EIO)
     }
+}
 
-    /// Closing a file is where the mount catches up on maintenance.
-    ///
-    /// It used to happen when a host asked how much space was free, which read
-    /// well and was wrong: the Finder asks that many times a second, each call
-    /// did up to sixteen checkpoint commits, and the volume became unusable to
-    /// look at. A close is a person finishing something, it is not polled, and
-    /// it happens often enough for the backlog to drain.
-    fn release_maintenance(&self) {
-        if let Ok(mut adapter) = self.lock() {
-            adapter.run_maintenance(now());
+impl<D: BlockDevice + Send> Drop for FuserFilesystem<D> {
+    fn drop(&mut self) {
+        if let Some(maintainer) = self.maintainer.take() {
+            maintainer.stop();
         }
     }
 }
 
 impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
+    fn init(&mut self, _request: &Request, _config: &mut KernelConfig) -> std::io::Result<()> {
+        if let Ok(mut adapter) = self.adapter.lock() {
+            adapter.set_inline_maintenance(false);
+        }
+        self.maintainer = Some(Maintainer::start(Arc::clone(&self.adapter)));
+        Ok(())
+    }
+
     fn destroy(&mut self) {
-        if let Ok(adapter) = self.adapter.get_mut() {
+        if let Some(maintainer) = self.maintainer.take() {
+            maintainer.stop();
+        }
+        if let Ok(mut adapter) = self.adapter.lock() {
             let _ = adapter.sync_filesystem();
         }
     }
@@ -434,9 +501,6 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
         let result = self
             .lock()
             .and_then(|mut adapter| adapter.close(handle.0).map_err(errno));
-        if result.is_ok() {
-            self.release_maintenance();
-        }
         empty_reply(result, reply);
     }
 

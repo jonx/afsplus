@@ -2,7 +2,10 @@
 
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** [tools/check-mounted-usage.sh](../tools/check-mounted-usage.sh),
-> [tools/check-mount-driver-death.py](../tools/check-mount-driver-death.py) · **Milestones:** M08
+> [tools/check-mount-driver-death.py](../tools/check-mount-driver-death.py),
+> [tools/check-mount-responsiveness.py](../tools/check-mount-responsiveness.py),
+> [crates/afsplus-vfs/tests/background_maintenance.rs](../crates/afsplus-vfs/tests/background_maintenance.rs) ·
+> **Milestones:** M08
 
 This plan covers what a person can do with an AFS+ volume mounted through
 macFUSE: create, copy, rename, link, archive, and unmount with everything
@@ -101,6 +104,29 @@ it on purpose. Two things can still leave a dead mountpoint: killing the
 supervisor itself with `SIGKILL`, which no process can intercept, and killing
 the driver of a build older than the supervisor. The helper can then be
 terminated by hand as shown above.
+
+## One request at a time
+
+On macOS, fuser serves a mount from a single thread, so a request that takes
+long makes every other program using the volume wait for it. The work that
+used to make requests long is the maintenance a delete leaves behind:
+cleaning the orphan and returning its blocks to the free pool, which grows
+with how fragmented the file was.
+
+The driver therefore turns inline maintenance off in the portable layer and
+runs it on a thread of its own, one transaction at a time, taking the
+volume's lock only between requests. A request now waits for at most one
+transaction.
+[crates/afsplus-vfs/tests/background_maintenance.rs](../crates/afsplus-vfs/tests/background_maintenance.rs)
+checks, below the mount, that with inline maintenance off an unlink does none
+of the work and the steps drain all of it.
+[tools/check-mount-responsiveness.py](../tools/check-mount-responsiveness.py)
+checks the mounted result: another program's worst wait while a fragmented
+file is deleted, and that the space still comes back.
+
+A request that blocks inside the driver itself still stops the whole volume;
+only more serving threads would change that, and fuser offers them on Linux
+only.
 
 ## What belongs below the mount
 
