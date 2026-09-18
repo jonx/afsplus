@@ -417,6 +417,9 @@ pub struct Vfs<D: BlockDevice> {
     window_first: Option<Timespec>,
     window_last: Option<Timespec>,
     window_changes: u32,
+    /// Deletions the window holds: each leaves an orphan whose cleanup the
+    /// commit starts, as an immediate delete starts its own.
+    window_deletes: u32,
 }
 
 impl<D: BlockDevice> Vfs<D> {
@@ -444,6 +447,7 @@ impl<D: BlockDevice> Vfs<D> {
             window_first: None,
             window_last: None,
             window_changes: 0,
+            window_deletes: 0,
         }
     }
 
@@ -487,7 +491,7 @@ impl<D: BlockDevice> Vfs<D> {
         }
         match self.volume.window_commit(now) {
             Ok(()) => {
-                self.forget_window();
+                self.after_window_commit(now);
                 Ok(())
             }
             // The window could not be published and is now poisoned, which
@@ -507,10 +511,23 @@ impl<D: BlockDevice> Vfs<D> {
         }
     }
 
+    /// What follows every commit of the window: what it deleted is cleaned
+    /// now, whichever operation committed it, so orphans never pile up
+    /// behind a delayed mount.
+    fn after_window_commit(&mut self, now: Timespec) {
+        let deletes = self.window_deletes as usize;
+        self.forget_window();
+        if deletes > 0 && self.idle_maintenance && self.inline_maintenance {
+            let _ = self.cleanup_orphans(2 * deletes + ORPHAN_STEPS_PER_RELEASE, now);
+            let _ = self.reclaim_space(2 * deletes + RECLAIM_STEPS_PER_RELEASE, now);
+        }
+    }
+
     fn forget_window(&mut self) {
         self.window_first = None;
         self.window_last = None;
         self.window_changes = 0;
+        self.window_deletes = 0;
     }
 
     /// The durability of this mount; [`Durability::Sync`] until set.
@@ -1168,7 +1185,10 @@ impl<D: BlockDevice> Vfs<D> {
                     },
                     now,
                 ) {
-                    Ok(_) => return self.note_change(now),
+                    Ok(_) => {
+                        self.window_deletes = self.window_deletes.saturating_add(1);
+                        return self.note_change(now);
+                    }
                     Err(CoreError::PrototypeLimit(_)) => {}
                     Err(error) => return Err(error.into()),
                 }
@@ -1387,7 +1407,12 @@ impl<D: BlockDevice> Vfs<D> {
                     },
                     now,
                 ) {
-                    Ok(_) => return self.note_change(now),
+                    Ok(_) => {
+                        if replace {
+                            self.window_deletes = self.window_deletes.saturating_add(1);
+                        }
+                        return self.note_change(now);
+                    }
                     Err(CoreError::PrototypeLimit(_)) => {}
                     Err(error) => return Err(error.into()),
                 }
@@ -1843,7 +1868,9 @@ impl<D: BlockDevice> Vfs<D> {
         match self.volume.window_fsync() {
             Ok(()) => Ok(()),
             Err(CoreError::PrototypeLimit(_)) => {
-                Ok(self.volume.window_commit(Timespec::default())?)
+                self.volume.window_commit(Timespec::default())?;
+                self.after_window_commit(Timespec::default());
+                Ok(())
             }
             Err(error) => Err(error.into()),
         }
@@ -1852,6 +1879,7 @@ impl<D: BlockDevice> Vfs<D> {
     pub fn sync_filesystem(&mut self) -> Result<(), VfsError> {
         if self.volume.mount_mode() == MountMode::ReadWrite && self.logged_data_fsync_enabled() {
             self.volume.window_commit(Timespec::default())?;
+            self.after_window_commit(Timespec::default());
         } else {
             self.volume.sync()?;
         }
