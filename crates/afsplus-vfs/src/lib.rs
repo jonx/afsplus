@@ -15,7 +15,7 @@ use afsplus_block::BlockDevice;
 use afsplus_core::flight::FlightRecorder;
 use afsplus_core::name_key::comparison_key;
 use afsplus_core::volume::{
-    DataUpdatePolicy, DirectoryCursor, FileEditLimits, ObjectMetadata, PreservedMetadata,
+    BatchOp, DataUpdatePolicy, DirectoryCursor, FileEditLimits, ObjectMetadata, PreservedMetadata,
     SecurityProjectionPolicy, Volume,
 };
 pub use afsplus_core::AttributeWriteMode;
@@ -374,6 +374,31 @@ enum OpenHandle {
     },
 }
 
+/// When changes reach the disk (ADR-121).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durability {
+    /// Every namespace change is durable when it returns; file data waits
+    /// for fsync, the close of its last handle, or the next namespace change.
+    Sync,
+    /// Changes gather in the open window and are committed together when
+    /// [`Vfs::commit_if_due`] finds the volume idle for `idle_ms` or the
+    /// oldest change `max_age_ms` old, at the window's bound, or when
+    /// anything asks for durability.
+    Delayed { idle_ms: u32, max_age_ms: u32 },
+}
+
+impl Durability {
+    /// ADR-121's defaults: one idle second, five seconds at most.
+    pub const DELAYED: Durability = Durability::Delayed {
+        idle_ms: 1_000,
+        max_age_ms: 5_000,
+    };
+}
+
+/// Changes a delayed window holds before it is committed whatever the
+/// clock says.
+pub const DELAYED_WINDOW_OPS_MAX: u32 = 512;
+
 pub struct Vfs<D: BlockDevice> {
     volume: Volume<D>,
     handles: BTreeMap<Handle, OpenHandle>,
@@ -386,6 +411,12 @@ pub struct Vfs<D: BlockDevice> {
     next_handle: Handle,
     idle_maintenance: bool,
     inline_maintenance: bool,
+    durability: Durability,
+    /// Clock of the first and the latest change the open window holds, and
+    /// how many it holds, as the callers stated them.
+    window_first: Option<Timespec>,
+    window_last: Option<Timespec>,
+    window_changes: u32,
 }
 
 impl<D: BlockDevice> Vfs<D> {
@@ -409,6 +440,10 @@ impl<D: BlockDevice> Vfs<D> {
             next_handle: 1,
             idle_maintenance: true,
             inline_maintenance: true,
+            durability: Durability::Sync,
+            window_first: None,
+            window_last: None,
+            window_changes: 0,
         }
     }
 
@@ -451,7 +486,10 @@ impl<D: BlockDevice> Vfs<D> {
             return Ok(());
         }
         match self.volume.window_commit(now) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.forget_window();
+                Ok(())
+            }
             // The window could not be published and is now poisoned, which
             // refuses every later commit, which is what poisons it further. A
             // volume that hit one full-disk write used to answer "busy" to
@@ -463,9 +501,105 @@ impl<D: BlockDevice> Vfs<D> {
             // checkpoint.
             Err(_) => {
                 let lost = self.volume.window_discard();
+                self.forget_window();
                 Err(VfsError::WindowLost(lost))
             }
         }
+    }
+
+    fn forget_window(&mut self) {
+        self.window_first = None;
+        self.window_last = None;
+        self.window_changes = 0;
+    }
+
+    /// The durability of this mount; [`Durability::Sync`] until set.
+    pub fn durability(&self) -> Durability {
+        self.durability
+    }
+
+    /// Chooses when changes reach the disk. Leaving `Delayed` commits what
+    /// waits. `Delayed` needs the intent log's data updates; without them the
+    /// mount stays `Sync` and this returns [`VfsError::NotSupported`].
+    pub fn set_durability(&mut self, durability: Durability) -> Result<(), VfsError> {
+        if let Durability::Delayed { .. } = durability {
+            if !self.logged_data_fsync_enabled() {
+                return Err(VfsError::NotSupported);
+            }
+        } else {
+            self.checkpoint_data_window(Timespec::default())?;
+        }
+        self.durability = durability;
+        Ok(())
+    }
+
+    fn delayed(&self) -> bool {
+        matches!(self.durability, Durability::Delayed { .. })
+            && self.volume.mount_mode() == MountMode::ReadWrite
+            && self.logged_data_fsync_enabled()
+    }
+
+    /// Whether changes wait in the window, uncommitted.
+    pub fn changes_pending(&self) -> bool {
+        self.volume.window_open()
+    }
+
+    /// Counts one change the window now holds, made at `now`, and commits
+    /// the window at its bound.
+    fn note_change(&mut self, now: Timespec) -> Result<(), VfsError> {
+        if !self.volume.window_open() {
+            self.forget_window();
+            return Ok(());
+        }
+        if self.window_first.is_none() {
+            self.window_first = Some(now);
+        }
+        self.window_last = Some(now);
+        self.window_changes = self.window_changes.saturating_add(1);
+        if self.delayed() && self.window_changes >= DELAYED_WINDOW_OPS_MAX {
+            self.commit_window(now)?;
+        }
+        Ok(())
+    }
+
+    fn commit_window(&mut self, now: Timespec) -> Result<(), VfsError> {
+        self.checkpoint_data_window(now)?;
+        self.reclaim_after_release(now);
+        Ok(())
+    }
+
+    /// Commits the delayed window when `now` finds the volume idle long
+    /// enough or the oldest change old enough (ADR-121). A clock that went
+    /// back counts as due. Returns whether changes still wait, so a caller
+    /// knows whether to ask again.
+    pub fn commit_if_due(&mut self, now: Timespec) -> Result<bool, VfsError> {
+        if !self.volume.window_open() {
+            self.forget_window();
+            return Ok(false);
+        }
+        let Durability::Delayed {
+            idle_ms,
+            max_age_ms,
+        } = self.durability
+        else {
+            return Ok(true);
+        };
+        let since = |then: Option<Timespec>| -> Option<u64> {
+            let then = then?;
+            let elapsed = (i128::from(now.seconds) - i128::from(then.seconds)) * 1_000
+                + (i128::from(now.nanoseconds) - i128::from(then.nanoseconds)) / 1_000_000;
+            Some(if elapsed < 0 {
+                u64::MAX
+            } else {
+                elapsed as u64
+            })
+        };
+        let idle = since(self.window_last).is_none_or(|ms| ms >= u64::from(idle_ms));
+        let old = since(self.window_first).is_none_or(|ms| ms >= u64::from(max_age_ms));
+        if idle || old {
+            self.commit_window(now)?;
+        }
+        Ok(self.volume.window_open())
     }
 
     /// Generation of the checkpoint or open data window the mount exposes.
@@ -642,6 +776,12 @@ impl<D: BlockDevice> Vfs<D> {
         Ok(handle)
     }
 
+    fn is_open(&self, object_id: ObjectId) -> bool {
+        self.handles.values().any(
+            |state| matches!(state, OpenHandle::File { object_id: open_id, .. } if *open_id == object_id),
+        )
+    }
+
     pub fn close(&mut self, handle: Handle) -> Result<(), VfsError> {
         let state = self.handles.remove(&handle).ok_or(VfsError::Stale)?;
         self.directory_resume.remove(&handle);
@@ -656,6 +796,11 @@ impl<D: BlockDevice> Vfs<D> {
         if self.volume.mount_mode() != MountMode::ReadWrite
             || self.volume.ident().features.ro_compat & RO_COMPAT_ORPHAN_DIRECTORY == 0
         {
+            return Ok(());
+        }
+        // A delayed mount commits on its own clock; only the last close of a
+        // file already unlinked has cleanup to start.
+        if self.delayed() && !self.volume.orphan_object(object_id)? {
             return Ok(());
         }
         if !self.idle_maintenance || !self.inline_maintenance {
@@ -709,6 +854,7 @@ impl<D: BlockDevice> Vfs<D> {
             }
             result => result?,
         }
+        self.note_change(now)?;
         Ok(source.len())
     }
 
@@ -720,8 +866,19 @@ impl<D: BlockDevice> Vfs<D> {
         now: Timespec,
     ) -> Result<(), VfsError> {
         if self.logged_data_fsync_enabled() {
-            self.volume
-                .window_write_file_at(object_id, offset, source, now)?;
+            match self
+                .volume
+                .window_write_file_at(object_id, offset, source, now)
+            {
+                // A file the window created, grown past what the window
+                // rewrites: commit, and write it as the committed file it is.
+                Err(CoreError::PrototypeLimit(_)) if self.volume.window_open() => {
+                    self.checkpoint_data_window(now)?;
+                    self.volume
+                        .window_write_file_at(object_id, offset, source, now)?;
+                }
+                result => result?,
+            }
         } else {
             self.volume.write_file_at(object_id, offset, source, now)?;
         }
@@ -738,7 +895,14 @@ impl<D: BlockDevice> Vfs<D> {
             return Err(VfsError::ReadOnly);
         }
         if self.logged_data_fsync_enabled() {
-            Ok(self.volume.window_truncate_file(object_id, size, now)?)
+            match self.volume.window_truncate_file(object_id, size, now) {
+                Err(CoreError::PrototypeLimit(_)) if self.volume.window_open() => {
+                    self.checkpoint_data_window(now)?;
+                    self.volume.window_truncate_file(object_id, size, now)?;
+                }
+                result => result?,
+            }
+            self.note_change(now)
         } else {
             Ok(self.volume.truncate_file(object_id, size, now)?)
         }
@@ -758,6 +922,12 @@ impl<D: BlockDevice> Vfs<D> {
             Some(OpenHandle::File { .. }) => return Err(VfsError::NotDirectory),
             None => return Err(VfsError::Stale),
         };
+        // A directory whose entries wait in the window is listed after they
+        // are committed; the cursor's recovery below absorbs the new
+        // generation.
+        if self.volume.window_changes_directory(object_id) {
+            self.commit_window(Timespec::default())?;
+        }
         // Cookie zero is a rewind: the caller is asking for the directory
         // from its start, so there is nothing to resume after and a resume
         // point left from an earlier pass would silently skip the entries
@@ -926,6 +1096,24 @@ impl<D: BlockDevice> Vfs<D> {
         name: &str,
         now: Timespec,
     ) -> Result<ObjectId, VfsError> {
+        if self.delayed() {
+            match self.volume.window_op(
+                &BatchOp::CreateFile {
+                    parent_id: parent,
+                    name,
+                    content: b"",
+                },
+                now,
+            ) {
+                Ok(Some(object_id)) => {
+                    self.note_change(now)?;
+                    return Ok(object_id);
+                }
+                // What the window cannot stage goes the immediate way.
+                Ok(None) | Err(CoreError::PrototypeLimit(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         self.checkpoint_data_window(now)?;
         Ok(self
             .volume
@@ -964,6 +1152,28 @@ impl<D: BlockDevice> Vfs<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), VfsError> {
+        if self.delayed() {
+            let object_id = self.lookup(parent, name)?;
+            let metadata = self
+                .volume
+                .visible_metadata(object_id)?
+                .ok_or(VfsError::NotFound)?;
+            // A file still open elsewhere keeps the immediate orphan path,
+            // which its last close cleans.
+            if metadata.object_type == ObjectType::File && !self.is_open(object_id) {
+                match self.volume.window_op(
+                    &BatchOp::DeleteFile {
+                        parent_id: parent,
+                        name,
+                    },
+                    now,
+                ) {
+                    Ok(_) => return self.note_change(now),
+                    Err(CoreError::PrototypeLimit(_)) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         self.checkpoint_data_window(now)?;
         let object_id = self.lookup(parent, name)?;
         let metadata = self
@@ -1155,6 +1365,34 @@ impl<D: BlockDevice> Vfs<D> {
         replace: bool,
         now: Timespec,
     ) -> Result<(), VfsError> {
+        if self.delayed() {
+            let source = self.lookup(source_parent, source_name)?;
+            let is_file = self
+                .volume
+                .visible_metadata(source)?
+                .is_some_and(|metadata| metadata.object_type == ObjectType::File);
+            let target_open = match self.lookup(target_parent, target_name) {
+                Ok(target) => target != source && self.is_open(target),
+                Err(VfsError::NotFound) => false,
+                Err(error) => return Err(error),
+            };
+            if is_file && !target_open {
+                match self.volume.window_op(
+                    &BatchOp::Rename {
+                        source_parent_id: source_parent,
+                        source_name,
+                        target_parent_id: target_parent,
+                        target_name,
+                        replace,
+                    },
+                    now,
+                ) {
+                    Ok(_) => return self.note_change(now),
+                    Err(CoreError::PrototypeLimit(_)) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         self.checkpoint_data_window(now)?;
         if replace {
             let target = match self.lookup(target_parent, target_name) {
