@@ -101,11 +101,11 @@ fn trace_sink_streams_selected_categories_until_detached() {
     assert_eq!(mkdir(filesystem, b"traced"), 0);
 
     assert!(!collected.events.is_empty());
-    // The stream opens with the API entry (event code 7, ApiBegin) and only
+    // The stream opens with the API entry (AFSP_EVENT_API_BEGIN, 8) and only
     // carries the two selected categories, in strictly increasing sequence.
     assert_eq!(
         (collected.events[0].category, collected.events[0].event),
-        (0x2000, 7)
+        (0x2000, 8)
     );
     assert!(collected
         .events
@@ -325,4 +325,48 @@ fn info_document_crosses_the_boundary_with_the_short_buffer_rule() {
         210
     );
     assert_eq!(afsplus_aros_unmount(filesystem), 0);
+}
+
+/// The published codes of `api/debug_observability.h` are the core's: every
+/// kind has one under its own name, each code once, and nothing else.
+#[test]
+fn trace_event_codes_are_the_ones_the_header_publishes() {
+    use afsplus_core::flight::EventKind;
+    let header = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../api/debug_observability.h"
+    ))
+    .unwrap();
+    let published: Vec<(String, u16)> = header
+        .lines()
+        .filter_map(|line| {
+            let (name, code) = line.trim().strip_prefix("AFSP_EVENT_")?.split_once(" = ")?;
+            Some((name.to_owned(), code.trim_end_matches(',').parse().ok()?))
+        })
+        .collect();
+    let screaming = |kind: EventKind| {
+        let mut name = String::new();
+        for (index, character) in format!("{kind:?}").chars().enumerate() {
+            if character.is_ascii_uppercase() && index > 0 {
+                name.push('_');
+            }
+            name.push(character.to_ascii_uppercase());
+        }
+        name
+    };
+    assert_eq!(published.len(), EventKind::ALL.len());
+    for kind in EventKind::ALL {
+        assert!(
+            published.contains(&(screaming(kind), kind.code())),
+            "{kind:?} is not published as code {}",
+            kind.code()
+        );
+        assert_eq!(EventKind::from_code(kind.code()), Some(kind));
+    }
+    let mut codes: Vec<u16> = published.iter().map(|(_, code)| *code).collect();
+    codes.sort_unstable();
+    codes.dedup();
+    assert_eq!(codes.len(), published.len(), "a code is published twice");
+    assert!(!codes.contains(&0), "zero means no event");
+    assert_eq!(EventKind::from_code(0), None);
 }

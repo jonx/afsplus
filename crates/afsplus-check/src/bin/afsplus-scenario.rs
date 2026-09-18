@@ -137,85 +137,28 @@ fn image(out: &mut impl Write, name: &str, device: &mut MemoryBackend) -> Result
     Ok(())
 }
 
-/// Wire code for one diagnostic event kind, in `flight.rs` declaration order.
-/// Codes 1 to 22 are the version-4/5/6 kinds; 23 onward are appended by the
-/// version-8 profile. An export profile that does not select a scope refuses
-/// its kinds rather than emitting an unadmitted code.
+/// Wire code for one diagnostic event kind: its stable code
+/// ([`EventKind::code`]). Codes 1 to 22 are the version-4/5/6 kinds; 23
+/// onward are appended by the version-8 profile. An export profile that does
+/// not select a scope refuses its kinds rather than emitting an unadmitted
+/// code.
+///
+/// [`EventKind::code`]: afsplus_core::flight::EventKind::code
 fn event_kind_code(
     kind: afsplus_core::flight::EventKind,
     plan: &afsplus_check::scenario::Plan,
 ) -> Result<u8, String> {
-    use afsplus_core::flight::EventKind;
-    let api = plan.api_observation();
-    let object = plan.object_observation();
-    let life = plan.lifecycle_observation();
-    Ok(match kind {
-        EventKind::Begin => 1,
-        EventKind::DataWritesComplete => 2,
-        EventKind::MetadataDurable => 3,
-        EventKind::PublicationBegin => 4,
-        EventKind::CheckpointDurable => 5,
-        EventKind::Adopted => 6,
-        EventKind::Failed => 7,
-        EventKind::ApiBegin if api => 8,
-        EventKind::ApiSucceeded if api => 9,
-        EventKind::ApiFailed if api => 10,
-        EventKind::ApiUnwound if api => 11,
-        EventKind::WindowOpened if api => 12,
-        EventKind::WindowAttached if api => 13,
-        EventKind::WindowLogBegin if api => 14,
-        EventKind::WindowLogDurable if api => 15,
-        EventKind::WindowLogFailed if api => 16,
-        EventKind::WindowFailed if api => 17,
-        EventKind::WindowClosed if api => 18,
-        EventKind::WindowDetached if api => 19,
-        EventKind::ObjectLookup if object => 20,
-        EventKind::ObjectMapped if object => 21,
-        EventKind::ObjectMissing if object => 22,
-        EventKind::AllocationBegin if life => 23,
-        EventKind::AllocationGranted if life => 24,
-        EventKind::AllocationRetired if life => 25,
-        EventKind::AllocationFailed if life => 26,
-        EventKind::TreeReadBegin if life => 27,
-        EventKind::TreeReadComplete if life => 28,
-        EventKind::TreeSpillBegin if life => 29,
-        EventKind::TreeSpillComplete if life => 30,
-        EventKind::TreeIoFailed if life => 31,
-        EventKind::ReclaimBegin if life => 32,
-        EventKind::ReclaimPromoted if life => 33,
-        EventKind::ReclaimBlocked if life => 34,
-        EventKind::ReclaimAppended if life => 35,
-        EventKind::ReclaimPlanned if life => 36,
-        EventKind::ReclaimBuilt if life => 37,
-        EventKind::ReclaimFailed if life => 38,
-        EventKind::MountBegin if life => 39,
-        EventKind::MountSelected if life => 40,
-        EventKind::MountIntentBegin if life => 41,
-        EventKind::MountIntentScanned if life => 42,
-        EventKind::MountIntentReplayed if life => 43,
-        EventKind::MountComplete if life => 44,
-        EventKind::MountFailed if life => 45,
-        EventKind::FormatBegin if life => 46,
-        EventKind::FormatMetadataDurable if life => 47,
-        EventKind::FormatPublicationBegin if life => 48,
-        EventKind::FormatCheckpointDurable if life => 49,
-        EventKind::FormatFailed if life => 50,
-        EventKind::VerifyBegin if life => 51,
-        EventKind::VerifyPhase if life => 52,
-        EventKind::VerifyFinding if life => 53,
-        EventKind::VerifyComplete if life => 54,
-        EventKind::VerifyFailed if life => 55,
-        EventKind::DataWriteBegin if life => 56,
-        EventKind::DataWriteComplete if life => 57,
-        EventKind::DataWriteFailed if life => 58,
-        EventKind::IntentDataDurable if life => 59,
-        EventKind::IntentEmptyFlush if life => 60,
-        EventKind::ViewReadBegin if life => 61,
-        EventKind::ViewReadComplete if life => 62,
-        EventKind::ViewReadFailed if life => 63,
-        EventKind::ViewMaintenanceFailed if life => 64,
-        _ => return Err("diagnostic event kind requires an extended export profile".into()),
-    })
+    let code = kind.code();
+    let admitted = match code {
+        1..=7 => true,
+        8..=19 => plan.api_observation(),
+        20..=22 => plan.object_observation(),
+        _ => plan.lifecycle_observation(),
+    };
+    if !admitted {
+        return Err("diagnostic event kind requires an extended export profile".into());
+    }
+    u8::try_from(code).map_err(|_| "diagnostic event code exceeds the bundle's byte".into())
 }
 
 /// One tagged fixed payload area: a presence tag, four enumeration bytes, one

@@ -373,7 +373,7 @@ impl LiveSink for CallbackSink {
             arg1: event.api.operation,
             task_id: 0,
             category: trace_bit(event.kind.category()) as u16,
-            event: event.kind as u16,
+            event: event.kind.code(),
         };
         // SAFETY: the installer guarantees the callback and context outlive
         // the attachment and that the callback does not unwind or reenter.

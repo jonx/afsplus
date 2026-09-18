@@ -269,8 +269,12 @@ from its own clock, and a tool drains the ring through the extension packet
 and nothing lost, and with a ring of 8 the last 8 events with the other 85
 counted as overwritten.
 
-Lacking: stable event codes (the draft header publishes the core's event
-order); a serial front-end for QEMU and m68k, where no tool can run beside
+Every event carries a stable code, `enum afsp_trace_event_code` of
+[`debug_observability.h`](../api/debug_observability.h): the same numbers the
+diagnostic bundles use, appended and never reused, and a test holds the header
+to the core's table.
+
+Lacking: a serial front-end for QEMU and m68k, where no tool can run beside
 the filesystem; a clock better than the system tick, which today gives every
 event of one operation the same stamp. Forwarding from the M1 target to a
 development host needs the hardware.
