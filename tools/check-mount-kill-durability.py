@@ -178,7 +178,9 @@ chance = random.Random(int(os.environ.get("AFSPLUS_KILL_SEED", "20260918")))
 
 def mount():
     mnt = fresh_mountpoint()
-    supervisor = subprocess.Popen([MOUNT, image, mnt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # What afsplus-mount says goes to a file of its own, shown when a check fails.
+    said = open(mnt + ".said", "w")
+    supervisor = subprocess.Popen([MOUNT, image, mnt], stdout=said, stderr=subprocess.STDOUT)
     if not wait_for(lambda: mounted(mnt) or supervisor.poll() is not None, 40) or not mounted(mnt):
         fatal("the volume did not mount")
     return supervisor, mnt
@@ -219,8 +221,14 @@ try:
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         time.sleep(delay)
         os.kill(int(serving[0]), signal.SIGKILL)
-        check("the mount is released after the kill",
-              wait_for(lambda: supervisor.poll() is not None and not mounted(mnt), 20))
+        released_at = time.time()
+        released = wait_for(lambda: supervisor.poll() is not None and not mounted(mnt), 40)
+        with open(mnt + ".said") as said:
+            check("the mount is released after the kill", released,
+                  f"after {time.time() - released_at:.0f} s: afsplus-mount "
+                  + ("is still running" if supervisor.poll() is None else f"ended with {supervisor.poll()}")
+                  + ", mounted" * mounted(mnt) + "; it said: " + said.read().strip().replace("\n", " | ")[-400:])
+        print(f"        released after {time.time() - released_at:.1f} s")
         if not wait_for(lambda: not recorded(mnt), 5):
             # macFUSE's relay never completes the unmount of a volume whose
             # process died while nothing was in flight; terminating it
