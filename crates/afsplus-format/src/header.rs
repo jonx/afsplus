@@ -85,15 +85,22 @@ impl BlockHeader {
     /// Whether the stored checksum matches the block, and nothing else: a
     /// diagnostic question, not admission. `verify` is admission.
     pub fn checksum_matches(block: &[u8]) -> bool {
-        if block.len() < HEADER_SIZE {
-            return false;
+        block.len() >= HEADER_SIZE && {
+            let (stored, computed) = Self::checksums(block);
+            stored == computed
         }
+    }
+
+    /// The checksum a block stores and the one its bytes give, computed over
+    /// the whole block with the checksum field taken as zero. Every check of
+    /// a metadata block, admission and diagnosis alike, comes through here.
+    fn checksums(block: &[u8]) -> (u32, u32) {
         let stored = le::get_u32(&block[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4]);
         let mut hasher = crate::crc32c::Hasher::new();
         hasher.update(&block[..CHECKSUM_OFFSET]);
         hasher.update(&[0u8; 4]);
         hasher.update(&block[CHECKSUM_OFFSET + 4..]);
-        stored == hasher.finalize()
+        (stored, hasher.finalize())
     }
 
     pub fn verify(block: &[u8], expected_type: u32) -> Result<BlockHeader, FormatError> {
@@ -104,12 +111,7 @@ impl BlockHeader {
             });
         }
         // Checksum first: no field of a corrupted block is trustworthy.
-        let stored = le::get_u32(&block[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4]);
-        let mut hasher = crate::crc32c::Hasher::new();
-        hasher.update(&block[..CHECKSUM_OFFSET]);
-        hasher.update(&[0u8; 4]);
-        hasher.update(&block[CHECKSUM_OFFSET + 4..]);
-        let computed = hasher.finalize();
+        let (stored, computed) = Self::checksums(block);
         if stored != computed {
             return Err(FormatError::ChecksumMismatch { stored, computed });
         }
