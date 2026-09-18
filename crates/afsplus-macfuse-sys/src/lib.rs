@@ -12,8 +12,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use fuser::SessionTransport;
 use libloading::Library;
@@ -240,7 +242,8 @@ impl Drop for MessageGuard {
 /// Owns one MFMount channel and the asynchronous mount operation.
 pub struct MacFuseMount {
     inner: Arc<ChannelInner>,
-    mount_thread: Option<JoinHandle<io::Result<()>>>,
+    mount_thread: Option<JoinHandle<()>>,
+    outcome: Receiver<io::Result<()>>,
     mount_complete: bool,
 }
 
@@ -294,6 +297,7 @@ impl MacFuseMount {
             _library: library,
         });
         let mount_inner = inner.clone();
+        let (report, outcome) = mpsc::channel();
         let mount_thread = thread::Builder::new()
             .name("afsplus-mfmount".into())
             .spawn(move || {
@@ -310,12 +314,13 @@ impl MacFuseMount {
                 if outcome.is_err() {
                     mount_inner.close();
                 }
-                outcome
+                let _ = report.send(outcome);
             })?;
 
         Ok(MacFuseMount {
             inner,
             mount_thread: Some(mount_thread),
+            outcome,
             mount_complete: false,
         })
     }
@@ -326,21 +331,37 @@ impl MacFuseMount {
     }
 
     /// Waits for macFUSE to finish the mount operation after the FUSE INIT
-    /// handshake has completed.
-    pub fn wait_until_mounted(&mut self) -> io::Result<()> {
+    /// handshake has completed, for at most `limit`.
+    ///
+    /// Bounded because MFMount does not always return: when macOS refuses the
+    /// mount, it reports the failure and then waits for ever. A mount that
+    /// does not complete in time is a failure, and the thread that is still
+    /// inside MFMount is left behind rather than joined, so the caller can
+    /// end the process.
+    pub fn wait_until_mounted(&mut self, limit: Duration) -> io::Result<()> {
         if self.mount_complete {
             return Ok(());
         }
-        let thread = self
-            .mount_thread
-            .take()
-            .ok_or_else(|| io::Error::other("MFMount thread is missing"))?;
-        let result = thread
-            .join()
-            .map_err(|_| io::Error::other("MFMount thread panicked"))?;
-        result?;
-        self.mount_complete = true;
-        Ok(())
+        match self.outcome.recv_timeout(limit) {
+            Ok(result) => {
+                if let Some(thread) = self.mount_thread.take() {
+                    thread
+                        .join()
+                        .map_err(|_| io::Error::other("MFMount thread panicked"))?;
+                }
+                result?;
+                self.mount_complete = true;
+                Ok(())
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                self.mount_thread = None;
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "macOS did not complete the mount; a mount at this path may still be recorded from a volume whose process died",
+                ))
+            }
+            Err(RecvTimeoutError::Disconnected) => Err(io::Error::other("MFMount thread panicked")),
+        }
     }
 }
 

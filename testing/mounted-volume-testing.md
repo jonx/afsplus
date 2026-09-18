@@ -73,10 +73,22 @@ mid-request.
 
 `afsplus-mount` therefore runs as a supervisor over the process that serves
 the volume. When that process ends any way other than a clean unmount, the
-supervisor terminates the helper of that mount, which releases everything
-waiting on it with an I/O error, and removes the entry by its canonical path.
-Stopping the supervisor with Ctrl-C, `kill` or a closing terminal unmounts
-cleanly instead of killing the driver under its clients.
+supervisor unmounts the volume by its canonical path, and terminates the
+helper of that mount only if the unmount blocks, which releases everything
+waiting on it with an I/O error and lets the unmount finish. Stopping the
+supervisor with Ctrl-C, `kill` or a closing terminal unmounts cleanly instead
+of killing the driver under its clients.
+
+The order matters. macOS keeps its own record of FSKit mounts, in
+`/Library/Application Support/livefsd/settings.plist`, and removes an entry
+only when the mount ends through an unmount. A mount whose helper is
+terminated first disappears from the kernel but stays recorded, and macOS then
+refuses every later mount at the same path, as `mount(8) returned 69`, until
+the machine restarts. The driver-death check mounts again at the same path to
+hold this. A refused mount also never returns from macFUSE's mount call, so
+the driver gives up after thirty seconds and says why instead of waiting for
+ever. Entries left by older builds are harmless except at their own paths;
+mount somewhere else.
 
 For a dead mount left by an older build, terminate that mount's helper by
 hand; the program stuck on it is released at once and no reboot is needed:
@@ -114,8 +126,9 @@ supervisor releases the mount, and
 [tools/check-mount-driver-death.py](../tools/check-mount-driver-death.py) does
 it on purpose. Two things can still leave a dead mountpoint: killing the
 supervisor itself with `SIGKILL`, which no process can intercept, and killing
-the driver of a build older than the supervisor. The helper can then be
-terminated by hand as shown above.
+the driver of a build older than the supervisor. Start `umount` on the
+canonical path first, then terminate the helper as shown above, so that the
+unmount completes and macOS forgets the mount.
 
 ## One request at a time
 

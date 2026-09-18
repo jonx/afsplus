@@ -182,9 +182,13 @@ fn mount_session(
     // filesystem (notably with STATFS). Start the request loop before waiting
     // for the mount operation, otherwise both sides wait for each other.
     let background = session.spawn()?;
-    if let Err(error) = native_mount.wait_until_mounted() {
+    if let Err(error) = native_mount.wait_until_mounted(std::time::Duration::from_secs(30)) {
         drop(native_mount);
-        let _ = background.join();
+        // After a refused mount the request loop can stay inside macFUSE
+        // too; the process ends without it.
+        if error.kind() != io::ErrorKind::TimedOut {
+            let _ = background.join();
+        }
         return Err(error);
     }
     let result = background.join();
@@ -436,7 +440,7 @@ mod supervisor {
         });
 
         let relay = identify_relay(&before, &mut child);
-        let status = child.wait();
+        let status = wait_while_served(&mut child, relay);
         if matches!(&status, Ok(status) if status.success()) {
             return ExitCode::SUCCESS;
         }
@@ -451,20 +455,95 @@ mod supervisor {
             },
             Err(error) => eprintln!("afsplus-mount: lost track of the volume process: {error}"),
         }
+        unmount_dead(&listed, relay);
+        ExitCode::from(1)
+    }
+
+    /// Remove a mount whose process is gone, and release whatever waits on it.
+    ///
+    /// The unmount comes first and the relay goes only if it blocks. An
+    /// unmount goes through macOS's file system daemon, which also removes the
+    /// mount from the list of mounts it keeps on disk. Terminating the relay
+    /// first made the kernel drop the mount without that, and the entry left
+    /// behind made macOS refuse every later mount at the same path.
+    ///
+    /// The unmount blocks when a request was in flight as the process died:
+    /// the relay still waits for its answer. Terminating the relay then
+    /// releases the waiting programs with an I/O error and lets the unmount
+    /// finish. By the listed spelling, because through `/tmp`, which is a
+    /// symlink, umount no longer finds a mount whose process is gone.
+    fn unmount_dead(listed: &Path, relay: Option<i32>) {
+        let Ok(mut unmount) = Command::new("umount")
+            .arg(listed)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        else {
+            if let Some(pid) = relay {
+                release(pid);
+            }
+            return;
+        };
+        if !ends_within(&mut unmount, Duration::from_secs(2)) {
+            if let Some(pid) = relay {
+                release(pid);
+            }
+            if !ends_within(&mut unmount, Duration::from_secs(15)) {
+                eprintln!("afsplus-mount: the volume could not be unmounted");
+                let _ = unmount.kill();
+            }
+        }
+        // A relay the unmount did not end is released too, so that nothing
+        // outlives the volume.
         if let Some(pid) = relay {
             release(pid);
         }
-        // Released, the mount answers every access with an I/O error at once
-        // instead of blocking, but it stays listed. Remove the entry by the
-        // spelling the mount table uses: through `/tmp`, which is a symlink,
-        // umount no longer finds a mount whose process is gone. Unconditional,
-        // because asking whether it is still mounted is the one question a
-        // dead mount can refuse to answer.
-        let _ = Command::new("umount")
-            .arg(&listed)
-            .stderr(std::process::Stdio::null())
-            .status();
-        ExitCode::from(1)
+    }
+
+    fn ends_within(child: &mut Child, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        matches!(child.try_wait(), Ok(Some(_)))
+    }
+
+    /// Wait for the volume process, and stop it once nothing can reach it.
+    ///
+    /// When macOS refuses a mount, it terminates the relay, and macFUSE's
+    /// mount call reports the failure and then never returns: the process
+    /// would wait for ever with nothing mounted. A relay that is gone while
+    /// the process lives means the volume can no longer be served, whatever
+    /// the cause. The process gets time to finish on its own first, because a
+    /// clean unmount also ends the relay, a moment before the process has
+    /// written its last state.
+    fn wait_while_served(
+        child: &mut Child,
+        relay: Option<i32>,
+    ) -> std::io::Result<std::process::ExitStatus> {
+        let Some(relay) = relay else {
+            return child.wait();
+        };
+        let relay = Pid::from_raw(relay);
+        let mut orphaned_since: Option<Instant> = None;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if orphaned_since.is_none() && kill(relay, None).is_err() {
+                orphaned_since = Some(Instant::now());
+            }
+            if orphaned_since.is_some_and(|since| since.elapsed() > Duration::from_secs(10)) {
+                eprintln!(
+                    "afsplus-mount: macOS ended or refused the mount; stopping the volume process"
+                );
+                let _ = child.kill();
+                return child.wait();
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 
     /// The path as the mount table spells it: `/tmp` is `/private/tmp`.

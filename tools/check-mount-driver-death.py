@@ -187,6 +187,21 @@ try:
     check("afsplus-mount says the volume process was killed", status not in (None, 0) and "killed" in said, said.strip())
     check("the mountpoint answers afterwards", answers(mnt))
     check("the dead volume is no longer mounted", not mounted(mnt))
+    # macOS keeps its own list of mounts, and a mount it did not see end
+    # stays on it: every later mount at that path was then refused until a
+    # restart. A person mounts at the same place again.
+    image = os.path.join(work, "dying.img")
+    again = subprocess.Popen([MOUNT, image, mnt], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    deadline = time.time() + 20
+    while time.time() < deadline and not mounted(mnt) and again.poll() is None:
+        time.sleep(0.1)
+    check("the same mountpoint mounts again", mounted(mnt),
+          again.stdout.read().strip() if again.poll() is not None else "it never appeared")
+    if mounted(mnt):
+        subprocess.run(["umount", mnt], capture_output=True, timeout=15)
+        ends(again)
+    elif again.poll() is None:
+        again.kill()
 
     print("\nasking afsplus-mount to stop unmounts cleanly")
     for stop in (signal.SIGTERM, signal.SIGINT):
