@@ -597,7 +597,7 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
             Ok(entries) => {
                 for entry in entries {
                     if reply.add(
-                        INodeNo(entry.object_id),
+                        listed_inode(entry.object_id),
                         entry.next_offset,
                         file_type(entry.kind),
                         OsStr::from_bytes(&entry.name),
@@ -817,6 +817,27 @@ fn file_attributes(attributes: &FuseAttributes) -> FileAttr {
         blksize: attributes.block_size,
         flags: 0,
     }
+}
+
+/// The inode number a directory listing carries for an entry.
+///
+/// macFUSE's FSKit relay answers a listing by looking up every name it
+/// receives, and when the listing already carried the entry's inode number it
+/// also hands the entry to the kernel a second time: every program that reads
+/// the directory saw each name twice, and tar archived every file twice, the
+/// second copy of a hard-linked one as a link to itself. Its own libfuse sends
+/// the unknown inode number there, and the relay then takes the number from the
+/// lookup, so `d_ino` stays right. Elsewhere the kernel passes the listed
+/// number straight to the program, so it has to be the real one.
+#[cfg(target_os = "macos")]
+fn listed_inode(_object_id: u64) -> INodeNo {
+    const FUSE_UNKNOWN_INO: u64 = 0xffff_ffff;
+    INodeNo(FUSE_UNKNOWN_INO)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn listed_inode(object_id: u64) -> INodeNo {
+    INodeNo(object_id)
 }
 
 fn file_type(kind: NodeKind) -> FileType {

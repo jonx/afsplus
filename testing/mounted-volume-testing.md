@@ -17,6 +17,17 @@ in the words a person would use.
 It also covers how to test a mounted driver without taking the machine down
 with it, which is the harder half.
 
+<!-- toc -->
+
+- [A driver under test must not be able to stop the desktop](#a-driver-under-test-must-not-be-able-to-stop-the-desktop)
+- [What leaves a dead mount behind, and what clears it](#what-leaves-a-dead-mount-behind-and-what-clears-it)
+- [Simulating a filesystem that stops answering](#simulating-a-filesystem-that-stops-answering)
+- [One request at a time](#one-request-at-a-time)
+- [What macFUSE's FSKit backend does to a listing and to `df`](#what-macfuses-fskit-backend-does-to-a-listing-and-to-df)
+- [What belongs below the mount](#what-belongs-below-the-mount)
+
+<!-- /toc -->
+
 ## A driver under test must not be able to stop the desktop
 
 A macFUSE mountpoint whose filesystem process died can be left behind in a
@@ -127,6 +138,29 @@ file is deleted, and that the space still comes back.
 A request that blocks inside the driver itself still stops the whole volume;
 only more serving threads would change that, and fuser offers them on Linux
 only.
+
+## What macFUSE's FSKit backend does to a listing and to `df`
+
+Two things a person sees on the mounted volume come from the relay rather
+than from the volume, and each was first taken for a driver fault.
+
+**A directory listing carries no inode numbers.** The relay answers a listing
+by looking up every name it receives. When the listing also carried each
+entry's inode number, it handed every entry to the kernel twice. `ls` did not
+show it, because it reads folders through the attribute interface, but
+`readdir` did: Python listed every name twice, tar archived every file twice
+and failed on the second copy of a hard-linked one, and git refused a
+repository whose `refs/heads` it saw twice. The driver now sends the unknown
+inode number in listings on macOS, as macFUSE's own libfuse does, and the
+relay takes the real number from the lookup. The battery checks that a
+program reading a folder sees each name once.
+
+**`df` shows nothing used.** macOS `df` takes its Used column from the volume
+attribute `ATTR_VOL_SPACEUSED`, not from `statfs`. The relay reports the
+total, free and available space the driver gives it, but leaves the used
+space at zero for every filesystem it serves: a minimal libfuse filesystem
+that reports half its blocks free shows the same zero. The battery measures
+used space from `statfs`, which is the figure the driver answers for.
 
 ## What belongs below the mount
 

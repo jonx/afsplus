@@ -23,7 +23,9 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-work=$(mktemp -d /tmp/afsplus-usage.XXXXXX)
+# The real path: /tmp is a symlink, the mount table records the resolved
+# spelling, and resolving it later would stat a mountpoint that may be dead.
+work=$(CDPATH= cd -- "$(mktemp -d /tmp/afsplus-usage.XXXXXX)" && pwd -P)
 image="$work/usage.img"
 # A mountpoint of our own, OUTSIDE /Volumes, in this run's work directory.
 #
@@ -51,9 +53,6 @@ failures=""
 # what is broken teaches nothing.
 known_failure() {
     case "$1" in
-    hardlink-tar) echo "unpacking an archive that contains a hard-link pair fails; the links themselves are correct, tar is not" ;;
-    git-refs) echo "git init on a volume that already holds a tree fails with a reference directory conflict" ;;
-    df-used) echo "not proven to be ours: the kernel's own statfs reports the right figures for this volume, so suspect df or the macFUSE backend before the driver" ;;
     *) echo "" ;;
     esac
 }
@@ -137,6 +136,25 @@ path_responds() {
     return 1
 }
 
+# Whether the mountpoint is in the mount table.
+#
+# Not `mount`: it asks every mounted filesystem for its state, so one dead
+# mount anywhere on the machine makes it block for ever. getmntinfo with
+# MNT_NOWAIT reads the cached table and asks no filesystem anything.
+is_mounted() {
+    python3 - "$1" <<'CHECK'
+import ctypes, ctypes.util, sys
+class Statfs(ctypes.Structure):
+    _fields_ = [("head", ctypes.c_char * 72), ("f_fstypename", ctypes.c_char * 16),
+                ("f_mntonname", ctypes.c_char * 1024), ("f_mntfromname", ctypes.c_char * 1024),
+                ("tail", ctypes.c_uint32 * 8)]
+table = ctypes.POINTER(Statfs)()
+count = ctypes.CDLL(ctypes.util.find_library("c")).getmntinfo(ctypes.byref(table), 2)
+wanted = sys.argv[1].encode()
+sys.exit(0 if any(table[i].f_mntonname == wanted for i in range(count)) else 1)
+CHECK
+}
+
 # Unmount and confirm it through the mount table.
 #
 # Never diskutil. It enumerates every volume before acting, so one wedged
@@ -144,10 +162,10 @@ path_responds() {
 # whatever volume you asked about; `|| true` does not rescue a command that
 # never exits. This is what stopped this battery's first author, twice.
 release_mount() {
-    mount | grep -q " on $mountpoint " || return 0
+    is_mounted "$mountpoint" || return 0
     umount "$mountpoint" >/dev/null 2>&1 || umount -f "$mountpoint" >/dev/null 2>&1 || true
     tries=0
-    while mount | grep -q " on $mountpoint "; do
+    while is_mounted "$mountpoint"; do
         sleep 1
         tries=$((tries + 1))
         [ "$tries" -lt 15 ] || { say "        the volume would not unmount"; return 1; }
@@ -183,7 +201,8 @@ cargo build -q -p afsplus-tools --bin mkafsplus ||
 cargo build -q -p afsplus-fuse --features macfuse-mount --bin afsplus-mount ||
     fatal "cannot build afsplus-mount with macfuse-mount"
 mkafsplus="$CARGO_TARGET_DIR/debug/mkafsplus"
-afsplus_mount="$CARGO_TARGET_DIR/debug/afsplus-mount"
+# A negative control points this at an older or deliberately broken build.
+afsplus_mount=${AFSPLUS_MOUNT_BINARY:-$CARGO_TARGET_DIR/debug/afsplus-mount}
 
 # ---------------------------------------------------------------- mount
 
@@ -191,7 +210,7 @@ say "making a ${size_mib} MiB volume and mounting it at $mountpoint"
 "$mkafsplus" --size-mib "$size_mib" --label AfsplusUsage "$image" >/dev/null ||
     fatal "cannot format the image"
 
-if mount | grep -q " on $mountpoint "; then
+if is_mounted "$mountpoint"; then
     fatal "$mountpoint is already mounted; this battery only uses a volume it made"
 fi
 mkdir -p "$mountpoint" || fatal "cannot make $mountpoint"
@@ -203,7 +222,7 @@ fi
 mount_pid=$!
 
 waited=0
-while ! mount | grep -q " on $mountpoint "; do
+while ! is_mounted "$mountpoint"; do
     sleep 1
     waited=$((waited + 1))
     if [ "$waited" -gt 20 ]; then
@@ -271,6 +290,10 @@ check "make two hundred small files" -- sh -c "
     done"
 expect_equal "all two hundred are listed" "200" \
     "$(ls "$here/many" 2>/dev/null | wc -l | tr -d ' ')"
+# ls reads a folder through the attribute interface; tar, Python and most
+# programs read it with readdir, which once listed every name twice.
+expect_equal "a program reading the folder sees each name once" "200 200" \
+    "$(python3 -c 'import os, sys; names = os.listdir(sys.argv[1]); print(len(names), len(set(names)))' "$here/many" 2>&1)"
 
 say ""
 say "copying, the way the Finder does it"
@@ -300,10 +323,10 @@ check "search inside files with grep" -- sh -c "grep -r 'round trip' '$here/Docu
 check "measure a folder with du" -- sh -c "du -sh '$here/Documents' > /dev/null"
 check "list a folder in detail" -- sh -c "ls -la '$here/Documents' > /dev/null"
 check "make an archive with tar" -- tar -cf "$work/from-volume.tar" -C "$here" Documents
-check "unpack an archive onto the volume" hardlink-tar -- tar -xf "$work/from-volume.tar" -C "$here/many"
+check "unpack an archive onto the volume" -- tar -xf "$work/from-volume.tar" -C "$here/many"
 check "make a zip archive" -- sh -c "cd '$here' && zip -qr '$work/from-volume.zip' Documents"
 check "copy a tree with rsync" -- rsync -a "$here/Documents/" "$here/rsynced/"
-check "start a git repository on the volume" git-refs -- sh -c "cd '$here' && git init -q repo && cd repo && git -c user.email=a@b -c user.name=a commit -q --allow-empty -m first"
+check "start a git repository on the volume" -- sh -c "cd '$here' && git init -q repo && cd repo && git -c user.email=a@b -c user.name=a commit -q --allow-empty -m first"
 
 say ""
 say "case, on a volume that does distinguish upper from lower"
@@ -352,13 +375,22 @@ free_blocks() {
 # that a loss and reported a megabyte missing that was never missing. What
 # matters, and what a person would notice, is whether doing the same thing
 # again shrinks the volume every time.
+#
+# The driver returns a deleted file's space in the background, a transaction at
+# a time between requests, so the figure is given up to thirty seconds to come
+# back before it counts.
 round_cost() {
     before=$(free_blocks)
     dd if=/dev/zero of="$here/temporary.bin" bs=1m count=20 >/dev/null 2>&1 || true
     rm -f "$here/temporary.bin"
     sync
-    sleep 1
     after=$(free_blocks)
+    waited=0
+    while [ "$waited" -lt 60 ] && [ "$((before - after))" -gt 64 ]; do
+        sleep 0.5
+        after=$(free_blocks)
+        waited=$((waited + 1))
+    done
     echo $((before - after))
 }
 first=$(round_cost)
@@ -375,12 +407,16 @@ fi
 
 say ""
 say "what the volume says about itself"
-used=$(df -k "$mountpoint" 2>/dev/null | awk 'NR == 2 { print $3 }')
+# From statfs, which is what the driver answers. Not df's Used column: macOS
+# df takes that from the volume attribute ATTR_VOL_SPACEUSED, which macFUSE's
+# FSKit backend leaves at zero for every filesystem it serves; see
+# testing/mounted-volume-testing.md.
+used=$(python3 -c 'import os, sys; s = os.statvfs(sys.argv[1]); print((s.f_blocks - s.f_bfree) * s.f_frsize // 1024)' "$mountpoint" 2>/dev/null)
 if [ "${used:-0}" -gt 0 ]; then
     result_pass "the volume reports space in use after writing to it"
 else
     result_fail "the volume reports space in use after writing to it" \
-        "df shows ${used:-nothing} used on a volume holding several megabytes" df-used
+        "statfs shows ${used:-nothing}K used on a volume holding several megabytes"
 fi
 
 # ------------------------------------------------- unmount and come back
@@ -395,13 +431,13 @@ mount_pid=
 "$afsplus_mount" --diagnostics="$report" "$image" "$mountpoint" >>"$mount_log" 2>&1 &
 mount_pid=$!
 waited=0
-while ! mount | grep -q " on $mountpoint "; do
+while ! is_mounted "$mountpoint"; do
     sleep 1
     waited=$((waited + 1))
     [ "$waited" -le 20 ] || break
 done
 
-if mount | grep -q " on $mountpoint "; then
+if is_mounted "$mountpoint"; then
     result_pass "the volume mounts again after being unmounted"
     after_listing=$(ls -A "$here" | sort | tr '\n' ' ')
     expect_equal "everything written before the unmount is still there" \
