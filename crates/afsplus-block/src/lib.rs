@@ -85,7 +85,24 @@ pub trait BlockDevice {
     fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError>;
     /// Durability barrier: all previously written blocks are durable on return.
     fn flush(&mut self) -> Result<(), BlockError>;
+
+    /// A decoded form of block `lba` that a caller attached with
+    /// [`BlockDevice::attach`] and that no write of the block has dropped
+    /// since. A device that keeps none answers `None`, and that is always
+    /// correct: the caller decodes the bytes itself.
+    fn attached(&self, _lba: u64) -> Option<Decoded> {
+        None
+    }
+
+    /// Keeps `value`, decoded from the bytes block `lba` holds now, until the
+    /// block is written or leaves the device's cache. A device that keeps
+    /// none ignores it.
+    fn attach(&mut self, _lba: u64, _value: Decoded) {}
 }
+
+/// A decoded block a device may keep beside its bytes; the caller knows the
+/// type and downcasts.
+pub type Decoded = std::sync::Arc<dyn std::any::Any + Send + Sync>;
 
 pub(crate) fn check_access(
     lba: u64,

@@ -1,9 +1,11 @@
 //! Bounded reader and exhaustive verifier for shared COW tree nodes.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use afsplus_block::BlockDevice;
 use afsplus_format::geometry::Geometry;
+use afsplus_format::header::{block_type, BlockHeader};
 use afsplus_format::tree::{TreeKind, TreeNode, MAX_TREE_KEY_BYTES, MAX_TREE_LEVEL};
 
 use crate::CoreError;
@@ -37,6 +39,42 @@ pub struct TreeSummary {
     pub height: u8,
 }
 
+/// A tree node decoded from the bytes of block `lba`, which the device kept
+/// beside them. A write of the block drops it.
+struct KeptNode {
+    node: Arc<TreeNode>,
+    generation: u64,
+}
+
+/// Decodes tree node `lba` from `buf`, the bytes just read from it. The
+/// block's checksum is checked on every read; when the device kept the node
+/// decoded from these same bytes, that spares the decoding.
+pub(crate) fn decode_node<D: BlockDevice>(
+    dev: &mut D,
+    lba: u64,
+    buf: &[u8],
+) -> Result<(Arc<TreeNode>, u64), CoreError> {
+    if let Some(kept) = dev
+        .attached(lba)
+        .and_then(|value| value.downcast::<KeptNode>().ok())
+    {
+        BlockHeader::verify(buf, block_type::TREE_NODE)
+            .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        return Ok((Arc::clone(&kept.node), kept.generation));
+    }
+    let (node, generation) = TreeNode::decode(buf)
+        .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+    let node = Arc::new(node);
+    dev.attach(
+        lba,
+        Arc::new(KeptNode {
+            node: Arc::clone(&node),
+            generation,
+        }),
+    );
+    Ok((node, generation))
+}
+
 /// Looks up one binary key with a two-page-equivalent working set.
 pub fn lookup<D: BlockDevice>(
     dev: &mut D,
@@ -68,8 +106,7 @@ pub fn lookup<D: BlockDevice>(
         }
         dev.read_block(lba, &mut buf)?;
         stats.pages_read += 1;
-        let (node, generation) = TreeNode::decode(&buf)
-            .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        let (node, generation) = decode_node(dev, lba, &buf)?;
         validate_node_identity(&node, generation, spec, expected_level, lba)?;
         validate_node_range(&node, lower.as_deref(), upper.as_deref(), depth == 0)?;
 
@@ -140,8 +177,7 @@ pub fn lookup_floor<D: BlockDevice>(
         }
         dev.read_block(lba, &mut buf)?;
         stats.pages_read += 1;
-        let (node, generation) = TreeNode::decode(&buf)
-            .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        let (node, generation) = decode_node(dev, lba, &buf)?;
         validate_node_identity(&node, generation, spec, expected_level, lba)?;
         validate_node_range(&node, lower.as_deref(), upper.as_deref(), depth == 0)?;
 
@@ -254,8 +290,7 @@ fn read_key_page_node<D: BlockDevice>(
         dev.read_block(lba, &mut buf)?;
         stats.pages_read += 1;
         stats.peak_page_buffers = stats.peak_page_buffers.max((path.len() * 2) as u8);
-        let (node, generation) = TreeNode::decode(&buf)
-            .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        let (node, generation) = decode_node(dev, lba, &buf)?;
         validate_node_identity(&node, generation, spec, expected_level, lba)?;
         validate_node_range(&node, lower, upper, expected_level.is_none())?;
         if out.len() >= limit {
@@ -346,8 +381,7 @@ fn read_range_node<D: BlockDevice>(
     let result = (|| {
         let mut buf = vec![0u8; geo.block_size];
         dev.read_block(lba, &mut buf)?;
-        let (node, generation) = TreeNode::decode(&buf)
-            .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        let (node, generation) = decode_node(dev, lba, &buf)?;
         validate_node_identity(&node, generation, spec, expected_level, lba)?;
         validate_node_range(&node, lower, upper, is_root)?;
         let total = node.subtree_items;
@@ -489,8 +523,7 @@ where
     let result = (|| {
         let mut buf = vec![0u8; geo.block_size];
         dev.read_block(lba, &mut buf)?;
-        let (node, generation) = TreeNode::decode(&buf)
-            .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        let (node, generation) = decode_node(dev, lba, &buf)?;
         validate_node_identity(&node, generation, spec, expected_level, lba)?;
         validate_node_range(&node, lower, upper, is_root)?;
 
@@ -864,6 +897,77 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// A device that keeps decoded forms and never drops them, and whose
+    /// bytes a test may damage behind them.
+    struct Keeps {
+        inner: MemoryBackend,
+        kept: std::collections::HashMap<u64, afsplus_block::Decoded>,
+    }
+
+    impl BlockDevice for Keeps {
+        fn block_size(&self) -> usize {
+            self.inner.block_size()
+        }
+        fn total_blocks(&self) -> u64 {
+            self.inner.total_blocks()
+        }
+        fn read_block(
+            &mut self,
+            lba: u64,
+            buf: &mut [u8],
+        ) -> Result<(), afsplus_block::BlockError> {
+            self.inner.read_block(lba, buf)
+        }
+        fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), afsplus_block::BlockError> {
+            self.inner.write_block(lba, data)
+        }
+        fn flush(&mut self) -> Result<(), afsplus_block::BlockError> {
+            Ok(())
+        }
+        fn attached(&self, lba: u64) -> Option<afsplus_block::Decoded> {
+            self.kept.get(&lba).cloned()
+        }
+        fn attach(&mut self, lba: u64, value: afsplus_block::Decoded) {
+            self.kept.insert(lba, value);
+        }
+    }
+
+    #[test]
+    fn a_kept_node_is_used_only_after_its_bytes_pass_the_checksum() {
+        let geo = Geometry {
+            block_size: 4096,
+            total_blocks: 128,
+            region_size: 128,
+        };
+        let mut dev = Keeps {
+            inner: MemoryBackend::new(4096, 128),
+            kept: Default::default(),
+        };
+        dev.write_block(20, &leaf(&[1, 2, 3]).encode(4096, 1).unwrap())
+            .unwrap();
+        let spec = TreeSpec {
+            kind: TreeKind::ObjectMap,
+            owner: 0,
+            max_generation: 1,
+        };
+        let (value, _) = lookup(&mut dev, &geo, 20, spec, &key_u64(2)).unwrap();
+        assert_eq!(u64::from_le_bytes(value.unwrap().try_into().unwrap()), 1002);
+        assert!(
+            dev.attached(20).is_some(),
+            "the lookup kept the decoded node"
+        );
+        // The kept node answers again for the same bytes.
+        let (value, _) = lookup(&mut dev, &geo, 20, spec, &key_u64(3)).unwrap();
+        assert_eq!(u64::from_le_bytes(value.unwrap().try_into().unwrap()), 1003);
+        // Damage the bytes behind the kept node: the read fails, it does not
+        // answer from the kept node.
+        let mut block = vec![0u8; 4096];
+        dev.inner.read_block(20, &mut block).unwrap();
+        block[100] ^= 0x40;
+        dev.inner.write_block(20, &block).unwrap();
+        assert!(lookup(&mut dev, &geo, 20, spec, &key_u64(2)).is_err());
     }
 
     #[test]

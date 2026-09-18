@@ -187,3 +187,48 @@ fn a_capacity_that_cannot_be_had_leaves_the_cache_as_it_was() {
     read(&mut cached, 3);
     assert_eq!(control.capacity(), 4);
 }
+
+#[test]
+fn a_decoded_form_lives_until_its_block_is_written_or_leaves() {
+    use std::sync::Arc;
+    let mut cached = CachedDevice::new(MemoryBackend::new(BLOCK, 16), 2);
+    let decoded = |value: u32| -> afsplus_block::Decoded { Arc::new(value) };
+    let of = |cached: &CachedDevice<MemoryBackend>, lba| {
+        cached
+            .attached(lba)
+            .and_then(|value| value.downcast::<u32>().ok())
+            .map(|value| *value)
+    };
+    // Nothing is kept for a block the cache does not hold.
+    cached.attach(1, decoded(1));
+    assert_eq!(of(&cached, 1), None);
+    read(&mut cached, 1);
+    cached.attach(1, decoded(11));
+    assert_eq!(of(&cached, 1), Some(11));
+    // A read leaves it; a write of the block drops it.
+    read(&mut cached, 1);
+    assert_eq!(of(&cached, 1), Some(11));
+    cached.write_block(1, &block(5)).unwrap();
+    assert_eq!(of(&cached, 1), None);
+    // Leaving the cache drops it too, even when the block comes back.
+    cached.attach(1, decoded(12));
+    read(&mut cached, 2);
+    read(&mut cached, 3);
+    read(&mut cached, 1);
+    assert_eq!(of(&cached, 1), None);
+    // A refused write drops it with the bytes.
+    let device = LandsThenFails {
+        inner: MemoryBackend::new(BLOCK, 8),
+        fail_next_write: false,
+    };
+    let mut cached = CachedDevice::new(device, 4);
+    read(&mut cached, 4);
+    cached.attach(4, decoded(4));
+    cached.inner_mut().fail_next_write = true;
+    assert!(cached.write_block(4, &block(9)).is_err());
+    assert!(cached.attached(4).is_none());
+    // A device without a cache keeps nothing.
+    let mut plain = MemoryBackend::new(BLOCK, 4);
+    plain.attach(0, decoded(0));
+    assert!(plain.attached(0).is_none());
+}

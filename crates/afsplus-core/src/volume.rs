@@ -7755,7 +7755,7 @@ impl<D: BlockDevice> Volume<D> {
         }
         let mut buf = vec![0u8; self.dev.block_size()];
         self.dev.read_block(lba, &mut buf)?;
-        let (record, block_generation) = ObjectRecord::decode_metadata_with_generation(&buf)
+        let (record, block_generation) = decode_record(&mut self.dev, lba, &buf)
             .map_err(|e| CoreError::Corrupt(format!("object {object_id} record invalid: {e}")))?;
         if block_generation == 0 || block_generation > self.checkpoint.generation {
             return Err(CoreError::Corrupt(format!(
@@ -8206,6 +8206,36 @@ impl<D: BlockDevice> Volume<D> {
         self.window_poisoned = false;
         Ok(())
     }
+}
+
+/// An object record decoded from the bytes of block `lba`, which the device
+/// kept beside them. A write of the block drops it.
+struct KeptRecord {
+    record: ObjectRecord,
+    generation: u64,
+}
+
+/// Decodes the object record in `buf`, the bytes just read from block `lba`.
+/// The checksum is checked on every read; when the device kept the record
+/// decoded from these same bytes, that spares the decoding.
+fn decode_record<D: BlockDevice>(
+    dev: &mut D,
+    lba: u64,
+    buf: &[u8],
+) -> Result<(ObjectRecord, u64), afsplus_format::FormatError> {
+    if let Some(kept) = dev
+        .attached(lba)
+        .and_then(|value| value.downcast::<KeptRecord>().ok())
+    {
+        afsplus_format::header::BlockHeader::verify(
+            buf,
+            afsplus_format::header::block_type::OBJECT,
+        )?;
+        return Ok((kept.record, kept.generation));
+    }
+    let (record, generation) = ObjectRecord::decode_metadata_with_generation(buf)?;
+    dev.attach(lba, std::sync::Arc::new(KeptRecord { record, generation }));
+    Ok((record, generation))
 }
 
 fn direct_layout(extents: &[Extent], size_bytes: u64, block_size: u64) -> Option<Option<Extent>> {

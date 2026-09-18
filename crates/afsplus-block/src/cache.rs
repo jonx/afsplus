@@ -11,6 +11,10 @@
 //! to a slot, and the slots form a doubly linked recency list by index, so a
 //! hit, an insertion and an eviction each cost a constant number of steps.
 //!
+//! A slot may also carry the decoded form of its block ([`BlockDevice::attach`]);
+//! it goes whenever the slot's bytes change or the slot is reused, so it is
+//! never older than the bytes beside it.
+//!
 //! A [`CacheControl`] reaches a cache that sits deep inside a volume: it
 //! reads the counters and asks for another capacity, which the cache takes at
 //! its next device access.
@@ -19,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
 
-use crate::{BlockDevice, BlockError};
+use crate::{BlockDevice, BlockError, Decoded};
 
 const NONE: u32 = u32::MAX;
 
@@ -84,6 +88,7 @@ struct Slot {
     lba: u64,
     previous: u32,
     next: u32,
+    decoded: Option<Decoded>,
 }
 
 pub struct CachedDevice<D: BlockDevice> {
@@ -255,12 +260,14 @@ impl<D: BlockDevice> CachedDevice<D> {
         if let Some(&slot) = self.index.get(&lba) {
             let range = self.block_range(slot);
             self.data[range].copy_from_slice(block);
+            self.slots[slot as usize].decoded = None;
             self.unlink(slot);
             self.push_newest(slot);
             return;
         }
         let slot = if let Some(slot) = self.free.pop() {
             self.slots[slot as usize].lba = lba;
+            self.slots[slot as usize].decoded = None;
             let range = self.block_range(slot);
             self.data[range].copy_from_slice(block);
             slot
@@ -270,6 +277,7 @@ impl<D: BlockDevice> CachedDevice<D> {
                 lba,
                 previous: NONE,
                 next: NONE,
+                decoded: None,
             });
             self.data.extend_from_slice(block);
             slot
@@ -279,6 +287,7 @@ impl<D: BlockDevice> CachedDevice<D> {
             self.index.remove(&self.slots[victim as usize].lba);
             self.shared.evictions.fetch_add(1, Relaxed);
             self.slots[victim as usize].lba = lba;
+            self.slots[victim as usize].decoded = None;
             let range = self.block_range(victim);
             self.data[range].copy_from_slice(block);
             victim
@@ -290,6 +299,7 @@ impl<D: BlockDevice> CachedDevice<D> {
     /// Forgets `lba`; its slot waits in the free list.
     fn invalidate(&mut self, lba: u64) {
         if let Some(slot) = self.index.remove(&lba) {
+            self.slots[slot as usize].decoded = None;
             self.unlink(slot);
             self.free.push(slot);
             self.shared.invalidations.fetch_add(1, Relaxed);
@@ -340,5 +350,16 @@ impl<D: BlockDevice> BlockDevice for CachedDevice<D> {
 
     fn flush(&mut self) -> Result<(), BlockError> {
         self.inner.flush()
+    }
+
+    fn attached(&self, lba: u64) -> Option<Decoded> {
+        let slot = *self.index.get(&lba)?;
+        self.slots[slot as usize].decoded.clone()
+    }
+
+    fn attach(&mut self, lba: u64, value: Decoded) {
+        if let Some(&slot) = self.index.get(&lba) {
+            self.slots[slot as usize].decoded = Some(value);
+        }
     }
 }
