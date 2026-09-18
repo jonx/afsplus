@@ -168,6 +168,9 @@ Invariants the reviewer checks on every change that touches the core:
 
 ## Do not
 
+- Add a "Generated with" footer or a link to the tool that wrote it, such as
+  `🤖 Generated with [Claude Code](https://claude.com/claude-code)`, to a
+  commit message, PR or issue description, comment or document.
 - Respond to implementation uncertainty by adding speculative specification.
 - Implement every Proposed feature; a proposed primitive stabilises only with
   a real consumer and measured value
