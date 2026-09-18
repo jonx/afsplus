@@ -30,3 +30,10 @@ unsafe_code = "forbid"
 # This is required by macFUSE's FSKit backend, which deliberately has no
 # /dev/fuse file descriptor. Regular device-backed paths remain unchanged.
 fuser = { path = "vendor/fuser" }
+
+# Tests read thousands of metadata blocks and check each one's CRC32C. The
+# eight-table loop that makes it fast is six times slower than the byte loop
+# when unoptimized, so the format crate is optimized in test builds too;
+# debug assertions and overflow checks stay on.
+[profile.dev.package.afsplus-format]
+opt-level = 3
