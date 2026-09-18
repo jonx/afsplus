@@ -362,12 +362,17 @@ run where either moved. System free memory alone cannot show this: the
 allocator's pools absorb a small leak, and a cache of parents that grew by
 about 94 bytes a round passed that check until the heap counters found it.
 
-Lacking: a target runner executing a fixed operation trace against AFS+ and
-the AFS/FFS baseline with manifest verification before and structural check
-after; a result bundle in the contract format. Hosted gives software cost;
-the emulators give determinism; the budget of
+The target runner is
+[`tools/bench-hosted-aros.sh`](../tools/bench-hosted-aros.sh) with
+`AFSPlusBench` on Hosted: a fixed seeded workload against AFS+ and the Fast
+File System in one boot, the package manifest and the image checked before,
+the AFS+ image checked after, and a `results.json` bundle in the contract
+format ([benchmark contract](../testing/benchmark-contract.md#native-aros-runner)).
+
+Lacking: the same runner on the emulators and on m68k, where the clock and
+the budget of
 [section 2](../testing/aros-system-volume-qualification.md#2-what-macaros-performance-proves)
-needs the M1 and the A500.
+apply; the M1 and the A500 for hardware numbers.
 
 ## C14. AROS handler qualification ladder
 

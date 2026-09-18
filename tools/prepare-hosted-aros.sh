@@ -48,6 +48,9 @@ fi
     (cd "$aros_build" && make compiler-posixc); }
 [ -f "$tree/Devs/fdsk.device" ] || { step "building fdsk.device"
     (cd "$aros_build" && make workbench-devs-fdsk); }
+# The Fast File System handler, the baseline of the benchmark runner.
+[ -f "$tree/L/afs-handler" ] || { step "building afs-handler"
+    (cd "$aros_build" && make kernel-fs-afs); }
 
 # (3) Directories nothing creates. AROS/S must exist or the first boot hangs
 # with no startup script; DiskImages is where FDSK: is assigned.
@@ -79,6 +82,7 @@ fi
 
 step "checking what a gate will look for"
 for path in "$tree/Libs/posixc.library" "$tree/Devs/fdsk.device" \
+        "$tree/L/afs-handler" \
         "$tree/C/Mount" "$tree/S" "$tree/DiskImages"; do
     [ -e "$path" ] || { echo "still missing: $path" >&2; exit 1; }
 done

@@ -31,6 +31,7 @@ AFS+ must measure performance and resource use continuously. A new filesystem ha
 - [Allocation origins and instrumentation cost](#allocation-origins-and-instrumentation-cost)
 - [Borrowed payloads in atomic batches](#borrowed-payloads-in-atomic-batches)
 - [Stage A accounting acceptance](#stage-a-accounting-acceptance)
+- [Native AROS runner](#native-aros-runner)
 
 <!-- /toc -->
 
@@ -592,3 +593,27 @@ The [ordinary workload tests](../tools/test-measure-workload.py),
 Resource optimization, current ownership after object transfer, arbitrary mixed
 workload duration and native hardware budgets remain separate requirements.
 Completion of this harness item cannot close their milestone gates.
+
+## Native AROS runner
+
+[`tools/bench-hosted-aros.sh`](../tools/bench-hosted-aros.sh) runs the
+small-file development-tree workload on Hosted MacAROS against an AFS+
+volume and against a Fast File System volume of the same size, in one boot
+and with one seed. The target side is `AFSPlusBench`
+([source](../native/aros/tools/afsplus_bench.c)): trees of eight drawers of
+thirty-two files, sizes and bytes drawn from the seed, go through create,
+list, read, rename and delete, and each phase runs over every tree before it
+is timed once, because the Hosted clock moves in 5 ms steps. The runner
+reports the step it measured, reads every byte back and compares it, and on
+AFS+ adds the handler's counters before and after, the heap and its peak
+included.
+
+Before the run the package is checked against its manifest and the AFS+ image
+by the image checker; after it the AFS+ image is checked again. The Fast File
+System volume is formatted by the runner through `dos.library` in the same
+boot; no host checker exists for it, so its correctness evidence is the
+byte-for-byte read. `results.json` carries the fields of
+[section 7](#7-benchmark-reproducibility) and states what it does not measure:
+AROS keeps no per-task CPU time, and the Fast File System reports no device
+counters. Hosted measures software cost; the emulators and the target
+hardware own determinism and budgets.

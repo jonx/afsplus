@@ -147,6 +147,10 @@ echo "[aros-package] build the target-side clone-or-copy tool"
 build_target_program native/aros/tools/afsplus_clone.c AFSPlusClone \
     native/aros/client/afsplus_client.c native/aros/client/afsplus_copy.c
 
+echo "[aros-package] build the target-side benchmark runner"
+build_target_program native/aros/tools/afsplus_bench.c AFSPlusBench \
+    native/aros/client/afsplus_client.c
+
 echo "[aros-package] build the target-side crash-replay probe"
 build_target_program native/aros/tests/replay_probe.c AFSPlusReplayProbe
 
@@ -167,6 +171,7 @@ cargo run --quiet --release -p afsplus-check --bin afsplus-check -- \
     "$staging/Unit19" --json >"$staging/check-before.json"
 
 cp native/aros/AFSPLUS19.mountlist "$staging/AFSPLUS19"
+cp native/aros/BASE20.mountlist "$staging/BASE20"
 cp docs/aros-alpha0-package.md "$staging/README.md"
 {
     echo "format=afsplus-aros-build-profile-v2"
@@ -201,7 +206,7 @@ cp docs/aros-alpha0-package.md "$staging/README.md"
 (
     cd "$staging"
     shasum -a 256 afsplus-handler AFSPlusAlpha0Probe AFSPlusDosProbe \
-        AFSPlusInfo AFSPlusClone FDSKUpdateProbe \
+        AFSPlusInfo AFSPlusClone FDSKUpdateProbe AFSPlusBench BASE20 \
         AFSPlusReplayProbe \
         AFSPlusS1Probe AFSPlusS1bProbe AFSPlusS1Pivot AFSPLUS19 Unit19 \
         abi-report.txt build-profile.txt check-before.json README.md \
