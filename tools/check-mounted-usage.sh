@@ -46,8 +46,8 @@ failures=""
 # what is broken teaches nothing.
 known_failure() {
     case "$1" in
-    modes) echo "thread 20, the POSIX mode is not stored, so any mode but the mount's own is refused" ;;
-    times) echo "thread 20, a timestamp written with touch is accepted and discarded" ;;
+    hardlink-tar) echo "unpacking an archive that contains a hard-link pair fails; the links themselves are correct, tar is not" ;;
+    git-refs) echo "git init on a volume that already holds a tree fails with a reference directory conflict" ;;
     df-used) echo "not proven to be ours: the kernel's own statfs reports the right figures for this volume, so suspect df or the macFUSE backend before the driver" ;;
     *) echo "" ;;
     esac
@@ -294,10 +294,10 @@ check "search inside files with grep" -- sh -c "grep -r 'round trip' '$here/Docu
 check "measure a folder with du" -- sh -c "du -sh '$here/Documents' > /dev/null"
 check "list a folder in detail" -- sh -c "ls -la '$here/Documents' > /dev/null"
 check "make an archive with tar" -- tar -cf "$work/from-volume.tar" -C "$here" Documents
-check "unpack an archive onto the volume" modes -- tar -xf "$work/from-volume.tar" -C "$here/many"
+check "unpack an archive onto the volume" hardlink-tar -- tar -xf "$work/from-volume.tar" -C "$here/many"
 check "make a zip archive" -- sh -c "cd '$here' && zip -qr '$work/from-volume.zip' Documents"
-check "copy a tree with rsync" modes -- rsync -a "$here/Documents/" "$here/rsynced/"
-check "start a git repository on the volume" modes -- sh -c "cd '$here' && git init -q repo && cd repo && git -c user.email=a@b -c user.name=a commit -q --allow-empty -m first"
+check "copy a tree with rsync" -- rsync -a "$here/Documents/" "$here/rsynced/"
+check "start a git repository on the volume" git-refs -- sh -c "cd '$here' && git init -q repo && cd repo && git -c user.email=a@b -c user.name=a commit -q --allow-empty -m first"
 
 say ""
 say "case, on a volume that does distinguish upper from lower"
