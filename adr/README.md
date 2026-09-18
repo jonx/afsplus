@@ -91,7 +91,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-060](ADR-060-mountable-alpha0-completion-gate.md) | Close Mountable Alpha-0 with one composite gate | Accepted | — |
 | [ADR-061](ADR-061-shared-extent-references.md) | Shared-extent references in a typed reference tree | Accepted | amends [ADR-027](ADR-027-reflink-clones.md), [ADR-035](ADR-035-allocation-root-reserved-pool.md); amended by [ADR-062](ADR-062-explicit-hybrid-data-updates.md) |
 | [ADR-062](ADR-062-explicit-hybrid-data-updates.md) | Explicit hybrid policy for committed user-data updates | Accepted | amended by [ADR-079](ADR-079-initialize-private-unwritten-reservations.md); amends [ADR-020](ADR-020-checkpoint-commit.md), [ADR-061](ADR-061-shared-extent-references.md) |
-| [ADR-063](ADR-063-intent-log-epoch1.md) | Checkpoint COW plus an intent log for epoch-1 durability | Accepted | amends [ADR-009](ADR-009-journal.md), [ADR-020](ADR-020-checkpoint-commit.md), [ADR-026](ADR-026-bounded-atomic-batches.md), [ADR-037](ADR-037-intent-log.md); amended by [ADR-064](ADR-064-intent-log-data-update-compatibility.md) |
+| [ADR-063](ADR-063-intent-log-epoch1.md) | Checkpoint COW plus an intent log for epoch-1 durability | Accepted | amends [ADR-009](ADR-009-journal.md), [ADR-020](ADR-020-checkpoint-commit.md), [ADR-026](ADR-026-bounded-atomic-batches.md), [ADR-037](ADR-037-intent-log.md); amended by [ADR-064](ADR-064-intent-log-data-update-compatibility.md), [ADR-121](ADR-121-delayed-group-commit.md) |
 | [ADR-064](ADR-064-intent-log-data-update-compatibility.md) | Fail closed on intent-log data-update records | Accepted | amends [ADR-063](ADR-063-intent-log-epoch1.md) |
 | [ADR-065](ADR-065-persistent-data-update-policy.md) | Persistent per-file data-update policy encoding | Accepted | amends [ADR-062](ADR-062-explicit-hybrid-data-updates.md) |
 | [ADR-066](ADR-066-bounded-orphan-directory.md) | Bounded open-unlinked lifecycle through a reserved orphan directory | Accepted | amends [ADR-039](ADR-039-portable-vfs-slice.md) |
@@ -149,6 +149,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-118](ADR-118-posix-permission-projection.md) | The POSIX mode is a projection of the protection word | Accepted | — |
 | [ADR-119](ADR-119-backup-carries-comment-and-owner.md) | A backup carries the comment and the owner | Accepted | amends [ADR-082](ADR-082-backup-object-metadata.md) |
 | [ADR-120](ADR-120-comment-and-protection-as-host-attributes.md) | The comment and the protection word are host attributes | Accepted | amends [ADR-108](ADR-108-extended-attributes.md) |
+| [ADR-121](ADR-121-delayed-group-commit.md) | Changes are durable within seconds, or at once on request | Accepted | amends [ADR-063](ADR-063-intent-log-epoch1.md) |
 
 <!-- /adr-index -->
 
