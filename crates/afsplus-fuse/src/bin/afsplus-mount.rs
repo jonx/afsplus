@@ -19,7 +19,16 @@ use nix::unistd::{getegid, geteuid};
 /// A reader gets a report at most this old, without stopping the filesystem.
 const DIAGNOSTICS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Set in the environment of the process that serves the mount, so that it
+/// knows it is the supervised one and not the supervisor.
+#[cfg(all(target_os = "macos", feature = "macfuse-mount"))]
+const SERVE_ENV: &str = "AFSPLUS_MOUNT_SERVE";
+
 fn main() -> ExitCode {
+    #[cfg(all(target_os = "macos", feature = "macfuse-mount"))]
+    if std::env::var_os(SERVE_ENV).is_none() {
+        return supervisor::run();
+    }
     init_logging();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -343,4 +352,197 @@ fn open_image(path: &Path) -> Result<FileBackend, String> {
         .map_err(|error| format!("invalid identification block: {error}"))?;
     device.set_total_blocks(identification.total_blocks);
     Ok(device)
+}
+
+/// Keeps a dead filesystem process from leaving a dead mount behind.
+///
+/// macFUSE's FSKit backend relays every request from the kernel to this
+/// driver through a helper process, one per mount. If the driver dies while a
+/// request is in flight, that helper waits for an answer that never comes:
+/// the program that made the request cannot even be killed, `umount` blocks
+/// the same way, and the mountpoint is left out of the mount table with every
+/// `stat` on it blocking. Nothing cleared it but a reboot. A client killed on
+/// its own does no harm; it takes the driver dying mid-request.
+///
+/// So `afsplus-mount` runs as a supervisor, and the process serving the volume
+/// is its child. The supervisor notes which relay appeared when the volume
+/// came up, and if the child ends in any way other than a clean unmount it
+/// terminates that relay. Everything waiting on the volume is then released
+/// with an error, which is what a person expects from a disk that went away.
+///
+/// It also turns Ctrl-C, `kill` and a closing terminal into a clean unmount.
+/// The child is started with those signals blocked, so it can only end through
+/// an unmount or something no process can refuse, and never with a request
+/// in flight because somebody asked it to stop.
+#[cfg(all(target_os = "macos", feature = "macfuse-mount"))]
+mod supervisor {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, ExitCode};
+    use std::time::{Duration, Instant};
+
+    use nix::sys::signal::{kill, SigSet, Signal};
+    use nix::unistd::Pid;
+
+    /// The executable name of macFUSE's per-mount FSKit relay.
+    const RELAY: &str = "io.macfuse.app.fsmodule.macfuse";
+
+    pub fn run() -> ExitCode {
+        let mut stops = SigSet::empty();
+        for signal in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP] {
+            stops.add(signal);
+        }
+        // Before any thread exists, so every later thread and the child inherit it.
+        if let Err(error) = stops.thread_block() {
+            eprintln!("afsplus-mount: cannot take charge of stop signals: {error}");
+            return ExitCode::from(1);
+        }
+        let mountpoint: PathBuf = match super::arguments() {
+            Ok((_, _, mountpoint, _)) => mountpoint,
+            Err(error) => {
+                eprintln!("afsplus-mount: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let listed = listed_path(&mountpoint);
+        let before = relays();
+        let executable = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("afsplus-mount: cannot find this program to start the volume: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        let mut child = match Command::new(executable)
+            .args(std::env::args_os().skip(1))
+            .env(super::SERVE_ENV, "1")
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                eprintln!("afsplus-mount: cannot start the volume: {error}");
+                return ExitCode::from(1);
+            }
+        };
+
+        // A person stopping the mount asks for an unmount, which the child
+        // answers like any other and then ends cleanly. The listed spelling,
+        // because a path through a symlink stops resolving once a mount dies.
+        let target = listed.clone();
+        std::thread::spawn(move || loop {
+            if stops.wait().is_ok() {
+                let _ = Command::new("umount").arg(&target).status();
+            }
+        });
+
+        let relay = identify_relay(&before, &mut child);
+        let status = child.wait();
+        if matches!(&status, Ok(status) if status.success()) {
+            return ExitCode::SUCCESS;
+        }
+        match &status {
+            Ok(status) => match status.code() {
+                Some(code) => {
+                    eprintln!("afsplus-mount: the volume process ended with status {code}")
+                }
+                None => eprintln!(
+                    "afsplus-mount: the volume process was killed while the volume was mounted"
+                ),
+            },
+            Err(error) => eprintln!("afsplus-mount: lost track of the volume process: {error}"),
+        }
+        if let Some(pid) = relay {
+            release(pid);
+        }
+        // Released, the mount answers every access with an I/O error at once
+        // instead of blocking, but it stays listed. Remove the entry by the
+        // spelling the mount table uses: through `/tmp`, which is a symlink,
+        // umount no longer finds a mount whose process is gone. Unconditional,
+        // because asking whether it is still mounted is the one question a
+        // dead mount can refuse to answer.
+        let _ = Command::new("umount")
+            .arg(&listed)
+            .stderr(std::process::Stdio::null())
+            .status();
+        ExitCode::from(1)
+    }
+
+    /// The path as the mount table spells it: `/tmp` is `/private/tmp`.
+    fn listed_path(mountpoint: &Path) -> PathBuf {
+        if let Ok(path) = mountpoint.canonicalize() {
+            return path;
+        }
+        match (mountpoint.parent(), mountpoint.file_name()) {
+            (Some(parent), Some(name)) => parent
+                .canonicalize()
+                .map(|parent| parent.join(name))
+                .unwrap_or_else(|_| mountpoint.to_path_buf()),
+            _ => mountpoint.to_path_buf(),
+        }
+    }
+
+    /// Processes whose EXECUTABLE is the relay. Matched on the executable
+    /// path, never on the command line: a shell that merely mentions the name
+    /// matches a command-line search, and this list decides what gets killed.
+    fn relays() -> BTreeSet<i32> {
+        let Ok(out) = Command::new("ps").args(["-axo", "pid=,comm="]).output() else {
+            return BTreeSet::new();
+        };
+        let suffix = format!("/{RELAY}");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let (pid, executable) = line.trim_start().split_once(char::is_whitespace)?;
+                let executable = executable.trim();
+                (executable == RELAY || executable.ends_with(&suffix))
+                    .then(|| pid.parse().ok())
+                    .flatten()
+            })
+            .collect()
+    }
+
+    /// The relay that appeared while this volume came up. One per mount, so
+    /// the new one is this volume's; if two appeared at once another mount
+    /// raced this one and no guess is made.
+    ///
+    /// It watches the process list and never lists mounts. `mount` asks every
+    /// mounted filesystem for its state, so a dead mount anywhere on the
+    /// machine blocks it for ever, and this is exactly the code that must
+    /// still work when one exists.
+    fn identify_relay(before: &BTreeSet<i32>, child: &mut Child) -> Option<i32> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return None;
+            }
+            let fresh: Vec<i32> = relays().difference(before).copied().collect();
+            match fresh.as_slice() {
+                [] => {}
+                [pid] => return Some(*pid),
+                _ => {
+                    eprintln!("afsplus-mount: several volumes came up at once; this one will not be released automatically if its process dies");
+                    return None;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        None
+    }
+
+    fn release(pid: i32) {
+        let pid = Pid::from_raw(pid);
+        if kill(pid, None).is_err() {
+            return;
+        }
+        eprintln!("afsplus-mount: releasing the macFUSE relay (pid {pid}) so that programs waiting on the volume are not left blocked");
+        let _ = kill(pid, Signal::SIGTERM);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if kill(pid, None).is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = kill(pid, Signal::SIGKILL);
+    }
 }
