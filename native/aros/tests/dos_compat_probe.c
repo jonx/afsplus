@@ -1051,7 +1051,6 @@ static int steady_round(void)
 }
 
 #define STEADY_ALLOWANCE 1024
-#define STEADY_WARMUP 5
 /* The commit path grows by a few dozen bytes over hundreds of rounds, an
  * open finding; three bytes a round over a hundred rounds is past this. */
 #define STEADY_HEAP_ALLOWANCE 256
@@ -1099,21 +1098,25 @@ static int probe_steady(const char *rounds_text)
     port = afsplus_client_lock_port(drawer);
     UnLock(drawer);
     status = RETURN_OK;
-    /* Rounds first, so one-off allocations of the first use of each
-     * operation, and structures growing to their working size, are not
-     * read as a leak: at the C boundary the heap settles by the third. */
-    for (round = 0; status == RETURN_OK && round < STEADY_WARMUP; round++)
+    /* As many rounds first as are measured, so one-off allocations of the
+     * first use of each operation, and structures growing to their working
+     * size, are not read as a leak. The read cache is one of them: a delayed
+     * mount leaves each round's delete for idle time, the next round writes
+     * to blocks the cache has not held, and the cache fills to its size over
+     * the first hundred rounds. */
+    for (round = 0; status == RETURN_OK && round < rounds; round++)
         status = steady_round();
     if (status == RETURN_OK)
         status = steady_heap(port, &warm);
+    /* Both readings follow a flush: between flushes a delayed mount holds
+     * its open window and the deletes waiting for idle time, which the flush
+     * gives back. */
     before = (ULONG)AvailMem(MEMF_ANY);
     for (round = 0; status == RETURN_OK && round < rounds; round++)
-    {
         status = steady_round();
-        after = (ULONG)AvailMem(MEMF_ANY);
-    }
     if (status == RETURN_OK)
         status = steady_heap(port, &done);
+    after = (ULONG)AvailMem(MEMF_ANY);
     DeleteFile(DRAWER);
     if (status != RETURN_OK)
         return status;
