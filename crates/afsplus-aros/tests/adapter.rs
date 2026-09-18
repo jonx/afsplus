@@ -225,3 +225,42 @@ fn read_only_mount_and_invalid_offsets_map_to_dos_errors() {
     );
     assert_eq!(ArosError::NoMoreEntries.io_error(), 232);
 }
+
+/// The parent cache is pruned to what live locks reach: a lock held deep in
+/// the tree still names every ancestor after hundreds of other objects were
+/// locked, freed and deleted around it.
+#[test]
+fn a_held_lock_names_its_ancestors_after_the_parent_cache_is_pruned() {
+    let vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let mut adapter = ArosAdapter::new(vfs, ArosConfig::default());
+    let a = adapter.create_directory(None, b"a", timestamp(1)).unwrap();
+    let b = adapter
+        .create_directory(Some(a), b"b", timestamp(1))
+        .unwrap();
+    let c = adapter
+        .create_directory(Some(b), b"c", timestamp(1))
+        .unwrap();
+    adapter.free_lock(a).unwrap();
+    adapter.free_lock(b).unwrap();
+
+    for index in 0..300u32 {
+        let name = format!("n{index}").into_bytes();
+        let file = adapter
+            .open(None, &name, OpenMode::NewFile, timestamp(2))
+            .unwrap();
+        adapter.close(file).unwrap();
+        let lock = adapter.locate(None, &name, LockAccess::Shared).unwrap();
+        adapter.free_lock(lock).unwrap();
+        adapter.delete_object(None, &name, timestamp(3)).unwrap();
+    }
+
+    let mut names = Vec::new();
+    let mut current = c;
+    while let Some(parent) = adapter.parent_lock(current).unwrap() {
+        names.push(adapter.examine_lock(parent).unwrap().name);
+        adapter.free_lock(current).unwrap();
+        current = parent;
+    }
+    adapter.free_lock(current).unwrap();
+    assert_eq!(names, [b"b".to_vec(), b"a".to_vec(), b"AFS+".to_vec()]);
+}

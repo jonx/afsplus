@@ -8,7 +8,7 @@
 pub mod health;
 pub mod management;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use afsplus_block::BlockDevice;
 use afsplus_core::flight::FlightRecorder;
@@ -286,6 +286,9 @@ pub struct V2Page {
 /// Largest page one `read_enumerator` call returns.
 pub const V2_MAX_PAGE_ENTRIES: usize = 64;
 
+/// Size of the parent cache below which it is never pruned.
+const KNOWN_PARENTS_FLOOR: usize = 64;
+
 /// A paged directory walk. The position is the stored name returned last,
 /// not an ordinal, so it holds across any namespace change between pages.
 #[derive(Debug)]
@@ -347,7 +350,13 @@ pub struct ArosAdapter<D: BlockDevice> {
     config: ArosConfig,
     locks: BTreeMap<LockId, LockState>,
     lock_counts: BTreeMap<ObjectId, LockCounts>,
+    /// Parent and name of the objects a live lock or file handle may need
+    /// to name a parent of: the volume keeps no parent link. Entries no such
+    /// reference reaches are pruned, so the map follows what is held open,
+    /// not every object the mount has ever seen.
     known_parents: BTreeMap<ObjectId, (Option<ObjectId>, Vec<u8>)>,
+    /// Size of `known_parents` that triggers the next prune.
+    known_parents_bound: usize,
     files: BTreeMap<FileHandleId, FileState>,
     records: Vec<RecordLock>,
     enumerators: BTreeMap<EnumeratorId, Enumerator>,
@@ -397,6 +406,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
             locks: BTreeMap::new(),
             lock_counts: BTreeMap::new(),
             known_parents,
+            known_parents_bound: KNOWN_PARENTS_FLOOR,
             files: BTreeMap::new(),
             records: Vec::new(),
             enumerators: BTreeMap::new(),
@@ -491,7 +501,51 @@ impl<D: BlockDevice> ArosAdapter<D> {
             self.vfs.close(handle)?;
         }
         self.release_object_lock(state.object_id, state.access);
+        self.prune_known_parents();
         Ok(())
+    }
+
+    /// Drops the parent entries no live lock or file handle reaches through
+    /// its chain of ancestors. With nothing held it keeps the root alone;
+    /// otherwise it runs when the map has doubled since the last prune. Each
+    /// entry is removed once, so the cost per call stays constant.
+    fn prune_known_parents(&mut self) {
+        if self.locks.is_empty() && self.files.is_empty() {
+            if self.known_parents.len() > 1 {
+                self.known_parents
+                    .retain(|object, _| *object == OBJECT_ROOT);
+            }
+            self.known_parents_bound = KNOWN_PARENTS_FLOOR;
+            return;
+        }
+        if self.known_parents.len() < self.known_parents_bound {
+            return;
+        }
+        let mut keep = BTreeSet::from([OBJECT_ROOT]);
+        let starts = self
+            .locks
+            .values()
+            .flat_map(|lock| [Some(lock.object_id), lock.parent])
+            .chain(
+                self.files
+                    .values()
+                    .flat_map(|file| [Some(file.object_id), Some(file.parent)]),
+            )
+            .flatten();
+        for start in starts {
+            let mut next = Some(start);
+            while let Some(object) = next {
+                if !keep.insert(object) {
+                    break;
+                }
+                next = self
+                    .known_parents
+                    .get(&object)
+                    .and_then(|(parent, _)| *parent);
+            }
+        }
+        self.known_parents.retain(|object, _| keep.contains(object));
+        self.known_parents_bound = (self.known_parents.len() * 2).max(KNOWN_PARENTS_FLOOR);
     }
 
     pub fn open(
@@ -715,6 +769,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         if state.dirty {
             self.touch_raw(state.parent, &state.name);
         }
+        self.prune_known_parents();
         Ok(self.vfs.close(state.vfs_handle)?)
     }
 
