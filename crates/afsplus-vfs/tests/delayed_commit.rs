@@ -335,3 +335,35 @@ fn a_write_uses_the_space_of_a_delete_still_waiting_for_idle_time() {
     assert!(read_file(&mut vfs, "first").is_none());
     assert_eq!(read_file(&mut vfs, "second").unwrap().len(), 1 << 16);
 }
+
+#[test]
+fn deletes_on_a_volume_never_idle_keep_room_for_their_commits() {
+    let mut vfs = delayed(formatted());
+    let files = 2_560;
+    let drawers: Vec<u64> = (0..80)
+        .map(|index| {
+            vfs.create_directory(OBJECT_ROOT, &format!("d{index}"), ms(0))
+                .unwrap()
+        })
+        .collect();
+    for index in 0..files {
+        let id = vfs
+            .create_file(drawers[index / 32], &format!("f{index}"), ms(0))
+            .unwrap();
+        let handle = vfs.open_file(id, AccessMode::WriteOnly).unwrap();
+        vfs.write(handle, 0, &[3u8; 1_200], ms(0)).unwrap();
+        vfs.close(handle).unwrap();
+    }
+    vfs.sync_filesystem().unwrap();
+    // A change every millisecond: no idle tick ever runs. Every delete must
+    // still commit, the last ones included.
+    for index in 0..files {
+        let at = 10_000 + index as i64;
+        vfs.unlink_file(drawers[index / 32], &format!("f{index}"), ms(at))
+            .unwrap();
+        vfs.commit_if_due(ms(at)).unwrap();
+    }
+    vfs.set_durability(Durability::Sync).unwrap();
+    let room = vfs.statfs().available_blocks;
+    assert!(room >= 1_024, "{room} blocks available");
+}

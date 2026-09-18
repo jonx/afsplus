@@ -51,10 +51,11 @@ loses is a whole suffix of operations, never a torn one.
    before: correct, only slower.
 9. `DELAYED` commits a delete as the removal of the name. The object's
    blocks come back in idle time, a bounded batch per idle tick, after the
-   window is committed. A commit cleans only what exceeds 4,096 waiting
-   objects, so a volume that is never idle still has a bound. An operation
-   that needs space reclaims it first, counting what the open window has
-   already allocated.
+   window is committed. A commit cleans what exceeds 4,096 waiting
+   objects, and cleans until an eighth of the volume, and at least 1,024
+   blocks, is available: a volume that is never idle still has a bound, and
+   the next commit has room. An operation that needs space reclaims it
+   first, counting what the open window has already allocated.
 
 ## Consequences
 

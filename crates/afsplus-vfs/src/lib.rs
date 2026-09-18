@@ -404,6 +404,14 @@ pub const DELAYED_WINDOW_OPS_MAX: u32 = 512;
 /// a mount after a crash resumes, not memory.
 pub const DELAYED_ORPHANS_MAX: u64 = 4_096;
 
+/// Blocks a delayed mount keeps available after a commit while deleted
+/// space waits for idle time: an eighth of the volume, and at least twice
+/// what a full window of deletes takes, which is about a block each. A
+/// volume smaller than eight such windows cleans at every commit.
+fn delayed_room_blocks(total_blocks: u64) -> u64 {
+    (total_blocks / 8).max(2 * u64::from(DELAYED_WINDOW_OPS_MAX))
+}
+
 /// Orphan cleanups, and reclaim steps, one idle tick of a delayed mount runs.
 const IDLE_STEPS_PER_TICK: usize = 32;
 
@@ -523,19 +531,36 @@ impl<D: BlockDevice> Vfs<D> {
     }
 
     /// What follows every commit of the window. The orphans its deletions
-    /// left are cleaned in idle time ([`Self::commit_if_due`]); only a
-    /// backlog past [`DELAYED_ORPHANS_MAX`] is cleaned now, down to it.
+    /// left, and the blocks the commit superseded, are cleaned in idle time
+    /// ([`Self::commit_if_due`]). Two things are cleaned now: a backlog past
+    /// [`DELAYED_ORPHANS_MAX`], down to it, and whatever keeps the volume
+    /// below [`delayed_room_blocks`] available. Without the second, a volume
+    /// that was never idle ran out of space in the commit of its deletes:
+    /// each window of 512 took some 570 blocks and none came back.
     fn after_window_commit(&mut self, now: Timespec) {
         let deletes = self.window_deletes;
         self.forget_window();
-        if deletes == 0 || !self.idle_maintenance || !self.inline_maintenance {
+        if !self.idle_maintenance || !self.inline_maintenance {
             return;
         }
-        if let Ok(pending) = self.volume.orphan_count() {
-            if pending > DELAYED_ORPHANS_MAX {
-                let excess = (pending - DELAYED_ORPHANS_MAX) as usize;
-                let _ = self.cleanup_orphans(2 * excess, now);
-                let _ = self.reclaim_space(2 * excess, now);
+        if deletes > 0 {
+            if let Ok(pending) = self.volume.orphan_count() {
+                if pending > DELAYED_ORPHANS_MAX {
+                    let excess = (pending - DELAYED_ORPHANS_MAX) as usize;
+                    let _ = self.cleanup_orphans(2 * excess, now);
+                    let _ = self.reclaim_space(2 * excess, now);
+                }
+            }
+        }
+        let room = delayed_room_blocks(self.volume.ident().total_blocks);
+        while self.volume.available_blocks() < room {
+            // Orphans first: cleaning one is what fills the reclaim queue.
+            let step = match self.cleanup_orphans(1, now) {
+                Ok(0) => self.reclaim_space(1, now).map(|blocks| blocks as usize),
+                other => other,
+            };
+            if !matches!(step, Ok(steps) if steps > 0) {
+                break;
             }
         }
     }
