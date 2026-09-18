@@ -870,6 +870,19 @@ impl<D: BlockDevice> Volume<D> {
             .saturating_sub(self.emergency_headroom_blocks())
     }
 
+    /// [`Self::available_blocks`] less what the open window has already
+    /// allocated: the checkpoint's count does not see the window, and a
+    /// window of large writes can hold most of what it reports.
+    pub fn window_available_blocks(&self) -> u64 {
+        match &self.window {
+            Some(window) => window
+                .tx
+                .free_blocks_remaining()
+                .saturating_sub(self.emergency_headroom_blocks()),
+            None => self.available_blocks(),
+        }
+    }
+
     fn protect_emergency_headroom(&self, tx: &mut TxAllocator) {
         tx.set_free_block_floor(self.emergency_headroom_blocks());
     }

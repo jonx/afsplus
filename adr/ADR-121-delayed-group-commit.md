@@ -49,6 +49,12 @@ loses is a whole suffix of operations, never a torn one.
 8. Operations join the window as the core learns to stage them. One the
    window does not stage commits the window first and then itself, as
    before: correct, only slower.
+9. `DELAYED` commits a delete as the removal of the name. The object's
+   blocks come back in idle time, a bounded batch per idle tick, after the
+   window is committed. A commit cleans only what exceeds 4,096 waiting
+   objects, so a volume that is never idle still has a bound. An operation
+   that needs space reclaims it first, counting what the open window has
+   already allocated.
 
 ## Consequences
 
@@ -60,5 +66,7 @@ loses is a whole suffix of operations, never a torn one.
   handler commits at once for them.
 - The crash matrices gain delayed windows: every cut must mount at a prefix
   of the operations, with no torn state.
+- A delete costs the removal of its name; the space of a deleted file is
+  not available at once, but a write that needs it takes it back.
 - The read cache is separate and changes no durability; see
   [performance](../docs/20-performance.md#cache-integration-qualification).

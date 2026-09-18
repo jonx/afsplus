@@ -16,7 +16,22 @@ const BLOCK_SIZE: usize = 4096;
 const TOTAL_BLOCKS: u64 = 8192;
 
 pub fn formatted(shared_extents: bool) -> MemoryBackend {
+    format(MemoryBackend::new(BLOCK_SIZE, TOTAL_BLOCKS), shared_extents)
+}
+
+/// A formatted disk whose every block is already in memory: the memory disk
+/// allocates a block when it is first written, so on a sparse one the heap
+/// meter counts the disk filling up as if the library held it.
+pub fn materialized(shared_extents: bool) -> MemoryBackend {
     let mut device = MemoryBackend::new(BLOCK_SIZE, TOTAL_BLOCKS);
+    let zeros = [0u8; BLOCK_SIZE];
+    for lba in 0..TOTAL_BLOCKS {
+        device.apply_raw(lba, &zeros);
+    }
+    format(device, shared_extents)
+}
+
+fn format(mut device: MemoryBackend, shared_extents: bool) -> MemoryBackend {
     mkfs(
         &mut device,
         &MkfsParams {

@@ -1,5 +1,6 @@
 //! The STEADY rounds on a delayed mount (ADR-121), measured at a durable
-//! point: after a flush, three hundred more rounds hold almost nothing more. One test in its own binary: the heap meter is the
+//! point: after a flush, three hundred more rounds hold almost nothing more.
+//! One test in its own binary: the heap meter is the
 //! library's.
 
 mod common;
@@ -7,7 +8,7 @@ mod common;
 use std::mem::size_of;
 
 use afsplus_aros_ffi::*;
-use common::{formatted, mount};
+use common::{materialized, mount};
 
 fn heap(filesystem: *mut AfsplusAros) -> (u64, u64) {
     assert_eq!(afsplus_aros_flush(filesystem), 0);
@@ -91,7 +92,7 @@ fn round_with_clock(filesystem: *mut AfsplusAros, now: i64) {
 
 #[test]
 fn delayed_rounds_hold_nothing_more_at_a_durable_point() {
-    let mut device = formatted(true);
+    let mut device = materialized(true);
     let filesystem = mount(&mut device);
     assert_eq!(afsplus_aros_set_commit_policy(filesystem, 5_000, 1_000), 0);
     for now in 1..=5 {
@@ -108,8 +109,9 @@ fn delayed_rounds_hold_nothing_more_at_a_durable_point() {
     let (held_after, _) = heap(filesystem);
     // Not to the byte: the commit path grows by a few dozen bytes over
     // hundreds of rounds, in sync mode too (an open finding of C13). A leak
-    // of four bytes a round crosses this; the orphans a delete left behind,
-    // before the commit cleaned them, cost 1.2 KB a round.
+    // of four bytes a round crosses this. The disk is materialized: the
+    // deletes wait for idle time, and on a sparse disk every round would
+    // write blocks the memory disk has never held.
     assert!(
         held_after < held + 1_024,
         "held after the warm-up {held}, then {trail:?}, finally {held_after}"

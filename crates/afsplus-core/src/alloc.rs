@@ -664,7 +664,8 @@ impl TxAllocator {
         self.free_block_floor
     }
 
-    fn free_blocks_remaining(&self) -> u64 {
+    /// Raw free blocks left after what this transaction has allocated.
+    pub fn free_blocks_remaining(&self) -> u64 {
         let made_available = self
             .current_free_blocks_total
             .saturating_add(self.stats.blocks_promoted);

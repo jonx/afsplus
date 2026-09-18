@@ -399,6 +399,14 @@ impl Durability {
 /// clock says.
 pub const DELAYED_WINDOW_OPS_MAX: u32 = 512;
 
+/// Deleted files a delayed mount leaves for idle time. Past it, the commit
+/// cleans the excess at once: pending deletions cost disk space and the work
+/// a mount after a crash resumes, not memory.
+pub const DELAYED_ORPHANS_MAX: u64 = 4_096;
+
+/// Orphan cleanups, and reclaim steps, one idle tick of a delayed mount runs.
+const IDLE_STEPS_PER_TICK: usize = 32;
+
 pub struct Vfs<D: BlockDevice> {
     volume: Volume<D>,
     handles: BTreeMap<Handle, OpenHandle>,
@@ -417,9 +425,11 @@ pub struct Vfs<D: BlockDevice> {
     window_first: Option<Timespec>,
     window_last: Option<Timespec>,
     window_changes: u32,
-    /// Deletions the window holds: each leaves an orphan whose cleanup the
-    /// commit starts, as an immediate delete starts its own.
+    /// Deletions the window holds, each leaving an orphan.
     window_deletes: u32,
+    /// Clock of the latest change, kept past the commit: idle time is
+    /// measured from it.
+    last_change: Option<Timespec>,
 }
 
 impl<D: BlockDevice> Vfs<D> {
@@ -448,6 +458,7 @@ impl<D: BlockDevice> Vfs<D> {
             window_last: None,
             window_changes: 0,
             window_deletes: 0,
+            last_change: None,
         }
     }
 
@@ -511,16 +522,33 @@ impl<D: BlockDevice> Vfs<D> {
         }
     }
 
-    /// What follows every commit of the window: what it deleted is cleaned
-    /// now, whichever operation committed it, so orphans never pile up
-    /// behind a delayed mount.
+    /// What follows every commit of the window. The orphans its deletions
+    /// left are cleaned in idle time ([`Self::commit_if_due`]); only a
+    /// backlog past [`DELAYED_ORPHANS_MAX`] is cleaned now, down to it.
     fn after_window_commit(&mut self, now: Timespec) {
-        let deletes = self.window_deletes as usize;
+        let deletes = self.window_deletes;
         self.forget_window();
-        if deletes > 0 && self.idle_maintenance && self.inline_maintenance {
-            let _ = self.cleanup_orphans(2 * deletes + ORPHAN_STEPS_PER_RELEASE, now);
-            let _ = self.reclaim_space(2 * deletes + RECLAIM_STEPS_PER_RELEASE, now);
+        if deletes == 0 || !self.idle_maintenance || !self.inline_maintenance {
+            return;
         }
+        if let Ok(pending) = self.volume.orphan_count() {
+            if pending > DELAYED_ORPHANS_MAX {
+                let excess = (pending - DELAYED_ORPHANS_MAX) as usize;
+                let _ = self.cleanup_orphans(2 * excess, now);
+                let _ = self.reclaim_space(2 * excess, now);
+            }
+        }
+    }
+
+    /// One idle tick of maintenance: a bounded batch of orphan cleanups and
+    /// reclaim steps. Returns whether it did anything.
+    fn idle_maintenance_step(&mut self, now: Timespec) -> bool {
+        if !self.idle_maintenance || !self.inline_maintenance {
+            return false;
+        }
+        let cleaned = self.cleanup_orphans(IDLE_STEPS_PER_TICK, now).unwrap_or(0);
+        let returned = self.reclaim_space(IDLE_STEPS_PER_TICK, now).unwrap_or(0);
+        cleaned > 0 || returned > 0
     }
 
     fn forget_window(&mut self) {
@@ -572,6 +600,7 @@ impl<D: BlockDevice> Vfs<D> {
             self.window_first = Some(now);
         }
         self.window_last = Some(now);
+        self.last_change = Some(now);
         self.window_changes = self.window_changes.saturating_add(1);
         if self.delayed() && self.window_changes >= DELAYED_WINDOW_OPS_MAX {
             self.commit_window(now)?;
@@ -580,26 +609,22 @@ impl<D: BlockDevice> Vfs<D> {
     }
 
     fn commit_window(&mut self, now: Timespec) -> Result<(), VfsError> {
-        self.checkpoint_data_window(now)?;
-        self.reclaim_after_release(now);
-        Ok(())
+        self.checkpoint_data_window(now)
     }
 
     /// Commits the delayed window when `now` finds the volume idle long
-    /// enough or the oldest change old enough (ADR-121). A clock that went
-    /// back counts as due. Returns whether changes still wait, so a caller
-    /// knows whether to ask again.
+    /// enough or the oldest change old enough (ADR-121); a clock that went
+    /// back counts as due. On a volume idle that long, it also cleans a
+    /// bounded batch of deleted files and returns their space. Returns
+    /// whether work remains, changes waiting or a batch just done, so a
+    /// caller knows whether to ask again.
     pub fn commit_if_due(&mut self, now: Timespec) -> Result<bool, VfsError> {
-        if !self.volume.window_open() {
-            self.forget_window();
-            return Ok(false);
-        }
         let Durability::Delayed {
             idle_ms,
             max_age_ms,
         } = self.durability
         else {
-            return Ok(true);
+            return Ok(self.volume.window_open());
         };
         let since = |then: Option<Timespec>| -> Option<u64> {
             let then = then?;
@@ -611,12 +636,19 @@ impl<D: BlockDevice> Vfs<D> {
                 elapsed as u64
             })
         };
-        let idle = since(self.window_last).is_none_or(|ms| ms >= u64::from(idle_ms));
-        let old = since(self.window_first).is_none_or(|ms| ms >= u64::from(max_age_ms));
-        if idle || old {
-            self.commit_window(now)?;
+        let idle = since(self.last_change).is_none_or(|ms| ms >= u64::from(idle_ms));
+        if self.volume.window_open() {
+            let old = since(self.window_first).is_none_or(|ms| ms >= u64::from(max_age_ms));
+            if idle || old {
+                self.commit_window(now)?;
+            }
+        } else {
+            self.forget_window();
         }
-        Ok(self.volume.window_open())
+        // Deleted files are cleaned, and their space returned, while nothing
+        // else happens; a tick that finds nothing to do lets the caller rest.
+        let working = idle && !self.volume.window_open() && self.idle_maintenance_step(now);
+        Ok(self.volume.window_open() || working)
     }
 
     /// Generation of the checkpoint or open data window the mount exposes.
@@ -1245,9 +1277,14 @@ impl<D: BlockDevice> Vfs<D> {
     /// from four hundred megabytes to forty, and a write in the trough failed
     /// for want of space that was only waiting to be reclaimed, which also
     /// cost the write window. While deleted space is waiting, the operation
-    /// that needs space keeps an eighth of the volume available, or what it
-    /// needs if that is more, reclaiming one transaction at a time. Nothing
-    /// else waits for it, and a volume with nothing to reclaim pays nothing.
+    /// that needs space keeps a thirty-second of the volume available, or
+    /// what it needs if that is more, reclaiming one transaction at a time.
+    /// Available counts what the open window has already taken: a delayed
+    /// mount leaves deletes for idle time, and a large write after one saw
+    /// the checkpoint's free space, found none when it came to allocate, and
+    /// lost its window when the commit maintenance needed failed as well.
+    /// Nothing else waits for it, and a volume with nothing to reclaim pays
+    /// nothing.
     fn keep_room(&mut self, bytes: u64, now: Timespec) -> Result<(), VfsError> {
         let stats = self.statfs();
         let needed = bytes.div_ceil(u64::from(stats.block_size.max(1))) + ROOM_FOR_METADATA_BLOCKS;
@@ -1257,7 +1294,7 @@ impl<D: BlockDevice> Vfs<D> {
         // when the operation itself would not fit otherwise.
         let mut steps = 0;
         loop {
-            let available = self.statfs().available_blocks;
+            let available = self.volume.window_available_blocks();
             if available >= low_water || (available >= needed && steps >= ROOM_STEPS_PER_OPERATION)
             {
                 break;
