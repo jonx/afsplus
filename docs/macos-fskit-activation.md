@@ -23,6 +23,18 @@ upstream in [macfuse/macfuse#1194](https://github.com/macfuse/macfuse/issues/119
 Check that issue before using the workaround: a supported fix or activation
 procedure may supersede it.
 
+## After upgrading macFUSE
+
+An upgrade can leave the module registered but no longer enabled, and every
+mount then fails with `MFMount: File system extension not found`. On macOS
+26.6.2 with macFUSE 5.4.0, enabling it again for the user was enough, with no
+restart:
+
+```sh
+pluginkit -e use -i io.macfuse.app.fsmodule.macfuse
+tools/macos-fskit-modules.sh check
+```
+
 ## Diagnose without changing the system
 
 From the repository root:

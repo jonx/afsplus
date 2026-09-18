@@ -5,6 +5,8 @@
 > [tools/check-mount-driver-death.py](../tools/check-mount-driver-death.py),
 > [tools/check-mount-responsiveness.py](../tools/check-mount-responsiveness.py),
 > [tools/check-mount-name-policy.py](../tools/check-mount-name-policy.py),
+> [tools/check-mount-kill-durability.py](../tools/check-mount-kill-durability.py),
+> [crates/afsplus-fuse/tests/process_death.rs](../crates/afsplus-fuse/tests/process_death.rs),
 > [crates/afsplus-vfs/tests/background_maintenance.rs](../crates/afsplus-vfs/tests/background_maintenance.rs) ·
 > **Milestones:** M08
 
@@ -24,6 +26,8 @@ with it, which is the harder half.
 - [What leaves a dead mount behind, and what clears it](#what-leaves-a-dead-mount-behind-and-what-clears-it)
 - [Simulating a filesystem that stops answering](#simulating-a-filesystem-that-stops-answering)
 - [One request at a time](#one-request-at-a-time)
+- [What a killed driver keeps](#what-a-killed-driver-keeps)
+- [macFUSE releases](#macfuse-releases)
 - [What macFUSE's FSKit backend does to a listing and to `df`](#what-macfuses-fskit-backend-does-to-a-listing-and-to-df)
 - [What belongs below the mount](#what-belongs-below-the-mount)
 
@@ -152,6 +156,46 @@ file is deleted, and that the space still comes back.
 A request that blocks inside the driver itself still stops the whole volume;
 only more serving threads would change that, and fuser offers them on Linux
 only.
+
+## What a killed driver keeps
+
+A program that calls `fsync` and gets success is owed its data. On macOS the
+FSKit backend does not pass `fsync` on to the driver, but it does not return
+before the kernel has handed the driver every dirty byte of the file either,
+and the driver makes each write durable before it answers it. A killed
+driver therefore keeps everything whose `fsync` returned.
+
+Two tests hold it. Below the mount,
+[crates/afsplus-fuse/tests/process_death.rs](../crates/afsplus-fuse/tests/process_death.rs)
+records every block the adapter writes and checks the image a kill would
+leave after every prefix of those writes: the checker must find it clean and
+every file whose durability was acknowledged must read back, with a
+program's `fsync` and in the macOS driver's configuration. With durability
+never asked for, the same harness must find a loss. On the mount,
+[tools/check-mount-kill-durability.py](../tools/check-mount-kill-durability.py)
+kills the driver with `SIGKILL` at a different instant in each of eight
+rounds while a program writes, fsyncs and pauses, then requires the checker
+to pass and every file reported after its `fsync` to read back byte for byte
+on the next mount. A driver that commits nothing before unmounting fails it.
+
+macFUSE's relay never completes the unmount of a volume whose driver died
+while no request was in flight: `umount` waits for ever. The supervisor then
+terminates the relay, which releases the mount, but macOS keeps its record of
+that path and refuses a new mount there, with a macFUSE alert, until its file
+system daemon restarts. A mount at any other path works. The kill test mounts
+at a new path every time for that reason and reports how many records were
+left.
+
+## macFUSE releases
+
+macFUSE 5.3 delivered every write of one to fourteen bytes to the driver as
+zeros (macFUSE issue 1188). The file looked right while the volume was
+mounted, because the kernel served it from its own cache, and held zeros once
+the volume came back. macFUSE 5.4.0 fixes it and is required; the usage
+battery rereads twenty small files after the remount to hold it. The same
+release turns an empty reply to a read into a read that reports every byte and
+fills none (issue 1196), so the driver answers such a read, which only a race
+with a truncation can produce, with an I/O error.
 
 ## What macFUSE's FSKit backend does to a listing and to `df`
 

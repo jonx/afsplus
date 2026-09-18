@@ -447,6 +447,9 @@ impl<D: BlockDevice + Send + 'static> Filesystem for FuserFilesystem<D> {
             .lock()
             .and_then(|mut adapter| adapter.read(handle.0, offset, size).map_err(errno));
         match result {
+            Ok(data) if data.is_empty() && size > 0 && EMPTY_READ_IS_MISREPORTED => {
+                reply.error(Errno::EIO)
+            }
             Ok(data) => reply.data(&data),
             Err(error) => reply.error(error),
         }
@@ -819,6 +822,14 @@ fn file_attributes(attributes: &FuseAttributes) -> FileAttr {
         flags: 0,
     }
 }
+
+/// macFUSE 5.4's FSKit backend turns an empty reply to a read into a read
+/// that reports every requested byte and fills none of them (its issue
+/// 1196), so a program would take whatever its buffer held for file data.
+/// The kernel does not ask past the end of a file it knows, so an empty reply
+/// only answers a read that raced a truncation; an I/O error is the honest
+/// answer there.
+const EMPTY_READ_IS_MISREPORTED: bool = cfg!(target_os = "macos");
 
 /// Tell the host whether names fold case, so that what it reports to
 /// programs (`pathconf`'s `_PC_CASE_SENSITIVE`, the volume capabilities) is

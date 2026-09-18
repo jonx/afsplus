@@ -423,6 +423,16 @@ fi
 
 say ""
 say "unmounting and mounting again, with the content still there"
+# Files of one to twenty bytes, each written in one go. While a volume is
+# mounted, the kernel serves a file it just wrote from its own cache, so only
+# reading it again after the volume comes back shows what reached the disk:
+# macFUSE 5.3 delivered writes of up to fourteen bytes as zeros.
+mkdir -p "$here/small"
+n=1
+while [ "$n" -le 20 ]; do
+    printf '%s' "$(printf 'abcdefghijklmnopqrst' | cut -c1-$n)" > "$here/small/$n"
+    n=$((n + 1))
+done
 before_listing=$(ls -A "$here" | sort | tr '\n' ' ')
 release_mount
 wait "$mount_pid" 2>/dev/null || true
@@ -442,6 +452,14 @@ if is_mounted "$mountpoint"; then
     after_listing=$(ls -A "$here" | sort | tr '\n' ' ')
     expect_equal "everything written before the unmount is still there" \
         "$before_listing" "$after_listing"
+    small_back=0
+    n=1
+    while [ "$n" -le 20 ]; do
+        [ "$(cat "$here/small/$n" 2>/dev/null)" = "$(printf 'abcdefghijklmnopqrst' | cut -c1-$n)" ] &&
+            small_back=$((small_back + 1))
+        n=$((n + 1))
+    done
+    expect_equal "twenty small files hold their bytes after the volume comes back" "20" "$small_back"
     expect_equal "a file written before the unmount still reads back" \
         "$(shasum -a 256 < "$work/big.bin" | cut -d' ' -f1)" \
         "$(shasum -a 256 < "$here/big.bin" 2>/dev/null | cut -d' ' -f1)"

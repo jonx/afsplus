@@ -279,10 +279,12 @@ The host mount CLI is built with:
 cargo build -p afsplus-fuse --features fuser-adapter --bin afsplus-mount
 ```
 
-Linux uses fuser's native mount path. On macOS, install macFUSE and build with
-`--features macfuse-mount`; the CLI selects macFUSE's user-space FSKit backend
-and the mountpoint must be an existing directory or a new direct child of
-`/Volumes`. The library is loaded at runtime, so ordinary workspace builds do
+Linux uses fuser's native mount path. On macOS, install macFUSE 5.4.0 or later
+and build with `--features macfuse-mount`; earlier releases deliver writes of
+up to fourteen bytes to the driver as zeros
+([testing/mounted-volume-testing.md](testing/mounted-volume-testing.md)). The
+CLI selects macFUSE's user-space FSKit backend and the mountpoint must be an
+existing directory or a new direct child of `/Volumes`. The library is loaded at runtime, so ordinary workspace builds do
 not require a system FUSE installation. If macOS's File System Extensions
 switches are inert, use the diagnostic and reversible workaround in
 [docs/macos-fskit-activation.md](docs/macos-fskit-activation.md). FUSE-T's NFS
