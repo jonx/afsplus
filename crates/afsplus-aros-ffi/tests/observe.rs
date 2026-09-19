@@ -393,3 +393,53 @@ fn trace_event_codes_are_the_ones_the_header_publishes() {
     assert!(!codes.contains(&0), "zero means no event");
     assert_eq!(EventKind::from_code(0), None);
 }
+
+/// The health-event kinds of `api/afsplus_aros.h` are the library's: one
+/// number per kind, under its own name, and nothing on either side alone.
+#[test]
+fn health_event_kinds_are_the_ones_the_header_publishes() {
+    let exported = [
+        ("DEVICE_ERROR", AFSPLUS_AROS_HEALTH_EVENT_DEVICE_ERROR),
+        ("CORRUPTION", AFSPLUS_AROS_HEALTH_EVENT_CORRUPTION),
+        ("NO_SPACE", AFSPLUS_AROS_HEALTH_EVENT_NO_SPACE),
+        ("INTERNAL_FAULT", AFSPLUS_AROS_HEALTH_EVENT_INTERNAL_FAULT),
+        (
+            "CHECKPOINT_FALLBACK",
+            AFSPLUS_AROS_HEALTH_EVENT_CHECKPOINT_FALLBACK,
+        ),
+        (
+            "RECLAIM_BACKLOG_HIGH",
+            AFSPLUS_AROS_HEALTH_EVENT_RECLAIM_BACKLOG_HIGH,
+        ),
+        (
+            "REGION_FREECOUNT_MISMATCH",
+            AFSPLUS_AROS_HEALTH_EVENT_REGION_FREECOUNT_MISMATCH,
+        ),
+    ];
+    let header = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../api/afsplus_aros.h"
+    ))
+    .unwrap();
+    let published: Vec<(String, u32)> = header
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line
+                .strip_prefix("#define AFSPLUS_AROS_HEALTH_EVENT_")?
+                .split_once(" UINT32_C(")?;
+            Some((name.to_owned(), value.trim_end_matches(')').parse().ok()?))
+        })
+        .collect();
+    assert_eq!(published.len(), exported.len(), "one define per kind");
+    for (name, number) in exported {
+        let line = published
+            .iter()
+            .find(|(published_name, _)| published_name == name)
+            .unwrap_or_else(|| panic!("{name} has no define in afsplus_aros.h"));
+        assert_eq!(line.1, number, "{name}");
+    }
+    // The numbers are identities: never two kinds on one, never renumbered.
+    let mut numbers: Vec<u32> = exported.iter().map(|(_, number)| *number).collect();
+    numbers.sort_unstable();
+    assert_eq!(numbers, [1, 2, 3, 4, 5, 6, 7]);
+}

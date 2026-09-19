@@ -639,7 +639,8 @@ where
 }
 
 /// `ffi_status` for a mounted instance: a failure that describes the volume
-/// or its device, and any internal fault, also enters the health log.
+/// or its device, and any internal fault, also enters the health log, and so
+/// does what the operation made the mount observe about the volume itself.
 fn bridge_status<F>(filesystem: *mut AfsplusAros, operation: F) -> i32
 where
     F: FnOnce() -> Result<(), ArosError>,
@@ -649,6 +650,8 @@ where
         return ArosError::InvalidLock.io_error();
     };
     bridge.calls += 1;
+    // Before the call's own error, so the ring keeps what happened in order.
+    bridge.adapter.collect_health_notes();
     match outcome {
         Ok(Ok(())) => 0,
         Ok(Err(error)) => {
