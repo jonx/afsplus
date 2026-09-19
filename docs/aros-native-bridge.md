@@ -273,14 +273,31 @@ version 1 and `EM_X86_64`; only the relocation types
 is a wrong address at load time rather than a link error; and no undefined
 symbol, because nothing resolves one after the link.
 
+The x86_64 handler runs.
+[`tools/check-qemu-aros-x86_64.sh`](../tools/check-qemu-aros-x86_64.sh) builds
+the package and both probes with this profile, makes a 64 MiB AFS+ volume on
+the host, remasters the nightly pc-x86_64 ISO with the handler in `L:`, the
+programs in `C:` and a DOSDriver for a raw second disk, and boots it headless
+in QEMU. The volume mounts on `ata.device` unit 0, and on the machine itself
+the Alpha-0 operation matrix, the DOS semantics probe, its hundred steady
+rounds, the tour of clones, watches and attributes and `AFSPlusDriverProbe`
+against the device all pass, the dismount is clean, and `afsplus-check` finds
+the image clean after QEMU has exited. Twenty seconds from boot to the last
+line. The DOSDriver counts its geometry in the volume's own 4096-byte blocks
+and the handler turns a block number into a byte offset, so `ata.device`'s
+512-byte sectors need only divide 4096, which is all the block-device
+contract asks. The control run, `AFSPLUS_QEMU_CONTROL=blank`, gives the same
+boot a zeroed disk: the handler refuses it at `rust-mount` with error 225,
+every probe fails behind it and the gate fails.
+
+`build-profile.txt` records `qualified=qemu` and the `ReadMe` says exactly
+that much.
+
 ### What x86_64 and m68k still lack
 
-The x86_64 handler compiles, links and audits clean. It has never been run.
-Nobody has mounted an AFS+ volume with it on an AROS PC, and the package it
-produces says so in its `ReadMe` and in `qualified=no` in
-`build-profile.txt`. What stands between it and the Hosted build's standing is
-a run: an x86_64 AROS with the handler in `L:`, a DOSDriver, and the Alpha-0
-operation matrix and crash replay through it.
+On x86_64 the crash matrices have not run: no power-cut replay, no boot from
+an AFS+ partition, and no benchmark. Those are what stand between this
+profile and the Hosted build's standing.
 
 There is no m68k distribution profile.
 [`tools/check-aros-ffi.sh`](../tools/check-aros-ffi.sh) compiles and links the

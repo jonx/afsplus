@@ -3,7 +3,9 @@ AFS+ for AROS
 
 This is the AFS+ filesystem handler for AROS, built for @CPU@ by the build
 profile @PROFILE_ID@, with the four programs that look at an AFS+ volume from
-the machine itself.
+the machine itself. It is one handler for every AROS machine: the same source
+serves Hosted MacAROS on AArch64 and an AROS PC on x86_64, and each profile
+says below what has been run on it.
 
 AFS+ is a new filesystem for AROS: 64-bit throughout, journalled, with
 extents, clones of a file that share their blocks until one of them is

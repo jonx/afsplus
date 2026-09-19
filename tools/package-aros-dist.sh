@@ -268,6 +268,16 @@ This build of it runs: the AFS+ gates mount an AFS+ volume through this
 handler on Hosted MacAROS, exercise the operation matrix against it, replay
 power cuts, and boot a system from an AFS+ partition served by it.
 EOF
+elif [ "$profile_qualified" = qemu ]; then
+    cat >"$work/qualification" <<EOF
+This build of it runs. On an AROS $profile_cpu PC in QEMU, booted from the
+nightly ISO, it mounts a 64 MiB AFS+ volume on a raw ata.device disk and
+serves it: the Alpha-0 operation matrix, the DOS semantics probe and its
+hundred steady rounds, the tour of clones, watches and attributes, and a
+clean dismount, with the volume checking clean afterwards on the host. What
+has not been done on $profile_cpu is a power-cut replay, a boot from an AFS+
+partition, and a benchmark.
+EOF
 else
     cat >"$work/qualification" <<EOF
 This build of it has never been run. It is compiled, linked and audited as a

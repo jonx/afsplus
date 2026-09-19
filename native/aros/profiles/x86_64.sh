@@ -5,8 +5,9 @@
 # against the Developer directory of an x86_64 AROS nightly, and linked by a
 # collect-aros built for x86_64.
 #
-# Nothing here has been executed on an AROS machine. The package this profile
-# produces says so.
+# What this profile produces has been run: tools/check-qemu-aros-x86_64.sh
+# mounts an AFS+ volume with it on a pc-x86_64 AROS in QEMU and puts the
+# probes through it. The package says that, and says what is still untried.
 #
 # Sourced by tools/package-aros-dist.sh.
 
@@ -15,7 +16,7 @@
 aros_sdk=${AFSPLUS_AROS_SDK_ROOT:-$(ls -d "$HOME"/aros-native/AROS-*-linux-x86_64-system/Developer 2>/dev/null | tail -1)}
 
 profile_id=${AFSPLUS_AROS_PROFILE_ID:-x86_64}
-profile_qualified=${AFSPLUS_AROS_QUALIFIED:-no}
+profile_qualified=${AFSPLUS_AROS_QUALIFIED:-qemu}
 profile_cpu=${AFSPLUS_AROS_CPU:-x86_64}
 
 aros_cc=${AFSPLUS_AROS_CC:-"$LLVM/bin/clang"}
