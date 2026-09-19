@@ -45,6 +45,9 @@ numeric lock/file-handle and durability semantics.
 - [Reproduce the bridge qualification](#reproduce-the-bridge-qualification)
 - [Reproduce the Hosted target run](#reproduce-the-hosted-target-run)
 - [AArch64 platform profiles](#aarch64-platform-profiles)
+- [Distribution builds per CPU](#distribution-builds-per-cpu)
+  - [The x86_64 profile](#the-x8664-profile)
+  - [What x86_64 and m68k still lack](#what-x8664-and-m68k-still-lack)
 - [Trackdisk viewport](#trackdisk-viewport)
 - [Qualification diagnostics](#qualification-diagnostics)
 - [Native lifecycle](#native-lifecycle)
@@ -211,6 +214,70 @@ It creates `build/aros-alpha0` atomically and refuses to replace an existing
 package. The directory contains the complete handler, target operation probe,
 DOSDriver, clean 64-MiB `fdsk.device` image, host checker report, instructions
 and hashes. No MacAROS tree is modified by the packaging command.
+
+## Distribution builds per CPU
+
+The profiles above are variables a caller sets. A profile meant to be
+*distributed* is a file, so that the same build can be repeated by someone
+else: `native/aros/profiles/<id>.sh`, one per platform, holding the same
+contract ADR-051 defines plus what a cross-build needs that a Hosted build
+does not (the include and library roots, the defines a stock clang does not
+predefine for the AROS triple, the `collect-aros` for that CPU). There are two
+today, `darwin-aarch64` and `x86_64`.
+
+### The x86_64 profile
+
+AROS on a PC is the build most people would install. It is cross-built on
+macOS: the Homebrew LLVM clang knows the `x86_64-unknown-aros` triple, the
+headers and libraries come from the `Developer` directory of an x86_64 AROS
+nightly, and the link goes through a `collect-aros` built for x86_64, because
+that tool is fixed to one CPU at build time. Pkg's `tools/build-aros-x86_64.sh`
+builds it; the profile reuses it rather than building a second one.
+
+[`native/aros/x86_64-unknown-aros.json`](../native/aros/x86_64-unknown-aros.json)
+is the Rust target. It differs from the AArch64 one where the CPU differs and
+nowhere else:
+
+| Setting | Value | Why |
+|---|---|---|
+| `llvm-target` | `x86_64-unknown-none-elf` | No host `std` assumptions; AROS `std` is the seven glues |
+| `features` | `+sse,+sse2` | The x86_64 baseline; AROS uses the SSE registers normally, so no soft float |
+| `code-model` | `large` | AROS builds x86_64 large, and the loader may place a module's sections anywhere in the 64-bit space |
+| `relocation-model` | `static` | A module is relocated by the AROS ELF loader, not by a dynamic linker |
+| `disable-redzone` | `true` | AROS delivers exceptions and interrupts on the interrupted stack |
+| `max-atomic-width` | `64` | The widest atomic the x86_64 ABI guarantees without `cmpxchg16b` |
+| `panic-strategy` | `abort` | As on AArch64: a handler has nowhere to unwind to |
+
+There is no `-ffixed-x18` equivalent: reserving `x18` is a Hosted-on-Darwin
+requirement, and nothing on x86_64 AROS reserves a general register. The C
+flags are `-mcmodel=large -mno-red-zone`, matching the Rust target and AROS's
+own `configure`.
+
+The audit is per profile for the same reason.
+[`tools/check-aros-x86_64-abi.py`](../tools/check-aros-x86_64-abi.py) asks the
+questions x86_64 raises: an `ET_REL` object with the AROS OSABI and ABI
+version 1 and `EM_X86_64`; only the relocation types
+`rom/dos/internalloadseg_elf.c` resolves for this CPU (`R_X86_64_NONE`, `_64`,
+`_PC32`, `_PLT32`, `_32`, `_32S`, `_PC64`, `_GOTOFF64`), since anything else
+is a wrong address at load time rather than a link error; and no undefined
+symbol, because nothing resolves one after the link.
+
+### What x86_64 and m68k still lack
+
+The x86_64 handler compiles, links and audits clean. It has never been run.
+Nobody has mounted an AFS+ volume with it on an AROS PC, and the package it
+produces says so in its `ReadMe` and in `qualified=no` in
+`build-profile.txt`. What stands between it and the Hosted build's standing is
+a run: an x86_64 AROS with the handler in `L:`, a DOSDriver, and the Alpha-0
+operation matrix and crash replay through it.
+
+There is no m68k distribution profile.
+[`tools/check-aros-ffi.sh`](../tools/check-aros-ffi.sh) compiles and links the
+C shell for m68k, which proves the headers and the ABI agree but is not a
+handler: the complete m68k module needs the Rust toolchain whose LLVM carries
+the m68k backend patch, which
+[`tools/check-aros-m68k-alpha0-fsuae.sh`](../tools/check-aros-m68k-alpha0-fsuae.sh)
+uses.
 
 ## Trackdisk viewport
 
