@@ -4,6 +4,7 @@ C:FailAt 21
 C:AFSPlusInfo SYS: >MacRW:s2-info-sys.json
 C:Info SYS: >MacRW:s2-info.out
 C:Copy SYS:s2-origin MacRW:s2-origin >NIL:
+C:AFSPlusTour SYS: >MacRW:s2-tour.out
 If NOT EXISTS "RAM:Clipboards"
     C:MakeDir "RAM:Clipboards"
 EndIf
@@ -45,7 +46,7 @@ C:Run <NIL: >NIL: QUIET WANDERER:Wanderer
 C:Wait 3
 C:Run <NIL: >NIL: QUIET SYS:Utilities/Clock
 C:Wait 1
-C:Run <NIL: >NIL: C:NewShell "CON:130/400/1220/360/AROS booted from AFS+/CLOSE" FROM S:AFSPlus-Proof
-C:Wait 2
+C:Run <NIL: >NIL: C:NewShell "CON:130/300/1220/460/AROS booted from AFS+/CLOSE" FROM S:AFSPlus-Tour
+C:Wait 4
 C:Echo afsplus >MacRW:done
 C:EndCLI >NIL:

@@ -148,6 +148,10 @@ echo "[aros-package] build the target-side clone-or-copy tool"
 build_target_program native/aros/tools/afsplus_clone.c AFSPlusClone \
     native/aros/client/afsplus_client.c native/aros/client/afsplus_copy.c
 
+echo "[aros-package] build the target-side tour of the extension interface"
+build_target_program native/aros/tools/afsplus_tour.c AFSPlusTour \
+    native/aros/client/afsplus_client.c
+
 echo "[aros-package] build the target-side benchmark runner"
 build_target_program native/aros/tools/afsplus_bench.c AFSPlusBench \
     native/aros/client/afsplus_client.c
@@ -207,7 +211,7 @@ cp docs/aros-alpha0-package.md "$staging/README.md"
 (
     cd "$staging"
     shasum -a 256 afsplus-handler AFSPlusAlpha0Probe AFSPlusDosProbe \
-        AFSPlusInfo AFSPlusClone FDSKUpdateProbe AFSPlusDriverProbe AFSPlusBench BASE20 \
+        AFSPlusInfo AFSPlusClone FDSKUpdateProbe AFSPlusDriverProbe AFSPlusTour AFSPlusBench BASE20 \
         AFSPlusReplayProbe \
         AFSPlusS1Probe AFSPlusS1bProbe AFSPlusS1Pivot AFSPLUS19 Unit19 \
         abi-report.txt build-profile.txt check-before.json README.md \

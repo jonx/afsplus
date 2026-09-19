@@ -116,6 +116,8 @@ done
 mkdir "$source_tree/S"
 cp native/aros/tests/s2-startup-sequence "$source_tree/S/Startup-Sequence"
 cp native/aros/tests/s1b-proof "$source_tree/S/AFSPlus-Proof"
+cp native/aros/tests/s2-tour "$source_tree/S/AFSPlus-Tour"
+cp "$package/AFSPlusTour" "$source_tree/C/AFSPlusTour"
 cp "$package/AFSPlusInfo" "$source_tree/C/AFSPlusInfo"
 cp "$package/afsplus-handler" "$source_tree/L/afsplus-handler"
 printf '%s' afsplus-s2 >"$source_tree/s2-origin"
@@ -175,6 +177,14 @@ grep -q '^{"schema":"afsplus-handler-info"' "$result/s2/s2-info-sys.json"
 grep -q '"label":"AFSPlusS2"' "$result/s2/s2-info-sys.json"
 grep -q 'AFS+' "$result/s2/s2-info.out"
 [ "$(cat "$result/s2/s2-origin")" = afsplus-s2 ]
+# The tour of the v2 interface, run from the boot volume on itself.
+for tour_step in volume clone watch attribute; do
+    grep -qx "\[AFSPLUS-TOUR\] $tour_step PASS" "$result/s2/s2-tour.out" || {
+        echo "[hosted-s2] the tour failed at $tour_step:" >&2
+        cat "$result/s2/s2-tour.out" >&2
+        exit 1
+    }
+done
 
 echo "[hosted-s2] the same boot without the AFS+ handler module"
 remove_module_lines

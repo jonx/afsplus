@@ -1,0 +1,6 @@
+; Shown on the S2 desktop: the boot volume, and what its interface gives.
+FailAt 21
+Echo "1> Info SYS:"
+Info SYS:
+Echo "1> AFSPlusTour SYS:"
+AFSPlusTour SYS:
