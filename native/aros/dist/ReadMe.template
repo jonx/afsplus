@@ -1,0 +1,75 @@
+AFS+ for AROS
+=============
+
+This is the AFS+ filesystem handler for AROS, built for @CPU@ by the build
+profile @PROFILE_ID@, with the four programs that look at an AFS+ volume from
+the machine itself.
+
+AFS+ is a new filesystem for AROS: 64-bit throughout, journalled, with
+extents, clones of a file that share their blocks until one of them is
+written, extended attributes and a change stream programs can watch. It reads
+and writes its own format only; it is not a Fast File System replacement that
+understands old volumes.
+
+This release is alpha.
+@QUALIFICATION@
+
+
+What is in here
+---------------
+
+  L/afsplus-handler            the filesystem itself, an AROS module
+  C/AFSPlusInfo                what a mounted AFS+ volume is doing
+  C/AFSPlusTour                a tour of clones, watches and attributes
+  C/AFSPlusClone               clone a file, or copy it if the volume cannot
+  C/AFSPlusDriverProbe         what a block device promises the handler
+  Devs/DOSDrivers/AFSPLUS.example  a mountlist to edit and rename
+  ReadMe                       this file
+  SHA256SUMS                   the hash of every file above
+  abi-report.txt               the machine-code audit of the handler
+  build-profile.txt            exactly which toolchain and inputs built it
+
+
+Installing it
+-------------
+
+  Copy L/afsplus-handler to L:
+  Copy C/#? to C:
+  Copy Devs/DOSDrivers/AFSPLUS.example to DEVS:DOSDrivers/AFSPLUS
+
+Then edit DEVS:DOSDrivers/AFSPLUS: it is commented, and the lines you have to
+change are Device, Unit and the geometry of the partition. Mount it with
+
+  Mount AFSPLUS:
+
+A volume has to exist on that partition first. AFS+ volumes are made on a
+host with mkafsplus, from the AFS+ source tree; there is no target-side
+formatter in this release.
+
+
+Two things worth knowing
+------------------------
+
+COMMIT= says how long a change may wait before it reaches the disk. The
+default, COMMIT=5, lets five seconds of changes gather, which is what makes
+writing many small files fast. A power cut loses at most the changes still
+waiting, whole and in order: the volume is never half written. A partition
+you boot from should use COMMIT=SYNC, which lets nothing wait.
+
+CACHE=AUTO, the default, sizes the cache from the machine's free memory and
+treats Buffers as a floor. CACHE=BUFFERS takes Buffers exactly, for a machine
+where memory is the scarce thing.
+
+Both go in the Control line of the DOSDriver. The file lists the rest.
+
+
+Where it came from
+------------------
+
+This was built from the AFS+ source tree at revision @REVISION@. Licensing is
+not settled yet: LICENSE.md in that tree says what is proposed, and this
+package carries no licence grant of its own.
+
+build-profile.txt records the compiler, the SDK, the Rust target and the hash
+of every build input, so that this exact handler can be rebuilt. abi-report.txt
+is the audit that says the module is loadable by this CPU's AROS ELF loader.

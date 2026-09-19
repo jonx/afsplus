@@ -1,0 +1,72 @@
+/* AFS+ DOSDriver. Copy this to DEVS:DOSDrivers/AFSPLUS (no .example), edit
+   Device, Unit and the geometry to name your partition, and mount it with
+   "Mount AFSPLUS:". The handler itself must be in L:.
+
+   Everything below the geometry is already right for AFS+; the lines you
+   normally change are Device, Unit, LowCyl and HighCyl.                     */
+
+/* The handler, loaded from L:. */
+FileSystem      = afsplus-handler
+
+/* The block device holding the partition, and which unit of it. On a PC
+   ata.device unit 0 is usually the first disk; under Hosted AROS the disk
+   images are fdsk.device or hostdisk.device.                                */
+Device          = ata.device
+Unit            = 0
+
+Flags           = 0
+
+/* The partition, in the device's own blocks. A whole unit that AFS+ owns
+   alone is Surfaces 1, BlocksPerTrack 1, LowCyl 0 and HighCyl the last
+   block; a partition inside a larger disk uses the geometry that disk
+   reports.                                                                  */
+Surfaces        = 1
+BlocksPerTrack  = 1
+LowCyl          = 0
+HighCyl         = 16383
+Reserved        = 0
+
+/* AFS+ uses 4096-byte blocks. Do not change this: it is the block size of
+   the volume on disk, not a tuning knob.                                    */
+BlockSize       = 4096
+
+/* Cache size in blocks. With CACHE=AUTO below the handler sizes its cache
+   from the machine's free memory and treats this as the floor.              */
+Buffers         = 64
+BufMemType      = 1
+Mask            = 0
+
+/* The handler runs the whole filesystem on this stack. 262144 is the
+   qualified value; less has not been tested.                                */
+StackSize       = 262144
+Priority        = 5
+GlobVec         = -1
+
+/* "AFS+". The identifier the handler claims; leave it alone.                */
+DosType         = 0x4146532b
+
+/* 1 mounts the volume at boot, 0 only when something asks for AFSPLUS:.     */
+Activate        = 1
+
+/* Control tunes the mount. Keywords are separated by spaces or commas and
+   each may appear once. Uncomment the line you want.
+
+   COMMIT=<seconds>   how long a change may wait before it reaches the disk.
+                      The default is 5. A crash loses at most the waiting
+                      changes, whole and in order.
+   COMMIT=SYNC        every change reaches the disk before the program is
+                      told it is done. Slower, and what a boot partition
+                      should use.
+   CACHE=AUTO         size the cache from free memory (the default).
+   CACHE=BUFFERS      use exactly the Buffers above and nothing more.
+   SECURITY=PRESERVE  keep the protection bits as they are (the default).
+   SECURITY=STRICT    project the volume's permissions strictly.
+   SECURITY=DOWNGRADE accept a volume whose permissions this machine cannot
+                      represent, with the bits it can.
+   ENCODING=UTF8      names on the packet interface are UTF-8 (the default).
+   ENCODING=LATIN1    names are Latin-1, for older programs.
+   TRACE=OFF          no handler tracing (the default); TRACE=<n> keeps the
+                      last n events for AFSPlusInfo.
+
+   Control        = "COMMIT=5 CACHE=AUTO"
+   Control        = "COMMIT=SYNC CACHE=AUTO SECURITY=PRESERVE"              */

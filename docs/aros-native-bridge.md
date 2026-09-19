@@ -225,6 +225,17 @@ does not (the include and library roots, the defines a stock clang does not
 predefine for the AROS triple, the `collect-aros` for that CPU). There are two
 today, `darwin-aarch64` and `x86_64`.
 
+[`tools/package-aros-dist.sh`](../tools/package-aros-dist.sh) `<profile>
+<output-dir>` builds the handler and the four target programs with one
+profile and lays them out the way a machine wants them and Pkg, the project's
+package manager, publishes them: `L/afsplus-handler`,
+`C/AFSPlusInfo`, `C/AFSPlusTour`, `C/AFSPlusClone`, `C/AFSPlusDriverProbe`,
+`Devs/DOSDrivers/AFSPLUS.example`, a `ReadMe` a person can act on,
+`abi-report.txt`, `build-profile.txt` (format v3) and `SHA256SUMS`. With a
+`pkg` on `PATH` or in `AFSPLUS_PKG` it also writes `MANIFEST.txt`, the
+description a publish would sign; signing needs a key this script never sees,
+so it stops there. It installs nothing and starts nothing.
+
 ### The x86_64 profile
 
 AROS on a PC is the build most people would install. It is cross-built on
@@ -277,7 +288,8 @@ C shell for m68k, which proves the headers and the ABI agree but is not a
 handler: the complete m68k module needs the Rust toolchain whose LLVM carries
 the m68k backend patch, which
 [`tools/check-aros-m68k-alpha0-fsuae.sh`](../tools/check-aros-m68k-alpha0-fsuae.sh)
-uses.
+uses. `tools/package-aros-dist.sh m68k` says that and refuses rather than
+producing a drawer with no handler in it.
 
 ## Trackdisk viewport
 
