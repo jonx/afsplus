@@ -452,3 +452,49 @@ fn a_logged_create_appended_after_its_fsync_keeps_what_the_record_named() {
     let id = vol.lookup_root("g").unwrap().unwrap();
     assert_eq!(vol.read_file(id).unwrap(), whole);
 }
+
+#[test]
+fn an_extended_logged_create_that_is_rewritten_or_cancelled_keeps_its_whole_run() {
+    // The append grew the run behind the one the durable record names. A
+    // later rewrite or delete must account for all of it, and quarantine it
+    // rather than release blocks an earlier record still describes.
+    for delete in [false, true] {
+        let mut vol = mount(formatted()).unwrap();
+        let id = vol
+            .window_op(&create("g", &[0x61; 5000]), ts(1))
+            .unwrap()
+            .unwrap();
+        vol.window_fsync().unwrap();
+        vol.window_write_file_at(id, 5000, &[0x62; 9000], ts(2))
+            .unwrap();
+        if delete {
+            vol.window_op(
+                &BatchOp::DeleteFile {
+                    parent_id: OBJECT_ROOT,
+                    name: "g",
+                },
+                ts(3),
+            )
+            .unwrap();
+        } else {
+            // Below the end of the file: the rewrite answers, and the whole
+            // extended run goes with it.
+            vol.window_write_file_at(id, 0, b"rewritten", ts(3))
+                .unwrap();
+        }
+        vol.window_commit(ts(4)).unwrap();
+        let mut dev = vol.into_device();
+        let report = check_device(&mut dev);
+        assert!(report.is_clean(), "delete={delete}: {:?}", report.errors);
+        let mut vol = mount(dev).unwrap();
+        match vol.lookup_root("g").unwrap() {
+            None => assert!(delete, "the file disappeared without a delete"),
+            Some(id) => {
+                let mut expected = vec![0x61u8; 5000];
+                expected.extend_from_slice(&[0x62; 9000]);
+                expected[..9].copy_from_slice(b"rewritten");
+                assert_eq!(vol.read_file(id).unwrap(), expected, "delete={delete}");
+            }
+        }
+    }
+}
