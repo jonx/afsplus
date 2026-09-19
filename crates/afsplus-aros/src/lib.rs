@@ -398,7 +398,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         });
         let mut known_parents = BTreeMap::new();
         known_parents.insert(OBJECT_ROOT, (None, config.volume_name.clone()));
-        ArosAdapter {
+        let mut adapter = ArosAdapter {
             health: health::HealthLog::new(config.health_event_capacity),
             security: Box::new(ProtectionBitsOnly),
             vfs,
@@ -416,6 +416,21 @@ impl<D: BlockDevice> ArosAdapter<D> {
             next_lock: 1,
             next_file: 1,
             next_watch: 1,
+        };
+        // What mount itself saw about the volume is a health event of this
+        // mount, recorded here because no later call would ever report it.
+        adapter.collect_health_notes();
+        adapter
+    }
+
+    /// Moves what the VFS observed about the volume into the health log.
+    ///
+    /// The boundary above calls this after every operation: the states it
+    /// reports (a checkpoint fallback, a reclaim backlog, a free-count
+    /// mismatch) fail nothing, so no result carries them.
+    pub fn collect_health_notes(&mut self) {
+        for note in self.vfs.take_health_notes() {
+            self.health.record_note(note);
         }
     }
 
@@ -1829,10 +1844,12 @@ impl<D: BlockDevice> ArosAdapter<D> {
     /// The health log. The boundary that turns results into `IoErr()` values
     /// records every failure here; the adapter's callers decide nothing.
     pub fn health_log(&mut self) -> &mut health::HealthLog {
+        self.collect_health_notes();
         &mut self.health
     }
 
     pub fn health(&mut self) -> Result<health::HealthSnapshot, ArosError> {
+        self.collect_health_notes();
         let statfs = self.vfs.statfs();
         let mount_mode = self.vfs.mount_mode();
         let pending_intent_records = self.vfs.pending_intent_records();
@@ -1849,6 +1866,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
             corruption_errors: 0,
             no_space_errors: 0,
             internal_faults: 0,
+            checkpoint_fallbacks: 0,
+            reclaim_backlog_highs: 0,
+            free_count_mismatches: 0,
             events_recorded: 0,
             events_dropped: 0,
             last_error: 0,

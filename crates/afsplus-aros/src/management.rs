@@ -57,7 +57,9 @@ fn mount_mode_name(mode: MountMode) -> &'static str {
 
 impl<D: BlockDevice> ArosAdapter<D> {
     /// One JSON object describing the volume, mount, capabilities, health and
-    /// handle usage. Field order is fixed; additions raise the version.
+    /// handle usage. Field order is fixed, and a reader keyed on names keeps
+    /// working when a counter is added, so an addition leaves the version
+    /// alone; a rename or a removal raises it.
     pub fn info_json(&mut self) -> Result<String, ArosError> {
         let identity = self.vfs.identity();
         let policy = self.volume_policy();
@@ -78,7 +80,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
              \"pending_orphans\":{}}},\
              \"capabilities\":{},\
              \"health\":{{\"flags\":{},\"device_errors\":{},\"corruption_errors\":{},\
-             \"no_space_errors\":{},\"internal_faults\":{},\"events_recorded\":{},\
+             \"no_space_errors\":{},\"internal_faults\":{},\
+             \"checkpoint_fallbacks\":{},\"reclaim_backlog_highs\":{},\
+             \"free_count_mismatches\":{},\"events_recorded\":{},\
              \"events_dropped\":{},\"last_error\":{}}},\
              \"handles\":{{\"locks\":{},\"files\":{},\"watches\":{}}}}}",
             json_string(INFO_SCHEMA),
@@ -110,6 +114,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
             health.corruption_errors,
             health.no_space_errors,
             health.internal_faults,
+            health.checkpoint_fallbacks,
+            health.reclaim_backlog_highs,
+            health.free_count_mismatches,
             health.events_recorded,
             health.events_dropped,
             health.last_error,

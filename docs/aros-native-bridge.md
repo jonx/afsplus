@@ -566,7 +566,17 @@ that describes the volume or its device (device error, failed validation,
 disk full, internal fault) enters a health log with counters, degraded-state
 flags and a bounded event ring whose sequence numbers expose loss.
 `afsplus_aros_health` returns that state with the generation, pending intent
-records, pending orphans and block counts. `afsplus_aros_set_trace_sink`
+records, pending orphans and block counts. Three events describe the volume
+without failing a call, so they carry `dos_error` 0 and set no degraded-state
+flag: `CHECKPOINT_FALLBACK` (5) once at mount when the newer checkpoint of the
+A/B pair was unusable and the volume reads the older one,
+`RECLAIM_BACKLOG_HIGH` (6) each time retired space waiting to come back
+crosses a sixteenth of the volume (at least 4096 blocks), and again only after
+it has fallen below half of that, and `REGION_FREECOUNT_MISMATCH` (7) once at
+mount when the checkpoint's free-block total disagrees with the sum over its
+own allocation-root region records. Their counters were appended to
+`AfsplusArosHealth` after its first published layout, which a caller that
+declares the old size still receives unchanged. `afsplus_aros_set_trace_sink`
 attaches the core flight recorder to a callback of
 [`debug_observability.h`](../api/debug_observability.h) with a category mask;
 the callback runs inside filesystem operations and only hands the event to a
@@ -604,7 +614,8 @@ inferring traffic from elapsed time.
 instance: `afsplus_aros_info_json` returns one JSON object with schema
 `afsplus-handler-info` and its `schema_version`, then volume identity and
 feature masks, mount state, capability names, health and handle usage. Field
-order is fixed and an addition raises the version. A target tool is a thin
+order is fixed; a reader keyed on names survives a new counter, so an addition
+leaves the version alone and a rename or a removal raises it. A target tool is a thin
 client that prints this document.
 
 `ACTION_SEEK64`, size/position variants and `DosPacket64.dp_Res0 == DP64_INIT`

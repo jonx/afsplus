@@ -415,6 +415,38 @@ fn delayed_room_blocks(total_blocks: u64) -> u64 {
 /// Orphan cleanups, and reclaim steps, one idle tick of a delayed mount runs.
 const IDLE_STEPS_PER_TICK: usize = 32;
 
+/// A state of the volume the VFS observes but no caller asked about, and
+/// that no result can report: nothing failed, so there is no error to
+/// return. An adapter drains them with [`Vfs::take_health_notes`] and turns
+/// them into whatever its host calls a health event; a caller that never
+/// asks pays for none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthNote {
+    /// The newer checkpoint of the A/B pair was unusable and the volume
+    /// mounted from the older one: the last commit before this mount is not
+    /// in what the volume now shows.
+    CheckpointFallback,
+    /// The reclaim backlog crossed [`reclaim_backlog_high_blocks`]. Raised
+    /// once per crossing: the next one needs the backlog to fall below half
+    /// the threshold first, so a volume that simply stays high says so once.
+    ReclaimBacklogHigh,
+    /// The mounted checkpoint's free-block total disagrees with the sum over
+    /// its own allocation-root region records.
+    RegionFreeCountMismatch,
+}
+
+/// How many undrained notes a mount keeps. Notes are transitions, not
+/// events per operation, and an adapter that asks for health at all drains
+/// them; past this, a repeated fact is dropped rather than grown.
+const HEALTH_NOTES_MAX: usize = 8;
+
+/// The reclaim backlog that counts as high: a sixteenth of the volume, never
+/// less than 4096 blocks, so a small volume does not call an ordinary
+/// deletion a backlog.
+pub fn reclaim_backlog_high_blocks(total_blocks: u64) -> u64 {
+    (total_blocks / 16).max(4_096)
+}
+
 pub struct Vfs<D: BlockDevice> {
     volume: Volume<D>,
     handles: BTreeMap<Handle, OpenHandle>,
@@ -438,6 +470,15 @@ pub struct Vfs<D: BlockDevice> {
     /// Clock of the latest change, kept past the commit: idle time is
     /// measured from it.
     last_change: Option<Timespec>,
+    /// Undrained health notes, and the state the backlog note needs to be a
+    /// transition rather than a repetition.
+    notes: Vec<HealthNote>,
+    backlog_high: bool,
+    /// The mount facts are established at the first drain, not at mount: a
+    /// mount that nobody asks about does no work for them. The fallback is
+    /// read from the volume at mount because the first commit supersedes it.
+    mount_notes_pending: bool,
+    mounted_from_older_checkpoint: bool,
 }
 
 impl<D: BlockDevice> Vfs<D> {
@@ -455,6 +496,7 @@ impl<D: BlockDevice> Vfs<D> {
 
     pub fn new(volume: Volume<D>) -> Self {
         Vfs {
+            mounted_from_older_checkpoint: volume.mounted_from_older_checkpoint(),
             volume,
             handles: BTreeMap::new(),
             directory_resume: BTreeMap::new(),
@@ -467,6 +509,9 @@ impl<D: BlockDevice> Vfs<D> {
             window_changes: 0,
             window_deletes: 0,
             last_change: None,
+            notes: Vec::new(),
+            backlog_high: false,
+            mount_notes_pending: true,
         }
     }
 
@@ -538,6 +583,11 @@ impl<D: BlockDevice> Vfs<D> {
     /// that was never idle ran out of space in the commit of its deletes:
     /// each window of 512 took some 570 blocks and none came back.
     fn after_window_commit(&mut self, now: Timespec) {
+        self.after_window_commit_maintenance(now);
+        self.note_reclaim_backlog();
+    }
+
+    fn after_window_commit_maintenance(&mut self, now: Timespec) {
         let deletes = self.window_deletes;
         self.forget_window();
         if !self.idle_maintenance || !self.inline_maintenance {
@@ -547,16 +597,18 @@ impl<D: BlockDevice> Vfs<D> {
             if let Ok(pending) = self.volume.orphan_count() {
                 if pending > DELAYED_ORPHANS_MAX {
                     let excess = (pending - DELAYED_ORPHANS_MAX) as usize;
-                    let _ = self.cleanup_orphans(2 * excess, now);
-                    let _ = self.reclaim_space(2 * excess, now);
+                    let _ = self.cleanup_orphans_inner(2 * excess, now);
+                    let _ = self.reclaim_space_inner(2 * excess, now);
                 }
             }
         }
         let room = delayed_room_blocks(self.volume.ident().total_blocks);
         while self.volume.available_blocks() < room {
             // Orphans first: cleaning one is what fills the reclaim queue.
-            let step = match self.cleanup_orphans(1, now) {
-                Ok(0) => self.reclaim_space(1, now).map(|blocks| blocks as usize),
+            let step = match self.cleanup_orphans_inner(1, now) {
+                Ok(0) => self
+                    .reclaim_space_inner(1, now)
+                    .map(|blocks| blocks as usize),
                 other => other,
             };
             if !matches!(step, Ok(steps) if steps > 0) {
@@ -571,8 +623,12 @@ impl<D: BlockDevice> Vfs<D> {
         if !self.idle_maintenance || !self.inline_maintenance {
             return false;
         }
-        let cleaned = self.cleanup_orphans(IDLE_STEPS_PER_TICK, now).unwrap_or(0);
-        let returned = self.reclaim_space(IDLE_STEPS_PER_TICK, now).unwrap_or(0);
+        let cleaned = self
+            .cleanup_orphans_inner(IDLE_STEPS_PER_TICK, now)
+            .unwrap_or(0);
+        let returned = self
+            .reclaim_space_inner(IDLE_STEPS_PER_TICK, now)
+            .unwrap_or(0);
         cleaned > 0 || returned > 0
     }
 
@@ -673,6 +729,9 @@ impl<D: BlockDevice> Vfs<D> {
         // Deleted files are cleaned, and their space returned, while nothing
         // else happens; a tick that finds nothing to do lets the caller rest.
         let working = idle && !self.volume.window_open() && self.idle_maintenance_step(now);
+        if working {
+            self.note_reclaim_backlog();
+        }
         Ok(self.volume.window_open() || working)
     }
 
@@ -698,6 +757,68 @@ impl<D: BlockDevice> Vfs<D> {
         self.volume
             .flight_recorder_mut()
             .map(|mut recorder| inspect(&mut recorder))
+    }
+
+    /// Drains the health notes this mount has gathered ([`HealthNote`]).
+    ///
+    /// The first call establishes what mount itself observed, which costs one
+    /// bounded read of the allocation root and one of the orphan directory;
+    /// every later call is a move of a list that is almost always empty. An
+    /// adapter calls it after each operation and after mount.
+    pub fn take_health_notes(&mut self) -> Vec<HealthNote> {
+        if self.mount_notes_pending {
+            self.mount_notes_pending = false;
+            if self.mounted_from_older_checkpoint {
+                self.push_note(HealthNote::CheckpointFallback);
+            }
+            if matches!(self.volume.checkpoint_free_count_mismatch(), Ok(Some(_))) {
+                self.push_note(HealthNote::RegionFreeCountMismatch);
+            }
+            self.note_reclaim_backlog();
+        }
+        std::mem::take(&mut self.notes)
+    }
+
+    fn push_note(&mut self, note: HealthNote) {
+        if self.notes.len() < HEALTH_NOTES_MAX {
+            self.notes.push(note);
+        }
+    }
+
+    /// Records the crossing of the reclaim backlog threshold, once per
+    /// crossing. The backlog is what the volume has retired but not yet
+    /// returned: the blocks quarantined in the reclaim queue plus the
+    /// deleted files still waiting to be cleaned.
+    ///
+    /// The orphans are a read, so they are only counted when the blocks
+    /// alone leave the answer open; a commit on a volume whose queue is
+    /// already past the threshold adds no read at all.
+    fn note_reclaim_backlog(&mut self) {
+        let threshold = reclaim_backlog_high_blocks(self.volume.ident().total_blocks);
+        let blocks = self.volume.reclaim_pending_blocks();
+        let decided = if self.backlog_high {
+            blocks >= threshold / 2
+        } else {
+            blocks >= threshold
+        };
+        let backlog = if decided {
+            blocks
+        } else {
+            blocks.saturating_add(self.volume.orphan_count().unwrap_or(0))
+        };
+        if self.backlog_high {
+            if backlog < threshold / 2 {
+                self.backlog_high = false;
+            }
+        } else if backlog >= threshold {
+            self.backlog_high = true;
+            self.push_note(HealthNote::ReclaimBacklogHigh);
+        }
+    }
+
+    /// Whether the reclaim backlog is above the threshold it last crossed.
+    pub fn reclaim_backlog_high(&self) -> bool {
+        self.backlog_high
     }
 
     pub fn pending_intent_records(&self) -> u32 {
@@ -728,6 +849,12 @@ impl<D: BlockDevice> Vfs<D> {
     /// leaves behind is storage the older checkpoint still protects; the next
     /// transaction releases it.
     pub fn reclaim_space(&mut self, max_steps: usize, now: Timespec) -> Result<u64, VfsError> {
+        let returned = self.reclaim_space_inner(max_steps, now);
+        self.note_reclaim_backlog();
+        returned
+    }
+
+    fn reclaim_space_inner(&mut self, max_steps: usize, now: Timespec) -> Result<u64, VfsError> {
         if self.volume.mount_mode() != MountMode::ReadWrite {
             return Ok(0);
         }
@@ -1289,8 +1416,8 @@ impl<D: BlockDevice> Vfs<D> {
         if !self.idle_maintenance || !self.inline_maintenance {
             return;
         }
-        let _ = self.cleanup_orphans(ORPHAN_STEPS_PER_RELEASE, now);
-        let _ = self.reclaim_space(RECLAIM_STEPS_PER_RELEASE, now);
+        let _ = self.cleanup_orphans_inner(ORPHAN_STEPS_PER_RELEASE, now);
+        let _ = self.reclaim_space_inner(RECLAIM_STEPS_PER_RELEASE, now);
     }
 
     /// Reclaim deleted space while it runs short, before an operation that
@@ -1361,10 +1488,13 @@ impl<D: BlockDevice> Vfs<D> {
         // space stopped coming back. With work waiting, the window is
         // published first.
         self.checkpoint_data_window(now)?;
-        if self.cleanup_orphans(1, now)? > 0 {
-            return Ok(true);
-        }
-        Ok(self.reclaim_space(1, now)? > 0)
+        let progressed = if self.cleanup_orphans_inner(1, now)? > 0 {
+            true
+        } else {
+            self.reclaim_space_inner(1, now)? > 0
+        };
+        self.note_reclaim_backlog();
+        Ok(progressed)
     }
 
     /// Resume the maintenance that bounded operations leave behind, and say
@@ -1381,8 +1511,9 @@ impl<D: BlockDevice> Vfs<D> {
         if self.volume.mount_mode() != MountMode::ReadWrite || !self.idle_maintenance {
             return Ok(false);
         }
-        self.cleanup_orphans(budget, now)?;
-        self.reclaim_space(budget, now)?;
+        self.cleanup_orphans_inner(budget, now)?;
+        self.reclaim_space_inner(budget, now)?;
+        self.note_reclaim_backlog();
         Ok(self.volume.first_orphan()?.is_some() || self.volume.reclaim_pending_blocks() > 0)
     }
 
@@ -1394,6 +1525,16 @@ impl<D: BlockDevice> Vfs<D> {
     /// is cleaned at last close, which is what [`Self::close`] already does.
     /// Bounded by `max_steps`, and it stops as soon as a step makes no progress.
     pub fn cleanup_orphans(&mut self, max_steps: usize, now: Timespec) -> Result<usize, VfsError> {
+        let steps = self.cleanup_orphans_inner(max_steps, now);
+        self.note_reclaim_backlog();
+        steps
+    }
+
+    fn cleanup_orphans_inner(
+        &mut self,
+        max_steps: usize,
+        now: Timespec,
+    ) -> Result<usize, VfsError> {
         if self.volume.mount_mode() != MountMode::ReadWrite {
             return Ok(0);
         }

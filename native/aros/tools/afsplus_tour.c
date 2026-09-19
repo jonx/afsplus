@@ -150,6 +150,10 @@ static void tour(BPTR drawer, CONST_STRPTR drawer_name, UBYTE *chunk)
         Printf("Health: %lu device errors, %lu corruption errors, %lu internal faults.\n",
             (ULONG)health.device_errors, (ULONG)health.corruption_errors,
             (ULONG)health.internal_faults);
+        Printf("Notices: %lu checkpoint fallbacks, %lu reclaim backlogs,"
+            " %lu free-count mismatches.\n",
+            (ULONG)health.checkpoint_fallbacks, (ULONG)health.reclaim_backlog_highs,
+            (ULONG)health.free_count_mismatches);
         step("volume", health.corruption_errors == 0 && health.internal_faults == 0);
     }
     else

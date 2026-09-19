@@ -14,6 +14,7 @@
 
 use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::Checkpoint;
+use afsplus_format::header::{block_type, HEADER_SIZE};
 use afsplus_format::ident::{
     Identification, INCOMPAT_INTENT_LOG, INCOMPAT_INTENT_LOG_DATA_UPDATES,
     INCOMPAT_PERSISTENT_SNAPSHOTS, INCOMPAT_SECURITY_DESCRIPTORS, RO_COMPAT_ORPHAN_DIRECTORY,
@@ -90,6 +91,27 @@ pub struct Selection {
     pub other: Option<Checkpoint>,
     /// Human-readable status per slot, for diagnostics and the checker.
     pub slot_status: [String; 2],
+    /// The rejected slot claimed a generation newer than the chosen one: the
+    /// newer checkpoint of the pair was unusable and this mount reads the
+    /// older one. A slot that was never written, or whose header no longer
+    /// reads as a checkpoint of this volume, claims nothing and is not a
+    /// fallback.
+    pub fell_back_to_older: bool,
+}
+
+/// The generation a rejected slot still claims for itself.
+///
+/// Diagnostic only, and deliberately outside admission: the block failed its
+/// checksum or its structure, so this is what its header says, not a fact
+/// about the volume. It answers one question a health report needs — was the
+/// slot that mount could not use the newer one of the pair.
+fn claimed_generation(block: &[u8]) -> Option<u64> {
+    if block.len() < HEADER_SIZE
+        || afsplus_format::le::get_u32(&block[0..4]) != block_type::CHECKPOINT
+    {
+        return None;
+    }
+    Some(afsplus_format::le::get_u64(&block[16..24]))
 }
 
 /// Structurally selects a checkpoint. Reads exactly three blocks
@@ -103,25 +125,14 @@ pub fn select_checkpoint<D: BlockDevice>(
     let mut buf = vec![0u8; geo.block_size];
     let mut candidates: [Option<Checkpoint>; 2] = [None, None];
     let mut slot_status = [String::new(), String::new()];
+    let mut claimed: [Option<u64>; 2] = [None, None];
 
-    read_checkpoint_candidate(
-        dev,
-        ident,
-        &geo,
-        0,
-        &mut buf,
-        &mut candidates[0],
-        &mut slot_status,
-    )?;
-    read_checkpoint_candidate(
-        dev,
-        ident,
-        &geo,
-        1,
-        &mut buf,
-        &mut candidates[1],
-        &mut slot_status,
-    )?;
+    for slot in 0..2 {
+        let read = read_checkpoint_candidate(dev, ident, &geo, slot, &mut buf)?;
+        candidates[slot] = read.candidate;
+        slot_status[slot] = read.status;
+        claimed[slot] = read.claimed;
+    }
 
     let selection = match (candidates[0].take(), candidates[1].take()) {
         (None, None) => Err(CoreError::NoValidCheckpoint {
@@ -129,12 +140,14 @@ pub fn select_checkpoint<D: BlockDevice>(
             slot_b: slot_status[1].clone(),
         }),
         (Some(chosen), None) => Ok(Selection {
+            fell_back_to_older: claimed[1].is_some_and(|rejected| rejected > chosen.generation),
             chosen,
             chosen_slot: 0,
             other: None,
             slot_status,
         }),
         (None, Some(chosen)) => Ok(Selection {
+            fell_back_to_older: claimed[0].is_some_and(|rejected| rejected > chosen.generation),
             chosen,
             chosen_slot: 1,
             other: None,
@@ -154,6 +167,8 @@ pub fn select_checkpoint<D: BlockDevice>(
                 chosen_slot,
                 other: Some(other),
                 slot_status,
+                // Both slots decoded: neither was rejected.
+                fell_back_to_older: false,
             })
         }
     }?;
@@ -166,29 +181,41 @@ pub fn select_checkpoint<D: BlockDevice>(
     Ok(selection)
 }
 
+/// One slot as selection sees it: the checkpoint if it is admissible, the
+/// diagnostic line either way, and the generation a rejected slot claims.
+struct SlotRead {
+    candidate: Option<Checkpoint>,
+    status: String,
+    claimed: Option<u64>,
+}
+
 fn read_checkpoint_candidate<D: BlockDevice>(
     dev: &mut D,
     ident: &Identification,
     geo: &afsplus_format::geometry::Geometry,
     slot: usize,
     buf: &mut [u8],
-    candidate: &mut Option<Checkpoint>,
-    slot_status: &mut [String; 2],
-) -> Result<(), CoreError> {
+) -> Result<SlotRead, CoreError> {
     dev.read_block(ident.checkpoint_slots[slot], buf)?;
-    match Checkpoint::decode(buf, &ident.uuid) {
+    Ok(match Checkpoint::decode(buf, &ident.uuid) {
         Ok(checkpoint) => match checkpoint.validate_structural(geo) {
-            Ok(()) => {
-                slot_status[slot] = valid_checkpoint_status(checkpoint.generation);
-                *candidate = Some(checkpoint);
-            }
-            Err(error) => {
-                slot_status[slot] = checkpoint_error_status("structurally invalid: ", &error)
-            }
+            Ok(()) => SlotRead {
+                status: valid_checkpoint_status(checkpoint.generation),
+                candidate: Some(checkpoint),
+                claimed: None,
+            },
+            Err(error) => SlotRead {
+                candidate: None,
+                status: checkpoint_error_status("structurally invalid: ", &error),
+                claimed: Some(checkpoint.generation),
+            },
         },
-        Err(error) => slot_status[slot] = checkpoint_error_status("invalid: ", &error),
-    }
-    Ok(())
+        Err(error) => SlotRead {
+            candidate: None,
+            status: checkpoint_error_status("invalid: ", &error),
+            claimed: claimed_generation(buf),
+        },
+    })
 }
 
 #[cfg(target_arch = "m68k")]

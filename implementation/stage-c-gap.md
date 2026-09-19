@@ -255,10 +255,45 @@ and a bounded event ring whose sequence numbers expose loss;
 `afsplus_aros_health` adds generation, pending intent records, pending
 orphans and block counts and flags a read-only view of an unreplayed log.
 
-Lacking: the remaining events of
+Present (L1, L2): the three events of
 [docs/26 section 17](../docs/26-debug-observability.md#17-structured-healthevent-stream)
-that the core does not raise as errors (checkpoint fallback, reclaim backlog,
-free-count mismatch). The target query path exists: `HEALTH_EVENTS` over the
+that no failed call can report, because nothing fails. They carry `dos_error`
+0, set no degraded-state flag, and each has its own counter in
+`AfsplusArosHealth`, in the handler's info JSON and in the event ring. The
+VFS gathers them as notes and the adapter drains them into the log after
+mount and after every call, which keeps AROS types out of the core.
+
+- `CHECKPOINT_FALLBACK` (5): selection rejected a slot that claims a
+  generation newer than the chosen one, so the volume reads the older
+  checkpoint of the pair and the last commit before this mount is not in what
+  it shows. A slot that was never written claims nothing. Proven by
+  `crates/afsplus-aros/tests/health_events.rs`: two commits use both slots,
+  the newer slot's payload is damaged so its checksum fails, and the mount is
+  clean, one generation back, with exactly one event; the controls are the
+  same image undamaged and a freshly formatted volume whose second slot is
+  empty.
+- `RECLAIM_BACKLOG_HIGH` (6): the blocks quarantined in the reclaim queue
+  plus the deleted files still waiting to be cleaned crossed a sixteenth of
+  the volume, at least 4096 blocks; the next crossing is only noted after the
+  backlog has fallen below half of it. Proven by
+  `crates/afsplus-vfs/tests/health_notes.rs`: retiring a large file at once
+  is one note, four further maintenance rounds over the same backlog are
+  none, draining it below half arms it again, and a second large delete is a
+  second note; the control is an ordinary small delete on the same volume,
+  which notes nothing. `crates/afsplus-aros/tests/health_events.rs` carries
+  that backlog into the handler's log as event 6.
+- `REGION_FREECOUNT_MISMATCH` (7): the mounted checkpoint's
+  `free_blocks_total` against the sum over its own allocation-root region
+  records, one bounded read at the first health drain. The bitmap pages
+  themselves are not read: a normal mount never reads them, and the region
+  records are what the descriptors and the pages are checked against on the
+  full load path and by `afsplus-check`. Proven by
+  `crates/afsplus-aros/tests/health_events.rs`: the checkpoint is re-encoded
+  with a free count off by one and a checksum that covers the lie, the mount
+  believes the record and records one event; the control is the same volume
+  untouched.
+
+The target query path exists: `HEALTH_EVENTS` over the
 extension packet of C4 empties the ring and reports what it dropped.
 
 ## C10. Trace streaming and developer attachment

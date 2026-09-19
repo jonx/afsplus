@@ -520,7 +520,12 @@ REGION_FREECOUNT_MISMATCH
 CACHE_PIN_VIOLATION
 ```
 
-The API exposes current health plus an event stream.
+The API exposes current health plus an event stream. The AROS handler raises
+`CHECKPOINT_FALLBACK`, `RECLAIM_BACKLOG_HIGH` and `REGION_FREECOUNT_MISMATCH`
+besides the events that a failed call already carries; they describe the
+volume without failing anything, so they have no DOS error and set no
+degraded-state flag ([the bridge](aros-native-bridge.md),
+[C9](../implementation/stage-c-gap.md#c9-health-reporting)).
 
 ## 18. Debug features must not become disk-format dependencies
 

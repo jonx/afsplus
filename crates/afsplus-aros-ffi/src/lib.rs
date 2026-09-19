@@ -55,6 +55,22 @@ pub const AFSPLUS_AROS_HEALTH_DEVICE_ERROR: u32 = afsplus_aros::health::HEALTH_D
 pub const AFSPLUS_AROS_HEALTH_CORRUPTION: u32 = afsplus_aros::health::HEALTH_CORRUPTION;
 pub const AFSPLUS_AROS_HEALTH_REPLAY_PENDING: u32 = afsplus_aros::health::HEALTH_REPLAY_PENDING;
 pub const AFSPLUS_AROS_HEALTH_INTERNAL_FAULT: u32 = afsplus_aros::health::HEALTH_INTERNAL_FAULT;
+
+/// `AfsplusArosHealthEvent.kind`; the numbers of `api/afsplus_aros.h`.
+pub const AFSPLUS_AROS_HEALTH_EVENT_DEVICE_ERROR: u32 =
+    afsplus_aros::health::HealthEventKind::DeviceError as u32;
+pub const AFSPLUS_AROS_HEALTH_EVENT_CORRUPTION: u32 =
+    afsplus_aros::health::HealthEventKind::Corruption as u32;
+pub const AFSPLUS_AROS_HEALTH_EVENT_NO_SPACE: u32 =
+    afsplus_aros::health::HealthEventKind::NoSpace as u32;
+pub const AFSPLUS_AROS_HEALTH_EVENT_INTERNAL_FAULT: u32 =
+    afsplus_aros::health::HealthEventKind::InternalFault as u32;
+pub const AFSPLUS_AROS_HEALTH_EVENT_CHECKPOINT_FALLBACK: u32 =
+    afsplus_aros::health::HealthEventKind::CheckpointFallback as u32;
+pub const AFSPLUS_AROS_HEALTH_EVENT_RECLAIM_BACKLOG_HIGH: u32 =
+    afsplus_aros::health::HealthEventKind::ReclaimBacklogHigh as u32;
+pub const AFSPLUS_AROS_HEALTH_EVENT_REGION_FREECOUNT_MISMATCH: u32 =
+    afsplus_aros::health::HealthEventKind::RegionFreeCountMismatch as u32;
 pub const AFSPLUS_AROS_ADVICE_NO_EFFECT: u32 = 0;
 const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_INTERFACE_QUERY
@@ -261,6 +277,11 @@ pub struct AfsplusArosHealth {
     pub events_dropped: u64,
     pub last_error: i32,
     pub reserved: u32,
+    // Appended after the first published layout (112 bytes): a caller that
+    // declares the older size still gets exactly that much written back.
+    pub checkpoint_fallbacks: u64,
+    pub reclaim_backlog_highs: u64,
+    pub free_count_mismatches: u64,
 }
 
 #[repr(C)]
@@ -451,7 +472,7 @@ const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosExtent>()];
 const _: [(); 88] = [(); std::mem::size_of::<AfsplusArosStat>()];
 const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosDirEntry>()];
 const _: [(); 112] = [(); std::mem::size_of::<AfsplusArosCounters>()];
-const _: [(); 112] = [(); std::mem::size_of::<AfsplusArosHealth>()];
+const _: [(); 136] = [(); std::mem::size_of::<AfsplusArosHealth>()];
 const _: [(); 16] = [(); std::mem::size_of::<AfsplusArosHealthEvent>()];
 const _: [(); 40] = [(); std::mem::size_of::<AfsplusArosTraceCounters>()];
 const _: [(); 64] = [(); std::mem::size_of::<AfspTraceEvent>()];
@@ -1942,6 +1963,9 @@ pub extern "C" fn afsplus_aros_health(
                 events_dropped: health.events_dropped,
                 last_error: health.last_error,
                 reserved: 0,
+                checkpoint_fallbacks: health.checkpoint_fallbacks,
+                reclaim_backlog_highs: health.reclaim_backlog_highs,
+                free_count_mismatches: health.free_count_mismatches,
             },
             |value, size| value.struct_size = size,
         )

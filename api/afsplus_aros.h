@@ -64,11 +64,23 @@ extern "C" {
 #define AFSPLUS_AROS_HEALTH_REPLAY_PENDING UINT32_C(0x4)
 #define AFSPLUS_AROS_HEALTH_INTERNAL_FAULT UINT32_C(0x8)
 
-/* AfsplusArosHealthEvent.kind. */
+/* AfsplusArosHealthEvent.kind. Numbers are appended and never reused. The
+ * last three describe the volume without failing a call: they carry
+ * dos_error 0 and set no flag. CHECKPOINT_FALLBACK says the mount could not
+ * use the newer checkpoint of the A/B pair and reads the older one, so the
+ * last commit before this mount is not in what the volume shows.
+ * RECLAIM_BACKLOG_HIGH is raised once each time retired space waiting to
+ * come back crosses a sixteenth of the volume (at least 4096 blocks), and
+ * again only after it has fallen below half of that. REGION_FREECOUNT_
+ * MISMATCH says the mounted checkpoint's free-block total disagrees with
+ * the sum over its own allocation-root region records. */
 #define AFSPLUS_AROS_HEALTH_EVENT_DEVICE_ERROR UINT32_C(1)
 #define AFSPLUS_AROS_HEALTH_EVENT_CORRUPTION UINT32_C(2)
 #define AFSPLUS_AROS_HEALTH_EVENT_NO_SPACE UINT32_C(3)
 #define AFSPLUS_AROS_HEALTH_EVENT_INTERNAL_FAULT UINT32_C(4)
+#define AFSPLUS_AROS_HEALTH_EVENT_CHECKPOINT_FALLBACK UINT32_C(5)
+#define AFSPLUS_AROS_HEALTH_EVENT_RECLAIM_BACKLOG_HIGH UINT32_C(6)
+#define AFSPLUS_AROS_HEALTH_EVENT_REGION_FREECOUNT_MISMATCH UINT32_C(7)
 
 /* afsplus_aros_advise effect. */
 #define AFSPLUS_AROS_ADVICE_NO_EFFECT UINT32_C(0)
@@ -219,8 +231,15 @@ struct AfsplusArosHealth {
     uint64_t internal_faults;
     uint64_t events_recorded;
     uint64_t events_dropped;
+    /* IoErr() of the most recent event that carries one; an event that
+     * failed no call leaves it as it was. */
     int32_t last_error;
     uint32_t reserved;
+    /* Appended after the first published layout; a caller that declares
+     * AFSPLUS_AROS_HEALTH_FIRST_LAYOUT receives exactly that much. */
+    uint64_t checkpoint_fallbacks;
+    uint64_t reclaim_backlog_highs;
+    uint64_t free_count_mismatches;
 };
 
 /* sequence counts every recorded event since mount, so a gap is loss. */
@@ -317,7 +336,7 @@ _Static_assert(sizeof(struct AfsplusArosDirEntry) == 24,
     "AfsplusArosDirEntry ABI drift");
 _Static_assert(sizeof(struct AfsplusArosCounters) == 112,
     "AfsplusArosCounters ABI drift");
-_Static_assert(sizeof(struct AfsplusArosHealth) == 112,
+_Static_assert(sizeof(struct AfsplusArosHealth) == 136,
     "AfsplusArosHealth ABI drift");
 _Static_assert(sizeof(struct AfsplusArosHealthEvent) == 16,
     "AfsplusArosHealthEvent ABI drift");

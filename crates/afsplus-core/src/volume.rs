@@ -387,6 +387,10 @@ pub struct Volume<D: BlockDevice> {
     /// The other slot's structurally valid checkpoint, if any: its bitmap
     /// slots and quarantined blocks must stay untouched.
     other_checkpoint: Option<Checkpoint>,
+    /// Selection had to skip a newer but unusable checkpoint (see
+    /// [`Selection::fell_back_to_older`]). A property of this mount, kept for
+    /// the health report; a commit supersedes it.
+    fell_back_to_older: bool,
     state: MountState,
     mount_mode: MountMode,
     pending_intent_records: u32,
@@ -515,6 +519,7 @@ impl<D: BlockDevice> Volume<D> {
             checkpoint: selection.chosen,
             current_slot: selection.chosen_slot,
             other_checkpoint: selection.other,
+            fell_back_to_older: selection.fell_back_to_older,
             state,
             mount_mode,
             pending_intent_records: 0,
@@ -727,6 +732,36 @@ impl<D: BlockDevice> Volume<D> {
 
     pub fn pending_intent_records(&self) -> u32 {
         self.pending_intent_records
+    }
+
+    /// Whether this mount had to skip a newer but unusable checkpoint and
+    /// read the older slot of the pair. False after the first commit of this
+    /// mount, which publishes a checkpoint of its own.
+    pub fn mounted_from_older_checkpoint(&self) -> bool {
+        self.fell_back_to_older
+    }
+
+    /// Free blocks the allocation root accounts for, summed over its region
+    /// records, against the total the mounted checkpoint states. `None` when
+    /// they agree.
+    ///
+    /// One bounded read of the allocation root, not of the bitmap pages: a
+    /// normal mount never reads those, and the region records are exactly
+    /// what the descriptors and the pages are checked against on the full
+    /// load path and by `afsplus-check`. A checkpoint whose total disagrees
+    /// with its own regions is corrupt accounting either way.
+    pub fn checkpoint_free_count_mismatch(&mut self) -> Result<Option<(u64, u64)>, CoreError> {
+        let geo = self.ident.geometry();
+        let records = crate::allocation_root::load_all(
+            &mut self.dev,
+            &geo,
+            self.checkpoint.allocation_root_block,
+            self.checkpoint.generation,
+        )?
+        .records;
+        let counted: u64 = records.iter().map(|record| record.free_blocks as u64).sum();
+        Ok((counted != self.checkpoint.free_blocks_total)
+            .then_some((self.checkpoint.free_blocks_total, counted)))
     }
 
     /// Blocks currently quarantined in the reclaim queue.
@@ -8215,6 +8250,9 @@ impl<D: BlockDevice> Volume<D> {
         self.alloc_rover_region = finished.rover_region;
         self.other_checkpoint = Some(std::mem::replace(&mut self.checkpoint, new_checkpoint));
         self.current_slot = new_slot;
+        // This mount published a checkpoint of its own; whatever the slot it
+        // started from, it no longer reads an older one.
+        self.fell_back_to_older = false;
         self.last_commit = Some(stats);
         self.window_poisoned = false;
         Ok(())

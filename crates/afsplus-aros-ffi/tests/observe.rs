@@ -236,7 +236,8 @@ fn a_failing_device_becomes_a_queryable_health_event() {
     assert_eq!(afsplus_aros_mount(&callbacks, &config, &mut filesystem), 0);
 
     let clean = health(filesystem);
-    assert_eq!(clean.struct_size, 112);
+    // The current layout, which grew past the 112 bytes first published.
+    assert_eq!(clean.struct_size, 136);
     assert_eq!(
         (clean.flags, clean.generation, clean.events_recorded),
         (0, 1, 0)
@@ -285,6 +286,28 @@ fn a_failing_device_becomes_a_queryable_health_event() {
     );
     assert_eq!(count, 0);
     assert_eq!(health(filesystem).device_errors, 1);
+
+    // A client of the first layout gets the first layout: the counters
+    // appended after it are not written past the size it declared.
+    let mut old = AfsplusArosHealth {
+        struct_size: AFSPLUS_AROS_HEALTH_FIRST_LAYOUT as u32,
+        checkpoint_fallbacks: 0x5a5a,
+        reclaim_backlog_highs: 0x5a5a,
+        free_count_mismatches: 0x5a5a,
+        ..Default::default()
+    };
+    assert_eq!(afsplus_aros_health(filesystem, &mut old), 0);
+    assert_eq!(old.struct_size, 112);
+    assert_eq!(old.device_errors, 1);
+    assert_eq!(
+        (
+            old.checkpoint_fallbacks,
+            old.reclaim_backlog_highs,
+            old.free_count_mismatches
+        ),
+        (0x5a5a, 0x5a5a, 0x5a5a)
+    );
+
     faulty.fail_writes = false;
     let _ = afsplus_aros_unmount(filesystem);
 }
