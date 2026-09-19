@@ -101,6 +101,7 @@ fn profile() {
     let end = Instant::now() + Duration::from_secs(seconds);
     let (mut ops, start) = (0u64, Instant::now());
     let mut pass = 0usize;
+    let c0 = counters(fs);
     while Instant::now() < end {
         for drawer in 0..DRAWERS { for f in 0..FILES {
             match op.as_str() {
@@ -112,7 +113,9 @@ fn profile() {
         } }
         pass += 1;
     }
-    eprintln!("DONE {op}: {ops} ops, {:?} per op", start.elapsed() / ops as u32);
+    let c1 = counters(fs);
+    eprintln!("DONE {op}: {ops} ops, {:?} per op; per op {:.2} flushes, {:.2} writes, {:.1} calls", start.elapsed() / ops as u32,
+        (c1.device_flushes - c0.device_flushes) as f64 / ops as f64, (c1.device_writes - c0.device_writes) as f64 / ops as f64, (c1.calls - c0.calls) as f64 / ops as f64);
     assert_eq!(afsplus_aros_unmount(fs), 0);
 }
 
