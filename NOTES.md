@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-19 — The third-party probe kit, and what building its vectors found](#2026-09-19--the-third-party-probe-kit-and-what-building-its-vectors-found)
 - [2026-09-19 — Stage C on the roadmap, and the documents brought to the day](#2026-09-19--stage-c-on-the-roadmap-and-the-documents-brought-to-the-day)
 - [2026-09-18 — A mode, an owner and a time that a mounted volume keeps](#2026-09-18--a-mode-an-owner-and-a-time-that-a-mounted-volume-keeps)
 - [2026-09-17 — The root of a mounted volume stopped listing after the first write](#2026-09-17--the-root-of-a-mounted-volume-stopped-listing-after-the-first-write)
@@ -220,6 +221,34 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-19 — The third-party probe kit, and what building its vectors found
+
+Stage D's "third-party probe kit" is docs/18's promise made concrete:
+`portable/probe/afsplus_probe.c`, two files of C99 under BSD-2-Clause that
+say from the first 4 KiB whether a partition is an AFS+ volume, with UUID,
+label, size and feature masks, the whole block checked by its CRC32C; and
+`tools/check-probe-kit.sh`, which compiles it under `-pedantic -Werror`,
+builds the nine vectors of docs/18 section 6 with the project's own tools
+and checks the probe against `afsplus-info` on each, plus a foreign block, a
+flipped byte and a short read. Thirty checks; the control (a probe that skips
+the checksum) fails the flipped-byte vector. A block with the AFS+ type or
+the magic but a bad check is reported as damaged, not as foreign: a person
+with a broken volume wants to know it is theirs.
+
+Building the vectors found `afsplus-populate` short in three ways, all
+fixed and pinned by `crates/afsplus-core/tests/populate.rs`: it read each
+file whole and asked for one extent, so a file over 16 MiB (`MAX_EXTENT_BLOCKS`)
+was refused with "file extent exceeds prototype cap", and a host hole
+became zeros on disk; it refused symlinks ("not representable in Alpha-0")
+although the core has had them since Stage B; and it copied a hard link as
+a second file. It writes in 1 MiB chunks through `write_file_at` and leaves
+a chunk of zeros unwritten, so a 40 MiB file with two written bytes costs a
+few blocks; it creates symlinks with their targets and links a second name
+to the object it already made. The direct one-extent path of
+`create_file_in_directory` keeps its cap and its refusal, which the control
+test holds.
+
 
 ## 2026-09-19 — Stage C on the roadmap, and the documents brought to the day
 

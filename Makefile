@@ -5,7 +5,7 @@
 
 PYTHON ?= python3
 
-.PHONY: check check-docs toc adr-index rust-gate rust-codec-fuzz-gate \
+.PHONY: check check-docs toc adr-index probe-kit rust-gate rust-codec-fuzz-gate \
 	portable-c-gate portable-c-fuzz-gate portable-c-fuzz-long
 
 ## check: every repository gate (Rust quality gate + documentation)
@@ -43,3 +43,7 @@ portable-c-fuzz-gate:
 portable-c-fuzz-long:
 	AFSPLUS_FUZZ_RUNS=$${AFSPLUS_FUZZ_RUNS:-100000} \
 		tools/check-portable-c-fuzz.sh
+
+## probe-kit: the third-party probe kit (docs/18), built and checked into build/probe-kit
+probe-kit:
+	sh tools/check-probe-kit.sh

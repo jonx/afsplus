@@ -268,7 +268,7 @@ Portable C work begins from the stable executable spec/conformance corpus:
 Milestones: [\[M01\]](implementation/milestones.md), [~~M08~~](implementation/milestones.md), [\[M12\]](implementation/milestones.md).
 
 - ~~FUSE host mount~~ <!-- progress: roadmap-28 -->
-- third-party probe kit
+- ~~third-party probe kit~~ <!-- progress: roadmap-53 -->
 - compatibility profiles
 - portable C `classic-rw` qualification
 - portable C `full-portable` qualification where feasible

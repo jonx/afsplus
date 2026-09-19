@@ -77,7 +77,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test -p afsplus-check --test measurements -- --nocapture   # cost table
 cargo run -p afsplus-core --example mkimage -- demo.img
-cargo run -p afsplus-core --bin afsplus-populate -- demo.img ./payload
+cargo run -p afsplus-core --bin afsplus-populate -- demo.img ./payload   # a drawer onto an empty volume: files in 1 MiB chunks with zero chunks left as holes, symlinks, hard links
 cargo run -p afsplus-check --bin afsplus-check -- demo.img --json
 cargo run -p afsplus-tools --bin mkafsplus -- --profile workstation demo.img
 cargo run -p afsplus-tools --bin afsplus-info -- --json demo.img
