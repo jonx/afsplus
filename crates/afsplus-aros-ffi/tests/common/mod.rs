@@ -31,7 +31,7 @@ pub fn materialized(shared_extents: bool) -> MemoryBackend {
     format(device, shared_extents)
 }
 
-fn format(mut device: MemoryBackend, shared_extents: bool) -> MemoryBackend {
+pub fn format(mut device: MemoryBackend, shared_extents: bool) -> MemoryBackend {
     mkfs(
         &mut device,
         &MkfsParams {
@@ -86,13 +86,17 @@ unsafe extern "C" fn flush(context: *mut c_void) -> i32 {
 }
 
 pub fn mount(device: &mut MemoryBackend) -> *mut AfsplusAros {
+    mount_sized(device, TOTAL_BLOCKS)
+}
+
+pub fn mount_sized(device: &mut MemoryBackend, total_blocks: u64) -> *mut AfsplusAros {
     let callbacks = AfsplusArosDevice {
         abi_version: AFSPLUS_AROS_ABI_VERSION,
         struct_size: size_of::<AfsplusArosDevice>() as u32,
         context: ptr::from_mut(device).cast::<c_void>(),
         block_size: BLOCK_SIZE as u32,
         reserved: 0,
-        total_blocks: TOTAL_BLOCKS,
+        total_blocks,
         read_block: Some(read_block),
         write_block: Some(write_block),
         flush: Some(flush),
