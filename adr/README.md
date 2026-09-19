@@ -150,6 +150,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-119](ADR-119-backup-carries-comment-and-owner.md) | A backup carries the comment and the owner | Accepted | amends [ADR-082](ADR-082-backup-object-metadata.md) |
 | [ADR-120](ADR-120-comment-and-protection-as-host-attributes.md) | The comment and the protection word are host attributes | Accepted | amends [ADR-108](ADR-108-extended-attributes.md) |
 | [ADR-121](ADR-121-delayed-group-commit.md) | Changes are durable within seconds, or at once on request | Accepted | amends [ADR-063](ADR-063-intent-log-epoch1.md) |
+| [ADR-122](ADR-122-aros-partition-identity.md) | An AFS+ partition is an AROS GPT partition of DosType AFS+ | Accepted | amends [ADR-045](ADR-045-native-aros-handler-shell.md) |
 
 <!-- /adr-index -->
 

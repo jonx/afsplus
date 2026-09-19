@@ -8,6 +8,7 @@
 
 mod common;
 mod diff;
+mod disk;
 mod dump;
 mod explain;
 mod extract;
@@ -17,6 +18,15 @@ mod mkfs;
 use std::ffi::OsString;
 
 pub use common::{EXIT_MEDIA, EXIT_OK, EXIT_USAGE_OR_IO};
+
+/// Runs the `afsplus-disk` command: an AFS+ image in a bootable AROS GPT
+/// partition, or out of one.
+pub fn run_disk<I>(args: I) -> u8
+where
+    I: IntoIterator<Item = OsString>,
+{
+    disk::run(args)
+}
 
 /// Runs the `mkafsplus` command and returns its documented process status.
 pub fn run_mkafsplus<I>(args: I) -> u8
