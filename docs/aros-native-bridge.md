@@ -284,7 +284,7 @@ The usual packet mapping is direct:
 
 | DOS action | C boundary |
 |---|---|
-| locate/copy/parent/same/free lock | `locate`, `duplicate_lock`, `parent_lock`, `same_lock`, `free_lock` |
+| locate/copy/parent/same/free lock | `locate_path` for the whole path, else `locate` per component; `duplicate_lock`, `parent_lock`, `same_lock`, `free_lock` |
 | find input/output/update, end | `open`, `close` |
 | read/write | `read`, `write` |
 | seek and 64-bit position actions | `seek`, `file_position` |
@@ -300,6 +300,18 @@ The usual packet mapping is direct:
 | examine object/FH/next | corresponding examine function |
 | flush | `flush` |
 | info/disk info | `disk_info` |
+
+A path reaches the library whole. `locate_path` walks the components the
+packet layer used to walk, by object ID, and makes one lock for the object
+the last component names: a volume prefix or a leading `:` starts at the
+root, an empty component is the parent operation, which at the root stays at
+the root, and a trailing `/` is inert. A library without the
+`AFSPLUS_AROS_GROUP_PATHS` group gets the component loop instead, one lock
+per component and freed again, which is what the packet layer did for every
+path before revision 18. The one difference between the two: the loop takes a
+lock on each directory it passes, so a directory another task held
+exclusively refused the path; `locate_path` passes it by object ID, as the
+Fast File System does.
 
 A file handle holds its object like a lock: `MODE_NEWFILE` exclusively, the
 other modes shared. A held object is not deletable, and `ACTION_COPY_DIR_FH`

@@ -49,6 +49,8 @@ static struct NotifyRequest second;
 static struct NotifyRequest *delivered[8];
 static uint32_t delivered_count;
 static uint64_t stub_groups = UINT64_C(0x1FFFF);
+/* Non-zero: the whole-path resolution fails with this error. */
+static int32_t stub_locate_path_error;
 static uint32_t stub_revision = AFSPLUS_AROS_INTERFACE_REVISION;
 static uint32_t stub_protect;
 static uint32_t stub_protect_key;
@@ -146,6 +148,18 @@ int32_t afsplus_aros_locate(struct AfsplusAros *filesystem,
 {
     assert(filesystem == STUB_FILESYSTEM);
     record('L', base_lock, name, name_length, access);
+    *output_lock = next_lock++;
+    return 0;
+}
+
+int32_t afsplus_aros_locate_path(struct AfsplusAros *filesystem,
+    uint64_t base, const uint8_t *path, uint32_t length, uint32_t access,
+    uint64_t *output_lock)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    record('A', base, path, length, access);
+    if (stub_locate_path_error != 0)
+        return stub_locate_path_error;
     *output_lock = next_lock++;
     return 0;
 }
@@ -3013,6 +3027,64 @@ int main(void)
             config.complete = packet_complete;
             config.trace_take = stub_trace_take;
         }
+    }
+
+    /* A library that offers the PATHS group resolves a path in one call:
+     * the same packets, no lock per component and no free of one. Every
+     * case above ran against a library without the group, which is the
+     * fallback loop. */
+    {
+        struct AfsplusArosPacketContext *paths = NULL;
+        BPTR paths_root;
+
+        stub_groups = UINT64_C(0x1FFFF) | AFSPLUS_AROS_GROUP_PATHS;
+        assert(afsplus_aros_packet_create(&config, &paths) == 0);
+        reset_events();
+        initialize_packet(&packet, ACTION_LOCATE_OBJECT);
+        packet.dp_Arg2 = packet_bstr("");
+        packet.dp_Arg3 = SHARED_LOCK;
+        assert(afsplus_aros_packet_process(paths, &packet) == 0);
+        assert(packet.dp_Res1 != 0 && packet.dp_Res2 == 0);
+        paths_root = (BPTR)packet.dp_Res1;
+        assert(event_count == 1);
+        assert_event(0, 'A', "", AFSPLUS_AROS_LOCK_SHARED);
+
+        reset_events();
+        initialize_packet(&packet, ACTION_LOCATE_OBJECT);
+        packet.dp_Arg1 = (SIPTR)paths_root;
+        packet.dp_Arg2 = packet_bstr("AFS+:one//two");
+        packet.dp_Arg3 = EXCLUSIVE_LOCK;
+        assert(afsplus_aros_packet_process(paths, &packet) == 0);
+        assert(packet.dp_Res1 != 0 && packet.dp_Res2 == 0);
+        assert(event_count == 1);
+        assert_event(0, 'A', "AFS+:one//two", AFSPLUS_AROS_LOCK_EXCLUSIVE);
+        /* A leaf operation resolves the parent prefix, separator included,
+         * with the same one call. */
+        reset_events();
+        initialize_packet(&packet, ACTION_CREATE_DIR);
+        packet.dp_Arg1 = (SIPTR)paths_root;
+        packet.dp_Arg2 = packet_bstr("parent/newdir");
+        assert(afsplus_aros_packet_process(paths, &packet) == 0);
+        assert(packet.dp_Res1 != 0 && packet.dp_Res2 == 0);
+        assert(event_count == 3);
+        assert_event(0, 'A', "parent/", AFSPLUS_AROS_LOCK_SHARED);
+        assert_event(1, 'C', "newdir", 0);
+        assert(events[2].operation == 'F');
+
+        /* The error of the failing component is the packet's error. */
+        reset_events();
+        stub_locate_path_error = ERROR_OBJECT_NOT_FOUND;
+        initialize_packet(&packet, ACTION_LOCATE_OBJECT);
+        packet.dp_Arg1 = (SIPTR)paths_root;
+        packet.dp_Arg2 = packet_bstr("gone/leaf");
+        packet.dp_Arg3 = SHARED_LOCK;
+        assert(afsplus_aros_packet_process(paths, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_OBJECT_NOT_FOUND);
+        assert(event_count == 1);
+        stub_locate_path_error = 0;
+        assert(afsplus_aros_packet_destroy(paths) == 0);
+        stub_groups = UINT64_C(0xFFFF);
     }
 
     initialize_packet(&packet, ACTION_DIE);

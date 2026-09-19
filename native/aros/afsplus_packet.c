@@ -405,6 +405,13 @@ static int32_t resolve_path_lock(struct AfsplusArosPacketContext *context,
     uint64_t current = base;
     int32_t error;
 
+    /* A library that resolves the whole path does it in one call and makes
+     * one lock; the loop below stays for a library that does not offer the
+     * group. */
+    if ((context->groups & AFSPLUS_AROS_GROUP_PATHS) != 0)
+        return afsplus_aros_locate_path(context->filesystem, base, path,
+            length, access, output);
+
     if (at != 0)
         current = 0;
 
