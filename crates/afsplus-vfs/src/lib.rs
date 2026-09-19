@@ -553,9 +553,15 @@ impl<D: BlockDevice> Vfs<D> {
         if self.volume.mount_mode() != MountMode::ReadWrite || !self.logged_data_fsync_enabled() {
             return Ok(());
         }
+        // A commit that published nothing changed no backlog; only a real
+        // one is worth the orphan-directory read the note costs.
+        let published = self.volume.window_open();
         match self.volume.window_commit(now) {
             Ok(()) => {
                 self.after_window_commit(now);
+                if published {
+                    self.note_reclaim_backlog();
+                }
                 Ok(())
             }
             // The window could not be published and is now poisoned, which
@@ -582,12 +588,9 @@ impl<D: BlockDevice> Vfs<D> {
     /// below [`delayed_room_blocks`] available. Without the second, a volume
     /// that was never idle ran out of space in the commit of its deletes:
     /// each window of 512 took some 570 blocks and none came back.
+    /// Whether a window was open, so a caller knows a commit published
+    /// something and the backlog is worth looking at again.
     fn after_window_commit(&mut self, now: Timespec) {
-        self.after_window_commit_maintenance(now);
-        self.note_reclaim_backlog();
-    }
-
-    fn after_window_commit_maintenance(&mut self, now: Timespec) {
         let deletes = self.window_deletes;
         self.forget_window();
         if !self.idle_maintenance || !self.inline_maintenance {
@@ -2081,8 +2084,12 @@ impl<D: BlockDevice> Vfs<D> {
 
     pub fn sync_filesystem(&mut self) -> Result<(), VfsError> {
         if self.volume.mount_mode() == MountMode::ReadWrite && self.logged_data_fsync_enabled() {
+            let published = self.volume.window_open();
             self.volume.window_commit(Timespec::default())?;
             self.after_window_commit(Timespec::default());
+            if published {
+                self.note_reclaim_backlog();
+            }
         } else {
             self.volume.sync()?;
         }
