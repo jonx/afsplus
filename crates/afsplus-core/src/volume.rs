@@ -140,6 +140,22 @@ pub struct OrphanCleanupProgress {
     pub still_pending: bool,
 }
 
+/// What one batched orphan cleanup did, in the single transaction it was.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OrphanBatchProgress {
+    /// Orphans whose last extent went and whose entry left the orphan
+    /// directory.
+    pub objects_removed: usize,
+    /// An orphan the batch shrank without finishing it, because its data
+    /// exceeded what the batch had left to spend. At most one: the object
+    /// that spends the last of the budget is the last the batch takes.
+    pub objects_advanced: usize,
+    /// Logical extent records released, over every orphan the batch touched.
+    pub extents_removed: usize,
+    /// The orphan directory is not empty: another batch has work.
+    pub still_pending: bool,
+}
+
 /// Runtime data-update policy used by the Q1 architecture qualification.
 ///
 /// This does not alter the on-disk format. `InPlacePrivate` is deliberately
@@ -3683,44 +3699,202 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
+    /// Cleans up to `max_objects` orphans in one transaction, where cleaning
+    /// them one at a time cost two commits each.
+    ///
+    /// `skip` names an orphan somebody still has open. It is passed over and
+    /// the batch takes the rest of the page: an open orphan holds up nobody
+    /// else, and is cleaned at its last close as before.
+    ///
+    /// The batch spends at most `max_objects` times the volume's extent
+    /// budget, which is what that many single-orphan steps spent, so one call
+    /// does the work it did and only the commits are fewer. An orphan whose
+    /// data outlives the budget stays in the orphan directory, shrunk,
+    /// exactly as a single step leaves it, and the batch stops there.
+    pub fn cleanup_orphans(
+        &mut self,
+        max_objects: usize,
+        skip: &mut dyn FnMut(u64) -> bool,
+        now: Timespec,
+    ) -> Result<OrphanBatchProgress, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::CleanupOrphans, |volume| {
+            volume.cleanup_orphans_untraced(max_objects, skip, now)
+        })
+    }
+
+    fn cleanup_orphans_untraced(
+        &mut self,
+        max_objects: usize,
+        skip: &mut dyn FnMut(u64) -> bool,
+        now: Timespec,
+    ) -> Result<OrphanBatchProgress, CoreError> {
+        metadata::validate_time(now)?;
+        self.ensure_window_closed()?;
+        if max_objects == 0 || !self.orphan_directory_enabled() {
+            return Ok(OrphanBatchProgress::default());
+        }
+        let Some(directory) = self.read_object(OBJECT_ORPHAN_DIRECTORY)? else {
+            return Ok(OrphanBatchProgress::default());
+        };
+        self.validate_orphan_directory(directory)?;
+        let (entries, total_entries) = directory::read_page(
+            &mut self.dev,
+            &self.ident.geometry(),
+            directory.data_root,
+            directory::spec(OBJECT_ORPHAN_DIRECTORY, self.checkpoint.generation),
+            &self.ident,
+            0,
+            max_objects.min(MAX_DIRECTORY_PAGE_ENTRIES),
+        )?;
+        let mut progress = OrphanBatchProgress {
+            still_pending: total_entries > 0,
+            ..Default::default()
+        };
+        let mut candidates = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let expected_name = Self::orphan_name(entry.child_id);
+            if entry.child_type_hint != 1 || entry.name.as_slice() != expected_name.as_bytes() {
+                return Err(CoreError::Corrupt(format!(
+                    "orphan entry for object {} has invalid name or type",
+                    entry.child_id
+                )));
+            }
+            if !skip(entry.child_id) {
+                candidates.push((entry.child_id, entry.key));
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(progress);
+        }
+
+        let block_size = self.dev.block_size();
+        let generation = self.next_generation()?;
+        let mut tx = self.begin_orphan_transaction(generation)?;
+        let mut budget = self
+            .orphan_cleanup_extent_budget
+            .saturating_mul(max_objects);
+        let mut meta_writes: Vec<(u64, Vec<u8>)> = Vec::new();
+        let mut map_entries: Vec<([u8; 8], Option<[u8; 8]>)> = Vec::new();
+        let mut removed_keys: Vec<Vec<u8>> = Vec::new();
+        for (object_id, entry_key) in candidates {
+            if budget == 0 {
+                break;
+            }
+            let record = self.read_orphan_record(object_id)?;
+            let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
+                CoreError::Corrupt(format!("orphan object {object_id} missing from object map"))
+            })?;
+            let (removed, total_extents) = self.orphan_release_set(&record, budget)?;
+            budget -= removed.len();
+            progress.extents_removed += removed.len();
+            if total_extents == removed.len() as u64 {
+                // Nothing of the object is left to release, so it leaves the
+                // volume in this transaction rather than in a second one.
+                self.retire_security_descriptor(&mut tx, &record)?;
+                self.retire_attributes(&mut tx, &record)?;
+                self.retire_file_storage(&mut tx, generation, &record)?;
+                tx.retire(&mut self.dev, record_lba)?;
+                map_entries.push((object_map::key(object_id), None));
+                removed_keys.push(entry_key);
+                progress.objects_removed += 1;
+            } else {
+                let staged = self
+                    .stage_orphan_shrink(&mut tx, generation, &record, record_lba, &removed, now)?;
+                map_entries.push((
+                    object_map::key(object_id),
+                    Some(object_map::value(staged.record_lba)?),
+                ));
+                meta_writes.extend(staged.metadata_writes);
+                progress.objects_advanced += 1;
+            }
+        }
+
+        if !removed_keys.is_empty() {
+            let directory_lba = self
+                .object_record_lba(OBJECT_ORPHAN_DIRECTORY)?
+                .ok_or_else(|| {
+                    CoreError::Corrupt("orphan directory missing from object map".into())
+                })?;
+            let new_directory_lba = tx.allocate(&mut self.dev)?;
+            tx.retire(&mut self.dev, directory_lba)?;
+            let operations = removed_keys
+                .iter()
+                .map(|key| TreeOperation::Delete {
+                    key: key.as_slice(),
+                })
+                .collect::<Vec<_>>();
+            let mutation = mutate_many(
+                &mut self.dev,
+                &self.ident.geometry(),
+                &mut tx,
+                directory.data_root,
+                directory::spec(OBJECT_ORPHAN_DIRECTORY, self.checkpoint.generation),
+                generation,
+                &operations,
+            )?;
+            let new_directory = ObjectRecord {
+                modified: now,
+                changed: now,
+                content_generation: generation,
+                data_root: mutation.root_lba,
+                ..directory
+            };
+            meta_writes.push((
+                new_directory_lba,
+                new_directory.encode(block_size, generation)?,
+            ));
+            meta_writes.extend(mutation.writes);
+            map_entries.push((
+                object_map::key(OBJECT_ORPHAN_DIRECTORY),
+                Some(object_map::value(new_directory_lba)?),
+            ));
+        }
+
+        let operations = map_entries
+            .iter()
+            .map(|(key, value)| match value {
+                Some(value) => TreeOperation::Upsert {
+                    key: key.as_slice(),
+                    value: value.as_slice(),
+                },
+                None => TreeOperation::Delete {
+                    key: key.as_slice(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let map_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &operations,
+        )?;
+        meta_writes.extend(map_mutation.writes);
+        self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            Vec::new(),
+            meta_writes,
+            map_mutation.root_lba,
+        )?;
+        progress.still_pending = total_entries > progress.objects_removed as u64;
+        Ok(progress)
+    }
+
     fn cleanup_orphan_data_step(
         &mut self,
         object_id: u64,
         limit: usize,
         now: Timespec,
     ) -> Result<OrphanDataStep, CoreError> {
-        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
-        if record.object_type != ObjectType::File || record.link_count != 1 {
-            return Err(CoreError::Corrupt(format!(
-                "orphan object {object_id} is not a singly-linked regular file"
-            )));
-        }
+        let record = self.read_orphan_record(object_id)?;
         let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
             CoreError::Corrupt(format!("orphan object {object_id} missing from object map"))
         })?;
-        let (removed, total_extents) = if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
-            let tail = extent_map::read_tail(
-                &mut self.dev,
-                &self.ident.geometry(),
-                record.data_root,
-                object_id,
-                self.checkpoint.generation,
-                limit,
-            )?;
-            (tail.extents, tail.total_extents)
-        } else if record.data_blocks == 0 {
-            (Vec::new(), 0)
-        } else {
-            (
-                vec![Extent {
-                    logical_start: 0,
-                    physical_start: record.data_root,
-                    block_count: record.data_blocks,
-                    flags: 0,
-                }],
-                1,
-            )
-        };
+        let (removed, total_extents) = self.orphan_release_set(&record, limit)?;
         if removed.is_empty() {
             return Ok(OrphanDataStep {
                 extents_removed: 0,
@@ -3728,9 +3902,94 @@ impl<D: BlockDevice> Volume<D> {
             });
         }
 
-        let block_size = self.dev.block_size();
         let generation = self.next_generation()?;
-        let mut tx = TxAllocator::begin_observed(
+        let mut tx = self.begin_orphan_transaction(generation)?;
+        let staged =
+            self.stage_orphan_shrink(&mut tx, generation, &record, record_lba, &removed, now)?;
+        let mut metadata_writes = staged.metadata_writes;
+
+        let map_key = object_map::key(object_id);
+        let map_value = object_map::value(staged.record_lba)?;
+        let map_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &[TreeOperation::Upsert {
+                key: &map_key,
+                value: &map_value,
+            }],
+        )?;
+        metadata_writes.extend(map_mutation.writes);
+        self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            Vec::new(),
+            metadata_writes,
+            map_mutation.root_lba,
+        )?;
+
+        Ok(OrphanDataStep {
+            extents_removed: removed.len(),
+            data_empty: total_extents == removed.len() as u64,
+        })
+    }
+
+    /// An orphan's record, checked to be the singly-linked regular file the
+    /// orphan directory promises.
+    fn read_orphan_record(&mut self, object_id: u64) -> Result<ObjectRecord, CoreError> {
+        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        if record.object_type != ObjectType::File || record.link_count != 1 {
+            return Err(CoreError::Corrupt(format!(
+                "orphan object {object_id} is not a singly-linked regular file"
+            )));
+        }
+        Ok(record)
+    }
+
+    /// The tail of an orphan's logical extents, at most `limit` of them, and
+    /// how many it has in all. Cleanup works from the tail so that what a
+    /// partial step leaves is still a prefix of the file.
+    fn orphan_release_set(
+        &mut self,
+        record: &ObjectRecord,
+        limit: usize,
+    ) -> Result<(Vec<Extent>, u64), CoreError> {
+        if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
+            let tail = extent_map::read_tail(
+                &mut self.dev,
+                &self.ident.geometry(),
+                record.data_root,
+                record.object_id,
+                self.checkpoint.generation,
+                limit,
+            )?;
+            Ok((tail.extents, tail.total_extents))
+        } else if record.data_blocks == 0 {
+            Ok((Vec::new(), 0))
+        } else if limit == 0 {
+            Ok((Vec::new(), 1))
+        } else {
+            Ok((
+                vec![Extent {
+                    logical_start: 0,
+                    physical_start: record.data_root,
+                    block_count: record.data_blocks,
+                    flags: 0,
+                }],
+                1,
+            ))
+        }
+    }
+
+    /// The transaction an orphan cleanup runs in. The reclaim admission floor
+    /// is what lets a cleanup on a full volume take back the blocks it needs
+    /// to publish itself.
+    fn begin_orphan_transaction(&mut self, generation: u64) -> Result<TxAllocator, CoreError> {
+        Ok(TxAllocator::begin_observed(
             crate::flight::AllocationObserver::new(self.flight.as_ref()),
             &mut self.dev,
             &self.ident.geometry(),
@@ -3741,7 +4000,24 @@ impl<D: BlockDevice> Volume<D> {
                 .max(MIN_ORPHAN_CLEANUP_RECLAIM_BLOCKS),
             self.alloc_rover_region,
         )?
-        .with_tree_cache_pages(self.tree_cache_pages);
+        .with_tree_cache_pages(self.tree_cache_pages))
+    }
+
+    /// Stages the release of `removed` from orphan `record` into `tx`: the
+    /// data runs, the extent-tree mutation and the rewritten record. The
+    /// caller owns the object-map operation, so that a batch publishes one
+    /// object-map mutation for all of its orphans.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_orphan_shrink(
+        &mut self,
+        tx: &mut TxAllocator,
+        generation: u64,
+        record: &ObjectRecord,
+        record_lba: u64,
+        removed: &[Extent],
+        now: Timespec,
+    ) -> Result<StagedFileLayout, CoreError> {
+        let block_size = self.dev.block_size();
         let new_record_lba = tx.allocate(&mut self.dev)?;
         tx.retire(&mut self.dev, record_lba)?;
 
@@ -3756,8 +4032,8 @@ impl<D: BlockDevice> Volume<D> {
             .data_blocks
             .checked_sub(removed_blocks)
             .ok_or_else(|| CoreError::Corrupt("orphan extent count exceeds record".into()))?;
-        for extent in &removed {
-            self.release_data_run(&mut tx, generation, extent)?;
+        for extent in removed {
+            self.release_data_run(tx, generation, extent)?;
         }
 
         let (data_root, mut metadata_writes) = if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
@@ -3772,9 +4048,9 @@ impl<D: BlockDevice> Volume<D> {
             let mutation = mutate_many(
                 &mut self.dev,
                 &self.ident.geometry(),
-                &mut tx,
+                tx,
                 record.data_root,
-                extent_map::spec(object_id, self.checkpoint.generation),
+                extent_map::spec(record.object_id, self.checkpoint.generation),
                 generation,
                 &operations,
             )?;
@@ -3802,37 +4078,12 @@ impl<D: BlockDevice> Volume<D> {
             content_generation: generation,
             data_root,
             data_blocks: remaining_blocks,
-            ..record
+            ..*record
         };
-
-        let map_key = object_map::key(object_id);
-        let map_value = object_map::value(new_record_lba)?;
-        let map_mutation = mutate_many(
-            &mut self.dev,
-            &self.ident.geometry(),
-            &mut tx,
-            self.checkpoint.object_map_block,
-            object_map::spec(self.checkpoint.generation),
-            generation,
-            &[TreeOperation::Upsert {
-                key: &map_key,
-                value: &map_value,
-            }],
-        )?;
         metadata_writes.push((new_record_lba, new_record.encode(block_size, generation)?));
-        metadata_writes.extend(map_mutation.writes);
-        self.commit_transaction(
-            generation,
-            self.checkpoint.next_object_id,
-            tx,
-            Vec::new(),
+        Ok(StagedFileLayout {
+            record_lba: new_record_lba,
             metadata_writes,
-            map_mutation.root_lba,
-        )?;
-
-        Ok(OrphanDataStep {
-            extents_removed: removed.len(),
-            data_empty: total_extents == removed.len() as u64,
         })
     }
 

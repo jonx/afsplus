@@ -513,6 +513,7 @@ pub enum ApiMethod {
     SetObjectOwner = 82,
     SetObjectTimes = 83,
     WindowDiscard = 84,
+    CleanupOrphans = 85,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

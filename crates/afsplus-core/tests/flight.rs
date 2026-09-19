@@ -3183,6 +3183,7 @@ fn every_registered_api_method_executes_under_its_own_guard() {
     volume.orphan_count().ok();
     let orphan = volume.first_orphan().ok().flatten().unwrap_or(file);
     volume.cleanup_orphan(orphan, now).ok();
+    volume.cleanup_orphans(4, &mut |_| false, now).ok();
     volume.link_file(file, OBJECT_ROOT, "hard", now).ok();
     volume
         .rename(OBJECT_ROOT, "hard", OBJECT_ROOT, "moved", now)
