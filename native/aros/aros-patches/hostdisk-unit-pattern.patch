@@ -6,6 +6,17 @@ hostdisk.device for booting AROS from an image file on Hosted MacAROS.
 - Darwin on Apple Silicon: struct stat in place of the 32-bit inode
   request, which the SDK refuses, and the two DKIOC requests of
   <sys/disk.h> spelled out, since that header cannot be included.
+- CMD_UPDATE is a barrier. The stock device answered it inside BeginIO,
+  so it overtook the writes already queued on the unit port and nothing
+  ever reached the host file on purpose. It is now forwarded to the unit
+  thread like CMD_WRITE, which replies to it only after the writes ahead
+  of it, and the unit thread syncs the host file: fcntl(fd, F_FULLFSYNC)
+  on Darwin, spelled out as request 51 because <sys/fcntl.h> cannot be
+  included either, falling back to fsync() when the file system does not
+  implement it, and fsync() on every other host. "fsync" and "fcntl" are
+  added to libcSymbols[] and to struct HostInterface, in the same order.
+  A failed sync returns the host errno through error(), so io_Error is
+  TDERR_NotSpecified rather than a silent success.
 
 Local to this machine's AROS tree (jonx/AROS, aarch64-darwin-graft); it
 is not pushed anywhere. Apply from the AROS source root with
@@ -30,8 +41,64 @@ index db5beb9dca..e71af8d148 100644
  
  #include "hostdisk_host.h"
  #include "hostdisk_device.h"
+diff --git a/arch/all-hosted/devs/hostdisk/hostdisk_device.c b/arch/all-hosted/devs/hostdisk/hostdisk_device.c
+index 06e78e98e9..b1ff85d116 100644
+--- a/arch/all-hosted/devs/hostdisk/hostdisk_device.c
++++ b/arch/all-hosted/devs/hostdisk/hostdisk_device.c
+@@ -246,7 +246,6 @@ AROS_LH1(void, beginio,
+     DCMD(bug("hostdisk: command %u\n", iotd->iotd_Req.io_Command));
+     switch(iotd->iotd_Req.io_Command)
+     {
+-        case CMD_UPDATE:
+         case CMD_CLEAR:
+         case CMD_FLUSH:
+         case TD_MOTOR:
+@@ -254,6 +253,13 @@ AROS_LH1(void, beginio,
+             iotd->iotd_Req.io_Error = 0;
+             break;
+ 
++        /*
++         * CMD_UPDATE is a barrier: it may only be answered once the writes
++         * queued ahead of it have reached the host file. Answering it here,
++         * inside BeginIO, would overtake them, so it goes to the unit thread
++         * like CMD_WRITE and is replied after the host sync.
++         */
++        case CMD_UPDATE:
+         case CMD_READ:
+         case CMD_WRITE:
+         case TD_SEEK:
+@@ -543,6 +549,17 @@ static void unitentry(struct IOExtTD *iotd)
+                     err = Host_Seek64(unit, iotd->iotd_Req.io_Offset, iotd->iotd_Req.io_Actual);
+                     break;
+  
++                case CMD_UPDATE:
++                    DCMD(bug("%s: received CMD_UPDATE.\n", me->tc_Node.ln_Name));
++
++                    /*
++                     * Everything queued ahead of this message has already been
++                     * written to the host file by this same loop; the sync
++                     * makes it durable before the reply goes out.
++                     */
++                    err = Host_Flush(unit);
++                    break;
++
+                 case CMD_READ:
+                     DCMD(bug("%s: received CMD_READ.\n", me->tc_Node.ln_Name));
+                     DREAD(bug("hostdisk/CMD_READ: offset = %u (0x%08X)  size = %d\n", iotd->iotd_Req.io_Offset, iotd->iotd_Req.io_Offset, iotd->iotd_Req.io_Length));
+diff --git a/arch/all-hosted/devs/hostdisk/hostdisk_device.h b/arch/all-hosted/devs/hostdisk/hostdisk_device.h
+index 1368ef1660..85ed0983d3 100644
+--- a/arch/all-hosted/devs/hostdisk/hostdisk_device.h
++++ b/arch/all-hosted/devs/hostdisk/hostdisk_device.h
+@@ -52,6 +52,7 @@ ULONG Host_Open(struct unit *Unit);
+ void Host_Close(struct unit *Unit);
+ LONG Host_Read(struct unit *Unit, APTR buf, ULONG size, ULONG *ioerr);
+ LONG Host_Write(struct unit *Unit, APTR buf, ULONG size, ULONG *ioerr);
++ULONG Host_Flush(struct unit *Unit);
+ ULONG Host_Seek(struct unit *Unit, ULONG pos);
+ ULONG Host_Seek64(struct unit *Unit, ULONG pos, ULONG pos_hi);
+ ULONG Host_GetGeometry(struct unit *Unit, struct DriveGeometry *dg);
 diff --git a/arch/all-unix/devs/hostdisk/hostdisk_host.c b/arch/all-unix/devs/hostdisk/hostdisk_host.c
-index 2f6efe4004..7be2ad7051 100644
+index 2f6efe4004..2433470e75 100644
 --- a/arch/all-unix/devs/hostdisk/hostdisk_host.c
 +++ b/arch/all-unix/devs/hostdisk/hostdisk_host.c
 @@ -22,6 +22,14 @@
@@ -58,7 +125,78 @@ index 2f6efe4004..7be2ad7051 100644
  
  #ifdef HOST_LONG_ALIGNED
  #pragma pack(4)
-@@ -344,6 +354,54 @@ static BOOL CheckArch(const char *Component, const char *MyArch, const char *Sys
+@@ -185,6 +195,61 @@ LONG Host_Write(struct unit *Unit, APTR buf, ULONG size, ULONG *ioerr)
+     return ret;
+ }
+ 
++/*
++ * Darwin's F_FULLFSYNC, spelled out because <sys/fcntl.h> cannot be reached
++ * from an AROS compile, the way geometry.c spells out the DKIOC requests.
++ * fsync() on Darwin only hands the data to the drive; F_FULLFSYNC also asks
++ * the drive to empty its own write cache, which is what CMD_UPDATE promises.
++ */
++#define HOST_F_FULLFSYNC 51
++
++ULONG Host_Flush(struct unit *Unit)
++{
++    struct HostDiskBase *hdskBase = Unit->hdskBase;
++    int res, err;
++
++    D(bug("hostdisk: sync unit %s\n", Unit->n.ln_Name));
++
++    /* An ejected unit has nothing to sync. */
++    if (Unit->file == INVALID_HANDLE_VALUE)
++        return 0;
++
++    HostLib_Lock();
++
++#ifdef HOST_OS_darwin
++    res = hdskBase->iface->fcntl(Unit->file, HOST_F_FULLFSYNC, 0);
++    AROS_HOST_BARRIER
++    err = *hdskBase->errnoPtr;
++
++    if (res == -1)
++    {
++        /*
++         * Not every Darwin file system implements F_FULLFSYNC; fsync() still
++         * gets the data out of the host kernel.
++         */
++        D(bug("hostdisk: F_FULLFSYNC failed with %d, falling back to fsync\n", err));
++
++        res = hdskBase->iface->fsync(Unit->file);
++        AROS_HOST_BARRIER
++        err = *hdskBase->errnoPtr;
++    }
++#else
++    res = hdskBase->iface->fsync(Unit->file);
++    AROS_HOST_BARRIER
++    err = *hdskBase->errnoPtr;
++#endif
++
++    HostLib_Unlock();
++
++    if (res == -1)
++    {
++        D(bug("hostdisk: sync failed, UNIX error %d\n", err));
++        return error(err);
++    }
++
++    return 0;
++}
++
+ ULONG Host_Seek(struct unit *Unit, ULONG pos)
+ {
+     return Host_Seek64(Unit, pos, 0);
+@@ -306,6 +371,8 @@ static const char *libcSymbols[] =
+     "fstat64" INODE64_SUFFIX,
+     "stat64" INODE64_SUFFIX,
+ #endif
++    "fsync",
++    "fcntl",
+     NULL
+ };
+ 
+@@ -344,6 +411,54 @@ static BOOL CheckArch(const char *Component, const char *MyArch, const char *Sys
      return TRUE;
  }
  
@@ -113,7 +251,7 @@ index 2f6efe4004..7be2ad7051 100644
  static int Host_Init(struct HostDiskBase *hdskBase)
  {
      ULONG r;
-@@ -377,6 +435,7 @@ static int Host_Init(struct HostDiskBase *hdskBase)
+@@ -377,6 +492,7 @@ static int Host_Init(struct HostDiskBase *hdskBase)
  
      hdskBase->DiskDevice = DISK_DEVICE;
      hdskBase->unitBase   = DISK_BASE;
@@ -121,3 +259,16 @@ index 2f6efe4004..7be2ad7051 100644
  
      return TRUE;
  }
+diff --git a/arch/all-unix/devs/hostdisk/hostdisk_host.h b/arch/all-unix/devs/hostdisk/hostdisk_host.h
+index e8a2d79740..2802f9c2aa 100644
+--- a/arch/all-unix/devs/hostdisk/hostdisk_host.h
++++ b/arch/all-unix/devs/hostdisk/hostdisk_host.h
+@@ -81,6 +81,8 @@ struct HostInterface
+     int            (*fstat64)(int fd, struct stat64 *buf);
+ #endif
+     int            (*stat64)(const char *path, struct stat64 *buf);
++    int            (*fsync)(int fd);
++    int            (*fcntl)(int fd, int cmd, ...);
+ };
+ 
+ #ifdef HOST_LONG_ALIGNED

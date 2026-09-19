@@ -6,9 +6,12 @@
 # each over a scratch image. Two runs must fail: one with
 # CORRUPT, which flips a byte of the expected pattern, at read-back; one over
 # a range past the end of the device, at range. The images must be the same
-# afterwards, byte for byte: the probe writes the range back. The stock
-# devices fail one clause, the barrier, as a known defect; it is recorded,
-# and every other clause must hold.
+# afterwards, byte for byte: the probe writes the range back. Every clause
+# must hold. fdsk.device alone still fails the barrier, as a known defect;
+# it is recorded. hostdisk.device passes it since the local patch
+# native/aros/aros-patches/hostdisk-unit-pattern.patch made CMD_UPDATE a
+# queued command that syncs the host file, so a barrier failure there is a
+# failure of this check and not an allowance.
 #
 #   AFSPLUS_DRIVER_OUTPUT   where the result goes (default build/hosted-aros-driver)
 #   AFSPLUS_DRIVER_TIMEOUT  seconds the boot may take (default 120)
@@ -116,16 +119,20 @@ done
 aros_started=0
 cp /tmp/aros-window.log "$result/aros-window.log"
 
-# Both stock devices answer CMD_UPDATE inside BeginIO, ahead of a queued
-# write: a known defect of fdsk (stage-c-gap C12, fixed by
+# Stock fdsk.device answers CMD_UPDATE inside BeginIO, ahead of a queued
+# write: a known defect (stage-c-gap C12, fixed by
 # native/aros/upstream/fdsk-cmd-update.patch and proven by
-# check-aros-fdsk-ordering.sh) and the same in hostdisk. Every other clause
-# must hold; the barrier result is recorded, and a device that starts to
-# pass it is reported.
+# check-aros-fdsk-ordering.sh), so its barrier result is recorded rather than
+# failing here. hostdisk.device keeps the barrier with the local patch, so
+# every clause of its run must pass.
 : >"$result/known-defects.txt"
 for device in fdsk hostdisk; do
-    others=$(grep '^\[AFSPLUS-DRIVER\] FAIL ' "$result/$device.out" \
-        | grep -v '^\[AFSPLUS-DRIVER\] FAIL barrier ' || true)
+    if [ "$device" = fdsk ]; then
+        others=$(grep '^\[AFSPLUS-DRIVER\] FAIL ' "$result/$device.out" \
+            | grep -v '^\[AFSPLUS-DRIVER\] FAIL barrier ' || true)
+    else
+        others=$(grep '^\[AFSPLUS-DRIVER\] FAIL ' "$result/$device.out" || true)
+    fi
     [ -z "$others" ] && grep -q '^\[AFSPLUS-DRIVER\] PASS read-back$' "$result/$device.out" || {
         echo "[driver] $device.device does not meet the contract:" >&2
         cat "$result/$device.out" >&2
