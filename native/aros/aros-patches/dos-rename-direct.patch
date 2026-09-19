@@ -1,0 +1,42 @@
+dos.library Rename() without the canonical names: a proposal, not applied.
+
+Board task #11. rom/dos/rename.c takes a Lock and a NameFromLock on the old
+name and on the new name's directory before it sends ACTION_RENAME_OBJECT,
+which is 27 packets of the 28 a Rename costs (2 Locate, 2 DupLock, 7
+Examine, 7 Parent, 9 FreeLock for the benchmark's four-level paths). The
+canonical names exist for a destination written a/b//c (ad6f718cca). With
+this change a name without a doubled separator goes to the handler as the
+caller wrote it, relative to the lock GetDeviceProc gives, as AmigaOS sends
+it. Measured on Hosted with the AFS+ benchmark, same boot, both file
+systems through this dos.library: rename phase 0.81 -> 0.38 s on AFS+ and
+0.62 -> 0.31 s on the Fast File System; AFS+ library calls for the phase
+230,411 -> 15,367. Not applied to the tree and not pushed: the owner
+decides what the Macaros fork ships.
+
+diff --git a/rom/dos/rename.c b/rom/dos/rename.c
+index 71281a49a7..1f013572ea 100644
+--- a/rom/dos/rename.c
++++ b/rom/dos/rename.c
+@@ -60,6 +60,14 @@
+ 
+     ASSERT_VALID_PROCESS(me);
+ 
++    /* Experiment (afsplus lot H, local): the canonical names below cost a
++     * Lock and a NameFromLock on each side, some 25 packets, and exist for
++     * the a/b//c destination; a name without a doubled separator goes to
++     * the handler as the caller wrote it, relative to the device lock, as
++     * AmigaOS sends it. */
++    if (strstr(oldName, "//") == NULL && strstr(newName, "//") == NULL)
++        goto send;
++
+     len = SplitName(oldName, ':', vol, 0, sizeof(vol) - 1);
+ 
+     if (len > 0)
+@@ -148,6 +156,7 @@
+ 
+     D(bug("[Dos] rename %s %s\n", oldName, newName));
+ 
++send:
+     /* get device pointers */
+     if ((olddvp = GetDeviceProc(oldName, NULL)) == NULL ||
+         (newdvp = GetDeviceProc(newName, NULL)) == NULL) {
