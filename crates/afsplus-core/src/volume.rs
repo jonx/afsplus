@@ -5244,6 +5244,144 @@ impl<D: BlockDevice> Volume<D> {
         Ok(())
     }
 
+    /// Grows a file the open window created where it lies: an append whose
+    /// new blocks are the free blocks after the file's run extends the run
+    /// and writes only the blocks the append touches, instead of reading the
+    /// whole file back and writing it again somewhere else
+    /// ([`Self::rewrite_created_file`]). Answers `false` when the file
+    /// cannot grow in place — the write is not an append, the file has no
+    /// run yet, or the blocks behind it are taken — and the caller rewrites
+    /// it; nothing is changed then, so the caller's refusal is still a
+    /// preflight refusal.
+    ///
+    /// The run keeps its first block, so a durable log record that names it
+    /// still describes the file it described: the record's CRC covers the
+    /// file's first `size_bytes` bytes, and those bytes are exactly what
+    /// this leaves alone. The blocks it claims were free, which in an open
+    /// window means no checkpoint and no durable record refers to them.
+    fn grow_created_file_in_place(
+        &mut self,
+        window: &mut OpenWindow,
+        object_id: u64,
+        offset: u64,
+        content: &[u8],
+        now: Timespec,
+    ) -> Result<bool, (bool, CoreError)> {
+        let block_size = self.dev.block_size() as u64;
+        let (start, blocks) = window.pending.created_data[&object_id];
+        let Some(Some(record)) = window.pending.records.get(&object_id).copied() else {
+            // The rewrite reports the missing record.
+            return Ok(false);
+        };
+        let size = record.size_bytes;
+        // Only an append grows in place. A change below the end of the file
+        // would overwrite bytes an earlier durable record still describes,
+        // and those bytes are the ones a rewrite moves out of the way.
+        let new_size = offset + content.len() as u64;
+        if offset < size || new_size <= size || blocks == 0 {
+            return Ok(false);
+        }
+        if new_size > WINDOW_CREATED_REWRITE_MAX {
+            // The rewrite reports the bound, and the caller commits.
+            return Ok(false);
+        }
+        let new_blocks = new_size.div_ceil(block_size);
+        if blocks != size.div_ceil(block_size) {
+            return Ok(false);
+        }
+        if !window
+            .tx
+            .try_extend_run(&mut self.dev, start, blocks, new_blocks - blocks)
+            .map_err(|error| (false, error))?
+        {
+            return Ok(false);
+        }
+        // The run has grown: every later refusal poisons the window.
+        let mut mutated = new_blocks > blocks;
+        let staged = crate::flight::DataContext {
+            scope: crate::flight::DataScope::CreateWriteThrough,
+            object_id,
+            offset,
+            length: content.len() as u64,
+            start,
+            blocks: u32::try_from(new_blocks).unwrap_or(u32::MAX),
+        };
+        self.flight_data_event(
+            crate::flight::EventKind::DataWriteBegin,
+            staged,
+            window.generation,
+        );
+        // From the file's last block, partial or not, to its new end: a gap
+        // a write past the end leaves is written as zeros, never left as
+        // whatever the free blocks held.
+        let first = size / block_size;
+        let mut block = vec![0u8; block_size as usize];
+        for index in first..new_blocks {
+            let at = index * block_size;
+            block.fill(0);
+            if index < blocks {
+                // The file's last block keeps the bytes it already holds.
+                self.dev
+                    .read_block(start + index, &mut block)
+                    .map_err(|error| (mutated, error.into()))?;
+                block[(size - at) as usize..].fill(0);
+            }
+            let from = offset.max(at);
+            let to = new_size.min(at + block_size);
+            if from < to {
+                let source = (from - offset) as usize;
+                let target = (from - at) as usize;
+                block[target..target + (to - from) as usize]
+                    .copy_from_slice(&content[source..source + (to - from) as usize]);
+            }
+            mutated = true;
+            if let Err(error) = self.dev.write_block(start + index, &block) {
+                self.flight_data_event(
+                    crate::flight::EventKind::DataWriteFailed,
+                    crate::flight::DataContext {
+                        start: start + index,
+                        blocks: 1,
+                        ..staged
+                    },
+                    window.generation,
+                );
+                return Err((mutated, error.into()));
+            }
+        }
+        self.flight_data_event(
+            crate::flight::EventKind::DataWriteComplete,
+            staged,
+            window.generation,
+        );
+        window.pending.prewritten_data_blocks = window
+            .pending
+            .prewritten_data_blocks
+            .checked_add(new_blocks - first)
+            .ok_or((
+                true,
+                CoreError::PrototypeLimit("window data accounting overflow"),
+            ))?;
+        window
+            .pending
+            .created_data
+            .insert(object_id, (start, new_blocks));
+        window.pending.records.insert(
+            object_id,
+            Some(ObjectRecord {
+                size_bytes: new_size,
+                allocated_bytes: new_blocks * block_size,
+                data_root: start,
+                data_blocks: new_blocks,
+                modified: now,
+                changed: now,
+                content_generation: window.generation,
+                ..record
+            }),
+        );
+        window.unloggable = true;
+        Ok(true)
+    }
+
     /// Writes or truncates a file the open window created: its content is
     /// read, changed and written to a new run, and the old run released, or
     /// quarantined when a durable log record still names it. Only a file up
@@ -6522,6 +6660,13 @@ impl<D: BlockDevice> Volume<D> {
             .ok_or(CoreError::PrototypeLimit("file size limit reached"))?;
         let mut window = self.take_or_open_window()?;
         if window.pending.created_data.contains_key(&object_id) {
+            // An append to a file the window created grows its run where it
+            // lies; anything else still moves the file.
+            match self.grow_created_file_in_place(&mut window, object_id, offset, content, now) {
+                Ok(true) => return self.finish_created_rewrite(window, Ok(true)),
+                Err(failure) => return self.finish_created_rewrite(window, Err(failure)),
+                Ok(false) => {}
+            }
             let result = self.rewrite_created_file(&mut window, object_id, now, |bytes| {
                 let start = usize::try_from(offset)
                     .map_err(|_| CoreError::PrototypeLimit("write offset is too large"))?;
@@ -6732,6 +6877,13 @@ impl<D: BlockDevice> Volume<D> {
             .is_some_and(|window| window.pending.created_data.contains_key(&object_id))
         {
             let mut window = self.take_or_open_window()?;
+            // Growing a created file is an append of zeros: it extends the
+            // run in place like any other append.
+            match self.grow_created_file_in_place(&mut window, object_id, new_size, &[], now) {
+                Ok(true) => return self.finish_created_rewrite(window, Ok(true)),
+                Err(failure) => return self.finish_created_rewrite(window, Err(failure)),
+                Ok(false) => {}
+            }
             let result = self.rewrite_created_file(&mut window, object_id, now, |bytes| {
                 let size = usize::try_from(new_size)
                     .map_err(|_| CoreError::PrototypeLimit("file size limit reached"))?;

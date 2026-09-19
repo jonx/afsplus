@@ -893,6 +893,62 @@ impl TxAllocator {
         self.retire_run(dev, lba, 1)
     }
 
+    /// Grows a run this transaction already holds by `blocks`, in place:
+    /// claims the blocks that follow it when every one of them is free.
+    /// Answers `false` when they are not, so that a file which cannot grow
+    /// where it lies is written elsewhere instead; nothing is changed then,
+    /// and the caller's refusal is still a preflight refusal. Only free
+    /// blocks are claimed, so this never takes bytes a checkpoint or a
+    /// durable log record still refers to.
+    pub fn try_extend_run<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        run_start: u64,
+        run_blocks: u64,
+        blocks: u64,
+    ) -> Result<bool, CoreError> {
+        self.check_snapshot_writable()?;
+        if blocks == 0 {
+            return Ok(true);
+        }
+        let start = run_start
+            .checked_add(run_blocks)
+            .ok_or_else(|| CoreError::Corrupt("extended run start overflows".into()))?;
+        let end = start
+            .checked_add(blocks)
+            .ok_or_else(|| CoreError::Corrupt("extended run end overflows".into()))?;
+        if end > self.geo.total_blocks {
+            return Ok(false);
+        }
+        if self.free_blocks_remaining().saturating_sub(blocks) < self.free_block_floor {
+            return Ok(false);
+        }
+        // An extent lives inside one region: the intent log rejects a record
+        // whose extent crosses a region boundary, and the next region's
+        // reserved head is in the way in any case.
+        let region = self.geo.region_of(run_start);
+        if self.geo.region_of(end - 1) != region {
+            return Ok(false);
+        }
+        // Look before claiming, so that a taken block leaves the allocator
+        // exactly as it was.
+        for lba in start..end {
+            if !self.geo.is_allocatable(lba) {
+                return Ok(false);
+            }
+            let region_index = (lba - self.geo.region_base(region)) as u32;
+            let (page_index, local_index) = self.geo.bitmap_page_for_index(region_index);
+            if self
+                .page_mut(dev, region, page_index)?
+                .is_allocated(local_index)
+            {
+                return Ok(false);
+            }
+        }
+        self.allocate_exact_run(dev, start, blocks)?;
+        Ok(true)
+    }
+
     /// Claims a specific free run (intent-log replay: the record names the
     /// exact extents whose data survived the crash). Every block must be
     /// FREE in the working state; the run then behaves like any allocation

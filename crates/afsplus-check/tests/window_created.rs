@@ -2,7 +2,7 @@
 //! the window changed, a file the window created is read, written and
 //! truncated before any commit, and every crash mounts at a whole prefix.
 
-use afsplus_block::{crash_states, MemoryBackend, RecordingBackend};
+use afsplus_block::{crash_states, MemoryBackend, RecordingBackend, TraceBackend};
 use afsplus_check::check_device;
 use afsplus_core::volume::{BatchOp, WINDOW_CREATED_REWRITE_MAX};
 use afsplus_core::{mkfs, mount, CoreError, MkfsParams, NamePolicy};
@@ -298,4 +298,157 @@ fn a_file_the_window_created_answers_for_its_comment_and_attributes() {
     )
     .unwrap();
     assert_eq!(vol.object_comment(id).unwrap(), "noted");
+}
+
+/// 200 KiB written in 8 KiB pieces: the blocks and the allocator searches
+/// the device sees for it. Item 7 of the performance programme.
+fn pieces_cost(pieces: usize) -> (u64, u64, Vec<u8>) {
+    const PIECE: usize = 8 * 1024;
+    let mut vol = mount(TraceBackend::new(formatted())).unwrap();
+    let id = vol.window_op(&create("p", b""), ts(1)).unwrap().unwrap();
+    let content: Vec<u8> = (0..pieces * PIECE).map(|i| (i % 251) as u8).collect();
+    vol.device_mut().reset();
+    for (piece, bytes) in content.chunks(PIECE).enumerate() {
+        vol.window_write_file_at(id, (piece * PIECE) as u64, bytes, ts(2))
+            .unwrap();
+    }
+    let writes = vol.device_mut().stats().writes;
+    // What the caller sees before anything is committed.
+    assert_eq!(read_all(&mut vol, id), content);
+    vol.window_commit(ts(3)).unwrap();
+    let searches = vol.last_commit_stats().unwrap().alloc.allocation_searches;
+    assert_eq!(read_all(&mut vol, id), content);
+    let mut dev = vol.into_device().into_inner();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+    let mut vol = mount(dev).unwrap();
+    let id = vol.lookup_root("p").unwrap().unwrap();
+    assert_eq!(vol.read_file(id).unwrap(), content);
+    (writes, searches, content)
+}
+
+#[test]
+fn a_created_file_written_in_pieces_is_written_once() {
+    // 25 pieces of 8 KiB make 50 blocks of 4 KiB. The file grows behind
+    // itself, so the device sees each of them once and the allocator
+    // searches for one run, not for one per piece.
+    let (writes, searches, content) = pieces_cost(25);
+    assert_eq!(content.len(), 200 * 1024);
+    assert!(writes <= 60, "{writes} device writes for 50 blocks of data");
+    assert!(searches <= 12, "{searches} allocator searches for one run");
+}
+
+#[test]
+fn a_created_file_whose_blocks_are_taken_is_rewritten_and_still_right() {
+    // A second file takes the blocks behind the first one between two of
+    // its pieces, so the first one cannot grow where it lies. The rewrite
+    // answers, and the bytes are the bytes.
+    let mut vol = mount(formatted()).unwrap();
+    let a = vol.window_op(&create("a", b""), ts(1)).unwrap().unwrap();
+    vol.window_write_file_at(a, 0, &[0xA1; 9000], ts(2))
+        .unwrap();
+    let b = vol
+        .window_op(&create("b", &[0xB2; 9000]), ts(3))
+        .unwrap()
+        .unwrap();
+    vol.window_write_file_at(a, 9000, &[0xA3; 9000], ts(4))
+        .unwrap();
+    // A write below the end of the file is not an append either.
+    vol.window_write_file_at(a, 4000, &[0xA4; 100], ts(5))
+        .unwrap();
+    let mut expected = vec![0xA1u8; 9000];
+    expected.extend_from_slice(&[0xA3; 9000]);
+    expected[4000..4100].fill(0xA4);
+    assert_eq!(read_all(&mut vol, a), expected);
+    assert_eq!(read_all(&mut vol, b), vec![0xB2; 9000]);
+    vol.window_commit(ts(6)).unwrap();
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+    let mut vol = mount(dev).unwrap();
+    let a = vol.lookup_root("a").unwrap().unwrap();
+    let b = vol.lookup_root("b").unwrap().unwrap();
+    assert_eq!(vol.read_file(a).unwrap(), expected);
+    assert_eq!(vol.read_file(b).unwrap(), vec![0xB2; 9000]);
+}
+
+#[test]
+fn a_cut_in_the_middle_of_the_pieces_leaves_the_file_absent_and_the_image_clean() {
+    const PIECE: usize = 8 * 1024;
+    let base = {
+        let mut vol = mount(formatted()).unwrap();
+        vol.create_file_in_root("old", b"old", ts(1)).unwrap();
+        vol.into_device()
+    };
+    let generation = mount(base.clone()).unwrap().generation();
+    let mut vol = mount(RecordingBackend::new(base.clone())).unwrap();
+    let id = vol.window_op(&create("p", b""), ts(2)).unwrap().unwrap();
+    // Four pieces are eight blocks: every subset of the unflushed tail is
+    // enumerated, and every one of them must mount clean.
+    for piece in 0..4 {
+        let bytes = vec![piece as u8; PIECE];
+        vol.window_write_file_at(id, (piece * PIECE) as u64, &bytes, ts(3))
+            .unwrap();
+    }
+    // The cut is here: nothing of the window has been committed.
+    let (_, log) = vol.into_device().into_parts();
+    let mut states = 0;
+    for crash_point in 0..=log.len() {
+        for state in crash_states(&base, &log, crash_point) {
+            let context = state.description.clone();
+            let mut image = state.image;
+            let report = check_device(&mut image);
+            assert!(report.is_clean(), "{context}: {:?}", report.errors);
+            let mut vol = mount(image).unwrap_or_else(|e| panic!("{context}: {e}"));
+            assert_eq!(vol.generation(), generation, "{context}");
+            assert_eq!(vol.lookup_root("p").unwrap(), None, "{context}");
+            let old = vol.lookup_root("old").unwrap().expect("the committed file");
+            assert_eq!(vol.read_file(old).unwrap(), b"old", "{context}");
+            states += 1;
+        }
+    }
+    assert!(states > 0);
+}
+
+#[test]
+fn a_logged_create_appended_after_its_fsync_keeps_what_the_record_named() {
+    // The create is durable in the intent log, with a CRC over its first
+    // 5000 bytes; the append grows the run behind it and writes over the
+    // tail of the last block, which that CRC does not cover. A cut between
+    // the two fsyncs must still replay the record.
+    let first = vec![0x51u8; 5000];
+    let second = vec![0x52u8; 9000];
+    let mut whole = first.clone();
+    whole.extend_from_slice(&second);
+    let mut vol = mount(formatted()).unwrap();
+    let id = vol.window_op(&create("g", &first), ts(1)).unwrap().unwrap();
+    vol.window_fsync().unwrap();
+    vol.window_write_file_at(id, 5000, &second, ts(2)).unwrap();
+    assert_eq!(read_all(&mut vol, id), whole);
+    // The log cannot describe the append: the next fsync must commit.
+    assert!(matches!(
+        vol.window_fsync(),
+        Err(CoreError::PrototypeLimit(_))
+    ));
+    // The cut between the two fsyncs: the record replays as it was written.
+    let mut dev = vol.into_device();
+    assert!(check_device(&mut dev).is_clean());
+    let mut cut = mount(dev.clone()).unwrap();
+    let cut_id = cut.lookup_root("g").unwrap().expect("the fsynced create");
+    assert_eq!(cut.read_file(cut_id).unwrap(), first);
+    let mut replayed = cut.into_device();
+    assert!(check_device(&mut replayed).is_clean());
+
+    // No cut: the same window committed keeps the whole file.
+    let mut vol = mount(formatted()).unwrap();
+    let id = vol.window_op(&create("g", &first), ts(1)).unwrap().unwrap();
+    vol.window_fsync().unwrap();
+    vol.window_write_file_at(id, 5000, &second, ts(2)).unwrap();
+    vol.window_commit(ts(3)).unwrap();
+    let mut dev = vol.into_device();
+    let report = check_device(&mut dev);
+    assert!(report.is_clean(), "{:?}", report.errors);
+    let mut vol = mount(dev).unwrap();
+    let id = vol.lookup_root("g").unwrap().unwrap();
+    assert_eq!(vol.read_file(id).unwrap(), whole);
 }
