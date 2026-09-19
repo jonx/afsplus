@@ -4,6 +4,7 @@
 > **Tests:** [tools/check-mounted-usage.sh](../tools/check-mounted-usage.sh),
 > [tools/check-mount-driver-death.py](../tools/check-mount-driver-death.py),
 > [tools/check-mount-responsiveness.py](../tools/check-mount-responsiveness.py),
+> [tools/check-mount-mmap.py](../tools/check-mount-mmap.py),
 > [tools/check-mount-name-policy.py](../tools/check-mount-name-policy.py),
 > [tools/check-mount-kill-durability.py](../tools/check-mount-kill-durability.py),
 > [tools/check-mount-endurance.py](../tools/check-mount-endurance.py),
@@ -28,6 +29,7 @@ with it, which is the harder half.
 - [What leaves a dead mount behind, and what clears it](#what-leaves-a-dead-mount-behind-and-what-clears-it)
 - [Simulating a filesystem that stops answering](#simulating-a-filesystem-that-stops-answering)
 - [One request at a time](#one-request-at-a-time)
+- [Memory-mapped files under parallel page faults](#memory-mapped-files-under-parallel-page-faults)
 - [Hours of use by several programs](#hours-of-use-by-several-programs)
 - [What a killed driver keeps](#what-a-killed-driver-keeps)
 - [macFUSE releases](#macfuse-releases)
@@ -159,6 +161,22 @@ file is deleted, and that the space still comes back.
 A request that blocks inside the driver itself still stops the whole volume;
 only more serving threads would change that, and fuser offers them on Linux
 only.
+
+## Memory-mapped files under parallel page faults
+
+A program that maps a file reads it through the kernel's page cache, which
+asks the driver for whole pages in the order the faults arrive, from every
+process that touches the map at once. [tools/check-mount-mmap.py](../tools/check-mount-mmap.py)
+writes a 32 MiB file with a pattern that names each page, maps it from eight
+processes that each fault every page in their own random order, and requires
+every byte right in every process (65,536 faults, about 4,000 pages a second
+on the development machine); then two processes write through a shared,
+writable map, `msync`, and the bytes are required both through `read()` and,
+after the unmount, through the core (`afsplus-extract`), not the mount. Its
+control changes one page through `write()` and requires a reader to count
+exactly one wrong page. The mmap path of the driver is macFUSE's: the driver
+sees reads and writes of whole pages, so the contract it holds is the
+ordinary one, exactness of positioned I/O under concurrency.
 
 ## Hours of use by several programs
 

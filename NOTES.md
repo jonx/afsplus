@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-19 — Mapped files under eight processes' page faults](#2026-09-19--mapped-files-under-eight-processes-page-faults)
 - [2026-09-19 — A volume says which profiles can take it](#2026-09-19--a-volume-says-which-profiles-can-take-it)
 - [2026-09-19 — The image workflow, and what a replayed session does not repeat](#2026-09-19--the-image-workflow-and-what-a-replayed-session-does-not-repeat)
 - [2026-09-19 — The tools' JSON has schema files a consumer can validate against](#2026-09-19--the-tools-json-has-schema-files-a-consumer-can-validate-against)
@@ -224,6 +225,19 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-19 — Mapped files under eight processes' page faults
+
+Stage D's last host item, mmap and parallel page faults, is a gate in the
+mounted-volume battery: eight processes fault every page of a 32 MiB file
+in their own order, two write through a shared map, and the bytes are
+checked through `read()` and then through the core after the unmount. All
+held at the first complete run; what failed twice on the way was the gate,
+first because macOS spawns worker processes fresh (the module body ran
+eight more times), then because `afsplus-extract` names its output by object
+id and the check looked for the file by name. Both are the kind of failure a
+gate must show before it is believed; the control was added last.
+
 
 ## 2026-09-19 — A volume says which profiles can take it
 

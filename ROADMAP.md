@@ -276,7 +276,7 @@ Milestones: [\[M01\]](implementation/milestones.md), [~~M08~~](implementation/mi
 - host-side inspect/check/repair workflow
 - sparse-image create/mount/fork/replay workflow <!-- progress: roadmap-55 -->
 - cross-OS interoperability test matrix
-- FUSE mmap and parallel page-fault qualification
+- ~~FUSE mmap and parallel page-fault qualification~~ <!-- progress: roadmap-57 -->
 
 If rich multi-user ACL semantics remain a project goal, this is the earliest sensible point to build real POSIX and Windows mapping adapters and use them to validate or revise the canonical ACL proposal.
 
