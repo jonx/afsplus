@@ -233,6 +233,9 @@ and ordinary extents with strong locality before freezing an approach
 
 ## Build, test and check
 
+New here: [GETTING-STARTED.md](GETTING-STARTED.md) goes from a clone to a
+volume under AROS on one page.
+
 The build is the Cargo workspace under [crates/](crates/README.md):
 
 ```sh
