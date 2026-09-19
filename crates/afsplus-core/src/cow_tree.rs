@@ -648,7 +648,12 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             // one slot changes. Writing that slot in place spares two clones
             // of every key the node holds, one to build a child vector and
             // one to put the keys back.
-            replace_child(&mut node, child_index, single, child.reference.subtree_items)?;
+            replace_child(
+                &mut node,
+                child_index,
+                single,
+                child.reference.subtree_items,
+            )?;
             if node.fits(self.geo.block_size) {
                 return self.persist(lba, staged, vec![(node, known_min)]);
             }
@@ -1455,9 +1460,14 @@ fn split_leaf(
     }
     let total = prefix[node.items.len()];
     let mut best: Option<(usize, usize)> = None;
-    for split in 1..node.items.len() {
-        let left_len = prefix[split];
-        let right_len = base + (total - prefix[split]);
+    for (split, left_len) in prefix
+        .iter()
+        .copied()
+        .enumerate()
+        .take(node.items.len())
+        .skip(1)
+    {
+        let right_len = base + (total - left_len);
         if left_len <= capacity && right_len <= capacity {
             let difference = left_len.abs_diff(right_len);
             if best
