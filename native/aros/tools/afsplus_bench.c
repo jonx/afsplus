@@ -188,21 +188,34 @@ static struct AfsplusArosCounters phase_counters(struct MsgPort *port)
     return counters;
 }
 
+/* Whether the handler behind the port answers the counters query: another
+ * file system's port does not, and its phase lines then carry no costs
+ * rather than zeros that would read as free. */
+static int has_counters(struct MsgPort *port)
+{
+    struct AfsplusArosCounters counters;
+
+    memset(&counters, 0, sizeof(counters));
+    return port != NULL && afsplus_client_counters(port, &counters) == 0;
+}
+
 static void report_phase(const char *name, ULONG operations, uint64_t start,
     struct MsgPort *port, const struct AfsplusArosCounters *at_start)
 {
-    struct AfsplusArosCounters now = phase_counters(port);
+    /* The time first: the two queries below are not the phase's. */
+    ULONG elapsed = clamp(now_microseconds() - start);
+    struct AfsplusArosCounters now;
     char text[4][21];
 
-    if (port == NULL)
+    if (!has_counters(port))
     {
         Printf("[AFSPLUS-BENCH] phase %s ops %lu us %lu\n", name, operations,
-            clamp(now_microseconds() - start));
+            elapsed);
         return;
     }
+    now = phase_counters(port);
     Printf("[AFSPLUS-BENCH] phase %s ops %lu us %lu calls %s flushes %s"
-        " writes %s cache_reads %s\n", name, operations,
-        clamp(now_microseconds() - start),
+        " writes %s cache_reads %s\n", name, operations, elapsed,
         decimal(text[0], now.calls - at_start->calls),
         decimal(text[1], now.device_flushes - at_start->device_flushes),
         decimal(text[2], now.device_writes - at_start->device_writes),
