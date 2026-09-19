@@ -156,6 +156,10 @@ echo "[aros-package] build the target-side benchmark runner"
 build_target_program native/aros/tools/afsplus_bench.c AFSPlusBench \
     native/aros/client/afsplus_client.c
 
+echo "[aros-package] build the target-side S3 cut-and-boot workload"
+build_target_program native/aros/tools/afsplus_s3_workload.c AFSPlusS3Workload \
+    native/aros/client/afsplus_client.c
+
 echo "[aros-package] build the target-side crash-replay probe"
 build_target_program native/aros/tests/replay_probe.c AFSPlusReplayProbe
 
@@ -211,7 +215,8 @@ cp docs/aros-alpha0-package.md "$staging/README.md"
 (
     cd "$staging"
     shasum -a 256 afsplus-handler AFSPlusAlpha0Probe AFSPlusDosProbe \
-        AFSPlusInfo AFSPlusClone FDSKUpdateProbe AFSPlusDriverProbe AFSPlusTour AFSPlusBench BASE20 \
+        AFSPlusInfo AFSPlusClone FDSKUpdateProbe AFSPlusDriverProbe AFSPlusTour AFSPlusBench \
+        AFSPlusS3Workload BASE20 \
         AFSPlusReplayProbe \
         AFSPlusS1Probe AFSPlusS1bProbe AFSPlusS1Pivot AFSPLUS19 Unit19 \
         abi-report.txt build-profile.txt check-before.json README.md \
