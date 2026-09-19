@@ -302,6 +302,16 @@ pub struct TxAllocator {
     snapshot: Option<Box<SnapshotAccounting>>,
     /// Region where allocation last succeeded; searches start here.
     rover_region: u32,
+    /// Block after this transaction's last allocation in `rover_region`.
+    /// It is a hint and nothing else: a search that finds nothing above it
+    /// wraps and covers the rest of the region, so a path that clears bits
+    /// behind it -- a release, a retirement's promotion, an abandoned run --
+    /// leaves it alone and stays correct. Its only job is to stop a fill
+    /// from rescanning the blocks it has already filled, which made filling
+    /// a region cost the square of its size. It is transaction-local: a
+    /// fresh transaction starts at the region's first block, because the
+    /// committed checkpoint carries the region and not the position.
+    rover_index: u32,
     /// Raw free blocks that must remain after every allocation made by this
     /// transaction. Normal growth transactions use the volume's emergency
     /// metadata headroom; destructive/recovery transactions leave this at
@@ -451,6 +461,7 @@ impl TxAllocator {
                 })
             }),
             rover_region: rover_region % geo.region_count().max(1),
+            rover_index: 0,
             free_block_floor: 0,
             stats: AllocStats::default(),
         };
@@ -730,38 +741,23 @@ impl TxAllocator {
                 }
             }
             let base = geo.region_base(region);
-            let mut run_start = 0u32;
-            let mut run_len = 0u64;
-            let mut found = None;
+            let valid = geo.region_valid_blocks(region);
+            // Resume where this transaction's last allocation in this region
+            // ended. Only the region the rover names has a position; every
+            // other region is entered at its first block.
+            let resume = if step == 0 {
+                self.rover_index.min(valid)
+            } else {
+                0
+            };
             let mut examined = 0u64;
-            for page_index in 0..geo.bitmap_page_count(region) {
-                let first_block = page_index * afsplus_format::bitmap::BITMAP_PAGE_BLOCKS;
-                {
-                    let page = self.page_mut(dev, region, page_index)?;
-                    for local_index in 0..page.valid_blocks {
-                        examined += 1;
-                        let region_index = first_block + local_index;
-                        let lba = base + region_index as u64;
-                        if geo.is_allocatable(lba) && !page.is_allocated(local_index) {
-                            if run_len == 0 {
-                                run_start = region_index;
-                            }
-                            run_len += 1;
-                            if run_len == len {
-                                found = Some(run_start);
-                                break;
-                            }
-                        } else {
-                            run_len = 0;
-                        }
-                    }
-                }
-                if !self.dirty_pages.contains(&(region, page_index)) {
-                    self.pages.remove(&(region, page_index));
-                }
-                if found.is_some() {
-                    break;
-                }
+            let mut found = self.scan_region(dev, region, len, resume, valid, &mut examined)?;
+            if found.is_none() && resume > 0 {
+                // Wrap once. A run of `len` blocks that starts below the
+                // rover ends before `resume + len`, so this second pass sees
+                // every run the first one could not.
+                let limit = resume.saturating_add((len - 1) as u32).min(valid);
+                found = self.scan_region(dev, region, len, 0, limit, &mut examined)?;
             }
             self.stats.bitmap_bits_examined += examined;
             if let Some(start) = found {
@@ -779,11 +775,91 @@ impl TxAllocator {
                 }
                 self.track_snapshot_allocation(lba, lba + len)?;
                 self.rover_region = region;
+                self.rover_index = start.saturating_add(len as u32).min(valid);
                 self.stats.blocks_allocated += len;
                 return Ok(lba);
             }
         }
         Err(CoreError::NoSpace)
+    }
+
+    /// Looks for a free run of `len` blocks whose first block lies in
+    /// `[from, until)` of `region`, in region-relative blocks. A run may
+    /// cross a bitmap page, as it always could; clean pages are still
+    /// evicted as the scan leaves them.
+    fn scan_region<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        region: u32,
+        len: u64,
+        from: u32,
+        until: u32,
+        examined: &mut u64,
+    ) -> Result<Option<u32>, CoreError> {
+        let geo = self.geo;
+        // Every block below a region's reserved head is that region's own
+        // metadata, and the head is the same for the whole region:
+        // `is_allocatable` says so per block, this says it once.
+        let reserved_head = if region == 0 {
+            geo.region0_reserved_blocks() as u32
+        } else {
+            geo.region_reserved_blocks(region) as u32
+        };
+        let begin = from.max(reserved_head);
+        if begin >= until {
+            return Ok(None);
+        }
+        let page_blocks = afsplus_format::bitmap::BITMAP_PAGE_BLOCKS;
+        let mut run_start = 0u32;
+        let mut run_len = 0u64;
+        let mut found = None;
+        for page_index in begin / page_blocks..=(until - 1) / page_blocks {
+            let first_block = page_index * page_blocks;
+            {
+                let page = self.page_mut(dev, region, page_index)?;
+                let stop = (until - first_block).min(page.valid_blocks);
+                let mut local_index = begin.saturating_sub(first_block);
+                while local_index < stop {
+                    // A byte whose every block is allocated ends the run at
+                    // the cost of one test instead of eight. Filling a
+                    // region walks over its filled head this way.
+                    if local_index % 8 == 0
+                        && stop - local_index >= 8
+                        && page.bits[local_index as usize / 8] == 0xff
+                    {
+                        run_len = 0;
+                        local_index += 8;
+                        *examined += 8;
+                        continue;
+                    }
+                    *examined += 1;
+                    if page.is_allocated(local_index) {
+                        run_len = 0;
+                    } else {
+                        if run_len == 0 {
+                            run_start = first_block + local_index;
+                        }
+                        run_len += 1;
+                        if run_len == len {
+                            found = Some(run_start);
+                            break;
+                        }
+                    }
+                    local_index += 1;
+                }
+            }
+            if !self.dirty_pages.contains(&(region, page_index)) {
+                self.pages.remove(&(region, page_index));
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        debug_assert!(found.is_none_or(|start| {
+            let lba = geo.region_base(region) + start as u64;
+            geo.is_allocatable(lba) && geo.is_allocatable(lba + len - 1)
+        }));
+        Ok(found)
     }
 
     pub fn retire<D: BlockDevice>(&mut self, dev: &mut D, lba: u64) -> Result<(), CoreError> {
@@ -1324,6 +1400,89 @@ mod tests {
         assert_eq!(finished.stats.bitmap_pages_dirty, 2);
         assert_eq!(finished.stats.region_descriptors_dirty, 1);
         assert!(finished.stats.allocator_ram_bytes <= 2 * 4096);
+    }
+
+    /// A rover is a hint, not a promise: whatever it has walked past must
+    /// still be found. With the region full above the rover, the only free
+    /// run left is the one released behind it, and the wrapped pass has to
+    /// return exactly that.
+    #[test]
+    fn the_rover_still_finds_what_was_released_behind_it() {
+        let mut dev = MemoryBackend::new(4096, 2048);
+        mkfs(
+            &mut dev,
+            &MkfsParams {
+                uuid: [19u8; 16],
+                label: "Rover".into(),
+                region_size: 2048,
+                reclaim_caps: Default::default(),
+                log_slots: 8,
+                shared_extents: true,
+                data_policy: false,
+                name_policy: crate::NamePolicy::Sensitive,
+                timestamp: Timespec::default(),
+            },
+        )
+        .unwrap();
+        let vol = mount(dev).unwrap();
+        let geo = vol.ident().geometry();
+        let checkpoint = vol.checkpoint().clone();
+        let mut dev = vol.into_device();
+
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096, 0).unwrap();
+        let first = tx.allocate_run(&mut dev, 2).unwrap();
+        let rest = tx.free_blocks_remaining();
+        let above = tx.allocate_run(&mut dev, rest).unwrap();
+        assert_eq!(above, first + 2);
+        assert!(matches!(
+            tx.allocate_run(&mut dev, 1),
+            Err(CoreError::NoSpace)
+        ));
+        tx.release_uncommitted(&mut dev, first).unwrap();
+        tx.release_uncommitted(&mut dev, first + 1).unwrap();
+        assert_eq!(tx.allocate_run(&mut dev, 2).unwrap(), first);
+    }
+
+    /// Filling a region costs what it allocates. Before the rover every
+    /// allocation rescanned the region from its first block, so the bits
+    /// examined grew with the square of the blocks taken.
+    #[test]
+    fn filling_a_region_examines_bits_in_proportion_to_the_blocks_taken() {
+        let mut dev = MemoryBackend::new(4096, 262_144);
+        mkfs(
+            &mut dev,
+            &MkfsParams {
+                uuid: [20u8; 16],
+                label: "RoverFill".into(),
+                region_size: 262_144,
+                reclaim_caps: Default::default(),
+                log_slots: 8,
+                shared_extents: true,
+                data_policy: false,
+                name_policy: crate::NamePolicy::Sensitive,
+                timestamp: Timespec::default(),
+            },
+        )
+        .unwrap();
+        let vol = mount(dev).unwrap();
+        let geo = vol.ident().geometry();
+        let checkpoint = vol.checkpoint().clone();
+        let mut dev = vol.into_device();
+
+        let blocks = 4_000u64;
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096, 0).unwrap();
+        let first = tx.allocate(&mut dev).unwrap();
+        for expected in 1..blocks {
+            assert_eq!(tx.allocate(&mut dev).unwrap(), first + expected);
+        }
+        let examined = tx.stats().bitmap_bits_examined;
+        // One walk of the region's allocated head plus one bit per block
+        // taken. The quadratic scan examined about eight million here.
+        assert!(
+            examined < 4 * blocks,
+            "filling {blocks} blocks examined {examined} bitmap bits"
+        );
+        tx.finish(&mut dev).unwrap();
     }
 
     #[test]
