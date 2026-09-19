@@ -124,3 +124,26 @@ hosted benchmark beside the numbers above. A lot that moves a bench phase
 also runs `tools/check-hosted-aros-dos.sh`; one that changes what reaches
 the disk or when also runs `tools/check-hosted-aros-s3.sh`. The full test
 suite is not run.
+
+## Where it stands on 2026-09-19
+
+Lots A, B, C, D, F and I are on main, each with its named tests, a negative
+control, the hosted DOS gate, the benchmark and, where it changes what
+reaches the disk, S3. H went upstream as aros-development-team/AROS#1256 and
+is applied to the local AROS tree. E was struck: `comparison_key` already
+has an ASCII path, and the profile's share was drop glue instantiated in
+that crate. The hosted benchmark reads 1.11 s against 1.15 s for the Fast
+File System in the same boot (create 0.23 against 0.43, list 0.11 against
+0.06, read 0.23 against 0.35, rename 0.23 against 0.21, delete 0.33 against
+0.12 s), from 3.15 against 1.43 s.
+
+| Phase | Calls per operation | Flushes | Writes per operation |
+|---|---|---|---|
+| create | 8 | 30 | 2.5 |
+| rename | 6 | 10 | 1.1 |
+| delete | 4 | 910 | 2.2 |
+
+What is left, by measurement: delete still commits 455 times for 2,650
+operations on a 64 MiB volume, the room floor again; the object-map batch
+encodes the same leaf once per operation (lot B's report); and G, the pool
+allocator for the AROS build.
