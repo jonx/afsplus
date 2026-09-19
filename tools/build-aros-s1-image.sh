@@ -47,6 +47,8 @@ desktop)
     mountlist="$repo_root/native/aros/AFSPLUS19-s1b.mountlist"
     sequence="$repo_root/native/aros/tests/s1b-sequence"
     require_file "$package/AFSPlusS1bProbe"
+    require_file "$package/AFSPlusInfo"
+    require_file "$repo_root/native/aros/tests/s1b-proof"
     require_file "$repo_root/native/aros/tests/s1b-backdrop"
     ;;
 *)
@@ -76,7 +78,7 @@ cp "$sequence" "$source_tree/S/S1-Sequence"
 printf '%s' 'afsplus-s1' >"$source_tree/s1-origin"
 
 if [ "$profile" = desktop ]; then
-    desktop_commands='AddAudioModes AddDataTypes ConClip EndIf GetEnv If IPrefs LoadKeymap MakeDir Mount Run SetClock SetEnv Wait'
+    desktop_commands='AddAudioModes AddDataTypes ConClip Echo EndCLI EndIf FailAt GetEnv If Info IPrefs LoadKeymap MakeDir Mount NewShell Run SetClock SetEnv Wait'
     desktop_directories='Classes Devs Fonts Locale Prefs System Tools Utilities L'
     for command in $desktop_commands; do
         require_file "$aros_tree/C/$command"
@@ -95,6 +97,8 @@ if [ "$profile" = desktop ]; then
     done
     mkdir -p "$source_tree/clips" "$source_tree/Prefs/Env-Archive/AFSPlus"
     cp "$package/AFSPlusS1bProbe" "$source_tree/C/AFSPlusS1bProbe"
+    cp "$package/AFSPlusInfo" "$source_tree/C/AFSPlusInfo"
+    cp "$repo_root/native/aros/tests/s1b-proof" "$source_tree/S/AFSPlus-Proof"
     cp "$repo_root/native/aros/tests/s1b-backdrop" "$source_tree/.backdrop"
     printf '%s' 'afsplus-s1b' >"$source_tree/s1b-origin"
 fi

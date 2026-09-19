@@ -59,7 +59,19 @@ C:GetEnv AFSPLUS_S1B >MacRW:s1b-env.out
 C:Copy ENVARC:AFSPLUS_S1B MacRW:s1b-saved-env >MacRW:s1b-saved-env-copy.out
 C:Run <NIL: >NIL: QUIET WANDERER:Wanderer
 C:Wait 3
+; Which file system serves what: AFS+ answers its own query, the host and
+; RAM: volumes refuse it. The same commands run on screen for the screenshot.
+C:FailAt 21
+C:AFSPlusInfo SYS: >MacRW:s1b-info-sys.json
+C:AFSPlusInfo RAM: >MacRW:s1b-info-ram.out
+C:AFSPlusInfo MacRW: >MacRW:s1b-info-host.out
+C:FailAt 10
 C:Run <NIL: >NIL: QUIET SYS:Prefs/Locale
 C:Run <NIL: >NIL: QUIET SYS:Utilities/Clock
 C:Wait 2
+; Opened last, so it is on top in the screenshot.
+C:Run <NIL: >NIL: C:NewShell "CON:130/400/1220/360/Which file system serves SYS:?/CLOSE" FROM S:AFSPlus-Proof
+C:Wait 2
 C:Copy SYS:s1b-origin MacRW:s1b-runtime >MacRW:s1b-copy.out
+; The boot shell covers the screen; a Startup-Sequence ends by closing it.
+C:EndCLI >NIL:

@@ -2,6 +2,12 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 # Hosted desktop/preferences/application session after the SYS: pivot to AFS+.
+#
+# The AROS tree needs more than Macaros's graft/rebuild-aros.sh builds: the
+# Locale, Font, Time and other preference editors (workbench-prefs-*), the
+# themes (workbench-images-themes) and codesets.library, which Locale opens
+# (workbench-libs-codesets). The screenshot shows AFSPlusInfo refused by the
+# Mac folder and RAM:, and answered by SYS: on AFS+.
 
 set -eu
 
@@ -157,6 +163,11 @@ require_content "$result/s1b-runtime" afsplus-s1b
 require_content "$result/s1b-preference" afsplus-s1b
 require_content "$result/s1b-env.out" afsplus-s1b
 require_content "$result/s1b-saved-env" afsplus-s1b
+grep -q '^{"schema":"afsplus-handler-info"' "$result/s1b-info-sys.json"
+grep -q '"label":"AFSPlusS1b"' "$result/s1b-info-sys.json"
+for volume in ram host; do
+    grep -q 'is not served by an AFS+ handler' "$result/s1b-info-$volume.out"
+done
 grep -q "'WANDERER:Wanderer'" "$result/s1b-tasks.out"
 grep -q 'IPrefs main' "$result/s1b-tasks.out"
 grep -q 'Locale main' "$result/s1b-tasks.out"
@@ -186,6 +197,7 @@ git -C "$macaros_root" status --short >"$result/macaros-status.txt"
     shasum -a 256 Unit19.s1.final check-before.json check-after.json \
         content-SHA256SUMS package-SHA256SUMS s1-probe.out s1b-probe.out \
         s1b-runtime s1b-preference s1b-env.out s1b-saved-env s1b-pivot.out \
+        s1b-info-sys.json s1b-info-ram.out s1b-info-host.out \
         s1b-tasks.out \
         s1b-desktop.png s1b-desktop.ppm s1b-desktop-foreground-pixels.txt \
         macaros-commit.txt macaros-status.txt guest-failure-requester.txt \

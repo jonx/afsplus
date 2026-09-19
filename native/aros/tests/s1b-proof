@@ -1,0 +1,10 @@
+; Shown on the S1b desktop: which file system serves each volume.
+FailAt 21
+Echo "1> AFSPlusInfo MacRW:   (the Mac folder, emul-handler)"
+AFSPlusInfo MacRW:
+Echo "1> AFSPlusInfo RAM:"
+AFSPlusInfo RAM:
+Echo "1> Info SYS:"
+Info SYS:
+Echo "1> AFSPlusInfo SYS:"
+AFSPlusInfo SYS:
