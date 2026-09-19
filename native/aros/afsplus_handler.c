@@ -489,6 +489,7 @@ static uint32_t buffer_matches_mask(const struct AfsplusArosHandler *handler,
 {
     uintptr_t first;
     uintptr_t last;
+    uintptr_t alignment;
 
     if (!handler->use_dma_mask)
         return 1;
@@ -498,7 +499,13 @@ static uint32_t buffer_matches_mask(const struct AfsplusArosHandler *handler,
     if (first > UINTPTR_MAX - (length - 1))
         return 0;
     last = first + length - 1;
-    return ((first | last) & ~handler->dma_mask) == 0;
+    /* The clear low bits of the mask are an alignment and bind the start of
+     * the buffer; the rest is the reach of the device's DMA and binds every
+     * byte. Applied whole to the last byte, a mask of ...fffe refused every
+     * buffer of even length. */
+    alignment = (handler->dma_mask & (0 - handler->dma_mask)) - 1;
+    return (first & ~handler->dma_mask) == 0
+        && (last & ~(handler->dma_mask | alignment)) == 0;
 }
 
 static int32_t device_transfer(void *context, uint32_t command,
@@ -695,6 +702,18 @@ static int32_t setup_dma_bounce(struct AfsplusArosHandler *handler)
 
     handler->use_dma_mask = 1;
     handler->dma_mask = (uintptr_t)environment->de_Mask;
+#if UINTPTR_MAX > 0xFFFFFFFFu
+    /*
+     * A mask with no bit above 31 is a 32-bit Amiga value, such as the
+     * 0x7ffffffe that partition.library gives a GPT partition: on a 64-bit
+     * system it constrains the low word, alignment and all, and says nothing
+     * of the rest. PFS3 and SFS test the low word the same way. Every
+     * allocation of a hosted or Apple Silicon AROS lies above 4 GiB, and a
+     * boot partition refused them all.
+     */
+    if ((handler->dma_mask >> 32) == 0)
+        handler->dma_mask |= ~(uintptr_t)0xFFFFFFFFu;
+#endif
     handler->bounce_size = AFSPLUS_AROS_ALPHA0_BLOCK_SIZE;
     if ((SIPTR)environment->de_TableSize >= DE_BUFMEMTYPE)
         memory_flags |= (ULONG)environment->de_BufMemType;
@@ -1320,6 +1339,18 @@ static LONG forward_to_claimed_instance(struct ExecBase *SysBase,
  * call afsplus_aros_refuse_startup() when the libraries or the init set
  * failed.
  */
+/*
+ * stdc.library is optional to this handler, and posixc.library and
+ * stdcio.library are not linked (afsplus_bootposix.c). Rust's standard
+ * library refers to all three, but while it runs the handler calls none of
+ * them: its allocator and HashMap seeds are afsplus_bootlibc.c, and it takes
+ * time and files from its packets. A boot volume's handler cannot open them
+ * anyway: they need dos.library to start, and dos.library waits for the boot
+ * volume. A negative requirement tells autoinit to open stdc when it can and
+ * to start without it otherwise.
+ */
+const LONG __aros_libreq_StdCBase = -1;
+
 void ___showerror(struct ExecBase *SysBase, const char *format, ...)
 {
     va_list arguments;

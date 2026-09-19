@@ -256,8 +256,23 @@ echo "[aros-ffi] AROS AArch64 native handler shell"
     -I api -I native/aros -c native/aros/afsplus_handler.c \
     -o "$task_dir/handler-aarch64.o"
 
+echo "[aros-ffi] AROS AArch64 boot C library"
+# shellcheck disable=SC2086 -- profile and handler flags are separate words.
+"$aros_clang" --target="$aros_target" $aros_arch_flags \
+    $handler_cflags -std=gnu11 -Wall -Wextra -Werror -D__NOLIBBASE__ \
+    -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
+    -I api -I native/aros -c native/aros/afsplus_bootlibc.c \
+    -o "$task_dir/bootlibc-aarch64.o"
+# shellcheck disable=SC2086 -- profile and handler flags are separate words.
+"$aros_clang" --target="$aros_target" $aros_arch_flags \
+    $handler_cflags -std=gnu11 -Wall -Wextra -Werror -D__NOLIBBASE__ \
+    -fno-builtin -I "$aros_include" -I "$aros_gen_include" \
+    -I api -I native/aros -c native/aros/afsplus_bootposix.c \
+    -o "$task_dir/bootposix-aarch64.o"
+
 echo "[aros-ffi] AROS AArch64 relocatable handler/staticlib link"
 "$aros_ld" -r "$task_dir/handler-aarch64.o" \
+    "$task_dir/bootlibc-aarch64.o" "$task_dir/bootposix-aarch64.o" \
     "$task_dir/packet-aarch64.o" "$task_dir/trackdisk-aarch64.o" \
     "$task_dir/claim-aarch64.o" \
     "$task_dir/control-aarch64.o" \
@@ -335,6 +350,7 @@ PATH="$aros_tools:$PATH" COMPILER_PATH="$aros_crosstools/bin" \
     -o "$task_dir/afsplus-handler" \
     "$task_dir/module/afsplus_start.o" \
     "$task_dir/handler-aarch64.o" \
+    "$task_dir/bootlibc-aarch64.o" "$task_dir/bootposix-aarch64.o" \
     "$task_dir/packet-aarch64.o" \
     "$task_dir/trackdisk-aarch64.o" \
     "$task_dir/claim-aarch64.o" \
@@ -353,6 +369,20 @@ if "$aros_nm" --undefined-only "$task_dir/afsplus-handler" \
     | grep -Eq '[^[:space:]]'; then
     echo "Unresolved symbol in complete AROS handler module:" >&2
     "$aros_nm" --undefined-only "$task_dir/afsplus-handler" >&2
+    exit 65
+fi
+# The handler serves packets without stdc.library (afsplus_bootlibc.c):
+# none of these may resolve to a library stub.
+if "$aros_nm" --defined-only "$task_dir/afsplus-handler" \
+        | grep -Eq '__(malloc|calloc|realloc|free|arc4random_buf)_StdCBase_wrapper$'; then
+    echo "The handler's allocator still goes through stdc.library" >&2
+    exit 65
+fi
+if "$aros_nm" --defined-only "$task_dir/afsplus-handler" \
+        | grep -Eq '[[:space:]](PosixCBase|StdCIOBase)$'; then
+    echo "The handler still links posixc.library or stdcio.library, for:" >&2
+    "$aros_nm" --defined-only "$task_dir/afsplus-handler" \
+        | grep -E '(PosixCBase|StdCIOBase)' >&2
     exit 65
 fi
 for symbol in afsplus_Handler handler afsplus_aros_mount; do
