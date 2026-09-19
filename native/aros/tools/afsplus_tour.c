@@ -64,6 +64,21 @@ static void join(char *out, CONST_STRPTR drawer, CONST_STRPTR name)
     AddPart((STRPTR)out, name, PATH_MAX_TOUR);
 }
 
+/* A durable point, so that the space readings around it compare like with
+ * like. The default mount lets five seconds of changes gather before they
+ * reach the disk, and until they do the volume does not count their blocks
+ * as in use: a reading taken straight after a 16 MiB write understates by
+ * 16 MiB, and the next reading then charges that to whatever happened in
+ * between. Flushing before each reading is what makes the clone's own cost
+ * the thing being measured. */
+static void settle(BPTR lock)
+{
+    struct MsgPort *port = afsplus_client_lock_port(lock);
+
+    if (port != NULL)
+        DoPkt(port, ACTION_FLUSH, 0, 0, 0, 0, 0);
+}
+
 /* Bytes the volume holds in use now. */
 static uint64_t used_bytes(BPTR lock)
 {
@@ -176,6 +191,7 @@ static void tour(BPTR drawer, CONST_STRPTR drawer_name, UBYTE *chunk)
             step("clone", FALSE);
             goto watch;
         }
+        settle(drawer);
         before = used_bytes(drawer);
         source = Lock((CONST_STRPTR)original, SHARED_LOCK);
         started = now_microseconds();
@@ -186,10 +202,12 @@ static void tour(BPTR drawer, CONST_STRPTR drawer_name, UBYTE *chunk)
             UnLock(source);
         }
         clone_us = now_microseconds() - started;
+        settle(drawer);
         after_clone = used_bytes(drawer);
         started = now_microseconds();
         copied = copy_file((CONST_STRPTR)original, (CONST_STRPTR)copy, chunk);
         copy_us = now_microseconds() - started;
+        settle(drawer);
         after_copy = used_bytes(drawer);
         /* The clock may step by milliseconds; a clone inside one step reads
          * as no time at all, and is said so. */
