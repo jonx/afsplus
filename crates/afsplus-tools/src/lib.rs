@@ -7,6 +7,7 @@
 //! fail closed.
 
 mod common;
+mod compat;
 mod diff;
 mod disk;
 mod dump;

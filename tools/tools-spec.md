@@ -96,7 +96,8 @@ Success reports the UUID, label, block size, region size, enabled feature IDs,
 name-key algorithm and requested profile. A profile is an input policy, not an
 on-disk identity: the identification block records the resulting feature
 masks, so an inspector must not guess which equivalent profile name was used.
-The `mkafsplus` JSON schema version is 1.
+The reverse question, which profiles can take a given volume, is answered by
+`afsplus-info` (below). The `mkafsplus` JSON schema version is 1.
 
 ## afsplus-info
 
@@ -113,6 +114,17 @@ authoritative raw `free_blocks`, runtime `emergency_headroom_blocks` and
 saturating `available_blocks` advertised to normal growth. The headroom is
 computed from immutable geometry, so this adds no descendant read. The tool
 therefore remains suitable for quick probes of very large volumes.
+
+`afsplus-info` also answers which compatibility profiles and implementations
+can take the volume, from its feature masks and the policy files of
+[`profiles/`](../profiles/) (each names every feature it allows): for each
+profile `full`, `read-only` (an enabled `ro_compat` feature the profile does
+not allow: it may be read but must not be written by an implementation of
+that profile) or `cannot-mount` (an `incompat` one), with the features
+beyond the profile named; and for the portable C reader, `reads` or
+`cannot-read` from its compiled mask. A distributor formats with the
+profile of the smallest implementation that must write the volume, and
+checks a volume from elsewhere with this before shipping it to one.
 
 The `afsplus-info` JSON schema version is 1. It performs zero writes and uses
 an OS read-only descriptor; the block interface's write and flush methods also

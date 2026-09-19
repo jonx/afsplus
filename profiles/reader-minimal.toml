@@ -12,3 +12,5 @@ allow_shared_extents = false
 allow_data_policy = false
 allow_orphan_directory = true
 require_journal_write_support = false
+allow_persistent_snapshots = false
+allow_security_descriptors = false

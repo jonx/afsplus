@@ -86,8 +86,9 @@ fn execute(options: &Options) -> Result<String, Failure> {
     let (_device, view) = read_header(&options.image)?;
     if options.json {
         return Ok(format!(
-            "{{\"schema_version\":1,\"tool\":\"afsplus-info\",{}}}",
-            header_json(&view)
+            "{{\"schema_version\":1,\"tool\":\"afsplus-info\",{},\"compatibility\":{}}}",
+            header_json(&view),
+            crate::compat::report_json(&view.ident)
         ));
     }
 
@@ -104,7 +105,7 @@ fn execute(options: &Options) -> Result<String, Failure> {
         feature_list.join(", ")
     };
     Ok(format!(
-        "AFS+ volume {}\nlabel: {:?}\ngeometry: {} blocks x {} bytes; region {} blocks\nnames: {} (Unicode {}.{}.{})\nfeatures: {}\nfeature masks: {}\ncheckpoint: slot {}, generation {}, transaction {}, raw free {}, emergency headroom {}, normally available {} blocks\nslot A: {}\nslot B: {}",
+        "AFS+ volume {}\nlabel: {:?}\ngeometry: {} blocks x {} bytes; region {} blocks\nnames: {} (Unicode {}.{}.{})\nfeatures: {}\nfeature masks: {}\ncheckpoint: slot {}, generation {}, transaction {}, raw free {}, emergency headroom {}, normally available {} blocks\nslot A: {}\nslot B: {}\ncompatibility:\n{}",
         uuid_hex(&ident.uuid),
         checkpoint.label,
         ident.total_blocks,
@@ -124,5 +125,6 @@ fn execute(options: &Options) -> Result<String, Failure> {
         available_blocks,
         view.selection.slot_status[0],
         view.selection.slot_status[1],
+        crate::compat::report_text(ident),
     ))
 }

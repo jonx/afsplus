@@ -93,3 +93,7 @@ Classic implementations obey feature classes:
 There is no separate "AFS+ Classic" disk format.
 
 Different implementations support different profiles of the same specification.
+Which profiles can take a given volume, and whether the portable C reader can
+read it, is what `afsplus-info` reports from the feature masks
+([tools-spec](../tools/tools-spec.md#afsplus-info)); the policy files under
+[`profiles/`](../profiles/) decide it, and every profile names every feature.

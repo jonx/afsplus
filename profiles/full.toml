@@ -13,3 +13,5 @@ allow_data_policy = true
 allow_orphan_directory = true
 require_metadata_journal = true
 require_metadata_checksums = true
+allow_persistent_snapshots = true
+allow_security_descriptors = true

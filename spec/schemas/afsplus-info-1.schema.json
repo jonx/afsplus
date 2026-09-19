@@ -170,13 +170,175 @@
         "slot_status"
       ],
       "additionalProperties": false
+    },
+    "compatibility": {
+      "type": "object",
+      "description": "Which compatibility profiles and implementations can take the volume, from its feature masks: full, read-only (an ro_compat feature beyond the profile) or cannot-mount (an incompat one); the portable C reader reads or cannot-read.",
+      "properties": {
+        "profiles": {
+          "type": "object",
+          "properties": {
+            "reader-minimal": {
+              "type": "object",
+              "properties": {
+                "verdict": {
+                  "enum": [
+                    "full",
+                    "read-only",
+                    "cannot-mount"
+                  ]
+                },
+                "beyond": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "verdict",
+                "beyond"
+              ],
+              "additionalProperties": false
+            },
+            "classic-rw": {
+              "type": "object",
+              "properties": {
+                "verdict": {
+                  "enum": [
+                    "full",
+                    "read-only",
+                    "cannot-mount"
+                  ]
+                },
+                "beyond": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "verdict",
+                "beyond"
+              ],
+              "additionalProperties": false
+            },
+            "boot-safe": {
+              "type": "object",
+              "properties": {
+                "verdict": {
+                  "enum": [
+                    "full",
+                    "read-only",
+                    "cannot-mount"
+                  ]
+                },
+                "beyond": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "verdict",
+                "beyond"
+              ],
+              "additionalProperties": false
+            },
+            "workstation": {
+              "type": "object",
+              "properties": {
+                "verdict": {
+                  "enum": [
+                    "full",
+                    "read-only",
+                    "cannot-mount"
+                  ]
+                },
+                "beyond": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "verdict",
+                "beyond"
+              ],
+              "additionalProperties": false
+            },
+            "full": {
+              "type": "object",
+              "properties": {
+                "verdict": {
+                  "enum": [
+                    "full",
+                    "read-only",
+                    "cannot-mount"
+                  ]
+                },
+                "beyond": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "verdict",
+                "beyond"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "reader-minimal",
+            "classic-rw",
+            "boot-safe",
+            "workstation",
+            "full"
+          ],
+          "additionalProperties": false
+        },
+        "portable_c_reader": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "enum": [
+                "reads",
+                "cannot-read"
+              ]
+            },
+            "beyond": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "verdict",
+            "beyond"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "profiles",
+        "portable_c_reader"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
     "schema_version",
     "tool",
     "volume",
-    "checkpoint"
+    "checkpoint",
+    "compatibility"
   ],
   "additionalProperties": false,
   "title": "afsplus-info --json",

@@ -269,7 +269,7 @@ Milestones: [\[M01\]](implementation/milestones.md), [~~M08~~](implementation/mi
 
 - ~~FUSE host mount~~ <!-- progress: roadmap-28 -->
 - ~~third-party probe kit~~ <!-- progress: roadmap-53 -->
-- compatibility profiles
+- ~~compatibility profiles~~ <!-- progress: roadmap-56 -->
 - portable C `classic-rw` qualification
 - portable C `full-portable` qualification where feasible
 - ~~JSON/structured tooling schemas~~ <!-- progress: roadmap-54 -->

@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-19 — A volume says which profiles can take it](#2026-09-19--a-volume-says-which-profiles-can-take-it)
 - [2026-09-19 — The image workflow, and what a replayed session does not repeat](#2026-09-19--the-image-workflow-and-what-a-replayed-session-does-not-repeat)
 - [2026-09-19 — The tools' JSON has schema files a consumer can validate against](#2026-09-19--the-tools-json-has-schema-files-a-consumer-can-validate-against)
 - [2026-09-19 — The third-party probe kit, and what building its vectors found](#2026-09-19--the-third-party-probe-kit-and-what-building-its-vectors-found)
@@ -223,6 +224,19 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-19 — A volume says which profiles can take it
+
+The five profiles were a format-time policy and nothing else; a distributor
+who received an image could not ask what would read it. `afsplus-info` now
+reports, from the feature masks, each profile's verdict, full, read-only or
+cannot-mount, with the features beyond it, and whether the portable C
+reader reads it, from its compiled mask. The masks already meant this:
+compat ignorable, ro_compat needed to write, incompat needed to mount. The
+profile files gain the two features they did not decide, persistent
+snapshots and security descriptors, and a test holds every profile to
+naming every feature. Additive in the info JSON; the schema file names it.
+
 
 ## 2026-09-19 — The image workflow, and what a replayed session does not repeat
 

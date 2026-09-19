@@ -562,3 +562,30 @@ fn extraction_isolates_a_damaged_directory_and_refuses_unreadable_roots() {
     assert!(!destination.exists());
     assert_eq!(fs::read(&image).unwrap(), before);
 }
+
+/// A profile is a format-time policy; afsplus-info answers the reverse
+/// question, which profiles and implementations can take the volume.
+#[test]
+fn info_reports_which_profiles_can_take_the_volume() {
+    let dir = TempDir::new("compat");
+    let classic = dir.join("classic.afsp");
+    let workstation = dir.join("workstation.afsp");
+    assert_status(&format_image(&classic, &["--profile", "classic-rw"]), 0);
+    assert_status(&format_image(&workstation, &["--profile", "workstation"]), 0);
+
+    let text = stdout(&run("afsplus-info", [classic.to_str().unwrap()]));
+    assert!(text.contains("  classic-rw: full\n"), "{text}");
+    assert!(text.contains("  boot-safe: full\n"), "{text}");
+    assert!(text.contains("  portable C reader: reads\n"), "{text}");
+
+    let text = stdout(&run("afsplus-info", [workstation.to_str().unwrap()]));
+    assert!(
+        text.contains("  classic-rw: read-only (beyond it: org.aros.afsplus:data-policy, org.aros.afsplus:shared-extents)\n"),
+        "{text}"
+    );
+    assert!(text.contains("  workstation: full\n"), "{text}");
+
+    let json = stdout(&run("afsplus-info", ["--json", workstation.to_str().unwrap()]));
+    assert!(json.contains("\"compatibility\":{\"profiles\":{\"reader-minimal\":{\"verdict\":\"read-only\""), "{json}");
+    assert!(json.contains("\"portable_c_reader\":{\"verdict\":\"reads\",\"beyond\":[]}"), "{json}");
+}
