@@ -1119,6 +1119,10 @@ int32_t afsplus_aros_packet_destroy(
         int32_t error = 0;
         int32_t close_error;
 
+        /* A dismount is a durability point of ADR-121, and this is the
+         * dismount path: the context goes away with files still open, so
+         * their writes are made durable here rather than left to a caller
+         * that may free the mount next. */
         if (file->writable)
             error = afsplus_aros_fsync(context->filesystem, file->id);
         close_error = afsplus_aros_close(context->filesystem, file->id);
@@ -2203,7 +2207,6 @@ int32_t afsplus_aros_packet_process(
     {
         struct AfsplusArosNativeFile *file = find_file(context,
             (BPTR)packet->dp_Arg1);
-        int32_t close_error;
 
         if (file == NULL)
             error = ERROR_INVALID_LOCK;
@@ -2211,11 +2214,15 @@ int32_t afsplus_aros_packet_process(
         {
             fail_parked_of(context, file, ERROR_INVALID_LOCK);
             released = 1;
-            if (file->writable)
-                error = afsplus_aros_fsync(context->filesystem, file->id);
-            close_error = afsplus_aros_close(context->filesystem, file->id);
-            if (error == 0)
-                error = close_error;
+            /* A close is not a durability point. ADR-121 lists the ones
+             * that are, and Close() is not among them; AmigaDOS never
+             * promised it and the Fast File System does not flush there
+             * either. Synchronising here cost a whole checkpoint for every
+             * written file, because a write to a file the open window
+             * created makes that window unloggable. A program that needs
+             * its bytes on the medium asks for them with Flush() or an
+             * fsync of the handle. */
+            error = afsplus_aros_close(context->filesystem, file->id);
             unlink_file(context, file);
             if (error == 0)
                 result = DOSTRUE;

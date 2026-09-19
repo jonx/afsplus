@@ -1331,11 +1331,14 @@ int main(void)
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
     assert(disk64.id_NumBlocks == UINT64_C(0x100000005));
 
+    /* A close of a written file closes it and nothing more: ADR-121 does
+     * not make Close() a durability point, so the packet layer asks for no
+     * commit here. The dismount case below still does. */
     initialize_packet(&packet, ACTION_END);
     packet.dp_Arg1 = public_file.fh_Arg1;
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
-    assert(fsync_count == 1 && close_count == 1);
+    assert(fsync_count == 0 && close_count == 1);
 
     /* C2: metadata setters resolve a path to parent lock plus leaf. */
     {
@@ -2948,6 +2951,7 @@ int main(void)
                 struct FileHandle held;
                 struct DosPacket waiter;
                 uint32_t closes_before;
+                uint32_t fsyncs_before;
 
                 config.complete = packet_complete;
                 assert(afsplus_aros_packet_create(&config, &dying) == 0);
@@ -2968,11 +2972,15 @@ int main(void)
                 stub_record_error = 0;
                 completed_count = 0;
                 closes_before = close_count;
+                fsyncs_before = fsync_count;
                 assert(afsplus_aros_packet_destroy(dying) == 0);
                 assert(completed_count == 1 && completed[0] == &waiter);
                 assert(waiter.dp_Res1 == DOSFALSE
                     && waiter.dp_Res2 == ERROR_DEVICE_NOT_MOUNTED);
                 assert(close_count == closes_before + 1);
+                /* A dismount is a durability point: the writable file still
+                 * open is synchronised before it is closed. */
+                assert(fsync_count == fsyncs_before + 1);
                 completed_count = 0;
             }
 
