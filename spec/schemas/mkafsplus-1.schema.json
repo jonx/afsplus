@@ -1,0 +1,59 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "tool": {
+      "const": "mkafsplus"
+    },
+    "profile": {
+      "type": "string"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "label": {
+      "type": "string"
+    },
+    "block_size": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "total_blocks": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "region_blocks": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "name_key_algorithm": {
+      "type": "string"
+    },
+    "features": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "tool",
+    "profile",
+    "uuid",
+    "label",
+    "block_size",
+    "total_blocks",
+    "region_blocks",
+    "name_key_algorithm",
+    "features"
+  ],
+  "additionalProperties": false,
+  "title": "mkafsplus --json",
+  "description": "What mkafsplus formatted: one object, then a newline. Exact 64-bit counters are integers; masks and CRCs are hex strings.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aros.org/afsplus/schemas/mkafsplus-1.schema.json"
+}

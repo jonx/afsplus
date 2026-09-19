@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "afsplus-probe --json",
+  "description": "The third-party probe: one 4 KiB read. afsplus true carries the identity; false carries the status and its reason.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "afsplus-probe"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "afsplus": {
+          "const": true
+        },
+        "epoch": {
+          "const": 1
+        },
+        "identification_version": {
+          "const": 3
+        },
+        "uuid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "label": {
+          "type": "string"
+        },
+        "block_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_blocks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "features": {
+          "type": "object",
+          "properties": {
+            "compat": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{16}$"
+            },
+            "ro_compat": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{16}$"
+            },
+            "incompat": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{16}$"
+            }
+          },
+          "required": [
+            "compat",
+            "ro_compat",
+            "incompat"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "schema_version",
+        "afsplus",
+        "epoch",
+        "identification_version",
+        "uuid",
+        "label",
+        "block_size",
+        "total_blocks",
+        "size_bytes",
+        "features"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "afsplus-probe"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "afsplus": {
+          "const": false
+        },
+        "status": {
+          "enum": [
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema",
+        "schema_version",
+        "afsplus",
+        "status",
+        "reason"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$id": "https://aros.org/afsplus/schemas/afsplus-probe-1.schema.json"
+}

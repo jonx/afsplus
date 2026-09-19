@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-19 — The tools' JSON has schema files a consumer can validate against](#2026-09-19--the-tools-json-has-schema-files-a-consumer-can-validate-against)
 - [2026-09-19 — The third-party probe kit, and what building its vectors found](#2026-09-19--the-third-party-probe-kit-and-what-building-its-vectors-found)
 - [2026-09-19 — Stage C on the roadmap, and the documents brought to the day](#2026-09-19--stage-c-on-the-roadmap-and-the-documents-brought-to-the-day)
 - [2026-09-18 — A mode, an owner and a time that a mounted volume keeps](#2026-09-18--a-mode-an-owner-and-a-time-that-a-mounted-volume-keeps)
@@ -221,6 +222,21 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-19 — The tools' JSON has schema files a consumer can validate against
+
+Each tool's `--json` carried a `schema_version` and a prose description in
+tools-spec, and nothing a program could check a document against. Seven
+JSON Schema files under `spec/schemas/` say the shape now, top level closed
+so drift is caught, volume-dependent sections left open;
+`tools/check-json-schemas.py` runs every tool on the probe kit's vectors and
+validates each answer with a validator of its own (no module to install),
+30 checks with two controls. Writing the schemas from the outputs and
+running them corrected three guesses at once: the other checkpoint slot's
+generation is `null` on a fresh volume, `explain feature` with no id answers
+kind `features`, and the image diff says `created`, not `added`, for a new
+object. tools-spec said the checker's schema was version 1; it is 5.
+
 
 ## 2026-09-19 — The third-party probe kit, and what building its vectors found
 

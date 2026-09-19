@@ -272,7 +272,7 @@ Milestones: [\[M01\]](implementation/milestones.md), [~~M08~~](implementation/mi
 - compatibility profiles
 - portable C `classic-rw` qualification
 - portable C `full-portable` qualification where feasible
-- JSON/structured tooling schemas
+- ~~JSON/structured tooling schemas~~ <!-- progress: roadmap-54 -->
 - host-side inspect/check/repair workflow
 - sparse-image create/mount/fork/replay workflow
 - cross-OS interoperability test matrix

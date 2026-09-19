@@ -1,0 +1,137 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 5
+    },
+    "clean": {
+      "type": "boolean"
+    },
+    "volume": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "uuid": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "total_blocks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "region_size": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "name_key_algorithm": {
+              "type": "string"
+            },
+            "case_sensitive": {
+              "type": "boolean"
+            },
+            "unicode_version": {
+              "type": "string"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "chosen_slot": {
+              "enum": [
+                0,
+                1
+              ]
+            },
+            "objects": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "metadata_blocks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "data_blocks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reclaim_pending_blocks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reclaim_runs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "log_records_pending": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "free_blocks": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "uuid",
+            "label",
+            "total_blocks",
+            "region_size",
+            "name_key_algorithm",
+            "case_sensitive",
+            "unicode_version",
+            "generation",
+            "chosen_slot",
+            "objects",
+            "metadata_blocks",
+            "data_blocks",
+            "reclaim_pending_blocks",
+            "reclaim_runs",
+            "log_records_pending",
+            "free_blocks"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "slots": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "clean",
+    "volume",
+    "slots",
+    "warnings",
+    "errors"
+  ],
+  "additionalProperties": false,
+  "title": "afsplus-check --json",
+  "description": "The verify-only checker; volume is null when the volume could not be read at all. clean is true only with no errors.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aros.org/afsplus/schemas/afsplus-check-5.schema.json"
+}

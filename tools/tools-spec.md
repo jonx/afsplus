@@ -45,6 +45,21 @@ Exact 64-bit counters are emitted as JSON integers, while bit masks and CRCs
 are fixed-width lowercase hexadecimal strings. Consumers must ignore unknown
 members and reject an unsupported schema version.
 
+Each schema is published as a JSON Schema (draft 2020-12) file,
+[`spec/schemas/<tool>-<version>.schema.json`](../spec/schemas/), one per
+tool and version: `mkafsplus-1`, `afsplus-info-1`, `afsplus-dump-1`,
+`afsplus-check-5`, `afsplus-explain-2`, `afsplus-image-diff-3` and
+`afsplus-probe-1` ([docs/18](../docs/18-third-party-integration.md)). A
+consumer validates against the file for the version it supports; the top
+level of every schema is closed, so a member this specification does not
+name fails validation rather than passing unnoticed. Sections whose content
+varies with the volume (`afsplus-dump` counts and diagnostics, the
+per-question sections of `afsplus-explain`, the fields of a modified object
+in `afsplus-image-diff`) are typed as objects and left open.
+[`tools/check-json-schemas.py`](check-json-schemas.py) (`make json-schemas`)
+runs every tool on the probe kit's vectors and validates each answer, with
+two controls (a wrong version, an extra member) that must fail.
+
 These are AFS+-specific operational schemas. They do not accept or pre-empt
 the broader filesystem-neutral vocabulary, capability table or in-use map in
 the unresolved [Tool Contract proposal](../proposals/tool-contract.md).
@@ -217,7 +232,9 @@ media status and names the branch in `problems`.
 ## afsplus-check
 
 Verifier and repair tool. The implemented checker is verify-only and has
-human and versioned JSON output. Planned modes are check-only, repair with
+human and versioned JSON output; the JSON schema version is 5 (`clean`, the
+volume summary or `null` when the volume could not be read, the two slot
+verdicts, `warnings`, `errors`). Planned modes are check-only, repair with
 confirmation, scripted repair policy and `NO_CHANGES` forensic report.
 
 ## afsplus-resize

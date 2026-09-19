@@ -1,0 +1,288 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 3
+    },
+    "metadata_only": {
+      "type": "boolean"
+    },
+    "empty": {
+      "type": "boolean"
+    },
+    "partial": {
+      "type": "boolean"
+    },
+    "volume": {
+      "type": "object",
+      "properties": {
+        "generation": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        },
+        "label": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        },
+        "free_blocks": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        },
+        "root_object_id": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        },
+        "next_object_id": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        },
+        "quarantine_blocks": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        },
+        "quarantine_runs": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        },
+        "snapshot_next_id": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        },
+        "free_blocks_delta": {
+          "type": "integer"
+        },
+        "different_volume": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "generation",
+        "label",
+        "free_blocks",
+        "root_object_id",
+        "next_object_id",
+        "quarantine_blocks",
+        "quarantine_runs",
+        "snapshot_next_id",
+        "free_blocks_delta",
+        "different_volume"
+      ],
+      "additionalProperties": false
+    },
+    "objects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "object_id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "change": {
+            "enum": [
+              "created",
+              "removed",
+              "modified"
+            ]
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "type": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "link_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "object_id",
+          "change"
+        ]
+      }
+    },
+    "links": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "change": {
+            "enum": [
+              "added",
+              "removed"
+            ]
+          },
+          "parent": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "child": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "change",
+          "parent",
+          "name",
+          "child"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "renames": {
+      "type": "array"
+    },
+    "orphans": {
+      "type": "array"
+    },
+    "snapshots": {
+      "type": "array"
+    },
+    "problems": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "metadata_only",
+    "empty",
+    "partial",
+    "volume",
+    "objects",
+    "links",
+    "renames",
+    "orphans",
+    "snapshots",
+    "problems"
+  ],
+  "additionalProperties": false,
+  "title": "afsplus-image-diff --json",
+  "description": "The semantic difference between two images. A difference is status 0; a partial comparison names its branch in problems.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aros.org/afsplus/schemas/afsplus-image-diff-3.schema.json"
+}

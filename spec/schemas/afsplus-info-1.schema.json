@@ -1,0 +1,186 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "tool": {
+      "const": "afsplus-info"
+    },
+    "volume": {
+      "type": "object",
+      "properties": {
+        "uuid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "label": {
+          "type": "string"
+        },
+        "block_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_blocks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "region_blocks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "log_slots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "name_key_algorithm": {
+          "type": "string"
+        },
+        "case_sensitive": {
+          "type": "boolean"
+        },
+        "unicode_version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "features": {
+          "type": "object",
+          "properties": {
+            "compat": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{16}$"
+            },
+            "ro_compat": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{16}$"
+            },
+            "incompat": {
+              "type": "string",
+              "pattern": "^0x[0-9a-f]{16}$"
+            },
+            "enabled": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "compat",
+            "ro_compat",
+            "incompat",
+            "enabled"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "uuid",
+        "label",
+        "block_size",
+        "total_blocks",
+        "region_blocks",
+        "log_slots",
+        "name_key_algorithm",
+        "case_sensitive",
+        "unicode_version",
+        "features"
+      ],
+      "additionalProperties": false
+    },
+    "checkpoint": {
+      "type": "object",
+      "properties": {
+        "chosen_slot": {
+          "enum": [
+            "A",
+            "B"
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "other_generation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "null while the other slot has never been written"
+        },
+        "committed_tx_id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "next_object_id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "free_blocks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "emergency_headroom_blocks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "available_blocks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "object_map_lba": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "allocation_root_lba": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reclaim_root_lba": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "shared_extent_root_lba": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "slot_status": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      },
+      "required": [
+        "chosen_slot",
+        "generation",
+        "other_generation",
+        "committed_tx_id",
+        "next_object_id",
+        "free_blocks",
+        "emergency_headroom_blocks",
+        "available_blocks",
+        "object_map_lba",
+        "allocation_root_lba",
+        "reclaim_root_lba",
+        "shared_extent_root_lba",
+        "slot_status"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "tool",
+    "volume",
+    "checkpoint"
+  ],
+  "additionalProperties": false,
+  "title": "afsplus-info --json",
+  "description": "A bounded read of the identification block and the two checkpoint slots; zero writes.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aros.org/afsplus/schemas/afsplus-info-1.schema.json"
+}

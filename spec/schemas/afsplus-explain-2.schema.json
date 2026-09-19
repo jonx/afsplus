@@ -1,0 +1,262 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "afsplus-explain --json",
+  "description": "One question about an image, answered by kind; the common header, then one section named as the kind.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "kind": {
+      "enum": [
+        "block",
+        "object",
+        "path",
+        "extent",
+        "checkpoint",
+        "reclaim",
+        "space",
+        "feature",
+        "features"
+      ]
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "total_blocks": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "has_snapshots": {
+      "type": "boolean"
+    },
+    "partial": {
+      "type": "boolean"
+    },
+    "problems": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "block": {
+      "type": "object"
+    },
+    "object": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string"
+        },
+        "record_block": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "link_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "allocated_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "protection": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "created": {
+          "type": "object",
+          "properties": {
+            "seconds": {
+              "type": "integer"
+            },
+            "nanoseconds": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "seconds",
+            "nanoseconds"
+          ],
+          "additionalProperties": false
+        },
+        "modified": {
+          "type": "object",
+          "properties": {
+            "seconds": {
+              "type": "integer"
+            },
+            "nanoseconds": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "seconds",
+            "nanoseconds"
+          ],
+          "additionalProperties": false
+        },
+        "changed": {
+          "type": "object",
+          "properties": {
+            "seconds": {
+              "type": "integer"
+            },
+            "nanoseconds": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "seconds",
+            "nanoseconds"
+          ],
+          "additionalProperties": false
+        },
+        "content_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "extent_tree": {
+          "type": "boolean"
+        },
+        "data_in_place": {
+          "type": "boolean"
+        },
+        "comment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "symlink_target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tree_nodes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "entries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "extents": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "mapped_blocks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "shared_blocks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unwritten_blocks": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "extents",
+            "mapped_blocks",
+            "shared_blocks",
+            "unwritten_blocks"
+          ],
+          "additionalProperties": false
+        },
+        "security": {},
+        "attributes": {},
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "parent": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "parent",
+              "name"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "record_block",
+        "link_count",
+        "size_bytes"
+      ]
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "object": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "name",
+          "object"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "extent": {
+      "type": "object"
+    },
+    "checkpoint": {
+      "type": "object"
+    },
+    "reclaim": {
+      "type": "object"
+    },
+    "space": {
+      "type": "object"
+    },
+    "feature": {},
+    "features": {}
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "generation",
+    "total_blocks",
+    "has_snapshots",
+    "partial",
+    "problems"
+  ],
+  "additionalProperties": false,
+  "$id": "https://aros.org/afsplus/schemas/afsplus-explain-2.schema.json"
+}
