@@ -404,6 +404,64 @@ fn create_phase() {
     assert_eq!(afsplus_aros_unmount(fs), 0);
 }
 
+/// Lot I: what a drawer costs. 90 CreateDirs on a delayed mount, each with
+/// 32 files in it, through the C boundary. Before the drawer joined the
+/// window a CreateDir committed the window and then a transaction of its
+/// own; the numbers to watch are the flushes and writes per drawer, with the
+/// files of that drawer subtracted by the second reading.
+#[test]
+#[ignore = "profiling harness"]
+fn mkdir_phase() {
+    use afsplus_block::MemoryBackend;
+    const DIRS: usize = 90;
+    let mut device = common::format(MemoryBackend::new(4096, 131072), true);
+    let fs = common::mount_sized(&mut device, 131072);
+    let mut g = 0;
+    assert_eq!(afsplus_aros_set_cache_blocks(fs, 64, &mut g), 0);
+    if std::env::var("SYNC").is_err() { assert_eq!(afsplus_aros_set_commit_policy(fs, 5_000, 1_000), 0); }
+    let mk = |fs, base: u64, name: &str| { let mut l = 0; assert_eq!(afsplus_aros_create_directory(fs, base, name.as_ptr(), name.len() as u32, now().0, 0, &mut l), 0); l };
+    let file = |fs, dir: u64, name: &str| {
+        let t = now();
+        let mut handle = 0;
+        assert_eq!(afsplus_aros_open(fs, dir, name.as_ptr(), name.len() as u32, AFSPLUS_AROS_OPEN_NEW_FILE, t.0, t.1, &mut handle), 0);
+        let mut c = 0;
+        assert_eq!(afsplus_aros_write(fs, handle, [0x33u8; 1200].as_ptr(), 1200, t.0, t.1, &mut c), 0);
+        assert_eq!(afsplus_aros_close(fs, handle), 0);
+        let mut pending = 0; assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);
+    };
+    let bench = mk(fs, 0, "bench");
+    assert_eq!(afsplus_aros_flush(fs), 0);
+
+    // The drawers alone, so the per-drawer cost is not mixed with the files.
+    let c0 = counters(fs);
+    let start = Instant::now();
+    for d in 0..DIRS { let l = mk(fs, bench, &format!("e{d:02}")); assert_eq!(afsplus_aros_free_lock(fs, l), 0); }
+    let bare = start.elapsed();
+    let c1 = counters(fs);
+    let n = DIRS as u64;
+    eprintln!("empty drawers: {DIRS} in {bare:?}, {:?} each; per drawer {:.2} flushes, {:.2} writes, {:.1} calls",
+        bare / n as u32, (c1.device_flushes - c0.device_flushes) as f64 / n as f64,
+        (c1.device_writes - c0.device_writes) as f64 / n as f64, (c1.calls - c0.calls) as f64 / n as f64);
+
+    // The bench phase itself: a drawer and the 32 files that go in it.
+    assert_eq!(afsplus_aros_flush(fs), 0);
+    let c2 = counters(fs);
+    let start = Instant::now();
+    for d in 0..DIRS {
+        let l = mk(fs, bench, &format!("d{d:02}"));
+        for f in 0..FILES { file(fs, l, &format!("f{f:02}.c")); }
+        assert_eq!(afsplus_aros_free_lock(fs, l), 0);
+    }
+    let took = start.elapsed();
+    let c3 = counters(fs);
+    let ops = (DIRS + DIRS * FILES) as u64;
+    eprintln!("drawers with files: {DIRS} drawers of {FILES} files ({ops} operations) in {took:?}; \
+        per drawer {:.2} flushes, {:.1} writes; per operation {:.3} flushes, {:.2} writes",
+        (c3.device_flushes - c2.device_flushes) as f64 / n as f64, (c3.device_writes - c2.device_writes) as f64 / n as f64,
+        (c3.device_flushes - c2.device_flushes) as f64 / ops as f64, (c3.device_writes - c2.device_writes) as f64 / ops as f64);
+    assert_eq!(afsplus_aros_unmount(fs), 0);
+}
+
 #[test]
 #[ignore = "profiling harness"]
 fn create_only() {
