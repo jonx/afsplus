@@ -442,9 +442,37 @@ stdc.library, posixc.library or stdcio.library, which cannot start before
 the boot volume (`afsplus_bootlibc.c`, `afsplus_bootposix.c`), and a volume
 needs `AROS.boot` naming its CPU to be bootable.
 
-Open: S2 on QEMU and Native, S3 repeated boot and recovery, on every
-platform; the Apple hardware run with a reset-durable transport; the physical
-A500.
+S3 on Hosted: a machine booted from that partition is cut off and booted
+again, round after round
+([`check-hosted-aros-s3.sh`](../tools/check-hosted-aros-s3.sh)). Each round
+lets the Startup-Sequence reach Wanderer and a workload that churns files,
+saves a preference under ENVARC: and writes one marker it makes durable with
+ACTION_FLUSH and one it only closes; then `aros-ctl kill` takes the machine
+away at the moment the schedule names, the partition is taken out and checked,
+and a second boot has to reach the Startup-Sequence on AFS+ and read every
+marker back.
+
+The default run, 24 rounds in 24 minutes: 4 cuts inside the Startup-Sequence,
+5 in the workload's writes, 5 within 400 ms of a marker being made durable, 5
+in the idle time the mount cleans its deletes in, and 5 clean shutdowns as the
+reference. 24 boots after a cut, all reaching AFS+; 24 partitions checked
+after the cut and 24 after the mount that followed, all clean and all with
+`log_records_pending` 0; 25 markers kept by the last round, every one byte for
+byte; 0 torn, 0 lost. Boot time held: 21.8 s mean over the first three rounds
+against 20.4, 25.7 and 25.4 s over the last three, against a leak clause that
+fails at twice the mean.
+
+A boot mount found through the boot scan has no DOSDriver to say a stack size,
+and S3 found the handler task overrunning partition.library's 40 KiB while it
+replayed an intent-log record, twice in a row: the handler's
+`FileSystem.resource` entry now carries the 262144 bytes every AFS+ mountlist
+here asks for (`native/aros/afsplus.conf`). The same mount runs SYNC rather
+than with the COMMIT=5 default, because it is made before the handler can open
+timer.device; that is why the gate's negative control claims a marker it has
+not written rather than merely skipping the flush.
+
+Open: S2 on QEMU and Native, S3 on QEMU and Native; the Apple hardware run
+with a reset-durable transport; the physical A500.
 
 ## What Stage C still waits on elsewhere
 

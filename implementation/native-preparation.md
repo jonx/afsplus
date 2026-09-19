@@ -85,4 +85,9 @@ What Macaros Native takes from here: the handler, partition.library and its
 disk device as boot modules; a GPT partition of type
 `4146532B-BB67-46C5-AA4A-F502CA018E5E` written by `afsplus-disk wrap`, with
 `AROS.boot` naming the CPU at its root; drivers that pass
-`AFSPlusDriverProbe`; and the handler built with `+crc`.
+`AFSPlusDriverProbe`; and the handler built with `+crc`. A boot partition
+also needs the handler's `FileSystem.resource` entry to carry its stack size,
+because a partition the boot scan finds has no DOSDriver to say one: without
+it the handler task runs on partition.library's 40 KiB and overruns them
+replaying an intent log (`native/aros/afsplus.conf`, found by
+[`check-hosted-aros-s3.sh`](../tools/check-hosted-aros-s3.sh)).

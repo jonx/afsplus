@@ -67,9 +67,10 @@ partition_line="module $partition"
 
 remove_module_lines() {
     [ -f "$boot_conf" ] || return 0
+    # The three module lines and the kernel argument aros-ctl appends for
+    # them. No memory line is added here, so none is taken away.
     grep -vxF -e "$handler_line" -e "$hostdisk_line" -e "$partition_line" \
-        "$boot_conf" | grep -v '^arguments .*hostdisk=' \
-        | grep -v '^memory ' >"$work/conf" || true
+        "$boot_conf" | grep -v '^arguments .*hostdisk=' >"$work/conf" || true
     cat "$work/conf" >"$boot_conf"
 }
 
