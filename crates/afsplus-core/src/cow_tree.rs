@@ -577,7 +577,6 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         let child_index = node
             .items
             .partition_point(|item| item.key.as_slice() <= key);
-        let children = children_from_node(&node)?;
         let child_lower = if child_index == 0 {
             lower.clone()
         } else {
@@ -588,12 +587,11 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             .get(child_index)
             .map(|item| item.key.clone())
             .or_else(|| upper.clone());
-        let child = children[child_index].clone();
+        let child = child_at(&node, child_index)?;
         let child_level = node.level - 1;
         // Keep only the compact descent frame across recursion. The parent
         // page is re-read from the staged LRU or committed device on unwind,
         // so tree height does not multiply decoded-page residency.
-        drop(children);
         drop(node);
         let replacement = self.upsert_node(
             child.reference.lba,
@@ -676,12 +674,14 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         let child_index = node
             .items
             .partition_point(|item| item.key.as_slice() <= key);
-        let mut children = children_from_node(&node)?;
-        children[0].min_key = known_min.clone();
         let (child_lower, child_upper) = child_range(&node, child_index, &lower, &upper);
-        let child = children[child_index].clone();
+        let mut child = child_at(&node, child_index)?;
+        if child_index == 0 {
+            // The leftmost child's exact minimum is the one this node was
+            // entered with; the node itself does not store it.
+            child.min_key = known_min.clone();
+        }
         let child_level = node.level - 1;
-        drop(children);
         drop(node);
         let edited = self.delete_node(
             child.reference.lba,
@@ -856,6 +856,9 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             ));
         }
         validate_node_range(&node, lower, upper, is_root)?;
+        if !node.is_leaf() {
+            check_children_unique(&node)?;
+        }
         Ok((self.track_node(node), is_staged, generation))
     }
 
@@ -965,6 +968,9 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
     }
 
     fn stage_node(&mut self, lba: u64, node: &TreeNode) -> Result<(), CoreError> {
+        if !node.is_leaf() {
+            check_children_unique(node)?;
+        }
         let encoded = node
             .encode(self.geo.block_size, self.new_generation)
             .map_err(CoreError::Format)?;
@@ -1051,6 +1057,9 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
     }
 }
 
+/// The full child vector of an internal node. Only the paths that rebuild or
+/// split a node need it; a descent asks [`child_at`] for the one child it
+/// follows and leaves the node's keys where they are.
 fn children_from_node(node: &TreeNode) -> Result<Vec<ChildDesc>, CoreError> {
     let mut children = Vec::with_capacity(node.items.len() + 1);
     children.push(ChildDesc {
@@ -1066,16 +1075,52 @@ fn children_from_node(node: &TreeNode) -> Result<Vec<ChildDesc>, CoreError> {
             reference: TreeNode::child_ref(item).map_err(CoreError::Format)?,
         });
     }
-    let mut seen = BTreeSet::new();
-    if children
-        .iter()
-        .any(|child| !seen.insert(child.reference.lba))
-    {
+    Ok(children)
+}
+
+/// The one child a descent follows. The items are ordered, so the caller's
+/// partition point over the keys already names the slot: child 0 is the
+/// leftmost pointer, child `i` is item `i - 1`. Reading it in place keeps a
+/// descent independent of the node's fanout.
+fn child_at(node: &TreeNode, index: usize) -> Result<ChildDesc, CoreError> {
+    if index == 0 {
+        return Ok(ChildDesc {
+            min_key: None,
+            reference: ChildRef {
+                lba: node.leftmost_child,
+                subtree_items: node.leftmost_items,
+            },
+        });
+    }
+    let item = node
+        .items
+        .get(index - 1)
+        .ok_or_else(|| CoreError::Corrupt("tree child index out of range".into()))?;
+    Ok(ChildDesc {
+        min_key: Some(item.key.clone()),
+        reference: TreeNode::child_ref(item).map_err(CoreError::Format)?,
+    })
+}
+
+/// Every child of an internal node names a distinct block: a node that named
+/// one twice would have the batch stage and retire the same block along two
+/// paths. The answer cannot change while the batch holds the node, so this
+/// runs once per node event -- a decode, or an image staged by this batch --
+/// and not once per visit. Sorting the child blocks costs one small vector
+/// where a set cost an insertion per child.
+fn check_children_unique(node: &TreeNode) -> Result<(), CoreError> {
+    let mut blocks = Vec::with_capacity(node.items.len() + 1);
+    blocks.push(node.leftmost_child);
+    for item in &node.items {
+        blocks.push(TreeNode::child_ref(item).map_err(CoreError::Format)?.lba);
+    }
+    blocks.sort_unstable();
+    if blocks.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(CoreError::Corrupt(
             "internal tree node references a child more than once".into(),
         ));
     }
-    Ok(children)
+    Ok(())
 }
 
 fn child_range(
@@ -1835,6 +1880,96 @@ mod tests {
         assert!(matches!(
             error,
             crate::CoreError::Corrupt(message) if message.contains("level mismatch")
+        ));
+    }
+
+    /// Negative control for the duplicate-child check now that it runs once
+    /// per node event instead of once per visit: an internal node whose
+    /// leftmost pointer and whose only item name the same block must still
+    /// stop the mutation, and it must do so before the descent follows
+    /// either of them.
+    #[test]
+    fn mutation_rejects_a_node_that_names_one_child_twice() {
+        let mut dev = MemoryBackend::new(4096, 2048);
+        mkfs(
+            &mut dev,
+            &MkfsParams {
+                uuid: [93u8; 16],
+                label: "CowTreeTwice".into(),
+                region_size: 2048,
+                reclaim_caps: Default::default(),
+                log_slots: 8,
+                shared_extents: true,
+                data_policy: false,
+                name_policy: crate::NamePolicy::Sensitive,
+                timestamp: Timespec::default(),
+            },
+        )
+        .unwrap();
+        let vol = mount(dev).unwrap();
+        let geo = vol.ident().geometry();
+        let checkpoint = vol.checkpoint().clone();
+        let root = checkpoint.object_map_block;
+        let mut dev = vol.into_device();
+        // A block past every reserved head, so the leaf this node names twice
+        // is a real leaf and not a piece of volume metadata.
+        let leaf = geo.region0_reserved_blocks() + 200;
+        dev.write_block(
+            leaf,
+            &TreeNode {
+                kind: TreeKind::ObjectMap,
+                owner: 0,
+                level: 0,
+                subtree_items: 1,
+                leftmost_child: 0,
+                leftmost_items: 0,
+                items: vec![TreeItem {
+                    key: key_u64(100).to_vec(),
+                    value: vec![7],
+                }],
+            }
+            .encode(4096, 1)
+            .unwrap(),
+        )
+        .unwrap();
+        let corrupt_root = TreeNode {
+            kind: TreeKind::ObjectMap,
+            owner: 0,
+            level: 1,
+            subtree_items: 2,
+            leftmost_child: leaf,
+            leftmost_items: 1,
+            items: vec![TreeItem {
+                key: key_u64(100).to_vec(),
+                value: child_value(ChildRef {
+                    lba: leaf,
+                    subtree_items: 1,
+                })
+                .unwrap(),
+            }],
+        }
+        .encode(4096, 1)
+        .unwrap();
+        dev.write_block(root, &corrupt_root).unwrap();
+        let mut tx = TxAllocator::begin(&mut dev, &geo, &checkpoint, None, 2, 4096, 0).unwrap();
+        let error = upsert_many(
+            &mut dev,
+            &geo,
+            &mut tx,
+            root,
+            TreeSpec {
+                kind: TreeKind::ObjectMap,
+                owner: 0,
+                max_generation: 1,
+            },
+            2,
+            &[(key_u64(0).to_vec(), vec![1])],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::CoreError::Corrupt(message)
+                if message.contains("references a child more than once")
         ));
     }
 }
