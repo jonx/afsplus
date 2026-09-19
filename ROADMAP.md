@@ -274,7 +274,7 @@ Milestones: [\[M01\]](implementation/milestones.md), [~~M08~~](implementation/mi
 - portable C `full-portable` qualification where feasible
 - ~~JSON/structured tooling schemas~~ <!-- progress: roadmap-54 -->
 - host-side inspect/check/repair workflow
-- sparse-image create/mount/fork/replay workflow
+- sparse-image create/mount/fork/replay workflow <!-- progress: roadmap-55 -->
 - cross-OS interoperability test matrix
 - FUSE mmap and parallel page-fault qualification
 

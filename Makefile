@@ -5,7 +5,7 @@
 
 PYTHON ?= python3
 
-.PHONY: check check-docs toc adr-index probe-kit json-schemas rust-gate rust-codec-fuzz-gate \
+.PHONY: check check-docs toc adr-index probe-kit json-schemas image-workflow rust-gate rust-codec-fuzz-gate \
 	portable-c-gate portable-c-fuzz-gate portable-c-fuzz-long
 
 ## check: every repository gate (Rust quality gate + documentation)
@@ -51,3 +51,7 @@ probe-kit:
 ## json-schemas: every tool's --json validates against spec/schemas (needs the probe kit)
 json-schemas:
 	python3 tools/check-json-schemas.py
+
+## image-workflow: create, fork, mount, diff and replay an image on the host (mount steps need macFUSE)
+image-workflow:
+	sh tools/check-image-workflow.sh

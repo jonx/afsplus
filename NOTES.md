@@ -223,6 +223,24 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+## 2026-09-19 — The image workflow, and what a replayed session does not repeat
+
+Stage D's "sparse-image create/mount/fork/replay workflow" is a page and a
+gate: `testing/image-workflow.md` gives the six commands a developer types,
+and `tools/check-image-workflow.sh` runs them with the safety rules of the
+mounted-volume battery. The fork is a file clone (`cp -c` on APFS): an AFS+
+image is a plain sparse file and nothing rewrites its identification block,
+so no overlay tool is needed for a branch. The first version of the replay
+check compared the two forks for "timestamps only" and failed three runs in
+four; the evidence showed `content_generation` and the volume generation
+moving with the number of commits a session took, which the commit timer
+and idle-time cleanup decide, and once `free_blocks` off by a deleted file
+not yet cleaned at unmount. Those are counters, not content; the check
+compares names, links, sizes and bytes, and the page says why. Replaying a
+scenario bundle onto a file image stays open: the runner formats its own
+in-memory volume.
+
+
 ## 2026-09-19 — The tools' JSON has schema files a consumer can validate against
 
 Each tool's `--json` carried a `schema_version` and a prose description in
