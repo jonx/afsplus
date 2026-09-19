@@ -243,6 +243,13 @@ pub enum BatchOp<'a> {
         name: &'a str,
         content: &'a [u8],
     },
+    /// An empty directory. The intent log has no record kind for one, so a
+    /// window that stages this can only become durable as a checkpoint
+    /// (ADR-121 decisions 5 and 8).
+    CreateDirectory {
+        parent_id: u64,
+        name: &'a str,
+    },
     DeleteFile {
         parent_id: u64,
         name: &'a str,
@@ -3219,6 +3226,41 @@ impl<D: BlockDevice> Volume<D> {
         self.create_directory(OBJECT_ROOT, name, now)
     }
 
+    /// The record of a directory that has just been created, empty, with its
+    /// entry tree rooted at `root_lba`. Three paths make one and must agree:
+    /// [`Self::create_directory`] in its own transaction, the orphan
+    /// directory inside a batch, and [`BatchOp::CreateDirectory`] in the open
+    /// window. The block at `root_lba` holds [`directory::empty_leaf`]; the
+    /// immediate path writes it itself, a batch lets its materialization
+    /// stage it.
+    fn new_directory_record(
+        object_id: u64,
+        root_lba: u64,
+        now: Timespec,
+        generation: u64,
+    ) -> ObjectRecord {
+        ObjectRecord {
+            object_id,
+            object_type: ObjectType::Directory,
+            flags: 0,
+            link_count: 1,
+            owner_uid: 0,
+            owner_gid: 0,
+            size_bytes: 0,
+            allocated_bytes: 0,
+            created: now,
+            modified: now,
+            changed: now,
+            protection: 0,
+            content_generation: generation,
+            data_root: root_lba,
+            data_blocks: 0,
+            security: None,
+            attributes: None,
+            comment: afsplus_format::object::Comment::EMPTY,
+        }
+    }
+
     /// Creates an empty directory in an arbitrary parent directory.
     pub fn create_directory(
         &mut self,
@@ -3277,26 +3319,8 @@ impl<D: BlockDevice> Volume<D> {
 
         tx.retire(&mut self.dev, parent_record_lba)?;
 
-        let new_directory = ObjectRecord {
-            object_id,
-            object_type: ObjectType::Directory,
-            flags: 0,
-            link_count: 1,
-            owner_uid: 0,
-            owner_gid: 0,
-            size_bytes: 0,
-            allocated_bytes: 0,
-            created: now,
-            modified: now,
-            changed: now,
-            protection: 0,
-            content_generation: generation,
-            data_root: directory_root_lba,
-            data_blocks: 0,
-            security: None,
-            attributes: None,
-            comment: afsplus_format::object::Comment::EMPTY,
-        };
+        let new_directory =
+            Self::new_directory_record(object_id, directory_root_lba, now, generation);
 
         let entry = DirEntry {
             key: self.comparison_key(name.as_bytes())?,
@@ -4971,10 +4995,12 @@ impl<D: BlockDevice> Volume<D> {
             self.alloc_rover_region,
         )?
         .with_tree_cache_pages(self.tree_cache_pages);
-        if ops
-            .iter()
-            .any(|op| matches!(op, BatchOp::CreateFile { .. }))
-        {
+        if ops.iter().any(|op| {
+            matches!(
+                op,
+                BatchOp::CreateFile { .. } | BatchOp::CreateDirectory { .. }
+            )
+        }) {
             self.protect_emergency_headroom(&mut tx);
         }
         let mut pending = PendingBatch {
@@ -5207,26 +5233,12 @@ impl<D: BlockDevice> Volume<D> {
         let root_lba = root_result?;
         pending.records.insert(
             OBJECT_ORPHAN_DIRECTORY,
-            Some(ObjectRecord {
-                object_id: OBJECT_ORPHAN_DIRECTORY,
-                object_type: ObjectType::Directory,
-                flags: 0,
-                link_count: 1,
-                owner_uid: 0,
-                owner_gid: 0,
-                size_bytes: 0,
-                allocated_bytes: 0,
-                created: now,
-                modified: now,
-                changed: now,
-                protection: 0,
-                content_generation: generation,
-                data_root: root_lba,
-                data_blocks: 0,
-                security: None,
-                attributes: None,
-                comment: afsplus_format::object::Comment::EMPTY,
-            }),
+            Some(Self::new_directory_record(
+                OBJECT_ORPHAN_DIRECTORY,
+                root_lba,
+                now,
+                generation,
+            )),
         );
         pending.created_directories.insert(OBJECT_ORPHAN_DIRECTORY);
         Ok(())
@@ -5837,6 +5849,48 @@ impl<D: BlockDevice> Volume<D> {
                 pending.dir_timestamps.insert(*parent_id, now);
                 Ok(Some(object_id))
             }
+            BatchOp::CreateDirectory { parent_id, name } => {
+                validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+                let parent = self
+                    .batch_record(pending, *parent_id)?
+                    .ok_or(CoreError::NotFound)?;
+                if parent.object_type != ObjectType::Directory {
+                    return Err(CoreError::NotDirectory);
+                }
+                let key = self.comparison_key(name.as_bytes())?;
+                if self.batch_lookup(pending, *parent_id, &key)?.is_some() {
+                    return Err(CoreError::AlreadyExists);
+                }
+                let object_id = pending.next_object_id;
+                pending.next_object_id = object_id
+                    .checked_add(1)
+                    .ok_or(CoreError::PrototypeLimit("object ID space exhausted"))?;
+                let root_lba = tx.allocate(&mut self.dev)?;
+                pending.records.insert(
+                    object_id,
+                    Some(Self::new_directory_record(
+                        object_id, root_lba, now, generation,
+                    )),
+                );
+                pending.created_directories.insert(object_id);
+                // Materialization walks the directories the batch changed, and
+                // it is the one that stages the empty leaf at `root_lba`. A
+                // directory nothing has been put into yet changes no entry, so
+                // list it explicitly or its root block is never written.
+                pending.dir_changes.entry(object_id).or_default();
+                pending.dir_timestamps.insert(object_id, now);
+                pending.dir_changes.entry(*parent_id).or_default().insert(
+                    key,
+                    Some(DirEntry {
+                        key: self.comparison_key(name.as_bytes())?,
+                        name: name.as_bytes().to_vec(),
+                        child_type_hint: 2,
+                        child_id: object_id,
+                    }),
+                );
+                pending.dir_timestamps.insert(*parent_id, now);
+                Ok(Some(object_id))
+            }
             BatchOp::DeleteFile { parent_id, name } => {
                 validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
                 let key = self.comparison_key(name.as_bytes())?;
@@ -6369,7 +6423,12 @@ impl<D: BlockDevice> Volume<D> {
                         None
                     } else {
                         match Self::log_op_for(op, created, &window.pending, now) {
-                            Ok(logged) => Some(logged),
+                            Ok(logged) => {
+                                if logged.is_none() {
+                                    window.unloggable = true;
+                                }
+                                logged
+                            }
                             Err(error) => {
                                 self.window_poisoned = true;
                                 self.flight_window_event(
@@ -6849,13 +6908,16 @@ impl<D: BlockDevice> Volume<D> {
         .then_some(entry.child_id))
     }
 
+    /// The log record describing `op`, or `None` when the log has no record
+    /// kind for it. `None` makes the window unloggable: the next fsync
+    /// commits it as a checkpoint instead of appending (ADR-121 decision 5).
     fn log_op_for(
         op: &BatchOp<'_>,
         created: Option<u64>,
         pending: &PendingBatch,
         now: Timespec,
-    ) -> Result<LogOp, CoreError> {
-        Ok(match op {
+    ) -> Result<Option<LogOp>, CoreError> {
+        Ok(Some(match op {
             BatchOp::CreateFile {
                 parent_id,
                 name,
@@ -6883,6 +6945,10 @@ impl<D: BlockDevice> Volume<D> {
                     timestamp: now,
                 }
             }
+            // `LogOp` has Create, Delete, Rename and Write, and none of them
+            // makes a directory. Adding one is a format change; until then a
+            // staged directory is published by a checkpoint.
+            BatchOp::CreateDirectory { .. } => return Ok(None),
             BatchOp::DeleteFile { parent_id, name } => LogOp::Delete {
                 parent_id: *parent_id,
                 name: name.as_bytes().to_vec(),
@@ -6903,7 +6969,7 @@ impl<D: BlockDevice> Volume<D> {
                 replace: *replace,
                 timestamp: now,
             },
-        })
+        }))
     }
 
     /// Makes every window operation so far durable. Existing-file update
