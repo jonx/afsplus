@@ -35,9 +35,21 @@ use crate::CoreError;
 struct RunSet {
     /// start -> end (exclusive), non-overlapping runs.
     runs: std::collections::BTreeMap<u64, u64>,
+    /// Join a run to the one it touches. A set that only answers "does this
+    /// overlap" wants this: a sequential fill then costs one entry instead
+    /// of one per block. A set whose runs are written out as they were
+    /// recorded, like the snapshot ledgers, must not.
+    merge_adjacent: bool,
 }
 
 impl RunSet {
+    fn merging() -> Self {
+        RunSet {
+            merge_adjacent: true,
+            ..Default::default()
+        }
+    }
+
     fn overlaps(&self, start: u64, end: u64) -> bool {
         if let Some((_, prev_end)) = self.runs.range(..=start).next_back() {
             if *prev_end > start {
@@ -52,6 +64,21 @@ impl RunSet {
         debug_assert!(start < end);
         if self.overlaps(start, end) {
             return false;
+        }
+        let (mut start, mut end) = (start, end);
+        if self.merge_adjacent {
+            if let Some((previous_start, previous_end)) =
+                self.runs.range(..start).next_back().map(|(s, e)| (*s, *e))
+            {
+                if previous_end == start {
+                    self.runs.remove(&previous_start);
+                    start = previous_start;
+                }
+            }
+            if let Some(next_end) = self.runs.get(&end).copied() {
+                self.runs.remove(&end);
+                end = next_end;
+            }
         }
         self.runs.insert(start, end);
         true
@@ -447,8 +474,8 @@ impl TxAllocator {
             dirty_pages: BTreeSet::new(),
             dirty_regions: BTreeSet::new(),
             reclaim: Some(reclaim),
-            allocated_this_tx: RunSet::default(),
-            retired_this_tx: RunSet::default(),
+            allocated_this_tx: RunSet::merging(),
+            retired_this_tx: RunSet::merging(),
             snapshot: current.snapshot_roots.map(|roots| {
                 let _scope =
                     crate::allocation_trace::enter(crate::allocation_trace::Domain::Snapshot);
