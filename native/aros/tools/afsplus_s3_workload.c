@@ -62,7 +62,7 @@
 #define CHURN_FILES 32u
 #define CHURN_BYTES 8192u
 #define CHURN_MIN_US UINT64_C(6000000)
-#define CHURN_MAX_PASSES 8u
+#define CHURN_MAX_PASSES 24u
 #define IDLE_BEATS 16u
 #define IDLE_TICKS 25u /* Delay() ticks of 1/50 s: half a second a beat */
 #define COPY_BYTES 8192u

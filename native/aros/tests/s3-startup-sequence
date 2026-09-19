@@ -1,0 +1,53 @@
+; S3: the Startup-Sequence of the AFS+ boot volume that is cut off and booted
+; again, round after round. Reaching this file at all means AROS booted from
+; the AFS+ partition: nothing else holds it. The stage file says how far the
+; boot had got when the host cut the machine off, and the workload's own
+; progress file says where inside the work the cut fell.
+C:FailAt 21
+C:Echo "stage startup" >MacRW:s3-stage
+C:AFSPlusInfo SYS: >MacRW:s3-info-sys.json
+If NOT EXISTS "RAM:Clipboards"
+    C:MakeDir "RAM:Clipboards"
+EndIf
+If NOT EXISTS "RAM:T"
+    C:MakeDir "RAM:T"
+EndIf
+If NOT EXISTS "RAM:ENV"
+    C:MakeDir "RAM:ENV"
+EndIf
+C:Assign "ENV:" "RAM:ENV"
+C:Assign "T:" "RAM:T"
+C:Assign "CLIPS:" "RAM:Clipboards"
+C:Assign "ENVARC:" "SYS:Prefs/Env-Archive"
+If EXISTS "DEVS:Keymaps"
+    C:Assign "KEYMAPS:" "DEVS:Keymaps"
+EndIf
+C:Assign "LOCALE:" "SYS:Locale"
+C:Assign "LIBS:" "SYS:Classes" ADD
+C:Assign "HELP:" "LOCALE:Help" DEFER
+C:Assign "IMAGES:" "SYS:System/Images" DEFER
+C:Assign "WANDERER:" "SYS:System/Wanderer" DEFER
+C:Assign "THEMES:" "SYS:Prefs/Presets/Themes"
+C:Assign "THEME:" "THEMES:AROSDefault"
+If EXISTS "THEME:Images"
+    C:Assign "IMAGES:" "THEME:Images" PREPEND
+EndIf
+C:Path "C:" "SYS:System" "S:" "SYS:Prefs" QUIET
+C:Assign "FONTS:" "SYS:Fonts"
+C:Path "SYS:Tools" QUIET ADD
+C:Path "SYS:Utilities" QUIET ADD
+C:Echo "stage assigns" >>MacRW:s3-stage
+If EXISTS "C:AddDataTypes"
+    C:AddDataTypes REFRESH QUIET
+EndIf
+If EXISTS "C:IPrefs"
+    C:IPrefs
+EndIf
+C:Run <NIL: >NIL: QUIET C:ConClip
+C:Run <NIL: >NIL: QUIET WANDERER:Wanderer
+C:Wait 2
+C:Echo "stage desktop" >>MacRW:s3-stage
+C:AFSPlusS3Workload MacRW:s3-control MacRW:s3-progress SYS:S3 MacRW:markers >MacRW:s3-workload.out
+C:Echo "stage workload" >>MacRW:s3-stage
+C:Echo afsplus >MacRW:done
+C:EndCLI >NIL:
