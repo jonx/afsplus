@@ -142,6 +142,7 @@ build_target_program native/aros/tools/afsplus_info.c AFSPlusInfo \
 
 echo "[aros-package] build the target-side device ordering probe"
 build_target_program native/aros/tests/fdsk_update_probe.c FDSKUpdateProbe
+build_target_program native/aros/tools/afsplus_driver_probe.c AFSPlusDriverProbe
 
 echo "[aros-package] build the target-side clone-or-copy tool"
 build_target_program native/aros/tools/afsplus_clone.c AFSPlusClone \
@@ -206,7 +207,7 @@ cp docs/aros-alpha0-package.md "$staging/README.md"
 (
     cd "$staging"
     shasum -a 256 afsplus-handler AFSPlusAlpha0Probe AFSPlusDosProbe \
-        AFSPlusInfo AFSPlusClone FDSKUpdateProbe AFSPlusBench BASE20 \
+        AFSPlusInfo AFSPlusClone FDSKUpdateProbe AFSPlusDriverProbe AFSPlusBench BASE20 \
         AFSPlusReplayProbe \
         AFSPlusS1Probe AFSPlusS1bProbe AFSPlusS1Pivot AFSPLUS19 Unit19 \
         abi-report.txt build-profile.txt check-before.json README.md \
