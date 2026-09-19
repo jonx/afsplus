@@ -236,3 +236,76 @@ fn create_only() {
         (c1.cache_misses - c0.cache_misses) as f64 / ops as f64);
     assert_eq!(afsplus_aros_unmount(fs), 0);
 }
+
+#[test]
+#[ignore = "profiling harness"]
+fn steady_heap() {
+    // The STEADY probe of the DOS gate, at the FFI: rounds of create, write,
+    // close and delete; the heap read after a flush, twice.
+    let mut device = common::materialized(true);
+    let fs = mount(&mut device);
+    let mut g = 0;
+    assert_eq!(afsplus_aros_set_cache_blocks(fs, 64, &mut g), 0);
+    assert_eq!(afsplus_aros_set_commit_policy(fs, 5_000, 1_000), 0);
+    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+    let fsync = std::env::var("FSYNC_ON_CLOSE").is_ok();
+    let mut d0 = 0;
+    assert_eq!(afsplus_aros_create_directory(fs, 0, b"steady".as_ptr(), 6, now().0, 0, &mut d0), 0);
+    assert_eq!(afsplus_aros_free_lock(fs, d0), 0);
+    let skip = std::env::var("SKIP").unwrap_or_default();
+    let round = |fs| {
+        let t = now();
+        // As the probe: the drawer is looked up per operation and nothing is
+        // held between rounds.
+        let mut d = 0;
+        assert_eq!(afsplus_aros_locate(fs, 0, b"steady".as_ptr(), 6, 0, &mut d), 0);
+        let mut file = 0;
+        assert_eq!(afsplus_aros_open(fs, d, b"note".as_ptr(), 4, AFSPLUS_AROS_OPEN_NEW_FILE, t.0, t.1, &mut file), 0);
+        let mut c = 0;
+        assert_eq!(afsplus_aros_write(fs, file, [7u8; 1200].as_ptr(), 1200, t.0, t.1, &mut c), 0);
+        if fsync { assert_eq!(afsplus_aros_fsync(fs, file), 0); }
+        assert_eq!(afsplus_aros_close(fs, file), 0);
+        if !skip.contains("read") {
+            assert_eq!(afsplus_aros_open(fs, d, b"note".as_ptr(), 4, AFSPLUS_AROS_OPEN_OLD_FILE, t.0, t.1, &mut file), 0);
+            let mut buf = [0u8; 1200]; let mut got = 0;
+            assert_eq!(afsplus_aros_read(fs, file, buf.as_mut_ptr(), 1200, &mut got), 0);
+            if !skip.contains("record") {
+                assert_eq!(afsplus_aros_lock_record(fs, file, 0, 4, 1), 0);
+                assert_eq!(afsplus_aros_free_record(fs, file, 0, 4), 0);
+            }
+            assert_eq!(afsplus_aros_close(fs, file), 0);
+        }
+        if !skip.contains("examine") {
+            let mut l = 0;
+            assert_eq!(afsplus_aros_locate(fs, d, b"note".as_ptr(), 4, 0, &mut l), 0);
+            let mut info = AfsplusArosFileInfo::default(); let mut name = [0u8; 108];
+            assert_eq!(afsplus_aros_examine_lock(fs, l, &mut info, name.as_mut_ptr(), 108), 0);
+            assert_eq!(afsplus_aros_free_lock(fs, l), 0);
+        }
+        if !skip.contains("watch") {
+            let mut w = 0;
+            assert_eq!(afsplus_aros_watch_add(fs, d, b"note".as_ptr(), 4, &mut w), 0);
+            assert_eq!(afsplus_aros_watch_remove(fs, w), 0);
+        }
+        if !skip.contains("comment") { assert_eq!(afsplus_aros_set_comment(fs, d, b"note".as_ptr(), 4, b"round".as_ptr(), 5, t.0, t.1), 0); }
+        if !skip.contains("protect") { assert_eq!(afsplus_aros_set_protection(fs, d, b"note".as_ptr(), 4, 0x10, t.0, t.1), 0); }
+        assert_eq!(afsplus_aros_delete_object(fs, d, b"note".as_ptr(), 4, t.0, t.1), 0);
+        assert_eq!(afsplus_aros_free_lock(fs, d), 0);
+        let mut pending = 0; assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);
+    };
+    let settle = std::env::var("SETTLE").is_ok();
+    let warmup: usize = std::env::var("WARMUP").ok().and_then(|v| v.parse().ok()).unwrap_or(rounds);
+    let reading = |fs| {
+        assert_eq!(afsplus_aros_flush(fs), 0);
+        if settle { for _ in 0..64 { if orphans(fs) == 0 { break; } assert_eq!(afsplus_aros_flush(fs), 0); } }
+        let c = counters(fs);
+        (c.heap_bytes, c.heap_peak_bytes, orphans(fs))
+    };
+    for _ in 0..warmup { round(fs); }
+    let warm = reading(fs);
+    for _ in 0..rounds { round(fs); }
+    let done = reading(fs);
+    eprintln!("STEADY fsync={fsync} rounds={rounds}: heap {} -> {} ({:+}), peak {} -> {} ({:+}), orphans {} -> {}",
+        warm.0, done.0, done.0 as i64 - warm.0 as i64, warm.1, done.1, done.1 as i64 - warm.1 as i64, warm.2, done.2);
+    assert_eq!(afsplus_aros_unmount(fs), 0);
+}

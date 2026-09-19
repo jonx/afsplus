@@ -1055,16 +1055,40 @@ static int steady_round(void)
  * open finding; three bytes a round over a hundred rounds is past this. */
 #define STEADY_HEAP_ALLOWANCE 256
 
+/* What the volume still owes after the flush: deleted files whose blocks
+ * are not back yet. Their number is what the heap readings differ by when
+ * they differ, so it is printed beside them. */
+static ULONG steady_orphans(struct MsgPort *port)
+{
+    struct AfsplusArosHealth health;
+
+    memset(&health, 0, sizeof(health));
+    if (afsplus_client_health(port, &health) != 0)
+        return 0;
+    return (ULONG)health.pending_orphans;
+}
+
 /* The handler library's heap counters, through the transport. */
 static int steady_heap(struct MsgPort *port,
     struct AfsplusArosCounters *counters)
 {
     LONG error;
+    ULONG flushes;
 
-    /* At a durable point: a delayed mount holds a varying amount of
-     * uncommitted state between rounds. */
-    if (!DoPkt(port, ACTION_FLUSH, 0, 0, 0, 0, 0))
-        return fail("STEADY flush", DOSFALSE);
+    /* At a durable point, and with nothing left to do: a delayed mount
+     * holds a varying amount of uncommitted state between rounds, and one
+     * flush cleans a bounded number of the files the rounds deleted; those
+     * still pending live in the orphan directory the cache holds decoded,
+     * about 24 bytes each, so two readings with different backlogs differ
+     * by that and not by a leak. Flushing until none is pending compares
+     * like with like. */
+    for (flushes = 0; flushes < 64; flushes++)
+    {
+        if (!DoPkt(port, ACTION_FLUSH, 0, 0, 0, 0, 0))
+            return fail("STEADY flush", DOSFALSE);
+        if (steady_orphans(port) == 0)
+            break;
+    }
     memset(counters, 0, sizeof(*counters));
     error = afsplus_client_counters(port, counters);
     if (error != 0)
@@ -1080,6 +1104,8 @@ static int probe_steady(const char *rounds_text)
     ULONG round;
     ULONG before;
     ULONG after = 0;
+    ULONG orphans_warm = 0;
+    ULONG orphans_done = 0;
     struct AfsplusArosCounters warm;
     struct AfsplusArosCounters done;
     struct MsgPort *port;
@@ -1098,16 +1124,20 @@ static int probe_steady(const char *rounds_text)
     port = afsplus_client_lock_port(drawer);
     UnLock(drawer);
     status = RETURN_OK;
-    /* As many rounds first as are measured, so one-off allocations of the
-     * first use of each operation, and structures growing to their working
-     * size, are not read as a leak. The read cache is one of them: a delayed
-     * mount leaves each round's delete for idle time, the next round writes
-     * to blocks the cache has not held, and the cache fills to its size over
-     * the first hundred rounds. */
-    for (round = 0; status == RETURN_OK && round < rounds; round++)
+    /* Three times as many rounds first as are measured, so one-off
+     * allocations of the first use of each operation, and structures
+     * growing to their working size, are not read as a leak. The read cache
+     * is one of them: a delayed mount leaves each round's delete for idle
+     * time, the next round writes to blocks the cache has not held, and the
+     * cache fills to its size over the first hundred rounds. Another took a
+     * step of 2,176 bytes somewhere between the hundredth and the two
+     * hundredth round once a close stopped committing the window, which a
+     * warm-up as long as the measurement put between the two readings. */
+    for (round = 0; status == RETURN_OK && round < 3 * rounds; round++)
         status = steady_round();
     if (status == RETURN_OK)
         status = steady_heap(port, &warm);
+    orphans_warm = steady_orphans(port);
     /* Both readings follow a flush: between flushes a delayed mount holds
      * its open window and the deletes waiting for idle time, which the flush
      * gives back. */
@@ -1116,6 +1146,7 @@ static int probe_steady(const char *rounds_text)
         status = steady_round();
     if (status == RETURN_OK)
         status = steady_heap(port, &done);
+    orphans_done = steady_orphans(port);
     after = (ULONG)AvailMem(MEMF_ANY);
     DeleteFile(DRAWER);
     if (status != RETURN_OK)
@@ -1125,6 +1156,8 @@ static int probe_steady(const char *rounds_text)
     Printf("[AFSPLUS-DOS] STEADY heap before %lu after %lu peak before %lu"
         " after %lu\n", (ULONG)warm.heap_bytes, (ULONG)done.heap_bytes,
         (ULONG)warm.heap_peak_bytes, (ULONG)done.heap_peak_bytes);
+    Printf("[AFSPLUS-DOS] STEADY orphans pending before %lu after %lu\n",
+        orphans_warm, orphans_done);
     /* The handler library's own view, blind to other tasks: after the
      * warm-up, further rounds hold nothing more and need no more at once,
      * within the allowance, so the peak is a property of the operations and
