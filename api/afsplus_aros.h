@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(17)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(18)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -45,6 +45,7 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_ATTRIBUTES UINT64_C(0x8000)
 #define AFSPLUS_AROS_GROUP_CACHE UINT64_C(0x10000)
 #define AFSPLUS_AROS_GROUP_COMMIT UINT64_C(0x20000)
+#define AFSPLUS_AROS_GROUP_PATHS UINT64_C(0x40000)
 
 /* AfsplusArosExtent.flags. */
 #define AFSPLUS_AROS_EXTENT_UNWRITTEN UINT32_C(0x1)
@@ -595,6 +596,19 @@ int32_t afsplus_aros_set_commit_policy(struct AfsplusAros *filesystem,
     uint32_t max_age_ms, uint32_t idle_ms);
 int32_t afsplus_aros_commit_due(struct AfsplusAros *filesystem,
     int64_t now_seconds, uint32_t now_nanoseconds, uint32_t *output_pending);
+
+/* Group AFSPLUS_AROS_GROUP_PATHS: one call resolves a whole AmigaDOS path
+ * and makes one lock, where the caller made a lock per component and freed
+ * it again. The path is relative to base, unless a volume prefix or a
+ * leading ':' starts it at the root; an empty component is the parent
+ * operation, which at the root stays at the root; a trailing '/' is inert.
+ * The components before the last are passed by object ID and take no lock,
+ * so a directory held exclusively no longer refuses a path through it; the
+ * lock records the parent and the name locate records, and the error is the
+ * error of the component that failed, ERROR_IS_SOFT_LINK included. */
+int32_t afsplus_aros_locate_path(struct AfsplusAros *filesystem,
+    uint64_t base, const uint8_t *path, uint32_t length, uint32_t access,
+    uint64_t *output_lock);
 
 /* Group AFSPLUS_AROS_GROUP_ATTRIBUTES: extended attributes of the object
  * name under base_lock, an empty name being the base lock's own object.

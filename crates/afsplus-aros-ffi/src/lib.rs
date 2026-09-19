@@ -27,7 +27,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 17;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 18;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -46,6 +46,7 @@ pub const AFSPLUS_AROS_GROUP_DOS_COMMENT: u64 = 0x4000;
 pub const AFSPLUS_AROS_GROUP_ATTRIBUTES: u64 = 0x8000;
 pub const AFSPLUS_AROS_GROUP_CACHE: u64 = 0x10000;
 pub const AFSPLUS_AROS_GROUP_COMMIT: u64 = 0x20000;
+pub const AFSPLUS_AROS_GROUP_PATHS: u64 = 0x40000;
 pub const AFSPLUS_AROS_EXTENT_UNWRITTEN: u32 = 1;
 pub const AFSPLUS_AROS_DIR_RECORD_MAX: u32 = 280;
 pub const AFSPLUS_AROS_KIND_FILE: u32 = 1;
@@ -89,7 +90,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_DOS_COMMENT
     | AFSPLUS_AROS_GROUP_ATTRIBUTES
     | AFSPLUS_AROS_GROUP_CACHE
-    | AFSPLUS_AROS_GROUP_COMMIT;
+    | AFSPLUS_AROS_GROUP_COMMIT
+    | AFSPLUS_AROS_GROUP_PATHS;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -1022,6 +1024,27 @@ pub extern "C" fn afsplus_aros_locate(
         let lock = bridge_mut(filesystem)?.adapter.locate(
             optional_lock(base_lock),
             name,
+            lock_access(access)?,
+        )?;
+        write_output(output_lock, lock)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_locate_path(
+    filesystem: *mut AfsplusAros,
+    base: u64,
+    path: *const u8,
+    length: u32,
+    access: u32,
+    output_lock: *mut u64,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_lock)?;
+        let path = input_bytes(path, length)?;
+        let lock = bridge_mut(filesystem)?.adapter.locate_path(
+            optional_lock(base),
+            path,
             lock_access(access)?,
         )?;
         write_output(output_lock, lock)

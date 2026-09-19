@@ -473,6 +473,66 @@ impl<D: BlockDevice> ArosAdapter<D> {
         self.insert_lock(object_id, parent, stored_name, access)
     }
 
+    /// Resolves a whole AmigaDOS path and makes one lock, for the object the
+    /// last component names, with `access`. A `volume:` prefix or a leading
+    /// `:` starts the walk at the root, an empty component is the parent
+    /// operation, which at the root stays at the root, and a trailing `/` is
+    /// inert. The walk itself runs on object IDs: the packet layer used to
+    /// make and free a lock per component, which cost a lock table entry and
+    /// two boundary calls for a directory it only passed through. Nothing
+    /// else changes, because the lock records the parent and the name the
+    /// per-component walk recorded, so `examine` and `parent_lock` see what
+    /// they saw. The one behaviour that goes with the intermediate locks: a
+    /// directory another task holds exclusively no longer refuses a path
+    /// that passes through it, which is what the Fast File System does.
+    pub fn locate_path(
+        &mut self,
+        base: Option<LockId>,
+        path: &[u8],
+        access: LockAccess,
+    ) -> Result<LockId, ArosError> {
+        self.ensure_lock_capacity()?;
+        let start = path
+            .iter()
+            .rposition(|byte| *byte == b':')
+            .map_or(0, |colon| colon + 1);
+        let (mut object, mut parent, mut name) = match base {
+            Some(lock) if start == 0 => {
+                let state = self.lock_state(lock)?;
+                (state.object_id, state.parent, state.name.clone())
+            }
+            _ => self.root_step(),
+        };
+        let mut at = start;
+        while let Some(component) = next_component(path, &mut at) {
+            if component.is_empty() {
+                match parent {
+                    Some(up) => {
+                        let (grandparent, up_name) = self
+                            .known_parents
+                            .get(&up)
+                            .cloned()
+                            .ok_or(ArosError::InvalidLock)?;
+                        (object, parent, name) = (up, grandparent, up_name);
+                    }
+                    None => (object, parent, name) = self.root_step(),
+                }
+                continue;
+            }
+            let decoded = self.decode_component(component)?;
+            let child = self.vfs.lookup(object, &decoded)?;
+            // dos.library resolves the link through ACTION_READ_LINK and
+            // retries with the substituted path, at whatever depth it meets it.
+            if self.vfs.stat(child)?.kind == NodeKind::Symlink {
+                return Err(ArosError::IsSoftLink);
+            }
+            self.known_parents
+                .insert(child, (Some(object), component.to_vec()));
+            (object, parent, name) = (child, Some(object), component.to_vec());
+        }
+        self.insert_lock(object, parent, name, access)
+    }
+
     pub fn duplicate_lock(&mut self, lock: LockId) -> Result<LockId, ArosError> {
         self.ensure_lock_capacity()?;
         let state = self.lock_state(lock)?.clone();
@@ -1995,6 +2055,11 @@ impl<D: BlockDevice> ArosAdapter<D> {
         Ok(encoded)
     }
 
+    /// The object, parent and name a lock on the root carries.
+    fn root_step(&self) -> (ObjectId, Option<ObjectId>, Vec<u8>) {
+        (OBJECT_ROOT, None, self.config.volume_name.clone())
+    }
+
     fn lock_object_or_root(&self, lock: Option<LockId>) -> Result<ObjectId, ArosError> {
         match lock {
             Some(lock) => Ok(self.lock_state(lock)?.object_id),
@@ -2099,6 +2164,25 @@ impl<D: BlockDevice> ArosAdapter<D> {
             .ok_or(ArosError::NoFreeStore)?;
         Ok(handle)
     }
+}
+
+/// The next AmigaDOS path component from `at`, as `next_path_operation` of
+/// the packet layer cuts it: everything up to the next `/`, which is consumed
+/// with it. None once `at` has passed the end, so a trailing separator ends
+/// the path instead of adding an empty component.
+fn next_component<'a>(path: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
+    if *at >= path.len() {
+        return None;
+    }
+    let start = *at;
+    while *at < path.len() && path[*at] != b'/' {
+        *at += 1;
+    }
+    let end = *at;
+    if *at < path.len() {
+        *at += 1;
+    }
+    Some(&path[start..end])
 }
 
 fn v2_kind(kind: NodeKind) -> Result<V2Kind, ArosError> {
