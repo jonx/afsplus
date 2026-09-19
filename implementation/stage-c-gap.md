@@ -93,9 +93,15 @@ Lacking:
    those runs reach the DOS, soft-link, notify, record, volume-label,
    comment, attribute and extension-packet groups through a real
    dos.library, and the paged object-ID walk and the health-event ring
-   through the extension packet. What no Hosted run reaches: the trace sink,
-   which no target path can call at all. QEMU and m68k stand where they were,
-   because neither toolchain is on the machine that ran the rest;
+   through the extension packet. The trace sink is reached from a target as
+   well: the handler shell owns the queue and registers it
+   (`afsplus_aros_set_trace_sink`, fb237de), and the ring is drained through
+   the extension packet's `AFSPLUS_EXT_TRACE_EVENTS` and
+   `AFSPLUS_EXT_TRACE_COUNTERS`, which is what C10 describes. QEMU and m68k
+   have not been rerun on the current boundary; both toolchains are on the
+   machine, and the m68k one compiles and links the handler in every
+   [`check-aros-ffi.sh`](../tools/check-aros-ffi.sh) run, so what stands
+   between those rows and a verdict is the run, not the tools;
 2. a structured result for callers that are not DOS packets: every error is
    an `ERROR_*` value, and `Limit`, `Corrupt` and `Io` share codes with
    ordinary results.
