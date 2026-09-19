@@ -30,7 +30,8 @@ const SECTOR: u64 = 512;
 const ENTRY_SIZE: usize = 128;
 const ENTRIES: usize = 128;
 const ENTRY_SECTORS: u64 = (ENTRY_SIZE * ENTRIES) as u64 / SECTOR;
-/// Partitions start and end on 1 MiB, as every current partitioning tool does.
+/// Partitions start on 1 MiB, as every current partitioning tool does; the
+/// disk ends on 1 MiB after the backup table.
 const ALIGN: u64 = 1024 * 1024 / SECTOR;
 const AROS_BOOTABLE: u64 = 1 << 60;
 const HEADER_SIZE: u32 = 92;

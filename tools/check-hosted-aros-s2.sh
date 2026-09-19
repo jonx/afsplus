@@ -177,7 +177,15 @@ grep -q '^{"schema":"afsplus-handler-info"' "$result/s2/s2-info-sys.json"
 grep -q '"label":"AFSPlusS2"' "$result/s2/s2-info-sys.json"
 grep -q 'AFS+' "$result/s2/s2-info.out"
 [ "$(cat "$result/s2/s2-origin")" = afsplus-s2 ]
-# The tour of the v2 interface, run from the boot volume on itself.
+# The tour of the v2 interface, run from the boot volume on itself: no step
+# may fail, whatever steps it grows, the summary must pass, and these four
+# must be there.
+if grep -q '^\[AFSPLUS-TOUR\] .*FAIL$' "$result/s2/s2-tour.out" \
+    || ! tail -n 1 "$result/s2/s2-tour.out" | grep -qx '\[AFSPLUS-TOUR\] PASS'; then
+    echo "[hosted-s2] the tour failed:" >&2
+    cat "$result/s2/s2-tour.out" >&2
+    exit 1
+fi
 for tour_step in volume clone watch attribute; do
     grep -qx "\[AFSPLUS-TOUR\] $tour_step PASS" "$result/s2/s2-tour.out" || {
         echo "[hosted-s2] the tour failed at $tour_step:" >&2

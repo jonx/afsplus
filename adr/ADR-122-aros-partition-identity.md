@@ -30,8 +30,10 @@ resident init registers AFS+ there
    partition.library needs no change.
 3. A bootable AFS+ partition sets bit 60 of its attributes and its boot
    priority, a signed byte, in bits 32 to 39.
-4. Partitions start on a 1 MiB boundary. The file system inside keeps its own
-   block size (4096 by default); the partition carries 512-byte sectors.
+4. Partitions start on a 1 MiB boundary and are exactly as long as the file
+   system inside, whose own block size (4096 by default) they contain in
+   512-byte sectors; `afsplus-disk wrap` rounds only the disk, not the
+   partition, up to 1 MiB, leaving room for the backup table.
 5. `afsplus-disk wrap` writes such a disk from a formatted AFS+ image, and
    `afsplus-disk extract` takes the partition out again by its type. The
    Native installer uses the same layout.
