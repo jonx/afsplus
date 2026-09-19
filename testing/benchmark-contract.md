@@ -606,7 +606,9 @@ list, read, rename and delete, and each phase runs over every tree before it
 is timed once, because the Hosted clock moves in 5 ms steps. The runner
 reports the step it measured, reads every byte back and compares it, and on
 AFS+ adds the handler's counters before and after, the heap and its peak
-included.
+included, and to each phase what it cost the handler: library calls, device
+flushes, block writes and cache reads, so a phase's time can be laid beside
+what it asked of the device.
 
 Before the run the package is checked against its manifest and the AFS+ image
 by the image checker; after it the AFS+ image is checked again. The Fast File

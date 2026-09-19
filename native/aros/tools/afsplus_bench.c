@@ -7,9 +7,11 @@
  * once: create, list, read (every byte compared), rename, delete. The clock
  * moves in steps ("clock step_us <n>"), so a phase long against the step
  * needs enough trees (default 10, at most 99). One line per phase ("phase
- * <name> ops <n> us <time>"), and when an AFS+ handler serves the drawer its
- * counters before and after ("counters <when> ..."); another file system
- * says "counters none". The last line is PASS or FAIL.
+ * <name> ops <n> us <time>", and when an AFS+ handler serves the drawer
+ * also what the phase cost it: "calls <n> flushes <n> writes <n>
+ * cache_reads <n>"), and that handler's counters before and after
+ * ("counters <when> ..."); another file system says "counters none". The
+ * last line is PASS or FAIL.
  *
  * AFSPlusBench FORMAT <device:> <name> formats the volume of a device with
  * the Fast File System, the baseline the same workload runs against. */
@@ -171,10 +173,41 @@ static ULONG clamp(uint64_t value)
     return value > 0xFFFFFFFFULL ? 0xFFFFFFFFUL : (ULONG)value;
 }
 
-static void report_phase(const char *name, ULONG operations, uint64_t start)
+static const char *decimal(char *out, uint64_t value);
+
+/* The handler's counters at a phase boundary, all zero where the volume
+ * has none, so that a phase line can carry what the phase cost the device
+ * and not only what it cost the clock. */
+static struct AfsplusArosCounters phase_counters(struct MsgPort *port)
 {
-    Printf("[AFSPLUS-BENCH] phase %s ops %lu us %lu\n", name, operations,
-        clamp(now_microseconds() - start));
+    struct AfsplusArosCounters counters;
+
+    memset(&counters, 0, sizeof(counters));
+    if (port != NULL && afsplus_client_counters(port, &counters) != 0)
+        memset(&counters, 0, sizeof(counters));
+    return counters;
+}
+
+static void report_phase(const char *name, ULONG operations, uint64_t start,
+    struct MsgPort *port, const struct AfsplusArosCounters *at_start)
+{
+    struct AfsplusArosCounters now = phase_counters(port);
+    char text[4][21];
+
+    if (port == NULL)
+    {
+        Printf("[AFSPLUS-BENCH] phase %s ops %lu us %lu\n", name, operations,
+            clamp(now_microseconds() - start));
+        return;
+    }
+    Printf("[AFSPLUS-BENCH] phase %s ops %lu us %lu calls %s flushes %s"
+        " writes %s cache_reads %s\n", name, operations,
+        clamp(now_microseconds() - start),
+        decimal(text[0], now.calls - at_start->calls),
+        decimal(text[1], now.device_flushes - at_start->device_flushes),
+        decimal(text[2], now.device_writes - at_start->device_writes),
+        decimal(text[3], now.cache_hits + now.cache_misses
+            - at_start->cache_hits - at_start->cache_misses));
 }
 
 static int write_one(const char *path, const UBYTE *bytes, uint32_t size)
@@ -288,6 +321,7 @@ static int run(const char *root, uint32_t seed, uint32_t trees)
     char path[PATH_MAX_BYTES];
     char other[PATH_MAX_BYTES];
     struct MsgPort *port = NULL;
+    struct AfsplusArosCounters at_start;
     uint64_t total = 0;
     uint64_t start;
     uint32_t index;
@@ -313,6 +347,7 @@ static int run(const char *root, uint32_t seed, uint32_t trees)
     print_counters("before", port);
 
     start = now_microseconds();
+    at_start = phase_counters(port);
     for (index = 0; ok && index < trees; index++)
     {
         tree_path(path, root, index);
@@ -338,9 +373,10 @@ static int run(const char *root, uint32_t seed, uint32_t trees)
         if (!write_one(path, file_bytes, size))
             return fail("create file", (LONG)index);
     }
-    report_phase("create", trees + drawers + files, start);
+    report_phase("create", trees + drawers + files, start, port, &at_start);
 
     start = now_microseconds();
+    at_start = phase_counters(port);
     for (index = 0; index < drawers; index++)
     {
         ULONG entries;
@@ -352,9 +388,10 @@ static int run(const char *root, uint32_t seed, uint32_t trees)
         if (entries != FILES_PER_DRAWER)
             return fail("entries listed", (LONG)entries);
     }
-    report_phase("list", files, start);
+    report_phase("list", files, start, port, &at_start);
 
     start = now_microseconds();
+    at_start = phase_counters(port);
     for (index = 0; index < files; index++)
     {
         uint32_t size = file_size(seed, index);
@@ -364,9 +401,10 @@ static int run(const char *root, uint32_t seed, uint32_t trees)
         if (!read_matches(path, file_bytes, size))
             return fail("read back", (LONG)index);
     }
-    report_phase("read", files, start);
+    report_phase("read", files, start, port, &at_start);
 
     start = now_microseconds();
+    at_start = phase_counters(port);
     for (index = 0; index < files; index++)
     {
         file_path(path, root, index, 0);
@@ -374,9 +412,10 @@ static int run(const char *root, uint32_t seed, uint32_t trees)
         if (!Rename((CONST_STRPTR)path, (CONST_STRPTR)other))
             return fail("rename", (LONG)index);
     }
-    report_phase("rename", files, start);
+    report_phase("rename", files, start, port, &at_start);
 
     start = now_microseconds();
+    at_start = phase_counters(port);
     for (index = 0; index < files; index++)
     {
         file_path(path, root, index, 1);
@@ -395,7 +434,7 @@ static int run(const char *root, uint32_t seed, uint32_t trees)
         if (!DeleteFile((CONST_STRPTR)path))
             return fail("delete tree", (LONG)index);
     }
-    report_phase("delete", trees + drawers + files, start);
+    report_phase("delete", trees + drawers + files, start, port, &at_start);
 
     if (!DeleteFile((CONST_STRPTR)root))
         return fail("remove the run drawer", 0);

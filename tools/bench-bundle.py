@@ -14,7 +14,9 @@ import sys
 from pathlib import Path
 
 PHASES = ("create", "list", "read", "rename", "delete")
-PHASE = re.compile(r"^\[AFSPLUS-BENCH\] phase (\w+) ops (\d+) us (\d+)$")
+PHASE = re.compile(r"^\[AFSPLUS-BENCH\] phase (\w+) ops (\d+) us (\d+)(?: (.*))?$")
+# What a phase cost the handler, present when an AFS+ handler served it.
+PHASE_COUNTERS = ("calls", "flushes", "writes", "cache_reads")
 WORKLOAD = re.compile(
     r"^\[AFSPLUS-BENCH\] workload (\w+) seed (\d+) trees (\d+) drawers (\d+)"
     r" files (\d+) bytes (\d+)$"
@@ -56,7 +58,13 @@ def run(path):
                 "payload_bytes": int(match[6]),
             }
         elif match := PHASE.match(line):
-            phases[match[1]] = {"operations": int(match[2]), "elapsed_us": int(match[3])}
+            phase = {"operations": int(match[2]), "elapsed_us": int(match[3])}
+            if match[4]:
+                words = match[4].split()
+                if len(words) != 2 * len(PHASE_COUNTERS) or tuple(words[::2]) != PHASE_COUNTERS:
+                    fail(f"{path}: phase counters {match[4]!r}")
+                phase["counters"] = dict(zip(PHASE_COUNTERS, map(int, words[1::2])))
+            phases[match[1]] = phase
         elif match := COUNTERS.match(line):
             words = match[2].split()
             if len(words) % 2:
