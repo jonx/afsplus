@@ -18,3 +18,4 @@ measurement reports; the sequence of stages is [ROADMAP.md](../ROADMAP.md).
 | [audit-work-queue.md](audit-work-queue.md) | Complete audit findings, dependency order, evidence boundaries and next-session handoff |
 | [stage-c-gap.md](stage-c-gap.md) | What the external AROS handler lacks for each Stage C item, in dependency order, with the proof target of each layer |
 | [native-preparation.md](native-preparation.md) | What AFS+ prepares for Macaros Native, bare-metal AROS on Apple Silicon: boot from an AFS+ partition, GPT identity, driver contract, and their order |
+| [performance-program.md](performance-program.md) | Where the time of an AROS operation goes, measured, and the lots that take it back, in order |
