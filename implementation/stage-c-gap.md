@@ -319,10 +319,16 @@ Lacking in the generic device, as upstream patches with regression probes:
    that one device, proves the ordering and restores the tree. The second
    half, a host `fsync`,
    waits on a generic AROS decision named in
-   [`native/aros/upstream/README.md`](../native/aros/upstream/README.md);
-   `hostdisk.device` has the same defect, found by
+   [`native/aros/upstream/README.md`](../native/aros/upstream/README.md).
+   `hostdisk.device` had the same defect, found by
    [`AFSPlusDriverProbe`](../native/aros/tools/afsplus_driver_probe.c)
-   ([`check-hosted-aros-driver.sh`](../tools/check-hosted-aros-driver.sh));
+   ([`check-hosted-aros-driver.sh`](../tools/check-hosted-aros-driver.sh)),
+   and passes the barrier with the local patch
+   [`native/aros/aros-patches/hostdisk-unit-pattern.patch`](../native/aros/aros-patches/hostdisk-unit-pattern.patch):
+   `CMD_UPDATE` goes to the unit thread like `CMD_WRITE`, and the unit thread
+   syncs the host file, `fcntl(fd, F_FULLFSYNC)` on Darwin with `fsync()` as
+   the fallback and on every other host, so both halves hold there. A failing
+   sync is reported as a non-zero `io_Error`, never a silent success;
 2. upstream has no `TD_READ64`, `TD_WRITE64` or `NSCMD_TD_*64`; MacAROS
    carries that fix, and AFS+ images beyond 4 GiB depend on it. Without it
    the handler does not misaddress such a volume, it refuses to mount it: the

@@ -74,8 +74,17 @@ prints `PASS` or `FAIL`, and the last line is the verdict.
 
 On Hosted MacAROS,
 [`check-hosted-aros-driver.sh`](../tools/check-hosted-aros-driver.sh) runs
-the probe on `fdsk.device` and `hostdisk.device`. Both fail clause 5: they
-answer `CMD_UPDATE` inside `BeginIO`. For `fdsk.device` that is a known
-defect with an upstream patch
-([stage-c-gap C12](../implementation/stage-c-gap.md#c12-file-backed-virtual-block-device));
-`hostdisk.device` has the same one. A native driver should pass every clause.
+the probe on `fdsk.device` and `hostdisk.device`. `fdsk.device` fails clause
+5: it answers `CMD_UPDATE` inside `BeginIO`, a known defect with an upstream
+patch
+([stage-c-gap C12](../implementation/stage-c-gap.md#c12-file-backed-virtual-block-device)),
+and the check records it instead of failing on it.
+
+`hostdisk.device` passes clause 5 with the local patch
+[`native/aros/aros-patches/hostdisk-unit-pattern.patch`](../native/aros/aros-patches/hostdisk-unit-pattern.patch):
+`CMD_UPDATE` is queued on the unit port like `CMD_WRITE`, so it is answered
+behind the writes ahead of it, and the unit thread then syncs the host file,
+`fcntl(fd, F_FULLFSYNC)` on Darwin with `fsync()` as the fallback and on
+every other host. A failing sync becomes a non-zero `io_Error`. A barrier
+failure of `hostdisk.device` is therefore a failure of the check, and a
+native driver should pass every clause.
