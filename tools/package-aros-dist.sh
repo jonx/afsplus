@@ -202,6 +202,7 @@ then
 fi
 
 echo "[aros-dist] $profile_id: the four programs"
+program_dir=$staging/C
 build_program() {
     name=$1
     shift
@@ -221,9 +222,9 @@ build_program() {
     done
     # shellcheck disable=SC2086 -- every profile value is a list of flags.
     COMPILER_PATH="$(dirname -- "$aros_cc")" \
-        "$aros_collect_aros" -o "$staging/C/$name" "$aros_startup" $objects \
+        "$aros_collect_aros" -o "$program_dir/$name" "$aros_startup" $objects \
         $aros_lib_dirs --allow-multiple-definition $aros_program_libs
-    chmod 755 "$staging/C/$name"
+    chmod 755 "$program_dir/$name"
 }
 
 for entry in \
@@ -240,6 +241,20 @@ do
     # shellcheck disable=SC2086 -- the sources are separate words.
     build_program "$program_name" $program_sources
 done
+
+# The probes are test programs, not part of what a person installs, so they
+# are built only when a gate asks for them and land beside C/ in Probes/.
+# They are built by the same profile as the programs: a probe compiled any
+# other way would prove something about a different binary.
+if [ "${AFSPLUS_AROS_DIST_PROBES:-0}" = 1 ]; then
+    echo "[aros-dist] $profile_id: the probes"
+    mkdir -p "$staging/Probes"
+    program_dir=$staging/Probes
+    build_program AFSPlusAlpha0Probe native/aros/tests/alpha0_probe.c
+    build_program AFSPlusDosProbe native/aros/tests/dos_compat_probe.c \
+        native/aros/client/afsplus_client.c
+    program_dir=$staging/C
+fi
 
 echo "[aros-dist] $profile_id: ABI audit"
 "$aros_abi_audit" --objdump "$aros_objdump" "$staging/L/afsplus-handler" \
