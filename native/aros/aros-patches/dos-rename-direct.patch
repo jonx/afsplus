@@ -1,38 +1,56 @@
-dos.library Rename() without the canonical names: a proposal, not applied.
+dos.library Rename() without the canonical names.
 
-Board task #11. rom/dos/rename.c takes a Lock and a NameFromLock on the old
-name and on the new name's directory before it sends ACTION_RENAME_OBJECT,
-which is 27 packets of the 28 a Rename costs (2 Locate, 2 DupLock, 7
-Examine, 7 Parent, 9 FreeLock for the benchmark's four-level paths). The
-canonical names exist for a destination written a/b//c (ad6f718cca). With
-this change a name without a doubled separator goes to the handler as the
-caller wrote it, relative to the lock GetDeviceProc gives, as AmigaOS sends
-it. Measured on Hosted with the AFS+ benchmark, same boot, both file
-systems through this dos.library: rename phase 0.81 -> 0.38 s on AFS+ and
-0.62 -> 0.31 s on the Fast File System; AFS+ library calls for the phase
-230,411 -> 15,367. Not applied to the tree and not pushed: the owner
-decides what the Macaros fork ships.
+Board task #11; upstream as aros-development-team/AROS#1256. Applied to this
+machine's AROS tree (rom/dos/rename.c, then make kernel-dos). rename.c takes
+a Lock and a NameFromLock on both sides before ACTION_RENAME_OBJECT, 27 of
+the 28 packets of a Rename; the canonical names exist for a name holding a
+parent reference (a/b//c, ad6f718cca) and are built only for such a name.
+Hosted, same boot: rename phase 0.81 -> 0.38 s on AFS+, 0.62 -> 0.31 s on
+the Fast File System.
 
 diff --git a/rom/dos/rename.c b/rom/dos/rename.c
-index 71281a49a7..1f013572ea 100644
+index 71281a49a7..0bdc93e5b6 100644
 --- a/rom/dos/rename.c
 +++ b/rom/dos/rename.c
-@@ -60,6 +60,14 @@
+@@ -9,6 +9,22 @@
+ #include "dos_intern.h"
+ #include <string.h>
+ 
++/* An empty path component is the AmigaDOS parent operation: a leading '/',
++ * a '/' right after the volume separator, or a doubled '/'. */
++static BOOL has_parent_reference(CONST_STRPTR name)
++{
++    CONST_STRPTR p;
++
++    if (name[0] == '/')
++        return TRUE;
++    for (p = name; *p; p++)
++    {
++        if ((p[0] == ':' || p[0] == '/') && p[1] == '/')
++            return TRUE;
++    }
++    return FALSE;
++}
++
+ /*****************************************************************************
+ 
+     NAME */
+@@ -60,6 +76,14 @@
  
      ASSERT_VALID_PROCESS(me);
  
-+    /* Experiment (afsplus lot H, local): the canonical names below cost a
-+     * Lock and a NameFromLock on each side, some 25 packets, and exist for
-+     * the a/b//c destination; a name without a doubled separator goes to
-+     * the handler as the caller wrote it, relative to the device lock, as
-+     * AmigaOS sends it. */
-+    if (strstr(oldName, "//") == NULL && strstr(newName, "//") == NULL)
++    /* The canonical names built below cost a Lock and a NameFromLock on
++     * each side: an Examine and a Parent packet per directory level, some
++     * 27 packets before the one that renames. They are needed when a name
++     * holds a parent reference (a/b//c); any other name goes to the handler
++     * as the caller wrote it, relative to the lock GetDeviceProc() returns. */
++    if (!has_parent_reference(oldName) && !has_parent_reference(newName))
 +        goto send;
 +
      len = SplitName(oldName, ':', vol, 0, sizeof(vol) - 1);
  
      if (len > 0)
-@@ -148,6 +156,7 @@
+@@ -148,6 +172,7 @@
  
      D(bug("[Dos] rename %s %s\n", oldName, newName));
  
