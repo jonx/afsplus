@@ -1,0 +1,123 @@
+hostdisk.device for booting AROS from an image file on Hosted MacAROS.
+
+- hostdisk=PATTERN on the kernel command line replaces the host path of
+  unit N (/dev/disk%ld); the pattern must hold one %ld and no other
+  conversion. Without it the device probes the Mac's own drives.
+- Darwin on Apple Silicon: struct stat in place of the 32-bit inode
+  request, which the SDK refuses, and the two DKIOC requests of
+  <sys/disk.h> spelled out, since that header cannot be included.
+
+Local to this machine's AROS tree (jonx/AROS, aarch64-darwin-graft); it
+is not pushed anywhere. Apply from the AROS source root with
+git apply, then build workbench-devs-hostdisk.
+
+diff --git a/arch/all-darwin/hostdisk/geometry.c b/arch/all-darwin/hostdisk/geometry.c
+index db5beb9dca..e71af8d148 100644
+--- a/arch/all-darwin/hostdisk/geometry.c
++++ b/arch/all-darwin/hostdisk/geometry.c
+@@ -9,7 +9,13 @@
+ #include <exec/memory.h>
+ #include <proto/hostlib.h>
+ 
+-#include <sys/disk.h>
++/*
++ * The two requests of <sys/disk.h>, which cannot be included in an AROS
++ * compile: it pulls in <net/if.h>, whose BSD types AROS does not define.
++ * _IOR('d', 24, uint32_t) and _IOR('d', 25, uint64_t).
++ */
++#define DKIOCGETBLOCKSIZE  0x40046418UL
++#define DKIOCGETBLOCKCOUNT 0x40086419UL
+ 
+ #include "hostdisk_host.h"
+ #include "hostdisk_device.h"
+diff --git a/arch/all-unix/devs/hostdisk/hostdisk_host.c b/arch/all-unix/devs/hostdisk/hostdisk_host.c
+index 2f6efe4004..7be2ad7051 100644
+--- a/arch/all-unix/devs/hostdisk/hostdisk_host.c
++++ b/arch/all-unix/devs/hostdisk/hostdisk_host.c
+@@ -22,6 +22,14 @@
+ 
+ /* Correspondingly, there's no struct stat64. Use struct stat instead. */
+ #define stat64 stat
++#elif defined(HOST_OS_darwin)
++
++/*
++ * Modern macOS, and all of Apple Silicon, has 64-bit inodes only: asking for
++ * the 32-bit inode_t is a compile error, and fstat64 is the same function as
++ * fstat. Use struct stat, as emul-handler's unix_hints.h does.
++ */
++#define stat64 stat
+ #else
+ 
+ /*
+@@ -61,6 +69,8 @@
+ #include <proto/hostlib.h>
+ #include <proto/intuition.h>
+ #include <proto/kernel.h>
++#include <proto/bootloader.h>
++#include <aros/bootloader.h>
+ 
+ #ifdef HOST_LONG_ALIGNED
+ #pragma pack(4)
+@@ -344,6 +354,54 @@ static BOOL CheckArch(const char *Component, const char *MyArch, const char *Sys
+     return TRUE;
+ }
+ 
++/*
++ * hostdisk=PATTERN on the kernel command line replaces the host path of unit
++ * N, "/dev/disk%ld" by default, so that a boot can take its disks from image
++ * files instead of the machine's own drives. The pattern must hold exactly
++ * one %ld and no other conversion; any other value is ignored.
++ */
++static void Host_UnitPattern(struct HostDiskBase *hdskBase)
++{
++    APTR BootLoaderBase = OpenResource("bootloader.resource");
++    struct List *args;
++    struct Node *node;
++
++    if (BootLoaderBase == NULL)
++        return;
++    args = GetBootInfo(BL_Args);
++    if (args == NULL)
++        return;
++    ForeachNode(args, node)
++    {
++        STRPTR pattern;
++        STRPTR cursor;
++        ULONG conversions = 0;
++        BOOL valid = TRUE;
++
++        if (strncmp(node->ln_Name, "hostdisk=", 9) != 0)
++            continue;
++        pattern = node->ln_Name + 9;
++        for (cursor = pattern; *cursor; cursor++)
++        {
++            if (*cursor != '%')
++                continue;
++            if (cursor[1] == 'l' && cursor[2] == 'd')
++            {
++                conversions++;
++                cursor += 2;
++            }
++            else
++                valid = FALSE;
++        }
++        if (valid && conversions == 1)
++        {
++            D(bug("hostdisk: unit pattern %s\n", pattern));
++            hdskBase->DiskDevice = pattern;
++            hdskBase->unitBase = 0;
++        }
++    }
++}
++
+ static int Host_Init(struct HostDiskBase *hdskBase)
+ {
+     ULONG r;
+@@ -377,6 +435,7 @@ static int Host_Init(struct HostDiskBase *hdskBase)
+ 
+     hdskBase->DiskDevice = DISK_DEVICE;
+     hdskBase->unitBase   = DISK_BASE;
++    Host_UnitPattern(hdskBase);
+ 
+     return TRUE;
+ }

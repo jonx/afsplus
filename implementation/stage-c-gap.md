@@ -386,10 +386,21 @@ apply; the M1 and the A500 for hardware numbers.
 
 ## C14. AROS handler qualification ladder
 
-Open after the items above: S2 boot-selected volume (handler resident before
-boot-volume selection, bootable priority, recorded bootstrap dependencies),
-S3 repeated boot and recovery, on every platform; the Apple hardware run with
-a reset-durable transport; the physical A500.
+S2 on Hosted: AROS boots from an AFS+ partition
+([`check-hosted-aros-s2.sh`](../tools/check-hosted-aros-s2.sh)). The handler is
+a boot module and registers DosType AFS+ in `FileSystem.resource`; the
+partition is an AROS GPT partition of that type ([ADR-122](../adr/ADR-122-aros-partition-identity.md));
+the boot scan finds it through partition.library and hostdisk.device, whose
+unit pattern comes from a kernel argument (a local AROS patch in
+`native/aros/aros-patches`). The recorded bootstrap dependencies are those
+three modules and nothing else: the handler serves packets without
+stdc.library, posixc.library or stdcio.library, which cannot start before
+the boot volume (`afsplus_bootlibc.c`, `afsplus_bootposix.c`), and a volume
+needs `AROS.boot` naming its CPU to be bootable.
+
+Open: S2 on QEMU and Native, S3 repeated boot and recovery, on every
+platform; the Apple hardware run with a reset-durable transport; the physical
+A500.
 
 ## What Stage C still waits on elsewhere
 

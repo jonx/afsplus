@@ -1,0 +1,51 @@
+; S2: the Startup-Sequence of an AFS+ boot volume. Reaching this file at all
+; means AROS booted from the AFS+ partition: nothing else holds it.
+C:FailAt 21
+C:AFSPlusInfo SYS: >MacRW:s2-info-sys.json
+C:Info SYS: >MacRW:s2-info.out
+C:Copy SYS:s2-origin MacRW:s2-origin >NIL:
+If NOT EXISTS "RAM:Clipboards"
+    C:MakeDir "RAM:Clipboards"
+EndIf
+If NOT EXISTS "RAM:T"
+    C:MakeDir "RAM:T"
+EndIf
+If NOT EXISTS "RAM:ENV"
+    C:MakeDir "RAM:ENV"
+EndIf
+C:Assign "ENV:" "RAM:ENV"
+C:Assign "T:" "RAM:T"
+C:Assign "CLIPS:" "RAM:Clipboards"
+C:Assign "ENVARC:" "SYS:Prefs/Env-Archive"
+If EXISTS "DEVS:Keymaps"
+    C:Assign "KEYMAPS:" "DEVS:Keymaps"
+EndIf
+C:Assign "LOCALE:" "SYS:Locale"
+C:Assign "LIBS:" "SYS:Classes" ADD
+C:Assign "HELP:" "LOCALE:Help" DEFER
+C:Assign "IMAGES:" "SYS:System/Images" DEFER
+C:Assign "WANDERER:" "SYS:System/Wanderer" DEFER
+C:Assign "THEMES:" "SYS:Prefs/Presets/Themes"
+C:Assign "THEME:" "THEMES:AROSDefault"
+If EXISTS "THEME:Images"
+    C:Assign "IMAGES:" "THEME:Images" PREPEND
+EndIf
+C:Path "C:" "SYS:System" "S:" "SYS:Prefs" QUIET
+C:Assign "FONTS:" "SYS:Fonts"
+C:Path "SYS:Tools" QUIET ADD
+C:Path "SYS:Utilities" QUIET ADD
+If EXISTS "C:AddDataTypes"
+    C:AddDataTypes REFRESH QUIET
+EndIf
+If EXISTS "C:IPrefs"
+    C:IPrefs
+EndIf
+C:Run <NIL: >NIL: QUIET C:ConClip
+C:Run <NIL: >NIL: QUIET WANDERER:Wanderer
+C:Wait 3
+C:Run <NIL: >NIL: QUIET SYS:Utilities/Clock
+C:Wait 1
+C:Run <NIL: >NIL: C:NewShell "CON:130/400/1220/360/AROS booted from AFS+/CLOSE" FROM S:AFSPlus-Proof
+C:Wait 2
+C:Echo afsplus >MacRW:done
+C:EndCLI >NIL:
