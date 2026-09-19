@@ -1346,6 +1346,23 @@ impl<D: BlockDevice> Vfs<D> {
         name: &str,
         now: Timespec,
     ) -> Result<ObjectId, VfsError> {
+        if self.delayed() {
+            match self.volume.window_op(
+                &BatchOp::CreateDirectory {
+                    parent_id: parent,
+                    name,
+                },
+                now,
+            ) {
+                Ok(Some(object_id)) => {
+                    self.note_change(now)?;
+                    return Ok(object_id);
+                }
+                // What the window cannot stage goes the immediate way.
+                Ok(None) | Err(CoreError::PrototypeLimit(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         self.checkpoint_data_window(now)?;
         Ok(self.volume.create_directory(parent, name, now)?)
     }
