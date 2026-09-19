@@ -63,6 +63,31 @@ calls and cache reads per operation.
    new run, up to 256 KiB. A program that writes a 200 KiB file in 8 KiB
    pieces moves 2.5 MB through the device for it. The benchmark writes each
    file once and does not see this; compilers and editors will.
+8. **A directory is made outside the window.** `CreateDir` is an immediate
+   transaction: it commits the open window and then itself, two commits
+   and some four flushes for each of the 90 drawers the benchmark makes.
+   ADR-121 point 8 foresaw it: operations join the window as the core
+   learns to stage them.
+
+## What each phase costs, after lot A
+
+The benchmark lines now carry, per phase, the library calls, device
+flushes, block writes and cache reads the phase took (7d6b1b7). At lot A,
+2,560 files in 90 drawers on Hosted:
+
+| Phase | ms | Calls per operation | Flushes | Writes per operation | Cache reads per operation |
+|---|---|---|---|---|---|
+| create | 365 | 12 | 750 | 3.2 | 53 |
+| list | 115 | 3.4 | 2 | 0.07 | 25 |
+| read | 200 | 12 | 0 | 0 | 47 |
+| rename | 860 | 108 | 10 | 1.1 | 278 |
+| delete | 730 | 8 | 2,170 | 4.3 | 99 |
+
+Rename is calls: dos.library's 28 packets, each resolved and examined
+through the boundary (lots C and H). Delete is commits: on a 64 MiB volume
+the room floor is reached and orphans are cleaned one transaction each
+(lot D). Create's flushes are the drawers (item 8) and its time the
+commit (lot B).
 
 ## The lots, in order
 
@@ -76,12 +101,20 @@ calls and cache reads per operation.
 | F | A created file grows in place: a write at its end extends the run when the blocks after it are free, and the rewrite is the exception. | `crates/afsplus-core` | 200 KiB in 8 KiB writes: 2.5 MB → 200 KiB of device writes | harness writing in pieces, device write counter |
 | G | The AROS build allocates from size-class pools over `AllocMem` slabs. | `crates/afsplus-aros-ffi/src/heap.rs`, `afsplus_bootlibc.c` | unknown on Hosted, measured there | heap tests; hosted bench |
 | H | dos.library sends 28 packets for a `Rename`; a proposal for the Macaros fork (board task #11). Owner's decision. | AROS `rom/dos` | rename 0.91 → near FFS | the packet counts of the benchmark |
+| I | A directory is made in the window, as a file is. | `crates/afsplus-core`, `afsplus-vfs` | 4 flushes per `CreateDir` → 0 | harness: 90 CreateDirs on a delayed mount flush at most once; the DOS gate; S3 |
 
 A and B are independent of each other and of C; they are done first, in
 that order, each with the hosted benchmark before it is called done. D
 follows B, because a batched cleanup is one more batch through the same
-trees. E, F and G are taken by measurement after that. H waits for the
-owner.
+trees, and I goes with it. E, F and G are taken by measurement after
+that. H waits for the owner.
+
+Lot A landed as the close that commits nothing: create 1.27 → 0.37 s on
+Hosted, below the Fast File System's 0.45 s in the same boot; 3.15 → 2.36 s
+in all, against 1.58 s; 8,056 → 2,956 flushes and 48,444 → 23,127 block
+writes. It also found the STEADY probe of the DOS gate comparing two
+readings of different states, which a commit on every close had made
+identical by accident (`native/aros/tests/dos_compat_probe.c`).
 
 ## How a lot is done
 
