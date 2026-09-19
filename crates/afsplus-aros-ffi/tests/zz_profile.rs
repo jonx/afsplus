@@ -18,8 +18,16 @@ fn locate(fs: *mut AfsplusAros, base: u64, name: &str) -> u64 {
     assert_eq!(s, 0, "locate {name}");
     lock
 }
-/// resolve_path_lock: one locate per component, the previous lock released.
+/// resolve_path_lock: one locate per component, the previous lock released,
+/// or the whole path in one call with LOCATE_PATH=1.
 fn resolve(fs: *mut AfsplusAros, parts: &[&str]) -> u64 {
+    if std::env::var("LOCATE_PATH").is_ok() {
+        let path = parts.join("/");
+        let mut lock = 0;
+        let s = afsplus_aros_locate_path(fs, 0, path.as_ptr(), path.len() as u32, 0, &mut lock);
+        assert_eq!(s, 0, "locate_path {path}");
+        return lock;
+    }
     let mut current = 0u64;
     for part in parts {
         let next = locate(fs, current, part);
