@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-19 — The image workflow, and what a replayed session does not repeat](#2026-09-19--the-image-workflow-and-what-a-replayed-session-does-not-repeat)
 - [2026-09-19 — The tools' JSON has schema files a consumer can validate against](#2026-09-19--the-tools-json-has-schema-files-a-consumer-can-validate-against)
 - [2026-09-19 — The third-party probe kit, and what building its vectors found](#2026-09-19--the-third-party-probe-kit-and-what-building-its-vectors-found)
 - [2026-09-19 — Stage C on the roadmap, and the documents brought to the day](#2026-09-19--stage-c-on-the-roadmap-and-the-documents-brought-to-the-day)
