@@ -336,11 +336,15 @@ where
         access_clock: 0,
         resident_lru: BTreeSet::new(),
         decoded_residency: Rc::new(NodeResidency::default()),
+        decoded: BTreeMap::new(),
+        decoded_lru: BTreeSet::new(),
+        decoded_limit: (cache_pages / 16).min(DECODED_CACHE_NODES),
         stats: TreeMutationStats::default(),
     };
     if new_empty_root {
-        let node = TreeNode::leaf(spec.kind, spec.owner);
+        let node = context.track_node(TreeNode::leaf(spec.kind, spec.owner));
         context.stage_node(root_lba, &node)?;
+        context.cache_decoded(root_lba, node, new_generation);
         context.stats.nodes_allocated = 1;
     }
     let mut root = root_lba;
@@ -376,9 +380,10 @@ where
                             value: child_value(right.reference).map_err(CoreError::Format)?,
                         }],
                     });
-                    let lba = context.tx.allocate_tree_block(context.dev)?;
+                    let lba = context.allocate_block()?;
                     context.stats.nodes_allocated += 1;
                     context.stage_node(lba, &root_node)?;
+                    context.cache_decoded(lba, root_node, new_generation);
                     context.stats.root_splits += 1;
                     lba
                 };
@@ -403,6 +408,8 @@ where
     }
     context.stats.final_nodes_written = context.writes.len() as u64;
     context.stats.max_live_decoded_nodes = context.decoded_residency.peak.get();
+    context.decoded.clear();
+    context.decoded_lru.clear();
     debug_assert_eq!(context.decoded_residency.live.get(), 0);
     context.tx.record_tree_mutation(context.stats);
     let writes = context
@@ -429,7 +436,30 @@ struct MutationContext<'a, D: BlockDevice, A: TreeAllocator<D>> {
     access_clock: u64,
     resident_lru: BTreeSet<(u64, u64)>,
     decoded_residency: Rc<NodeResidency>,
+    /// Nodes this batch has already decoded, by block. A visit that finds
+    /// its block here skips the image copy, the block checksum and the
+    /// decode, and re-runs only the checks that depend on the descent.
+    decoded: BTreeMap<u64, DecodedNode>,
+    /// Access order of `decoded`, oldest first.
+    decoded_lru: BTreeSet<(u64, u64)>,
+    decoded_limit: usize,
     stats: TreeMutationStats,
+}
+
+/// Decoded nodes a batch may hold beside its staged images. A decoded node
+/// costs roughly twice its block image, so this is about 64 KiB at the
+/// prototype's 4 KiB block size, held only while one mutation runs. A
+/// profile that asked for a staged page budget keeps proportionally fewer
+/// and, below sixteen pages, none at all: a constrained machine pays the
+/// decode again rather than double what a mutation holds.
+const DECODED_CACHE_NODES: usize = 8;
+
+struct DecodedNode {
+    node: TrackedNode,
+    /// Header generation the image carried, for the identity check that
+    /// every visit repeats.
+    generation: u64,
+    last_used: u64,
 }
 
 #[derive(Default)]
@@ -540,7 +570,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             ));
         }
         self.stats.max_depth = self.stats.max_depth.max(depth + 1);
-        let (mut node, staged, _) = self.read_node(
+        let (mut node, staged, generation) = self.read_node(
             lba,
             expected_level,
             lower.as_deref(),
@@ -590,9 +620,10 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         let child = child_at(&node, child_index)?;
         let child_level = node.level - 1;
         // Keep only the compact descent frame across recursion. The parent
-        // page is re-read from the staged LRU or committed device on unwind,
-        // so tree height does not multiply decoded-page residency.
-        drop(node);
+        // goes back to the decoded cache, whose bound -- not the tree height
+        // -- decides how many pages a descent holds; where that cache is
+        // switched off the page is dropped here and re-read on unwind.
+        self.cache_decoded(lba, node, generation);
         let replacement = self.upsert_node(
             child.reference.lba,
             Some(child_level),
@@ -647,7 +678,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                 "tree mutation exceeded maximum depth".into(),
             ));
         }
-        let (mut node, staged, _) = self.read_node(
+        let (mut node, staged, generation) = self.read_node(
             lba,
             expected_level,
             lower.as_deref(),
@@ -682,7 +713,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             child.min_key = known_min.clone();
         }
         let child_level = node.level - 1;
-        drop(node);
+        self.cache_decoded(lba, node, generation);
         let edited = self.delete_node(
             child.reference.lba,
             Some(child_level),
@@ -695,7 +726,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         )?;
         let (replace_start, replace_end, replacement) =
             if needs_rebalance(&edited.node, self.geo.block_size)? {
-                let (parent, _, _) = self.read_node(
+                let (parent, _, parent_generation) = self.read_node(
                     lba,
                     expected_level,
                     lower.as_deref(),
@@ -714,7 +745,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                     child_range(&parent, sibling_index, &lower, &upper);
                 let sibling_desc = parent_children[sibling_index].clone();
                 drop(parent_children);
-                drop(parent);
+                self.cache_decoded(lba, parent, parent_generation);
                 let (sibling_node, sibling_staged, _) = self.read_node(
                     sibling_desc.reference.lba,
                     Some(child_level),
@@ -792,6 +823,19 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         }
         check_tree_lba(&self.geo, lba)?;
         let is_staged = self.writes.contains_key(&lba);
+        if let Some((node, generation)) = self.take_decoded(lba) {
+            // This batch decoded the block and has staged no newer image for
+            // it since, so its checksum and its child set were checked when
+            // it was decoded and nothing outside this batch can have touched
+            // it. What depends on this descent -- the node's identity, its
+            // generation and its key range against the parent's bounds -- is
+            // checked again here.
+            self.stats.node_reads += 1;
+            self.stats.max_depth = self.stats.max_depth.max(depth + 1);
+            self.validate_read(&node, generation, is_staged, expected_level, lba)?;
+            validate_node_range(&node, lower, upper, is_root)?;
+            return Ok((node, is_staged, generation));
+        }
         let block = if is_staged {
             let access = self.next_access();
             let resident = {
@@ -841,6 +885,24 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         self.stats.max_depth = self.stats.max_depth.max(depth + 1);
         let (node, generation) = TreeNode::decode(&block)
             .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
+        self.validate_read(&node, generation, is_staged, expected_level, lba)?;
+        validate_node_range(&node, lower, upper, is_root)?;
+        if !node.is_leaf() {
+            check_children_unique(&node)?;
+        }
+        Ok((self.track_node(node), is_staged, generation))
+    }
+
+    /// Identity and generation of a node this mutation is about to use,
+    /// whether it was just decoded or came back from the decoded cache.
+    fn validate_read(
+        &self,
+        node: &TreeNode,
+        generation: u64,
+        is_staged: bool,
+        expected_level: Option<u8>,
+        lba: u64,
+    ) -> Result<(), CoreError> {
         let validation_spec = TreeSpec {
             max_generation: if is_staged {
                 self.new_generation
@@ -849,17 +911,13 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             },
             ..self.spec
         };
-        validate_node_identity(&node, generation, validation_spec, expected_level, lba)?;
+        validate_node_identity(node, generation, validation_spec, expected_level, lba)?;
         if is_staged && generation != self.new_generation {
             return Err(CoreError::Corrupt(
                 "staged tree node generation mismatch".into(),
             ));
         }
-        validate_node_range(&node, lower, upper, is_root)?;
-        if !node.is_leaf() {
-            check_children_unique(&node)?;
-        }
-        Ok((self.track_node(node), is_staged, generation))
+        Ok(())
     }
 
     fn persist(
@@ -882,11 +940,11 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         if old_staged {
             lbas.push(old_lba);
         } else {
-            self.tx.retire_tree_block(self.dev, old_lba)?;
+            self.retire_block(old_lba)?;
             self.stats.committed_nodes_retired += 1;
         }
         while lbas.len() < nodes.len() {
-            lbas.push(self.tx.allocate_tree_block(self.dev)?);
+            lbas.push(self.allocate_block()?);
             self.stats.nodes_allocated += 1;
         }
         let mut children = Vec::with_capacity(nodes.len());
@@ -896,6 +954,8 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                 subtree_items: node.subtree_items,
             };
             self.stage_node(lba, &node)?;
+            let generation = self.new_generation;
+            self.cache_decoded(lba, node, generation);
             children.push(ChildDesc { min_key, reference });
         }
         Ok(Replacement { children, level })
@@ -925,18 +985,18 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                 }
                 reusable.push(lba);
             } else {
-                self.tx.retire_tree_block(self.dev, lba)?;
+                self.retire_block(lba)?;
                 self.stats.committed_nodes_retired += 1;
             }
         }
         while reusable.len() < outputs.len() {
-            reusable.push(self.tx.allocate_tree_block(self.dev)?);
+            reusable.push(self.allocate_block()?);
             self.stats.nodes_allocated += 1;
         }
         while reusable.len() > outputs.len() {
             let lba = reusable.pop().expect("length checked above");
             self.remove_staged(lba);
-            self.tx.release_tree_block(self.dev, lba)?;
+            self.release_block(lba)?;
             self.stats.staged_nodes_discarded += 1;
         }
         let mut replacement = Vec::with_capacity(outputs.len());
@@ -946,6 +1006,8 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                 subtree_items: node.subtree_items,
             };
             self.stage_node(lba, &node)?;
+            let generation = self.new_generation;
+            self.cache_decoded(lba, node, generation);
             replacement.push(ChildDesc { min_key, reference });
         }
         Ok(replacement)
@@ -958,19 +1020,18 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                     "staged tree source has no write image".into(),
                 ));
             }
-            self.tx.release_tree_block(self.dev, pending.old_lba)?;
+            self.release_block(pending.old_lba)?;
             self.stats.staged_nodes_discarded += 1;
         } else {
-            self.tx.retire_tree_block(self.dev, pending.old_lba)?;
+            self.retire_block(pending.old_lba)?;
             self.stats.committed_nodes_retired += 1;
         }
         Ok(())
     }
 
     fn stage_node(&mut self, lba: u64, node: &TreeNode) -> Result<(), CoreError> {
-        if !node.is_leaf() {
-            check_children_unique(node)?;
-        }
+        // Whatever the batch had decoded for this block is now an old image.
+        self.decoded_forget(lba);
         let encoded = node
             .encode(self.geo.block_size, self.new_generation)
             .map_err(CoreError::Format)?;
@@ -1028,6 +1089,9 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                 return Err(error.into());
             }
             self.observe(crate::flight::EventKind::TreeSpillComplete, lba);
+            // The image left memory; let its decoded node go with it rather
+            // than keep a page the budget has just refused.
+            self.decoded_forget(lba);
             self.resident_staged_nodes -= 1;
             self.stats.staged_spill_writes += 1;
         }
@@ -1039,6 +1103,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
     }
 
     fn remove_staged(&mut self, lba: u64) -> Option<StagedImage> {
+        self.decoded_forget(lba);
         let image = self.writes.remove(&lba)?;
         if image.resident.is_some() {
             self.resident_lru.remove(&(image.last_used, lba));
@@ -1054,6 +1119,65 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
 
     fn track_node(&self, node: TreeNode) -> TrackedNode {
         self.decoded_residency.track(node)
+    }
+
+    /// Takes a block's decoded node out of the cache. The caller owns it and
+    /// either consumes it or gives it back with [`Self::cache_decoded`].
+    fn take_decoded(&mut self, lba: u64) -> Option<(TrackedNode, u64)> {
+        let entry = self.decoded.remove(&lba)?;
+        self.decoded_lru.remove(&(entry.last_used, lba));
+        Some((entry.node, entry.generation))
+    }
+
+    /// Gives a decoded node to the batch, dropping the least recently used
+    /// one when the cache is full. A zero bound drops the node here.
+    fn cache_decoded(&mut self, lba: u64, node: TrackedNode, generation: u64) {
+        if self.decoded_limit == 0 {
+            return;
+        }
+        self.decoded_forget(lba);
+        let last_used = self.next_access();
+        self.decoded.insert(
+            lba,
+            DecodedNode {
+                node,
+                generation,
+                last_used,
+            },
+        );
+        self.decoded_lru.insert((last_used, lba));
+        while self.decoded.len() > self.decoded_limit {
+            let Some((_, victim)) = self.decoded_lru.pop_first() else {
+                break;
+            };
+            self.decoded.remove(&victim);
+        }
+    }
+
+    /// Forgets a block's decoded node, because the block is leaving the tree
+    /// or its image is about to be replaced.
+    fn decoded_forget(&mut self, lba: u64) {
+        if let Some(previous) = self.decoded.remove(&lba) {
+            self.decoded_lru.remove(&(previous.last_used, lba));
+        }
+    }
+
+    /// Allocates a tree block and forgets anything the batch still had
+    /// decoded for it: a block this transaction released can come back.
+    fn allocate_block(&mut self) -> Result<u64, CoreError> {
+        let lba = self.tx.allocate_tree_block(self.dev)?;
+        self.decoded_forget(lba);
+        Ok(lba)
+    }
+
+    fn retire_block(&mut self, lba: u64) -> Result<(), CoreError> {
+        self.decoded_forget(lba);
+        self.tx.retire_tree_block(self.dev, lba)
+    }
+
+    fn release_block(&mut self, lba: u64) -> Result<(), CoreError> {
+        self.decoded_forget(lba);
+        self.tx.release_tree_block(self.dev, lba)
     }
 }
 
