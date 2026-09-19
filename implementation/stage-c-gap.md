@@ -162,9 +162,11 @@ Lacking:
 1. the transport ([docs/13](../docs/13-filesystem-api-v2.md#the-aros-transport))
    is present at L3: `ACTION_AFSPLUS_EXT`, its fifteen packet-layer
    operations and a client library with fallback, proven by the packet and
-   client host matrices and cross-compiled. Open: its target run, which
-   [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) drives
-   through `AFSPlusInfo`, and the AROS-wide allocation of the packet number;
+   client host matrices and on Hosted, where
+   [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh) drives it
+   through `AFSPlusInfo` (info, packet counts, trace) and S2 through
+   `AFSPlusTour` (clone, watch, attribute, health). Open: the AROS-wide
+   allocation of the packet number;
 2. a consumer: the AROS Rust `std` port binding to the group.
 
 Hosted and QEMU: all. Apple hardware: none.
@@ -327,8 +329,10 @@ Present (L1, L2): `afsplus_aros_info_json` serves one versioned JSON
 document (`afsplus-handler-info`, version 1) from the mounted instance:
 identity, feature masks, mount state, capability names, health, handle usage.
 
-Present (L3, cross-compiled): `AFSPlusInfo`, which prints the report of the
-handler behind a path through the transport of C4; not yet run on a target.
+Present (L3, L4): `AFSPlusInfo`, which prints the report of the handler
+behind a path through the transport of C4; it runs in the DOS gate and in
+S2, where the Startup-Sequence's first command reads the boot volume's
+report.
 
 Lacking:
 machine-readable error documents for failed management calls; dry-run

@@ -428,8 +428,8 @@ RSS is reported in 1024-byte units. These provider contracts were reviewed on
 2026-09-14. The implementation uses safe Rust process APIs; it introduces no new
 unsafe ABI boundary. Other target OSes refuse this option before workload I/O.
 Empty, ambiguous, zero, overflowing and failed provider results refuse a successful
-report. Only macOS execution is currently qualified; Linux units are documented,
-but Linux runtime qualification remains open.
+report. macOS execution is qualified; Linux units are documented and Linux
+runtime qualification is open.
 
 RSS probes occur outside each phase's wall-time and requested-heap interval.
 Their durations are separately reported as `resident_start_probe_wall_ns` and

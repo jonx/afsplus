@@ -240,21 +240,21 @@ review.
 
 Milestones: [\[M06\]](implementation/milestones.md), [\[M07\]](implementation/milestones.md), [\[M12\]](implementation/milestones.md).
 
-- AROS handler
-- DOS compatibility
-- Filesystem API v2
-- modern 64-bit API
-- clone/reflink capability API
-- access-intent/preallocation mapping
-- mmap-friendly large-file path
-- notifications
-- health reporting
-- trace streaming / developer attachment
-- structured management APIs
-- Rust/C integration boundary
-- generic file-backed virtual block device for mounting images
-- native AROS benchmark runner
-- classic/single-user security preservation adapter
+- AROS handler <!-- progress: roadmap-38 -->
+- DOS compatibility <!-- progress: roadmap-39 -->
+- Filesystem API v2 <!-- progress: roadmap-40 -->
+- modern 64-bit API <!-- progress: roadmap-41 -->
+- ~~clone/reflink capability API~~ <!-- progress: roadmap-42 -->
+- access-intent/preallocation mapping <!-- progress: roadmap-43 -->
+- mmap-friendly large-file path <!-- progress: roadmap-44 -->
+- ~~notifications~~ <!-- progress: roadmap-45 -->
+- ~~health reporting~~ <!-- progress: roadmap-46 -->
+- ~~trace streaming / developer attachment~~ <!-- progress: roadmap-47 -->
+- structured management APIs <!-- progress: roadmap-48 -->
+- Rust/C integration boundary <!-- progress: roadmap-49 -->
+- generic file-backed virtual block device for mounting images <!-- progress: roadmap-50 -->
+- ~~native AROS benchmark runner~~ <!-- progress: roadmap-51 -->
+- ~~classic/single-user security preservation adapter~~ <!-- progress: roadmap-52 -->
 
 Portable C work begins from the stable executable spec/conformance corpus:
 

@@ -177,20 +177,20 @@ Its first runs found three faults that no short check could.
 - Maintenance was starved. It cannot run beside an open data window, and a
   driver that makes every write durable keeps one open whenever anybody
   writes, so orphan cleanup was refused for as long as writing went on.
-  Maintenance now publishes the window first when it has work, and the
+  Maintenance publishes the window first when it has work, and the
   maintenance thread queues for the lock instead of waiting for a free
   moment.
 - Deleted space ran out before it came back. Free space swung between four
   hundred and forty megabytes, and a write in the trough failed for want of
   space that was only waiting to be reclaimed, which also lost the data
-  window. An operation that needs space now reclaims toward a low-water mark
+  window. An operation that needs space reclaims toward a low-water mark
   first, a few transactions at a time, with room kept for publishing the
   window; a write that still finds no space reclaims everything and tries
   once more.
   [crates/afsplus-vfs/tests/space_under_load.rs](../crates/afsplus-vfs/tests/space_under_load.rs)
   holds this below the mount.
 - One request carried up to sixteen megabytes, committed before it was
-  answered, and every other program waited behind it. Requests now carry at
+  answered, and every other program waited behind it. Requests carry at
   most a megabyte.
 
 Listings were the last to wait: FSKit looked up every name a listing returned,
@@ -269,7 +269,7 @@ used space from `statfs`, which is the figure the driver answers for.
 flag in the reply to its first request and passes it on to programs through
 `pathconf(_PC_CASE_SENSITIVE)`. fuser set that flag for every macOS
 filesystem, so a case-sensitive volume, which keeps `Name.txt` and
-`NAME.TXT` apart, reported the opposite. The driver now sets it only for a
+`NAME.TXT` apart, reported the opposite. The driver sets it only for a
 case-insensitive volume;
 [tools/check-mount-name-policy.py](../tools/check-mount-name-policy.py)
 mounts one volume of each policy and requires the answer and the behaviour to

@@ -90,7 +90,7 @@ whole-volume comparison.
 
 ### 3.1 Multi-page region binding experiment
 
-The executable prototype now implements the descriptor indirection below.
+The executable prototype implements the descriptor indirection below.
 The proposed 1 GiB region needs nine 4 KiB bitmap pages: the raw bits occupy
 32 KiB, but every independently verifiable page also needs its common header
 and page identity. A naïve checkpoint record for every bitmap page would make
@@ -144,8 +144,8 @@ the metadata barrier and previous-checkpoint preservation under
 descriptor/page damage to be reported by the checker or first allocator access
 without turning normal mount into a bitmap scan.
 
-The formatter no longer loops over every logical block merely to seal reserved
-bits; it touches reserved ranges and bitmap pages directly. An explicit host
+The formatter touches reserved ranges and bitmap pages directly rather than
+looping over every logical block to seal reserved bits. An explicit host
 qualification now formats and bounded-mounts a sparse 1 TiB image (1,024 full
 regions), performs two small commits, and runs the exhaustive checker in about
 3.57 seconds total on the development Apple-Silicon/APFS host. The latest
@@ -160,8 +160,8 @@ write amplification, on-demand loading, crash safety, and repairability. If
 the descriptor indirection performs poorly or becomes too complex, the
 delta-log/spacemap candidates remain open.
 
-The earlier inline checkpoint array has now been replaced by ADR-035's bounded
-allocation-root tree. Its nodes live in a permanent triple-version pool, so
+The allocation state is ADR-035's bounded allocation-root tree, not an inline
+checkpoint array. Its nodes live in a permanent triple-version pool, so
 updating the allocator does not recursively allocate from the free space being
 described. Transactions load current/older region records on demand and the
 allocation-root mutation emits upserts only for dirty regions, therefore
@@ -172,8 +172,8 @@ materializing all typed records.
 
 Checker bitmap equality is exhaustive but sparse-aware: it verifies every
 expected reserved/reachable/retired block, then walks set bits byte-wise to find
-unowned allocations. It no longer performs one map lookup for every logical
-LBA, which is what makes the 1 TiB checker qualification practical.
+unowned allocations, without a map lookup for every logical LBA, which is what
+makes the 1 TiB checker qualification practical.
 
 The first leaf-capacity boundary is crash-qualified separately: 145 regions
 force a two-level allocation root, and the every-write/every-flush matrix

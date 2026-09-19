@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-19 — Stage C on the roadmap, and the documents brought to the day](#2026-09-19--stage-c-on-the-roadmap-and-the-documents-brought-to-the-day)
 - [2026-09-18 — A mode, an owner and a time that a mounted volume keeps](#2026-09-18--a-mode-an-owner-and-a-time-that-a-mounted-volume-keeps)
 - [2026-09-17 — The root of a mounted volume stopped listing after the first write](#2026-09-17--the-root-of-a-mounted-volume-stopped-listing-after-the-first-write)
 - [2026-09-17 — Answer what else renders wrong, having first been wrong about it](#2026-09-17--answer-what-else-renders-wrong-having-first-been-wrong-about-it)
@@ -219,6 +220,26 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-19 — Stage C on the roadmap, and the documents brought to the day
+
+The roadmap listed the fifteen Stage C items with no state, while the gap
+list and the milestone cells carried it in prose. The list-item table of
+[milestones](implementation/milestones.md#individual-list-item-completion)
+gains one row per item (roadmap-38 to roadmap-52) with the evidence each has
+today, and the roadmap shows them struck, bracketed or plain like every
+other item: clone/reflink, notifications, health, trace streaming, the
+benchmark runner and the classic security adapter are complete on the
+Hosted target; the handler, DOS compatibility, API v2, the 64-bit API,
+intent/preallocation, the mmap path, management, the boundary and the block
+device are partial, each row naming what is open. M06 and M07 read S2, S3,
+the DOS gate, the driver probe and the benchmark at revision 17; the README
+row for M06 says the same; C4 and C11 of the gap list stop calling the
+transport and `AFSPlusInfo` unrun on a target, since the DOS gate and S2 run
+them. Six documents lose their "now" and "currently" sentences for the
+finished state. Nothing here changes code; every claim was read against the
+tree at ee22d4e and the evidence directories of the S2/S3/bench runs.
+
 
 ## 2026-09-18 — A mode, an owner and a time that a mounted volume keeps
 

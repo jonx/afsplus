@@ -153,7 +153,7 @@ requester is diagnosed; lldb attaches, the binary carrying `get-task-allow`.
 
 ## AArch64 platform profiles
 
-The default profile remains the qualified Hosted MacAROS build. Its target JSON
+The default profile is the qualified Hosted MacAROS build. Its target JSON
 reserves `x18`, and every C object uses `-ffixed-x18`, because Darwin may alter
 that platform register across host signal delivery. Those are Hosted runtime
 requirements, not properties of the AFS+ format or handler ABI.
@@ -195,7 +195,7 @@ AFSPLUS_AROS_PROFILE_ID=macaros-native-apple-aarch64-prehardware \
 tools/package-aros-alpha0.sh
 ```
 
-It reuses the currently qualified MacAROS AROS-AArch64 Rust target and seven
+It reuses the qualified MacAROS AROS-AArch64 Rust target and seven
 glues, but links against the `apple-aarch64` SDK. Their hashes, the SDK target
 configuration, host tools and ABI auditor are recorded in profile format v2.
 The resulting machine-code report is a build gate, not a native runtime claim.
@@ -433,7 +433,7 @@ A handler that cannot open one of its libraries fails its mount. The
 generated entry opens them before any AFS+ code runs; autoinit reports a
 failure through a requester when the process has no console, and the entry
 then returned without answering the startup packet, so the first access
-waited for ever. The module now carries its own `___showerror()`, which
+waited for ever. The module carries its own `___showerror()`, which
 writes the reason to the debug log, and
 [`afsplus-handler-autolibs.patch`](../native/aros/afsplus-handler-autolibs.patch)
 makes the entry answer the startup packet with
@@ -629,7 +629,7 @@ Legacy 32-bit counters saturate at `INT32_MAX` rather than wrapping.
 
 ## Native handler shell
 
-[`native/aros/afsplus_handler.c`](../native/aros/afsplus_handler.c) now performs the target-specific assembly: it
+[`native/aros/afsplus_handler.c`](../native/aros/afsplus_handler.c) performs the target-specific assembly: it
 validates startup geometry, opens the device, probes NSD/TD64 and write
 protection, handles optional DMA masks through a bounded bounce buffer,
 registers the volume, provides UTC/public-memory callbacks, processes messages
@@ -662,13 +662,13 @@ macFUSE same-image round trip, Hosted crash replay, native MacAROS Alpha-0 and
 native crash replay into one checksummed requirement matrix. ADR-060 defines
 the completion boundary and its explicit lack of a hardware claim.
 
-[`tools/check-hosted-aros-alpha0.sh`](../tools/check-hosted-aros-alpha0.sh) now installs the off-tree package into a
+[`tools/check-hosted-aros-alpha0.sh`](../tools/check-hosted-aros-alpha0.sh) installs the off-tree package into a
 dedicated Hosted test tree, executes create/read/write/truncate/rename/fsync on
 AROS and macFUSE, returns to AROS for cross-created-file readback, and requires
 a clean strict checker at every boundary. ADR-046 records the runtime startup
 fixes and S0 evidence.
 
-The deterministic Hosted replay gate now mounts six modeled power-cut images
+The deterministic Hosted replay gate mounts six modeled power-cut images
 through the native handler and validates their exact old/new state plus a clean
 post-replay checker; ADR-047 records its model and limits. The cumulative S1
 system pivot is also qualified: S1a moves the six core assigns, while S1b runs
