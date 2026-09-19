@@ -57,6 +57,20 @@ loses is a whole suffix of operations, never a torn one.
    the next commit has room. An operation that needs space reclaims it
    first, counting what the open window has already allocated.
 
+**Amendment, 2026-09-19.** The AROS handler was committing on every close of
+a written file, which decision 2 never asked for: `ACTION_END` called
+`afsplus_aros_fsync`, left there from before this decision, when every
+operation was durable when it returned. Under `DELAYED` that is a whole
+checkpoint for each created file, because a write to a file the open window
+created makes the window unloggable: 2.00 flushes and 12 block writes per
+created file against 0.01 and 2.1 without it. A close is not in the list of
+decision 2 and is not added to it. AmigaDOS `Close()` promises nothing about
+the medium, the Fast File System does not flush there, and a program that
+needs its bytes on the disk asks for them, with `ACTION_FLUSH` or an fsync of
+the handle before it closes. `ACTION_END` now closes the handle and nothing
+more; the dismount path still synchronises the files it finds open, because a
+dismount is a durability point.
+
 ## Consequences
 
 - An unprotected crash or power cut on AROS loses up to the maximum age of

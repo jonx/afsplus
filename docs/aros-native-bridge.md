@@ -390,8 +390,11 @@ from a program calling the C boundary directly before this.
 ([ADR-121](../adr/ADR-121-delayed-group-commit.md)). By default changes
 gather and are committed together after one idle second, or once the oldest
 is five seconds old: the handler's timer calls `afsplus_aros_commit_due` with
-its clock, and `ACTION_FLUSH`, inhibit, dismount and fsync commit at once. A
-crash loses at most the waiting changes, whole and in order. `COMMIT=SYNC`
+its clock, and `ACTION_FLUSH`, inhibit, dismount and fsync commit at once.
+Closing a file is not one of them. `ACTION_END` closes the handle and asks
+for no commit, as the Fast File System does not flush on a close either, so
+a program that needs its bytes on the disk calls `Flush()` or fsyncs the
+handle. A crash loses at most the waiting changes, whole and in order. `COMMIT=SYNC`
 makes every change durable before its packet is answered. A volume without
 the intent log's data updates, or a handler without its timer, stays `SYNC`
 unless the string asked for a delay, which then fails the mount.
