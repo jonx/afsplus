@@ -5850,6 +5850,9 @@ impl<D: BlockDevice> Volume<D> {
                 Ok(Some(object_id))
             }
             BatchOp::CreateDirectory { parent_id, name } => {
+                // The same refusals as the immediate `create_directory`, so a
+                // delayed mount answers a caller exactly as a SYNC one does.
+                self.ensure_public_object_id(*parent_id)?;
                 validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
                 let parent = self
                     .batch_record(pending, *parent_id)?
