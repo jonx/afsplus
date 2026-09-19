@@ -689,3 +689,68 @@ fn steady_heap() {
         warm.0, done.0, done.0 as i64 - warm.0 as i64, warm.1, done.1, done.1 as i64 - warm.1 as i64, warm.2, done.2);
     assert_eq!(afsplus_aros_unmount(fs), 0);
 }
+
+#[test]
+#[ignore = "profiling harness"]
+fn piecewise_write() {
+    // Item 7 of the performance programme: a program that writes a file in
+    // pieces, as compilers and editors do, against one that writes it with a
+    // single Write. Both go through the C boundary on a delayed mount.
+    use afsplus_block::MemoryBackend;
+    let files: usize = std::env::var("FILES").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
+    let size: usize = std::env::var("SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(192 * 1024);
+    let piece: usize = std::env::var("PIECE").ok().and_then(|v| v.parse().ok()).unwrap_or(8 * 1024);
+    let mut device = common::format(MemoryBackend::new(4096, 131072), true);
+    let fs = common::mount_sized(&mut device, 131072);
+    let mut g = 0;
+    assert_eq!(afsplus_aros_set_cache_blocks(fs, 64, &mut g), 0);
+    if std::env::var("SYNC").is_err() { assert_eq!(afsplus_aros_set_commit_policy(fs, 5_000, 1_000), 0); }
+    let mut dir = 0;
+    assert_eq!(afsplus_aros_create_directory(fs, 0, b"pieces".as_ptr(), 6, now().0, 0, &mut dir), 0);
+    assert_eq!(afsplus_aros_flush(fs), 0);
+    let content: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let one_call = std::env::var("ONE_CALL").is_ok();
+    let c0 = counters(fs);
+    let start = Instant::now();
+    for f in 0..files {
+        let name = format!("piece{f:03}.o");
+        let t = now();
+        let mut file = 0;
+        assert_eq!(afsplus_aros_open(fs, dir, name.as_ptr(), name.len() as u32, AFSPLUS_AROS_OPEN_NEW_FILE, t.0, t.1, &mut file), 0);
+        let mut at = 0usize;
+        while at < size {
+            let take = piece.min(size - at);
+            let take = if one_call { size } else { take };
+            let mut c = 0;
+            assert_eq!(afsplus_aros_write(fs, file, content[at..at + take].as_ptr(), take as u32, t.0, t.1, &mut c), 0);
+            assert_eq!(c as usize, take);
+            at += take;
+        }
+        assert_eq!(afsplus_aros_close(fs, file), 0);
+        let mut pending = 0;
+        assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);
+    }
+    let took = start.elapsed();
+    assert_eq!(afsplus_aros_flush(fs), 0);
+    let c1 = counters(fs);
+    // The bytes come back as they were written.
+    for f in 0..files {
+        let name = format!("piece{f:03}.o");
+        let t = now();
+        let mut file = 0;
+        assert_eq!(afsplus_aros_open(fs, dir, name.as_ptr(), name.len() as u32, AFSPLUS_AROS_OPEN_OLD_FILE, t.0, t.1, &mut file), 0);
+        let mut back = vec![0u8; size];
+        let mut got = 0;
+        assert_eq!(afsplus_aros_read(fs, file, back.as_mut_ptr(), size as u32, &mut got), 0);
+        assert_eq!(got as usize, size, "{name} short read");
+        assert!(back == content, "{name} came back changed");
+        assert_eq!(afsplus_aros_close(fs, file), 0);
+    }
+    assert_eq!(afsplus_aros_free_lock(fs, dir), 0);
+    eprintln!("PIECEWISE {files} files of {size} B in {} B pieces{}: {:?} each, {:.1} writes and {:.2} flushes per file, {:.1} cache reads",
+        piece, if one_call { " (ONE_CALL)" } else { "" }, took / files as u32,
+        (c1.device_writes - c0.device_writes) as f64 / files as f64,
+        (c1.device_flushes - c0.device_flushes) as f64 / files as f64,
+        (c1.cache_hits + c1.cache_misses - c0.cache_hits - c0.cache_misses) as f64 / files as f64);
+    assert_eq!(afsplus_aros_unmount(fs), 0);
+}
