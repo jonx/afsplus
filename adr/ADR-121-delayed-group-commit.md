@@ -88,6 +88,26 @@ the handle before it closes. `ACTION_END` now closes the handle and nothing
 more; the dismount path still synchronises the files it finds open, because a
 dismount is a durability point.
 
+**Amendment, 2026-09-19 (cleanup is batched per transaction).** The bounded
+batch of decision 9 was a batch of transactions rather than a transaction.
+Each waiting object cost two commits, one to release its data and one to
+remove its name, so an idle tick of 32 objects was 67 commits and 134 device
+flushes, and on the hosted benchmark the delete phase paid 2,170 flushes for
+2,650 deletes: the delete itself is a window operation, the flushes were the
+cleanup behind it. Cleanup is now batched per transaction. One transaction
+takes up to 32 orphans from the orphan directory, releases their data,
+removes the entries of the ones it finished and commits once; the same tick
+is 4 commits and 8 flushes, and the delete-then-create loop of the profiling
+harness falls from 2.20 to 0.04 device flushes and 12.93 to 1.79 block writes
+per operation. What bounds a batch is its count, 32 objects, and its extent
+budget, which is the volume's per-orphan budget times that count: exactly
+what that many single steps spent, so a batch does their work and only the
+commits are fewer. An orphan whose data outlives the budget stays in the
+orphan directory, shrunk, and the batch stops there. An orphan a caller still
+holds open is passed over rather than waited for, and no longer stops the
+cleanup of the orphans behind it. A cut in the middle of a batch leaves every
+orphan in it whole or gone, because the batch is one checkpoint.
+
 ## Consequences
 
 - An unprotected crash or power cut on AROS loses up to the maximum age of
