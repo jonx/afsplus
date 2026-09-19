@@ -38,6 +38,12 @@
  *                       60 (ADR-121); a crash loses at most those changes,
  *                       whole. COMMIT=5 is the default.
  *   COMMIT=SYNC         every change is durable when its packet is answered.
+ *   CACHE=AUTO          the read cache is the DOSDriver's Buffers, or on a
+ *                       machine with 512 MiB or more, 1/256 of its memory up
+ *                       to 64 MiB if that is more: a boot partition takes
+ *                       partition.library's few buffers, and nothing can add
+ *                       to them before it boots. The default.
+ *   CACHE=BUFFERS       exactly the DOSDriver's Buffers.
  */
 #include <stdint.h>
 
@@ -51,6 +57,7 @@ struct AfsplusArosControl {
     uint32_t trace_events;  /* ring size, 0 for no trace ring */
     uint32_t commit_seconds; /* longest a change waits, 0 for SYNC */
     uint32_t commit_named;   /* 1 when the string said COMMIT= */
+    uint32_t cache_auto;     /* 1 for CACHE=AUTO, 0 for CACHE=BUFFERS */
 };
 
 #define AFSPLUS_CONTROL_OK 0

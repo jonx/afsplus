@@ -97,6 +97,7 @@ struct AfsplusArosHandler {
      * whether the Control string named it, whether the library delays, and
      * whether changes wait now, which keeps the timer running. */
     uint32_t commit_seconds;
+    uint32_t cache_auto;
     uint32_t commit_named;
     uint32_t commit_delayed;
     uint32_t commit_pending;
@@ -686,6 +687,29 @@ static int32_t require_media(struct AfsplusArosHandler *handler)
     return request->iotd_Req.io_Actual == 0 ? 0 : ERROR_NO_DISK;
 }
 
+/*
+ * CACHE=AUTO: a machine with memory to spare reads its metadata from memory.
+ * From 512 MiB, the cache is 1/256 of the machine's memory, 4 MiB on a
+ * 1 GiB system and 64 MiB, the cap, from 16 GiB, unless the DOSDriver's
+ * Buffers ask for more; below it, Buffers as given, as on the machines the
+ * classic file systems were made for.
+ */
+#define AFSPLUS_CACHE_AUTO_MEMORY_MIN (UINT64_C(512) << 20)
+#define AFSPLUS_CACHE_AUTO_BLOCKS_MAX UINT64_C(16384)
+
+static uint32_t auto_cache_blocks(struct ExecBase *SysBase, uint32_t buffers)
+{
+    uint64_t total = (uint64_t)AvailMem(MEMF_TOTAL);
+    uint64_t wanted;
+
+    if (total < AFSPLUS_CACHE_AUTO_MEMORY_MIN)
+        return buffers;
+    wanted = total / 256 / AFSPLUS_AROS_ALPHA0_BLOCK_SIZE;
+    if (wanted > AFSPLUS_CACHE_AUTO_BLOCKS_MAX)
+        wanted = AFSPLUS_CACHE_AUTO_BLOCKS_MAX;
+    return wanted > buffers ? (uint32_t)wanted : buffers;
+}
+
 static int32_t setup_dma_bounce(struct AfsplusArosHandler *handler)
 {
     struct ExecBase *SysBase = handler->SysBase;
@@ -854,6 +878,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
         handler->trace_capacity = control.trace_events;
         handler->commit_seconds = control.commit_seconds;
         handler->commit_named = control.commit_named;
+        handler->cache_auto = control.cache_auto;
     }
 
     memset(&mount_config, 0, sizeof(mount_config));
@@ -911,6 +936,9 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
                 >= DE_NUMBUFFERS
                 && (SIPTR)handler->environment->de_NumBuffers > 0
             ? (uint32_t)handler->environment->de_NumBuffers : 0;
+
+        if (handler->cache_auto)
+            buffers = auto_cache_blocks(SysBase, buffers);
 
         error = afsplus_aros_set_cache_blocks(handler->filesystem, buffers,
             &granted);

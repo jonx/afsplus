@@ -63,6 +63,7 @@ uint32_t afsplus_control_parse(const char *text, uint32_t length,
     uint32_t seen_encoding = 0;
     uint32_t seen_trace = 0;
     uint32_t seen_commit = 0;
+    uint32_t seen_cache = 0;
     uint32_t at = 0;
 
     parsed.mount_flags = 0;
@@ -70,6 +71,7 @@ uint32_t afsplus_control_parse(const char *text, uint32_t length,
     parsed.trace_events = 0;
     parsed.commit_seconds = AFSPLUS_CONTROL_COMMIT_DEFAULT;
     parsed.commit_named = 0;
+    parsed.cache_auto = 1;
     *output = parsed;
     if (text == NULL)
         return AFSPLUS_CONTROL_OK;
@@ -147,6 +149,17 @@ uint32_t afsplus_control_parse(const char *text, uint32_t length,
                 parsed.commit_seconds = 0;
             else if (!parse_count(value, at - value_start,
                 AFSPLUS_CONTROL_COMMIT_MAX, &parsed.commit_seconds))
+                return AFSPLUS_CONTROL_UNKNOWN_VALUE;
+        }
+        else if (same_word(keyword, keyword_length, "CACHE"))
+        {
+            if (seen_cache++)
+                return AFSPLUS_CONTROL_REPEATED_KEYWORD;
+            if (same_word(value, at - value_start, "AUTO"))
+                parsed.cache_auto = 1;
+            else if (same_word(value, at - value_start, "BUFFERS"))
+                parsed.cache_auto = 0;
+            else
                 return AFSPLUS_CONTROL_UNKNOWN_VALUE;
         }
         else

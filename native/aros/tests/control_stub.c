@@ -40,6 +40,7 @@ static void refuses(const char *text, uint32_t reason)
     check(control.trace_events == 0);
     check(control.commit_seconds == AFSPLUS_CONTROL_COMMIT_DEFAULT
         && control.commit_named == 0);
+    check(control.cache_auto == 1);
 }
 
 int main(void)
@@ -119,6 +120,17 @@ int main(void)
     refuses("COMMIT=0", AFSPLUS_CONTROL_UNKNOWN_VALUE);
     refuses("COMMIT=NEVER", AFSPLUS_CONTROL_UNKNOWN_VALUE);
     refuses("COMMIT=5 COMMIT=SYNC", AFSPLUS_CONTROL_REPEATED_KEYWORD);
+
+    /* The read cache: sized by memory unless the string pins Buffers. */
+    check(parse(NULL, &control) == AFSPLUS_CONTROL_OK);
+    check(control.cache_auto == 1);
+    check(parse("CACHE=BUFFERS", &control) == AFSPLUS_CONTROL_OK);
+    check(control.cache_auto == 0);
+    check(parse("cache=auto,COMMIT=SYNC", &control) == AFSPLUS_CONTROL_OK);
+    check(control.cache_auto == 1 && control.commit_seconds == 0);
+    refuses("CACHE=BUFFERS COMMIT=61", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("CACHE=64", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("CACHE=AUTO CACHE=BUFFERS", AFSPLUS_CONTROL_REPEATED_KEYWORD);
 
     /* What a mountlist may not say without being told. */
     refuses("SECURITY=NONE", AFSPLUS_CONTROL_UNKNOWN_VALUE);

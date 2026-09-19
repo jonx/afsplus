@@ -405,6 +405,17 @@ device keeps. On the Hosted benchmark 64 blocks served 99 % of the reads and
 took the run from 55.8 s to 35.5 s; 1,024 or 16,384 blocks gained nothing
 more there, so the remaining time is the work of each operation, not reading.
 
+`CACHE=AUTO`, the default of the Control string, sizes the cache by the
+machine as well: from 512 MiB of memory it takes 1/256 of it, up to 64 MiB,
+when that is more than `Buffers`. A boot partition found by the boot scan
+gets partition.library's few buffers and cannot be given more before it
+boots; a Mac with memory to spare reads its metadata from memory whatever
+the partition says. Below 512 MiB, `Buffers` stands, as on the machines the
+classic file systems were made for. `CACHE=BUFFERS` takes `Buffers` exactly.
+Hosted MacAROS runs in 256 MiB and keeps `Buffers`; with 1 GiB the cache is
+1,028 blocks. On Hosted the size changes nothing measurable, since the Mac's
+own file cache lies below `fdsk.device`; real storage is where it counts.
+
 Below the handler, `fdsk.device` answers `CMD_UPDATE` inside `BeginIO`, so on
 the stock device a write barrier is replied before the writes it was queued
 behind. AFS+ has no defence against that and does not claim write ordering
