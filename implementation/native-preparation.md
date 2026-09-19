@@ -77,8 +77,8 @@ Each item ends with its own named check, a commit and a push.
 | 3 | done, 8acbe8c and 7bdcc30 | [`check-hosted-aros-s2.sh`](../tools/check-hosted-aros-s2.sh); the handler needs no C library to start |
 | 4 | done, da0c61a | 8.86 against 1.75 GB/s on the host |
 | 5 | done, f705a93 | [`check-hosted-aros-driver.sh`](../tools/check-hosted-aros-driver.sh); fdsk and hostdisk fail the barrier |
-| 6 | done, 3db8c65 | `CACHE=AUTO`; 1,028 blocks with 1 GiB |
-| 7 | done, 6aa5469 | AFSPlusTour runs in the S2 boot |
+| 6 | done, 3db8c65 | `CACHE=AUTO`; at 1e45a23, clean: 3.15 s with 64 blocks in 256 MiB, 3.13 s with 1,028 blocks in 1 GiB (FFS 1.43 and 1.42 s) |
+| 7 | done, 6aa5469 and 1e45a23 | AFSPlusTour runs in the S2 boot; the gate fails on any tour FAIL (shown with the tour pointed at `RAM:`) |
 | 8 | waiting | the Native build tree is not on this machine and needs some 15 GiB this disk does not have to spare |
 
 What Macaros Native takes from here: the handler, partition.library and its
