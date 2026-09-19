@@ -25,8 +25,16 @@
  * round and the hash of the payload, 4096 deterministic payload bytes, and a
  * trailer. The host builds the same bytes (tools/s3-markers.py) and compares.
  *
- * With `noflush` the flush is skipped and the line claiming it is printed
- * anyway: the negative control, which must make the check fail.
+ * With `noflush` the claim comes first and nothing backs it: the line saying
+ * the marker is flushed is printed, a second passes, and only then is the
+ * marker written, with no flush at all. That is the negative control. It is
+ * built this way because on the Hosted boot mount, skipping the flush alone
+ * loses nothing: the mount cannot open timer.device while it is being made,
+ * so it runs SYNC (afsplus_handler.c, "a volume that cannot delay stays
+ * SYNC"), and every packet is already durable when it is answered. A claim
+ * with nothing behind it is what a check must catch, and the second of delay
+ * is the window every cut of the control falls into, so the control fails on
+ * every round instead of on the ones that get unlucky.
  *
  * Every step prints a line to <progress>, unbuffered, so the host can time a
  * cut on a phase instead of on a sleep:
@@ -65,6 +73,7 @@
 #define CHURN_MAX_PASSES 24u
 #define IDLE_BEATS 16u
 #define IDLE_TICKS 25u /* Delay() ticks of 1/50 s: half a second a beat */
+#define CLAIM_TICKS 50u /* the negative control's empty second */
 #define COPY_BYTES 8192u
 
 struct Device *TimerBase;
@@ -401,15 +410,24 @@ static int work_round(const char *root, uint32_t round, uint32_t seed,
     length = build_marker(seed, round);
     churn_name(name, "m", round, ".flush");
     join(path, markers, name);
-    if (!write_whole(path, marker_bytes, length, 4u))
-        return fail("write the flushed marker");
-    /* ACTION_FLUSH: the whole-volume flush of dos.library. The handler has
-     * committed and the device barrier has passed when it answers. */
-    if (!noflush && !DoPkt(port, ACTION_FLUSH, 0, 0, 0, 0, 0))
-        return fail("flush the volume");
-    /* The line the host times the "after-flush" cut on. It is printed even
-     * when the flush was skipped: that is the negative control. */
-    say_marker(round, "flushed");
+    /* The line the host times the "after-flush" cut on. */
+    if (noflush)
+    {
+        say_marker(round, "flushed");
+        Delay(CLAIM_TICKS);
+        if (!write_whole(path, marker_bytes, length, 4u))
+            return fail("write the flushed marker");
+    }
+    else
+    {
+        if (!write_whole(path, marker_bytes, length, 4u))
+            return fail("write the flushed marker");
+        /* ACTION_FLUSH: the whole-volume flush of dos.library. The handler
+         * has committed and the device barrier has passed when it answers. */
+        if (!DoPkt(port, ACTION_FLUSH, 0, 0, 0, 0, 0))
+            return fail("flush the volume");
+        say_marker(round, "flushed");
+    }
 
     churn_name(name, "m", round, ".soft");
     join(path, markers, name);

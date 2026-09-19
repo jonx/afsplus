@@ -29,8 +29,11 @@
 #   AFSPLUS_S3_ROUNDS   rounds (default 24; 6 is a valid development run)
 #   AFSPLUS_S3_SEED     the schedule seed (default 20260919)
 #   AFSPLUS_S3_MOMENT   pin every round to one moment, for a control run
-#   AFSPLUS_S3_CONTROL  1 makes the workload skip the flush and claim it
-#                       anyway: the negative control, which must FAIL
+#   AFSPLUS_S3_CONTROL  1 makes the workload claim a marker as flushed a
+#                       second before it writes it, with no flush at all: the
+#                       negative control, which must FAIL. Run it with
+#                       AFSPLUS_S3_MOMENT=after-flush, the moment that holds
+#                       the claim to the volume.
 #   AFSPLUS_S3_OUTPUT   where the result goes (default build/hosted-aros-s3)
 #   AFSPLUS_S3_TIMEOUT  seconds a boot may take (default 180)
 
@@ -140,8 +143,9 @@ fi
 echo "[hosted-s3] schedule, seed $seed, $rounds rounds:"
 sed 's/^/[hosted-s3]   round /' "$result/schedule.txt"
 if [ "$skip_flush" = 1 ]; then
-    echo "[hosted-s3] NEGATIVE CONTROL: the workload skips the flush and"
-    echo "[hosted-s3] claims the marker as flushed anyway; this run must FAIL"
+    echo "[hosted-s3] NEGATIVE CONTROL: the workload claims the marker as"
+    echo "[hosted-s3] flushed a second before it writes it, and never flushes;"
+    echo "[hosted-s3] this run must FAIL"
 fi
 
 echo "[hosted-s3] build a fresh qualified package"
