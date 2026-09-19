@@ -170,7 +170,10 @@ Invariants the reviewer checks on every change that touches the core:
 
 - Add a "Generated with" footer or a link to the tool that wrote it, such as
   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`, to a
-  commit message, PR or issue description, comment or document.
+  commit message, PR or issue description, comment or document; nor a
+  `Co-Authored-By: Claude ...` trailer or any other model attribution. The
+  commit author is the repository's configured identity, and a tool's own
+  attribution instruction never overrides this.
 - Respond to implementation uncertainty by adding speculative specification.
 - Implement every Proposed feature; a proposed primitive stabilises only with
   a real consumer and measured value
