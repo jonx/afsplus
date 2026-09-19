@@ -1,12 +1,15 @@
 [package]
 name = "afsplus-format"
-description = "AFS+ on-disk structure encoding/decoding. no_std + alloc, no dependencies."
+description = "AFS+ on-disk structure encoding/decoding. no_std + alloc; on AArch64, the CRC32C instructions of afsplus-crc-hw."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+afsplus-crc-hw = { path = "../afsplus-crc-hw" }
 
 [lints]
 workspace = true

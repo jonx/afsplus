@@ -1,8 +1,10 @@
 //! CRC32C (Castagnoli), the initial metadata checksum proposal
-//! (`docs/03-on-disk-format.md` §6). Table-driven, dependency-free: eight
-//! bytes a step through eight tables (slicing-by-8), then byte by byte. The
-//! words are read little-endian explicitly, so a big-endian CPU computes the
-//! same value; the tables take 8 KiB.
+//! (`docs/03-on-disk-format.md` §6). On AArch64 built with the `crc`
+//! feature, as every Apple Silicon target is, the CPU's CRC32C instructions
+//! take eight bytes a step. Elsewhere it is table-driven and dependency-free:
+//! eight bytes a step through eight tables (slicing-by-8), then byte by byte.
+//! The words are read little-endian explicitly, so a big-endian CPU computes
+//! the same value; the tables take 8 KiB.
 //!
 //! The checksum algorithm identifier remains an explicit format field so a
 //! later epoch can negotiate alternatives.
@@ -73,7 +75,26 @@ impl Hasher {
     }
 
     pub fn update(&mut self, data: &[u8]) {
-        let mut crc = self.state;
+        #[cfg(all(target_arch = "aarch64", target_feature = "crc"))]
+        {
+            self.state = afsplus_crc_hw::crc32c_update(self.state, data);
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_feature = "crc")))]
+        {
+            self.state = update_tables(self.state, data);
+        }
+    }
+
+    pub fn finalize(self) -> u32 {
+        !self.state
+    }
+}
+
+/// Eight bytes a step through eight tables, then byte by byte.
+#[cfg_attr(all(target_arch = "aarch64", target_feature = "crc"), allow(dead_code))]
+fn update_tables(state: u32, data: &[u8]) -> u32 {
+    {
+        let mut crc = state;
         let (chunks, rest) = data.as_chunks::<8>();
         for chunk in chunks {
             let low = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) ^ crc;
@@ -90,11 +111,7 @@ impl Hasher {
         for &byte in rest {
             crc = (crc >> 8) ^ TABLE[((crc ^ byte as u32) & 0xFF) as usize];
         }
-        self.state = crc;
-    }
-
-    pub fn finalize(self) -> u32 {
-        !self.state
+        crc
     }
 }
 
@@ -106,7 +123,7 @@ impl Default for Hasher {
 
 #[cfg(test)]
 mod tests {
-    use super::{crc32c, Hasher, TABLE};
+    use super::{crc32c, update_tables, Hasher, TABLE};
 
     /// The byte-at-a-time definition the sliced form must equal.
     fn reference(data: &[u8]) -> u32 {
@@ -146,6 +163,17 @@ mod tests {
                 hasher.update(piece);
             }
             assert_eq!(hasher.finalize(), reference(&data[..4096]), "split {split}");
+        }
+    }
+
+    #[test]
+    fn the_tables_equal_the_definition_whichever_path_is_built() {
+        let data: Vec<u8> = (0..5000u32).map(|index| (index * 31 + 7) as u8).collect();
+        for start in 0..9 {
+            for length in (0..40).chain([4096, 4099]) {
+                let slice = &data[start..start + length];
+                assert_eq!(!update_tables(!0, slice), reference(slice));
+            }
         }
     }
 

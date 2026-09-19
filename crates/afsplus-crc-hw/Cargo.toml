@@ -1,0 +1,15 @@
+[package]
+name = "afsplus-crc-hw"
+description = "The CPU's CRC32C instructions for afsplus-format. no_std, no dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints.rust]
+# The two instruction calls are the only unsafe code; afsplus-format keeps the
+# workspace-wide `unsafe_code = "forbid"` rule.
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"

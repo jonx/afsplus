@@ -17,6 +17,11 @@ aros_target=${AFSPLUS_AROS_TARGET:-aarch64-unknown-aros}
 aros_codegen_target=${AFSPLUS_AROS_CODEGEN_TARGET:-aarch64-unknown-none-elf}
 aros_arch_flags=${AFSPLUS_AROS_ARCH_FLAGS:--mcmodel=large -ffixed-x18}
 handler_cflags=${AFSPLUS_AROS_HANDLER_CFLAGS:-}
+# CPU features the handler's Rust may use beyond the target's baseline. Every
+# Apple Silicon CPU has the ARMv8 CRC32 instructions, which checksum metadata
+# five times faster than the tables; an AROS for an AArch64 CPU without them
+# sets this empty.
+rust_cpu_features=${AFSPLUS_AROS_RUST_CPU_FEATURES-+crc}
 aros_sdk=${AFSPLUS_AROS_SDK_ROOT:-"$aros_build/bin/darwin-aarch64"}
 aros_build_tools=${AFSPLUS_AROS_BUILD_TOOLS_ROOT:-"$aros_sdk/tools"}
 expected_platform=${AFSPLUS_AROS_EXPECTED_PLATFORM:-}
@@ -156,6 +161,10 @@ clang -std=c11 -Wall -Wextra -Werror \
 
 echo "[aros-ffi] AROS AArch64 profile: sdk=$sdk_platform target=$aros_target codegen=$aros_codegen_target"
 echo "[aros-ffi] AROS AArch64 Rust static library"
+rust_flags=${RUSTFLAGS:-}
+[ -z "$rust_cpu_features" ] || rust_flags="$rust_flags -C target-feature=$rust_cpu_features"
+echo "[aros-ffi] Rust CPU features beyond the target: ${rust_cpu_features:-none}"
+RUSTFLAGS="$rust_flags" \
 PATH="$aros_crosstools/bin:$PATH" cargo "+$rust_toolchain" build \
     -p afsplus-aros-ffi --release --target "$target_json" \
     -Zjson-target-spec -Zbuild-std=std,panic_abort

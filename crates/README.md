@@ -7,13 +7,17 @@ as such in the crate docs.
 
 ## Crates
 
+- `afsplus-crc-hw` — the CRC32C instructions of AArch64 for
+  `afsplus-format`, built where the target has the `crc` feature, as every
+  Apple Silicon target does; elsewhere empty, and the format crate keeps its
+  tables. The only unsafe code on the format side. `no_std`, no dependencies.
 - `afsplus-format` — on-disk structure encode/decode (identification, A/B
   checkpoints, object records with one direct data extent, shared typed AFST
   nodes for object maps/directories/allocation records, region bitmap pages
   and descriptors, retired-block list, plus transitional legacy codecs), CRC32C,
   explicit little-endian codecs, region
-  geometry. `no_std` + `alloc` (verified against a bare-metal target), zero
-  dependencies. Bounds-first validation; every decoder rejects corrupted
+  geometry. `no_std` + `alloc` (verified against a bare-metal target), no
+  dependency but `afsplus-crc-hw` on AArch64. Bounds-first validation; every decoder rejects corrupted
   input via checksums and never panics on garbage.
 - `afsplus-block` — the narrow block-provider trait plus test backends:
   memory, sparse host file, trace/accounting, deterministic fault injection,

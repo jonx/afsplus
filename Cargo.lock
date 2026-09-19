@@ -61,8 +61,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "afsplus-crc-hw"
+version = "0.0.1"
+
+[[package]]
 name = "afsplus-format"
 version = "0.0.1"
+dependencies = [
+ "afsplus-crc-hw",
+]
 
 [[package]]
 name = "afsplus-fuse"
