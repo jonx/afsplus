@@ -635,7 +635,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             key,
             value,
         )?;
-        let (node, staged, _) = self.read_node(
+        let (mut node, staged, _) = self.read_node(
             lba,
             expected_level,
             lower.as_deref(),
@@ -643,6 +643,26 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             is_root,
             depth,
         )?;
+        if let [single] = replacement.children.as_slice() {
+            // The child below did not split, so this node keeps its shape:
+            // one slot changes. Writing that slot in place spares two clones
+            // of every key the node holds, one to build a child vector and
+            // one to put the keys back.
+            replace_child(&mut node, child_index, single, child.reference.subtree_items)?;
+            if node.fits(self.geo.block_size) {
+                return self.persist(lba, staged, vec![(node, known_min)]);
+            }
+            // A longer separator key can still overflow the block; that is
+            // the ordinary split below, over the node as just updated.
+            let children = children_from_node(&node)?;
+            let (left, right, right_min) = split_internal(node, &children, self.geo.block_size)?;
+            self.stats.splits += 1;
+            return self.persist(
+                lba,
+                staged,
+                vec![(left, known_min), (right, Some(right_min))],
+            );
+        }
         let mut children = children_from_node(&node)?;
         children.splice(child_index..=child_index, replacement.children);
         if child_index == 0 {
@@ -1247,6 +1267,38 @@ fn check_children_unique(node: &TreeNode) -> Result<(), CoreError> {
     Ok(())
 }
 
+/// Points one slot of an internal node at a new child, keeping the node's
+/// item count and therefore its shape. `previous_items` is what the slot's
+/// subtree held before, so the node's total follows without walking it.
+fn replace_child(
+    node: &mut TreeNode,
+    index: usize,
+    child: &ChildDesc,
+    previous_items: u64,
+) -> Result<(), CoreError> {
+    if index == 0 {
+        node.leftmost_child = child.reference.lba;
+        node.leftmost_items = child.reference.subtree_items;
+    } else {
+        let key = child
+            .min_key
+            .clone()
+            .ok_or_else(|| CoreError::Corrupt("non-leftmost child has no minimum".into()))?;
+        let item = node
+            .items
+            .get_mut(index - 1)
+            .ok_or_else(|| CoreError::Corrupt("tree child index out of range".into()))?;
+        item.key = key;
+        item.value = child_value(child.reference).map_err(CoreError::Format)?;
+    }
+    node.subtree_items = node
+        .subtree_items
+        .checked_sub(previous_items)
+        .and_then(|total| total.checked_add(child.reference.subtree_items))
+        .ok_or_else(|| CoreError::Corrupt("tree item count overflow".into()))?;
+    Ok(())
+}
+
 fn child_range(
     node: &TreeNode,
     child_index: usize,
@@ -1388,10 +1440,24 @@ fn split_leaf(
     block_size: usize,
 ) -> Result<(TrackedNode, TrackedNode), CoreError> {
     let capacity = block_size.saturating_sub(afsplus_format::header::HEADER_SIZE);
+    // The encoded length of a prefix of the items is a prefix sum, so one
+    // pass answers every candidate split. Measuring both halves for each
+    // candidate made splitting a leaf cost the square of its item count.
+    let base = encoded_items_len(&[])?;
+    let mut prefix = Vec::with_capacity(node.items.len() + 1);
+    prefix.push(base);
+    for index in 0..node.items.len() {
+        let length = encoded_items_len(&node.items[index..=index])?
+            .checked_sub(base)
+            .and_then(|item| prefix[index].checked_add(item))
+            .ok_or_else(|| CoreError::Corrupt("tree node size overflow".into()))?;
+        prefix.push(length);
+    }
+    let total = prefix[node.items.len()];
     let mut best: Option<(usize, usize)> = None;
     for split in 1..node.items.len() {
-        let left_len = encoded_items_len(&node.items[..split])?;
-        let right_len = encoded_items_len(&node.items[split..])?;
+        let left_len = prefix[split];
+        let right_len = base + (total - prefix[split]);
         if left_len <= capacity && right_len <= capacity {
             let difference = left_len.abs_diff(right_len);
             if best
