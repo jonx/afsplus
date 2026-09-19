@@ -67,3 +67,22 @@ still comes from the host folder.
    on the current handler.
 
 Each item ends with its own named check, a commit and a push.
+
+## State on 2026-09-19
+
+| Item | State | Evidence |
+|---|---|---|
+| 1 | done, 9aadb07 | [`check-hosted-aros-resident.sh`](../tools/check-hosted-aros-resident.sh) |
+| 2 | done, 0d8f159 | [ADR-122](../adr/ADR-122-aros-partition-identity.md); `sgdisk -v` finds no problem |
+| 3 | done, 8acbe8c and 7bdcc30 | [`check-hosted-aros-s2.sh`](../tools/check-hosted-aros-s2.sh); the handler needs no C library to start |
+| 4 | done, da0c61a | 8.86 against 1.75 GB/s on the host |
+| 5 | done, f705a93 | [`check-hosted-aros-driver.sh`](../tools/check-hosted-aros-driver.sh); fdsk and hostdisk fail the barrier |
+| 6 | done, 3db8c65 | `CACHE=AUTO`; 1,028 blocks with 1 GiB |
+| 7 | done, 6aa5469 | AFSPlusTour runs in the S2 boot |
+| 8 | waiting | the Native build tree is not on this machine and needs some 15 GiB this disk does not have to spare |
+
+What Macaros Native takes from here: the handler, partition.library and its
+disk device as boot modules; a GPT partition of type
+`4146532B-BB67-46C5-AA4A-F502CA018E5E` written by `afsplus-disk wrap`, with
+`AROS.boot` naming the CPU at its root; drivers that pass
+`AFSPlusDriverProbe`; and the handler built with `+crc`.
