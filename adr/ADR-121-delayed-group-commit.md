@@ -57,6 +57,23 @@ loses is a whole suffix of operations, never a torn one.
    the next commit has room. An operation that needs space reclaims it
    first, counting what the open window has already allocated.
 
+**Amendment, 2026-09-19.** Directories join the window (decision 8). A
+`CreateDir` was an immediate transaction: it committed the open window and
+then ran a transaction of its own, four device flushes for every drawer, and
+a `Copy ALL` of a source tree paid that for every directory it made. The
+window now stages the new directory's record, the block its entry tree will
+be rooted at and the entry in its parent, and the directory is usable at once:
+a file created in it in the same window, a lookup, a stat, a rename into it.
+The intent log has Create, Delete, Rename and Write and no record that makes
+a directory, so a window holding one is unloggable and the next fsync
+commits it as a checkpoint rather than appending, which is decision 5. That
+is not a format change; a log record kind for a directory would be, and is
+not proposed here. Removing a directory is still not stageable: the
+immediate path commits the window first, as this decision allows. Measured
+at the C boundary, 90 drawers of 32 files: 3.98 flushes per drawer before,
+0.38 after, which is the window commits of the whole phase spread over the
+drawers.
+
 **Amendment, 2026-09-19.** The AROS handler was committing on every close of
 a written file, which decision 2 never asked for: `ACTION_END` called
 `afsplus_aros_fsync`, left there from before this decision, when every
