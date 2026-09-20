@@ -40,6 +40,41 @@ pub struct TreeSummary {
     pub height: u8,
 }
 
+/// The blocks a descent has already passed, for cycle detection. A tree is
+/// at most `MAX_TREE_LEVEL + 1` nodes deep, so the path fits in an array and
+/// needs no heap block; the `BTreeSet` it replaces took one per lookup,
+/// which was 5 % of the allocations of a create.
+#[derive(Default)]
+pub(crate) struct DescentPath {
+    lbas: [u64; MAX_TREE_LEVEL as usize + 2],
+    len: usize,
+}
+
+impl DescentPath {
+    /// Records `lba` and answers whether it is new. A path longer than a
+    /// tree can be is answered like a cycle: the caller's error is the same
+    /// one, and neither can be walked.
+    fn insert(&mut self, lba: u64) -> bool {
+        if self.len == self.lbas.len() || self.lbas[..self.len].contains(&lba) {
+            return false;
+        }
+        self.lbas[self.len] = lba;
+        self.len += 1;
+        true
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn remove(&mut self, lba: u64) {
+        if let Some(index) = self.lbas[..self.len].iter().position(|value| *value == lba) {
+            self.lbas.copy_within(index + 1..self.len, index);
+            self.len -= 1;
+        }
+    }
+}
+
 /// A tree node decoded from the bytes of block `lba`, which the device kept
 /// beside them. A write of the block drops it.
 struct KeptNode {
@@ -98,7 +133,7 @@ pub fn lookup<D: BlockDevice>(
     let mut expected_level = None;
     let mut lower: Option<SmallBytes> = None;
     let mut upper: Option<SmallBytes> = None;
-    let mut visited = BTreeSet::new();
+    let mut visited = DescentPath::default();
     let mut buf = crate::scratch::Block::take(geo.block_size);
     let mut stats = TreeLookupStats {
         pages_read: 0,
@@ -169,7 +204,7 @@ pub fn lookup_floor<D: BlockDevice>(
     let mut expected_level = None;
     let mut lower: Option<SmallBytes> = None;
     let mut upper: Option<SmallBytes> = None;
-    let mut visited = BTreeSet::new();
+    let mut visited = DescentPath::default();
     let mut buf = crate::scratch::Block::take(geo.block_size);
     let mut stats = TreeLookupStats {
         pages_read: 0,
@@ -237,7 +272,7 @@ pub fn read_range<D: BlockDevice>(
 ) -> Result<TreeRangePage, CoreError> {
     check_tree_lba(geo, root_lba)?;
     let mut items = Vec::with_capacity(limit);
-    let mut path = BTreeSet::new();
+    let mut path = DescentPath::default();
     let total_items = read_range_node(
         dev, geo, root_lba, spec, None, None, None, true, start, limit, &mut path, &mut items,
     )?;
@@ -264,7 +299,7 @@ pub fn read_key_page<D: BlockDevice>(
     }
     check_tree_lba(geo, root_lba)?;
     let mut items = Vec::new();
-    let mut path = BTreeSet::new();
+    let mut path = DescentPath::default();
     let mut stats = TreeLookupStats::default();
     let total_items = read_key_page_node(
         dev, geo, root_lba, spec, None, None, None, low, limit, &mut path, &mut items, &mut stats,
@@ -283,7 +318,7 @@ fn read_key_page_node<D: BlockDevice>(
     upper: Option<&[u8]>,
     low: &[u8],
     limit: usize,
-    path: &mut BTreeSet<u64>,
+    path: &mut DescentPath,
     out: &mut Vec<TreeFloorItem>,
     stats: &mut TreeLookupStats,
 ) -> Result<u64, CoreError> {
@@ -361,7 +396,7 @@ fn read_key_page_node<D: BlockDevice>(
         }
         Ok(node.subtree_items)
     })();
-    path.remove(&lba);
+    path.remove(lba);
     result
 }
 
@@ -377,7 +412,7 @@ fn read_range_node<D: BlockDevice>(
     is_root: bool,
     mut start: u64,
     limit: usize,
-    path: &mut BTreeSet<u64>,
+    path: &mut DescentPath,
     out: &mut Vec<(Vec<u8>, Vec<u8>)>,
 ) -> Result<u64, CoreError> {
     if !path.insert(lba) {
@@ -458,7 +493,7 @@ fn read_range_node<D: BlockDevice>(
         }
         Ok(total)
     })();
-    path.remove(&lba);
+    path.remove(lba);
     result
 }
 
@@ -486,7 +521,7 @@ where
         ));
     }
     check_tree_lba(geo, root_lba)?;
-    let mut path = BTreeSet::new();
+    let mut path = DescentPath::default();
     visit_key_range_node(
         dev,
         geo,
@@ -515,7 +550,7 @@ fn visit_key_range_node<D, F>(
     is_root: bool,
     low: &[u8],
     high: &[u8],
-    path: &mut BTreeSet<u64>,
+    path: &mut DescentPath,
     visitor: &mut F,
 ) -> Result<(), CoreError>
 where
@@ -588,7 +623,7 @@ where
         }
         Ok(())
     })();
-    path.remove(&lba);
+    path.remove(lba);
     result
 }
 
