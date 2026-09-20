@@ -754,3 +754,355 @@ fn piecewise_write() {
         (c1.cache_hits + c1.cache_misses - c0.cache_hits - c0.cache_misses) as f64 / files as f64);
     assert_eq!(afsplus_aros_unmount(fs), 0);
 }
+
+/// Lot D2: the benchmark's delete phase, on the host. Ten trees of eight
+/// drawers of 32 files on a 64 MiB disk, the sizes of `afsplus_bench.c`, then
+/// the files, the drawers, the trees and the root drawer removed in that
+/// order, `afsplus_aros_commit_due` after every operation as the handler
+/// calls it. Every device flush is attributed to the call that caused it, by
+/// reading the counters around each call; the checkpoints come from the
+/// flight recorder's `CheckpointDurable`, so a line also says how many
+/// transactions a call site published.
+mod delete_tree {
+    pub const TREES: usize = 10;
+    pub const DRAWERS_PER_TREE: usize = 8;
+    pub const FILES_PER_DRAWER: usize = 32;
+    pub const LARGEST: u32 = 16384;
+
+    fn next_random(state: &mut u32) -> u32 {
+        let mut value = *state;
+        value ^= value << 13;
+        value ^= value >> 17;
+        value ^= value << 5;
+        *state = value;
+        value
+    }
+
+    fn file_state(seed: u32, index: u32) -> u32 {
+        let state = seed ^ index.wrapping_mul(2_654_435_761) ^ 0x9e37_79b9;
+        if state != 0 {
+            state
+        } else {
+            1
+        }
+    }
+
+    /// `afsplus_bench.c`'s `file_size`: three files in four under 1 KiB, the
+    /// fourth up to 16 KiB.
+    pub fn file_size(seed: u32, index: u32) -> u32 {
+        let mut state = file_state(seed, index);
+        let value = next_random(&mut state);
+        if (value >> 30) == 0 {
+            value % (LARGEST + 1)
+        } else {
+            value % 1024
+        }
+    }
+}
+
+/// Device flushes, block writes and checkpoints one kind of call spent.
+#[derive(Default, Clone, Copy)]
+struct Attribution {
+    calls: u64,
+    flushes: u64,
+    writes: u64,
+    checkpoints: u64,
+}
+
+/// Checkpoints the flight recorder has reported since the last reading. The
+/// harness is single-threaded and runs one filesystem.
+static CHECKPOINTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `EventKind::CheckpointDurable`.
+const CHECKPOINT_DURABLE: u16 = 5;
+
+unsafe extern "C" fn count_checkpoints(_context: *mut std::ffi::c_void, event: *const AfspTraceEvent) {
+    // SAFETY: the recorder passes one readable event for the call.
+    let event = unsafe { &*event };
+    if event.event == CHECKPOINT_DURABLE {
+        CHECKPOINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A reading of everything the table attributes.
+fn mark(fs: *mut AfsplusAros) -> (u64, u64, u64) {
+    let c = counters(fs);
+    (
+        c.device_flushes,
+        c.device_writes,
+        CHECKPOINTS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+fn charge(bucket: &mut Attribution, fs: *mut AfsplusAros, before: (u64, u64, u64)) {
+    let after = mark(fs);
+    bucket.calls += 1;
+    bucket.flushes += after.0 - before.0;
+    bucket.writes += after.1 - before.1;
+    bucket.checkpoints += after.2 - before.2;
+}
+
+#[test]
+#[ignore = "profiling harness"]
+fn delete_tree_phase() {
+    use afsplus_block::MemoryBackend;
+    use delete_tree::{DRAWERS_PER_TREE, FILES_PER_DRAWER, LARGEST, TREES};
+    // 64 MiB, the benchmark's volume; BLOCKS=n for a smaller one, which is
+    // how the post-commit room floor is measured where it is reached.
+    let blocks: u64 = std::env::var("BLOCKS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(16_384);
+    let seed = 0x4146_5350u32;
+
+    let mut device = common::format(MemoryBackend::new(4096, blocks), true);
+    let fs = common::mount_sized(&mut device, blocks);
+    let mut g = 0;
+    assert_eq!(afsplus_aros_set_cache_blocks(fs, 64, &mut g), 0);
+    if std::env::var("SYNC").is_err() {
+        assert_eq!(afsplus_aros_set_commit_policy(fs, 5_000, 1_000), 0);
+    }
+    let sink = AfspTraceSink {
+        emit: Some(count_checkpoints),
+        ctx: std::ptr::null_mut(),
+        category_mask: AFSP_TRACE_CHECKPOINT,
+    };
+    assert_eq!(afsplus_aros_set_trace_sink(fs, &sink), 0);
+
+    let mk = |fs, base: u64, name: &str| {
+        let mut l = 0;
+        let t = now();
+        assert_eq!(
+            afsplus_aros_create_directory(fs, base, name.as_ptr(), name.len() as u32, t.0, t.1, &mut l),
+            0,
+            "create directory {name}"
+        );
+        l
+    };
+    let tree_name = |t: usize| format!("t{t:02}");
+    let drawer_name = |d: usize| format!("d{d}");
+    let file_name = |f: usize| format!("f{f:02}.c");
+
+    // The tree the benchmark builds: one root drawer, ten trees, eight
+    // drawers each, 32 files each, the sizes of `afsplus_bench.c`. Only a
+    // few locks are held at once, as the benchmark holds none.
+    let root = mk(fs, 0, "bench");
+    let mut bytes = vec![0x33u8; LARGEST as usize];
+    for t in 0..TREES {
+        let tl = mk(fs, root, &tree_name(t));
+        for d in 0..DRAWERS_PER_TREE {
+            let dl = mk(fs, tl, &drawer_name(d));
+            for f in 0..FILES_PER_DRAWER {
+                let index = ((t * DRAWERS_PER_TREE + d) * FILES_PER_DRAWER + f) as u32;
+                let size = delete_tree::file_size(seed, index);
+                let name = file_name(f);
+                let at = now();
+                let mut file = 0;
+                assert_eq!(
+                    afsplus_aros_open(fs, dl, name.as_ptr(), name.len() as u32, AFSPLUS_AROS_OPEN_NEW_FILE, at.0, at.1, &mut file),
+                    0
+                );
+                if size > 0 {
+                    let mut written = 0;
+                    assert_eq!(afsplus_aros_write(fs, file, bytes.as_mut_ptr(), size, at.0, at.1, &mut written), 0);
+                }
+                assert_eq!(afsplus_aros_close(fs, file), 0);
+                let mut pending = 0;
+                assert_eq!(afsplus_aros_commit_due(fs, at.0, at.1, &mut pending), 0);
+            }
+            assert_eq!(afsplus_aros_free_lock(fs, dl), 0);
+        }
+        assert_eq!(afsplus_aros_free_lock(fs, tl), 0);
+    }
+    assert_eq!(afsplus_aros_flush(fs), 0);
+    // Idle maintenance until nothing is left over from the build, so the
+    // table measures the delete phase and not the tail of the create phase.
+    for _ in 0..8_192 {
+        let t = now();
+        let mut pending = 0;
+        assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);
+        if pending == 0 {
+            break;
+        }
+    }
+
+    let mut files_bucket = Attribution::default();
+    let mut drawers_bucket = Attribution::default();
+    let mut trees_bucket = Attribution::default();
+    let mut root_bucket = Attribution::default();
+    let mut tick_bucket = Attribution::default();
+    let start = Instant::now();
+    let c0 = counters(fs);
+    let checkpoints0 = CHECKPOINTS.load(std::sync::atomic::Ordering::Relaxed);
+
+    let tick = |fs, bucket: &mut Attribution| {
+        let t = now();
+        let before = mark(fs);
+        let mut pending = 0;
+        assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);
+        charge(bucket, fs, before);
+    };
+    let remove = |fs, parent: u64, name: &str, bucket: &mut Attribution| {
+        let t = now();
+        let before = mark(fs);
+        assert_eq!(
+            afsplus_aros_delete_object(fs, parent, name.as_ptr(), name.len() as u32, t.0, t.1),
+            0,
+            "delete {name}"
+        );
+        charge(bucket, fs, before);
+    };
+    for t in 0..TREES {
+        let tl = locate(fs, root, &tree_name(t));
+        for d in 0..DRAWERS_PER_TREE {
+            let dl = locate(fs, tl, &drawer_name(d));
+            for f in 0..FILES_PER_DRAWER {
+                remove(fs, dl, &file_name(f), &mut files_bucket);
+                tick(fs, &mut tick_bucket);
+            }
+            assert_eq!(afsplus_aros_free_lock(fs, dl), 0);
+        }
+        assert_eq!(afsplus_aros_free_lock(fs, tl), 0);
+    }
+    for t in 0..TREES {
+        let tl = locate(fs, root, &tree_name(t));
+        for d in 0..DRAWERS_PER_TREE {
+            remove(fs, tl, &drawer_name(d), &mut drawers_bucket);
+            tick(fs, &mut tick_bucket);
+        }
+        assert_eq!(afsplus_aros_free_lock(fs, tl), 0);
+    }
+    for t in 0..TREES {
+        remove(fs, root, &tree_name(t), &mut trees_bucket);
+        tick(fs, &mut tick_bucket);
+    }
+    assert_eq!(afsplus_aros_free_lock(fs, root), 0);
+    remove(fs, 0, "bench", &mut root_bucket);
+    tick(fs, &mut tick_bucket);
+
+    let took = start.elapsed();
+    let c1 = counters(fs);
+    let checkpoints1 = CHECKPOINTS.load(std::sync::atomic::Ordering::Relaxed);
+    let drawers = TREES * DRAWERS_PER_TREE;
+    let operations = (drawers * FILES_PER_DRAWER + drawers + TREES + 1) as u64;
+    eprintln!(
+        "DELETE PHASE {operations} operations on {blocks} blocks in {took:?}: {} flushes, {} writes, {} checkpoints",
+        c1.device_flushes - c0.device_flushes,
+        c1.device_writes - c0.device_writes,
+        checkpoints1 - checkpoints0
+    );
+    eprintln!("{:<16} {:>7} {:>9} {:>9} {:>12} {:>9}", "call site", "calls", "flushes", "writes", "checkpoints", "flush/call");
+    for (name, bucket) in [
+        ("delete file", files_bucket),
+        ("remove drawer", drawers_bucket),
+        ("remove tree", trees_bucket),
+        ("remove root", root_bucket),
+        ("commit_due tick", tick_bucket),
+    ] {
+        eprintln!(
+            "{:<16} {:>7} {:>9} {:>9} {:>12} {:>9.3}",
+            name,
+            bucket.calls,
+            bucket.flushes,
+            bucket.writes,
+            bucket.checkpoints,
+            bucket.flushes as f64 / bucket.calls.max(1) as f64
+        );
+    }
+    assert_eq!(afsplus_aros_set_trace_sink(fs, std::ptr::null()), 0);
+    assert_eq!(afsplus_aros_unmount(fs), 0);
+}
+
+/// Lot D2: what the post-commit room floor costs. A volume filled until the
+/// free space is near [`delayed_room_blocks`], then a delete-and-create loop
+/// that never goes idle. Every commit of the window then finds the volume
+/// below the floor and cleans until it is above it again, one transaction at
+/// a time; the numbers to watch are the flushes and checkpoints per
+/// operation.
+#[test]
+#[ignore = "profiling harness"]
+fn room_floor_loop() {
+    use afsplus_block::MemoryBackend;
+    let blocks: u64 = std::env::var("BLOCKS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4_096);
+    let rounds: usize = std::env::var("ROUNDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4);
+    let mut device = common::format(MemoryBackend::new(4096, blocks), true);
+    let fs = common::mount_sized(&mut device, blocks);
+    let mut g = 0;
+    assert_eq!(afsplus_aros_set_cache_blocks(fs, 64, &mut g), 0);
+    assert_eq!(afsplus_aros_set_commit_policy(fs, 5_000, 1_000), 0);
+    let sink = AfspTraceSink {
+        emit: Some(count_checkpoints),
+        ctx: std::ptr::null_mut(),
+        category_mask: AFSP_TRACE_CHECKPOINT,
+    };
+    assert_eq!(afsplus_aros_set_trace_sink(fs, &sink), 0);
+
+    let mut dir = 0;
+    let t = now();
+    assert_eq!(afsplus_aros_create_directory(fs, 0, "load".as_ptr(), 4, t.0, t.1, &mut dir), 0);
+    assert_eq!(afsplus_aros_flush(fs), 0);
+
+    // Fill until the free space is about the floor the commit keeps: an
+    // eighth of the volume before this lot.
+    let bytes = [0x33u8; 4096];
+    let floor = blocks / 8;
+    let mut files = 0usize;
+    while free_blocks(fs) > floor + 32 {
+        let name = format!("l{files:04}.d");
+        let t = now();
+        let mut file = 0;
+        assert_eq!(afsplus_aros_open(fs, dir, name.as_ptr(), name.len() as u32, AFSPLUS_AROS_OPEN_NEW_FILE, t.0, t.1, &mut file), 0, "fill {name}");
+        let mut written = 0;
+        assert_eq!(afsplus_aros_write(fs, file, bytes.as_ptr(), 4096, t.0, t.1, &mut written), 0);
+        assert_eq!(afsplus_aros_close(fs, file), 0);
+        let mut pending = 0;
+        assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);
+        files += 1;
+        assert!(files < 100_000, "the volume never filled");
+    }
+    assert_eq!(afsplus_aros_flush(fs), 0);
+    eprintln!("ROOM FLOOR {blocks} blocks, floor {floor}, {files} files, {} free", free_blocks(fs));
+
+    // The loop itself: delete a file and make it again, never idle, so every
+    // window commit meets the floor.
+    let c0 = counters(fs);
+    let checkpoints0 = CHECKPOINTS.load(std::sync::atomic::Ordering::Relaxed);
+    let start = Instant::now();
+    let mut operations = 0u64;
+    for _ in 0..rounds {
+        for f in 0..files {
+            let name = format!("l{f:04}.d");
+            let t = now();
+            assert_eq!(afsplus_aros_delete_object(fs, dir, name.as_ptr(), name.len() as u32, t.0, t.1), 0, "delete {name}");
+            let mut pending = 0;
+            assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);
+            let t = now();
+            let mut file = 0;
+            assert_eq!(afsplus_aros_open(fs, dir, name.as_ptr(), name.len() as u32, AFSPLUS_AROS_OPEN_NEW_FILE, t.0, t.1, &mut file), 0, "remake {name}");
+            let mut written = 0;
+            assert_eq!(afsplus_aros_write(fs, file, bytes.as_ptr(), 4096, t.0, t.1, &mut written), 0);
+            assert_eq!(afsplus_aros_close(fs, file), 0);
+            let mut pending = 0;
+            assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);
+            operations += 2;
+        }
+    }
+    let took = start.elapsed();
+    let c1 = counters(fs);
+    let checkpoints1 = CHECKPOINTS.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!(
+        "ROOM FLOOR LOOP {operations} operations in {took:?}: {:.3} flushes, {:.2} writes, {:.3} checkpoints per operation",
+        (c1.device_flushes - c0.device_flushes) as f64 / operations as f64,
+        (c1.device_writes - c0.device_writes) as f64 / operations as f64,
+        (checkpoints1 - checkpoints0) as f64 / operations as f64
+    );
+    assert_eq!(afsplus_aros_set_trace_sink(fs, std::ptr::null()), 0);
+    assert_eq!(afsplus_aros_free_lock(fs, dir), 0);
+    assert_eq!(afsplus_aros_unmount(fs), 0);
+}
