@@ -21,6 +21,7 @@ operations.
 - [Where the delete phase's flushes went, on 2026-09-20](#where-the-delete-phases-flushes-went-on-2026-09-20)
 - [Memory](#memory)
   - [Where the allocations come from](#where-the-allocations-come-from)
+  - [What lot J took back](#what-lot-j-took-back)
   - [What the table changed](#what-the-table-changed)
   - [What was left alone, and why](#what-was-left-alone-and-why)
 
@@ -347,6 +348,74 @@ allocations of 8 to 15 bytes and the 220 of 4 to 7 come from, and it is why
 the sizes are those of a key and a child reference. The `format!` in the
 error paths, the pending overlay's `BTreeMap` nodes and the flight recorder
 together do not reach 1 % of an operation.
+
+### What lot J took back
+
+Four changes, in the order the table above put them, each measured on the
+host with `zz_profile`'s `create_only` and the allocations per operation of
+`zz_memory`. Every reading is against the lot's base, 5ecbcad: 31.6 us per
+create, 1,310 allocations per create, 1,711 per rename, 2,312 per delete.
+
+| After | us per create | Create | Rename | Delete | Lookup |
+|---|---|---|---|---|---|
+| the base | 31.6 | 1,310 | 1,711 | 2,312 | 26.4 |
+| the borrowed block buffer | 27.3 | 1,296 | 1,700 | 2,269 | 23.4 |
+| the item that holds its own bytes | 28.6 | 186 | 221 | 632 | 15.2 |
+| the descent path in an array | 28.6 | 173 | 211 | 594 | 12.2 |
+| the image encoded once | 23.2 | 175 | 212 | 599 | 12.2 |
+
+**One block buffer, borrowed.** Every read of a tree node took a
+`vec![0u8; block_size]` and dropped it. They come from a per-thread pool
+now (`crates/afsplus-core/src/scratch.rs`); a borrow owns its buffer until
+it is dropped, so a nested read is never handed the one its caller is
+reading. It is not zeroed unless its size changed, because every caller
+reads a block into it first, and the memset of a block was as much of the
+cost as the allocation.
+
+**A tree item holds its key and its value inside itself.**
+`afsplus_format::small_bytes::SmallBytes` keeps up to 22 bytes without a
+heap block, which is every key and every child reference the trees use, and
+falls back to a vector above that. That is the whole of the 78 % above. It
+is memory and not format: the same bytes reach the disk, and the C constants
+test and the format roundtrip are unchanged. A tree item grows from 48 bytes
+to 64. The descent carries its bounding keys the same way, and
+`directory::validate_root` reads through the decoded-node cache instead of
+decoding the root again per operation.
+
+**A descent remembers its path in an array**, not in a `BTreeSet` made fresh
+per lookup: a tree is at most sixteen nodes deep, and the set's first insert
+took a heap block.
+
+**A batch encodes an image once.** `stage_node` encoded a node every time an
+operation passed through it: 1,500 encodes to write 62 images in a
+512-operation batch. A staged image is deferred until its bytes are wanted,
+to spill it, to read it back through the image, or to hand the writes to the
+caller. The decoded cache is then load-bearing for a deferred block, so
+nothing drops such a node without encoding it first. The memory bound is
+that cache's own, which already follows the staged budget: at most eight
+decoded nodes, about 64 KiB at a 4 KiB block, and none below sixteen staged
+pages -- so the constrained profiles encode eagerly, exactly as before, and
+their spill counts, spill reloads and staged residency are unchanged, since
+a deferred image is in memory like an encoded one. A 512-upsert batch makes
+62 encodes for 62 images with a decoded cache and 0 with none
+(`a_batch_encodes_an_image_once_and_a_tiny_profile_encodes_eagerly`). This
+is 19 % of a create on its own, measured back to back against the commit
+before it, and it changes nothing about what a commit writes or when.
+
+`crates/afsplus-aros-ffi/tests/heap_allocation_bounds.rs` holds the numbers
+to these: 192 allocations per create, 234 per rename, 660 per delete and 14
+per lookup, the readings above plus a tenth. Run against the base commit in
+a separate worktree it fails on the first line, at 1,310 per create.
+
+**What is left.** The largest remaining site is not below the 2 % the lot
+aimed at: 30 allocations per create and 93 per delete, 20 % and 17 %, are
+the `BTreeMap` nodes of the batch's own staged and decoded maps in
+`cow_tree`, churned by the insert and remove of every staged image. Nothing
+else reaches 7 %: the block copy in the cache's `write_block` at 6 %, the
+`Vec` a lookup returns at 5 %, the vector `persist` builds at 5 %, and the
+`Arc` of each decoded node at 4 %. A staged overlay that did not allocate
+per entry is the next thing to measure, and it is a change to how a batch
+holds its images, not another clone to remove.
 
 ### What the table changed
 
