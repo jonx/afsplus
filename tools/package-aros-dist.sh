@@ -73,8 +73,11 @@ for needed in "$aros_rust_target_json" "$aros_startup"; do
         exit 69
     }
 done
+# The thread and sync glues are deliberately absent: the handler answers what
+# std asks of them itself, in native/aros/afsplus_bootthread.c, so that it
+# links no thread library and carries no thread table.
 for glue in aros_net_glue aros_fs_glue aros_process_glue aros_proc_glue \
-    aros_thread_glue aros_sync_glue aros_env_glue
+    aros_env_glue
 do
     [ -f "$aros_platform_glue_dir/$glue.c" ] || {
         echo "package-aros-dist: missing std glue: $glue.c" >&2
@@ -108,8 +111,8 @@ RUSTFLAGS="$rust_flags" cargo "+$rust_toolchain" build \
 
 echo "[aros-dist] $profile_id: handler shell"
 # shellcheck disable=SC2086 -- every profile value is a list of flags.
-for source in afsplus_handler afsplus_bootlibc afsplus_packet \
-    afsplus_trackdisk afsplus_claim afsplus_control
+for source in afsplus_handler afsplus_bootlibc afsplus_bootthread \
+    afsplus_packet afsplus_trackdisk afsplus_claim afsplus_control
 do
     "$aros_cc" --target="$aros_target" $aros_arch_flags $aros_defines \
         -O2 -std=gnu11 -Wall -Wextra -Werror -D__NOLIBBASE__ \
@@ -149,7 +152,7 @@ done
 
 echo "[aros-dist] $profile_id: AROS Rust std glue"
 for glue in aros_net_glue aros_process_glue aros_proc_glue aros_env_glue \
-    aros_thread_glue aros_fs_glue aros_sync_glue
+    aros_fs_glue
 do
     # These are the MacAROS std glues, compiled as they were written; the
     # warnings they raise are the AROS headers' own.
@@ -170,6 +173,7 @@ COMPILER_PATH="$(dirname -- "$aros_cc")" \
     "$work/module/afsplus_start.o" \
     "$work/obj/afsplus_handler.o" \
     "$work/obj/afsplus_bootlibc.o" "$work/obj/afsplus_bootposix.o" \
+    "$work/obj/afsplus_bootthread.o" \
     "$work/obj/afsplus_packet.o" "$work/obj/afsplus_trackdisk.o" \
     "$work/obj/afsplus_claim.o" "$work/obj/afsplus_control.o" \
     "$work/module"/aros_*_glue.o \
@@ -328,8 +332,7 @@ awk '
         cd "$aros_platform_glue_dir"
         shasum -a 256 \
             aros_net_glue.c aros_fs_glue.c aros_process_glue.c \
-            aros_proc_glue.c aros_thread_glue.c aros_sync_glue.c \
-            aros_env_glue.c
+            aros_proc_glue.c aros_env_glue.c
     )
     echo "platform_glue_sha256_end"
 } >"$staging/build-profile.txt"

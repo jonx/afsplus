@@ -43,7 +43,10 @@ aros_lib_dirs=${AFSPLUS_AROS_LIB_DIRS:-"-L $aros_sdk/lib"}
 aros_startup=${AFSPLUS_AROS_STARTUP:-"$aros_sdk/lib/startup.o"}
 # No compiler-runtime library: the x86_64 code generator needs no builtin the
 # AROS libraries do not already define. A link that did would fail loudly.
-aros_module_libs=${AFSPLUS_AROS_MODULE_LIBS:---start-group -lstdc.static -lamiga -larossupport -lkeymap -lexpansion -lcommodities -licon -lintuition -lgadtools -llayers -laros -lpartition -liffparse -lgraphics -llocale -ldos -lutility -loop -llibinit -lautoinit -lposixc -lstdcio -lstdc -lexec -lpthread --end-group}
+# No -lpthread: the handler makes no thread, and pthread.library's fixed
+# thread table is 1,841,328 bytes of .bss taken at load. What std asks of a
+# thread library is answered by native/aros/afsplus_bootthread.c.
+aros_module_libs=${AFSPLUS_AROS_MODULE_LIBS:---start-group -lstdc.static -lamiga -larossupport -lkeymap -lexpansion -lcommodities -licon -lintuition -lgadtools -llayers -laros -lpartition -liffparse -lgraphics -llocale -ldos -lutility -loop -llibinit -lautoinit -lposixc -lstdcio -lstdc -lexec --end-group}
 aros_program_libs=${AFSPLUS_AROS_PROGRAM_LIBS:---start-group -lpthread -lposixc -lstdc -lstdcio -ldos -lexec -laros -lautoinit -llibinit -lutility -lamiga -larossupport --end-group}
 
 # collect-aros is AROS's linker wrapper and is built per CPU: the one a hosted

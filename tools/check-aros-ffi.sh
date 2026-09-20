@@ -83,9 +83,12 @@ if [ -n "$expected_platform" ] && [ "$sdk_platform" != "$expected_platform" ]; t
     echo "AROS SDK platform mismatch: expected $expected_platform, got $sdk_platform" >&2
     exit 65
 fi
+# The thread and sync glues are not among them: the handler answers what std
+# asks of a thread library itself, in native/aros/afsplus_bootthread.c, so
+# that it links no pthread library and carries no thread table.
 for glue in \
     aros_net_glue.c aros_fs_glue.c aros_process_glue.c \
-    aros_proc_glue.c aros_thread_glue.c aros_sync_glue.c aros_env_glue.c
+    aros_proc_glue.c aros_env_glue.c
 do
     require_file "$platform_glue_dir/$glue"
 done
@@ -279,10 +282,17 @@ echo "[aros-ffi] AROS AArch64 boot C library"
     -fno-builtin -I "$aros_include" -I "$aros_gen_include" \
     -I api -I native/aros -c native/aros/afsplus_bootposix.c \
     -o "$task_dir/bootposix-aarch64.o"
+# shellcheck disable=SC2086 -- profile and handler flags are separate words.
+"$aros_clang" --target="$aros_target" $aros_arch_flags \
+    $handler_cflags -std=gnu11 -Wall -Wextra -Werror -D__NOLIBBASE__ \
+    -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
+    -I api -I native/aros -c native/aros/afsplus_bootthread.c \
+    -o "$task_dir/bootthread-aarch64.o"
 
 echo "[aros-ffi] AROS AArch64 relocatable handler/staticlib link"
 "$aros_ld" -r "$task_dir/handler-aarch64.o" \
     "$task_dir/bootlibc-aarch64.o" "$task_dir/bootposix-aarch64.o" \
+    "$task_dir/bootthread-aarch64.o" \
     "$task_dir/packet-aarch64.o" "$task_dir/trackdisk-aarch64.o" \
     "$task_dir/claim-aarch64.o" \
     "$task_dir/control-aarch64.o" \
@@ -327,7 +337,7 @@ for source in afsplus_start afsplus_end; do
 done
 for glue in \
     aros_net_glue aros_process_glue aros_proc_glue \
-    aros_env_glue aros_thread_glue
+    aros_env_glue
 do
     # shellcheck disable=SC2086 -- the profile intentionally supplies separate flags.
     "$aros_clang" --target="$aros_codegen_target" $aros_arch_flags \
@@ -340,7 +350,7 @@ do
         -c "$platform_glue_dir/$glue.c" \
         -o "$task_dir/module/$glue.o"
 done
-for glue in aros_fs_glue aros_sync_glue; do
+for glue in aros_fs_glue; do
     # shellcheck disable=SC2086 -- the profile intentionally supplies separate flags.
     "$aros_clang" --target="$aros_codegen_target" $aros_arch_flags \
         -D__arm64__ -O2 \
@@ -361,6 +371,7 @@ PATH="$aros_tools:$PATH" COMPILER_PATH="$aros_crosstools/bin" \
     "$task_dir/module/afsplus_start.o" \
     "$task_dir/handler-aarch64.o" \
     "$task_dir/bootlibc-aarch64.o" "$task_dir/bootposix-aarch64.o" \
+    "$task_dir/bootthread-aarch64.o" \
     "$task_dir/packet-aarch64.o" \
     "$task_dir/trackdisk-aarch64.o" \
     "$task_dir/claim-aarch64.o" \
@@ -373,7 +384,7 @@ PATH="$aros_tools:$PATH" COMPILER_PATH="$aros_crosstools/bin" \
     -ldatatypes -lcybergraphics -lworkbench -licon -lintuition \
     -lgadtools -llayers -laros -lpartition -liffparse -lgraphics \
     -llocale -ldos -lutility -loop -llibinit -lautoinit \
-    -lposixc -lstdcio -lstdc -lexec -lpthread \
+    -lposixc -lstdcio -lstdc -lexec \
     -lclang_rt.builtins-aarch64 -Wl,--end-group
 if "$aros_nm" --undefined-only "$task_dir/afsplus-handler" \
     | grep -Eq '[^[:space:]]'; then

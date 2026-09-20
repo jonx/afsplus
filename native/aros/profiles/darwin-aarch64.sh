@@ -36,7 +36,10 @@ aros_glue_includes=${AFSPLUS_AROS_GLUE_INCLUDES:-"-I $aros_sdk/gen/include -I $a
 
 aros_lib_dirs=${AFSPLUS_AROS_LIB_DIRS:-"-L $aros_developer/lib -L $AROS_CROSSTOOLS/lib/generic"}
 aros_startup=${AFSPLUS_AROS_STARTUP:-"$aros_developer/lib/startup.o"}
-aros_module_libs=${AFSPLUS_AROS_MODULE_LIBS:---start-group -lstdc.static -lmui -lamiga -larossupport -lamiga -lcodesets -lkeymap -lexpansion -lcommodities -ldiskfont -lasl -lmuimaster -ldatatypes -lcybergraphics -lworkbench -licon -lintuition -lgadtools -llayers -laros -lpartition -liffparse -lgraphics -llocale -ldos -lutility -loop -llibinit -lautoinit -lposixc -lstdcio -lstdc -lexec -lpthread -lclang_rt.builtins-aarch64 --end-group}
+# No -lpthread: the handler makes no thread, and pthread.library's fixed
+# thread table is 1,841,328 bytes of .bss taken at load. What std asks of a
+# thread library is answered by native/aros/afsplus_bootthread.c.
+aros_module_libs=${AFSPLUS_AROS_MODULE_LIBS:---start-group -lstdc.static -lmui -lamiga -larossupport -lamiga -lcodesets -lkeymap -lexpansion -lcommodities -ldiskfont -lasl -lmuimaster -ldatatypes -lcybergraphics -lworkbench -licon -lintuition -lgadtools -llayers -laros -lpartition -liffparse -lgraphics -llocale -ldos -lutility -loop -llibinit -lautoinit -lposixc -lstdcio -lstdc -lexec -lclang_rt.builtins-aarch64 --end-group}
 aros_program_libs=${AFSPLUS_AROS_PROGRAM_LIBS:---start-group -lpthread -lposixc -lstdc -lstdcio -ldos -lexec -laros -lautoinit -llibinit -lutility -lamiga -larossupport --end-group -lclang_rt.builtins-aarch64}
 
 aros_collect_aros=${AFSPLUS_AROS_COLLECT_AROS:-"$aros_sdk/tools/collect-aros"}
