@@ -94,6 +94,9 @@ pub struct TreeMutationStats {
     pub staged_spill_reloads: u64,
     /// Maximum resident staged entries after enforcing the cache limit.
     pub max_resident_staged_nodes: u64,
+    /// Images encoded because their bytes were wanted, rather than as they
+    /// were staged. Zero where the decoded cache is switched off.
+    pub deferred_encodes: u64,
     /// Resident staged entries before eviction, including the admitted image.
     /// Decoding/encoding temporaries and caller-held mutation results are separate.
     pub max_staged_nodes_before_eviction: u64,
@@ -123,6 +126,7 @@ impl TreeMutationStats {
         self.max_resident_staged_nodes = self
             .max_resident_staged_nodes
             .max(other.max_resident_staged_nodes);
+        self.deferred_encodes += other.deferred_encodes;
         self.max_staged_nodes_before_eviction = self
             .max_staged_nodes_before_eviction
             .max(other.max_staged_nodes_before_eviction);
@@ -344,8 +348,7 @@ where
     };
     if new_empty_root {
         let node = context.track_node(TreeNode::leaf(spec.kind, spec.owner));
-        context.stage_node(root_lba, &node)?;
-        context.cache_decoded(root_lba, node, new_generation);
+        context.stage_node(root_lba, node)?;
         context.stats.nodes_allocated = 1;
     }
     let mut root = root_lba;
@@ -385,8 +388,7 @@ where
                     });
                     let lba = context.allocate_block()?;
                     context.stats.nodes_allocated += 1;
-                    context.stage_node(lba, &root_node)?;
-                    context.cache_decoded(lba, root_node, new_generation);
+                    context.stage_node(lba, root_node)?;
                     context.stats.root_splits += 1;
                     lba
                 };
@@ -410,6 +412,17 @@ where
         }
     }
     context.stats.final_nodes_written = context.writes.len() as u64;
+    // Everything still deferred is encoded now, while its decoded node is
+    // still here: the caller is handed bytes, as it always was.
+    let deferred: Vec<u64> = context
+        .writes
+        .iter()
+        .filter(|(_, image)| matches!(image.resident, Resident::Deferred))
+        .map(|(lba, _)| *lba)
+        .collect();
+    for lba in deferred {
+        context.materialize(lba)?;
+    }
     context.stats.max_live_decoded_nodes = context.decoded_residency.peak.get();
     context.decoded.clear();
     context.decoded_lru.clear();
@@ -418,7 +431,10 @@ where
     let writes = context
         .writes
         .into_iter()
-        .filter_map(|(lba, image)| image.resident.map(|block| (lba, block)))
+        .filter_map(|(lba, image)| match image.resident {
+            Resident::Bytes(block) => Some((lba, block)),
+            Resident::Deferred | Resident::Spilled => None,
+        })
         .collect();
     Ok(TreeMutation {
         root_lba: root,
@@ -526,8 +542,38 @@ impl Drop for TrackedNode {
 }
 
 struct StagedImage {
-    resident: Option<Vec<u8>>,
+    resident: Resident,
     last_used: u64,
+}
+
+/// What a staged block's image is at this moment.
+///
+/// A node is encoded once the bytes are wanted -- to spill it, to read it
+/// back through the image rather than the decoded cache, or to hand the
+/// writes to the caller -- and not once per operation of the batch that
+/// passes through it. A batch of 512 creates passes through the same leaf,
+/// its parent and the root some three times for every image it finally
+/// writes.
+///
+/// `Deferred` means the bytes are not made yet and the node is the batch's
+/// decoded node for this block. That cache is then load-bearing: nothing may
+/// drop a decoded node whose block is deferred without encoding it first,
+/// which [`MutationContext::materialize`] does. Where the decoded cache is
+/// switched off -- below sixteen staged pages, the constrained profiles --
+/// nothing is ever deferred and every image is encoded as it is staged.
+enum Resident {
+    /// The encoded block, in memory.
+    Bytes(Vec<u8>),
+    /// Not encoded yet; the block's decoded node holds it.
+    Deferred,
+    /// Nothing in memory: the image was spilled to its block.
+    Spilled,
+}
+
+impl Resident {
+    fn in_memory(&self) -> bool {
+        !matches!(self, Resident::Spilled)
+    }
 }
 
 #[derive(Clone)]
@@ -626,7 +672,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         // goes back to the decoded cache, whose bound -- not the tree height
         // -- decides how many pages a descent holds; where that cache is
         // switched off the page is dropped here and re-read on unwind.
-        self.cache_decoded(lba, node, generation);
+        self.cache_decoded(lba, node, generation)?;
         let replacement = self.upsert_node(
             child.reference.lba,
             Some(child_level),
@@ -741,7 +787,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             child.min_key = known_min.clone();
         }
         let child_level = node.level - 1;
-        self.cache_decoded(lba, node, generation);
+        self.cache_decoded(lba, node, generation)?;
         let edited = self.delete_node(
             child.reference.lba,
             Some(child_level),
@@ -773,7 +819,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                     child_range(&parent, sibling_index, &lower, &upper);
                 let sibling_desc = parent_children[sibling_index].clone();
                 drop(parent_children);
-                self.cache_decoded(lba, parent, parent_generation);
+                self.cache_decoded(lba, parent, parent_generation)?;
                 let (sibling_node, sibling_staged, _) = self.read_node(
                     sibling_desc.reference.lba,
                     Some(child_level),
@@ -866,15 +912,21 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         }
         let block = if is_staged {
             let access = self.next_access();
+            // A read through the image needs the bytes, so an image that is
+            // still deferred is encoded here.
+            self.materialize(lba)?;
             let resident = {
                 let image = self.writes.get_mut(&lba).ok_or_else(|| {
                     CoreError::Corrupt("staged tree membership changed during read".into())
                 })?;
-                if image.resident.is_some() {
+                if image.resident.in_memory() {
                     self.resident_lru.remove(&(image.last_used, lba));
                 }
                 image.last_used = access;
-                image.resident.clone()
+                match &image.resident {
+                    Resident::Bytes(block) => Some(block.clone()),
+                    Resident::Deferred | Resident::Spilled => None,
+                }
             };
             if let Some(block) = resident {
                 self.resident_lru.insert((access, lba));
@@ -892,7 +944,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                 self.writes
                     .get_mut(&lba)
                     .ok_or_else(|| CoreError::Corrupt("staged tree image disappeared".into()))?
-                    .resident = Some(block.clone());
+                    .resident = Resident::Bytes(block.clone());
                 self.resident_staged_nodes += 1;
                 self.resident_lru.insert((access, lba));
                 self.enforce_cache_limit()?;
@@ -981,9 +1033,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                 lba,
                 subtree_items: node.subtree_items,
             };
-            self.stage_node(lba, &node)?;
-            let generation = self.new_generation;
-            self.cache_decoded(lba, node, generation);
+            self.stage_node(lba, node)?;
             children.push(ChildDesc { min_key, reference });
         }
         Ok(Replacement { children, level })
@@ -1033,9 +1083,7 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                 lba,
                 subtree_items: node.subtree_items,
             };
-            self.stage_node(lba, &node)?;
-            let generation = self.new_generation;
-            self.cache_decoded(lba, node, generation);
+            self.stage_node(lba, node)?;
             replacement.push(ChildDesc { min_key, reference });
         }
         Ok(replacement)
@@ -1057,30 +1105,67 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         Ok(())
     }
 
-    fn stage_node(&mut self, lba: u64, node: &TreeNode) -> Result<(), CoreError> {
-        // Whatever the batch had decoded for this block is now an old image.
-        self.decoded_forget(lba);
-        let encoded = node
-            .encode(self.geo.block_size, self.new_generation)
-            .map_err(CoreError::Format)?;
+    /// Stages `node` as the image of block `lba` and gives it to the
+    /// decoded cache. The image is deferred where that cache keeps the node,
+    /// and encoded here where it does not, so a block is never staged
+    /// without a way to produce its bytes.
+    fn stage_node(&mut self, lba: u64, node: TrackedNode) -> Result<(), CoreError> {
+        // Whatever the batch had decoded for this block is now an old image,
+        // and so is whatever it staged: neither has to be encoded.
+        self.decoded_drop(lba);
+        let resident = if self.decoded_limit == 0 {
+            Resident::Bytes(
+                node.encode(self.geo.block_size, self.new_generation)
+                    .map_err(CoreError::Format)?,
+            )
+        } else {
+            Resident::Deferred
+        };
         let access = self.next_access();
         let previous = self.writes.insert(
             lba,
             StagedImage {
-                resident: Some(encoded),
+                resident,
                 last_used: access,
             },
         );
         if let Some(previous) = &previous {
-            if previous.resident.is_some() {
+            if previous.resident.in_memory() {
                 self.resident_lru.remove(&(previous.last_used, lba));
             }
         }
-        if previous.is_none_or(|image| image.resident.is_none()) {
+        if previous.is_none_or(|image| !image.resident.in_memory()) {
             self.resident_staged_nodes += 1;
         }
         self.resident_lru.insert((access, lba));
+        let generation = self.new_generation;
+        self.cache_decoded(lba, node, generation)?;
         self.enforce_cache_limit()?;
+        Ok(())
+    }
+
+    /// Encodes block `lba`'s image if it is still deferred, so that the
+    /// bytes exist. The node comes from the decoded cache, which holds it
+    /// for exactly as long as the image is deferred.
+    fn materialize(&mut self, lba: u64) -> Result<(), CoreError> {
+        if !matches!(
+            self.writes.get(&lba).map(|image| &image.resident),
+            Some(Resident::Deferred)
+        ) {
+            return Ok(());
+        }
+        let node = self
+            .decoded
+            .get(&lba)
+            .ok_or_else(|| CoreError::Corrupt("deferred tree image has no decoded node".into()))?;
+        let encoded = node
+            .node
+            .encode(self.geo.block_size, self.new_generation)
+            .map_err(CoreError::Format)?;
+        self.stats.deferred_encodes += 1;
+        if let Some(image) = self.writes.get_mut(&lba) {
+            image.resident = Resident::Bytes(encoded);
+        }
         Ok(())
     }
 
@@ -1106,11 +1191,19 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                 .resident_lru
                 .pop_first()
                 .ok_or_else(|| CoreError::Corrupt("staged cache accounting mismatch".into()))?;
-            let block = self
+            self.materialize(lba)?;
+            let block = match self
                 .writes
                 .get_mut(&lba)
-                .and_then(|image| image.resident.take())
-                .ok_or_else(|| CoreError::Corrupt("staged cache victim has no image".into()))?;
+                .map(|image| std::mem::replace(&mut image.resident, Resident::Spilled))
+            {
+                Some(Resident::Bytes(block)) => block,
+                _ => {
+                    return Err(CoreError::Corrupt(
+                        "staged cache victim has no image".into(),
+                    ))
+                }
+            };
             self.observe(crate::flight::EventKind::TreeSpillBegin, lba);
             if let Err(error) = self.dev.write_block(lba, &block) {
                 self.observe(crate::flight::EventKind::TreeIoFailed, lba);
@@ -1118,8 +1211,9 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             }
             self.observe(crate::flight::EventKind::TreeSpillComplete, lba);
             // The image left memory; let its decoded node go with it rather
-            // than keep a page the budget has just refused.
-            self.decoded_forget(lba);
+            // than keep a page the budget has just refused. It is already
+            // encoded, so nothing here needs it.
+            self.decoded_drop(lba);
             self.resident_staged_nodes -= 1;
             self.stats.staged_spill_writes += 1;
         }
@@ -1131,9 +1225,9 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
     }
 
     fn remove_staged(&mut self, lba: u64) -> Option<StagedImage> {
-        self.decoded_forget(lba);
+        self.decoded_drop(lba);
         let image = self.writes.remove(&lba)?;
-        if image.resident.is_some() {
+        if image.resident.in_memory() {
             self.resident_lru.remove(&(image.last_used, lba));
             self.resident_staged_nodes -= 1;
         }
@@ -1159,11 +1253,16 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
 
     /// Gives a decoded node to the batch, dropping the least recently used
     /// one when the cache is full. A zero bound drops the node here.
-    fn cache_decoded(&mut self, lba: u64, node: TrackedNode, generation: u64) {
+    fn cache_decoded(
+        &mut self,
+        lba: u64,
+        node: TrackedNode,
+        generation: u64,
+    ) -> Result<(), CoreError> {
         if self.decoded_limit == 0 {
-            return;
+            return Ok(());
         }
-        self.decoded_forget(lba);
+        self.decoded_drop(lba);
         let last_used = self.next_access();
         self.decoded.insert(
             lba,
@@ -1178,13 +1277,25 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
             let Some((_, victim)) = self.decoded_lru.pop_first() else {
                 break;
             };
+            // A victim whose image is still deferred is encoded before its
+            // node goes: the image must not lose its only copy.
+            self.materialize(victim)?;
             self.decoded.remove(&victim);
         }
+        Ok(())
     }
 
-    /// Forgets a block's decoded node, because the block is leaving the tree
-    /// or its image is about to be replaced.
-    fn decoded_forget(&mut self, lba: u64) {
+    /// Forgets a block's decoded node, encoding its image first where that
+    /// image is still deferred.
+    fn decoded_forget(&mut self, lba: u64) -> Result<(), CoreError> {
+        self.materialize(lba)?;
+        self.decoded_drop(lba);
+        Ok(())
+    }
+
+    /// Forgets a block's decoded node without encoding anything, for the
+    /// callers that are discarding the staged image with it.
+    fn decoded_drop(&mut self, lba: u64) {
         if let Some(previous) = self.decoded.remove(&lba) {
             self.decoded_lru.remove(&(previous.last_used, lba));
         }
@@ -1194,17 +1305,17 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
     /// decoded for it: a block this transaction released can come back.
     fn allocate_block(&mut self) -> Result<u64, CoreError> {
         let lba = self.tx.allocate_tree_block(self.dev)?;
-        self.decoded_forget(lba);
+        self.decoded_forget(lba)?;
         Ok(lba)
     }
 
     fn retire_block(&mut self, lba: u64) -> Result<(), CoreError> {
-        self.decoded_forget(lba);
+        self.decoded_forget(lba)?;
         self.tx.retire_tree_block(self.dev, lba)
     }
 
     fn release_block(&mut self, lba: u64) -> Result<(), CoreError> {
-        self.decoded_forget(lba);
+        self.decoded_forget(lba)?;
         self.tx.release_tree_block(self.dev, lba)
     }
 }
@@ -1805,6 +1916,102 @@ mod tests {
             Some(surviving_value)
         );
         tx2.finish(&mut dev).unwrap();
+    }
+
+    /// A batch encodes an image once, not once per operation that passes
+    /// through it, and a profile too small for a decoded cache encodes every
+    /// image as it is staged, as it always did.
+    #[test]
+    fn a_batch_encodes_an_image_once_and_a_tiny_profile_encodes_eagerly() {
+        let geo = afsplus_format::geometry::Geometry {
+            block_size: 4096,
+            total_blocks: 8192,
+            region_size: 8192,
+        };
+        let spec = TreeSpec {
+            kind: TreeKind::ObjectMap,
+            owner: 0,
+            max_generation: 1,
+        };
+        let entries: Vec<_> = (0..512u64)
+            .map(|ordinal| (wide_key(ordinal), vec![ordinal as u8; 24]))
+            .collect();
+        let operations: Vec<_> = entries
+            .iter()
+            .map(|(key, value)| TreeOperation::Upsert { key, value })
+            .collect();
+
+        // 256 staged pages give the batch a decoded cache; 8 give it none.
+        for (cache_pages, deferred) in [(256usize, true), (8, false)] {
+            let mut dev = MemoryBackend::new(4096, 8192);
+            dev.write_block(
+                100,
+                &TreeNode::leaf(TreeKind::ObjectMap, 0)
+                    .encode(4096, 1)
+                    .unwrap(),
+            )
+            .unwrap();
+            let mut pool = ReservedTreePool::new(100..4000, &[100], &[]).unwrap();
+            let mutation = mutate_many_with_cache_limit(
+                &mut dev,
+                &geo,
+                &mut pool,
+                100,
+                spec,
+                2,
+                &operations,
+                cache_pages,
+            )
+            .unwrap();
+            if deferred {
+                // One encode per image the batch ends with, give or take the
+                // images it read back or spilled, against one per operation.
+                assert!(
+                    mutation.stats.deferred_encodes
+                        <= mutation.stats.final_nodes_written + mutation.stats.staged_spill_writes,
+                    "{} encodes for {} images",
+                    mutation.stats.deferred_encodes,
+                    mutation.stats.final_nodes_written
+                );
+                assert!(
+                    mutation.stats.deferred_encodes < operations.len() as u64,
+                    "the batch encoded once per operation"
+                );
+            } else {
+                assert_eq!(mutation.stats.deferred_encodes, 0);
+            }
+            for (lba, block) in &mutation.writes {
+                dev.write_block(*lba, block).unwrap();
+            }
+            let summary = validate_tree(
+                &mut dev,
+                &geo,
+                mutation.root_lba,
+                TreeSpec {
+                    max_generation: 2,
+                    ..spec
+                },
+            )
+            .unwrap();
+            assert_eq!(summary.items, 512);
+            for (key, value) in &entries {
+                assert_eq!(
+                    lookup(
+                        &mut dev,
+                        &geo,
+                        mutation.root_lba,
+                        TreeSpec {
+                            max_generation: 2,
+                            ..spec
+                        },
+                        key,
+                    )
+                    .unwrap()
+                    .0,
+                    Some(value.clone())
+                );
+            }
+        }
     }
 
     #[test]
