@@ -98,7 +98,7 @@ pub fn lookup<D: BlockDevice>(
     let mut lower: Option<Vec<u8>> = None;
     let mut upper: Option<Vec<u8>> = None;
     let mut visited = BTreeSet::new();
-    let mut buf = vec![0u8; geo.block_size];
+    let mut buf = crate::scratch::Block::take(geo.block_size);
     let mut stats = TreeLookupStats {
         pages_read: 0,
         peak_page_buffers: 2,
@@ -169,7 +169,7 @@ pub fn lookup_floor<D: BlockDevice>(
     let mut lower: Option<Vec<u8>> = None;
     let mut upper: Option<Vec<u8>> = None;
     let mut visited = BTreeSet::new();
-    let mut buf = vec![0u8; geo.block_size];
+    let mut buf = crate::scratch::Block::take(geo.block_size);
     let mut stats = TreeLookupStats {
         pages_read: 0,
         peak_page_buffers: 2,
@@ -383,7 +383,7 @@ fn read_range_node<D: BlockDevice>(
         return Err(CoreError::Corrupt(format!("tree cycle at block {lba}")));
     }
     let result = (|| {
-        let mut buf = vec![0u8; geo.block_size];
+        let mut buf = crate::scratch::Block::take(geo.block_size);
         dev.read_block(lba, &mut buf)?;
         let (node, generation) = decode_node(dev, lba, &buf)?;
         validate_node_identity(&node, generation, spec, expected_level, lba)?;
@@ -525,7 +525,7 @@ where
         return Err(CoreError::Corrupt(format!("tree cycle at block {lba}")));
     }
     let result = (|| {
-        let mut buf = vec![0u8; geo.block_size];
+        let mut buf = crate::scratch::Block::take(geo.block_size);
         dev.read_block(lba, &mut buf)?;
         let (node, generation) = decode_node(dev, lba, &buf)?;
         validate_node_identity(&node, generation, spec, expected_level, lba)?;
@@ -707,7 +707,7 @@ where
             "tree cycle or duplicate child at block {lba}"
         )));
     }
-    let mut buf = vec![0u8; geo.block_size];
+    let mut buf = crate::scratch::Block::take(geo.block_size);
     dev.read_block(lba, &mut buf)?;
     let (node, generation) = TreeNode::decode(&buf)
         .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;

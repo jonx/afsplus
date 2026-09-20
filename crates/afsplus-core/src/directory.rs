@@ -66,7 +66,7 @@ pub fn validate_root<D: BlockDevice>(
     max_generation: u64,
 ) -> Result<(), CoreError> {
     crate::tree::check_tree_lba(geo, root_lba)?;
-    let mut block = vec![0u8; geo.block_size];
+    let mut block = crate::scratch::Block::take(geo.block_size);
     dev.read_block(root_lba, &mut block)?;
     let (node, generation) = TreeNode::decode(&block)
         .map_err(|error| CoreError::Corrupt(format!("directory root {root_lba}: {error}")))?;

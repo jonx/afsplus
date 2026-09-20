@@ -37,6 +37,7 @@ pub mod mount;
 pub mod name_key;
 pub mod object_map;
 pub mod reclaim;
+mod scratch;
 pub mod shared_extents;
 pub mod snapshot;
 pub mod tree;
