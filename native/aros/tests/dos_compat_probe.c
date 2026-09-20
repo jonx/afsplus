@@ -985,6 +985,11 @@ static int wait_for_record(void)
  * One round of the operations a handler is asked for all day, each one
  * paired with what releases it. Nothing here is meant to fail.
  */
+/* The negative control of STEADY: "STEADY <rounds> LEAK" keeps one lock on
+ * the drawer per round and never gives it back, so the handler's heap grows
+ * at every reading and the gate has to say so. */
+static int steady_leak;
+
 static int steady_round(void)
 {
     struct FileInfoBlock *fib;
@@ -994,6 +999,8 @@ static int steady_round(void)
     BPTR file;
     UBYTE buffer[sizeof(content)];
 
+    if (steady_leak && Lock(DRAWER, SHARED_LOCK) == BNULL)
+        return fail("STEADY leak lock", DOSFALSE);
     if (!write_file(NOTE, MODE_NEWFILE))
         return fail("STEADY create", DOSFALSE);
     file = Open(NOTE, MODE_OLDFILE);
@@ -1113,6 +1120,8 @@ static int probe_steady(const char *rounds_text)
     ULONG after = 0;
     ULONG orphans_warm = 0;
     ULONG orphans_done = 0;
+    ULONG batch;
+    uint64_t held[4] = { 0, 0, 0, 0 };
     struct AfsplusArosCounters warm;
     struct AfsplusArosCounters done;
     struct MsgPort *port;
@@ -1149,10 +1158,21 @@ static int probe_steady(const char *rounds_text)
      * its open window and the deletes waiting for idle time, which the flush
      * gives back. */
     before = (ULONG)AvailMem(MEMF_ANY);
-    for (round = 0; status == RETURN_OK && round < rounds; round++)
-        status = steady_round();
-    if (status == RETURN_OK)
-        status = steady_heap(port, &done);
+    /* Four readings, the warm one and three more a batch apart. What the
+     * mount holds at a flush point moves by a kilobyte or two with where
+     * the window's bound falls among the rounds, up on one machine and
+     * down on another with the same code: 1,712 bytes fewer on Hosted and
+     * 1,600 more under QEMU, the peak flat on both. A leak grows at every
+     * reading; that does not. */
+    held[0] = warm.heap_bytes;
+    for (batch = 1; status == RETURN_OK && batch < 4; batch++)
+    {
+        for (round = 0; status == RETURN_OK && round < rounds; round++)
+            status = steady_round();
+        if (status == RETURN_OK)
+            status = steady_heap(port, &done);
+        held[batch] = done.heap_bytes;
+    }
     orphans_done = steady_orphans(port);
     after = (ULONG)AvailMem(MEMF_ANY);
     DeleteFile(DRAWER);
@@ -1169,9 +1189,18 @@ static int probe_steady(const char *rounds_text)
      * warm-up, further rounds hold nothing more and need no more at once,
      * within the allowance, so the peak is a property of the operations and
      * not of how often they run. */
-    if (done.heap_bytes > warm.heap_bytes + STEADY_HEAP_ALLOWANCE)
-        return fail("heap held over the rounds",
-            (SIPTR)(done.heap_bytes - warm.heap_bytes));
+    Printf("[AFSPLUS-DOS] STEADY held %lu %lu %lu %lu\n", (ULONG)held[0],
+        (ULONG)held[1], (ULONG)held[2], (ULONG)held[3]);
+    /* A leak: the lower of the last two readings above the higher of the
+     * first two. Three bytes a round over batches of a hundred is past the
+     * allowance; a reading that swings and comes back is not. */
+    {
+        uint64_t early = held[0] > held[1] ? held[0] : held[1];
+        uint64_t late = held[2] < held[3] ? held[2] : held[3];
+
+        if (late > early + STEADY_HEAP_ALLOWANCE)
+            return fail("heap held over the rounds", (SIPTR)(late - early));
+    }
     if (done.heap_peak_bytes > warm.heap_peak_bytes + STEADY_HEAP_ALLOWANCE)
         return fail("heap peak grew over the rounds",
             (SIPTR)(done.heap_peak_bytes - warm.heap_peak_bytes));
@@ -1193,7 +1222,10 @@ int main(int argc, char **argv)
     int status;
 
     if (argc > 2 && strcmp(argv[1], "STEADY") == 0)
+    {
+        steady_leak = argc > 3 && strcmp(argv[3], "LEAK") == 0;
         return probe_steady(argv[2]);
+    }
     if (argc > 1 && strcmp(argv[1], "RECORD-HOLDER") == 0)
         return hold_record();
     if (argc > 1 && strcmp(argv[1], "RECORD-WAITER") == 0)

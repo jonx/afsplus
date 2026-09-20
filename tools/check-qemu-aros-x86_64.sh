@@ -27,6 +27,9 @@ set -u
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 output=${AFSPLUS_QEMU_OUTPUT:-"$repo_root/build/qemu-aros-x86_64"}
 control=${AFSPLUS_QEMU_CONTROL:-none}
+# leak: the probe keeps a lock per round, and STEADY has to see the heap grow.
+steady_mode=
+if [ "$control" = leak ]; then steady_mode=" LEAK"; fi
 iso=${AFSPLUS_QEMU_ISO:-$(ls "$HOME"/aros-native/AROS-*-pc-x86_64-boot-iso/aros-pc-x86_64.iso 2>/dev/null | tail -1)}
 boot_timeout=${AFSPLUS_QEMU_TIMEOUT:-900}
 # The Control line of the DOSDriver. COMMIT stays at its default of five
@@ -60,8 +63,8 @@ trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
 
 case "$control" in
-none|blank) ;;
-*) echo "AFSPLUS_QEMU_CONTROL must be none or blank" >&2; exit 64 ;;
+none|blank|leak) ;;
+*) echo "AFSPLUS_QEMU_CONTROL must be none, blank or leak" >&2; exit 64 ;;
 esac
 [ ! -e "$output" ] || {
     echo "[qemu-x86_64] refusing to replace existing result: $output" >&2
@@ -186,7 +189,7 @@ step() {  # step <name> <command...>
     step alpha0 AFSPlusAlpha0Probe
     step tour AFSPlusTour AFSPLUS19:
     step dos AFSPlusDosProbe
-    step steady AFSPlusDosProbe STEADY 100
+    step steady AFSPlusDosProbe STEADY 100$steady_mode
     step list List AFSPLUS19: ALL
     step packets AFSPlusInfo AFSPLUS19: PACKETS
     step driver AFSPlusDriverProbe ata.device 1 16 8 WRITE
@@ -331,12 +334,20 @@ fi
 mkdir -p "$(dirname -- "$output")"
 mv "$result" "$output"
 if [ "$fails" -ne 0 ]; then
-    if [ "$control" = blank ]; then
+    if [ "$control" = leak ]; then
+        echo "[qemu-x86_64] CONTROL FAIL, as it must be when STEADY is the failure:"
+        grep -h "heap held\|FAIL STEADY" "$output"/* 2>/dev/null | head -3
+    elif [ "$control" = blank ]; then
         echo "[qemu-x86_64] CONTROL FAIL, as it must be: a zeroed image is not"
         echo "[qemu-x86_64] an AFS+ volume and the gate says so. Evidence: $output"
     else
         echo "[qemu-x86_64] FAIL: $output"
     fi
+    exit 1
+fi
+if [ "$control" = leak ]; then
+    echo "[qemu-x86_64] CONTROL PASSED, which is the defect: a lock leaked per" >&2
+    echo "[qemu-x86_64] round and STEADY saw nothing." >&2
     exit 1
 fi
 if [ "$control" = blank ]; then
