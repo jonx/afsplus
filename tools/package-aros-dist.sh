@@ -60,7 +60,7 @@ target_name=$(basename -- "$aros_rust_target_json" .json)
 archive=${AFSPLUS_AROS_RUST_ARCHIVE:-"${CARGO_TARGET_DIR:-$repo_root/target}/$target_name/release/libafsplus_aros_ffi.a"}
 
 for needed in "$aros_cc" "$aros_collect_aros" "$aros_genmodule" "$aros_nm" \
-    "$aros_abi_audit"
+    "$aros_objcopy" "$aros_abi_audit"
 do
     [ -x "$needed" ] || {
         echo "package-aros-dist: missing executable: $needed" >&2
@@ -259,6 +259,18 @@ if [ "${AFSPLUS_AROS_DIST_PROBES:-0}" = 1 ]; then
         native/aros/client/afsplus_client.c
     program_dir=$staging/C
 fi
+
+# The AROS ELF loader reads a module's symbol table to resolve its
+# relocations (rom/dos/internalloadseg_elf.c: relocate() takes sym->shindex
+# and sym->value, and the symbol's name only for a debug or error line), and
+# it loads the whole of .symtab and .strtab into memory to do it. A local
+# symbol no relocation names is read by nobody, so it is discarded: 732
+# symbols, 140,784 bytes off the package and off what the loader holds while
+# it relocates. The global symbols stay, because the loader's error messages,
+# the checks above and genmodule's entry points want them. The audit below
+# runs on the stripped file, so what is audited is what ships.
+echo "[aros-dist] $profile_id: discard the local symbols"
+"$aros_objcopy" --discard-all "$staging/L/afsplus-handler"
 
 echo "[aros-dist] $profile_id: ABI audit"
 "$aros_abi_audit" --objdump "$aros_objdump" "$staging/L/afsplus-handler" \

@@ -57,6 +57,7 @@ aros_collect_aros=${AFSPLUS_AROS_COLLECT_AROS:-"$HOME/aros-native/collect-aros-x
 aros_genmodule=${AFSPLUS_AROS_GENMODULE:-"$HOME/aros-build/bin/darwin-aarch64/tools/genmodule"}
 aros_nm=${AFSPLUS_AROS_NM:-"$LLVM/bin/llvm-nm"}
 aros_objdump=${AFSPLUS_AROS_OBJDUMP:-"$LLVM/bin/llvm-objdump"}
+aros_objcopy=${AFSPLUS_AROS_OBJCOPY:-"$LLVM/bin/llvm-objcopy"}
 
 aros_rust_toolchain=${AFSPLUS_AROS_RUST_TOOLCHAIN:-nightly-2026-06-27}
 aros_rust_target_json=${AFSPLUS_AROS_RUST_TARGET_JSON:-"$repo_root/native/aros/x86_64-unknown-aros.json"}

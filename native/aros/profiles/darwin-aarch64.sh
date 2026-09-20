@@ -46,6 +46,7 @@ aros_collect_aros=${AFSPLUS_AROS_COLLECT_AROS:-"$aros_sdk/tools/collect-aros"}
 aros_genmodule=${AFSPLUS_AROS_GENMODULE:-"$aros_sdk/tools/genmodule"}
 aros_nm=${AFSPLUS_AROS_NM:-"$AROS_CROSSTOOLS/bin/llvm-nm"}
 aros_objdump=${AFSPLUS_AROS_OBJDUMP:-"$AROS_CROSSTOOLS/bin/llvm-objdump"}
+aros_objcopy=${AFSPLUS_AROS_OBJCOPY:-"$AROS_CROSSTOOLS/bin/llvm-objcopy"}
 
 aros_rust_toolchain=${AFSPLUS_AROS_RUST_TOOLCHAIN:-nightly-2026-06-27}
 aros_rust_target_json=${AFSPLUS_AROS_RUST_TARGET_JSON:-"${MACAROS_ROOT:-$repo_root/../Macaros}/hosted/rust/aarch64-unknown-aros.json"}
