@@ -11,6 +11,17 @@ delete 0.69 against 0.10 s), with 371,007 library calls, 8,056 device
 flushes, 48,444 block writes and 1.33 million cache reads for 12,980
 operations.
 
+<!-- toc -->
+
+- [What the measurements say](#what-the-measurements-say)
+- [What each phase costs, after lot A](#what-each-phase-costs-after-lot-a)
+- [The lots, in order](#the-lots-in-order)
+- [How a lot is done](#how-a-lot-is-done)
+- [Where it stands on 2026-09-19](#where-it-stands-on-2026-09-19)
+- [Where the delete phase's flushes went, on 2026-09-20](#where-the-delete-phases-flushes-went-on-2026-09-20)
+
+<!-- /toc -->
+
 ## What the measurements say
 
 The host harness `crates/afsplus-aros-ffi/tests/zz_profile.rs` replays the
@@ -143,7 +154,45 @@ File System in the same boot (create 0.23 against 0.43, list 0.11 against
 | rename | 6 | 10 | 1.1 |
 | delete | 4 | 910 | 2.2 |
 
-What is left, by measurement: delete still commits 455 times for 2,650
-operations on a 64 MiB volume, the room floor again; the object-map batch
-encodes the same leaf once per operation (lot B's report); and G, the pool
-allocator for the AROS build.
+What is left, by measurement: the object-map batch encodes the same leaf once
+per operation (lot B's report), and G, the pool allocator for the AROS build.
+
+## Where the delete phase's flushes went, on 2026-09-20
+
+Lot D2. The harness builds the benchmark's own tree on a 64 MiB disk, ten
+trees of eight drawers of 32 files with the sizes of `afsplus_bench.c`, and
+deletes it as the benchmark does, one `afsplus_aros_commit_due` after every
+operation with the handler's 2 ms clock
+(`crates/afsplus-aros-ffi/tests/zz_profile.rs`, ignored test
+`delete_tree_phase`). Every flush is charged to the call that caused it, and
+the checkpoints come from the flight recorder, so a line also says how many
+transactions a call site published. The host reads 920 flushes where the
+hosted benchmark reads 910: the same phase.
+
+| Call site | Calls | Flushes before | Checkpoints before | Flushes after | Checkpoints after |
+|---|---|---|---|---|---|
+| delete file | 2,560 | 10 | 5 | 10 | 5 |
+| remove drawer | 80 | 800 | 400 | 0 | 0 |
+| remove tree | 10 | 100 | 50 | 0 | 0 |
+| remove root | 1 | 10 | 5 | 0 | 0 |
+| `commit_due` tick | 2,651 | 0 | 0 | 0 | 0 |
+| whole phase | 2,651 | 920 | 460 | 10 | 5 |
+
+The files were never the cost: 2,560 deletes are the 5 commits of the window
+bound and nothing else. Every directory removal cost five checkpoints and ten
+flushes: the open window committed first, then the removal's own transaction,
+then three maintenance transactions behind it. Removing a directory now joins
+the window, as making one did in lot I, and the phase costs the window
+commits alone: 920 flushes and 6,568 block writes become 10 and 2,891.
+
+The room floor was the other suspect and the table clears it for this phase:
+the volume never comes near it, and neither the deletes nor the `commit_due`
+ticks spend anything on cleanup. Where it is reached it was still
+disproportionate, and a second harness test measures that on its own
+(`room_floor_loop`: a volume filled to the floor, then a delete-and-create
+loop that never goes idle). On a 64 MiB volume it costs 0.031 checkpoints per
+operation with the old floor of an eighth of the volume and 0.019 with the
+floor at what the next window can need. On a 16 MiB volume the same loop
+costs 3 checkpoints per operation either way, because there it is not the
+floor: it is the 1,024 blocks of headroom an operation keeps free before it
+writes, on a volume with 542 blocks free.

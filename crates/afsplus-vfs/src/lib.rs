@@ -413,12 +413,16 @@ pub const DELAYED_WINDOW_OPS_MAX: u32 = 512;
 /// a mount after a crash resumes, not memory.
 pub const DELAYED_ORPHANS_MAX: u64 = 4_096;
 
-/// Blocks a delayed mount keeps available after a commit while deleted
-/// space waits for idle time: an eighth of the volume, and at least twice
-/// what a full window of deletes takes, which is about a block each. A
-/// volume smaller than eight such windows cleans at every commit.
-fn delayed_room_blocks(total_blocks: u64) -> u64 {
-    (total_blocks / 8).max(2 * u64::from(DELAYED_WINDOW_OPS_MAX))
+/// Blocks a delayed mount keeps available after a commit while deleted space
+/// waits for idle time: what the next window can need, and no more. A full
+/// window takes about a block per operation, and the commit that publishes it
+/// takes the metadata headroom [`keep_room`] already estimates. The floor was
+/// an eighth of the volume, which is not a property of the next window at
+/// all: on a volume held near it that turned every commit into a chain of
+/// cleanup commits, and on a large volume it asked for gigabytes. A volume
+/// smaller than this cleans at every commit, as it did before.
+fn delayed_room_blocks() -> u64 {
+    ROOM_FOR_METADATA_BLOCKS + u64::from(DELAYED_WINDOW_OPS_MAX)
 }
 
 /// Orphan cleanups, and reclaim steps, one idle tick of a delayed mount runs.
@@ -626,7 +630,7 @@ impl<D: BlockDevice> Vfs<D> {
                 }
             }
         }
-        let room = delayed_room_blocks(self.volume.ident().total_blocks);
+        let room = delayed_room_blocks();
         while self.volume.available_blocks() < room {
             // Orphans first: cleaning them is what fills the reclaim queue.
             // A batch per turn, so that a volume permanently at its floor

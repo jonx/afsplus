@@ -138,6 +138,30 @@ and the next fsync commits it as a checkpoint, which is decision 5; that is
 not a format change. The same phase now costs 10 flushes and 5 checkpoints in
 all, and 91 drawer removals cost nothing beyond the window commits.
 
+**Amendment, 2026-09-20 (the room floor is what the next window needs).**
+Decision 9 has a commit clean until an eighth of the volume is available, so
+that a volume that is never idle still has a bound and the next commit has
+room. An eighth of the volume is not a property of the next window: on a
+large volume it asks for gigabytes back before the operation that needs them
+exists, and on a volume held near it every commit became a chain of cleanup
+commits. The floor is now what the next window can need and no more: a full
+window of operations takes about a block each, 512 blocks, and the commit
+that publishes it takes the metadata headroom an operation already keeps
+free, 1,024 blocks, so the floor is 1,536 blocks whatever the volume's size.
+The guarantee of decision 9 is unchanged and is now stated by the number
+itself: after every commit the volume has at least a whole window's
+allocations plus a commit's headroom available, so a mount that is never idle
+cannot run out of space in the commit of its own deletes, and the bound on
+waiting deletions, 4,096 objects, is untouched. A volume too small to hold
+that much free space cleans at every commit, as it did before. Measured with
+a delete-and-create loop that never goes idle on a 64 MiB volume held at the
+floor: 0.031 to 0.019 checkpoints and 0.062 to 0.038 device flushes per
+operation. On a 16 MiB volume the same loop is unchanged at 3 checkpoints per
+operation, and the measurement says why: there it is the room an operation
+keeps before it writes, not the floor behind the commit, and 1,024 blocks of
+headroom on a volume with 542 free is the volume being genuinely short of
+space rather than work being wasted.
+
 ## Consequences
 
 - An unprotected crash or power cut on AROS loses up to the maximum age of

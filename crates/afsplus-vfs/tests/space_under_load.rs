@@ -107,3 +107,75 @@ fn a_write_can_use_the_space_of_a_file_deleted_before_it() {
         "and it is on the volume"
     );
 }
+
+/// ADR-121 decision 9 with the post-commit floor of lot D2: the floor is what
+/// the next window can need, not an eighth of the volume. A volume that is
+/// never idle must still find room in its own delete commits, so this loop
+/// deletes and remakes files on a small volume with a clock that never sits
+/// still long enough for an idle tick. A refusal for want of space here
+/// would mean the commit that returns the space could not run.
+#[test]
+fn a_never_idle_delete_and_create_loop_keeps_finding_room() {
+    use afsplus_vfs::Durability;
+
+    let mut vfs = volume();
+    vfs.set_inline_maintenance(true);
+    vfs.set_durability(Durability::DELAYED).unwrap();
+    // Two milliseconds an operation, as the AROS handler's clock moves.
+    let mut millis: i64 = 1_000_000;
+    let mut clock = || {
+        millis += 2;
+        Timespec {
+            seconds: millis / 1_000,
+            nanoseconds: (millis % 1_000) as u32 * 1_000_000,
+        }
+    };
+
+    // Filled in files of 16 KiB until the volume refuses, so the loop below
+    // runs where the room floor governs.
+    let piece = content(7, 16 * 1024);
+    let mut files = 0usize;
+    loop {
+        let now = clock();
+        let name = format!("f{files:04}");
+        let full = match vfs.create_file(OBJECT_ROOT, &name, now) {
+            Ok(id) => {
+                let handle = vfs.open_file(id, AccessMode::WriteOnly).unwrap();
+                let full = vfs.write(handle, 0, &piece, now).is_err();
+                vfs.close(handle).unwrap();
+                full
+            }
+            Err(_) => true,
+        };
+        if full {
+            let _ = vfs.unlink_file(OBJECT_ROOT, &name, clock());
+            break;
+        }
+        vfs.commit_if_due(clock()).unwrap();
+        files += 1;
+        assert!(files < 100_000, "the volume never filled");
+    }
+    vfs.sync_filesystem().unwrap();
+    assert!(files > 16, "only {files} files fitted");
+
+    for round in 0..4 {
+        for file in 0..files {
+            let name = format!("f{file:04}");
+            let now = clock();
+            vfs.unlink_file(OBJECT_ROOT, &name, now)
+                .unwrap_or_else(|error| panic!("round {round} delete {name}: {error:?}"));
+            vfs.commit_if_due(clock()).unwrap();
+            let now = clock();
+            let id = vfs
+                .create_file(OBJECT_ROOT, &name, now)
+                .unwrap_or_else(|error| panic!("round {round} create {name}: {error:?}"));
+            let handle = vfs.open_file(id, AccessMode::WriteOnly).unwrap();
+            vfs.write(handle, 0, &piece, now)
+                .unwrap_or_else(|error| panic!("round {round} write {name}: {error:?}"));
+            vfs.close(handle).unwrap();
+            vfs.commit_if_due(clock()).unwrap();
+        }
+    }
+    vfs.sync_filesystem().unwrap();
+    assert_eq!(read_file(&mut vfs, "f0000"), piece);
+}
