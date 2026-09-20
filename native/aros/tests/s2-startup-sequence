@@ -48,5 +48,9 @@ C:Run <NIL: >NIL: QUIET SYS:Utilities/Clock
 C:Wait 1
 C:Run <NIL: >NIL: C:NewShell "CON:130/300/1220/460/AROS booted from AFS+/CLOSE" FROM S:AFSPlus-Tour
 C:Wait 4
+; The commit policy SYS: runs under, a few seconds into the boot: a mount the
+; boot scan made has no Control string and no timer.device yet, so it starts
+; SYNC and takes the delayed policy once it has the clock.
+C:AFSPlusInfo SYS: COMMIT >MacRW:s2-commit-sys.out
 C:Echo afsplus >MacRW:done
 C:EndCLI >NIL:

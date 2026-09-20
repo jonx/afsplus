@@ -20,7 +20,10 @@
 # booted again and must reach the Startup-Sequence on AFS+, and that boot
 # copies every marker out for the host to judge (tools/s3-markers.py): a
 # marker claimed flushed before the cut must be there and byte for byte the
-# same, one only written may be there or not but never half written. The
+# same, one only written may be there or not but never half written -- and
+# since the boot mount now takes the delayed commit policy once it has a
+# clock (native/aros/afsplus_handler.c), a marker only closed really can be
+# lost in a cut, which is the case this clause already allowed. The
 # partition must check clean after the cut, and hold no pending log records
 # after the mount that follows it. Boot time is recorded per round: the S3
 # leak clause fails a run whose last three boots each take more than twice

@@ -15,8 +15,17 @@
 # The boot scan reads the GPT through partition.library, so it is a boot
 # module too.
 #
+# The boot mount is made before the handler can be given a clock, so it starts
+# SYNC and asks for timer.device again while it serves packets. The gate reads
+# the policy SYS: runs under a few seconds into the boot and requires
+# "delayed": a system volume that commits every change separately pays a
+# device flush per operation on Native.
+#
 #   AFSPLUS_S2_OUTPUT   where the result goes (default build/hosted-aros-s2)
 #   AFSPLUS_S2_TIMEOUT  seconds a boot may take (default 180)
+#   AFSPLUS_S2_COMMIT_CONTROL=1  negative control: build the handler without
+#                       that retry (-DAFSPLUS_AROS_COMMIT_RETRY=0). SYS: then
+#                       stays SYNC and the gate must fail here.
 
 set -eu
 
@@ -27,6 +36,7 @@ aros_tree="$aros_build/bin/darwin-aarch64/AROS"
 boot_conf="$aros_tree/boot/darwin/AROSBootstrap.conf"
 control="$macaros_root/graft/aros-ctl"
 timeout=${AFSPLUS_S2_TIMEOUT:-180}
+commit_control=${AFSPLUS_S2_COMMIT_CONTROL:-0}
 output=${AFSPLUS_S2_OUTPUT:-"$repo_root/build/hosted-aros-s2"}
 work=$(mktemp -d "${TMPDIR:-/tmp}/afsplus-s2.XXXXXX")
 package="$work/package"
@@ -97,6 +107,12 @@ fi
 
 mkdir "$result"
 cd "$repo_root"
+
+if [ "$commit_control" = 1 ]; then
+    echo "[hosted-s2] negative control: the handler never retries timer.device"
+    AFSPLUS_AROS_HANDLER_CFLAGS="${AFSPLUS_AROS_HANDLER_CFLAGS:-} -DAFSPLUS_AROS_COMMIT_RETRY=0"
+    export AFSPLUS_AROS_HANDLER_CFLAGS
+fi
 
 echo "[hosted-s2] build a fresh qualified package"
 AFSPLUS_AROS_PACKAGE_OUTPUT="$package" tools/package-aros-alpha0.sh
@@ -193,6 +209,19 @@ for tour_step in volume clone watch attribute; do
         exit 1
     }
 done
+
+# The boot volume must group its changes: it is the one mount nothing can
+# give a Control string, and the one that pays most for committing each
+# change on its own.
+commit_line=$(cat "$result/s2/s2-commit-sys.out" 2>/dev/null || true)
+echo "[hosted-s2] SYS: $commit_line"
+case "$commit_line" in
+    "commit delayed "[1-9]*) ;;
+    *)
+        echo "[hosted-s2] SYS: does not run delayed commit: $commit_line" >&2
+        exit 1
+        ;;
+esac
 
 echo "[hosted-s2] the same boot without the AFS+ handler module"
 remove_module_lines

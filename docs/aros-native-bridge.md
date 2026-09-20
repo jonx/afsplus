@@ -504,8 +504,16 @@ for no commit, as the Fast File System does not flush on a close either, so
 a program that needs its bytes on the disk calls `Flush()` or fsyncs the
 handle. A crash loses at most the waiting changes, whole and in order. `COMMIT=SYNC`
 makes every change durable before its packet is answered. A volume without
-the intent log's data updates, or a handler without its timer, stays `SYNC`
-unless the string asked for a delay, which then fails the mount.
+the intent log's data updates stays `SYNC` unless the string asked for a
+delay, which then fails the mount. A handler that has no timer yet also
+starts `SYNC`, but asks for timer.device again every 64 packets and switches
+to the delayed policy once it has one, without a dismount; waiting record
+locks start waiting at that same moment. A mount the boot scan made is the
+case this is for: it has no Control string, and it is made before the handler
+can be given a clock, so the default delay would otherwise never reach the
+system volume. A string that asked for `SYNC` never switches, and
+`AFSPlusInfo <path> COMMIT` prints the policy in force, its seconds and
+whether it was taken after the mount.
 
 The DOSDriver's `Buffers` sizes the read cache, in device blocks, as it does
 for the classic file systems, and `AddBuffers` grows or shrinks it while the

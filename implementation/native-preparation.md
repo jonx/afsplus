@@ -91,3 +91,14 @@ because a partition the boot scan finds has no DOSDriver to say one: without
 it the handler task runs on partition.library's 40 KiB and overruns them
 replaying an intent log (`native/aros/afsplus.conf`, found by
 [`check-hosted-aros-s3.sh`](../tools/check-hosted-aros-s3.sh)).
+
+A boot mount also has no Control string, and it is made before the handler
+can be given the clock that delayed commit needs, so it started SYNC and
+stayed there for the session: every change on `SYS:` was a checkpoint commit
+with its flushes, free on Hosted and a device flush per operation on Native.
+It starts SYNC still and asks for timer.device again every 64 packets; with
+the clock it switches to the COMMIT=5 default and lets waiting record locks
+wait, both at that one moment. `AFSPlusInfo SYS: COMMIT` prints the policy,
+its seconds and whether it was taken late, and
+[`check-hosted-aros-s2.sh`](../tools/check-hosted-aros-s2.sh) requires
+`delayed` for `SYS:` a few seconds into the boot.
