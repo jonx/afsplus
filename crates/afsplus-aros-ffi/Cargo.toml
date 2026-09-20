@@ -8,6 +8,12 @@ repository.workspace = true
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[features]
+# A build that counts the allocations the meter sees, for the memory
+# measurements of the performance programme. Off by default: the counting
+# sits in the library's hottest path.
+heap-profile = []
+
 [dependencies]
 afsplus-aros = { path = "../afsplus-aros" }
 afsplus-block = { path = "../afsplus-block" }

@@ -7,6 +7,9 @@
 
 mod heap;
 
+#[cfg(feature = "heap-profile")]
+pub use heap::profile as heap_profile;
+
 use std::ffi::c_void;
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};

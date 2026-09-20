@@ -19,6 +19,7 @@ operations.
 - [How a lot is done](#how-a-lot-is-done)
 - [Where it stands on 2026-09-19](#where-it-stands-on-2026-09-19)
 - [Where the delete phase's flushes went, on 2026-09-20](#where-the-delete-phases-flushes-went-on-2026-09-20)
+- [Memory](#memory)
 
 <!-- /toc -->
 
@@ -196,3 +197,97 @@ floor at what the next window can need. On a 16 MiB volume the same loop
 costs 3 checkpoints per operation either way, because there it is not the
 floor: it is the 1,024 blocks of headroom an operation keeps free before it
 writes, on a volume with 542 blocks free.
+What is left, by measurement: delete still commits 455 times for 2,650
+operations on a 64 MiB volume, the room floor again; the object-map batch
+encodes the same leaf once per operation (lot B's report); and G, the pool
+allocator for the AROS build.
+
+## Memory
+
+What one mounted volume costs, on 2026-09-20, measured with the library's
+own heap counters. The harness is
+[`crates/afsplus-aros-ffi/tests/zz_memory.rs`](../crates/afsplus-aros-ffi/tests/zz_memory.rs),
+a build of its own:
+
+```text
+cargo test -q -p afsplus-aros-ffi --features heap-profile --test zz_memory \
+    -- --ignored --nocapture --test-threads=1
+```
+
+The `heap-profile` feature adds a count of the allocations the meter sees
+and a histogram of their sizes; it is off by default because an atomic
+increment per allocation would sit in the hottest path the library has. The
+test disk is materialized, so the volume writing new blocks is not counted
+as the library's memory, and every reading is the difference against the
+heap before the mount.
+
+**(a) The handler.** `tools/package-aros-dist.sh darwin-aarch64` builds a
+4,648,696-byte `L/afsplus-handler`. It is a relocatable module, and its
+relocations name its symbols, so it cannot be stripped: `--strip-debug`
+takes it to 4,607,336 bytes, because it carries no debug information, and
+the 1,992,792 bytes a full strip leaves would not load. Its sections are
+1,631,776 of code, 348,904 of read-only data, 1,492,512 of relocations,
+1,113,930 of symbol and string tables, and 1,843,228 of `.bss`, which costs
+no file bytes and 1.8 MiB of memory at load.
+
+| Part | Bytes | Share of the code |
+|---|---|---|
+| `core::fmt` | 140,244 | 8.4 % |
+| panicking and unwinding | 10,108 | 0.6 % |
+| Unicode tables | 38,412 | 2.3 % |
+| all of `core` | 462,544 | 27.8 % |
+| all of `alloc` | 471,692 | 28.4 % |
+| all of `std` | 187,888 | 11.3 % |
+
+Formatting and panic machinery together are 9 % of the code and 3 % of the
+file. `.bss` is another matter: 1,841,328 of its 1,843,228 bytes are one
+symbol, `threads`, the fixed thread table of the AROS static pthread
+library the module links. Nothing in AFS+ makes a thread.
+
+**(b) A mount.** With the read cache off, a mounted volume holds 7,018
+bytes. The cache is the rest, and it is taken in full when it is set:
+
+| Buffers | Heap after the mount |
+|---|---|
+| 0 | 7,018 |
+| 64 | 273,938 |
+| 1024 | 4,273,298 |
+
+**(c) A full delayed window**, 512 creates, 512 deletes and a 16 MiB write
+on a 128 MiB volume with 64 buffers:
+
+| After | Held | Peak |
+|---|---|---|
+| the mount | 5,386 | 461,879 |
+| 512 creates | 289,956 | 1,711,927 |
+| 512 deletes | 283,483 | 3,140,709 |
+| a 16 MiB write | 408,211 | 3,140,709 |
+| the commit | 382,299 | 3,140,709 |
+
+The window holds little and peaks high: the commit of a full window of
+deletes is 3.1 MiB, eleven times what the window held before it. The 16 MiB
+write costs 125 KiB, because a write goes to the device as it is made.
+
+**(d) Allocations per operation**, each phase measured between two commits
+so that the phase before it is not charged to it:
+
+| Operation | Allocations | Frees | Reallocations | Largest |
+|---|---|---|---|---|
+| create | 1,310 | 1,307 | 7.2 | 16,128 |
+| lookup | 26 | 28 | 1.0 | 4,752 |
+| rename | 1,711 | 1,707 | 9.8 | 11,328 |
+| delete | 2,312 | 2,315 | 17.2 | 8,496 |
+
+**(e) The sizes asked for.** Almost all of them are tiny: 710 of the 1,310
+allocations of a create are 8 to 15 bytes and 220 are 4 to 7. Above them
+stands one band that is neither small nor rare: 53 allocations of 4 KiB to
+8 KiB per create, 167 per delete. Those are the block buffer
+`cow_tree::read_node` makes for each node it decodes, one per tree node the
+operation reads, against 59.6 cache reads per create. The largest single
+allocations are that buffer and the vectors a commit builds.
+
+What a 4 MiB 68000 machine could not live with: `Buffers=1024`, which asks
+for more memory than the machine has; the 3.1 MiB peak of a full delayed
+window, which is most of it; and the 1.8 MiB thread table the module
+reserves before it serves a packet. What it can live with is the mount
+itself, 7 KiB, and the 274 KiB of a 64-buffer cache.

@@ -30,6 +30,91 @@ impl Meter {
     }
 }
 
+/// A count of the allocations the meter sees and a histogram of their sizes,
+/// so that a measurement can say how many allocations an operation costs and
+/// how large the largest of them are. It is a build of its own, behind the
+/// `heap-profile` feature, because an atomic increment per allocation would
+/// otherwise sit in the hottest path the library has.
+#[cfg(feature = "heap-profile")]
+pub mod profile {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+
+    /// One bucket per power of two of the size asked for, the last one
+    /// holding everything from 2^30 upwards.
+    pub const BUCKETS: usize = 32;
+
+    static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+    static FREES: AtomicU64 = AtomicU64::new(0);
+    static REALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+    static LARGEST: AtomicUsize = AtomicUsize::new(0);
+    static HISTOGRAM: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
+
+    pub(super) fn note_alloc(bytes: usize) {
+        ALLOCATIONS.fetch_add(1, Relaxed);
+        record(bytes);
+    }
+
+    pub(super) fn note_free() {
+        FREES.fetch_add(1, Relaxed);
+    }
+
+    pub(super) fn note_realloc(bytes: usize) {
+        REALLOCATIONS.fetch_add(1, Relaxed);
+        record(bytes);
+    }
+
+    fn record(bytes: usize) {
+        LARGEST.fetch_max(bytes, Relaxed);
+        HISTOGRAM[bucket(bytes)].fetch_add(1, Relaxed);
+    }
+
+    fn bucket(bytes: usize) -> usize {
+        ((usize::BITS - bytes.leading_zeros()) as usize).min(BUCKETS - 1)
+    }
+
+    /// A reading of the counters: allocations, frees, reallocations, the
+    /// largest size asked for, and the histogram of the sizes asked for by
+    /// an allocation or a reallocation.
+    pub struct Profile {
+        pub allocations: u64,
+        pub frees: u64,
+        pub reallocations: u64,
+        pub largest: usize,
+        pub histogram: [u64; BUCKETS],
+    }
+
+    pub fn sample() -> Profile {
+        let mut histogram = [0u64; BUCKETS];
+        for (slot, counter) in histogram.iter_mut().zip(HISTOGRAM.iter()) {
+            *slot = counter.load(Relaxed);
+        }
+        Profile {
+            allocations: ALLOCATIONS.load(Relaxed),
+            frees: FREES.load(Relaxed),
+            reallocations: REALLOCATIONS.load(Relaxed),
+            largest: LARGEST.load(Relaxed),
+            histogram,
+        }
+    }
+
+    /// The bytes held now and the peak, as `afsplus_aros_counters` reports
+    /// them, but readable without a mount: a measurement needs the heap
+    /// before the volume is mounted to subtract what its test disk holds.
+    pub fn heap() -> (u64, u64) {
+        super::sample()
+    }
+
+    pub fn reset() {
+        ALLOCATIONS.store(0, Relaxed);
+        FREES.store(0, Relaxed);
+        REALLOCATIONS.store(0, Relaxed);
+        LARGEST.store(0, Relaxed);
+        for counter in HISTOGRAM.iter() {
+            counter.store(0, Relaxed);
+        }
+    }
+}
+
 #[global_allocator]
 static HEAP: Meter = Meter::new();
 
@@ -102,6 +187,8 @@ unsafe impl GlobalAlloc for Meter {
         };
         if !pointer.is_null() {
             self.acquire(layout.size());
+            #[cfg(feature = "heap-profile")]
+            profile::note_alloc(layout.size());
         }
         pointer
     }
@@ -116,6 +203,8 @@ unsafe impl GlobalAlloc for Meter {
         };
         if !pointer.is_null() {
             self.acquire(layout.size());
+            #[cfg(feature = "heap-profile")]
+            profile::note_alloc(layout.size());
         }
         pointer
     }
@@ -129,6 +218,8 @@ unsafe impl GlobalAlloc for Meter {
             unsafe { System.dealloc(pointer, layout) };
         }
         self.release(layout.size());
+        #[cfg(feature = "heap-profile")]
+        profile::note_free();
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
@@ -150,6 +241,8 @@ unsafe impl GlobalAlloc for Meter {
         // SAFETY: the caller's live pointer and new size are passed on.
         let moved = unsafe { System.realloc(pointer, layout, new_size) };
         if !moved.is_null() {
+            #[cfg(feature = "heap-profile")]
+            profile::note_realloc(new_size);
             if new_size >= layout.size() {
                 self.acquire(new_size - layout.size());
             } else {
