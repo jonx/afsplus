@@ -85,7 +85,7 @@ fn walk(filesystem: *mut AfsplusAros) {
 
 /// (c) The peak of a full delayed window: 512 creates, 512 deletes and a
 /// 16 MiB write. Every reading is the library's heap less what the test disk
-/// held before the mount.
+/// held before the mount. `WINDOW_OPS` shortens the window.
 #[test]
 #[ignore = "measurement harness"]
 fn peak_of_a_full_delayed_window() {
@@ -103,6 +103,11 @@ fn peak_of_a_full_delayed_window() {
         afsplus_aros_set_commit_policy(filesystem, 60_000, 60_000),
         0
     );
+    if let Some(ops) = std::env::var("WINDOW_OPS").ok().and_then(|v| v.parse().ok()) {
+        let mut taken = 0;
+        assert_eq!(afsplus_aros_set_window_ops(filesystem, ops, &mut taken), 0);
+        println!("the window holds {taken} changes");
+    }
     let (seconds, nanoseconds) = now();
     // The blocks live at each point, so that what a per-block header would
     // have cost on AROS can be read off the table.

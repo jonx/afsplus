@@ -405,8 +405,13 @@ impl Durability {
 }
 
 /// Changes a delayed window holds before it is committed whatever the
-/// clock says.
+/// clock says, and the most a mount may ask for.
 pub const DELAYED_WINDOW_OPS_MAX: u32 = 512;
+
+/// The fewest changes a window may be asked to hold. Below this the window
+/// stops being a window: every few operations would commit, which is what
+/// the delayed mount exists to avoid.
+pub const DELAYED_WINDOW_OPS_MIN: u32 = 16;
 
 /// Deleted files a delayed mount leaves for idle time. Past it, the commit
 /// cleans the excess at once: pending deletions cost disk space and the work
@@ -490,6 +495,9 @@ pub struct Vfs<D: BlockDevice> {
     window_first: Option<Timespec>,
     window_last: Option<Timespec>,
     window_changes: u32,
+    /// Changes the window holds before it commits whatever the clock says.
+    /// [`DELAYED_WINDOW_OPS_MAX`] unless the mount asked for less.
+    window_ops_max: u32,
     /// Deletions the window holds, each leaving an orphan.
     window_deletes: u32,
     /// Clock of the latest change, kept past the commit: idle time is
@@ -532,6 +540,7 @@ impl<D: BlockDevice> Vfs<D> {
             window_first: None,
             window_last: None,
             window_changes: 0,
+            window_ops_max: DELAYED_WINDOW_OPS_MAX,
             window_deletes: 0,
             last_change: None,
             notes: Vec::new(),
@@ -691,6 +700,23 @@ impl<D: BlockDevice> Vfs<D> {
         Ok(())
     }
 
+    /// How many changes the delayed window may hold before it commits
+    /// whatever the clock says, between [`DELAYED_WINDOW_OPS_MIN`] and
+    /// [`DELAYED_WINDOW_OPS_MAX`]; the value taken is returned. A window
+    /// holds little while it is open and peaks when it commits -- 283 KiB
+    /// against 3.1 MiB for a full window of 512 deletes -- so a machine
+    /// that cannot spare the peak asks for a shorter window and commits
+    /// more often instead.
+    pub fn set_window_ops_max(&mut self, ops: u32) -> u32 {
+        self.window_ops_max = ops.clamp(DELAYED_WINDOW_OPS_MIN, DELAYED_WINDOW_OPS_MAX);
+        self.window_ops_max
+    }
+
+    /// The bound in force.
+    pub fn window_ops_max(&self) -> u32 {
+        self.window_ops_max
+    }
+
     fn delayed(&self) -> bool {
         matches!(self.durability, Durability::Delayed { .. })
             && self.volume.mount_mode() == MountMode::ReadWrite
@@ -715,7 +741,7 @@ impl<D: BlockDevice> Vfs<D> {
         self.window_last = Some(now);
         self.last_change = Some(now);
         self.window_changes = self.window_changes.saturating_add(1);
-        if self.delayed() && self.window_changes >= DELAYED_WINDOW_OPS_MAX {
+        if self.delayed() && self.window_changes >= self.window_ops_max {
             self.commit_window(now)?;
         }
         Ok(())

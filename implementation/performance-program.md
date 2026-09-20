@@ -20,6 +20,8 @@ operations.
 - [Where it stands on 2026-09-19](#where-it-stands-on-2026-09-19)
 - [Where the delete phase's flushes went, on 2026-09-20](#where-the-delete-phases-flushes-went-on-2026-09-20)
 - [Memory](#memory)
+  - [What the table changed](#what-the-table-changed)
+  - [What was left alone, and why](#what-was-left-alone-and-why)
 
 <!-- /toc -->
 
@@ -258,8 +260,8 @@ on a 128 MiB volume with 64 buffers:
 
 | After | Held | Peak |
 |---|---|---|
-| the mount | 5,386 | 461,879 |
-| 512 creates | 289,956 | 1,711,927 |
+| the mount | 5,386 | 12,928 |
+| 512 creates | 289,956 | 1,714,103 |
 | 512 deletes | 283,483 | 3,140,709 |
 | a 16 MiB write | 408,211 | 3,140,709 |
 | the commit | 382,299 | 3,140,709 |
@@ -291,3 +293,69 @@ for more memory than the machine has; the 3.1 MiB peak of a full delayed
 window, which is most of it; and the 1.8 MiB thread table the module
 reserves before it serves a packet. What it can live with is the mount
 itself, 7 KiB, and the 274 KiB of a 64-buffer cache.
+
+### What the table changed
+
+Three things, smallest first, each measured against the table above.
+
+**The AROS heap carries no size header.** Rust's `GlobalAlloc` hands the
+layout to `dealloc` and to `realloc`, so a block's size is known where it is
+freed, and `crates/afsplus-aros-ffi/src/heap.rs` calls exec's `AllocMem` and
+`FreeMem` with it through `afsplus_exec_alloc` and `afsplus_exec_free` in
+`native/aros/afsplus_bootlibc.c`. The 16-byte header that file's `malloc`
+puts before every block is gone from every Rust allocation; `malloc` keeps
+it for the C shell, which frees without a size. With exec rounding to 16
+bytes, an 8-byte allocation took 32 bytes and now takes 16, and a create
+makes 710 allocations of 8 to 15 bytes. The host is unchanged in speed:
+30.4, 31.7 and 31.8 us per create against 29.4, 30.9 and 31.7 before.
+
+**The window's bound is a mount parameter.** The peak was the commit of a
+full window, eleven times what the window held. It now comes from the same
+memory profile the handler computes for `CACHE=AUTO`
+(`auto_window_ops` in `native/aros/afsplus_handler.c`), through
+`afsplus_aros_set_window_ops` (interface revision 19), and the peak follows
+it:
+
+| Changes the window holds | Peak |
+|---|---|
+| 512 | 3,140,709 |
+| 128 | 1,088,324 |
+| 64 | 883,244 |
+| 32 | 879,836 |
+| 16 | 883,564 |
+
+Below 64 the peak stops falling, because the 16 MiB write is then the
+largest thing in the run, so 64 is the floor. The handler takes 512 from
+32 MiB of memory, 128 from 8 MiB and 64 below: a 4 MiB machine peaks at
+about 880 KiB where it would have peaked at 3.1 MiB, and every machine the
+qualified profiles run on keeps today's window.
+
+### What was left alone, and why
+
+**A pool of the handler's own** (`CreatePool`, `AllocPooled`) was not made.
+The measurement that would have chosen its puddle size says the blocks are
+not there to pool: a mounted volume holds 413 live blocks after 512 creates
+and 814 after a commit, and a dismount already returns every one of them,
+because the meter reads zero held after an unmount. What a pool would buy is
+fewer exec calls per operation, and that is a speed question for the hosted
+benchmark, not a memory one; the header that was costing memory is gone
+above.
+
+**The buffers that start large** were looked for and not found where the
+histogram pointed. The 4 KiB band is 53 allocations per create, and they are
+the one block buffer `tree::lookup` takes per call, not a buffer that starts
+large and stays empty: every one of them is filled by the block it reads.
+Giving them a home would mean threading a scratch buffer through
+`tree`, `directory` and `volume`, which is a wide change for no change in
+what the handler holds -- the held and peak figures do not move when the
+`cow_tree` read path is given such a buffer, which was measured: 1,310
+allocations per create became 1,307.9. It belongs to a lot about allocation
+count, not to this one.
+
+**A smaller build for small machines** was not proposed. Formatting and
+panic machinery are 9 % of the code and 3 % of the handler file, and an
+`opt-level = "z"` build would take part of that. Beside it stands the 1.8 MiB
+of `.bss` the AROS static pthread library reserves for a thread table the
+handler never uses, which is twenty times as much memory and none of it
+AFS+'s: until that is answered, a build profile that trades speed for 3 % of
+a file is not the change to make.

@@ -30,7 +30,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 18;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 19;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -2210,6 +2210,26 @@ pub extern "C" fn afsplus_aros_set_commit_policy(
             }
         };
         bridge.adapter.set_durability(durability)
+    })
+}
+
+/// Group COMMIT (revision 19): how many changes the delayed window may hold
+/// before it commits whatever the clock says. A window holds little while it
+/// is open and peaks when it commits, so a machine that cannot spare the
+/// peak asks for a shorter window: 283 KiB held against a 3.1 MiB peak for a
+/// full window of 512 deletes on the development host. `ops` is bounded to
+/// 16 to 512, and `output_ops` receives the bound taken. A mount starts at
+/// 512.
+#[no_mangle]
+pub extern "C" fn afsplus_aros_set_window_ops(
+    filesystem: *mut AfsplusAros,
+    ops: u32,
+    output_ops: *mut u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        let bridge = bridge_mut(filesystem)?;
+        let taken = bridge.adapter.set_window_ops_max(ops);
+        write_output(output_ops, taken)
     })
 }
 

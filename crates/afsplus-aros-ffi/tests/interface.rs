@@ -150,7 +150,7 @@ fn interface_query_needs_no_mount_and_names_its_revision_and_groups() {
         AfsplusArosInterface {
             struct_size: 24,
             abi_version: 1,
-            interface_revision: 18,
+            interface_revision: 19,
             reserved: 0,
             groups: 0x7_FFFF,
         }
@@ -189,7 +189,7 @@ fn sized_output_refuses_short_callers_and_never_writes_past_a_long_one() {
         0
     );
     assert_eq!(future.known.struct_size, 24);
-    assert_eq!(future.known.interface_revision, 18);
+    assert_eq!(future.known.interface_revision, 19);
     assert_eq!(future.tail, [0x5A; 16]);
 }
 

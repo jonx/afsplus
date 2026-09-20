@@ -1392,6 +1392,12 @@ impl<D: BlockDevice> ArosAdapter<D> {
         Ok(self.vfs.set_durability(durability)?)
     }
 
+    /// How many changes the delayed window may hold before it commits;
+    /// returns the bound taken.
+    pub fn set_window_ops_max(&mut self, ops: u32) -> u32 {
+        self.vfs.set_window_ops_max(ops)
+    }
+
     /// Commits the delayed changes when `now` makes them due; returns
     /// whether changes still wait, so the handler keeps its clock running.
     pub fn commit_if_due(&mut self, now: Timespec) -> Result<bool, ArosError> {

@@ -71,13 +71,16 @@ older library must be able to refuse by value.
 
 ## C1. Rust/C integration boundary
 
-Present (L1 to L3): ABI version 1 with interface revision 18.
+Present (L1 to L3): ABI version 1 with interface revision 19.
 `afsplus_aros_interface` answers without a mount with the revision and a
 mask of entry-point groups; the packet layer asks it at creation and answers
 `ERROR_ACTION_NOT_KNOWN` for an action of a missing group. The rule holds for
 a call that is not an action of its own: `AFSPLUS_AROS_GROUP_PATHS`
 (revision 18) resolves a whole AmigaDOS path in one call, and the packet
 layer keeps its component loop for a library that does not offer it.
+`afsplus_aros_set_window_ops` (revision 19) bounds what a delayed window
+holds, from the memory profile the handler already computes for
+`CACHE=AUTO`.
 `afsplus_aros_capabilities` reports the published `FSV2_CAP_*` mask, mount
 mode, name limit, case policy, Unicode version, pending intent records and
 block counts. Query structures share one size-negotiated growth rule. The

@@ -781,6 +781,33 @@ static uint32_t auto_cache_blocks(struct ExecBase *SysBase, uint32_t buffers)
     return wanted > buffers ? (uint32_t)wanted : buffers;
 }
 
+/*
+ * The delayed window holds little while it is open and peaks when it
+ * commits: 283 KiB held against a peak of 3.1 MiB for a full window of 512
+ * deletes, measured on the development host with the library's own heap
+ * counters. A machine that cannot spare that peak takes a shorter window and
+ * commits more often instead; below 64 changes the peak stops falling, so
+ * that is the floor.
+ *
+ * The thresholds keep the peak near an eighth of the machine's memory: 512
+ * from 32 MiB, which is every machine the qualified profiles run on, 128
+ * from 8 MiB, and 64 below that. A 4 MiB 68000 machine therefore peaks at
+ * about 880 KiB where it would have peaked at 3.1 MiB.
+ */
+#define AFSPLUS_WINDOW_FULL_MEMORY_MIN (UINT64_C(32) << 20)
+#define AFSPLUS_WINDOW_HALF_MEMORY_MIN (UINT64_C(8) << 20)
+
+static uint32_t auto_window_ops(struct ExecBase *SysBase)
+{
+    uint64_t total = (uint64_t)AvailMem(MEMF_TOTAL);
+
+    if (total >= AFSPLUS_WINDOW_FULL_MEMORY_MIN)
+        return 512;
+    if (total >= AFSPLUS_WINDOW_HALF_MEMORY_MIN)
+        return 128;
+    return 64;
+}
+
 static int32_t setup_dma_bounce(struct AfsplusArosHandler *handler)
 {
     struct ExecBase *SysBase = handler->SysBase;
@@ -1013,6 +1040,18 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
 
         error = afsplus_aros_set_cache_blocks(handler->filesystem, buffers,
             &granted);
+        if (error != 0)
+            return error;
+    }
+
+    /* The delayed window's bound comes from the same memory profile: what
+     * the window holds is small, what its commit peaks at is not. */
+    set_startup_stage(handler, "window-bound");
+    {
+        uint32_t taken = 0;
+
+        error = afsplus_aros_set_window_ops(handler->filesystem,
+            auto_window_ops(SysBase), &taken);
         if (error != 0)
             return error;
     }

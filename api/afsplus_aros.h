@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(18)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(19)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -592,6 +592,16 @@ int32_t afsplus_aros_set_cache_blocks(struct AfsplusAros *filesystem,
  * and sets output_pending to 1 while changes still wait: the handler calls it
  * after its packets and on its clock until it answers 0. A crash loses at
  * most the waiting changes, whole and in order. */
+/* set_window_ops (revision 19) bounds how many changes the delayed window
+ * holds before it commits whatever the clock says. A window holds little
+ * while it is open and peaks when it commits, so a machine that cannot spare
+ * the peak asks for a shorter window and commits more often: 283 KiB held
+ * against a 3.1 MiB peak for a full window of 512 deletes. ops is bounded to
+ * 16 to 512, output_ops receives the bound taken, and a mount starts at
+ * 512. */
+int32_t afsplus_aros_set_window_ops(struct AfsplusAros *filesystem,
+    uint32_t ops, uint32_t *output_ops);
+
 int32_t afsplus_aros_set_commit_policy(struct AfsplusAros *filesystem,
     uint32_t max_age_ms, uint32_t idle_ms);
 int32_t afsplus_aros_commit_due(struct AfsplusAros *filesystem,

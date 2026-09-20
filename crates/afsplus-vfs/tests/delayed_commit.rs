@@ -6,7 +6,9 @@ use afsplus_block::{MemoryBackend, TraceBackend};
 use afsplus_check::check_device;
 use afsplus_core::{mkfs, MkfsParams, MountOptions};
 use afsplus_format::{Timespec, OBJECT_ROOT};
-use afsplus_vfs::{AccessMode, Durability, Vfs, DELAYED_WINDOW_OPS_MAX};
+use afsplus_vfs::{
+    AccessMode, Durability, Vfs, DELAYED_WINDOW_OPS_MAX, DELAYED_WINDOW_OPS_MIN,
+};
 
 fn ms(millis: i64) -> Timespec {
     Timespec {
@@ -122,6 +124,35 @@ fn the_window_bound_commits_without_the_clock() {
     }
     assert!(vfs.generation() > start);
     assert!(!vfs.changes_pending());
+}
+
+/// A mount that cannot spare the peak of a full window asks for a shorter
+/// one: the bound it takes is the bound the window then commits at, and a
+/// value outside the range is brought into it rather than refused.
+#[test]
+fn a_mount_may_shorten_the_window_and_the_bound_is_what_commits() {
+    let mut vfs = delayed(formatted());
+    assert_eq!(vfs.window_ops_max(), DELAYED_WINDOW_OPS_MAX);
+    assert_eq!(vfs.set_window_ops_max(64), 64);
+    assert_eq!(vfs.window_ops_max(), 64);
+
+    let start = vfs.generation();
+    for index in 0..63 {
+        vfs.create_file(OBJECT_ROOT, &format!("s{index}"), ms(0))
+            .unwrap();
+    }
+    assert_eq!(vfs.generation(), start, "63 changes are still a window");
+    assert!(vfs.changes_pending());
+    vfs.create_file(OBJECT_ROOT, "s63", ms(0)).unwrap();
+    assert!(vfs.generation() > start, "the 64th commits the window");
+    assert!(!vfs.changes_pending());
+
+    // Neither end of the range can be left.
+    assert_eq!(vfs.set_window_ops_max(0), DELAYED_WINDOW_OPS_MIN);
+    assert_eq!(
+        vfs.set_window_ops_max(u32::MAX),
+        DELAYED_WINDOW_OPS_MAX
+    );
 }
 
 #[test]
