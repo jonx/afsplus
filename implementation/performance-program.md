@@ -353,16 +353,26 @@ together do not reach 1 % of an operation.
 
 Four changes, in the order the table above put them, each measured on the
 host with `zz_profile`'s `create_only` and the allocations per operation of
-`zz_memory`. Every reading is against the lot's base, 5ecbcad: 31.6 us per
+`zz_memory`. Every reading is against the lot's base, 5ecbcad: 30.9 us per
 create, 1,310 allocations per create, 1,711 per rename, 2,312 per delete.
+
+The times are the median of three runs, all five commits measured one after
+another on the same quiet machine, because a host under other work reads two
+microseconds either way.
 
 | After | us per create | Create | Rename | Delete | Lookup |
 |---|---|---|---|---|---|
-| the base | 31.6 | 1,310 | 1,711 | 2,312 | 26.4 |
-| the borrowed block buffer | 27.3 | 1,296 | 1,700 | 2,269 | 23.4 |
-| the item that holds its own bytes | 28.6 | 186 | 221 | 632 | 15.2 |
-| the descent path in an array | 28.6 | 173 | 211 | 594 | 12.2 |
-| the image encoded once | 23.2 | 175 | 212 | 599 | 12.2 |
+| the base | 30.9 | 1,310 | 1,711 | 2,312 | 26.4 |
+| the borrowed block buffer | 29.9 | 1,296 | 1,700 | 2,269 | 23.4 |
+| the item that holds its own bytes | 29.4 | 186 | 221 | 632 | 15.2 |
+| the descent path in an array | 28.5 | 173 | 211 | 594 | 12.2 |
+| the image encoded once | 23.4 | 175 | 212 | 599 | 12.2 |
+
+The time is the last change and the allocations are the third: cutting a
+create from 1,310 allocations to 186 bought a microsecond and a half on the
+host, where an allocation is a `malloc`. On AROS each of those 1,124
+allocations is an exec `AllocMem` and a `FreeMem`, which is why the count is
+worth holding to a bound whatever the host clock says.
 
 **One block buffer, borrowed.** Every read of a tree node took a
 `vec![0u8; block_size]` and dropped it. They come from a per-thread pool
@@ -399,8 +409,8 @@ their spill counts, spill reloads and staged residency are unchanged, since
 a deferred image is in memory like an encoded one. A 512-upsert batch makes
 62 encodes for 62 images with a decoded cache and 0 with none
 (`a_batch_encodes_an_image_once_and_a_tiny_profile_encodes_eagerly`). This
-is 19 % of a create on its own, measured back to back against the commit
-before it, and it changes nothing about what a commit writes or when.
+is 18 % of a create on its own, 28.5 us against 23.4 measured back to back
+against the commit before it, and it changes nothing about what a commit writes or when.
 
 `crates/afsplus-aros-ffi/tests/heap_allocation_bounds.rs` holds the numbers
 to these: 192 allocations per create, 234 per rename, 660 per delete and 14
