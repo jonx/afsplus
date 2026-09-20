@@ -12,7 +12,12 @@ What an AROS x86_64 module must be:
   ``rom/dos/internalloadseg_elf.c`` loads modules, not executables;
 * relocated only with the types that loader implements. Anything else is a
   silent wrong address at load time, not a link error;
-* free of undefined symbols, because nothing resolves them after the link.
+* free of undefined symbols, because nothing resolves them after the link;
+* small in ``.bss``. A module's zero-filled memory costs no file bytes and is
+  taken in full at load, on every machine that has the handler in ``L/``,
+  mounted volume or not: the AROS static pthread library once put a
+  1,841,328-byte thread table there. The bound is what keeps a library like
+  that from coming back unnoticed.
 """
 
 from __future__ import annotations
@@ -37,7 +42,17 @@ EM_X86_64 = 62
 
 SHT_RELA = 4
 SHT_SYMTAB = 2
+SHT_NOBITS = 8
 SHN_UNDEF = 0
+
+# What the handler may take at load before a volume is mounted, and what any
+# one zero-filled object may be. A total that creeps up in kilobytes is a
+# design change; one object of megabytes is a library that was linked by
+# accident, and the object bound names it. The module is audited after its
+# local symbols are discarded, so the object bound sees the global ones and
+# the total is what holds in every case.
+BSS_LIMIT = 64 * 1024
+BSS_OBJECT_LIMIT = 64 * 1024
 
 # Every relocation type rom/dos/internalloadseg_elf.c resolves for x86_64.
 SUPPORTED_RELOCATIONS = {
@@ -118,6 +133,33 @@ class Module:
                 counted[kind] = counted.get(kind, 0) + 1
         return counted
 
+    def zero_filled(self) -> tuple[int, list[tuple[str, int]]]:
+        """The module's zero-filled size, and its objects over the bound."""
+        # sh_flags is the third word; SHF_ALLOC means it is given memory.
+        sections = {
+            index: section for index, section in enumerate(self.sections)
+            if section[1] == SHT_NOBITS and section[2] & 0x2
+        }
+        total = sum(section[5] for section in sections.values())
+        large = []
+        for section in self.sections:
+            if section[1] != SHT_SYMTAB:
+                continue
+            strings = self.contents(self.sections[section[6]])
+            data = self.contents(section)
+            for at in range(0, len(data) - SYMBOL.size + 1, SYMBOL.size):
+                name, _, _, shndx, _, size = SYMBOL.unpack(
+                    data[at:at + SYMBOL.size]
+                )
+                if shndx not in sections or size <= BSS_OBJECT_LIMIT:
+                    continue
+                end = strings.find(b"\0", name)
+                large.append(
+                    (strings[name:end].decode("utf-8", "replace"), size)
+                )
+        large.sort(key=lambda item: -item[1])
+        return total, large
+
     def undefined_symbols(self) -> list[str]:
         names = []
         for section in self.sections:
@@ -172,6 +214,22 @@ def main() -> int:
                 f"{args.artifact}: undefined symbol in a loadable module: "
                 f"{preview}"
             )
+        bss, large = module.zero_filled()
+        if large:
+            listed = "; ".join(
+                f"{name} {size} bytes" for name, size in large[:4]
+            )
+            raise AbiError(
+                f"{args.artifact}: zero-filled object above "
+                f"{BSS_OBJECT_LIMIT} bytes, taken at load whether or not a "
+                f"volume is mounted: {listed}"
+            )
+        if bss > BSS_LIMIT:
+            raise AbiError(
+                f"{args.artifact}: .bss is {bss} bytes, above the "
+                f"{BSS_LIMIT}-byte bound; that memory is taken at load on "
+                "every machine"
+            )
     except AbiError as error:
         print(f"aros-x86_64-abi result=FAIL reason={error}", file=sys.stderr)
         return 1
@@ -182,7 +240,7 @@ def main() -> int:
     print(
         "aros-x86_64-abi result=PASS "
         f"file={args.artifact.name} format=ET_REL osabi=AROS "
-        f"machine=x86-64 relocations={relocations} undefined=0"
+        f"machine=x86-64 relocations={relocations} undefined=0 bss={bss}"
     )
     return 0
 
