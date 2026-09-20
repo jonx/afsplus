@@ -24,6 +24,7 @@ operations.
   - [What lot J took back](#what-lot-j-took-back)
   - [What the table changed](#what-the-table-changed)
   - [What was left alone, and why](#what-was-left-alone-and-why)
+- [Where it stands at the end of 2026-09-20](#where-it-stands-at-the-end-of-2026-09-20)
 
 <!-- /toc -->
 
@@ -544,3 +545,30 @@ relocatable link has no entry point to keep anything alive from, so
 unreferenced `core` and `alloc` code here is the archive member, not the
 section: a member nothing refers to is never pulled in, which is how the
 thread table left.
+
+## Where it stands at the end of 2026-09-20
+
+The benchmark reads 0.93 s against 1.12 s for the Fast File System in the
+same boot: create 0.21 against 0.40, list 0.10 against 0.08, read 0.20
+against 0.34, rename 0.22 against 0.22, delete 0.21 against 0.09 s. It began
+the day before at 3.15 against 1.43 s.
+
+| Phase | Calls per operation | Flushes | Writes per operation |
+|---|---|---|---|
+| create | 8 | 30 | 2.5 |
+| list | 3 | 2 | 0.01 |
+| read | 8 | 0 | 0 |
+| rename | 6 | 10 | 1.1 |
+| delete | 4 | 10 | 1.1 |
+
+Lots A, B, C, D, D2, F, G, I, J, K are on main and H is in AROS upstream. E
+was struck. The flushes are what the window commits, everywhere.
+
+What is left, by measurement: delete is the one phase still behind the Fast
+File System, and its cost is no longer flushes; the staged and decoded maps
+of a batch churn `BTreeMap` nodes, 20 % of a create's allocations and 17 %
+of a delete's; the block cache copies a whole block into itself on every
+insert; a lookup copies the value it found out of the node at the API
+boundary. None of it has been measured on hardware: Hosted gives software
+cost, and a device flush there is free.
+
