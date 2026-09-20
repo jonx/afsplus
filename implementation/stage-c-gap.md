@@ -479,17 +479,16 @@ A boot mount found through the boot scan has no DOSDriver to say a stack size,
 and S3 found the handler task overrunning partition.library's 40 KiB while it
 replayed an intent-log record, twice in a row: the handler's
 `FileSystem.resource` entry now carries the 262144 bytes every AFS+ mountlist
-here asks for (`native/aros/afsplus.conf`). The same mount ran SYNC rather
-than with the COMMIT=5 default, because delayed commit needs the clock that
-wakes the handler and that mount had none when it was made. It starts SYNC
-still, which is right and only slower, and asks for timer.device again every
-64 packets until it has one; it then gives the packet layer its complete
-callback and switches the library to the delayed policy
-(`native/aros/afsplus_handler.c`). `AFSPlusInfo SYS: COMMIT` prints the
-policy in force and whether it was taken late, and
+here asks for (`native/aros/afsplus.conf`). The same mount takes the
+COMMIT=5 default: timer.device is open when the boot scan starts the handler,
+and `AFSPlusInfo SYS: COMMIT` answers `commit delayed 5 at-mount` on Hosted.
+A handler that meets a mount with no timer starts SYNC, which is right and
+only slower, asks for timer.device again every 64 packets, and then gives the
+packet layer its complete callback and switches the library to the delayed
+policy (`native/aros/afsplus_handler.c`).
 [`check-hosted-aros-s2.sh`](../tools/check-hosted-aros-s2.sh) requires
-`delayed` there, with `AFSPLUS_S2_COMMIT_CONTROL=1` building a handler that
-never retries as the negative control. S3's own negative control claims a
+`delayed` there, with `AFSPLUS_S2_COMMIT_CONTROL=1` building a handler whose
+default is SYNC as the negative control. S3's own negative control claims a
 marker it has not written rather than merely skipping the flush, which it
 needed while the boot mount was SYNC and which remains the stricter test.
 

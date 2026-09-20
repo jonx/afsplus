@@ -92,13 +92,13 @@ it the handler task runs on partition.library's 40 KiB and overruns them
 replaying an intent log (`native/aros/afsplus.conf`, found by
 [`check-hosted-aros-s3.sh`](../tools/check-hosted-aros-s3.sh)).
 
-A boot mount also has no Control string, and it is made before the handler
-can be given the clock that delayed commit needs, so it started SYNC and
-stayed there for the session: every change on `SYS:` was a checkpoint commit
-with its flushes, free on Hosted and a device flush per operation on Native.
-It starts SYNC still and asks for timer.device again every 64 packets; with
-the clock it switches to the COMMIT=5 default and lets waiting record locks
-wait, both at that one moment. `AFSPlusInfo SYS: COMMIT` prints the policy,
-its seconds and whether it was taken late, and
+A boot mount has no Control string, so it takes the default, COMMIT=5, and
+timer.device is open when the boot scan starts the handler: on Hosted
+`AFSPlusInfo SYS: COMMIT` answers `commit delayed 5 at-mount`. The commit per
+change S3 first measured on the boot volume came from the close that
+committed, which the performance programme removed. A handler that does meet
+a mount with no timer starts SYNC, asks for timer.device again every 64
+packets and switches then, with waiting record locks.
 [`check-hosted-aros-s2.sh`](../tools/check-hosted-aros-s2.sh) requires
-`delayed` for `SYS:` a few seconds into the boot.
+`delayed` for `SYS:` a few seconds into the boot, and its control builds a
+handler whose default is SYNC, which the gate refuses.

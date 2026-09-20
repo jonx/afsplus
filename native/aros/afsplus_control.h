@@ -49,7 +49,11 @@
 
 #define AFSPLUS_CONTROL_TRACE_MAX 4096
 #define AFSPLUS_CONTROL_COMMIT_MAX 60
+/* A build may name another default; the boot gate's control builds with 0,
+ * which is SYNC, to show the gate sees a boot volume that does not delay. */
+#ifndef AFSPLUS_CONTROL_COMMIT_DEFAULT
 #define AFSPLUS_CONTROL_COMMIT_DEFAULT 5
+#endif
 
 struct AfsplusArosControl {
     uint32_t mount_flags;   /* AFSPLUS_AROS_MOUNT_FLAG_* of afsplus_aros.h */

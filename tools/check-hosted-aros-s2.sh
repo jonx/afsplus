@@ -23,9 +23,11 @@
 #
 #   AFSPLUS_S2_OUTPUT   where the result goes (default build/hosted-aros-s2)
 #   AFSPLUS_S2_TIMEOUT  seconds a boot may take (default 180)
-#   AFSPLUS_S2_COMMIT_CONTROL=1  negative control: build the handler without
-#                       that retry (-DAFSPLUS_AROS_COMMIT_RETRY=0). SYS: then
-#                       stays SYNC and the gate must fail here.
+#   AFSPLUS_S2_COMMIT_CONTROL=1  negative control: build the handler with SYNC
+#                       as its default policy and without the retry. SYS: then
+#                       runs SYNC and the gate must fail here. Disabling the
+#                       retry alone proves nothing: timer.device opens at the
+#                       boot mount, and the volume delays at once.
 
 set -eu
 
@@ -110,7 +112,7 @@ cd "$repo_root"
 
 if [ "$commit_control" = 1 ]; then
     echo "[hosted-s2] negative control: the handler never retries timer.device"
-    AFSPLUS_AROS_HANDLER_CFLAGS="${AFSPLUS_AROS_HANDLER_CFLAGS:-} -DAFSPLUS_AROS_COMMIT_RETRY=0"
+    AFSPLUS_AROS_HANDLER_CFLAGS="${AFSPLUS_AROS_HANDLER_CFLAGS:-} -DAFSPLUS_AROS_COMMIT_RETRY=0 -DAFSPLUS_CONTROL_COMMIT_DEFAULT=0"
     export AFSPLUS_AROS_HANDLER_CFLAGS
 fi
 

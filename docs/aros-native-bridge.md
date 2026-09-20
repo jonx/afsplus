@@ -508,10 +508,9 @@ the intent log's data updates stays `SYNC` unless the string asked for a
 delay, which then fails the mount. A handler that has no timer yet also
 starts `SYNC`, but asks for timer.device again every 64 packets and switches
 to the delayed policy once it has one, without a dismount; waiting record
-locks start waiting at that same moment. A mount the boot scan made is the
-case this is for: it has no Control string, and it is made before the handler
-can be given a clock, so the default delay would otherwise never reach the
-system volume. A string that asked for `SYNC` never switches, and
+locks start waiting at that same moment. A mount the boot scan made has no
+Control string and takes the default delay; on Hosted its timer is open at
+the mount. A string that asked for `SYNC` never switches, and
 `AFSPlusInfo <path> COMMIT` prints the policy in force, its seconds and
 whether it was taken after the mount.
 
