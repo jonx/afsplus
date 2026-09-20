@@ -166,4 +166,3 @@ fn every_cut_of_a_batch_leaves_each_orphan_whole_or_gone() {
     );
     eprintln!("orphan batch cuts: {states} states, before/after {outcomes:?}");
 }
-

@@ -173,8 +173,8 @@ fn every_c_format_constant_equals_the_rust_codec() {
     let empty_leaf = TreeNode::leaf(TreeKind::ObjectMap, 0);
     let mut one_item = empty_leaf.clone();
     one_item.items.push(TreeItem {
-        key: vec![1],
-        value: vec![2],
+        key: vec![1].into(),
+        value: vec![2].into(),
     });
     one_item.subtree_items = 1;
     let tree_fixed = payload_len(&empty_leaf.encode(BS, 1).unwrap());

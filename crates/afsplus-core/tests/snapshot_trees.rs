@@ -17,8 +17,8 @@ fn write_leaf(dev: &mut MemoryBackend, kind: TreeKind, records: Vec<(u64, Vec<u8
     node.items = records
         .into_iter()
         .map(|(key, value)| TreeItem {
-            key: key_u64(key).to_vec(),
-            value,
+            key: key_u64(key).into(),
+            value: value.into(),
         })
         .collect();
     node.subtree_items = node.items.len() as u64;
@@ -126,7 +126,7 @@ fn registry_rejects_control_identity_and_contextual_corruption() {
             1 => node.kind = TreeKind::SnapshotLifetimes,
             2 => node.owner = 1,
             3 => node.items[0].value[8] = 1,
-            4 => node.items[2].key = key_u64(5).to_vec(),
+            4 => node.items[2].key = key_u64(5).into(),
             5 => node.items[1].value[0..8].copy_from_slice(&11u64.to_le_bytes()),
             6 => node.items[1].value[16..24].copy_from_slice(&3u64.to_le_bytes()),
             7 => node.items[1].value[16..24].copy_from_slice(

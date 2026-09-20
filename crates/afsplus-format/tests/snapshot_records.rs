@@ -225,8 +225,8 @@ fn complete_registry_and_ledger_leaf_images_round_trip_and_detect_damage() {
             .into_iter()
             .zip(values)
             .map(|(id, value)| TreeItem {
-                key: key_u64(id).to_vec(),
-                value: value.to_vec(),
+                key: key_u64(id).into(),
+                value: value.into(),
             })
             .collect();
         node.subtree_items = 2;

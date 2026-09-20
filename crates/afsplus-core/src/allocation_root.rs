@@ -12,6 +12,7 @@ use afsplus_block::BlockDevice;
 use afsplus_format::checkpoint::RegionRecord;
 use afsplus_format::geometry::{Geometry, DESCRIPTOR_SLOTS};
 use afsplus_format::le;
+use afsplus_format::small_bytes::SmallBytes;
 use afsplus_format::tree::{child_value, ChildRef, TreeItem, TreeKind, TreeNode};
 
 use crate::cow_tree::TreeAllocator;
@@ -77,8 +78,8 @@ pub fn initial_leaf(region: u32, record: RegionRecord) -> Result<TreeNode, CoreE
         leftmost_child: 0,
         leftmost_items: 0,
         items: vec![TreeItem {
-            key: key(region).to_vec(),
-            value: value(record)?.to_vec(),
+            key: key(region).into(),
+            value: value(record)?.into(),
         }],
     })
 }
@@ -116,8 +117,8 @@ pub fn bulk_build(
             .take(group_len)
         {
             node.items.push(TreeItem {
-                key: key(region as u32).to_vec(),
-                value: value(*record)?.to_vec(),
+                key: key(region as u32).into(),
+                value: value(*record)?.into(),
             });
         }
         node.subtree_items = node.items.len() as u64;
@@ -156,7 +157,8 @@ pub fn bulk_build(
                         lba: child.lba,
                         subtree_items: child.items,
                     })
-                    .map_err(CoreError::Format)?,
+                    .map_err(CoreError::Format)?
+                    .into(),
                 });
             }
             let node = TreeNode {
@@ -254,7 +256,7 @@ fn allocatable_at(geo: &Geometry, ordinal: u64) -> Result<u64, CoreError> {
 #[derive(Clone)]
 struct BulkChild {
     lba: u64,
-    min_key: Vec<u8>,
+    min_key: SmallBytes,
     items: u64,
 }
 

@@ -34,8 +34,8 @@ fn leaf(
     node.items = records
         .into_iter()
         .map(|(key, value)| TreeItem {
-            key: key_u64(key).to_vec(),
-            value,
+            key: key_u64(key).into(),
+            value: value.into(),
         })
         .collect();
     node.subtree_items = node.items.len() as u64;

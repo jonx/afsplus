@@ -39,6 +39,7 @@ pub mod posix;
 pub mod reclaim;
 pub mod region;
 pub mod security;
+pub mod small_bytes;
 pub mod snapshot;
 pub mod tree;
 

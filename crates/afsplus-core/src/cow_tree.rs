@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use afsplus_block::BlockDevice;
 use afsplus_format::geometry::Geometry;
+use afsplus_format::small_bytes::SmallBytes;
 use afsplus_format::tree::{
     child_value, ChildRef, TreeItem, TreeNode, MAX_TREE_KEY_BYTES, MAX_TREE_LEVEL,
 };
@@ -377,7 +378,9 @@ where
                             key: right.min_key.clone().ok_or_else(|| {
                                 CoreError::Corrupt("split child has no minimum key".into())
                             })?,
-                            value: child_value(right.reference).map_err(CoreError::Format)?,
+                            value: child_value(right.reference)
+                                .map_err(CoreError::Format)?
+                                .into(),
                         }],
                     });
                     let lba = context.allocate_block()?;
@@ -530,7 +533,7 @@ struct StagedImage {
 #[derive(Clone)]
 struct ChildDesc {
     /// None only for the leftmost child at the current node/root boundary.
-    min_key: Option<Vec<u8>>,
+    min_key: Option<SmallBytes>,
     reference: ChildRef,
 }
 
@@ -545,10 +548,10 @@ struct PendingNode {
     node: TrackedNode,
     /// Exact subtree minimum. It is absent only for an empty tree or where a
     /// root boundary does not need to expose the value to a parent.
-    min_key: Option<Vec<u8>>,
+    min_key: Option<SmallBytes>,
 }
 
-type NodeImage = (TrackedNode, Option<Vec<u8>>);
+type NodeImage = (TrackedNode, Option<SmallBytes>);
 
 impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
     #[allow(clippy::too_many_arguments)]
@@ -556,9 +559,9 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         &mut self,
         lba: u64,
         expected_level: Option<u8>,
-        known_min: Option<Vec<u8>>,
-        lower: Option<Vec<u8>>,
-        upper: Option<Vec<u8>>,
+        known_min: Option<SmallBytes>,
+        lower: Option<SmallBytes>,
+        upper: Option<SmallBytes>,
         is_root: bool,
         depth: u8,
         key: &[u8],
@@ -583,12 +586,12 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
                 .items
                 .binary_search_by(|item| item.key.as_slice().cmp(key))
             {
-                Ok(index) => node.items[index].value = value.to_vec(),
+                Ok(index) => node.items[index].value = value.into(),
                 Err(index) => node.items.insert(
                     index,
                     TreeItem {
-                        key: key.to_vec(),
-                        value: value.to_vec(),
+                        key: key.into(),
+                        value: value.into(),
                     },
                 ),
             }
@@ -691,9 +694,9 @@ impl<D: BlockDevice, A: TreeAllocator<D>> MutationContext<'_, D, A> {
         &mut self,
         lba: u64,
         expected_level: Option<u8>,
-        known_min: Option<Vec<u8>>,
-        lower: Option<Vec<u8>>,
-        upper: Option<Vec<u8>>,
+        known_min: Option<SmallBytes>,
+        lower: Option<SmallBytes>,
+        upper: Option<SmallBytes>,
         is_root: bool,
         depth: u8,
         key: &[u8],
@@ -1294,7 +1297,9 @@ fn replace_child(
             .get_mut(index - 1)
             .ok_or_else(|| CoreError::Corrupt("tree child index out of range".into()))?;
         item.key = key;
-        item.value = child_value(child.reference).map_err(CoreError::Format)?;
+        item.value = child_value(child.reference)
+            .map_err(CoreError::Format)?
+            .into();
     }
     node.subtree_items = node
         .subtree_items
@@ -1307,9 +1312,9 @@ fn replace_child(
 fn child_range(
     node: &TreeNode,
     child_index: usize,
-    lower: &Option<Vec<u8>>,
-    upper: &Option<Vec<u8>>,
-) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    lower: &Option<SmallBytes>,
+    upper: &Option<SmallBytes>,
+) -> (Option<SmallBytes>, Option<SmallBytes>) {
     let child_lower = if child_index == 0 {
         lower.clone()
     } else {
@@ -1433,7 +1438,9 @@ fn internal_from_children(
                 .min_key
                 .clone()
                 .ok_or_else(|| CoreError::Corrupt("non-leftmost child has no minimum".into()))?,
-            value: child_value(child.reference).map_err(CoreError::Format)?,
+            value: child_value(child.reference)
+                .map_err(CoreError::Format)?
+                .into(),
         });
     }
     template.subtree_items = total;
@@ -1501,7 +1508,7 @@ fn split_internal(
     node: TrackedNode,
     children: &[ChildDesc],
     block_size: usize,
-) -> Result<(TrackedNode, TrackedNode, Vec<u8>), CoreError> {
+) -> Result<(TrackedNode, TrackedNode, SmallBytes), CoreError> {
     let capacity = block_size.saturating_sub(afsplus_format::header::HEADER_SIZE);
     let mut best: Option<(usize, usize)> = None;
     for split in 2..children.len().saturating_sub(1) {
@@ -2051,12 +2058,13 @@ mod tests {
             leftmost_child: root,
             leftmost_items: 1,
             items: vec![TreeItem {
-                key: key_u64(100).to_vec(),
+                key: key_u64(100).into(),
                 value: child_value(ChildRef {
                     lba: root + 1,
                     subtree_items: 1,
                 })
-                .unwrap(),
+                .unwrap()
+                .into(),
             }],
         }
         .encode(4096, 1)
@@ -2124,8 +2132,8 @@ mod tests {
                 leftmost_child: 0,
                 leftmost_items: 0,
                 items: vec![TreeItem {
-                    key: key_u64(100).to_vec(),
-                    value: vec![7],
+                    key: key_u64(100).into(),
+                    value: vec![7].into(),
                 }],
             }
             .encode(4096, 1)
@@ -2140,12 +2148,13 @@ mod tests {
             leftmost_child: leaf,
             leftmost_items: 1,
             items: vec![TreeItem {
-                key: key_u64(100).to_vec(),
+                key: key_u64(100).into(),
                 value: child_value(ChildRef {
                     lba: leaf,
                     subtree_items: 1,
                 })
-                .unwrap(),
+                .unwrap()
+                .into(),
             }],
         }
         .encode(4096, 1)

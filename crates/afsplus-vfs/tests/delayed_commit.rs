@@ -6,9 +6,7 @@ use afsplus_block::{MemoryBackend, TraceBackend};
 use afsplus_check::check_device;
 use afsplus_core::{mkfs, MkfsParams, MountOptions};
 use afsplus_format::{Timespec, OBJECT_ROOT};
-use afsplus_vfs::{
-    AccessMode, Durability, Vfs, DELAYED_WINDOW_OPS_MAX, DELAYED_WINDOW_OPS_MIN,
-};
+use afsplus_vfs::{AccessMode, Durability, Vfs, DELAYED_WINDOW_OPS_MAX, DELAYED_WINDOW_OPS_MIN};
 
 fn ms(millis: i64) -> Timespec {
     Timespec {
@@ -149,10 +147,7 @@ fn a_mount_may_shorten_the_window_and_the_bound_is_what_commits() {
 
     // Neither end of the range can be left.
     assert_eq!(vfs.set_window_ops_max(0), DELAYED_WINDOW_OPS_MIN);
-    assert_eq!(
-        vfs.set_window_ops_max(u32::MAX),
-        DELAYED_WINDOW_OPS_MAX
-    );
+    assert_eq!(vfs.set_window_ops_max(u32::MAX), DELAYED_WINDOW_OPS_MAX);
 }
 
 #[test]

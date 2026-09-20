@@ -127,8 +127,8 @@ fn sample_tree_leaf() -> TreeNode {
             .into_iter()
             .enumerate()
             .map(|(index, id)| TreeItem {
-                key: key_u64(id).to_vec(),
-                value: (100 + index as u64).to_le_bytes().to_vec(),
+                key: key_u64(id).into(),
+                value: (100 + index as u64).to_le_bytes().into(),
             })
             .collect(),
     }
@@ -735,20 +735,22 @@ fn shared_tree_leaf_and_internal_nodes_roundtrip() {
         leftmost_items: 100,
         items: vec![
             TreeItem {
-                key: key_u64(100).to_vec(),
+                key: key_u64(100).into(),
                 value: child_value(ChildRef {
                     lba: 41,
                     subtree_items: 100,
                 })
-                .unwrap(),
+                .unwrap()
+                .into(),
             },
             TreeItem {
-                key: key_u64(200).to_vec(),
+                key: key_u64(200).into(),
                 value: child_value(ChildRef {
                     lba: 42,
                     subtree_items: 100,
                 })
-                .unwrap(),
+                .unwrap()
+                .into(),
             },
         ],
     };
@@ -774,8 +776,8 @@ fn shared_tree_rejects_bad_order_depth_children_and_hostile_counts() {
         leftmost_child: 10,
         leftmost_items: 1,
         items: vec![TreeItem {
-            key: b"x".to_vec(),
-            value: vec![1, 2, 3],
+            key: b"x".into(),
+            value: vec![1, 2, 3].into(),
         }],
     };
     assert!(bad_internal.encode(BS, 1).is_err());

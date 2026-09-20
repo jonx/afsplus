@@ -7,6 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::header::{block_type, BlockHeader, HEADER_SIZE};
+use crate::small_bytes::SmallBytes;
 use crate::{le, FormatError};
 
 const FIXED_PAYLOAD: usize = 32;
@@ -58,9 +59,9 @@ impl TreeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeItem {
-    pub key: Vec<u8>,
+    pub key: SmallBytes,
     /// Leaf value, or a 16-byte child reference in an internal node.
-    pub value: Vec<u8>,
+    pub value: SmallBytes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,9 +231,9 @@ impl TreeNode {
             if key_len > p.len() - offset || value_len > p.len() - offset - key_len {
                 return Err(FormatError::Invalid("tree item lengths exceed payload"));
             }
-            let key = p[offset..offset + key_len].to_vec();
+            let key = SmallBytes::from_slice(&p[offset..offset + key_len]);
             offset += key_len;
-            let value = p[offset..offset + value_len].to_vec();
+            let value = SmallBytes::from_slice(&p[offset..offset + value_len]);
             offset += value_len;
             items.push(TreeItem { key, value });
         }

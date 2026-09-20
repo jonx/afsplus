@@ -340,7 +340,11 @@ impl<D: BlockDevice> Walk<'_, D> {
             self.add(lba, node_role(node.level));
             self.tree_nodes += 1;
             if node.is_leaf() {
-                leaves.extend(node.items.into_iter().map(|item| (item.key, item.value)));
+                leaves.extend(
+                    node.items
+                        .into_iter()
+                        .map(|item| (item.key.into_vec(), item.value.into_vec())),
+                );
                 continue;
             }
             // Children are pushed in reverse so leaves come out in key order.

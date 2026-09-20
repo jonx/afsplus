@@ -205,7 +205,7 @@ fn stored_comparison_key_must_match_the_name() {
     // changing the original name inside its typed value.
     let (mut forged, generation) = TreeNode::decode(&dev.peek(dir_lba)).unwrap();
     assert_eq!(forged.items.len(), 1);
-    forged.items[0].key = b"zzz-not-the-name".to_vec();
+    forged.items[0].key = b"zzz-not-the-name".into();
     dev.apply_raw(dir_lba, &forged.encode(BS, generation).unwrap());
 
     // Bounded mount validates only the root structure. The first lookup that

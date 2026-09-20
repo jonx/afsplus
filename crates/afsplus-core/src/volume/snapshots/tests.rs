@@ -572,7 +572,7 @@ fn exhausted_snapshot_ids_do_not_publish_a_pending_namespace_window() {
     node.items[0].value = afsplus_format::snapshot::RegistryState { next_id: u64::MAX }
         .encode()
         .unwrap()
-        .to_vec();
+        .into();
     dev.write_block(root, &node.encode(4096, generation).unwrap())
         .unwrap();
     let mut volume = open(dev, MountMode::ReadWrite);
@@ -661,7 +661,7 @@ fn snapshot_checker_rejects_resealed_ownership_and_historical_namespace_corrupti
                 && left.retirement == right.retirement
             {
                 left.blocks += right.blocks;
-                tree.items[index].value = left.encode(start, cp.generation, 512).unwrap().to_vec();
+                tree.items[index].value = left.encode(start, cp.generation, 512).unwrap().into();
                 tree.items.remove(index + 1);
             } else {
                 index += 1;
@@ -676,7 +676,7 @@ fn snapshot_checker_rejects_resealed_ownership_and_historical_namespace_corrupti
         mutate_ledger(&|tree| {
             let mut control = LedgerState::decode(&tree.items[0].value, 512).unwrap();
             control.retained_blocks += 1;
-            tree.items[0].value = control.encode(512).unwrap().to_vec();
+            tree.items[0].value = control.encode(512).unwrap().into();
         }),
         "retained total",
     );
@@ -701,7 +701,7 @@ fn snapshot_checker_rejects_resealed_ownership_and_historical_namespace_corrupti
     reject(
         mutate_ledger(&|tree| {
             tree.items.push(TreeItem {
-                key: key_u64(roots.registry).to_vec(),
+                key: key_u64(roots.registry).into(),
                 value: LifetimeRecord {
                     blocks: 1,
                     birth: 1,
@@ -709,11 +709,11 @@ fn snapshot_checker_rejects_resealed_ownership_and_historical_namespace_corrupti
                 }
                 .encode(roots.registry, cp.generation, 512)
                 .unwrap()
-                .to_vec(),
+                .into(),
             });
             let mut control = LedgerState::decode(&tree.items[0].value, 512).unwrap();
             control.retained_blocks += 1;
-            tree.items[0].value = control.encode(512).unwrap().to_vec();
+            tree.items[0].value = control.encode(512).unwrap().into();
             tree.items.sort_by(|a, b| a.key.cmp(&b.key));
         }),
         "aliases housekeeping or quarantine",
@@ -736,10 +736,10 @@ fn snapshot_checker_rejects_resealed_ownership_and_historical_namespace_corrupti
             let mut run = LifetimeRecord::decode(&item.value, start, cp.generation, 512).unwrap();
             let blocks = run.blocks;
             run.retirement = 0;
-            item.value = run.encode(start, cp.generation, 512).unwrap().to_vec();
+            item.value = run.encode(start, cp.generation, 512).unwrap().into();
             let mut control = LedgerState::decode(&tree.items[0].value, 512).unwrap();
             control.retained_blocks -= blocks;
-            tree.items[0].value = control.encode(512).unwrap().to_vec();
+            tree.items[0].value = control.encode(512).unwrap().into();
         }),
         "inconsistent live ownership",
     );
@@ -761,13 +761,13 @@ fn snapshot_checker_rejects_resealed_ownership_and_historical_namespace_corrupti
             let mut run = LifetimeRecord::decode(&item.value, start, cp.generation, 512).unwrap();
             assert!(run.birth > 1);
             run.birth = 1;
-            item.value = run.encode(start, cp.generation, 512).unwrap().to_vec();
+            item.value = run.encode(start, cp.generation, 512).unwrap().into();
         }),
         "birth disagrees with header",
     );
     let mut dev = base.clone();
     let (mut tree, generation) = decode_tree(&mut dev, roots.registry);
-    tree.items[0].value = RegistryState { next_id: id }.encode().unwrap().to_vec();
+    tree.items[0].value = RegistryState { next_id: id }.encode().unwrap().into();
     dev.write_block(roots.registry, &tree.encode(4096, generation).unwrap())
         .unwrap();
     reject(dev, "snapshot ID outside");
@@ -787,7 +787,7 @@ fn snapshot_checker_rejects_resealed_ownership_and_historical_namespace_corrupti
     let mut bad_view = view;
     bad_view.generation = 1;
     bad_view.committed_tx_id = 1;
-    tree.items[1].value = bad_view.encode(cp.generation, 512).unwrap().to_vec();
+    tree.items[1].value = bad_view.encode(cp.generation, 512).unwrap().into();
     dev.write_block(roots.registry, &tree.encode(4096, generation).unwrap())
         .unwrap();
     reject(dev, "generation");
@@ -852,7 +852,10 @@ fn checker_rejects_disconnected_directory_cycles_with_matching_link_counts() {
         },
     )
     .unwrap();
-    dir_node.items.push(TreeItem { key, value });
+    dir_node.items.push(TreeItem {
+        key: key.into(),
+        value: value.into(),
+    });
     dir_node.subtree_items = 1;
     volume
         .dev

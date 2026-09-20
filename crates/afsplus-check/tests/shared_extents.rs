@@ -441,8 +441,8 @@ fn raw_shared_item(start: u64, blocks: u64, references: u32, flags: u32) -> Tree
     le::put_u32(&mut value[8..12], references);
     le::put_u32(&mut value[12..16], flags);
     TreeItem {
-        key: key_u64(start).to_vec(),
-        value,
+        key: key_u64(start).into(),
+        value: value.into(),
     }
 }
 
@@ -766,12 +766,13 @@ fn shared_loader_rejects_wrong_identity_generation_and_unreadable_nodes() {
         leftmost_child: 21,
         leftmost_items: 1,
         items: vec![TreeItem {
-            key: key_u64(60).to_vec(),
+            key: key_u64(60).into(),
             value: child_value(ChildRef {
                 lba: 22,
                 subtree_items: 1,
             })
-            .unwrap(),
+            .unwrap()
+            .into(),
         }],
     };
     let mut right = TreeNode::leaf(TreeKind::SharedExtents, 0);

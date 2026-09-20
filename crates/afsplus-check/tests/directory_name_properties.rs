@@ -87,7 +87,10 @@ fn value(entry: &DirEntry) -> Vec<u8> {
 fn single(key: Vec<u8>, value: Vec<u8>) -> MemoryBackend {
     let mut dev = MemoryBackend::new(4096, 256);
     let mut node = TreeNode::leaf(TreeKind::Directory, 42);
-    node.items.push(TreeItem { key, value });
+    node.items.push(TreeItem {
+        key: key.into(),
+        value: value.into(),
+    });
     node.subtree_items = 1;
     dev.apply_raw(16, &node.encode(4096, 7).unwrap());
     dev
@@ -254,8 +257,8 @@ fn hand_built_directory_values_preserve_spelling_and_binary_page_order() {
                     (entry.key.clone(), wire.clone())
                 );
                 node.items.push(TreeItem {
-                    key: entry.key.clone(),
-                    value: wire,
+                    key: entry.key.clone().into(),
+                    value: wire.into(),
                 });
             }
             node.subtree_items = chunk.len() as u64;
@@ -269,12 +272,13 @@ fn hand_built_directory_values_preserve_spelling_and_binary_page_order() {
             leftmost_child: 17,
             leftmost_items: split as u64,
             items: vec![TreeItem {
-                key: entries[split].key.clone(),
+                key: entries[split].key.clone().into(),
                 value: child_value(ChildRef {
                     lba: 18,
                     subtree_items: (entries.len() - split) as u64,
                 })
-                .unwrap(),
+                .unwrap()
+                .into(),
             }],
         };
         dev.apply_raw(16, &root.encode(4096, 7).unwrap());

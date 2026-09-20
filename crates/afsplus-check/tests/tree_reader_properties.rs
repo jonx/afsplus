@@ -53,12 +53,13 @@ fn parent(
         leftmost_child: left,
         leftmost_items: left_count,
         items: vec![TreeItem {
-            key: separator,
+            key: separator.into(),
             value: child_value(ChildRef {
                 lba: right,
                 subtree_items: right_count,
             })
-            .unwrap(),
+            .unwrap()
+            .into(),
         }],
     }
 }
@@ -80,7 +81,10 @@ fn fixture(kind: TreeKind, variant: usize) -> Fixture {
             let k = key(number);
             let value = vec![leaf as u8, position as u8, variant as u8, 0xa5];
             expected.insert(k.clone(), value.clone());
-            node.items.push(TreeItem { key: k, value });
+            node.items.push(TreeItem {
+                key: k.into(),
+                value: value.into(),
+            });
         }
         node.subtree_items = *size;
         nodes.insert(19 + leaf as u64, node);
@@ -318,11 +322,11 @@ fn traversed_identity_child_range_and_cycle_corruptions_fail_boundedly() {
         .items
         .last_mut()
         .unwrap()
-        .key = key(40);
+        .key = key(40).into();
     reject_traversed(fixture.device(), fixture.spec, 1, 3);
 
     let mut fixture = self::fixture(TreeKind::Directory, 2);
-    fixture.nodes.get_mut(&ROOT).unwrap().items[0].key = key(64);
+    fixture.nodes.get_mut(&ROOT).unwrap().items[0].key = key(64).into();
     reject_traversed(fixture.device(), fixture.spec, 65, 3);
 
     let mut fixture = self::fixture(TreeKind::Directory, 2);
@@ -367,7 +371,8 @@ fn global_counts_and_unvisited_damage_belong_to_checker_not_point_lookup() {
         lba: 17,
         subtree_items: fixture.nodes[&18].subtree_items,
     })
-    .unwrap();
+    .unwrap()
+    .into();
     let mut dev = TraceBackend::new(fixture.device());
     assert!(tree::validate_tree(&mut dev, &GEO, ROOT, fixture.spec).is_err());
     assert!(dev.stats().reads <= 7);

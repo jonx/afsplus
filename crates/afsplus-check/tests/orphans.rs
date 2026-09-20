@@ -497,7 +497,10 @@ fn checker_rejects_every_malformed_orphan_authority_surface() {
         child_id: object,
     };
     let (key, value) = directory::encode_entry(&ident, &forged).unwrap();
-    orphan_node.items[0] = TreeItem { key, value };
+    orphan_node.items[0] = TreeItem {
+        key: key.into(),
+        value: value.into(),
+    };
     wrong_name.apply_raw(
         orphan_lba,
         &orphan_node.encode(DEFAULT_BLOCK_SIZE, generation).unwrap(),
@@ -531,7 +534,10 @@ fn checker_rejects_every_malformed_orphan_authority_surface() {
             child_id,
         };
         let (key, value) = directory::encode_entry(&ident, &entry).unwrap();
-        root.items.push(TreeItem { key, value });
+        root.items.push(TreeItem {
+            key: key.into(),
+            value: value.into(),
+        });
         root.subtree_items = root.items.len() as u64;
         exposed.apply_raw(
             root_lba,

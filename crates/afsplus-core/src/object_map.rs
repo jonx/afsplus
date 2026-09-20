@@ -58,8 +58,8 @@ pub fn initial_leaf(object_id: u64, block: u64) -> Result<TreeNode, CoreError> {
         leftmost_child: 0,
         leftmost_items: 0,
         items: vec![TreeItem {
-            key: key(object_id).to_vec(),
-            value: value(block)?.to_vec(),
+            key: key(object_id).into(),
+            value: value(block)?.into(),
         }],
     })
 }

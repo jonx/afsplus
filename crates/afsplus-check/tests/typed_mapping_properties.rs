@@ -20,7 +20,10 @@ fn image(kind: TreeKind, key: Vec<u8>, value: Vec<u8>) -> TraceBackend<MemoryBac
         subtree_items: 1,
         leftmost_child: 0,
         leftmost_items: 0,
-        items: vec![TreeItem { key, value }],
+        items: vec![TreeItem {
+            key: key.into(),
+            value: value.into(),
+        }],
     };
     let bytes = node.encode(4096, 7).unwrap();
     let mut dev = MemoryBackend::new(4096, 256);

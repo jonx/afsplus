@@ -6,6 +6,7 @@ use std::sync::Arc;
 use afsplus_block::BlockDevice;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::header::{block_type, BlockHeader};
+use afsplus_format::small_bytes::SmallBytes;
 use afsplus_format::tree::{TreeKind, TreeNode, MAX_TREE_KEY_BYTES, MAX_TREE_LEVEL};
 
 use crate::CoreError;
@@ -95,8 +96,8 @@ pub fn lookup<D: BlockDevice>(
     check_tree_lba(geo, root_lba)?;
     let mut lba = root_lba;
     let mut expected_level = None;
-    let mut lower: Option<Vec<u8>> = None;
-    let mut upper: Option<Vec<u8>> = None;
+    let mut lower: Option<SmallBytes> = None;
+    let mut upper: Option<SmallBytes> = None;
     let mut visited = BTreeSet::new();
     let mut buf = crate::scratch::Block::take(geo.block_size);
     let mut stats = TreeLookupStats {
@@ -119,7 +120,7 @@ pub fn lookup<D: BlockDevice>(
                 .items
                 .binary_search_by(|item| item.key.as_slice().cmp(key))
                 .ok()
-                .map(|index| node.items[index].value.clone());
+                .map(|index| node.items[index].value.to_vec());
             return Ok((value, stats));
         }
 
@@ -166,8 +167,8 @@ pub fn lookup_floor<D: BlockDevice>(
     check_tree_lba(geo, root_lba)?;
     let mut lba = root_lba;
     let mut expected_level = None;
-    let mut lower: Option<Vec<u8>> = None;
-    let mut upper: Option<Vec<u8>> = None;
+    let mut lower: Option<SmallBytes> = None;
+    let mut upper: Option<SmallBytes> = None;
     let mut visited = BTreeSet::new();
     let mut buf = crate::scratch::Block::take(geo.block_size);
     let mut stats = TreeLookupStats {
@@ -191,8 +192,8 @@ pub fn lookup_floor<D: BlockDevice>(
                 .partition_point(|item| item.key.as_slice() <= key);
             let value = position.checked_sub(1).map(|index| {
                 (
-                    node.items[index].key.clone(),
-                    node.items[index].value.clone(),
+                    node.items[index].key.to_vec(),
+                    node.items[index].value.to_vec(),
                 )
             });
             return Ok((value, stats));
@@ -306,7 +307,7 @@ fn read_key_page_node<D: BlockDevice>(
                 node.items[start..]
                     .iter()
                     .take(limit - out.len())
-                    .map(|item| (item.key.clone(), item.value.clone())),
+                    .map(|item| (item.key.to_vec(), item.value.to_vec())),
             );
             return Ok(node.subtree_items);
         }
@@ -401,7 +402,7 @@ fn read_range_node<D: BlockDevice>(
                 node.items[first..]
                     .iter()
                     .take(take)
-                    .map(|item| (item.key.clone(), item.value.clone())),
+                    .map(|item| (item.key.to_vec(), item.value.to_vec())),
             );
             return Ok(total);
         }
@@ -720,8 +721,8 @@ where
             items: node.subtree_items,
             nodes: 1,
             level: 0,
-            min_key: node.items.first().map(|item| item.key.clone()),
-            max_key: node.items.last().map(|item| item.key.clone()),
+            min_key: node.items.first().map(|item| item.key.to_vec()),
+            max_key: node.items.last().map(|item| item.key.to_vec()),
         };
         if !retain_visited {
             visited.remove(&lba);
@@ -896,8 +897,8 @@ mod tests {
             items: keys
                 .iter()
                 .map(|key| TreeItem {
-                    key: key_u64(*key).to_vec(),
-                    value: (1000 + *key).to_le_bytes().to_vec(),
+                    key: key_u64(*key).into(),
+                    value: (1000 + *key).to_le_bytes().into(),
                 })
                 .collect(),
         }
@@ -1002,12 +1003,13 @@ mod tests {
             leftmost_child: 20,
             leftmost_items: 3,
             items: vec![TreeItem {
-                key: key_u64(50).to_vec(),
+                key: key_u64(50).into(),
                 value: child_value(ChildRef {
                     lba: 21,
                     subtree_items: 2,
                 })
-                .unwrap(),
+                .unwrap()
+                .into(),
             }],
         };
         dev.write_block(22, &root.encode(4096, 1).unwrap()).unwrap();
@@ -1043,7 +1045,7 @@ mod tests {
         );
 
         let mut bad_root = root;
-        bad_root.items[0].key = key_u64(49).to_vec();
+        bad_root.items[0].key = key_u64(49).into();
         dev.write_block(22, &bad_root.encode(4096, 1).unwrap())
             .unwrap();
         assert!(validate_tree(&mut dev, &geo, 22, spec).is_err());
@@ -1072,12 +1074,13 @@ mod tests {
                 leftmost_items: 8,
                 items: (1..8)
                     .map(|index| TreeItem {
-                        key: key_u64((branch * 64 + index * 8 + 1) * 3).to_vec(),
+                        key: key_u64((branch * 64 + index * 8 + 1) * 3).into(),
                         value: child_value(ChildRef {
                             lba: 20 + branch * 8 + index,
                             subtree_items: 8,
                         })
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     })
                     .collect(),
             };
@@ -1093,12 +1096,13 @@ mod tests {
             leftmost_items: 64,
             items: (1..16)
                 .map(|branch| TreeItem {
-                    key: key_u64((branch * 64 + 1) * 3).to_vec(),
+                    key: key_u64((branch * 64 + 1) * 3).into(),
                     value: child_value(ChildRef {
                         lba: 200 + branch,
                         subtree_items: 64,
                     })
-                    .unwrap(),
+                    .unwrap()
+                    .into(),
                 })
                 .collect(),
         };

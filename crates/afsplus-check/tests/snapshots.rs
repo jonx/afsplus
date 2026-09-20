@@ -36,9 +36,9 @@ fn checker_validates_snapshot_images_without_enabling_writable_mounts() {
     // Independently add an initial view without changing physical ownership.
     dev.read_block(roots.registry, &mut buf).unwrap();
     let (mut tree, generation) = TreeNode::decode(&buf).unwrap();
-    tree.items[0].value = RegistryState { next_id: 2 }.encode().unwrap().to_vec();
+    tree.items[0].value = RegistryState { next_id: 2 }.encode().unwrap().into();
     tree.items.push(TreeItem {
-        key: key_u64(1).to_vec(),
+        key: key_u64(1).into(),
         value: SnapshotRecord {
             generation: cp.generation,
             committed_tx_id: cp.committed_tx_id,
@@ -46,7 +46,7 @@ fn checker_validates_snapshot_images_without_enabling_writable_mounts() {
         }
         .encode(cp.generation, ident.total_blocks)
         .unwrap()
-        .to_vec(),
+        .into(),
     });
     tree.subtree_items = 2;
     dev.write_block(roots.registry, &tree.encode(4096, generation).unwrap())
@@ -68,7 +68,7 @@ fn checker_validates_snapshot_images_without_enabling_writable_mounts() {
     }
     .encode(512)
     .unwrap()
-    .to_vec();
+    .into();
     dev.write_block(roots.lifetimes, &tree.encode(4096, generation).unwrap())
         .unwrap();
     let report = afsplus_check::check_device(&mut dev);

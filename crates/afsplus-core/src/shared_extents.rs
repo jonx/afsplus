@@ -85,8 +85,8 @@ pub fn encode_run(run: SharedRun) -> Result<([u8; 8], [u8; VALUE_SIZE]), CoreErr
 pub fn item(run: SharedRun) -> Result<TreeItem, CoreError> {
     let (key, value) = encode_run(run)?;
     Ok(TreeItem {
-        key: key.to_vec(),
-        value: value.to_vec(),
+        key: key.into(),
+        value: value.into(),
     })
 }
 
@@ -599,13 +599,13 @@ fn internal_fanout(block_size: usize) -> Result<usize, CoreError> {
     let mut children = 1usize;
     loop {
         node.items.push(TreeItem {
-            key: key_u64(children as u64).to_vec(),
+            key: key_u64(children as u64).into(),
             value: child_value(ChildRef {
                 lba: children as u64 + 1,
                 subtree_items: 1,
             })
             .map_err(CoreError::Format)?
-            .to_vec(),
+            .into(),
         });
         node.subtree_items = children as u64 + 1;
         if !node.fits(block_size) {
@@ -678,7 +678,7 @@ pub fn bulk_build(
         node.subtree_items = node.items.len() as u64;
         level_nodes.push(BulkChild {
             lba,
-            min_key: node.items[0].key.clone(),
+            min_key: node.items[0].key.clone().to_vec(),
             items: node.subtree_items,
         });
         nodes.push((lba, node));
@@ -707,13 +707,13 @@ pub fn bulk_build(
                     .checked_add(child.items)
                     .ok_or_else(|| CoreError::Corrupt("shared record count overflows".into()))?;
                 items.push(TreeItem {
-                    key: child.min_key.clone(),
+                    key: child.min_key.clone().into(),
                     value: child_value(ChildRef {
                         lba: child.lba,
                         subtree_items: child.items,
                     })
                     .map_err(CoreError::Format)?
-                    .to_vec(),
+                    .into(),
                 });
             }
             let node = TreeNode {

@@ -319,29 +319,29 @@ fn mkfs_impl<D: BlockDevice>(
         };
         let mut registry = TreeNode::leaf(TreeKind::SnapshotRegistry, 0);
         registry.items.push(TreeItem {
-            key: key_u64(0).to_vec(),
-            value: RegistryState { next_id: 1 }.encode()?.to_vec(),
+            key: key_u64(0).into(),
+            value: RegistryState { next_id: 1 }.encode()?.into(),
         });
         registry.subtree_items = 1;
         let mut ledger = TreeNode::leaf(TreeKind::SnapshotLifetimes, 0);
         ledger.items.push(TreeItem {
-            key: key_u64(0).to_vec(),
+            key: key_u64(0).into(),
             value: LedgerState {
                 scan_position: 0,
                 retained_blocks: 0,
             }
             .encode(geo.total_blocks)?
-            .to_vec(),
+            .into(),
         });
         ledger.items.push(TreeItem {
-            key: key_u64(root_record_lba).to_vec(),
+            key: key_u64(root_record_lba).into(),
             value: LifetimeRecord {
                 blocks: 3,
                 birth: generation,
                 retirement: 0,
             }
             .encode(root_record_lba, generation, geo.total_blocks)?
-            .to_vec(),
+            .into(),
         });
         ledger.subtree_items = 2;
         dev.write_block(roots.registry, &registry.encode(block_size, generation)?)?;

@@ -83,8 +83,8 @@ pub fn leaf_from_extents(owner: u64, extents: &[Extent]) -> Result<TreeNode, Cor
         .map(|extent| {
             let (key, value) = encode_extent(extent)?;
             Ok(TreeItem {
-                key: key.to_vec(),
-                value: value.to_vec(),
+                key: key.into(),
+                value: value.into(),
             })
         })
         .collect::<Result<Vec<_>, CoreError>>()?;
@@ -157,7 +157,7 @@ pub fn bulk_build(
         let node = leaf_from_extents(owner, &extents[offset..offset + group_len])?;
         level_nodes.push(BulkChild {
             lba,
-            min_key: node.items[0].key.clone(),
+            min_key: node.items[0].key.clone().to_vec(),
             items: node.subtree_items,
         });
         nodes.push((lba, node));
@@ -186,12 +186,13 @@ pub fn bulk_build(
                     .checked_add(child.items)
                     .ok_or_else(|| CoreError::Corrupt("extent item count overflows".into()))?;
                 items.push(TreeItem {
-                    key: child.min_key.clone(),
+                    key: child.min_key.clone().into(),
                     value: child_value(ChildRef {
                         lba: child.lba,
                         subtree_items: child.items,
                     })
-                    .map_err(CoreError::Format)?,
+                    .map_err(CoreError::Format)?
+                    .into(),
                 });
             }
             let node = TreeNode {
@@ -242,8 +243,8 @@ fn leaf_capacity(block_size: usize) -> Result<usize, CoreError> {
             flags: 0,
         })?;
         node.items.push(TreeItem {
-            key: key.to_vec(),
-            value: value.to_vec(),
+            key: key.into(),
+            value: value.into(),
         });
         node.subtree_items = node.items.len() as u64;
         if !node.fits(block_size) {
@@ -272,12 +273,13 @@ fn internal_fanout(block_size: usize) -> Result<usize, CoreError> {
     let mut children = 1usize;
     loop {
         node.items.push(TreeItem {
-            key: key_u64(children as u64).to_vec(),
+            key: key_u64(children as u64).into(),
             value: child_value(ChildRef {
                 lba: children as u64 + 1,
                 subtree_items: 1,
             })
-            .map_err(CoreError::Format)?,
+            .map_err(CoreError::Format)?
+            .into(),
         });
         node.subtree_items += 1;
         if !node.fits(block_size) {
@@ -716,8 +718,8 @@ mod tests {
         ] {
             let (key, value) = encode_extent(extent).unwrap();
             leaf.items.push(afsplus_format::tree::TreeItem {
-                key: key.to_vec(),
-                value: value.to_vec(),
+                key: key.into(),
+                value: value.into(),
             });
         }
         leaf.subtree_items = leaf.items.len() as u64;

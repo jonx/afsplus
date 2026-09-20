@@ -578,7 +578,7 @@ impl<'a, D: BlockDevice> Image<'a, D> {
                 stream.items = node
                     .items
                     .into_iter()
-                    .map(|item| (item.key, item.value))
+                    .map(|item| (item.key.into_vec(), item.value.into_vec()))
                     .collect::<Vec<_>>()
                     .into_iter();
                 continue;
