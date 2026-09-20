@@ -67,6 +67,23 @@
 #define AFSPLUS_EXT_WATCH_ADD UINT32_C(26)       /* NOTIFY */
 #define AFSPLUS_EXT_WATCH_TAKE UINT32_C(27)      /* NOTIFY */
 #define AFSPLUS_EXT_WATCH_REMOVE UINT32_C(28)    /* NOTIFY */
+#define AFSPLUS_EXT_COMMIT_POLICY UINT32_C(29)   /* always */
+
+/* The commit policy the mount runs under (ADR-121). policy is 0 for SYNC
+ * and 1 for delayed; seconds is the longest a change then waits, and 0 under
+ * SYNC. late is 1 when the mount started SYNC and took the delayed policy
+ * afterwards, which is what a mount made before timer.device could be opened
+ * does. The handler answers from what it applied, never from what the
+ * Control string asked for. */
+#define AFSPLUS_EXT_COMMIT_SYNC UINT32_C(0)
+#define AFSPLUS_EXT_COMMIT_DELAYED UINT32_C(1)
+
+struct AfsplusExtCommitPolicy {
+    uint32_t struct_size;
+    uint32_t policy;
+    uint32_t seconds;
+    uint32_t late;
+};
 
 /* One record of AFSPLUS_EXT_PACKET_COUNTS. With flags 0 the key is a packet
  * type, count the packets of that type answered since the handler started
@@ -164,6 +181,7 @@ struct AfsplusExtPacketCount {
  *                 AfsplusExtPacketCount, buffer_size in bytes
  *                 -> output_count records stored, output_value records the
  *                    table holds; the request itself is counted by the next
+ *   COMMIT_POLICY buffer: struct AfsplusExtCommitPolicy, struct_size set
  *
  * A struct buffer must be at least as large as the struct_size it declares.
  * Names are single components in the mount's name encoding, exactly as the
@@ -205,6 +223,8 @@ _Static_assert(sizeof(struct AfsplusExtRequest) == 112,
     "AfsplusExtRequest layout drift");
 _Static_assert(sizeof(struct AfsplusExtPacketCount) == 24,
     "AfsplusExtPacketCount layout drift");
+_Static_assert(sizeof(struct AfsplusExtCommitPolicy) == 16,
+    "AfsplusExtCommitPolicy layout drift");
 #endif
 
 #endif

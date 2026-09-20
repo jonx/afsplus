@@ -334,6 +334,14 @@ int main(void)
     memset(&counters, 0xFF, sizeof(counters));
     assert(afsplus_client_counters(&handler_port, &counters) == 0);
     assert(counters.struct_size == sizeof(counters));
+    {
+        struct AfsplusExtCommitPolicy policy;
+
+        memset(&policy, 0xFF, sizeof(policy));
+        assert(afsplus_client_commit_policy(&handler_port, &policy) == 0);
+        assert(last_request.operation == AFSPLUS_EXT_COMMIT_POLICY);
+        assert(policy.struct_size == sizeof(policy));
+    }
     assert(afsplus_client_info_json(&handler_port, (char *)data,
         sizeof(data), &required) == 0);
     assert(required == 300);

@@ -53,6 +53,13 @@
 #define AFSPLUS_AROS_TRACE_STARTUP 0
 #endif
 
+/* A mount made before timer.device can be opened asks for it again while it
+ * serves packets. Built with this at 0 it does not, which is how the boot
+ * gate's negative control reproduces the session-long SYNC mount. */
+#ifndef AFSPLUS_AROS_COMMIT_RETRY
+#define AFSPLUS_AROS_COMMIT_RETRY 1
+#endif
+
 #if AFSPLUS_AROS_TRACE_STARTUP && defined(__aarch64__)
 #include <aros/apple/startup.h>
 #include <proto/kernel.h>
@@ -101,6 +108,12 @@ struct AfsplusArosHandler {
     uint32_t commit_named;
     uint32_t commit_delayed;
     uint32_t commit_pending;
+    /* A mount made before timer.device can be opened runs SYNC. It is right
+     * and only slower, so the mount succeeds; these two carry the later
+     * attempt to get the clock after all, and whether it worked. */
+    uint32_t commit_retry;
+    uint32_t commit_late;
+    uint32_t commit_retry_packets;
     uint8_t *bounce;
     uintptr_t dma_mask;
     uint32_t bounce_size;
@@ -320,6 +333,64 @@ static void run_wait_timer(struct AfsplusArosHandler *handler)
         SendIO((struct IORequest *)handler->timer_request);
         handler->timer_pending = 1;
     }
+}
+
+/* Asks the library for the delayed policy the mount wants. The caller has
+ * the timer by this point; the library refuses a volume whose format has no
+ * intent-log data updates with ERROR_ACTION_NOT_KNOWN. */
+static int32_t apply_commit_policy(struct AfsplusArosHandler *handler)
+{
+    int32_t error = afsplus_aros_set_commit_policy(handler->filesystem,
+        handler->commit_seconds * UINT32_C(1000), UINT32_C(1000));
+
+    if (error == 0)
+        handler->commit_delayed = 1;
+    return error;
+}
+
+/* Publishes the policy in force, which AFSPLUS_EXT_COMMIT_POLICY answers and
+ * AFSPlusInfo prints. */
+static void report_commit_policy(struct AfsplusArosHandler *handler)
+{
+    afsplus_aros_packet_set_commit_policy(handler->packets,
+        handler->commit_delayed
+            ? AFSPLUS_EXT_COMMIT_DELAYED : AFSPLUS_EXT_COMMIT_SYNC,
+        handler->commit_delayed ? handler->commit_seconds : 0,
+        handler->commit_late);
+}
+
+/* A mount that started without timer.device tries for it again while it
+ * serves packets, once every this many, and never again after an attempt has
+ * settled the question. Nothing wakes the handler for this, so the packets
+ * are the clock. */
+#define AFSPLUS_AROS_COMMIT_RETRY_PACKETS UINT32_C(64)
+
+static void retry_commit_policy(struct AfsplusArosHandler *handler)
+{
+    struct ExecBase *SysBase = handler->SysBase;
+    int32_t error;
+
+    (void)SysBase;
+
+    if (!handler->commit_retry)
+        return;
+    if (++handler->commit_retry_packets < AFSPLUS_AROS_COMMIT_RETRY_PACKETS)
+        return;
+    handler->commit_retry_packets = 0;
+    open_wait_timer(handler);
+    if (!handler->timer_open)
+        return;
+    /* Everything that waits on the clock takes it at this one moment: the
+     * delayed commit below, and the record locks the packet layer parks. */
+    afsplus_aros_packet_set_complete(handler->packets, packet_complete);
+    handler->commit_retry = 0;
+    error = apply_commit_policy(handler);
+    if (error == 0)
+        handler->commit_late = 1;
+    report_commit_policy(handler);
+    bug("[AFSPLUS] timer.device opened after the mount; commit policy %s"
+        " (error %d)\n", handler->commit_delayed ? "delayed" : "SYNC",
+        (int)error);
 }
 
 static void *packet_allocate(void *context, size_t size)
@@ -1020,29 +1091,37 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     if (handler->timer_open)
         packet_config.complete = packet_complete;
     /* Delayed commit needs the timer that wakes the handler to commit. A
-     * volume that cannot delay stays SYNC unless the Control string asked
-     * for a delay, which then fails the mount rather than look applied. */
+     * mount that has no timer yet stays SYNC, which is right and only
+     * slower, and asks for the timer again while it serves packets. A
+     * Control string that named a delay wants to be told instead, so it
+     * fails the mount rather than look applied; a boot-scan mount has no
+     * Control string, so the default and the retry are what it gets. A
+     * volume whose format cannot delay is refused once and never retried. */
     set_startup_stage(handler, "commit-policy");
     if (handler->commit_seconds != 0)
     {
         if (!handler->timer_open)
-            error = handler->commit_named ? ERROR_NO_FREE_STORE : 0;
+        {
+            if (handler->commit_named)
+                return ERROR_NO_FREE_STORE;
+            handler->commit_retry = AFSPLUS_AROS_COMMIT_RETRY;
+        }
         else
         {
-            error = afsplus_aros_set_commit_policy(handler->filesystem,
-                handler->commit_seconds * UINT32_C(1000), UINT32_C(1000));
-            if (error == 0)
-                handler->commit_delayed = 1;
-            else if (error == ERROR_ACTION_NOT_KNOWN && !handler->commit_named)
+            error = apply_commit_policy(handler);
+            if (error == ERROR_ACTION_NOT_KNOWN && !handler->commit_named)
                 error = 0;
+            if (error != 0)
+                return error;
         }
-        if (error != 0)
-            return error;
     }
     set_startup_stage(handler, "packet-context");
     error = afsplus_aros_packet_create(&packet_config, &handler->packets);
     if (error == 0)
+    {
+        report_commit_policy(handler);
         set_startup_stage(handler, "ready");
+    }
     return error;
 }
 
@@ -1541,6 +1620,7 @@ LONG handler(struct ExecBase *SysBase)
                 collect_notify_replies(state);
             afsplus_aros_startup_trace(SysBase, UINT32_C(0x40000000) |
                 ((uint32_t)packet->dp_Type & UINT32_C(0x0fffffff)));
+            retry_commit_policy(state);
             error = afsplus_aros_packet_process(state->packets, packet);
             /* Kept by the packet layer: packet_complete replies later. */
             if (error == AFSPLUS_AROS_PACKET_DEFERRED)

@@ -118,6 +118,10 @@ struct AfsplusArosPacketContext {
     uint32_t quit;
     uint64_t groups;
     uint32_t revision;
+    /* What AFSPLUS_EXT_COMMIT_POLICY answers. The handler pushes it: the
+     * policy in force is the handler's, because it owns the clock that
+     * delayed commit needs. */
+    struct AfsplusExtCommitPolicy commit;
 };
 
 struct AfsplusPathOperation {
@@ -1187,6 +1191,26 @@ uint32_t afsplus_aros_packet_should_quit(
     return context != NULL ? context->quit : 0;
 }
 
+void afsplus_aros_packet_set_complete(
+    struct AfsplusArosPacketContext *context,
+    AfsplusArosPacketComplete complete)
+{
+    if (context != NULL)
+        context->complete = complete;
+}
+
+void afsplus_aros_packet_set_commit_policy(
+    struct AfsplusArosPacketContext *context, uint32_t policy,
+    uint32_t seconds, uint32_t late)
+{
+    if (context == NULL)
+        return;
+    context->commit.struct_size = sizeof(context->commit);
+    context->commit.policy = policy;
+    context->commit.seconds = seconds;
+    context->commit.late = late;
+}
+
 static uint32_t has_notify_request(
     const struct AfsplusArosPacketContext *context)
 {
@@ -1248,6 +1272,7 @@ static void deliver_notifications(struct AfsplusArosPacketContext *context)
 /* The report structs an extension request can ask for. */
 union AfsplusExtReport {
     uint32_t struct_size;
+    struct AfsplusExtCommitPolicy commit;
     struct AfsplusArosCapabilities capabilities;
     struct AfsplusArosCounters counters;
     struct AfsplusArosHealth health;
@@ -1698,6 +1723,17 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
         request->output_value = dropped;
         return 0;
     }
+    case AFSPLUS_EXT_COMMIT_POLICY:
+        error = report_begin(request, sizeof(report.commit), &report);
+        if (error == 0)
+        {
+            uint32_t size = report.commit.struct_size;
+
+            report.commit = context->commit;
+            report.commit.struct_size = size;
+            report_end(request, &report);
+        }
+        return error;
     case AFSPLUS_EXT_TRACE_COUNTERS:
         error = require_group(context, AFSPLUS_AROS_GROUP_OBSERVE);
         if (error == 0)

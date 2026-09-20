@@ -8,6 +8,11 @@
  * started, one line per packet type ("packet <type> <count> <failed>") and
  * one per error code ("error <code> <count>"), in decimal.
  *
+ * AFSPlusInfo <path> COMMIT prints the commit policy the mount runs under,
+ * as "commit sync 0 at-mount" or "commit delayed <seconds> <at-mount|late>";
+ * "late" means the mount started SYNC because it had no timer.device yet and
+ * took the delayed policy afterwards.
+ *
  * AFSPlusInfo <path> TRACE drains the handler's trace ring, one line per
  * event ("trace <sequence> <timestamp> <category> <event> <object>"), then
  * "trace lost <n>" and the sink's counters. A mount whose Control string did
@@ -49,6 +54,18 @@ static LONG print_counts(struct MsgPort *port, uint32_t which)
         else
             Printf("error %ld %lu\n", (LONG)records[index].key, count);
     }
+    return error;
+}
+
+static LONG print_commit(struct MsgPort *port)
+{
+    struct AfsplusExtCommitPolicy policy;
+    LONG error = afsplus_client_commit_policy(port, &policy);
+
+    if (error == 0)
+        Printf("commit %s %lu %s\n",
+            policy.policy == AFSPLUS_EXT_COMMIT_DELAYED ? "delayed" : "sync",
+            (ULONG)policy.seconds, policy.late ? "late" : "at-mount");
     return error;
 }
 
@@ -111,9 +128,9 @@ int main(int argc, char **argv)
     int attempt;
 
     if (argc != 2 && !(argc == 3 && (strcmp(argv[2], "PACKETS") == 0
-        || strcmp(argv[2], "TRACE") == 0)))
+        || strcmp(argv[2], "TRACE") == 0 || strcmp(argv[2], "COMMIT") == 0)))
     {
-        Printf("usage: AFSPlusInfo <volume or path> [PACKETS|TRACE]\n");
+        Printf("usage: AFSPlusInfo <volume or path> [PACKETS|TRACE|COMMIT]\n");
         return RETURN_ERROR;
     }
     process = GetDeviceProc((CONST_STRPTR)argv[1], NULL);
@@ -130,6 +147,17 @@ int main(int argc, char **argv)
         Printf("AFSPlusInfo: %s is not served by an AFS+ handler with the "
             "extension transport\n", argv[1]);
         return RETURN_WARN;
+    }
+    if (error == 0 && argc == 3 && strcmp(argv[2], "COMMIT") == 0)
+    {
+        error = print_commit(port);
+        FreeDeviceProc(process);
+        if (error != 0)
+        {
+            Printf("AFSPlusInfo: error %ld\n", error);
+            return RETURN_FAIL;
+        }
+        return RETURN_OK;
     }
     if (error == 0 && argc == 3 && strcmp(argv[2], "TRACE") == 0)
     {

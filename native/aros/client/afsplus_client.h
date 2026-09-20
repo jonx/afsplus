@@ -127,6 +127,11 @@ LONG afsplus_client_trace_events(struct MsgPort *port,
 LONG afsplus_client_trace_counters(struct MsgPort *port,
     struct AfsplusArosTraceCounters *output);
 
+/* The commit policy the mount runs under, and whether it was taken after the
+ * mount rather than at it (ADR-121). */
+LONG afsplus_client_commit_policy(struct MsgPort *port,
+    struct AfsplusExtCommitPolicy *output);
+
 /* Health events the handler recorded, oldest first; the call empties what it
  * hands over. lost receives how many the ring has dropped since the mount,
  * which a caller cannot see from the events themselves. */

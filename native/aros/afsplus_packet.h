@@ -139,6 +139,22 @@ void afsplus_aros_packet_elapsed(struct AfsplusArosPacketContext *context,
 uint32_t afsplus_aros_packet_should_quit(
     const struct AfsplusArosPacketContext *context);
 
+/* Installs the complete callback on a running context. A handler that could
+ * not open its clock at mount calls this the moment it has one, so that
+ * waiting record locks wait from then on rather than only after the next
+ * mount. */
+void afsplus_aros_packet_set_complete(
+    struct AfsplusArosPacketContext *context,
+    AfsplusArosPacketComplete complete);
+
+/* What AFSPLUS_EXT_COMMIT_POLICY answers: AFSPLUS_EXT_COMMIT_SYNC or
+ * AFSPLUS_EXT_COMMIT_DELAYED, the longest a change then waits in seconds,
+ * and whether the delayed policy was taken after the mount. The handler
+ * calls this once it has applied a policy, and again whenever it changes. */
+void afsplus_aros_packet_set_commit_policy(
+    struct AfsplusArosPacketContext *context, uint32_t policy,
+    uint32_t seconds, uint32_t late);
+
 #ifdef __cplusplus
 }
 #endif

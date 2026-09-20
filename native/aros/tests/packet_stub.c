@@ -1908,6 +1908,36 @@ int main(void)
         EXT_SEND(DOSFALSE, ERROR_NOT_IMPLEMENTED);
         ext_error = 0;
 
+        /* The commit policy the handler applied, which it pushes into the
+         * context and may push again: a mount that had no clock starts SYNC
+         * and reports the delayed policy, late, once it has one. */
+        {
+            struct AfsplusExtCommitPolicy policy;
+
+            memset(&policy, 0, sizeof(policy));
+            policy.struct_size = sizeof(policy);
+            EXT_BEGIN(AFSPLUS_EXT_COMMIT_POLICY);
+            request.buffer = &policy;
+            request.buffer_size = sizeof(policy) - 1;
+            EXT_SEND(DOSFALSE, ERROR_BAD_NUMBER);
+            request.buffer_size = sizeof(policy);
+            EXT_SEND(DOSTRUE, 0);
+            assert(policy.struct_size == sizeof(policy)
+                && policy.policy == AFSPLUS_EXT_COMMIT_SYNC
+                && policy.seconds == 0 && policy.late == 0);
+
+            afsplus_aros_packet_set_commit_policy(context,
+                AFSPLUS_EXT_COMMIT_DELAYED, 5, 1);
+            memset(&policy, 0, sizeof(policy));
+            policy.struct_size = sizeof(policy);
+            EXT_SEND(DOSTRUE, 0);
+            assert(policy.policy == AFSPLUS_EXT_COMMIT_DELAYED
+                && policy.seconds == 5 && policy.late == 1);
+            afsplus_aros_packet_set_commit_policy(context,
+                AFSPLUS_EXT_COMMIT_SYNC, 0, 0);
+        }
+
+
         initialize_packet(&packet, ACTION_END);
         packet.dp_Arg1 = writable_file.fh_Arg1;
         assert(afsplus_aros_packet_process(context, &packet) == 0);

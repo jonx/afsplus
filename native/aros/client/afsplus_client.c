@@ -541,3 +541,9 @@ LONG afsplus_client_trace_counters(struct MsgPort *port,
 {
     return report(port, AFSPLUS_EXT_TRACE_COUNTERS, output, sizeof(*output));
 }
+
+LONG afsplus_client_commit_policy(struct MsgPort *port,
+    struct AfsplusExtCommitPolicy *output)
+{
+    return report(port, AFSPLUS_EXT_COMMIT_POLICY, output, sizeof(*output));
+}
