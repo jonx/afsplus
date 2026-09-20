@@ -207,8 +207,7 @@ cp docs/aros-alpha0-package.md "$staging/README.md"
         cd "$platform_glue_dir"
         shasum -a 256 \
             aros_net_glue.c aros_fs_glue.c aros_process_glue.c \
-            aros_proc_glue.c aros_thread_glue.c aros_sync_glue.c \
-            aros_env_glue.c
+            aros_proc_glue.c aros_env_glue.c
     )
     echo "platform_glue_sha256_end"
 } >"$staging/build-profile.txt"

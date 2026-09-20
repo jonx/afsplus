@@ -230,7 +230,8 @@ takes it to 4,607,336 bytes, because it carries no debug information, and
 the 1,992,792 bytes a full strip leaves would not load. Its sections are
 1,631,776 of code, 348,904 of read-only data, 1,492,512 of relocations,
 1,113,930 of symbol and string tables, and 1,843,228 of `.bss`, which costs
-no file bytes and 1.8 MiB of memory at load.
+no file bytes and 1.8 MiB of memory at load. Both of those last figures are
+answered below.
 
 | Part | Bytes | Share of the code |
 |---|---|---|
@@ -292,11 +293,12 @@ What a 4 MiB 68000 machine could not live with: `Buffers=1024`, which asks
 for more memory than the machine has; the 3.1 MiB peak of a full delayed
 window, which is most of it; and the 1.8 MiB thread table the module
 reserves before it serves a packet. What it can live with is the mount
-itself, 7 KiB, and the 274 KiB of a 64-buffer cache.
+itself, 7 KiB, and the 274 KiB of a 64-buffer cache. The first two are
+answered below, and the third is gone.
 
 ### What the table changed
 
-Three things, smallest first, each measured against the table above.
+Four things, smallest first, each measured against the table above.
 
 **The AROS heap carries no size header.** Rust's `GlobalAlloc` hands the
 layout to `dealloc` and to `realloc`, so a block's size is known where it is
@@ -330,6 +332,49 @@ largest thing in the run, so 64 is the floor. The handler takes 512 from
 about 880 KiB where it would have peaked at 3.1 MiB, and every machine the
 qualified profiles run on keeps today's window.
 
+**The handler costs a machine 1.8 MiB less before it mounts anything.** The
+module's `.bss` was 1,843,228 bytes, of which 1,841,328 were one symbol,
+`threads`: the fixed thread table of the AROS static pthread library the link
+list named. It is taken at load, on every machine that has the handler in
+`L:`, whether or not a volume is ever mounted, and on a 4 MiB 68k machine it
+is most of the machine. AFS+ creates no thread.
+
+What Rust's standard library asks of a thread library is eighteen entry
+points -- a Mutex, a Condvar, spawn, join, detach, yield and sleep -- plus six
+that compiler-rt's emulated TLS wants for a `#[thread_local]` static. That
+second set is why dropping `-lpthread` from the profiles was not enough on
+its own: `collect-aros` adds `-lpthread` by itself when a `pthread` symbol is
+left undefined, and says so ("emulated-TLS dependency").
+[`native/aros/afsplus_bootthread.c`](../native/aros/afsplus_bootthread.c)
+answers all twenty-four, as `afsplus_bootlibc.c` and `afsplus_bootposix.c`
+already answer libc and posix. The Mutex is real, over an exec
+`SignalSemaphore`, because `std` takes it; the thread-local keys are one
+task's table; a condition wait, a spawn, a join and a sleep on the packet
+task each write a `bug()` line and fail, because a quiet success there is a
+handler that waits forever with nothing written down.
+
+| | Before | After |
+|---|---|---|
+| `.bss`, aarch64 | 1,843,228 | 596 |
+| `.bss`, x86_64 | 1,584,873 | 577 |
+| file, aarch64 | 4,728,872 | 4,549,256 |
+| file, x86_64 | 6,617,824 | 5,875,248 |
+
+The file also lost its local symbols. A relocatable module needs the symbols
+its relocations name, and the AROS ELF loader reads only `sym->shindex` and
+`sym->value` from an entry, the name reaching nothing but a debug line
+(`rom/dos/internalloadseg_elf.c`); it loads `.symtab` and `.strtab` whole to
+do it and frees them afterwards. `llvm-objcopy --discard-all` takes out the
+locals and keeps every global: 732 symbols and 140,784 bytes on aarch64, 738
+and 709,512 on x86_64, where a function per section makes the names longer,
+off the package and off what the loader holds while it relocates.
+That every relocation still resolves to the same section and offset was
+checked entry by entry, 65,431 of them on aarch64 and 34,350 on x86_64.
+
+Both ABI audits now refuse a module with more than 64 KiB of `.bss`, or any
+single zero-filled object above 64 KiB, and name it. Run against the handler
+built before this change they fail and name `threads`.
+
 ### What was left alone, and why
 
 **A pool of the handler's own** (`CreatePool`, `AllocPooled`) was not made.
@@ -354,8 +399,17 @@ count, not to this one.
 
 **A smaller build for small machines** was not proposed. Formatting and
 panic machinery are 9 % of the code and 3 % of the handler file, and an
-`opt-level = "z"` build would take part of that. Beside it stands the 1.8 MiB
-of `.bss` the AROS static pthread library reserves for a thread table the
-handler never uses, which is twenty times as much memory and none of it
-AFS+'s: until that is answered, a build profile that trades speed for 3 % of
-a file is not the change to make.
+`opt-level = "z"` build would take part of that: a speed trade for 3 % of a
+file, worth making only with a measurement of what it costs the benchmark,
+which belongs to a lot of its own.
+
+**Garbage collection of unreferenced code** was measured and does not apply.
+The x86_64 profile already gives every function its own section -- the module
+carries 12,718 of them -- so `--gc-sections` looks like the obvious next
+saving. It is not: `collect-aros` links a module with `ld -r`, and a
+relocatable link has no entry point to keep anything alive from, so
+`--gc-sections` collects nearly all of it. The link runs, and produces a
+12,168-byte module: everything the handler is, collected. What drops
+unreferenced `core` and `alloc` code here is the archive member, not the
+section: a member nothing refers to is never pulled in, which is how the
+thread table left.

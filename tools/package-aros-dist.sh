@@ -265,8 +265,8 @@ fi
 # and sym->value, and the symbol's name only for a debug or error line), and
 # it loads the whole of .symtab and .strtab into memory to do it. A local
 # symbol no relocation names is read by nobody, so it is discarded: 732
-# symbols, 140,784 bytes off the package and off what the loader holds while
-# it relocates. The global symbols stay, because the loader's error messages,
+# symbols and 140,784 bytes on aarch64, 738 and 709,512 on x86_64, off the
+# package and off what the loader holds while it relocates. The global symbols stay, because the loader's error messages,
 # the checks above and genmodule's entry points want them. The audit below
 # runs on the stripped file, so what is audited is what ships.
 echo "[aros-dist] $profile_id: discard the local symbols"

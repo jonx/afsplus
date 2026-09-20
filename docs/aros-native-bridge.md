@@ -171,9 +171,10 @@ profile variables:
 | `AFSPLUS_AROS_EXPECTED_PLATFORM` | unset | Required `AROS_TARGET_PLATFORM` value for a release profile |
 | `AFSPLUS_AROS_PROFILE_ID` | SDK platform | Human-readable package profile identity |
 | `AFSPLUS_AROS_OBJDUMP` | `$AROS_CROSSTOOLS/bin/llvm-objdump` | Disassembler used by the final machine-code ABI gate |
+| `AFSPLUS_AROS_OBJCOPY` | `$AROS_CROSSTOOLS/bin/llvm-objcopy` | Discards the module's local symbols before the audit |
 | `AFSPLUS_AROS_RUST_TARGET_JSON` | MacAROS `aarch64-unknown-aros.json` | Rust target used with `-Zbuild-std` |
 | `AFSPLUS_AROS_RUST_ARCHIVE` | derived from the JSON filename | Optional explicit `libafsplus_aros_ffi.a` output |
-| `AFSPLUS_AROS_PLATFORM_GLUE_DIR` | MacAROS `hosted/rust` | Seven AROS `std` C glue sources |
+| `AFSPLUS_AROS_PLATFORM_GLUE_DIR` | MacAROS `hosted/rust` | Five AROS `std` C glue sources |
 | `AFSPLUS_AROS_TARGET` | `aarch64-unknown-aros` | Clang driver/link target |
 | `AFSPLUS_AROS_CODEGEN_TARGET` | `aarch64-unknown-none-elf` | Clang target for generated entry/glue objects |
 | `AFSPLUS_AROS_ARCH_FLAGS` | `-mcmodel=large -ffixed-x18` | Whitespace-separated target ABI/codegen flags |
@@ -182,7 +183,7 @@ profile variables:
 A bare-metal MacAROS SDK plus its host build tools must provide these as one
 coherent profile. In particular it must not inherit `+reserve-x18` or
 `-ffixed-x18` unless that platform ABI independently reserves the register. The
-build still requires the same public AROS headers/libraries and seven `std`
+build still requires the same public AROS headers/libraries and five `std`
 glue symbols; no filesystem source fork is permitted. Every package records
 the profile values, target-JSON hash and per-glue hashes in
 `build-profile.txt`. ADR-051 records this boundary.
@@ -198,7 +199,7 @@ AFSPLUS_AROS_PROFILE_ID=macaros-native-apple-aarch64-prehardware \
 tools/package-aros-alpha0.sh
 ```
 
-It reuses the qualified MacAROS AROS-AArch64 Rust target and seven
+It reuses the qualified MacAROS AROS-AArch64 Rust target and five
 glues, but links against the `apple-aarch64` SDK. Their hashes, the SDK target
 configuration, host tools and ABI auditor are recorded in profile format v2.
 The resulting machine-code report is a build gate, not a native runtime claim.
@@ -251,7 +252,7 @@ nowhere else:
 
 | Setting | Value | Why |
 |---|---|---|
-| `llvm-target` | `x86_64-unknown-none-elf` | No host `std` assumptions; AROS `std` is the seven glues |
+| `llvm-target` | `x86_64-unknown-none-elf` | No host `std` assumptions; AROS `std` is the five glues |
 | `features` | `+sse,+sse2` | The x86_64 baseline; AROS uses the SSE registers normally, so no soft float |
 | `code-model` | `large` | AROS builds x86_64 large, and the loader may place a module's sections anywhere in the 64-bit space |
 | `relocation-model` | `static` | A module is relocated by the AROS ELF loader, not by a dynamic linker |
@@ -762,10 +763,33 @@ That final off-tree link deliberately consumes the glue sources from
 release architecture, not a temporary dependency on AROS accepting AFS+ into
 its source tree. The resulting module is installed in `L:` and selected by a
 normal file in `DEVS:DOSDrivers`; it uses only public Exec, DOS and device APIs.
-An optional upstream or distribution `mmakefile.src` would list the same seven
-glues (`net`, `fs`, `process`, `proc`, `thread`, `sync`, `env`), the AFS+ static
-library and the standard MacAROS `posixc/stdc/pthread` link set. A handler uses
-its generated start/end objects, never the command-oriented `startup.o`.
+An optional upstream or distribution `mmakefile.src` would list the same five
+glues (`net`, `fs`, `process`, `proc`, `env`), the AFS+ static library and the
+MacAROS `posixc/stdc` link set. A handler uses its generated start/end
+objects, never the command-oriented `startup.o`.
+
+The thread and sync glues are deliberately not among them, and the link list
+carries no `-lpthread`. The AROS static pthread library keeps a fixed thread
+table, and the linker puts it in the module's `.bss` whether or not anything
+makes a thread: 1,841,328 bytes on AArch64, 1,582,896 on x86_64, taken at
+load on every machine that has the handler in `L:`, mounted volume or not.
+AFS+ creates no thread.
+[`native/aros/afsplus_bootthread.c`](../native/aros/afsplus_bootthread.c)
+answers what `std` asks of a thread library instead: a Mutex over an exec
+`SignalSemaphore`, a one-task thread-local key table, and a loud refusal for
+everything only a second thread could make true. It also answers the six
+pthread entry points compiler-rt's emulated TLS wants, because `collect-aros`
+adds `-lpthread` by itself when a `pthread` symbol is left undefined. The
+module holds 596 bytes of `.bss` on AArch64 and 577 on x86_64, and both ABI
+audits fail a module above 64 KiB of it.
+
+The packaged module then has its local symbols discarded. The AROS ELF loader
+resolves relocations through the symbol table and reads only `sym->shindex`
+and `sym->value` from an entry (`rom/dos/internalloadseg_elf.c`), loading
+`.symtab` and `.strtab` whole to do it, so a local symbol no relocation names
+costs package bytes and load-time memory for nothing. `llvm-objcopy
+--discard-all` removes 732 of them and keeps every global; the ABI audit runs
+afterwards, on the file that ships.
 
 ## Runtime qualification stages
 
