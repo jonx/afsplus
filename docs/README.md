@@ -55,6 +55,7 @@ format and the writing rules are in [DOCUMENTATION.md](DOCUMENTATION.md).
 |---|---|
 | [Native AROS bridge](aros-native-bridge.md) | The C ABI boundary, native handler assembly and the AROS qualification gates |
 | [AROS block-device contract](aros-block-device-contract.md) | What the handler requires of a disk driver, clause by clause, and the probe that checks it |
+| [AFS+ performance on AROS](aros-performance.md) | Where AFS+ stands against the Fast File System on Hosted, how the benchmark is run, and what the comparison is worth |
 | [AFS+ MacAROS Alpha-0 package](aros-alpha0-package.md) | Layout of the self-contained MacAROS Alpha-0 qualification package |
 | [AFS+ Hosted MacAROS S1 image](aros-s1-image.md) | The manifested system image used by the post-bootstrap `SYS:` pivot |
 | [macFUSE FSKit activation on macOS](macos-fskit-activation.md) | Enabling the macFUSE FSKit backend, including the diagnostic workaround |
