@@ -52,6 +52,7 @@ pub mod profile {
     pub(super) fn note_alloc(bytes: usize) {
         ALLOCATIONS.fetch_add(1, Relaxed);
         record(bytes);
+        trace::note(bytes);
     }
 
     pub(super) fn note_free() {
@@ -111,6 +112,111 @@ pub mod profile {
         LARGEST.store(0, Relaxed);
         for counter in HISTOGRAM.iter() {
             counter.store(0, Relaxed);
+        }
+        trace::clear();
+    }
+
+    /// Where the allocations come from. While tracing is on, every
+    /// allocation records the return addresses of the frames above it in a
+    /// fixed table, so that a measurement can say which call sites the
+    /// allocations of one operation belong to. It is off unless a
+    /// measurement turns it on: a stack walk per allocation costs far more
+    /// than the allocation.
+    pub mod trace {
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
+
+        /// Frames kept per allocation, counted from the caller of the
+        /// global allocator upwards.
+        pub const DEPTH: usize = 16;
+        const SLOTS: usize = 16384;
+
+        extern "C" {
+            fn backtrace(buffer: *mut *mut std::ffi::c_void, size: i32) -> i32;
+        }
+
+        static ON: AtomicBool = AtomicBool::new(false);
+        static INSIDE: AtomicBool = AtomicBool::new(false);
+        static COUNTS: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
+        static BYTES: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
+        static FRAMES: [[AtomicUsize; DEPTH]; SLOTS] =
+            [const { [const { AtomicUsize::new(0) }; DEPTH] }; SLOTS];
+
+        pub fn on() {
+            ON.store(true, Relaxed);
+        }
+
+        pub fn off() {
+            ON.store(false, Relaxed);
+        }
+
+        pub fn clear() {
+            for slot in 0..SLOTS {
+                COUNTS[slot].store(0, Relaxed);
+                BYTES[slot].store(0, Relaxed);
+                for frame in FRAMES[slot].iter() {
+                    frame.store(0, Relaxed);
+                }
+            }
+        }
+
+        /// The recorded stacks: the frames, how many allocations shared them
+        /// and how many bytes those asked for.
+        pub fn stacks() -> Vec<([usize; DEPTH], u64, u64)> {
+            let mut out = Vec::new();
+            for slot in 0..SLOTS {
+                let count = COUNTS[slot].load(Relaxed);
+                if count == 0 {
+                    continue;
+                }
+                let mut frames = [0usize; DEPTH];
+                for (index, frame) in FRAMES[slot].iter().enumerate() {
+                    frames[index] = frame.load(Relaxed);
+                }
+                out.push((frames, count, BYTES[slot].load(Relaxed)));
+            }
+            out
+        }
+
+        pub(in crate::heap) fn note(bytes: usize) {
+            if !ON.load(Relaxed) || INSIDE.swap(true, Relaxed) {
+                return;
+            }
+            // The stack walk allocates nothing; the guard above is only
+            // there so that a future one could not recurse into the meter.
+            let mut raw = [std::ptr::null_mut(); DEPTH + 4];
+            // SAFETY: `raw` holds the length passed.
+            let taken = unsafe { backtrace(raw.as_mut_ptr(), raw.len() as i32) } as usize;
+            let mut frames = [0usize; DEPTH];
+            for index in 0..DEPTH {
+                // The first frames are the allocator's own and say nothing.
+                let source = index + 4;
+                frames[index] = if source < taken {
+                    raw[source] as usize
+                } else {
+                    0
+                };
+            }
+            let mut hash = 0xcbf2_9ce4_8422_2325u64;
+            for frame in frames {
+                hash ^= frame as u64;
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+            let mut slot = (hash as usize) % SLOTS;
+            for _ in 0..SLOTS {
+                if COUNTS[slot].load(Relaxed) == 0 {
+                    for (index, frame) in frames.iter().enumerate() {
+                        FRAMES[slot][index].store(*frame, Relaxed);
+                    }
+                    break;
+                }
+                if (0..DEPTH).all(|index| FRAMES[slot][index].load(Relaxed) == frames[index]) {
+                    break;
+                }
+                slot = (slot + 1) % SLOTS;
+            }
+            COUNTS[slot].fetch_add(1, Relaxed);
+            BYTES[slot].fetch_add(bytes as u64, Relaxed);
+            INSIDE.store(false, Relaxed);
         }
     }
 }

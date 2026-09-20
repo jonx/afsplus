@@ -197,6 +197,156 @@ fn peak_of_a_full_delayed_window() {
     assert_eq!(afsplus_aros_unmount(filesystem), 0);
 }
 
+extern "C" {
+    fn backtrace_symbols(
+        buffer: *const *mut std::ffi::c_void,
+        size: i32,
+    ) -> *mut *mut std::ffi::c_char;
+}
+
+/// The names of the frames of one recorded stack, innermost first.
+fn names(frames: &[usize; heap_profile::trace::DEPTH]) -> Vec<String> {
+    let live: Vec<*mut std::ffi::c_void> = frames
+        .iter()
+        .take_while(|frame| **frame != 0)
+        .map(|frame| *frame as *mut std::ffi::c_void)
+        .collect();
+    if live.is_empty() {
+        return Vec::new();
+    }
+    // SAFETY: `live` holds the count passed, and the frames are return
+    // addresses of this process.
+    let table = unsafe { backtrace_symbols(live.as_ptr(), live.len() as i32) };
+    let mut out = Vec::new();
+    for index in 0..live.len() {
+        // SAFETY: `table` holds `live.len()` C strings.
+        let text = unsafe { std::ffi::CStr::from_ptr(*table.add(index)) };
+        let text = text.to_string_lossy();
+        // "index binary address symbol + offset": the symbol is what a
+        // measurement reads.
+        let symbol = text.split_whitespace().nth(3).unwrap_or("?").to_string();
+        out.push(symbol);
+    }
+    out
+}
+
+/// Where the allocations of one operation come from: the stacks the meter
+/// recorded, grouped by their innermost AFS+ frame. This is the table the
+/// performance programme's memory section carries.
+#[test]
+#[ignore = "measurement harness"]
+fn allocation_sites() {
+    const OPERATIONS: u64 = 128;
+    let mut device = disk(32768);
+    let filesystem = common::mount_sized(&mut device, 32768);
+    let mut granted = 0;
+    assert_eq!(
+        afsplus_aros_set_cache_blocks(filesystem, 64, &mut granted),
+        0
+    );
+    let (seconds, nanoseconds) = now();
+
+    let phase = |label: &str, body: &mut dyn FnMut()| {
+        assert_eq!(afsplus_aros_flush(filesystem), 0);
+        heap_profile::reset();
+        heap_profile::trace::on();
+        body();
+        assert_eq!(afsplus_aros_flush(filesystem), 0);
+        heap_profile::trace::off();
+        let stacks = heap_profile::trace::stacks();
+        let total: u64 = stacks.iter().map(|(_, count, _)| *count).sum();
+        let mut rows: Vec<(String, u64, u64)> = Vec::new();
+        for (frames, count, bytes) in &stacks {
+            let symbols = names(frames);
+            let site = symbols
+                .iter()
+                .find(|name| name.contains("afsplus"))
+                .cloned()
+                .unwrap_or_else(|| symbols.first().cloned().unwrap_or_else(|| "?".into()));
+            let context = symbols
+                .iter()
+                .filter(|name| name.contains("afsplus"))
+                .skip(1)
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" < ");
+            rows.push((format!("{site}  [{context}]"), *count, *bytes));
+        }
+        rows.sort_by_key(|(_, count, _)| std::cmp::Reverse(*count));
+        println!("--- {label}: {total} allocations, {OPERATIONS} operations");
+        for (site, count, bytes) in rows.iter().take(200) {
+            println!(
+                "{:8.1} per op {:5.1} %  {:9} bytes  {site}",
+                *count as f64 / OPERATIONS as f64,
+                *count as f64 * 100.0 / total as f64,
+                bytes
+            );
+        }
+    };
+
+    phase("create", &mut || {
+        for index in 0..OPERATIONS {
+            let name = format!("c{index:04}");
+            let mut file = 0;
+            assert_eq!(
+                afsplus_aros_open(
+                    filesystem,
+                    0,
+                    name.as_ptr(),
+                    name.len() as u32,
+                    AFSPLUS_AROS_OPEN_NEW_FILE,
+                    seconds,
+                    nanoseconds,
+                    &mut file
+                ),
+                0
+            );
+            assert_eq!(afsplus_aros_close(filesystem, file), 0);
+        }
+    });
+
+    phase("rename", &mut || {
+        for index in 0..OPERATIONS {
+            let from = format!("c{index:04}");
+            let to = format!("r{index:04}");
+            assert_eq!(
+                afsplus_aros_rename(
+                    filesystem,
+                    0,
+                    from.as_ptr(),
+                    from.len() as u32,
+                    0,
+                    to.as_ptr(),
+                    to.len() as u32,
+                    seconds,
+                    nanoseconds
+                ),
+                0
+            );
+        }
+    });
+
+    phase("delete", &mut || {
+        for index in 0..OPERATIONS {
+            let name = format!("r{index:04}");
+            assert_eq!(
+                afsplus_aros_delete_object(
+                    filesystem,
+                    0,
+                    name.as_ptr(),
+                    name.len() as u32,
+                    seconds,
+                    nanoseconds
+                ),
+                0
+            );
+        }
+    });
+
+    assert_eq!(afsplus_aros_unmount(filesystem), 0);
+}
+
 /// (d) and (e): the allocations one operation makes, and the sizes asked
 /// for. Each phase is measured on its own after a flush, so that the window
 /// commit of the phase before it is not charged to this one.

@@ -20,6 +20,7 @@ operations.
 - [Where it stands on 2026-09-19](#where-it-stands-on-2026-09-19)
 - [Where the delete phase's flushes went, on 2026-09-20](#where-the-delete-phases-flushes-went-on-2026-09-20)
 - [Memory](#memory)
+  - [Where the allocations come from](#where-the-allocations-come-from)
   - [What the table changed](#what-the-table-changed)
   - [What was left alone, and why](#what-was-left-alone-and-why)
 
@@ -295,6 +296,57 @@ window, which is most of it; and the 1.8 MiB thread table the module
 reserves before it serves a packet. What it can live with is the mount
 itself, 7 KiB, and the 274 KiB of a 64-buffer cache. The first two are
 answered below, and the third is gone.
+
+### Where the allocations come from
+
+Lot J. The meter can record a stack per allocation
+(`heap_profile::trace` in `crates/afsplus-aros-ffi/src/heap.rs`, off unless a
+measurement turns it on, because a stack walk costs far more than the
+allocation it describes). The harness test `allocation_sites` in
+`crates/afsplus-aros-ffi/tests/zz_memory.rs` turns it on for one phase at a
+time and groups the stacks by their innermost AFS+ frame:
+
+```text
+cargo test -q -p afsplus-aros-ffi --features heap-profile --test zz_memory \
+    -- --ignored --nocapture --test-threads=1 allocation_sites
+```
+
+It runs 128 operations, where the table of allocations per operation above
+runs 512, so the counts below are of a shallower directory and are read as
+shares rather than as the same absolute numbers.
+
+Create, 829 allocations per operation:
+
+| Site | Per create | Share |
+|---|---|---|
+| `TreeNode::decode`, under `cow_tree::read_node` for the commit's `upsert_node` | 267 | 32 % |
+| `TreeNode::decode`, under `tree::lookup` for `object_map::lookup_lba` | 132 | 16 % |
+| `TreeNode::decode`, under `tree::lookup` for `directory::lookup_entry` | 121 | 15 % |
+| `TreeNode::decode`, under `directory::validate_root` at `load_mount_state` | 111 | 13 % |
+| the read cache's own block box, under `CachedDevice` | 43 | 5 % |
+| `TreeNode::decode`, under `tree::lookup` for `allocation_root::lookup_record` | 17 | 2 % |
+| `to_vec` of a block, in the cache's `write_block` and in `upsert_node` | 15 | 2 % |
+| `Box::new_uninit` for the decoded node, in `tree::decode_node` | 6 | 1 % |
+| `vec![0u8; block_size]`, in `tree::lookup` | 7 | 1 % |
+| `comparison_key`'s buffer | 10 | 1 % |
+
+Rename, 1,299 per operation, and delete, 2,154, have the same shape:
+`TreeNode::decode` is 87 % of a rename's allocations and 81 % of a delete's,
+split between the descent (`tree::lookup`), the commit's tree walk
+(`cow_tree::read_node` under `upsert_node` and `delete_node`) and, for a
+delete, `directory::validate_root` at 552 per operation.
+
+The expectation this table was made to test was that the small allocations
+would be key and name clones spread over the descent, the window's overlay
+and error paths. They are not spread at all. Every one of them is inside
+`TreeNode::decode`, which turns a block into a `Vec<TreeItem>` whose every
+item owns a `Vec<u8>` key and a `Vec<u8>` value: two heap allocations per
+item, for every item of every node the operation touches, when a lookup
+wants one item and a descent wants one separator. That is where the 710
+allocations of 8 to 15 bytes and the 220 of 4 to 7 come from, and it is why
+the sizes are those of a key and a child reference. The `format!` in the
+error paths, the pending overlay's `BTreeMap` nodes and the flight recorder
+together do not reach 1 % of an operation.
 
 ### What the table changed
 
