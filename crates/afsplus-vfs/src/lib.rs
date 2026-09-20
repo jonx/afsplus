@@ -1632,6 +1632,25 @@ impl<D: BlockDevice> Vfs<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), VfsError> {
+        if self.delayed() {
+            // The window removes a drawer as it makes one. Before this, a
+            // `RemoveDir` committed the open window and then ran a
+            // transaction of its own, and the maintenance behind it committed
+            // again: five checkpoints and ten device flushes for every drawer
+            // of the benchmark's delete phase.
+            match self.volume.window_op(
+                &BatchOp::RemoveDirectory {
+                    parent_id: parent,
+                    name,
+                },
+                now,
+            ) {
+                Ok(_) => return self.note_change(now),
+                // What the window cannot stage goes the immediate way.
+                Err(CoreError::PrototypeLimit(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         self.checkpoint_data_window(now)?;
         self.volume.remove_directory(parent, name, now)?;
         self.reclaim_after_release(now);

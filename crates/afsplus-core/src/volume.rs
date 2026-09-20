@@ -270,6 +270,14 @@ pub enum BatchOp<'a> {
         parent_id: u64,
         name: &'a str,
     },
+    /// An empty directory, counting the changes the batch itself has staged
+    /// in it. As for [`BatchOp::CreateDirectory`] the intent log has no
+    /// record kind for it, so a window that stages one becomes durable as a
+    /// checkpoint (ADR-121 decisions 5 and 8).
+    RemoveDirectory {
+        parent_id: u64,
+        name: &'a str,
+    },
     Rename {
         source_parent_id: u64,
         source_name: &'a str,
@@ -6305,6 +6313,9 @@ impl<D: BlockDevice> Volume<D> {
                 pending.dir_timestamps.insert(*parent_id, now);
                 Ok(None)
             }
+            BatchOp::RemoveDirectory { parent_id, name } => {
+                self.remove_directory_in_batch(tx, pending, *parent_id, name, now)
+            }
             BatchOp::Rename {
                 source_parent_id,
                 source_name,
@@ -6501,6 +6512,118 @@ impl<D: BlockDevice> Volume<D> {
         Ok(())
     }
 
+    /// Removes an empty directory inside a batch, the staged counterpart of
+    /// [`Self::remove_entry`] for a directory.
+    ///
+    /// Empty means empty as the batch sees it: an entry the batch deleted is
+    /// gone, an entry it created or renamed in is there. A directory the same
+    /// batch created cancels out, record, entry and entry-tree root together,
+    /// and nothing of it reaches the disk. A committed one gives its record
+    /// block, its entry-tree blocks and its security and attribute blocks to
+    /// the transaction to retire, exactly as the immediate path does.
+    fn remove_directory_in_batch(
+        &mut self,
+        tx: &mut TxAllocator,
+        pending: &mut PendingBatch,
+        parent_id: u64,
+        name: &str,
+        now: Timespec,
+    ) -> Result<Option<u64>, CoreError> {
+        self.ensure_public_object_id(parent_id)?;
+        validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+        let parent = self
+            .batch_record(pending, parent_id)?
+            .ok_or(CoreError::NotFound)?;
+        if parent.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        let key = self.comparison_key(name.as_bytes())?;
+        let entry = self
+            .batch_lookup(pending, parent_id, &key)?
+            .ok_or(CoreError::NotFound)?;
+        let victim_id = entry.child_id;
+        let victim = self
+            .batch_record(pending, victim_id)?
+            .ok_or_else(|| CoreError::Corrupt("victim missing from object map".into()))?;
+        if victim.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        if entry.child_type_hint != 2 {
+            return Err(CoreError::Corrupt(
+                "directory entry type hint does not match victim object".into(),
+            ));
+        }
+        if victim.link_count != 1 {
+            return Err(CoreError::Corrupt(
+                "directory hard links are not supported".into(),
+            ));
+        }
+        let created_here = pending.created_directories.contains(&victim_id);
+        // An entry the batch staged in the victim keeps it non-empty even
+        // when the committed tree is empty, and one the batch deleted lets it
+        // go even when the committed tree still holds it.
+        let staged = pending.dir_changes.get(&victim_id);
+        if staged.is_some_and(|changes| changes.values().any(Option::is_some)) {
+            return Err(CoreError::DirectoryNotEmpty);
+        }
+        let tree_blocks = if created_here {
+            Vec::new()
+        } else {
+            let committed = self
+                .read_object(victim_id)?
+                .ok_or_else(|| CoreError::Corrupt("victim missing from object map".into()))?;
+            let loaded = directory::load_all(
+                &mut self.dev,
+                &self.ident.geometry(),
+                committed.data_root,
+                victim_id,
+                self.checkpoint.generation,
+                &self.ident,
+            )?;
+            let removed = |entry: &DirEntry| {
+                pending
+                    .dir_changes
+                    .get(&victim_id)
+                    .and_then(|changes| changes.get(entry.key.as_slice()))
+                    .is_some_and(Option::is_none)
+            };
+            if loaded.entries.iter().any(|entry| !removed(entry)) {
+                return Err(CoreError::DirectoryNotEmpty);
+            }
+            loaded.tree_blocks
+        };
+
+        // Nothing of the victim goes to the disk any more: drop the entry
+        // changes staged in it so materialization does not walk it.
+        pending.dir_changes.remove(&victim_id);
+        pending.dir_timestamps.remove(&victim_id);
+        if created_here {
+            pending.created_directories.remove(&victim_id);
+            pending.records.remove(&victim_id);
+            // The root block was reserved by this batch and nothing published
+            // ever named it.
+            tx.release_uncommitted(&mut self.dev, victim.data_root)?;
+        } else {
+            self.note_committed_record(pending, victim_id)?;
+            let committed_lba = pending.committed_record_lbas[&victim_id];
+            tx.retire(&mut self.dev, committed_lba)?;
+            pending.committed_record_lbas.remove(&victim_id);
+            self.retire_security_descriptor(tx, &victim)?;
+            self.retire_attributes(tx, &victim)?;
+            for lba in tree_blocks {
+                tx.retire(&mut self.dev, lba)?;
+            }
+            pending.records.insert(victim_id, None);
+        }
+        pending
+            .dir_changes
+            .entry(parent_id)
+            .or_default()
+            .insert(key, None);
+        pending.dir_timestamps.insert(parent_id, now);
+        Ok(None)
+    }
+
     /// True when this volume may hold shared extents (ADR-061).
     fn shared_extents_enabled(&self) -> bool {
         self.ident.features.ro_compat & RO_COMPAT_SHARED_EXTENTS != 0
@@ -6692,6 +6815,10 @@ impl<D: BlockDevice> Volume<D> {
                 | CoreError::InvalidName(_)
                 | CoreError::NotDirectory
                 | CoreError::IsDirectory
+                // A staged `RemoveDirectory` refuses a directory that still
+                // holds something before it changes anything, so the window
+                // is intact and the caller sees what the immediate path says.
+                | CoreError::DirectoryNotEmpty
                 | CoreError::NoSpace
                 | CoreError::PrototypeLimit(_)
         )
@@ -7354,7 +7481,7 @@ impl<D: BlockDevice> Volume<D> {
             // `LogOp` has Create, Delete, Rename and Write, and none of them
             // makes a directory. Adding one is a format change; until then a
             // staged directory is published by a checkpoint.
-            BatchOp::CreateDirectory { .. } => return Ok(None),
+            BatchOp::CreateDirectory { .. } | BatchOp::RemoveDirectory { .. } => return Ok(None),
             BatchOp::DeleteFile { parent_id, name } => LogOp::Delete {
                 parent_id: *parent_id,
                 name: name.as_bytes().to_vec(),

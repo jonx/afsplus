@@ -193,22 +193,167 @@ fn a_file_renames_into_a_drawer_the_window_made() {
     assert_eq!(names(&mut vfs, OBJECT_ROOT), ["tidy"]);
 }
 
-/// Removing a drawer the window made is not a window operation: the
-/// immediate path commits the window first and then removes it. That is
-/// correct, only slower, and it is what ADR-121 decision 8 allows.
+/// The counter test of lot D2. Removing 91 drawers on a delayed mount costs
+/// the flushes of the window commits alone. Before it, each `RemoveDir`
+/// committed the open window, ran a transaction of its own and let the
+/// maintenance behind it commit again: five checkpoints and ten flushes per
+/// drawer, 910 for the delete phase of the hosted benchmark.
 #[test]
-fn removing_a_drawer_the_window_made_commits_it_first() {
+fn removing_drawers_flushes_what_the_window_commits_flush() {
+    const TREES: usize = 10;
+    const PER_TREE: usize = 8;
+    let device = TraceBackend::new(formatted());
+    let mut vfs = Vfs::mount(device, MountOptions::default()).unwrap();
+    vfs.set_durability(Durability::DELAYED).unwrap();
+    for tree in 0..TREES {
+        let id = vfs
+            .create_directory(OBJECT_ROOT, &format!("t{tree:02}"), ms(0))
+            .unwrap();
+        for drawer in 0..PER_TREE {
+            vfs.create_directory(id, &format!("d{drawer}"), ms(0))
+                .unwrap();
+        }
+    }
+    vfs.sync_filesystem().unwrap();
+
+    // The drawers are committed; the counters start from here, so what
+    // follows counts the removals and nothing else.
+    let mut device = vfs.into_volume().into_device();
+    device.reset();
+    let mut vfs = Vfs::mount(device, MountOptions::default()).unwrap();
+    vfs.set_durability(Durability::DELAYED).unwrap();
+    let start = vfs.generation();
+    for tree in 0..TREES {
+        let name = format!("t{tree:02}");
+        let id = vfs.lookup(OBJECT_ROOT, &name).unwrap();
+        for drawer in 0..PER_TREE {
+            vfs.remove_directory(id, &format!("d{drawer}"), ms(10))
+                .unwrap();
+        }
+        vfs.remove_directory(OBJECT_ROOT, &name, ms(10)).unwrap();
+    }
+    vfs.sync_filesystem().unwrap();
+    let commits = vfs.generation() - start;
+    let removals = (TREES * PER_TREE + TREES) as u32;
+    let device = vfs.into_volume().into_device();
+    let flushes = device.stats().flushes;
+    // The window bound commits once per 512 removals, the final sync once
+    // more, and the maintenance each commit runs afterwards is a transaction
+    // of its own.
+    let expected_commits = 2 * (removals / DELAYED_WINDOW_OPS_MAX + 2);
+    eprintln!(
+        "{removals} drawers removed: {commits} generations, {flushes} flushes, \
+         {expected_commits} commits expected"
+    );
+    // Two flushes a commit. The old code paid ten flushes per drawer, 900
+    // here, and this assertion fails on it.
+    assert!(
+        flushes <= u64::from(2 * expected_commits),
+        "{flushes} flushes for {expected_commits} commits of two flushes"
+    );
+    assert!(
+        flushes < u64::from(removals),
+        "{flushes} flushes is still a flush per drawer or more"
+    );
+    let mut device = device.into_inner();
+    let report = check_device(&mut device);
+    assert!(report.is_clean(), "{:?}", report.errors);
+    let mut vfs = Vfs::mount(device, MountOptions::default()).unwrap();
+    assert!(names(&mut vfs, OBJECT_ROOT).is_empty());
+}
+
+/// A drawer made and removed inside one window cancels out: nothing was
+/// committed in between, so nothing of it reaches the disk and the block its
+/// entry tree was to be rooted at goes back to the transaction.
+#[test]
+fn a_drawer_made_and_removed_in_one_window_leaves_nothing() {
     let mut vfs = delayed(formatted());
     vfs.sync_filesystem().unwrap();
     let start = vfs.generation();
+    let free_before = vfs.statfs().available_blocks;
     let drawer = vfs.create_directory(OBJECT_ROOT, "gone", ms(0)).unwrap();
     assert_eq!(vfs.generation(), start);
     vfs.remove_directory(OBJECT_ROOT, "gone", ms(10)).unwrap();
-    assert!(vfs.generation() > start);
+    // Still no commit: the removal is an operation of the same window.
+    assert_eq!(vfs.generation(), start);
     assert!(matches!(vfs.stat(drawer), Err(VfsError::NotFound)));
+    assert!(names(&mut vfs, OBJECT_ROOT).is_empty());
+    vfs.sync_filesystem().unwrap();
+    assert_eq!(vfs.statfs().available_blocks, free_before);
+    let mut vfs = remount(vfs);
+    assert!(names(&mut vfs, OBJECT_ROOT).is_empty());
+    assert!(matches!(vfs.stat(drawer), Err(VfsError::NotFound)));
+}
+
+/// A drawer that still holds something is refused, and the window that
+/// staged that something is intact afterwards: the delayed path answers what
+/// the immediate path answers.
+#[test]
+fn removing_a_drawer_that_still_holds_a_pending_file_is_refused() {
+    let mut vfs = delayed(formatted());
+    let drawer = vfs.create_directory(OBJECT_ROOT, "work", ms(0)).unwrap();
+    vfs.sync_filesystem().unwrap();
+    let start = vfs.generation();
+
+    // A file only in the window: the drawer is not empty, and no commit is
+    // allowed to happen to find that out.
+    vfs.create_file(drawer, "draft.c", ms(10)).unwrap();
+    assert!(matches!(
+        vfs.remove_directory(OBJECT_ROOT, "work", ms(20)),
+        Err(VfsError::DirectoryNotEmpty)
+    ));
+    assert_eq!(vfs.generation(), start);
+    assert_eq!(names(&mut vfs, drawer), ["draft.c"]);
+
+    // With the file gone, again only in the window, the drawer goes.
+    vfs.unlink_file(drawer, "draft.c", ms(30)).unwrap();
+    vfs.remove_directory(OBJECT_ROOT, "work", ms(40)).unwrap();
     assert!(names(&mut vfs, OBJECT_ROOT).is_empty());
     let mut vfs = remount(vfs);
     assert!(names(&mut vfs, OBJECT_ROOT).is_empty());
+
+    // A committed drawer holding a committed file is refused the same way.
+    vfs.set_durability(Durability::DELAYED).unwrap();
+    let drawer = vfs.create_directory(OBJECT_ROOT, "src", ms(50)).unwrap();
+    vfs.create_file(drawer, "main.c", ms(60)).unwrap();
+    vfs.sync_filesystem().unwrap();
+    assert!(matches!(
+        vfs.remove_directory(OBJECT_ROOT, "src", ms(70)),
+        Err(VfsError::DirectoryNotEmpty)
+    ));
+    assert_eq!(names(&mut vfs, drawer), ["main.c"]);
+}
+
+/// A cut inside a window that removes drawers: the image is clean and the
+/// drawers are all present or all gone, per checkpoint.
+#[test]
+fn a_cut_inside_the_window_leaves_the_drawers_all_present_or_all_gone() {
+    let mut vfs = delayed(formatted());
+    let mut drawers = Vec::new();
+    for drawer in 0..12 {
+        let id = vfs
+            .create_directory(OBJECT_ROOT, &format!("d{drawer:02}"), ms(0))
+            .unwrap();
+        vfs.create_file(id, "inside", ms(0)).unwrap();
+        drawers.push(id);
+    }
+    vfs.sync_filesystem().unwrap();
+    let present: Vec<String> = (0..12).map(|drawer| format!("d{drawer:02}")).collect();
+
+    // The removals stay in the window; the cut takes the device as it is.
+    for (at, id) in drawers.iter().enumerate() {
+        vfs.unlink_file(*id, "inside", ms(1_000)).unwrap();
+        vfs.remove_directory(OBJECT_ROOT, &format!("d{at:02}"), ms(1_010))
+            .unwrap();
+    }
+    // Listing the root would commit the window first, so the cut comes
+    // straight after the removals.
+    assert!(vfs.changes_pending());
+    let mut vfs = remount(vfs);
+    assert_eq!(names(&mut vfs, OBJECT_ROOT), present);
+    for id in &drawers {
+        assert_eq!(names(&mut vfs, *id), ["inside"]);
+    }
 }
 
 /// A cut inside the window: the whole group is lost, never a part of it, and

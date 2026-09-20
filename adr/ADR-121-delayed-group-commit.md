@@ -3,6 +3,14 @@
 Status: Accepted
 Amends: ADR-063
 
+<!-- toc -->
+
+- [Context](#context)
+- [Decision](#decision)
+- [Consequences](#consequences)
+
+<!-- /toc -->
+
 ## Context
 
 [ADR-063](ADR-063-intent-log-epoch1.md) chose checkpoint copy-on-write with
@@ -107,6 +115,28 @@ orphan directory, shrunk, and the batch stops there. An orphan a caller still
 holds open is passed over rather than waited for, and no longer stops the
 cleanup of the orphans behind it. A cut in the middle of a batch leaves every
 orphan in it whole or gone, because the batch is one checkpoint.
+
+**Amendment, 2026-09-20 (a drawer is removed in the window too).** The
+amendment above left removing a directory on the immediate path, which
+decision 8 allows. Measured on the host with the benchmark's own tree, ten
+trees of eight drawers of 32 files on a 64 MiB volume, that was the whole
+cost of the delete phase: the 2,560 file deletes cost 10 device flushes, the
+five commits of the window bound, and the 91 drawer removals cost 910, five
+checkpoints and ten flushes each. The five are the open window committed
+first, the removal's own transaction, and the three maintenance transactions
+behind it. A directory now joins the window as `RemoveDirectory`. Empty means
+empty as the window sees it: an entry the window deleted is gone, an entry it
+created or renamed in keeps the directory occupied and the removal is refused
+exactly as the immediate path refuses it, without committing anything to find
+out. A directory the same window created cancels out, record, parent entry
+and the block its entry tree was to be rooted at together, and nothing of it
+reaches the disk. A committed one gives its record block, its entry-tree
+blocks and its security and attribute blocks to the window's transaction to
+retire, which is what `Volume::remove_directory` does. As for `CreateDir` the
+intent log has no record kind for it, so a window holding one is unloggable
+and the next fsync commits it as a checkpoint, which is decision 5; that is
+not a format change. The same phase now costs 10 flushes and 5 checkpoints in
+all, and 91 drawer removals cost nothing beyond the window commits.
 
 ## Consequences
 
