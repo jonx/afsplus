@@ -46,6 +46,30 @@ static void *allocate(size_t size, ULONG flags)
     return block + HEADER;
 }
 
+/*
+ * The same memory for the Rust heap, without the header. Rust's GlobalAlloc
+ * hands the layout to dealloc, so the size is known at both ends and exec
+ * can be asked directly: no 16-byte header and no header write. The
+ * library's allocations are mostly a dozen bytes each -- a create makes
+ * some 1,310 of them, 710 of those of 8 to 15 bytes -- so the header was
+ * costing more than the block it described.
+ *
+ * malloc below keeps its header, because the C shell frees without a size.
+ */
+void *afsplus_exec_alloc(size_t size, int clear)
+{
+    if (size == 0)
+        return NULL;
+    return AllocMem(size, clear ? (MEMF_ANY | MEMF_CLEAR) : MEMF_ANY);
+}
+
+void afsplus_exec_free(void *pointer, size_t size)
+{
+    if (pointer == NULL || size == 0)
+        return;
+    FreeMem(pointer, size);
+}
+
 void *malloc(size_t size)
 {
     return allocate(size, MEMF_ANY);

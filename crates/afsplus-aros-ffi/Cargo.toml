@@ -25,6 +25,9 @@ afsplus-vfs = { path = "../afsplus-vfs" }
 afsplus-check = { path = "../afsplus-check" }
 
 [lints.rust]
+# The AROS targets are custom JSON targets, so the compiler's list of known
+# operating systems does not carry `aros`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("aros"))'] }
 # Raw pointers and C callbacks are confined to this boundary crate. The safe
 # filesystem crates retain the workspace-wide `unsafe_code = "forbid"` rule.
 unsafe_code = "allow"

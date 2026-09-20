@@ -4,7 +4,7 @@
 //! process that runs several instances on one copy of the library sees their
 //! sum.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 pub(crate) struct Meter {
@@ -126,6 +126,122 @@ pub(crate) fn sample() -> (u64, u64) {
     )
 }
 
+/// The allocator under the meter. Rust's `GlobalAlloc` hands the layout to
+/// `dealloc` and to `realloc`, so the size of a block is known where it is
+/// freed and nothing here keeps a size header.
+///
+/// On AROS that is what the handler needs: `afsplus_exec_alloc` and
+/// `afsplus_exec_free` in `native/aros/afsplus_bootlibc.c` call exec's
+/// `AllocMem` and `FreeMem` with the size, and the 16-byte header the
+/// handler's `malloc` puts before every block is saved on every Rust
+/// allocation. On the development host the pair is `malloc` and `free`,
+/// which is what Rust's `System` calls for these alignments anyway, and a
+/// debug build checks the size it is given against the block's own.
+mod backing {
+    #[cfg(target_os = "aros")]
+    extern "C" {
+        fn afsplus_exec_alloc(size: usize, clear: i32) -> *mut u8;
+        fn afsplus_exec_free(pointer: *mut u8, size: usize);
+    }
+
+    #[cfg(not(target_os = "aros"))]
+    extern "C" {
+        fn malloc(size: usize) -> *mut u8;
+        fn calloc(count: usize, size: usize) -> *mut u8;
+        fn free(pointer: *mut u8);
+        #[link_name = "realloc"]
+        fn c_realloc(pointer: *mut u8, size: usize) -> *mut u8;
+    }
+
+    // The size the host's allocator actually gave a block. Only Apple's C
+    // library is asked; elsewhere the check below is not made, and the AROS
+    // path has no such call at all.
+    #[cfg(all(not(target_os = "aros"), target_vendor = "apple", debug_assertions))]
+    extern "C" {
+        fn malloc_size(pointer: *const u8) -> usize;
+    }
+
+    /// A free whose size is not the size the block was allocated with is a
+    /// bug in this file, and on AROS it would hand exec's free list a wrong
+    /// length in silence. A debug build stops on it; a release build pays
+    /// nothing.
+    #[allow(unused_variables)]
+    fn check_size(pointer: *mut u8, size: usize) {
+        #[cfg(all(not(target_os = "aros"), target_vendor = "apple", debug_assertions))]
+        {
+            // SAFETY: `pointer` is a live block of this allocator.
+            let given = unsafe { malloc_size(pointer) };
+            assert!(
+                given >= size,
+                "a block of {given} bytes is being freed as {size}"
+            );
+        }
+    }
+
+    /// # Safety
+    /// `size` is not zero.
+    pub unsafe fn alloc(size: usize, zeroed: bool) -> *mut u8 {
+        #[cfg(target_os = "aros")]
+        // SAFETY: a non-zero size, and the C side answers null on failure.
+        unsafe {
+            afsplus_exec_alloc(size, i32::from(zeroed))
+        }
+        #[cfg(not(target_os = "aros"))]
+        // SAFETY: as above.
+        unsafe {
+            if zeroed {
+                calloc(1, size)
+            } else {
+                malloc(size)
+            }
+        }
+    }
+
+    /// # Safety
+    /// `pointer` is a live block of this allocator and `size` is the size it
+    /// was allocated with.
+    pub unsafe fn dealloc(pointer: *mut u8, size: usize) {
+        check_size(pointer, size);
+        #[cfg(target_os = "aros")]
+        // SAFETY: the caller's contract.
+        unsafe {
+            afsplus_exec_free(pointer, size)
+        }
+        #[cfg(not(target_os = "aros"))]
+        // SAFETY: the caller's contract; `free` does not need the size.
+        unsafe {
+            let _ = size;
+            free(pointer)
+        }
+    }
+
+    /// A block of `new_size` holding the first bytes of `pointer`. The host
+    /// asks its own `realloc`, which grows a block in place where it can;
+    /// exec has nothing of the kind, so on AROS the block is moved.
+    ///
+    /// # Safety
+    /// `pointer` is a live block of this allocator of `old_size` bytes, and
+    /// `new_size` is not zero.
+    pub unsafe fn realloc(pointer: *mut u8, old_size: usize, new_size: usize) -> *mut u8 {
+        #[cfg(target_os = "aros")]
+        // SAFETY: the caller's contract.
+        unsafe {
+            let moved = alloc(new_size, false);
+            if !moved.is_null() {
+                core::ptr::copy_nonoverlapping(pointer, moved, old_size.min(new_size));
+                dealloc(pointer, old_size);
+            }
+            moved
+        }
+        #[cfg(not(target_os = "aros"))]
+        // SAFETY: the caller's contract; the check is the free's.
+        unsafe {
+            check_size(pointer, old_size);
+            c_realloc(pointer, new_size)
+        }
+    }
+}
+
 /// The largest alignment the system allocator gives through `malloc`.
 /// Beyond it Rust's `System` asks `posix_memalign`, which on AROS lives in
 /// posixc.library: a library a boot volume's handler cannot open, since it
@@ -146,13 +262,7 @@ unsafe fn alloc_over_aligned(layout: Layout, zeroed: bool) -> *mut u8 {
         return std::ptr::null_mut();
     };
     // SAFETY: `outer` has a non-zero size and the malloc alignment.
-    let base = unsafe {
-        if zeroed {
-            System.alloc_zeroed(outer)
-        } else {
-            System.alloc(outer)
-        }
-    };
+    let base = unsafe { backing::alloc(outer.size(), zeroed) };
     if base.is_null() {
         return base;
     }
@@ -170,7 +280,7 @@ unsafe fn dealloc_over_aligned(pointer: *mut u8, layout: Layout) {
     let base = unsafe { (pointer as *mut usize).sub(1).read() } as *mut u8;
     let outer = over_aligned(layout).expect("the layout was allocated");
     // SAFETY: `base` is the block `alloc_over_aligned` got for `outer`.
-    unsafe { System.dealloc(base, outer) };
+    unsafe { backing::dealloc(base, outer.size()) };
 }
 
 // SAFETY: every call is forwarded to the system allocator, through `malloc`
@@ -182,8 +292,8 @@ unsafe impl GlobalAlloc for Meter {
             // SAFETY: the caller's layout contract holds.
             unsafe { alloc_over_aligned(layout, false) }
         } else {
-            // SAFETY: the caller's layout contract is passed on unchanged.
-            unsafe { System.alloc(layout) }
+            // SAFETY: a non-zero size, as `GlobalAlloc` requires.
+            unsafe { backing::alloc(layout.size(), false) }
         };
         if !pointer.is_null() {
             self.acquire(layout.size());
@@ -199,7 +309,7 @@ unsafe impl GlobalAlloc for Meter {
             unsafe { alloc_over_aligned(layout, true) }
         } else {
             // SAFETY: as for `alloc`.
-            unsafe { System.alloc_zeroed(layout) }
+            unsafe { backing::alloc(layout.size(), true) }
         };
         if !pointer.is_null() {
             self.acquire(layout.size());
@@ -215,7 +325,7 @@ unsafe impl GlobalAlloc for Meter {
             unsafe { dealloc_over_aligned(pointer, layout) };
         } else {
             // SAFETY: the caller returns a live allocation of this layout.
-            unsafe { System.dealloc(pointer, layout) };
+            unsafe { backing::dealloc(pointer, layout.size()) };
         }
         self.release(layout.size());
         #[cfg(feature = "heap-profile")]
@@ -224,10 +334,12 @@ unsafe impl GlobalAlloc for Meter {
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if layout.align() > MALLOC_ALIGN {
-            // SAFETY: the caller's live pointer and a valid new layout.
+            // An over-aligned block is moved: its base address sits in the
+            // word before it, and only a fresh block re-establishes that.
             let Ok(new_layout) = Layout::from_size_align(new_size, layout.align()) else {
                 return std::ptr::null_mut();
             };
+            // SAFETY: a layout of its own.
             let moved = unsafe { self.alloc(new_layout) };
             if !moved.is_null() {
                 // SAFETY: both blocks are live and at least this long.
@@ -238,8 +350,8 @@ unsafe impl GlobalAlloc for Meter {
             }
             return moved;
         }
-        // SAFETY: the caller's live pointer and new size are passed on.
-        let moved = unsafe { System.realloc(pointer, layout, new_size) };
+        // SAFETY: the caller's live pointer with the size it was given.
+        let moved = unsafe { backing::realloc(pointer, layout.size(), new_size) };
         if !moved.is_null() {
             #[cfg(feature = "heap-profile")]
             profile::note_realloc(new_size);
@@ -277,5 +389,20 @@ mod tests {
             // SAFETY: the grown block is live with this layout.
             unsafe { HEAP.dealloc(grown, grown_layout) };
         }
+    }
+
+    /// The negative control of the header-free path: no block records its
+    /// own size any more, so a free given the wrong size would hand exec's
+    /// free list a length that is not the block's. A debug build catches it.
+    #[test]
+    #[should_panic(expected = "is being freed as")]
+    #[cfg(all(target_vendor = "apple", debug_assertions))]
+    fn a_wrong_size_on_free_is_caught() {
+        // SAFETY: a non-zero size. The free below is expected to stop the
+        // test before the block is returned.
+        let pointer = unsafe { backing::alloc(64, false) };
+        assert!(!pointer.is_null());
+        // SAFETY: the pointer is live; the size is deliberately not its own.
+        unsafe { backing::dealloc(pointer, 1 << 20) };
     }
 }

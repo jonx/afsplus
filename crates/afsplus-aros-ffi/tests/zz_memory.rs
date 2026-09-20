@@ -104,12 +104,17 @@ fn peak_of_a_full_delayed_window() {
         0
     );
     let (seconds, nanoseconds) = now();
+    // The blocks live at each point, so that what a per-block header would
+    // have cost on AROS can be read off the table.
+    heap_profile::reset();
     let report = |label: &str| {
         let read = counters(filesystem);
+        let profile = heap_profile::sample();
         println!(
-            "{label}: holds {}, peak {}",
+            "{label}: holds {}, peak {}, {} blocks live",
             read.heap_bytes - baseline,
-            read.heap_peak_bytes - baseline
+            read.heap_peak_bytes - baseline,
+            profile.allocations as i64 - profile.frees as i64
         );
     };
     report("mounted");
