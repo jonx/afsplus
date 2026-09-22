@@ -92,6 +92,62 @@ static struct Message *await_message(struct MsgPort *port)
     return NULL;
 }
 
+/* The archive bit says "backed up since the last change": a backup sets it,
+ * and the file system clears it when the object changes after that, as SFS,
+ * PFS3 and the RAM handler do. The setters above already showed that a date
+ * and a comment keep it. Here: a write clears it on the file and keeps the
+ * other bits, a drawer that gains or loses an entry loses it, and a
+ * SetProtection puts it back, as a backup or a restore does. */
+static int probe_archive(struct FileInfoBlock *fib)
+{
+    static const char more[] = " and a line more";
+    BPTR file;
+    LONG written;
+
+    file = Open(NOTE, MODE_OLDFILE);
+    if (file == BNULL)
+        return fail("archive: open", DOSFALSE);
+    Seek(file, 0, OFFSET_END);
+    written = Write(file, (APTR)more, sizeof(more) - 1);
+    if (!Close(file) || written != (LONG)(sizeof(more) - 1))
+        return fail("archive: append", written);
+    if (!examine_path(NOTE, fib))
+        return fail("archive: examine file", DOSFALSE);
+    if (fib->fib_Protection != (LONG)FIBF_SCRIPT)
+        return fail("archive: a write kept the bit", fib->fib_Protection);
+
+    if (!SetProtection(DRAWER, FIBF_ARCHIVE))
+        return fail("archive: mark drawer", DOSFALSE);
+    if (!write_file(DRAWER "/archive-child", MODE_NEWFILE))
+        return fail("archive: create in drawer", DOSFALSE);
+    if (!examine_path(DRAWER, fib))
+        return fail("archive: examine drawer", DOSFALSE);
+    if (fib->fib_Protection & FIBF_ARCHIVE)
+        return fail("archive: a new entry kept the drawer's bit",
+            fib->fib_Protection);
+    if (!SetProtection(DRAWER, FIBF_ARCHIVE))
+        return fail("archive: mark drawer again", DOSFALSE);
+    if (!DeleteFile(DRAWER "/archive-child"))
+        return fail("archive: delete in drawer", DOSFALSE);
+    if (!examine_path(DRAWER, fib))
+        return fail("archive: examine drawer again", DOSFALSE);
+    if (fib->fib_Protection & FIBF_ARCHIVE)
+        return fail("archive: a removed entry kept the drawer's bit",
+            fib->fib_Protection);
+    if (!SetProtection(DRAWER, 0))
+        return fail("archive: drawer back to plain", DOSFALSE);
+
+    /* What a backup does once it holds a copy; the later phases also read
+     * the note with this word. */
+    if (!SetProtection(NOTE, FIBF_SCRIPT | FIBF_ARCHIVE))
+        return fail("archive: mark note", DOSFALSE);
+    if (!examine_path(NOTE, fib)
+        || fib->fib_Protection != (LONG)(FIBF_SCRIPT | FIBF_ARCHIVE))
+        return fail("archive: SetProtection did not put the bit back",
+            fib->fib_Protection);
+    return RETURN_OK;
+}
+
 static int probe_metadata(struct FileInfoBlock *fib)
 {
     struct DateStamp stamp;
@@ -132,7 +188,7 @@ static int probe_metadata(struct FileInfoBlock *fib)
         return fail("79-character readback", DOSFALSE);
     if (!SetComment(NOTE, "kept"))
         return fail("SetComment kept", DOSFALSE);
-    return RETURN_OK;
+    return probe_archive(fib);
 }
 
 static int probe_soft_link(void)

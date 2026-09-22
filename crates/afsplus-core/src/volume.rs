@@ -47,6 +47,7 @@ use afsplus_format::object::{
     ObjectRecord, ObjectType, MAX_EXTENT_BLOCKS, OBJECT_FLAG_COMMENT, OBJECT_FLAG_DATA_IN_PLACE,
     OBJECT_FLAG_EXTENT_TREE, OBJECT_FLAG_SECURITY_REF,
 };
+use afsplus_format::posix::archive_cleared;
 use afsplus_format::{validate_name, FormatError, Timespec, OBJECT_ORPHAN_DIRECTORY, OBJECT_ROOT};
 
 use crate::alloc::{AllocStats, TxAllocator};
@@ -2597,6 +2598,7 @@ impl<D: BlockDevice> Volume<D> {
         )?;
         let new_parent = ObjectRecord {
             modified: now,
+            protection: archive_cleared(parent.protection),
             changed: now,
             content_generation: generation,
             data_root: directory_mutation.root_lba,
@@ -3168,6 +3170,7 @@ impl<D: BlockDevice> Volume<D> {
 
         let new_parent = ObjectRecord {
             modified: now,
+            protection: archive_cleared(parent.protection),
             changed: now,
             content_generation: generation,
             data_root: directory_mutation.root_lba,
@@ -3367,6 +3370,7 @@ impl<D: BlockDevice> Volume<D> {
         )?;
         let new_parent = ObjectRecord {
             modified: now,
+            protection: archive_cleared(parent.protection),
             changed: now,
             content_generation: generation,
             data_root: parent_mutation.root_lba,
@@ -4327,6 +4331,7 @@ impl<D: BlockDevice> Volume<D> {
 
         let new_parent = ObjectRecord {
             modified: now,
+            protection: archive_cleared(parent.protection),
             changed: now,
             content_generation: generation,
             data_root: directory_mutation.root_lba,
@@ -4476,6 +4481,7 @@ impl<D: BlockDevice> Volume<D> {
         )?;
         let new_parent = ObjectRecord {
             modified: now,
+            protection: archive_cleared(parent.protection),
             changed: now,
             content_generation: generation,
             data_root: directory_mutation.root_lba,
@@ -4738,6 +4744,7 @@ impl<D: BlockDevice> Volume<D> {
 
         let new_source_parent = ObjectRecord {
             modified: now,
+            protection: archive_cleared(source_parent.protection),
             changed: now,
             content_generation: generation,
             data_root: source_mutation.root_lba,
@@ -4745,6 +4752,7 @@ impl<D: BlockDevice> Volume<D> {
         };
         let new_target_parent = target_mutation.as_ref().map(|mutation| ObjectRecord {
             modified: now,
+            protection: archive_cleared(target_parent.protection),
             changed: now,
             content_generation: generation,
             data_root: mutation.root_lba,
@@ -5020,6 +5028,11 @@ impl<D: BlockDevice> Volume<D> {
                 modified
             } else {
                 record.modified
+            },
+            protection: if content_changed {
+                archive_cleared(record.protection)
+            } else {
+                record.protection
             },
             changed,
             content_generation: if content_changed {
@@ -6000,6 +6013,7 @@ impl<D: BlockDevice> Volume<D> {
             Some(ObjectRecord {
                 size_bytes: new_size,
                 modified: now,
+                protection: archive_cleared(record.protection),
                 changed: now,
                 content_generation: generation,
                 ..record
@@ -6100,6 +6114,7 @@ impl<D: BlockDevice> Volume<D> {
             Some(ObjectRecord {
                 size_bytes: new_size,
                 modified: now,
+                protection: archive_cleared(record.protection),
                 changed: now,
                 content_generation: generation,
                 ..record
@@ -8178,6 +8193,7 @@ impl<D: BlockDevice> Volume<D> {
                 Some(ObjectRecord {
                     modified: directory_timestamp,
                     changed: directory_timestamp,
+                    protection: archive_cleared(base.protection),
                     content_generation: generation,
                     data_root: mutation.root_lba,
                     ..base

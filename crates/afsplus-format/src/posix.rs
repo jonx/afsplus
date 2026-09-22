@@ -40,6 +40,20 @@ use crate::FormatError;
 /// Bits with no POSIX meaning, preserved byte for byte by [`with_mode`].
 pub const PROTECTION_AMIGA_ONLY: u32 = 0xF0;
 
+/// ARCHIVE: set by a backup program once it holds a copy of the object, and
+/// cleared by the file system when the object changes after that, so the bit
+/// says "backed up since the last change" and a backup can trust it.
+pub const PROTECTION_ARCHIVE: u32 = 1 << 4;
+
+/// The protection word of an object that has just changed in the way a
+/// backup must see: a file whose content was written, truncated or extended,
+/// a drawer that gained or lost an entry. Everything as it was, ARCHIVE
+/// clear. Setting the protection, the date or the comment is not such a
+/// change, so a restore can put ARCHIVE back and keep it.
+pub const fn archive_cleared(protection: u32) -> u32 {
+    protection & !PROTECTION_ARCHIVE
+}
+
 const OWNER_DELETE: u32 = 1 << 0;
 const OWNER_EXECUTE: u32 = 1 << 1;
 const OWNER_WRITE: u32 = 1 << 2;
