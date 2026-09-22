@@ -168,13 +168,29 @@ fn a_drawer_that_gains_or_loses_an_entry_loses_its_bit() {
         mark_archived(&mut vfs, moving, at(5));
         vfs.sync_filesystem().unwrap();
 
+        // A link is not staged in the window: it commits what waits and then
+        // itself. It goes first, so the four changes after it are still in
+        // the window when the drawers are read below.
+        vfs.link_file(shared, linked, "shared", at(9)).unwrap();
+        assert!(!archived(&mut vfs, linked), "delayed={delayed}");
         vfs.create_file(gains_file, "new", at(10)).unwrap();
         vfs.create_directory(gains_drawer, "new", at(10)).unwrap();
         vfs.unlink_file(loses, "leaving", at(10)).unwrap();
         vfs.rename(source, "moving", target, "moved", false, at(10))
             .unwrap();
-        vfs.link_file(shared, linked, "shared", at(10)).unwrap();
         let _ = leaving;
+
+        // Before any commit, as a program on a delayed mount reads it: the
+        // drawers already show the change, with its date (ADR-121 decision 4).
+        for changed in [gains_file, gains_drawer, loses, source, target] {
+            let stat = vfs.stat(changed).unwrap();
+            assert!(
+                stat.protection as u32 & PROTECTION_ARCHIVE == 0,
+                "delayed={delayed}: a changed drawer showed the bit before the commit"
+            );
+            assert_eq!(stat.modified, at(10), "delayed={delayed}");
+        }
+        assert!(archived(&mut vfs, quiet), "delayed={delayed}");
 
         assert_eq!(
             archived_after_remount(

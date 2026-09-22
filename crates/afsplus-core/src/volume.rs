@@ -1472,6 +1472,7 @@ impl<D: BlockDevice> Volume<D> {
                 let Some(record) = *record else {
                     return Ok(None);
                 };
+                let record = Self::as_window_leaves_it(window, object_id, record);
                 let mut metadata = ObjectMetadata::from(record);
                 if let Some(layout) = window.pending.file_layouts.get(&object_id) {
                     let allocated_blocks =
@@ -1492,7 +1493,34 @@ impl<D: BlockDevice> Volume<D> {
                 return Ok(Some(metadata));
             }
         }
-        Ok(self.read_object(object_id)?.map(ObjectMetadata::from))
+        let record = self.read_object(object_id)?;
+        Ok(record.map(|record| match self.window.as_ref() {
+            Some(window) => {
+                ObjectMetadata::from(Self::as_window_leaves_it(window, object_id, record))
+            }
+            None => ObjectMetadata::from(record),
+        }))
+    }
+
+    /// A drawer whose entries the open window changed, as the window's commit
+    /// will write it: the window's time, and ARCHIVE clear. Every operation
+    /// is visible at once, committed or not (ADR-121 decision 4), and a
+    /// reader who stats the drawer between the change and the commit must not
+    /// see the date and the archive bit of before.
+    fn as_window_leaves_it(
+        window: &OpenWindow,
+        object_id: u64,
+        record: ObjectRecord,
+    ) -> ObjectRecord {
+        match window.pending.dir_timestamps.get(&object_id) {
+            Some(&timestamp) => ObjectRecord {
+                modified: timestamp,
+                changed: timestamp,
+                protection: archive_cleared(record.protection),
+                ..record
+            },
+            None => record,
+        }
     }
 
     /// Reads a file's visible content, including existing-file edits in the
@@ -5804,10 +5832,18 @@ impl<D: BlockDevice> Volume<D> {
     ) -> Result<Option<ObjectRecord>, CoreError> {
         if let Some(window) = self.window.as_ref() {
             if let Some(record) = window.pending.records.get(&object_id) {
-                return Ok(*record);
+                return Ok(
+                    record.map(|record| Self::as_window_leaves_it(window, object_id, record))
+                );
             }
         }
-        self.read_object(object_id)
+        let record = self.read_object(object_id)?;
+        Ok(match self.window.as_ref() {
+            Some(window) => {
+                record.map(|record| Self::as_window_leaves_it(window, object_id, record))
+            }
+            None => record,
+        })
     }
 
     /// Whether a window is open.

@@ -104,7 +104,9 @@ static int probe_archive(struct FileInfoBlock *fib)
     BPTR file;
     LONG written;
 
-    file = Open(NOTE, MODE_OLDFILE);
+    /* MODE_READWRITE: AFS+ opens MODE_OLDFILE for reading only, where FFS
+     * and SFS let the handle write; that is a C2 row of its own. */
+    file = Open(NOTE, MODE_READWRITE);
     if (file == BNULL)
         return fail("archive: open", DOSFALSE);
     Seek(file, 0, OFFSET_END);
