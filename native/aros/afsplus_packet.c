@@ -2012,8 +2012,11 @@ int32_t afsplus_aros_packet_process(
             error = bstr_view(packet->dp_Arg3, &path, &path_length);
         if (packet->dp_Type == ACTION_FINDINPUT)
         {
+            /* MODE_OLDFILE: an existing file, which the handle may also
+             * write, as the Fast File System and SFS let it. The library
+             * answers the write on a volume that takes none. */
             mode = AFSPLUS_AROS_OPEN_OLD_FILE;
-            writable = 0;
+            writable = 1;
         }
         else if (packet->dp_Type == ACTION_FINDOUTPUT)
         {

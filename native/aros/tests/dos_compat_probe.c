@@ -109,9 +109,9 @@ static int probe_archive(struct FileInfoBlock *fib)
         return fail("archive: create", DOSFALSE);
     if (!SetProtection(DRAWER "/archive-note", FIBF_SCRIPT | FIBF_ARCHIVE))
         return fail("archive: mark file", DOSFALSE);
-    /* MODE_READWRITE: AFS+ opens MODE_OLDFILE for reading only, where FFS
-     * and SFS let that handle write; that is a C2 row of its own. */
-    file = Open(DRAWER "/archive-note", MODE_READWRITE);
+    /* MODE_OLDFILE, as a program updating a file in place opens it: the
+     * handle may write, as on the Fast File System and SFS. */
+    file = Open(DRAWER "/archive-note", MODE_OLDFILE);
     if (file == BNULL)
         return fail("archive: open", DOSFALSE);
     Seek(file, 0, OFFSET_END);

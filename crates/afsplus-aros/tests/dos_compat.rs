@@ -845,3 +845,74 @@ fn the_volume_is_named_after_its_label_at_every_mount() {
     assert_eq!(adapter.examine_lock(root).unwrap().name, b"Override");
     assert_eq!(adapter.volume_label().unwrap(), b"Work");
 }
+
+fn read_all(adapter: &mut ArosAdapter<MemoryBackend>, name: &[u8]) -> Vec<u8> {
+    let file = adapter
+        .open(None, name, OpenMode::OldFile, timestamp(90))
+        .unwrap();
+    let mut bytes = vec![0u8; 256];
+    let count = adapter.read(file, &mut bytes).unwrap();
+    adapter.close(file).unwrap();
+    bytes.truncate(count);
+    bytes
+}
+
+/// MODE_OLDFILE opens an existing file that the handle may also write: the
+/// Fast File System and SFS let a program update a file in place this way.
+/// While the volume is write-protected the write is refused, and it goes
+/// through once the protection is lifted, on the same handle.
+#[test]
+fn an_old_file_handle_writes_as_it_does_on_the_fast_file_system() {
+    let mut adapter = adapter(formatted());
+    create(&mut adapter, b"data", b"abcdef", 10);
+
+    let file = adapter
+        .open(None, b"data", OpenMode::OldFile, timestamp(11))
+        .unwrap();
+    adapter
+        .seek(file, 2, afsplus_aros::SeekMode::Beginning)
+        .unwrap();
+    assert_eq!(adapter.write(file, b"XY", timestamp(12)).unwrap(), 2);
+
+    adapter.set_write_protect(true, 7).unwrap();
+    assert_eq!(
+        adapter.write(file, b"!", timestamp(13)),
+        Err(ArosError::DiskWriteProtected)
+    );
+    adapter.set_write_protect(false, 7).unwrap();
+    assert_eq!(adapter.write(file, b"Z", timestamp(14)).unwrap(), 1);
+    adapter.close(file).unwrap();
+
+    assert_eq!(read_all(&mut adapter, b"data"), b"abXYZf");
+    let mut adapter = remount(adapter);
+    assert_eq!(read_all(&mut adapter, b"data"), b"abXYZf");
+}
+
+/// On a mount that takes no write at all, MODE_OLDFILE still opens the file
+/// for reading, and a write through it is refused as write-protected.
+#[test]
+fn an_old_file_handle_on_a_read_only_mount_reads_and_refuses_writes() {
+    let mut writable = adapter(formatted());
+    create(&mut writable, b"note", b"text", 10);
+    let device = writable.into_vfs().unwrap().into_volume().into_device();
+    let vfs = Vfs::mount(
+        device,
+        MountOptions {
+            mode: MountMode::ReadOnly,
+            ..MountOptions::default()
+        },
+    )
+    .unwrap();
+    let mut adapter = ArosAdapter::new(vfs, ArosConfig::default());
+    let file = adapter
+        .open(None, b"note", OpenMode::OldFile, timestamp(20))
+        .unwrap();
+    assert_eq!(
+        adapter.write(file, b"x", timestamp(21)),
+        Err(ArosError::DiskWriteProtected)
+    );
+    let mut bytes = [0u8; 8];
+    assert_eq!(adapter.read(file, &mut bytes).unwrap(), 4);
+    assert_eq!(&bytes[..4], b"text");
+    adapter.close(file).unwrap();
+}

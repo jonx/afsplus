@@ -1354,6 +1354,30 @@ int main(void)
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
     assert(fsync_count == 0 && close_count == 1);
 
+    /* C2: MODE_OLDFILE opens the existing file with a handle that may
+     * write, as the Fast File System and SFS let it; the write reaches the
+     * library instead of being refused as write-protected here. */
+    reset_events();
+    memset(&public_file, 0, sizeof(public_file));
+    initialize_packet(&packet, ACTION_FINDINPUT);
+    packet.dp_Arg1 = (SIPTR)MKBADDR(&public_file);
+    packet.dp_Arg2 = (SIPTR)root;
+    packet.dp_Arg3 = packet_bstr("dir/file");
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert_event(1, 'O', "file", AFSPLUS_AROS_OPEN_OLD_FILE);
+    initialize_packet(&packet, ACTION_WRITE);
+    packet.dp_Arg1 = public_file.fh_Arg1;
+    packet.dp_Arg2 = (SIPTR)write_data;
+    packet.dp_Arg3 = sizeof(write_data);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == (SIPTR)sizeof(write_data));
+    initialize_packet(&packet, ACTION_END);
+    packet.dp_Arg1 = public_file.fh_Arg1;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert(fsync_count == 0 && close_count == 2);
+
     /* C2: metadata setters resolve a path to parent lock plus leaf. */
     {
         struct DateStamp stamp;

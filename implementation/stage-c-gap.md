@@ -121,9 +121,11 @@ namespace changes, `ACTION_FH_FROM_LOCK`, `ACTION_CHANGE_MODE`, `ACTION_WRITE_PR
 with `ACTION_EXAMINE_ALL_END`. The archive bit keeps its meaning: a write,
 a truncate or an extension clears `FIBF_ARCHIVE` on the file, a new, removed
 or renamed entry clears it on the drawer, and setting the protection, the
-date or the comment keeps it, as SFS, PFS3 and the RAM handler do; a delayed
-mount shows the cleared bit before its window commits
-([`archive_bit.rs`](../crates/afsplus-vfs/tests/archive_bit.rs)).
+date or the comment keeps it, as SFS, PFS3 and the RAM handler do; a mount shows the cleared bit before its window commits
+([`archive_bit.rs`](../crates/afsplus-vfs/tests/archive_bit.rs)). A
+`MODE_OLDFILE` handle may write, as on the Fast File System and SFS, so a
+program that updates a file in place works; on a write-protected volume the
+write is refused and goes through once the protection is lifted.
 
 Lacking, in the order classic software meets them:
 
@@ -133,9 +135,8 @@ Lacking, in the order classic software meets them:
 | one instance per unit on an SMP kernel | the claim relies on `Forbid()` for the port list | L4 |
 | `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |
 | `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |
-| `MODE_OLDFILE` writes | `ACTION_FINDINPUT` opens the handle for reading only, so `Open(name, MODE_OLDFILE)` followed by `Write` fails; FFS (`rom/filesys/afs/filehandles1.c:1008`, `writef`) and SFS (`ACTION_WRITE` in `rom/filesys/SFS/FS/filesystemmain.c`) let that handle write, and a program that updates a file in place relies on it | L3 |
 
-Proven on Hosted darwin-aarch64 by [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh): the setters, the archive bit, the comment, soft links, `ExAll`, `OpenFromLock`, `ChangeMode`, record locks with a grant by a second task's release, the owed `NRF_WAIT_REPLY` notification, a dismount with a message never replied, `Relabel`, and one instance per unit under dos.library's double start. QEMU and m68k: every row. Apple hardware: none.
+Proven on Hosted darwin-aarch64 by [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh): the setters, the archive bit, a `MODE_OLDFILE` write, the comment, soft links, `ExAll`, `OpenFromLock`, `ChangeMode`, record locks with a grant by a second task's release, the owed `NRF_WAIT_REPLY` notification, a dismount with a message never replied, `Relabel`, and one instance per unit under dos.library's double start. QEMU and m68k: every row. Apple hardware: none.
 
 ## C3. Classic single-user security preservation adapter
 

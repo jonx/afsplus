@@ -680,10 +680,15 @@ impl<D: BlockDevice> ArosAdapter<D> {
         lock_access: LockAccess,
         now: Timespec,
     ) -> Result<FileHandleId, ArosError> {
-        let access = if mode == OpenMode::OldFile {
-            AccessMode::ReadOnly
-        } else {
+        // MODE_OLDFILE opens an existing file that the handle may also write:
+        // the Fast File System and SFS let it, a program that updates a file
+        // in place opens it this way, and open_from_lock already gives such a
+        // handle. It is read-only only on a mount that takes no write at all;
+        // while the volume is write-protected, the write itself says so.
+        let access = if mode != OpenMode::OldFile || self.vfs.mount_mode() == MountMode::ReadWrite {
             AccessMode::ReadWrite
+        } else {
+            AccessMode::ReadOnly
         };
         let vfs_handle = self.vfs.open_file(object_id, access)?;
         if mode == OpenMode::NewFile {
