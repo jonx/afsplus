@@ -302,6 +302,7 @@ Candidates:
 - optional data checksums using the already reserved feature/extent association path
 - CloneTree evaluation
 - derived content fingerprints
+- cold-data tiering: the archive bit says what is backed up, an extended attribute carries the date a copy may move, the change stream finds the candidates without a full walk, and extent relocation moves the blocks with the object's identity unchanged ([docs/23](docs/23-pfs3-stage0-review.md) already names the mechanism)
 - full portable ACL semantics if real multi-user adapters validate them
 - subtree security domains
 - optional encryption/key hierarchy review

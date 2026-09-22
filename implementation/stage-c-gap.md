@@ -128,6 +128,7 @@ Lacking, in the order classic software meets them:
 | one instance per unit on an SMP kernel | the claim relies on `Forbid()` for the port list | L4 |
 | `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |
 | `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |
+| the archive bit | a write, a rename and a size change must clear `FIBF_ARCHIVE` on the object and on its parent drawer, as `SFS` (`rom/filesys/SFS/FS/objects.c:502`), PFS3 (`rom/filesys/pfs3/fs/directory.c:2770`) and the RAM handler (`rom/filesys/ram/commands.c:500`) do; AROS FFS does not, and neither does AFS+, which carries the bit untouched. Until then the bit says "backed up at some point" instead of "backed up since the last change", and a backup tool that trusts it skips modified files | core |
 
 Proven on Hosted darwin-aarch64 by [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh): the setters, the comment, soft links, `ExAll`, `OpenFromLock`, `ChangeMode`, record locks with a grant by a second task's release, the owed `NRF_WAIT_REPLY` notification, a dismount with a message never replied, `Relabel`, and one instance per unit under dos.library's double start. QEMU and m68k: every row. Apple hardware: none.
 
