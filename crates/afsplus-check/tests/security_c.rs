@@ -238,13 +238,16 @@ fn c_and_rust_agree_on_objects_of_real_images() {
     }
     let secured = image(&mut volume.into_device());
 
+    // A new volume's root carries the mode mkfs gives it (0o755 since
+    // ADR-118), not zero, so both readers must report that word.
+    let root_protection = afsplus_format::posix::protection_for_mode(0o755).unwrap();
     for (label, id, kind, flags, protection) in [
         ("secured, attributed and commented file", file, 1, 28, 0x11),
         ("attributed plain file", attributed, 1, 16, 0),
         ("commented plain file", commented, 1, 8, 0),
         ("secured directory", dir, 2, 4, 0x22),
         ("secured and attributed symlink", link, 3, 20, 0),
-        ("secured root", OBJECT_ROOT, 2, 4, 0),
+        ("secured root", OBJECT_ROOT, 2, 4, root_protection),
         ("plain file beside them", plain, 1, 0, 0x33),
     ] {
         agree(
