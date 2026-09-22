@@ -118,7 +118,12 @@ locking (`MODE_NEWFILE` exclusive, held objects not deletable, refused
 `DupLockFromFH` on an exclusive handle), `ExNext` that continues across
 namespace changes, `ACTION_FH_FROM_LOCK`, `ACTION_CHANGE_MODE`, `ACTION_WRITE_PROTECT`, `ACTION_RENAME_DISK`, `ACTION_SET_COMMENT` with the comment in `FileInfoBlock` and `ED_COMMENT` records, immediate `ACTION_LOCK_RECORD` with
 `ACTION_FREE_RECORD`, and at L3 `ACTION_EXAMINE_ALL`
-with `ACTION_EXAMINE_ALL_END`.
+with `ACTION_EXAMINE_ALL_END`. The archive bit keeps its meaning: a write,
+a truncate or an extension clears `FIBF_ARCHIVE` on the file, a new, removed
+or renamed entry clears it on the drawer, and setting the protection, the
+date or the comment keeps it, as SFS, PFS3 and the RAM handler do; a delayed
+mount shows the cleared bit before its window commits
+([`archive_bit.rs`](../crates/afsplus-vfs/tests/archive_bit.rs)).
 
 Lacking, in the order classic software meets them:
 
@@ -128,9 +133,9 @@ Lacking, in the order classic software meets them:
 | one instance per unit on an SMP kernel | the claim relies on `Forbid()` for the port list | L4 |
 | `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |
 | `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |
-| the archive bit | a write, a rename and a size change must clear `FIBF_ARCHIVE` on the object and on its parent drawer, as `SFS` (`rom/filesys/SFS/FS/objects.c:502`), PFS3 (`rom/filesys/pfs3/fs/directory.c:2770`) and the RAM handler (`rom/filesys/ram/commands.c:500`) do; AROS FFS does not, and neither does AFS+, which carries the bit untouched. Until then the bit says "backed up at some point" instead of "backed up since the last change", and a backup tool that trusts it skips modified files | core |
+| `MODE_OLDFILE` writes | `ACTION_FINDINPUT` opens the handle for reading only, so `Open(name, MODE_OLDFILE)` followed by `Write` fails; FFS (`rom/filesys/afs/filehandles1.c:1008`, `writef`) and SFS (`ACTION_WRITE` in `rom/filesys/SFS/FS/filesystemmain.c`) let that handle write, and a program that updates a file in place relies on it | L3 |
 
-Proven on Hosted darwin-aarch64 by [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh): the setters, the comment, soft links, `ExAll`, `OpenFromLock`, `ChangeMode`, record locks with a grant by a second task's release, the owed `NRF_WAIT_REPLY` notification, a dismount with a message never replied, `Relabel`, and one instance per unit under dos.library's double start. QEMU and m68k: every row. Apple hardware: none.
+Proven on Hosted darwin-aarch64 by [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh): the setters, the archive bit, the comment, soft links, `ExAll`, `OpenFromLock`, `ChangeMode`, record locks with a grant by a second task's release, the owed `NRF_WAIT_REPLY` notification, a dismount with a message never replied, `Relabel`, and one instance per unit under dos.library's double start. QEMU and m68k: every row. Apple hardware: none.
 
 ## C3. Classic single-user security preservation adapter
 

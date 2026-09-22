@@ -104,19 +104,26 @@ static int probe_archive(struct FileInfoBlock *fib)
     BPTR file;
     LONG written;
 
+    /* A file of its own: the later phases read the note's content back. */
+    if (!write_file(DRAWER "/archive-note", MODE_NEWFILE))
+        return fail("archive: create", DOSFALSE);
+    if (!SetProtection(DRAWER "/archive-note", FIBF_SCRIPT | FIBF_ARCHIVE))
+        return fail("archive: mark file", DOSFALSE);
     /* MODE_READWRITE: AFS+ opens MODE_OLDFILE for reading only, where FFS
-     * and SFS let the handle write; that is a C2 row of its own. */
-    file = Open(NOTE, MODE_READWRITE);
+     * and SFS let that handle write; that is a C2 row of its own. */
+    file = Open(DRAWER "/archive-note", MODE_READWRITE);
     if (file == BNULL)
         return fail("archive: open", DOSFALSE);
     Seek(file, 0, OFFSET_END);
     written = Write(file, (APTR)more, sizeof(more) - 1);
     if (!Close(file) || written != (LONG)(sizeof(more) - 1))
         return fail("archive: append", written);
-    if (!examine_path(NOTE, fib))
+    if (!examine_path(DRAWER "/archive-note", fib))
         return fail("archive: examine file", DOSFALSE);
     if (fib->fib_Protection != (LONG)FIBF_SCRIPT)
         return fail("archive: a write kept the bit", fib->fib_Protection);
+    if (!DeleteFile(DRAWER "/archive-note"))
+        return fail("archive: delete file", DOSFALSE);
 
     if (!SetProtection(DRAWER, FIBF_ARCHIVE))
         return fail("archive: mark drawer", DOSFALSE);
@@ -136,17 +143,15 @@ static int probe_archive(struct FileInfoBlock *fib)
     if (fib->fib_Protection & FIBF_ARCHIVE)
         return fail("archive: a removed entry kept the drawer's bit",
             fib->fib_Protection);
-    if (!SetProtection(DRAWER, 0))
-        return fail("archive: drawer back to plain", DOSFALSE);
 
-    /* What a backup does once it holds a copy; the later phases also read
-     * the note with this word. */
-    if (!SetProtection(NOTE, FIBF_SCRIPT | FIBF_ARCHIVE))
-        return fail("archive: mark note", DOSFALSE);
-    if (!examine_path(NOTE, fib)
-        || fib->fib_Protection != (LONG)(FIBF_SCRIPT | FIBF_ARCHIVE))
+    /* What a backup does once it holds a copy: the bit comes back and stays. */
+    if (!SetProtection(DRAWER, FIBF_ARCHIVE))
+        return fail("archive: mark drawer at the end", DOSFALSE);
+    if (!examine_path(DRAWER, fib) || !(fib->fib_Protection & FIBF_ARCHIVE))
         return fail("archive: SetProtection did not put the bit back",
             fib->fib_Protection);
+    if (!SetProtection(DRAWER, 0))
+        return fail("archive: drawer back to plain", DOSFALSE);
     return RETURN_OK;
 }
 
