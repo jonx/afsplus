@@ -42,7 +42,17 @@ const ANCHOR: &[u8] = b"anchor bytes the cursor transition must keep";
 const FILLER: &[u8] = b"filler bytes behind the three-block run";
 
 /// Free and pending blocks of the fixture and of the published state.
-const CURSOR_ACCOUNTING: [(u64, u64); 2] = [(208, 18), (209, 20)];
+///
+/// The step reclaims three blocks and retires five of its own, so pending
+/// goes from 18 to 20 whatever the layout. Free depends on how many blocks
+/// the rebuilt reclaim queue takes. Under the allocator rover (f33df34) the
+/// five retired blocks are five separate runs, one more than the four inline
+/// entries of the tiny format, so the queue seals them into a segment block
+/// besides its root: free is 208. The first-fit placement before the rover
+/// had two of those blocks adjacent, four runs fitted inline, and free was
+/// 209. The cursor transition itself, three blocks consumed and the head
+/// left two blocks into a run, is the same under both.
+const CURSOR_ACCOUNTING: [(u64, u64); 2] = [(208, 18), (208, 20)];
 /// Consumed blocks inside the head entry, fixture and published state.
 const CURSOR_HEAD_BLOCK_OFFSET: [u32; 2] = [0, 2];
 

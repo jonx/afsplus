@@ -888,8 +888,9 @@ impl Family for SharedTruncate {
 fn records_for(op: Op, pages: usize) -> u64 {
     match (op, pages) {
         (_, 2) => 40,
-        // Four staged nodes at 120 and at 160 records fit the four-page
-        // profile, so the reservation write needs the wider fixture to evict.
+        // Four staged nodes at 120 records fit the four-page profile, so the
+        // reservation write needs a wider fixture to evict; at 500 records its
+        // own extent map stages ten nodes.
         (Op::ReservationWrite, _) => 500,
         (_, 4) => 120,
         _ => 500,
@@ -898,6 +899,22 @@ fn records_for(op: Op, pages: usize) -> u64 {
 
 /// Measured resident staged-node demand of each fixture at the unlimited
 /// profile; the driver asserts it and derives the spill expectation from it.
+///
+/// The demand is the largest of the trees one commit mutates. For several
+/// fixtures that is not the subject's extent map but the snapshot lifetime
+/// ledger, which records the blocks the operation retires under the
+/// snapshot, one entry per physically contiguous run. Its node count follows
+/// where the allocator placed the fixture's data and tree nodes, so a change
+/// of placement moves it while the extent map, whose records are logical,
+/// stays put. The allocator rover (f33df34) is such a change: a transaction
+/// now continues after its last allocation instead of rescanning from the
+/// region's first block, so it no longer backfills a block it released
+/// itself or a hole a multi-block run skipped, and the retired blocks fall
+/// into different runs. The values below are those of the rover layout:
+/// the reservation write at 500 records is its ledger at 11 (the extent map
+/// stages 10), the two shrinks at 500 are their ledger at 14 (was 15), and
+/// the sparse growth at 500, which changes no extent, is its ledger at 5
+/// (was 4). Every spill expectation derived from them is unchanged.
 fn demand(op: Op, records: u64) -> u64 {
     match (op, records) {
         (_, 40) => 3,
@@ -905,10 +922,11 @@ fn demand(op: Op, records: u64) -> u64 {
         (Op::ReserveHoles, 120) => 5,
         (Op::Shrink, 120) | (Op::BoundedShrink, 120) => 7,
         (Op::Growth, 120) => 5,
-        (Op::CowWrite, 500) | (Op::ReservationWrite, 500) => 10,
+        (Op::CowWrite, 500) => 10,
+        (Op::ReservationWrite, 500) => 11,
         (Op::ReserveHoles, 500) => 12,
-        (Op::Shrink, 500) | (Op::BoundedShrink, 500) => 15,
-        (Op::Growth, 500) => 4,
+        (Op::Shrink, 500) | (Op::BoundedShrink, 500) => 14,
+        (Op::Growth, 500) => 5,
         other => panic!("no measured staged demand for {other:?}"),
     }
 }
@@ -931,12 +949,15 @@ fn small(op: Op) -> DataFamily {
 }
 
 /// The bounded window spans eight extent leaves and leaves a sparse tail.
+/// Its demand of 23 is the snapshot lifetime ledger of the 800 blocks the
+/// window retires (the extent map stages two nodes); it was 24 under the
+/// first-fit placement before the rover, see [`demand`].
 fn window_family() -> DataFamily {
     assert_eq!(leaf_capacity(), 100, "measured extent-leaf capacity");
     DataFamily {
         op: Op::WindowWrite,
         records: 8 * leaf_capacity() + 300,
-        demand: 24,
+        demand: 23,
     }
 }
 
@@ -1022,26 +1043,32 @@ crate::profile_tests!(shared_truncate_refusal, |pages| matrix::refusal(
     pages
 ));
 
-/// Measured limit: reservation-initializing writes stage four nodes at both
-/// 120 and 160 records, so the four-page profile does not evict them there.
+/// Measured limit: a reservation-initializing write stages four nodes at 120
+/// records, so the four-page profile does not evict it there and the
+/// eviction fixture uses 500 records. Its extent map stages three nodes at
+/// 120 records and four at 160; the peak is the snapshot lifetime ledger of
+/// the retired blocks, four nodes at 120 records and five at 160, where the
+/// rover layout (f33df34) records those blocks in 17 ledger entries instead of the 16
+/// that fitted four ledger nodes. At 160 records the four-page profile
+/// therefore spills one provisional image.
 #[test]
-fn reservation_initialization_stages_four_nodes_at_120_and_160_records() {
-    for records in [120, 160] {
+fn reservation_initialization_stages_four_nodes_at_120_records_and_five_at_160() {
+    for (records, unlimited, four_pages) in [(120, (4, 0), (4, 0)), (160, (5, 0), (4, 1))] {
         let family = DataFamily {
             op: Op::ReservationWrite,
             records,
-            demand: 4,
+            demand: unlimited.0,
         };
         let mut volume = matrix::open(family.format(Variant::Eviction).device(), usize::MAX);
         let state = family.setup(&mut volume, Variant::Eviction);
         let base = volume.into_device();
-        for pages in [4, usize::MAX] {
+        for (pages, expected) in [(4, four_pages), (usize::MAX, unlimited)] {
             let mut volume = matrix::open(base.clone(), pages);
             family.apply(&mut volume, &state).unwrap();
             let stats = volume.last_commit_stats().unwrap().tree_mutations;
             assert_eq!(
                 (stats.max_resident_staged_nodes, stats.staged_spill_writes),
-                (4, 0),
+                expected,
                 "{records} records at pages={pages}"
             );
             family.verify(&mut volume, &state, Variant::Eviction, 1, "measured limit");
