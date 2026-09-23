@@ -691,7 +691,7 @@ remount.
 
 | Test | Profiles | Spills and reloads the successful run reports |
 |---|---|---|
-| `extent_map_write_survives_reload_read_failures` | 2/4 | 26 spills with 17 reloads at two pages and 2 spills with 1 reload at four pages over a 160-record extent map; eight pages hold the window, so they spill nothing |
+| `extent_map_write_survives_reload_read_failures` | 2/4 | 47 spills with 28 reloads at two pages and 11 spills with 3 reloads at four pages over a 400-record extent map; the write over its first 200 records stages five extent-map nodes whatever the block placement, and the reloads at four pages come from the snapshot lifetime ledger of the same transaction |
 | `object_map_replacement_survives_reload_read_failures` | 2 | 4 spills with 2 reloads over the object map, root directory and orphan directory of 400 long names; the measured demand of three nodes spills at two pages only |
 | `allocation_root_promotion_survives_reload_read_failures` | 2/4/8 | 8, 5 and 1 spill writes across eight allocation-root leaves with zero reloads, so this fixture qualifies read failures over the spill writes it performs |
 

@@ -629,10 +629,19 @@ impl Family for Consumption {
 // Reload read failures outside the directory and batch transactions
 // ---------------------------------------------------------------------------
 
-/// Logical blocks the fragmented extent-map fixture writes.
-const EXTENT_FIXTURE_BLOCKS: u64 = 160;
+/// Logical blocks the fragmented extent-map fixture writes. With 400
+/// records and a write over the first 200, the map alone stages five nodes
+/// (measured at eight pages and unlimited): more than the four-page profile
+/// holds. Its records are logical and never coalesce, so
+/// that count is the same whatever blocks the allocator picks. With 160
+/// records and a 48-record write the map staged three nodes, and the
+/// four-page profile spilled only through the snapshot lifetime ledger of
+/// the retired blocks, whose size follows the allocator's placement: it
+/// needed five ledger nodes under first-fit and four under the rover
+/// (f33df34), which then spilled nothing.
+const EXTENT_FIXTURE_BLOCKS: u64 = 400;
 /// Logical blocks the recorded extent-map write covers.
-const EXTENT_WRITE_BLOCKS: u64 = 48;
+const EXTENT_WRITE_BLOCKS: u64 = 200;
 
 struct ExtentState {
     file: u64,
@@ -820,13 +829,16 @@ crate::profile_tests!(consumption_retained, |pages| matrix::retained(
 
 #[test]
 fn extent_map_write_survives_reload_read_failures() {
-    // Eight pages hold the whole extent-map window, so only two and four
-    // pages spill provisional images.
-    let reloads: u64 = [2, 4]
-        .into_iter()
-        .map(|pages| matrix::reload_failures(&ExtentMapWrite, pages, Variant::Plain).1)
-        .sum();
-    assert!(reloads > 0, "no profile reloaded a provisional image");
+    // The extent map stages five nodes, so it spills at two and at four
+    // pages, and reloads its own images at two. At four pages the reloads
+    // come from the snapshot lifetime ledger of the same transaction, which
+    // writes ten nodes for the blocks the write retires (eight under the
+    // first-fit placement before the rover).
+    for pages in [2, 4] {
+        let (spills, reloads) = matrix::reload_failures(&ExtentMapWrite, pages, Variant::Plain);
+        assert!(spills > 0, "pages={pages}: no provisional image spilled");
+        assert!(reloads > 0, "pages={pages}: no provisional image reloaded");
+    }
 }
 
 #[test]
