@@ -46,6 +46,9 @@
 #define AFSPLUS_TICKS_PER_SECOND UINT32_C(50)
 #define AFSPLUS_MAX_NSD_COMMANDS UINT32_C(256)
 
+#ifndef AFSPLUS_AROS_LOG_STAGES
+#define AFSPLUS_AROS_LOG_STAGES 0
+#endif
 #ifndef AFSPLUS_AROS_TRACE_STARTUP
 #define AFSPLUS_AROS_TRACE_STARTUP 0
 #endif
@@ -149,6 +152,10 @@ void afsplus_aros_trace_stage(const char *stage)
 }
 
 static void set_startup_stage(struct AfsplusArosHandler *handler,
+    const char *stage);
+#define handler_entry_address set_startup_stage
+
+static void set_startup_stage(struct AfsplusArosHandler *handler,
     const char *stage)
 {
 #if AFSPLUS_AROS_TRACE_STARTUP && defined(__aarch64__)
@@ -158,6 +165,15 @@ static void set_startup_stage(struct AfsplusArosHandler *handler,
 
     handler->startup_stage = stage;
     afsplus_aros_trace_stage(stage);
+#if AFSPLUS_AROS_LOG_STAGES
+    {
+        struct ExecBase *SysBase = handler->SysBase;
+        (void)SysBase;
+        /* The entry's address locates the code hunk, so an ELR from a
+         * hypervisor dump maps back to a function of this ELF. */
+        bug("[AFSPLUS] stage %s code=%p\n", stage, (void *)&handler_entry_address);
+    }
+#endif
 #if AFSPLUS_AROS_TRACE_STARTUP && defined(__aarch64__)
     while (*cursor != 0) {
         hash ^= *cursor++;
@@ -825,6 +841,17 @@ static void cleanup_handler(struct AfsplusArosHandler *handler)
     (void)LocaleBase;
 }
 
+/* Rust panic text, one line, to the debug console; the abort follows. */
+static struct ExecBase *panic_log_sysbase;
+
+static void panic_log(const uint8_t *line)
+{
+    struct ExecBase *SysBase = panic_log_sysbase;
+
+    if (SysBase != NULL)
+        bug("%s\n", (const char *)line);
+}
+
 static struct AfsplusArosHandler *initialize_handler(struct ExecBase *SysBase,
     struct Process *process, struct DosPacket *startup_packet, int32_t *error)
 {
@@ -872,6 +899,8 @@ static struct AfsplusArosHandler *initialize_handler(struct ExecBase *SysBase,
         handler->locale = OpenLocale(NULL);
     }
 
+    panic_log_sysbase = SysBase;
+    (void)afsplus_aros_install_panic_log(panic_log);
     *error = open_device(handler);
     if (*error == 0)
         *error = setup_filesystem(handler);

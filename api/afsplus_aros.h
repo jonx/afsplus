@@ -111,6 +111,10 @@ _Static_assert(sizeof(struct AfsplusArosMountConfig) == 40,
 #endif
 #endif
 
+/* Call once before mounting: Rust panic messages then reach log() as one
+ * NUL-terminated line before the process aborts. */
+int32_t afsplus_aros_install_panic_log(void (*log)(const uint8_t *line));
+
 int32_t afsplus_aros_mount(const struct AfsplusArosDevice *device,
     const struct AfsplusArosMountConfig *config,
     struct AfsplusAros **output);
