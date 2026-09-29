@@ -569,3 +569,69 @@ fn data_policy_capability_is_absent_without_the_feature() {
         "the unsupported policy request published the intent window"
     );
 }
+
+#[test]
+fn a_full_volume_rejects_the_write_and_keeps_the_window_usable() {
+    const REGIONS: u64 = 64;
+    const REGION_BLOCKS: u32 = 16;
+    let mut dev = MemoryBackend::new(BS, REGIONS * u64::from(REGION_BLOCKS));
+    mkfs(
+        &mut dev,
+        &MkfsParams {
+            uuid: [0x52; 16],
+            label: "VfsFull".into(),
+            region_size: REGION_BLOCKS,
+            reclaim_caps: Default::default(),
+            log_slots: 8,
+            shared_extents: true,
+            data_policy: true,
+            name_policy: afsplus_core::NamePolicy::Sensitive,
+            timestamp: ts(0),
+        },
+    )
+    .unwrap();
+    let mut vfs = Vfs::mount(dev, MountOptions::default()).unwrap();
+    let block = vec![0xA5u8; BS];
+    let mut written = 0usize;
+    let mut refused = false;
+    for index in 0..4096 {
+        let object = vfs
+            .create_file(OBJECT_ROOT, &format!("fill-{index:04}"), ts(1))
+            .unwrap();
+        let handle = vfs.open_file(object, AccessMode::ReadWrite).unwrap();
+        let mut offset = 0u64;
+        let mut failed = false;
+        for _ in 0..4 {
+            match vfs.write(handle, offset, &block, ts(2)) {
+                Ok(count) => offset += count as u64,
+                Err(VfsError::NoSpace) => {
+                    failed = true;
+                    break;
+                }
+                Err(error) => panic!("unexpected error {error:?}"),
+            }
+        }
+        vfs.close(handle).unwrap();
+        if failed {
+            refused = true;
+            break;
+        }
+        written += 1;
+    }
+    assert!(refused, "the volume never filled up");
+    assert!(written > 0);
+    // The failed write must not poison the volume: a flush commits what was
+    // written, and a delete then frees room for a new file.
+    vfs.sync_filesystem().unwrap();
+    vfs.unlink_file(OBJECT_ROOT, "fill-0000", ts(3)).unwrap();
+    vfs.sync_filesystem().unwrap();
+    let object = vfs.create_file(OBJECT_ROOT, "after-full", ts(4)).unwrap();
+    let handle = vfs.open_file(object, AccessMode::ReadWrite).unwrap();
+    assert_eq!(vfs.write(handle, 0, b"still works", ts(5)).unwrap(), 11);
+    vfs.close(handle).unwrap();
+    vfs.sync_filesystem().unwrap();
+    let mut back = [0u8; 16];
+    let handle = vfs.open_file(object, AccessMode::ReadOnly).unwrap();
+    assert_eq!(vfs.read(handle, 0, &mut back).unwrap(), 11);
+    assert_eq!(&back[..11], b"still works");
+}

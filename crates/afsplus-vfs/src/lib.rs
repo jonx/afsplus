@@ -811,6 +811,12 @@ impl<D: BlockDevice> Vfs<D> {
     }
 
     pub fn sync_filesystem(&mut self) -> Result<(), VfsError> {
+        if self.volume.window_poisoned() {
+            // The staged window cannot be committed. Drop it so the volume
+            // goes on from its last checkpoint, and report the loss once.
+            self.volume.window_abort()?;
+            return Err(VfsError::Busy);
+        }
         if self.volume.mount_mode() == MountMode::ReadWrite && self.logged_data_fsync_enabled() {
             self.volume.window_commit(Timespec::default())?;
         } else {

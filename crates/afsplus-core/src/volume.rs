@@ -259,6 +259,11 @@ struct PendingBatch {
 
 /// An open operation window: a live ADR-026 batch whose fsynced prefix is
 /// persisted in the intent log (ADR-037).
+/// Blocks kept free above the emergency headroom while a window stages
+/// data, so that committing the window (directory pages, object records,
+/// object map, bitmaps, checkpoint) can never fail for lack of space.
+const WINDOW_COMMIT_RESERVE_BLOCKS: u64 = 256;
+
 struct OpenWindow {
     tx: TxAllocator,
     pending: PendingBatch,
@@ -4526,7 +4531,13 @@ impl<D: BlockDevice> Volume<D> {
             0,
             self.alloc_rover_region,
         )?;
-        self.protect_emergency_headroom(&mut tx);
+        // Data staged in the window stops short of the emergency headroom
+        // by a further commit reserve, which the commit itself may use for
+        // its metadata: a window that fills the volume must still close.
+        tx.set_free_block_floor(
+            self.emergency_headroom_blocks()
+                .saturating_add(WINDOW_COMMIT_RESERVE_BLOCKS),
+        );
         Ok(OpenWindow {
             tx,
             pending: PendingBatch {
@@ -4640,6 +4651,11 @@ impl<D: BlockDevice> Volume<D> {
         let end_block = end_offset.div_ceil(block_size);
         let block_count = end_block - first_block;
 
+        // Nothing of the window is touched before `staged` is set: an error
+        // before that point (a full volume above all) rejects this write and
+        // leaves the window usable; an error after it leaves the staged
+        // state inconsistent and poisons the window.
+        let mut staged = false;
         let result = (|| {
             let mut blocks = Vec::with_capacity(block_count as usize);
             for logical_block in first_block..end_block {
@@ -4682,6 +4698,7 @@ impl<D: BlockDevice> Volume<D> {
                     "logged write block count mismatch".into(),
                 ));
             }
+            staged = true;
             window.pending.prewritten_data_blocks = window
                 .pending
                 .prewritten_data_blocks
@@ -4727,6 +4744,10 @@ impl<D: BlockDevice> Volume<D> {
             Ok(()) => {
                 self.window = Some(window);
                 Ok(())
+            }
+            Err(error) if !staged => {
+                self.window = Some(window);
+                Err(error)
             }
             Err(error) => {
                 self.window_poisoned = true;
@@ -4779,6 +4800,7 @@ impl<D: BlockDevice> Volume<D> {
         }
         let current_extents = window.pending.file_layouts[&object_id].extents.clone();
         let block_size = self.dev.block_size() as u64;
+        let mut staged = false;
         let result = (|| {
             let mut logical_start = 0;
             let mut extents = Vec::new();
@@ -4793,6 +4815,7 @@ impl<D: BlockDevice> Volume<D> {
                     block[(new_size % block_size) as usize..].fill(0);
                     let physical_start = window.tx.allocate(&mut self.dev)?;
                     self.dev.write_block(physical_start, &block)?;
+                    staged = true;
                     window.pending.prewritten_data_blocks = window
                         .pending
                         .prewritten_data_blocks
@@ -4803,6 +4826,7 @@ impl<D: BlockDevice> Volume<D> {
                     content_crc = crc32c(&block);
                 }
             }
+            staged = true;
             self.install_logged_truncate(
                 &mut window.tx,
                 &mut window.pending,
@@ -4829,6 +4853,10 @@ impl<D: BlockDevice> Volume<D> {
             Ok(()) => {
                 self.window = Some(window);
                 Ok(())
+            }
+            Err(error) if !staged => {
+                self.window = Some(window);
+                Err(error)
             }
             Err(error) => {
                 self.window_poisoned = true;
@@ -5018,6 +5046,25 @@ impl<D: BlockDevice> Volume<D> {
     /// Materializes the open window as one checkpoint transaction. Always
     /// publishes a checkpoint when any record was logged, so stale records
     /// can never be mistaken for live ones.
+    /// Discards a window whose staged state can no longer be trusted, so the
+    /// volume goes on from its last checkpoint. Only a window with no logged
+    /// (fsynced) records can be dropped: a logged record would be replayed
+    /// at the next mount against state this discard forgets.
+    pub fn window_abort(&mut self) -> Result<(), CoreError> {
+        if let Some(window) = self.window.as_ref() {
+            if window.logged_records != 0 {
+                return Err(CoreError::WindowPoisoned);
+            }
+        }
+        self.window = None;
+        self.window_poisoned = false;
+        Ok(())
+    }
+
+    pub fn window_poisoned(&self) -> bool {
+        self.window_poisoned
+    }
+
     pub fn window_commit(&mut self, now: Timespec) -> Result<(), CoreError> {
         if !self.mount_mode.allows_user_writes() {
             return Err(CoreError::ReadOnly);
@@ -5025,14 +5072,22 @@ impl<D: BlockDevice> Volume<D> {
         if self.window_poisoned {
             return Err(CoreError::WindowPoisoned);
         }
-        let Some(window) = self.window.take() else {
+        let Some(mut window) = self.window.take() else {
             return Ok(());
         };
         let force = window.logged_records > 0;
+        window
+            .tx
+            .set_free_block_floor(self.emergency_headroom_blocks());
         let result =
             self.materialize_batch(window.tx, window.pending, now, window.generation, force);
-        if result.is_err() {
-            self.window_poisoned = true;
+        match &result {
+            // The checkpoint was not published: the committed state is
+            // intact and the staged operations are simply lost. Only logged
+            // records, which a mount would replay, make that unsafe.
+            Err(CoreError::NoSpace) if !force => {}
+            Err(_) => self.window_poisoned = true,
+            Ok(()) => {}
         }
         result
     }
@@ -6057,7 +6112,7 @@ fn allocate_extent_runs<D: BlockDevice>(
     flags: u32,
 ) -> Result<Vec<Extent>, CoreError> {
     let max_run = maximum_allocatable_run(geo)?;
-    let mut extents = Vec::new();
+    let mut extents: Vec<Extent> = Vec::new();
     while block_count > 0 {
         let mut candidate = block_count.min(max_run);
         let physical_start = loop {
@@ -6066,7 +6121,16 @@ fn allocate_extent_runs<D: BlockDevice>(
                 Err(CoreError::NoSpace) if candidate > 1 => {
                     candidate = candidate.div_ceil(2);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // A full volume rejects the operation; the runs taken so
+                    // far go back so the transaction stays balanced.
+                    for extent in &extents {
+                        for block in 0..extent.block_count {
+                            let _ = tx.release_uncommitted(dev, extent.physical_start + block);
+                        }
+                    }
+                    return Err(error);
+                }
             }
         };
         extents.push(Extent {
