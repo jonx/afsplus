@@ -218,10 +218,11 @@ impl<D: BlockDevice> ArosAdapter<D> {
             (base_object, parent, stored_name)
         } else {
             let decoded = self.decode_component(name)?;
-            let object_id = self.vfs.lookup(base_object, &decoded)?;
+            let (object_id, stored) = self.vfs.lookup_entry(base_object, &decoded)?;
+            let stored_name = self.encode_name(stored.as_bytes())?;
             self.known_parents
-                .insert(object_id, (Some(base_object), name.to_vec()));
-            (object_id, Some(base_object), name.to_vec())
+                .insert(object_id, (Some(base_object), stored_name.clone()));
+            (object_id, Some(base_object), stored_name)
         };
         self.insert_lock(object_id, parent, stored_name, access)
     }
@@ -282,14 +283,16 @@ impl<D: BlockDevice> ArosAdapter<D> {
         self.ensure_file_capacity()?;
         let parent = self.lock_object_or_root(base)?;
         let decoded = self.decode_component(name)?;
-        let existing = self.vfs.lookup(parent, &decoded);
-        let object_id = match (mode, existing) {
-            (OpenMode::OldFile, Ok(object_id))
-            | (OpenMode::ReadWrite, Ok(object_id))
-            | (OpenMode::NewFile, Ok(object_id)) => object_id,
+        let existing = self.vfs.lookup_entry(parent, &decoded);
+        let (object_id, stored_name) = match (mode, existing) {
+            (OpenMode::OldFile, Ok((object_id, stored)))
+            | (OpenMode::ReadWrite, Ok((object_id, stored)))
+            | (OpenMode::NewFile, Ok((object_id, stored))) => {
+                (object_id, self.encode_name(stored.as_bytes())?)
+            }
             (OpenMode::OldFile, Err(error)) => return Err(error.into()),
             (OpenMode::ReadWrite | OpenMode::NewFile, Err(VfsError::NotFound)) => {
-                self.vfs.create_file(parent, &decoded, now)?
+                (self.vfs.create_file(parent, &decoded, now)?, name.to_vec())
             }
             (_, Err(error)) => return Err(error.into()),
         };
@@ -315,7 +318,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
                 vfs_handle,
                 object_id,
                 parent,
-                name: name.to_vec(),
+                name: stored_name,
                 position: 0,
             },
         );
@@ -515,6 +518,43 @@ impl<D: BlockDevice> ArosAdapter<D> {
         Ok(self
             .vfs
             .link_file(source_object, target_parent, &target, now)?)
+    }
+
+    /// `ACTION_SET_PROTECT`: replaces the AmigaDOS protection mask of the
+    /// object named relative to `base`.
+    pub fn set_protection(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+        protection: u32,
+        now: Timespec,
+    ) -> Result<(), ArosError> {
+        let object_id = self.resolve_object(base, name)?;
+        Ok(self.vfs.set_protection(object_id, protection, now)?)
+    }
+
+    /// `ACTION_SET_DATE`: replaces the modification timestamp of the object
+    /// named relative to `base`.
+    pub fn set_date(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+        modified: Timespec,
+        now: Timespec,
+    ) -> Result<(), ArosError> {
+        let object_id = self.resolve_object(base, name)?;
+        Ok(self.vfs.set_modified(object_id, modified, now)?)
+    }
+
+    /// The object a (lock, name) pair designates: the lock's own object when
+    /// the name is empty, as DOS passes for `SetProtection("")` on a lock.
+    fn resolve_object(&mut self, base: Option<LockId>, name: &[u8]) -> Result<ObjectId, ArosError> {
+        let base_object = self.lock_object_or_root(base)?;
+        if name.is_empty() {
+            return Ok(base_object);
+        }
+        let decoded = self.decode_component(name)?;
+        Ok(self.vfs.lookup(base_object, &decoded)?)
     }
 
     pub fn examine_lock(&mut self, lock: LockId) -> Result<FileInfo, ArosError> {

@@ -348,6 +348,55 @@ impl<D: BlockDevice> Vfs<D> {
             .ok_or(VfsError::NotFound)
     }
 
+    /// Like [`Self::lookup`], also returning the entry's stored spelling,
+    /// which differs from `name` only in case or normalization form.
+    pub fn lookup_entry(
+        &mut self,
+        parent: ObjectId,
+        name: &str,
+    ) -> Result<(ObjectId, String), VfsError> {
+        let (object_id, stored) = self
+            .volume
+            .lookup_entry_in_directory(parent, name)?
+            .ok_or(VfsError::NotFound)?;
+        let stored = String::from_utf8(stored)
+            .map_err(|_| VfsError::Corrupt("directory entry name is not UTF-8".into()))?;
+        Ok((object_id, stored))
+    }
+
+    /// Replaces the AROS protection flags of a file or directory.
+    pub fn set_protection(
+        &mut self,
+        object_id: ObjectId,
+        protection: u32,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        if self.volume.mount_mode() != MountMode::ReadWrite {
+            return Err(VfsError::ReadOnly);
+        }
+        self.checkpoint_data_window(now)?;
+        Ok(self
+            .volume
+            .set_object_attributes(object_id, Some(protection), None, now)?)
+    }
+
+    /// Replaces the modification timestamp of a file or directory, as
+    /// AmigaDOS `SetFileDate()` does.
+    pub fn set_modified(
+        &mut self,
+        object_id: ObjectId,
+        modified: Timespec,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        if self.volume.mount_mode() != MountMode::ReadWrite {
+            return Err(VfsError::ReadOnly);
+        }
+        self.checkpoint_data_window(now)?;
+        Ok(self
+            .volume
+            .set_object_attributes(object_id, None, Some(modified), now)?)
+    }
+
     pub fn stat(&mut self, object_id: ObjectId) -> Result<Stat, VfsError> {
         if self.volume.orphan_object(object_id)? {
             return Err(VfsError::NotFound);

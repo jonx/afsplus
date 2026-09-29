@@ -800,6 +800,49 @@ pub extern "C" fn afsplus_aros_make_hard_link(
 }
 
 #[no_mangle]
+pub extern "C" fn afsplus_aros_set_protection(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    protection: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    ffi_status(|| {
+        let name = input_bytes(name, name_length)?;
+        bridge_mut(filesystem)?.adapter.set_protection(
+            optional_lock(base_lock),
+            name,
+            protection,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_set_date(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    modified_seconds: i64,
+    modified_nanoseconds: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    ffi_status(|| {
+        let name = input_bytes(name, name_length)?;
+        bridge_mut(filesystem)?.adapter.set_date(
+            optional_lock(base_lock),
+            name,
+            timestamp(modified_seconds, modified_nanoseconds)?,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn afsplus_aros_examine_lock(
     filesystem: *mut AfsplusAros,
     lock: u64,

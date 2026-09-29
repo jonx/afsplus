@@ -213,3 +213,96 @@ fn read_only_mount_and_invalid_offsets_map_to_dos_errors() {
     );
     assert_eq!(ArosError::NoMoreEntries.io_error(), 232);
 }
+
+#[test]
+fn examine_reports_the_stored_spelling_on_a_case_insensitive_volume() {
+    let vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let mut adapter = ArosAdapter::new(vfs, ArosConfig::default());
+
+    let file = adapter
+        .open(None, b"CaseTest", OpenMode::NewFile, timestamp(1))
+        .unwrap();
+    adapter.close(file).unwrap();
+
+    let lock = adapter
+        .locate(None, b"CASETEST", LockAccess::Shared)
+        .unwrap();
+    assert_eq!(adapter.examine_lock(lock).unwrap().name, b"CaseTest");
+
+    let reopened = adapter
+        .open(None, b"casetest", OpenMode::OldFile, timestamp(2))
+        .unwrap();
+    assert_eq!(adapter.examine_file(reopened).unwrap().name, b"CaseTest");
+    let from_file = adapter.lock_from_file(reopened).unwrap();
+    assert_eq!(adapter.examine_lock(from_file).unwrap().name, b"CaseTest");
+    adapter.close(reopened).unwrap();
+
+    let dir = adapter
+        .create_directory(None, b"Work", timestamp(3))
+        .unwrap();
+    let inner = adapter
+        .open(Some(dir), b"Draft", OpenMode::NewFile, timestamp(4))
+        .unwrap();
+    adapter.close(inner).unwrap();
+    let inner_lock = adapter.locate(None, b"work", LockAccess::Shared).unwrap();
+    let draft = adapter
+        .locate(Some(inner_lock), b"DRAFT", LockAccess::Shared)
+        .unwrap();
+    assert_eq!(adapter.examine_lock(draft).unwrap().name, b"Draft");
+    let parent = adapter.parent_lock(draft).unwrap().unwrap();
+    assert_eq!(adapter.examine_lock(parent).unwrap().name, b"Work");
+}
+
+#[test]
+fn set_protection_and_set_date_persist_through_examine() {
+    let vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let mut adapter = ArosAdapter::new(vfs, ArosConfig::default());
+
+    let file = adapter
+        .open(None, b"prot", OpenMode::NewFile, timestamp(1))
+        .unwrap();
+    adapter.write(file, b"p", timestamp(1)).unwrap();
+    adapter.close(file).unwrap();
+    let dir = adapter
+        .create_directory(None, b"dir", timestamp(1))
+        .unwrap();
+
+    const FIBF_SCRIPT_PURE: u32 = (1 << 6) | (1 << 5);
+    adapter
+        .set_protection(None, b"prot", FIBF_SCRIPT_PURE, timestamp(2))
+        .unwrap();
+    adapter
+        .set_protection(Some(dir), b"", 0x0f, timestamp(2))
+        .unwrap();
+    let modified = Timespec {
+        seconds: 1_634_906_064,
+        nanoseconds: 680_000_000,
+    };
+    adapter
+        .set_date(None, b"PROT", modified, timestamp(3))
+        .unwrap();
+
+    let lock = adapter.locate(None, b"prot", LockAccess::Shared).unwrap();
+    let info = adapter.examine_lock(lock).unwrap();
+    assert_eq!(info.protection, FIBF_SCRIPT_PURE);
+    assert_eq!(info.modified, modified);
+    assert_eq!(adapter.examine_lock(dir).unwrap().protection, 0x0f);
+
+    assert_eq!(
+        adapter
+            .set_protection(None, b"missing", 0, timestamp(4))
+            .unwrap_err(),
+        ArosError::ObjectNotFound
+    );
+
+    // Survives a remount.
+    adapter.free_lock(lock).unwrap();
+    adapter.free_lock(dir).unwrap();
+    let device = adapter.into_vfs().unwrap().into_volume().into_device();
+    let vfs = Vfs::mount(device, MountOptions::default()).unwrap();
+    let mut adapter = ArosAdapter::new(vfs, ArosConfig::default());
+    let lock = adapter.locate(None, b"prot", LockAccess::Shared).unwrap();
+    let info = adapter.examine_lock(lock).unwrap();
+    assert_eq!(info.protection, FIBF_SCRIPT_PURE);
+    assert_eq!(info.modified, modified);
+}

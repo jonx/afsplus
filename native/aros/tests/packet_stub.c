@@ -318,6 +318,36 @@ int32_t afsplus_aros_delete_object(struct AfsplusAros *filesystem,
     return 0;
 }
 
+static uint32_t last_protection;
+static int64_t last_modified_seconds;
+static uint32_t last_modified_nanoseconds;
+
+int32_t afsplus_aros_set_protection(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint32_t protection, int64_t now_seconds, uint32_t now_nanoseconds)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    assert(now_nanoseconds == UINT32_C(40000000));
+    last_protection = protection;
+    record('P', base_lock, name, name_length, 0);
+    return 0;
+}
+
+int32_t afsplus_aros_set_date(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    int64_t modified_seconds, uint32_t modified_nanoseconds,
+    int64_t now_seconds, uint32_t now_nanoseconds)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    assert(now_nanoseconds == UINT32_C(40000000));
+    last_modified_seconds = modified_seconds;
+    last_modified_nanoseconds = modified_nanoseconds;
+    record('D', base_lock, name, name_length, 0);
+    return 0;
+}
+
 int32_t afsplus_aros_rename(struct AfsplusAros *filesystem,
     uint64_t source_base_lock, const uint8_t *source_name,
     uint32_t source_name_length, uint64_t target_base_lock,
@@ -530,6 +560,59 @@ int main(void)
     assert_event(0, 'L', "links", AFSPLUS_AROS_LOCK_SHARED);
     assert_event(1, 'H', "copy", (uint32_t)created_lock_id);
     assert(events[2].operation == 'F');
+
+    reset_events();
+    initialize_packet(&packet, ACTION_SET_PROTECT);
+    packet.dp_Arg1 = 0;
+    packet.dp_Arg2 = (SIPTR)root;
+    packet.dp_Arg3 = packet_bstr("bin/tool");
+    packet.dp_Arg4 = FIBF_SCRIPT | FIBF_PURE;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert_event(0, 'L', "bin", AFSPLUS_AROS_LOCK_SHARED);
+    assert_event(1, 'P', "tool", 0);
+    assert(events[2].operation == 'F');
+    assert(last_protection == (uint32_t)(FIBF_SCRIPT | FIBF_PURE));
+
+    /* An empty name is the lock's own object: no parent lookup. */
+    reset_events();
+    initialize_packet(&packet, ACTION_SET_PROTECT);
+    packet.dp_Arg2 = (SIPTR)created;
+    packet.dp_Arg3 = packet_bstr("");
+    packet.dp_Arg4 = FIBF_DELETE;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert_event(0, 'P', "", 0);
+    assert(events[0].base == (uint64_t)created_lock_id);
+    assert(event_count == 1);
+
+    {
+        /* 2021-10-22 12:34:24.68: days 16000, minute 754, tick 1234. */
+        struct DateStamp stamp = { 16000, 754, 1234 };
+
+        reset_events();
+        initialize_packet(&packet, ACTION_SET_DATE);
+        packet.dp_Arg2 = (SIPTR)root;
+        packet.dp_Arg3 = packet_bstr("bin/tool");
+        packet.dp_Arg4 = (SIPTR)&stamp;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert_event(0, 'L', "bin", AFSPLUS_AROS_LOCK_SHARED);
+        assert_event(1, 'D', "tool", 0);
+        assert(events[2].operation == 'F');
+        assert(last_modified_seconds == INT64_C(252460800)
+            + INT64_C(16000) * 86400 + INT64_C(754) * 60 + 24);
+        assert(last_modified_nanoseconds == UINT32_C(680000000));
+
+        reset_events();
+        initialize_packet(&packet, ACTION_SET_DATE);
+        packet.dp_Arg2 = (SIPTR)root;
+        packet.dp_Arg3 = packet_bstr("bin/tool");
+        packet.dp_Arg4 = 0;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_BAD_NUMBER);
+        assert(event_count == 0);
+    }
 
     reset_events();
     initialize_packet(&packet, ACTION_DELETE_OBJECT);

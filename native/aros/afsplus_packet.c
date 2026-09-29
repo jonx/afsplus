@@ -449,6 +449,52 @@ static void unix_to_datestamp(int64_t seconds, uint32_t nanoseconds,
     date->ds_Tick = ticks > INT32_MAX ? INT32_MAX : (LONG)ticks;
 }
 
+/* Inverse of unix_to_datestamp. A DateStamp cannot express a time before
+ * the Amiga epoch, so the result is never earlier than it. */
+static void datestamp_to_unix(const struct DateStamp *date, int64_t *seconds,
+    uint32_t *nanoseconds)
+{
+    int64_t days = date->ds_Days < 0 ? 0 : date->ds_Days;
+    int64_t minutes = date->ds_Minute < 0 ? 0 : date->ds_Minute;
+    int64_t ticks = date->ds_Tick < 0 ? 0 : date->ds_Tick;
+
+    *seconds = AFSPLUS_UNIX_TO_AMIGA_EPOCH + days * AFSPLUS_SECONDS_PER_DAY
+        + minutes * AFSPLUS_SECONDS_PER_MINUTE
+        + ticks / AFSPLUS_TICKS_PER_SECOND;
+    *nanoseconds = (uint32_t)(ticks % AFSPLUS_TICKS_PER_SECOND)
+        * UINT32_C(20000000);
+}
+
+/* Resolves the (lock, name) pair of ACTION_SET_PROTECT and ACTION_SET_DATE.
+ * An empty name designates the lock's own object and resolves no parent. */
+static int32_t resolve_attribute_target(
+    struct AfsplusArosPacketContext *context, BPTR lock, SIPTR name,
+    struct AfsplusResolvedParent *target, uint32_t *ready)
+{
+    const uint8_t *path;
+    uint32_t path_length = 0;
+    uint64_t base;
+    int32_t error;
+
+    *ready = 0;
+    error = lock_id(context, lock, &base);
+    if (error == 0)
+        error = bstr_view(name, &path, &path_length);
+    if (error != 0)
+        return error;
+    if (path_length == 0)
+    {
+        target->id = base;
+        target->owned = 0;
+        target->leaf = path;
+        target->leaf_length = 0;
+        return 0;
+    }
+    error = resolve_parent(context, base, path, path_length, target);
+    *ready = error == 0;
+    return error;
+}
+
 static int32_t fill_fib_name(UBYTE *destination, size_t capacity,
     const uint8_t *name, uint32_t length)
 {
@@ -1319,6 +1365,57 @@ int32_t afsplus_aros_packet_process(
                 seconds, nanoseconds);
         if (parent_ready)
             release_temporary_lock(context, parent.id, parent.owned);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
+    case ACTION_SET_PROTECT:
+    {
+        struct AfsplusResolvedParent target;
+        uint32_t target_ready;
+        int64_t seconds;
+        uint32_t nanoseconds;
+
+        error = resolve_attribute_target(context, (BPTR)packet->dp_Arg2,
+            packet->dp_Arg3, &target, &target_ready);
+        if (error == 0)
+            error = packet_now(context, &seconds, &nanoseconds);
+        if (error == 0)
+            error = afsplus_aros_set_protection(context->filesystem,
+                target.id, target.leaf, target.leaf_length,
+                (uint32_t)packet->dp_Arg4, seconds, nanoseconds);
+        if (target_ready)
+            release_temporary_lock(context, target.id, target.owned);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
+    case ACTION_SET_DATE:
+    {
+        struct AfsplusResolvedParent target;
+        uint32_t target_ready;
+        const struct DateStamp *date = (const struct DateStamp *)packet->dp_Arg4;
+        int64_t modified_seconds;
+        uint32_t modified_nanoseconds;
+        int64_t seconds;
+        uint32_t nanoseconds;
+
+        if (date == NULL)
+            error = ERROR_BAD_NUMBER;
+        else
+            error = resolve_attribute_target(context, (BPTR)packet->dp_Arg2,
+                packet->dp_Arg3, &target, &target_ready);
+        if (error == 0)
+            error = packet_now(context, &seconds, &nanoseconds);
+        if (error == 0)
+        {
+            datestamp_to_unix(date, &modified_seconds, &modified_nanoseconds);
+            error = afsplus_aros_set_date(context->filesystem, target.id,
+                target.leaf, target.leaf_length, modified_seconds,
+                modified_nanoseconds, seconds, nanoseconds);
+        }
+        if (date != NULL && target_ready)
+            release_temporary_lock(context, target.id, target.owned);
         if (error == 0)
             result = DOSTRUE;
         break;

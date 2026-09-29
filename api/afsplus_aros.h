@@ -177,6 +177,16 @@ int32_t afsplus_aros_make_hard_link(struct AfsplusAros *filesystem,
     uint32_t target_name_length, uint64_t source_lock,
     int64_t now_seconds, uint32_t now_nanoseconds);
 
+/* ACTION_SET_PROTECT and ACTION_SET_DATE. An empty name designates the base
+ * lock's own object. Times are Unix seconds and nanoseconds. */
+int32_t afsplus_aros_set_protection(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint32_t protection, int64_t now_seconds, uint32_t now_nanoseconds);
+int32_t afsplus_aros_set_date(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    int64_t modified_seconds, uint32_t modified_nanoseconds,
+    int64_t now_seconds, uint32_t now_nanoseconds);
+
 /* Pass at least max_file_info_name_bytes bytes. On success name_length bytes
  * have been written to name without a trailing NUL or BCPL length byte. */
 int32_t afsplus_aros_examine_lock(struct AfsplusAros *filesystem,

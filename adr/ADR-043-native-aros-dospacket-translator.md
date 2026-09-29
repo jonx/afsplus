@@ -47,8 +47,12 @@ advance enumeration.
 `ACTION_END` calls per-file `fsync` for writable handles before consuming the
 handle. `ACTION_FLUSH` is the filesystem-wide durability barrier. The
 translator supports the Alpha-0 lock, open, read/write, seek/truncate,
-namespace, examine, disk-info, flush and lifecycle actions. Unsupported
-actions return `ERROR_ACTION_NOT_KNOWN`.
+namespace, examine, disk-info, flush and lifecycle actions, plus
+`ACTION_SET_PROTECT` and `ACTION_SET_DATE`, whose `DateStamp` is converted
+to the on-disk Unix timestamp. Locks and file handles carry the stored
+spelling of a name, so `Examine` on a case-insensitive volume reports the
+creator's case rather than the caller's. Unsupported actions return
+`ERROR_ACTION_NOT_KNOWN`.
 
 On 32-bit targets, the four AmigaOS 4 compatible position/size actions require
 `DosPacket64.dp_Res0 == DP64_INIT` and preserve that overlay while writing the

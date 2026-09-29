@@ -606,6 +606,113 @@ impl<D: BlockDevice> Volume<D> {
         .map(|entry| entry.child_id))
     }
 
+    /// Looks a name up in a directory and also returns the stored spelling of
+    /// the matching entry. On a case-insensitive volume the stored spelling is
+    /// the creator's, which is what AmigaDOS `Examine()` reports.
+    pub fn lookup_entry_in_directory(
+        &mut self,
+        directory_id: u64,
+        name: &str,
+    ) -> Result<Option<(u64, Vec<u8>)>, CoreError> {
+        self.ensure_public_object_id(directory_id)?;
+        validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
+        let directory_record = self.read_object(directory_id)?.ok_or(CoreError::NotFound)?;
+        if directory_record.object_type != ObjectType::Directory {
+            return Err(CoreError::NotDirectory);
+        }
+        let key = self.comparison_key(name.as_bytes())?;
+        Ok(directory::lookup_entry(
+            &mut self.dev,
+            &self.ident.geometry(),
+            directory_record.data_root,
+            directory_id,
+            self.checkpoint.generation,
+            &self.ident,
+            &key,
+        )?
+        .map(|entry| (entry.child_id, entry.name)))
+    }
+
+    /// Rewrites the AROS protection flags and/or the modification timestamp of
+    /// a file or directory in one record-only transaction. `None` keeps the
+    /// current value. The metadata-change timestamp becomes `now`.
+    pub fn set_object_attributes(
+        &mut self,
+        object_id: u64,
+        protection: Option<u32>,
+        modified: Option<Timespec>,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        if !self.mount_mode.allows_user_writes() {
+            return Err(CoreError::ReadOnly);
+        }
+        self.ensure_window_closed()?;
+        self.ensure_public_object_id(object_id)?;
+        if self.orphan_object(object_id)? {
+            return Err(CoreError::NotFound);
+        }
+        let record = self.read_object(object_id)?.ok_or(CoreError::NotFound)?;
+        if !matches!(
+            record.object_type,
+            ObjectType::File | ObjectType::Directory | ObjectType::Symlink
+        ) {
+            return Err(CoreError::NotFound);
+        }
+        let new_protection = protection.unwrap_or(record.protection);
+        let new_modified = modified.unwrap_or(record.modified);
+        if new_protection == record.protection && new_modified == record.modified {
+            return Ok(());
+        }
+        let record_lba = self.object_record_lba(object_id)?.ok_or_else(|| {
+            CoreError::Corrupt(format!("object {object_id} missing from object map"))
+        })?;
+
+        let block_size = self.dev.block_size();
+        let generation = self.next_generation()?;
+        let mut tx = TxAllocator::begin(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &self.checkpoint,
+            self.other_checkpoint.as_ref(),
+            generation,
+            self.reclaim_batch_blocks,
+            self.alloc_rover_region,
+        )?;
+        self.protect_emergency_headroom(&mut tx);
+        let new_lba = tx.allocate(&mut self.dev)?;
+        tx.retire(&mut self.dev, record_lba)?;
+        let new_record = ObjectRecord {
+            protection: new_protection,
+            modified: new_modified,
+            changed: now,
+            ..record
+        };
+        let map_key = object_map::key(object_id);
+        let map_value = object_map::value(new_lba)?;
+        let object_map_mutation = mutate_many(
+            &mut self.dev,
+            &self.ident.geometry(),
+            &mut tx,
+            self.checkpoint.object_map_block,
+            object_map::spec(self.checkpoint.generation),
+            generation,
+            &[TreeOperation::Upsert {
+                key: &map_key,
+                value: &map_value,
+            }],
+        )?;
+        let mut metadata_writes = vec![(new_lba, new_record.encode(block_size, generation)?)];
+        metadata_writes.extend(object_map_mutation.writes);
+        self.commit_transaction(
+            generation,
+            self.checkpoint.next_object_id,
+            tx,
+            Vec::new(),
+            metadata_writes,
+            object_map_mutation.root_lba,
+        )
+    }
+
     /// Lists the root directory as (original name, object ID) pairs.
     pub fn list_root(&mut self) -> Result<Vec<(String, u64)>, CoreError> {
         self.list_directory(OBJECT_ROOT)
