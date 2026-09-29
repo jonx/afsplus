@@ -306,3 +306,48 @@ fn set_protection_and_set_date_persist_through_examine() {
     assert_eq!(info.protection, FIBF_SCRIPT_PURE);
     assert_eq!(info.modified, modified);
 }
+
+#[test]
+fn label_rename_open_from_lock_and_change_mode() {
+    let vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let mut adapter = ArosAdapter::new(vfs, ArosConfig::default());
+    assert_eq!(adapter.label().unwrap(), b"ArosAdapter");
+    adapter.set_label(b"Renamed").unwrap();
+    assert_eq!(adapter.label().unwrap(), b"Renamed");
+
+    let file = adapter
+        .open(None, b"data", OpenMode::NewFile, timestamp(1))
+        .unwrap();
+    adapter.write(file, b"abc", timestamp(1)).unwrap();
+    adapter.close(file).unwrap();
+
+    let shared = adapter.locate(None, b"data", LockAccess::Shared).unwrap();
+    // Shared -> exclusive succeeds while this is the only lock.
+    adapter
+        .change_lock_access(shared, LockAccess::Exclusive)
+        .unwrap();
+    assert_eq!(
+        adapter
+            .locate(None, b"data", LockAccess::Shared)
+            .unwrap_err(),
+        ArosError::ObjectInUse
+    );
+    let handle = adapter.open_from_lock(shared, timestamp(2)).unwrap();
+    // The lock was consumed.
+    assert_eq!(
+        adapter.examine_lock(shared).unwrap_err(),
+        ArosError::InvalidLock
+    );
+    assert_eq!(adapter.write(handle, b"d", timestamp(2)).unwrap(), 1);
+    adapter.change_file_access(handle, false).unwrap();
+    assert!(adapter.write(handle, b"e", timestamp(3)).is_err());
+    let mut back = [0u8; 8];
+    adapter.seek(handle, 0, SeekMode::Beginning).unwrap();
+    assert_eq!(adapter.read(handle, &mut back).unwrap(), 3);
+    assert_eq!(&back[..3], b"dbc");
+    adapter.close(handle).unwrap();
+
+    let device = adapter.into_vfs().unwrap().into_volume().into_device();
+    let vfs = Vfs::mount(device, MountOptions::default()).unwrap();
+    assert_eq!(vfs.label(), "Renamed");
+}

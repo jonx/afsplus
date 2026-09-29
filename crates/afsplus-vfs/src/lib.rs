@@ -348,6 +348,20 @@ impl<D: BlockDevice> Vfs<D> {
             .ok_or(VfsError::NotFound)
     }
 
+    /// The on-disk volume label.
+    pub fn label(&self) -> &str {
+        &self.volume.ident().label
+    }
+
+    /// Rewrites the on-disk volume label (`ACTION_RENAME_DISK`).
+    pub fn set_label(&mut self, label: &str) -> Result<(), VfsError> {
+        if self.volume.mount_mode() != MountMode::ReadWrite {
+            return Err(VfsError::ReadOnly);
+        }
+        self.checkpoint_data_window(Timespec::default())?;
+        Ok(self.volume.set_label(label)?)
+    }
+
     /// Like [`Self::lookup`], also returning the entry's stored spelling,
     /// which differs from `name` only in case or normalization form.
     pub fn lookup_entry(

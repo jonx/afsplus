@@ -2,6 +2,10 @@
 
 #include "afsplus_packet.h"
 
+#include <dos/exall.h>
+#include <dos/notify.h>
+#include <dos/record.h>
+
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -348,6 +352,81 @@ int32_t afsplus_aros_set_date(struct AfsplusAros *filesystem,
     return 0;
 }
 
+static uint32_t notify_count;
+static struct NotifyRequest *last_notified;
+static uint8_t stub_label[64] = "Work";
+static uint32_t stub_label_length = 4;
+static uint32_t format_count;
+
+static int32_t packet_notify(void *context, struct NotifyRequest *request)
+{
+    (void)context;
+    notify_count++;
+    last_notified = request;
+    return 0;
+}
+
+int32_t afsplus_aros_open_from_lock(struct AfsplusAros *filesystem,
+    uint64_t lock, int64_t now_seconds, uint32_t now_nanoseconds,
+    uint64_t *output_file)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    assert(now_nanoseconds == UINT32_C(40000000));
+    record('Q', lock, NULL, 0, 0);
+    *output_file = next_file++;
+    return 0;
+}
+
+int32_t afsplus_aros_change_lock_access(struct AfsplusAros *filesystem,
+    uint64_t lock, uint32_t access)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    record('M', lock, NULL, 0, access);
+    return 0;
+}
+
+int32_t afsplus_aros_change_file_access(struct AfsplusAros *filesystem,
+    uint64_t file, uint32_t writable)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    record('m', file, NULL, 0, writable);
+    return 0;
+}
+
+int32_t afsplus_aros_label(struct AfsplusAros *filesystem, uint8_t *name,
+    uint32_t name_capacity, uint32_t *output_length)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(name_capacity >= stub_label_length);
+    memcpy(name, stub_label, stub_label_length);
+    *output_length = stub_label_length;
+    return 0;
+}
+
+int32_t afsplus_aros_set_label(struct AfsplusAros *filesystem,
+    const uint8_t *label, uint32_t label_length)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(label_length <= sizeof(stub_label));
+    memcpy(stub_label, label, label_length);
+    stub_label_length = label_length;
+    record('V', 0, label, label_length, 0);
+    return 0;
+}
+
+int32_t afsplus_aros_format(struct AfsplusAros *filesystem,
+    const uint8_t *label, uint32_t label_length, int64_t now_seconds,
+    uint32_t now_nanoseconds)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    assert(now_nanoseconds == UINT32_C(40000000));
+    format_count++;
+    record('Z', 0, label, label_length, 0);
+    return 0;
+}
+
 int32_t afsplus_aros_rename(struct AfsplusAros *filesystem,
     uint64_t source_base_lock, const uint8_t *source_name,
     uint32_t source_name_length, uint64_t target_base_lock,
@@ -480,6 +559,7 @@ int main(void)
     config.allocate = packet_allocate;
     config.free = packet_free;
     config.now = packet_now;
+    config.notify = packet_notify;
     assert(afsplus_aros_packet_create(&config, &context) == 0);
     assert(context != NULL);
 
@@ -561,6 +641,268 @@ int main(void)
     assert_event(1, 'H', "copy", (uint32_t)created_lock_id);
     assert(events[2].operation == 'F');
 
+    {
+        /* ExAll: entries fill a small buffer, the overflowed one is kept. */
+        uint8_t exall_buffer[160];
+        struct ExAllControl control;
+        struct ExAllData *entry;
+
+        memset(&control, 0, sizeof(control));
+        reset_events();
+        initialize_packet(&packet, ACTION_EXAMINE_ALL);
+        packet.dp_Arg1 = (SIPTR)created;
+        packet.dp_Arg2 = (SIPTR)exall_buffer;
+        packet.dp_Arg3 = sizeof(exall_buffer);
+        packet.dp_Arg4 = ED_COMMENT;
+        packet.dp_Arg5 = (SIPTR)&control;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(control.eac_Entries == 2);
+        assert(control.eac_LastKey == 1);
+        entry = (struct ExAllData *)exall_buffer;
+        assert(strcmp((const char *)entry->ed_Name, "entry") == 0);
+        assert(entry->ed_Type == ST_FILE);
+        assert(entry->ed_Days == 1 && entry->ed_Mins == 1
+            && entry->ed_Ticks == 52);
+        assert(entry->ed_Comment[0] == 0);
+        assert(entry->ed_Next != NULL && entry->ed_Next->ed_Next == NULL);
+        assert(strcmp((const char *)entry->ed_Next->ed_Name, "entry") == 0);
+
+        /* Pattern matching is left to dos.library's emulation. */
+        control.eac_MatchString = (UBYTE *)"#?";
+        initialize_packet(&packet, ACTION_EXAMINE_ALL);
+        packet.dp_Arg1 = (SIPTR)created;
+        packet.dp_Arg2 = (SIPTR)exall_buffer;
+        packet.dp_Arg3 = sizeof(exall_buffer);
+        packet.dp_Arg4 = ED_NAME;
+        packet.dp_Arg5 = (SIPTR)&control;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+        control.eac_MatchString = NULL;
+
+        initialize_packet(&packet, ACTION_EXAMINE_ALL);
+        packet.dp_Arg1 = (SIPTR)created;
+        packet.dp_Arg2 = (SIPTR)exall_buffer;
+        packet.dp_Arg3 = sizeof(exall_buffer);
+        packet.dp_Arg4 = ED_OWNER + 1;
+        packet.dp_Arg5 = (SIPTR)&control;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_BAD_NUMBER);
+
+        initialize_packet(&packet, ACTION_EXAMINE_ALL_END);
+        packet.dp_Arg1 = (SIPTR)created;
+        packet.dp_Arg5 = (SIPTR)&control;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && control.eac_LastKey == 0);
+    }
+
+    {
+        /* Notification: initial delivery, then removal frees the locks. */
+        struct NotifyRequest request;
+
+        memset(&request, 0, sizeof(request));
+        request.nr_FullName = (STRPTR)"Work:parent/watch";
+        request.nr_Flags = NRF_SEND_SIGNAL | NRF_NOTIFY_INITIAL;
+        reset_events();
+        initialize_packet(&packet, ACTION_ADD_NOTIFY);
+        packet.dp_Arg1 = (SIPTR)&request;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert_event(0, 'L', "parent", AFSPLUS_AROS_LOCK_SHARED);
+        assert_event(1, 'L', "watch", AFSPLUS_AROS_LOCK_SHARED);
+        assert(notify_count == 1 && last_notified == &request);
+        assert(request.nr_Handler == config.handler_port);
+
+        reset_events();
+        initialize_packet(&packet, ACTION_REMOVE_NOTIFY);
+        packet.dp_Arg1 = (SIPTR)&request;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(events[0].operation == 'F' && events[1].operation == 'F');
+        assert(event_count == 2);
+
+        initialize_packet(&packet, ACTION_REMOVE_NOTIFY);
+        packet.dp_Arg1 = (SIPTR)&request;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_OBJECT_NOT_FOUND);
+
+        request.nr_Flags = 0;
+        initialize_packet(&packet, ACTION_ADD_NOTIFY);
+        packet.dp_Arg1 = (SIPTR)&request;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_BAD_NUMBER);
+    }
+
+    {
+        /* Record locks on one file, FH_FROM_LOCK and CHANGE_MODE. */
+        struct FileHandle handle;
+        struct FileHandle second;
+        BPTR exclusive;
+
+        memset(&handle, 0, sizeof(handle));
+        reset_events();
+        initialize_packet(&packet, ACTION_FINDOUTPUT);
+        packet.dp_Arg1 = (SIPTR)MKBADDR(&handle);
+        packet.dp_Arg2 = (SIPTR)root;
+        packet.dp_Arg3 = packet_bstr("records");
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+
+        initialize_packet(&packet, ACTION_LOCK_RECORD);
+        packet.dp_Arg1 = handle.fh_Arg1;
+        packet.dp_Arg2 = 0;
+        packet.dp_Arg3 = 10;
+        packet.dp_Arg4 = REC_EXCLUSIVE;
+        packet.dp_Arg5 = 0;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+
+        initialize_packet(&packet, ACTION_LOCK_RECORD);
+        packet.dp_Arg1 = handle.fh_Arg1;
+        packet.dp_Arg2 = 5;
+        packet.dp_Arg3 = 10;
+        packet.dp_Arg4 = REC_SHARED_IMMED;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_LOCK_COLLISION);
+
+        initialize_packet(&packet, ACTION_LOCK_RECORD);
+        packet.dp_Arg1 = handle.fh_Arg1;
+        packet.dp_Arg2 = 10;
+        packet.dp_Arg3 = 10;
+        packet.dp_Arg4 = REC_SHARED;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+
+        initialize_packet(&packet, ACTION_FREE_RECORD);
+        packet.dp_Arg1 = handle.fh_Arg1;
+        packet.dp_Arg2 = 0;
+        packet.dp_Arg3 = 10;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+
+        initialize_packet(&packet, ACTION_FREE_RECORD);
+        packet.dp_Arg1 = handle.fh_Arg1;
+        packet.dp_Arg2 = 0;
+        packet.dp_Arg3 = 10;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_RECORD_NOT_LOCKED);
+
+        reset_events();
+        initialize_packet(&packet, ACTION_CHANGE_MODE);
+        packet.dp_Arg1 = CHANGE_FH;
+        packet.dp_Arg2 = handle.fh_Arg1;
+        packet.dp_Arg3 = MODE_OLDFILE;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(events[0].operation == 'm' && events[0].access == 0);
+
+        /* Closing frees the remaining record silently. */
+        initialize_packet(&packet, ACTION_END);
+        packet.dp_Arg1 = handle.fh_Arg1;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+
+        reset_events();
+        initialize_packet(&packet, ACTION_LOCATE_OBJECT);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = packet_bstr("tool");
+        packet.dp_Arg3 = EXCLUSIVE_LOCK;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 != 0 && packet.dp_Res2 == 0);
+        exclusive = (BPTR)packet.dp_Res1;
+
+        reset_events();
+        memset(&second, 0, sizeof(second));
+        initialize_packet(&packet, ACTION_FH_FROM_LOCK);
+        packet.dp_Arg1 = (SIPTR)MKBADDR(&second);
+        packet.dp_Arg2 = (SIPTR)exclusive;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(events[0].operation == 'Q');
+        assert(event_count == 1);
+        assert(second.fh_Arg1 != 0);
+
+        initialize_packet(&packet, ACTION_END);
+        packet.dp_Arg1 = second.fh_Arg1;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+
+        reset_events();
+        initialize_packet(&packet, ACTION_CHANGE_MODE);
+        packet.dp_Arg1 = CHANGE_LOCK;
+        packet.dp_Arg2 = (SIPTR)created;
+        packet.dp_Arg3 = EXCLUSIVE_LOCK;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(events[0].operation == 'M'
+            && events[0].access == AFSPLUS_AROS_LOCK_EXCLUSIVE);
+        initialize_packet(&packet, ACTION_CHANGE_MODE);
+        packet.dp_Arg1 = CHANGE_LOCK;
+        packet.dp_Arg2 = (SIPTR)created;
+        packet.dp_Arg3 = SHARED_LOCK;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    }
+
+    {
+        /* Soft write protection refuses mutations until the key unlocks. */
+        reset_events();
+        initialize_packet(&packet, ACTION_WRITE_PROTECT);
+        packet.dp_Arg1 = DOSTRUE;
+        packet.dp_Arg2 = 7;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+
+        initialize_packet(&packet, ACTION_CREATE_DIR);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = packet_bstr("refused");
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_DISK_WRITE_PROTECTED);
+        assert(event_count == 0);
+
+        initialize_packet(&packet, ACTION_DISK_INFO);
+        packet.dp_Arg1 = (SIPTR)MKBADDR(&disk);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && disk.id_DiskState == ID_WRITE_PROTECTED);
+
+        initialize_packet(&packet, ACTION_WRITE_PROTECT);
+        packet.dp_Arg1 = DOSFALSE;
+        packet.dp_Arg2 = 8;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_INVALID_LOCK);
+
+        initialize_packet(&packet, ACTION_WRITE_PROTECT);
+        packet.dp_Arg1 = DOSFALSE;
+        packet.dp_Arg2 = 7;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+
+        initialize_packet(&packet, ACTION_DISK_INFO);
+        packet.dp_Arg1 = (SIPTR)MKBADDR(&disk);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && disk.id_DiskState == ID_VALIDATED);
+    }
+
+    reset_events();
+    initialize_packet(&packet, ACTION_RENAME_DISK);
+    packet.dp_Arg1 = packet_bstr("Data");
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert_event(0, 'V', "Data", 0);
+
+    /* FORMAT needs an inhibited volume. */
+    initialize_packet(&packet, ACTION_FORMAT);
+    packet.dp_Arg1 = packet_bstr("Fresh");
+    packet.dp_Arg2 = (SIPTR)0x4146532b;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_OBJECT_IN_USE);
+    assert(format_count == 0);
+
     reset_events();
     initialize_packet(&packet, ACTION_SET_PROTECT);
     packet.dp_Arg1 = 0;
@@ -637,6 +979,7 @@ int main(void)
     assert_event(1, 'O', "file", AFSPLUS_AROS_OPEN_NEW_FILE);
     assert(events[2].operation == 'F');
 
+    examine_count = 0;
     initialize_packet(&packet, ACTION_EXAMINE_FH);
     packet.dp_Arg1 = public_file.fh_Arg1;
     packet.dp_Arg2 = 0;
@@ -716,6 +1059,8 @@ int main(void)
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
     assert(disk64.id_NumBlocks == UINT64_C(0x100000005));
 
+    fsync_count = 0;
+    close_count = 0;
     initialize_packet(&packet, ACTION_END);
     packet.dp_Arg1 = public_file.fh_Arg1;
     assert(afsplus_aros_packet_process(context, &packet) == 0);
@@ -750,6 +1095,15 @@ int main(void)
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
     assert(flush_count == 1);
+
+    reset_events();
+    initialize_packet(&packet, ACTION_FORMAT);
+    packet.dp_Arg1 = packet_bstr("Fresh");
+    packet.dp_Arg2 = (SIPTR)0x4146532b;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert(format_count == 1);
+    assert_event(0, 'Z', "Fresh", 0);
 
     initialize_packet(&packet, ACTION_INHIBIT);
     packet.dp_Arg1 = DOSTRUE;

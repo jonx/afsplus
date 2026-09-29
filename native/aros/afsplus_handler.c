@@ -20,7 +20,9 @@
 #include <dos/dos.h>
 #include <dos/dosextens.h>
 #include <dos/filehandler.h>
+#include <dos/notify.h>
 #include <exec/errors.h>
+#include <exec/nodes.h>
 #include <exec/execbase.h>
 #include <exec/memory.h>
 #include <libraries/locale.h>
@@ -88,6 +90,7 @@ struct AfsplusArosHandler {
     uint16_t read_command;
     uint16_t write_command;
     uint32_t supports_64bit_offsets;
+    uint32_t trace_packets;
     const char *startup_stage;
 };
 
@@ -220,6 +223,159 @@ static int32_t packet_now(void *context, int64_t *unix_seconds,
     *nanoseconds = (uint32_t)(stamp.ds_Tick % AFSPLUS_TICKS_PER_SECOND)
         * UINT32_C(20000000);
     return 0;
+}
+
+/* One StartNotify() delivery. Messages reply to the handler port, where the
+ * main loop recognises and frees them. */
+static int32_t packet_notify(void *context, struct NotifyRequest *request)
+{
+    struct AfsplusArosHandler *handler = context;
+    struct ExecBase *SysBase = handler->SysBase;
+    struct NotifyMessage *message;
+
+    if (request->nr_Flags & NRF_SEND_SIGNAL)
+    {
+        Signal(request->nr_stuff.nr_Signal.nr_Task,
+            1UL << request->nr_stuff.nr_Signal.nr_SignalNum);
+        return 0;
+    }
+    if (!(request->nr_Flags & NRF_SEND_MESSAGE))
+        return ERROR_BAD_NUMBER;
+    if ((request->nr_Flags & NRF_WAIT_REPLY) && request->nr_MsgCount > 0)
+        return 0;
+    message = AllocMem(sizeof(*message), MEMF_PUBLIC | MEMF_CLEAR);
+    if (message == NULL)
+        return ERROR_NO_FREE_STORE;
+    message->nm_ExecMessage.mn_Node.ln_Type = NT_MESSAGE;
+    message->nm_ExecMessage.mn_ReplyPort = handler->handler_port;
+    message->nm_ExecMessage.mn_Length = sizeof(*message);
+    message->nm_Class = NOTIFY_CLASS;
+    message->nm_Code = NOTIFY_CODE;
+    message->nm_NReq = request;
+    request->nr_MsgCount++;
+    PutMsg(request->nr_stuff.nr_Msg.nr_Port, &message->nm_ExecMessage);
+    return 0;
+}
+
+/* A replied NotifyMessage arrives on the handler port like a packet but
+ * carries no DosPacket in ln_Name. */
+static uint32_t consume_notify_reply(struct AfsplusArosHandler *handler,
+    struct Message *message)
+{
+    struct ExecBase *SysBase = handler->SysBase;
+    struct NotifyMessage *notify = (struct NotifyMessage *)message;
+
+    if (message->mn_Node.ln_Name != NULL
+        || message->mn_Length != sizeof(*notify)
+        || notify->nm_Class != NOTIFY_CLASS
+        || notify->nm_Code != NOTIFY_CODE)
+        return 0;
+    if (notify->nm_NReq != NULL && notify->nm_NReq->nr_MsgCount > 0)
+        notify->nm_NReq->nr_MsgCount--;
+    FreeMem(notify, sizeof(*notify));
+    return 1;
+}
+
+/* The DOS volume node carries the on-disk label. Renaming swaps the name
+ * under the DOS list lock; the node itself, which open locks reference,
+ * stays in place. */
+static int32_t volume_label(struct AfsplusArosHandler *handler,
+    char *destination, size_t capacity)
+{
+    uint32_t length = 0;
+    int32_t error;
+
+    if (capacity < 2)
+        return ERROR_OBJECT_TOO_LARGE;
+    error = afsplus_aros_label(handler->filesystem, (uint8_t *)destination,
+        (uint32_t)(capacity - 1), &length);
+    if (error != 0)
+        return error;
+    if (length == 0)
+    {
+        memcpy(destination, "AFS+", 4);
+        length = 4;
+    }
+    destination[length] = 0;
+    return 0;
+}
+
+static int32_t rename_volume_node(struct AfsplusArosHandler *handler)
+{
+    struct ExecBase *SysBase = handler->SysBase;
+    struct DosLibrary *DOSBase = handler->DOSBase;
+    char label[MAXFILENAMELENGTH];
+    size_t length;
+    STRPTR fresh;
+    STRPTR stale;
+    int32_t error;
+
+    error = volume_label(handler, label, sizeof(label));
+    if (error != 0)
+        return error;
+    length = strlen(label);
+#ifdef AROS_FAST_BPTR
+    fresh = AllocVec(length + 1, MEMF_PUBLIC | MEMF_CLEAR);
+    if (fresh == NULL)
+        return ERROR_NO_FREE_STORE;
+    memcpy(fresh, label, length);
+#else
+    fresh = AllocVec(length + 2, MEMF_PUBLIC | MEMF_CLEAR);
+    if (fresh == NULL)
+        return ERROR_NO_FREE_STORE;
+    fresh[0] = (UBYTE)(length > 255 ? 255 : length);
+    memcpy(fresh + 1, label, length);
+#endif
+    LockDosList(LDF_VOLUMES | LDF_WRITE);
+    stale = BADDR(handler->volume_node->dol_Name);
+    handler->volume_node->dol_Name = MKBADDR(fresh);
+    UnLockDosList(LDF_VOLUMES | LDF_WRITE);
+    FreeVec(stale);
+    return 0;
+}
+
+/* The mountlist Control string selects the name encoding AROS programs
+ * use on this volume: LATIN1 (the AROS default charset, and ours) or
+ * UTF8. Names are stored as UTF-8 either way. */
+/* Control=TRACE logs every packet type as it arrives, for freeze hunts. */
+static uint32_t control_trace_packets(struct AfsplusArosHandler *handler)
+{
+    const struct DosEnvec *environment = handler->environment;
+    const char *cursor;
+
+    if ((SIPTR)environment->de_TableSize < DE_CONTROL
+        || environment->de_Control == 0)
+        return 0;
+    for (cursor = (const char *)AROS_BSTR_ADDR((BSTR)environment->de_Control);
+        *cursor != 0; cursor++)
+        if ((cursor[0] == 'T' || cursor[0] == 't')
+            && (cursor[1] == 'R' || cursor[1] == 'r')
+            && (cursor[2] == 'A' || cursor[2] == 'a')
+            && (cursor[3] == 'C' || cursor[3] == 'c')
+            && (cursor[4] == 'E' || cursor[4] == 'e'))
+            return 1;
+    return 0;
+}
+
+static uint32_t control_name_encoding(struct AfsplusArosHandler *handler)
+{
+    const struct DosEnvec *environment = handler->environment;
+    const char *control;
+    const char *cursor;
+
+    if ((SIPTR)environment->de_TableSize < DE_CONTROL
+        || environment->de_Control == 0)
+        return AFSPLUS_AROS_ENCODING_LATIN1;
+    control = (const char *)AROS_BSTR_ADDR((BSTR)environment->de_Control);
+    for (cursor = control; *cursor != 0; cursor++)
+    {
+        if ((cursor[0] == 'U' || cursor[0] == 'u')
+            && (cursor[1] == 'T' || cursor[1] == 't')
+            && (cursor[2] == 'F' || cursor[2] == 'f')
+            && cursor[3] == '8')
+            return AFSPLUS_AROS_ENCODING_UTF8;
+    }
+    return AFSPLUS_AROS_ENCODING_LATIN1;
 }
 
 static uint32_t buffer_matches_mask(const struct AfsplusArosHandler *handler,
@@ -542,12 +698,15 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     mount_config.struct_size = sizeof(mount_config);
     mount_config.mount_mode = handler->read_only
         ? AFSPLUS_AROS_MOUNT_READ_ONLY : AFSPLUS_AROS_MOUNT_READ_WRITE;
-    mount_config.name_encoding = AFSPLUS_AROS_ENCODING_UTF8;
+    mount_config.name_encoding = control_name_encoding(handler);
+    /* Empty: the Rust side names the root after the on-disk label, which
+     * is also the DOS volume node's name below. */
     mount_config.volume_name = volume_name;
-    mount_config.volume_name_length = sizeof(volume_name);
+    mount_config.volume_name_length = 0;
     mount_config.max_file_handles = 1024;
     mount_config.max_locks = 1024;
     mount_config.max_file_info_name_bytes = 107;
+    handler->trace_packets = control_trace_packets(handler);
     set_startup_stage(handler, "rust-mount");
 #if defined(AFSPLUS_AROS_DIAGNOSTIC_STOP_BEFORE_RUST_MOUNT)
     return ERROR_NOT_IMPLEMENTED;
@@ -562,7 +721,13 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     if (error != 0)
         return error;
     set_startup_stage(handler, "volume-entry");
-    handler->volume_node = MakeDosEntry((STRPTR)"AFS+", DLT_VOLUME);
+    {
+        char label[MAXFILENAMELENGTH];
+        error = volume_label(handler, label, sizeof(label));
+        if (error != 0)
+            return error;
+        handler->volume_node = MakeDosEntry((STRPTR)label, DLT_VOLUME);
+    }
     if (handler->volume_node == NULL)
         return ERROR_NO_FREE_STORE;
     handler->volume_node->dol_Task = handler->handler_port;
@@ -585,6 +750,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     packet_config.allocate = packet_allocate;
     packet_config.free = packet_free;
     packet_config.now = packet_now;
+    packet_config.notify = packet_notify;
     set_startup_stage(handler, "packet-context");
     error = afsplus_aros_packet_create(&packet_config, &handler->packets);
     if (error == 0)
@@ -768,12 +934,23 @@ LONG handler(struct ExecBase *SysBase)
         afsplus_aros_startup_trace(SysBase, UINT32_C(0x30200005));
         while (!quit && (message = GetMsg(port)) != NULL)
         {
+            if (consume_notify_reply(state, message))
+                continue;
             packet = (struct DosPacket *)message->mn_Node.ln_Name;
             if (packet == NULL)
                 continue;
             afsplus_aros_startup_trace(SysBase, UINT32_C(0x40000000) |
                 ((uint32_t)packet->dp_Type & UINT32_C(0x0fffffff)));
+            if (state->trace_packets)
+                bug("[AFSPLUS] packet %ld arg1=%lx arg2=%lx arg3=%lx\n",
+                    (long)packet->dp_Type, (unsigned long)packet->dp_Arg1,
+                    (unsigned long)packet->dp_Arg2,
+                    (unsigned long)packet->dp_Arg3);
             error = afsplus_aros_packet_process(state->packets, packet);
+            if (state->trace_packets)
+                bug("[AFSPLUS] packet %ld -> res1=%lx res2=%ld\n",
+                    (long)packet->dp_Type, (unsigned long)packet->dp_Res1,
+                    (long)packet->dp_Res2);
             if (error != 0)
                 afsplus_aros_startup_trace(SysBase, UINT32_C(0x50000000) |
                     ((uint32_t)error & UINT32_C(0x0fffffff)));
@@ -782,6 +959,10 @@ LONG handler(struct ExecBase *SysBase)
                 packet->dp_Res1 = DOSFALSE;
                 packet->dp_Res2 = error;
             }
+            else if ((packet->dp_Type == ACTION_RENAME_DISK
+                    || packet->dp_Type == ACTION_FORMAT)
+                && packet->dp_Res1 == DOSTRUE)
+                (void)rename_volume_node(state);
             quit = afsplus_aros_packet_should_quit(state->packets);
             if (quit)
             {

@@ -48,11 +48,26 @@ advance enumeration.
 handle. `ACTION_FLUSH` is the filesystem-wide durability barrier. The
 translator supports the Alpha-0 lock, open, read/write, seek/truncate,
 namespace, examine, disk-info, flush and lifecycle actions, plus
-`ACTION_SET_PROTECT` and `ACTION_SET_DATE`, whose `DateStamp` is converted
-to the on-disk Unix timestamp. Locks and file handles carry the stored
-spelling of a name, so `Examine` on a case-insensitive volume reports the
-creator's case rather than the caller's. Unsupported actions return
-`ERROR_ACTION_NOT_KNOWN`.
+`ACTION_SET_PROTECT` and `ACTION_SET_DATE` (the `DateStamp` is converted to
+the on-disk Unix timestamp), `ACTION_EXAMINE_ALL` and `_END` (levels up to
+`ED_OWNER`; pattern and hook matching are declined so that dos.library
+emulates them), `ACTION_ADD_NOTIFY` and `_REMOVE_NOTIFY` (delivered through
+the handler's notify callback; a watcher is matched by parent-directory
+identity and case-folded leaf name, so it may be posted before the object
+exists), `ACTION_LOCK_RECORD` and `_FREE_RECORD` (ranges keyed by object; a
+timed request that collides fails at once, the translator cannot wait),
+`ACTION_FH_FROM_LOCK`, `ACTION_CHANGE_MODE`, `ACTION_WRITE_PROTECT` (a soft
+flag with its key), `ACTION_FORMAT` (a fresh case-insensitive volume written
+in place under `Inhibit`) and `ACTION_RENAME_DISK`. Locks and file handles
+carry the stored spelling of a name, so `Examine` on a case-insensitive
+volume reports the creator's case rather than the caller's. The root is
+named after the on-disk label, as is the DOS volume node the handler
+registers; the two must agree or dos.library asks for a volume that does not
+exist. Names cross the packet boundary in Latin-1 unless the mountlist
+`Control` string says `UTF8`; `Control=TRACE` logs every packet. Not
+implemented: `ACTION_SET_COMMENT` (needs the attribute subsystem),
+`ACTION_SET_OWNER`, `ACTION_SERIALIZE_DISK`, `ACTION_MORE_CACHE`, soft
+links. Those return `ERROR_ACTION_NOT_KNOWN`.
 
 On 32-bit targets, the four AmigaOS 4 compatible position/size actions require
 `DosPacket64.dp_Res0 == DP64_INIT` and preserve that overlay while writing the

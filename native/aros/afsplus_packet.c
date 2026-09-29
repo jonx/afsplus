@@ -15,6 +15,9 @@ extern void afsplus_aros_trace_stage(const char *stage);
 
 #include <dos/dos.h>
 #include <dos/dosextens.h>
+#include <dos/exall.h>
+#include <dos/notify.h>
+#include <dos/record.h>
 #include <aros/stdc/string.h>
 
 #define AFSPLUS_NATIVE_LOCK_MAGIC UINT32_C(0x41464c4b)
@@ -30,6 +33,35 @@ struct AfsplusArosNativeLock {
     struct AfsplusArosPacketContext *owner;
     uint64_t id;
     struct AfsplusArosNativeLock *next;
+    /* One directory entry fetched by ACTION_EXAMINE_ALL that did not fit
+     * its buffer; the next enumeration step consumes it first. */
+    uint32_t pending;
+    struct AfsplusArosFileInfo pending_info;
+    uint8_t pending_name[MAXFILENAMELENGTH];
+};
+
+/* One StartNotify() request. The parent directory lock and, once the
+ * object exists, the object lock stay held so that changes compare by
+ * identity instead of by path text. */
+struct AfsplusNotifyNode {
+    struct NotifyRequest *request;
+    uint64_t parent_lock;
+    uint32_t parent_owned;
+    uint64_t object_lock;
+    uint32_t leaf_length;
+    uint8_t leaf[MAXFILENAMELENGTH];
+    struct AfsplusNotifyNode *next;
+};
+
+/* One LockRecord() range, keyed by object so that handles on the same file
+ * see each other. */
+struct AfsplusRecordNode {
+    struct AfsplusArosNativeFile *file;
+    uint64_t object_id;
+    uint64_t offset;
+    uint64_t length;
+    uint32_t exclusive;
+    struct AfsplusRecordNode *next;
 };
 
 struct AfsplusArosNativeFile {
@@ -48,10 +80,15 @@ struct AfsplusArosPacketContext {
     AfsplusArosPacketAllocate allocate;
     AfsplusArosPacketFree free;
     AfsplusArosPacketNow now;
+    AfsplusArosPacketNotify notify;
     struct AfsplusArosNativeLock *locks;
     struct AfsplusArosNativeFile *files;
+    struct AfsplusNotifyNode *notifies;
+    struct AfsplusRecordNode *records;
     uint32_t inhibited;
     uint32_t quit;
+    uint32_t write_protected;
+    IPTR write_protect_key;
 };
 
 struct AfsplusPathOperation {
@@ -495,6 +532,465 @@ static int32_t resolve_attribute_target(
     return error;
 }
 
+/* ---- write protection ------------------------------------------------ */
+
+static uint32_t action_mutates(LONG action)
+{
+    switch (action)
+    {
+    case ACTION_FINDOUTPUT:
+    case ACTION_FINDUPDATE:
+    case ACTION_WRITE:
+    case ACTION_SET_FILE_SIZE:
+    case ACTION_SET_FILE_SIZE64:
+    case ACTION_CHANGE_FILE_SIZE64:
+    case ACTION_DELETE_OBJECT:
+    case ACTION_RENAME_OBJECT:
+    case ACTION_CREATE_DIR:
+    case ACTION_MAKE_LINK:
+    case ACTION_SET_PROTECT:
+    case ACTION_SET_DATE:
+    case ACTION_SET_COMMENT:
+    case ACTION_FORMAT:
+    case ACTION_RENAME_DISK:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* ---- notification ---------------------------------------------------- */
+
+static void drop_notify(struct AfsplusArosPacketContext *context,
+    struct AfsplusNotifyNode *node)
+{
+    struct AfsplusNotifyNode **link;
+
+    for (link = &context->notifies; *link != NULL; link = &(*link)->next)
+        if (*link == node)
+        {
+            *link = node->next;
+            break;
+        }
+    if (node->object_lock != 0)
+        (void)afsplus_aros_free_lock(context->filesystem, node->object_lock);
+    release_temporary_lock(context, node->parent_lock, node->parent_owned);
+    context->free(context->callback_context, node, sizeof(*node));
+}
+
+static uint32_t leaf_equal_nocase(const uint8_t *a, uint32_t a_length,
+    const uint8_t *b, uint32_t b_length)
+{
+    uint32_t i;
+
+    if (a_length != b_length)
+        return 0;
+    for (i = 0; i < a_length; i++)
+    {
+        uint8_t x = a[i];
+        uint8_t y = b[i];
+        if (x >= 'A' && x <= 'Z')
+            x = (uint8_t)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z')
+            y = (uint8_t)(y - 'A' + 'a');
+        if (x != y)
+            return 0;
+    }
+    return 1;
+}
+
+static uint32_t locks_same(struct AfsplusArosPacketContext *context,
+    uint64_t first, uint64_t second)
+{
+    uint32_t same = 0;
+
+    if (afsplus_aros_same_lock(context->filesystem, first, second, &same) != 0)
+        return 0;
+    return same;
+}
+
+static void fire_notify(struct AfsplusArosPacketContext *context,
+    struct AfsplusNotifyNode *node)
+{
+    if (context->notify != NULL)
+        (void)context->notify(context->callback_context, node->request);
+}
+
+/* A watched object may not exist when the request is posted; the object
+ * lock is taken as soon as a change under its parent names it. */
+static void refresh_notify_object(struct AfsplusArosPacketContext *context,
+    struct AfsplusNotifyNode *node)
+{
+    uint64_t lock = 0;
+
+    if (node->object_lock != 0)
+        return;
+    if (afsplus_aros_locate(context->filesystem, node->parent_lock,
+            node->leaf, node->leaf_length, AFSPLUS_AROS_LOCK_SHARED,
+            &lock) == 0)
+        node->object_lock = lock;
+}
+
+/* The entry `leaf` under the directory `parent` was created, removed or
+ * changed: notify watchers of that entry and watchers of the directory. */
+static void notify_entry_changed(struct AfsplusArosPacketContext *context,
+    uint64_t parent, const uint8_t *leaf, uint32_t leaf_length)
+{
+    struct AfsplusNotifyNode *node;
+
+    for (node = context->notifies; node != NULL; node = node->next)
+    {
+        if (locks_same(context, parent, node->parent_lock)
+            && leaf_equal_nocase(leaf, leaf_length, node->leaf,
+                node->leaf_length))
+        {
+            refresh_notify_object(context, node);
+            fire_notify(context, node);
+        }
+        else if (node->object_lock != 0
+            && locks_same(context, parent, node->object_lock))
+            fire_notify(context, node);
+    }
+}
+
+/* The object behind `lock` changed in place (data or attributes): notify
+ * by (parent directory, name), which also covers a watcher posted before
+ * the object existed and watchers of the directory itself. */
+static void notify_object_changed(struct AfsplusArosPacketContext *context,
+    uint64_t lock)
+{
+    struct AfsplusArosFileInfo info;
+    uint8_t name[MAXFILENAMELENGTH];
+    uint64_t parent = 0;
+
+    if (context->notifies == NULL || lock == 0)
+        return;
+    if (afsplus_aros_examine_lock(context->filesystem, lock, &info, name,
+            sizeof(name)) != 0)
+        return;
+    if (afsplus_aros_parent_lock(context->filesystem, lock, &parent) != 0)
+        return;
+    notify_entry_changed(context, parent, name, info.name_length);
+    if (parent != 0)
+        (void)afsplus_aros_free_lock(context->filesystem, parent);
+}
+
+static void notify_file_changed(struct AfsplusArosPacketContext *context,
+    uint64_t file)
+{
+    uint64_t lock = 0;
+
+    if (context->notifies == NULL)
+        return;
+    if (afsplus_aros_lock_from_file(context->filesystem, file, &lock) != 0)
+        return;
+    notify_object_changed(context, lock);
+    (void)afsplus_aros_free_lock(context->filesystem, lock);
+}
+
+static int32_t add_notify(struct AfsplusArosPacketContext *context,
+    struct NotifyRequest *request)
+{
+    struct AfsplusNotifyNode *node;
+    struct AfsplusResolvedParent parent;
+    const uint8_t *name;
+    size_t name_length;
+    int32_t error;
+
+    if (context->notify == NULL)
+        return ERROR_ACTION_NOT_KNOWN;
+    if (request == NULL || request->nr_FullName == NULL)
+        return ERROR_BAD_NUMBER;
+    if ((request->nr_Flags & (NRF_SEND_MESSAGE | NRF_SEND_SIGNAL)) == 0)
+        return ERROR_BAD_NUMBER;
+    name = (const uint8_t *)request->nr_FullName;
+    name_length = strlen((const char *)request->nr_FullName);
+    if (name_length > UINT32_MAX)
+        return ERROR_LINE_TOO_LONG;
+    error = resolve_parent(context, 0, name, (uint32_t)name_length, &parent);
+    if (error != 0)
+        return error;
+    if (parent.leaf_length >= sizeof(node->leaf))
+    {
+        release_temporary_lock(context, parent.id, parent.owned);
+        return ERROR_OBJECT_TOO_LARGE;
+    }
+    node = context->allocate(context->callback_context, sizeof(*node));
+    if (node == NULL)
+    {
+        release_temporary_lock(context, parent.id, parent.owned);
+        return ERROR_NO_FREE_STORE;
+    }
+    memset(node, 0, sizeof(*node));
+    node->request = request;
+    node->parent_lock = parent.id;
+    node->parent_owned = parent.owned;
+    node->leaf_length = parent.leaf_length;
+    memcpy(node->leaf, parent.leaf, parent.leaf_length);
+    node->next = context->notifies;
+    context->notifies = node;
+    request->nr_MsgCount = 0;
+    request->nr_Handler = context->handler_port;
+    refresh_notify_object(context, node);
+    if ((request->nr_Flags & NRF_NOTIFY_INITIAL) && node->object_lock != 0)
+        fire_notify(context, node);
+    return 0;
+}
+
+static int32_t remove_notify(struct AfsplusArosPacketContext *context,
+    struct NotifyRequest *request)
+{
+    struct AfsplusNotifyNode *node;
+
+    for (node = context->notifies; node != NULL; node = node->next)
+        if (node->request == request)
+        {
+            drop_notify(context, node);
+            return 0;
+        }
+    return ERROR_OBJECT_NOT_FOUND;
+}
+
+/* ---- record locks ---------------------------------------------------- */
+
+static void drop_record(struct AfsplusArosPacketContext *context,
+    struct AfsplusRecordNode *node)
+{
+    struct AfsplusRecordNode **link;
+
+    for (link = &context->records; *link != NULL; link = &(*link)->next)
+        if (*link == node)
+        {
+            *link = node->next;
+            break;
+        }
+    context->free(context->callback_context, node, sizeof(*node));
+}
+
+static void drop_file_records(struct AfsplusArosPacketContext *context,
+    struct AfsplusArosNativeFile *file)
+{
+    struct AfsplusRecordNode *node = context->records;
+
+    while (node != NULL)
+    {
+        struct AfsplusRecordNode *next = node->next;
+        if (node->file == file)
+            drop_record(context, node);
+        node = next;
+    }
+}
+
+static uint32_t ranges_overlap(uint64_t a_offset, uint64_t a_length,
+    uint64_t b_offset, uint64_t b_length)
+{
+    if (a_length == 0 || b_length == 0)
+        return 0;
+    if (a_offset >= b_offset)
+        return a_offset - b_offset < b_length;
+    return b_offset - a_offset < a_length;
+}
+
+static int32_t lock_record(struct AfsplusArosPacketContext *context,
+    struct AfsplusArosNativeFile *file, uint64_t offset, uint64_t length,
+    uint32_t mode, uint64_t timeout)
+{
+    struct AfsplusArosFileInfo info;
+    uint8_t name[MAXFILENAMELENGTH];
+    struct AfsplusRecordNode *node;
+    uint32_t exclusive = mode == REC_EXCLUSIVE || mode == REC_EXCLUSIVE_IMMED;
+    uint32_t immediate = mode == REC_EXCLUSIVE_IMMED
+        || mode == REC_SHARED_IMMED;
+    int32_t error;
+
+    if (mode > REC_SHARED_IMMED)
+        return ERROR_BAD_NUMBER;
+    error = afsplus_aros_examine_file(context->filesystem, file->id, &info,
+        name, sizeof(name));
+    if (error != 0)
+        return error;
+    for (node = context->records; node != NULL; node = node->next)
+    {
+        if (node->object_id != info.object_id)
+            continue;
+        if (!(exclusive || node->exclusive))
+            continue;
+        if (!ranges_overlap(offset, length, node->offset, node->length))
+            continue;
+        /* The translator cannot wait on the packet loop: a timed request
+         * that collides fails as if the timeout had expired. */
+        return immediate || timeout == 0 ? ERROR_LOCK_COLLISION
+            : ERROR_LOCK_TIMEOUT;
+    }
+    node = context->allocate(context->callback_context, sizeof(*node));
+    if (node == NULL)
+        return ERROR_NO_FREE_STORE;
+    memset(node, 0, sizeof(*node));
+    node->file = file;
+    node->object_id = info.object_id;
+    node->offset = offset;
+    node->length = length;
+    node->exclusive = exclusive;
+    node->next = context->records;
+    context->records = node;
+    return 0;
+}
+
+static int32_t free_record(struct AfsplusArosPacketContext *context,
+    struct AfsplusArosNativeFile *file, uint64_t offset, uint64_t length)
+{
+    struct AfsplusRecordNode *node;
+
+    for (node = context->records; node != NULL; node = node->next)
+        if (node->file == file && node->offset == offset
+            && node->length == length)
+        {
+            drop_record(context, node);
+            return 0;
+        }
+    return ERROR_RECORD_NOT_LOCKED;
+}
+
+/* ---- ExAll ----------------------------------------------------------- */
+
+/* Byte size of one ExAllData record at a given ED_ level. */
+static size_t exall_record_size(LONG level)
+{
+    switch (level)
+    {
+    case ED_NAME:
+        return offsetof(struct ExAllData, ed_Type);
+    case ED_TYPE:
+        return offsetof(struct ExAllData, ed_Size);
+    case ED_SIZE:
+        return offsetof(struct ExAllData, ed_Prot);
+    case ED_PROTECTION:
+        return offsetof(struct ExAllData, ed_Days);
+    case ED_DATE:
+        return offsetof(struct ExAllData, ed_Comment);
+    case ED_COMMENT:
+        return offsetof(struct ExAllData, ed_OwnerUID);
+    default:
+        return sizeof(struct ExAllData);
+    }
+}
+
+/* Fetches the next directory entry of `lock`, honouring a pushed-back one. */
+static int32_t next_directory_entry(struct AfsplusArosPacketContext *context,
+    struct AfsplusArosNativeLock *lock, struct AfsplusArosFileInfo *info,
+    uint8_t *name, size_t capacity)
+{
+    if (lock->pending)
+    {
+        *info = lock->pending_info;
+        memcpy(name, lock->pending_name, sizeof(lock->pending_name) < capacity
+            ? sizeof(lock->pending_name) : capacity);
+        lock->pending = 0;
+        return 0;
+    }
+    return afsplus_aros_examine_next(context->filesystem, lock->id, info,
+        name, (uint32_t)capacity);
+}
+
+static int32_t examine_all(struct AfsplusArosPacketContext *context,
+    struct AfsplusArosNativeLock *lock, uint8_t *buffer, size_t size,
+    LONG level, struct ExAllControl *control, SIPTR *result)
+{
+    const size_t align = sizeof(IPTR);
+    size_t record_size = exall_record_size(level);
+    size_t used = 0;
+    struct ExAllData *previous = NULL;
+    struct AfsplusArosFileInfo info;
+    uint8_t name[MAXFILENAMELENGTH];
+    int32_t error;
+
+    if (level < ED_NAME || level > ED_OWNER)
+        return ERROR_BAD_NUMBER;
+    if (control == NULL || buffer == NULL)
+        return ERROR_BAD_NUMBER;
+    /* dos.library emulates pattern and hook matching on top of ExNext
+     * when the handler declines; it does so once and remembers. */
+    if (control->eac_MatchString != NULL || control->eac_MatchFunc != NULL)
+        return ERROR_ACTION_NOT_KNOWN;
+    control->eac_Entries = 0;
+    if (control->eac_LastKey == 0)
+    {
+        lock->pending = 0;
+        error = afsplus_aros_rewind_directory(context->filesystem, lock->id);
+        if (error != 0)
+            return error;
+        control->eac_LastKey = 1;
+    }
+    *result = DOSFALSE;
+    for (;;)
+    {
+        size_t name_length;
+        size_t entry_bytes;
+        struct ExAllData *entry;
+        uint8_t *text;
+
+        error = next_directory_entry(context, lock, &info, name, sizeof(name));
+        if (error == ERROR_NO_MORE_ENTRIES)
+        {
+            /* Exhausted: DOSFALSE with ERROR_NO_MORE_ENTRIES, entries kept. */
+            return control->eac_Entries != 0 ? 0 : ERROR_NO_MORE_ENTRIES;
+        }
+        if (error != 0)
+            return error;
+        name_length = info.name_length;
+        /* record, name + NUL, empty comment + NUL, rounded to pointer size */
+        entry_bytes = record_size + name_length + 1 + 1;
+        entry_bytes = (entry_bytes + align - 1) & ~(align - 1);
+        if (used + entry_bytes > size)
+        {
+            /* Does not fit: push it back for the next call. */
+            lock->pending = 1;
+            lock->pending_info = info;
+            memcpy(lock->pending_name, name, sizeof(lock->pending_name));
+            if (control->eac_Entries == 0)
+                return ERROR_NO_FREE_STORE;
+            *result = DOSTRUE;
+            return 0;
+        }
+        entry = (struct ExAllData *)(buffer + used);
+        memset(entry, 0, record_size);
+        text = buffer + used + record_size;
+        memcpy(text, name, name_length);
+        text[name_length] = 0;
+        text[name_length + 1] = 0;
+        entry->ed_Name = text;
+        if (level >= ED_TYPE)
+            entry->ed_Type = (LONG)info.directory_entry_type;
+        if (level >= ED_SIZE)
+        {
+#if (__DOS64)
+            entry->ed_Size = info.size;
+#else
+            entry->ed_Size = info.size > UINT32_MAX ? UINT32_MAX
+                : (ULONG)info.size;
+#endif
+        }
+        if (level >= ED_PROTECTION)
+            entry->ed_Prot = info.protection;
+        if (level >= ED_DATE)
+        {
+            struct DateStamp stamp;
+            unix_to_datestamp(info.modified_seconds,
+                info.modified_nanoseconds, &stamp);
+            entry->ed_Days = (ULONG)stamp.ds_Days;
+            entry->ed_Mins = (ULONG)stamp.ds_Minute;
+            entry->ed_Ticks = (ULONG)stamp.ds_Tick;
+        }
+        if (level >= ED_COMMENT)
+            entry->ed_Comment = text + name_length + 1;
+        if (previous != NULL)
+            previous->ed_Next = entry;
+        previous = entry;
+        used += entry_bytes;
+        control->eac_Entries++;
+    }
+}
+
 static int32_t fill_fib_name(UBYTE *destination, size_t capacity,
     const uint8_t *name, uint32_t length)
 {
@@ -579,6 +1075,7 @@ static void fill_info64(struct AfsplusArosPacketContext *context,
 {
     memset(destination, 0, sizeof(*destination));
     destination->id_DiskState = info->write_protected
+            || context->write_protected
         ? ID_WRITE_PROTECTED : ID_VALIDATED;
     destination->id_NumBlocks = info->total_blocks;
     destination->id_NumBlocksUsed = info->used_blocks;
@@ -595,6 +1092,7 @@ static void fill_info32(struct AfsplusArosPacketContext *context,
 {
     memset(destination, 0, sizeof(*destination));
     destination->id_DiskState = info->write_protected
+            || context->write_protected
         ? ID_WRITE_PROTECTED : ID_VALIDATED;
     destination->id_NumBlocks = info->total_blocks > INT32_MAX
         ? INT32_MAX : (LONG)info->total_blocks;
@@ -726,8 +1224,16 @@ int32_t afsplus_aros_packet_create(
     context->allocate = config->allocate;
     context->free = config->free;
     context->now = config->now;
+    context->notify = config->notify;
     *output = context;
     return 0;
+}
+
+void afsplus_aros_packet_set_volume_node(
+    struct AfsplusArosPacketContext *context, BPTR volume_node)
+{
+    if (context != NULL)
+        context->volume_node = volume_node;
 }
 
 int32_t afsplus_aros_packet_destroy(
@@ -737,6 +1243,10 @@ int32_t afsplus_aros_packet_destroy(
 
     if (context == NULL)
         return ERROR_BAD_NUMBER;
+    while (context->notifies != NULL)
+        drop_notify(context, context->notifies);
+    while (context->records != NULL)
+        drop_record(context, context->records);
     while (context->files != NULL)
     {
         struct AfsplusArosNativeFile *file = context->files;
@@ -797,6 +1307,13 @@ int32_t afsplus_aros_packet_process(
         }
     }
 #endif
+
+    if (context->write_protected && action_mutates(packet->dp_Type))
+    {
+        store_packet_result(packet, DOSFALSE, DOSFALSE,
+            ERROR_DISK_WRITE_PROTECTED, packet64);
+        return 0;
+    }
 
     switch (packet->dp_Type)
     {
@@ -1204,8 +1721,12 @@ int32_t afsplus_aros_packet_process(
             error = ERROR_INVALID_LOCK;
         else
         {
+            drop_file_records(context, file);
             if (file->writable)
+            {
                 error = afsplus_aros_fsync(context->filesystem, file->id);
+                notify_file_changed(context, file->id);
+            }
             close_error = afsplus_aros_close(context->filesystem, file->id);
             if (error == 0)
                 error = close_error;
@@ -1249,6 +1770,9 @@ int32_t afsplus_aros_packet_process(
             (void)afsplus_aros_free_lock(context->filesystem, id);
         if (error != 0 && lock != NULL)
             discard_reserved_lock(context, lock);
+        if (error == 0)
+            notify_entry_changed(context, parent.id, parent.leaf,
+                parent.leaf_length);
         if (parent_ready)
             release_temporary_lock(context, parent.id, parent.owned);
         if (error == 0)
@@ -1279,6 +1803,9 @@ int32_t afsplus_aros_packet_process(
             error = afsplus_aros_delete_object(context->filesystem,
                 parent.id, parent.leaf, parent.leaf_length, seconds,
                 nanoseconds);
+        if (error == 0)
+            notify_entry_changed(context, parent.id, parent.leaf,
+                parent.leaf_length);
         if (parent_ready)
             release_temporary_lock(context, parent.id, parent.owned);
         if (error == 0)
@@ -1325,6 +1852,13 @@ int32_t afsplus_aros_packet_process(
             error = afsplus_aros_rename(context->filesystem, source.id,
                 source.leaf, source.leaf_length, target.id, target.leaf,
                 target.leaf_length, seconds, nanoseconds);
+        if (error == 0)
+        {
+            notify_entry_changed(context, source.id, source.leaf,
+                source.leaf_length);
+            notify_entry_changed(context, target.id, target.leaf,
+                target.leaf_length);
+        }
         if (target_ready)
             release_temporary_lock(context, target.id, target.owned);
         if (source_ready)
@@ -1363,6 +1897,9 @@ int32_t afsplus_aros_packet_process(
             error = afsplus_aros_make_hard_link(context->filesystem,
                 parent.id, parent.leaf, parent.leaf_length, source->id,
                 seconds, nanoseconds);
+        if (error == 0)
+            notify_entry_changed(context, parent.id, parent.leaf,
+                parent.leaf_length);
         if (parent_ready)
             release_temporary_lock(context, parent.id, parent.owned);
         if (error == 0)
@@ -1384,6 +1921,14 @@ int32_t afsplus_aros_packet_process(
             error = afsplus_aros_set_protection(context->filesystem,
                 target.id, target.leaf, target.leaf_length,
                 (uint32_t)packet->dp_Arg4, seconds, nanoseconds);
+        if (error == 0)
+        {
+            if (target.leaf_length != 0)
+                notify_entry_changed(context, target.id, target.leaf,
+                    target.leaf_length);
+            else
+                notify_object_changed(context, target.id);
+        }
         if (target_ready)
             release_temporary_lock(context, target.id, target.owned);
         if (error == 0)
@@ -1413,6 +1958,14 @@ int32_t afsplus_aros_packet_process(
             error = afsplus_aros_set_date(context->filesystem, target.id,
                 target.leaf, target.leaf_length, modified_seconds,
                 modified_nanoseconds, seconds, nanoseconds);
+        }
+        if (error == 0)
+        {
+            if (target.leaf_length != 0)
+                notify_entry_changed(context, target.id, target.leaf,
+                    target.leaf_length);
+            else
+                notify_object_changed(context, target.id);
         }
         if (date != NULL && target_ready)
             release_temporary_lock(context, target.id, target.owned);
@@ -1464,12 +2017,16 @@ int32_t afsplus_aros_packet_process(
 
             if (error == 0 && (packet->dp_Type == ACTION_EXAMINE_OBJECT
                     || packet->dp_Type == ACTION_EXAMINE_OBJECT64))
+            {
+                if (lock != NULL)
+                    lock->pending = 0;
                 error = afsplus_aros_rewind_directory(context->filesystem,
                     id);
+            }
             if (error == 0 && (packet->dp_Type == ACTION_EXAMINE_NEXT
                     || packet->dp_Type == ACTION_EXAMINE_NEXT64))
-                error = afsplus_aros_examine_next(context->filesystem, id,
-                    &info, name, sizeof(name));
+                error = next_directory_entry(context, lock, &info, name,
+                    sizeof(name));
             else if (error == 0)
                 error = afsplus_aros_examine_lock(context->filesystem, id,
                     &info, name, sizeof(name));
@@ -1480,6 +2037,208 @@ int32_t afsplus_aros_packet_process(
         if (temporary_root != 0)
             (void)afsplus_aros_free_lock(context->filesystem,
                 temporary_root);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
+    case ACTION_EXAMINE_ALL:
+    {
+        struct AfsplusArosNativeLock *lock = find_lock(context,
+            (BPTR)packet->dp_Arg1);
+
+        if (lock == NULL)
+            error = ERROR_INVALID_LOCK;
+        else
+            error = examine_all(context, lock, (uint8_t *)packet->dp_Arg2,
+                (size_t)packet->dp_Arg3, (LONG)packet->dp_Arg4,
+                (struct ExAllControl *)packet->dp_Arg5, &result);
+        break;
+    }
+    case ACTION_EXAMINE_ALL_END:
+    {
+        struct AfsplusArosNativeLock *lock = find_lock(context,
+            (BPTR)packet->dp_Arg1);
+        struct ExAllControl *control = (struct ExAllControl *)packet->dp_Arg5;
+
+        if (lock == NULL)
+            error = ERROR_INVALID_LOCK;
+        else
+        {
+            lock->pending = 0;
+            if (control != NULL)
+                control->eac_LastKey = 0;
+            error = afsplus_aros_rewind_directory(context->filesystem,
+                lock->id);
+        }
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
+    case ACTION_ADD_NOTIFY:
+        error = add_notify(context, (struct NotifyRequest *)packet->dp_Arg1);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    case ACTION_REMOVE_NOTIFY:
+        error = remove_notify(context,
+            (struct NotifyRequest *)packet->dp_Arg1);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    case ACTION_LOCK_RECORD:
+    {
+        struct AfsplusArosNativeFile *file = find_file(context,
+            (BPTR)packet->dp_Arg1);
+
+        if (file == NULL)
+            error = ERROR_INVALID_LOCK;
+        else
+            error = lock_record(context, file, (uint64_t)packet->dp_Arg2,
+                (uint64_t)packet->dp_Arg3, (uint32_t)packet->dp_Arg4,
+                (uint64_t)packet->dp_Arg5);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
+    case ACTION_FREE_RECORD:
+    {
+        struct AfsplusArosNativeFile *file = find_file(context,
+            (BPTR)packet->dp_Arg1);
+
+        if (file == NULL)
+            error = ERROR_INVALID_LOCK;
+        else
+            error = free_record(context, file, (uint64_t)packet->dp_Arg2,
+                (uint64_t)packet->dp_Arg3);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
+    case ACTION_FH_FROM_LOCK:
+    {
+        struct FileHandle *public_file = packet->dp_Arg1 != 0
+            ? (struct FileHandle *)BADDR((BPTR)packet->dp_Arg1) : NULL;
+        struct AfsplusArosNativeLock *lock = find_lock(context,
+            (BPTR)packet->dp_Arg2);
+        struct AfsplusArosNativeFile *file = NULL;
+        uint32_t writable;
+        uint64_t id = 0;
+        int64_t seconds = 0;
+        uint32_t nanoseconds = 0;
+
+        if (public_file == NULL || lock == NULL)
+            error = ERROR_INVALID_LOCK;
+        writable = lock != NULL && lock->public_lock.fl_Access == EXCLUSIVE_LOCK;
+        if (error == 0 && writable && context->write_protected)
+            error = ERROR_DISK_WRITE_PROTECTED;
+        if (error == 0)
+            error = packet_now(context, &seconds, &nanoseconds);
+        if (error == 0)
+            file = reserve_file(context, writable, &error);
+        if (error == 0)
+            error = afsplus_aros_open_from_lock(context->filesystem,
+                lock->id, seconds, nanoseconds, &id);
+        if (error == 0)
+        {
+            /* The Rust lock is consumed; only the wrapper remains. */
+            unlink_lock(context, lock);
+            publish_file(context, file, id);
+            public_file->fh_Arg1 = (SIPTR)MKBADDR(file);
+            public_file->fh_Port = DOSFALSE;
+            result = DOSTRUE;
+        }
+        else if (file != NULL)
+            discard_reserved_file(context, file);
+        break;
+    }
+    case ACTION_CHANGE_MODE:
+    {
+        if ((LONG)packet->dp_Arg1 == CHANGE_LOCK)
+        {
+            struct AfsplusArosNativeLock *lock = find_lock(context,
+                (BPTR)packet->dp_Arg2);
+            LONG native_access = (LONG)packet->dp_Arg3;
+            uint32_t access = ffi_access(native_access, &error);
+
+            if (error == 0 && lock == NULL)
+                error = ERROR_INVALID_LOCK;
+            if (error == 0)
+                error = afsplus_aros_change_lock_access(context->filesystem,
+                    lock->id, access);
+            if (error == 0)
+                lock->public_lock.fl_Access = native_access;
+        }
+        else if ((LONG)packet->dp_Arg1 == CHANGE_FH)
+        {
+            struct AfsplusArosNativeFile *file = find_file(context,
+                (BPTR)packet->dp_Arg2);
+            uint32_t writable = (LONG)packet->dp_Arg3 != MODE_OLDFILE;
+
+            if (file == NULL)
+                error = ERROR_INVALID_LOCK;
+            else if (writable && context->write_protected)
+                error = ERROR_DISK_WRITE_PROTECTED;
+            else
+                error = afsplus_aros_change_file_access(context->filesystem,
+                    file->id, writable);
+            if (error == 0)
+                file->writable = writable;
+        }
+        else
+            error = ERROR_BAD_NUMBER;
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
+    case ACTION_WRITE_PROTECT:
+        if (packet->dp_Arg1 == DOSTRUE)
+        {
+            if (context->write_protected)
+                error = ERROR_DISK_WRITE_PROTECTED;
+            else
+            {
+                context->write_protected = 1;
+                context->write_protect_key = (IPTR)packet->dp_Arg2;
+            }
+        }
+        else if (context->write_protected
+            && context->write_protect_key != (IPTR)packet->dp_Arg2)
+            error = ERROR_INVALID_LOCK;
+        else
+            context->write_protected = 0;
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    case ACTION_FORMAT:
+    {
+        const uint8_t *label;
+        uint32_t label_length = 0;
+        int64_t seconds;
+        uint32_t nanoseconds;
+
+        if (!context->inhibited || context->locks != NULL
+            || context->files != NULL)
+            error = ERROR_OBJECT_IN_USE;
+        if (error == 0)
+            error = bstr_view(packet->dp_Arg1, &label, &label_length);
+        if (error == 0)
+            error = packet_now(context, &seconds, &nanoseconds);
+        if (error == 0)
+            error = afsplus_aros_format(context->filesystem, label,
+                label_length, seconds, nanoseconds);
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
+    case ACTION_RENAME_DISK:
+    {
+        const uint8_t *label;
+        uint32_t label_length = 0;
+
+        error = bstr_view(packet->dp_Arg1, &label, &label_length);
+        if (error == 0)
+            error = afsplus_aros_set_label(context->filesystem, label,
+                label_length);
         if (error == 0)
             result = DOSTRUE;
         break;

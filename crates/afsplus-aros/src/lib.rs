@@ -325,6 +325,136 @@ impl<D: BlockDevice> ArosAdapter<D> {
         Ok(handle)
     }
 
+    /// `ACTION_FH_FROM_LOCK`: turns a lock on a file into an open file handle.
+    /// The lock is consumed on success and untouched on failure. An exclusive
+    /// lock yields a writable handle, a shared lock a read-only one.
+    pub fn open_from_lock(
+        &mut self,
+        lock: LockId,
+        now: Timespec,
+    ) -> Result<FileHandleId, ArosError> {
+        self.ensure_file_capacity()?;
+        let state = self.lock_state(lock)?.clone();
+        if self.vfs.stat(state.object_id)?.kind != NodeKind::File {
+            return Err(ArosError::ObjectWrongType);
+        }
+        let parent = state.parent.ok_or(ArosError::ObjectWrongType)?;
+        let access = match state.access {
+            LockAccess::Exclusive => AccessMode::ReadWrite,
+            LockAccess::Shared => AccessMode::ReadOnly,
+        };
+        let vfs_handle = self.vfs.open_file(state.object_id, access)?;
+        let handle = match self.allocate_file_id() {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = self.vfs.close(vfs_handle);
+                return Err(error);
+            }
+        };
+        let _ = now;
+        self.files.insert(
+            handle,
+            FileState {
+                vfs_handle,
+                object_id: state.object_id,
+                parent,
+                name: state.name,
+                position: 0,
+            },
+        );
+        self.free_lock(lock)?;
+        Ok(handle)
+    }
+
+    /// `ACTION_CHANGE_MODE` on a lock. Shared to exclusive succeeds only when
+    /// this is the object's sole lock and no file handle is open on it.
+    pub fn change_lock_access(
+        &mut self,
+        lock: LockId,
+        access: LockAccess,
+    ) -> Result<(), ArosError> {
+        let state = self.lock_state(lock)?.clone();
+        if state.access == access {
+            return Ok(());
+        }
+        let object_id = state.object_id;
+        if access == LockAccess::Exclusive {
+            let counts = self
+                .lock_counts
+                .get(&object_id)
+                .copied()
+                .unwrap_or_default();
+            let open_files = self.files.values().any(|file| file.object_id == object_id);
+            if counts.shared != 1 || counts.exclusive || open_files {
+                return Err(ArosError::ObjectInUse);
+            }
+        }
+        self.release_object_lock(object_id, state.access);
+        let counts = self.lock_counts.entry(object_id).or_default();
+        match access {
+            LockAccess::Shared => counts.shared += 1,
+            LockAccess::Exclusive => counts.exclusive = true,
+        }
+        self.locks.get_mut(&lock).expect("validated lock").access = access;
+        Ok(())
+    }
+
+    /// `ACTION_CHANGE_MODE` on a file handle: reopens the file with the new
+    /// access at the same position. `writable` selects read-write access.
+    pub fn change_file_access(
+        &mut self,
+        handle: FileHandleId,
+        writable: bool,
+    ) -> Result<(), ArosError> {
+        let state = self.file_state(handle)?.clone();
+        let access = if writable {
+            AccessMode::ReadWrite
+        } else {
+            AccessMode::ReadOnly
+        };
+        let vfs_handle = self.vfs.open_file(state.object_id, access)?;
+        if let Err(error) = self.vfs.close(state.vfs_handle) {
+            let _ = self.vfs.close(vfs_handle);
+            return Err(error.into());
+        }
+        self.files
+            .get_mut(&handle)
+            .expect("validated file")
+            .vfs_handle = vfs_handle;
+        Ok(())
+    }
+
+    /// The on-disk volume label, in the configured name encoding.
+    pub fn label(&self) -> Result<Vec<u8>, ArosError> {
+        let label = self.vfs.label().as_bytes().to_vec();
+        self.encode_name(&label)
+    }
+
+    /// `ACTION_RENAME_DISK`: rewrites the on-disk label. The DOS volume node
+    /// is the handler's to rename.
+    pub fn set_label(&mut self, label: &[u8]) -> Result<(), ArosError> {
+        let decoded = self.decode_component(label)?;
+        self.vfs.set_label(&decoded)?;
+        self.adopt_volume_name(label.to_vec());
+        Ok(())
+    }
+
+    /// The root's name as Examine reports it. It must equal the DOS volume
+    /// node's name, or dos.library rebuilds paths on a volume that does not
+    /// exist and asks the user to insert it.
+    pub fn adopt_volume_name(&mut self, name: Vec<u8>) {
+        self.config.volume_name = name.clone();
+        self.known_parents.insert(OBJECT_ROOT, (None, name));
+    }
+
+    pub fn config(&self) -> &ArosConfig {
+        &self.config
+    }
+
+    pub fn mount_mode(&self) -> MountMode {
+        self.vfs.mount_mode()
+    }
+
     pub fn parent_of_file(&mut self, handle: FileHandleId) -> Result<LockId, ArosError> {
         self.ensure_lock_capacity()?;
         let parent = self.file_state(handle)?.parent;

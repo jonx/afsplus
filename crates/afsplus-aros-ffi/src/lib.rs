@@ -113,6 +113,7 @@ pub struct AfsplusAros {
     _private: [u8; 0],
 }
 
+#[derive(Clone)]
 struct CallbackDevice {
     context: *mut c_void,
     block_size: usize,
@@ -178,6 +179,7 @@ impl CallbackDevice {
 
 struct NativeBridge {
     adapter: ArosAdapter<CallbackDevice>,
+    device: CallbackDevice,
     max_file_info_name_bytes: usize,
 }
 
@@ -424,8 +426,9 @@ pub extern "C" fn afsplus_aros_mount(
             write_block: device.write_block,
             flush: device.flush,
         };
+        let device = callback_device.clone();
         let vfs = Vfs::mount(callback_device, MountOptions { mode })?;
-        let adapter = ArosAdapter::new(
+        let mut adapter = ArosAdapter::new(
             vfs,
             ArosConfig {
                 name_encoding: name_encoding(config.name_encoding)?,
@@ -435,8 +438,17 @@ pub extern "C" fn afsplus_aros_mount(
                 max_file_info_name_bytes,
             },
         );
+        // An empty configured name means "the on-disk label", which is also
+        // what the handler names the DOS volume node.
+        if config.volume_name_length == 0 {
+            let label = adapter.label()?;
+            if !label.is_empty() {
+                adapter.adopt_volume_name(label);
+            }
+        }
         let raw = Box::into_raw(Box::new(NativeBridge {
             adapter,
+            device,
             max_file_info_name_bytes,
         }))
         .cast::<AfsplusAros>();
@@ -839,6 +851,157 @@ pub extern "C" fn afsplus_aros_set_date(
             timestamp(modified_seconds, modified_nanoseconds)?,
             timestamp(now_seconds, now_nanoseconds)?,
         )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_open_from_lock(
+    filesystem: *mut AfsplusAros,
+    lock: u64,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+    output_file: *mut u64,
+) -> i32 {
+    ffi_status(|| {
+        require_output(output_file)?;
+        let file = bridge_mut(filesystem)?
+            .adapter
+            .open_from_lock(lock, timestamp(now_seconds, now_nanoseconds)?)?;
+        write_output(output_file, file)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_change_lock_access(
+    filesystem: *mut AfsplusAros,
+    lock: u64,
+    access: u32,
+) -> i32 {
+    ffi_status(|| {
+        bridge_mut(filesystem)?
+            .adapter
+            .change_lock_access(lock, lock_access(access)?)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_change_file_access(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    writable: u32,
+) -> i32 {
+    ffi_status(|| {
+        bridge_mut(filesystem)?
+            .adapter
+            .change_file_access(file, writable != 0)
+    })
+}
+
+/// Copies the on-disk label into `name` and stores its length. Pass at least
+/// max_file_info_name_bytes bytes.
+#[no_mangle]
+pub extern "C" fn afsplus_aros_label(
+    filesystem: *mut AfsplusAros,
+    name: *mut u8,
+    name_capacity: u32,
+    output_length: *mut u32,
+) -> i32 {
+    ffi_status(|| {
+        require_output(output_length)?;
+        let bridge = bridge_mut(filesystem)?;
+        let label = bridge.adapter.label()?;
+        let capacity = usize::try_from(name_capacity).map_err(|_| ArosError::ObjectTooLarge)?;
+        if name.is_null() || label.len() > capacity {
+            return Err(ArosError::ObjectTooLarge);
+        }
+        // SAFETY: the caller guarantees `name` is writable for `capacity`
+        // bytes, and the label was just bounded by that capacity.
+        unsafe { ptr::copy_nonoverlapping(label.as_ptr(), name, label.len()) };
+        write_output(output_length, label.len() as u32)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_set_label(
+    filesystem: *mut AfsplusAros,
+    label: *const u8,
+    label_length: u32,
+) -> i32 {
+    ffi_status(|| {
+        let label = input_bytes(label, label_length)?;
+        bridge_mut(filesystem)?.adapter.set_label(label)
+    })
+}
+
+/// `ACTION_FORMAT`: writes a fresh case-insensitive AFS+ volume with the
+/// given label over the mounted device and remounts it in place. The caller
+/// holds no locks or file handles (the volume is inhibited). The mount
+/// pointer stays valid.
+#[no_mangle]
+pub extern "C" fn afsplus_aros_format(
+    filesystem: *mut AfsplusAros,
+    label: *const u8,
+    label_length: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    ffi_status(|| {
+        let label = input_bytes(label, label_length)?;
+        let now = timestamp(now_seconds, now_nanoseconds)?;
+        let bridge = bridge_mut(filesystem)?;
+        let config = bridge.adapter.config().clone();
+        let label = match config.name_encoding {
+            NameEncoding::Utf8 => std::str::from_utf8(label)
+                .map(str::to_owned)
+                .map_err(|_| ArosError::InvalidComponentName)?,
+            NameEncoding::Latin1 => label.iter().map(|byte| char::from(*byte)).collect(),
+        };
+        if label.is_empty() || label.len() > afsplus_format::ident::LABEL_MAX_BYTES {
+            return Err(ArosError::InvalidComponentName);
+        }
+        if bridge.adapter.disk_info().in_use {
+            return Err(ArosError::ObjectInUse);
+        }
+        if bridge.adapter.mount_mode() != MountMode::ReadWrite {
+            return Err(ArosError::DiskWriteProtected);
+        }
+        let mut device = bridge.device.clone();
+        // The volume UUID mixes the clock with the device identity; there is
+        // no entropy source at this layer.
+        let mut uuid =
+            (now.seconds as u128 * 1_000_000_000 + now.nanoseconds as u128).to_le_bytes();
+        for (index, byte) in device.total_blocks.to_le_bytes().iter().enumerate() {
+            uuid[index + 8] ^= *byte;
+        }
+        afsplus_core::mkfs(
+            &mut device,
+            &afsplus_core::MkfsParams {
+                uuid,
+                label: label.clone(),
+                region_size: afsplus_format::geometry::MAX_REGION_BLOCKS,
+                reclaim_caps: Default::default(),
+                log_slots: 8,
+                shared_extents: true,
+                data_policy: true,
+                name_policy: afsplus_core::NamePolicy::Insensitive,
+                timestamp: now,
+            },
+        )
+        .map_err(|error| ArosError::from(afsplus_vfs::VfsError::from(error)))?;
+        let vfs = Vfs::mount(
+            device,
+            MountOptions {
+                mode: MountMode::ReadWrite,
+            },
+        )?;
+        let mut fresh = ArosAdapter::new(vfs, config);
+        let label = fresh.label()?;
+        fresh.adopt_volume_name(label);
+        let old = std::mem::replace(&mut bridge.adapter, fresh);
+        // The old adapter has no locks or handles; dropping its volume
+        // performs no I/O.
+        drop(old);
+        Ok(())
     })
 }
 

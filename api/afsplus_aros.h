@@ -187,6 +187,27 @@ int32_t afsplus_aros_set_date(struct AfsplusAros *filesystem,
     int64_t modified_seconds, uint32_t modified_nanoseconds,
     int64_t now_seconds, uint32_t now_nanoseconds);
 
+/* ACTION_FH_FROM_LOCK: the lock is consumed on success only. */
+int32_t afsplus_aros_open_from_lock(struct AfsplusAros *filesystem,
+    uint64_t lock, int64_t now_seconds, uint32_t now_nanoseconds,
+    uint64_t *output_file);
+/* ACTION_CHANGE_MODE. */
+int32_t afsplus_aros_change_lock_access(struct AfsplusAros *filesystem,
+    uint64_t lock, uint32_t access);
+int32_t afsplus_aros_change_file_access(struct AfsplusAros *filesystem,
+    uint64_t file, uint32_t writable);
+/* The on-disk label, in the mount's name encoding; pass at least
+ * max_file_info_name_bytes bytes. ACTION_RENAME_DISK rewrites it. */
+int32_t afsplus_aros_label(struct AfsplusAros *filesystem, uint8_t *name,
+    uint32_t name_capacity, uint32_t *output_length);
+int32_t afsplus_aros_set_label(struct AfsplusAros *filesystem,
+    const uint8_t *label, uint32_t label_length);
+/* ACTION_FORMAT: rewrites the device as a fresh volume and remounts it in
+ * place; requires no open locks or file handles. */
+int32_t afsplus_aros_format(struct AfsplusAros *filesystem,
+    const uint8_t *label, uint32_t label_length, int64_t now_seconds,
+    uint32_t now_nanoseconds);
+
 /* Pass at least max_file_info_name_bytes bytes. On success name_length bytes
  * have been written to name without a trailing NUL or BCPL length byte. */
 int32_t afsplus_aros_examine_lock(struct AfsplusAros *filesystem,

@@ -564,6 +564,28 @@ impl<D: BlockDevice> Volume<D> {
         )
     }
 
+    /// Rewrites the volume label in the identification record. The record
+    /// is a fixed, checksummed block outside the checkpoint chain, so the
+    /// label is written in place and flushed; nothing else changes.
+    pub fn set_label(&mut self, label: &str) -> Result<(), CoreError> {
+        if !self.mount_mode.allows_user_writes() {
+            return Err(CoreError::ReadOnly);
+        }
+        if label.is_empty() || label.len() > afsplus_format::ident::LABEL_MAX_BYTES {
+            return Err(CoreError::InvalidName(FormatError::Overflow(
+                "volume label",
+            )));
+        }
+        self.ensure_window_closed()?;
+        let mut ident = self.ident.clone();
+        ident.label = label.to_owned();
+        let encoded = ident.encode(self.dev.block_size())?;
+        self.dev.write_block(crate::layout::IDENT_LBA, &encoded)?;
+        self.dev.flush()?;
+        self.ident = ident;
+        Ok(())
+    }
+
     /// Filesystem-wide durability barrier. Successful immediate mutations
     /// are already durable; this also gives adapters an explicit sync hook.
     /// Read-only modes return success without touching the device.

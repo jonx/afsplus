@@ -20,15 +20,21 @@
 extern "C" {
 #endif
 
-#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(1)
+#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(2)
 
 struct AfsplusArosPacketContext;
+struct NotifyRequest;
 
 typedef void *(*AfsplusArosPacketAllocate)(void *context, size_t size);
 typedef void (*AfsplusArosPacketFree)(void *context, void *allocation,
     size_t size);
 typedef int32_t (*AfsplusArosPacketNow)(void *context,
     int64_t *unix_seconds, uint32_t *nanoseconds);
+/* Delivers one change notification for the request: a signal or a
+ * NotifyMessage, as nr_Flags asks. The handler owns the message reply. NULL
+ * disables ACTION_ADD_NOTIFY. */
+typedef int32_t (*AfsplusArosPacketNotify)(void *context,
+    struct NotifyRequest *request);
 
 struct AfsplusArosPacketConfig {
     uint32_t abi_version;
@@ -40,14 +46,15 @@ struct AfsplusArosPacketConfig {
     AfsplusArosPacketAllocate allocate;
     AfsplusArosPacketFree free;
     AfsplusArosPacketNow now;
+    AfsplusArosPacketNotify notify;
 };
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 64,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 72,
     "AfsplusArosPacketConfig 64-bit ABI drift");
 #elif UINTPTR_MAX == UINT32_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 36,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 40,
     "AfsplusArosPacketConfig 32-bit ABI drift");
 #endif
 #endif
@@ -67,6 +74,11 @@ int32_t afsplus_aros_packet_destroy(
  * including when the packet's operation reports an ERROR_* in dp_Res2. */
 int32_t afsplus_aros_packet_process(
     struct AfsplusArosPacketContext *context, struct DosPacket *packet);
+
+/* Replaces the volume node stored in the context after the handler
+ * re-registers it (ACTION_RENAME_DISK, ACTION_FORMAT). */
+void afsplus_aros_packet_set_volume_node(
+    struct AfsplusArosPacketContext *context, BPTR volume_node);
 
 uint32_t afsplus_aros_packet_should_quit(
     const struct AfsplusArosPacketContext *context);

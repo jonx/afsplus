@@ -123,7 +123,10 @@ for symbol in \
     afsplus_aros_read afsplus_aros_write afsplus_aros_seek \
     afsplus_aros_set_file_size afsplus_aros_fsync afsplus_aros_rename \
     afsplus_aros_parent_lock_with_access afsplus_aros_lock_from_file \
-    afsplus_aros_set_protection afsplus_aros_set_date
+    afsplus_aros_set_protection afsplus_aros_set_date \
+    afsplus_aros_open_from_lock afsplus_aros_change_lock_access \
+    afsplus_aros_change_file_access afsplus_aros_label \
+    afsplus_aros_set_label afsplus_aros_format
 do
     "$aros_nm" --defined-only "$archive" | grep -Eq "[[:space:]]$symbol$" || {
         echo "Missing exported symbol: $symbol" >&2
