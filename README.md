@@ -227,6 +227,8 @@ The official host tools format and inspect an image without requiring a mount:
 
 ```sh
 cargo run -p afsplus-tools --bin mkafsplus -- --profile workstation demo.img
+# An AROS volume: names match without case, and the label is the volume name.
+cargo run -p afsplus-tools --bin mkafsplus -- --case-insensitive --label Work work.img
 cargo run -p afsplus-tools --bin afsplus-info -- --json demo.img
 cargo run -p afsplus-tools --bin afsplus-dump -- --json demo.img
 ```
