@@ -306,3 +306,30 @@ fn examine_reports_the_stored_spelling_on_a_case_insensitive_volume() {
     let parent = adapter.parent_lock(draft).unwrap().unwrap();
     assert_eq!(adapter.examine_lock(parent).unwrap().name, b"Work");
 }
+
+#[test]
+fn locate_path_keeps_the_stored_spelling_at_every_step() {
+    let vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let mut adapter = ArosAdapter::new(vfs, ArosConfig::default());
+    let dir = adapter
+        .create_directory(None, b"FSQual", timestamp(1))
+        .unwrap();
+    adapter.free_lock(dir).unwrap();
+    let file = adapter
+        .open(None, b"FSQual/CaseTest", OpenMode::NewFile, timestamp(2))
+        .unwrap_or_else(|_| {
+            let d = adapter.locate(None, b"fsqual", LockAccess::Shared).unwrap();
+            let f = adapter
+                .open(Some(d), b"CaseTest", OpenMode::NewFile, timestamp(2))
+                .unwrap();
+            adapter.free_lock(d).unwrap();
+            f
+        });
+    adapter.close(file).unwrap();
+    let lock = adapter
+        .locate_path(None, b"AFSQ:fsqual/CASETEST", LockAccess::Shared)
+        .unwrap();
+    assert_eq!(adapter.examine_lock(lock).unwrap().name, b"CaseTest");
+    let parent = adapter.parent_lock(lock).unwrap().unwrap();
+    assert_eq!(adapter.examine_lock(parent).unwrap().name, b"FSQual");
+}

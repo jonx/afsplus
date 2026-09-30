@@ -523,15 +523,18 @@ impl<D: BlockDevice> ArosAdapter<D> {
                 continue;
             }
             let decoded = self.decode_component(component)?;
-            let child = self.vfs.lookup(object, &decoded)?;
+            // Each step keeps the on-disk spelling, so the resulting lock
+            // examines as the creator wrote the name, not as the path did.
+            let (child, stored) = self.vfs.lookup_entry(object, &decoded)?;
             // dos.library resolves the link through ACTION_READ_LINK and
             // retries with the substituted path, at whatever depth it meets it.
             if self.vfs.stat(child)?.kind == NodeKind::Symlink {
                 return Err(ArosError::IsSoftLink);
             }
+            let stored_name = self.encode_name(stored.as_bytes())?;
             self.known_parents
-                .insert(child, (Some(object), component.to_vec()));
-            (object, parent, name) = (child, Some(object), component.to_vec());
+                .insert(child, (Some(object), stored_name.clone()));
+            (object, parent, name) = (child, Some(object), stored_name);
         }
         self.insert_lock(object, parent, name, access)
     }
