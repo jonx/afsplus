@@ -264,3 +264,45 @@ fn a_held_lock_names_its_ancestors_after_the_parent_cache_is_pruned() {
     adapter.free_lock(current).unwrap();
     assert_eq!(names, [b"b".to_vec(), b"a".to_vec(), b"AFS+".to_vec()]);
 }
+
+#[test]
+fn examine_reports_the_stored_spelling_on_a_case_insensitive_volume() {
+    let vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let mut adapter = ArosAdapter::new(vfs, ArosConfig::default());
+
+    let file = adapter
+        .open(None, b"CaseTest", OpenMode::NewFile, timestamp(1))
+        .unwrap();
+    adapter.close(file).unwrap();
+
+    let lock = adapter
+        .locate(None, b"CASETEST", LockAccess::Shared)
+        .unwrap();
+    assert_eq!(adapter.examine_lock(lock).unwrap().name, b"CaseTest");
+    adapter.free_lock(lock).unwrap();
+
+    let reopened = adapter
+        .open(None, b"casetest", OpenMode::OldFile, timestamp(2))
+        .unwrap();
+    assert_eq!(adapter.examine_file(reopened).unwrap().name, b"CaseTest");
+    let from_file = adapter.lock_from_file(reopened).unwrap();
+    assert_eq!(adapter.examine_lock(from_file).unwrap().name, b"CaseTest");
+    adapter.free_lock(from_file).unwrap();
+    adapter.close(reopened).unwrap();
+
+    let dir = adapter
+        .create_directory(None, b"Work", timestamp(3))
+        .unwrap();
+    adapter.free_lock(dir).unwrap();
+    let inner_lock = adapter.locate(None, b"work", LockAccess::Shared).unwrap();
+    let inner = adapter
+        .open(Some(inner_lock), b"Draft", OpenMode::NewFile, timestamp(4))
+        .unwrap();
+    adapter.close(inner).unwrap();
+    let draft = adapter
+        .locate(Some(inner_lock), b"DRAFT", LockAccess::Shared)
+        .unwrap();
+    assert_eq!(adapter.examine_lock(draft).unwrap().name, b"Draft");
+    let parent = adapter.parent_lock(draft).unwrap().unwrap();
+    assert_eq!(adapter.examine_lock(parent).unwrap().name, b"Work");
+}

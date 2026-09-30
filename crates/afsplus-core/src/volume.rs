@@ -1090,11 +1090,34 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
+    /// Looks a name up and also returns the entry's stored spelling: on a
+    /// case-insensitive volume that is the creator's, which is what AmigaDOS
+    /// `Examine()` must report.
+    pub fn lookup_entry_in_directory(
+        &mut self,
+        directory_id: u64,
+        name: &str,
+    ) -> Result<Option<(u64, Vec<u8>)>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::LookupInDirectory, |volume| {
+            volume.lookup_entry_untraced(directory_id, name)
+        })
+    }
+
     fn lookup_in_directory_untraced(
         &mut self,
         directory_id: u64,
         name: &str,
     ) -> Result<Option<u64>, CoreError> {
+        Ok(self
+            .lookup_entry_untraced(directory_id, name)?
+            .map(|(child_id, _)| child_id))
+    }
+
+    fn lookup_entry_untraced(
+        &mut self,
+        directory_id: u64,
+        name: &str,
+    ) -> Result<Option<(u64, Vec<u8>)>, CoreError> {
         self.ensure_public_object_id(directory_id)?;
         validate_name(name.as_bytes()).map_err(CoreError::InvalidName)?;
         // Changes waiting in the open window are part of the namespace every
@@ -1104,7 +1127,7 @@ impl<D: BlockDevice> Volume<D> {
                 .comparison_key(name.as_bytes())
                 .and_then(|key| self.batch_lookup(&window.pending, directory_id, &key));
             self.window = Some(window);
-            return result.map(|entry| entry.map(|entry| entry.child_id));
+            return result.map(|entry| entry.map(|entry| (entry.child_id, entry.name)));
         }
         let directory_record = self.read_object(directory_id)?.ok_or(CoreError::NotFound)?;
         if directory_record.object_type != ObjectType::Directory {
@@ -1129,7 +1152,7 @@ impl<D: BlockDevice> Volume<D> {
                 )
             },
         )?;
-        Ok(entry.map(|entry| entry.child_id))
+        Ok(entry.map(|entry| (entry.child_id, entry.name)))
     }
 
     /// Lists the root directory as (original name, object ID) pairs.

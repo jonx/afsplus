@@ -460,15 +460,18 @@ impl<D: BlockDevice> ArosAdapter<D> {
             (base_object, parent, stored_name)
         } else {
             let decoded = self.decode_component(name)?;
-            let object_id = self.vfs.lookup(base_object, &decoded)?;
+            // The lock carries the on-disk spelling: on a case-insensitive
+            // volume Examine() reports the creator's case, not the caller's.
+            let (object_id, stored) = self.vfs.lookup_entry(base_object, &decoded)?;
             // dos.library resolves the link through ACTION_READ_LINK and
             // retries with the substituted path.
             if self.vfs.stat(object_id)?.kind == NodeKind::Symlink {
                 return Err(ArosError::IsSoftLink);
             }
+            let stored_name = self.encode_name(stored.as_bytes())?;
             self.known_parents
-                .insert(object_id, (Some(base_object), name.to_vec()));
-            (object_id, Some(base_object), name.to_vec())
+                .insert(object_id, (Some(base_object), stored_name.clone()));
+            (object_id, Some(base_object), stored_name)
         };
         self.insert_lock(object_id, parent, stored_name, access)
     }
@@ -636,16 +639,18 @@ impl<D: BlockDevice> ArosAdapter<D> {
         self.ensure_file_capacity()?;
         let parent = self.lock_object_or_root(base)?;
         let decoded = self.decode_component(name)?;
-        let existing = self.vfs.lookup(parent, &decoded);
-        let object_id = match (mode, existing) {
-            (OpenMode::OldFile, Ok(object_id))
-            | (OpenMode::ReadWrite, Ok(object_id))
-            | (OpenMode::NewFile, Ok(object_id)) => object_id,
+        let existing = self.vfs.lookup_entry(parent, &decoded);
+        let (object_id, stored_name) = match (mode, existing) {
+            (OpenMode::OldFile, Ok((object_id, stored)))
+            | (OpenMode::ReadWrite, Ok((object_id, stored)))
+            | (OpenMode::NewFile, Ok((object_id, stored))) => {
+                (object_id, self.encode_name(stored.as_bytes())?)
+            }
             (OpenMode::OldFile, Err(error)) => return Err(error.into()),
             (OpenMode::ReadWrite | OpenMode::NewFile, Err(VfsError::NotFound)) => {
                 let created = self.vfs.create_file(parent, &decoded, now)?;
                 self.touch(parent, &decoded);
-                created
+                (created, name.to_vec())
             }
             (_, Err(error)) => return Err(error.into()),
         };
@@ -662,7 +667,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
             LockAccess::Shared
         };
         self.acquire_object_lock(object_id, lock_access)?;
-        match self.open_locked(object_id, parent, name, mode, lock_access, now) {
+        match self.open_locked(object_id, parent, &stored_name, mode, lock_access, now) {
             Ok(handle) => Ok(handle),
             Err(error) => {
                 self.release_object_lock(object_id, lock_access);
