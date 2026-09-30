@@ -209,6 +209,12 @@ from checks independent of the author) is [the development method](implementatio
   format-change procedure in [CONTRIBUTING.md](CONTRIBUTING.md); an API change
   follows the API-change procedure there. ADRs are immutable except for their
   `Status:` and relation lines; numbers are never reused.
+- No compatibility debt before the first official release: nobody but us
+  uses AFS+ yet, so no image, on-disk format, encoding or API is kept for
+  compatibility with our own earlier work. When a break is the better
+  design, make it, record it in its ADR, and update every consumer and
+  tool in the same change. This ends with the first official release
+  (integration repository, D-113).
 - Documents that await team review go to [proposals/](proposals/README.md),
   never straight into `docs/`, `adr/` or `spec/`.
 - Before every commit: the Rust quality gate of
