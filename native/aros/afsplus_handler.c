@@ -840,11 +840,17 @@ static int32_t setup_dma_bounce(struct AfsplusArosHandler *handler)
     if ((SIPTR)environment->de_TableSize >= DE_BUFMEMTYPE)
         memory_flags |= (ULONG)environment->de_BufMemType;
     handler->bounce = AllocMem(handler->bounce_size, memory_flags);
-    if (handler->bounce == NULL)
-        return ERROR_NO_FREE_STORE;
-    if (!buffer_matches_mask(handler, handler->bounce, handler->bounce_size))
-        return ERROR_NO_FREE_STORE;
-    return 0;
+    if (handler->bounce != NULL
+        && buffer_matches_mask(handler, handler->bounce, handler->bounce_size))
+        return 0;
+    /* Failure only: the two refusals share one error number, and the mount
+     * message names the stage but not which one it was. */
+    bug("[AFSPLUS] dma-bounce refused: de_Mask=0x%lx mask=0x%lx "
+        "flags=0x%lx size=%lu bounce=%p\n",
+        (unsigned long)environment->de_Mask,
+        (unsigned long)handler->dma_mask, (unsigned long)memory_flags,
+        (unsigned long)handler->bounce_size, handler->bounce);
+    return ERROR_NO_FREE_STORE;
 }
 
 static int32_t open_device(struct AfsplusArosHandler *handler)
