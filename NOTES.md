@@ -253,7 +253,8 @@ failures with host cache retained, not electrical power-loss claims.
 
 The release handler compacts diagnostic symbol names while retaining allocated
 bytes, entry symbols and every loader relocation. The combined candidate is
-4,784,312 bytes before compaction, 3,830,704 after (19.93% saved), with 66,555
+4,784,312 bytes before compaction, 3,830,704 after (19.93% saved) for the
+Darwin Hosted SDK profile, with 66,555
 relocations checked and 604 bytes BSS. The complete original stays outside the
 installed package for symbolication. Actual Hosted LoadSeg and the four-part
 AFSPlusTour pass; the combined compact candidate also passes FORMAT and cuts.

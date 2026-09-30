@@ -171,7 +171,7 @@ profile variables:
 | `AFSPLUS_AROS_EXPECTED_PLATFORM` | unset | Required `AROS_TARGET_PLATFORM` value for a release profile |
 | `AFSPLUS_AROS_PROFILE_ID` | SDK platform | Human-readable package profile identity |
 | `AFSPLUS_AROS_OBJDUMP` | `$AROS_CROSSTOOLS/bin/llvm-objdump` | Disassembler used by the final machine-code ABI gate |
-| `AFSPLUS_AROS_OBJCOPY` | `$AROS_CROSSTOOLS/bin/llvm-objcopy` | Discards the module's local symbols before the audit |
+| `AFSPLUS_AROS_OBJCOPY` | `$AROS_CROSSTOOLS/bin/llvm-objcopy` | Compacts diagnostic symbol names while retaining loader relocations |
 | `AFSPLUS_AROS_RUST_TARGET_JSON` | MacAROS `aarch64-unknown-aros.json` | Rust target used with `-Zbuild-std` |
 | `AFSPLUS_AROS_RUST_ARCHIVE` | derived from the JSON filename | Optional explicit `libafsplus_aros_ffi.a` output |
 | `AFSPLUS_AROS_PLATFORM_GLUE_DIR` | MacAROS `hosted/rust` | Five AROS `std` C glue sources |

@@ -125,7 +125,8 @@ def compact(source, output, objcopy, source_revision=None, debug_output=None):
     output.chmod(0o755)
     result = {
         'source_revision': source_revision,
-        'source': str(source.resolve()), 'debug': str(debug.resolve()),
+        'source': str(source.resolve()),
+        'debug': debug.name if debug.parent == output.parent else str(debug.resolve()),
         'output_basename': output.name,
         'source_sha256': hashlib.sha256(original.data).hexdigest(),
         'output_sha256': hashlib.sha256(compacted.data).hexdigest(),

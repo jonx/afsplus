@@ -885,6 +885,9 @@ static int32_t prepare_filesystem(struct AfsplusArosHandler *handler)
     uint64_t physical_block_size;
     int32_t error;
 
+    /* Hosted debug macros use SysBase; the native bug() implementation does not. */
+    (void)SysBase;
+
     set_startup_stage(handler, "geometry-fields");
     if ((SIPTR)environment->de_TableSize < DE_HIGHCYL
         || (SIPTR)environment->de_SizeBlock <= 0
