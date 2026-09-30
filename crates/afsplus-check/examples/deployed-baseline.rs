@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 John Knipper
 
-//! Historical fixture producer. Run only to add a baseline, never to replace one.
+//! Historical fixture producer. Regenerate reference bytes only for a reviewed
+//! pre-release format decision, never to hide an unexplained regression.
 use std::io::Write;
 use std::path::Path;
 

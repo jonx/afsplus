@@ -1,5 +1,5 @@
 {
-  "contract": "protected-deployed-epoch1-0307e86",
+  "contract": "pre-release-epoch1-reference-0307e86",
   "reference_commit": "0307e86979ca532c0c88dd014d164e094ebb5d48",
   "wire": {
     "epoch": 1,
@@ -49,5 +49,5 @@
     "handler_commit": "0307e86979ca532c0c88dd014d164e094ebb5d48",
     "scope": "Exact initial deployed geometry and format bytes; excludes files copied or changed later on the M1."
   },
-  "replacement_policy": "Never regenerate these paths to make a failing reader pass. Register a new baseline alongside them."
+  "replacement_policy": "Investigate unintended failures. A deliberate pre-release format break updates all consumers, ADR/specification, fixtures, hashes and semantic expectations together under review; no legacy-reader or indefinite image-preservation obligation applies."
 }

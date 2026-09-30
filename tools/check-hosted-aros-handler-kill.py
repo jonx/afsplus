@@ -109,6 +109,8 @@ def main():
                     if acks and max(acks) >= cut_ack and writing and max(writing) > max(acks):
                         pid = kill_owned()
                         final = log.read_text(errors='replace')
+                        require('[AFSPLUS-KILL] FAIL' not in final and 'EXHAUSTED' not in final,
+                                'workload failed or finished before observed termination')
                         final_acks = [int(n) for n in re.findall(r'\[AFSPLUS-KILL\] ACK (\d+)\n', final)]
                         final_writes = [int(n) for n in re.findall(r'\[AFSPLUS-KILL\] WRITING (\d+)\n', final)]
                         require(final_acks and final_writes, 'missing final workload bounds')

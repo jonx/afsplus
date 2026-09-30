@@ -49,10 +49,11 @@ independent checks covers it, not when its own tests are green.
 No undirected test suite: no workspace run, no crate-wide run, no "quick"
 tier, no closing proof at the end of a stage or milestone. Run the named
 regressions affected by a change, including the
-[protected deployed-image gate](../spec/compatibility-rules.md#protected-deployed-images)
-when its format or filesystem paths change. A public release is not a
-prerequisite for a compatibility obligation. Other regressions enter with
-the real defect or independently specified contract they pin.
+[reference-image gate](../spec/compatibility-rules.md#pre-release-format-changes)
+when its format or filesystem paths change. Its retained images detect
+unintended regressions; they do not require legacy compatibility before the
+first official release. Other regressions enter with the real defect or
+independently specified contract they pin.
 
 A lot is integrated on three things: the named tests of what it built, run
 alone; formatting, Clippy and the documentation checker, which are compile
@@ -62,15 +63,15 @@ those, the story goes to [NOTES.md](../NOTES.md), commit, push.
 
 ## Format changes
 
-Deployed AROS images follow the
-[protected-image compatibility contract](../spec/compatibility-rules.md#protected-deployed-images).
-When a feature or fix changes an on-disk record, field, size or placement,
-the codec, formatter, mount, checker, portable C reader, spec header and
-documents change together, and the decision is written as an ADR. Preserve
-the registered baselines; do not assume an image is disposable because
-there has been no public release. Every publication keeps two legal states
-under a power cut, both readers agree, and retained conformance images pin
-the accepted layouts.
+Before the first official release, apply the
+[pre-release format rule](../spec/compatibility-rules.md#pre-release-format-changes):
+prefer the better design over compatibility with our own earlier work. An
+intentional break records its reason in an ADR and updates the codec,
+formatter, mount, checker, portable C reader, adapters, tools and specification
+together. Update the version/feature admission rules and regenerate affected
+internal images and test fixtures under review. Do not retain a legacy path
+solely for those images. Every publication keeps two legal states under a
+power cut, both readers agree, and conformance tests pin the chosen layout.
 
 ## Lots and agents
 

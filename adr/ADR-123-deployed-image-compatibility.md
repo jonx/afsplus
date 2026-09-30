@@ -1,7 +1,8 @@
 # ADR-123: Preserve registered deployed images before the global format freeze
 
-Status: Accepted
+Status: Superseded
 Amends: ADR-104, ADR-115
+Superseded by: ADR-124
 
 ## Context
 

@@ -1,4 +1,5 @@
-//! Read retained writer bytes, rather than formatting with the reader under test.
+//! Detect unintended changes using retained writer bytes. Deliberate pre-release
+//! format changes update these fixtures and their oracle together (ADR-124).
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -116,7 +117,7 @@ fn retained_bytes_and_wire_identity_are_fixed() {
 }
 
 #[test]
-fn protected_clean_image_is_readable_and_writable_without_conversion() {
+fn reference_clean_image_is_readable_and_writable_without_conversion() {
     let mut volume = mount_with_options(
         TraceBackend::new(image(CLEAN, 1024)),
         MountOptions {

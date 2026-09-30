@@ -1,44 +1,49 @@
 # Compatibility Rules
 
+## Pre-release format changes
+
+Before the first official release, AFS+ has no obligation to preserve an
+internal image, encoding or API. When an incompatible change is the better
+design, make it deliberately and update every reader, writer, adapter,
+checker and tool in the same change. Do not add legacy readers or automatic
+migration solely to keep our own prototype images working. This follows
+[ADR-124](../adr/ADR-124-pre-release-format-evolution.md) and the owner's
+standing rule in [AGENTS.md](../AGENTS.md).
+
+A format break is not silent: record its reason and compatibility
+classification in an ADR, choose the epoch, record version or feature
+identity appropriate to the change, update the specification, and refresh
+conformance fixtures and their semantic expectations under review. Retired
+identities are not reused. A new handler and the image provisioned for it
+must come from matching producers; an internal SYS image may be regenerated
+as part of that coordinated change. The first official release ends this
+pre-release rule and requires an explicit published compatibility contract.
+
+The [reference manifest](../crates/afsplus-check/tests/fixtures/deployed-epoch1/manifest.json)
+records writer `0307e86979ca532c0c88dd014d164e094ebb5d48`: epoch 1,
+identification version 3, common header version 1, 4 KiB blocks, 168-byte
+checkpoints without snapshots, and Unicode 16.0.0 comparison keys. It also
+records the exact M1 `System` initializer, 80 KiB followed by zeros to
+256 MiB. The initializer's formatter commit is unrecorded; its bytes,
+geometry and hash identify this test input, not an indefinite support promise.
+
+The [reference-image tests](../crates/afsplus-check/tests/deployed_compatibility.rs)
+load retained bytes rather than the formatter under test. They detect
+unintended changes to names, data, metadata, mutation/remount, log replay
+and refusal before writes. Run
+`cargo test -p afsplus-check --test deployed_compatibility` when those paths
+change. A failure requires investigation; it must not be hidden by casually
+regenerating expected bytes. An agreed format break updates the fixtures,
+hashes, manifest and semantic oracle together, and does not require retaining
+old decoders or obsolete images. Existing images need no byte change merely
+to adopt this policy.
+
 ## Protected deployed images
 
-This contract follows [ADR-123](../adr/ADR-123-deployed-image-compatibility.md).
-
-An image used as an AROS system volume is a compatibility obligation even
-before a public release. A registered baseline fixes the accepted bytes and
-semantics, not just the integer epoch. Epoch 1 alone does not distinguish
-the historical prototype layouts.
-
-The protected baseline is
-[`deployed-epoch1/manifest.json`](../crates/afsplus-check/tests/fixtures/deployed-epoch1/manifest.json).
-Its reference writer is `0307e86979ca532c0c88dd014d164e094ebb5d48`:
-epoch 1, identification version 3, common header version 1, 4 KiB blocks,
-168-byte checkpoints without snapshots, and Unicode 16.0.0 comparison
-keys. It also retains the exact initializer used for the M1 `System`
-volume: 80 KiB followed by zeros to 256 MiB. The initializer's formatter
-commit is unrecorded; the bytes, geometry and hash are the authority.
-
-Changes must preserve reading, recovery and safe writing of these images
-without an implicit conversion. A decoder may reject corruption; it must
-not redefine valid baseline data as corruption to retire a layout. Feature
-identities and wire versions are never reused. A new incompatible encoding
-requires explicit negotiation and a separately invoked migration that
-preserves the original image; mounting is not migration permission.
-
-The historical 96/112-byte checkpoint layouts are not this baseline and
-remain unsupported. This contract does not assert completion of the global
-epoch-1 freeze gates or qualification of every optional feature.
-
-The [compatibility tests](../crates/afsplus-check/tests/deployed_compatibility.rs)
-load immutable bytes rather than the formatter under test. They check
-literal hashes/identity, case-insensitive names, data and metadata, ordinary
-mutation and remount, pending-log recovery, and refusal of unknown epochs
-or incompatible features before any write. The retained M1 initializer
-protects its initial geometry and encoding, not the user's later files.
-Run `cargo test -p afsplus-check --test deployed_compatibility` for changes
-to format, mount, replay, mutation or admission rules. A new baseline is
-added alongside existing fixtures; a failed test is never repaired by
-regenerating a protected fixture.
+There is no protected-image compatibility class before the first official
+release. This heading is the historical link target used by superseded
+[ADR-123](../adr/ADR-123-deployed-image-compatibility.md); the operative rule is
+[Pre-release format changes](#pre-release-format-changes).
 
 ## Mount decision algorithm
 

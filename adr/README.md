@@ -151,7 +151,8 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-120](ADR-120-comment-and-protection-as-host-attributes.md) | The comment and the protection word are host attributes | Accepted | amends [ADR-108](ADR-108-extended-attributes.md) |
 | [ADR-121](ADR-121-delayed-group-commit.md) | Changes are durable within seconds, or at once on request | Accepted | amends [ADR-063](ADR-063-intent-log-epoch1.md) |
 | [ADR-122](ADR-122-aros-partition-identity.md) | An AFS+ partition is an AROS GPT partition of DosType AFS+ | Accepted | amends [ADR-045](ADR-045-native-aros-handler-shell.md) |
-| [ADR-123](ADR-123-deployed-image-compatibility.md) | Preserve registered deployed images before the global format freeze | Accepted | amends [ADR-104](ADR-104-volume-label-in-checkpoint.md), [ADR-115](ADR-115-retire-unwritten-surface.md) |
+| [ADR-123](ADR-123-deployed-image-compatibility.md) | Preserve registered deployed images before the global format freeze | Superseded | amends [ADR-104](ADR-104-volume-label-in-checkpoint.md), [ADR-115](ADR-115-retire-unwritten-surface.md); superseded by [ADR-124](ADR-124-pre-release-format-evolution.md) |
+| [ADR-124](ADR-124-pre-release-format-evolution.md) | Prefer coordinated format changes over pre-release compatibility debt | Accepted | supersedes [ADR-123](ADR-123-deployed-image-compatibility.md) |
 
 <!-- /adr-index -->
 

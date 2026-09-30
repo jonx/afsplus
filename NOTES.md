@@ -258,8 +258,10 @@ relocations checked and 604 bytes BSS. The complete original stays outside the
 installed package for symbolication. Actual Hosted LoadSeg and the four-part
 AFSPlusTour pass; the combined compact candidate also passes FORMAT and cuts.
 
-[ADR-123](adr/ADR-123-deployed-image-compatibility.md) protects actual deployed
-images without pretending that all of milestone M14 is frozen. Six regression
+[ADR-124](adr/ADR-124-pre-release-format-evolution.md) keeps current image fixtures
+as regression evidence without freezing the pre-release format (D-113).
+Deliberate breaks update the decision, relevant version, all consumers and
+reviewed fixtures together; no legacy readers or migration promises are added. Six regression
 tests include immutable current clean/replay fixtures and the exact 80 KiB
 initializer used by the M1 SYS image, extended to its declared 256 MiB size.
 Unknown incompatible epochs/features are rejected before writes. The on-disk

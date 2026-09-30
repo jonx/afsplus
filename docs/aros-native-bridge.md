@@ -387,7 +387,7 @@ handler unmounts the old instance before `afsplus_aros_format` (FORMAT group,
 interface revision 20) writes the device, then mounts and registers the
 committed label. The label is converted from the mount's encoding, including
 Latin-1, to UTF-8. The formatter creates the
-[protected epoch-1 profile](../spec/compatibility-rules.md#protected-deployed-images)
+[reference epoch-1 profile](../spec/compatibility-rules.md#pre-release-format-changes)
 with case-insensitive names. Validation fails before writes; an interrupted
 format is destructive and non-atomic. A failed attempt remounts any readable
 volume or leaves the device in its not-DOS state. No implicit migration is

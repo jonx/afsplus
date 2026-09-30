@@ -374,7 +374,7 @@ int32_t afsplus_aros_interface(struct AfsplusArosInterface *output);
  * device must be exclusively owned with every old instance unmounted.
  * uuid points to sixteen bytes. Label uses the requested name encoding;
  * DOS separators, empty names and more than 64 encoded UTF-8 bytes fail
- * before writes. Creates the protected epoch-1 case-insensitive profile.
+ * before writes. Creates the reference epoch-1 case-insensitive profile.
  * Call afsplus_aros_mount afterwards to obtain the new volume. */
 int32_t afsplus_aros_format(const struct AfsplusArosDevice *device,
     uint32_t name_encoding, const uint8_t *label, uint32_t label_length,
