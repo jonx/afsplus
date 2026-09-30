@@ -184,12 +184,7 @@ fn component_loop(
 
 /// Resolves `path` both ways, one at a time so that an exclusive request
 /// does not collide with itself, and returns what both agreed on.
-fn agree(
-    filesystem: *mut AfsplusAros,
-    base: u64,
-    path: &str,
-    access: u32,
-) -> Result<Facts, i32> {
+fn agree(filesystem: *mut AfsplusAros, base: u64, path: &str, access: u32) -> Result<Facts, i32> {
     let by_loop = component_loop(filesystem, base, path.as_bytes(), access).map(|lock| {
         let facts = facts(filesystem, lock);
         assert_eq!(afsplus_aros_free_lock(filesystem, lock), 0);
@@ -251,16 +246,7 @@ fn tree(filesystem: *mut AfsplusAros) {
     );
     assert_eq!(afsplus_aros_close(filesystem, file), 0);
     assert_eq!(
-        afsplus_aros_make_soft_link(
-            filesystem,
-            0,
-            b"link".as_ptr(),
-            4,
-            b"one".as_ptr(),
-            3,
-            1,
-            0
-        ),
+        afsplus_aros_make_soft_link(filesystem, 0, b"link".as_ptr(), 4, b"one".as_ptr(), 3, 1, 0),
         0
     );
 }
@@ -281,7 +267,10 @@ fn one_call_resolves_the_path_the_component_loop_resolves() {
     // the base lock is.
     let base = component_loop(filesystem, 0, b"one/two", SHARED).unwrap();
     assert_eq!(agree(filesystem, base, ":one/two", SHARED).unwrap(), two);
-    assert_eq!(agree(filesystem, base, "AFS+:one/two", SHARED).unwrap(), two);
+    assert_eq!(
+        agree(filesystem, base, "AFS+:one/two", SHARED).unwrap(),
+        two
+    );
     assert_eq!(agree(filesystem, base, "AFS+:", SHARED).unwrap(), root);
 
     // An empty component is the parent operation, and a trailing separator
@@ -324,7 +313,10 @@ fn one_call_resolves_the_path_the_component_loop_resolves() {
         agree(filesystem, 0, "link/two", SHARED),
         Err(ERROR_IS_SOFT_LINK)
     );
-    assert_eq!(agree(filesystem, 0, "link", SHARED), Err(ERROR_IS_SOFT_LINK));
+    assert_eq!(
+        agree(filesystem, 0, "link", SHARED),
+        Err(ERROR_IS_SOFT_LINK)
+    );
 
     // A file is not a directory to walk through.
     let file = component_loop(filesystem, 0, b"file", SHARED).unwrap();

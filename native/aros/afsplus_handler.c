@@ -1260,6 +1260,17 @@ static void cleanup_handler(struct AfsplusArosHandler *handler)
     (void)LocaleBase;
 }
 
+/* Rust panic text, one line, to the debug console; the abort follows. */
+static struct ExecBase *panic_log_sysbase;
+
+static void panic_log(const uint8_t *line)
+{
+    struct ExecBase *SysBase = panic_log_sysbase;
+
+    if (SysBase != NULL)
+        bug("%s\n", (const char *)line);
+}
+
 static struct AfsplusArosHandler *initialize_handler(struct ExecBase *SysBase,
     struct Process *process, struct DosPacket *startup_packet, int32_t *error)
 {
@@ -1273,6 +1284,8 @@ static struct AfsplusArosHandler *initialize_handler(struct ExecBase *SysBase,
         return NULL;
     }
     handler->SysBase = SysBase;
+    panic_log_sysbase = SysBase;
+    (void)afsplus_aros_install_panic_log(panic_log);
     set_startup_stage(handler, "startup-message");
     handler->process = process;
     handler->handler_port = &process->pr_MsgPort;

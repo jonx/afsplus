@@ -26,6 +26,16 @@ target_json=${AFSPLUS_AROS_RUST_TARGET_JSON:-"$macaros_root/hosted/rust/aarch64-
 platform_glue_dir=${AFSPLUS_AROS_PLATFORM_GLUE_DIR:-"$macaros_root/hosted/rust"}
 aros_clang="$aros_crosstools/bin/clang"
 developer="$sdk/AROS/Developer"
+# A package built from a checkout behind its origin measures the wrong
+# handler; a week of AFS+ conclusions was once drawn from one. Refuse unless
+# the caller says the lag is intended.
+if [ -z "${AFSPLUS_ALLOW_STALE_CHECKOUT:-}" ] && git -C "$repo_root" fetch -q origin 2>/dev/null; then
+    behind=$(git -C "$repo_root" rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
+    if [ "$behind" != 0 ]; then
+        echo "package-aros-alpha0: this checkout is $behind commit(s) behind origin/main; merge first, or set AFSPLUS_ALLOW_STALE_CHECKOUT=1" >&2
+        exit 75
+    fi
+fi
 staging=$(mktemp -d "${TMPDIR:-/tmp}/afsplus-aros-package.XXXXXX")
 
 cleanup() {

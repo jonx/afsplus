@@ -571,7 +571,10 @@ fn info_reports_which_profiles_can_take_the_volume() {
     let classic = dir.join("classic.afsp");
     let workstation = dir.join("workstation.afsp");
     assert_status(&format_image(&classic, &["--profile", "classic-rw"]), 0);
-    assert_status(&format_image(&workstation, &["--profile", "workstation"]), 0);
+    assert_status(
+        &format_image(&workstation, &["--profile", "workstation"]),
+        0,
+    );
 
     let text = stdout(&run("afsplus-info", [classic.to_str().unwrap()]));
     assert!(text.contains("  classic-rw: full\n"), "{text}");
@@ -585,7 +588,18 @@ fn info_reports_which_profiles_can_take_the_volume() {
     );
     assert!(text.contains("  workstation: full\n"), "{text}");
 
-    let json = stdout(&run("afsplus-info", ["--json", workstation.to_str().unwrap()]));
-    assert!(json.contains("\"compatibility\":{\"profiles\":{\"reader-minimal\":{\"verdict\":\"read-only\""), "{json}");
-    assert!(json.contains("\"portable_c_reader\":{\"verdict\":\"reads\",\"beyond\":[]}"), "{json}");
+    let json = stdout(&run(
+        "afsplus-info",
+        ["--json", workstation.to_str().unwrap()],
+    ));
+    assert!(
+        json.contains(
+            "\"compatibility\":{\"profiles\":{\"reader-minimal\":{\"verdict\":\"read-only\""
+        ),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"portable_c_reader\":{\"verdict\":\"reads\",\"beyond\":[]}"),
+        "{json}"
+    );
 }

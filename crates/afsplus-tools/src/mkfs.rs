@@ -98,6 +98,9 @@ where
         Ok(ParseResult::Help) => {
             println!("{USAGE}");
             println!(
+                "An AROS volume needs --case-insensitive (AmigaDOS matches names without case) and --label NAME (the label is the volume name AROS shows)."
+            );
+            println!(
                 "Profiles: reader-minimal, classic-rw, boot-safe, workstation (default), full."
             );
             return EXIT_OK;
@@ -530,7 +533,12 @@ fn print_summary(summary: &FormatSummary, json: bool) {
             DEFAULT_BLOCK_SIZE,
             MAX_REGION_BLOCKS,
             summary.profile.name(),
-            algorithm,
+            match summary.name_policy {
+                NamePolicy::Sensitive => {
+                    "unicode-nfc (case-sensitive; not for AROS, which needs --case-insensitive)"
+                }
+                NamePolicy::Insensitive => "unicode-nfc-casefold (case-insensitive, AROS)",
+            },
             features.join(", "),
         );
     }

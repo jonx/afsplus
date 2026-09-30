@@ -998,6 +998,37 @@ pub extern "C" fn afsplus_aros_mount(
     })
 }
 
+/// Routes Rust panic messages to the handler's own log before the abort:
+/// a handler process has no `Output()`, so std's default report is lost.
+/// The callback receives one NUL-terminated line and must not retain it.
+#[no_mangle]
+pub extern "C" fn afsplus_aros_install_panic_log(
+    log: Option<unsafe extern "C" fn(*const u8)>,
+) -> i32 {
+    let Some(log) = log else {
+        return ArosError::InvalidComponentName.io_error();
+    };
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|at| format!("{}:{}", at.file(), at.line()))
+            .unwrap_or_else(|| "?".to_owned());
+        let message = if let Some(text) = info.payload().downcast_ref::<&str>() {
+            (*text).to_owned()
+        } else if let Some(text) = info.payload().downcast_ref::<String>() {
+            text.clone()
+        } else {
+            "non-string panic payload".to_owned()
+        };
+        let mut line = format!("[AFSPLUS] panic at {location}: {message}").into_bytes();
+        line.retain(|byte| *byte != 0);
+        line.push(0);
+        // SAFETY: the line is NUL-terminated and outlives the call.
+        unsafe { log(line.as_ptr()) };
+    }));
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn afsplus_aros_unmount(filesystem: *mut AfsplusAros) -> i32 {
     ffi_status(|| {

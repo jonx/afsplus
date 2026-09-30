@@ -418,16 +418,49 @@ fn mkdir_phase() {
     let fs = common::mount_sized(&mut device, 131072);
     let mut g = 0;
     assert_eq!(afsplus_aros_set_cache_blocks(fs, 64, &mut g), 0);
-    if std::env::var("SYNC").is_err() { assert_eq!(afsplus_aros_set_commit_policy(fs, 5_000, 1_000), 0); }
-    let mk = |fs, base: u64, name: &str| { let mut l = 0; assert_eq!(afsplus_aros_create_directory(fs, base, name.as_ptr(), name.len() as u32, now().0, 0, &mut l), 0); l };
+    if std::env::var("SYNC").is_err() {
+        assert_eq!(afsplus_aros_set_commit_policy(fs, 5_000, 1_000), 0);
+    }
+    let mk = |fs, base: u64, name: &str| {
+        let mut l = 0;
+        assert_eq!(
+            afsplus_aros_create_directory(
+                fs,
+                base,
+                name.as_ptr(),
+                name.len() as u32,
+                now().0,
+                0,
+                &mut l
+            ),
+            0
+        );
+        l
+    };
     let file = |fs, dir: u64, name: &str| {
         let t = now();
         let mut handle = 0;
-        assert_eq!(afsplus_aros_open(fs, dir, name.as_ptr(), name.len() as u32, AFSPLUS_AROS_OPEN_NEW_FILE, t.0, t.1, &mut handle), 0);
+        assert_eq!(
+            afsplus_aros_open(
+                fs,
+                dir,
+                name.as_ptr(),
+                name.len() as u32,
+                AFSPLUS_AROS_OPEN_NEW_FILE,
+                t.0,
+                t.1,
+                &mut handle
+            ),
+            0
+        );
         let mut c = 0;
-        assert_eq!(afsplus_aros_write(fs, handle, [0x33u8; 1200].as_ptr(), 1200, t.0, t.1, &mut c), 0);
+        assert_eq!(
+            afsplus_aros_write(fs, handle, [0x33u8; 1200].as_ptr(), 1200, t.0, t.1, &mut c),
+            0
+        );
         assert_eq!(afsplus_aros_close(fs, handle), 0);
-        let mut pending = 0; assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);
+        let mut pending = 0;
+        assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);
     };
     let bench = mk(fs, 0, "bench");
     assert_eq!(afsplus_aros_flush(fs), 0);
@@ -435,7 +468,10 @@ fn mkdir_phase() {
     // The drawers alone, so the per-drawer cost is not mixed with the files.
     let c0 = counters(fs);
     let start = Instant::now();
-    for d in 0..DIRS { let l = mk(fs, bench, &format!("e{d:02}")); assert_eq!(afsplus_aros_free_lock(fs, l), 0); }
+    for d in 0..DIRS {
+        let l = mk(fs, bench, &format!("e{d:02}"));
+        assert_eq!(afsplus_aros_free_lock(fs, l), 0);
+    }
     let bare = start.elapsed();
     let c1 = counters(fs);
     let n = DIRS as u64;
@@ -449,16 +485,22 @@ fn mkdir_phase() {
     let start = Instant::now();
     for d in 0..DIRS {
         let l = mk(fs, bench, &format!("d{d:02}"));
-        for f in 0..FILES { file(fs, l, &format!("f{f:02}.c")); }
+        for f in 0..FILES {
+            file(fs, l, &format!("f{f:02}.c"));
+        }
         assert_eq!(afsplus_aros_free_lock(fs, l), 0);
     }
     let took = start.elapsed();
     let c3 = counters(fs);
     let ops = (DIRS + DIRS * FILES) as u64;
-    eprintln!("drawers with files: {DIRS} drawers of {FILES} files ({ops} operations) in {took:?}; \
+    eprintln!(
+        "drawers with files: {DIRS} drawers of {FILES} files ({ops} operations) in {took:?}; \
         per drawer {:.2} flushes, {:.1} writes; per operation {:.3} flushes, {:.2} writes",
-        (c3.device_flushes - c2.device_flushes) as f64 / n as f64, (c3.device_writes - c2.device_writes) as f64 / n as f64,
-        (c3.device_flushes - c2.device_flushes) as f64 / ops as f64, (c3.device_writes - c2.device_writes) as f64 / ops as f64);
+        (c3.device_flushes - c2.device_flushes) as f64 / n as f64,
+        (c3.device_writes - c2.device_writes) as f64 / n as f64,
+        (c3.device_flushes - c2.device_flushes) as f64 / ops as f64,
+        (c3.device_writes - c2.device_writes) as f64 / ops as f64
+    );
     assert_eq!(afsplus_aros_unmount(fs), 0);
 }
 
@@ -697,16 +739,30 @@ fn piecewise_write() {
     // pieces, as compilers and editors do, against one that writes it with a
     // single Write. Both go through the C boundary on a delayed mount.
     use afsplus_block::MemoryBackend;
-    let files: usize = std::env::var("FILES").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
-    let size: usize = std::env::var("SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(192 * 1024);
-    let piece: usize = std::env::var("PIECE").ok().and_then(|v| v.parse().ok()).unwrap_or(8 * 1024);
+    let files: usize = std::env::var("FILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64);
+    let size: usize = std::env::var("SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(192 * 1024);
+    let piece: usize = std::env::var("PIECE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8 * 1024);
     let mut device = common::format(MemoryBackend::new(4096, 131072), true);
     let fs = common::mount_sized(&mut device, 131072);
     let mut g = 0;
     assert_eq!(afsplus_aros_set_cache_blocks(fs, 64, &mut g), 0);
-    if std::env::var("SYNC").is_err() { assert_eq!(afsplus_aros_set_commit_policy(fs, 5_000, 1_000), 0); }
+    if std::env::var("SYNC").is_err() {
+        assert_eq!(afsplus_aros_set_commit_policy(fs, 5_000, 1_000), 0);
+    }
     let mut dir = 0;
-    assert_eq!(afsplus_aros_create_directory(fs, 0, b"pieces".as_ptr(), 6, now().0, 0, &mut dir), 0);
+    assert_eq!(
+        afsplus_aros_create_directory(fs, 0, b"pieces".as_ptr(), 6, now().0, 0, &mut dir),
+        0
+    );
     assert_eq!(afsplus_aros_flush(fs), 0);
     let content: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
     let one_call = std::env::var("ONE_CALL").is_ok();
@@ -716,13 +772,36 @@ fn piecewise_write() {
         let name = format!("piece{f:03}.o");
         let t = now();
         let mut file = 0;
-        assert_eq!(afsplus_aros_open(fs, dir, name.as_ptr(), name.len() as u32, AFSPLUS_AROS_OPEN_NEW_FILE, t.0, t.1, &mut file), 0);
+        assert_eq!(
+            afsplus_aros_open(
+                fs,
+                dir,
+                name.as_ptr(),
+                name.len() as u32,
+                AFSPLUS_AROS_OPEN_NEW_FILE,
+                t.0,
+                t.1,
+                &mut file
+            ),
+            0
+        );
         let mut at = 0usize;
         while at < size {
             let take = piece.min(size - at);
             let take = if one_call { size } else { take };
             let mut c = 0;
-            assert_eq!(afsplus_aros_write(fs, file, content[at..at + take].as_ptr(), take as u32, t.0, t.1, &mut c), 0);
+            assert_eq!(
+                afsplus_aros_write(
+                    fs,
+                    file,
+                    content[at..at + take].as_ptr(),
+                    take as u32,
+                    t.0,
+                    t.1,
+                    &mut c
+                ),
+                0
+            );
             assert_eq!(c as usize, take);
             at += take;
         }
@@ -738,10 +817,25 @@ fn piecewise_write() {
         let name = format!("piece{f:03}.o");
         let t = now();
         let mut file = 0;
-        assert_eq!(afsplus_aros_open(fs, dir, name.as_ptr(), name.len() as u32, AFSPLUS_AROS_OPEN_OLD_FILE, t.0, t.1, &mut file), 0);
+        assert_eq!(
+            afsplus_aros_open(
+                fs,
+                dir,
+                name.as_ptr(),
+                name.len() as u32,
+                AFSPLUS_AROS_OPEN_OLD_FILE,
+                t.0,
+                t.1,
+                &mut file
+            ),
+            0
+        );
         let mut back = vec![0u8; size];
         let mut got = 0;
-        assert_eq!(afsplus_aros_read(fs, file, back.as_mut_ptr(), size as u32, &mut got), 0);
+        assert_eq!(
+            afsplus_aros_read(fs, file, back.as_mut_ptr(), size as u32, &mut got),
+            0
+        );
         assert_eq!(got as usize, size, "{name} short read");
         assert!(back == content, "{name} came back changed");
         assert_eq!(afsplus_aros_close(fs, file), 0);
@@ -816,7 +910,10 @@ static CHECKPOINTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 /// `EventKind::CheckpointDurable`.
 const CHECKPOINT_DURABLE: u16 = 5;
 
-unsafe extern "C" fn count_checkpoints(_context: *mut std::ffi::c_void, event: *const AfspTraceEvent) {
+unsafe extern "C" fn count_checkpoints(
+    _context: *mut std::ffi::c_void,
+    event: *const AfspTraceEvent,
+) {
     // SAFETY: the recorder passes one readable event for the call.
     let event = unsafe { &*event };
     if event.event == CHECKPOINT_DURABLE {
@@ -873,7 +970,15 @@ fn delete_tree_phase() {
         let mut l = 0;
         let t = now();
         assert_eq!(
-            afsplus_aros_create_directory(fs, base, name.as_ptr(), name.len() as u32, t.0, t.1, &mut l),
+            afsplus_aros_create_directory(
+                fs,
+                base,
+                name.as_ptr(),
+                name.len() as u32,
+                t.0,
+                t.1,
+                &mut l
+            ),
             0,
             "create directory {name}"
         );
@@ -899,12 +1004,32 @@ fn delete_tree_phase() {
                 let at = now();
                 let mut file = 0;
                 assert_eq!(
-                    afsplus_aros_open(fs, dl, name.as_ptr(), name.len() as u32, AFSPLUS_AROS_OPEN_NEW_FILE, at.0, at.1, &mut file),
+                    afsplus_aros_open(
+                        fs,
+                        dl,
+                        name.as_ptr(),
+                        name.len() as u32,
+                        AFSPLUS_AROS_OPEN_NEW_FILE,
+                        at.0,
+                        at.1,
+                        &mut file
+                    ),
                     0
                 );
                 if size > 0 {
                     let mut written = 0;
-                    assert_eq!(afsplus_aros_write(fs, file, bytes.as_mut_ptr(), size, at.0, at.1, &mut written), 0);
+                    assert_eq!(
+                        afsplus_aros_write(
+                            fs,
+                            file,
+                            bytes.as_mut_ptr(),
+                            size,
+                            at.0,
+                            at.1,
+                            &mut written
+                        ),
+                        0
+                    );
                 }
                 assert_eq!(afsplus_aros_close(fs, file), 0);
                 let mut pending = 0;
@@ -991,7 +1116,10 @@ fn delete_tree_phase() {
         c1.device_writes - c0.device_writes,
         checkpoints1 - checkpoints0
     );
-    eprintln!("{:<16} {:>7} {:>9} {:>9} {:>12} {:>9}", "call site", "calls", "flushes", "writes", "checkpoints", "flush/call");
+    eprintln!(
+        "{:<16} {:>7} {:>9} {:>9} {:>12} {:>9}",
+        "call site", "calls", "flushes", "writes", "checkpoints", "flush/call"
+    );
     for (name, bucket) in [
         ("delete file", files_bucket),
         ("remove drawer", drawers_bucket),
@@ -1045,7 +1173,10 @@ fn room_floor_loop() {
 
     let mut dir = 0;
     let t = now();
-    assert_eq!(afsplus_aros_create_directory(fs, 0, "load".as_ptr(), 4, t.0, t.1, &mut dir), 0);
+    assert_eq!(
+        afsplus_aros_create_directory(fs, 0, "load".as_ptr(), 4, t.0, t.1, &mut dir),
+        0
+    );
     assert_eq!(afsplus_aros_flush(fs), 0);
 
     // Fill until the free space is about the floor the commit keeps: an
@@ -1057,9 +1188,25 @@ fn room_floor_loop() {
         let name = format!("l{files:04}.d");
         let t = now();
         let mut file = 0;
-        assert_eq!(afsplus_aros_open(fs, dir, name.as_ptr(), name.len() as u32, AFSPLUS_AROS_OPEN_NEW_FILE, t.0, t.1, &mut file), 0, "fill {name}");
+        assert_eq!(
+            afsplus_aros_open(
+                fs,
+                dir,
+                name.as_ptr(),
+                name.len() as u32,
+                AFSPLUS_AROS_OPEN_NEW_FILE,
+                t.0,
+                t.1,
+                &mut file
+            ),
+            0,
+            "fill {name}"
+        );
         let mut written = 0;
-        assert_eq!(afsplus_aros_write(fs, file, bytes.as_ptr(), 4096, t.0, t.1, &mut written), 0);
+        assert_eq!(
+            afsplus_aros_write(fs, file, bytes.as_ptr(), 4096, t.0, t.1, &mut written),
+            0
+        );
         assert_eq!(afsplus_aros_close(fs, file), 0);
         let mut pending = 0;
         assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);
@@ -1067,7 +1214,10 @@ fn room_floor_loop() {
         assert!(files < 100_000, "the volume never filled");
     }
     assert_eq!(afsplus_aros_flush(fs), 0);
-    eprintln!("ROOM FLOOR {blocks} blocks, floor {floor}, {files} files, {} free", free_blocks(fs));
+    eprintln!(
+        "ROOM FLOOR {blocks} blocks, floor {floor}, {files} files, {} free",
+        free_blocks(fs)
+    );
 
     // The loop itself: delete a file and make it again, never idle, so every
     // window commit meets the floor.
@@ -1079,14 +1229,34 @@ fn room_floor_loop() {
         for f in 0..files {
             let name = format!("l{f:04}.d");
             let t = now();
-            assert_eq!(afsplus_aros_delete_object(fs, dir, name.as_ptr(), name.len() as u32, t.0, t.1), 0, "delete {name}");
+            assert_eq!(
+                afsplus_aros_delete_object(fs, dir, name.as_ptr(), name.len() as u32, t.0, t.1),
+                0,
+                "delete {name}"
+            );
             let mut pending = 0;
             assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);
             let t = now();
             let mut file = 0;
-            assert_eq!(afsplus_aros_open(fs, dir, name.as_ptr(), name.len() as u32, AFSPLUS_AROS_OPEN_NEW_FILE, t.0, t.1, &mut file), 0, "remake {name}");
+            assert_eq!(
+                afsplus_aros_open(
+                    fs,
+                    dir,
+                    name.as_ptr(),
+                    name.len() as u32,
+                    AFSPLUS_AROS_OPEN_NEW_FILE,
+                    t.0,
+                    t.1,
+                    &mut file
+                ),
+                0,
+                "remake {name}"
+            );
             let mut written = 0;
-            assert_eq!(afsplus_aros_write(fs, file, bytes.as_ptr(), 4096, t.0, t.1, &mut written), 0);
+            assert_eq!(
+                afsplus_aros_write(fs, file, bytes.as_ptr(), 4096, t.0, t.1, &mut written),
+                0
+            );
             assert_eq!(afsplus_aros_close(fs, file), 0);
             let mut pending = 0;
             assert_eq!(afsplus_aros_commit_due(fs, t.0, t.1, &mut pending), 0);

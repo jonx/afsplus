@@ -76,7 +76,10 @@ fn heap_after_mount_at_three_buffer_counts() {
 /// Reads enough of the volume to fill a read cache: every entry of the root.
 fn walk(filesystem: *mut AfsplusAros) {
     let mut lock = 0;
-    assert_eq!(afsplus_aros_locate(filesystem, 0, b"".as_ptr(), 0, 0, &mut lock), 0);
+    assert_eq!(
+        afsplus_aros_locate(filesystem, 0, b"".as_ptr(), 0, 0, &mut lock),
+        0
+    );
     let mut info = AfsplusArosFileInfo::default();
     let mut name = [0u8; 108];
     while afsplus_aros_examine_next(filesystem, lock, &mut info, name.as_mut_ptr(), 108) == 0 {}
@@ -103,7 +106,10 @@ fn peak_of_a_full_delayed_window() {
         afsplus_aros_set_commit_policy(filesystem, 60_000, 60_000),
         0
     );
-    if let Some(ops) = std::env::var("WINDOW_OPS").ok().and_then(|v| v.parse().ok()) {
+    if let Some(ops) = std::env::var("WINDOW_OPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
         let mut taken = 0;
         assert_eq!(afsplus_aros_set_window_ops(filesystem, ops, &mut taken), 0);
         println!("the window holds {taken} changes");
