@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(19)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(20)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -46,6 +46,7 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_CACHE UINT64_C(0x10000)
 #define AFSPLUS_AROS_GROUP_COMMIT UINT64_C(0x20000)
 #define AFSPLUS_AROS_GROUP_PATHS UINT64_C(0x40000)
+#define AFSPLUS_AROS_GROUP_FORMAT UINT64_C(0x80000)
 
 /* AfsplusArosExtent.flags. */
 #define AFSPLUS_AROS_EXTENT_UNWRITTEN UINT32_C(0x1)
@@ -368,6 +369,19 @@ _Static_assert(sizeof(struct AfsplusArosMountConfig) == 40,
 
 /* Callable without a mounted filesystem. */
 int32_t afsplus_aros_interface(struct AfsplusArosInterface *output);
+
+/* FORMAT group, revision 20. Explicitly destructive and non-atomic: the
+ * device must be exclusively owned with every old instance unmounted.
+ * uuid points to sixteen bytes. Label uses the requested name encoding;
+ * DOS separators, empty names and more than 64 encoded UTF-8 bytes fail
+ * before writes. Creates the protected epoch-1 case-insensitive profile.
+ * Call afsplus_aros_mount afterwards to obtain the new volume. */
+int32_t afsplus_aros_format(const struct AfsplusArosDevice *device,
+    uint32_t name_encoding, const uint8_t *label, uint32_t label_length,
+    const uint8_t *uuid, int64_t seconds, uint32_t nanoseconds);
+/* Pure input check: call before detaching/flushing an existing volume. */
+int32_t afsplus_aros_validate_format_label(uint32_t name_encoding,
+    const uint8_t *label, uint32_t label_length);
 
 /* Call once before mounting: Rust panic messages then reach log() as one
  * NUL-terminated line before the process aborts. */

@@ -109,6 +109,7 @@ struct AfsplusArosPacketContext {
     AfsplusArosPacketRelabel relabel;
     AfsplusArosPacketComplete complete;
     AfsplusArosPacketTraceTake trace_take;
+    AfsplusArosPacketFormat format;
     struct AfsplusArosCountTable by_action;
     struct AfsplusArosCountTable by_error;
     struct AfsplusArosParked parked[AFSPLUS_AROS_PARKED_MAX];
@@ -1079,7 +1080,8 @@ int32_t afsplus_aros_packet_create(
     *output = NULL;
     if (config->abi_version != AFSPLUS_AROS_PACKET_ABI_VERSION
         || config->struct_size != sizeof(*config)
-        || config->filesystem == NULL || config->allocate == NULL
+        || (config->filesystem == NULL && config->format == NULL)
+        || config->allocate == NULL
         || config->free == NULL)
         return ERROR_BAD_NUMBER;
     context = config->allocate(config->callback_context, sizeof(*context));
@@ -1097,6 +1099,7 @@ int32_t afsplus_aros_packet_create(
     context->relabel = config->relabel;
     context->complete = config->complete;
     context->trace_take = config->trace_take;
+    context->format = config->format;
     {
         struct AfsplusArosInterface interface;
 
@@ -1849,6 +1852,30 @@ int32_t afsplus_aros_packet_process(
         }
     }
 #endif
+
+    if (context->filesystem == NULL || context->inhibited)
+    {
+        switch (packet->dp_Type)
+        {
+        case ACTION_FORMAT:
+        case ACTION_INHIBIT:
+        case ACTION_INFO:
+        case ACTION_INFO64:
+        case ACTION_DISK_INFO:
+        case ACTION_DISK_TYPE:
+        case ACTION_CURRENT_VOLUME:
+        case ACTION_IS_FILESYSTEM:
+        case ACTION_FLUSH:
+        case ACTION_DIE:
+        case ACTION_REMOVE_NOTIFY:
+            break;
+        default:
+            store_packet_result(packet, DOSFALSE, DOSFALSE,
+                ERROR_NOT_A_DOS_DISK, packet64);
+            count_packet(context, packet->dp_Type, ERROR_NOT_A_DOS_DISK);
+            return 0;
+        }
+    }
 
     switch (packet->dp_Type)
     {
@@ -2776,7 +2803,14 @@ int32_t afsplus_aros_packet_process(
         BPTR destination = (BPTR)(packet->dp_Type == ACTION_DISK_INFO
             ? packet->dp_Arg1 : packet->dp_Arg2);
 
-        error = afsplus_aros_disk_info(context->filesystem, &info);
+        if (context->filesystem == NULL)
+        {
+            memset(&info, 0, sizeof(info));
+            info.disk_type = ID_NOT_REALLY_DOS;
+            info.bytes_per_block = 4096;
+        }
+        else
+            error = afsplus_aros_disk_info(context->filesystem, &info);
         if (error == 0)
             error = fill_packet_info(context, packet->dp_Type, destination,
                 &info);
@@ -2785,10 +2819,45 @@ int32_t afsplus_aros_packet_process(
         break;
     }
     case ACTION_FLUSH:
-        error = afsplus_aros_flush(context->filesystem);
+        if (context->filesystem != NULL)
+            error = afsplus_aros_flush(context->filesystem);
         if (error == 0)
             result = DOSTRUE;
         break;
+    case ACTION_FORMAT:
+    {
+        const uint8_t *name = NULL;
+        uint32_t length = 0;
+        uint32_t dos_type = (uint32_t)packet->dp_Arg2;
+
+        if (context->format == NULL)
+            error = ERROR_ACTION_NOT_KNOWN;
+        else if (dos_type != UINT32_C(0x4146532b))
+            error = ERROR_BAD_NUMBER;
+        else if (context->locks != NULL || context->files != NULL
+            || context->notifies != NULL || context->parked_count != 0)
+            error = ERROR_OBJECT_IN_USE;
+        if (error == 0 && context->filesystem != NULL)
+        {
+            struct AfsplusArosDiskInfo info;
+
+            error = afsplus_aros_disk_info(context->filesystem, &info);
+            if (error == 0 && info.write_protected)
+                error = ERROR_DISK_WRITE_PROTECTED;
+        }
+        if (error == 0)
+            error = bstr_view(packet->dp_Arg1, &name, &length);
+        if (error == 0 && length == 0)
+            error = ERROR_INVALID_COMPONENT_NAME;
+        if (error == 0)
+            error = context->format(context->callback_context, name, length,
+                dos_type, &context->filesystem, &context->volume_node);
+        if (error == 0 && context->filesystem == NULL)
+            error = ERROR_NOT_A_DOS_DISK;
+        if (error == 0)
+            result = DOSTRUE;
+        break;
+    }
     case ACTION_INHIBIT:
         if (packet->dp_Arg1 == DOSTRUE)
         {
@@ -2796,7 +2865,8 @@ int32_t afsplus_aros_packet_process(
                 error = ERROR_OBJECT_IN_USE;
             else if (!context->inhibited)
             {
-                error = afsplus_aros_flush(context->filesystem);
+                if (context->filesystem != NULL)
+                    error = afsplus_aros_flush(context->filesystem);
                 if (error == 0)
                     context->inhibited = 1;
             }
@@ -2812,7 +2882,10 @@ int32_t afsplus_aros_packet_process(
     case ACTION_DISK_TYPE:
     {
         struct AfsplusArosDiskInfo info;
-        error = afsplus_aros_disk_info(context->filesystem, &info);
+        if (context->filesystem == NULL)
+            info.disk_type = ID_NOT_REALLY_DOS;
+        else
+            error = afsplus_aros_disk_info(context->filesystem, &info);
         if (error == 0)
             result = (SIPTR)info.disk_type;
         break;
@@ -2859,7 +2932,8 @@ int32_t afsplus_aros_packet_process(
             error = ERROR_OBJECT_IN_USE;
         else
         {
-            error = afsplus_aros_flush(context->filesystem);
+            if (context->filesystem != NULL)
+                error = afsplus_aros_flush(context->filesystem);
             if (error == 0)
             {
                 context->quit = 1;

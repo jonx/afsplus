@@ -16,6 +16,8 @@ enforces that.
 
 | File | What it does | Owned by |
 |---|---|---|
+| [build-aros-kill-probe.sh](build-aros-kill-probe.sh) | Build the DOS crash workload for hosted AROS | [crash testing](../testing/crash-testing.md) |
+| [check-hosted-aros-handler-kill.py](check-hosted-aros-handler-kill.py) | Kill a private hosted guest during writes and verify recovery | [crash testing](../testing/crash-testing.md) |
 | [measure-command.py](measure-command.py) | Record per-child CPU, wall time and normalized peak RSS without a shell or report overwrite | [benchmark contract](../testing/benchmark-contract.md) |
 | [test-measure-command.py](test-measure-command.py) | Temporary-fixture accounting, failure, signal and overwrite-refusal checks | [benchmark contract](../testing/benchmark-contract.md) |
 | [afsptest.py](afsptest.py) | Execute, reproduce, minimize and compare rebuilt runners against private cache/crash bundles | [developer harness](../testing/developer-harness.md) |
@@ -78,6 +80,8 @@ enforces that.
 | [check-aros-aarch64-abi.py](check-aros-aarch64-abi.py) | Rejects AROS AArch64 handler artifacts that violate the external ABI or platform profile | [ADR-051](../adr/ADR-051-explicit-aros-aarch64-platform-profiles.md) |
 | [check-aros-serial-log.sh](check-aros-serial-log.sh) | Fails when an AROS diagnostic stream contains a modal software-failure requester or another fatal marker | [ADR-059](../adr/ADR-059-guest-failure-diagnostics-are-gate-verdicts.md) |
 | [check-aros-x86_64-abi.py](check-aros-x86_64-abi.py) | Rejects AROS x86_64 handler modules the ELF loader could not load: wrong header, a relocation type `rom/dos` does not resolve, or an undefined symbol | [docs/aros-native-bridge.md](../docs/aros-native-bridge.md#the-x8664-profile) |
+| [shrink-aros-handler.py](shrink-aros-handler.py) | Compacts release ELF symbol metadata while preserving allocated bytes and loader relocations; retains the original diagnostic artifact and a size/provenance report | [native bridge](../docs/aros-native-bridge.md) |
+| [test-shrink-aros-handler.py](test-shrink-aros-handler.py) | Checks a real original/release handler pair and rejects executable-byte and relocation-addend corruption | [native bridge](../docs/aros-native-bridge.md) |
 | [package-aros-dist.sh](package-aros-dist.sh) | Builds the handler and the four programs for one platform profile and lays them out as the drawer Pkg publishes: `L/`, `C/`, a DOSDriver to edit, a ReadMe, the ABI audit, the build profile, hashes and the unsigned manifest | [docs/aros-native-bridge.md](../docs/aros-native-bridge.md#distribution-builds-per-cpu) |
 | [package-aros-alpha0.sh](package-aros-alpha0.sh) | Builds the self-contained, host-checked MacAROS Alpha-0 qualification package; never installs into a MacAROS tree | [docs/aros-alpha0-package.md](../docs/aros-alpha0-package.md) |
 | [build-aros-s1-image.sh](build-aros-s1-image.sh) | Builds the manifested AFS+ system image (`core` or `desktop` profile) for the post-bootstrap S1 pivot | [docs/aros-s1-image.md](../docs/aros-s1-image.md) |

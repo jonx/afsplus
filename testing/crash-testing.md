@@ -22,6 +22,7 @@
 - [Validation after every crash](#validation-after-every-crash)
 - [Block reuse across generations](#block-reuse-across-generations)
 - [Explicit full-enumeration budgets](#explicit-full-enumeration-budgets)
+- [AROS handler process interruption](#aros-handler-process-interruption)
 
 <!-- /toc -->
 
@@ -201,3 +202,51 @@ the requested limit rejects the cut. Overlay enumeration retains its default
 limit. [Budget tests](../crates/afsplus-block/tests/powercut_budget.rs) verify
 all 8,192 distinct subsets and 39 tears for thirteen writes, and default refusal
 before callbacks at the same size.
+
+## AROS handler process interruption
+
+Two complementary gates terminate a process with SIGKILL, without unmounting
+or running handler cleanup. Both preserve the host kernel's write cache: they
+are process-death tests, not physical power-loss or device-reordering proofs.
+
+The deterministic FFI gate runs the production handler behind file-backed
+callbacks and kills its child before and after every device write/flush plus
+an acknowledged fsync. It retains every image and trace under the printed
+artifact directory:
+
+```sh
+cargo test -p afsplus-aros-ffi --test handler_process_cut killed_handler_recovers_at_every_device_boundary -- --nocapture
+```
+
+The baseline enables the deployed data-policy feature. Every recovery must
+preserve an unrelated sentinel, expose the entire old or new file (never mixed
+bytes), retain an acknowledged fsync, accept new writes, and pass the independent
+checker. Negative controls reject a corrupted sentinel, lost acknowledged write
+and mixed generation. Eleven observed boundaries pass on the current workload.
+
+The actual Hosted gate uses ordinary DOS calls through the packet handler and
+fdsk.device. Build [the workload](../native/aros/tests/kill_probe.c), install it
+in an **isolated copied AROS tree**, and run:
+
+```sh
+tools/build-aros-kill-probe.sh /tmp/AFSPlusKillProbe
+# Copy probe to INSTANCE/AROS/C and candidate handler to INSTANCE/AROS/L.
+python3 tools/check-hosted-aros-handler-kill.py --instance INSTANCE \
+  --mkafsplus target/debug/mkafsplus --checker target/debug/afsplus-check \
+  --output NEW-EVIDENCE-DIRECTORY
+```
+
+The instance's `control` wrapper must isolate its boot tree, FIFO, PID, log,
+startup, MacRW host directory and launchd job. Its label is
+`org.aros.INSTANCE-BASENAME`. Preserve `AROS.boot` and create `T/` when copying
+the Hosted tree. The gate refuses an existing Unit28 image or evidence directory.
+It only signals a PID verified against that private boot tree, observes its
+termination, and requires a stopped instance before replacing an image.
+
+Three runs kill an active repeated overwrite workload. After termination, the
+last complete ACK and WRITING records bound the only permitted recovered
+generations; the guest verifies every byte and an unrelated sentinel. A new
+write must survive a second restart, the independent checker must accept the
+image, and all guest/probe logs must pass the fatal-diagnostic scanner. Evidence
+includes the baseline, pre-recovery images, logs, handler hash and JSON verdict.
+No native M1 or electrical power-cut qualification is implied by these gates.

@@ -481,7 +481,12 @@ if [ -n "$handler_output" ]; then
         echo "Refusing to replace handler output: $handler_output" >&2
         exit 73
     }
-    cp "$task_dir/afsplus-handler" "$handler_output"
+    "$repo_root/tools/shrink-aros-handler.py" \
+        "$task_dir/afsplus-handler" "$handler_output" \
+        --objcopy "${AFSPLUS_AROS_OBJCOPY:-$aros_crosstools/bin/llvm-objcopy}" \
+        --source-revision "$(git rev-parse HEAD)"
+    "$repo_root/tools/check-aros-aarch64-abi.py" \
+        --objdump "$aros_objdump" "$handler_output"
     chmod +x "$handler_output"
     echo "[aros-ffi] handler artifact: $handler_output"
 fi

@@ -372,7 +372,7 @@ static void retry_commit_policy(struct AfsplusArosHandler *handler)
 
     (void)SysBase;
 
-    if (!handler->commit_retry)
+    if (handler->filesystem == NULL || !handler->commit_retry)
         return;
     if (++handler->commit_retry_packets < AFSPLUS_AROS_COMMIT_RETRY_PACKETS)
         return;
@@ -875,18 +875,11 @@ static int32_t open_device(struct AfsplusArosHandler *handler)
     return require_media(handler);
 }
 
-static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
+static int32_t prepare_filesystem(struct AfsplusArosHandler *handler)
 {
-    uint8_t volume_name[AFSPLUS_VOLUME_NAME_MAX];
-    uint32_t volume_name_length = 0;
-    struct AfsplusArosTrackdiskConfig trackdisk_config;
-    struct AfsplusArosMountConfig mount_config;
-    struct AfsplusArosPacketConfig packet_config;
-    struct AfsplusArosDiskInfo disk_info;
     struct ExecBase *SysBase = handler->SysBase;
-    struct DosLibrary *DOSBase = handler->DOSBase;
+    struct AfsplusArosTrackdiskConfig trackdisk_config;
     struct DosEnvec *environment = handler->environment;
-    struct DateStamp now;
     uint64_t partition_start;
     uint64_t partition_length;
     uint64_t physical_block_size;
@@ -979,6 +972,21 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
         handler->cache_auto = control.cache_auto;
     }
 
+    return 0;
+}
+
+/* Mount/publish only; the packet context and device survive a FORMAT. */
+static int32_t mount_volume(struct AfsplusArosHandler *handler)
+{
+    uint8_t volume_name[AFSPLUS_VOLUME_NAME_MAX];
+    uint32_t volume_name_length = 0;
+    struct AfsplusArosMountConfig mount_config;
+    struct AfsplusArosDiskInfo disk_info;
+    struct ExecBase *SysBase = handler->SysBase;
+    struct DosLibrary *DOSBase = handler->DOSBase;
+    struct DateStamp now;
+    int32_t error;
+
     memset(&mount_config, 0, sizeof(mount_config));
     mount_config.abi_version = AFSPLUS_AROS_ABI_VERSION;
     mount_config.struct_size = sizeof(mount_config);
@@ -1010,7 +1018,8 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
         struct afsp_trace_sink sink;
 
         set_startup_stage(handler, "trace-ring");
-        handler->trace_ring = AllocMem(
+        if (handler->trace_ring == NULL)
+            handler->trace_ring = AllocMem(
             (ULONG)handler->trace_capacity * sizeof(*handler->trace_ring),
             MEMF_PUBLIC | MEMF_CLEAR);
         if (handler->trace_ring == NULL)
@@ -1109,6 +1118,130 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
         return IoErr() != 0 ? (int32_t)IoErr() : ERROR_OBJECT_EXISTS;
     handler->volume_registered = 1;
 
+    return 0;
+}
+
+/* Consumes the old mount even on a flush error (the FFI unmount contract).
+ * No old filesystem instance may survive a write of new format metadata. */
+static int32_t detach_volume(struct AfsplusArosHandler *handler)
+{
+    struct DosLibrary *DOSBase = handler->DOSBase;
+    int32_t error = 0;
+
+    handler->commit_delayed = 0;
+    handler->commit_pending = 0;
+    handler->commit_retry = 0;
+    handler->commit_late = 0;
+    if (handler->volume_registered)
+    {
+        RemDosEntry(handler->volume_node);
+        handler->volume_registered = 0;
+    }
+    if (handler->volume_node != NULL)
+    {
+        FreeDosEntry(handler->volume_node);
+        handler->volume_node = NULL;
+    }
+    if (handler->filesystem != NULL)
+    {
+        if (handler->trace_ring != NULL)
+            (void)afsplus_aros_set_trace_sink(handler->filesystem, NULL);
+        error = afsplus_aros_unmount(handler->filesystem);
+        handler->filesystem = NULL;
+    }
+    return error;
+}
+
+static int32_t packet_format(void *context, const uint8_t *name,
+    uint32_t name_length, uint32_t dos_type,
+    struct AfsplusAros **filesystem, BPTR *volume_node)
+{
+    struct AfsplusArosHandler *handler = context;
+    uint8_t uuid[16];
+    int64_t seconds;
+    uint32_t nanoseconds;
+    int32_t error, mounted;
+    unsigned i;
+    /* Supplied by the boot libc on native builds, stdc on hosted builds. */
+    extern void arc4random_buf(void *buffer, size_t length);
+
+    if (dos_type != UINT32_C(0x4146532b))
+        return ERROR_ACTION_NOT_KNOWN;
+    if (handler->read_only || device_is_write_protected(handler))
+        return ERROR_DISK_WRITE_PROTECTED;
+    /* Invalid labels must not even flush/unmount the existing filesystem. */
+    error = afsplus_aros_validate_format_label(handler->name_encoding,
+        name, name_length);
+    if (error != 0)
+        return error;
+    error = packet_now(handler, &seconds, &nanoseconds);
+    if (error != 0)
+        return error;
+    arc4random_buf(uuid, sizeof(uuid));
+    /* Include wall time as well as the boot libc's per-process seed. */
+    for (i = 0; i < 8; ++i)
+        uuid[i] ^= (uint8_t)((uint64_t)seconds >> (8 * i));
+    uuid[6] = (uuid[6] & 15) | 64;
+    uuid[8] = (uuid[8] & 63) | 128;
+
+    error = detach_volume(handler);
+    if (error == 0)
+    {
+        error = afsplus_aros_format(&handler->device, handler->name_encoding,
+            name, name_length, uuid, seconds, nanoseconds);
+        if (error != 0)
+        {
+            /* Formatting is not atomic. An old checkpoint could survive
+             * partial writes; do not mistake that for a mountable old volume. */
+            *filesystem = NULL;
+            *volume_node = BNULL;
+            report_commit_policy(handler);
+            return error;
+        }
+    }
+    /* Remount after success, or recover the unchanged old volume if unmount
+     * failed before the formatter was called. */
+    mounted = mount_volume(handler);
+    if (mounted != 0)
+    {
+        (void)detach_volume(handler);
+        if (error == 0)
+            error = mounted;
+    }
+    else if (handler->commit_seconds != 0)
+    {
+        if (handler->timer_open)
+        {
+            int32_t policy = apply_commit_policy(handler);
+            if (error == 0 && (policy != ERROR_ACTION_NOT_KNOWN
+                || handler->commit_named))
+                error = policy;
+        }
+        else
+            handler->commit_retry = AFSPLUS_AROS_COMMIT_RETRY;
+    }
+    *filesystem = handler->filesystem;
+    *volume_node = handler->volume_node == NULL ? BNULL : MKBADDR(handler->volume_node);
+    report_commit_policy(handler);
+    return error;
+}
+
+static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
+{
+    struct AfsplusArosPacketConfig packet_config;
+    struct ExecBase *SysBase = handler->SysBase;
+    int32_t error = prepare_filesystem(handler);
+
+    if (error != 0)
+        return error;
+    error = mount_volume(handler);
+    if (error != 0 && error != ERROR_NOT_A_DOS_DISK)
+        return error;
+    if (error != 0)
+    {
+        (void)detach_volume(handler);
+        set_startup_stage(handler, "not-dos-media");
+    }
     memset(&packet_config, 0, sizeof(packet_config));
     packet_config.abi_version = AFSPLUS_AROS_PACKET_ABI_VERSION;
     packet_config.struct_size = sizeof(packet_config);
@@ -1124,7 +1257,8 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
         return ERROR_NO_FREE_STORE;
     packet_config.notify = packet_notify;
     packet_config.relabel = packet_relabel;
-    if (handler->trace_ring != NULL)
+    packet_config.format = packet_format;
+    if (handler->trace_capacity != 0)
         packet_config.trace_take = packet_trace_take;
     open_wait_timer(handler);
     if (handler->timer_open)
@@ -1137,7 +1271,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
      * Control string, so the default and the retry are what it gets. A
      * volume whose format cannot delay is refused once and never retried. */
     set_startup_stage(handler, "commit-policy");
-    if (handler->commit_seconds != 0)
+    if (handler->filesystem != NULL && handler->commit_seconds != 0)
     {
         if (!handler->timer_open)
         {

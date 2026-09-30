@@ -4,7 +4,7 @@
 //!
 //! AROS gives its partitions GPT type GUIDs of the form
 //! `{DosType}-BB67-46C5-AA4A-F502CA018E5E` and keeps the boot priority in the
-//! low byte of the upper attribute word, beside its bootable bit
+//! type-specific attribute bits 48..55, beside its bootable bit
 //! (`rom/partition/partitiongpt.c`). An AFS+ partition is therefore
 //! `4146532B-BB67-46C5-AA4A-F502CA018E5E`, DosType 'AFS+'. `wrap` places a
 //! formatted AFS+ image in such a partition; `extract` finds the partition by
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use crate::common::{report_failure, Failure, EXIT_OK};
 
 const TOOL: &str = "afsplus-disk";
-const USAGE: &str = "usage: afsplus-disk wrap [--bootpri N] [--name NAME] [--disk-guid HEX32] [--partition-guid HEX32] [--force] <disk-image> <afsplus-image>\n       afsplus-disk extract <disk-image> <new-afsplus-image>";
+const USAGE: &str = "usage: afsplus-disk wrap [--sector-size 512|4096] [--bootpri N] [--name NAME] [--disk-guid HEX32] [--partition-guid HEX32] [--force] <disk-image> <afsplus-image>\n       afsplus-disk extract [--sector-size 512|4096] <disk-image> <new-afsplus-image>";
 
 /// The DosType of AFS+ partitions and volumes, 'AFS+'.
 pub const AFSPLUS_DOSTYPE: u32 = 0x4146_532B;
@@ -29,9 +29,11 @@ const AROS_TYPE_TAIL: [u8; 12] = [
 const SECTOR: u64 = 512;
 const ENTRY_SIZE: usize = 128;
 const ENTRIES: usize = 128;
+#[cfg(test)]
 const ENTRY_SECTORS: u64 = (ENTRY_SIZE * ENTRIES) as u64 / SECTOR;
 /// Partitions start on 1 MiB, as every current partitioning tool does; the
 /// disk ends on 1 MiB after the backup table.
+#[cfg(test)]
 const ALIGN: u64 = 1024 * 1024 / SECTOR;
 const AROS_BOOTABLE: u64 = 1 << 60;
 const HEADER_SIZE: u32 = 92;
@@ -59,6 +61,7 @@ pub fn crc32(data: &[u8]) -> u32 {
 /// Where the partition of a wrapped disk lies, in sectors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
+    pub sector_size: u64,
     pub disk_sectors: u64,
     pub first: u64,
     pub last: u64,
@@ -67,17 +70,23 @@ pub struct Layout {
 impl Layout {
     /// A disk with one partition of `bytes`, aligned at both ends, and room
     /// after it for the backup table.
-    pub fn for_partition(bytes: u64) -> Result<Self, Failure> {
-        if bytes == 0 || !bytes.is_multiple_of(SECTOR) {
+    pub fn for_partition_sector_size(bytes: u64, sector_size: u64) -> Result<Self, Failure> {
+        validate_sector_size(sector_size)?;
+        if bytes == 0 || !bytes.is_multiple_of(sector_size) {
             return Err(Failure::usage(format!(
-                "the AFS+ image is {bytes} bytes, not a positive multiple of {SECTOR}"
+                "the AFS+ image is {bytes} bytes, not a positive multiple of {sector_size}"
             )));
         }
-        let sectors = bytes / SECTOR;
-        let first = ALIGN;
+        let sectors = bytes / sector_size;
+        let align = 1024 * 1024 / sector_size;
+        let first = align;
         let last = first + sectors - 1;
-        let disk_sectors = (last + 1).div_ceil(ALIGN) * ALIGN + ALIGN;
+        let disk_sectors = (last + 1).div_ceil(align) * align + align;
+        if disk_sectors.checked_mul(sector_size).is_none() {
+            return Err(Failure::usage("disk size overflows byte offsets"));
+        }
         Ok(Self {
+            sector_size,
             disk_sectors,
             first,
             last,
@@ -99,7 +108,7 @@ fn entry(layout: &Layout, wrap: &Wrap) -> [u8; ENTRY_SIZE] {
     entry[16..32].copy_from_slice(&wrap.partition_guid);
     entry[32..40].copy_from_slice(&layout.first.to_le_bytes());
     entry[40..48].copy_from_slice(&layout.last.to_le_bytes());
-    let attributes = AROS_BOOTABLE | (u64::from(wrap.bootpri as u8) << 32);
+    let attributes = AROS_BOOTABLE | (u64::from(wrap.bootpri as u8) << 48);
     entry[48..56].copy_from_slice(&attributes.to_le_bytes());
     for (index, unit) in wrap.name.encode_utf16().take(36).enumerate() {
         entry[56 + 2 * index..58 + 2 * index].copy_from_slice(&unit.to_le_bytes());
@@ -107,21 +116,22 @@ fn entry(layout: &Layout, wrap: &Wrap) -> [u8; ENTRY_SIZE] {
     entry
 }
 
-fn header(layout: &Layout, disk_guid: &[u8; 16], backup: bool, entries_crc: u32) -> [u8; 512] {
+fn header(layout: &Layout, disk_guid: &[u8; 16], backup: bool, entries_crc: u32) -> Vec<u8> {
+    let entry_sectors = (ENTRY_SIZE * ENTRIES) as u64 / layout.sector_size;
     let last_sector = layout.disk_sectors - 1;
     let (current, other, table) = if backup {
-        (last_sector, 1, last_sector - ENTRY_SECTORS)
+        (last_sector, 1, last_sector - entry_sectors)
     } else {
         (1, last_sector, 2)
     };
-    let mut block = [0u8; 512];
+    let mut block = vec![0u8; layout.sector_size as usize];
     block[..8].copy_from_slice(b"EFI PART");
     block[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
     block[12..16].copy_from_slice(&HEADER_SIZE.to_le_bytes());
     block[24..32].copy_from_slice(&current.to_le_bytes());
     block[32..40].copy_from_slice(&other.to_le_bytes());
-    block[40..48].copy_from_slice(&(2 + ENTRY_SECTORS).to_le_bytes());
-    block[48..56].copy_from_slice(&(last_sector - ENTRY_SECTORS - 1).to_le_bytes());
+    block[40..48].copy_from_slice(&(2 + entry_sectors).to_le_bytes());
+    block[48..56].copy_from_slice(&(last_sector - entry_sectors - 1).to_le_bytes());
     block[56..72].copy_from_slice(disk_guid);
     block[72..80].copy_from_slice(&table.to_le_bytes());
     block[80..84].copy_from_slice(&(ENTRIES as u32).to_le_bytes());
@@ -150,21 +160,19 @@ fn protective_mbr(layout: &Layout) -> [u8; 512] {
 /// primary header and table at the start, the backup table and header at
 /// the end, as (sector, bytes).
 pub fn tables(layout: &Layout, wrap: &Wrap) -> Vec<(u64, Vec<u8>)> {
+    let entry_sectors = (ENTRY_SIZE * ENTRIES) as u64 / layout.sector_size;
     let mut entries = vec![0u8; ENTRY_SIZE * ENTRIES];
     entries[..ENTRY_SIZE].copy_from_slice(&entry(layout, wrap));
     let entries_crc = crc32(&entries);
     let last_sector = layout.disk_sectors - 1;
     vec![
         (0, protective_mbr(layout).to_vec()),
-        (
-            1,
-            header(layout, &wrap.disk_guid, false, entries_crc).to_vec(),
-        ),
+        (1, header(layout, &wrap.disk_guid, false, entries_crc)),
         (2, entries.clone()),
-        (last_sector - ENTRY_SECTORS, entries),
+        (last_sector - entry_sectors, entries),
         (
             last_sector,
-            header(layout, &wrap.disk_guid, true, entries_crc).to_vec(),
+            header(layout, &wrap.disk_guid, true, entries_crc),
         ),
     ]
 }
@@ -172,18 +180,29 @@ pub fn tables(layout: &Layout, wrap: &Wrap) -> Vec<(u64, Vec<u8>)> {
 /// Finds the AFS+ partition in a GPT disk: validates the primary header and
 /// its table by their CRCs and returns the partition's first and last
 /// sector. Exactly one AFS+ partition is accepted.
-pub fn find_partition(disk: &mut File) -> Result<(u64, u64), Failure> {
-    let mut block = [0u8; 512];
-    read_at(disk, SECTOR, &mut block)?;
+fn validate_sector_size(sector_size: u64) -> Result<(), Failure> {
+    if !matches!(sector_size, 512 | 4096) {
+        return Err(Failure::usage("--sector-size takes 512 or 4096"));
+    }
+    Ok(())
+}
+
+pub fn find_partition_sector_size(
+    disk: &mut File,
+    sector_size: u64,
+) -> Result<(u64, u64), Failure> {
+    validate_sector_size(sector_size)?;
+    let mut block = vec![0u8; sector_size as usize];
+    read_at(disk, sector_size, &mut block)?;
     if &block[..8] != b"EFI PART" {
         return Err(Failure::media("E_GPT", "no GPT header in sector 1"));
     }
     let size = u32::from_le_bytes(block[12..16].try_into().unwrap()) as usize;
-    if !(HEADER_SIZE as usize..=512).contains(&size) {
+    if !(HEADER_SIZE as usize..=sector_size as usize).contains(&size) {
         return Err(Failure::media("E_GPT", format!("GPT header size {size}")));
     }
     let stored = u32::from_le_bytes(block[16..20].try_into().unwrap());
-    let mut copy = block;
+    let mut copy = block.clone();
     copy[16..20].fill(0);
     if crc32(&copy[..size]) != stored {
         return Err(Failure::media("E_GPT", "GPT header CRC mismatch"));
@@ -199,7 +218,10 @@ pub fn find_partition(disk: &mut File) -> Result<(u64, u64), Failure> {
         ));
     }
     let mut entries = vec![0u8; count * entry_size];
-    read_at(disk, table * SECTOR, &mut entries)?;
+    let offset = table
+        .checked_mul(sector_size)
+        .ok_or_else(|| Failure::media("E_GPT", "table offset overflow"))?;
+    read_at(disk, offset, &mut entries)?;
     if crc32(&entries) != entries_crc {
         return Err(Failure::media("E_GPT", "GPT partition table CRC mismatch"));
     }
@@ -215,7 +237,20 @@ pub fn find_partition(disk: &mut File) -> Result<(u64, u64), Failure> {
         })
         .collect();
     match found.as_slice() {
-        [(first, last)] if first <= last => Ok((*first, *last)),
+        [(first, last)] if first <= last => {
+            let end = last
+                .checked_add(1)
+                .and_then(|n| n.checked_mul(sector_size))
+                .ok_or_else(|| Failure::media("E_GPT", "partition offset overflow"))?;
+            let length = disk
+                .metadata()
+                .map_err(|e| Failure::host_io(e.to_string()))?
+                .len();
+            if end > length {
+                return Err(Failure::media("E_GPT", "partition exceeds disk image"));
+            }
+            Ok((*first, *last))
+        }
         [_] => Err(Failure::media(
             "E_GPT",
             "the AFS+ partition ends before it starts",
@@ -293,8 +328,10 @@ enum Command {
         image: PathBuf,
         wrap: Wrap,
         force: bool,
+        sector_size: u64,
     },
     Extract {
+        sector_size: u64,
         disk: PathBuf,
         image: PathBuf,
     },
@@ -318,9 +355,16 @@ fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Command>, F
     let mut disk_guid = None;
     let mut partition_guid = None;
     let mut force = false;
+    let mut sector_size = SECTOR;
     while let Some(argument) = args.next() {
         match argument.to_str() {
             Some("--help" | "-h") => return Ok(None),
+            Some("--sector-size") => {
+                sector_size = text(args.next(), "--sector-size")?
+                    .parse()
+                    .map_err(|_| Failure::usage("--sector-size takes 512 or 4096"))?;
+                validate_sector_size(sector_size)?;
+            }
             Some("--bootpri") => {
                 let value = text(args.next(), "--bootpri")?;
                 bootpri = value
@@ -364,8 +408,13 @@ fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Command>, F
                 },
             },
             force,
+            sector_size,
         })),
-        Some("extract") => Ok(Some(Command::Extract { disk, image })),
+        Some("extract") => Ok(Some(Command::Extract {
+            disk,
+            image,
+            sector_size,
+        })),
         _ => Err(Failure::usage(USAGE)),
     }
 }
@@ -390,6 +439,7 @@ fn execute(command: Command) -> Result<(), Failure> {
             image,
             wrap,
             force,
+            sector_size,
         } => {
             let mut source = File::open(&image).map_err(|error| {
                 Failure::host_io(format!("cannot open {}: {error}", image.display()))
@@ -398,14 +448,20 @@ fn execute(command: Command) -> Result<(), Failure> {
                 .metadata()
                 .map_err(|error| Failure::host_io(format!("{}: {error}", image.display())))?
                 .len();
-            let layout = Layout::for_partition(bytes)?;
+            let layout = Layout::for_partition_sector_size(bytes, sector_size)?;
             let mut target = create(&disk, force)?;
             target
-                .set_len(layout.disk_sectors * SECTOR)
+                .set_len(layout.disk_sectors * sector_size)
                 .map_err(|error| Failure::host_io(format!("{}: {error}", disk.display())))?;
-            copy(&mut source, 0, &mut target, layout.first * SECTOR, bytes)?;
+            copy(
+                &mut source,
+                0,
+                &mut target,
+                layout.first * sector_size,
+                bytes,
+            )?;
             for (sector, content) in tables(&layout, &wrap) {
-                write_at(&mut target, sector * SECTOR, &content)?;
+                write_at(&mut target, sector * sector_size, &content)?;
             }
             target
                 .sync_all()
@@ -421,17 +477,21 @@ fn execute(command: Command) -> Result<(), Failure> {
             );
             Ok(())
         }
-        Command::Extract { disk, image } => {
+        Command::Extract {
+            disk,
+            image,
+            sector_size,
+        } => {
             let mut source = File::open(&disk).map_err(|error| {
                 Failure::host_io(format!("cannot open {}: {error}", disk.display()))
             })?;
-            let (first, last) = find_partition(&mut source)?;
-            let bytes = (last - first + 1) * SECTOR;
+            let (first, last) = find_partition_sector_size(&mut source, sector_size)?;
+            let bytes = (last - first + 1) * sector_size;
             let mut target = create(&image, false)?;
             target
                 .set_len(bytes)
                 .map_err(|error| Failure::host_io(format!("{}: {error}", image.display())))?;
-            copy(&mut source, first * SECTOR, &mut target, 0, bytes)?;
+            copy(&mut source, first * sector_size, &mut target, 0, bytes)?;
             println!(
                 "extracted the AFS+ partition, sectors {first}..={last}, to {}",
                 image.display()
@@ -478,10 +538,86 @@ mod tests {
 
     #[test]
     fn the_partition_is_aligned_and_leaves_room_for_the_backup_table() {
-        let layout = Layout::for_partition(64 * 1024 * 1024).unwrap();
+        let layout = Layout::for_partition_sector_size(64 * 1024 * 1024, SECTOR).unwrap();
         assert_eq!(layout.first, 2048);
         assert_eq!(layout.last, 2048 + 131_072 - 1);
         assert_eq!(layout.disk_sectors % ALIGN, 0);
         assert!(layout.disk_sectors - 1 - ENTRY_SECTORS > layout.last);
+    }
+    #[test]
+    fn both_sector_sizes_roundtrip_and_have_valid_backup_headers() {
+        for sector_size in [512, 4096] {
+            let dir = std::env::temp_dir()
+                .join(format!("afsplus-disk-{}-{sector_size}", std::process::id()));
+            std::fs::create_dir(&dir).unwrap();
+            let image = dir.join("input");
+            let disk = dir.join("disk");
+            let output = dir.join("output");
+            let payload: Vec<u8> = (0..16384).map(|n| (n % 251) as u8).collect();
+            std::fs::write(&image, &payload).unwrap();
+            let layout =
+                Layout::for_partition_sector_size(payload.len() as u64, sector_size).unwrap();
+            execute(Command::Wrap {
+                disk: disk.clone(),
+                image,
+                force: false,
+                sector_size,
+                wrap: Wrap {
+                    bootpri: 5,
+                    name: "SYS".into(),
+                    disk_guid: [1; 16],
+                    partition_guid: [2; 16],
+                },
+            })
+            .unwrap();
+            let bytes = std::fs::read(&disk).unwrap();
+            assert_eq!(layout.first * sector_size, 1024 * 1024);
+            assert_eq!(&bytes[1024 * 1024..1024 * 1024 + payload.len()], &payload);
+            for lba in [1, layout.disk_sectors - 1] {
+                let start = (lba * sector_size) as usize;
+                let mut header = bytes[start..start + HEADER_SIZE as usize].to_vec();
+                assert_eq!(&header[..8], b"EFI PART");
+                assert_eq!(u64::from_le_bytes(header[24..32].try_into().unwrap()), lba);
+                let stored = u32::from_le_bytes(header[16..20].try_into().unwrap());
+                header[16..20].fill(0);
+                assert_eq!(crc32(&header), stored);
+                let table = u64::from_le_bytes(header[72..80].try_into().unwrap()) as usize
+                    * sector_size as usize;
+                let entries = &bytes[table..table + ENTRY_SIZE * ENTRIES];
+                assert_eq!(
+                    crc32(entries),
+                    u32::from_le_bytes(header[88..92].try_into().unwrap())
+                );
+                assert_eq!(&entries[..16], &aros_type_guid(AFSPLUS_DOSTYPE));
+                assert_eq!(
+                    u64::from_le_bytes(entries[48..56].try_into().unwrap()),
+                    (1u64 << 60) | (5u64 << 48)
+                );
+            }
+            let mut source = File::open(&disk).unwrap();
+            assert!(find_partition_sector_size(
+                &mut source,
+                if sector_size == 512 { 4096 } else { 512 }
+            )
+            .is_err());
+            execute(Command::Extract {
+                disk,
+                image: output.clone(),
+                sector_size,
+            })
+            .unwrap();
+            assert_eq!(std::fs::read(output).unwrap(), payload);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn unsupported_geometry_and_unaligned_payload_are_rejected() {
+        assert!(Layout::for_partition_sector_size(4096, 1024).is_err());
+        assert!(Layout::for_partition_sector_size(512, 4096).is_err());
+        assert!(Layout::for_partition_sector_size(u64::MAX - 511, 512).is_err());
+        assert!(
+            parse(["wrap", "--sector-size", "1024", "disk", "image"].map(OsString::from)).is_err()
+        );
     }
 }

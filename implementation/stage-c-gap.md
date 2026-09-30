@@ -127,13 +127,18 @@ date or the comment keeps it, as SFS, PFS3 and the RAM handler do; a mount shows
 program that updates a file in place works; on a write-protected volume the
 write is refused and goes through once the protection is lifted.
 
+`ACTION_FORMAT` now starts on blank media, answers INHIBIT/NOT DOS, formats
+the open device and publishes the requested volume label. Busy objects and
+invalid labels are refused before formatting; a failed format leaves NOT DOS.
+The FFI and packet gates pass, and Hosted runs the real DOS Format call.
+
 Lacking, in the order classic software meets them:
 
 | Action | Missing piece | Layer where it starts |
 |---|---|---|
 | all of the above | the QEMU and m68k sequences do not run [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh); Hosted does, and passes | L4 |
 | one instance per unit on an SMP kernel | the claim relies on `Forbid()` for the port list | L4 |
-| `ACTION_FORMAT`, `ACTION_SERIALIZE_DISK` | in-handler mkfs through the mounted device; refused while locks are open | L1, L4 |
+| `ACTION_SERIALIZE_DISK` | disk identity replacement | L1, L4 |
 | `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |
 
 Proven on Hosted darwin-aarch64 by [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh): the setters, the archive bit, a `MODE_OLDFILE` write, the comment, soft links, `ExAll`, `OpenFromLock`, `ChangeMode`, record locks with a grant by a second task's release, the owed `NRF_WAIT_REPLY` notification, a dismount with a message never replied, `Relabel`, and one instance per unit under dos.library's double start. QEMU and m68k: every row. Apple hardware: none.

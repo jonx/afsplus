@@ -187,10 +187,10 @@ pub mod profile {
             // SAFETY: `raw` holds the length passed.
             let taken = unsafe { backtrace(raw.as_mut_ptr(), raw.len() as i32) } as usize;
             let mut frames = [0usize; DEPTH];
-            for index in 0..DEPTH {
+            for (index, frame) in frames.iter_mut().enumerate() {
                 // The first frames are the allocator's own and say nothing.
                 let source = index + 4;
-                frames[index] = if source < taken {
+                *frame = if source < taken {
                     raw[source] as usize
                 } else {
                     0

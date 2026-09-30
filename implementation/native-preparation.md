@@ -84,7 +84,13 @@ Each item ends with its own named check, a commit and a push.
 What Macaros Native takes from here: the handler, partition.library and its
 disk device as boot modules; a GPT partition of type
 `4146532B-BB67-46C5-AA4A-F502CA018E5E` written by `afsplus-disk wrap`, with
-`AROS.boot` naming the CPU at its root; drivers that pass
+`AROS.boot` naming the CPU at its root. `afsplus-disk wrap` and `extract`
+accept `--sector-size 512|4096` (default 512): select 4096 for a native
+4Kn disk such as Apple NVMe, and use the same value when extracting.
+The sector size describes GPT addressing, independently of the 4096-byte
+AFS+ logical block size. Boot priority uses GPT type-specific bits 48–55; bootable uses bit 60.
+The private AROS partition reader and disk tool must use this layout together.
+Native startup also needs drivers that pass
 `AFSPlusDriverProbe`; and the handler built with `+crc`. A boot partition
 also needs the handler's `FileSystem.resource` entry to carry its stack size,
 because a partition the boot scan finds has no DOSDriver to say one: without

@@ -14,8 +14,10 @@ GPT identity" as the step before it can format a `SYS:` partition.
 
 AROS already has a GPT scheme. `rom/partition/partitiongpt.c` reads a type GUID
 of the form `{DosType}-BB67-46C5-AA4A-F502CA018E5E` as an AROS partition, takes
-its DosType from the first field, its boot priority from the low byte of the
-upper attribute word and its bootable flag from bit 60. The boot scan
+its DosType from the first field, its boot priority from a byte of the attribute field and its bootable
+flag from bit 60. The original priority placement in bits 32–39 overlaps
+UEFI-reserved bits and is replaced by type-specific bits 48–55 in the
+private AROS reader and AFS+ writer together. The boot scan
 (`rom/dosboot/bootscan.c`) then gives the partition the handler that
 `FileSystem.resource` holds for that DosType, and the handler's generated
 resident init registers AFS+ there
@@ -27,12 +29,15 @@ resident init registers AFS+ there
    the DOSDriver, `FileSystem.resource`, RDB partitions and GPT partitions.
 2. The GPT partition type of AFS+ is `4146532B-BB67-46C5-AA4A-F502CA018E5E`,
    the AROS scheme applied to that DosType. No private GUID is minted, and
-   partition.library needs no change.
+   the private partition.library reader uses the matching attribute layout.
 3. A bootable AFS+ partition sets bit 60 of its attributes and its boot
-   priority, a signed byte, in bits 32 to 39.
+   priority, a signed byte, in bits 48 to 55. Bits 0 to 47 are zero.
+   This replaces the legacy priority placement in bits 32 to 39; existing
+   GPT images using that layout are not retained or migrated. The AFS+
+   filesystem format inside the partition is unchanged.
 4. Partitions start on a 1 MiB boundary and are exactly as long as the file
    system inside, whose own block size (4096 by default) they contain in
-   512-byte sectors; `afsplus-disk wrap` rounds only the disk, not the
+   512- or 4096-byte physical sectors; `afsplus-disk wrap` rounds only the disk, not the
    partition, up to 1 MiB, leaving room for the backup table.
 5. `afsplus-disk wrap` writes such a disk from a formatted AFS+ image, and
    `afsplus-disk extract` takes the partition out again by its type. The
@@ -41,7 +46,7 @@ resident init registers AFS+ there
 ## Consequences
 
 - Any AROS with partition.library and the AFS+ handler as a boot module finds
-  and boots an AFS+ partition with no further change.
+  and boots an AFS+ partition with the matching priority reader.
 - Tools that do not know AROS show the partition as an unknown type
   (`sgdisk` prints `FFFF`); macOS leaves it alone.
 - The DosType is also the key a future AROS-wide registry would record; if

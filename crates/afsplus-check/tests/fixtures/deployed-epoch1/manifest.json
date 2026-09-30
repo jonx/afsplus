@@ -1,0 +1,53 @@
+{
+  "contract": "protected-deployed-epoch1-0307e86",
+  "reference_commit": "0307e86979ca532c0c88dd014d164e094ebb5d48",
+  "wire": {
+    "epoch": 1,
+    "identification_version": 3,
+    "common_header_version": 1,
+    "block_bytes": 4096,
+    "checkpoint_payload_bytes": 168,
+    "unicode_version": [
+      16,
+      0,
+      0
+    ],
+    "features": {
+      "compat": 1,
+      "ro_compat": 3,
+      "incompat": 3
+    }
+  },
+  "generated_fixtures": {
+    "producer": "../../../examples/deployed-baseline.rs",
+    "command": "cargo run -p afsplus-check --example deployed-baseline -- NEW_DIRECTORY",
+    "source_note": "Generated using the unchanged core/format/block sources of reference_commit. The producer is added by the compatibility change.",
+    "images": [
+      {
+        "path": "clean.img",
+        "bytes": 4194304,
+        "sha256": "fa10bb11224ac50a85dd6e705f82810f4559c5c3282084d10629300febda9813"
+      },
+      {
+        "path": "pending.img",
+        "bytes": 4194304,
+        "sha256": "1d2fef4c35c9a9d7716efd50b2f61477ab97811570be0ef7413f5799653bafa8"
+      }
+    ]
+  },
+  "m1_sys_initializer": {
+    "path": "m1-sys-head.img",
+    "bytes": 81920,
+    "sha256": "863c30061fc2c659710b5e0d89b55c8020f0c6d81ec0bb9e7428a4843fee5cf6",
+    "expanded_image_bytes": 268435456,
+    "expanded_image_sha256": "53ce2e7290b939e0a36f1bc03a38c563f8c6b1751163cdc8d19ace0fc3046034",
+    "suffix": "all zero bytes",
+    "label": "System",
+    "source": "aros-apple-silicon/run/pcie-seq9-20260924/run-s2.sh EXTRA_FILES S/sys-head.img; referenced scratchpad artifact copied unchanged",
+    "deployment_evidence": "aros-apple-silicon/artifacts/runs/20260924-pcie-seq9/s2b/NativeStartup: FSQualify WORK:System/Unit30 IMAGEMB=256 HEAD=SYS:S/sys-head.img",
+    "formatter_commit": "not recorded with the retained initializer",
+    "handler_commit": "0307e86979ca532c0c88dd014d164e094ebb5d48",
+    "scope": "Exact initial deployed geometry and format bytes; excludes files copied or changed later on the M1."
+  },
+  "replacement_policy": "Never regenerate these paths to make a failing reader pass. Register a new baseline alongside them."
+}

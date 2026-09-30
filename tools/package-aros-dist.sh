@@ -260,17 +260,15 @@ if [ "${AFSPLUS_AROS_DIST_PROBES:-0}" = 1 ]; then
     program_dir=$staging/C
 fi
 
-# The AROS ELF loader reads a module's symbol table to resolve its
-# relocations (rom/dos/internalloadseg_elf.c: relocate() takes sym->shindex
-# and sym->value, and the symbol's name only for a debug or error line), and
-# it loads the whole of .symtab and .strtab into memory to do it. A local
-# symbol no relocation names is read by nobody, so it is discarded: 732
-# symbols and 140,784 bytes on aarch64, 738 and 709,512 on x86_64, off the
-# package and off what the loader holds while it relocates. The global symbols stay, because the loader's error messages,
-# the checks above and genmodule's entry points want them. The audit below
-# runs on the stripped file, so what is audited is what ships.
-echo "[aros-dist] $profile_id: discard the local symbols"
-"$aros_objcopy" --discard-all "$staging/L/afsplus-handler"
+# Keep relocation symbols but compact their long diagnostic names. The full
+# original stays outside the package, never in the installed L: drawer.
+echo "[aros-dist] $profile_id: compact loader symbol metadata"
+mv "$staging/L/afsplus-handler" "$work/afsplus-handler.full"
+"$repo_root/tools/shrink-aros-handler.py" \
+    "$work/afsplus-handler.full" "$staging/L/afsplus-handler" \
+    --objcopy "$aros_objcopy" --source-revision "$(git rev-parse HEAD)" \
+    --debug-output "$output.debug/afsplus-handler"
+mv "$staging/L/afsplus-handler.size.json" "$staging/handler-size.json"
 
 echo "[aros-dist] $profile_id: ABI audit"
 "$aros_abi_audit" --objdump "$aros_objdump" "$staging/L/afsplus-handler" \

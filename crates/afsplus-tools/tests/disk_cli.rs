@@ -90,3 +90,55 @@ fn a_disk_whose_partition_table_does_not_check_is_refused() {
     assert!(!back.exists());
     fs::remove_dir_all(&directory).unwrap();
 }
+
+#[test]
+fn native_4kn_disk_preserves_the_formatted_volume() {
+    let directory = scratch("4kn");
+    let image = formatted(&directory);
+    let disk = directory.join("disk.img");
+    let back = directory.join("back.afsp");
+    assert_eq!(
+        afsplus_tools::run_disk(args(&[
+            "wrap",
+            "--sector-size",
+            "4096",
+            disk.to_str().unwrap(),
+            image.to_str().unwrap()
+        ])),
+        0
+    );
+    let bytes = fs::read(&disk).unwrap();
+    assert_eq!(&bytes[4096..4104], b"EFI PART");
+    assert_eq!(&bytes[bytes.len() - 4096..][..8], b"EFI PART");
+    assert_eq!(
+        u64::from_le_bytes(bytes[8192 + 32..8192 + 40].try_into().unwrap()),
+        256
+    );
+    assert_eq!(
+        afsplus_tools::run_disk(args(&[
+            "extract",
+            "--sector-size",
+            "4096",
+            disk.to_str().unwrap(),
+            back.to_str().unwrap()
+        ])),
+        0
+    );
+    assert_eq!(fs::read(&image).unwrap(), fs::read(&back).unwrap());
+    fs::remove_file(&back).unwrap();
+    let mut damaged = bytes;
+    damaged[8192 + 32] ^= 1;
+    fs::write(&disk, damaged).unwrap();
+    assert_eq!(
+        afsplus_tools::run_disk(args(&[
+            "extract",
+            "--sector-size",
+            "4096",
+            disk.to_str().unwrap(),
+            back.to_str().unwrap()
+        ])),
+        1
+    );
+    assert!(!back.exists());
+    fs::remove_dir_all(directory).unwrap();
+}

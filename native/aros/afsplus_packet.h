@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(5)
+#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(6)
 
 /* afsplus_aros_packet_process kept the packet: no result is stored and the
  * handler must not reply. The packet comes back through the complete
@@ -54,6 +54,14 @@ typedef void (*AfsplusArosPacketNotify)(void *context,
 #define AFSPLUS_AROS_RELABEL_ABORT UINT32_C(2)
 typedef int32_t (*AfsplusArosPacketRelabel)(void *context, uint32_t phase,
     const uint8_t *name, uint32_t name_length);
+
+/* Replaces an idle volume only on explicit ACTION_FORMAT. The context stays
+ * alive across this call. Update both bindings on every exit, including an
+ * error after detaching the old instance; NULL/BNULL represents not-DOS media.
+ * No locks, files, watches or deferred packets exist when called. */
+typedef int32_t (*AfsplusArosPacketFormat)(void *context,
+    const uint8_t *name, uint32_t name_length, uint32_t dos_type,
+    struct AfsplusAros **filesystem, BPTR *volume_node);
 
 /* Takes up to capacity events from the handler's trace ring, oldest first,
  * and stores in dropped how many it has lost since the mount. Returns the
@@ -90,14 +98,16 @@ struct AfsplusArosPacketConfig {
     AfsplusArosPacketComplete complete;
     /* Optional; present when the mount asked for a trace ring. */
     AfsplusArosPacketTraceTake trace_take;
+    /* Optional. A NULL filesystem is accepted only with this callback. */
+    AfsplusArosPacketFormat format;
 };
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 96,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 104,
     "AfsplusArosPacketConfig 64-bit ABI drift");
 #elif UINTPTR_MAX == UINT32_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 52,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 56,
     "AfsplusArosPacketConfig 32-bit ABI drift");
 #endif
 #endif

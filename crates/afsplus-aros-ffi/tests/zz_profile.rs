@@ -209,7 +209,7 @@ fn profile() {
             for f in 0..FILES {
                 match op.as_str() {
                     "rename" => {
-                        let (a, b) = if pass % 2 == 0 {
+                        let (a, b) = if pass & 1 == 0 {
                             (".c", ".o")
                         } else {
                             (".o", ".c")
@@ -217,7 +217,7 @@ fn profile() {
                         aros_rename(fs, drawer, &format!("f{f:02}{a}"), &format!("f{f:02}{b}"));
                     }
                     _ => {
-                        if pass % 2 == 0 {
+                        if pass & 1 == 0 {
                             aros_delete(fs, drawer, &format!("f{f:02}.c"));
                         } else {
                             aros_create(fs, drawer, &format!("f{f:02}.c"));

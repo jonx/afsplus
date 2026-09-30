@@ -364,13 +364,50 @@ Lock value zero represents the DOS null lock/root at the C boundary. A native
 not be squeezed into the 32-bit `fl_Key`/`fh_Arg1` scalar itself. Those fields
 point to native wrappers instead.
 
-Create the packet context from [`native/aros/afsplus_packet.h`](../native/aros/afsplus_packet.h) after mounting
-the Rust bridge. Its allocation callback must return suitably aligned public
+Create the packet context from [`native/aros/afsplus_packet.h`](../native/aros/afsplus_packet.h) after opening
+the device. A mounted bridge supplies its filesystem and DOS volume node;
+unreadable media supplies neither and requires the format callback. Its
+allocation callback must return suitably aligned public
 memory; the translator clears each allocation itself. Its clock callback
 returns UTC Unix seconds and nanoseconds. Process one packet at a time with
 `afsplus_aros_packet_process`, then reply to the original message from the
 handler loop. Destroy the packet context before calling
 `afsplus_aros_unmount`.
+
+On a readable device without a valid filesystem, startup retains the device
+node and serves `ACTION_INHIBIT`, `ACTION_FORMAT` and disk information
+(`ID_NOT_REALLY_DOS`). It creates no volume node until mount succeeds.
+Ordinary file operations fail with `ERROR_NOT_A_DOS_DISK`; they never trigger
+formatting. Other startup failures, such as an unavailable device or invalid
+geometry, retain their errors.
+
+`ACTION_FORMAT` accepts DosType `0x4146532b`, requires no open files, locks,
+watches or deferred packets, and refuses a write-protected volume. The
+handler unmounts the old instance before `afsplus_aros_format` (FORMAT group,
+interface revision 20) writes the device, then mounts and registers the
+committed label. The label is converted from the mount's encoding, including
+Latin-1, to UTF-8. The formatter creates the
+[protected epoch-1 profile](../spec/compatibility-rules.md#protected-deployed-images)
+with case-insensitive names. Validation fails before writes; an interrupted
+format is destructive and non-atomic. A failed attempt remounts any readable
+volume or leaves the device in its not-DOS state. No implicit migration is
+performed. The packet context survives replacement, and its filesystem and
+volume bindings follow every success or failure.
+
+The focused checks are `cargo test -p afsplus-aros-ffi --test format` and
+the format/blank-medium cases in
+[`packet_stub.c`](../native/aros/tests/packet_stub.c). They cover the native
+packet contract and formatter separately; actual AROS lifecycle and media
+durability require the mounted handler gate and target testing.
+For a mounted-handler check, build
+[`format_state_probe.c`](../native/aros/tests/format_state_probe.c) with the
+target SDK and run `FormatStateProbe DEVICE: 0x4e444f53` on blank media.
+After explicit formatting, `FormatStateProbe LABEL: 0x4146532b` verifies
+both the published label and AFS+ disk type without relying on a file lock.
+Write and flush test data, restart the hosted guest, then verify its bytes
+before cleanup; inspect both guest logs for fatal diagnostics and run the
+host checker on retained images. A hosted restart is not a physical
+power-loss test.
 
 Names are raw byte spans with an explicit encoding selected at mount. Examine
 functions write name bytes separately from `AfsplusArosFileInfo`; the packet

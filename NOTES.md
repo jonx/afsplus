@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-09-30 — Native AROS readiness without changing deployed volume bytes](#2026-09-30--native-aros-readiness-without-changing-deployed-volume-bytes)
 - [2026-09-19 — Mapped files under eight processes' page faults](#2026-09-19--mapped-files-under-eight-processes-page-faults)
 - [2026-09-19 — A volume says which profiles can take it](#2026-09-19--a-volume-says-which-profiles-can-take-it)
 - [2026-09-19 — The image workflow, and what a replayed session does not repeat](#2026-09-19--the-image-workflow-and-what-a-replayed-session-does-not-repeat)
@@ -225,6 +226,51 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-09-30 — Native AROS readiness without changing deployed volume bytes
+
+The native integration checkout was current at `0307e86`, with only `main`
+and its remote tracking branch. The old DOS-semantics branch was already
+removed after its useful work was carried forward; an internal Codex diff ref
+is a checkpoint, not a feature branch to merge or delete.
+
+Blank media now keeps the DOS handler alive. INHIBIT and FORMAT work through
+the device already opened by the handler, validate labels before detaching a
+mounted volume, refuse busy/write-protected cases, and publish the formatted
+label. An interrupted or failed format is not atomic and leaves NOT DOS.
+The actual Hosted run formats a zero-filled 64 MiB image, passes FSQualify
+13/0/0, then restarts and verifies 128 files and CRC `b6ee2004`.
+Evidence is retained in `build/hosted-format-20260930`.
+
+[Process interruption gates](testing/crash-testing.md#aros-handler-process-interruption)
+pass eleven deterministic device-boundary cuts and three SIGKILLs of an actual
+Hosted guest writing through DOS/fdsk. Each keeps acknowledged data, checks
+an unrelated sentinel, writes again after recovery, restarts again, and passes
+the independent checker. The latter run is retained at
+`/tmp/afs-hosted-cut-20260930`; recovered generations are 56, 84 and 82 within
+observed ACK/attempt bounds [56,57], [83,84] and [81,82]. These are process
+failures with host cache retained, not electrical power-loss claims.
+
+The release handler compacts diagnostic symbol names while retaining allocated
+bytes, entry symbols and every loader relocation. The combined candidate is
+4,784,312 bytes before compaction, 3,830,704 after (19.93% saved), with 66,555
+relocations checked and 604 bytes BSS. The complete original stays outside the
+installed package for symbolication. Actual Hosted LoadSeg and the four-part
+AFSPlusTour pass; the combined compact candidate also passes FORMAT and cuts.
+
+[ADR-123](adr/ADR-123-deployed-image-compatibility.md) protects actual deployed
+images without pretending that all of milestone M14 is frozen. Six regression
+tests include immutable current clean/replay fixtures and the exact 80 KiB
+initializer used by the M1 SYS image, extended to its declared 256 MiB size.
+Unknown incompatible epochs/features are rejected before writes. The on-disk
+AFS filesystem encoding does not change in this readiness work.
+
+The disk wrapper gains 512/4096-byte GPT sector geometry and round-trip tests.
+Native partition access lives in the private AROS integration/core: an explicit
+AFS GUID/extent permit, bounded partition unit and filesystem boot node. No
+physical GPT edit, NVMe write or physical direct-boot qualification was performed
+in this host-side work. GPT boot-priority encoding is documented separately in
+[ADR-122](adr/ADR-122-aros-partition-identity.md).
 
 ## 2026-09-19 — Mapped files under eight processes' page faults
 

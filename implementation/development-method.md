@@ -46,12 +46,13 @@ independent checks covers it, not when its own tests are green.
 
 ## What is never run, proposed or discussed
 
-No test suite, whatever its length: no workspace run, no crate-wide run, no
-"quick" tier, no closing proof at the end of a stage or milestone. Nothing
-has been released, so there is nothing to regress against. Do not propose
-such a run, do not plan one in a handoff, do not spend time making one
-faster or measuring it. Non-regression tests enter the repository when a
-real problem appears and needs pinning, with the reproducer that found it.
+No undirected test suite: no workspace run, no crate-wide run, no "quick"
+tier, no closing proof at the end of a stage or milestone. Run the named
+regressions affected by a change, including the
+[protected deployed-image gate](../spec/compatibility-rules.md#protected-deployed-images)
+when its format or filesystem paths change. A public release is not a
+prerequisite for a compatibility obligation. Other regressions enter with
+the real defect or independently specified contract they pin.
 
 A lot is integrated on three things: the named tests of what it built, run
 alone; formatting, Clippy and the documentation checker, which are compile
@@ -61,15 +62,15 @@ those, the story goes to [NOTES.md](../NOTES.md), commit, push.
 
 ## Format changes
 
-No image of this filesystem has been released, so there is no legacy format
-and no backward compatibility to keep. When a feature or a fix calls for an
-on-disk change (a new record, a field, a size, a moved structure), make it:
-codec, formatter, mount, checker, portable C reader, spec header and
-documents change together, and the decision is written as an ADR. No
-migration path, compatibility shim or feature-bit detour is built for images
-that exist only in tests. The integrity rules do not relax: every
-publication keeps two legal states under a power cut, both readers agree,
-and conformance images pin the new layout.
+Deployed AROS images follow the
+[protected-image compatibility contract](../spec/compatibility-rules.md#protected-deployed-images).
+When a feature or fix changes an on-disk record, field, size or placement,
+the codec, formatter, mount, checker, portable C reader, spec header and
+documents change together, and the decision is written as an ADR. Preserve
+the registered baselines; do not assume an image is disposable because
+there has been no public release. Every publication keeps two legal states
+under a power cut, both readers agree, and retained conformance images pin
+the accepted layouts.
 
 ## Lots and agents
 

@@ -54,6 +54,9 @@ static int32_t stub_locate_path_error;
 static uint32_t stub_revision = AFSPLUS_AROS_INTERFACE_REVISION;
 static uint32_t stub_protect;
 static uint32_t stub_protect_key;
+static uint32_t stub_disk_readonly;
+static uint32_t format_calls;
+static uint32_t format_failure;
 static int32_t stub_label_error;
 static uint8_t relabelled[16];
 static uint32_t relabelled_length;
@@ -491,6 +494,7 @@ int32_t afsplus_aros_disk_info(struct AfsplusAros *filesystem,
     output->bytes_per_block = 4096;
     output->disk_type = (int32_t)UINT32_C(0x4146532b);
     output->in_use = 1;
+    output->write_protected = stub_disk_readonly;
     return 0;
 }
 
@@ -1131,6 +1135,94 @@ static void assert_event(size_t index, char operation, const char *name,
     assert(events[index].length == length);
     assert(memcmp(events[index].name, name, length) == 0);
     assert(events[index].access == access);
+}
+
+static int32_t packet_format(void *context, const uint8_t *name,
+    uint32_t length, uint32_t dos_type, struct AfsplusAros **filesystem,
+    BPTR *volume_node)
+{
+    (void)context;
+    assert(dos_type == UINT32_C(0x4146532b));
+    assert(length == 5 && memcmp(name, "Fresh", 5) == 0);
+    format_calls++;
+    *filesystem = format_failure ? NULL : STUB_FILESYSTEM;
+    *volume_node = format_failure ? BNULL
+        : MKBADDR((void *)(uintptr_t)UINT32_C(0x3000));
+    return format_failure ? ERROR_SEEK_ERROR : 0;
+}
+
+static void blank_medium_format_packets(struct AfsplusArosPacketConfig config)
+{
+    struct AfsplusArosPacketContext *context = NULL;
+    struct DosPacket packet;
+    struct InfoData disk;
+    BPTR lock;
+
+    config.filesystem = NULL;
+    config.volume_node = BNULL;
+    config.format = packet_format;
+    assert(afsplus_aros_packet_create(&config, &context) == 0);
+    initialize_packet(&packet, ACTION_DISK_INFO);
+    packet.dp_Arg1 = (SIPTR)MKBADDR(&disk);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert(disk.id_DiskType == ID_NOT_REALLY_DOS);
+    assert(disk.id_VolumeNode == BNULL);
+    initialize_packet(&packet, ACTION_LOCATE_OBJECT);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_NOT_A_DOS_DISK);
+    initialize_packet(&packet, ACTION_INHIBIT);
+    packet.dp_Arg1 = DOSTRUE;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    initialize_packet(&packet, ACTION_FORMAT);
+    packet.dp_Arg1 = packet_bstr("Fresh");
+    packet.dp_Arg2 = UINT32_C(0x444f5301);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res2 == ERROR_BAD_NUMBER && format_calls == 0);
+    packet.dp_Arg2 = UINT32_C(0x4146532b);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0 && format_calls == 1);
+    initialize_packet(&packet, ACTION_CURRENT_VOLUME);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == (SIPTR)MKBADDR((void *)(uintptr_t)UINT32_C(0x3000)));
+    initialize_packet(&packet, ACTION_INHIBIT);
+    packet.dp_Arg1 = DOSFALSE;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE);
+    initialize_packet(&packet, ACTION_LOCATE_OBJECT);
+    packet.dp_Arg2 = packet_bstr("");
+    packet.dp_Arg3 = SHARED_LOCK;
+    event_count = 0;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res2 == 0 && packet.dp_Res1 != 0);
+    lock = (BPTR)packet.dp_Res1;
+    initialize_packet(&packet, ACTION_FORMAT);
+    packet.dp_Arg1 = packet_bstr("Fresh");
+    packet.dp_Arg2 = UINT32_C(0x4146532b);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res2 == ERROR_OBJECT_IN_USE && format_calls == 1);
+    initialize_packet(&packet, ACTION_FREE_LOCK);
+    packet.dp_Arg1 = (SIPTR)lock;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res2 == 0);
+    stub_disk_readonly = 1;
+    initialize_packet(&packet, ACTION_FORMAT);
+    packet.dp_Arg1 = packet_bstr("Fresh");
+    packet.dp_Arg2 = UINT32_C(0x4146532b);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res2 == ERROR_DISK_WRITE_PROTECTED && format_calls == 1);
+    stub_disk_readonly = 0;
+    format_failure = 1;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res2 == ERROR_SEEK_ERROR && format_calls == 2);
+    initialize_packet(&packet, ACTION_DISK_TYPE);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == ID_NOT_REALLY_DOS);
+    initialize_packet(&packet, ACTION_DIE);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && afsplus_aros_packet_should_quit(context));
+    assert(afsplus_aros_packet_destroy(context) == 0);
 }
 
 int main(void)
@@ -3236,6 +3328,7 @@ int main(void)
 
     assert(afsplus_aros_packet_destroy(context) == 0);
     assert(stub_removed_watches == 4);
+    blank_medium_format_packets(config);
     puts("afsplus packet stub: PASS");
     return 0;
 }

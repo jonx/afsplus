@@ -25,12 +25,12 @@ use afsplus_aros::{
 };
 use afsplus_block::{BlockDevice, BlockError, CacheControl, CachedDevice};
 use afsplus_core::flight::{Categories, Category, Event, FlightRecorder, LiveSink, SinkResult};
-use afsplus_core::{MountMode, MountOptions};
+use afsplus_core::{mkfs, MkfsParams, MountMode, MountOptions, NamePolicy};
 use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 19;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 20;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -50,6 +50,7 @@ pub const AFSPLUS_AROS_GROUP_ATTRIBUTES: u64 = 0x8000;
 pub const AFSPLUS_AROS_GROUP_CACHE: u64 = 0x10000;
 pub const AFSPLUS_AROS_GROUP_COMMIT: u64 = 0x20000;
 pub const AFSPLUS_AROS_GROUP_PATHS: u64 = 0x40000;
+pub const AFSPLUS_AROS_GROUP_FORMAT: u64 = 0x80000;
 pub const AFSPLUS_AROS_EXTENT_UNWRITTEN: u32 = 1;
 pub const AFSPLUS_AROS_DIR_RECORD_MAX: u32 = 280;
 pub const AFSPLUS_AROS_KIND_FILE: u32 = 1;
@@ -94,7 +95,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_ATTRIBUTES
     | AFSPLUS_AROS_GROUP_CACHE
     | AFSPLUS_AROS_GROUP_COMMIT
-    | AFSPLUS_AROS_GROUP_PATHS;
+    | AFSPLUS_AROS_GROUP_PATHS
+    | AFSPLUS_AROS_GROUP_FORMAT;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -995,6 +997,105 @@ pub extern "C" fn afsplus_aros_mount(
         }))
         .cast::<AfsplusAros>();
         write_output(output, raw)
+    })
+}
+
+fn format_label(encoding: u32, label: *const u8, length: u32) -> Result<String, ArosError> {
+    if length > 64 {
+        return Err(ArosError::ObjectTooLarge);
+    }
+    let input = input_bytes(label, length)?;
+    let label: String = match name_encoding(encoding)? {
+        NameEncoding::Utf8 => std::str::from_utf8(input)
+            .map_err(|_| ArosError::InvalidComponentName)?
+            .to_owned(),
+        NameEncoding::Latin1 => input.iter().map(|byte| char::from(*byte)).collect(),
+    };
+    if label.is_empty() || label.bytes().any(|byte| matches!(byte, 0 | b':' | b'/')) {
+        return Err(ArosError::InvalidComponentName);
+    }
+    if label.len() > 64 {
+        return Err(ArosError::ObjectTooLarge);
+    }
+    Ok(label)
+}
+
+/// Pure validation before a handler detaches or flushes the old volume.
+#[no_mangle]
+pub extern "C" fn afsplus_aros_validate_format_label(
+    encoding: u32,
+    label: *const u8,
+    label_length: u32,
+) -> i32 {
+    ffi_status(|| format_label(encoding, label, label_length).map(|_| ()))
+}
+
+/// Formats an exclusively owned device; no mounted instance may reference it.
+/// Validation precedes writes. Interrupted formatting is not an atomic operation.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn afsplus_aros_format(
+    device: *const AfsplusArosDevice,
+    encoding: u32,
+    label: *const u8,
+    label_length: u32,
+    uuid: *const u8,
+    seconds: i64,
+    nanoseconds: u32,
+) -> i32 {
+    ffi_status(|| {
+        if device.is_null() || uuid.is_null() {
+            return Err(ArosError::InvalidComponentName);
+        }
+        // SAFETY: caller supplies a complete ABI device and sixteen UUID bytes.
+        let device = unsafe { &*device };
+        if device.abi_version != AFSPLUS_AROS_ABI_VERSION
+            || device.struct_size as usize != std::mem::size_of::<AfsplusArosDevice>()
+            || device.block_size != 4096
+            || device.total_blocks == 0
+            || device.reserved != 0
+        {
+            return Err(ArosError::BadNumber);
+        }
+        let read_block = device.read_block.ok_or(ArosError::NotDosDisk)?;
+        if device.write_block.is_none() || device.flush.is_none() {
+            return Err(ArosError::DiskWriteProtected);
+        }
+        let label = format_label(encoding, label, label_length)?;
+        if nanoseconds >= 1_000_000_000 {
+            return Err(ArosError::InvalidComponentName);
+        }
+        let mut volume_uuid = [0u8; 16];
+        // SAFETY: uuid is non-null and the caller supplies sixteen readable bytes.
+        volume_uuid.copy_from_slice(unsafe { slice::from_raw_parts(uuid, 16) });
+        let mut callback_device = CallbackDevice {
+            counters: Arc::new(DeviceCounters::default()),
+            context: device.context,
+            block_size: device.block_size as usize,
+            total_blocks: device.total_blocks,
+            read_block,
+            write_block: device.write_block,
+            flush: device.flush,
+        };
+        mkfs(
+            &mut callback_device,
+            &MkfsParams {
+                uuid: volume_uuid,
+                label,
+                region_size: 512,
+                reclaim_caps: Default::default(),
+                log_slots: 8,
+                shared_extents: true,
+                data_policy: true,
+                name_policy: NamePolicy::Insensitive,
+                timestamp: Timespec {
+                    seconds,
+                    nanoseconds,
+                },
+            },
+        )
+        .map_err(afsplus_vfs::VfsError::from)?;
+        Ok(())
     })
 }
 
