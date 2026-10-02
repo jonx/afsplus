@@ -783,6 +783,13 @@ impl<D: BlockDevice> Volume<D> {
     /// load path and by `afsplus-check`. A checkpoint whose total disagrees
     /// with its own regions is corrupt accounting either way.
     pub fn checkpoint_free_count_mismatch(&mut self) -> Result<Option<(u64, u64)>, CoreError> {
+        self.trace_api(
+            crate::flight::ApiMethod::CheckpointFreeCountMismatch,
+            |volume| volume.checkpoint_free_count_mismatch_untraced(),
+        )
+    }
+
+    fn checkpoint_free_count_mismatch_untraced(&mut self) -> Result<Option<(u64, u64)>, CoreError> {
         let geo = self.ident.geometry();
         let records = crate::allocation_root::load_all(
             &mut self.dev,
@@ -1098,7 +1105,7 @@ impl<D: BlockDevice> Volume<D> {
         directory_id: u64,
         name: &str,
     ) -> Result<Option<(u64, Vec<u8>)>, CoreError> {
-        self.trace_api(crate::flight::ApiMethod::LookupInDirectory, |volume| {
+        self.trace_api(crate::flight::ApiMethod::LookupEntryInDirectory, |volume| {
             volume.lookup_entry_untraced(directory_id, name)
         })
     }

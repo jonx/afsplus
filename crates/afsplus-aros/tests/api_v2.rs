@@ -214,14 +214,23 @@ fn preallocation_reserves_without_growing_and_is_bounded_per_request() {
     assert_eq!(adapter.examine_file(file).unwrap().blocks, 16);
     adapter.close(file).unwrap();
 
-    let reader = adapter
+    // MODE_OLDFILE opens an existing file, not a read-only handle.
+    let existing = adapter
         .open(None, b"reserved", OpenMode::OldFile, timestamp(7))
         .unwrap();
+    adapter
+        .preallocate(existing, 0, 4096, timestamp(8))
+        .unwrap();
+    assert_eq!(adapter.file_size(existing).unwrap(), 8 * 4096);
+    assert_eq!(adapter.examine_file(existing).unwrap().blocks, 17);
+    adapter.set_write_protect(true, 7).unwrap();
     assert_eq!(
-        adapter.preallocate(reader, 0, 4096, timestamp(8)),
+        adapter.preallocate(existing, 32 * 4096, 4096, timestamp(9)),
         Err(ArosError::DiskWriteProtected)
     );
-    adapter.close(reader).unwrap();
+    assert_eq!(adapter.examine_file(existing).unwrap().blocks, 17);
+    adapter.set_write_protect(false, 7).unwrap();
+    adapter.close(existing).unwrap();
     checked(adapter);
 }
 

@@ -514,6 +514,8 @@ pub enum ApiMethod {
     SetObjectTimes = 83,
     WindowDiscard = 84,
     CleanupOrphans = 85,
+    CheckpointFreeCountMismatch = 86,
+    LookupEntryInDirectory = 87,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

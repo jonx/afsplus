@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-10-02 — Restore API tracing coverage and preallocation expectations](#2026-10-02--restore-api-tracing-coverage-and-preallocation-expectations)
 - [2026-09-30 — Native AROS readiness without changing deployed volume bytes](#2026-09-30--native-aros-readiness-without-changing-deployed-volume-bytes)
 - [2026-09-19 — Mapped files under eight processes' page faults](#2026-09-19--mapped-files-under-eight-processes-page-faults)
 - [2026-09-19 — A volume says which profiles can take it](#2026-09-19--a-volume-says-which-profiles-can-take-it)
@@ -226,6 +227,17 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-10-02 — Restore API tracing coverage and preallocation expectations
+
+The native review exposed two failures on main. The preallocation test still
+expected MODE_OLDFILE to be read-only after the adapter adopted AROS existing-file
+write semantics. It now verifies reservation through that handle, then explicitly
+write-protects the volume and checks that another reservation is refused without
+changing its allocation. The checkpoint free-count diagnostic lacked its outer
+flight-recorder guard; it has a registered identity and guard. The coverage test
+then exposed lookup_entry_in_directory sharing LookupInDirectory's identity;
+that operation also has its own registered identity. No disk format changes.
 
 ## 2026-09-30 — Native AROS readiness without changing deployed volume bytes
 
