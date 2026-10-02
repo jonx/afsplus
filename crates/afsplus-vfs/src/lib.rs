@@ -488,6 +488,12 @@ pub struct Vfs<D: BlockDevice> {
     directory_resume: BTreeMap<Handle, Vec<u8>>,
     next_handle: Handle,
     idle_maintenance: bool,
+    /// The reclaim backlog at which idle reclaim last only rotated the queue:
+    /// a step committed and the backlog did not move, because the commit
+    /// returned as many blocks as it retired of its own structure. Until the
+    /// backlog differs, idle ticks leave reclaim alone; otherwise every tick
+    /// of a volume that is only read would write a checkpoint.
+    idle_reclaim_rest: Option<u64>,
     inline_maintenance: bool,
     durability: Durability,
     /// Clock of the first and the latest change the open window holds, and
@@ -535,6 +541,7 @@ impl<D: BlockDevice> Vfs<D> {
             directory_resume: BTreeMap::new(),
             next_handle: 1,
             idle_maintenance: true,
+            idle_reclaim_rest: None,
             inline_maintenance: true,
             durability: Durability::Sync,
             window_first: None,
@@ -667,9 +674,21 @@ impl<D: BlockDevice> Vfs<D> {
         let cleaned = self
             .cleanup_orphans_inner(IDLE_STEPS_PER_TICK, now)
             .unwrap_or(0);
-        let returned = self
-            .reclaim_space_inner(IDLE_STEPS_PER_TICK, now)
-            .unwrap_or(0);
+        let backlog = self.volume.reclaim_pending_blocks();
+        let returned = if self.idle_reclaim_rest == Some(backlog) {
+            0
+        } else {
+            let returned = self
+                .reclaim_space_inner(IDLE_STEPS_PER_TICK, now)
+                .unwrap_or(0);
+            let left = self.volume.reclaim_pending_blocks();
+            // Nothing returned and the backlog where it was: the step only
+            // exchanged the queue's own retired roots. A backlog a checkpoint
+            // still protects grows by the step's root instead, and is tried
+            // again on the next tick.
+            self.idle_reclaim_rest = (returned == 0 && left == backlog).then_some(left);
+            returned
+        };
         cleaned > 0 || returned > 0
     }
 

@@ -393,3 +393,44 @@ fn deletes_on_a_volume_never_idle_keep_room_for_their_commits() {
     let room = vfs.statfs().available_blocks;
     assert!(room >= 1_024, "{room} blocks available");
 }
+
+/// A volume that is only read must not write: once idle maintenance has
+/// returned what it can, further idle ticks commit nothing, however many
+/// packets wake the handler (measured on the J313: a checkpoint per wake,
+/// ten thousand 4 KiB writes during one boot).
+#[test]
+fn idle_ticks_on_a_settled_volume_commit_nothing() {
+    let mut vfs = delayed(formatted());
+    for index in 0..8 {
+        write_file(&mut vfs, &format!("s{index}"), &[7u8; 9000], index);
+    }
+    vfs.unlink_file(OBJECT_ROOT, "s3", ms(500)).unwrap();
+    // Commit, then give idle maintenance the ticks it needs: a backlog the
+    // older checkpoint still protects takes one more transaction to free.
+    for tick in 0..10 {
+        vfs.commit_if_due(ms(2_000 + tick * 100)).unwrap();
+    }
+    let settled = vfs.generation();
+    let free = vfs.statfs().free_blocks;
+    for tick in 0..200 {
+        assert_eq!(read_file(&mut vfs, "s1").unwrap().len(), 9000);
+        assert!(!vfs.commit_if_due(ms(10_000 + tick * 50)).unwrap());
+    }
+    assert_eq!(
+        vfs.generation(),
+        settled,
+        "idle ticks on a read-only workload committed checkpoints"
+    );
+    assert!(
+        vfs.reclaim_pending_blocks() <= 2,
+        "{}",
+        vfs.reclaim_pending_blocks()
+    );
+    assert!(vfs.statfs().free_blocks >= free);
+    // The residue is returned by the next real transaction's reclaim.
+    write_file(&mut vfs, "later", b"x", 30_000);
+    while vfs.commit_if_due(ms(32_000)).unwrap() {}
+    let mut vfs = remount(vfs);
+    assert_eq!(read_file(&mut vfs, "s1").unwrap().len(), 9000);
+    assert!(read_file(&mut vfs, "s3").is_none());
+}
