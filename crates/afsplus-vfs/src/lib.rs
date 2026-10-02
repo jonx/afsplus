@@ -488,12 +488,14 @@ pub struct Vfs<D: BlockDevice> {
     directory_resume: BTreeMap<Handle, Vec<u8>>,
     next_handle: Handle,
     idle_maintenance: bool,
-    /// The reclaim backlog at which idle reclaim last only rotated the queue:
-    /// a step committed and the backlog did not move, because the commit
-    /// returned as many blocks as it retired of its own structure. Until the
-    /// backlog differs, idle ticks leave reclaim alone; otherwise every tick
-    /// of a volume that is only read would write a checkpoint.
-    idle_reclaim_rest: Option<u64>,
+    /// The checkpoint generation and reclaim backlog an idle reclaim step
+    /// left behind when it succeeded, returned nothing and did not move the
+    /// backlog: the commit only exchanged the queue's own retired roots.
+    /// While both are unchanged, idle ticks leave reclaim alone; otherwise
+    /// every tick of a volume that is only read would write a checkpoint.
+    /// Any transaction moves the generation and ends the rest, and so does
+    /// a remount; a step that failed never starts one.
+    idle_reclaim_rest: Option<(u64, u64)>,
     inline_maintenance: bool,
     durability: Durability,
     /// Clock of the first and the latest change the open window holds, and
@@ -675,19 +677,21 @@ impl<D: BlockDevice> Vfs<D> {
             .cleanup_orphans_inner(IDLE_STEPS_PER_TICK, now)
             .unwrap_or(0);
         let backlog = self.volume.reclaim_pending_blocks();
-        let returned = if self.idle_reclaim_rest == Some(backlog) {
+        let resting = self.idle_reclaim_rest == Some((self.volume.generation(), backlog));
+        let returned = if resting {
             0
         } else {
-            let returned = self
-                .reclaim_space_inner(IDLE_STEPS_PER_TICK, now)
-                .unwrap_or(0);
+            let step = self.reclaim_space_inner(IDLE_STEPS_PER_TICK, now);
             let left = self.volume.reclaim_pending_blocks();
-            // Nothing returned and the backlog where it was: the step only
-            // exchanged the queue's own retired roots. A backlog a checkpoint
-            // still protects grows by the step's root instead, and is tried
-            // again on the next tick.
-            self.idle_reclaim_rest = (returned == 0 && left == backlog).then_some(left);
-            returned
+            // Rest only after a step that succeeded, returned nothing and
+            // left the backlog where it was. A backlog a checkpoint still
+            // protects grows by the step's root instead and is tried again
+            // on the next tick, and so is a step that failed.
+            self.idle_reclaim_rest = match step {
+                Ok(0) if left == backlog => Some((self.volume.generation(), left)),
+                _ => None,
+            };
+            step.unwrap_or(0)
         };
         cleaned > 0 || returned > 0
     }

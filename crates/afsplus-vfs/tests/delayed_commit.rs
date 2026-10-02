@@ -434,3 +434,133 @@ fn idle_ticks_on_a_settled_volume_commit_nothing() {
     assert_eq!(read_file(&mut vfs, "s1").unwrap().len(), 9000);
     assert!(read_file(&mut vfs, "s3").is_none());
 }
+
+/// A device whose writes fail while the shared switch is on: a transient
+/// fault the test turns on for one idle tick and off again.
+struct Flaky {
+    inner: MemoryBackend,
+    failing: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl afsplus_block::BlockDevice for Flaky {
+    fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+    fn total_blocks(&self) -> u64 {
+        self.inner.total_blocks()
+    }
+    fn read_block(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), afsplus_block::BlockError> {
+        self.inner.read_block(lba, buf)
+    }
+    fn write_block(&mut self, lba: u64, data: &[u8]) -> Result<(), afsplus_block::BlockError> {
+        if self.failing.get() {
+            return Err(afsplus_block::BlockError::Injected("transient write fault"));
+        }
+        self.inner.write_block(lba, data)
+    }
+    fn flush(&mut self) -> Result<(), afsplus_block::BlockError> {
+        self.inner.flush()
+    }
+}
+
+/// The rest ends with any transaction, even one that leaves the backlog at
+/// the same count, and a remount starts without one.
+#[test]
+fn the_idle_rest_ends_with_a_transaction_and_with_a_remount() {
+    let mut vfs = delayed(formatted());
+    write_file(&mut vfs, "a", &[1u8; 9000], 0);
+    for tick in 0..10 {
+        vfs.commit_if_due(ms(2_000 + tick * 100)).unwrap();
+    }
+    let rested = vfs.generation();
+    let backlog = vfs.reclaim_pending_blocks();
+    for tick in 0..20 {
+        assert!(!vfs.commit_if_due(ms(4_000 + tick * 100)).unwrap());
+    }
+    assert_eq!(vfs.generation(), rested, "resting");
+    // A real transaction: idle reclaim is tried again afterwards, whatever
+    // the backlog count, then rests at the new generation.
+    write_file(&mut vfs, "b", b"x", 10_000);
+    for tick in 0..10 {
+        vfs.commit_if_due(ms(12_000 + tick * 100)).unwrap();
+    }
+    let after = vfs.generation();
+    assert!(
+        after >= rested + 2,
+        "the change committed and idle reclaim ran again: {rested} -> {after} (backlog {backlog} -> {})",
+        vfs.reclaim_pending_blocks()
+    );
+    for tick in 0..20 {
+        assert!(!vfs.commit_if_due(ms(20_000 + tick * 100)).unwrap());
+    }
+    assert_eq!(vfs.generation(), after, "resting again");
+    // A remount carries no rest: its first idle tick tries once.
+    let mut vfs = delayed(remount(vfs).into_volume().into_device());
+    let mounted = vfs.generation();
+    for tick in 0..10 {
+        vfs.commit_if_due(ms(40_000 + tick * 100)).unwrap();
+    }
+    let tried = vfs.generation();
+    assert!(tried > mounted, "idle reclaim ran after the remount");
+    for tick in 0..20 {
+        vfs.commit_if_due(ms(50_000 + tick * 100)).unwrap();
+    }
+    assert_eq!(vfs.generation(), tried, "and rests again");
+}
+
+/// A reclaim step that fails does not start a rest: the backlog it could
+/// not touch is tried again on the next tick and drains.
+#[test]
+fn a_failed_idle_reclaim_step_is_retried() {
+    let failing = std::rc::Rc::new(std::cell::Cell::new(false));
+    let device = Flaky {
+        inner: formatted(),
+        failing: failing.clone(),
+    };
+    let mut vfs = Vfs::mount(device, MountOptions::default()).unwrap();
+    vfs.set_durability(Durability::DELAYED).unwrap();
+    let at = |millis: i64| ms(millis);
+    for index in 0..40 {
+        let id = vfs
+            .create_file(OBJECT_ROOT, &format!("f{index}"), at(index))
+            .unwrap();
+        let handle = vfs.open_file(id, AccessMode::WriteOnly).unwrap();
+        vfs.write(handle, 0, &[3u8; 9000], at(index)).unwrap();
+        vfs.close(handle).unwrap();
+    }
+    for tick in 0..10 {
+        vfs.commit_if_due(at(2_000 + tick * 100)).unwrap();
+    }
+    // Truncate them with maintenance off: the freed blocks wait in the
+    // reclaim queue, with no deleted file whose cleanup would be a
+    // transaction of its own.
+    vfs.set_idle_maintenance(false);
+    for index in 0..40 {
+        let id = vfs.lookup(OBJECT_ROOT, &format!("f{index}")).unwrap();
+        let handle = vfs.open_file(id, AccessMode::WriteOnly).unwrap();
+        vfs.truncate(handle, 0, at(3_000 + index)).unwrap();
+        vfs.close(handle).unwrap();
+    }
+    vfs.commit_if_due(at(6_000)).unwrap();
+    vfs.set_idle_maintenance(true);
+    assert_eq!(vfs.pending_orphans().unwrap(), 0);
+    assert!(
+        vfs.reclaim_pending_blocks() > 40,
+        "{}",
+        vfs.reclaim_pending_blocks()
+    );
+    // One idle tick on a device that refuses every write.
+    failing.set(true);
+    let _ = vfs.commit_if_due(at(8_000));
+    failing.set(false);
+    let stuck = vfs.reclaim_pending_blocks();
+    // The fault is gone: the following ticks must work the backlog down.
+    for tick in 0..30 {
+        let _ = vfs.commit_if_due(at(9_000 + tick * 100));
+    }
+    let left = vfs.reclaim_pending_blocks();
+    assert!(
+        left <= 2,
+        "the backlog was abandoned after a transient fault: {stuck} -> {left}"
+    );
+}
