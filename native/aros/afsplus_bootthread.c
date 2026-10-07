@@ -286,29 +286,51 @@ int aros_thr_sleep(unsigned int secs, unsigned int nsecs)
  * not enough on its own: these six have to be answered here too, or the
  * thread table comes back through the linker's own hand.
  *
- * One task means one set of thread-local values, so the key table below is
- * that set. A second task using it would silently read the first task's
- * values, which is why the owner is remembered and a stranger is named in
- * the log.
+ * Each task that touches a thread-local value gets its own set below, so a
+ * second handler instance served from the same resident segment (the mounted
+ * update image next to the installed volume) keeps its own values.
  */
 
 #define KEY_SLOTS 16
+#define KEY_OWNERS 4
 
-static void *key_values[KEY_SLOTS];
+/* One set of thread-local values per task that uses them: two handler
+ * instances served from one resident segment (the installed volume and a
+ * mounted update image) are two tasks with two sets. The table is claimed
+ * under Forbid(); a fifth task is named in the log and gets nothing. */
+static struct {
+    struct Task *owner;
+    void *values[KEY_SLOTS];
+} key_tables[KEY_OWNERS];
 static unsigned int keys_taken;
-static struct Task *key_owner;
 
-static int key_task_is_ours(void)
+static void **key_values_of_this_task(void)
 {
     struct Task *task = FindTask(NULL);
+    int i;
 
-    if (key_owner == NULL)
-        key_owner = task;
-    if (key_owner == task)
-        return 1;
-    bug("afsplus: a second task read the handler's thread-local values; "
-        "they belong to the task that serves its packets\n");
-    return 0;
+    Forbid();
+    for (i = 0; i < KEY_OWNERS; i++)
+    {
+        if (key_tables[i].owner == task)
+        {
+            Permit();
+            return key_tables[i].values;
+        }
+    }
+    for (i = 0; i < KEY_OWNERS; i++)
+    {
+        if (key_tables[i].owner == NULL)
+        {
+            key_tables[i].owner = task;
+            Permit();
+            return key_tables[i].values;
+        }
+    }
+    Permit();
+    bug("afsplus: more than %d tasks read the handler's thread-local values; "
+        "the extra task gets none\n", KEY_OWNERS);
+    return NULL;
 }
 
 int pthread_key_create(unsigned int *key, void (*destructor)(void *))
@@ -336,25 +358,32 @@ int pthread_key_create(unsigned int *key, void (*destructor)(void *))
 
 int pthread_key_delete(unsigned int key)
 {
+    int i;
+
     if (key >= KEY_SLOTS)
         return AFSPLUS_EINVAL;
-    key_values[key] = NULL;
+    for (i = 0; i < KEY_OWNERS; i++)
+        key_tables[i].values[key] = NULL;
     return 0;
 }
 
 int pthread_setspecific(unsigned int key, const void *value)
 {
-    if (key >= KEY_SLOTS || !key_task_is_ours())
+    void **values;
+
+    if (key >= KEY_SLOTS || (values = key_values_of_this_task()) == NULL)
         return AFSPLUS_EINVAL;
-    key_values[key] = (void *)(uintptr_t)value;
+    values[key] = (void *)(uintptr_t)value;
     return 0;
 }
 
 void *pthread_getspecific(unsigned int key)
 {
-    if (key >= KEY_SLOTS || !key_task_is_ours())
+    void **values;
+
+    if (key >= KEY_SLOTS || (values = key_values_of_this_task()) == NULL)
         return NULL;
-    return key_values[key];
+    return values[key];
 }
 
 /*
