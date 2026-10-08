@@ -601,7 +601,7 @@ One handler instance serves a medium, whatever dos.library starts. `RunHandler()
 start to the first access, so two tasks that make their first access together
 each get a handler process; on a target this happened in every run of the
 two-task record probe. The instance that comes first publishes a claim, a
-public port named after the medium it is about to open, before it opens it
+record in the boot-lifetime `afsplus.claims` resource, before it opens the medium
 ([`afsplus_claim.h`](../native/aros/afsplus_claim.h)). The medium is the
 partition: device, unit, open flags, block size, surfaces, blocks per track
 and the cylinder range, written as numbers, so two partitions of one disk
@@ -610,8 +610,7 @@ later instance opens nothing, reports its startup as success and leaves
 `dn_Task` alone, because a refused startup makes `RunHandler()` clear
 `dn_Task`, which by then may be the first instance's. It forwards the packets
 of the one caller that was handed its port, looks the claim up for every
-packet under `Forbid()` together with the `PutMsg()`, and lives exactly as
-long as the instance it serves. dos.library stores the port a file was
+packet under the shared claim lock together with the protected delivery. dos.library stores the port a file was
 opened through in its `FileHandle`, so the later packets of such a file keep
 arriving at the forwarder; it therefore passes an `ACTION_DIE` on without
 ending, and the instance refuses that packet while a file is open. When the
@@ -619,10 +618,31 @@ instance releases the claim it wakes its forwarders, and a forwarder also
 ends on a packet it can no longer forward, which it answers
 `ERROR_DEVICE_NOT_MOUNTED`. It never serves a later instance, whose locks and files are
 not the ones its caller's packets name, and it never mounts the volume
-itself. A claim whose owner is no longer that task, on the task lists, a
-process, with the unique task ID the claim recorded, is withdrawn by whoever
-finds it, and a forwarder is asked the same before it is signalled. `Forbid()` makes lookup and publication one step on the uniprocessor
-kernels AROS ships; an SMP exec.library would need a lock of its own here.
+itself.
+
+The resource shares the list and monotonically increasing generation counter
+across separately loaded handler modules. Generation exhaustion refuses a new
+owner. Its storage and name survive module unloading. UP exclusion uses
+`Forbid()`; SMP exclusion uses `execlock.resource`. Resource publication is
+serialized under the Exec resource-list lock, with a recheck after allocation.
+Allocation and freeing occur outside locks.
+
+SMP requires Exec 51.9 or later and uses `TryProcessMessage` to validate the
+recorded task pointer and unique ID and deliver to its embedded process port
+under kernel lifetime protection. Only a proven absent identity permits stale
+claim removal. A retiring identity or notification backpressure means retry,
+not death. A refused delivery retains the original packet; the forwarder yields
+outside the claim lock and rechecks the generation before each retry. Shutdown retains the claim through unmount, flushing and closing the device.
+Release then withdraws the claim before waking forwarders, outside the claim
+lock; queued packets are refused before the process exits.
+The UP adapter validates the process identity and sends under `Forbid()`.
+
+[`test-aros-claim-concurrent.py`](../tools/test-aros-claim-concurrent.py)
+exercises separately compiled module copies on eight host threads, including
+publication races, forwarding against release, generation separation and
+allocation failures. The host fixtures mock Exec locking and delivery; these
+checks do not qualify the installed kernel or storage hardware.
+
 
 Record locks are advisory byte ranges in a bounded in-memory table, owned
 by a file handle and released when it closes. Two ranges collide when they

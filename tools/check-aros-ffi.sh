@@ -260,6 +260,11 @@ echo "[aros-ffi] AROS AArch64 one-instance claim"
     -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
     -I api -I native/aros -c native/aros/afsplus_claim.c \
     -o "$task_dir/claim-aarch64.o"
+"$aros_clang" --target="$aros_target" $aros_arch_flags \
+    $handler_cflags -std=gnu11 -Wall -Wextra -Werror -D__NOLIBBASE__ \
+    -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
+    -I api -I native/aros -c native/aros/afsplus_claim_exec.c \
+    -o "$task_dir/claim-exec-aarch64.o"
 
 echo "[aros-ffi] AROS AArch64 native handler shell"
 # shellcheck disable=SC2086 -- profile and handler flags are separate words.
@@ -295,6 +300,7 @@ echo "[aros-ffi] AROS AArch64 relocatable handler/staticlib link"
     "$task_dir/bootthread-aarch64.o" \
     "$task_dir/packet-aarch64.o" "$task_dir/trackdisk-aarch64.o" \
     "$task_dir/claim-aarch64.o" \
+    "$task_dir/claim-exec-aarch64.o" \
     "$task_dir/control-aarch64.o" \
     "$archive" -o "$task_dir/handler-bundle-aarch64.o"
 for symbol in handler afsplus_aros_mount afsplus_aros_packet_process; do
@@ -375,6 +381,7 @@ PATH="$aros_tools:$PATH" COMPILER_PATH="$aros_crosstools/bin" \
     "$task_dir/packet-aarch64.o" \
     "$task_dir/trackdisk-aarch64.o" \
     "$task_dir/claim-aarch64.o" \
+    "$task_dir/claim-exec-aarch64.o" \
     "$task_dir/control-aarch64.o" \
     "$task_dir/module"/aros_*_glue.o \
     "$archive" "$task_dir/module/afsplus_end.o" \
@@ -451,6 +458,12 @@ if [ "${AFSPLUS_AROS_SKIP_M68K_ABI:-0}" != 1 ]; then
         -I "$m68k_gen_include" -I api -I native/aros \
         -c native/aros/afsplus_claim.c \
         -o "$task_dir/claim-m68k.o"
+    "$m68k_cc" $handler_cflags -O2 -std=gnu11 -Wall -Wextra -Werror \
+        -Wno-volatile-register-var -D__NOLIBBASE__ \
+        -I "$m68k_stdc_include" -I "$m68k_include" \
+        -I "$m68k_gen_include" -I api -I native/aros \
+        -c native/aros/afsplus_claim_exec.c \
+        -o "$task_dir/claim-exec-m68k.o"
     echo "[aros-ffi] AROS m68k native handler shell"
     # The SDK's register-call inlines trigger this GCC warning at every call
     # site; suppress only that header/toolchain diagnostic and retain -Werror.

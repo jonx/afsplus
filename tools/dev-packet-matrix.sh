@@ -114,11 +114,13 @@ if [ -f "$sdk_include/exec/execbase.h" ] \
         && [ -f "$sdk_include/proto/locale.h" ]; then
         if [ -x "$crosstools/bin/clang" ]; then
             echo "[dev-packet] handler shell cross compile (AROS clang, generated proto headers)"
-            "$crosstools/bin/clang" --target=aarch64-unknown-aros \
-                -mcmodel=large -ffixed-x18 -std=gnu11 -Wall -Wextra -Werror \
-                -D__NOLIBBASE__ -I "$sdk_include/aros/stdc" -I "$sdk_include" \
-                -I "$sdk/gen/include" -I "$work/dos64" -I api -I native/aros \
-                -c native/aros/afsplus_handler.c -o "$work/handler.o"
+            for source in afsplus_handler afsplus_claim afsplus_claim_exec; do
+                "$crosstools/bin/clang" --target=aarch64-unknown-aros \
+                    -mcmodel=large -ffixed-x18 -std=gnu11 -Wall -Wextra -Werror \
+                    -D__NOLIBBASE__ -I "$sdk_include/aros/stdc" -I "$sdk_include" \
+                    -I "$sdk/gen/include" -I "$work/dos64" -I api -I native/aros \
+                    -c "native/aros/$source.c" -o "$work/$source.o"
+            done
         else
             echo "[dev-packet] handler shell type check (host clang, generated proto headers)"
             clang -std=gnu11 -fsyntax-only -Wall -Wextra -Werror -nostdlibinc \

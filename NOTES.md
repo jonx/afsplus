@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-10-08 — Share AROS handler claims across SMP module instances](#2026-10-08--share-aros-handler-claims-across-smp-module-instances)
 - [2026-10-02 — Restore API tracing coverage and preallocation expectations](#2026-10-02--restore-api-tracing-coverage-and-preallocation-expectations)
 - [2026-09-30 — Native AROS readiness without changing deployed volume bytes](#2026-09-30--native-aros-readiness-without-changing-deployed-volume-bytes)
 - [2026-09-19 — Mapped files under eight processes' page faults](#2026-09-19--mapped-files-under-eight-processes-page-faults)
@@ -227,6 +228,31 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+## 2026-10-08 — Share AROS handler claims across SMP module instances
+
+The claim list and generation counter live in a boot-lifetime Exec resource,
+shared by separately loaded modules. SMP uses execlock.resource and Exec 51.9
+TryProcessMessage; older Exec is rejected before that vector can be called.
+A retiring owner remains reserved, queue pressure retains the packet for retry,
+and retries yield outside the claim lock. Shutdown retains ownership until
+unmount and CloseDevice finish, preventing another writer during final flush.
+
+The packet matrix passes with the actual source headers. The common protocol,
+OS adapter and handler cross-compile against both the Apple UP and SMP SDKs.
+Eight host threads using two separately compiled module copies pass 1000 claim
+generations, including forwarding against release. A second fixture compiles
+the actual resource adapter twice and races eight candidate publications,
+checks losing allocations are freed, exercises allocation failures, and rejects
+incompatible resource/Exec identities. ASan/UBSan and TSan pass. Exec primitives
+are mocked in these tests; installed filesystem and native SMP qualification
+are not established. Full package linking is the next integration step.
+
+Evidence is retained in the sibling integration repository under
+`artifacts/runs/20261008-afs-shared-claims/`, including failed fixture compilation
+attempts and successful result JSON. The SMP SDK also required the private core
+FreeLock inline arity fix, recorded by that repository. No disk format or Rust
+code changed, and no target was deployed.
 
 ## 2026-10-02 — Restore API tracing coverage and preallocation expectations
 

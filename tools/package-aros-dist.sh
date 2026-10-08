@@ -112,7 +112,7 @@ RUSTFLAGS="$rust_flags" cargo "+$rust_toolchain" build \
 echo "[aros-dist] $profile_id: handler shell"
 # shellcheck disable=SC2086 -- every profile value is a list of flags.
 for source in afsplus_handler afsplus_bootlibc afsplus_bootthread \
-    afsplus_packet afsplus_trackdisk afsplus_claim afsplus_control
+    afsplus_packet afsplus_trackdisk afsplus_claim afsplus_claim_exec afsplus_control
 do
     "$aros_cc" --target="$aros_target" $aros_arch_flags $aros_defines \
         -O2 -std=gnu11 -Wall -Wextra -Werror -D__NOLIBBASE__ \
@@ -175,7 +175,7 @@ COMPILER_PATH="$(dirname -- "$aros_cc")" \
     "$work/obj/afsplus_bootlibc.o" "$work/obj/afsplus_bootposix.o" \
     "$work/obj/afsplus_bootthread.o" \
     "$work/obj/afsplus_packet.o" "$work/obj/afsplus_trackdisk.o" \
-    "$work/obj/afsplus_claim.o" "$work/obj/afsplus_control.o" \
+    "$work/obj/afsplus_claim.o" "$work/obj/afsplus_claim_exec.o" "$work/obj/afsplus_control.o" \
     "$work/module"/aros_*_glue.o \
     "$archive" "$work/module/afsplus_end.o" \
     $aros_lib_dirs --allow-multiple-definition $aros_module_libs

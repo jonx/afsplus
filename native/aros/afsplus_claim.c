@@ -53,28 +53,27 @@ uint32_t afsplus_claim_name(char *name,
     return 1;
 }
 
-/* Shared by every instance of the loaded module; read and advanced under
- * Forbid(). */
-static uint64_t next_generation = 1;
-
-/* The live holder of name, or NULL. A holder whose owner is no longer a task
- * is withdrawn here: its memory was the dead task's AllocMem() and nobody
- * else will return it. Called under Forbid(); the stale claim is handed back
- * through *stale and freed by the caller after Permit(). */
+/* Caller holds the store lock. No pointer escapes that lock except the new
+ * owner's own claim. Only the finder of a proven stale entry frees it. */
 static struct AfsplusArosClaim *live_holder(struct ExecBase *SysBase,
-    const char *name, struct AfsplusArosClaim **stale)
+    struct AfsplusArosClaimStore *store, const char *name,
+    struct AfsplusArosClaim **stale)
 {
-    struct AfsplusArosClaim *holder =
-        (struct AfsplusArosClaim *)FindPort((CONST_STRPTR)name);
-
-    if (holder != NULL && !afsplus_claim_task_alive(SysBase, holder->owner,
-            holder->owner_id))
+    struct AfsplusArosClaim *holder;
+    ForeachNode(&store->claims, holder)
     {
-        RemPort(&holder->port);
-        *stale = holder;
-        return NULL;
+        if (strcmp(holder->name, name) != 0)
+            continue;
+        if (afsplus_claim_deliver(SysBase, holder->owner, holder->owner_id,
+                NULL, NULL, 0) == AFSPLUS_CLAIM_GONE)
+        {
+            REMOVE(&holder->node);
+            *stale = holder;
+            return NULL;
+        }
+        return holder;
     }
-    return holder;
+    return NULL;
 }
 
 uint32_t afsplus_claim_take(struct ExecBase *sysbase, const char *name,
@@ -86,11 +85,15 @@ uint32_t afsplus_claim_take(struct ExecBase *sysbase, const char *name,
     struct AfsplusArosClaim *holder;
     struct AfsplusArosClaim *stale = NULL;
     uint32_t result;
+    struct AfsplusArosClaimStore *store;
 
     *claim = NULL;
     *held_generation = 0;
     if (strlen(name) >= sizeof(mine->name))
         return AFSPLUS_CLAIM_NAME_TOO_LONG;
+    store = afsplus_claim_store(SysBase, &result);
+    if (store == NULL)
+        return result;
     /* Allocated before the list is looked at: nothing may fail, or wait,
      * between the lookup and the publication. */
     mine = AllocMem(sizeof(*mine), MEMF_PUBLIC | MEMF_CLEAR);
@@ -99,29 +102,29 @@ uint32_t afsplus_claim_take(struct ExecBase *sysbase, const char *name,
         strcpy(mine->name, name);
         mine->handler_port = handler_port;
         mine->owner = owner;
-        mine->port.mp_Node.ln_Type = NT_MSGPORT;
-        mine->port.mp_Node.ln_Name = mine->name;
-        mine->port.mp_Flags = PA_IGNORE;
-        NEWLIST(&mine->port.mp_MsgList);
+        mine->store = store;
+        mine->node.ln_Name = mine->name;
     }
 
-    Forbid();
-    holder = live_holder(SysBase, name, &stale);
+    afsplus_claim_lock(SysBase, store);
+    holder = live_holder(SysBase, store, name, &stale);
     if (holder != NULL)
     {
         *held_generation = holder->generation;
         result = AFSPLUS_CLAIM_ALREADY_HELD;
     }
+    else if (store->next_generation == 0)
+        result = AFSPLUS_CLAIM_EXHAUSTED;
     else if (mine == NULL)
         result = AFSPLUS_CLAIM_NO_MEMORY;
     else
     {
-        mine->generation = next_generation++;
+        mine->generation = store->next_generation++;
         mine->owner_id = afsplus_claim_task_id(SysBase, owner);
-        AddPort(&mine->port);
+        ADDTAIL(&store->claims, &mine->node);
         result = AFSPLUS_CLAIM_TAKEN;
     }
-    Permit();
+    afsplus_claim_unlock(SysBase, store);
 
     if (stale != NULL)
         FreeMem(stale, sizeof(*stale));
@@ -141,16 +144,25 @@ void afsplus_claim_release(struct ExecBase *sysbase,
         return;
     size_t index;
 
-    /* Withdrawn and announced in one step: a forwarder that wakes finds the
-     * claim gone. */
-    Forbid();
-    RemPort(&claim->port);
+    struct AfsplusArosClaimStore *store = claim->store;
+    afsplus_claim_lock(SysBase, store);
+    REMOVE(&claim->node);
+    afsplus_claim_unlock(SysBase, store);
+    /* No lookup can reach the removed claim, and no enrolment is in flight.
+     * A queue-full retry must not hold the shared claim lock. */
     for (index = 0; index < AFSPLUS_CLAIM_FORWARDERS; index++)
-        if (claim->forwarders[index] != NULL
-            && afsplus_claim_task_alive(SysBase, claim->forwarders[index],
-                claim->forwarder_ids[index]))
-            Signal(claim->forwarders[index], AFSPLUS_CLAIM_WAKE_SIGNAL);
-    Permit();
+        if (claim->forwarders[index] != NULL)
+        {
+            uint32_t result;
+            do
+            {
+                result = afsplus_claim_deliver(SysBase, claim->forwarders[index],
+                    claim->forwarder_ids[index], NULL, NULL,
+                    AFSPLUS_CLAIM_WAKE_SIGNAL);
+                if (result == AFSPLUS_CLAIM_RETRY)
+                    afsplus_claim_yield(SysBase);
+            } while (result == AFSPLUS_CLAIM_RETRY);
+        }
     FreeMem(claim, sizeof(*claim));
 }
 
@@ -161,20 +173,29 @@ uint32_t afsplus_claim_enroll(struct ExecBase *sysbase, const char *name,
     struct AfsplusArosClaim *holder;
     struct AfsplusArosClaim *stale = NULL;
     uint32_t served = 0;
+    uint32_t error, own_id;
+    struct AfsplusArosClaimStore *store = afsplus_claim_store(SysBase, &error);
     size_t index;
+    if (store == NULL)
+        return 0;
 
-    Forbid();
-    holder = live_holder(SysBase, name, &stale);
+    afsplus_claim_lock(SysBase, store);
+    holder = live_holder(SysBase, store, name, &stale);
     if (holder != NULL && holder->generation == generation)
     {
         size_t free_slot = AFSPLUS_CLAIM_FORWARDERS;
+        own_id = afsplus_claim_task_id(SysBase, forwarder);
         size_t own_slot = AFSPLUS_CLAIM_FORWARDERS;
 
         served = 1;
         for (index = 0; index < AFSPLUS_CLAIM_FORWARDERS; index++)
         {
             if (holder->forwarders[index] == forwarder)
+            {
                 own_slot = index;
+                if (enroll)
+                    holder->forwarder_ids[index] = own_id;
+            }
             else if (holder->forwarders[index] == NULL
                 && free_slot == AFSPLUS_CLAIM_FORWARDERS)
                 free_slot = index;
@@ -187,10 +208,10 @@ uint32_t afsplus_claim_enroll(struct ExecBase *sysbase, const char *name,
         {
             holder->forwarders[free_slot] = forwarder;
             holder->forwarder_ids[free_slot] =
-                afsplus_claim_task_id(SysBase, forwarder);
+                own_id;
         }
     }
-    Permit();
+    afsplus_claim_unlock(SysBase, store);
     if (stale != NULL)
         FreeMem(stale, sizeof(*stale));
     return served;
@@ -202,16 +223,19 @@ uint32_t afsplus_claim_forward(struct ExecBase *sysbase, const char *name,
     struct ExecBase *SysBase = sysbase;
     struct AfsplusArosClaim *holder;
     struct AfsplusArosClaim *stale = NULL;
-    uint32_t sent = 0;
+    uint32_t sent = 0, error;
+    struct AfsplusArosClaimStore *store = afsplus_claim_store(SysBase, &error);
+    if (store == NULL)
+        return AFSPLUS_CLAIM_SEND_ERROR;
 
-    Forbid();
-    holder = live_holder(SysBase, name, &stale);
+    afsplus_claim_lock(SysBase, store);
+    holder = live_holder(SysBase, store, name, &stale);
     if (holder != NULL && holder->generation == generation)
     {
-        PutMsg(holder->handler_port, message);
-        sent = 1;
+        sent = afsplus_claim_deliver(SysBase, holder->owner, holder->owner_id,
+            holder->handler_port, message, 0);
     }
-    Permit();
+    afsplus_claim_unlock(SysBase, store);
     if (stale != NULL)
         FreeMem(stale, sizeof(*stale));
     return sent;

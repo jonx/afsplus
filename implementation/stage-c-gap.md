@@ -137,7 +137,7 @@ Lacking, in the order classic software meets them:
 | Action | Missing piece | Layer where it starts |
 |---|---|---|
 | all of the above | the QEMU and m68k sequences do not run [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh); Hosted does, and passes | L4 |
-| one instance per unit on an SMP kernel | the claim relies on `Forbid()` for the port list | L4 |
+| one instance per unit on an SMP kernel | shared resource and protected process delivery require concurrent and installed qualification | L4 |
 | `ACTION_SERIALIZE_DISK` | disk identity replacement | L1, L4 |
 | `ExNext` resume cost | one resume reads O(log n) single-entry pages; a core seek-by-key page read makes it one descent | core |
 

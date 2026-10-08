@@ -3,55 +3,13 @@
 #ifndef AFSPLUS_AROS_CLAIM_H
 #define AFSPLUS_AROS_CLAIM_H
 
-/*
- * One handler instance per medium.
- *
- * dos.library starts a handler from RunHandler() when dn_Task is NULL, without
- * serialising its callers: Mount defers the start to the first access, and two
- * tasks that make their first access together each get a handler process. Two
- * instances on one volume are two writers on one image. The instance that
- * comes first therefore publishes a claim, a public port named after the
- * medium it is about to open, before it opens it. The medium is the
- * partition: device, unit, open flags and the geometry that places it on the
- * unit, all as numbers, so two partitions of one disk can never share a name
- * and one partition reached under two DOS names, or through a node whose
- * address a later mount reused, always does.
- *
- * An instance that finds the claim opens nothing. Failing its startup would
- * not do: RunHandler() then clears dn_Task, which by then may be the first
- * instance's, and the next access would start a third. It reports success,
- * leaves dn_Task alone and forwards the packets that reach its own port, which
- * are those of the one caller RunHandler() handed that port to. A DosPacket
- * can be forwarded: the reply goes to dp_Port.
- *
- * A forwarder serves one instance, the one that held the claim when it
- * started, and never takes the volume over: when that instance has gone,
- * dn_Task is NULL again and dos.library starts a fresh instance on the next
- * access, so a forwarder that mounted the volume then would be the second
- * writer this exists to prevent. It looks the claim up for every packet,
- * together with the PutMsg() under Forbid(), so it never holds a pointer to an
- * instance that may have gone. A claim that is missing, or that belongs to a
- * later instance, ends the forwarder: a packet that still names locks or
- * files of the instance that went must not reach another one. That packet is
- * answered ERROR_DEVICE_NOT_MOUNTED. A forwarder lives exactly as long as the
- * instance it serves, and for a reason: dos.library stores the port a file
- * was opened through in its FileHandle, so every later packet of a file
- * opened through a forwarder comes to that forwarder. It therefore does not
- * end on an ACTION_DIE it passes on, which the instance refuses while such a
- * file is open, and it is woken and ends when the instance releases its
- * claim, which the instance does only with no file left.
- *
- * An instance that crashed keeps its claim, and its port is memory of a task
- * that no longer runs. Whoever finds a claim therefore asks whether its owner
- * is still that task of this system: on the task lists, a process, and with
- * the unique task ID the claim recorded, since a task address is reissued. A
- * dead owner's claim is withdrawn: the finder becomes the first instance, a
- * forwarder ends. A forwarder is asked the same before it is signalled.
- *
- * Forbid() is what makes lookup and publication one step. On an SMP build of
- * exec.library it does not exclude another CPU from the port list; this
- * defence is stated for the uniprocessor kernels AROS ships.
- */
+/* One handler per exact medium key. A boot-lifetime resource owns the claim
+ * list, exclusion primitive and generation counter across separately loaded
+ * handler modules. UP uses Forbid; SMP uses execlock.resource and the kernel's
+ * checked process-message operation. Only proven-dead owners are reclaimed:
+ * an unpublished/retiring owner or notification backpressure is not death.
+ * Forwarders never take ownership and never forward across generations.
+ * Allocation, deallocation and retry/yield happen outside the claim lock. */
 #include <exec/ports.h>
 #include <stdint.h>
 
@@ -87,8 +45,23 @@ struct AfsplusArosClaimKey {
 
 struct Task;
 
+struct Library;
+struct AfsplusArosClaimStore {
+    struct Node resource;
+    uint32_t abi;
+    uint32_t bytes;
+    struct List claims;
+    uint64_t next_generation;
+    struct Library *lock_base;
+    void *lock;
+    char resource_name[32];
+};
+#define AFSPLUS_CLAIM_STORE_NAME "afsplus.claims"
+#define AFSPLUS_CLAIM_STORE_ABI 1
+
 struct AfsplusArosClaim {
-    struct MsgPort port;
+    struct Node node;
+    struct AfsplusArosClaimStore *store;
     struct MsgPort *handler_port;
     struct Task *owner;
     uint32_t owner_id;
@@ -103,18 +76,27 @@ struct AfsplusArosClaim {
     char name[AFSPLUS_CLAIM_NAME_BYTES];
 };
 
-/* Supplied by the handler shell, called under Forbid(). task_id is the
- * unique ID of a task; task_alive is 1 while task is on the system's task
- * lists, is a process, and still has that ID. */
-uint32_t afsplus_claim_task_id(struct ExecBase *sysbase,
-    const struct Task *task);
-uint32_t afsplus_claim_task_alive(struct ExecBase *sysbase,
-    const struct Task *task, uint32_t task_id);
+/* OS adapter. The store persists until reboot and owns no module pointers.
+ * task_id is used only for the calling owner/forwarder itself. deliver checks
+ * recorded identities without dereferencing a stale pointer. */
+uint32_t afsplus_claim_task_id(struct ExecBase *, const struct Task *);
+struct AfsplusArosClaimStore *afsplus_claim_store(struct ExecBase *, uint32_t *error);
+void afsplus_claim_lock(struct ExecBase *, struct AfsplusArosClaimStore *);
+void afsplus_claim_unlock(struct ExecBase *, struct AfsplusArosClaimStore *);
+#define AFSPLUS_CLAIM_GONE 0
+#define AFSPLUS_CLAIM_SENT 1
+#define AFSPLUS_CLAIM_RETRY 2
+#define AFSPLUS_CLAIM_SEND_ERROR 3
+uint32_t afsplus_claim_deliver(struct ExecBase *, struct Task *, uint32_t id,
+    struct MsgPort *, struct Message *, uint32_t signals);
+void afsplus_claim_yield(struct ExecBase *);
 
 #define AFSPLUS_CLAIM_TAKEN 0
 #define AFSPLUS_CLAIM_ALREADY_HELD 1
 #define AFSPLUS_CLAIM_NO_MEMORY 2
 #define AFSPLUS_CLAIM_NAME_TOO_LONG 3
+#define AFSPLUS_CLAIM_UNSUPPORTED 4
+#define AFSPLUS_CLAIM_EXHAUSTED 5
 
 /* Builds the claim name; 0 when the device name is empty or does not fit. */
 uint32_t afsplus_claim_name(char *name,
@@ -141,9 +123,9 @@ void afsplus_claim_release(struct ExecBase *sysbase,
 uint32_t afsplus_claim_enroll(struct ExecBase *sysbase, const char *name,
     uint64_t generation, struct Task *forwarder, uint32_t enroll);
 
-/* Hands message to the live instance that holds the claim name with this
- * generation. Returns 0 when there is none; the message is then still the
- * caller's to answer, and the caller ends. */
+/* SENT transfers message ownership; GONE/SEND_ERROR leaves it for the caller
+ * to answer. RETRY leaves it byte-for-byte unchanged: yield outside the claim
+ * lock and call again, rechecking the generation on every attempt. */
 uint32_t afsplus_claim_forward(struct ExecBase *sysbase, const char *name,
     uint64_t generation, struct Message *message);
 

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 
-/* Host matrix of the one-instance claim over a faked exec.library port list:
+/* Host matrix of the one-instance claim over a shared store and faked Exec:
  * who gets the unit, what a later instance does, and what a forwarder does
  * when the claimed instance has gone or has been restarted. */
 
@@ -20,17 +20,38 @@ void __assert(const char *expression, const char *file, unsigned int line)
     abort();
 }
 
-/* The public port list, and the rule every list access must obey. */
-static struct MsgPort *public_ports[8];
+/* The OS adapter supplies one boot-lifetime store across module copies. */
+static struct AfsplusArosClaimStore store;
+static int initialized;
 static int forbid_depth;
 static int allocations;
 static int fail_allocation;
 static struct MsgPort *last_target;
 static struct Message *last_message;
 static int puts_outside_forbid;
+static int busy_deliveries;
+static int yield_count;
 
 void Forbid(void) { forbid_depth++; }
 void Permit(void) { assert(forbid_depth > 0); forbid_depth--; }
+struct AfsplusArosClaimStore *afsplus_claim_store(struct ExecBase *sysbase,
+    uint32_t *error)
+{
+    (void)sysbase; (void)error;
+    if (!initialized)
+    {
+        NEWLIST(&store.claims);
+        store.next_generation = 1;
+        initialized = 1;
+    }
+    return &store;
+}
+void afsplus_claim_lock(struct ExecBase *sysbase, struct AfsplusArosClaimStore *s)
+{ (void)sysbase; assert(s == &store); Forbid(); }
+void afsplus_claim_unlock(struct ExecBase *sysbase, struct AfsplusArosClaimStore *s)
+{ (void)sysbase; assert(s == &store); Permit(); }
+void afsplus_claim_yield(struct ExecBase *sysbase)
+{ (void)sysbase; assert(forbid_depth == 0); yield_count++; }
 
 APTR AllocMem(IPTR size, ULONG requirements)
 {
@@ -51,50 +72,10 @@ void FreeMem(APTR memory, IPTR size)
     free(memory);
 }
 
-struct MsgPort *FindPort(CONST_STRPTR name)
-{
-    size_t index;
-
-    assert(forbid_depth > 0);
-    for (index = 0; index < 8; index++)
-        if (public_ports[index] != NULL && strcmp(
-                (const char *)public_ports[index]->mp_Node.ln_Name,
-                (const char *)name) == 0)
-            return public_ports[index];
-    return NULL;
-}
-
-void AddPort(struct MsgPort *port)
-{
-    size_t index;
-
-    assert(forbid_depth > 0);
-    for (index = 0; index < 8; index++)
-        if (public_ports[index] == NULL)
-        {
-            public_ports[index] = port;
-            return;
-        }
-    abort();
-}
-
-void RemPort(struct MsgPort *port)
-{
-    size_t index;
-
-    assert(forbid_depth > 0);
-    for (index = 0; index < 8; index++)
-        if (public_ports[index] == port)
-        {
-            public_ports[index] = NULL;
-            return;
-        }
-    abort();
-}
-
 /* The faked system's tasks: an address is alive unless it is dead_task, and
  * carries the unique ID the table says, so an address can be reissued. */
 static struct Task *dead_task;
+static struct Task *retiring_task;
 static struct Task *reissued_task;
 static uint32_t reissued_id;
 
@@ -135,6 +116,31 @@ void PutMsg(struct MsgPort *port, struct Message *message)
         puts_outside_forbid++;
     last_target = port;
     last_message = message;
+}
+
+uint32_t afsplus_claim_deliver(struct ExecBase *sysbase, struct Task *task,
+    uint32_t id, struct MsgPort *port, struct Message *message, uint32_t signals)
+{
+    uint32_t result = AFSPLUS_CLAIM_GONE;
+    Forbid();
+    if (task == retiring_task)
+        result = AFSPLUS_CLAIM_RETRY;
+    else if (afsplus_claim_task_alive(sysbase, task, id))
+    {
+        result = AFSPLUS_CLAIM_SENT;
+        if ((message != NULL || signals != 0) && busy_deliveries > 0)
+        {
+            busy_deliveries--;
+            result = AFSPLUS_CLAIM_RETRY;
+        }
+        else
+        {
+            if (message != NULL) PutMsg(port, message);
+            if (signals != 0) Signal(task, signals);
+        }
+    }
+    Permit();
+    return result;
 }
 
 int main(void)
@@ -229,6 +235,21 @@ int main(void)
         &seen) == AFSPLUS_CLAIM_ALREADY_HELD);
     assert(second == NULL && allocations == 1);
     assert(seen == first->generation && seen != 0);
+    /* Retirement is not death: keep the reservation until cleanup removes
+     * the identity. A retry transfers no packet and admits no new writer. */
+    retiring_task = first_task;
+    assert(afsplus_claim_take(NULL, name, second_task, &second_port, &second,
+        &seen) == AFSPLUS_CLAIM_ALREADY_HELD);
+    assert(second == NULL && allocations == 1 && seen == first->generation);
+    last_target = NULL;
+    memset(&message, 0x5a, sizeof(message));
+    {
+        struct Message before = message;
+        assert(afsplus_claim_forward(NULL, name, seen, &message)
+            == AFSPLUS_CLAIM_RETRY);
+        assert(last_target == NULL && memcmp(&message, &before, sizeof(message)) == 0);
+    }
+    retiring_task = NULL;
     /* Another unit of the same device is another medium. */
     other_key = key;
     other_key.unit = 1;
@@ -251,6 +272,11 @@ int main(void)
     fail_allocation = 0;
     assert(other_unit == NULL && allocations == 1);
 
+    /* Queue pressure transfers nothing and permits retry with this generation. */
+    busy_deliveries = 1;
+    last_target = NULL;
+    assert(afsplus_claim_forward(NULL, name, seen, &message) == AFSPLUS_CLAIM_RETRY);
+    assert(last_target == NULL && allocations == 1);
     /* A forwarder sends to the instance it serves. */
     assert(afsplus_claim_forward(NULL, name, seen, &message) == 1);
     assert(last_target == &first_port && last_message == &message);
@@ -279,7 +305,9 @@ int main(void)
 
     /* The served instance has gone: the message is not sent anywhere and is
      * still the forwarder's to answer. No stale port is ever used. */
+    busy_deliveries = 2;
     afsplus_claim_release(NULL, first);
+    assert(yield_count == 2);
     assert(allocations == 0);
     assert(signalled_count == 1 && signalled[0] == (struct Task *)0x3000);
     assert(afsplus_claim_enroll(NULL, name, seen, (struct Task *)0x3000, 1)
@@ -338,6 +366,17 @@ int main(void)
     afsplus_claim_release(NULL, second);
     reissued_task = NULL;
 
+    /* The generation counter never silently wraps and aliases an old forwarder. */
+    store.next_generation = UINT64_MAX;
+    assert(afsplus_claim_take(NULL, name, first_task, &first_port, &first,
+        &seen) == AFSPLUS_CLAIM_TAKEN);
+    assert(first->generation == UINT64_MAX);
+    assert(afsplus_claim_take(NULL, name, second_task, &second_port, &second,
+        &seen) == AFSPLUS_CLAIM_ALREADY_HELD);
+    afsplus_claim_release(NULL, first);
+    assert(afsplus_claim_take(NULL, name, first_task, &first_port, &first,
+        &seen) == AFSPLUS_CLAIM_EXHAUSTED);
+    assert(first == NULL);
     assert(puts_outside_forbid == 0 && forbid_depth == 0);
     assert(allocations == 0);
     puts("afsplus claim stub: PASS");

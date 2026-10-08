@@ -1542,42 +1542,6 @@ uint32_t afsplus_aros_trace_take(struct AfsplusArosHandler *handler,
     return taken;
 }
 
-/* afsplus_claim.h: the identity of a task, and whether a recorded task is
- * still that task. Called under Forbid(), which is what keeps the lists
- * still. A task that crashed or ended is on neither list; the running task
- * is on neither as well. The address alone is not an identity: exec reissues
- * it, so the unique task ID has to match too. */
-uint32_t afsplus_claim_task_id(struct ExecBase *SysBase,
-    const struct Task *task)
-{
-    (void)SysBase;
-    if (task == NULL || !(task->tc_Flags & TF_ETASK)
-        || task->tc_UnionETask.tc_ETask == NULL)
-        return 0;
-    return (uint32_t)task->tc_UnionETask.tc_ETask->et_UniqueID;
-}
-
-uint32_t afsplus_claim_task_alive(struct ExecBase *SysBase,
-    const struct Task *task, uint32_t task_id)
-{
-    const struct Node *node;
-    uint32_t listed = 0;
-
-    if (task == NULL)
-        return 0;
-    if (task == SysBase->ThisTask)
-        listed = 1;
-    for (node = SysBase->TaskReady.lh_Head; !listed && node->ln_Succ != NULL;
-        node = node->ln_Succ)
-        listed = (const struct Task *)node == task;
-    for (node = SysBase->TaskWait.lh_Head; !listed && node->ln_Succ != NULL;
-        node = node->ln_Succ)
-        listed = (const struct Task *)node == task;
-    /* Only now is task known to be a task, and safe to read. */
-    return listed && task->tc_Node.ln_Type == NT_PROCESS
-        && afsplus_claim_task_id(SysBase, task) == task_id;
-}
-
 /* The life of an instance that found its medium claimed: see
  * afsplus_claim.h. A packet is not touched again once it has been forwarded;
  * it belongs to the other instance then. The forwarder ends with the
@@ -1606,8 +1570,15 @@ static LONG forward_to_claimed_instance(struct ExecBase *SysBase,
 
             if (packet == NULL)
                 continue;
-            if (!afsplus_claim_forward(SysBase, claim_name, generation,
-                    message))
+            uint32_t forwarded;
+            do
+            {
+                forwarded = afsplus_claim_forward(SysBase, claim_name,
+                    generation, message);
+                if (forwarded == AFSPLUS_CLAIM_RETRY)
+                    afsplus_claim_yield(SysBase);
+            } while (forwarded == AFSPLUS_CLAIM_RETRY);
+            if (forwarded != AFSPLUS_CLAIM_SENT)
             {
                 packet->dp_Res1 = DOSFALSE;
                 packet->dp_Res2 = ERROR_DEVICE_NOT_MOUNTED;
@@ -1754,7 +1725,8 @@ LONG handler(struct ExecBase *SysBase)
         {
             packet->dp_Res1 = DOSFALSE;
             packet->dp_Res2 = claim_result == AFSPLUS_CLAIM_NO_MEMORY
-                ? ERROR_NO_FREE_STORE : ERROR_OBJECT_TOO_LARGE;
+                ? ERROR_NO_FREE_STORE : (claim_result == AFSPLUS_CLAIM_UNSUPPORTED
+                    ? ERROR_ACTION_NOT_KNOWN : ERROR_OBJECT_TOO_LARGE);
             reply_packet(port, SysBase, packet);
             return RETURN_FAIL;
         }
@@ -1835,19 +1807,17 @@ LONG handler(struct ExecBase *SysBase)
             run_wait_timer(state);
     }
 
-    /* Packets that queued up behind ACTION_DIE would wait for ever on a port
-     * nobody serves. No lock or file exists at this point, so each of them
-     * names the volume only, and the volume is going away. The claim goes
-     * first, so that no forwarder queues another one behind this sweep. */
+    /* Retain the medium claim until unmount/flush and CloseDevice finish.
+     * Releasing it first would let a new writer mount while cleanup still
+     * writes the old filesystem. Forwarded packets may queue during cleanup;
+     * the process port outlives state and is drained after claim withdrawal. */
+    afsplus_aros_startup_trace(SysBase, UINT32_C(0x60000000));
+    cleanup_handler(state);
     afsplus_claim_release(SysBase, claim);
     refuse_queued_packets(SysBase, port);
 
-    /* Keep the ACTION_DIE sender blocked until every handler-owned reference
-     * to the device node and backing device is gone. The caller retains the
-     * DeviceNode: Mount SHUTDOWN must leave it available for a subsequent
-     * Assign DISMOUNT, and a later access may restart this handler from it. */
-    afsplus_aros_startup_trace(SysBase, UINT32_C(0x60000000));
-    cleanup_handler(state);
+    /* ACTION_DIE returns only after handler-owned device references are gone.
+     * The caller retains the DeviceNode for Assign DISMOUNT or later restart. */
     afsplus_aros_startup_trace(SysBase, UINT32_C(0x60000008));
     if (death_packet != NULL)
         reply_packet(port, SysBase, death_packet);
