@@ -1127,6 +1127,16 @@ impl<D: BlockDevice> ArosAdapter<D> {
         Ok(self.vfs.lookup(parent, name)?)
     }
 
+    /// Native DOS packet lookup uses the mount's encoding, unlike the UTF-8
+    /// filesystem-neutral object-ID interface. The final link is not followed.
+    pub fn lookup_dos_id(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+    ) -> Result<ObjectId, ArosError> {
+        self.named_object(base, name)
+    }
+
     /// v2 stat by object ID. The ID names the object through renames; a
     /// deleted object and a guessed identifier are `ObjectNotFound`.
     pub fn stat_id(&mut self, object_id: ObjectId) -> Result<V2Stat, ArosError> {

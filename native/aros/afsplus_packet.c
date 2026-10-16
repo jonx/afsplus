@@ -18,6 +18,7 @@ extern void afsplus_aros_trace_stage(const char *stage);
 #include <dos/dosasl.h>
 #include <dos/exall.h>
 #include <dos/record.h>
+#include "../../api/filesystem_v2_packet.h"
 #include <aros/stdc/string.h>
 
 #define AFSPLUS_NATIVE_LOCK_MAGIC UINT32_C(0x41464c4b)
@@ -1271,6 +1272,8 @@ static void deliver_notifications(struct AfsplusArosPacketContext *context)
         }
     } while (count == sizeof(fired) / sizeof(fired[0]));
 }
+
+#include "afsplus_v2_packet.inc"
 
 /* The report structs an extension request can ask for. */
 union AfsplusExtReport {
@@ -3012,6 +3015,11 @@ int32_t afsplus_aros_packet_process(
             result = DOSTRUE;
         break;
     }
+    case ACTION_FILESYSTEM_V2:
+        error = process_filesystem_v2(context,
+            (struct FSV2_Request *)packet->dp_Arg1);
+        if (error == 0) result = DOSTRUE;
+        break;
     case ACTION_AFSPLUS_EXT:
         error = process_extension(context,
             (struct AfsplusExtRequest *)packet->dp_Arg1);

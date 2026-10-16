@@ -86,10 +86,22 @@ unsafe extern "C" fn flush(context: *mut c_void) -> i32 {
 }
 
 pub fn mount(device: &mut MemoryBackend) -> *mut AfsplusAros {
-    mount_sized(device, TOTAL_BLOCKS)
+    mount_with_encoding(device, AFSPLUS_AROS_ENCODING_UTF8)
+}
+
+pub fn mount_with_encoding(device: &mut MemoryBackend, encoding: u32) -> *mut AfsplusAros {
+    mount_sized_encoding(device, TOTAL_BLOCKS, encoding)
 }
 
 pub fn mount_sized(device: &mut MemoryBackend, total_blocks: u64) -> *mut AfsplusAros {
+    mount_sized_encoding(device, total_blocks, AFSPLUS_AROS_ENCODING_UTF8)
+}
+
+fn mount_sized_encoding(
+    device: &mut MemoryBackend,
+    total_blocks: u64,
+    encoding: u32,
+) -> *mut AfsplusAros {
     let callbacks = AfsplusArosDevice {
         abi_version: AFSPLUS_AROS_ABI_VERSION,
         struct_size: size_of::<AfsplusArosDevice>() as u32,
@@ -105,7 +117,7 @@ pub fn mount_sized(device: &mut MemoryBackend, total_blocks: u64) -> *mut Afsplu
         abi_version: AFSPLUS_AROS_ABI_VERSION,
         struct_size: size_of::<AfsplusArosMountConfig>() as u32,
         mount_mode: AFSPLUS_AROS_MOUNT_READ_WRITE,
-        name_encoding: AFSPLUS_AROS_ENCODING_UTF8,
+        name_encoding: encoding,
         volume_name: b"AFS+".as_ptr(),
         volume_name_length: 4,
         max_file_handles: 8,

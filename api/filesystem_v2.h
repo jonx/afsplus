@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 John KNIPPER <code@jkn.me>
+ * This file is distributed under the AROS Public License 1.1.
+ * Canonical Filesystem API v2 definitions, shared with filesystem handlers.
+ */
 #ifndef AROS_FILESYSTEM_V2_H
 #define AROS_FILESYSTEM_V2_H
 
@@ -43,7 +48,10 @@ enum FSV2_Capability {
     FSV2_CAP_DATA_POLICY       = UINT64_C(1) << 14,
     FSV2_CAP_OPEN_UNLINKED     = UINT64_C(1) << 15,
     FSV2_CAP_PAGED_DIRECTORIES = UINT64_C(1) << 16,
-    FSV2_CAP_PREALLOCATE       = UINT64_C(1) << 17
+    FSV2_CAP_PREALLOCATE       = UINT64_C(1) << 17,
+    FSV2_CAP_STAT_NS           = UINT64_C(1) << 18,
+    FSV2_CAP_SET_TIME_NS       = UINT64_C(1) << 19,
+    FSV2_CAP_PAGING            = UINT64_C(1) << 20
 };
 
 struct FSV2_String {
@@ -60,6 +68,10 @@ struct FSV2_Stat {
     uint64_t protection;
     int64_t mtime_seconds;
     uint32_t mtime_nanoseconds;
+    uint32_t links;
+    int64_t ctime_seconds;
+    uint32_t ctime_nanoseconds;
+    uint32_t reserved;
 };
 
 struct FSV2_StatFs {

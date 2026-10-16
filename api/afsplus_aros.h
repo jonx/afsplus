@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(20)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(21)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -532,6 +532,11 @@ int32_t afsplus_aros_free_record(struct AfsplusAros *filesystem,
  * directory is ERROR_OBJECT_NOT_FOUND. After the end every call stores zero
  * records and output_eof 1. */
 int32_t afsplus_aros_lookup_id(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint64_t *output_object_id);
+/* Native DOS encoding, final link not followed; empty name is the base.
+ * Revision 21, OBJECT_IDS group. lookup_id above remains explicitly UTF-8. */
+int32_t afsplus_aros_lookup_dos_id(struct AfsplusAros *filesystem,
     uint64_t base_lock, const uint8_t *name, uint32_t name_length,
     uint64_t *output_object_id);
 int32_t afsplus_aros_stat_id(struct AfsplusAros *filesystem,

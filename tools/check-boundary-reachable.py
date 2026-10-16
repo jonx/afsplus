@@ -41,6 +41,7 @@ def main() -> int:
 
     sources = [
         *(root / "native" / "aros").glob("*.c"),
+        *(root / "native" / "aros").glob("*.inc"),
         *(root / "native" / "aros" / "client").glob("*.c"),
         *(root / "native" / "aros" / "tools").glob("*.c"),
     ]

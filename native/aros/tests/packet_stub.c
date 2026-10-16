@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 
 #include "afsplus_packet.h"
+#include "filesystem_v2_packet.h"
 
 #include <dos/dosasl.h>
 #include <dos/exall.h>
@@ -412,6 +413,7 @@ static int32_t examine_common(struct AfsplusArosFileInfo *output,
     examine_count++;
     memset(output, 0, sizeof(*output));
     memcpy(name, filename, sizeof(filename) - 1);
+    output->object_id = UINT64_C(0x1122334455);
     output->disk_key = UINT64_C(0x12345678);
     output->size = UINT64_C(0x100000002);
     output->blocks = UINT64_C(0x100001);
@@ -699,6 +701,7 @@ int32_t afsplus_aros_capabilities(struct AfsplusAros *filesystem,
     /* It fills what it knows and stores that size, never the caller's. */
     output->struct_size = sizeof(*output);
     output->mount_mode = 77;
+    output->capabilities = FSV2_CAP_OBJECT_IDS | FSV2_CAP_ATOMIC_REPLACE;
     return ext_call('1', 0, NULL, 0, output->struct_size, 0, 0, 0);
 }
 
@@ -944,10 +947,26 @@ int32_t afsplus_aros_lookup_id(struct AfsplusAros *filesystem,
     return ext_call('d', base_lock, name, name_length, 0, 0, 0, 0);
 }
 
+int32_t afsplus_aros_lookup_dos_id(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint64_t *output_object_id)
+{
+    return afsplus_aros_lookup_id(filesystem, base_lock, name, name_length, output_object_id);
+}
+
 int32_t afsplus_aros_stat_id(struct AfsplusAros *filesystem,
     uint64_t object_id, struct AfsplusArosStat *output)
 {
     assert(filesystem == STUB_FILESYSTEM);
+    output->object_id = object_id;
+    output->size = 107;
+    output->allocated_size = 4096;
+    output->kind = 1;
+    output->links = 2;
+    output->changed_seconds = INT64_C(1729000011);
+    output->changed_nanoseconds = 7654321;
+    output->modified_seconds = INT64_C(1729000000);
+    output->modified_nanoseconds = 123456789;
     return ext_call('e', 0, NULL, 0, object_id, output->struct_size, 0, 0);
 }
 
@@ -1263,6 +1282,61 @@ int main(void)
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res2 == 0 && packet.dp_Res1 != 0);
     root = (BPTR)packet.dp_Res1;
+
+    /* Generic native API v2 dispatch, exact ns and object identity. */
+    {
+        struct FSV2_Request v2;
+        memset(&v2, 0, sizeof(v2));
+        v2.struct_size = sizeof(v2);
+        v2.version = FSV2_PACKET_VERSION;
+        v2.operation = FSV2_OP_CAPABILITIES;
+        initialize_packet(&packet, ACTION_FILESYSTEM_V2);
+        packet.dp_Arg1 = (SIPTR)&v2;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert((v2.capabilities & (FSV2_CAP_STAT_NS | FSV2_CAP_SET_TIME_NS))
+            == (FSV2_CAP_STAT_NS | FSV2_CAP_SET_TIME_NS));
+        assert(!(v2.capabilities & FSV2_CAP_PAGING));
+        v2.operation = FSV2_OP_STAT;
+        v2.object[0] = (uintptr_t)root;
+        v2.path0 = "entry";
+        v2.flags = FSV2_FLAG_NOFOLLOW;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(v2.stat.object_id == UINT64_C(0x1122334455));
+        assert(v2.stat.size == 107 && v2.stat.mtime_nanoseconds == 123456789);
+        assert(v2.stat.mtime_seconds == INT64_C(1729000000));
+        assert(v2.stat.links == 2 && v2.stat.ctime_nanoseconds == 7654321);
+        v2.operation = FSV2_OP_SET_MTIME;
+        v2.seconds = INT64_C(1729000010);
+        v2.nanoseconds = 987654321;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(stub_modified_seconds == v2.seconds);
+        assert(stub_modified_nanoseconds == v2.nanoseconds);
+        reset_events();
+        v2.operation = FSV2_OP_REPLACE;
+        v2.flags = 0;
+        v2.path0 = "old";
+        v2.path1 = "new";
+        v2.object[1] = (uintptr_t)root;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(event_count == 1 && events[0].operation == '7' && ext_seen[4] == 1);
+        v2.operation = FSV2_OP_SET_MTIME;
+        v2.path0 = "entry";
+        v2.nanoseconds = 1000000000;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_BAD_NUMBER);
+        v2.version = 99;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res2 == ERROR_BAD_NUMBER);
+        v2.version = FSV2_PACKET_VERSION;
+        v2.struct_size--;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res2 == ERROR_BAD_NUMBER);
+        reset_events();
+    }
 
     reset_events();
     initialize_packet(&packet, ACTION_LOCATE_OBJECT);

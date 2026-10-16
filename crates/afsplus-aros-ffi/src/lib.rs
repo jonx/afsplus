@@ -30,7 +30,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 20;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 21;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -2503,6 +2503,24 @@ pub extern "C" fn afsplus_aros_lookup_id(
         let object = bridge_mut(filesystem)?
             .adapter
             .lookup_id(optional_lock(base_lock), name)?;
+        write_output(output_object_id, object)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_lookup_dos_id(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    output_object_id: *mut u64,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_object_id)?;
+        let name = input_bytes(name, name_length)?;
+        let object = bridge_mut(filesystem)?
+            .adapter
+            .lookup_dos_id(optional_lock(base_lock), name)?;
         write_output(output_object_id, object)
     })
 }

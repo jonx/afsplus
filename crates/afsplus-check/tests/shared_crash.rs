@@ -613,6 +613,24 @@ fn rename_replace_of_a_shared_target_is_crash_atomic() {
     }
 }
 
+#[test]
+fn posix_delete_then_rename_control_exposes_missing_target_at_the_cut() {
+    // POSIX caller fallback: the first transaction committed, the second has
+    // not started. A checker-clean disk still violates atomic replacement.
+    let mut setup = mount(formatted("PosixReplaceControl", 0)).unwrap();
+    setup.create_file_in_root("target", b"old", ts(1)).unwrap();
+    let incoming = setup
+        .create_file_in_root("incoming", b"new", ts(2))
+        .unwrap();
+    setup.delete_file(OBJECT_ROOT, "target", ts(3)).unwrap();
+    let mut cut = setup.into_device();
+    assert!(check_device(&mut cut).is_clean());
+    let mut recovered = mount(cut).unwrap();
+    assert_eq!(recovered.lookup_root("target").unwrap(), None);
+    assert_eq!(recovered.lookup_root("incoming").unwrap(), Some(incoming));
+    println!("POSIX replacement control: delete-then-rename neither=1 checker=clean");
+}
+
 fn rename_replace_of_a_shared_target_is_crash_atomic_profile(pages: usize) {
     let mut setup = profile_mount(formatted("CrashSharedReplace", 0), pages);
     let victim_bytes = vec![0x66u8; BS];
