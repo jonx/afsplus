@@ -24,6 +24,7 @@ cross_lib=${AFSPLUS_AROS_CROSS_LIB:-"$aros_crosstools/lib/generic"}
 clang="$aros_crosstools/bin/clang"
 nm="$aros_crosstools/bin/llvm-nm"
 objdump=${AFSPLUS_AROS_OBJDUMP:-"$aros_crosstools/bin/llvm-objdump"}
+abi_audit=${AFSPLUS_AROS_ABI_AUDIT:-"$repo_root/tools/check-aros-aarch64-abi.py"}
 genmodule="$build_tools/genmodule"
 developer="$sdk/AROS/Developer"
 generated="$sdk/gen/include"
@@ -43,7 +44,7 @@ require_executable "$clang"
 require_executable "$nm"
 require_executable "$objdump"
 require_executable "$genmodule"
-require_executable "$repo_root/tools/check-aros-aarch64-abi.py"
+require_executable "$abi_audit"
 require_file "$sdk/gen/config/target.cfg"
 require_file "$source_dir/afsram.conf"
 require_file "$source_dir/afsram_device.c"
@@ -170,7 +171,7 @@ for symbol in AfsRam_5_AfsRam_BeginIO AfsRam_6_AfsRam_AbortIO AfsRam_ROMTag; do
         exit 65
     }
 done
-"$repo_root/tools/check-aros-aarch64-abi.py" \
+"$abi_audit" \
     --objdump "$objdump" "$task_dir/afsram.device" \
     >"$task_dir/abi-report.txt"
 
@@ -193,7 +194,7 @@ COMPILER_PATH="$build_tools:$aros_crosstools/bin" \
     -lpthread -lposixc -lstdc -lstdcio -ldos -lexec -laros \
     -lautoinit -llibinit -lutility -lexpansion -lamiga -larossupport \
     -Wl,--end-group -lclang_rt.builtins-aarch64
-"$repo_root/tools/check-aros-aarch64-abi.py" \
+"$abi_audit" \
     --objdump "$objdump" "$task_dir/AFSPlusAfsRamProbe" \
     >"$task_dir/probe-abi-report.txt"
 
@@ -220,7 +221,7 @@ COMPILER_PATH="$build_tools:$aros_crosstools/bin" \
     -lpthread -lposixc -lstdc -lstdcio -ldos -lexec -laros \
     -lautoinit -llibinit -lutility -lexpansion -lamiga -larossupport \
     -Wl,--end-group -lclang_rt.builtins-aarch64
-"$repo_root/tools/check-aros-aarch64-abi.py" \
+"$abi_audit" \
     --objdump "$objdump" "$task_dir/AFSPlusNativeMountProbe" \
     >"$task_dir/mount-probe-abi-report.txt"
 
@@ -260,7 +261,7 @@ for replay_state in old new; do
         -lpthread -lposixc -lstdc -lstdcio -ldos -lexec -laros \
         -lautoinit -llibinit -lutility -lexpansion -lamiga -larossupport \
         -Wl,--end-group -lclang_rt.builtins-aarch64
-    "$repo_root/tools/check-aros-aarch64-abi.py" \
+    "$abi_audit" \
         --objdump "$objdump" "$task_dir/$replay_target" \
         >"$task_dir/$replay_state-replay-probe-abi-report.txt"
 done
@@ -283,7 +284,7 @@ COMPILER_PATH="$build_tools:$aros_crosstools/bin" \
     -lpthread -lposixc -lstdc -lstdcio -ldos -lexec -laros \
     -lautoinit -llibinit -lutility -lexpansion -lamiga -larossupport \
     -Wl,--end-group -lclang_rt.builtins-aarch64
-"$repo_root/tools/check-aros-aarch64-abi.py" \
+"$abi_audit" \
     --objdump "$objdump" "$task_dir/AFSPlusNativeAlpha0Probe" \
     >"$task_dir/alpha-probe-abi-report.txt"
 
