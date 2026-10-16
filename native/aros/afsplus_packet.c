@@ -54,12 +54,16 @@ struct AfsplusArosNativeLock {
     uint32_t exall_key;
 };
 
+struct AfsplusPagingSnapshot;
+
 struct AfsplusArosNativeFile {
     uint32_t magic;
     uint32_t writable;
     struct AfsplusArosPacketContext *owner;
     uint64_t id;
     struct AfsplusArosNativeFile *next;
+    struct AfsplusPagingSnapshot *snapshot;
+    uint64_t snapshot_position;
 };
 
 /* A NotifyRequest's watch, or with request NULL a watch of the extension
@@ -1070,6 +1074,8 @@ void afsplus_aros_packet_elapsed(struct AfsplusArosPacketContext *context,
     }
 }
 
+#include "afsplus_paging_v2.inc"
+
 int32_t afsplus_aros_packet_create(
     const struct AfsplusArosPacketConfig *config,
     struct AfsplusArosPacketContext **output)
@@ -1140,7 +1146,13 @@ int32_t afsplus_aros_packet_destroy(
          * that may free the mount next. */
         if (file->writable)
             error = afsplus_aros_fsync(context->filesystem, file->id);
-        close_error = afsplus_aros_close(context->filesystem, file->id);
+        if (file->snapshot != NULL)
+        {
+            paging_release(context, file->snapshot);
+            close_error = 0;
+        }
+        else
+            close_error = afsplus_aros_close(context->filesystem, file->id);
         if (error == 0)
             error = close_error;
         if (first_error == 0)
@@ -1880,8 +1892,17 @@ int32_t afsplus_aros_packet_process(
         }
     }
 
+    if (paging_file_packet(context, packet, packet64,
+            &result, &result64, &error))
+        goto packet_finished;
+
     switch (packet->dp_Type)
     {
+    case ACTION_FILESYSTEM_PAGING_V2:
+        error = process_paging_v2(context,
+            (struct FSV2_PagingRequest *)packet->dp_Arg1);
+        if (error == 0) result = DOSTRUE;
+        break;
     case ACTION_LOCATE_OBJECT:
     {
         const uint8_t *path;
@@ -3262,6 +3283,7 @@ int32_t afsplus_aros_packet_process(
         break;
     }
 
+packet_finished:
     if (!deferred)
     {
         store_packet_result(packet, result, result64, error, packet64);

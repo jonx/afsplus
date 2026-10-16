@@ -33,6 +33,11 @@ static uint32_t fsync_count;
 static uint32_t close_count;
 static uint32_t examine_count;
 static uint32_t fail_allocations;
+static uint32_t paging_fail_at, paging_alloc_calls, paging_live;
+static int32_t paging_clone_error = ERROR_ACTION_NOT_KNOWN;
+static uint32_t paging_read_mode;
+static uint8_t paging_source_byte = 0x35;
+
 static uint64_t created_lock_id;
 /* Negative: examine_next yields "entry" forever (the single-entry cases).
  * Otherwise a directory of that many entries named e0, e1, ... */
@@ -111,18 +116,25 @@ static void reset_events(void)
 static void *packet_allocate(void *context, size_t size)
 {
     (void)context;
+    paging_alloc_calls++;
+    if (paging_fail_at != 0 && paging_alloc_calls == paging_fail_at)
+        return NULL;
     if (fail_allocations != 0)
     {
         fail_allocations--;
         return NULL;
     }
-    return calloc(1, size);
+    void *allocation = calloc(1, size);
+    if (allocation != NULL) paging_live++;
+    return allocation;
 }
 
 static void packet_free(void *context, void *allocation, size_t size)
 {
     (void)context;
     (void)size;
+    assert(paging_live != 0);
+    paging_live--;
     free(allocation);
 }
 
@@ -710,6 +722,12 @@ int32_t afsplus_aros_read_at(struct AfsplusAros *filesystem, uint64_t file,
     uint32_t *output_count)
 {
     assert(filesystem == STUB_FILESYSTEM);
+    if (paging_read_mode) {
+        uint32_t count = length > 173 ? 173 : length;
+        memset(destination, paging_source_byte, count);
+        *output_count = count;
+        return 0;
+    }
     if (ext_error == 0 && length >= 2)
     {
         destination[0] = 'o';
@@ -728,6 +746,15 @@ int32_t afsplus_aros_write_at(struct AfsplusAros *filesystem, uint64_t file,
     assert(now_nanoseconds == UINT32_C(40000000));
     *output_count = length;
     return ext_call('3', file, source, length, offset, length, 0, 0);
+}
+
+int32_t afsplus_aros_clone_open_snapshot(struct AfsplusAros *filesystem,
+    uint64_t source_file, int64_t seconds, uint32_t ns, uint64_t *output_file)
+{
+    assert(filesystem == STUB_FILESYSTEM && source_file >= 100);
+    (void)seconds; (void)ns;
+    if (paging_clone_error == 0) *output_file = next_file++;
+    return paging_clone_error;
 }
 
 int32_t afsplus_aros_clone_file(struct AfsplusAros *filesystem,
@@ -2084,6 +2111,9 @@ int main(void)
             }
         }
 
+        /* Do not retain the trace counter's expired block-scope buffer. */
+        EXT_BEGIN(AFSPLUS_EXT_ADVISE);
+        request.object[0] = file_object;
         /* A filesystem error travels in dp_Res2 and clears the outputs. */
         ext_error = ERROR_OBJECT_NOT_FOUND;
         request.output_value = 5;

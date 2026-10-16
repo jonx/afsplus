@@ -1053,6 +1053,53 @@ impl<D: BlockDevice> Vfs<D> {
         self.insert_handle(OpenHandle::File { object_id, access })
     }
 
+    /// Metadata reached through a live file handle remains available after
+    /// unlink. Public stat by object ID deliberately still hides orphans.
+    pub fn stat_file(&mut self, handle: Handle) -> Result<Stat, VfsError> {
+        let object_id = match self.handles.get(&handle).copied() {
+            Some(OpenHandle::File { object_id, .. }) => object_id,
+            Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
+            None => return Err(VfsError::Stale),
+        };
+        self.volume
+            .visible_metadata(object_id)?
+            .map(Stat::from)
+            .ok_or(VfsError::NotFound)
+    }
+
+    /// An immutable open snapshot with no visible directory entry. Last
+    /// close uses the existing bounded orphan cleanup; a crash does too.
+    pub fn clone_open_snapshot(
+        &mut self,
+        source: Handle,
+        now: Timespec,
+    ) -> Result<Handle, VfsError> {
+        let object_id = match self.handles.get(&source).copied() {
+            Some(OpenHandle::File { object_id, access }) if access.can_read() => object_id,
+            Some(OpenHandle::File { .. }) => return Err(VfsError::Invalid),
+            Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
+            None => return Err(VfsError::Stale),
+        };
+        if self.volume.mount_mode() != MountMode::ReadWrite {
+            return Err(VfsError::ReadOnly);
+        }
+        if !self
+            .capabilities()
+            .contains(Capabilities::CLONE_FILE | Capabilities::OPEN_UNLINKED)
+        {
+            return Err(VfsError::NotSupported);
+        }
+        self.next_handle
+            .checked_add(1)
+            .ok_or(VfsError::Limit("handle space exhausted"))?;
+        self.checkpoint_data_window(now)?;
+        let object_id = self.volume.clone_file_unlinked(object_id, now)?;
+        self.insert_handle(OpenHandle::File {
+            object_id,
+            access: AccessMode::ReadOnly,
+        })
+    }
+
     pub fn open_directory(&mut self, object_id: ObjectId) -> Result<Handle, VfsError> {
         let stat = self.stat(object_id)?;
         if stat.kind != NodeKind::Directory {
@@ -2030,6 +2077,12 @@ impl<D: BlockDevice> Vfs<D> {
     /// The object's stored comment; empty when it has none.
     pub fn comment(&mut self, object_id: ObjectId) -> Result<String, VfsError> {
         self.stat(object_id)?;
+        Ok(self.volume.object_comment(object_id)?)
+    }
+
+    /// Comment reached through a live file handle, including an orphan.
+    pub fn comment_file(&mut self, handle: Handle) -> Result<String, VfsError> {
+        let object_id = self.stat_file(handle)?.object_id;
         Ok(self.volume.object_comment(object_id)?)
     }
 

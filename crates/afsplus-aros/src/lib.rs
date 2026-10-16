@@ -911,7 +911,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         let base = match mode {
             SeekMode::Beginning => 0,
             SeekMode::Current => old,
-            SeekMode::End => self.vfs.stat(state.object_id)?.size,
+            SeekMode::End => self.vfs.stat_file(state.vfs_handle)?.size,
         };
         let position = add_signed(base, offset)?;
         self.files
@@ -926,8 +926,8 @@ impl<D: BlockDevice> ArosAdapter<D> {
     }
 
     pub fn file_size(&mut self, handle: FileHandleId) -> Result<u64, ArosError> {
-        let object_id = self.file_state(handle)?.object_id;
-        Ok(self.vfs.stat(object_id)?.size)
+        let vfs_handle = self.file_state(handle)?.vfs_handle;
+        Ok(self.vfs.stat_file(vfs_handle)?.size)
     }
 
     pub fn set_file_size(
@@ -938,14 +938,14 @@ impl<D: BlockDevice> ArosAdapter<D> {
         now: Timespec,
     ) -> Result<u64, ArosError> {
         self.ensure_writable()?;
-        let (vfs_handle, object_id, position) = {
+        let (vfs_handle, position) = {
             let state = self.file_state(handle)?;
-            (state.vfs_handle, state.object_id, state.position)
+            (state.vfs_handle, state.position)
         };
         let base = match mode {
             SeekMode::Beginning => 0,
             SeekMode::Current => position,
-            SeekMode::End => self.vfs.stat(object_id)?.size,
+            SeekMode::End => self.vfs.stat_file(vfs_handle)?.size,
         };
         let size = add_signed(base, offset)?;
         self.vfs.truncate(vfs_handle, size, now)?;
@@ -997,6 +997,51 @@ impl<D: BlockDevice> ArosAdapter<D> {
         self.vfs.clone_file(source_object, parent, &decoded, now)?;
         self.touch(parent, &decoded);
         Ok(())
+    }
+
+    /// Read-only unnamed clone for the native private-mapping pager. The
+    /// snapshot has independent identity and never appears in enumeration.
+    pub fn clone_open_snapshot(
+        &mut self,
+        source: FileHandleId,
+        now: Timespec,
+    ) -> Result<FileHandleId, ArosError> {
+        self.ensure_writable()?;
+        self.ensure_file_capacity()?;
+        let source_handle = self.file_state(source)?.vfs_handle;
+        let vfs_handle = self.vfs.clone_open_snapshot(source_handle, now)?;
+        let object_id = match self.vfs.stat_file(vfs_handle) {
+            Ok(stat) => stat.object_id,
+            Err(error) => {
+                let _ = self.vfs.close(vfs_handle);
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = self.acquire_object_lock(object_id, LockAccess::Shared) {
+            let _ = self.vfs.close(vfs_handle);
+            return Err(error);
+        }
+        let handle = match self.allocate_file_id() {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.release_object_lock(object_id, LockAccess::Shared);
+                let _ = self.vfs.close(vfs_handle);
+                return Err(error);
+            }
+        };
+        self.files.insert(
+            handle,
+            FileState {
+                vfs_handle,
+                object_id,
+                parent: OBJECT_ROOT,
+                name: Vec::new(),
+                position: 0,
+                access: LockAccess::Shared,
+                dirty: false,
+            },
+        );
+        Ok(handle)
     }
 
     /// `CloneRange` between two open files.
@@ -1578,8 +1623,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
         handle: FileHandleId,
         max_bytes: usize,
     ) -> Result<Vec<u8>, ArosError> {
-        let object = self.file_state(handle)?.object_id;
-        self.encoded_comment(object, max_bytes)
+        let vfs_handle = self.file_state(handle)?.vfs_handle;
+        let text = self.vfs.comment_file(vfs_handle)?;
+        self.encode_comment_text(&text, max_bytes)
     }
 
     fn encoded_comment(
@@ -1588,6 +1634,10 @@ impl<D: BlockDevice> ArosAdapter<D> {
         max_bytes: usize,
     ) -> Result<Vec<u8>, ArosError> {
         let text = self.vfs.comment(object)?;
+        self.encode_comment_text(&text, max_bytes)
+    }
+
+    fn encode_comment_text(&self, text: &str, max_bytes: usize) -> Result<Vec<u8>, ArosError> {
         let mut encoded = Vec::with_capacity(text.len().min(max_bytes));
         let mut buffer = [0u8; 4];
         for character in text.chars() {
@@ -1854,7 +1904,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
 
     pub fn examine_file(&mut self, handle: FileHandleId) -> Result<FileInfo, ArosError> {
         let state = self.file_state(handle)?.clone();
-        let stat = self.vfs.stat(state.object_id)?;
+        let stat = self.vfs.stat_file(state.vfs_handle)?;
         self.file_info(stat, state.name, 0)
     }
 

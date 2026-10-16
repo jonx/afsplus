@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(21)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(22)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -711,6 +711,13 @@ int32_t afsplus_aros_clone_file(struct AfsplusAros *filesystem,
     uint64_t source_lock, uint64_t target_base_lock,
     const uint8_t *target_name, uint32_t target_name_length,
     int64_t now_seconds, uint32_t now_nanoseconds);
+/* Revision 22, API_V2 group: read-only open-unlinked reflink, independent of the source's
+ * position, later writes and name. No file data is copied. Requires a
+ * writable mount with clone-file and open-unlinked capabilities; otherwise
+ * refuses explicitly. Close the returned handle with afsplus_aros_close. */
+int32_t afsplus_aros_clone_open_snapshot(struct AfsplusAros *filesystem,
+    uint64_t source_file, int64_t now_seconds, uint32_t now_nanoseconds,
+    uint64_t *output_file);
 int32_t afsplus_aros_clone_range(struct AfsplusAros *filesystem,
     uint64_t source_file, uint64_t source_offset, uint64_t target_file,
     uint64_t target_offset, uint64_t length, int64_t now_seconds,

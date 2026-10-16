@@ -2430,9 +2430,31 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<u64, CoreError> {
+        self.ensure_public_object_id(parent_id)?;
         self.trace_api(crate::flight::ApiMethod::CloneFile, |volume| {
             volume.clone_file_untraced(source_id, parent_id, name, now)
         })
+    }
+
+    /// Clone directly into the existing reserved orphan namespace. The
+    /// resulting object has no public name, but keeps the ordinary clone
+    /// reference accounting and orphan crash/cleanup representation.
+    pub fn clone_file_unlinked(&mut self, source_id: u64, now: Timespec) -> Result<u64, CoreError> {
+        metadata::validate_time(now)?;
+        // Both gates precede committing a pending window or allocating the
+        // orphan directory. An unsupported snapshot has no side effects.
+        if !self.shared_extents_enabled() || !self.orphan_directory_enabled() {
+            return Err(CoreError::FeatureDisabled(
+                "open clones require shared extents and the orphan directory",
+            ));
+        }
+        if self.window.is_some() {
+            self.window_commit(now)?;
+        }
+        self.ensure_window_closed()?;
+        self.ensure_orphan_directory(now)?;
+        let name = Self::orphan_name(self.checkpoint.next_object_id);
+        self.clone_file_untraced(source_id, OBJECT_ORPHAN_DIRECTORY, &name, now)
     }
 
     fn clone_file_untraced(
@@ -2463,7 +2485,17 @@ impl<D: BlockDevice> Volume<D> {
             CoreError::Corrupt(format!("directory {parent_id} missing from object map"))
         })?;
         let key = self.comparison_key(name.as_bytes())?;
-        if self.lookup_in_directory(parent_id, name)?.is_some() {
+        if directory::lookup_entry(
+            &mut self.dev,
+            &self.ident.geometry(),
+            parent.data_root,
+            parent_id,
+            self.checkpoint.generation,
+            &self.ident,
+            &key,
+        )?
+        .is_some()
+        {
             return Err(CoreError::AlreadyExists);
         }
         let source = self.read_object(source_id)?.ok_or(CoreError::NotFound)?;
