@@ -29,6 +29,7 @@
 #include <proto/dos.h>
 #include <proto/exec.h>
 #include <proto/locale.h>
+#include <proto/timer.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -540,12 +541,30 @@ static int32_t packet_now(void *context, int64_t *unix_seconds,
 
     if (unix_seconds == NULL || nanoseconds == NULL)
         return ERROR_BAD_NUMBER;
-    DateStamp(&stamp);
-    if (stamp.ds_Days < 0 || stamp.ds_Minute < 0 || stamp.ds_Tick < 0)
-        return ERROR_BAD_NUMBER;
     if (handler->locale != NULL)
         gmt_offset = (int64_t)handler->locale->loc_GMTOffset
             * AFSPLUS_SECONDS_PER_MINUTE;
+    /* DateStamp rounds to 20 ms before the metadata reaches the filesystem.
+     * The already-open timer supplies real microseconds without submitting
+     * an I/O request or disturbing the handler's pending commit timer. */
+    if (handler->timer_open)
+    {
+        struct Device *TimerBase = handler->timer_request->tr_node.io_Device;
+        struct timeval now;
+
+        GetSysTime(&now);
+        if (now.tv_micro >= UINT32_C(1000000))
+            return ERROR_BAD_NUMBER;
+        *unix_seconds = (int64_t)now.tv_secs + AFSPLUS_UNIX_TO_AMIGA_EPOCH
+            + gmt_offset;
+        *nanoseconds = now.tv_micro * UINT32_C(1000);
+        return 0;
+    }
+    /* Early boot can mount before timer.device is available. Preserve its
+     * coarse clock until the existing timer-open retry succeeds. */
+    DateStamp(&stamp);
+    if (stamp.ds_Days < 0 || stamp.ds_Minute < 0 || stamp.ds_Tick < 0)
+        return ERROR_BAD_NUMBER;
     amiga_seconds = (int64_t)stamp.ds_Days * AFSPLUS_SECONDS_PER_DAY
         + (int64_t)stamp.ds_Minute * AFSPLUS_SECONDS_PER_MINUTE
         + (int64_t)stamp.ds_Tick / AFSPLUS_TICKS_PER_SECOND;
