@@ -748,6 +748,14 @@ int32_t afsplus_aros_write_at(struct AfsplusAros *filesystem, uint64_t file,
     return ext_call('3', file, source, length, offset, length, 0, 0);
 }
 
+int32_t afsplus_aros_writeback_atomic(struct AfsplusAros *filesystem,
+    uint64_t file, uint64_t offset, const uint8_t *source, uint32_t length,
+    int64_t seconds, uint32_t ns, uint32_t *count)
+{
+    return afsplus_aros_write_at(filesystem, file, offset, source, length,
+        seconds, ns, count);
+}
+
 int32_t afsplus_aros_clone_open_snapshot(struct AfsplusAros *filesystem,
     uint64_t source_file, int64_t seconds, uint32_t ns, uint64_t *output_file)
 {

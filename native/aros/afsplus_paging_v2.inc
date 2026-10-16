@@ -105,6 +105,40 @@ static void paging_read(struct AfsplusArosNativeFile *file, uint8_t *buffer,
     *count = done;
 }
 
+static int32_t process_writeback_v2(struct AfsplusArosPacketContext *context,
+    struct FSV2_WritebackRequest *shared)
+{
+    struct FSV2_WritebackRequest request;
+    struct AfsplusArosNativeFile *file;
+    int64_t seconds;
+    uint32_t ns, count = 0;
+    int32_t error;
+    memcpy(&request, shared, sizeof(request));
+    if (request.struct_size != sizeof(request)
+        || request.version != FSV2_PAGING_VERSION
+        || request.operation != FSV2_PAGING_WRITEBACK_FROZEN)
+        return ERROR_NOT_IMPLEMENTED;
+    if (request.flags != FSV2_WRITEBACK_SYNC || request.reserved != 0
+        || request.reserved2 != 0 || request.source > UINTPTR_MAX
+        || request.length > UINT32_MAX
+        || (request.length != 0 && request.buffer == NULL)
+        || request.offset > UINT64_MAX - request.length)
+        return ERROR_BAD_NUMBER;
+    if (context->revision < 23) return ERROR_NOT_IMPLEMENTED;
+    error = require_group(context, AFSPLUS_AROS_GROUP_API_V2);
+    if (error != 0) return error;
+    file = find_file(context, (BPTR)(uintptr_t)request.source);
+    if (file == NULL) return ERROR_INVALID_LOCK;
+    if (file->snapshot != NULL) return ERROR_DISK_WRITE_PROTECTED;
+    error = packet_now(context, &seconds, &ns);
+    if (error == 0)
+        error = afsplus_aros_writeback_atomic(context->filesystem, file->id,
+            request.offset, request.buffer, (uint32_t)request.length,
+            seconds, ns, &count);
+    if (error == 0) shared->output_count = count;
+    return error;
+}
+
 static int32_t process_paging_v2(struct AfsplusArosPacketContext *context,
     struct FSV2_PagingRequest *shared)
 {
@@ -117,6 +151,12 @@ static int32_t process_paging_v2(struct AfsplusArosPacketContext *context,
     int32_t error = 0;
     if (shared == NULL) return ERROR_REQUIRED_ARG_MISSING;
     memcpy(&request, shared, 8);
+    if (request.version == FSV2_PAGING_VERSION
+        && request.operation == FSV2_PAGING_WRITEBACK_FROZEN) {
+        if (request.struct_size != sizeof(struct FSV2_WritebackRequest))
+            return ERROR_NOT_IMPLEMENTED;
+        return process_writeback_v2(context, (struct FSV2_WritebackRequest *)shared);
+    }
     if (request.struct_size != sizeof(request)
         || request.version != FSV2_PAGING_VERSION
         || request.operation != FSV2_PAGING_SNAPSHOT_OPEN)

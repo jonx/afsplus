@@ -22,3 +22,21 @@ Reproduce with `cargo test -p afsplus-aros-ffi --test mmap_writeback --test
 mmap_snapshot -- --nocapture` using an isolated target directory. Evidence and
 hashes: `mmap-validation/afs-writeback-proof-001/result.json` in the workspace.
 The earlier failed attempts are retained. There is no guest or SMP qualification.
+
+
+The optional `FSV2_PAGING_WRITEBACK_FROZEN` native packet now reaches this
+primitive through the serialized real handler and requires interface revision
+23 and API-v2 support. Its fixed 64-byte request is distinct from the unchanged
+48-byte snapshot request. Sync durability, integer overflow, 32-bit transfer
+length, cookies and reserved fields are validated; output count changes only
+on success. The caller's freeze/pin obligation remains mandatory and is not
+implemented by this packet. No range registration or CAP_PAGING is provided.
+
+`sh tools/test-mmap-writeback.sh NEW-OUTPUT` with AROS_SOURCE and
+AFSPLUS_AROS_SDK_ROOT runs actual C-to-Rust durable/remount/position tests,
+revision/group refusal, and the snapshot/ordinary packet regressions. Five
+compiled handler mutants were rejected at runtime. Both aarch64 and i386
+header ABI assertions passed. Packet attempt003 assumed DOS MODE_OLDFILE
+was read-only; its failure is retained, and attempt004 follows the existing
+FFS/SFS-compatible writable-oldfile semantics. No production access policy was
+changed to satisfy that test. Evidence: writeback-packet-proof-001/result.json.

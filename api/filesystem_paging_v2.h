@@ -14,6 +14,8 @@
 #define ACTION_FILESYSTEM_PAGING_V2 INT32_C(0x46535032)
 #define FSV2_PAGING_VERSION 1
 #define FSV2_PAGING_SNAPSHOT_OPEN 1
+#define FSV2_PAGING_WRITEBACK_FROZEN 2
+#define FSV2_WRITEBACK_SYNC 1
 #define FSV2_SNAPSHOT_ALLOW_COPY 1
 #define FSV2_SNAPSHOT_REFLINK 1
 #define FSV2_SNAPSHOT_RAM 2
@@ -32,7 +34,23 @@ struct FSV2_PagingRequest {
     uint32_t storage, reserved2;
 };
 
+/* Storage operation only; does not register a mapping or assert CAP_PAGING.
+ * Caller must freeze every writable alias and pin all source backing until
+ * reply. Handler performs no callback/fault into the mapping while committing.
+ * No file position changes, extension, or asynchronous completion is allowed.
+ * output_count changes only on successful durable completion. */
+struct FSV2_WritebackRequest {
+    uint32_t struct_size;
+    uint16_t version, operation;
+    uint32_t flags, reserved;
+    uint64_t source;
+    union { const void *buffer; uint64_t buffer_bits; };
+    uint64_t offset, length, output_count, reserved2;
+};
+
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(struct FSV2_WritebackRequest)==64,"FSV2 writeback packet ABI");
+_Static_assert(offsetof(struct FSV2_WritebackRequest,offset)==32,"FSV2 writeback offset ABI");
 _Static_assert(sizeof(struct FSV2_PagingRequest)==48,"FSV2 snapshot packet ABI");
 _Static_assert(offsetof(struct FSV2_PagingRequest,size)==32,"FSV2 snapshot size offset");
 #endif
