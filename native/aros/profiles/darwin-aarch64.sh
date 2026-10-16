@@ -7,8 +7,8 @@
 # Sourced by tools/package-aros-dist.sh. Every value may be overridden from
 # the environment, because a machine may keep its AROS build elsewhere.
 
-: "${AROS_BUILD:=$HOME/aros-build}"
-: "${AROS_CROSSTOOLS:=$HOME/aros-crosstools}"
+: "${AROS_BUILD:=$HOME/Source/aros-project/aros-build}"
+: "${AROS_CROSSTOOLS:=$HOME/Source/aros-project/aros-crosstools}"
 
 aros_sdk=${AFSPLUS_AROS_SDK_ROOT:-"$AROS_BUILD/bin/darwin-aarch64"}
 aros_developer="$aros_sdk/AROS/Developer"

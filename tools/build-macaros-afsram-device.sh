@@ -6,9 +6,9 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-aros_crosstools=${AROS_CROSSTOOLS:-"$HOME/aros-crosstools"}
-sdk=${AFSPLUS_AROS_SDK_ROOT:-"$HOME/Build/aros-apple-core/apple/bin/apple-aarch64"}
-build_tools=${AFSPLUS_AROS_BUILD_TOOLS_ROOT:-"$HOME/Build/aros-apple-core/apple/bin/darwin-aarch64/tools"}
+aros_crosstools=${AROS_CROSSTOOLS:-"$HOME/Source/aros-project/aros-crosstools"}
+sdk=${AFSPLUS_AROS_SDK_ROOT:-"$HOME/Source/aros-project/Build/aros-apple-core/apple/bin/apple-aarch64"}
+build_tools=${AFSPLUS_AROS_BUILD_TOOLS_ROOT:-"$HOME/Source/aros-project/Build/aros-apple-core/apple/bin/darwin-aarch64/tools"}
 expected_platform=${AFSPLUS_AROS_EXPECTED_PLATFORM:-apple-aarch64}
 target=${AFSPLUS_AROS_TARGET:-aarch64-unknown-aros}
 codegen_target=${AFSPLUS_AROS_CODEGEN_TARGET:-aarch64-unknown-none-elf}

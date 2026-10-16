@@ -99,8 +99,8 @@ run_matrix copy-stub -I native/aros/tests/dev-proto \
 # missing; native/aros/tests/dev-proto then stands in for the three the shell
 # uses, which checks types and nothing about library bases. dos/dos64.h comes
 # from the SDK when it is there, else from the AROS source tree.
-sdk=${AFSPLUS_AROS_SDK_ROOT:-"$HOME/aros-build/bin/darwin-aarch64"}
-crosstools=${AROS_CROSSTOOLS:-"$HOME/aros-crosstools"}
+sdk=${AFSPLUS_AROS_SDK_ROOT:-"$HOME/Source/aros-project/aros-build/bin/darwin-aarch64"}
+crosstools=${AROS_CROSSTOOLS:-"$HOME/Source/aros-project/aros-crosstools"}
 sdk_include="$sdk/AROS/Developer/include"
 if [ -f "$sdk_include/exec/execbase.h" ] \
     && [ -f "$sdk/gen/include/aros/config.h" ]; then

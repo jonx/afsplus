@@ -39,7 +39,7 @@ def main():
     args = parser.parse_args()
     instance, output = args.instance.resolve(), args.output.resolve()
     require(not output.exists(), 'refuse to overwrite retained evidence')
-    require(instance != Path.home() / 'aros-build', 'an isolated instance is required')
+    require(instance != Path.home() / 'Source/aros-project/aros-build', 'an isolated instance is required')
     control = instance / 'control'
     text = control.read_text()
     for key, value in [('AROS_CTL_BOOTD', instance / 'AROS/boot/darwin'),

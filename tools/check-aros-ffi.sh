@@ -5,9 +5,9 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 macaros_root=${MACAROS_ROOT:-"$repo_root/../Macaros"}
-aros_build=${AROS_BUILD:-"$HOME/aros-build"}
-aros_crosstools=${AROS_CROSSTOOLS:-"$HOME/aros-crosstools"}
-aros_m68k_build=${AROS_M68K_BUILD:-"$HOME/aros-m68k-build"}
+aros_build=${AROS_BUILD:-"$HOME/Source/aros-project/aros-build"}
+aros_crosstools=${AROS_CROSSTOOLS:-"$HOME/Source/aros-project/aros-crosstools"}
+aros_m68k_build=${AROS_M68K_BUILD:-"$HOME/Source/aros-project/aros-m68k-build"}
 rust_toolchain=${AFSPLUS_AROS_RUST_TOOLCHAIN:-nightly-2026-06-27}
 handler_output=${AFSPLUS_AROS_HANDLER_OUTPUT:-}
 target_json=${AFSPLUS_AROS_RUST_TARGET_JSON:-"$macaros_root/hosted/rust/aarch64-unknown-aros.json"}

@@ -338,7 +338,7 @@ fi
 # The AROS m68k cross compiler when it is built; otherwise a bare-metal
 # m68k-elf-gcc (Homebrew: m68k-elf-gcc), which has no C library headers and
 # takes the five <string.h> prototypes from tools/m68k-freestanding.
-m68k_compiler=${AFSPLUS_M68K_CC:-"$HOME/aros-m68k-build/bin/darwin-aarch64/tools/crosstools/m68k-aros-gcc"}
+m68k_compiler=${AFSPLUS_M68K_CC:-"$HOME/Source/aros-project/aros-m68k-build/bin/darwin-aarch64/tools/crosstools/m68k-aros-gcc"}
 m68k_flags=
 if [ ! -x "$m68k_compiler" ] && command -v m68k-elf-gcc >/dev/null 2>&1; then
     m68k_compiler=$(command -v m68k-elf-gcc)

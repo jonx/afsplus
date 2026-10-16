@@ -20,8 +20,8 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 macaros_root=${MACAROS_ROOT:-"$repo_root/../Macaros"}
 aros_source=${AROS_SOURCE:-"$repo_root/../aros-upstream"}
-aros_build=${AROS_BUILD:-"$HOME/aros-build"}
-aros_crosstools=${AROS_CROSSTOOLS:-"$HOME/aros-crosstools"}
+aros_build=${AROS_BUILD:-"$HOME/Source/aros-project/aros-build"}
+aros_crosstools=${AROS_CROSSTOOLS:-"$HOME/Source/aros-project/aros-crosstools"}
 aros_tree="$aros_build/bin/darwin-aarch64/AROS"
 control="$macaros_root/graft/aros-ctl"
 output=${AFSPLUS_FDSK_ORDERING_OUTPUT:-"$repo_root/build/aros-fdsk-ordering"}

@@ -81,8 +81,8 @@ The script performs these independent gates:
 7. a machine-code audit requiring AROS AArch64 `ET_REL` identity and rejecting
    every `x18` or architectural TLS-register instruction.
 
-Defaults assume sibling `Macaros`, `~/aros-build`, `~/aros-crosstools` and
-`~/aros-m68k-build` trees. Override `MACAROS_ROOT`, `AROS_BUILD`,
+Defaults assume sibling `Macaros`, `~/Source/aros-project/aros-build`, `~/Source/aros-project/aros-crosstools` and
+`~/Source/aros-project/aros-m68k-build` trees. Override `MACAROS_ROOT`, `AROS_BUILD`,
 `AROS_CROSSTOOLS`, or `AROS_M68K_BUILD` when needed. A host without the m68k SDK
 may set `AFSPLUS_AROS_SKIP_M68K_ABI=1`; release qualification must not skip it.
 
@@ -112,7 +112,7 @@ The Hosted gates
 [`check-hosted-aros-s1.sh`](../tools/check-hosted-aros-s1.sh),
 [`check-hosted-aros-dos.sh`](../tools/check-hosted-aros-dos.sh),
 [`check-aros-fdsk-ordering.sh`](../tools/check-aros-fdsk-ordering.sh)) run
-against a built Hosted AROS tree under `~/aros-build`, driven through
+against a built Hosted AROS tree under `~/Source/aros-project/aros-build`, driven through
 MacAROS's `graft/aros-ctl`. That tree needs six things a build of it does not
 produce, and every one of them is lost when the tree is rebuilt:
 
@@ -192,8 +192,8 @@ The first native-linked pre-hardware package is reproduced with:
 
 ```sh
 AFSPLUS_AROS_PACKAGE_OUTPUT="$PWD/build/aros-alpha0-apple-aarch64" \
-AFSPLUS_AROS_SDK_ROOT="$HOME/Build/aros-apple-core/apple/bin/apple-aarch64" \
-AFSPLUS_AROS_BUILD_TOOLS_ROOT="$HOME/Build/aros-apple-core/apple/bin/darwin-aarch64/tools" \
+AFSPLUS_AROS_SDK_ROOT="$HOME/Source/aros-project/Build/aros-apple-core/apple/bin/apple-aarch64" \
+AFSPLUS_AROS_BUILD_TOOLS_ROOT="$HOME/Source/aros-project/Build/aros-apple-core/apple/bin/darwin-aarch64/tools" \
 AFSPLUS_AROS_EXPECTED_PLATFORM=apple-aarch64 \
 AFSPLUS_AROS_PROFILE_ID=macaros-native-apple-aarch64-prehardware \
 tools/package-aros-alpha0.sh

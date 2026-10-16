@@ -588,7 +588,7 @@ first.
 
 ## 2026-09-17 — What a rebuilt AROS tree loses, written down and applied
 
-The Hosted gates run against a built AROS tree under `~/aros-build`, and that
+The Hosted gates run against a built AROS tree under `~/Source/aros-project/aros-build`, and that
 tree needs six things a build of it does not produce: the one local change in
 the fork clone that stops `CreateNewProc` expunging `fdsk.device` during its
 own first open, `posixc.library`, `fdsk.device`, the directories `AROS/S` and

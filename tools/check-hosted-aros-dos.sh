@@ -8,7 +8,7 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 macaros_root=${MACAROS_ROOT:-"$repo_root/../Macaros"}
-aros_build=${AROS_BUILD:-"$HOME/aros-build"}
+aros_build=${AROS_BUILD:-"$HOME/Source/aros-project/aros-build"}
 aros_tree="$aros_build/bin/darwin-aarch64/AROS"
 control="$macaros_root/graft/aros-ctl"
 output=${AFSPLUS_HOSTED_DOS_OUTPUT:-"$repo_root/build/hosted-aros-dos"}

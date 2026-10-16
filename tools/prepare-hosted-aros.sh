@@ -4,18 +4,18 @@
 # what `make` in an AROS build tree produces by itself, and a rebuild of the
 # tree loses all of it. Idempotent: run it after every build.
 #
-#   AROS_BUILD       the build tree (default ~/aros-build)
+#   AROS_BUILD       the build tree (default ~/Source/aros-project/aros-build)
 #   AROS_SOURCE      the fork clone (default ../aros-upstream beside afsplus)
 #   AROS_APPLE_CORE  the sibling clone Mount comes from
-#   AROS_CROSSTOOLS  the AROS cross toolchain (default ~/aros-crosstools)
+#   AROS_CROSSTOOLS  the AROS cross toolchain (default ~/Source/aros-project/aros-crosstools)
 #   AROS_BUILD_TOOLS the host build tools (default ~/aros-build-tools)
 set -e
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-aros_build=${AROS_BUILD:-"$HOME/aros-build"}
+aros_build=${AROS_BUILD:-"$HOME/Source/aros-project/aros-build"}
 aros_source=${AROS_SOURCE:-"$repo_root/../aros-upstream"}
 apple_core=${AROS_APPLE_CORE:-"$repo_root/../aros-apple-core"}
-crosstools=${AROS_CROSSTOOLS:-"$HOME/aros-crosstools"}
+crosstools=${AROS_CROSSTOOLS:-"$HOME/Source/aros-project/aros-crosstools"}
 build_tools=${AROS_BUILD_TOOLS:-"$HOME/aros-build-tools"}
 tree=$aros_build/bin/darwin-aarch64/AROS
 

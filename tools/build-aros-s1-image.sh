@@ -6,7 +6,7 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-aros_build=${AROS_BUILD:-"$HOME/aros-build"}
+aros_build=${AROS_BUILD:-"$HOME/Source/aros-project/aros-build"}
 aros_tree="$aros_build/bin/darwin-aarch64/AROS"
 package=${AFSPLUS_AROS_PACKAGE:?set AFSPLUS_AROS_PACKAGE to an Alpha-0 package}
 output=${AFSPLUS_AROS_S1_OUTPUT:-"$repo_root/build/aros-s1-image"}

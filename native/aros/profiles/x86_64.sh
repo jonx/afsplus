@@ -54,7 +54,7 @@ aros_program_libs=${AFSPLUS_AROS_PROGRAM_LIBS:---start-group -lpthread -lposixc 
 # builds the x86_64 one; this profile reuses it.
 aros_collect_aros=${AFSPLUS_AROS_COLLECT_AROS:-"$HOME/aros-native/collect-aros-x86_64/collect-aros"}
 # genmodule emits C and is the same host tool for every CPU.
-aros_genmodule=${AFSPLUS_AROS_GENMODULE:-"$HOME/aros-build/bin/darwin-aarch64/tools/genmodule"}
+aros_genmodule=${AFSPLUS_AROS_GENMODULE:-"$HOME/Source/aros-project/aros-build/bin/darwin-aarch64/tools/genmodule"}
 aros_nm=${AFSPLUS_AROS_NM:-"$LLVM/bin/llvm-nm"}
 aros_objdump=${AFSPLUS_AROS_OBJDUMP:-"$LLVM/bin/llvm-objdump"}
 aros_objcopy=${AFSPLUS_AROS_OBJCOPY:-"$LLVM/bin/llvm-objcopy"}

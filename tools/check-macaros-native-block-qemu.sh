@@ -9,7 +9,7 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 native_repo=${MACAROS_NATIVE_ROOT:-"$repo_root/../aros-apple-silicon"}
-core_build=${MACAROS_NATIVE_BUILD:-"$HOME/Build/aros-apple-core/apple"}
+core_build=${MACAROS_NATIVE_BUILD:-"$HOME/Source/aros-project/Build/aros-apple-core/apple"}
 sdk=${AFSPLUS_AROS_SDK_ROOT:-"$core_build/bin/apple-aarch64"}
 build_tools=${AFSPLUS_AROS_BUILD_TOOLS_ROOT:-"$core_build/bin/darwin-aarch64/tools"}
 output=${AFSPLUS_MACAROS_QEMU_OUTPUT:-"$repo_root/build/macaros-native-block-qemu"}

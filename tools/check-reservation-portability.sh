@@ -24,7 +24,7 @@ for mode in strict sanitized; do
     grep -q 'logical byte mismatch' "$work/negative-$mode.log"
     printf 'reservation_c build=%s negative-control=PASS\n' "$mode"
 done
-m68k_compiler=${AFSPLUS_M68K_CC:-"$HOME/aros-m68k-build/bin/darwin-aarch64/tools/crosstools/m68k-aros-gcc"}
+m68k_compiler=${AFSPLUS_M68K_CC:-"$HOME/Source/aros-project/aros-m68k-build/bin/darwin-aarch64/tools/crosstools/m68k-aros-gcc"}
 if [ -x "$m68k_compiler" ]; then
     "$m68k_compiler" -m68000 -std=c99 -Wall -Wextra -Werror -fstack-usage \
         -I"$repo/api" -I"$repo/spec" -c "$repo/portable/c/reader.c" -o "$work/reader-m68000.o"

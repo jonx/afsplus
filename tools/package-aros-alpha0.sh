@@ -8,8 +8,8 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 output=${AFSPLUS_AROS_PACKAGE_OUTPUT:-"$repo_root/build/aros-alpha0"}
-aros_build=${AROS_BUILD:-"$HOME/aros-build"}
-aros_crosstools=${AROS_CROSSTOOLS:-"$HOME/aros-crosstools"}
+aros_build=${AROS_BUILD:-"$HOME/Source/aros-project/aros-build"}
+aros_crosstools=${AROS_CROSSTOOLS:-"$HOME/Source/aros-project/aros-crosstools"}
 sdk=${AFSPLUS_AROS_SDK_ROOT:-"$aros_build/bin/darwin-aarch64"}
 build_tools=${AFSPLUS_AROS_BUILD_TOOLS_ROOT:-"$sdk/tools"}
 expected_platform=${AFSPLUS_AROS_EXPECTED_PLATFORM:-}
