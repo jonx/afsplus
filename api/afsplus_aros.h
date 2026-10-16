@@ -25,7 +25,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(22)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(23)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -711,6 +711,15 @@ int32_t afsplus_aros_clone_file(struct AfsplusAros *filesystem,
     uint64_t source_lock, uint64_t target_base_lock,
     const uint8_t *target_name, uint32_t target_name_length,
     int64_t now_seconds, uint32_t now_nanoseconds);
+/* Revision 23, API_V2 group: immediate durable COW write of an existing-file
+ * range. Source must stay alive and immutable until return: paging clients
+ * freeze all writable aliases first. Neither delayed writes nor in-place data
+ * policy is used; file position is unchanged and extension past EOF refused.
+ * This primitive alone does not advertise FSV2_CAP_PAGING or coherence. */
+int32_t afsplus_aros_writeback_atomic(struct AfsplusAros *filesystem,
+    uint64_t file, uint64_t offset, const uint8_t *source, uint32_t length,
+    int64_t now_seconds, uint32_t now_nanoseconds, uint32_t *output_count);
+
 /* Revision 22, API_V2 group: read-only open-unlinked reflink, independent of the source's
  * position, later writes and name. No file data is copied. Requires a
  * writable mount with clone-file and open-unlinked capabilities; otherwise

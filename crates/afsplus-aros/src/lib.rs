@@ -980,6 +980,23 @@ impl<D: BlockDevice> ArosAdapter<D> {
         Ok(count)
     }
 
+    /// Stable source bytes commit as one durable COW range. File position
+    /// and inode/volume update policy remain unchanged. The caller owns page
+    /// freezing and mapped-cache coherence; this does not advertise paging.
+    pub fn writeback_atomic(
+        &mut self,
+        handle: FileHandleId,
+        offset: u64,
+        source: &[u8],
+        now: Timespec,
+    ) -> Result<usize, ArosError> {
+        self.ensure_writable()?;
+        let vfs_handle = self.file_state(handle)?.vfs_handle;
+        self.vfs
+            .writeback_atomic(vfs_handle, offset, source, now)
+            .map_err(Into::into)
+    }
+
     /// `CloneFile`: a new file `name` that initially shares the source's
     /// storage. `NotSupported` maps to `ERROR_ACTION_NOT_KNOWN`, the signal
     /// for a caller to fall back to a byte copy.

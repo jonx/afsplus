@@ -1726,7 +1726,7 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<(), CoreError> {
-        self.write_file_at_with_limits(object_id, offset, content, now, None)
+        self.write_file_at_with_limits(object_id, offset, content, now, None, false)
     }
 
     /// Atomic write with explicit touched-block and local extent-record budgets.
@@ -1754,7 +1754,23 @@ impl<D: BlockDevice> Volume<D> {
         if limits.max_blocks == 0 || limits.max_records == 0 || limits.max_records == usize::MAX {
             return Err(CoreError::PrototypeLimit("file edit limits invalid"));
         }
-        self.write_file_at_with_limits(object_id, offset, content, now, Some(limits))
+        self.write_file_at_with_limits(object_id, offset, content, now, Some(limits), false)
+    }
+
+    /// One COW range transaction even when the volume or inode opts into
+    /// private in-place updates. The caller supplies a stable source buffer;
+    /// mapped writeback must freeze every writable alias until this returns.
+    /// This is a storage primitive, not a paging/coherence capability.
+    pub fn write_file_at_atomic_cow(
+        &mut self,
+        object_id: u64,
+        offset: u64,
+        content: &[u8],
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WriteFileAtAtomicCow, |volume| {
+            volume.write_file_at_with_limits(object_id, offset, content, now, None, true)
+        })
     }
 
     fn write_file_at_with_limits(
@@ -1764,6 +1780,7 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
         limits: Option<FileEditLimits>,
+        force_cow: bool,
     ) -> Result<(), CoreError> {
         metadata::validate_time(now)?;
         self.ensure_window_closed()?;
@@ -1809,8 +1826,9 @@ impl<D: BlockDevice> Volume<D> {
         } else {
             self.load_file_layout(&record)?
         };
-        let overwrite_in_place = (self.data_update_policy == DataUpdatePolicy::InPlacePrivate
-            || record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0)
+        let overwrite_in_place = !force_cow
+            && (self.data_update_policy == DataUpdatePolicy::InPlacePrivate
+                || record.flags & OBJECT_FLAG_DATA_IN_PLACE != 0)
             && !self.snapshots_require_cow()
             && end_offset <= record.size_bytes
             && (first_block..end_block).all(|logical_block| {
@@ -2430,8 +2448,8 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         now: Timespec,
     ) -> Result<u64, CoreError> {
-        self.ensure_public_object_id(parent_id)?;
         self.trace_api(crate::flight::ApiMethod::CloneFile, |volume| {
+            volume.ensure_public_object_id(parent_id)?;
             volume.clone_file_untraced(source_id, parent_id, name, now)
         })
     }
@@ -2440,6 +2458,12 @@ impl<D: BlockDevice> Volume<D> {
     /// resulting object has no public name, but keeps the ordinary clone
     /// reference accounting and orphan crash/cleanup representation.
     pub fn clone_file_unlinked(&mut self, source_id: u64, now: Timespec) -> Result<u64, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::CloneFileUnlinked, |volume| {
+            volume.clone_file_unlinked_untraced(source_id, now)
+        })
+    }
+
+    fn clone_file_unlinked_untraced(&mut self, source_id: u64, now: Timespec) -> Result<u64, CoreError> {
         metadata::validate_time(now)?;
         // Both gates precede committing a pending window or allocating the
         // orphan directory. An unsupported snapshot has no side effects.
@@ -5765,7 +5789,7 @@ impl<D: BlockDevice> Volume<D> {
                 return Err((
                     false,
                     CoreError::Corrupt(format!("created object {object_id} has no record")),
-                ))
+                ));
             }
         };
         let mut bytes = vec![0u8; record.size_bytes as usize];
@@ -8128,7 +8152,7 @@ impl<D: BlockDevice> Volume<D> {
             _ => {
                 return Err(CoreError::PrototypeLimit(
                     "multi-extent logged creates are not implemented",
-                ))
+                ));
             }
         };
         let block_size = self.dev.block_size();

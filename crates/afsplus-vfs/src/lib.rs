@@ -1203,6 +1203,38 @@ impl<D: BlockDevice> Vfs<D> {
         Ok(source.len())
     }
 
+    /// Immediate, durable COW writeback of a stable existing-file range.
+    /// It cannot extend a truncated file or use the delayed/in-place path.
+    /// No mapped-page registration or coherence is provided by this primitive.
+    pub fn writeback_atomic(
+        &mut self,
+        handle: Handle,
+        offset: u64,
+        source: &[u8],
+        now: Timespec,
+    ) -> Result<usize, VfsError> {
+        let (object_id, access) = match self.handles.get(&handle).copied() {
+            Some(OpenHandle::File { object_id, access }) => (object_id, access),
+            Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
+            None => return Err(VfsError::Stale),
+        };
+        if !access.can_write() || self.volume.mount_mode() != MountMode::ReadWrite {
+            return Err(VfsError::ReadOnly);
+        }
+        let end = offset
+            .checked_add(source.len() as u64)
+            .ok_or(VfsError::Invalid)?;
+        if end > self.stat_file(handle)?.size {
+            return Err(VfsError::Invalid);
+        }
+        self.checkpoint_data_window(now)?;
+        self.keep_room(source.len() as u64, now)?;
+        self.volume
+            .write_file_at_atomic_cow(object_id, offset, source, now)?;
+        self.volume.sync()?;
+        Ok(source.len())
+    }
+
     fn write_at(
         &mut self,
         object_id: ObjectId,

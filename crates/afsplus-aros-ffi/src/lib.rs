@@ -30,7 +30,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 22;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 23;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -1930,6 +1930,34 @@ pub extern "C" fn afsplus_aros_write_at(
         require_output(output_count)?;
         let source = input_bytes(source, length)?;
         let count = bridge_mut(filesystem)?.adapter.write_at(
+            file,
+            offset,
+            source,
+            timestamp(now_seconds, now_nanoseconds)?,
+        )?;
+        write_output(output_count, count as u32)
+    })
+}
+
+/// The caller keeps the entire source alive and immutable until return.
+/// A native paging caller must freeze every mapped writable alias first.
+/// Success commits the existing-file range durably; no handle position moves.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn afsplus_aros_writeback_atomic(
+    filesystem: *mut AfsplusAros,
+    file: u64,
+    offset: u64,
+    source: *const u8,
+    length: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+    output_count: *mut u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        require_output(output_count)?;
+        let source = input_bytes(source, length)?;
+        let count = bridge_mut(filesystem)?.adapter.writeback_atomic(
             file,
             offset,
             source,

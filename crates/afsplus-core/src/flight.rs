@@ -516,6 +516,8 @@ pub enum ApiMethod {
     CleanupOrphans = 85,
     CheckpointFreeCountMismatch = 86,
     LookupEntryInDirectory = 87,
+    WriteFileAtAtomicCow = 88,
+    CloneFileUnlinked = 89,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
