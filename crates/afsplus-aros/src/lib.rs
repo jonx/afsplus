@@ -992,9 +992,11 @@ impl<D: BlockDevice> ArosAdapter<D> {
     ) -> Result<usize, ArosError> {
         self.ensure_writable()?;
         let vfs_handle = self.file_state(handle)?.vfs_handle;
-        self.vfs
-            .writeback_atomic(vfs_handle, offset, source, now)
-            .map_err(Into::into)
+        let count = self.vfs.writeback_atomic(vfs_handle, offset, source, now)?;
+        // A writeback changes the file like a write: its NotifyRequests fire
+        // when the handle closes.
+        self.files.get_mut(&handle).expect("validated handle").dirty = true;
+        Ok(count)
     }
 
     /// `CloneFile`: a new file `name` that initially shares the source's

@@ -143,3 +143,29 @@ fn watch_table_is_bounded() {
     assert_eq!(adapter.drain_watches(&mut ids), 1);
     assert_eq!(ids[0], 4);
 }
+
+#[test]
+fn a_writeback_fires_the_watch_when_the_handle_closes() {
+    let mut adapter = adapter(8);
+    let file = adapter
+        .open(None, b"mapped", OpenMode::NewFile, timestamp(1))
+        .unwrap();
+    adapter.write(file, &[0u8; 8192], timestamp(2)).unwrap();
+    adapter.close(file).unwrap();
+    let watch = adapter.add_watch(None, b"mapped").unwrap();
+    assert_eq!(drain(&mut adapter), Vec::<WatchId>::new());
+
+    // Changed only through writeback, as a mapped page written back is.
+    let file = adapter
+        .open(None, b"mapped", OpenMode::OldFile, timestamp(3))
+        .unwrap();
+    assert_eq!(
+        adapter
+            .writeback_atomic(file, 4096, &[0x5a; 4096], timestamp(4))
+            .unwrap(),
+        4096
+    );
+    assert_eq!(drain(&mut adapter), Vec::<WatchId>::new());
+    adapter.close(file).unwrap();
+    assert_eq!(drain(&mut adapter), vec![watch]);
+}
