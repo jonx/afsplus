@@ -1,6 +1,7 @@
 # ADR-035: Allocation-root tree in a reserved triple-version node pool
 
 Status: Accepted
+Amended by: ADR-061, ADR-067
 
 ## Context
 

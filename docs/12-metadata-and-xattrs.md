@@ -25,7 +25,11 @@ Namespaces are explicit.
 A name is 1 to 255 bytes of UTF-8 without NUL. It starts with `user.`,
 `system.`, `security.` or `aros.` and has at least one byte after the
 namespace ([ADR-108](../adr/ADR-108-extended-attributes.md)). The filesystem
-gives no namespace a meaning; access policy belongs to the host adapter.
+gives no namespace a meaning; access policy belongs to the host adapter. One
+name is the exception: `system.restore.stage` is the filesystem's own restore
+stage marker ([ADR-130](../adr/ADR-130-bounded-private-restore-stages.md)).
+Ordinary reads and enumeration omit it, and writes and removals of it are
+refused.
 
 Examples:
 

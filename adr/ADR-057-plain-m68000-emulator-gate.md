@@ -1,6 +1,7 @@
 # ADR-057: Qualify the Rust reference handler on plain M68000 emulation
 
 Status: Accepted
+Amends: ADR-042
 
 ## Context
 

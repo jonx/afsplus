@@ -868,7 +868,8 @@ reformat. A mounted reader keeps formatting and orderly dismount busy.
 host authority policies. Each defaults to DENY. ROOT queries security.library's
 current task owner at admission; SINGLEUSER admits a configured administrator
 trust domain when that library is absent. A signal reply port with a task is
-required. Reader close remains available after revocation. The handler admits only an already loaded security.library 45.17+ service
+required. The task that opened a reader or snapshot directory can close it
+after revocation; no other task can. The handler admits only an already loaded security.library 45.17+ service
 with the permanent, non-expungeable lifetime of
 [ADR-134](../adr/ADR-134-loaded-aros-authority-lifetime.md). Unknown major versions
 or older revisions fail closed, even under SINGLEUSER when a library is present.
@@ -921,7 +922,10 @@ partial completion; completed on-disk cleanup steps survive a later rescan.
 
 The API cursor binds volume, scope and checkpoint generation with integrity
 checking. Quiesce the volume: a pending delayed window returns busy and unrelated
-commits make the cursor stale. Restart on stale state. Separate API consumers
+commits make the cursor stale. Restart on stale state: the command starts a
+fresh scan at most eight times and reports `restarts=` in its summary, then
+stops and asks for quiescent writers. A forged cursor cannot enter a stage
+below its root. Separate API consumers
 that persist a cursor must store it outside the repaired volume. Malformed or
 inconsistent stages stay private. Inactive derived markers on published objects
 never authorize deletion. No maintenance scan runs at mount.

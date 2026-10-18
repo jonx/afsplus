@@ -2,7 +2,7 @@
 
 Status: Accepted
 Amended by: ADR-133
-Amends: ADR-129
+Supersedes: ADR-129
 
 ## Decision
 

@@ -1,7 +1,7 @@
 # ADR-027: Reflink file and range cloning
 
 Status: Accepted
-Amended by: ADR-102
+Amended by: ADR-061, ADR-102
 
 ## Context
 

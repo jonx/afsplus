@@ -3,6 +3,7 @@
 Status: Accepted
 Amended by: ADR-087, ADR-088
 Supersedes: ADR-080
+Amends: ADR-076
 
 ## Context
 

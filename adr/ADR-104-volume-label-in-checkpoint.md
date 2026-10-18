@@ -1,6 +1,7 @@
 # ADR-104: The volume label is committed checkpoint state
 
 Status: Accepted
+Amended by: ADR-123
 
 ## Context
 

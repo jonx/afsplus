@@ -1,6 +1,7 @@
 # ADR-056: Qualify Alpha-0 and intent-log replay on native AROS/m68k
 
 Status: Accepted
+Amends: ADR-042
 
 ## Context
 

@@ -1,6 +1,7 @@
 # ADR-045: Native AROS handler shell assembly
 
 Status: Accepted
+Amended by: ADR-122
 
 ## Context
 

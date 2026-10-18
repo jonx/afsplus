@@ -12,7 +12,9 @@ in ``docs/DOCUMENTATION.md``; this script enforces the mechanical part:
 2. every Markdown file longer than ``TOC_MIN_LINES`` carries a
    ``<!-- toc -->`` ... ``<!-- /toc -->`` block that matches its headings
    (``--write-toc`` inserts or regenerates the blocks);
-3. every ``ADR-NNN`` mention resolves to ``adr/ADR-NNN-*.md``;
+3. every ``ADR-NNN`` mention resolves to ``adr/ADR-NNN-*.md``, and every
+   ``Amends:``/``Supersedes:`` line has its reciprocal ``Amended by:``/
+   ``Superseded by:`` line in the other ADR, and the reverse;
 4. every ``MNN`` milestone mention is a row of ``implementation/milestones.md``;
 5. ``adr/README.md`` carries a generated index of every ADR between
    ``<!-- adr-index -->`` and ``<!-- /adr-index -->`` (``--write-adr-index``
@@ -598,6 +600,22 @@ def main() -> int:
                 problems.append(
                     f"{path.relative_to(root)} -> ADR-{match.group(1)} "
                     "(no such adr/ADR-NNN-*.md)")
+
+    # 3b. Reciprocal relation lines.
+    reverse = {"supersedes": "superseded by", "superseded by": "supersedes",
+               "amends": "amended by", "amended by": "amends"}
+    links: set[tuple[str, str, str]] = set()
+    for record in adr_records(root):
+        for relation in filter(None, record["relations"].split("; ")):
+            kind = next(k for k in reverse if relation.startswith(k + " ")
+                        and not relation.startswith(k + " by"))
+            for target in ADR_REF.findall(relation[len(kind):]):
+                links.add((record["number"], kind, target))
+    for number, kind, target in sorted(links):
+        if (target, reverse[kind], number) not in links:
+            problems.append(
+                f"adr/ADR-{number}: {kind} ADR-{target}, but ADR-{target} "
+                f"has no '{reverse[kind].capitalize()}: ADR-{number}' line")
 
     # 4. Milestone references.
     milestones = milestone_ids(root)

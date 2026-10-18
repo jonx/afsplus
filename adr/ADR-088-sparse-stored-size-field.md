@@ -1,7 +1,7 @@
 # ADR-088: Keep sparse stored size in the raw tar header
 
 Status: Accepted
-Amends: ADR-087, ADR-081
+Amends: ADR-081, ADR-087
 
 ## Context
 

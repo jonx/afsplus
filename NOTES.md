@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-10-18 — Close the restore review findings left open](#2026-10-18--close-the-restore-review-findings-left-open)
 - [2026-10-18 — Remove the temporary authority pin before native testing](#2026-10-18--remove-the-temporary-authority-pin-before-native-testing)
 - [2026-10-18 — Repair restore-stage lifetime and qualify actual crash cuts](#2026-10-18--repair-restore-stage-lifetime-and-qualify-actual-crash-cuts)
 - [2026-10-18 — Observe snapshot commands on disposable AROS volumes](#2026-10-18--observe-snapshot-commands-on-disposable-aros-volumes)
@@ -237,6 +238,35 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+
+## 2026-10-18 — Close the restore review findings left open
+
+A forged reclaim cursor could resume inside a stage below its root: the frame
+after an ordinary directory carried a stage id and a marked descendant, so the
+step reclaimed a file that a scan blocks. The regression reclaimed it
+(`removed=1`) before the fix; cursor decoding now admits a stage only at its
+own root. A child name that is not UTF-8 blocks that entry instead of
+aborting the pass, a directory beyond the depth bound is reported as the
+deeper scope to select, and a compile-time assertion bounds the deepest cursor
+to the 24 KiB transport. A listing that hides an entry with an undecodable
+stage marker raises one `HiddenCorruptEntry` health note per object and mount.
+
+`AFSPlusReclaim` restarts a fresh scan when the cursor goes stale, at most
+eight times, and says so in its summary. Snapshot readers and directories
+belong to the task that opened them: closing another task's handle is refused,
+while the opener can close after revocation. The handler answers ACTION_DIE
+only after thread-local cleanup, under Forbid, because the reply lets the
+sender unload its code.
+
+The restore diagnostics host test had drifted from the command and no gate
+ran it; it and the reclaim command test now run in `tools/check-aros-ffi.sh`,
+whose m68k header step also gained the SDK `stdc` include it lacked. That gate
+passes, AArch64 and m68k handler builds included. `check-docs.py` enforces
+reciprocal Amends/Supersedes lines; 24 missing ones were added, ADR-130
+supersedes ADR-129, and the attribute documents name the managed
+`system.restore.stage` marker. The core's flight test failed on main: six API
+methods added with the restore work were registered but never run under their
+guard. The test now runs all six.
 
 ## 2026-10-18 — Remove the temporary authority pin before native testing
 

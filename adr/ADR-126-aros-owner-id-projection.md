@@ -1,6 +1,7 @@
 # ADR-126: AROS owner identifiers preserve the disk values
 
 Status: Accepted
+
 Related: ADR-031, ADR-101, ADR-118, ADR-125
 
 ## Context

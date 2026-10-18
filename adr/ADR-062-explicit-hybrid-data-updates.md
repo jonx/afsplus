@@ -1,7 +1,7 @@
 # ADR-062: Explicit hybrid policy for committed user-data updates
 
 Status: Accepted
-Amended by: ADR-079
+Amended by: ADR-065, ADR-079
 Amends: ADR-020, ADR-061
 
 ## Context

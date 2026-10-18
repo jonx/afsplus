@@ -366,7 +366,9 @@ show.
 Extended attributes ([ADR-108](../adr/ADR-108-extended-attributes.md)) travel
 as `GET_ATTRIBUTE`, `LIST_ATTRIBUTES` and `SET_ATTRIBUTE`. The size always
 comes back and the bytes only when they fit, so a zero capacity asks for the
-size. Every namespace is readable through the AROS handler; it writes `user.`
+size. Every namespace is readable through the AROS handler, except the
+managed restore stage marker `system.restore.stage`
+([ADR-130](../adr/ADR-130-bounded-private-restore-stages.md)); it writes `user.`
 and `aros.` and answers `ERROR_WRITE_PROTECTED` for `security.` and
 `system.`, which it preserves for the hosts that give them meaning. Through
 FUSE every stored name has exactly one host spelling: Linux keeps `user.` and
