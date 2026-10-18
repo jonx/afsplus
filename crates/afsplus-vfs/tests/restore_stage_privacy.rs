@@ -7,7 +7,7 @@ use afsplus_core::{
     mkfs_with_snapshots_and_security_descriptors, MkfsParams, MountOptions, NamePolicy,
 };
 use afsplus_format::{Timespec, OBJECT_ROOT};
-use afsplus_vfs::{Vfs, VfsError};
+use afsplus_vfs::{HealthNote, Vfs, VfsError};
 
 fn fixture() -> (Vfs<ProbeBackend>, u64, u64, Vec<u8>, PreservedMetadata) {
     let mut image = ProbeBackend::new(4096, 4096);
@@ -475,6 +475,22 @@ fn malformed_child_marker_does_not_make_healthy_siblings_unlistable() {
     );
     assert!(second.eof);
     v.close(handle).unwrap();
+    // The hidden entry is a health event, once per mount however often the
+    // directory is listed.
+    let notes = v.take_health_notes();
+    assert_eq!(
+        notes
+            .iter()
+            .filter(|n| **n == HealthNote::HiddenCorruptEntry)
+            .count(),
+        1
+    );
+    let again = v.open_directory(OBJECT_ROOT).unwrap();
+    v.read_directory(again, 0, 8).unwrap();
+    v.close(again).unwrap();
+    assert!(!v
+        .take_health_notes()
+        .contains(&HealthNote::HiddenCorruptEntry));
 }
 
 #[test]

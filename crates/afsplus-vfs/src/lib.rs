@@ -16,7 +16,7 @@ mod snapshot_restore_tree;
 pub use snapshot_restore_tree::TreeRestoreLimits;
 mod snapshots;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use afsplus_block::BlockDevice;
@@ -473,6 +473,10 @@ pub enum HealthNote {
     /// The mounted checkpoint's free-block total disagrees with the sum over
     /// its own allocation-root region records.
     RegionFreeCountMismatch,
+    /// A directory listing left out an entry whose restore-stage marker
+    /// cannot be decoded: a lookup of it answers corrupt, so the listing
+    /// says so here. Raised once per object per mount.
+    HiddenCorruptEntry,
 }
 
 /// How many undrained notes a mount keeps. Notes are transitions, not
@@ -546,6 +550,10 @@ pub struct Vfs<D: BlockDevice> {
     /// transition rather than a repetition.
     notes: Vec<HealthNote>,
     backlog_high: bool,
+    /// The objects a listing already reported hidden as corrupt, so one bad
+    /// entry is one event per mount, not one per listing. Bounded like the
+    /// notes: past it, a repeat is dropped.
+    hidden_corrupt: BTreeSet<ObjectId>,
     /// The mount facts are established at the first drain, not at mount: a
     /// mount that nobody asks about does no work for them. The fallback is
     /// read from the volume at mount because the first commit supersedes it.
@@ -598,6 +606,7 @@ impl<D: BlockDevice> Vfs<D> {
             window_deletes: 0,
             last_change: None,
             notes: Vec::new(),
+            hidden_corrupt: BTreeSet::new(),
             backlog_high: false,
             mount_notes_pending: true,
         }
@@ -1382,7 +1391,14 @@ impl<D: BlockDevice> Vfs<D> {
             for entry in std::mem::take(&mut page.entries) {
                 match self.restore_stage_private(entry.child_id) {
                     Ok(false) => visible.push(entry),
-                    Ok(true) | Err(VfsError::Corrupt(_)) => {}
+                    Ok(true) => {}
+                    Err(VfsError::Corrupt(_)) => {
+                        if self.hidden_corrupt.len() < HEALTH_NOTES_MAX
+                            && self.hidden_corrupt.insert(entry.child_id)
+                        {
+                            self.push_note(HealthNote::HiddenCorruptEntry);
+                        }
+                    }
                     Err(error) => return Err(error),
                 }
             }

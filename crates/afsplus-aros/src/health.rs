@@ -129,6 +129,7 @@ impl HealthLog {
                 HealthNote::CheckpointFallback => HealthEventKind::CheckpointFallback,
                 HealthNote::ReclaimBacklogHigh => HealthEventKind::ReclaimBacklogHigh,
                 HealthNote::RegionFreeCountMismatch => HealthEventKind::RegionFreeCountMismatch,
+                HealthNote::HiddenCorruptEntry => HealthEventKind::Corruption,
             },
             0,
         );
