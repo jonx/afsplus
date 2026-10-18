@@ -1,6 +1,7 @@
 # ADR-127: Restore a snapshot file into an explicit fresh destination
 
 Status: Accepted
+Amended by: ADR-133
 Amends: ADR-071, ADR-077, ADR-119, ADR-125
 
 ## Context

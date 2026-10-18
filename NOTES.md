@@ -279,8 +279,16 @@ Proposed ADR-132 records its required amendments to the snapshot authority and
 mount contracts and integration package/slot decisions; D-127 already fixes
 home placement. SAFE7 and Waiting on John name those prerequisites. No boot-root
 implementation or internal-volume snapshot activation is authorized by these
-corrections. Native qualification is coordinated with Claude on an identified
-installed generation and disposable fdsk storage after host and VM checks.
+corrections. The rebuilt review candidate 029191e3 passes disposable VM run
+`20261018-afs-snapshot-review-vm-002`: five probes in 15.60 seconds, normal QMP
+exit zero, including actual reclaim cursor resumption and preservation of
+published descendants. SET5 observes five restored settings through three live
+consumers (200 ms). A first strict failed run is retained: packaging selected an
+old BootUndoProbe, corrected by matching the preceding qualified provenance.
+A full distribution build also caught a pointer-sized IoErr narrowing in the
+reclaim CLI; 029191e3 fixes that type without weakening warnings. Native
+qualification is coordinated with Claude on an identified installed generation
+and disposable fdsk storage. No M1 pass is inferred from these runs.
 
 ## 2026-10-18 — Observe snapshot commands on disposable AROS volumes
 
