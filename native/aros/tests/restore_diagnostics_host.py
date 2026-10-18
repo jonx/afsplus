@@ -14,12 +14,13 @@ prefix=r'''
 #include <stdint.h>
 #define ERROR_NOT_A_DOS_DISK 225
 #define ERROR_UNKNOWN 999
+#define ERROR_DISK_FULL 221
+#define AFSPLUS_ERROR_PUBLICATION_UNCERTAIN 50001
 #define Printf printf
 #define CONST_STRPTR const char *
 int main(int argc,char **argv) {
  if(argc!=4)return 7;
  int error=atoi(argv[1]),attempted=1,published=atoi(argv[2]);
- uint64_t reader=0x12,object=0x34;
  const char *phase=published?"snapshot-close":"restore";
  char *paths[]={"unused","unused","unused","unused","AFSPROBE:Restore Dir","new file"};
  argv=paths;
@@ -29,20 +30,25 @@ with tempfile.TemporaryDirectory(prefix='afs-restore-diag-') as td:
  def compile(text):
   c.write_text(prefix+text+'\nreturn 0;\n}\n')
   subprocess.run(['clang','-std=c11','-Wall','-Wextra','-Werror','-g','-fsanitize=address,undefined',str(c),'-o',str(b)],check=True)
+ def run(*args):
+  r=subprocess.run([str(b),*args,'fixture'],capture_output=True,text=True,check=True)
+  assert not r.stdout
+  return r.stderr.replace('DOS error ','DOS error')
  def check():
-  uncertain=subprocess.run([str(b),'225','0','fixture'],capture_output=True,text=True,check=True)
-  assert not uncertain.stdout
-  assert 'restore: DOS error225' in uncertain.stderr.replace('error 225','error225')
-  assert 'Publication or cleanup is uncertain.' in uncertain.stderr
-  assert '.afsplus-restore-0000000000000012-0000000000000034-*' in uncertain.stderr
-  assert 'destination new file' in uncertain.stderr and 'AFSPROBE:Restore Dir' in uncertain.stderr
-  closed=subprocess.run([str(b),'225','1','fixture'],capture_output=True,text=True,check=True)
-  assert not closed.stdout and 'was published' in closed.stderr
-  assert 'Publication or cleanup is uncertain.' not in closed.stderr
-  denied=subprocess.run([str(b),'214','0','fixture'],capture_output=True,text=True,check=True)
-  assert not denied.stdout and 'DOS error214' in denied.stderr.replace('error 214','error214')
-  assert 'staged files' not in denied.stderr
- compile(code);check();print('PASS uncertain restore reports stderr destination/stage pattern; published close failure and denied admission distinguished')
+  uncertain=run('50001','0')
+  assert 'restore: DOS error50001' in uncertain
+  assert 'Remount and inspect destination new file in AFSPROBE:Restore Dir' in uncertain
+  assert 'AFSPlusReclaim' not in uncertain
+  stage=run('225','0')
+  assert 'Run AFSPlusReclaim on destination directory AFSPROBE:Restore Dir' in stage
+  assert 'Remount' not in stage
+  closed=run('225','1')
+  assert 'snapshot-close: DOS error225' in closed and 'was published' in closed
+  assert 'AFSPlusReclaim' not in closed and 'Remount' not in closed
+  denied=run('224','0')
+  assert 'DOS error224' in denied
+  assert 'AFSPlusReclaim' not in denied and 'Remount' not in denied and 'published' not in denied
+ compile(code);check();print('PASS uncertain publication, retained stage, published close failure and denied admission each get their own stderr advice')
  compile(code.replace('fprintf(stderr, ','printf('))
  try:check()
  except AssertionError:print('PASS stdout diagnostic mutation rejected')

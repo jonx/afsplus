@@ -121,6 +121,10 @@ clang -std=c11 -Wall -Wextra -Werror \
     -o "$task_dir/packet-stub"
 "$task_dir/packet-stub"
 
+echo "[aros-ffi] host restore and reclaim command diagnostics"
+python3 native/aros/tests/restore_diagnostics_host.py
+python3 native/aros/tests/reclaim_cli_host.py
+
 echo "[aros-ffi] host bounded trackdisk viewport matrix"
 clang -std=c11 -Wall -Wextra -Werror \
     -D__WORDSIZE=64 -DAROS_FAST_BPTR=1 -DAROS_FAST_BSTR=1 \
@@ -435,7 +439,7 @@ if [ "${AFSPLUS_AROS_SKIP_M68K_ABI:-0}" != 1 ]; then
     require_file "$m68k_gen_include/aros/config.h"
     echo "[aros-ffi] AROS m68k C/DOS64 header ABI"
     "$m68k_cc" -std=c11 -Wall -Wextra -Werror \
-        -I "$m68k_include" -I "$m68k_gen_include" -I api \
+        -I "$m68k_stdc_include" -I "$m68k_include" -I "$m68k_gen_include" -I api \
         -include dos/dos64.h -include afsplus_aros.h \
         -fsyntax-only -x c /dev/null
     echo "[aros-ffi] AROS m68k DosPacket translator"
