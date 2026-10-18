@@ -907,19 +907,23 @@ An unknown public checkpoint or final barrier outcome returns
 destination before retrying; an ordinary prepublication failure can leave a
 private stage available for maintenance. Boot-root rollback needs its own decision.
 
-`AFSPlusReclaim VOLUME DIRECTORY [CURSOR [SCAN WORK DEPTH]]` drives the
+`AFSPlusReclaim VOLUME DIRECTORY [SCAN WORK DEPTH [MAXCALLS]]` drives the
 RESTORE_RECOVERY group through operation 43. It requires RESTORE authority and
-no historical BACKUP grant. Each call scans at most 64 entries and performs at
-most eight object/extent steps, with traversal depth at most 64. A selected live
-directory scopes the scan; choose a deeper scope for a deep namespace. Cursor
-identity binds volume, scope and checkpoint generation, with integrity checking.
-The volume must be quiescent between calls; a pending delayed window returns
-busy, and unrelated commits make the cursor stale. Remove a stale cursor to
-restart safely. The default cursor file is `RAM:AFSPlusReclaim.cursor`; writing
-it on the repaired volume is refused. Losing it during publication requires only
-a rescan; completed on-disk cleanup steps are retained. Malformed or inconsistent
-stages stay private and produce a partial result. Inactive derived markers on
-published objects never authorize deletion. No maintenance scan runs at mount.
+no historical BACKUP grant. Each API call scans at most 64 entries and performs
+at most eight object/extent steps, with traversal depth at most 64 below the
+selected scope (depth zero). Choose a deeper live scope for a deep namespace.
+The command keeps its opaque cursor in memory and performs no cursor-file or
+temporary-path writes. Defaults are 64 entries, eight work steps, depth 64 and
+4096 calls; MAXCALLS supplies an explicit positive 32-bit call budget. Ctrl-C is
+checked between steps. Interruption, budget exhaustion and blocked stages report
+partial completion; completed on-disk cleanup steps survive a later rescan.
+
+The API cursor binds volume, scope and checkpoint generation with integrity
+checking. Quiesce the volume: a pending delayed window returns busy and unrelated
+commits make the cursor stale. Restart on stale state. Separate API consumers
+that persist a cursor must store it outside the repaired volume. Malformed or
+inconsistent stages stay private. Inactive derived markers on published objects
+never authorize deletion. No maintenance scan runs at mount.
 
 Host contracts are exercised by `snapshot_mount`, the FFI `format` snapshot
 case and the native packet matrix. Guest acceptance requires a rebuilt external

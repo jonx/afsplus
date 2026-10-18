@@ -8,6 +8,7 @@ const MAX_DEPTH: usize = 64;
 pub struct RestoreRecoveryLimits {
     pub scan_entries: usize,
     pub work_steps: usize,
+    /// Depth below the selected live scope (depth zero), including stage root.
     pub max_depth: usize,
 }
 
@@ -67,7 +68,7 @@ impl Cursor {
         let generation = number(&mut bytes)?;
         let blocked = number(&mut bytes)?;
         let count = number(&mut bytes)?;
-        if count == 0 || count > MAX_DEPTH as u64 {
+        if count == 0 || count > (MAX_DEPTH + 1) as u64 {
             return Err(VfsError::Invalid);
         }
         let mut frames = Vec::with_capacity(count as usize);
@@ -255,7 +256,7 @@ impl<D: BlockDevice> Vfs<D> {
         {
             return Err(VfsError::Stale);
         }
-        if cursor.frames.len() > limits.max_depth {
+        if cursor.frames.len() > limits.max_depth + 1 {
             return Err(VfsError::Invalid);
         }
         for frame in cursor.frames.iter().skip(1) {
@@ -348,7 +349,7 @@ impl<D: BlockDevice> Vfs<D> {
                 if child.object_type == ObjectType::Directory
                     || (stage != 0 && child.object_type == ObjectType::File)
                 {
-                    if cursor.frames.len() >= limits.max_depth
+                    if cursor.frames.len() > limits.max_depth
                         || cursor.frames.iter().any(|f| f.object == entry.child_id)
                     {
                         cursor.block(entry.child_id, &mut report);

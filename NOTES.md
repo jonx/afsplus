@@ -257,6 +257,27 @@ returned base and balanced real lifecycle hooks under ASan/UBSan. The library
 stub has no reference-count field, rejecting a reintroduced manual pin at
 compile time. This is a handler correction, not a generic Exec SMP fix.
 
+Independent review 113 also found that cursor-save staging re-resolved its
+new directory after unlocking it, allowing a rename/softlink swap to redirect
+writes. The CLI drops cursor-file persistence entirely: it drives bounded
+API steps with an in-memory cursor, a total-call budget and Ctrl-C checkpoints.
+No cursor or temporary-path writes remain. Partial cleanup is durable; a later
+invocation safely rescans. The raw API retains its resumable cursor contract.
+The old production CLI race is reproduced by a directory/softlink swap;
+23 actual-source ASan/UBSan scenarios and strict public-SDK AArch64 linking pass.
+
+A separate boundary regression found that the live scope consumed one of the
+64 permitted stage levels. Scope depth is zero; the bounded cursor admits
+65 frames. Ten semantic tests pass, including the old failing 64-level tree.
+The real reclamation-write campaign covers 112 operation-prefix cuts and
+6,252 remounted states, including 1,110 representative tears. Every state
+preserves historical bytes and ordinary/published neighbors, keeps surviving
+stages private, and completes bounded reclamation after a cursorless restart.
+Evidence is retained in the integration artifacts
+`afs-settings-20261018/027-reclaim-powercut/verification.json` and
+`runs/20261018-afs-diagnostics/reclaim-memory/verification.json`.
+
+
 ## 2026-10-18 — Repair restore-stage lifetime and qualify actual crash cuts
 
 The independent restore review reproduced an empty unmarked stage after a real

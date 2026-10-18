@@ -54,26 +54,25 @@ mkafsplus --snapshots, or by FORMATSNAPSHOTS=YES in the DOSDriver Control
 string for explicit Format. The feature is fixed when the volume is formatted.
 Supply SNAPSHOTEDIT, SNAPSHOTVIEWS and SNAPSHOTRECLAIM positive runtime budgets
 together to mount that volume; examples are in the DOSDriver template.
-BACKUP and RESTORE each default to DENY. ROOT uses current security.library
-ownership; SINGLEUSER declares an administrator domain without that library.
+BACKUP and RESTORE each default to DENY. ROOT uses the already loaded,
+permanent security.library 45.17+
+(major 45) authority service and its ROOT65535 identity; unsupported versions
+fail closed; SINGLEUSER declares an administrator domain without that library.
 
 AFSPlusBackup DEVICE captures a registered local snapshot. LIST enumerates
 captures. AFSPlusSnapshot DEVICE VIEW ID [PATH] reads an immutable view.
-AFSPlusReclaim DEVICE DIRECTORY [CURSORFILE [SCAN WORK DEPTH]] performs one
-authorized restore-maintenance step. It finds private retained stages by their
-managed markers, never by their names. Repeat while complete=0; defaults scan
-64 entries, perform 8 object/extent steps, and traverse 64 levels. Cursor files
-must be outside the repaired volume; the default is RAM:AFSPlusReclaim.cursor.
-The command checks and pins the resolved cursor parent directory, so an assign
-or symlink cannot redirect cursor writes into the repaired volume.
-On a stale cursor remove that cursor and restart on a quiescent subtree. An
-interruption retains durable progress; losing the cursor permits another scan.
+AFSPlusReclaim DEVICE DIRECTORY [SCAN WORK DEPTH [MAXCALLS]] performs
+RESTORE-authorized maintenance in bounded steps. It finds private retained
+stages by their managed markers, never by their names. Defaults scan 64 entries
+and perform 8 object/extent steps per call, traverse 64 levels and allow 4096
+calls. MAXCALLS is an explicit positive 32-bit bound; Ctrl-C interrupts between
+steps. The cursor stays in memory: no cursor files or temporary paths are
+written. Quiesce writers; stale state requires a restart. Interruption or call
+budget exhaustion retains durable cleanup progress for a later rescan.
 blocked>0 reports partial completion and keeps malformed stages private. Select
-a deeper live DIRECTORY when the traversal depth bound is reached. Cursor save
-flushes and closes a private file, then deletes the old cursor and renames the
-complete replacement. A crash in that gap loses only the cursor; rescan safely.
-This command does not inspect or expose
-historical payloads, and it never removes published objects or snapshot data.
+a deeper live DIRECTORY when the traversal depth bound is reached. The command
+does not expose historical payloads, remove published objects or discard
+snapshot data.
 
 AFSPlusRestore DEVICE ID PATH DIRECTORY NEWNAME restores a file or directory
 into a new destination, including supported metadata. Directory operations

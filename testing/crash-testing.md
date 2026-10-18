@@ -23,6 +23,7 @@
 - [Block reuse across generations](#block-reuse-across-generations)
 - [Explicit full-enumeration budgets](#explicit-full-enumeration-budgets)
 - [AROS handler process interruption](#aros-handler-process-interruption)
+- [Interrupted restore maintenance](#interrupted-restore-maintenance)
 
 <!-- /toc -->
 
@@ -250,3 +251,17 @@ write must survive a second restart, the independent checker must accept the
 image, and all guest/probe logs must pass the fatal-diagnostic scanner. Evidence
 includes the baseline, pre-recovery images, logs, handler hash and JSON verdict.
 No native M1 or electrical power-cut qualification is implied by these gates.
+
+## Interrupted restore maintenance
+
+`cargo test -p afsplus-vfs --test restore_recovery_powercut -- --nocapture`
+records actual ADR-133 private-file and private-tree reclamation writes, then
+freshly mounts every operation-prefix cut with all full-write subsets of the
+pending tail (explicit budget 12) and sampled single prefix tears at
+64/2048/4064 bytes. Each state must preserve ordinary and published neighbors,
+retain historical snapshot bytes, deny ordinary access and direct-ID mutation
+to every surviving private stage, and finish bounded cleanup after losing the
+cursor. Completed barriers are honored. Simultaneous tears, subblock reorder,
+dishonest barriers and device firmware behavior are outside this model.
+`cargo test -p afsplus-vfs --test restore_recovery` separately checks scope depth
+zero, the admitted 64-level boundary, malformed stages and cursor validation.

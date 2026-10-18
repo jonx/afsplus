@@ -349,3 +349,72 @@ fn pending_writer_is_refused_without_publishing_unbudgeted_changes() {
     assert_eq!(vfs.generation(), generation);
     assert!(vfs.changes_pending());
 }
+
+fn reclaim_full_admitted_depth(depth: usize, file: bool) {
+    use afsplus_format::object::ObjectType;
+    let mut volume = fixture().into_volume();
+    let root = volume
+        .create_restore_stage(
+            OBJECT_ROOT,
+            "stage",
+            if file {
+                ObjectType::File
+            } else {
+                ObjectType::Directory
+            },
+            None,
+            Timespec::default(),
+        )
+        .unwrap();
+    let mut parent = root;
+    for _ in 1..depth {
+        parent = volume
+            .create_restore_stage(
+                parent,
+                "next",
+                ObjectType::Directory,
+                Some(root),
+                Timespec::default(),
+            )
+            .unwrap();
+    }
+    let mut vfs = mount(volume.into_device());
+    let mut cursor = Vec::new();
+    let mut done = false;
+    for _ in 0..128 {
+        let r = vfs
+            .restore_reclaim_step(
+                OBJECT_ROOT,
+                &cursor,
+                RestoreRecoveryLimits {
+                    scan_entries: 64,
+                    work_steps: 8,
+                    max_depth: depth,
+                },
+                Timespec::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            r.blocked, 0,
+            "valid stage depth {depth} below live scope must fit admitted budget"
+        );
+        if r.done {
+            done = true;
+            break;
+        }
+        cursor = r.cursor;
+    }
+    assert!(done);
+    assert!(vfs.into_volume().stat(root).unwrap().is_none());
+}
+
+#[test]
+fn valid_sixty_four_level_stage_fits_scoped_depth_budget() {
+    reclaim_full_admitted_depth(64, false);
+}
+
+#[test]
+fn depth_one_reclaims_standalone_file_and_empty_stage_directory() {
+    reclaim_full_admitted_depth(1, true);
+    reclaim_full_admitted_depth(1, false);
+}
