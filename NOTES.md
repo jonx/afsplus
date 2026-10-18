@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-10-18 — Build the snapshot client with strict AROS conversions](#2026-10-18--build-the-snapshot-client-with-strict-aros-conversions)
 - [2026-10-18 — Keep retained historical restore stages private](#2026-10-18--keep-retained-historical-restore-stages-private)
 - [2026-10-18 — Expose budgeted snapshots and scoped restoration to AROS](#2026-10-18--expose-budgeted-snapshots-and-scoped-restoration-to-aros)
 - [2026-10-18 — Audit the AROS branches and reproduce handler resource limits](#2026-10-18--audit-the-aros-branches-and-reproduce-handler-resource-limits)
@@ -232,6 +233,15 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+
+## 2026-10-18 — Build the snapshot client with strict AROS conversions
+
+The VM distribution build reached the handler link, then refused the snapshot
+lookup client's implicit size_t-to-u32 name-length conversion. Made the
+conversion explicit, matching the other component-name client calls. The
+native packet validates the component limit. Actual VM-SDK compilation with
+-Wconversion/-Wsign-conversion/-Werror passes; the failed package log is retained
+in the integration artifacts rather than treated as runtime evidence.
 
 ## 2026-10-18 — Keep retained historical restore stages private
 

@@ -590,7 +590,7 @@ LONG afsplus_client_snapshot_lookup(struct MsgPort *port, uint64_t reader,
     if (name == NULL || object == NULL) return ERROR_REQUIRED_ARG_MISSING;
     *object = 0; begin(&r, AFSPLUS_EXT_SNAPSHOT_LOOKUP); r.offset[0] = reader;
     r.object[0] = directory; r.name0 = (const uint8_t *)name;
-    r.name_length[0] = strlen((const char *)name);
+    r.name_length[0] = (uint32_t)strlen((const char *)name);
     e = afsplus_client_send(port, &r); if (!e) *object = r.output_value; return e;
 }
 LONG afsplus_client_snapshot_read(struct MsgPort *port, uint64_t reader,
