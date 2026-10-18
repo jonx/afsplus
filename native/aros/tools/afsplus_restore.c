@@ -63,7 +63,7 @@ int main(int argc, char **argv)
         return RETURN_FAIL;
     }
     destination = Lock((CONST_STRPTR)argv[4], SHARED_LOCK);
-    if (destination == BNULL) { error = IoErr(); goto done; }
+    if (destination == BNULL) { error = (LONG)IoErr(); goto done; }
     if (afsplus_client_lock_port(destination) != device->dvp_Port)
     { error = ERROR_RENAME_ACROSS_DEVICES; goto done; }
     path = malloc(strlen(argv[3]) + 1);

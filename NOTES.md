@@ -239,7 +239,8 @@ Entry format: `## YYYY-MM-DD — title`.
 The VM distribution build reached the handler link, then refused the snapshot
 lookup client's implicit size_t-to-u32 name-length conversion. Made the
 conversion explicit, matching the other component-name client calls. The
-native packet validates the component limit. Actual VM-SDK compilation with
+native packet validates the component limit. The restore tool also explicitly
+narrows the DOS IoErr value to its LONG status. Actual VM-SDK compilation with
 -Wconversion/-Wsign-conversion/-Werror passes; the failed package log is retained
 in the integration artifacts rather than treated as runtime evidence.
 
