@@ -30,4 +30,6 @@ LONG RemDosEntry(struct DosList *dlist);
 struct DosList *AttemptLockDosList(ULONG flags);
 void UnLockDosList(ULONG flags);
 
+ULONG CheckSignal(ULONG mask);
+
 #endif

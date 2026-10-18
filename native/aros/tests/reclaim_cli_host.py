@@ -141,6 +141,10 @@ with tempfile.TemporaryDirectory(prefix='reclaim-cli-') as directory:
     for values in [('0','1','1'), ('65','1','1'), ('1','9','1'), ('1','1','65'),
                    ('x','1','1'), ('1','1','1','0'), ('1','1','1',str(2**32)),
                    ('1','1','1','9'*80)]:
-        run(args=('AFS:', 'AFS:scope', *values), expected=20, calls=0)
+        # A usage error: RETURN_ERROR with the accepted ranges, nothing touched.
+        result = run(args=('AFS:', 'AFS:scope', *values), expected=10, calls=0)
+        assert 'scan 1-64' in result.stderr
+    result = run('device-fail', expected=20, calls=0)
+    assert 'nothing was changed' in result.stderr and 'may have advanced' not in result.stderr
     run(args=('AFS:', 'AFS:scope', 'RAM:old-cursor'), expected=10, calls=0)
     print(f'reclaim CLI PASS: {runs} actual-source sanitizer scenarios; cursor continuity, bounded calls, Ctrl-C, stale, blocked, scope, lifecycle, no filesystem mutation')

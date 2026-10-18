@@ -49,12 +49,17 @@ int main(int argc, char **argv)
     }
     if (argc == 9)
     {
-        if (!parse_id(argv[6], &parsed) || parsed > UINT32_MAX) return RETURN_ERROR;
+        int valid = parse_id(argv[6], &parsed) && parsed <= UINT32_MAX;
         max_nodes = (uint32_t)parsed;
-        if (!parse_id(argv[7], &parsed) || parsed > UINT32_MAX) return RETURN_ERROR;
+        valid = valid && parse_id(argv[7], &parsed) && parsed <= UINT32_MAX;
         max_depth = (uint32_t)parsed;
-        if (!parse_id(argv[8], &parsed) || parsed > UINT32_MAX) return RETURN_ERROR;
+        valid = valid && parse_id(argv[8], &parsed) && parsed <= UINT32_MAX;
         max_metadata_bytes = (uint32_t)parsed;
+        if (!valid)
+        {
+            fprintf(stderr, "AFSPlusRestore: nodes, depth and metadata-bytes are positive decimal 32-bit numbers.\n");
+            return RETURN_ERROR;
+        }
     }
     device = GetDeviceProc((CONST_STRPTR)argv[1], NULL);
     if (device == NULL)
@@ -123,7 +128,9 @@ done:
             fprintf(stderr, "Publication may have committed. Remount and inspect destination %s in %s before deciding whether to retry.\n",
                 argv[5], argv[4]);
         }
-        else if (attempted && (error == ERROR_UNKNOWN || error == ERROR_NOT_A_DOS_DISK || error == ERROR_DISK_FULL))
+        /* Stage cleanup after a failure is best effort: any failure past
+         * admission may leave a private stage behind. */
+        else if (attempted && error != ERROR_READ_PROTECTED && error != ERROR_OBJECT_EXISTS)
             fprintf(stderr, "Run AFSPlusReclaim on destination directory %s to reclaim any retained private restore stages.\n", argv[4]);
     }
     else Printf((CONST_STRPTR)"AFSPlusRestore: restored %s in %s\n", argv[5], argv[4]);

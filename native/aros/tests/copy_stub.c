@@ -6,6 +6,7 @@
 
 #include "../client/afsplus_copy.h"
 
+#include <dos/dosasl.h>
 #include <proto/dos.h>
 #include <proto/exec.h>
 
@@ -32,6 +33,14 @@ struct Entry {
 };
 static struct Entry directory[ENTRIES];
 static SIPTR io_error;
+/* Ctrl-C: none unless a case raises it. */
+static ULONG break_signals;
+ULONG CheckSignal(ULONG mask)
+{
+    ULONG raised = break_signals & mask;
+    break_signals &= ~mask;
+    return raised;
+}
 
 /* Open handles: an entry, a position, a mode. */
 struct Handle {
@@ -270,6 +279,12 @@ int main(void)
         == 0);
     assert(entries() == 2);
     DeleteFile((CONST_STRPTR)"copy");
+
+    /* Ctrl-C between buffers stops the copy and leaves nothing. */
+    break_signals = SIGBREAKF_CTRL_C;
+    assert(afsplus_copy_file(MKBADDR(source), BNULL, (CONST_STRPTR)"copy")
+        == ERROR_BREAK);
+    assert(entries() == 1 && break_signals == 0);
 
     /* Another task creates the target while the bytes are being copied: its
      * file is neither truncated nor replaced, and the copy fails. */

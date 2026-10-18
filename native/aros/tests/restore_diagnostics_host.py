@@ -15,6 +15,8 @@ prefix=r'''
 #define ERROR_NOT_A_DOS_DISK 225
 #define ERROR_UNKNOWN 999
 #define ERROR_DISK_FULL 221
+#define ERROR_READ_PROTECTED 224
+#define ERROR_OBJECT_EXISTS 203
 #define AFSPLUS_ERROR_PUBLICATION_UNCERTAIN 50001
 #define Printf printf
 #define CONST_STRPTR const char *

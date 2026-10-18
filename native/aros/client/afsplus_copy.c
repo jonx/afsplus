@@ -3,6 +3,7 @@
 #include "afsplus_copy.h"
 
 #include <exec/memory.h>
+#include <dos/dosasl.h>
 #include <proto/dos.h>
 #include <proto/exec.h>
 
@@ -107,11 +108,18 @@ LONG afsplus_copy_file(BPTR source, BPTR directory, CONST_STRPTR name)
     if (output != BNULL)
     {
         while ((count = Read(input, buffer, COPY_BUFFER_BYTES)) > 0)
+        {
             if (Write(output, buffer, count) != count)
             {
                 error = last_error(ERROR_UNKNOWN);
                 break;
             }
+            if (CheckSignal(SIGBREAKF_CTRL_C))
+            {
+                error = ERROR_BREAK;
+                break;
+            }
+        }
         if (error == 0 && count < 0)
             error = last_error(ERROR_UNKNOWN);
         /* A close that fails has not stored the bytes. */

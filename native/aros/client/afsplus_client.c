@@ -131,7 +131,11 @@ static LONG classic_at(BPTR file, uint64_t offset, void *buffer,
         return ERROR_OBJECT_TOO_LARGE;
     previous = Seek(file, (LONG)offset, OFFSET_BEGINNING);
     if (previous < 0)
-        return (LONG)IoErr() != 0 ? (LONG)IoErr() : ERROR_SEEK_ERROR;
+    {
+        error = (LONG)IoErr() != 0 ? (LONG)IoErr() : ERROR_SEEK_ERROR;
+        SetIoErr(0);
+        return error;
+    }
     moved = writing ? Write(file, buffer, (LONG)length)
         : Read(file, buffer, (LONG)length);
     if (moved < 0)

@@ -45,8 +45,11 @@ int main(int argc,char **argv)
     r=calloc(1,sizeof(*r));
     if(!r){fprintf(stderr,"AFSPlusReclaim: no memory for bounded request.\n");return RETURN_FAIL;}
     r->struct_size=sizeof(*r);r->scan_entries=64;r->work_steps=8;r->max_depth=64;
-    if(argc>=6&&(!budget(argv[3],64,&r->scan_entries)||!budget(argv[4],8,&r->work_steps)||!budget(argv[5],64,&r->max_depth))){error=ERROR_BAD_NUMBER;goto done;}
-    if(argc==7&&!budget(argv[6],UINT32_MAX,&max_calls)){error=ERROR_BAD_NUMBER;goto done;}
+    if((argc>=6&&(!budget(argv[3],64,&r->scan_entries)||!budget(argv[4],8,&r->work_steps)||!budget(argv[5],64,&r->max_depth)))
+        ||(argc==7&&!budget(argv[6],UINT32_MAX,&max_calls))) {
+        fprintf(stderr,"AFSPlusReclaim: scan 1-64, work 1-8, depth 1-64 and maxcalls 1-4294967295, in decimal.\n");
+        free(r);return RETURN_ERROR;
+    }
     device=GetDeviceProc((CONST_STRPTR)argv[1],NULL);
     if(!device){error=IoErr();goto done;}
     scope=Lock((CONST_STRPTR)argv[2],SHARED_LOCK);
@@ -77,7 +80,8 @@ int main(int argc,char **argv)
     }
 done:
     if(error) {
-        fprintf(stderr,"AFSPlusReclaim: DOS error %ld; durable private-stage progress may have advanced.\n",(long)error);
+        if(calls)fprintf(stderr,"AFSPlusReclaim: DOS error %ld; durable private-stage progress may have advanced.\n",(long)error);
+        else fprintf(stderr,"AFSPlusReclaim: %s: DOS error %ld; nothing was changed.\n",argv[2],(long)error);
         if(error==ERROR_INVALID_LOCK&&restarts>=RECLAIM_RESTARTS_MAX)
             fprintf(stderr,"The volume kept changing: %lu fresh scans went stale. Quiesce writers in the subtree and retry.\n",(unsigned long)restarts);
         else if(error==ERROR_INVALID_LOCK)
