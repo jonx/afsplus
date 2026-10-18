@@ -76,10 +76,10 @@ int main(void)
     race_winner=publish_winner;
     assert(AFSPLUS_SECURITY_ROOT_UID==65535);
     assert(AFSPLUS_SECURITY_GET_TASK_OWNER_LVO==7);
-    /* Absent service: SINGLEUSER only, nothing loaded or opened. */
-    for(unsigned policy=0;policy<=3;policy++)
+    /* Absent service: SINGLEUSER and ANYONE only, nothing loaded or opened. */
+    for(unsigned policy=0;policy<=4;policy++)
         assert(afsplus_aros_authorize_policy(&exec,&packet,policy)
-            ==(policy==2?0:ERROR_READ_PROTECTED));
+            ==(policy==2||policy==3?0:ERROR_READ_PROTECTED));
     assert(!queries && !opens && !forbidden);
     loaded=&security;smp=1;
     /* Unsupported ABIs are refused before any Open. */
@@ -118,14 +118,21 @@ int main(void)
             assert(afsplus_aros_authorize_policy(&exec,&packet,policy)==ERROR_READ_PROTECTED);
         }
     assert(opens==3 && closes==2 && references==8 && queries==1+6000 && !forbidden);
-    /* Malformed senders are refused before the owner query. */
+    /* ANYONE admits nobody too, without an owner query. */
+    sender.owner=0;
+    assert(afsplus_aros_authorize_policy(&exec,&packet,3)==0);
+    assert(queries==1+6000);
+    /* Malformed senders are refused before the owner query, under every policy. */
     port.mp_Flags=1;
+    assert(afsplus_aros_authorize_policy(&exec,&packet,3)==ERROR_READ_PROTECTED);
     assert(afsplus_aros_authorize_policy(&exec,&packet,2)==ERROR_READ_PROTECTED);
     port.mp_Flags=PA_SIGNAL;port.mp_SigTask=NULL;
     assert(afsplus_aros_authorize_policy(&exec,&packet,2)==ERROR_READ_PROTECTED);
+    assert(afsplus_aros_authorize_policy(&exec,&packet,3)==ERROR_READ_PROTECTED);
     packet.dp_Port=NULL;
     assert(afsplus_aros_authorize_policy(&exec,&packet,2)==ERROR_READ_PROTECTED);
+    assert(afsplus_aros_authorize_policy(&exec,&packet,3)==ERROR_READ_PROTECTED);
     assert(opens==3 && queries==6001 && !forbidden && references==8);
-    puts("loaded permanent authority: PASS ROOT65535/nobody0/version/one-open/race/revocation");
+    puts("loaded permanent authority: PASS ROOT65535/nobody0/ANYONE/version/one-open/race/revocation");
     return 0;
 }

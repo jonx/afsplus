@@ -57,7 +57,8 @@ together to mount that volume; examples are in the DOSDriver template.
 BACKUP and RESTORE each default to DENY. ROOT uses the already loaded,
 permanent security.library 45.17+
 (major 45) authority service and its ROOT65535 identity; unsupported versions
-fail closed; SINGLEUSER declares an administrator domain without that library.
+fail closed; SINGLEUSER declares an administrator domain without that library;
+ANYONE admits every local task, as on a single-user machine.
 
 AFSPlusBackup DEVICE captures a registered local snapshot. LIST enumerates
 captures. AFSPlusSnapshot DEVICE VIEW ID [PATH] reads an immutable view.

@@ -1,7 +1,7 @@
 # ADR-125: Admit historical operations through the AROS host authority
 
 Status: Accepted
-Amended by: ADR-127, ADR-134
+Amended by: ADR-127, ADR-134, ADR-135
 Amends: ADR-075
 
 ## Context

@@ -864,11 +864,13 @@ feature under [ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md) and its
 amendments. Existing volumes require an explicitly planned migration or
 reformat. A mounted reader keeps formatting and orderly dismount busy.
 
-`BACKUP=ROOT|SINGLEUSER|DENY` and `RESTORE=ROOT|SINGLEUSER|DENY` select independent
-host authority policies. Each defaults to DENY. ROOT queries security.library's
-current task owner at admission; SINGLEUSER admits a configured administrator
-trust domain when that library is absent. A signal reply port with a task is
-required. The task that opened a reader or snapshot directory can close it
+`BACKUP=ROOT|SINGLEUSER|ANYONE|DENY` and `RESTORE=ROOT|SINGLEUSER|ANYONE|DENY`
+select independent host authority policies. Each defaults to DENY. ROOT queries
+security.library's current task owner at admission; SINGLEUSER admits a
+configured administrator trust domain when that library is absent; ANYONE admits
+every local task without a query
+([ADR-135](../adr/ADR-135-anyone-snapshot-policy.md)), and is what AFSSYS
+selects. A signal reply port with a task is required. The task that opened a reader or snapshot directory can close it
 after revocation; no other task can. The handler admits only an already loaded security.library 45.17+ service
 with the permanent, non-expungeable lifetime of
 [ADR-134](../adr/ADR-134-loaded-aros-authority-lifetime.md). Unknown major versions

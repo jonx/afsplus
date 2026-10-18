@@ -1,6 +1,7 @@
 # ADR-131: Supply AFSSYS snapshot budgets through its deployment Control
 
 Status: Accepted
+Amended by: ADR-135
 
 References: ADR-071, ADR-073, ADR-125
 

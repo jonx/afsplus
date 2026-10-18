@@ -75,5 +75,5 @@ Activate        = 1
    Control = "SNAPSHOTEDIT=4096 SNAPSHOTVIEWS=8 SNAPSHOTRECLAIM=64 BACKUP=ROOT RESTORE=ROOT"
    FORMATSNAPSHOTS=YES selects snapshots for explicit FORMAT only.
    SINGLEUSER replaces ROOT only for a configured administrator trust domain
-   without security.library. These numbers are caller budgets, not qualification
+   without security.library. ANYONE admits every local task (single user). These numbers are caller budgets, not qualification
    limits. Existing volume feature bits are immutable. */

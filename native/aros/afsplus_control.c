@@ -176,6 +176,7 @@ uint32_t afsplus_control_parse(const char *text, uint32_t length,
             if (same_word(value, at - value_start, "DENY")) parsed.backup_policy = 0;
             else if (same_word(value, at - value_start, "ROOT")) parsed.backup_policy = 1;
             else if (same_word(value, at - value_start, "SINGLEUSER")) parsed.backup_policy = 2;
+            else if (same_word(value, at - value_start, "ANYONE")) parsed.backup_policy = 3;
             else return AFSPLUS_CONTROL_UNKNOWN_VALUE;
         }
         else if (same_word(keyword, keyword_length, "RESTORE"))
@@ -184,6 +185,7 @@ uint32_t afsplus_control_parse(const char *text, uint32_t length,
             if (same_word(value, at - value_start, "DENY")) parsed.restore_policy = 0;
             else if (same_word(value, at - value_start, "ROOT")) parsed.restore_policy = 1;
             else if (same_word(value, at - value_start, "SINGLEUSER")) parsed.restore_policy = 2;
+            else if (same_word(value, at - value_start, "ANYONE")) parsed.restore_policy = 3;
             else return AFSPLUS_CONTROL_UNKNOWN_VALUE;
         }
         else if (same_word(keyword, keyword_length, "SNAPSHOTEDIT"))

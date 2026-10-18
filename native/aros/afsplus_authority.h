@@ -53,10 +53,13 @@ static int32_t afsplus_aros_authorize_policy(struct ExecBase *SysBase,
     struct Library *library;
     int supported;
     struct Library *ExecLockBase;
-    if (policy == 0 || policy > 2 || packet->dp_Port == NULL
+    if (policy == 0 || policy > 3 || packet->dp_Port == NULL
         || (packet->dp_Port->mp_Flags & PF_ACTION) != PA_SIGNAL
         || packet->dp_Port->mp_SigTask == NULL)
         return ERROR_READ_PROTECTED;
+    /* ANYONE: every local task, without asking any service. */
+    if (policy == 3)
+        return 0;
     secBase = afsplus_aros_security_base;
     if (secBase != NULL)
         return afsplus_aros_authorize_owner(secBase, packet);
