@@ -22,7 +22,7 @@ static struct Library *volatile afsplus_aros_security_base;
 static int afsplus_aros_publish_security(struct ExecBase *SysBase, struct Library *secBase)
 {
     (void)SysBase; /* Forbid() names it on AROS */
-#if defined(__aarch64__) || defined(__AROSEXEC_SMP__)
+#if defined(__aarch64__) || (defined(__GCC_ATOMIC_POINTER_LOCK_FREE) && __GCC_ATOMIC_POINTER_LOCK_FREE == 2)
     struct Library *expected = NULL;
     return __atomic_compare_exchange_n((struct Library **)&afsplus_aros_security_base,
         &expected, secBase, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED);

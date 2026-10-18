@@ -109,6 +109,10 @@ echo "[aros-ffi] host DosPacket translation matrix"
 clang -std=c11 -Wall -Wextra -Werror -I native/aros \
     native/aros/tests/authority_stub.c -o "$task_dir/authority-stub"
 "$task_dir/authority-stub"
+# The Forbid publication of uniprocessor targets without CAS (m68k).
+clang -std=c11 -Wall -Wextra -Werror -U__aarch64__ -U__GCC_ATOMIC_POINTER_LOCK_FREE \
+    -I native/aros native/aros/tests/authority_stub.c -o "$task_dir/authority-stub-up"
+"$task_dir/authority-stub-up"
 clang -std=c11 -Wall -Wextra -Werror \
     -D__WORDSIZE=64 -DAROS_FAST_BPTR=1 -DAROS_FAST_BSTR=1 \
     -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \

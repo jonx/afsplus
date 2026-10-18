@@ -33,7 +33,8 @@ holder doing I/O on an AFS+ volume; every exclusive section of 45.17 is short
 and does none. Handler processes that share the loaded code publish the base
 with a compare-and-swap, or under Forbid where exec runs one CPU without one
 (m68k); one that loses closes its own open. The open is never returned: one
-per loaded handler, which the permanent lifetime makes harmless. No adapter operation changes `lib_OpenCnt` directly. The list lock
+per loaded handler, which the permanent lifetime makes harmless.
+No adapter operation changes `lib_OpenCnt` directly. The list lock
 does not serialize generated library Open/Close counter updates, so a temporary
 manual pin is not a valid SMP lifetime primitive. This decision does not claim
 to repair generic library lifecycle synchronization in Exec or the loader.
