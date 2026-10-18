@@ -1701,7 +1701,9 @@ LONG afsplus_aros_refuse_startup(struct ExecBase *SysBase)
     return RETURN_FAIL;
 }
 
-static LONG handler_main(struct ExecBase *SysBase)
+/* *death receives a received ACTION_DIE, for handler() to answer last. */
+static LONG handler_main(struct ExecBase *SysBase, struct DosPacket **death,
+    struct MsgPort **death_port)
 {
     struct AfsplusArosHandler *state;
     struct Process *process;
@@ -1872,8 +1874,8 @@ static LONG handler_main(struct ExecBase *SysBase)
     /* ACTION_DIE returns only after handler-owned device references are gone.
      * The caller retains the DeviceNode for Assign DISMOUNT or later restart. */
     afsplus_aros_startup_trace(SysBase, UINT32_C(0x60000008));
-    if (death_packet != NULL)
-        reply_packet(port, SysBase, death_packet);
+    *death = death_packet;
+    *death_port = port;
     return RETURN_OK;
 }
 
@@ -1881,7 +1883,17 @@ extern void afsplus_aros_thread_cleanup(void);
 
 LONG handler(struct ExecBase *SysBase)
 {
-    LONG result = handler_main(SysBase);
+    struct DosPacket *death = NULL;
+    struct MsgPort *port = NULL;
+    LONG result = handler_main(SysBase, &death, &port);
+
     afsplus_aros_thread_cleanup();
+    /* The ACTION_DIE reply lets its sender unload this code, so it goes
+     * last, under a Forbid that lasts until the process ends. */
+    if (death != NULL)
+    {
+        Forbid();
+        reply_packet(port, SysBase, death);
+    }
     return result;
 }
