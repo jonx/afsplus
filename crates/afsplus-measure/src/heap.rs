@@ -318,6 +318,7 @@ mod tests {
     #[cfg(feature = "allocation-domains")]
     #[test]
     fn tagged_layouts_preserve_alignment_bytes_and_origin_through_resize() {
+        let _serial = crate::serial();
         use afsplus_core::allocation_trace::{self as trace, Domain};
         trace::enable();
         let meter = TaggedMeter::new();
@@ -369,6 +370,7 @@ mod tests {
     #[cfg(feature = "allocation-domains")]
     #[test]
     fn tagged_failed_growth_and_header_overflow_preserve_accounting() {
+        let _serial = crate::serial();
         use afsplus_core::allocation_trace::{self as trace, Domain};
         trace::enable();
         let meter = TaggedMeter::with_allocator(FailRequests(AtomicBool::new(true)));
@@ -407,6 +409,7 @@ mod tests {
     #[cfg(feature = "allocation-domains")]
     #[test]
     fn tagged_origin_survives_cross_thread_free_and_scope_unwind() {
+        let _serial = crate::serial();
         use afsplus_core::allocation_trace::{self as trace, Domain};
         trace::enable();
         let meter = TaggedMeter::new();
@@ -440,6 +443,7 @@ mod tests {
 
     #[test]
     fn failure_keeps_live_allocation_and_counters_unchanged() {
+        let _serial = crate::serial();
         let meter = Meter::with_allocator(FailRequests(AtomicBool::new(true)));
         let layout = Layout::from_size_align(32, 8).unwrap();
         // SAFETY: valid layouts; failed requests are never dereferenced and the
@@ -466,6 +470,7 @@ mod tests {
 
     #[test]
     fn tracks_zeroing_growth_shrink_release_and_phase_reset() {
+        let _serial = crate::serial();
         let meter = Meter::new();
         // SAFETY: each non-null pointer is used within its live layout and is
         // released exactly once using its final successful realloc size.
@@ -496,6 +501,7 @@ mod tests {
 
     #[test]
     fn independent_allocations_and_concurrent_release_balance() {
+        let _serial = crate::serial();
         let meter = Meter::new();
         std::thread::scope(|scope| {
             for _ in 0..4 {

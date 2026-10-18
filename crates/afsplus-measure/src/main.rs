@@ -17,6 +17,15 @@ static HEAP: heap::Meter = heap::Meter::new();
 #[cfg(feature = "allocation-domains")]
 #[global_allocator]
 static HEAP: heap::TaggedMeter = heap::TaggedMeter::new();
+/// The global meter counts every thread of the test binary: a test that
+/// compares two samples of it runs alone, and every other test takes this.
+#[cfg(test)]
+pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 const BS: usize = 4096;
 const BLOCKS: u64 = 4096;
 
@@ -495,6 +504,7 @@ mod flight_cost_support {
 
     #[test]
     fn an_attached_recorder_adds_no_requested_heap_bytes() {
+        let _serial = crate::serial();
         let mut plain = mount(image()).unwrap();
         let mut observed = mount(image()).unwrap();
         observed.replace_flight_recorder(Some(recorder()));
@@ -538,6 +548,7 @@ mod flight_workload_cost {
     #[test]
     #[ignore = "host cost measurement"]
     fn measure_workload_cost_with_and_without_a_recorder() {
+        let _serial = crate::serial();
         use afsplus_core::flight::Categories;
         const ROUNDS: usize = 60;
         for mode in ["unobserved", "attached, every kind filtered", "attached"] {
@@ -573,6 +584,7 @@ mod flight_workload_cost {
     #[test]
     #[ignore = "host cost measurement"]
     fn measure_lookup_cost_with_and_without_a_recorder() {
+        let _serial = crate::serial();
         const CALLS: usize = 200_000;
         for mode in ["unobserved", "attached, every kind filtered", "attached"] {
             use afsplus_core::flight::Categories;

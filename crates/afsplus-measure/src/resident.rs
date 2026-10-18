@@ -82,6 +82,7 @@ mod tests {
     use super::*;
     #[test]
     fn reject_ambiguous_missing_and_overflowing_measurements() {
+        let _serial = crate::serial();
         assert_eq!(parse(b" 1234\n").unwrap(), 1234 * 1024);
         for bytes in [
             b"".as_slice(),
