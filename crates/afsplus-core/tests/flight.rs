@@ -5,6 +5,7 @@ use afsplus_core::flight::{EventKind, FlightRecorder};
 use afsplus_core::{
     mkfs, mount, AttributeWriteMode, MkfsParams, NamePolicy, SecurityProjectionPolicy,
 };
+use afsplus_format::object::ObjectType;
 use afsplus_format::{Timespec, OBJECT_ROOT};
 use std::num::NonZeroUsize;
 
@@ -3268,6 +3269,23 @@ fn every_registered_api_method_executes_under_its_own_guard() {
     volume.snapshot_security_descriptor(&handle, file).ok();
     volume.snapshot_maintenance_step(now).ok();
     volume.snapshot_list(0, 4).ok();
+    volume.checkpoint_free_count_mismatch().ok();
+    volume.lookup_entry_in_directory(OBJECT_ROOT, "file").ok();
+    if let Ok(stage) =
+        volume.create_restore_stage(OBJECT_ROOT, "stage", ObjectType::Directory, None, now)
+    {
+        if let Ok(staged) =
+            volume.create_restore_stage(stage, "staged", ObjectType::File, Some(stage), now)
+        {
+            volume.validate_restore_stage_parent(stage, stage).ok();
+            volume
+                .discard_restore_file_step(stage, "staged", staged, stage, 1, now)
+                .ok();
+        }
+    }
+    volume
+        .publish_restored_object(OBJECT_ROOT, "dir", "published", now)
+        .ok();
     if let Ok(second) = volume.snapshot_create(now) {
         drop(volume.snapshot_open(second));
     }
