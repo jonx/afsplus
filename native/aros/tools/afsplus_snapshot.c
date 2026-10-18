@@ -19,19 +19,26 @@ static LONG put(const char *text)
 }
 static LONG number(uint64_t n)
 { char text[21]; snprintf(text,sizeof(text),"%llu",(unsigned long long)n); return put(text); }
-/* Decimal only: 010 is ten, never eight; no sign, no overflow, not zero. */
+/* Decimal, or 0x and 1 to 16 hex digits. A leading zero is refused, so 010
+ * is neither eight nor ten; no sign, no overflow, not zero. */
 static int parse_id(const char *text,uint64_t *id)
 {
     uint64_t value=0;
-    if (!*text) return 0;
-    for (; *text; text++)
+    int hex=text[0]=='0' && (text[1]=='x' || text[1]=='X');
+    unsigned base=hex?16:10,digits=0;
+    if (hex) text+=2;
+    else if (text[0]=='0') return 0;
+    for (; *text; text++,digits++)
     {
         unsigned digit;
-        if (*text<'0' || *text>'9') return 0;
-        digit=(unsigned)(*text-'0');
-        if (value>(UINT64_MAX-digit)/10) return 0;
-        value=value*10+digit;
+        if (*text>='0' && *text<='9') digit=(unsigned)(*text-'0');
+        else if (hex && *text>='a' && *text<='f') digit=(unsigned)(*text-'a'+10);
+        else if (hex && *text>='A' && *text<='F') digit=(unsigned)(*text-'A'+10);
+        else return 0;
+        if (value>(UINT64_MAX-digit)/base) return 0;
+        value=value*base+digit;
     }
+    if (!digits) return 0;
     *id=value;
     return value!=0;
 }
@@ -103,7 +110,7 @@ int main(int argc,char **argv)
     if (!(create || list || remove || show) || ((remove || show) && !parse_id(argv[3],&id)))
     {
         PutStr("usage: AFSPlusSnapshot DEVICE CREATE|LIST|DELETE id|VIEW id [path]\n"
-               "id is a decimal snapshot number from LIST.\n");
+               "id is a snapshot number from LIST, in decimal or 0x hexadecimal.\n");
         return RETURN_ERROR;
     }
     lock=Lock((CONST_STRPTR)argv[1],SHARED_LOCK);
