@@ -270,6 +270,16 @@ mode is unsupported for AFS+ volumes (attribute inventory is not implemented);
 recovery-mode backup works. That gap and the absence of an upper bound on the
 Control snapshot budgets remain open.
 
+The disposable VM qualification replays the previous review run with only the
+handler and the five commands rebuilt. Its first two attempts failed and caught
+two regressions of this pass in the commands: hexadecimal `0x` ids, part of the
+command interface, were refused, and `restarts=` broke callers matching the end
+of the reclaim summary. Both are fixed; run
+`20261018-afs-snapshot-review-vm-006` (afsplus 5ec5a0f2) passes all five probes
+in 15.59 s with normal QMP exit and no fault. It exercises one task, so owner
+refusal and the ANYONE policy are proven by host tests only; no M1 result is
+inferred.
+
 ## 2026-10-18 — Close the restore review findings left open
 
 A forged reclaim cursor could resume inside a stage below its root: the frame
