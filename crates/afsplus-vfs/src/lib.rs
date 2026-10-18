@@ -1044,10 +1044,48 @@ impl<D: BlockDevice> Vfs<D> {
         }
     }
 
+    /// Managed restore metadata is a bounded object/root gate, not a name rule.
+    fn restore_stage_private(&mut self, object: ObjectId) -> Result<bool, VfsError> {
+        let Some(marker) = self
+            .volume
+            .attribute(object, snapshot_restore::STAGE_ATTRIBUTE)?
+        else {
+            return Ok(false);
+        };
+        let bytes: [u8; 8] = marker
+            .try_into()
+            .map_err(|_| VfsError::Corrupt("invalid restore stage marker".into()))?;
+        let root = u64::from_le_bytes(bytes);
+        let root_marker = match self
+            .volume
+            .attribute(root, snapshot_restore::STAGE_ATTRIBUTE)
+        {
+            Ok(value) => value,
+            Err(CoreError::NotFound) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        match root_marker {
+            None => Ok(false),
+            Some(value) if value == root.to_le_bytes() => Ok(true),
+            Some(_) => Err(VfsError::Corrupt("invalid restore root marker".into())),
+        }
+    }
+
+    fn ordinary_access(&mut self, object: ObjectId) -> Result<(), VfsError> {
+        if self.restore_stage_private(object)? {
+            return Err(VfsError::NotFound);
+        }
+        Ok(())
+    }
+
     pub fn lookup(&mut self, parent: ObjectId, name: &str) -> Result<ObjectId, VfsError> {
-        self.volume
+        self.ordinary_access(parent)?;
+        let object = self
+            .volume
             .lookup_in_directory(parent, name)?
-            .ok_or(VfsError::NotFound)
+            .ok_or(VfsError::NotFound)?;
+        self.ordinary_access(object)?;
+        Ok(object)
     }
 
     /// Like [`Self::lookup`], also returning the entry's stored spelling,
@@ -1057,16 +1095,19 @@ impl<D: BlockDevice> Vfs<D> {
         parent: ObjectId,
         name: &str,
     ) -> Result<(ObjectId, String), VfsError> {
+        self.ordinary_access(parent)?;
         let (object_id, stored) = self
             .volume
             .lookup_entry_in_directory(parent, name)?
             .ok_or(VfsError::NotFound)?;
+        self.ordinary_access(object_id)?;
         let stored = String::from_utf8(stored)
             .map_err(|_| VfsError::Corrupt("directory entry name is not UTF-8".into()))?;
         Ok((object_id, stored))
     }
 
     pub fn stat(&mut self, object_id: ObjectId) -> Result<Stat, VfsError> {
+        self.ordinary_access(object_id)?;
         if self.volume.orphan_object(object_id)? {
             return Err(VfsError::NotFound);
         }
@@ -1160,6 +1201,7 @@ impl<D: BlockDevice> Vfs<D> {
             Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
             None => return Err(VfsError::Stale),
         };
+        self.ordinary_access(object_id)?;
         if !access.can_read() {
             return Err(VfsError::Invalid);
         }
@@ -1178,6 +1220,7 @@ impl<D: BlockDevice> Vfs<D> {
             Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
             None => return Err(VfsError::Stale),
         };
+        self.ordinary_access(object_id)?;
         if !access.can_write() {
             return Err(VfsError::ReadOnly);
         }
@@ -1227,6 +1270,7 @@ impl<D: BlockDevice> Vfs<D> {
             Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
             None => return Err(VfsError::Stale),
         };
+        self.ordinary_access(object_id)?;
         if !access.can_write() {
             return Err(VfsError::ReadOnly);
         }
@@ -1258,6 +1302,7 @@ impl<D: BlockDevice> Vfs<D> {
             Some(OpenHandle::File { .. }) => return Err(VfsError::NotDirectory),
             None => return Err(VfsError::Stale),
         };
+        self.ordinary_access(object_id)?;
         // A directory whose entries wait in the window is listed after they
         // are committed; the cursor's recovery below absorbs the new
         // generation.
@@ -1280,7 +1325,7 @@ impl<D: BlockDevice> Vfs<D> {
         // write. So a stale cursor is recovered here, once, by resuming
         // after the entry this handle returned last, which is a stored name
         // and not an ordinal and therefore survives the commit.
-        let page = match self.volume.read_directory_page(
+        let mut page = match self.volume.read_directory_page(
             object_id,
             Some(DirectoryCursor {
                 generation,
@@ -1303,16 +1348,25 @@ impl<D: BlockDevice> Vfs<D> {
             }
             other => other?,
         };
-        // The resume point is the last entry handed out, so a caller that
-        // stops mid-directory and comes back after a commit continues from
-        // where it stopped. An empty page leaves it alone: there was nothing
-        // new to resume after.
-        if let Some(last) = page.entries.last() {
-            self.directory_resume.insert(handle, last.name.clone());
-        }
+        let visible_entries = loop {
+            if let Some(last) = page.entries.last() {
+                self.directory_resume.insert(handle, last.name.clone());
+            }
+            let mut visible = Vec::new();
+            for entry in std::mem::take(&mut page.entries) {
+                if !self.restore_stage_private(entry.child_id)? {
+                    visible.push(entry);
+                }
+            }
+            if !visible.is_empty() || page.eof {
+                break visible;
+            }
+            page = self
+                .volume
+                .read_directory_page(object_id, Some(page.next), max_entries)?;
+        };
         Ok(DirectoryPage {
-            entries: page
-                .entries
+            entries: visible_entries
                 .into_iter()
                 .map(|entry| DirectoryEntry {
                     name: entry.name,
@@ -1432,6 +1486,7 @@ impl<D: BlockDevice> Vfs<D> {
         name: &str,
         now: Timespec,
     ) -> Result<ObjectId, VfsError> {
+        self.ordinary_access(parent)?;
         if self.delayed() {
             match self.volume.window_op(
                 &BatchOp::CreateFile {
@@ -1463,12 +1518,14 @@ impl<D: BlockDevice> Vfs<D> {
         target: &str,
         now: Timespec,
     ) -> Result<ObjectId, VfsError> {
+        self.ordinary_access(parent)?;
         self.checkpoint_data_window(now)?;
         Ok(self.volume.create_symlink(parent, name, target, now)?)
     }
 
     /// Exact opaque target bytes; short buffers are unchanged and return the required count.
     pub fn read_link(&mut self, object: ObjectId, output: &mut [u8]) -> Result<usize, VfsError> {
+        self.ordinary_access(object)?;
         Ok(self.volume.read_link(object, output)?)
     }
 
@@ -1478,6 +1535,7 @@ impl<D: BlockDevice> Vfs<D> {
         name: &str,
         now: Timespec,
     ) -> Result<ObjectId, VfsError> {
+        self.ordinary_access(parent)?;
         if self.delayed() {
             match self.volume.window_op(
                 &BatchOp::CreateDirectory {
@@ -1739,6 +1797,7 @@ impl<D: BlockDevice> Vfs<D> {
         name: &str,
         now: Timespec,
     ) -> Result<(), VfsError> {
+        self.lookup(parent, name)?;
         if self.delayed() {
             // The window removes a drawer as it makes one. Before this, a
             // `RemoveDir` committed the open window and then ran a
@@ -1774,6 +1833,15 @@ impl<D: BlockDevice> Vfs<D> {
         replace: bool,
         now: Timespec,
     ) -> Result<(), VfsError> {
+        self.lookup(source_parent, source_name)?;
+        self.ordinary_access(target_parent)?;
+        if let Some(target) = self
+            .volume
+            .lookup_in_directory(target_parent, target_name)?
+        {
+            self.ordinary_access(target)?;
+        }
+
         if self.delayed() {
             let source = self.lookup(source_parent, source_name)?;
             let is_file = self
@@ -1869,6 +1937,8 @@ impl<D: BlockDevice> Vfs<D> {
         target_name: &str,
         now: Timespec,
     ) -> Result<(), VfsError> {
+        self.ordinary_access(object_id)?;
+        self.ordinary_access(target_parent)?;
         self.checkpoint_data_window(now)?;
         Ok(self
             .volume
@@ -1884,6 +1954,8 @@ impl<D: BlockDevice> Vfs<D> {
         target_name: &str,
         now: Timespec,
     ) -> Result<ObjectId, VfsError> {
+        self.ordinary_access(source)?;
+        self.ordinary_access(target_parent)?;
         self.checkpoint_data_window(now)?;
         Ok(self
             .volume
@@ -1920,6 +1992,8 @@ impl<D: BlockDevice> Vfs<D> {
         if !destination_access.can_write() {
             return Err(VfsError::ReadOnly);
         }
+        self.ordinary_access(source_object)?;
+        self.ordinary_access(destination_object)?;
         self.checkpoint_data_window(now)?;
         Ok(self.volume.clone_range(
             source_object,
@@ -2030,13 +2104,21 @@ impl<D: BlockDevice> Vfs<D> {
         name: &str,
     ) -> Result<Option<Vec<u8>>, VfsError> {
         self.stat(object_id)?;
+        if name == snapshot_restore::STAGE_ATTRIBUTE {
+            return Ok(None);
+        }
         Ok(self.volume.attribute(object_id, name)?)
     }
 
     /// Every attribute name of the object, ascending by name bytes.
     pub fn attribute_names(&mut self, object_id: ObjectId) -> Result<Vec<String>, VfsError> {
         self.stat(object_id)?;
-        Ok(self.volume.attribute_names(object_id)?)
+        Ok(self
+            .volume
+            .attribute_names(object_id)?
+            .into_iter()
+            .filter(|k| k != snapshot_restore::STAGE_ATTRIBUTE)
+            .collect())
     }
 
     /// Applies `changes` in one commit: every change or none survives a
@@ -2052,10 +2134,9 @@ impl<D: BlockDevice> Vfs<D> {
         now: Timespec,
     ) -> Result<(), VfsError> {
         self.stat(object_id)?;
-        if changes
-            .iter()
-            .any(|(name, _)| FIELD_ATTRIBUTE_NAMES.contains(name))
-        {
+        if changes.iter().any(|(name, _)| {
+            FIELD_ATTRIBUTE_NAMES.contains(name) || *name == snapshot_restore::STAGE_ATTRIBUTE
+        }) {
             return Err(VfsError::Invalid);
         }
         self.checkpoint_data_window(now)?;
@@ -2133,6 +2214,7 @@ impl<D: BlockDevice> Vfs<D> {
             Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
             None => return Err(VfsError::Stale),
         };
+        self.ordinary_access(object_id)?;
         if !access.can_write() {
             return Err(VfsError::ReadOnly);
         }
@@ -2171,6 +2253,7 @@ impl<D: BlockDevice> Vfs<D> {
             Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
             None => return Err(VfsError::Stale),
         };
+        self.ordinary_access(object_id)?;
         let end = offset.checked_add(length).ok_or(VfsError::Invalid)?;
         if length == 0 || max_ranges == 0 || max_ranges > 64 {
             return Err(VfsError::Invalid);
@@ -2209,6 +2292,7 @@ impl<D: BlockDevice> Vfs<D> {
             Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
             None => return Err(VfsError::Stale),
         };
+        self.ordinary_access(object_id)?;
         Ok(self.volume.file_data_policy(object_id)? == DataUpdatePolicy::InPlacePrivate)
     }
 
@@ -2226,6 +2310,7 @@ impl<D: BlockDevice> Vfs<D> {
             Some(OpenHandle::Directory { .. }) => return Err(VfsError::IsDirectory),
             None => return Err(VfsError::Stale),
         };
+        self.ordinary_access(object_id)?;
         if !access.can_write() {
             return Err(VfsError::ReadOnly);
         }
@@ -2245,9 +2330,13 @@ impl<D: BlockDevice> Vfs<D> {
     }
 
     pub fn fsync(&mut self, handle: Handle) -> Result<(), VfsError> {
-        if !self.handles.contains_key(&handle) {
-            return Err(VfsError::Stale);
-        }
+        let object_id = match self.handles.get(&handle) {
+            Some(OpenHandle::File { object_id, .. } | OpenHandle::Directory { object_id, .. }) => {
+                *object_id
+            }
+            None => return Err(VfsError::Stale),
+        };
+        self.ordinary_access(object_id)?;
         if self.volume.mount_mode() != MountMode::ReadWrite || !self.logged_data_fsync_enabled() {
             return Ok(self.volume.sync()?);
         }

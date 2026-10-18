@@ -157,6 +157,8 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-126](ADR-126-aros-owner-id-projection.md) | AROS owner identifiers preserve the disk values | Accepted Related: ADR-031, ADR-101, ADR-118, ADR-125 | — |
 | [ADR-127](ADR-127-aros-snapshot-file-restore.md) | Restore a snapshot file into an explicit fresh destination | Accepted | amends [ADR-071](ADR-071-snapshot-lifetime-prototype.md), [ADR-077](ADR-077-separate-restore-authority.md), [ADR-119](ADR-119-backup-carries-comment-and-owner.md), [ADR-125](ADR-125-aros-backup-authority.md) |
 | [ADR-128](ADR-128-confined-snapshot-tree-restore.md) | Publish a restored snapshot tree through one fresh directory | Accepted | amends [ADR-127](ADR-127-aros-snapshot-file-restore.md) |
+| [ADR-129](ADR-129-private-restore-stages.md) | Keep retained restore stages private until publication | Superseded | amends [ADR-127](ADR-127-aros-snapshot-file-restore.md), [ADR-128](ADR-128-confined-snapshot-tree-restore.md); superseded by [ADR-130](ADR-130-bounded-private-restore-stages.md) |
+| [ADR-130](ADR-130-bounded-private-restore-stages.md) | Guard restore stages through bounded per-object metadata | Accepted | amends [ADR-129](ADR-129-private-restore-stages.md) |
 
 <!-- /adr-index -->
 

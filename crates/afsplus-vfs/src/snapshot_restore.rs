@@ -5,6 +5,8 @@
 use super::*;
 use afsplus_core::volume::{AttributeWriteMode, FileAllocationRange, FileEditLimits};
 
+pub(super) const STAGE_ATTRIBUTE: &str = "system.restore.stage";
+
 const COPY_BYTES: usize = 64 * 1024;
 const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ALLOCATION_RANGES: usize = 4096;
@@ -39,6 +41,18 @@ impl<D: BlockDevice> Vfs<D> {
         parent: ObjectId,
         name: &str,
         now: Timespec,
+    ) -> Result<ObjectId, VfsError> {
+        self.restore_file_private(reader, source, parent, name, now, None)
+    }
+
+    pub(super) fn restore_file_private(
+        &mut self,
+        reader: Handle,
+        source: ObjectId,
+        parent: ObjectId,
+        name: &str,
+        now: Timespec,
+        stage_root: Option<ObjectId>,
     ) -> Result<ObjectId, VfsError> {
         // Preflight must expose no target and must not truncate an old target.
         if self.mount_mode() != MountMode::ReadWrite {
@@ -76,6 +90,7 @@ impl<D: BlockDevice> Vfs<D> {
             .volume
             .snapshot_attribute_names(&view, source)?
             .ok_or(VfsError::NotFound)?;
+        let keys: Vec<_> = keys.into_iter().filter(|k| k != STAGE_ATTRIBUTE).collect();
         let mut attributes = Vec::new();
         let mut metadata_bytes = comment.len();
         for key in keys {
@@ -154,6 +169,15 @@ impl<D: BlockDevice> Vfs<D> {
             Err(error) => return Err(VfsError::Corrupt(format!("restore stage {stage}: creation failed: {error}; inspect retained stage before retry"))),
         };
         let result = (|| -> Result<(), VfsError> {
+            self.volume.set_attributes(
+                target,
+                &[(
+                    STAGE_ATTRIBUTE,
+                    Some(stage_root.unwrap_or(target).to_le_bytes().as_slice()),
+                )],
+                AttributeWriteMode::Create,
+                now,
+            )?;
             let limits = FileEditLimits {
                 max_blocks: 64,
                 max_records: 64,
@@ -220,7 +244,12 @@ impl<D: BlockDevice> Vfs<D> {
                 || restored.size_bytes != captured.size_bytes
                 || restored.allocated_bytes != captured.allocated_bytes
                 || self.volume.object_comment(target)? != comment
-                || self.volume.attribute_names(target)?
+                || self
+                    .volume
+                    .attribute_names(target)?
+                    .into_iter()
+                    .filter(|k| k != STAGE_ATTRIBUTE)
+                    .collect::<Vec<_>>()
                     != attributes
                         .iter()
                         .map(|(key, _)| key.clone())

@@ -74,6 +74,9 @@ impl<D: BlockDevice> Vfs<D> {
                 .snapshot_attribute_names(view, source)?
                 .ok_or(VfsError::NotFound)?
             {
+                if key == super::snapshot_restore::STAGE_ATTRIBUTE {
+                    continue;
+                }
                 let value = self
                     .volume
                     .snapshot_attribute(view, source, &key)?
@@ -186,7 +189,12 @@ impl<D: BlockDevice> Vfs<D> {
             || actual.link_count != node.metadata.link_count
             || PreservedMetadata::from(actual) != PreservedMetadata::from(node.metadata)
             || self.volume.object_comment(object)? != node.comment
-            || self.volume.attribute_names(object)?
+            || self
+                .volume
+                .attribute_names(object)?
+                .into_iter()
+                .filter(|k| k != super::snapshot_restore::STAGE_ATTRIBUTE)
+                .collect::<Vec<_>>()
                 != node
                     .attributes
                     .iter()
@@ -295,12 +303,38 @@ impl<D: BlockDevice> Vfs<D> {
         };
         let mut objects = vec![root];
         let result = (|| -> Result<(), VfsError> {
+            self.volume.set_attributes(
+                root,
+                &[(
+                    super::snapshot_restore::STAGE_ATTRIBUTE,
+                    Some(root.to_le_bytes().as_slice()),
+                )],
+                AttributeWriteMode::Create,
+                now,
+            )?;
             for node in nodes.iter().skip(1) {
                 let parent = objects[node.parent.ok_or(VfsError::Invalid)?];
                 let object = if node.metadata.object_type == ObjectType::Directory {
-                    self.volume.create_directory(parent, &node.name, now)?
+                    let object = self.volume.create_directory(parent, &node.name, now)?;
+                    self.volume.set_attributes(
+                        object,
+                        &[(
+                            super::snapshot_restore::STAGE_ATTRIBUTE,
+                            Some(root.to_le_bytes().as_slice()),
+                        )],
+                        AttributeWriteMode::Create,
+                        now,
+                    )?;
+                    object
                 } else {
-                    self.snapshot_restore_file(reader, node.source, parent, &node.name, now)?
+                    self.restore_file_private(
+                        reader,
+                        node.source,
+                        parent,
+                        &node.name,
+                        now,
+                        Some(root),
+                    )?
                 };
                 objects.push(object);
             }

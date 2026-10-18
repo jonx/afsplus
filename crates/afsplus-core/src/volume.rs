@@ -4775,6 +4775,18 @@ impl<D: BlockDevice> Volume<D> {
         }
         tx.retire(&mut self.dev, moved_lba)?;
 
+        let mut restore_attribute_writes = Vec::new();
+        let restored_attributes = if preserve_changed {
+            self.publish_restore_attributes(
+                &mut tx,
+                &moved,
+                generation,
+                &mut restore_attribute_writes,
+            )?
+        } else {
+            moved.attributes
+        };
+
         let target_entry = DirEntry {
             key: target_key,
             name: target_name.as_bytes().to_vec(),
@@ -4845,7 +4857,8 @@ impl<D: BlockDevice> Volume<D> {
         let new_moved = ObjectRecord {
             changed: if preserve_changed { moved.changed } else { now },
             ..moved
-        };
+        }
+        .with_attributes(restored_attributes);
 
         let source_parent_map_key = object_map::key(source_parent_id);
         let source_parent_map_value = object_map::value(source_parent_new_lba)?;
@@ -4887,6 +4900,7 @@ impl<D: BlockDevice> Volume<D> {
                 self.encode_preserving_target(new_moved, generation)?,
             ),
         ];
+        metadata_writes.extend(restore_attribute_writes);
         metadata_writes.extend(source_mutation.writes);
         if let (Some(record), Some(mutation)) = (new_target_parent, target_mutation) {
             metadata_writes.push((

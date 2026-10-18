@@ -195,6 +195,50 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
+    /// Remove the internal restore marker inside the namespace publication transaction.
+    pub(super) fn publish_restore_attributes(
+        &mut self,
+        tx: &mut TxAllocator,
+        record: &ObjectRecord,
+        generation: u64,
+        writes: &mut Vec<(u64, Vec<u8>)>,
+    ) -> Result<Option<AttributeRef>, CoreError> {
+        let mut attributes = self.load_attributes(record)?;
+        if attributes.get("system.restore.stage").map(Vec::as_slice)
+            != Some(record.object_id.to_le_bytes().as_slice())
+        {
+            return Ok(record.attributes);
+        }
+        attributes.remove("system.restore.stage");
+        self.retire_attributes(tx, record)?;
+        if attributes.is_empty() {
+            return Ok(None);
+        }
+        let entries: Vec<_> = attributes
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+            .collect();
+        let bytes = encode_attribute_set(&entries)
+            .map_err(|_| CoreError::InvalidMetadata("attribute set out of range"))?;
+        let count = segment_count(bytes.len() as u32, self.dev.block_size())
+            .ok_or(CoreError::InvalidMetadata("attribute set out of range"))?;
+        let first_block = stage_chain(
+            &mut self.dev,
+            tx,
+            &ATTRIBUTE_CHAIN,
+            record.object_id,
+            (ATTRIBUTE_SET_FORMAT, ATTRIBUTE_SET_VERSION, &bytes),
+            count,
+            generation,
+            writes,
+        )?;
+        Ok(Some(AttributeRef {
+            first_block,
+            total_len: bytes.len() as u32,
+            segment_count: count,
+        }))
+    }
+
     /// Copy the attribute chain of `source` into a fresh chain owned by
     /// `object_id`, inside the caller's transaction; the twin of
     /// `copy_security_descriptor`.

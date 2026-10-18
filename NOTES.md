@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-10-18 — Keep retained historical restore stages private](#2026-10-18--keep-retained-historical-restore-stages-private)
 - [2026-10-18 — Expose budgeted snapshots and scoped restoration to AROS](#2026-10-18--expose-budgeted-snapshots-and-scoped-restoration-to-aros)
 - [2026-10-18 — Audit the AROS branches and reproduce handler resource limits](#2026-10-18--audit-the-aros-branches-and-reproduce-handler-resource-limits)
 - [2026-10-08 — Share AROS handler claims across SMP module instances](#2026-10-08--share-aros-handler-claims-across-smp-module-instances)
@@ -230,6 +231,33 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+
+## 2026-10-18 — Keep retained historical restore stages private
+
+Independent sticky write-failure injection reproduced an actual failed copy
+and failed cleanup retaining historical bytes. After remount, ordinary AROS
+open/read returned 4096 bytes; setting classic protection to 0x0f did not
+prevent it. Recorded the exposing controls in the integration repository's
+`artifacts/afs-atomic-owner-20261018/`.
+
+[ADR-130](adr/ADR-130-bounded-private-restore-stages.md) supersedes the initial
+[ADR-129](adr/ADR-129-private-restore-stages.md) root-only proposal. Each staged
+object now carries a managed marker identifying its root. Ordinary VFS reads
+that marker and the root marker without scanning the volume, refuses access
+while the stage is private, and skips it during normal directory enumeration.
+Publication atomically clears the root marker; descendants retain inactive
+managed references omitted from public attributes. Captured public attributes,
+owner, protection and timestamps survive restoration. The core remains trusted
+maintenance; this change claims no protection against direct disk access or
+shared-memory corruption.
+
+Named host regressions cover real copy/cleanup failure and remount, direct
+object-ID access, metadata and namespace refusal, marker immutability, directory
+paging and publication. The independent AROS adapter witness now refuses the
+retained copied data. Existing seven file and eight tree restore regressions
+cover publication fault outcomes and preservation. VM and native qualification
+remain separate runtime gates.
 
 
 ## 2026-10-18 — Expose budgeted snapshots and scoped restoration to AROS
