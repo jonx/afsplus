@@ -56,19 +56,25 @@ static LONG CheckSignal(LONG mask) {
     if(mask!=SIGBREAKF_CTRL_C)abort();checks++;
     return !strcmp(mode(),"interrupt-zero") || (!strcmp(mode(),"interrupt-two")&&checks==3);
 }
+static unsigned scan_pos;
 static intptr_t afsplus_client_restore_reclaim(struct MsgPort *p,BPTR scope,struct AfsplusArosRestoreRecovery *r) {
     if(p!=&afs||scope!=1||r->struct_size!=sizeof(*r))abort();
     if(!r->scan_entries||r->scan_entries>64||!r->work_steps||r->work_steps>8||!r->max_depth||r->max_depth>64)abort();
     if(!api_calls) { if(r->cursor_size)abort(); }
-    else { uint32_t prior=0;memcpy(&prior,r->cursor,4);if(r->cursor_size!=4||prior!=api_calls)abort(); }
+    /* A fresh scan after a stale cursor starts empty; otherwise the cursor
+       continues exactly. */
+    if(!r->cursor_size) { uint8_t zero[sizeof(r->cursor)]={0};if(memcmp(r->cursor,zero,sizeof(zero)))abort();scan_pos=0; }
+    else { uint32_t prior=0;memcpy(&prior,r->cursor,4);if(r->cursor_size!=4||prior!=scan_pos)abort(); }
     api_calls++;
     if(!strcmp(mode(),"stale")&&api_calls==2)return ERROR_INVALID_LOCK;
+    if(!strcmp(mode(),"stale-always")&&scan_pos==1)return ERROR_INVALID_LOCK;
     if(!strcmp(mode(),"busy"))return ERROR_OBJECT_IN_USE;
     r->scanned=1;r->removed=1;r->advanced=0;r->flags=0;
     r->blocked=!strcmp(mode(),"blocked")?2:0;
     r->blocked_object=!strcmp(mode(),"blocked")&&api_calls==1?99:0;
-    uint32_t next=api_calls;memcpy(r->cursor,&next,4);r->cursor_size=4;
-    if((!strcmp(mode(),"done")||!strcmp(mode(),"blocked"))&&api_calls==3) {
+    scan_pos++;
+    uint32_t next=scan_pos;memcpy(r->cursor,&next,4);r->cursor_size=4;
+    if((!strcmp(mode(),"done")||!strcmp(mode(),"blocked")||!strcmp(mode(),"stale"))&&scan_pos==3) {
         r->flags=AFSPLUS_RESTORE_RECOVERY_DONE;r->cursor_size=0;
     }
     return 0;
@@ -110,7 +116,7 @@ with tempfile.TemporaryDirectory(prefix='reclaim-cli-') as directory:
         runs += 1
         return result
     result = run()
-    assert 'calls=3 scanned=3 removed=3 advanced=0 blocked=0 blocked-id=0 complete=1\n' in result.stdout
+    assert 'calls=3 scanned=3 removed=3 advanced=0 blocked=0 blocked-id=0 complete=1 restarts=0\n' in result.stdout
     run(args=('AFS:', 'AFS:scope', '1', '1', '64', '128'))
     run(args=('AFS:', 'AFS:scope', '1', '1', '64', str(2**32-1)))
     result = run('endless', ('AFS:', 'AFS:scope', '1', '1', '64', '2'), 5, 2)
@@ -122,8 +128,12 @@ with tempfile.TemporaryDirectory(prefix='reclaim-cli-') as directory:
     run('interrupt-two', expected=5, calls=2)
     result = run('blocked', expected=5)
     assert 'blocked=2 blocked-id=99 complete=1' in result.stdout  # cumulative, not summed
-    result = run('stale', expected=20, calls=2)
-    assert 'Restart a quiescent subtree' in result.stderr and 'scanned=1' in result.stdout
+    # A stale cursor restarts a fresh scan, which completes.
+    result = run('stale', expected=0, calls=5)
+    assert 'complete=1 restarts=1' in result.stdout and 'scanned=4' in result.stdout
+    # A volume that keeps changing stops after the bounded restarts.
+    result = run('stale-always', expected=20, calls=18)
+    assert 'restarts=8' in result.stdout and '8 fresh scans went stale' in result.stderr
     run('busy', expected=20, calls=1)
     run(args=('AFS:', 'RAM:scope'), expected=20, calls=0)
     run('device-fail', expected=20, calls=0)

@@ -7,7 +7,12 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "../client/afsplus_client.h"
+
+/* A write elsewhere on the volume makes the cursor stale; a fresh scan is
+ * safe (ADR-133), so a live volume restarts a bounded number of times. */
+#define RECLAIM_RESTARTS_MAX 8
 
 static int budget(const char *s, uint32_t max, uint32_t *out)
 {
@@ -28,7 +33,7 @@ int main(int argc,char **argv)
     struct AfsplusArosRestoreRecovery *r=NULL;
     BPTR scope=BNULL;
     intptr_t error=0;
-    uint32_t calls=0,max_calls=4096,blocked=0;
+    uint32_t calls=0,max_calls=4096,blocked=0,restarts=0;
     uint64_t scanned=0,removed=0,advanced=0,blocked_object=0;
     int result=RETURN_FAIL,complete=0,interrupted=0;
     if(argc!=3&&argc!=6&&argc!=7) {
@@ -51,16 +56,19 @@ int main(int argc,char **argv)
         if(CheckSignal(SIGBREAKF_CTRL_C)) {interrupted=1;break;}
         calls++;
         error=afsplus_client_restore_reclaim(device->dvp_Port,scope,r);
+        if(error==ERROR_INVALID_LOCK&&r->cursor_size&&restarts<RECLAIM_RESTARTS_MAX) {
+            restarts++;r->cursor_size=0;r->flags=0;memset(r->cursor,0,sizeof(r->cursor));error=0;continue;
+        }
         if(error)break;
         scanned+=r->scanned;removed+=r->removed;advanced+=r->advanced;
         blocked=r->blocked;
         if(r->blocked_object)blocked_object=r->blocked_object;
         if(r->flags&AFSPLUS_RESTORE_RECOVERY_DONE) {complete=1;break;}
     }
-    printf("AFSPlusReclaim: calls=%lu scanned=%llu removed=%llu advanced=%llu blocked=%lu blocked-id=%llu complete=%lu\n",
+    printf("AFSPlusReclaim: calls=%lu scanned=%llu removed=%llu advanced=%llu blocked=%lu blocked-id=%llu complete=%lu restarts=%lu\n",
         (unsigned long)calls,(unsigned long long)scanned,(unsigned long long)removed,
         (unsigned long long)advanced,(unsigned long)blocked,(unsigned long long)blocked_object,
-        (unsigned long)complete);
+        (unsigned long)complete,(unsigned long)restarts);
     if(!error) {
         result=complete&&!blocked?RETURN_OK:RETURN_WARN;
         if(interrupted)fprintf(stderr,"Partial: interrupted; durable progress is retained. A later invocation rescans.\n");
@@ -70,7 +78,9 @@ int main(int argc,char **argv)
 done:
     if(error) {
         fprintf(stderr,"AFSPlusReclaim: DOS error %ld; durable private-stage progress may have advanced.\n",(long)error);
-        if(error==ERROR_INVALID_LOCK)
+        if(error==ERROR_INVALID_LOCK&&restarts>=RECLAIM_RESTARTS_MAX)
+            fprintf(stderr,"The volume kept changing: %lu fresh scans went stale. Quiesce writers in the subtree and retry.\n",(unsigned long)restarts);
+        else if(error==ERROR_INVALID_LOCK)
             fprintf(stderr,"Directory scope or generation changed. Restart a quiescent subtree; remount after uncertain storage I/O.\n");
         if(error==ERROR_OBJECT_IN_USE)
             fprintf(stderr,"Quiesce writers and sync pending data before retrying maintenance.\n");
