@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-10-18 — Pass snapshot admission budgets to AFSSYS automount](#2026-10-18--pass-snapshot-admission-budgets-to-afssys-automount)
 - [2026-10-18 — Build the snapshot client with strict AROS conversions](#2026-10-18--build-the-snapshot-client-with-strict-aros-conversions)
 - [2026-10-18 — Keep retained historical restore stages private](#2026-10-18--keep-retained-historical-restore-stages-private)
 - [2026-10-18 — Expose budgeted snapshots and scoped restoration to AROS](#2026-10-18--expose-budgeted-snapshots-and-scoped-restoration-to-aros)
@@ -232,6 +233,31 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+
+## 2026-10-18 — Pass snapshot admission budgets to AFSSYS automount
+
+The NVMe boot-node environment included DE_CONTROL but left it zero. A volume
+formatted with snapshots therefore failed the handler's explicit mount-budget
+admission even though manual DOSDriver mounts supplied those budgets.
+
+[ADR-131](adr/ADR-131-afssys-automount-snapshot-policy.md) records the trusted
+Apple AFSSYS deployment Control: edit records 4096, views 8, reclaim records 64,
+BACKUP=ROOT and RESTORE=ROOT. Generic parser defaults remain DENY. The existing
+ROOT admission still refuses absent security.library and unknown senders;
+SINGLEUSER requires explicit administrative deployment configuration. The
+compiled literal is overridable when building a generation and never opts into
+snapshot formatting. ESP and WORK retain zero Control.
+
+Executed the actual core boot-node builder with the production parser and
+unchanged authorization callback under host ASan/UBSan. Classic and fast BSTR,
+resident lifetime after return, explicit build override, FAT nodes and failure
+cleanup passed; an overlong literal failed compilation as required. The actual
+NVMe source compiled to an AArch64 object using the isolated VM SDK read-only.
+Artifacts are in the integration repository's
+`artifacts/afs-atomic-owner-20261018/afssys-boot-control-*`. No SDK products or
+storage were changed. Installed-generation native qualification remains open;
+internal AFSSYS migration or reformatting still needs confirmation each time.
 
 
 ## 2026-10-18 — Build the snapshot client with strict AROS conversions
