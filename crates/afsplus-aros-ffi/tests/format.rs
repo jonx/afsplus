@@ -357,18 +357,21 @@ fn snapshot_format_requires_explicit_mount_budgets_and_preserves_feature() {
     assert_eq!(afsplus_aros_snapshot_open(fs, snapshot, 1, &mut reader), 0);
     let mut object = 0;
     assert_eq!(
-        afsplus_aros_snapshot_lookup(fs, reader, 1, b"PREFS".as_ptr(), 5, &mut object),
+        afsplus_aros_snapshot_lookup(fs, reader, 1, b"PREFS".as_ptr(), 5, 1, &mut object),
         0
     );
     let mut stat = AfsplusArosStat {
         struct_size: size_of::<AfsplusArosStat>() as u32,
         ..Default::default()
     };
-    assert_eq!(afsplus_aros_snapshot_stat(fs, reader, object, &mut stat), 0);
+    assert_eq!(
+        afsplus_aros_snapshot_stat(fs, reader, object, 1, &mut stat),
+        0
+    );
     assert_eq!(stat.kind, 1);
     assert_eq!(stat.size, 4);
     stat.struct_size = size_of::<AfsplusArosStat>() as u32;
-    assert_eq!(afsplus_aros_snapshot_stat(fs, reader, 1, &mut stat), 0);
+    assert_eq!(afsplus_aros_snapshot_stat(fs, reader, 1, 1, &mut stat), 0);
     assert_eq!(stat.kind, 2);
     let mut directory = 0;
     assert_eq!(
@@ -385,6 +388,7 @@ fn snapshot_format_requires_explicit_mount_budgets_and_preserves_feature() {
             records.as_mut_ptr(),
             512,
             1,
+            1,
             &mut count,
             &mut eof
         ),
@@ -396,8 +400,14 @@ fn snapshot_format_requires_explicit_mount_budgets_and_preserves_feature() {
     assert_ne!(afsplus_aros_snapshot_dir_close(fs, directory, 2), 0);
     assert_eq!(afsplus_aros_snapshot_dir_close(fs, directory, 1), 0);
     let mut bytes = [0u8; 4];
+    // Another task can neither read through the reader nor stat with it.
+    assert_ne!(
+        afsplus_aros_snapshot_read(fs, reader, object, 0, bytes.as_mut_ptr(), 4, 2, &mut count),
+        0
+    );
+    assert_ne!(afsplus_aros_snapshot_stat(fs, reader, 1, 2, &mut stat), 0);
     assert_eq!(
-        afsplus_aros_snapshot_read(fs, reader, object, 0, bytes.as_mut_ptr(), 4, &mut count),
+        afsplus_aros_snapshot_read(fs, reader, object, 0, bytes.as_mut_ptr(), 4, 1, &mut count),
         0
     );
     assert_eq!(count, 4);
@@ -416,6 +426,7 @@ fn snapshot_format_requires_explicit_mount_budgets_and_preserves_feature() {
             4096,
             2,
             0,
+            1,
             &mut restored
         ),
         0
@@ -434,6 +445,7 @@ fn snapshot_format_requires_explicit_mount_budgets_and_preserves_feature() {
             4096,
             2,
             0,
+            1,
             &mut restored
         ),
         0

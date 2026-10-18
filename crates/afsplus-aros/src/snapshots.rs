@@ -2,6 +2,14 @@
 use super::*;
 use afsplus_core::volume::SnapshotListPage;
 
+/// A full reader or directory budget is a resource to give back, not a size.
+fn budget_exhausted(error: afsplus_vfs::VfsError) -> ArosError {
+    match error {
+        afsplus_vfs::VfsError::Limit(_) => ArosError::NoFreeStore,
+        other => other.into(),
+    }
+}
+
 impl<D: BlockDevice> ArosAdapter<D> {
     pub fn restore_reclaim(
         &mut self,
@@ -30,7 +38,10 @@ impl<D: BlockDevice> ArosAdapter<D> {
         Ok(self.vfs.snapshot_list(after, limit)?)
     }
     pub fn snapshot_open(&mut self, id: u64, owner: u64) -> Result<u64, ArosError> {
-        let reader = self.vfs.snapshot_open(id, self.config.max_file_handles)?;
+        let reader = self
+            .vfs
+            .snapshot_open(id, self.config.max_file_handles)
+            .map_err(budget_exhausted)?;
         self.snapshot_owners.insert(reader, owner);
         Ok(reader)
     }
@@ -54,7 +65,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
         reader: u64,
         directory: u64,
         name: &[u8],
+        owner: u64,
     ) -> Result<u64, ArosError> {
+        self.snapshot_owned(reader, owner)?;
         let name = self.decode_component(name)?;
         Ok(self.vfs.snapshot_lookup(reader, directory, &name)?)
     }
@@ -64,14 +77,18 @@ impl<D: BlockDevice> ArosAdapter<D> {
         object: u64,
         offset: u64,
         out: &mut [u8],
+        owner: u64,
     ) -> Result<usize, ArosError> {
+        self.snapshot_owned(reader, owner)?;
         Ok(self.vfs.snapshot_read(reader, object, offset, out)?)
     }
     pub fn snapshot_stat(
         &mut self,
         reader: u64,
         object: u64,
+        owner: u64,
     ) -> Result<afsplus_vfs::Stat, ArosError> {
+        self.snapshot_owned(reader, owner)?;
         Ok(self.vfs.snapshot_stat(reader, object)?)
     }
     pub fn snapshot_directory_open(
@@ -80,30 +97,28 @@ impl<D: BlockDevice> ArosAdapter<D> {
         object: u64,
         owner: u64,
     ) -> Result<u64, ArosError> {
+        self.snapshot_owned(reader, owner)?;
         let directory = self
             .vfs
-            .snapshot_directory_open(reader, object, self.config.max_locks)?;
+            .snapshot_directory_open(reader, object, self.config.max_locks)
+            .map_err(budget_exhausted)?;
         self.snapshot_owners.insert(directory, owner);
         Ok(directory)
     }
+    /// Names are UTF-8 whatever the mount encoding, as the live directory
+    /// read returns them: a name Latin-1 cannot spell lists like any other.
     pub fn snapshot_directory_read(
         &mut self,
         directory: u64,
         limit: usize,
+        owner: u64,
     ) -> Result<afsplus_vfs::DirectoryPage, ArosError> {
-        let encoding = self.config.name_encoding;
-        Ok(self
-            .vfs
-            .snapshot_directory_read_encoded(directory, limit, |bytes| match encoding {
-                NameEncoding::Utf8 => Ok(bytes.to_vec()),
-                NameEncoding::Latin1 => std::str::from_utf8(bytes)
-                    .map_err(|_| afsplus_vfs::VfsError::Invalid)?
-                    .chars()
-                    .map(|ch| {
-                        u8::try_from(u32::from(ch)).map_err(|_| afsplus_vfs::VfsError::Invalid)
-                    })
-                    .collect(),
-            })?)
+        self.snapshot_owned(directory, owner)?;
+        Ok(self.vfs.snapshot_directory_read_encoded(
+            directory,
+            limit,
+            |bytes| Ok(bytes.to_vec()),
+        )?)
     }
     pub fn snapshot_directory_close(
         &mut self,
@@ -126,7 +141,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
         destination: Option<LockId>,
         name: &[u8],
         now: Timespec,
+        owner: u64,
     ) -> Result<u64, ArosError> {
+        self.snapshot_owned(reader, owner)?;
         self.ensure_writable()?;
         let parent = self.lock_object_or_root(destination)?;
         let name = self.decode_component(name)?;
@@ -139,6 +156,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
 }
 
 impl<D: BlockDevice> ArosAdapter<D> {
+    #[allow(clippy::too_many_arguments)] // one per packet field
     pub fn snapshot_restore_tree(
         &mut self,
         reader: u64,
@@ -147,7 +165,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
         name: &[u8],
         limits: afsplus_vfs::TreeRestoreLimits,
         now: Timespec,
+        owner: u64,
     ) -> Result<u64, ArosError> {
+        self.snapshot_owned(reader, owner)?;
         self.ensure_writable()?;
         let parent = self.lock_object_or_root(destination)?;
         let name = self.decode_component(name)?;

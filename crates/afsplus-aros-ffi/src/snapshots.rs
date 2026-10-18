@@ -211,6 +211,7 @@ pub extern "C" fn afsplus_aros_snapshot_lookup(
     directory: u64,
     name: *const u8,
     length: u32,
+    owner: u64,
     out: *mut u64,
 ) -> i32 {
     bridge_status(fs, || {
@@ -222,6 +223,7 @@ pub extern "C" fn afsplus_aros_snapshot_lookup(
             reader,
             directory,
             input_bytes(name, length)?,
+            owner,
         )?;
         write_output(out, id)
     })
@@ -234,6 +236,7 @@ pub extern "C" fn afsplus_aros_snapshot_read(
     offset: u64,
     buffer: *mut u8,
     capacity: u32,
+    owner: u64,
     count: *mut u32,
 ) -> i32 {
     bridge_status(fs, || {
@@ -243,6 +246,7 @@ pub extern "C" fn afsplus_aros_snapshot_read(
             object,
             offset,
             output_slice(buffer, capacity)?,
+            owner,
         )?;
         write_output(count, count_read as u32)
     })
@@ -252,10 +256,13 @@ pub extern "C" fn afsplus_aros_snapshot_stat(
     fs: *mut AfsplusAros,
     reader: u64,
     object: u64,
+    owner: u64,
     output: *mut AfsplusArosStat,
 ) -> i32 {
     bridge_status(fs, || {
-        let s = bridge_mut(fs)?.adapter.snapshot_stat(reader, object)?;
+        let s = bridge_mut(fs)?
+            .adapter
+            .snapshot_stat(reader, object, owner)?;
         write_sized_output(
             output,
             AFSPLUS_AROS_STAT_FIRST_LAYOUT,
@@ -314,6 +321,7 @@ pub extern "C" fn afsplus_aros_snapshot_dir_read(
     buffer: *mut u8,
     capacity: u32,
     limit: u32,
+    owner: u64,
     count: *mut u32,
     eof: *mut u32,
 ) -> i32 {
@@ -327,7 +335,7 @@ pub extern "C" fn afsplus_aros_snapshot_dir_read(
         let dst = output_slice(buffer, capacity)?;
         let page = bridge_mut(fs)?
             .adapter
-            .snapshot_directory_read(dir, limit as usize)?;
+            .snapshot_directory_read(dir, limit as usize, owner)?;
         let header = std::mem::size_of::<AfsplusArosDirEntry>();
         let mut at = 0;
         for entry in &page.entries {
@@ -369,6 +377,7 @@ pub extern "C" fn afsplus_aros_snapshot_restore_file(
     length: u32,
     seconds: i64,
     nanos: u32,
+    owner: u64,
     out: *mut u64,
 ) -> i32 {
     bridge_status(fs, || {
@@ -382,6 +391,7 @@ pub extern "C" fn afsplus_aros_snapshot_restore_file(
             optional_lock(destination),
             input_bytes(name, length)?,
             timestamp(seconds, nanos)?,
+            owner,
         )?;
         write_output(out, id)
     })
@@ -400,6 +410,7 @@ pub extern "C" fn afsplus_aros_snapshot_restore_tree(
     max_metadata_bytes: u32,
     seconds: i64,
     nanos: u32,
+    owner: u64,
     out: *mut u64,
 ) -> i32 {
     bridge_status(fs, || {
@@ -418,6 +429,7 @@ pub extern "C" fn afsplus_aros_snapshot_restore_tree(
                 max_metadata_bytes: max_metadata_bytes as usize,
             },
             timestamp(seconds, nanos)?,
+            owner,
         )?;
         write_output(out, id)
     })

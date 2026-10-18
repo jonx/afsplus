@@ -1266,22 +1266,22 @@ int32_t afsplus_aros_snapshot_open(struct AfsplusAros *f, uint64_t id, uint64_t 
 { (void)f; assert(id == 7); snapshot_opener = owner; *out = 99; stub_disk_in_use=1; snapshot_calls++; return 0; }
 int32_t afsplus_aros_snapshot_close(struct AfsplusAros *f, uint64_t id, uint64_t owner)
 { (void)f; assert(id == 99); if (owner != snapshot_opener) return ERROR_INVALID_LOCK; stub_disk_in_use=0; snapshot_calls++; return 0; }
-int32_t afsplus_aros_snapshot_lookup(struct AfsplusAros *f, uint64_t r, uint64_t d, const uint8_t *n, uint32_t l, uint64_t *out)
-{ (void)f; (void)r; (void)d; (void)n; (void)l; *out = 3; snapshot_calls++; return 0; }
-int32_t afsplus_aros_snapshot_read(struct AfsplusAros *f, uint64_t r, uint64_t o, uint64_t off, uint8_t *b, uint32_t c, uint32_t *out)
-{ (void)f; (void)r; (void)o; (void)off; assert(c >= 4); memcpy(b,"boot",4); *out = 4; snapshot_calls++; return 0; }
-int32_t afsplus_aros_snapshot_stat(struct AfsplusAros *f, uint64_t r, uint64_t o, struct AfsplusArosStat *out)
-{ (void)r; return afsplus_aros_stat_id(f,o,out); }
+int32_t afsplus_aros_snapshot_lookup(struct AfsplusAros *f, uint64_t r, uint64_t d, const uint8_t *n, uint32_t l, uint64_t owner, uint64_t *out)
+{ (void)f; (void)r; (void)d; (void)n; (void)l; (void)owner; *out = 3; snapshot_calls++; return 0; }
+int32_t afsplus_aros_snapshot_read(struct AfsplusAros *f, uint64_t r, uint64_t o, uint64_t off, uint8_t *b, uint32_t c, uint64_t owner, uint32_t *out)
+{ (void)f; (void)r; (void)o; (void)off; if (owner != snapshot_opener) return ERROR_INVALID_LOCK; assert(c >= 4); memcpy(b,"boot",4); *out = 4; snapshot_calls++; return 0; }
+int32_t afsplus_aros_snapshot_stat(struct AfsplusAros *f, uint64_t r, uint64_t o, uint64_t owner, struct AfsplusArosStat *out)
+{ (void)r; (void)owner; return afsplus_aros_stat_id(f,o,out); }
 int32_t afsplus_aros_snapshot_dir_open(struct AfsplusAros *f, uint64_t r, uint64_t o, uint64_t owner, uint64_t *out)
 { (void)r; (void)owner; return afsplus_aros_dir_open(f,o,out); }
-int32_t afsplus_aros_snapshot_dir_read(struct AfsplusAros *f, uint64_t d, uint8_t *b, uint32_t c, uint32_t l, uint32_t *out, uint32_t *eof)
-{ return afsplus_aros_dir_read(f,d,b,c,l,out,eof); }
+int32_t afsplus_aros_snapshot_dir_read(struct AfsplusAros *f, uint64_t d, uint8_t *b, uint32_t c, uint32_t l, uint64_t owner, uint32_t *out, uint32_t *eof)
+{ (void)owner; return afsplus_aros_dir_read(f,d,b,c,l,out,eof); }
 int32_t afsplus_aros_snapshot_dir_close(struct AfsplusAros *f, uint64_t d, uint64_t owner)
 { (void)owner; return afsplus_aros_dir_close(f,d); }
-int32_t afsplus_aros_snapshot_restore_file(struct AfsplusAros *f, uint64_t r, uint64_t s, uint64_t d, const uint8_t *name, uint32_t len, int64_t sec, uint32_t ns, uint64_t *out)
-{ (void)f; (void)r; (void)s; (void)d; (void)name; (void)len; (void)sec; (void)ns; *out=71; snapshot_calls++; return restore_result; }
-int32_t afsplus_aros_snapshot_restore_tree(struct AfsplusAros *f, uint64_t r, uint64_t s, uint64_t d, const uint8_t *name, uint32_t len, uint32_t nodes, uint32_t depth, uint32_t metadata, int64_t sec, uint32_t ns, uint64_t *out)
-{ assert(nodes==4096 && depth==64 && metadata==4194304); return afsplus_aros_snapshot_restore_file(f,r,s,d,name,len,sec,ns,out); }
+int32_t afsplus_aros_snapshot_restore_file(struct AfsplusAros *f, uint64_t r, uint64_t s, uint64_t d, const uint8_t *name, uint32_t len, int64_t sec, uint32_t ns, uint64_t owner, uint64_t *out)
+{ (void)f; (void)r; (void)s; (void)d; (void)name; (void)len; (void)sec; (void)ns; (void)owner; *out=71; snapshot_calls++; return restore_result; }
+int32_t afsplus_aros_snapshot_restore_tree(struct AfsplusAros *f, uint64_t r, uint64_t s, uint64_t d, const uint8_t *name, uint32_t len, uint32_t nodes, uint32_t depth, uint32_t metadata, int64_t sec, uint32_t ns, uint64_t owner, uint64_t *out)
+{ assert(nodes==4096 && depth==64 && metadata==4194304); return afsplus_aros_snapshot_restore_file(f,r,s,d,name,len,sec,ns,owner,out); }
 int32_t afsplus_aros_restore_reclaim(struct AfsplusAros *f, uint64_t scope,
     struct AfsplusArosRestoreRecovery *report, int64_t seconds, uint32_t nanos)
 {
@@ -1321,6 +1321,14 @@ static void snapshot_packets(struct AfsplusArosPacketConfig config)
       assert(afsplus_aros_packet_process(ctx,&die)==0 && die.dp_Res2==ERROR_OBJECT_IN_USE); }
     r.operation=AFSPLUS_EXT_SNAPSHOT_READ; r.offset[0]=99; r.object[0]=3; r.buffer=buffer; r.buffer_size=4;
     assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0 && r.output_count==4 && memcmp(buffer,"boot",4)==0);
+    /* Another admitted task cannot read through the opener's reader. */
+    p.dp_Port=&other_port;
+    assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_INVALID_LOCK);
+    p.dp_Port=&opener_port;
+    /* A missing buffer is a bad request, not a bad name. */
+    r.buffer=NULL;
+    assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_BAD_NUMBER);
+    r.buffer=buffer;
     snapshot_allow=0; memset(buffer,0xcc,sizeof(buffer));
     assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_READ_PROTECTED && buffer[0]==0xcc);
     r.operation=AFSPLUS_EXT_SNAPSHOT_CLOSE;

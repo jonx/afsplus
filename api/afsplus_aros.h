@@ -830,17 +830,18 @@ int32_t afsplus_aros_snapshot_create(struct AfsplusAros *, int64_t, uint32_t, ui
 int32_t afsplus_aros_snapshot_delete(struct AfsplusAros *, uint64_t, int64_t, uint32_t);
 int32_t afsplus_aros_snapshot_list(struct AfsplusAros *, uint64_t, uint8_t *, uint32_t, uint32_t, uint32_t *, uint64_t *);
 /* Readers and snapshot directories belong to the opener (owner): only the
- * same owner closes them, even after its authority is revoked. */
+ * same owner uses or closes them; it can close them after its authority is
+ * revoked. */
 int32_t afsplus_aros_snapshot_open(struct AfsplusAros *, uint64_t, uint64_t owner, uint64_t *);
 int32_t afsplus_aros_snapshot_close(struct AfsplusAros *, uint64_t, uint64_t owner);
-int32_t afsplus_aros_snapshot_lookup(struct AfsplusAros *, uint64_t, uint64_t, const uint8_t *, uint32_t, uint64_t *);
-int32_t afsplus_aros_snapshot_read(struct AfsplusAros *, uint64_t, uint64_t, uint64_t, uint8_t *, uint32_t, uint32_t *);
-int32_t afsplus_aros_snapshot_stat(struct AfsplusAros *, uint64_t, uint64_t, struct AfsplusArosStat *);
+int32_t afsplus_aros_snapshot_lookup(struct AfsplusAros *, uint64_t, uint64_t, const uint8_t *, uint32_t, uint64_t owner, uint64_t *);
+int32_t afsplus_aros_snapshot_read(struct AfsplusAros *, uint64_t, uint64_t, uint64_t, uint8_t *, uint32_t, uint64_t owner, uint32_t *);
+int32_t afsplus_aros_snapshot_stat(struct AfsplusAros *, uint64_t, uint64_t, uint64_t owner, struct AfsplusArosStat *);
 int32_t afsplus_aros_snapshot_dir_open(struct AfsplusAros *, uint64_t, uint64_t, uint64_t owner, uint64_t *);
-int32_t afsplus_aros_snapshot_dir_read(struct AfsplusAros *, uint64_t, uint8_t *, uint32_t, uint32_t, uint32_t *, uint32_t *);
+int32_t afsplus_aros_snapshot_dir_read(struct AfsplusAros *, uint64_t, uint8_t *, uint32_t, uint32_t, uint64_t owner, uint32_t *, uint32_t *);
 int32_t afsplus_aros_snapshot_dir_close(struct AfsplusAros *, uint64_t, uint64_t owner);
-int32_t afsplus_aros_snapshot_restore_file(struct AfsplusAros *, uint64_t, uint64_t, uint64_t, const uint8_t *, uint32_t, int64_t, uint32_t, uint64_t *);
-int32_t afsplus_aros_snapshot_restore_tree(struct AfsplusAros *, uint64_t, uint64_t, uint64_t, const uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, int64_t, uint32_t, uint64_t *);
+int32_t afsplus_aros_snapshot_restore_file(struct AfsplusAros *, uint64_t, uint64_t, uint64_t, const uint8_t *, uint32_t, int64_t, uint32_t, uint64_t owner, uint64_t *);
+int32_t afsplus_aros_snapshot_restore_tree(struct AfsplusAros *, uint64_t, uint64_t, uint64_t, const uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, int64_t, uint32_t, uint64_t owner, uint64_t *);
 int32_t afsplus_aros_restore_reclaim(struct AfsplusAros *, uint64_t, struct AfsplusArosRestoreRecovery *, int64_t, uint32_t);
 
 #ifdef __cplusplus

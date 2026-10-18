@@ -1764,6 +1764,7 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
         error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
         if (error != 0) return error;
         if (request->length == 0 || request->length > 64) return ERROR_BAD_NUMBER;
+        if (request->buffer == NULL) return ERROR_BAD_NUMBER;
         return afsplus_aros_snapshot_list(context->filesystem, request->offset[0],
             request->buffer, request->buffer_size, (uint32_t)request->length,
             &request->output_count, &request->output_value);
@@ -1783,18 +1784,19 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
         if (error != 0) return error;
         return afsplus_aros_snapshot_lookup(context->filesystem, request->offset[0],
             request->object[0], request->name0, request->name_length[0],
-            &request->output_value);
+            owner, &request->output_value);
     case AFSPLUS_EXT_SNAPSHOT_READ:
         error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
         if (error != 0) return error;
+        if (request->buffer == NULL && request->buffer_size != 0) return ERROR_BAD_NUMBER;
         return afsplus_aros_snapshot_read(context->filesystem, request->offset[0],
             request->object[0], request->offset[1], request->buffer,
-            request->buffer_size, &request->output_count);
+            request->buffer_size, owner, &request->output_count);
     case AFSPLUS_EXT_SNAPSHOT_STAT:
         error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
         if (error == 0) error = report_begin(request, sizeof(report.stat), &report);
         if (error == 0) error = afsplus_aros_snapshot_stat(context->filesystem,
-            request->offset[0], request->object[0], &report.stat);
+            request->offset[0], request->object[0], owner, &report.stat);
         if (error == 0) report_end(request, &report);
         return error;
     case AFSPLUS_EXT_SNAPSHOT_DIR_OPEN:
@@ -1806,9 +1808,11 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
         error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
         if (error != 0) return error;
         if (request->length == 0 || request->length > 64) return ERROR_BAD_NUMBER;
+        if (request->buffer == NULL) return ERROR_BAD_NUMBER;
         return afsplus_aros_snapshot_dir_read(context->filesystem,
             request->offset[0], request->buffer, request->buffer_size,
-            (uint32_t)request->length, &request->output_count, &request->output_flags);
+            (uint32_t)request->length, owner, &request->output_count,
+            &request->output_flags);
     case AFSPLUS_EXT_SNAPSHOT_DIR_CLOSE:
         return afsplus_aros_snapshot_dir_close(context->filesystem, request->offset[0],
             owner);
@@ -1821,7 +1825,8 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
         if (error != 0) return error;
         return afsplus_aros_snapshot_restore_file(context->filesystem,
             request->offset[0], request->object[0], second, request->name0,
-            request->name_length[0], seconds, nanoseconds, &request->output_value);
+            request->name_length[0], seconds, nanoseconds, owner,
+            &request->output_value);
     case AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE:
         if (request->object[1] == 0) return ERROR_INVALID_LOCK;
         if (request->length == 0 || request->length > UINT32_MAX
@@ -1837,7 +1842,7 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
             request->offset[0], request->object[0], second, request->name0,
             request->name_length[0], (uint32_t)request->length,
             (uint32_t)request->offset[1], request->buffer_size, seconds,
-            nanoseconds, &request->output_value);
+            nanoseconds, owner, &request->output_value);
     case AFSPLUS_EXT_RESTORE_RECLAIM:
         if (request->object[0] == 0) return ERROR_INVALID_LOCK;
         if (request->buffer == NULL || request->buffer_size < sizeof(struct AfsplusArosRestoreRecovery)

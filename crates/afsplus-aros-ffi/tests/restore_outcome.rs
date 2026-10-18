@@ -112,7 +112,7 @@ fn fixture() -> (Box<Device>, *mut AfsplusAros, u64, u64) {
     assert_eq!(afsplus_aros_snapshot_open(fs, snapshot, 1, &mut reader), 0);
     let mut source = 0;
     assert_eq!(
-        afsplus_aros_snapshot_lookup(fs, reader, 1, b"source".as_ptr(), 6, &mut source),
+        afsplus_aros_snapshot_lookup(fs, reader, 1, b"source".as_ptr(), 6, 1, &mut source),
         0
     );
     device.flushes = 0;
@@ -129,6 +129,7 @@ fn restore(fs: *mut AfsplusAros, reader: u64, source: u64) -> i32 {
         8,
         0,
         0,
+        1,
         &mut output,
     )
 }
