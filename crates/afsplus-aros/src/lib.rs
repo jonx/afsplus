@@ -185,6 +185,8 @@ pub enum ArosError {
     RecordNotLocked = 240,
     LockCollision = 241,
     IsSoftLink = 233,
+    /// A restore final checkpoint may have committed. Remount and inspect.
+    PublicationUncertain = 50001,
 }
 
 impl ArosError {
@@ -208,6 +210,7 @@ impl From<VfsError> for ArosError {
             VfsError::NotSupported => ArosError::ActionNotKnown,
             VfsError::Corrupt(_) => ArosError::NotDosDisk,
             VfsError::Io(_) => ArosError::Unknown,
+            VfsError::PublicationUncertain { .. } => ArosError::PublicationUncertain,
             VfsError::Limit(_) => ArosError::ObjectTooLarge,
             // Staged writes could not be published and were abandoned so the
             // volume stays usable. Data a caller was told had been written is

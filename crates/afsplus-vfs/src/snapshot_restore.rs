@@ -28,9 +28,10 @@ fn normalized_ranges(ranges: &[FileAllocationRange]) -> Vec<FileAllocationRange>
 }
 
 impl<D: BlockDevice> Vfs<D> {
-    /// Restore into a new name only. A visible staging name is confined to the
-    /// selected directory. Failures before publication remove it when storage
-    /// remains writable; a failed cleanup names the retained stage explicitly.
+    /// Restore into a new name only. A private stage belongs to the selected
+    /// directory. Failures before publication remove it when storage
+    /// remains writable; otherwise explicit bounded restore maintenance reclaims
+    /// retained private stages from the selected destination directory.
     /// The final non-replacing rename publishes verified data and metadata in
     /// one transaction. A crash can leave a stage, never a partial final name.
     /// This limited consumer refuses links, directories and security metadata.
@@ -58,7 +59,12 @@ impl<D: BlockDevice> Vfs<D> {
         if self.mount_mode() != MountMode::ReadWrite {
             return Err(VfsError::ReadOnly);
         }
-        self.sync_filesystem()?;
+        if let Some(root) = stage_root {
+            self.volume.validate_restore_stage_parent(parent, root)?;
+        } else {
+            self.ordinary_access(parent)?;
+            self.sync_filesystem()?;
+        }
         let view = self
             .snapshot_readers
             .get(&reader)
@@ -164,20 +170,10 @@ impl<D: BlockDevice> Vfs<D> {
                 }
             })
             .ok_or(VfsError::AlreadyExists)??;
-        let target = match self.volume.create_file_in_directory(parent, &stage, &[], now) {
-            Ok(object) => object,
-            Err(error) => return Err(VfsError::Corrupt(format!("restore stage {stage}: creation failed: {error}; inspect retained stage before retry"))),
-        };
+        let target =
+            self.volume
+                .create_restore_stage(parent, &stage, ObjectType::File, stage_root, now)?;
         let result = (|| -> Result<(), VfsError> {
-            self.volume.set_attributes(
-                target,
-                &[(
-                    STAGE_ATTRIBUTE,
-                    Some(stage_root.unwrap_or(target).to_le_bytes().as_slice()),
-                )],
-                AttributeWriteMode::Create,
-                now,
-            )?;
             let limits = FileEditLimits {
                 max_blocks: 64,
                 max_records: 64,
@@ -309,35 +305,60 @@ impl<D: BlockDevice> Vfs<D> {
                 }
                 offset += n as u64;
             }
-            self.volume.sync()?;
-            self.volume
-                .publish_restored_object(parent, &stage, name, now)?;
-            self.volume.sync()?;
+            self.publish_restore_stage(parent, &stage, name, target, stage_root.is_none(), now)?;
             Ok(())
         })();
         if let Err(error) = result {
-            // Do not remove a completed target if a publication barrier failed.
-            match self.volume.lookup_in_directory(parent, &stage) {
-                Ok(Some(object)) if object == target => {
-                    if let Err(cleanup) = self
-                        .volume
-                        .delete_file(parent, &stage, now)
-                        .and_then(|_| self.volume.sync())
-                    {
-                        return Err(VfsError::Corrupt(format!(
-                            "restore failed: {error}; retained stage {stage}: {cleanup}"
-                        )));
-                    }
-                }
-                Ok(None) => {}
-                other => {
-                    return Err(VfsError::Corrupt(format!(
-                        "restore failed: {error}; inspect stage {stage}: {other:?}"
-                    )))
-                }
+            // Failed checkpoint publication must be resolved by remount, never
+            // by deleting through the old in-memory roots. Ordinary failures
+            // retain their original classification even if cleanup also fails.
+            if !self.volume.publication_state_uncertain()
+                && matches!(self.volume.lookup_in_directory(parent, &stage), Ok(Some(object)) if object == target)
+            {
+                let _ = self
+                    .volume
+                    .delete_file(parent, &stage, now)
+                    .and_then(|_| self.volume.sync());
             }
             return Err(error);
         }
         Ok(target)
+    }
+
+    pub(super) fn publish_restore_stage(
+        &mut self,
+        parent: ObjectId,
+        stage: &str,
+        name: &str,
+        object: ObjectId,
+        public: bool,
+        now: Timespec,
+    ) -> Result<(), VfsError> {
+        // Immediate core mutations already commit their own barriers. Keep
+        // the public adapter durability hooks until the crash campaign has
+        // qualified removing them; private child publication remains hidden.
+        self.volume.sync()?;
+        if let Err(error) = self
+            .volume
+            .publish_restored_object(parent, stage, name, now)
+        {
+            if public && self.volume.publication_state_uncertain() {
+                return Err(VfsError::PublicationUncertain {
+                    object_id: object,
+                    detail: error.to_string(),
+                });
+            }
+            return Err(error.into());
+        }
+        if let Err(error) = self.volume.sync() {
+            if public {
+                return Err(VfsError::PublicationUncertain {
+                    object_id: object,
+                    detail: error.to_string(),
+                });
+            }
+            return Err(error.into());
+        }
+        Ok(())
     }
 }

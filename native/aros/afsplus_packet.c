@@ -1825,6 +1825,17 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
             request->name_length[0], (uint32_t)request->length,
             (uint32_t)request->offset[1], request->buffer_size, seconds,
             nanoseconds, &request->output_value);
+    case AFSPLUS_EXT_RESTORE_RECLAIM:
+        if (request->object[0] == 0) return ERROR_INVALID_LOCK;
+        if (request->buffer == NULL || request->buffer_size < sizeof(struct AfsplusArosRestoreRecovery)
+            || (uintptr_t)request->buffer % _Alignof(struct AfsplusArosRestoreRecovery) != 0)
+            return ERROR_BAD_NUMBER;
+        error = require_group(context, AFSPLUS_AROS_GROUP_RESTORE_RECOVERY);
+        if (error == 0) error = extension_lock(context, request->object[0], &first);
+        if (error == 0) error = packet_now(context, &seconds, &nanoseconds);
+        if (error != 0) return error;
+        return afsplus_aros_restore_reclaim(context->filesystem, first,
+            (struct AfsplusArosRestoreRecovery *)request->buffer, seconds, nanoseconds);
     case AFSPLUS_EXT_COMMIT_POLICY:
         error = report_begin(request, sizeof(report.commit), &report);
         if (error == 0)
@@ -1922,7 +1933,8 @@ static int32_t process_extension(struct AfsplusArosPacketContext *context,
         if (error != 0) return error;
     }
     if (request.operation == AFSPLUS_EXT_SNAPSHOT_RESTORE_FILE
-        || request.operation == AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE)
+        || request.operation == AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE
+        || request.operation == AFSPLUS_EXT_RESTORE_RECLAIM)
     {
         error = context->authorize_restore == NULL ? ERROR_READ_PROTECTED
             : context->authorize_restore(context->callback_context, packet);
@@ -2488,7 +2500,7 @@ int32_t afsplus_aros_packet_process(
         break;
     }
     case ACTION_RENAME_OBJECT:
-    case ACTION_REPLACE_OBJECT:
+    case AFSPLUS_ACTION_REPLACE_OBJECT:
     {
         const uint8_t *source_path;
         const uint8_t *target_path;
@@ -2524,9 +2536,9 @@ int32_t afsplus_aros_packet_process(
         }
         if (error == 0)
             error = packet_now(context, &seconds, &nanoseconds);
-        if (error == 0 && packet->dp_Type == ACTION_REPLACE_OBJECT)
+        if (error == 0 && packet->dp_Type == AFSPLUS_ACTION_REPLACE_OBJECT)
             error = require_group(context, AFSPLUS_AROS_GROUP_API_V2);
-        if (error == 0 && packet->dp_Type == ACTION_REPLACE_OBJECT)
+        if (error == 0 && packet->dp_Type == AFSPLUS_ACTION_REPLACE_OBJECT)
             error = afsplus_aros_replace(context->filesystem, source.id,
                 source.leaf, source.leaf_length, target.id, target.leaf,
                 target.leaf_length, seconds, nanoseconds);

@@ -7,6 +7,10 @@
 mod authority;
 pub mod backup;
 pub mod restore;
+mod restore_recovery;
+pub use restore_recovery::{
+    RestoreRecoveryLimits, RestoreRecoveryReport, RESTORE_RECOVERY_CURSOR_MAX,
+};
 mod snapshot_restore;
 mod snapshot_restore_tree;
 pub use snapshot_restore_tree::TreeRestoreLimits;
@@ -317,6 +321,12 @@ pub enum VfsError {
     NotSupported,
     Corrupt(String),
     Io(String),
+    /// The final restore publication may be durable. Remount and inspect the
+    /// destination before retrying; the object identifier is diagnostic only.
+    PublicationUncertain {
+        object_id: ObjectId,
+        detail: String,
+    },
     Limit(&'static str),
     /// Staged data could not be published and was abandoned so that the volume
     /// stays usable; this many acknowledged operations were lost.
@@ -339,6 +349,9 @@ impl fmt::Display for VfsError {
             VfsError::NotSupported => write!(f, "operation is not supported"),
             VfsError::Corrupt(detail) => write!(f, "corrupt filesystem: {detail}"),
             VfsError::Io(detail) => write!(f, "I/O error: {detail}"),
+            VfsError::PublicationUncertain { object_id, detail } => write!(
+                f, "publication of object {object_id} is uncertain; remount and inspect the destination before retrying: {detail}"
+            ),
             VfsError::Limit(detail) => write!(f, "implementation limit: {detail}"),
             VfsError::WindowLost(lost) => write!(
                 f,
@@ -1046,6 +1059,12 @@ impl<D: BlockDevice> Vfs<D> {
 
     /// Managed restore metadata is a bounded object/root gate, not a name rule.
     fn restore_stage_private(&mut self, object: ObjectId) -> Result<bool, VfsError> {
+        if self.volume.ident().features.incompat
+            & afsplus_format::ident::INCOMPAT_PERSISTENT_SNAPSHOTS
+            == 0
+        {
+            return Ok(false);
+        }
         let Some(marker) = self
             .volume
             .attribute(object, snapshot_restore::STAGE_ATTRIBUTE)?
@@ -1361,8 +1380,10 @@ impl<D: BlockDevice> Vfs<D> {
             }
             let mut visible = Vec::new();
             for entry in std::mem::take(&mut page.entries) {
-                if !self.restore_stage_private(entry.child_id)? {
-                    visible.push(entry);
+                match self.restore_stage_private(entry.child_id) {
+                    Ok(false) => visible.push(entry),
+                    Ok(true) | Err(VfsError::Corrupt(_)) => {}
+                    Err(error) => return Err(error),
                 }
             }
             if !visible.is_empty() || page.eof {

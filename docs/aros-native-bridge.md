@@ -868,7 +868,13 @@ reformat. A mounted reader keeps formatting and orderly dismount busy.
 host authority policies. Each defaults to DENY. ROOT queries security.library's
 current task owner at admission; SINGLEUSER admits a configured administrator
 trust domain when that library is absent. A signal reply port with a task is
-required. Reader close remains available after revocation.
+required. Reader close remains available after revocation. The handler borrows
+an already loaded security library under Exec's library-list exclusion, opens
+that pinned library through its normal hooks, then drops the temporary pin.
+No disk load is attempted when the library is absent: ROOT fails closed and
+only explicit SINGLEUSER admits that case. The ownership query and library
+hooks run without the list lock held. File and tree restoration require both
+BACKUP and RESTORE authority; stage reclamation requires RESTORE only.
 
 The SNAPSHOTS C group and `FSV2_CAP_SNAPSHOTS` distinguish implementation and
 volume support. The public C boundary has ABI 2; the native packet configuration
@@ -890,7 +896,26 @@ supplies positive node, depth and aggregate metadata budgets and preflights
 the complete selected tree. It preserves supported
 captured metadata and refuses unsupported metadata before target mutation.
 The operation allocates fresh data and publishes a verified staged object under
-a non-replacing rename. Boot-root rollback needs its own decision.
+a non-replacing rename. Creation and its managed marker share a transaction
+under [ADR-133](../adr/ADR-133-restore-stage-lifetime-and-recovery.md).
+An unknown public checkpoint or final barrier outcome returns
+`AFSPLUS_ERROR_PUBLICATION_UNCERTAIN` (50001). Remount and inspect the final
+destination before retrying; an ordinary prepublication failure can leave a
+private stage available for maintenance. Boot-root rollback needs its own decision.
+
+`AFSPlusReclaim VOLUME DIRECTORY [CURSOR [SCAN WORK DEPTH]]` drives the
+RESTORE_RECOVERY group through operation 43. It requires RESTORE authority and
+no historical BACKUP grant. Each call scans at most 64 entries and performs at
+most eight object/extent steps, with traversal depth at most 64. A selected live
+directory scopes the scan; choose a deeper scope for a deep namespace. Cursor
+identity binds volume, scope and checkpoint generation, with integrity checking.
+The volume must be quiescent between calls; a pending delayed window returns
+busy, and unrelated commits make the cursor stale. Remove a stale cursor to
+restart safely. The default cursor file is `RAM:AFSPlusReclaim.cursor`; writing
+it on the repaired volume is refused. Losing it during publication requires only
+a rescan; completed on-disk cleanup steps are retained. Malformed or inconsistent
+stages stay private and produce a partial result. Inactive derived markers on
+published objects never authorize deletion. No maintenance scan runs at mount.
 
 Host contracts are exercised by `snapshot_mount`, the FFI `format` snapshot
 case and the native packet matrix. Guest acceptance requires a rebuilt external

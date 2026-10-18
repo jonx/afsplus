@@ -3,7 +3,8 @@
 
 /* Stable, allocation-free C boundary for the native AROS DOS handler.
  *
- * All functions return 0 on success or an AROS ERROR_* value on failure.
+ * All functions return 0 on success or a DOS secondary error value on failure
+ * (including the adapter-specific AFSPLUS_ERROR_PUBLICATION_UNCERTAIN).
  * The caller owns every buffer and the block-device context. The context and
  * callbacks must remain valid until afsplus_aros_unmount() returns. One AFS+
  * instance is single-task: do not issue concurrent calls for the same pointer.
@@ -18,6 +19,11 @@
 extern "C" {
 #endif
 
+/* Restore publication may have committed. Remount and inspect the final
+ * destination before retrying. Ordinary prepublication failures retain their
+ * original error. This adapter-specific result passes unchanged through DOS. */
+#define AFSPLUS_ERROR_PUBLICATION_UNCERTAIN INT32_C(50001)
+
 #define AFSPLUS_AROS_ABI_VERSION UINT32_C(2)
 
 /* Additive growth inside ABI version 1. The revision counts the entry-point
@@ -25,7 +31,7 @@ extern "C" {
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(21)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(22)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -48,6 +54,30 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_PATHS UINT64_C(0x40000)
 #define AFSPLUS_AROS_GROUP_FORMAT UINT64_C(0x80000)
 #define AFSPLUS_AROS_GROUP_SNAPSHOTS UINT64_C(0x100000)
+#define AFSPLUS_AROS_GROUP_RESTORE_RECOVERY UINT64_C(0x200000)
+
+#define AFSPLUS_RESTORE_RECOVERY_CURSOR_MAX UINT32_C(24576)
+#define AFSPLUS_RESTORE_RECOVERY_DONE UINT32_C(1)
+/* Revision22, RESTORE_RECOVERY. Input: size, budgets, cursor_size/cursor.
+ * Other fields are outputs. Cursor files must live outside the repaired volume.
+ * DONE with blocked!=0 is partial completion, never successful full reclaim. */
+struct AfsplusArosRestoreRecovery {
+    uint32_t struct_size;
+    uint32_t scan_entries;
+    uint32_t work_steps;
+    uint32_t max_depth;
+    uint32_t cursor_size;
+    uint32_t flags;
+    uint32_t scanned;
+    uint32_t removed;
+    uint32_t advanced;
+    uint32_t blocked;
+    uint64_t blocked_object;
+    uint8_t cursor[AFSPLUS_RESTORE_RECOVERY_CURSOR_MAX];
+};
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(struct AfsplusArosRestoreRecovery) == 24624, "restore recovery layout drift");
+#endif
 
 /* AfsplusArosExtent.flags. */
 #define AFSPLUS_AROS_EXTENT_UNWRITTEN UINT32_C(0x1)
@@ -809,6 +839,7 @@ int32_t afsplus_aros_snapshot_dir_read(struct AfsplusAros *, uint64_t, uint8_t *
 int32_t afsplus_aros_snapshot_dir_close(struct AfsplusAros *, uint64_t);
 int32_t afsplus_aros_snapshot_restore_file(struct AfsplusAros *, uint64_t, uint64_t, uint64_t, const uint8_t *, uint32_t, int64_t, uint32_t, uint64_t *);
 int32_t afsplus_aros_snapshot_restore_tree(struct AfsplusAros *, uint64_t, uint64_t, uint64_t, const uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, int64_t, uint32_t, uint64_t *);
+int32_t afsplus_aros_restore_reclaim(struct AfsplusAros *, uint64_t, struct AfsplusArosRestoreRecovery *, int64_t, uint32_t);
 
 #ifdef __cplusplus
 }

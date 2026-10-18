@@ -46,10 +46,19 @@ fn explicit_budgets_admit_snapshots_preserve_old_bytes_and_refuse_busy_delete() 
         .unwrap();
     let snapshot = volume.snapshot_create(Timespec::default()).unwrap();
     let view = volume.snapshot_open(snapshot).unwrap();
-    assert!(volume
-        .snapshot_delete(snapshot, Timespec::default())
-        .is_err());
+    assert!(matches!(
+        volume.snapshot_delete(snapshot, Timespec::default()),
+        Err(afsplus_core::CoreError::Busy)
+    ));
     drop(view);
+    volume
+        .snapshot_delete(snapshot, Timespec::default())
+        .unwrap();
+    assert!(matches!(
+        volume.snapshot_open(snapshot),
+        Err(afsplus_core::CoreError::NotFound)
+    ));
+    let snapshot = volume.snapshot_create(Timespec::default()).unwrap();
     let image = volume.into_device();
     let vfs = Vfs::mount_with_snapshot_limits(
         image,
@@ -103,7 +112,10 @@ fn delayed_capture_keeps_pending_bytes_and_retries_a_failed_directory_page() {
     let mut bytes = [0; 4];
     assert_eq!(vfs.snapshot_read(reader, object, 0, &mut bytes).unwrap(), 4);
     assert_eq!(&bytes, b"boot");
-    assert!(vfs.snapshot_delete(id, Timespec::default()).is_err());
+    assert_eq!(
+        vfs.snapshot_delete(id, Timespec::default()),
+        Err(VfsError::Busy)
+    );
     let dir = vfs.snapshot_directory_open(reader, 1, 1).unwrap();
     assert!(vfs
         .snapshot_directory_read_encoded(dir, 1, |_| Err(VfsError::Invalid))

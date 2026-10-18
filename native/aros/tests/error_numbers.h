@@ -2,10 +2,11 @@
 
 /* The DOS error numbers the AROS adapter answers with, one line each. Two
  * readers hold both sides to this list: error_numbers.c checks every line
- * against the target's <dos/dos.h> at compile time, and the Rust test
+ * against the target's <dos/dos.h> or the adapter's afsplus_aros.h at
+ * compile time, and the Rust test
  * afsplus-aros-ffi/tests/error_numbers.rs checks every line against
  * ArosError, which it matches exhaustively. A number can then differ from
- * the header only if this file is wrong, and then the C side does not
+ * its canonical header only if this file is wrong, and then the C side does not
  * compile. The includer defines AFSPLUS_DOS_ERROR(name, number). */
 AFSPLUS_DOS_ERROR(ERROR_UNKNOWN, 100)
 AFSPLUS_DOS_ERROR(ERROR_NO_FREE_STORE, 103)
@@ -30,3 +31,4 @@ AFSPLUS_DOS_ERROR(ERROR_NO_MORE_ENTRIES, 232)
 AFSPLUS_DOS_ERROR(ERROR_IS_SOFT_LINK, 233)
 AFSPLUS_DOS_ERROR(ERROR_RECORD_NOT_LOCKED, 240)
 AFSPLUS_DOS_ERROR(ERROR_LOCK_COLLISION, 241)
+AFSPLUS_DOS_ERROR(AFSPLUS_ERROR_PUBLICATION_UNCERTAIN, 50001)

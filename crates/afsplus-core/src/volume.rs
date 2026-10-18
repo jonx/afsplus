@@ -20,6 +20,7 @@ pub(crate) use attributes::load_attribute_chain;
 pub use attributes::AttributeWriteMode;
 mod chain;
 mod metadata;
+mod restore_recovery;
 pub use metadata::PreservedMetadata;
 mod security;
 pub(crate) use security::load_descriptor_chain;
@@ -3079,7 +3080,7 @@ impl<D: BlockDevice> Volume<D> {
         content: &[u8],
         now: Timespec,
     ) -> Result<u64, CoreError> {
-        self.create_leaf_in_directory(parent_id, name, content, None, now)
+        self.create_leaf_in_directory(parent_id, name, content, None, None, now)
     }
 
     /// Store an opaque UTF-8 target without resolving it.
@@ -3109,7 +3110,72 @@ impl<D: BlockDevice> Volume<D> {
         {
             return Err(CoreError::InvalidMetadata("invalid symlink target"));
         }
-        self.create_leaf_in_directory(parent_id, name, &[], Some(target), now)
+        self.create_leaf_in_directory(parent_id, name, &[], Some(target), None, now)
+    }
+
+    /// Create an empty private restore object and its managed marker in one
+    /// checkpoint. `root == None` makes this object the stage root; children
+    /// must name an active directory root and a parent belonging to that root.
+    /// No historical payload may be written before this operation succeeds.
+    pub fn create_restore_stage(
+        &mut self,
+        parent: u64,
+        name: &str,
+        kind: ObjectType,
+        root: Option<u64>,
+        now: Timespec,
+    ) -> Result<u64, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::CreateRestoreStage, |volume| {
+            if volume.state.snapshots.is_none() {
+                return Err(CoreError::FeatureDisabled("persistent snapshots"));
+            }
+            if let Some(root) = root {
+                volume.validate_restore_stage_parent(parent, root)?;
+            }
+            match kind {
+                ObjectType::File => {
+                    volume.create_leaf_in_directory(parent, name, &[], None, Some(root), now)
+                }
+                ObjectType::Directory => {
+                    volume.create_directory_untraced(parent, name, Some(root), now)
+                }
+                _ => Err(CoreError::InvalidMetadata(
+                    "restore stage must be a file or directory",
+                )),
+            }
+        })
+    }
+
+    /// Validate the bounded relationship used by trusted private tree copying.
+    pub fn validate_restore_stage_parent(
+        &mut self,
+        parent: u64,
+        root: u64,
+    ) -> Result<(), CoreError> {
+        self.trace_api(
+            crate::flight::ApiMethod::ValidateRestoreStageParent,
+            |volume| {
+                let marker = root.to_le_bytes();
+                let record = volume.read_object(root)?.ok_or(CoreError::NotFound)?;
+                if record.object_type != ObjectType::Directory
+                    || volume.attribute(root, "system.restore.stage")?.as_deref()
+                        != Some(marker.as_slice())
+                    || volume.attribute(parent, "system.restore.stage")?.as_deref()
+                        != Some(marker.as_slice())
+                {
+                    return Err(CoreError::InvalidMove(
+                        "parent does not belong to active restore stage",
+                    ));
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// Checkpoint I/O began but did not finish adoption. Remount before any
+    /// further mutation; the old or new checkpoint may be durable.
+    pub fn publication_state_uncertain(&self) -> bool {
+        self.window_poisoned
     }
 
     fn create_leaf_in_directory(
@@ -3118,6 +3184,7 @@ impl<D: BlockDevice> Volume<D> {
         name: &str,
         content: &[u8],
         target: Option<&str>,
+        restore_root: Option<Option<u64>>,
         now: Timespec,
     ) -> Result<u64, CoreError> {
         metadata::validate_time(now)?;
@@ -3180,6 +3247,17 @@ impl<D: BlockDevice> Volume<D> {
         // Everything the new state no longer reaches goes into quarantine.
         tx.retire(&mut self.dev, parent_record_lba)?;
 
+        let mut restore_writes = Vec::new();
+        let attributes = match restore_root {
+            Some(root) => Some(self.create_restore_attributes(
+                &mut tx,
+                object_id,
+                root.unwrap_or(object_id),
+                generation,
+                &mut restore_writes,
+            )?),
+            None => None,
+        };
         let file_record = ObjectRecord {
             object_id,
             object_type: if target.is_some() {
@@ -3203,7 +3281,8 @@ impl<D: BlockDevice> Volume<D> {
             security: None,
             attributes: None,
             comment: afsplus_format::object::Comment::EMPTY,
-        };
+        }
+        .with_attributes(attributes);
 
         let directory_entry = DirEntry {
             key,
@@ -3277,6 +3356,7 @@ impl<D: BlockDevice> Volume<D> {
                 new_parent.encode(block_size, generation)?,
             ),
         ];
+        meta_writes.extend(restore_writes);
         meta_writes.extend(directory_mutation.writes);
         meta_writes.extend(omap_mutation.writes);
 
@@ -3354,7 +3434,7 @@ impl<D: BlockDevice> Volume<D> {
         now: Timespec,
     ) -> Result<u64, CoreError> {
         self.trace_api(crate::flight::ApiMethod::CreateDirectory, |volume| {
-            volume.create_directory_untraced(parent_id, name, now)
+            volume.create_directory_untraced(parent_id, name, None, now)
         })
     }
 
@@ -3362,6 +3442,7 @@ impl<D: BlockDevice> Volume<D> {
         &mut self,
         parent_id: u64,
         name: &str,
+        restore_root: Option<Option<u64>>,
         now: Timespec,
     ) -> Result<u64, CoreError> {
         metadata::validate_time(now)?;
@@ -3404,8 +3485,18 @@ impl<D: BlockDevice> Volume<D> {
 
         tx.retire(&mut self.dev, parent_record_lba)?;
 
-        let new_directory =
+        let mut new_directory =
             Self::new_directory_record(object_id, directory_root_lba, now, generation);
+        let mut restore_writes = Vec::new();
+        if let Some(root) = restore_root {
+            new_directory = new_directory.with_attributes(Some(self.create_restore_attributes(
+                &mut tx,
+                object_id,
+                root.unwrap_or(object_id),
+                generation,
+                &mut restore_writes,
+            )?));
+        }
 
         let entry = DirEntry {
             key: self.comparison_key(name.as_bytes())?,
@@ -3473,6 +3564,7 @@ impl<D: BlockDevice> Volume<D> {
                 new_parent.encode(block_size, generation)?,
             ),
         ];
+        metadata_writes.extend(restore_writes);
         metadata_writes.extend(parent_mutation.writes);
         metadata_writes.extend(object_map_mutation.writes);
 
@@ -4650,7 +4742,7 @@ impl<D: BlockDevice> Volume<D> {
         target_name: &str,
         now: Timespec,
     ) -> Result<(), CoreError> {
-        self.trace_api(crate::flight::ApiMethod::Rename, |volume| {
+        self.trace_api(crate::flight::ApiMethod::PublishRestoredObject, |volume| {
             metadata::validate_time(now)?;
             volume.ensure_public_object_id(parent_id)?;
             volume.rename_internal(parent_id, staged_name, parent_id, target_name, now, true)

@@ -159,8 +159,12 @@ LONG afsplus_client_snapshot_stat(struct MsgPort *, uint64_t, uint64_t, struct A
 LONG afsplus_client_snapshot_dir_open(struct MsgPort *, uint64_t, uint64_t, uint64_t *);
 LONG afsplus_client_snapshot_dir_read(struct MsgPort *, uint64_t, void *, uint32_t, uint32_t, uint32_t *, uint32_t *);
 LONG afsplus_client_snapshot_dir_close(struct MsgPort *, uint64_t);
+/* Restore result AFSPLUS_ERROR_PUBLICATION_UNCERTAIN requires remount and
+ * inspection of the final destination before retry; all other errors retain
+ * their ordinary meanings. No retry or recovery is performed by the client. */
 LONG afsplus_client_snapshot_restore_file(struct MsgPort *, uint64_t, uint64_t, BPTR, CONST_STRPTR, uint64_t *);
 LONG afsplus_client_snapshot_restore_tree(struct MsgPort *, uint64_t, uint64_t, BPTR, CONST_STRPTR, uint32_t, uint32_t, uint32_t, uint64_t *);
+LONG afsplus_client_restore_reclaim(struct MsgPort *, BPTR, struct AfsplusArosRestoreRecovery *);
 
 #ifdef __cplusplus
 }

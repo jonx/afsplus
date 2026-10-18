@@ -29,6 +29,10 @@
 #include <stdint.h>
 
 #define ACTION_AFSPLUS_EXT INT32_C(0x41465332)
+/* Filesystem-neutral atomic namespace replacement, allocated by AROS core.
+ * Declare the wire identity here so the external handler also builds with
+ * SDKs predating that DOS interface. No alternate replacement semantics. */
+#define AFSPLUS_ACTION_REPLACE_OBJECT INT32_C(1037)
 
 #define AFSPLUS_EXT_MAGIC UINT32_C(0x41465332)
 /* No name component of the format is longer, in any mount encoding. A longer
@@ -82,6 +86,11 @@
 #define AFSPLUS_EXT_SNAPSHOT_DIR_CLOSE UINT32_C(40) /* SNAPSHOTS */
 #define AFSPLUS_EXT_SNAPSHOT_RESTORE_FILE UINT32_C(41) /* SNAPSHOTS */
 #define AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE UINT32_C(42) /* SNAPSHOTS */
+#define AFSPLUS_EXT_RESTORE_RECLAIM UINT32_C(43) /* RESTORE_RECOVERY */
+/* RESTORE_RECLAIM object[0] live directory lock; buffer points to a sized
+ * AfsplusArosRestoreRecovery value (afsplus_aros.h), buffer_size covers it.
+ * Only current restore authority is required; no historical payload is read.
+ * Call once per bounded step. Stale cursors require a safe scoped restart. */
 
 /* The commit policy the mount runs under (ADR-121). policy is 0 for SYNC
  * and 1 for delayed; seconds is the longest a change then waits, and 0 under
@@ -218,6 +227,9 @@ struct AfsplusExtPacketCount {
  * the same scope plus length max nodes, offset[1] max depth, buffer_size
  * aggregate metadata budget (buffer NULL). Both need independent restore
  * authority at admission and never overwrite an existing target.
+ * Result 50001 (AFSPLUS_ERROR_PUBLICATION_UNCERTAIN in afsplus_aros.h)
+ * means publication may have committed: remount and inspect before retry.
+ * Failures known to precede public publication retain their original error.
  * Root object ID is1. Historical views expose no mutation operation.
  */
 struct AfsplusExtRequest {

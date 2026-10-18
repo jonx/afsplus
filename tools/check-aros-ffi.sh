@@ -106,6 +106,9 @@ clang -std=c11 -Wall -Wextra -Werror -I api \
     -include afsplus_aros.h -fsyntax-only -x c /dev/null
 
 echo "[aros-ffi] host DosPacket translation matrix"
+clang -std=c11 -Wall -Wextra -Werror -I native/aros \
+    native/aros/tests/authority_stub.c -o "$task_dir/authority-stub"
+"$task_dir/authority-stub"
 clang -std=c11 -Wall -Wextra -Werror \
     -D__WORDSIZE=64 -DAROS_FAST_BPTR=1 -DAROS_FAST_BSTR=1 \
     -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \

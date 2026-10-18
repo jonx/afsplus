@@ -3,6 +3,17 @@ use super::*;
 use afsplus_core::volume::SnapshotListPage;
 
 impl<D: BlockDevice> ArosAdapter<D> {
+    pub fn restore_reclaim(
+        &mut self,
+        destination: Option<LockId>,
+        cursor: &[u8],
+        limits: afsplus_vfs::RestoreRecoveryLimits,
+        now: Timespec,
+    ) -> Result<afsplus_vfs::RestoreRecoveryReport, ArosError> {
+        self.ensure_writable()?;
+        let scope = self.lock_object_or_root(destination)?;
+        Ok(self.vfs.restore_reclaim_step(scope, cursor, limits, now)?)
+    }
     pub fn snapshot_create(&mut self, now: Timespec) -> Result<u64, ArosError> {
         self.ensure_writable()?;
         Ok(self.vfs.snapshot_create(now)?)

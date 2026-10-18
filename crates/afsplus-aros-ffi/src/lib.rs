@@ -34,7 +34,7 @@ use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
 pub const AFSPLUS_AROS_ABI_VERSION: u32 = 2;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 21;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 22;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -56,6 +56,7 @@ pub const AFSPLUS_AROS_GROUP_COMMIT: u64 = 0x20000;
 pub const AFSPLUS_AROS_GROUP_PATHS: u64 = 0x40000;
 pub const AFSPLUS_AROS_GROUP_FORMAT: u64 = 0x80000;
 pub const AFSPLUS_AROS_GROUP_SNAPSHOTS: u64 = 0x100000;
+pub const AFSPLUS_AROS_GROUP_RESTORE_RECOVERY: u64 = 0x200000;
 pub const AFSPLUS_AROS_EXTENT_UNWRITTEN: u32 = 1;
 pub const AFSPLUS_AROS_DIR_RECORD_MAX: u32 = 280;
 pub const AFSPLUS_AROS_KIND_FILE: u32 = 1;
@@ -102,7 +103,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_COMMIT
     | AFSPLUS_AROS_GROUP_PATHS
     | AFSPLUS_AROS_GROUP_FORMAT
-    | AFSPLUS_AROS_GROUP_SNAPSHOTS;
+    | AFSPLUS_AROS_GROUP_SNAPSHOTS
+    | AFSPLUS_AROS_GROUP_RESTORE_RECOVERY;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.

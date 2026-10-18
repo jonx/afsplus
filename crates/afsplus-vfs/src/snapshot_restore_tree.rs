@@ -269,6 +269,7 @@ impl<D: BlockDevice> Vfs<D> {
         if self.mount_mode() != MountMode::ReadWrite {
             return Err(VfsError::ReadOnly);
         }
+        self.ordinary_access(parent)?;
         let view = self
             .snapshot_readers
             .get(&reader)
@@ -297,35 +298,21 @@ impl<D: BlockDevice> Vfs<D> {
                 }
             })
             .ok_or(VfsError::AlreadyExists)??;
-        let root=match self.volume.create_directory(parent,&stage,now) {
-            Ok(root)=>root,
-            Err(e)=>return Err(VfsError::Corrupt(format!("restore tree stage {stage}: creation failed: {e}; inspect destination before retry"))),
-        };
+        let root =
+            self.volume
+                .create_restore_stage(parent, &stage, ObjectType::Directory, None, now)?;
         let mut objects = vec![root];
         let result = (|| -> Result<(), VfsError> {
-            self.volume.set_attributes(
-                root,
-                &[(
-                    super::snapshot_restore::STAGE_ATTRIBUTE,
-                    Some(root.to_le_bytes().as_slice()),
-                )],
-                AttributeWriteMode::Create,
-                now,
-            )?;
             for node in nodes.iter().skip(1) {
                 let parent = objects[node.parent.ok_or(VfsError::Invalid)?];
                 let object = if node.metadata.object_type == ObjectType::Directory {
-                    let object = self.volume.create_directory(parent, &node.name, now)?;
-                    self.volume.set_attributes(
-                        object,
-                        &[(
-                            super::snapshot_restore::STAGE_ATTRIBUTE,
-                            Some(root.to_le_bytes().as_slice()),
-                        )],
-                        AttributeWriteMode::Create,
+                    self.volume.create_restore_stage(
+                        parent,
+                        &node.name,
+                        ObjectType::Directory,
+                        Some(root),
                         now,
-                    )?;
-                    object
+                    )?
                 } else {
                     self.restore_file_private(
                         reader,
@@ -395,27 +382,14 @@ impl<D: BlockDevice> Vfs<D> {
                     ));
                 }
             }
-            self.volume.sync()?;
-            self.volume
-                .publish_restored_object(parent, &stage, name, now)?;
-            self.volume.sync()?;
+            self.publish_restore_stage(parent, &stage, name, root, true, now)?;
             Ok(())
         })();
         if let Err(error) = result {
-            match self.volume.lookup_in_directory(parent, &stage) {
-                Ok(Some(object)) if object == root => {
-                    if let Err(cleanup) = self.remove_staged_tree(root, parent, &stage, now) {
-                        return Err(VfsError::Corrupt(format!(
-                            "restore tree failed: {error}; retained stage {stage}: {cleanup}"
-                        )));
-                    }
-                }
-                Ok(None) => {}
-                other => {
-                    return Err(VfsError::Corrupt(format!(
-                        "restore tree failed: {error}; inspect stage {stage}: {other:?}"
-                    )))
-                }
+            if !self.volume.publication_state_uncertain()
+                && matches!(self.volume.lookup_in_directory(parent, &stage), Ok(Some(object)) if object == root)
+            {
+                let _ = self.remove_staged_tree(root, parent, &stage, now);
             }
             return Err(error);
         }

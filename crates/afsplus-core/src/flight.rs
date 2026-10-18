@@ -516,6 +516,10 @@ pub enum ApiMethod {
     CleanupOrphans = 85,
     CheckpointFreeCountMismatch = 86,
     LookupEntryInDirectory = 87,
+    PublishRestoredObject = 88,
+    CreateRestoreStage = 89,
+    ValidateRestoreStageParent = 90,
+    DiscardRestoreFileStep = 91,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

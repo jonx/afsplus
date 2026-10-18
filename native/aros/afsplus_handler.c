@@ -29,7 +29,9 @@
 #include <proto/dos.h>
 #include <proto/exec.h>
 #include <proto/locale.h>
-#include <proto/security.h>
+#include <proto/execlock.h>
+#include <resources/execlock.h>
+#include <aros/types/spinlock_s.h>
 #include <libraries/security.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -39,6 +41,8 @@
 #include "afsplus_control.h"
 #include "afsplus_packet.h"
 #include "afsplus_trackdisk.h"
+#include "afsplus_security.h"
+#include "afsplus_authority.h"
 
 #ifndef TD_READ64
 #define TD_READ64 (CMD_NONSTD + 15)
@@ -1268,17 +1272,7 @@ static int32_t packet_authorize_policy(void *context, const struct DosPacket *pa
 {
     struct AfsplusArosHandler *handler = context;
     struct ExecBase *SysBase = handler->SysBase;
-    struct SecurityBase *secBase;
-    ULONG owner;
-    if (policy == 0 || packet->dp_Port == NULL
-        || (packet->dp_Port->mp_Flags & PF_ACTION) != PA_SIGNAL
-        || packet->dp_Port->mp_SigTask == NULL) return ERROR_READ_PROTECTED;
-    secBase = (struct SecurityBase *)OpenLibrary((CONST_STRPTR)SECURITYNAME, 0);
-    if (secBase == NULL)
-        return policy == 2 ? 0 : ERROR_READ_PROTECTED;
-    owner = secGetTaskOwner(packet->dp_Port->mp_SigTask);
-    CloseLibrary((struct Library *)secBase);
-    return (owner >> 16) == secROOT_UID ? 0 : ERROR_READ_PROTECTED;
+    return afsplus_aros_authorize_policy(SysBase, packet, policy);
 }
 
 static int32_t packet_authorize_backup(void *context, const struct DosPacket *packet)

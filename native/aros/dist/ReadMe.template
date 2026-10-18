@@ -24,6 +24,7 @@ What is in here
   C/AFSPlusSnapshot            create/list/delete and view local captures
   C/AFSPlusBackup              consistent local volume snapshot capture
   C/AFSPlusRestore             restore a file or directory into a fresh name
+  C/AFSPlusReclaim             bounded private restore-stage maintenance
   C/AFSPlusInfo                what a mounted AFS+ volume is doing
   C/AFSPlusTour                a tour of clones, watches and attributes
   C/AFSPlusClone               clone a file, or copy it if the volume cannot
@@ -58,6 +59,22 @@ ownership; SINGLEUSER declares an administrator domain without that library.
 
 AFSPlusBackup DEVICE captures a registered local snapshot. LIST enumerates
 captures. AFSPlusSnapshot DEVICE VIEW ID [PATH] reads an immutable view.
+AFSPlusReclaim DEVICE DIRECTORY [CURSORFILE [SCAN WORK DEPTH]] performs one
+authorized restore-maintenance step. It finds private retained stages by their
+managed markers, never by their names. Repeat while complete=0; defaults scan
+64 entries, perform 8 object/extent steps, and traverse 64 levels. Cursor files
+must be outside the repaired volume; the default is RAM:AFSPlusReclaim.cursor.
+The command checks and pins the resolved cursor parent directory, so an assign
+or symlink cannot redirect cursor writes into the repaired volume.
+On a stale cursor remove that cursor and restart on a quiescent subtree. An
+interruption retains durable progress; losing the cursor permits another scan.
+blocked>0 reports partial completion and keeps malformed stages private. Select
+a deeper live DIRECTORY when the traversal depth bound is reached. Cursor save
+flushes and closes a private file, then deletes the old cursor and renames the
+complete replacement. A crash in that gap loses only the cursor; rescan safely.
+This command does not inspect or expose
+historical payloads, and it never removes published objects or snapshot data.
+
 AFSPlusRestore DEVICE ID PATH DIRECTORY NEWNAME restores a file or directory
 into a new destination, including supported metadata. Directory operations
 admit at most 4096 nodes, 64 levels and 4 MiB of aggregate names/comments/

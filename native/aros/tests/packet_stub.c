@@ -1248,6 +1248,10 @@ static void blank_medium_format_packets(struct AfsplusArosPacketConfig config)
 
 static uint32_t snapshot_calls;
 static uint32_t snapshot_allow = 1;
+static uint32_t restore_allow = 1;
+static int32_t restore_result;
+static int32_t authorize_restore(void *ctx, const struct DosPacket *packet)
+{ (void)ctx; assert(packet != NULL); return restore_allow ? 0 : ERROR_READ_PROTECTED; }
 static int32_t authorize_backup(void *ctx, const struct DosPacket *packet)
 { (void)ctx; assert(packet != NULL); return snapshot_allow ? 0 : ERROR_READ_PROTECTED; }
 int32_t afsplus_aros_snapshot_create(struct AfsplusAros *f, int64_t s, uint32_t n, uint64_t *out)
@@ -1273,15 +1277,24 @@ int32_t afsplus_aros_snapshot_dir_read(struct AfsplusAros *f, uint64_t d, uint8_
 int32_t afsplus_aros_snapshot_dir_close(struct AfsplusAros *f, uint64_t d)
 { return afsplus_aros_dir_close(f,d); }
 int32_t afsplus_aros_snapshot_restore_file(struct AfsplusAros *f, uint64_t r, uint64_t s, uint64_t d, const uint8_t *name, uint32_t len, int64_t sec, uint32_t ns, uint64_t *out)
-{ (void)f; (void)r; (void)s; (void)d; (void)name; (void)len; (void)sec; (void)ns; *out=71; snapshot_calls++; return 0; }
+{ (void)f; (void)r; (void)s; (void)d; (void)name; (void)len; (void)sec; (void)ns; *out=71; snapshot_calls++; return restore_result; }
 int32_t afsplus_aros_snapshot_restore_tree(struct AfsplusAros *f, uint64_t r, uint64_t s, uint64_t d, const uint8_t *name, uint32_t len, uint32_t nodes, uint32_t depth, uint32_t metadata, int64_t sec, uint32_t ns, uint64_t *out)
 { assert(nodes==4096 && depth==64 && metadata==4194304); return afsplus_aros_snapshot_restore_file(f,r,s,d,name,len,sec,ns,out); }
+int32_t afsplus_aros_restore_reclaim(struct AfsplusAros *f, uint64_t scope,
+    struct AfsplusArosRestoreRecovery *report, int64_t seconds, uint32_t nanos)
+{
+    (void)f; (void)seconds; (void)nanos;
+    assert(scope != 0 && report->struct_size == sizeof(*report));
+    report->flags=AFSPLUS_RESTORE_RECOVERY_DONE;
+    report->scanned=1; report->removed=1; snapshot_calls++;
+    return 0;
+}
 static void snapshot_packets(struct AfsplusArosPacketConfig config)
 {
     struct AfsplusArosPacketContext *ctx = NULL;
     struct DosPacket p; struct AfsplusExtRequest r; uint8_t buffer[64];
     uint64_t original_groups = stub_groups;
-    stub_groups |= AFSPLUS_AROS_GROUP_SNAPSHOTS;
+    stub_groups |= AFSPLUS_AROS_GROUP_SNAPSHOTS | AFSPLUS_AROS_GROUP_RESTORE_RECOVERY;
     config.authorize_backup = authorize_backup;
     config.format = packet_format;
     assert(afsplus_aros_packet_create(&config, &ctx) == 0);
@@ -1316,7 +1329,7 @@ static void snapshot_packets(struct AfsplusArosPacketConfig config)
       assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_READ_PROTECTED);
       assert(snapshot_calls==before); }
     assert(afsplus_aros_packet_destroy(ctx)==0);
-    config.authorize_restore=authorize_backup;
+    config.authorize_restore=authorize_restore;
     assert(afsplus_aros_packet_create(&config,&ctx)==0);
     { struct DosPacket locate; BPTR destination;
       initialize_packet(&locate,ACTION_LOCATE_OBJECT);
@@ -1326,7 +1339,47 @@ static void snapshot_packets(struct AfsplusArosPacketConfig config)
       r.offset[0]=99; r.object[0]=1; r.object[1]=(uint64_t)(uintptr_t)destination;
       r.name0=(const uint8_t *)"restored"; r.name_length[0]=8;
       r.buffer=NULL; r.buffer_size=4194304; r.length=4096; r.offset[1]=64;
+      /* Both authorities are independent and checked before any restore call. */
+      for (uint32_t op=AFSPLUS_EXT_SNAPSHOT_RESTORE_FILE;
+           op<=AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE; ++op) {
+        r.operation=op;
+        for (uint32_t backup=0; backup<=1; ++backup) {
+          for (uint32_t restore=0; restore<=1; ++restore) {
+            uint32_t before=snapshot_calls;
+            snapshot_allow=backup; restore_allow=restore;
+            assert(afsplus_aros_packet_process(ctx,&p)==0);
+            assert(p.dp_Res2 == ((backup && restore) ? 0 : ERROR_READ_PROTECTED));
+            assert(snapshot_calls == before + ((backup && restore) ? 1 : 0));
+          }
+        }
+      }
+      snapshot_allow=1; restore_allow=1;
+      r.operation=AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE;
       assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0 && r.output_value==71);
+      restore_result=AFSPLUS_ERROR_PUBLICATION_UNCERTAIN;
+      assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==AFSPLUS_ERROR_PUBLICATION_UNCERTAIN);
+      restore_result=0;
+      {
+        struct AfsplusArosRestoreRecovery recovery;
+        memset(&recovery,0,sizeof(recovery)); recovery.struct_size=sizeof(recovery);
+        recovery.scan_entries=64; recovery.work_steps=8; recovery.max_depth=64;
+        r.operation=AFSPLUS_EXT_RESTORE_RECLAIM; r.object[0]=(uint64_t)(uintptr_t)destination;
+        r.buffer=(uint8_t *)&recovery; r.buffer_size=sizeof(recovery);
+        snapshot_allow=0; restore_allow=0;
+        { uint32_t before=snapshot_calls;
+          assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_READ_PROTECTED);
+          assert(snapshot_calls==before); }
+        restore_allow=1; /* Reclaim needs RESTORE; it reads no historical data. */
+        assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0);
+        assert(recovery.flags==AFSPLUS_RESTORE_RECOVERY_DONE && recovery.removed==1);
+        r.buffer_size=sizeof(recovery)-1;
+        assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_BAD_NUMBER);
+        r.buffer_size=sizeof(recovery); r.buffer=(uint8_t *)&recovery+1;
+        assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_BAD_NUMBER);
+        snapshot_allow=1;
+      }
+      r.operation=AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE;
+      r.object[0]=1; r.buffer=NULL; r.buffer_size=4194304;
       r.length=0;
       assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_BAD_NUMBER);
       initialize_packet(&locate,ACTION_FREE_LOCK); locate.dp_Arg1=(SIPTR)destination;
@@ -1439,7 +1492,7 @@ int main(void)
     assert(events[3].operation == 'F');
 
     reset_events();
-    initialize_packet(&packet, ACTION_REPLACE_OBJECT);
+    initialize_packet(&packet, AFSPLUS_ACTION_REPLACE_OBJECT);
     packet.dp_Arg1 = (SIPTR)root;
     packet.dp_Arg2 = packet_bstr("old");
     packet.dp_Arg3 = (SIPTR)root;

@@ -819,7 +819,7 @@ fn errno(error: VfsError) -> Errno {
         // told had been written is gone. How much is in the diagnostics
         // report, which is where a person can read a reason rather than a
         // three-letter code.
-        VfsError::WindowLost(_) => Errno::EIO,
+        VfsError::WindowLost(_) | VfsError::PublicationUncertain { .. } => Errno::EIO,
     }
 }
 

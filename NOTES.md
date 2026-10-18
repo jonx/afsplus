@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-10-18 — Repair restore-stage lifetime and qualify actual crash cuts](#2026-10-18--repair-restore-stage-lifetime-and-qualify-actual-crash-cuts)
 - [2026-10-18 — Observe snapshot commands on disposable AROS volumes](#2026-10-18--observe-snapshot-commands-on-disposable-aros-volumes)
 - [2026-10-18 — Pass snapshot admission budgets to AFSSYS automount](#2026-10-18--pass-snapshot-admission-budgets-to-afssys-automount)
 - [2026-10-18 — Build the snapshot client with strict AROS conversions](#2026-10-18--build-the-snapshot-client-with-strict-aros-conversions)
@@ -235,6 +236,51 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+
+## 2026-10-18 — Repair restore-stage lifetime and qualify actual crash cuts
+
+The independent restore review reproduced an empty unmarked stage after a real
+recorded cut. ADR-133 precedes the correction: object and private marker commit
+in one transaction; explicit scoped bounded maintenance reclaims interrupted
+stages without an ordinary-mount sweep. Public restore checks its destination
+parent before mutation. An uncertain final checkpoint or following barrier
+returns error 50001 through the adapter, FFI and DOS transport; prepublication
+I/O errors survive failed cleanup. The public postpublication barrier is retained.
+
+The independent campaign covers 380 actual operation cut points and 33,766
+modeled states (all full-write subsets of the tail and representative tears,
+maximum observed tail 11 writes with explicit budget 12). It checks empty and
+populated private IDs, final historical bytes and metadata, and historical data
+retention. All 121 persistent write failures pass privacy checks. Removing the
+Unicode final-key exclusion or splitting atomic creation makes the regressions
+fail. Busy deletion becomes successful after releasing the view. The evidence is
+`aros-apple-silicon/artifacts/runs/20261018-afs-diagnostics/restore-review-verification.json`.
+
+An identical uncached 4096-byte-block host fixture compared against 593b5f3e:
+130001-byte file reads 441 to 405, writes 103 to 95, flushes 22 to 20; five-object
+130140-byte tree reads 1292 to 1107, writes 248 to 190, flushes 61 to 45. Debug
+process peak RSS was 6,455,296 versus 6,684,672 bytes, including the memory device;
+CPU was 0.03 user seconds for both combined fixtures. These are modeled I/O costs,
+not storage timings or heap bounds. The comparison is retained in
+`aros-apple-silicon/artifacts/afs-atomic-owner-20261018/restore-followup/io-comparison.json`.
+Non-snapshot stat adds no guard block I/O: three reads, zero writes or flushes,
+matching the raw orphan/metadata path even with 32 external user attributes.
+Malformed child markers stay inaccessible while sibling enumeration continues.
+
+The handler's authority query only opens an already loaded security library,
+using a temporary protected reference before normal Open/Close hooks. It never
+asks the loader to fetch security.library through its own SYS handler. Tests
+exercise missing library, current/revoked ownership, valid sender, independent
+BACKUP/RESTORE decisions and publication-uncertain transport. Public SDK handler
+objects compile for AArch64 and m68k, including a direct binding of the public
+security vector whose generated headers are absent from those SDKs.
+
+Proposed ADR-132 records its required amendments to the snapshot authority and
+mount contracts and integration package/slot decisions; D-127 already fixes
+home placement. SAFE7 and Waiting on John name those prerequisites. No boot-root
+implementation or internal-volume snapshot activation is authorized by these
+corrections. Native qualification is coordinated with Claude on an identified
+installed generation and disposable fdsk storage after host and VM checks.
 
 ## 2026-10-18 — Observe snapshot commands on disposable AROS volumes
 

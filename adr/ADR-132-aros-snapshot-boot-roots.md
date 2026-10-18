@@ -2,11 +2,13 @@
 
 Status: Proposed
 
-Related: ADR-061, ADR-071, ADR-073, ADR-074, ADR-125, ADR-128, ADR-131
+Related: ADR-061, ADR-071, ADR-073, ADR-074, ADR-075, ADR-125, ADR-128, ADR-131
+Proposed amendments: ADR-071, ADR-073, ADR-075, ADR-125; integration D-126, D-039
 
 <!-- toc -->
 
 - [Context](#context)
+- [Required decision changes](#required-decision-changes)
 - [Proposed decision](#proposed-decision)
   - [System roots and mutable data](#system-roots-and-mutable-data)
   - [Adoption into a candidate namespace](#adoption-into-a-candidate-namespace)
@@ -37,6 +39,24 @@ Writing this proposal gives no permission to activate snapshots, format or
 migrate AFSSYS. Each destructive internal-storage operation needs John's
 confirmation, after host-image and VM proofs.
 
+## Required decision changes
+
+Acceptance must explicitly amend these existing contracts; this proposal does
+not silently override them:
+
+| Contract | Change required on acceptance |
+|---|---|
+| ADR-071 | Persistent boot references supplement transient reader pins; historical adoption gains a specified ownership lifetime. |
+| ADR-073 | Define mount-owned boot-view limits and bounded reference/adoption work in addition to administrative snapshot limits. |
+| ADR-075 | Trusted boot admission permits ordinary SYS reads without per-packet BACKUP authority; administrative historical operations retain revocable authorization. |
+| ADR-125 | Extend the administrative-only AROS snapshot view contract with an ordinary DOS boot view and a separate admission path. |
+| Integration D-126 | Build and verify packages into a candidate namespace instead of updating the selected read-only SYS tree. Preserve package manifest and signature admission. |
+| Integration D-039 | Bind each selectable payload slot to a retained AFS root; define retirement across the two independent durable domains without changing fixed boot substrates. |
+
+The format record, mount/API record and loader handoff record must precede
+implementation. John's acceptance must cover both the filesystem changes and
+the integration decisions. D-127's home placement remains binding.
+
 ## Proposed decision
 
 ### System roots and mutable data
@@ -57,8 +77,10 @@ paths and object-ID operations cannot escape the selected system directory.
 The present VIEW command is a historical stream reader and does not implement
 this mount.
 
-Keep mutable ENVARC, user homes and service secrets in explicitly selected
-writable namespaces outside the selected immutable system directory. Their
+Keep mutable ENVARC and service secrets in explicitly selected writable
+namespaces outside the selected immutable system directory. User homes follow
+integration D-127: `USERS:` outside `SYS:`, through per-user `HOME:`; their
+placement is decided and is not reopened by this proposal. Their
 state is outside system rollback. Boot Settings capture may use its existing
 RAM-copy fallback when SYS is read-only. Verify the complete Startup-Sequence
 and every system writer against that boundary before native admission.
@@ -177,6 +199,6 @@ Planning estimate for one engineer, after agreement and prerequisite access:
 
 This is roughly four to seven working weeks, excluding review waits, native
 access and any separately authorized volume migration. The episode format,
-mutable ENVARC/home placement, reference capacity, acknowledgement authority
+mutable ENVARC/service-secret placement, reference capacity, acknowledgement authority
 and existing loader integration must be resolved before accepting the plan.
 No implementation or boot-root experiment is included in the present mission.

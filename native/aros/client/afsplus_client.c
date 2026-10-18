@@ -681,3 +681,16 @@ LONG afsplus_client_snapshot_restore_tree(struct MsgPort *port, uint64_t reader,
     if (error == 0) *object = request.output_value;
     return error;
 }
+
+LONG afsplus_client_restore_reclaim(struct MsgPort *port, BPTR scope,
+    struct AfsplusArosRestoreRecovery *report)
+{
+    struct AfsplusExtRequest request;
+    if (scope == BNULL || report == NULL) return ERROR_REQUIRED_ARG_MISSING;
+    if (afsplus_client_lock_port(scope) != port) return ERROR_RENAME_ACROSS_DEVICES;
+    begin(&request, AFSPLUS_EXT_RESTORE_RECLAIM);
+    request.object[0] = (uint64_t)(uintptr_t)scope;
+    request.buffer = report;
+    request.buffer_size = sizeof(*report);
+    return afsplus_client_send(port, &request);
+}

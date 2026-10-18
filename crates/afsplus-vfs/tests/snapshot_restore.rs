@@ -325,7 +325,14 @@ fn final_name_never_aliases_staging_name_under_unicode_casefold() {
         .read_directory_page(OBJECT_ROOT, None, 64)
         .unwrap()
         .entries;
-    assert!(entries.iter().all(|entry| !entry.name.ends_with(b"-01")));
+    let final_entry = entries
+        .iter()
+        .find(|entry| entry.child_id == restored)
+        .unwrap();
+    assert_eq!(final_entry.name, name.as_bytes());
+    // This success assertion verifies spelling and metadata. The independently
+    // recorded crash campaign in restore_powercut additionally witnesses every
+    // private durable stage key; its filter-removal control must fail.
 }
 #[test]
 fn every_restore_flush_failure_leaves_final_absent_or_fully_preserved_after_remount() {

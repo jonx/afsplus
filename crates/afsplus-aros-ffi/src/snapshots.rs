@@ -1,5 +1,90 @@
 //! C snapshot operations; native packet callers pass host authorization first.
 use super::*;
+
+#[repr(C)]
+pub struct AfsplusArosRestoreRecovery {
+    pub struct_size: u32,
+    pub scan_entries: u32,
+    pub work_steps: u32,
+    pub max_depth: u32,
+    pub cursor_size: u32,
+    pub flags: u32,
+    pub scanned: u32,
+    pub removed: u32,
+    pub advanced: u32,
+    pub blocked: u32,
+    pub blocked_object: u64,
+    pub cursor: [u8; afsplus_vfs::RESTORE_RECOVERY_CURSOR_MAX],
+}
+
+#[no_mangle]
+pub extern "C" fn afsplus_aros_restore_reclaim(
+    fs: *mut AfsplusAros,
+    destination: u64,
+    report: *mut AfsplusArosRestoreRecovery,
+    seconds: i64,
+    nanos: u32,
+) -> i32 {
+    bridge_status(fs, || {
+        reclaim_request(fs, destination, report, seconds, nanos)
+    })
+}
+fn reclaim_request(
+    fs: *mut AfsplusAros,
+    destination: u64,
+    report: *mut AfsplusArosRestoreRecovery,
+    seconds: i64,
+    nanos: u32,
+) -> Result<(), ArosError> {
+    require_output(report)?;
+    // Read only the small input header and copy a bounded cursor once.
+    // Never place the 24KiB transport value on the handler's stack.
+    let size = unsafe { (*report).struct_size };
+    if size < std::mem::size_of::<AfsplusArosRestoreRecovery>() as u32 {
+        return Err(ArosError::BadNumber);
+    }
+    let (scan, work, depth, len) = unsafe {
+        (
+            (*report).scan_entries,
+            (*report).work_steps,
+            (*report).max_depth,
+            (*report).cursor_size as usize,
+        )
+    };
+    if len > afsplus_vfs::RESTORE_RECOVERY_CURSOR_MAX {
+        return Err(ArosError::BadNumber);
+    }
+    let input = unsafe {
+        std::slice::from_raw_parts(std::ptr::addr_of!((*report).cursor).cast::<u8>(), len)
+    }
+    .to_vec();
+    let result = bridge_mut(fs)?.adapter.restore_reclaim(
+        optional_lock(destination),
+        &input,
+        afsplus_vfs::RestoreRecoveryLimits {
+            scan_entries: scan as usize,
+            work_steps: work as usize,
+            max_depth: depth as usize,
+        },
+        timestamp(seconds, nanos)?,
+    )?;
+    unsafe {
+        (*report).cursor_size = result.cursor.len() as u32;
+        (*report).flags = u32::from(result.done);
+        (*report).scanned = result.scanned;
+        (*report).removed = result.removed;
+        (*report).advanced = result.advanced;
+        (*report).blocked = result.blocked.min(u32::MAX as u64) as u32;
+        (*report).blocked_object = result.blocked_object;
+        std::ptr::copy_nonoverlapping(
+            result.cursor.as_ptr(),
+            std::ptr::addr_of_mut!((*report).cursor).cast::<u8>(),
+            result.cursor.len(),
+        );
+    }
+    Ok(())
+}
+
 fn snapshot_kind(kind: afsplus_vfs::NodeKind) -> Result<u32, ArosError> {
     match kind {
         afsplus_vfs::NodeKind::File => Ok(AFSPLUS_AROS_KIND_FILE),
@@ -317,4 +402,20 @@ pub extern "C" fn afsplus_aros_snapshot_restore_tree(
         )?;
         write_output(out, id)
     })
+}
+
+#[cfg(test)]
+mod recovery_prefix_tests {
+    use super::*;
+    #[test]
+    fn short_four_byte_prefix_refused_before_other_fields_or_outputs() {
+        let mut size = Box::new(4u32);
+        let pointer = (&mut *size as *mut u32).cast::<AfsplusArosRestoreRecovery>();
+        assert!(matches!(
+            reclaim_request(std::ptr::null_mut(), 0, pointer, 0, 0),
+            Err(ArosError::BadNumber)
+        ));
+        assert_eq!(*size, 4);
+        assert_eq!(std::mem::size_of::<AfsplusArosRestoreRecovery>(), 24624);
+    }
 }

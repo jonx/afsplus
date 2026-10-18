@@ -195,6 +195,38 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
+    /// Stage the initial managed marker alongside a new object record.
+    pub(super) fn create_restore_attributes(
+        &mut self,
+        tx: &mut TxAllocator,
+        object_id: u64,
+        root: u64,
+        generation: u64,
+        writes: &mut Vec<(u64, Vec<u8>)>,
+    ) -> Result<AttributeRef, CoreError> {
+        let marker = root.to_le_bytes();
+        let bytes = encode_attribute_set(&[("system.restore.stage", marker.as_slice())])
+            .map_err(|_| CoreError::InvalidMetadata("restore marker attribute out of range"))?;
+        let count = segment_count(bytes.len() as u32, self.dev.block_size()).ok_or(
+            CoreError::InvalidMetadata("restore marker attribute out of range"),
+        )?;
+        let first_block = stage_chain(
+            &mut self.dev,
+            tx,
+            &ATTRIBUTE_CHAIN,
+            object_id,
+            (ATTRIBUTE_SET_FORMAT, ATTRIBUTE_SET_VERSION, &bytes),
+            count,
+            generation,
+            writes,
+        )?;
+        Ok(AttributeRef {
+            first_block,
+            total_len: bytes.len() as u32,
+            segment_count: count,
+        })
+    }
+
     /// Remove the internal restore marker inside the namespace publication transaction.
     pub(super) fn publish_restore_attributes(
         &mut self,

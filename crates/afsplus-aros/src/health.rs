@@ -113,7 +113,7 @@ impl HealthLog {
     /// results such as a missing object are not health events.
     pub fn record(&mut self, error: ArosError) {
         let kind = match error {
-            ArosError::Unknown => HealthEventKind::DeviceError,
+            ArosError::Unknown | ArosError::PublicationUncertain => HealthEventKind::DeviceError,
             ArosError::NotDosDisk => HealthEventKind::Corruption,
             ArosError::DiskFull => HealthEventKind::NoSpace,
             _ => return,

@@ -9,6 +9,7 @@ use afsplus_aros::ArosError;
 fn header_name(error: ArosError) -> &'static str {
     match error {
         ArosError::Unknown => "ERROR_UNKNOWN",
+        ArosError::PublicationUncertain => "AFSPLUS_ERROR_PUBLICATION_UNCERTAIN",
         ArosError::NoFreeStore => "ERROR_NO_FREE_STORE",
         ArosError::BadNumber => "ERROR_BAD_NUMBER",
         ArosError::ObjectInUse => "ERROR_OBJECT_IN_USE",
@@ -34,8 +35,9 @@ fn header_name(error: ArosError) -> &'static str {
     }
 }
 
-const ALL: [ArosError; 23] = [
+const ALL: [ArosError; 24] = [
     ArosError::Unknown,
+    ArosError::PublicationUncertain,
     ArosError::NoFreeStore,
     ArosError::BadNumber,
     ArosError::ObjectInUse,

@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 
-# Build the AFS+ handler and its four programs for one platform profile and
+# Build the AFS+ handler and its programs for one platform profile and
 # lay them out as a drawer Pkg can publish: L/, C/, Devs/DOSDrivers/, a ReadMe
 # a person can act on, the ABI audit, the build profile and SHA256SUMS.
 #
@@ -234,6 +234,7 @@ build_program() {
 for entry in \
     "AFSPlusBackup native/aros/tools/afsplus_backup.c native/aros/client/afsplus_client.c" \
     "AFSPlusRestore native/aros/tools/afsplus_restore.c native/aros/client/afsplus_client.c" \
+    "AFSPlusReclaim native/aros/tools/afsplus_reclaim.c native/aros/client/afsplus_client.c" \
     "AFSPlusSnapshot native/aros/tools/afsplus_snapshot.c native/aros/client/afsplus_client.c" \
     "AFSPlusInfo native/aros/tools/afsplus_info.c native/aros/client/afsplus_client.c" \
     "AFSPlusTour native/aros/tools/afsplus_tour.c native/aros/client/afsplus_client.c" \

@@ -118,14 +118,13 @@ done:
         fprintf(stderr, "AFSPlusRestore: %s: DOS error %ld\n", phase, (long)error);
         if (published)
             fprintf(stderr, "The restored destination %s in %s was published; closing its snapshot reader failed.\n", argv[5], argv[4]);
-        else if (attempted && (error == ERROR_NOT_A_DOS_DISK || error == ERROR_UNKNOWN))
+        else if (attempted && error == AFSPLUS_ERROR_PUBLICATION_UNCERTAIN)
         {
-            char stage[80];
-            snprintf(stage, sizeof stage, ".afsplus-restore-%016llx-%016llx-*",
-                (unsigned long long)reader, (unsigned long long)object);
-            fprintf(stderr, "Publication or cleanup is uncertain. Inspect destination %s and staged files matching %s in %s before retry.\n",
-                argv[5], stage, argv[4]);
+            fprintf(stderr, "Publication may have committed. Remount and inspect destination %s in %s before deciding whether to retry.\n",
+                argv[5], argv[4]);
         }
+        else if (attempted && (error == ERROR_UNKNOWN || error == ERROR_NOT_A_DOS_DISK || error == ERROR_DISK_FULL))
+            fprintf(stderr, "Run AFSPlusReclaim on destination directory %s to reclaim any retained private restore stages.\n", argv[4]);
     }
     else Printf((CONST_STRPTR)"AFSPlusRestore: restored %s in %s\n", argv[5], argv[4]);
     return error == 0 ? RETURN_OK : RETURN_FAIL;

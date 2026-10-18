@@ -141,19 +141,39 @@ impl BlockDevice for ProbeBackend {
 }
 
 #[test]
-fn actual_copy_and_cleanup_failure_retains_a_private_stage_after_remount() {
-    let mut witnessed = false;
-    for at in 8..150 {
-        let control = CONTROL.with(Clone::clone);
+fn every_actual_write_failure_checks_empty_and_nonempty_stage_ids_after_remount() {
+    let control = CONTROL.with(Clone::clone);
+    control.armed.set(false);
+    let (vfs, _, _, _, _) = fixture();
+    let original = vfs.into_volume().checkpoint().next_object_id;
+    // Measure this real workload once; every issued write receives a failure
+    // case. The failure persists during cleanup, rather than disappearing.
+    let (mut v, reader, source, _, _) = fixture();
+    control.kind.set(2);
+    control.at.set(usize::MAX);
+    control.count.set(0);
+    control.armed.set(true);
+    v.snapshot_restore_file(reader, source, OBJECT_ROOT, "Final", Timespec::default())
+        .unwrap();
+    control.armed.set(false);
+    let writes = control.count.get();
+    assert!(writes > 20);
+    let mut private = 0;
+    let mut empty = 0;
+    let mut nonempty = 0;
+    for at in 1..=writes {
         control.armed.set(false);
-        let (mut v, reader, source, _, _) = fixture();
+        let (mut v, reader, source, bytes, metadata) = fixture();
         control.kind.set(2);
         control.at.set(at);
         control.count.set(0);
+        control.hit.set(false);
         control.armed.set(true);
         let result =
             v.snapshot_restore_file(reader, source, OBJECT_ROOT, "Final", Timespec::default());
         control.armed.set(false);
+        assert!(control.hit.get(), "write {at}/{writes} was not reached");
+        assert!(result.is_err(), "injected write {at} did not fail restore");
         let limits = SnapshotWorkLimits {
             max_edit_records: 4096,
             max_views: 8,
@@ -166,92 +186,83 @@ fn actual_copy_and_cleanup_failure_retains_a_private_stage_after_remount() {
         )
         .unwrap()
         .into_volume();
-        let entries = volume
-            .read_directory_page(OBJECT_ROOT, None, 64)
-            .unwrap()
-            .entries;
-        let stage = entries
-            .into_iter()
-            .find(|e| e.name.starts_with(b".afsplus-restore-"));
-        let Some(stage) = stage else {
-            continue;
-        };
-        let object = stage.child_id;
-        let mut raw = [0; 4096];
-        let n = volume.read_file_at(object, 0, &mut raw).unwrap();
-        if !raw[..n].iter().any(|b| *b != 0) {
-            continue;
+        let next = volume.checkpoint().next_object_id;
+        let mut allocated = Vec::new();
+        for object in original..next {
+            if let Some(stat) = volume.visible_metadata(object).unwrap() {
+                allocated.push((object, stat.size_bytes));
+            }
         }
-        assert!(result.is_err());
-        assert_eq!(
-            volume.attribute(object, "system.restore.stage").unwrap(),
-            Some(object.to_le_bytes().to_vec())
-        );
         let mut v =
             Vfs::mount_with_snapshot_limits(volume.into_device(), MountOptions::default(), limits)
                 .unwrap();
-        assert_eq!(v.stat(object), Err(VfsError::NotFound));
-        assert_eq!(
-            v.open_file(object, afsplus_vfs::AccessMode::ReadOnly),
-            Err(VfsError::NotFound)
-        );
-        assert_eq!(
-            v.lookup(OBJECT_ROOT, std::str::from_utf8(&stage.name).unwrap()),
-            Err(VfsError::NotFound)
-        );
-        assert_eq!(
-            v.set_protection(object, 0, Timespec::default()),
-            Err(VfsError::NotFound)
-        );
-        assert_eq!(
-            v.set_attributes(
-                object,
-                &[("system.restore.stage", None)],
-                AttributeWriteMode::Upsert,
-                Timespec::default()
-            ),
-            Err(VfsError::NotFound)
-        );
-        assert_eq!(
-            v.clone_file(object, OBJECT_ROOT, "Escaped", Timespec::default()),
-            Err(VfsError::NotFound)
-        );
-        assert_eq!(
-            v.rename(
-                OBJECT_ROOT,
-                std::str::from_utf8(&stage.name).unwrap(),
-                OBJECT_ROOT,
-                "Escaped",
-                false,
-                Timespec::default()
-            ),
-            Err(VfsError::NotFound)
-        );
-        assert_eq!(
-            v.unlink_file(
-                OBJECT_ROOT,
-                std::str::from_utf8(&stage.name).unwrap(),
-                Timespec::default()
-            ),
-            Err(VfsError::NotFound)
-        );
-        let h = v.open_directory(OBJECT_ROOT).unwrap();
-        let mut cookie = 0;
-        let mut names = Vec::new();
-        loop {
-            let page = v.read_directory(h, cookie, 1).unwrap();
-            names.extend(page.entries.into_iter().map(|e| e.name));
-            if page.eof {
-                break;
+        let published = match v.lookup(OBJECT_ROOT, "Final") {
+            Ok(object) => {
+                let stat = v.stat(object).unwrap();
+                assert_eq!(
+                    (stat.created, stat.modified, stat.changed),
+                    (metadata.created, metadata.modified, metadata.changed)
+                );
+                assert_eq!(
+                    (stat.owner_uid, stat.owner_gid),
+                    (metadata.owner_uid, metadata.owner_gid)
+                );
+                assert_eq!(v.comment(object).unwrap(), "saved café");
+                assert_eq!(
+                    v.attribute(object, "user.test").unwrap(),
+                    Some(b"opaque\0value".to_vec())
+                );
+                let file = v
+                    .open_file(object, afsplus_vfs::AccessMode::ReadOnly)
+                    .unwrap();
+                let mut actual = vec![0; bytes.len() + 1];
+                assert_eq!(v.read(file, 0, &mut actual).unwrap(), bytes.len());
+                assert_eq!(&actual[..bytes.len()], bytes.as_slice());
+                v.close(file).unwrap();
+                Some(object)
             }
-            assert_ne!(page.next_cookie, cookie);
-            cookie = page.next_cookie;
+            Err(VfsError::NotFound) => None,
+            other => panic!("unexpected final state at write{at}: {other:?}"),
+        };
+        for (object, size) in allocated {
+            if Some(object) != published {
+                private += 1;
+                empty += usize::from(size == 0);
+                nonempty += usize::from(size != 0);
+                assert_eq!(
+                    v.stat(object),
+                    Err(VfsError::NotFound),
+                    "direct ID leak at write {at}, id{object}, size{size}"
+                );
+                assert_eq!(
+                    v.open_file(object, afsplus_vfs::AccessMode::ReadOnly),
+                    Err(VfsError::NotFound)
+                );
+                assert_eq!(
+                    v.create_file(object, "Injected", Timespec::default()),
+                    Err(VfsError::NotFound)
+                );
+                assert_eq!(
+                    v.set_protection(object, 0, Timespec::default()),
+                    Err(VfsError::NotFound)
+                );
+                assert_eq!(
+                    v.clone_file(object, OBJECT_ROOT, "Escaped", Timespec::default()),
+                    Err(VfsError::NotFound)
+                );
+            }
         }
-        assert_eq!(names, vec![b"Captured".to_vec()]);
-        witnessed = true;
-        break;
+        let h = v.open_directory(OBJECT_ROOT).unwrap();
+        let page = v.read_directory(h, 0, 64).unwrap();
+        assert!(page.eof);
+        assert!(page
+            .entries
+            .iter()
+            .all(|entry| entry.name == b"Captured" || entry.name == b"Final"));
+        v.close(h).unwrap();
     }
-    assert!(witnessed, "fixture must reach a real nonempty failed stage");
+    assert!(private > 0 && empty > 0 && nonempty > 0);
+    println!("PASS all{writes} persistent write failures: {private} private ID checks, {empty} empty, {nonempty} nonempty");
 }
 
 #[test]
@@ -404,4 +415,123 @@ fn malformed_root_identifiers_fail_closed_but_a_deleted_allocated_root_is_inacti
     assert_eq!(v.read(h, 0, &mut bytes).unwrap(), 7);
     assert_eq!(&bytes, b"payload");
     assert!(v.attribute_names(object).unwrap().is_empty());
+}
+
+#[test]
+fn malformed_child_marker_does_not_make_healthy_siblings_unlistable() {
+    let (v, _, _, _, _) = fixture();
+    let mut volume = v.into_volume();
+    let bad = volume
+        .create_directory(OBJECT_ROOT, "A-malformed", Timespec::default())
+        .unwrap();
+    volume
+        .set_attributes(
+            bad,
+            &[("system.restore.stage", Some(&[1, 2, 3]))],
+            AttributeWriteMode::Create,
+            Timespec::default(),
+        )
+        .unwrap();
+    volume
+        .create_file_in_root("B-visible", b"healthy", Timespec::default())
+        .unwrap();
+    let limits = SnapshotWorkLimits {
+        max_edit_records: 4096,
+        max_views: 8,
+        reclaim_records: 64,
+    };
+    let mut v =
+        Vfs::mount_with_snapshot_limits(volume.into_device(), MountOptions::default(), limits)
+            .unwrap();
+    assert!(matches!(v.stat(bad), Err(VfsError::Corrupt(_))));
+    assert!(matches!(v.open_directory(bad), Err(VfsError::Corrupt(_))));
+    assert!(matches!(
+        v.lookup(OBJECT_ROOT, "A-malformed"),
+        Err(VfsError::Corrupt(_))
+    ));
+    assert!(matches!(
+        v.create_file(bad, "Injected", Timespec::default()),
+        Err(VfsError::Corrupt(_))
+    ));
+    let handle = v.open_directory(OBJECT_ROOT).unwrap();
+    let first = v.read_directory(handle, 0, 1).unwrap();
+    assert_eq!(
+        first
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .collect::<Vec<_>>(),
+        vec![b"B-visible".to_vec()]
+    );
+    assert!(!first.eof);
+    let second = v.read_directory(handle, first.next_cookie, 1).unwrap();
+    assert_eq!(
+        second
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .collect::<Vec<_>>(),
+        vec![b"Captured".to_vec()]
+    );
+    assert!(second.eof);
+    v.close(handle).unwrap();
+}
+
+#[test]
+fn nonsnapshot_stat_does_not_read_restore_marker_attributes() {
+    use afsplus_block::TraceBackend;
+    let mut image = Inner::new(4096, 4096);
+    afsplus_core::mkfs(
+        &mut image,
+        &MkfsParams {
+            uuid: [0x86; 16],
+            label: "NoSnapshotGuard".into(),
+            region_size: 512,
+            reclaim_caps: Default::default(),
+            log_slots: 8,
+            shared_extents: true,
+            data_policy: true,
+            name_policy: NamePolicy::Insensitive,
+            timestamp: Timespec::default(),
+        },
+    )
+    .unwrap();
+    let mut volume = afsplus_core::mount_with_options(image, MountOptions::default()).unwrap();
+    let file = volume
+        .create_file_in_root("Ordinary", b"live", Timespec::default())
+        .unwrap();
+    let keys: Vec<_> = (0..32).map(|n| format!("user.inventory-{n:02}")).collect();
+    let value = [42u8; 128];
+    let attributes: Vec<_> = keys
+        .iter()
+        .map(|key| (key.as_str(), Some(value.as_slice())))
+        .collect();
+    volume
+        .set_attributes(
+            file,
+            &attributes,
+            AttributeWriteMode::Create,
+            Timespec::default(),
+        )
+        .unwrap();
+    let image = volume.into_device();
+    let mut core =
+        afsplus_core::mount_with_options(TraceBackend::new(image.clone()), MountOptions::default())
+            .unwrap();
+    core.device_mut().reset();
+    assert!(!core.orphan_object(file).unwrap());
+    core.visible_metadata(file).unwrap().unwrap();
+    let expected = core.device_mut().stats();
+    let mut core =
+        afsplus_core::mount_with_options(TraceBackend::new(image), MountOptions::default())
+            .unwrap();
+    core.device_mut().reset();
+    let mut vfs = Vfs::new(core);
+    assert_eq!(vfs.stat(file).unwrap().size, 4);
+    let actual = vfs.into_volume().into_device().stats();
+    assert_eq!(
+        actual, expected,
+        "disabled snapshots must add no attribute-guard block I/O"
+    );
+    println!("PASS nonsnapshot stat I/O equals core orphan+metadata path: reads={} bytes={} writes={} flushes={}",actual.reads,actual.bytes_read,actual.writes,actual.flushes);
 }
