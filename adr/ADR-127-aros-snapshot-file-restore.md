@@ -1,7 +1,7 @@
 # ADR-127: Restore a snapshot file into an explicit fresh destination
 
 Status: Accepted
-Amended by: ADR-128, ADR-129, ADR-133
+Amended by: ADR-128, ADR-129, ADR-133, ADR-136
 Amends: ADR-071, ADR-077, ADR-119, ADR-125
 
 ## Context
@@ -34,8 +34,7 @@ policies independently. Each defaults to DENY. ROOT queries security.library
 and admits the current sender's root UID. SINGLEUSER additionally permits
 admission without that library in an explicitly configured administrator
 trust domain. The sender's reply port must be a signal port with a task.
-No request boolean grants authority. The opening task can still close its
-reader after revocation; no other task can close it.
+No request boolean grants authority. Close remains permitted after revocation.
 
 Local backup captures a registered volume snapshot. LIST and DELETE use the
 same historical authority. Restoring a regular file names its snapshot, source

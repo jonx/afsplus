@@ -870,8 +870,9 @@ security.library's current task owner at admission; SINGLEUSER admits a
 configured administrator trust domain when that library is absent; ANYONE admits
 every local task without a query
 ([ADR-135](../adr/ADR-135-anyone-snapshot-policy.md)), and is what AFSSYS
-selects. A signal reply port with a task is required. The task that opened a reader or snapshot directory can close it
-after revocation; no other task can. The handler admits only an already loaded security.library 45.17+ service
+selects. A signal reply port with a task is required. A reader or snapshot directory serves only the task that opened it,
+which can close it after revocation
+([ADR-136](../adr/ADR-136-snapshot-handle-ownership-and-stage-bounds.md)). The handler admits only an already loaded security.library 45.17+ service
 with the permanent, non-expungeable lifetime of
 [ADR-134](../adr/ADR-134-loaded-aros-authority-lifetime.md). Unknown major versions
 or older revisions fail closed, even under SINGLEUSER when a library is present.

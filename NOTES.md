@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-10-18 — Second review pass over snapshots, restore and their commands](#2026-10-18--second-review-pass-over-snapshots-restore-and-their-commands)
 - [2026-10-18 — Close the restore review findings left open](#2026-10-18--close-the-restore-review-findings-left-open)
 - [2026-10-18 — Remove the temporary authority pin before native testing](#2026-10-18--remove-the-temporary-authority-pin-before-native-testing)
 - [2026-10-18 — Repair restore-stage lifetime and qualify actual crash cuts](#2026-10-18--repair-restore-stage-lifetime-and-qualify-actual-crash-cuts)
@@ -238,6 +239,36 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+
+## 2026-10-18 — Second review pass over snapshots, restore and their commands
+
+Four independent reviews read the VFS restore code, the handler boundary, the
+client and commands, and backup with the AFSSYS policy. Findings confirmed by
+running them were fixed (ADR-136):
+
+- Only close checked a snapshot handle's owner. Lookup, stat, read, directory
+  read and restoration accepted any admitted task, which under ANYONE is every
+  task; a second task could advance another's directory cursor and silently
+  thin its backup. Every reader operation now checks the opening task.
+- A snapshot taken after a failed restore captured the private stage, listed it
+  and published the unfinished copy when its parent was restored. Snapshot
+  views now keep such stages private.
+- Tree restoration accepted depths that reclamation can never reach, and a
+  captured attribute set near 64 KiB failed after staging started. Both are
+  refused before writing. An unreadable marker blocks only its entry.
+- Snapshot listings on a Latin-1 mount stopped at a name Latin-1 cannot spell;
+  they return UTF-8, as live listings do. A full reader budget reports
+  ERROR_NO_FREE_STORE.
+- AFSPlusSnapshot parsed ids with base detection (`DELETE 010` deleted snapshot
+  8). Ids are decimal only. VIEW, LIST and the cross-volume copy honour Ctrl-C.
+  A created id that cannot be written is an error. Usage and missing-volume
+  failures say what went wrong, and restore suggests reclamation after any
+  failure past admission.
+
+The three VFS regressions fail on the previous code. Backup in full-preservation
+mode is unsupported for AFS+ volumes (attribute inventory is not implemented);
+recovery-mode backup works. That gap and the absence of an upper bound on the
+Control snapshot budgets remain open.
 
 ## 2026-10-18 — Close the restore review findings left open
 

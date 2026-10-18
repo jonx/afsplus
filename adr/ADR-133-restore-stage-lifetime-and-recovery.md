@@ -1,6 +1,7 @@
 # ADR-133: Create private restore stages atomically and reclaim them explicitly
 
 Status: Accepted
+Amended by: ADR-136
 Amends: ADR-127, ADR-128, ADR-130
 
 ## Decision
@@ -20,9 +21,7 @@ work and depth budgets per call. It never runs an exhaustive scan at mount.
 The resumable cursor binds the volume, scope and checkpoint generation; a stale
 cursor requires a safe restart. Persist cursor files outside the repaired volume
 so saving a cursor cannot invalidate it. Concurrent modifications can require a
-restart: the maintenance tool restarts a fresh scan a bounded number of times,
-then stops and reports that the subtree kept changing. Maintenance of a
-quiescent subtree is the supported completion path.
+restart; maintenance of a quiescent subtree is the supported completion path.
 
 Only an exact active root marker and matching descendant markers permit reclaim.
 Validate the parent entry and expected object identifier before each mutation.

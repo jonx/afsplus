@@ -1,7 +1,7 @@
 # ADR-125: Admit historical operations through the AROS host authority
 
 Status: Accepted
-Amended by: ADR-127, ADR-134, ADR-135
+Amended by: ADR-127, ADR-134, ADR-135, ADR-136
 Amends: ADR-075
 
 ## Context
@@ -39,8 +39,7 @@ Snapshot capabilities report supported semantics separately from authority.
 
 Reader identifiers are scoped to the mount and bounded by the configured
 reader budget. Opening a reader pins its snapshot; explicit close releases
-that lease. A reader and each snapshot directory belong to the task that
-opened them: only that task closes them, with or without current authority. Deletion of an open snapshot reports busy. Teardown releases all
+that lease. Deletion of an open snapshot reports busy. Teardown releases all
 leases. There is no implicit expiry or deferred deletion.
 
 ## API and resource consequences

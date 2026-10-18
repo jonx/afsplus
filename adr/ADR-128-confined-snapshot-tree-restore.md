@@ -1,7 +1,7 @@
 # ADR-128: Publish a restored snapshot tree through one fresh directory
 
 Status: Accepted
-Amended by: ADR-129, ADR-133
+Amended by: ADR-129, ADR-133, ADR-136
 Amends: ADR-127
 
 ## Context

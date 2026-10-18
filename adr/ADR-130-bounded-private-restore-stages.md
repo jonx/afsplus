@@ -1,7 +1,7 @@
 # ADR-130: Guard restore stages through bounded per-object metadata
 
 Status: Accepted
-Amended by: ADR-133
+Amended by: ADR-133, ADR-136
 Supersedes: ADR-129
 
 ## Decision
