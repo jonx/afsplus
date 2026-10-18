@@ -2,3 +2,5 @@
 /fuzz/target
 /build
 *.img
+
+/artifacts/

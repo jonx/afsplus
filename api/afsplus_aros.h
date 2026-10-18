@@ -18,14 +18,14 @@
 extern "C" {
 #endif
 
-#define AFSPLUS_AROS_ABI_VERSION UINT32_C(1)
+#define AFSPLUS_AROS_ABI_VERSION UINT32_C(2)
 
 /* Additive growth inside ABI version 1. The revision counts the entry-point
  * groups a library carries; every revision keeps all earlier functions and
  * structure layouts. A caller built against a newer header asks
  * afsplus_aros_interface() before it calls a function of a later group and
  * treats a missing group as ERROR_ACTION_NOT_KNOWN. */
-#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(20)
+#define AFSPLUS_AROS_INTERFACE_REVISION UINT32_C(21)
 
 #define AFSPLUS_AROS_GROUP_BASE UINT64_C(0x1)
 #define AFSPLUS_AROS_GROUP_INTERFACE_QUERY UINT64_C(0x2)
@@ -47,6 +47,7 @@ extern "C" {
 #define AFSPLUS_AROS_GROUP_COMMIT UINT64_C(0x20000)
 #define AFSPLUS_AROS_GROUP_PATHS UINT64_C(0x40000)
 #define AFSPLUS_AROS_GROUP_FORMAT UINT64_C(0x80000)
+#define AFSPLUS_AROS_GROUP_SNAPSHOTS UINT64_C(0x100000)
 
 /* AfsplusArosExtent.flags. */
 #define AFSPLUS_AROS_EXTENT_UNWRITTEN UINT32_C(0x1)
@@ -152,6 +153,10 @@ struct AfsplusArosMountConfig {
     uint32_t max_locks;
     uint32_t max_file_info_name_bytes;
     uint32_t flags;
+    /* All zero refuses snapshot volumes; all positive enables bounded work. */
+    uint32_t snapshot_max_edit_records;
+    uint32_t snapshot_max_views;
+    uint32_t snapshot_reclaim_records;
 };
 
 struct AfsplusArosFileInfo {
@@ -166,6 +171,8 @@ struct AfsplusArosFileInfo {
     uint32_t modified_nanoseconds;
     uint32_t name_length;
     uint32_t reserved;
+    uint32_t owner_uid;
+    uint32_t owner_gid;
 };
 
 struct AfsplusArosDiskInfo {
@@ -306,6 +313,8 @@ struct AfsplusArosStat {
     uint32_t modified_nanoseconds;
     uint32_t changed_nanoseconds;
     uint32_t reserved1;
+    uint32_t owner_uid;
+    uint32_t owner_gid;
 };
 
 /* One mapped piece of a file's byte space; gaps are holes and read as zeros.
@@ -330,7 +339,7 @@ struct AfsplusArosDirEntry {
 };
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-_Static_assert(sizeof(struct AfsplusArosStat) == 88,
+_Static_assert(sizeof(struct AfsplusArosStat) == 96,
     "AfsplusArosStat ABI drift");
 _Static_assert(sizeof(struct AfsplusArosExtent) == 24,
     "AfsplusArosExtent ABI drift");
@@ -350,19 +359,19 @@ _Static_assert(sizeof(struct AfsplusArosInterface) == 24,
     "AfsplusArosInterface ABI drift");
 _Static_assert(sizeof(struct AfsplusArosCapabilities) == 64,
     "AfsplusArosCapabilities ABI drift");
-_Static_assert(sizeof(struct AfsplusArosFileInfo) == 64,
+_Static_assert(sizeof(struct AfsplusArosFileInfo) == 72,
     "AfsplusArosFileInfo ABI drift");
 _Static_assert(sizeof(struct AfsplusArosDiskInfo) == 32,
     "AfsplusArosDiskInfo ABI drift");
 #if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(struct AfsplusArosDevice) == 56,
     "AfsplusArosDevice 64-bit ABI drift");
-_Static_assert(sizeof(struct AfsplusArosMountConfig) == 48,
+_Static_assert(sizeof(struct AfsplusArosMountConfig) == 56,
     "AfsplusArosMountConfig 64-bit ABI drift");
 #elif UINTPTR_MAX == UINT32_MAX
 _Static_assert(sizeof(struct AfsplusArosDevice) == 40,
     "AfsplusArosDevice 32-bit ABI drift");
-_Static_assert(sizeof(struct AfsplusArosMountConfig) == 40,
+_Static_assert(sizeof(struct AfsplusArosMountConfig) == 52,
     "AfsplusArosMountConfig 32-bit ABI drift");
 #endif
 #endif
@@ -376,9 +385,11 @@ int32_t afsplus_aros_interface(struct AfsplusArosInterface *output);
  * DOS separators, empty names and more than 64 encoded UTF-8 bytes fail
  * before writes. Creates the reference epoch-1 case-insensitive profile.
  * Call afsplus_aros_mount afterwards to obtain the new volume. */
+#define AFSPLUS_AROS_FORMAT_SNAPSHOTS UINT32_C(1)
 int32_t afsplus_aros_format(const struct AfsplusArosDevice *device,
     uint32_t name_encoding, const uint8_t *label, uint32_t label_length,
-    const uint8_t *uuid, int64_t seconds, uint32_t nanoseconds);
+    const uint8_t *uuid, int64_t seconds, uint32_t nanoseconds,
+    uint32_t format_flags);
 /* Pure input check: call before detaching/flushing an existing volume. */
 int32_t afsplus_aros_validate_format_label(uint32_t name_encoding,
     const uint8_t *label, uint32_t label_length);
@@ -471,6 +482,14 @@ int32_t afsplus_aros_disk_info(struct AfsplusAros *filesystem,
 
 /* Group AFSPLUS_AROS_GROUP_DOS_METADATA. An empty name addresses the object
  * of base_lock itself. protection is the 32-bit DOS word, stored as given. */
+/* Full-width on-disk IDs. DOS Examine/ExAll project IDs above UINT16_MAX
+ * to secNOBODY (0); EXT_STAT preserves all 32 bits. In-range IDs are the
+ * AROS account database IDs (0 nobody, 65535 root). ACTION_SET_OWNER supplies
+ * the classic packed UID:GID pair and changes no other security metadata. */
+int32_t afsplus_aros_set_owner(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint32_t owner_uid, uint32_t owner_gid,
+    int64_t now_seconds, uint32_t now_nanoseconds);
 int32_t afsplus_aros_set_protection(struct AfsplusAros *filesystem,
     uint64_t base_lock, const uint8_t *name, uint32_t name_length,
     uint32_t protection, int64_t now_seconds, uint32_t now_nanoseconds);
@@ -768,6 +787,28 @@ int32_t afsplus_aros_counters(struct AfsplusAros *filesystem,
 /* Group AFSPLUS_AROS_GROUP_INTERFACE_QUERY. */
 int32_t afsplus_aros_capabilities(struct AfsplusAros *filesystem,
     struct AfsplusArosCapabilities *output);
+
+
+/* Historical operations require host admission on every packet (ADR-125).
+ * Direct C callers are trusted host code. Reader IDs are mount-scoped leases. */
+struct AfsplusArosSnapshotInfo {
+    uint64_t id;
+    uint64_t generation;
+    uint64_t committed_tx_id;
+};
+int32_t afsplus_aros_snapshot_create(struct AfsplusAros *, int64_t, uint32_t, uint64_t *);
+int32_t afsplus_aros_snapshot_delete(struct AfsplusAros *, uint64_t, int64_t, uint32_t);
+int32_t afsplus_aros_snapshot_list(struct AfsplusAros *, uint64_t, uint8_t *, uint32_t, uint32_t, uint32_t *, uint64_t *);
+int32_t afsplus_aros_snapshot_open(struct AfsplusAros *, uint64_t, uint64_t *);
+int32_t afsplus_aros_snapshot_close(struct AfsplusAros *, uint64_t);
+int32_t afsplus_aros_snapshot_lookup(struct AfsplusAros *, uint64_t, uint64_t, const uint8_t *, uint32_t, uint64_t *);
+int32_t afsplus_aros_snapshot_read(struct AfsplusAros *, uint64_t, uint64_t, uint64_t, uint8_t *, uint32_t, uint32_t *);
+int32_t afsplus_aros_snapshot_stat(struct AfsplusAros *, uint64_t, uint64_t, struct AfsplusArosStat *);
+int32_t afsplus_aros_snapshot_dir_open(struct AfsplusAros *, uint64_t, uint64_t, uint64_t *);
+int32_t afsplus_aros_snapshot_dir_read(struct AfsplusAros *, uint64_t, uint8_t *, uint32_t, uint32_t, uint32_t *, uint32_t *);
+int32_t afsplus_aros_snapshot_dir_close(struct AfsplusAros *, uint64_t);
+int32_t afsplus_aros_snapshot_restore_file(struct AfsplusAros *, uint64_t, uint64_t, uint64_t, const uint8_t *, uint32_t, int64_t, uint32_t, uint64_t *);
+int32_t afsplus_aros_snapshot_restore_tree(struct AfsplusAros *, uint64_t, uint64_t, uint64_t, const uint8_t *, uint32_t, uint32_t, uint32_t, uint32_t, int64_t, uint32_t, uint64_t *);
 
 #ifdef __cplusplus
 }

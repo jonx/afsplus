@@ -55,6 +55,7 @@ static uint32_t stub_revision = AFSPLUS_AROS_INTERFACE_REVISION;
 static uint32_t stub_protect;
 static uint32_t stub_protect_key;
 static uint32_t stub_disk_readonly;
+static uint32_t stub_disk_in_use=1;
 static uint32_t format_calls;
 static uint32_t format_failure;
 static int32_t stub_label_error;
@@ -74,6 +75,8 @@ static int32_t stub_change_mode_error;
 static uint32_t stub_changed_access;
 static const char *stub_link_target = "";
 static uint32_t stub_protection;
+static uint32_t stub_owner_uid = 501;
+static uint32_t stub_owner_gid = 70000;
 static int64_t stub_modified_seconds;
 static uint32_t stub_modified_nanoseconds;
 
@@ -420,6 +423,8 @@ static int32_t examine_common(struct AfsplusArosFileInfo *output,
     output->directory_entry_type = ST_FILE;
     output->entry_type = ST_FILE;
     output->name_length = sizeof(filename) - 1;
+    output->owner_uid = stub_owner_uid;
+    output->owner_gid = stub_owner_gid;
     return 0;
 }
 
@@ -468,6 +473,8 @@ int32_t afsplus_aros_examine_next(struct AfsplusAros *filesystem,
         output->entry_type = ST_FILE;
         output->size = (uint64_t)stub_directory_at + 10;
         output->protection = UINT32_C(0x40) + (uint32_t)stub_directory_at;
+        output->owner_uid = stub_owner_uid;
+        output->owner_gid = stub_owner_gid;
         stub_directory_at++;
         return error;
     }
@@ -493,7 +500,7 @@ int32_t afsplus_aros_disk_info(struct AfsplusAros *filesystem,
     output->used_blocks = 12;
     output->bytes_per_block = 4096;
     output->disk_type = (int32_t)UINT32_C(0x4146532b);
-    output->in_use = 1;
+    output->in_use = stub_disk_in_use;
     output->write_protected = stub_disk_readonly;
     return 0;
 }
@@ -559,6 +566,20 @@ int32_t afsplus_aros_set_comment(struct AfsplusAros *filesystem,
     record('C', base_lock, name, name_length, 0);
     memcpy(stub_comment, comment, comment_length);
     stub_comment_length = comment_length;
+    return 0;
+}
+
+int32_t afsplus_aros_set_owner(struct AfsplusAros *filesystem,
+    uint64_t base_lock, const uint8_t *name, uint32_t name_length,
+    uint32_t owner_uid, uint32_t owner_gid,
+    int64_t now_seconds, uint32_t now_nanoseconds)
+{
+    assert(filesystem == STUB_FILESYSTEM);
+    assert(now_seconds == INT64_C(252547261));
+    assert(now_nanoseconds == UINT32_C(40000000));
+    record('u', base_lock, name, name_length, 0);
+    stub_owner_uid = owner_uid;
+    stub_owner_gid = owner_gid;
     return 0;
 }
 
@@ -1225,6 +1246,100 @@ static void blank_medium_format_packets(struct AfsplusArosPacketConfig config)
     assert(afsplus_aros_packet_destroy(context) == 0);
 }
 
+static uint32_t snapshot_calls;
+static uint32_t snapshot_allow = 1;
+static int32_t authorize_backup(void *ctx, const struct DosPacket *packet)
+{ (void)ctx; assert(packet != NULL); return snapshot_allow ? 0 : ERROR_READ_PROTECTED; }
+int32_t afsplus_aros_snapshot_create(struct AfsplusAros *f, int64_t s, uint32_t n, uint64_t *out)
+{ (void)f; (void)s; (void)n; snapshot_calls++; *out = 7; return 0; }
+int32_t afsplus_aros_snapshot_delete(struct AfsplusAros *f, uint64_t id, int64_t s, uint32_t n)
+{ (void)f; (void)s; (void)n; assert(id == 7); snapshot_calls++; return 0; }
+int32_t afsplus_aros_snapshot_list(struct AfsplusAros *f, uint64_t low, uint8_t *b, uint32_t c, uint32_t l, uint32_t *out, uint64_t *next)
+{ struct AfsplusArosSnapshotInfo info = {7, 12, 11}; (void)f; (void)low; assert(l == 1 && c >= sizeof(info)); memcpy(b, &info, sizeof(info)); *out = 1; *next = 0; snapshot_calls++; return 0; }
+int32_t afsplus_aros_snapshot_open(struct AfsplusAros *f, uint64_t id, uint64_t *out)
+{ (void)f; assert(id == 7); *out = 99; stub_disk_in_use=1; snapshot_calls++; return 0; }
+int32_t afsplus_aros_snapshot_close(struct AfsplusAros *f, uint64_t id)
+{ (void)f; assert(id == 99); stub_disk_in_use=0; snapshot_calls++; return 0; }
+int32_t afsplus_aros_snapshot_lookup(struct AfsplusAros *f, uint64_t r, uint64_t d, const uint8_t *n, uint32_t l, uint64_t *out)
+{ (void)f; (void)r; (void)d; (void)n; (void)l; *out = 3; snapshot_calls++; return 0; }
+int32_t afsplus_aros_snapshot_read(struct AfsplusAros *f, uint64_t r, uint64_t o, uint64_t off, uint8_t *b, uint32_t c, uint32_t *out)
+{ (void)f; (void)r; (void)o; (void)off; assert(c >= 4); memcpy(b,"boot",4); *out = 4; snapshot_calls++; return 0; }
+int32_t afsplus_aros_snapshot_stat(struct AfsplusAros *f, uint64_t r, uint64_t o, struct AfsplusArosStat *out)
+{ (void)r; return afsplus_aros_stat_id(f,o,out); }
+int32_t afsplus_aros_snapshot_dir_open(struct AfsplusAros *f, uint64_t r, uint64_t o, uint64_t *out)
+{ (void)r; return afsplus_aros_dir_open(f,o,out); }
+int32_t afsplus_aros_snapshot_dir_read(struct AfsplusAros *f, uint64_t d, uint8_t *b, uint32_t c, uint32_t l, uint32_t *out, uint32_t *eof)
+{ return afsplus_aros_dir_read(f,d,b,c,l,out,eof); }
+int32_t afsplus_aros_snapshot_dir_close(struct AfsplusAros *f, uint64_t d)
+{ return afsplus_aros_dir_close(f,d); }
+int32_t afsplus_aros_snapshot_restore_file(struct AfsplusAros *f, uint64_t r, uint64_t s, uint64_t d, const uint8_t *name, uint32_t len, int64_t sec, uint32_t ns, uint64_t *out)
+{ (void)f; (void)r; (void)s; (void)d; (void)name; (void)len; (void)sec; (void)ns; *out=71; snapshot_calls++; return 0; }
+int32_t afsplus_aros_snapshot_restore_tree(struct AfsplusAros *f, uint64_t r, uint64_t s, uint64_t d, const uint8_t *name, uint32_t len, uint32_t nodes, uint32_t depth, uint32_t metadata, int64_t sec, uint32_t ns, uint64_t *out)
+{ assert(nodes==4096 && depth==64 && metadata==4194304); return afsplus_aros_snapshot_restore_file(f,r,s,d,name,len,sec,ns,out); }
+static void snapshot_packets(struct AfsplusArosPacketConfig config)
+{
+    struct AfsplusArosPacketContext *ctx = NULL;
+    struct DosPacket p; struct AfsplusExtRequest r; uint8_t buffer[64];
+    uint64_t original_groups = stub_groups;
+    stub_groups |= AFSPLUS_AROS_GROUP_SNAPSHOTS;
+    config.authorize_backup = authorize_backup;
+    config.format = packet_format;
+    assert(afsplus_aros_packet_create(&config, &ctx) == 0);
+    memset(&r,0,sizeof(r)); r.magic=AFSPLUS_EXT_MAGIC; r.version=AFSPLUS_EXT_VERSION; r.header_size=sizeof(r);
+    initialize_packet(&p,ACTION_AFSPLUS_EXT); p.dp_Arg1=(SIPTR)&r;
+    r.operation=AFSPLUS_EXT_SNAPSHOT_CREATE;
+    assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0 && r.output_value==7);
+    snapshot_allow=0; r.operation=AFSPLUS_EXT_SNAPSHOT_OPEN; r.object[0]=7;
+    { uint32_t before=snapshot_calls; assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_READ_PROTECTED); assert(snapshot_calls==before); }
+    snapshot_allow=1;
+    assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0 && r.output_value==99);
+    { struct DosPacket die; initialize_packet(&die,ACTION_DIE);
+      assert(afsplus_aros_packet_process(ctx,&die)==0 && die.dp_Res2==ERROR_OBJECT_IN_USE);
+      initialize_packet(&die,ACTION_FORMAT); die.dp_Arg1=packet_bstr("Fresh"); die.dp_Arg2=UINT32_C(0x4146532b);
+      assert(afsplus_aros_packet_process(ctx,&die)==0 && die.dp_Res2==ERROR_OBJECT_IN_USE); }
+    r.operation=AFSPLUS_EXT_SNAPSHOT_READ; r.offset[0]=99; r.object[0]=3; r.buffer=buffer; r.buffer_size=4;
+    assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0 && r.output_count==4 && memcmp(buffer,"boot",4)==0);
+    snapshot_allow=0; memset(buffer,0xcc,sizeof(buffer));
+    assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_READ_PROTECTED && buffer[0]==0xcc);
+    r.operation=AFSPLUS_EXT_SNAPSHOT_CLOSE;
+    assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0);
+    snapshot_allow=1; r.operation=AFSPLUS_EXT_SNAPSHOT_LIST; r.offset[0]=0; r.length=1; r.buffer_size=sizeof(buffer);
+    assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0 && r.output_count==1);
+    r.operation=AFSPLUS_EXT_SNAPSHOT_DELETE; r.object[0]=7;
+    assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0);
+    r.operation=AFSPLUS_EXT_SNAPSHOT_RESTORE_FILE;
+    { uint32_t before=snapshot_calls;
+      assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_READ_PROTECTED);
+      assert(snapshot_calls==before); }
+    r.operation=AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE;
+    { uint32_t before=snapshot_calls;
+      assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_READ_PROTECTED);
+      assert(snapshot_calls==before); }
+    assert(afsplus_aros_packet_destroy(ctx)==0);
+    config.authorize_restore=authorize_backup;
+    assert(afsplus_aros_packet_create(&config,&ctx)==0);
+    { struct DosPacket locate; BPTR destination;
+      initialize_packet(&locate,ACTION_LOCATE_OBJECT);
+      locate.dp_Arg2=packet_bstr(""); locate.dp_Arg3=SHARED_LOCK;
+      assert(afsplus_aros_packet_process(ctx,&locate)==0 && locate.dp_Res2==0);
+      destination=(BPTR)locate.dp_Res1;
+      r.offset[0]=99; r.object[0]=1; r.object[1]=(uint64_t)(uintptr_t)destination;
+      r.name0=(const uint8_t *)"restored"; r.name_length[0]=8;
+      r.buffer=NULL; r.buffer_size=4194304; r.length=4096; r.offset[1]=64;
+      assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0 && r.output_value==71);
+      r.length=0;
+      assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_BAD_NUMBER);
+      initialize_packet(&locate,ACTION_FREE_LOCK); locate.dp_Arg1=(SIPTR)destination;
+      assert(afsplus_aros_packet_process(ctx,&locate)==0 && locate.dp_Res2==0);
+    }
+    assert(afsplus_aros_packet_destroy(ctx)==0);
+    config.authorize_backup=NULL;
+    assert(afsplus_aros_packet_create(&config,&ctx)==0);
+    r.operation=AFSPLUS_EXT_SNAPSHOT_CREATE;
+    assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_READ_PROTECTED);
+    assert(afsplus_aros_packet_destroy(ctx)==0); stub_groups=original_groups;
+}
+
 int main(void)
 {
     struct AfsplusArosPacketConfig config;
@@ -1324,6 +1439,18 @@ int main(void)
     assert(events[3].operation == 'F');
 
     reset_events();
+    initialize_packet(&packet, ACTION_REPLACE_OBJECT);
+    packet.dp_Arg1 = (SIPTR)root;
+    packet.dp_Arg2 = packet_bstr("old");
+    packet.dp_Arg3 = (SIPTR)root;
+    packet.dp_Arg4 = packet_bstr("parent/new");
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert_event(0, 'L', "parent", AFSPLUS_AROS_LOCK_SHARED);
+    assert_event(1, '7', "old", 0);
+    assert(ext_seen[4]);
+
+    reset_events();
     initialize_packet(&packet, ACTION_MAKE_LINK);
     packet.dp_Arg1 = (SIPTR)root;
     packet.dp_Arg2 = packet_bstr("links/copy");
@@ -1421,6 +1548,7 @@ int main(void)
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
     assert(fib64.fib_Size == UINT64_C(0x100000002));
+    assert(fib64.fib_OwnerUID == 501 && fib64.fib_OwnerGID == 0);
 
     memset(&disk, 0, sizeof(disk));
     initialize_packet(&packet, ACTION_DISK_INFO);
@@ -1496,6 +1624,18 @@ int main(void)
         assert(stub_protection == 0x0F);
         assert_event(0, 'L', "dir", AFSPLUS_AROS_LOCK_SHARED);
         assert_event(1, 'p', "", 0);
+
+        reset_events();
+        initialize_packet(&packet, ACTION_SET_OWNER);
+        packet.dp_Arg2 = (SIPTR)root;
+        packet.dp_Arg3 = packet_bstr("dir/note");
+        packet.dp_Arg4 = (501u << 16) | 20u;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(stub_owner_uid == 501 && stub_owner_gid == 20);
+        assert_event(0, 'L', "dir", AFSPLUS_AROS_LOCK_SHARED);
+        assert_event(1, 'u', "note", 0);
+        stub_owner_gid = 70000;
 
         /* 1978-01-02 00:01:01.04: day 1, minute 1, tick 52. */
         stamp.ds_Days = 1;
@@ -2198,6 +2338,14 @@ int main(void)
         packet.dp_Arg4 = ED_DATE;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(control.eac_Entries == 2 && event_count == 0);
+
+        memset(&control, 0, sizeof(control));
+        packet.dp_Arg4 = ED_OWNER;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(control.eac_Entries == 2);
+        entry = (struct ExAllData *)buffer.bytes;
+        assert(entry->ed_OwnerUID == 501 && entry->ed_OwnerGID == 0);
+        assert(entry->ed_Next->ed_OwnerUID == 501);
 
         stub_comment_length = 0;
         stub_directory_size = -1;
@@ -3320,6 +3468,7 @@ int main(void)
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
     assert(flush_count == 2);
 
+    stub_disk_in_use=0;
     initialize_packet(&packet, ACTION_DIE);
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
@@ -3328,6 +3477,7 @@ int main(void)
 
     assert(afsplus_aros_packet_destroy(context) == 0);
     assert(stub_removed_watches == 4);
+    snapshot_packets(config);
     blank_medium_format_packets(config);
     puts("afsplus packet stub: PASS");
     return 0;

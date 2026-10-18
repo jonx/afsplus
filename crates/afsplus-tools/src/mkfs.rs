@@ -5,14 +5,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use afsplus_block::{BlockError, FileBackend};
-use afsplus_core::{mkfs, CoreError, MkfsParams, NamePolicy};
+use afsplus_core::{mkfs_with_options, CoreError, MkfsOptions, MkfsParams, NamePolicy};
 use afsplus_format::geometry::MAX_REGION_BLOCKS;
 use afsplus_format::{Timespec, DEFAULT_BLOCK_SIZE};
 
 use crate::common::{json_string, json_string_list, report_failure, uuid_hex, Failure, EXIT_OK};
 
 const TOOL: &str = "mkafsplus";
-const USAGE: &str = "usage: mkafsplus [--size-mib N] [--label NAME] [--profile PROFILE] [--case-sensitive|--case-insensitive] [--uuid HEX] [--timestamp-seconds N] [--json] [--force] <image>";
+const USAGE: &str = "usage: mkafsplus [--size-mib N] [--label NAME] [--profile PROFILE] [--case-sensitive|--case-insensitive] [--uuid HEX] [--timestamp-seconds N] [--snapshots] [--json] [--force] <image>";
 const DEFAULT_SIZE_MIB: u64 = 64;
 const BLOCKS_PER_MIB: u64 = 1024 * 1024 / DEFAULT_BLOCK_SIZE as u64;
 const LOG_SLOTS: u16 = 8;
@@ -74,6 +74,7 @@ struct Options {
     name_policy: NamePolicy,
     uuid: Option<[u8; 16]>,
     timestamp_seconds: Option<i64>,
+    snapshots: bool,
 }
 
 enum ParseResult {
@@ -82,6 +83,7 @@ enum ParseResult {
 }
 
 struct FormatSummary {
+    snapshots: bool,
     uuid: [u8; 16],
     label: String,
     total_blocks: u64,
@@ -132,6 +134,7 @@ where
     let mut uuid = None;
     let mut timestamp_seconds = None;
     let mut positional_only = false;
+    let mut snapshots = false;
 
     while let Some(argument) = args.next() {
         if !positional_only {
@@ -177,6 +180,13 @@ where
                     timestamp_seconds = Some(value.parse().map_err(|_| {
                         Failure::usage("--timestamp-seconds requires a signed base-10 integer")
                     })?);
+                    continue;
+                }
+                Some("--snapshots") => {
+                    if snapshots {
+                        return Err(Failure::usage("--snapshots was specified more than once"));
+                    }
+                    snapshots = true;
                     continue;
                 }
                 Some("--force") => {
@@ -237,6 +247,7 @@ where
         name_policy,
         uuid,
         timestamp_seconds,
+        snapshots,
     }))
 }
 
@@ -441,7 +452,7 @@ fn execute(options: &Options) -> Result<FormatSummary, Failure> {
         .uuid
         .unwrap_or_else(|| generated_uuid(nanos, &options.image));
     let (temporary, mut device) = TempImage::reserve(&options.image, total_blocks)?;
-    mkfs(
+    mkfs_with_options(
         &mut device,
         &MkfsParams {
             uuid,
@@ -454,6 +465,9 @@ fn execute(options: &Options) -> Result<FormatSummary, Failure> {
             name_policy: options.name_policy,
             timestamp: now,
         },
+        MkfsOptions {
+            persistent_snapshots: options.snapshots,
+        },
     )
     .map_err(format_error)?;
     device
@@ -462,6 +476,7 @@ fn execute(options: &Options) -> Result<FormatSummary, Failure> {
     drop(device);
     temporary.publish(&options.image, options.force)?;
     Ok(FormatSummary {
+        snapshots: options.snapshots,
         uuid,
         label: options.label.clone(),
         total_blocks,
@@ -488,7 +503,7 @@ fn format_error(error: CoreError) -> Failure {
     }
 }
 
-fn enabled_features(profile: Profile) -> Vec<&'static str> {
+fn enabled_features(profile: Profile, snapshots: bool) -> Vec<&'static str> {
     let mut features = vec![
         "org.aros.afsplus:intent-log",
         "org.aros.afsplus:intent-log-data-updates",
@@ -502,6 +517,9 @@ fn enabled_features(profile: Profile) -> Vec<&'static str> {
     if profile.data_policy() {
         features.push("org.aros.afsplus:data-policy");
     }
+    if snapshots {
+        features.push("org.aros.afsplus:persistent-snapshots");
+    }
     features.sort_unstable();
     features
 }
@@ -511,7 +529,7 @@ fn print_summary(summary: &FormatSummary, json: bool) {
         NamePolicy::Sensitive => "unicode-nfc",
         NamePolicy::Insensitive => "unicode-nfc-casefold",
     };
-    let features = enabled_features(summary.profile);
+    let features = enabled_features(summary.profile, summary.snapshots);
     if json {
         println!(
             "{{\"schema_version\":1,\"tool\":\"mkafsplus\",\"profile\":{},\"uuid\":{},\"label\":{},\"block_size\":{},\"total_blocks\":{},\"region_blocks\":{},\"name_key_algorithm\":{},\"features\":{}}}",

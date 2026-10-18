@@ -107,6 +107,9 @@ fn mount_with_flags(
         max_locks: 8,
         max_file_info_name_bytes: 107,
         flags,
+        snapshot_max_edit_records: 0,
+        snapshot_max_views: 0,
+        snapshot_reclaim_records: 0,
     };
     afsplus_aros_mount(&callbacks, &config, filesystem)
 }
@@ -149,10 +152,10 @@ fn interface_query_needs_no_mount_and_names_its_revision_and_groups() {
         output,
         AfsplusArosInterface {
             struct_size: 24,
-            abi_version: 1,
-            interface_revision: 20,
+            abi_version: 2,
+            interface_revision: 21,
             reserved: 0,
-            groups: 0xF_FFFF,
+            groups: 0x1F_FFFF,
         }
     );
     assert_eq!(afsplus_aros_interface(ptr::null_mut()), 210);
@@ -189,7 +192,7 @@ fn sized_output_refuses_short_callers_and_never_writes_past_a_long_one() {
         0
     );
     assert_eq!(future.known.struct_size, 24);
-    assert_eq!(future.known.interface_revision, 20);
+    assert_eq!(future.known.interface_revision, 21);
     assert_eq!(future.tail, [0x5A; 16]);
 }
 
@@ -271,6 +274,9 @@ fn a_mount_without_a_name_is_named_after_the_label() {
         max_locks: 8,
         max_file_info_name_bytes: 107,
         flags: 0,
+        snapshot_max_edit_records: 0,
+        snapshot_max_views: 0,
+        snapshot_reclaim_records: 0,
     };
     let mut filesystem = ptr::null_mut();
     assert_eq!(afsplus_aros_mount(&callbacks, &config, &mut filesystem), 0);

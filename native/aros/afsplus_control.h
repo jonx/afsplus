@@ -61,6 +61,13 @@ struct AfsplusArosControl {
     uint32_t trace_events;  /* ring size, 0 for no trace ring */
     uint32_t commit_seconds; /* longest a change waits, 0 for SYNC */
     uint32_t commit_named;   /* 1 when the string said COMMIT= */
+    /* Explicit runtime budgets. All zero declines snapshot volumes. */
+    uint32_t snapshot_max_edit_records;
+    uint32_t snapshot_max_views;
+    uint32_t snapshot_reclaim_records;
+    uint32_t restore_policy; /* distinct restore admission */
+    uint32_t backup_policy; /* 0 DENY, 1 ROOT, 2 SINGLEUSER */
+    uint32_t format_snapshots; /* FORMAT choice, immutable volume feature */
     uint32_t cache_auto;     /* 1 for CACHE=AUTO, 0 for CACHE=BUFFERS */
 };
 

@@ -27,6 +27,7 @@
   - [Captured metadata inventory knowledge](#captured-metadata-inventory-knowledge)
   - [Opaque captured metadata transport](#opaque-captured-metadata-transport)
   - [Captured allocation enumeration](#captured-allocation-enumeration)
+  - [AROS historical operation admission](#aros-historical-operation-admission)
   - [Versioning and compatibility](#versioning-and-compatibility)
 - [9. Destination-scoped restore extension](#9-destination-scoped-restore-extension)
   - [Committed destination allocation readback](#committed-destination-allocation-readback)
@@ -555,6 +556,21 @@ The ordinary full checker retains ownership and whole-tree validation duties.
 preservation of reservations from explicit content recovery with a loss report.
 The exact archive profile and destination reservation operations must define
 alignment, rounding and completion before claiming full restoration.
+
+### AROS historical operation admission
+
+The AROS adapter exposes snapshot capture, paged inventory, deletion and
+mount-scoped read-only readers through the SNAPSHOTS entry-point group.
+`FSV2_CAP_SNAPSHOTS` is bit 18 and reports volume support. The authority of
+[ADR-125](../adr/ADR-125-aros-backup-authority.md) is checked separately at
+admission to every historical packet. Closing a reader releases its deletion
+lease and remains permitted after revocation. Creation publishes pending live
+work before durable capture.
+
+A fresh-destination file restore has a distinct host authorization check and
+an explicit live directory scope. Its semantic operation follows
+[ADR-127](../adr/ADR-127-aros-snapshot-file-restore.md). Applications carry
+object IDs, names and bytes; they inspect no AFS+ disk records.
 
 ### Versioning and compatibility
 

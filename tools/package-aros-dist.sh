@@ -205,7 +205,7 @@ then
     exit 65
 fi
 
-echo "[aros-dist] $profile_id: the four programs"
+echo "[aros-dist] $profile_id: the filesystem programs"
 program_dir=$staging/C
 build_program() {
     name=$1
@@ -232,6 +232,9 @@ build_program() {
 }
 
 for entry in \
+    "AFSPlusBackup native/aros/tools/afsplus_backup.c native/aros/client/afsplus_client.c" \
+    "AFSPlusRestore native/aros/tools/afsplus_restore.c native/aros/client/afsplus_client.c" \
+    "AFSPlusSnapshot native/aros/tools/afsplus_snapshot.c native/aros/client/afsplus_client.c" \
     "AFSPlusInfo native/aros/tools/afsplus_info.c native/aros/client/afsplus_client.c" \
     "AFSPlusTour native/aros/tools/afsplus_tour.c native/aros/client/afsplus_client.c" \
     "AFSPlusClone native/aros/tools/afsplus_clone.c native/aros/client/afsplus_client.c native/aros/client/afsplus_copy.c" \

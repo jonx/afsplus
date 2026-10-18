@@ -161,6 +161,15 @@ int main(void)
     check(afsplus_control_parse("SECURITY=STRICT", 8, &control)
         == AFSPLUS_CONTROL_MALFORMED);
 
+    check(parse("SNAPSHOTEDIT=4096 SNAPSHOTVIEWS=8 SNAPSHOTRECLAIM=64 FORMATSNAPSHOTS=YES BACKUP=SINGLEUSER", &control) == AFSPLUS_CONTROL_OK);
+    check(control.snapshot_max_edit_records == 4096 && control.snapshot_max_views == 8
+        && control.snapshot_reclaim_records == 64 && control.format_snapshots == 1 && control.backup_policy == 2);
+    refuses("SNAPSHOTEDIT=4096", AFSPLUS_CONTROL_MALFORMED);
+    refuses("SNAPSHOTEDIT=1 SNAPSHOTVIEWS=8 SNAPSHOTRECLAIM=2", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("FORMATSNAPSHOTS=YES", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("BACKUP=YES", AFSPLUS_CONTROL_UNKNOWN_VALUE);
+    refuses("BACKUP=ROOT BACKUP=ROOT", AFSPLUS_CONTROL_REPEATED_KEYWORD);
+    refuses("SNAPSHOTEDIT=4294967296 SNAPSHOTVIEWS=8 SNAPSHOTRECLAIM=1", AFSPLUS_CONTROL_UNKNOWN_VALUE);
     puts("afsplus control stub: PASS");
     return 0;
 }

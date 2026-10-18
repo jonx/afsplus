@@ -92,6 +92,9 @@ fn mount(device: &mut MemoryBackend) -> *mut AfsplusAros {
         max_locks: 8,
         max_file_info_name_bytes: 107,
         flags: 0,
+        snapshot_max_edit_records: 0,
+        snapshot_max_views: 0,
+        snapshot_reclaim_records: 0,
     };
     let mut filesystem = ptr::null_mut();
     assert_eq!(afsplus_aros_mount(&callbacks, &config, &mut filesystem), 0);
@@ -140,6 +143,22 @@ fn c_boundary_sets_metadata_and_transports_soft_links() {
         0
     );
     assert_eq!(afsplus_aros_close(filesystem, file), 0);
+
+    assert_eq!(
+        afsplus_aros_set_owner(filesystem, 0, b"note".as_ptr(), 4, 501, 70000, 19, 0),
+        0
+    );
+    let ownership = examine(filesystem, b"note");
+    assert_eq!((ownership.owner_uid, ownership.owner_gid), (501, 70000));
+    let mut stat = AfsplusArosStat {
+        struct_size: size_of::<AfsplusArosStat>() as u32,
+        ..Default::default()
+    };
+    assert_eq!(
+        afsplus_aros_stat_id(filesystem, ownership.object_id, &mut stat),
+        0
+    );
+    assert_eq!((stat.owner_uid, stat.owner_gid), (501, 70000));
 
     assert_eq!(
         afsplus_aros_set_protection(filesystem, 0, b"note".as_ptr(), 4, 0x5A, 20, 0),

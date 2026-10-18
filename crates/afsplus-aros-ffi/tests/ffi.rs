@@ -94,6 +94,9 @@ fn mount(device: &mut MemoryBackend) -> *mut AfsplusAros {
         max_locks: 64,
         max_file_info_name_bytes: 107,
         flags: 0,
+        snapshot_max_edit_records: 0,
+        snapshot_max_views: 0,
+        snapshot_reclaim_records: 0,
     };
     let mut filesystem = ptr::null_mut();
     assert_eq!(afsplus_aros_mount(&callbacks, &config, &mut filesystem), 0);
@@ -397,6 +400,9 @@ fn abi_version_and_struct_sizes_are_checked_before_mount() {
         max_locks: 64,
         max_file_info_name_bytes: 107,
         flags: 0,
+        snapshot_max_edit_records: 0,
+        snapshot_max_views: 0,
+        snapshot_reclaim_records: 0,
     };
     let mut filesystem = ptr::null_mut();
     assert_ne!(afsplus_aros_mount(&callbacks, &config, &mut filesystem), 0);

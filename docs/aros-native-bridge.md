@@ -52,6 +52,7 @@ numeric lock/file-handle and durability semantics.
 - [Qualification diagnostics](#qualification-diagnostics)
 - [Native lifecycle](#native-lifecycle)
 - [Native handler shell](#native-handler-shell)
+- [Snapshot admission, capture and read-only views](#snapshot-admission-capture-and-read-only-views)
 - [Runtime qualification stages](#runtime-qualification-stages)
 
 <!-- /toc -->
@@ -384,7 +385,7 @@ geometry, retain their errors.
 `ACTION_FORMAT` accepts DosType `0x4146532b`, requires no open files, locks,
 watches or deferred packets, and refuses a write-protected volume. The
 handler unmounts the old instance before `afsplus_aros_format` (FORMAT group,
-interface revision 20) writes the device, then mounts and registers the
+interface revision 21) writes the device, then mounts and registers the
 committed label. The label is converted from the mount's encoding, including
 Latin-1, to UTF-8. The formatter creates the
 [reference epoch-1 profile](../spec/compatibility-rules.md#pre-release-format-changes)
@@ -847,6 +848,54 @@ and `sym->value` from an entry (`rom/dos/internalloadseg_elf.c`), loading
 costs package bytes and load-time memory for nothing. `llvm-objcopy
 --discard-all` removes 732 of them and keeps every global; the ABI audit runs
 afterwards, on the file that ships.
+
+## Snapshot admission, capture and read-only views
+
+The [host authority contract](../adr/ADR-125-aros-backup-authority.md) checks
+historical access at every packet admission. The DOSDriver names explicit
+`SNAPSHOTEDIT`, `SNAPSHOTVIEWS` and `SNAPSHOTRECLAIM` positive budgets together.
+Reclaim budget must fit the edit budget. All three absent refuses a
+snapshot-enabled volume. These runtime budgets change no disk bytes.
+
+`FORMATSNAPSHOTS=YES` selects persistent snapshots for explicit `ACTION_FORMAT`;
+it requires the three budgets. `mkafsplus --snapshots --case-insensitive`
+creates the same feature for host-built AROS images. Formatting fixes the
+feature under [ADR-073](../adr/ADR-073-snapshot-checkpoint-roots.md) and its
+amendments. Existing volumes require an explicitly planned migration or
+reformat. A mounted reader keeps formatting and orderly dismount busy.
+
+`BACKUP=ROOT|SINGLEUSER|DENY` and `RESTORE=ROOT|SINGLEUSER|DENY` select independent
+host authority policies. Each defaults to DENY. ROOT queries security.library's
+current task owner at admission; SINGLEUSER admits a configured administrator
+trust domain when that library is absent. A signal reply port with a task is
+required. Reader close remains available after revocation.
+
+The SNAPSHOTS C group and `FSV2_CAP_SNAPSHOTS` distinguish implementation and
+volume support. The public C boundary has ABI 2; the native packet configuration
+has ABI 7. Applications use semantic requests from
+[afsplus_ext_packet.h](../api/afsplus_ext_packet.h).
+Create publishes pending delayed work before capturing; list is paged with an
+inclusive lower ID and explicit continuation. Open pins a view until close.
+Deletion reports busy while a view has a reader. Lookup, stat and directory
+walks operate on captured namespace state; positioned reads return captured
+bytes. There is no historical mutation operation.
+
+`AFSPlusSnapshot DEVICE CREATE|LIST|DELETE id|VIEW id [relative-path]` manages
+captures and presents a read-only directory or file view. `AFSPlusBackup`
+captures and lists local volume snapshots. `AFSPlusRestore` restores a file or
+directory to an explicitly named fresh destination through
+[ADR-127](../adr/ADR-127-aros-snapshot-file-restore.md) and
+[ADR-128](../adr/ADR-128-confined-snapshot-tree-restore.md). Directory restore
+supplies positive node, depth and aggregate metadata budgets and preflights
+the complete selected tree. It preserves supported
+captured metadata and refuses unsupported metadata before target mutation.
+The operation allocates fresh data and publishes a verified staged object under
+a non-replacing rename. Boot-root rollback needs its own decision.
+
+Host contracts are exercised by `snapshot_mount`, the FFI `format` snapshot
+case and the native packet matrix. Guest acceptance requires a rebuilt external
+handler, recorded command binaries and a disposable image. Native acceptance
+requires an installed generation with matching harness artifacts.
 
 ## Runtime qualification stages
 

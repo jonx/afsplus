@@ -547,3 +547,137 @@ LONG afsplus_client_commit_policy(struct MsgPort *port,
 {
     return report(port, AFSPLUS_EXT_COMMIT_POLICY, output, sizeof(*output));
 }
+
+LONG afsplus_client_snapshot_create(struct MsgPort *port, uint64_t *id)
+{
+    struct AfsplusExtRequest r; LONG e;
+    if (id == NULL) return ERROR_REQUIRED_ARG_MISSING;
+    *id = 0; begin(&r, AFSPLUS_EXT_SNAPSHOT_CREATE);
+    e = afsplus_client_send(port, &r); if (!e) *id = r.output_value; return e;
+}
+LONG afsplus_client_snapshot_list(struct MsgPort *port, uint64_t low,
+    struct AfsplusArosSnapshotInfo *entries, uint32_t capacity, uint32_t *count, uint64_t *next)
+{
+    struct AfsplusExtRequest r; LONG e;
+    if (entries == NULL || count == NULL || next == NULL || capacity == 0 || capacity > 64)
+        return ERROR_BAD_NUMBER;
+    *count = 0; *next = 0; begin(&r, AFSPLUS_EXT_SNAPSHOT_LIST);
+    r.offset[0] = low; r.length = capacity; r.buffer = entries;
+    r.buffer_size = capacity * sizeof(*entries);
+    e = afsplus_client_send(port, &r); if (!e) { *count = r.output_count; *next = r.output_value; } return e;
+}
+LONG afsplus_client_snapshot_delete(struct MsgPort *port, uint64_t id)
+{
+    struct AfsplusExtRequest r; begin(&r, AFSPLUS_EXT_SNAPSHOT_DELETE);
+    r.object[0] = id; return afsplus_client_send(port, &r);
+}
+LONG afsplus_client_snapshot_open(struct MsgPort *port, uint64_t id, uint64_t *reader)
+{
+    struct AfsplusExtRequest r; LONG e;
+    if (reader == NULL) return ERROR_REQUIRED_ARG_MISSING;
+    *reader = 0; begin(&r, AFSPLUS_EXT_SNAPSHOT_OPEN); r.object[0] = id;
+    e = afsplus_client_send(port, &r); if (!e) *reader = r.output_value; return e;
+}
+LONG afsplus_client_snapshot_close(struct MsgPort *port, uint64_t reader)
+{
+    struct AfsplusExtRequest r; begin(&r, AFSPLUS_EXT_SNAPSHOT_CLOSE);
+    r.offset[0] = reader; return afsplus_client_send(port, &r);
+}
+LONG afsplus_client_snapshot_lookup(struct MsgPort *port, uint64_t reader,
+    uint64_t directory, CONST_STRPTR name, uint64_t *object)
+{
+    struct AfsplusExtRequest r; LONG e;
+    if (name == NULL || object == NULL) return ERROR_REQUIRED_ARG_MISSING;
+    *object = 0; begin(&r, AFSPLUS_EXT_SNAPSHOT_LOOKUP); r.offset[0] = reader;
+    r.object[0] = directory; r.name0 = (const uint8_t *)name;
+    r.name_length[0] = strlen((const char *)name);
+    e = afsplus_client_send(port, &r); if (!e) *object = r.output_value; return e;
+}
+LONG afsplus_client_snapshot_read(struct MsgPort *port, uint64_t reader,
+    uint64_t object, uint64_t offset, void *buffer, uint32_t capacity, uint32_t *count)
+{
+    struct AfsplusExtRequest r; LONG e;
+    if (count == NULL || (buffer == NULL && capacity != 0)) return ERROR_REQUIRED_ARG_MISSING;
+    *count = 0; begin(&r, AFSPLUS_EXT_SNAPSHOT_READ); r.offset[0] = reader;
+    r.object[0] = object; r.offset[1] = offset; r.buffer = buffer; r.buffer_size = capacity;
+    e = afsplus_client_send(port, &r); if (!e) *count = r.output_count; return e;
+}
+LONG afsplus_client_snapshot_stat(struct MsgPort *port, uint64_t reader,
+    uint64_t object, struct AfsplusArosStat *output)
+{
+    struct AfsplusExtRequest r;
+    if (output == NULL) return ERROR_REQUIRED_ARG_MISSING;
+    memset(output, 0, sizeof(*output)); output->struct_size = sizeof(*output);
+    begin(&r, AFSPLUS_EXT_SNAPSHOT_STAT); r.offset[0] = reader; r.object[0] = object;
+    r.buffer = output; r.buffer_size = sizeof(*output); return afsplus_client_send(port, &r);
+}
+LONG afsplus_client_snapshot_dir_open(struct MsgPort *port, uint64_t reader,
+    uint64_t object, uint64_t *directory)
+{
+    struct AfsplusExtRequest r; LONG e;
+    if (directory == NULL) return ERROR_REQUIRED_ARG_MISSING;
+    *directory = 0; begin(&r, AFSPLUS_EXT_SNAPSHOT_DIR_OPEN); r.offset[0] = reader; r.object[0] = object;
+    e = afsplus_client_send(port, &r); if (!e) *directory = r.output_value; return e;
+}
+LONG afsplus_client_snapshot_dir_read(struct MsgPort *port, uint64_t directory,
+    void *buffer, uint32_t capacity, uint32_t limit, uint32_t *count, uint32_t *eof)
+{
+    struct AfsplusExtRequest r; LONG e;
+    if (count == NULL || eof == NULL || buffer == NULL) return ERROR_REQUIRED_ARG_MISSING;
+    *count = 0; *eof = 0; begin(&r, AFSPLUS_EXT_SNAPSHOT_DIR_READ); r.offset[0] = directory;
+    r.buffer = buffer; r.buffer_size = capacity; r.length = limit;
+    e = afsplus_client_send(port, &r); if (!e) { *count = r.output_count; *eof = r.output_flags; } return e;
+}
+LONG afsplus_client_snapshot_dir_close(struct MsgPort *port, uint64_t directory)
+{
+    struct AfsplusExtRequest r; begin(&r, AFSPLUS_EXT_SNAPSHOT_DIR_CLOSE);
+    r.offset[0] = directory; return afsplus_client_send(port, &r);
+}
+
+LONG afsplus_client_snapshot_restore_file(struct MsgPort *port, uint64_t reader,
+    uint64_t source, BPTR destination, CONST_STRPTR name, uint64_t *object)
+{
+    struct AfsplusExtRequest request;
+    LONG error;
+    if (object == NULL || name == NULL || destination == BNULL)
+        return ERROR_REQUIRED_ARG_MISSING;
+    *object = 0;
+    if (afsplus_client_lock_port(destination) != port)
+        return ERROR_RENAME_ACROSS_DEVICES;
+    begin(&request, AFSPLUS_EXT_SNAPSHOT_RESTORE_FILE);
+    request.offset[0] = reader;
+    request.object[0] = source;
+    request.object[1] = (uint64_t)(uintptr_t)destination;
+    request.name0 = (const uint8_t *)name;
+    request.name_length[0] = (uint32_t)strlen((const char *)name);
+    error = afsplus_client_send(port, &request);
+    if (error == 0) *object = request.output_value;
+    return error;
+}
+
+LONG afsplus_client_snapshot_restore_tree(struct MsgPort *port, uint64_t reader,
+    uint64_t source, BPTR destination, CONST_STRPTR name, uint32_t max_nodes,
+    uint32_t max_depth, uint32_t max_metadata_bytes, uint64_t *object)
+{
+    struct AfsplusExtRequest request;
+    LONG error;
+    if (object == NULL || name == NULL || destination == BNULL)
+        return ERROR_REQUIRED_ARG_MISSING;
+    *object = 0;
+    if (max_nodes == 0 || max_depth == 0 || max_metadata_bytes == 0)
+        return ERROR_BAD_NUMBER;
+    if (afsplus_client_lock_port(destination) != port)
+        return ERROR_RENAME_ACROSS_DEVICES;
+    begin(&request, AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE);
+    request.offset[0] = reader;
+    request.offset[1] = max_depth;
+    request.object[0] = source;
+    request.object[1] = (uint64_t)(uintptr_t)destination;
+    request.name0 = (const uint8_t *)name;
+    request.name_length[0] = (uint32_t)strlen((const char *)name);
+    request.length = max_nodes;
+    request.buffer_size = max_metadata_bytes;
+    error = afsplus_client_send(port, &request);
+    if (error == 0) *object = request.output_value;
+    return error;
+}

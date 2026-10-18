@@ -112,6 +112,9 @@ pub fn mount_sized(device: &mut MemoryBackend, total_blocks: u64) -> *mut Afsplu
         max_locks: 8,
         max_file_info_name_bytes: 107,
         flags: 0,
+        snapshot_max_edit_records: 0,
+        snapshot_max_views: 0,
+        snapshot_reclaim_records: 0,
     };
     let mut filesystem = ptr::null_mut();
     assert_eq!(afsplus_aros_mount(&callbacks, &config, &mut filesystem), 0);

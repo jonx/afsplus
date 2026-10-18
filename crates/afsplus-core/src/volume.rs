@@ -3616,7 +3616,14 @@ impl<D: BlockDevice> Volume<D> {
                 victim.object_id
             )));
         }
-        self.rename_internal(parent_id, name, OBJECT_ORPHAN_DIRECTORY, &orphan_name, now)?;
+        self.rename_internal(
+            parent_id,
+            name,
+            OBJECT_ORPHAN_DIRECTORY,
+            &orphan_name,
+            now,
+            false,
+        )?;
         Ok(victim.object_id)
     }
 
@@ -4629,7 +4636,25 @@ impl<D: BlockDevice> Volume<D> {
             target_parent_id,
             target_name,
             now,
+            false,
         )
+    }
+
+    /// Publish a fully prepared restored object without changing its archived
+    /// change time. The trusted host must separately authorize restoration.
+    /// Existing targets are refused by the ordinary non-replacing rename.
+    pub fn publish_restored_object(
+        &mut self,
+        parent_id: u64,
+        staged_name: &str,
+        target_name: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::Rename, |volume| {
+            metadata::validate_time(now)?;
+            volume.ensure_public_object_id(parent_id)?;
+            volume.rename_internal(parent_id, staged_name, parent_id, target_name, now, true)
+        })
     }
 
     fn rename_internal(
@@ -4639,6 +4664,7 @@ impl<D: BlockDevice> Volume<D> {
         target_parent_id: u64,
         target_name: &str,
         now: Timespec,
+        preserve_changed: bool,
     ) -> Result<(), CoreError> {
         self.ensure_window_closed()?;
         validate_name(source_name.as_bytes()).map_err(CoreError::InvalidName)?;
@@ -4817,7 +4843,7 @@ impl<D: BlockDevice> Volume<D> {
             ..target_parent
         });
         let new_moved = ObjectRecord {
-            changed: now,
+            changed: if preserve_changed { moved.changed } else { now },
             ..moved
         };
 

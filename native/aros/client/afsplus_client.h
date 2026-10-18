@@ -147,6 +147,21 @@ LONG afsplus_client_packet_counts(struct MsgPort *port, uint32_t which,
     struct AfsplusExtPacketCount *records, uint32_t capacity,
     uint32_t *stored, uint32_t *total);
 
+/* Authorized historical views (ADR-125). Every call except close is checked. */
+LONG afsplus_client_snapshot_create(struct MsgPort *, uint64_t *);
+LONG afsplus_client_snapshot_list(struct MsgPort *, uint64_t, struct AfsplusArosSnapshotInfo *, uint32_t, uint32_t *, uint64_t *);
+LONG afsplus_client_snapshot_delete(struct MsgPort *, uint64_t);
+LONG afsplus_client_snapshot_open(struct MsgPort *, uint64_t, uint64_t *);
+LONG afsplus_client_snapshot_close(struct MsgPort *, uint64_t);
+LONG afsplus_client_snapshot_lookup(struct MsgPort *, uint64_t, uint64_t, CONST_STRPTR, uint64_t *);
+LONG afsplus_client_snapshot_read(struct MsgPort *, uint64_t, uint64_t, uint64_t, void *, uint32_t, uint32_t *);
+LONG afsplus_client_snapshot_stat(struct MsgPort *, uint64_t, uint64_t, struct AfsplusArosStat *);
+LONG afsplus_client_snapshot_dir_open(struct MsgPort *, uint64_t, uint64_t, uint64_t *);
+LONG afsplus_client_snapshot_dir_read(struct MsgPort *, uint64_t, void *, uint32_t, uint32_t, uint32_t *, uint32_t *);
+LONG afsplus_client_snapshot_dir_close(struct MsgPort *, uint64_t);
+LONG afsplus_client_snapshot_restore_file(struct MsgPort *, uint64_t, uint64_t, BPTR, CONST_STRPTR, uint64_t *);
+LONG afsplus_client_snapshot_restore_tree(struct MsgPort *, uint64_t, uint64_t, BPTR, CONST_STRPTR, uint32_t, uint32_t, uint32_t, uint64_t *);
+
 #ifdef __cplusplus
 }
 #endif

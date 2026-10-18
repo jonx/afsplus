@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(6)
+#define AFSPLUS_AROS_PACKET_ABI_VERSION UINT32_C(7)
 
 /* afsplus_aros_packet_process kept the packet: no result is stored and the
  * handler must not reply. The packet comes back through the complete
@@ -78,6 +78,9 @@ typedef uint32_t (*AfsplusArosPacketTraceTake)(void *context,
 typedef void (*AfsplusArosPacketComplete)(void *context,
     struct DosPacket *packet);
 
+typedef int32_t (*AfsplusArosPacketAuthorizeBackup)(void *context,
+    const struct DosPacket *packet);
+
 struct AfsplusArosPacketConfig {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -100,14 +103,16 @@ struct AfsplusArosPacketConfig {
     AfsplusArosPacketTraceTake trace_take;
     /* Optional. A NULL filesystem is accepted only with this callback. */
     AfsplusArosPacketFormat format;
+    AfsplusArosPacketAuthorizeBackup authorize_backup;
+    AfsplusArosPacketAuthorizeBackup authorize_restore;
 };
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 104,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 120,
     "AfsplusArosPacketConfig 64-bit ABI drift");
 #elif UINTPTR_MAX == UINT32_MAX
-_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 56,
+_Static_assert(sizeof(struct AfsplusArosPacketConfig) == 64,
     "AfsplusArosPacketConfig 32-bit ABI drift");
 #endif
 #endif

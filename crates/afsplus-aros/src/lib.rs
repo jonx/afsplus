@@ -125,6 +125,8 @@ pub struct FileInfo {
     pub blocks: u64,
     pub modified: Timespec,
     pub object_id: ObjectId,
+    pub owner_uid: u32,
+    pub owner_gid: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +269,8 @@ pub struct V2Stat {
     pub created: Timespec,
     pub modified: Timespec,
     pub changed: Timespec,
+    pub owner_uid: u32,
+    pub owner_gid: u32,
 }
 
 /// One enumerated entry; the name is the stored UTF-8 spelling.
@@ -1145,6 +1149,8 @@ impl<D: BlockDevice> ArosAdapter<D> {
             created: stat.created,
             modified: stat.modified,
             changed: stat.changed,
+            owner_uid: stat.owner_uid,
+            owner_gid: stat.owner_gid,
         })
     }
 
@@ -1520,6 +1526,25 @@ impl<D: BlockDevice> ArosAdapter<D> {
             return Err(ArosError::WriteProtected);
         }
         self.vfs.set_protection(object, protection, now)?;
+        self.touch_named(base, name);
+        Ok(())
+    }
+
+    /// `ACTION_SET_OWNER`. Names the actual stored owner; it does not
+    /// rewrite ACLs or other security metadata. Single-user mounts act as
+    /// the host administrator, like the existing metadata setters.
+    pub fn set_owner(
+        &mut self,
+        base: Option<LockId>,
+        name: &[u8],
+        owner_uid: u32,
+        owner_gid: u32,
+        now: Timespec,
+    ) -> Result<(), ArosError> {
+        self.ensure_writable()?;
+        let object = self.named_object(base, name)?;
+        self.vfs
+            .set_owner(object, Some(owner_uid), Some(owner_gid), now)?;
         self.touch_named(base, name);
         Ok(())
     }
@@ -1905,7 +1930,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
             used_blocks: stat.total_blocks.saturating_sub(stat.available_blocks),
             bytes_per_block: stat.block_size,
             disk_type: DISK_TYPE_AFS_PLUS,
-            in_use: !self.files.is_empty() || !self.locks.is_empty(),
+            in_use: !self.files.is_empty()
+                || !self.locks.is_empty()
+                || self.vfs.snapshot_readers_active(),
         }
     }
 
@@ -2012,6 +2039,8 @@ impl<D: BlockDevice> ArosAdapter<D> {
             blocks: stat.allocated_size.div_ceil(block_size),
             modified: stat.modified,
             object_id: stat.object_id,
+            owner_uid: stat.owner_uid,
+            owner_gid: stat.owner_gid,
         })
     }
 
@@ -2217,3 +2246,5 @@ fn add_signed(base: u64, offset: i64) -> Result<u64, ArosError> {
     let result = i128::from(base) + i128::from(offset);
     u64::try_from(result).map_err(|_| ArosError::SeekError)
 }
+
+mod snapshots;

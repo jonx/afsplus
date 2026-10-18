@@ -6,6 +6,8 @@
 //! instance on its single packet-processing task.
 
 mod heap;
+mod snapshots;
+pub use snapshots::*;
 
 #[cfg(feature = "heap-profile")]
 pub use heap::profile as heap_profile;
@@ -25,12 +27,14 @@ use afsplus_aros::{
 };
 use afsplus_block::{BlockDevice, BlockError, CacheControl, CachedDevice};
 use afsplus_core::flight::{Categories, Category, Event, FlightRecorder, LiveSink, SinkResult};
-use afsplus_core::{mkfs, MkfsParams, MountMode, MountOptions, NamePolicy};
+use afsplus_core::{
+    mkfs_with_options, MkfsOptions, MkfsParams, MountMode, MountOptions, NamePolicy,
+};
 use afsplus_format::Timespec;
 use afsplus_vfs::{Capabilities, Vfs};
 
-pub const AFSPLUS_AROS_ABI_VERSION: u32 = 1;
-pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 20;
+pub const AFSPLUS_AROS_ABI_VERSION: u32 = 2;
+pub const AFSPLUS_AROS_INTERFACE_REVISION: u32 = 21;
 pub const AFSPLUS_AROS_GROUP_BASE: u64 = 0x1;
 pub const AFSPLUS_AROS_GROUP_INTERFACE_QUERY: u64 = 0x2;
 pub const AFSPLUS_AROS_GROUP_DOS_METADATA: u64 = 0x4;
@@ -51,6 +55,7 @@ pub const AFSPLUS_AROS_GROUP_CACHE: u64 = 0x10000;
 pub const AFSPLUS_AROS_GROUP_COMMIT: u64 = 0x20000;
 pub const AFSPLUS_AROS_GROUP_PATHS: u64 = 0x40000;
 pub const AFSPLUS_AROS_GROUP_FORMAT: u64 = 0x80000;
+pub const AFSPLUS_AROS_GROUP_SNAPSHOTS: u64 = 0x100000;
 pub const AFSPLUS_AROS_EXTENT_UNWRITTEN: u32 = 1;
 pub const AFSPLUS_AROS_DIR_RECORD_MAX: u32 = 280;
 pub const AFSPLUS_AROS_KIND_FILE: u32 = 1;
@@ -96,7 +101,8 @@ const AFSPLUS_AROS_GROUPS: u64 = AFSPLUS_AROS_GROUP_BASE
     | AFSPLUS_AROS_GROUP_CACHE
     | AFSPLUS_AROS_GROUP_COMMIT
     | AFSPLUS_AROS_GROUP_PATHS
-    | AFSPLUS_AROS_GROUP_FORMAT;
+    | AFSPLUS_AROS_GROUP_FORMAT
+    | AFSPLUS_AROS_GROUP_SNAPSHOTS;
 
 // Published C capability identities of `api/filesystem_v2.h`. They are
 // independent of the Rust mask and never renumbered.
@@ -118,10 +124,11 @@ pub const FSV2_CAP_DATA_POLICY: u64 = 1 << 14;
 pub const FSV2_CAP_OPEN_UNLINKED: u64 = 1 << 15;
 pub const FSV2_CAP_PAGED_DIRECTORIES: u64 = 1 << 16;
 pub const FSV2_CAP_PREALLOCATE: u64 = 1 << 17;
+pub const FSV2_CAP_SNAPSHOTS: u64 = 1 << 18;
 
 /// Rust capability bit to published C identity. A Rust bit without a row is
 /// not advertised at the C boundary.
-const CAPABILITY_MAP: [(u64, u64); 16] = [
+const CAPABILITY_MAP: [(u64, u64); 17] = [
     (Capabilities::EXTENDED_ATTRIBUTES, FSV2_CAP_XATTRS),
     (Capabilities::PREALLOCATE, FSV2_CAP_PREALLOCATE),
     (Capabilities::IO_64BIT, FSV2_CAP_64BIT_IO),
@@ -138,6 +145,7 @@ const CAPABILITY_MAP: [(u64, u64); 16] = [
     (Capabilities::DATA_POLICY, FSV2_CAP_DATA_POLICY),
     (Capabilities::OPEN_UNLINKED, FSV2_CAP_OPEN_UNLINKED),
     (Capabilities::SYMLINKS, FSV2_CAP_SYMLINKS),
+    (Capabilities::SNAPSHOTS, FSV2_CAP_SNAPSHOTS),
 ];
 
 fn published_capabilities(capabilities: Capabilities) -> u64 {
@@ -205,6 +213,9 @@ pub struct AfsplusArosMountConfig {
     pub max_locks: u32,
     pub max_file_info_name_bytes: u32,
     pub flags: u32,
+    pub snapshot_max_edit_records: u32,
+    pub snapshot_max_views: u32,
+    pub snapshot_reclaim_records: u32,
 }
 
 #[repr(C)]
@@ -221,6 +232,8 @@ pub struct AfsplusArosFileInfo {
     pub modified_nanoseconds: u32,
     pub name_length: u32,
     pub reserved: u32,
+    pub owner_uid: u32,
+    pub owner_gid: u32,
 }
 
 #[repr(C)]
@@ -454,6 +467,8 @@ pub struct AfsplusArosStat {
     pub modified_nanoseconds: u32,
     pub changed_nanoseconds: u32,
     pub reserved1: u32,
+    pub owner_uid: u32,
+    pub owner_gid: u32,
 }
 
 #[repr(C)]
@@ -476,7 +491,7 @@ pub struct AfsplusArosExtent {
 }
 
 const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosExtent>()];
-const _: [(); 88] = [(); std::mem::size_of::<AfsplusArosStat>()];
+const _: [(); 96] = [(); std::mem::size_of::<AfsplusArosStat>()];
 const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosDirEntry>()];
 const _: [(); 112] = [(); std::mem::size_of::<AfsplusArosCounters>()];
 const _: [(); 136] = [(); std::mem::size_of::<AfsplusArosHealth>()];
@@ -485,16 +500,16 @@ const _: [(); 40] = [(); std::mem::size_of::<AfsplusArosTraceCounters>()];
 const _: [(); 64] = [(); std::mem::size_of::<AfspTraceEvent>()];
 const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosInterface>()];
 const _: [(); 64] = [(); std::mem::size_of::<AfsplusArosCapabilities>()];
-const _: [(); 64] = [(); std::mem::size_of::<AfsplusArosFileInfo>()];
+const _: [(); 72] = [(); std::mem::size_of::<AfsplusArosFileInfo>()];
 const _: [(); 32] = [(); std::mem::size_of::<AfsplusArosDiskInfo>()];
 #[cfg(target_pointer_width = "64")]
 const _: [(); 56] = [(); std::mem::size_of::<AfsplusArosDevice>()];
 #[cfg(target_pointer_width = "64")]
-const _: [(); 48] = [(); std::mem::size_of::<AfsplusArosMountConfig>()];
+const _: [(); 56] = [(); std::mem::size_of::<AfsplusArosMountConfig>()];
 #[cfg(target_pointer_width = "32")]
 const _: [(); 40] = [(); std::mem::size_of::<AfsplusArosDevice>()];
 #[cfg(target_pointer_width = "32")]
-const _: [(); 40] = [(); std::mem::size_of::<AfsplusArosMountConfig>()];
+const _: [(); 52] = [(); std::mem::size_of::<AfsplusArosMountConfig>()];
 
 /// Opaque to C. The actual allocation is `NativeBridge`.
 #[repr(C)]
@@ -869,6 +884,8 @@ fn copy_file_info(
             modified_nanoseconds: info.modified.nanoseconds,
             name_length: info.name.len() as u32,
             reserved: 0,
+            owner_uid: info.owner_uid,
+            owner_gid: info.owner_gid,
         },
     )
 }
@@ -964,13 +981,31 @@ pub extern "C" fn afsplus_aros_mount(
         // No cache until the handler sizes it (afsplus_aros_set_cache_blocks).
         let cached_device = CachedDevice::new(callback_device, 0);
         let cache = cached_device.control();
-        let vfs = Vfs::mount(
-            cached_device,
-            MountOptions {
-                mode,
-                ..Default::default()
-            },
-        )?;
+        let options = MountOptions {
+            mode,
+            ..Default::default()
+        };
+        let budgets = [
+            config.snapshot_max_edit_records,
+            config.snapshot_max_views,
+            config.snapshot_reclaim_records,
+        ];
+        let vfs = if budgets == [0; 3] {
+            Vfs::mount(cached_device, options)?
+        } else {
+            if budgets.contains(&0) {
+                return Err(ArosError::BadNumber);
+            }
+            Vfs::mount_with_snapshot_limits(
+                cached_device,
+                options,
+                afsplus_core::volume::SnapshotWorkLimits {
+                    max_edit_records: budgets[0] as usize,
+                    max_views: budgets[1] as usize,
+                    reclaim_records: budgets[2] as usize,
+                },
+            )?
+        };
         let adapter = ArosAdapter::new(
             vfs,
             ArosConfig {
@@ -1042,8 +1077,12 @@ pub extern "C" fn afsplus_aros_format(
     uuid: *const u8,
     seconds: i64,
     nanoseconds: u32,
+    format_flags: u32,
 ) -> i32 {
     ffi_status(|| {
+        if format_flags & !1 != 0 {
+            return Err(ArosError::BadNumber);
+        }
         if device.is_null() || uuid.is_null() {
             return Err(ArosError::InvalidComponentName);
         }
@@ -1077,7 +1116,7 @@ pub extern "C" fn afsplus_aros_format(
             write_block: device.write_block,
             flush: device.flush,
         };
-        mkfs(
+        mkfs_with_options(
             &mut callback_device,
             &MkfsParams {
                 uuid: volume_uuid,
@@ -1092,6 +1131,9 @@ pub extern "C" fn afsplus_aros_format(
                     seconds,
                     nanoseconds,
                 },
+            },
+            MkfsOptions {
+                persistent_snapshots: format_flags & 1 != 0,
             },
         )
         .map_err(afsplus_vfs::VfsError::from)?;
@@ -1622,6 +1664,30 @@ pub extern "C" fn afsplus_aros_capabilities(
                 available_blocks: policy.statfs.available_blocks,
             },
             |value, size| value.struct_size = size,
+        )
+    })
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn afsplus_aros_set_owner(
+    filesystem: *mut AfsplusAros,
+    base_lock: u64,
+    name: *const u8,
+    name_length: u32,
+    owner_uid: u32,
+    owner_gid: u32,
+    now_seconds: i64,
+    now_nanoseconds: u32,
+) -> i32 {
+    bridge_status(filesystem, || {
+        let name = input_bytes(name, name_length)?;
+        bridge_mut(filesystem)?.adapter.set_owner(
+            optional_lock(base_lock),
+            name,
+            owner_uid,
+            owner_gid,
+            timestamp(now_seconds, now_nanoseconds)?,
         )
     })
 }
@@ -2534,6 +2600,8 @@ pub extern "C" fn afsplus_aros_stat_id(
                 modified_nanoseconds: stat.modified.nanoseconds,
                 changed_nanoseconds: stat.changed.nanoseconds,
                 reserved1: 0,
+                owner_uid: stat.owner_uid,
+                owner_gid: stat.owner_gid,
             },
             |value, size| value.struct_size = size,
         )

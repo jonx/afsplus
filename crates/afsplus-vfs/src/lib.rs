@@ -7,6 +7,10 @@
 mod authority;
 pub mod backup;
 pub mod restore;
+mod snapshot_restore;
+mod snapshot_restore_tree;
+pub use snapshot_restore_tree::TreeRestoreLimits;
+mod snapshots;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -19,7 +23,9 @@ use afsplus_core::volume::{
     SecurityProjectionPolicy, Volume,
 };
 pub use afsplus_core::AttributeWriteMode;
-use afsplus_core::{mount_with_options, CoreError, MountMode, MountOptions};
+use afsplus_core::{
+    mount_with_options, mount_with_snapshot_limits, CoreError, MountMode, MountOptions,
+};
 use afsplus_format::ident::{
     NameKeyAlgorithm, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG_DATA_UPDATES,
     RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
@@ -245,6 +251,8 @@ impl Capabilities {
     /// Additive: named attributes can be written. Reading them needs no
     /// capability: a volume that cannot write them still reports what it has.
     pub const EXTENDED_ATTRIBUTES: u64 = 1 << 15;
+    /// Persistent immutable views; host authorization is checked separately.
+    pub const SNAPSHOTS: u64 = 1 << 16;
 
     pub const BASELINE: Capabilities = Capabilities(
         Self::IO_64BIT
@@ -258,7 +266,7 @@ impl Capabilities {
     );
 
     /// Stable lower-case names for structured output, in bit order.
-    pub const NAMES: [(u64, &'static str); 16] = [
+    pub const NAMES: [(u64, &'static str); 17] = [
         (Self::IO_64BIT, "io_64bit"),
         (Self::UTF8_NAMES, "utf8_names"),
         (Self::HARD_LINKS, "hard_links"),
@@ -275,6 +283,7 @@ impl Capabilities {
         (Self::SYMLINKS, "symlinks"),
         (Self::PREALLOCATE, "preallocate"),
         (Self::EXTENDED_ATTRIBUTES, "extended_attributes"),
+        (Self::SNAPSHOTS, "snapshots"),
     ];
 
     pub fn names(self) -> impl Iterator<Item = &'static str> {
@@ -480,6 +489,15 @@ pub fn reclaim_backlog_high_blocks(total_blocks: u64) -> u64 {
 pub struct Vfs<D: BlockDevice> {
     volume: Volume<D>,
     handles: BTreeMap<Handle, OpenHandle>,
+    snapshot_readers: BTreeMap<Handle, afsplus_core::volume::SnapshotHandle>,
+    snapshot_directories: BTreeMap<
+        Handle,
+        (
+            Handle,
+            ObjectId,
+            Option<afsplus_core::volume::SnapshotDirectoryCursor>,
+        ),
+    >,
     /// Stored spelling of the entry each open directory handle returned last.
     /// A directory cursor is bound to one generation, so any commit anywhere
     /// on the volume invalidates it; this is the point enumeration resumes
@@ -524,7 +542,19 @@ pub struct Vfs<D: BlockDevice> {
 
 impl<D: BlockDevice> Vfs<D> {
     pub fn mount(device: D, options: MountOptions) -> Result<Self, VfsError> {
-        let volume = mount_with_options(device, options)?;
+        Self::from_mounted_volume(mount_with_options(device, options)?)
+    }
+
+    /// Mount with explicit persistent-snapshot admission and work budgets.
+    pub fn mount_with_snapshot_limits(
+        device: D,
+        options: MountOptions,
+        limits: afsplus_core::volume::SnapshotWorkLimits,
+    ) -> Result<Self, VfsError> {
+        Self::from_mounted_volume(mount_with_snapshot_limits(device, options, limits)?)
+    }
+
+    fn from_mounted_volume(volume: Volume<D>) -> Result<Self, VfsError> {
         let mut vfs = Self::new(volume);
         if vfs.volume.mount_mode() == MountMode::ReadWrite {
             match vfs.resume_one_orphan(Timespec::default()) {
@@ -540,6 +570,8 @@ impl<D: BlockDevice> Vfs<D> {
             mounted_from_older_checkpoint: volume.mounted_from_older_checkpoint(),
             volume,
             handles: BTreeMap::new(),
+            snapshot_readers: BTreeMap::new(),
+            snapshot_directories: BTreeMap::new(),
             directory_resume: BTreeMap::new(),
             next_handle: 1,
             idle_maintenance: true,
@@ -582,6 +614,12 @@ impl<D: BlockDevice> Vfs<D> {
             bits |= Capabilities::OPEN_UNLINKED;
         }
         bits |= Capabilities::EXTENDED_ATTRIBUTES;
+        if self.volume.ident().features.incompat
+            & afsplus_format::ident::INCOMPAT_PERSISTENT_SNAPSHOTS
+            != 0
+        {
+            bits |= Capabilities::SNAPSHOTS;
+        }
         Capabilities(bits)
     }
 

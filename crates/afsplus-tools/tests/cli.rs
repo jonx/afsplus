@@ -603,3 +603,25 @@ fn info_reports_which_profiles_can_take_the_volume() {
         "{json}"
     );
 }
+
+#[test]
+fn snapshots_formatter_feature_and_explicit_admission() {
+    let temp = TempDir::new("snapshot-format");
+    let image = temp.join("snapshot.afsplus");
+    let result = format_image(&image, &["--snapshots", "--json"]);
+    assert_status(&result, 0);
+    assert!(stdout(&result).contains("org.aros.afsplus:persistent-snapshots"));
+    assert!(mount(FileBackend::open(&image, DEFAULT_BLOCK_SIZE, 512).unwrap()).is_err());
+    let limits = afsplus_core::volume::SnapshotWorkLimits {
+        max_edit_records: 4096,
+        max_views: 8,
+        reclaim_records: 64,
+    };
+    let mut volume = afsplus_core::mount_with_snapshot_limits(
+        FileBackend::open(&image, DEFAULT_BLOCK_SIZE, 512).unwrap(),
+        Default::default(),
+        limits,
+    )
+    .unwrap();
+    assert!(volume.snapshot_create(Timespec::default()).is_ok());
+}

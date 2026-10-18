@@ -29,6 +29,8 @@
 #include <proto/dos.h>
 #include <proto/exec.h>
 #include <proto/locale.h>
+#include <proto/security.h>
+#include <libraries/security.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -104,6 +106,12 @@ struct AfsplusArosHandler {
      * whether the Control string named it, whether the library delays, and
      * whether changes wait now, which keeps the timer running. */
     uint32_t commit_seconds;
+    uint32_t snapshot_max_edit_records;
+    uint32_t snapshot_max_views;
+    uint32_t snapshot_reclaim_records;
+    uint32_t format_snapshots;
+    uint32_t backup_policy;
+    uint32_t restore_policy;
     uint32_t cache_auto;
     uint32_t commit_named;
     uint32_t commit_delayed;
@@ -624,9 +632,18 @@ static int32_t device_sync(void *context)
     struct ExecBase *SysBase = handler->SysBase;
     struct IOExtTD *request = handler->device_request;
     LONG result;
+    const struct Library *device;
 
-    if (request == NULL)
+    if (request == NULL || request->iotd_Req.io_Device == NULL)
         return ERROR_BAD_NUMBER;
+    device = &request->iotd_Req.io_Device->dd_Library;
+    /* hostdisk 1.0 acknowledged UPDATE before queued writes, without a host
+     * barrier. Do not interpret that legacy success as a durable commit. */
+    if (device->lib_Node.ln_Name != NULL
+        && strcmp(device->lib_Node.ln_Name, "hostdisk.device") == 0
+        && (device->lib_Version < 1
+            || (device->lib_Version == 1 && device->lib_Revision < 1)))
+        return ERROR_ACTION_NOT_KNOWN;
     request->iotd_Req.io_Command = CMD_UPDATE;
     request->iotd_Req.io_Flags = 0;
     request->iotd_Req.io_Data = NULL;
@@ -634,6 +651,8 @@ static int32_t device_sync(void *context)
     request->iotd_Req.io_Offset = 0;
     request->iotd_Req.io_Actual = 0;
     result = DoIO((struct IORequest *)request);
+    if (result == IOERR_NOCMD || request->iotd_Req.io_Error == IOERR_NOCMD)
+        return ERROR_ACTION_NOT_KNOWN;
     return result == 0 && request->iotd_Req.io_Error == 0
         ? 0 : ERROR_NOT_A_DOS_DISK;
 }
@@ -840,11 +859,17 @@ static int32_t setup_dma_bounce(struct AfsplusArosHandler *handler)
     if ((SIPTR)environment->de_TableSize >= DE_BUFMEMTYPE)
         memory_flags |= (ULONG)environment->de_BufMemType;
     handler->bounce = AllocMem(handler->bounce_size, memory_flags);
-    if (handler->bounce == NULL)
-        return ERROR_NO_FREE_STORE;
-    if (!buffer_matches_mask(handler, handler->bounce, handler->bounce_size))
-        return ERROR_NO_FREE_STORE;
-    return 0;
+    if (handler->bounce != NULL
+        && buffer_matches_mask(handler, handler->bounce, handler->bounce_size))
+        return 0;
+    /* Failure only: the two refusals share one error number, and the mount
+     * message names the stage but not which one it was. */
+    bug("[AFSPLUS] dma-bounce refused: de_Mask=0x%lx mask=0x%lx "
+        "flags=0x%lx size=%lu bounce=%p\n",
+        (unsigned long)environment->de_Mask,
+        (unsigned long)handler->dma_mask, (unsigned long)memory_flags,
+        (unsigned long)handler->bounce_size, handler->bounce);
+    return ERROR_NO_FREE_STORE;
 }
 
 static int32_t open_device(struct AfsplusArosHandler *handler)
@@ -852,9 +877,8 @@ static int32_t open_device(struct AfsplusArosHandler *handler)
     struct ExecBase *SysBase = handler->SysBase;
     struct FileSysStartupMsg *startup = handler->startup;
 
-    set_startup_stage(handler, "device-unit");
-    if (startup->fssm_Unit > UINT32_MAX)
-        return ERROR_BAD_NUMBER;
+    /* Exec OpenDevice accepts a native-width unit. Hosted devices also use
+     * it for a path pointer, so neither reject nor truncate its high bits. */
     set_startup_stage(handler, "device-port");
     handler->device_port = CreateMsgPort();
     if (handler->device_port == NULL)
@@ -866,7 +890,7 @@ static int32_t open_device(struct AfsplusArosHandler *handler)
         return ERROR_NO_FREE_STORE;
     set_startup_stage(handler, "open-device");
     if (OpenDevice(AROS_BSTR_ADDR(startup->fssm_Device),
-            (ULONG)startup->fssm_Unit,
+            (IPTR)startup->fssm_Unit,
             (struct IORequest *)handler->device_request,
             startup->fssm_Flags) != 0)
         return ERROR_DEVICE_NOT_MOUNTED;
@@ -973,6 +997,12 @@ static int32_t prepare_filesystem(struct AfsplusArosHandler *handler)
         handler->commit_seconds = control.commit_seconds;
         handler->commit_named = control.commit_named;
         handler->cache_auto = control.cache_auto;
+        handler->snapshot_max_edit_records = control.snapshot_max_edit_records;
+        handler->snapshot_max_views = control.snapshot_max_views;
+        handler->snapshot_reclaim_records = control.snapshot_reclaim_records;
+        handler->format_snapshots = control.format_snapshots;
+        handler->backup_policy = control.backup_policy;
+        handler->restore_policy = control.restore_policy;
     }
 
     return 0;
@@ -997,6 +1027,9 @@ static int32_t mount_volume(struct AfsplusArosHandler *handler)
         ? AFSPLUS_AROS_MOUNT_READ_ONLY : AFSPLUS_AROS_MOUNT_READ_WRITE;
     mount_config.name_encoding = handler->name_encoding;
     mount_config.flags = handler->mount_flags;
+    mount_config.snapshot_max_edit_records = handler->snapshot_max_edit_records;
+    mount_config.snapshot_max_views = handler->snapshot_max_views;
+    mount_config.snapshot_reclaim_records = handler->snapshot_reclaim_records;
     /* No name: the volume is named after its committed label, so a renamed
      * volume comes back under its new name. */
     mount_config.volume_name = NULL;
@@ -1191,7 +1224,8 @@ static int32_t packet_format(void *context, const uint8_t *name,
     if (error == 0)
     {
         error = afsplus_aros_format(&handler->device, handler->name_encoding,
-            name, name_length, uuid, seconds, nanoseconds);
+            name, name_length, uuid, seconds, nanoseconds,
+            handler->format_snapshots ? AFSPLUS_AROS_FORMAT_SNAPSHOTS : 0);
         if (error != 0)
         {
             /* Formatting is not atomic. An old checkpoint could survive
@@ -1229,6 +1263,29 @@ static int32_t packet_format(void *context, const uint8_t *name,
     return error;
 }
 
+/* Each historical packet checks the sender's current host authority. */
+static int32_t packet_authorize_policy(void *context, const struct DosPacket *packet, uint32_t policy)
+{
+    struct AfsplusArosHandler *handler = context;
+    struct ExecBase *SysBase = handler->SysBase;
+    struct SecurityBase *secBase;
+    ULONG owner;
+    if (policy == 0 || packet->dp_Port == NULL
+        || (packet->dp_Port->mp_Flags & PF_ACTION) != PA_SIGNAL
+        || packet->dp_Port->mp_SigTask == NULL) return ERROR_READ_PROTECTED;
+    secBase = (struct SecurityBase *)OpenLibrary((CONST_STRPTR)SECURITYNAME, 0);
+    if (secBase == NULL)
+        return policy == 2 ? 0 : ERROR_READ_PROTECTED;
+    owner = secGetTaskOwner(packet->dp_Port->mp_SigTask);
+    CloseLibrary((struct Library *)secBase);
+    return (owner >> 16) == secROOT_UID ? 0 : ERROR_READ_PROTECTED;
+}
+
+static int32_t packet_authorize_backup(void *context, const struct DosPacket *packet)
+{ return packet_authorize_policy(context, packet, ((struct AfsplusArosHandler *)context)->backup_policy); }
+static int32_t packet_authorize_restore(void *context, const struct DosPacket *packet)
+{ return packet_authorize_policy(context, packet, ((struct AfsplusArosHandler *)context)->restore_policy); }
+
 static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
 {
     struct AfsplusArosPacketConfig packet_config;
@@ -1255,6 +1312,8 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     packet_config.allocate = packet_allocate;
     packet_config.free = packet_free;
     packet_config.now = packet_now;
+    packet_config.authorize_backup = packet_authorize_backup;
+    packet_config.authorize_restore = packet_authorize_restore;
     handler->notify_port = CreateMsgPort();
     if (handler->notify_port == NULL)
         return ERROR_NO_FREE_STORE;
@@ -1648,7 +1707,7 @@ LONG afsplus_aros_refuse_startup(struct ExecBase *SysBase)
     return RETURN_FAIL;
 }
 
-LONG handler(struct ExecBase *SysBase)
+static LONG handler_main(struct ExecBase *SysBase)
 {
     struct AfsplusArosHandler *state;
     struct Process *process;
@@ -1822,4 +1881,13 @@ LONG handler(struct ExecBase *SysBase)
     if (death_packet != NULL)
         reply_packet(port, SysBase, death_packet);
     return RETURN_OK;
+}
+
+extern void afsplus_aros_thread_cleanup(void);
+
+LONG handler(struct ExecBase *SysBase)
+{
+    LONG result = handler_main(SysBase);
+    afsplus_aros_thread_cleanup();
+    return result;
 }

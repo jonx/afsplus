@@ -209,6 +209,10 @@ fn read_only_mount_and_invalid_offsets_map_to_dos_errors() {
         Err(ArosError::DiskWriteProtected)
     );
     assert!(adapter.disk_info().write_protected);
+    assert_eq!(
+        adapter.set_owner(None, b"", 501, 20, timestamp(2)),
+        Err(ArosError::DiskWriteProtected)
+    );
 
     let writable = Vfs::mount(formatted(), MountOptions::default()).unwrap();
     let mut adapter = ArosAdapter::new(writable, ArosConfig::default());
@@ -332,4 +336,33 @@ fn locate_path_keeps_the_stored_spelling_at_every_step() {
     assert_eq!(adapter.examine_lock(lock).unwrap().name, b"CaseTest");
     let parent = adapter.parent_lock(lock).unwrap().unwrap();
     assert_eq!(adapter.examine_lock(parent).unwrap().name, b"FSQual");
+}
+
+#[test]
+fn owner_metadata_is_persistent_and_visible_through_dos_examine() {
+    let vfs = Vfs::mount(formatted(), MountOptions::default()).unwrap();
+    let mut adapter = ArosAdapter::new(vfs, ArosConfig::default());
+    let file = adapter
+        .open(None, b"owned", OpenMode::NewFile, timestamp(1))
+        .unwrap();
+    adapter.close(file).unwrap();
+    adapter
+        .set_owner(None, b"owned", 501, 70000, timestamp(2))
+        .unwrap();
+    let lock = adapter.locate(None, b"owned", LockAccess::Shared).unwrap();
+    let info = adapter.examine_lock(lock).unwrap();
+    assert_eq!((info.owner_uid, info.owner_gid), (501, 70000));
+    adapter
+        .set_owner(Some(lock), b"", 0, 20, timestamp(3))
+        .unwrap();
+    let info = adapter.examine_lock(lock).unwrap();
+    assert_eq!((info.owner_uid, info.owner_gid), (0, 20));
+    adapter.free_lock(lock).unwrap();
+    adapter.flush().unwrap();
+    let device = adapter.into_vfs().unwrap().into_volume().into_device();
+    let vfs = Vfs::mount(device, MountOptions::default()).unwrap();
+    let mut adapter = ArosAdapter::new(vfs, ArosConfig::default());
+    let lock = adapter.locate(None, b"owned", LockAccess::Shared).unwrap();
+    let info = adapter.examine_lock(lock).unwrap();
+    assert_eq!((info.owner_uid, info.owner_gid), (0, 20));
 }

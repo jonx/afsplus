@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /* Copyright (c) 2026 John Knipper */
-/* Confined restore to a new regular file, preserving supported metadata. */
+/* Confined fresh file/tree restore, preserving every supported metadata field. */
 #include <dos/dos.h>
 #include <dos/dosextens.h>
 #include <proto/dos.h>
@@ -28,21 +28,33 @@ int main(int argc, char **argv)
 {
     struct DevProc *device;
     BPTR destination = BNULL;
-    uint64_t id, reader = 0, object = 1, restored;
+    uint64_t id, reader = 0, object = 1, restored, parsed;
+    struct AfsplusArosStat captured;
+    uint32_t max_nodes = 4096, max_depth = 64, max_metadata_bytes = 4 * 1024 * 1024;
     LONG error = 0, close_error;
     int attempted = 0, published = 0;
     const char *phase = "destination";
     char *path, *component, *slash;
-    if (argc != 6 || !parse_id(argv[2], &id) || !argv[3][0]
+    if ((argc != 6 && argc != 9) || !parse_id(argv[2], &id) || !argv[3][0]
         || !argv[5][0] || strpbrk(argv[3], ":") != NULL
         || strpbrk(argv[5], ":/") != NULL
         || !strcmp(argv[5], ".") || !strcmp(argv[5], ".."))
     {
         Printf((CONST_STRPTR)"usage: AFSPlusRestore <volume> <snapshot-id> <snapshot-path> "
-               "<target-directory> <new-name>\n"
-               "Restores one regular file on the same volume. Existing targets, "
-               "links and security descriptors are refused.\n");
+               "<target-directory> <new-name> [nodes depth metadata-bytes]\n"
+               "Restores a file or directory on the same volume; / selects the captured root.\n"
+               "Existing targets, links and security descriptors are refused.\n"
+               "Tree defaults: 4096 nodes, 64 levels, 4194304 metadata bytes.\n");
         return RETURN_ERROR;
+    }
+    if (argc == 9)
+    {
+        if (!parse_id(argv[6], &parsed) || parsed > UINT32_MAX) return RETURN_ERROR;
+        max_nodes = (uint32_t)parsed;
+        if (!parse_id(argv[7], &parsed) || parsed > UINT32_MAX) return RETURN_ERROR;
+        max_depth = (uint32_t)parsed;
+        if (!parse_id(argv[8], &parsed) || parsed > UINT32_MAX) return RETURN_ERROR;
+        max_metadata_bytes = (uint32_t)parsed;
     }
     device = GetDeviceProc((CONST_STRPTR)argv[1], NULL);
     if (device == NULL)
@@ -61,7 +73,7 @@ int main(int argc, char **argv)
     error = afsplus_client_snapshot_open(device->dvp_Port, id, &reader);
     component = path;
     if (*component == '/') component++;
-    while (error == 0)
+    while (error == 0 && !(path[0] == '/' && *component == 0))
     {
         phase = "snapshot-path";
         slash = strchr(component, '/');
@@ -76,10 +88,21 @@ int main(int argc, char **argv)
     free(path);
     if (error == 0)
     {
+        phase = "snapshot-stat";
+        error = afsplus_client_snapshot_stat(device->dvp_Port, reader, object, &captured);
+    }
+    if (error == 0)
+    {
         attempted = 1;
         phase = "restore";
-        error = afsplus_client_snapshot_restore_file(device->dvp_Port, reader,
-            object, destination, (CONST_STRPTR)argv[5], &restored);
+        if (captured.kind == AFSPLUS_AROS_KIND_DIRECTORY)
+            error = afsplus_client_snapshot_restore_tree(device->dvp_Port, reader,
+                object, destination, (CONST_STRPTR)argv[5], max_nodes, max_depth,
+                max_metadata_bytes, &restored);
+        else if (captured.kind == AFSPLUS_AROS_KIND_FILE && argc == 6)
+            error = afsplus_client_snapshot_restore_file(device->dvp_Port, reader,
+                object, destination, (CONST_STRPTR)argv[5], &restored);
+        else error = ERROR_OBJECT_WRONG_TYPE;
         if (error == 0) published = 1;
     }
     if (reader != 0)

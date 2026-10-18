@@ -43,7 +43,8 @@ enum FSV2_Capability {
     FSV2_CAP_DATA_POLICY       = UINT64_C(1) << 14,
     FSV2_CAP_OPEN_UNLINKED     = UINT64_C(1) << 15,
     FSV2_CAP_PAGED_DIRECTORIES = UINT64_C(1) << 16,
-    FSV2_CAP_PREALLOCATE       = UINT64_C(1) << 17
+    FSV2_CAP_PREALLOCATE       = UINT64_C(1) << 17,
+    FSV2_CAP_SNAPSHOTS         = UINT64_C(1) << 18
 };
 
 struct FSV2_String {

@@ -77,6 +77,9 @@ fn config() -> AfsplusArosMountConfig {
         max_locks: 16,
         max_file_info_name_bytes: 107,
         flags: 0,
+        snapshot_max_edit_records: 0,
+        snapshot_max_views: 0,
+        snapshot_reclaim_records: 0,
     }
 }
 
@@ -100,6 +103,7 @@ fn blank_device_formats_mounts_and_preserves_latin1_label_and_case_policy() {
             label.len() as u32,
             [0x22; 16].as_ptr(),
             100,
+            0,
             0
         ),
         0
@@ -160,6 +164,7 @@ fn invalid_labels_and_read_only_devices_are_refused_before_writes() {
                 label.len() as u32,
                 [1; 16].as_ptr(),
                 0,
+                0,
                 0
             ),
             0
@@ -174,6 +179,7 @@ fn invalid_labels_and_read_only_devices_are_refused_before_writes() {
             1,
             [1; 16].as_ptr(),
             0,
+            0,
             0
         ),
         0
@@ -187,6 +193,7 @@ fn invalid_labels_and_read_only_devices_are_refused_before_writes() {
             b"Work".as_ptr(),
             4,
             [1; 16].as_ptr(),
+            0,
             0,
             0
         ),
@@ -207,6 +214,7 @@ fn rejected_format_preserves_every_block_of_an_existing_volume() {
             6,
             [3; 16].as_ptr(),
             123,
+            0,
             0
         ),
         0
@@ -230,6 +238,7 @@ fn rejected_format_preserves_every_block_of_an_existing_volume() {
                 label.len() as u32,
                 [4; 16].as_ptr(),
                 124,
+                0,
                 0
             ),
             0
@@ -258,6 +267,7 @@ fn device_write_failure_is_not_reported_as_a_successful_format() {
             4,
             [1; 16].as_ptr(),
             0,
+            0,
             0
         ),
         0
@@ -269,4 +279,208 @@ fn device_write_failure_is_not_reported_as_a_successful_format() {
         0
     );
     assert!(filesystem.is_null());
+}
+
+#[test]
+fn snapshot_format_requires_explicit_mount_budgets_and_preserves_feature() {
+    let mut device = device();
+    let cb = callbacks(&mut device);
+    assert_ne!(
+        afsplus_aros_format(
+            &cb,
+            AFSPLUS_AROS_ENCODING_UTF8,
+            b"Snapshot".as_ptr(),
+            8,
+            [0x53; 16].as_ptr(),
+            0,
+            0,
+            2
+        ),
+        0
+    );
+    assert_eq!(device.writes, 0);
+    assert_eq!(
+        afsplus_aros_format(
+            &cb,
+            AFSPLUS_AROS_ENCODING_UTF8,
+            b"Snapshot".as_ptr(),
+            8,
+            [0x53; 16].as_ptr(),
+            0,
+            0,
+            1
+        ),
+        0
+    );
+    let mut fs = ptr::null_mut();
+    assert_ne!(afsplus_aros_mount(&cb, &config(), &mut fs), 0);
+    let mut cfg = config();
+    cfg.snapshot_max_edit_records = 4096;
+    cfg.snapshot_max_views = 8;
+    cfg.snapshot_reclaim_records = 64;
+    assert_eq!(afsplus_aros_mount(&cb, &cfg, &mut fs), 0);
+    let mut capabilities = AfsplusArosCapabilities {
+        struct_size: size_of::<AfsplusArosCapabilities>() as u32,
+        ..Default::default()
+    };
+    assert_eq!(afsplus_aros_capabilities(fs, &mut capabilities), 0);
+    assert_ne!(capabilities.capabilities & (1 << 18), 0);
+    let mut file = 0;
+    let mut written = 0;
+    assert_eq!(
+        afsplus_aros_open(
+            fs,
+            0,
+            b"prefs".as_ptr(),
+            5,
+            AFSPLUS_AROS_OPEN_NEW_FILE,
+            0,
+            0,
+            &mut file
+        ),
+        0
+    );
+    assert_eq!(
+        afsplus_aros_write(fs, file, b"boot".as_ptr(), 4, 0, 0, &mut written),
+        0
+    );
+    assert_eq!(written, 4);
+    assert_eq!(afsplus_aros_close(fs, file), 0);
+    assert_eq!(afsplus_aros_set_write_protect(fs, 1, 91), 0);
+    let mut refused = 0;
+    assert_eq!(afsplus_aros_snapshot_create(fs, 1, 0, &mut refused), 214);
+    assert_eq!(afsplus_aros_set_write_protect(fs, 0, 91), 0);
+    let mut snapshot = 0;
+    assert_eq!(afsplus_aros_snapshot_create(fs, 1, 0, &mut snapshot), 0);
+    assert_ne!(snapshot, 0);
+    let mut reader = 0;
+    assert_eq!(afsplus_aros_snapshot_open(fs, snapshot, &mut reader), 0);
+    let mut object = 0;
+    assert_eq!(
+        afsplus_aros_snapshot_lookup(fs, reader, 1, b"PREFS".as_ptr(), 5, &mut object),
+        0
+    );
+    let mut stat = AfsplusArosStat {
+        struct_size: size_of::<AfsplusArosStat>() as u32,
+        ..Default::default()
+    };
+    assert_eq!(afsplus_aros_snapshot_stat(fs, reader, object, &mut stat), 0);
+    assert_eq!(stat.kind, 1);
+    assert_eq!(stat.size, 4);
+    stat.struct_size = size_of::<AfsplusArosStat>() as u32;
+    assert_eq!(afsplus_aros_snapshot_stat(fs, reader, 1, &mut stat), 0);
+    assert_eq!(stat.kind, 2);
+    let mut directory = 0;
+    assert_eq!(
+        afsplus_aros_snapshot_dir_open(fs, reader, 1, &mut directory),
+        0
+    );
+    let mut records = [0u8; 512];
+    let mut count = 0;
+    let mut eof = 0;
+    assert_eq!(
+        afsplus_aros_snapshot_dir_read(
+            fs,
+            directory,
+            records.as_mut_ptr(),
+            512,
+            1,
+            &mut count,
+            &mut eof
+        ),
+        0
+    );
+    assert_eq!(count, 1);
+    assert_eq!(u32::from_ne_bytes(records[8..12].try_into().unwrap()), 1);
+    assert_eq!(afsplus_aros_snapshot_dir_close(fs, directory), 0);
+    let mut bytes = [0u8; 4];
+    assert_eq!(
+        afsplus_aros_snapshot_read(fs, reader, object, 0, bytes.as_mut_ptr(), 4, &mut count),
+        0
+    );
+    assert_eq!(count, 4);
+    assert_eq!(&bytes, b"boot");
+    let mut restored = 0;
+    assert_ne!(
+        afsplus_aros_snapshot_restore_tree(
+            fs,
+            reader,
+            1,
+            0,
+            b"tree".as_ptr(),
+            4,
+            0,
+            64,
+            4096,
+            2,
+            0,
+            &mut restored
+        ),
+        0
+    );
+    assert_eq!(restored, 0);
+    assert_eq!(
+        afsplus_aros_snapshot_restore_tree(
+            fs,
+            reader,
+            1,
+            0,
+            b"tree".as_ptr(),
+            4,
+            2,
+            2,
+            4096,
+            2,
+            0,
+            &mut restored
+        ),
+        0
+    );
+    let mut restored_file = 0;
+    let mut restored_lock = 0;
+    assert_eq!(
+        afsplus_aros_locate(
+            fs,
+            0,
+            b"tree".as_ptr(),
+            4,
+            AFSPLUS_AROS_LOCK_SHARED,
+            &mut restored_lock
+        ),
+        0
+    );
+    assert_eq!(
+        afsplus_aros_lookup_id(fs, restored_lock, b"prefs".as_ptr(), 5, &mut restored_file),
+        0
+    );
+    stat.struct_size = size_of::<AfsplusArosStat>() as u32;
+    assert_eq!(afsplus_aros_stat_id(fs, restored_file, &mut stat), 0);
+    assert_eq!(stat.size, 4);
+    assert_eq!(stat.kind, 1);
+    assert_eq!(afsplus_aros_free_lock(fs, restored_lock), 0);
+    let mut info = AfsplusArosDiskInfo::default();
+    assert_eq!(afsplus_aros_disk_info(fs, &mut info), 0);
+    assert_eq!(info.in_use, 1);
+    assert_eq!(afsplus_aros_snapshot_delete(fs, snapshot, 2, 0), 202);
+    assert_eq!(afsplus_aros_snapshot_close(fs, reader), 0);
+    assert_eq!(afsplus_aros_unmount(fs), 0);
+    assert_eq!(afsplus_aros_mount(&cb, &cfg, &mut fs), 0);
+    let mut record = [0u8; 24];
+    let mut count = 0;
+    let mut next = 0;
+    assert_eq!(
+        afsplus_aros_snapshot_list(fs, 0, record.as_mut_ptr(), 24, 1, &mut count, &mut next),
+        0
+    );
+    assert_eq!(count, 1);
+    assert_eq!(next, snapshot + 1);
+    assert_eq!(
+        u64::from_ne_bytes(record[..8].try_into().unwrap()),
+        snapshot
+    );
+    assert_eq!(afsplus_aros_set_write_protect(fs, 1, 92), 0);
+    assert_eq!(afsplus_aros_snapshot_delete(fs, snapshot, 3, 0), 214);
+    assert_eq!(afsplus_aros_set_write_protect(fs, 0, 92), 0);
+    assert_eq!(afsplus_aros_snapshot_delete(fs, snapshot, 3, 0), 0);
+    assert_eq!(afsplus_aros_unmount(fs), 0);
 }

@@ -2,7 +2,7 @@ AFS+ for AROS
 =============
 
 This is the AFS+ filesystem handler for AROS, built for @CPU@ by the build
-profile @PROFILE_ID@, with the four programs that look at an AFS+ volume from
+profile @PROFILE_ID@, with filesystem programs that manage an AFS+ volume from
 the machine itself. It is one handler for every AROS machine: the same source
 serves Hosted MacAROS on AArch64 and an AROS PC on x86_64, and each profile
 says below what has been run on it.
@@ -21,6 +21,9 @@ What is in here
 ---------------
 
   L/afsplus-handler            the filesystem itself, an AROS module
+  C/AFSPlusSnapshot            create/list/delete and view local captures
+  C/AFSPlusBackup              consistent local volume snapshot capture
+  C/AFSPlusRestore             restore a file or directory into a fresh name
   C/AFSPlusInfo                what a mounted AFS+ volume is doing
   C/AFSPlusTour                a tour of clones, watches and attributes
   C/AFSPlusClone               clone a file, or copy it if the volume cannot
@@ -44,9 +47,24 @@ change are Device, Unit and the geometry of the partition. Mount it with
 
   Mount AFSPLUS:
 
-A volume has to exist on that partition first. AFS+ volumes are made on a
-host with mkafsplus, from the AFS+ source tree; there is no target-side
-formatter in this release.
+A volume is made on a host with mkafsplus or through explicit DOS Format.
+Formatting replaces filesystem state. Persistent snapshots are selected by
+mkafsplus --snapshots, or by FORMATSNAPSHOTS=YES in the DOSDriver Control
+string for explicit Format. The feature is fixed when the volume is formatted.
+Supply SNAPSHOTEDIT, SNAPSHOTVIEWS and SNAPSHOTRECLAIM positive runtime budgets
+together to mount that volume; examples are in the DOSDriver template.
+BACKUP and RESTORE each default to DENY. ROOT uses current security.library
+ownership; SINGLEUSER declares an administrator domain without that library.
+
+AFSPlusBackup DEVICE captures a registered local snapshot. LIST enumerates
+captures. AFSPlusSnapshot DEVICE VIEW ID [PATH] reads an immutable view.
+AFSPlusRestore DEVICE ID PATH DIRECTORY NEWNAME restores a file or directory
+into a new destination, including supported metadata. Directory operations
+admit at most 4096 nodes, 64 levels and 4 MiB of aggregate names/comments/
+attributes; optional NODES DEPTH METADATABYTES arguments set explicit budgets.
+Hard-linked files, symlinks and security descriptors are refused before target
+mutation. Each complete directory is published through one final rename. External
+archives and system boot-root rollback have separate interfaces.
 
 
 Two things worth knowing

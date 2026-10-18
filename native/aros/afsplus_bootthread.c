@@ -28,6 +28,7 @@
 #define AROS_LIBREQ(bname, ver)
 
 #include <exec/execbase.h>
+#include <exec/memory.h>
 #include <exec/semaphores.h>
 #include <proto/exec.h>
 
@@ -292,78 +293,129 @@ int aros_thr_sleep(unsigned int secs, unsigned int nsecs)
  */
 
 #define KEY_SLOTS 16
-#define KEY_OWNERS 4
-
-/* One set of thread-local values per task that uses them: two handler
- * instances served from one resident segment (the installed volume and a
- * mounted update image) are two tasks with two sets. The table is claimed
- * under Forbid(); a fifth task is named in the log and gets nothing. */
-static struct {
+/* A resident segment can serve any number of mounted volumes. Each handler
+ * task owns a small Exec allocation, released before that task exits. */
+struct key_table {
+    struct key_table *next;
     struct Task *owner;
     void *values[KEY_SLOTS];
-} key_tables[KEY_OWNERS];
+};
+static struct key_table *key_tables;
+static void (*key_destructors[KEY_SLOTS])(void *);
 static unsigned int keys_taken;
+static unsigned char keys_guard;
+
+/* Forbid protects the local CPU only on EXECSMP. The atomic guard also
+ * excludes other CPUs; never allocate, wait or call a destructor under it. */
+static void key_lock(void)
+{
+    Forbid();
+    while (__atomic_test_and_set(&keys_guard, __ATOMIC_ACQUIRE))
+        ;
+}
+
+static void key_unlock(void)
+{
+    __atomic_clear(&keys_guard, __ATOMIC_RELEASE);
+    Permit();
+}
 
 static void **key_values_of_this_task(void)
 {
     struct Task *task = FindTask(NULL);
-    int i;
+    struct key_table *table;
 
-    Forbid();
-    for (i = 0; i < KEY_OWNERS; i++)
+    key_lock();
+    for (table = key_tables; table != NULL; table = table->next)
     {
-        if (key_tables[i].owner == task)
+        if (table->owner == task)
         {
-            Permit();
-            return key_tables[i].values;
+            key_unlock();
+            return table->values;
         }
     }
-    for (i = 0; i < KEY_OWNERS; i++)
-    {
-        if (key_tables[i].owner == NULL)
+    key_unlock();
+    table = AllocVec(sizeof(*table), MEMF_PUBLIC | MEMF_CLEAR);
+    if (table == NULL)
+        return NULL;
+    table->owner = task;
+    key_lock();
+    table->next = key_tables;
+    key_tables = table;
+    key_unlock();
+    return table->values;
+}
+
+/* Called after the handler has finished all Rust work, on its own task.
+ * Destructors may reset values, as compiler-rt's emulated TLS cleanup does;
+ * permit four rounds, matching the POSIX destructor-iteration minimum. */
+void afsplus_aros_thread_cleanup(void)
+{
+    struct Task *task = FindTask(NULL);
+    struct key_table *table, **link;
+    unsigned int round, key;
+
+    key_lock();
+    for (table = key_tables; table != NULL; table = table->next)
+        if (table->owner == task)
+            break;
+    key_unlock();
+    if (table == NULL)
+        return;
+    for (round = 0; round < 4; round++)
+        for (key = 0; key < KEY_SLOTS; key++)
         {
-            key_tables[i].owner = task;
-            Permit();
-            return key_tables[i].values;
+            void *value;
+            void (*destructor)(void *);
+
+            key_lock();
+            value = table->values[key];
+            table->values[key] = NULL;
+            destructor = key_destructors[key];
+            key_unlock();
+            if (value != NULL && destructor != NULL)
+                destructor(value);
         }
-    }
-    Permit();
-    bug("afsplus: more than %d tasks read the handler's thread-local values; "
-        "the extra task gets none\n", KEY_OWNERS);
-    return NULL;
+    key_lock();
+    for (link = &key_tables; *link != NULL; link = &(*link)->next)
+        if (*link == table)
+        {
+            *link = table->next;
+            break;
+        }
+    key_unlock();
+    FreeVec(table);
 }
 
 int pthread_key_create(unsigned int *key, void (*destructor)(void *))
 {
-    /* Destructors run when a thread ends. The one task here ends with the
-     * handler, and nothing that ends with it needs unwinding, so a
-     * destructor is recorded as unserved rather than quietly dropped. */
     if (key == NULL)
         return AFSPLUS_EINVAL;
-    if (destructor != NULL)
-        bug("afsplus: a thread-local value asked for a destructor; the "
-            "handler runs none\n");
-    Forbid();
+    key_lock();
     if (keys_taken >= KEY_SLOTS)
     {
-        Permit();
+        key_unlock();
         bug("afsplus: the handler ran out of thread-local keys (%d)\n",
             KEY_SLOTS);
         return AFSPLUS_EPERM;
     }
     *key = keys_taken++;
-    Permit();
+    key_destructors[*key] = destructor;
+    key_unlock();
     return 0;
 }
 
 int pthread_key_delete(unsigned int key)
 {
-    int i;
+    struct key_table *table;
 
     if (key >= KEY_SLOTS)
         return AFSPLUS_EINVAL;
-    for (i = 0; i < KEY_OWNERS; i++)
-        key_tables[i].values[key] = NULL;
+    key_lock();
+    for (table = key_tables; table != NULL; table = table->next)
+        table->values[key] = NULL;
+    key_destructors[key] = NULL;
+    key_unlock();
     return 0;
 }
 
@@ -373,7 +425,9 @@ int pthread_setspecific(unsigned int key, const void *value)
 
     if (key >= KEY_SLOTS || (values = key_values_of_this_task()) == NULL)
         return AFSPLUS_EINVAL;
+    key_lock();
     values[key] = (void *)(uintptr_t)value;
+    key_unlock();
     return 0;
 }
 
@@ -383,15 +437,17 @@ void *pthread_getspecific(unsigned int key)
 
     if (key >= KEY_SLOTS || (values = key_values_of_this_task()) == NULL)
         return NULL;
-    return values[key];
+    key_lock();
+    void *value = values[key];
+    key_unlock();
+    return value;
 }
 
 /*
  * emutls takes its mutex statically initialised, so there is no init call to
- * hang the semaphore on; the first lock makes it. Forbid() is what keeps two
- * tasks from making two semaphores out of one buffer -- exec cannot switch
- * inside it -- and the buffer is pthread_mutex_t's 136 bytes, which is more
- * than a struct boot_mutex needs.
+ * hang the semaphore on; the first lock makes it. The task registry's atomic
+ * guard publishes exactly one semaphore, including on EXECSMP. The buffer
+ * is pthread_mutex_t's 136 bytes, more than a struct boot_mutex needs.
  */
 int pthread_mutex_lock(void *raw)
 {
@@ -399,13 +455,13 @@ int pthread_mutex_lock(void *raw)
 
     if (mutex == NULL)
         return AFSPLUS_EINVAL;
-    Forbid();
+    key_lock();
     if (mutex->magic != MUTEX_MAGIC)
     {
         InitSemaphore(&mutex->semaphore);
         mutex->magic = MUTEX_MAGIC;
     }
-    Permit();
+    key_unlock();
     ObtainSemaphore(&mutex->semaphore);
     return 0;
 }
@@ -420,26 +476,33 @@ int pthread_mutex_unlock(void *raw)
     return 0;
 }
 
-/* pthread_once_t on AROS is { volatile int done; int started; int lock; },
- * and PTHREAD_ONCE_INIT is { 0, -1, 0 }. One task cannot be interrupted
- * between the test and the call by another caller of the same guard, so
- * `done` is the whole of it. */
+/* pthread_once_t is { volatile int done; int started; int lock; }, initially
+ * { 0, -1, 0 }. A real recursive Exec semaphore serializes initializers;
+ * publishing done after the routine prevents another CPU reading half-init. */
 struct boot_once
 {
     volatile int done;
     int started;
     int lock;
 };
+static struct boot_mutex once_mutex;
 
 int pthread_once(void *raw, void (*routine)(void))
 {
     struct boot_once *once = raw;
+    int error;
 
     if (once == NULL || routine == NULL)
         return AFSPLUS_EINVAL;
-    if (once->done)
+    if (__atomic_load_n(&once->done, __ATOMIC_ACQUIRE))
         return 0;
-    once->done = 1;
-    routine();
-    return 0;
+    error = pthread_mutex_lock(&once_mutex);
+    if (error != 0)
+        return error;
+    if (!__atomic_load_n(&once->done, __ATOMIC_ACQUIRE))
+    {
+        routine();
+        __atomic_store_n(&once->done, 1, __ATOMIC_RELEASE);
+    }
+    return pthread_mutex_unlock(&once_mutex);
 }

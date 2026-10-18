@@ -79,7 +79,7 @@ fn c_boundary_looks_up_stats_and_pages_a_directory_by_object_id() {
             stat.size,
             stat.links
         ),
-        (88, AFSPLUS_AROS_KIND_FILE, beta, 0, 1)
+        (96, AFSPLUS_AROS_KIND_FILE, beta, 0, 1)
     );
     assert_eq!(stat.created_seconds, 1);
     assert_eq!(

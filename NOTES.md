@@ -9,6 +9,8 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-10-18 — Expose budgeted snapshots and scoped restoration to AROS](#2026-10-18--expose-budgeted-snapshots-and-scoped-restoration-to-aros)
+- [2026-10-18 — Audit the AROS branches and reproduce handler resource limits](#2026-10-18--audit-the-aros-branches-and-reproduce-handler-resource-limits)
 - [2026-10-08 — Share AROS handler claims across SMP module instances](#2026-10-08--share-aros-handler-claims-across-smp-module-instances)
 - [2026-10-02 — Restore API tracing coverage and preallocation expectations](#2026-10-02--restore-api-tracing-coverage-and-preallocation-expectations)
 - [2026-09-30 — Native AROS readiness without changing deployed volume bytes](#2026-09-30--native-aros-readiness-without-changing-deployed-volume-bytes)
@@ -228,6 +230,161 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+
+## 2026-10-18 — Expose budgeted snapshots and scoped restoration to AROS
+
+Fetched afsplus and the native core before inspecting the snapshot gap; both
+matched their origins. Added explicit VFS/AROS mount budgets and format-time
+snapshot selection to mkafsplus and ACTION_FORMAT, following ADR-071/073.
+The unchanged default mount refuses a snapshot volume without budgets.
+
+The extension handler and client expose create/list/delete, pinned read-only
+views, lookup/stat/read and directory walks. Historical operations require the
+current sender's backup authority; restore independently requires restore
+authority (ADR-125/127/128). Both policies default to DENY. SINGLEUSER is an
+explicit administrator domain only when security.library is absent; root is
+AROS UID 65535. Reader leases block deletion, formatting and orderly shutdown;
+close remains available after revocation. Corrected serialized object kinds and
+failed directory encoding so retry cannot skip a captured entry.
+
+AFSPlusSnapshot supplies CREATE/LIST/DELETE/VIEW; AFSPlusBackup captures a local
+volume snapshot. AFSPlusRestore publishes a captured regular file or complete
+supported directory into a fresh live destination. The historical view stays
+pinned, fresh allocation preserves supported metadata and Unicode comparison
+keys keep staging distinct from publication. Node/depth/metadata admission is
+explicit for directories. This is local recovery, not an external archive or
+boot-root rollback. Disk write protection also blocks snapshot mutation.
+
+Owner IDs retain their 32-bit values in semantic stat; classic Examine/ExAll
+project unrepresentable IDs to nobody rather than root. ACTION_SET_OWNER writes
+the packed classic pair (ADR-126). Boundary ABI 2, interface revision 21 and
+packet configuration ABI 7 update consumers together without an old-ABI path.
+
+Host evidence is retained in artifacts/runs/20261018-snapshots: snapshot mount,
+format and remount, delayed-write visibility, immutable bytes, busy leases,
+write protection, serialized kinds and paging retries pass. The named restore
+scenarios and independent failure/publication sweeps are recorded alongside
+the diagnostic journal entry. Actual VM qualification is recorded separately
+by the integration harness; these host results make no installed-M1 claim.
+
+## 2026-10-18 — Audit the AROS branches and reproduce handler resource limits
+
+Fetched the configured origins before inspection; neither `main..origin/main` in
+AFS+ nor `apple-silicon..origin/apple-silicon` in the AROS core had commits.
+The branch decisions are selective reuse, with no wholesale merges and no
+remote branch deletion:
+
+| Branch and inspected tip | Decision | Code evidence and disposition |
+|---|---|---|
+| `migration/codex-mmap` (`f4d0f25a`) | Reuse | Retain the unnamed file clone handle and bounded atomic range implementation for its filesystem-paging-v2 consumer. Its handle is a private mapping backing, not a retained volume snapshot or snapshot mount. Its six snapshot/writeback FFI tests pass, including all-old/all-new crash states and the torn negative control. Apply the complete consumer closure separately from the volume-snapshot API; it is not part of this increment. |
+| `migration/codex-posix-files` (`2636e794`) | Abandon this branch as an integration source | Every commit is contained in `migration/codex-posix-hostdisk`. Retain its actual CRT replace/crash harness as evidence; importing the duplicate filesystem-v2 API independently would duplicate the same changes. The superseding branch's two metadata/encoding FFI cases pass. |
+| `migration/codex-posix-hostdisk` (`e11ed27e`) | Reuse | Apply native-width Exec unit identity (`95a75c61`) and explicit hostdisk barrier admission (`e11ed27e`) on current main. Keep the common filesystem-v2/CRT work for its complete consumer closure, not a second partial API. Hostdisk 1.0's successful UPDATE did not promise a host barrier; the handler refuses that device contract rather than declaring a durable commit. The reproduced unit boundary passes nine cases and rejects both truncation/clamp controls; sync admission passes eleven cases and rejects four error-loss/false-success controls. |
+| `origin/claude/writeback-dirty` (`18bad1ec`) | Abandon this branch as an integration source | It is an ancestor of `migration/codex-mmap` and lacks `f4d0f25a`'s 16 MiB one-transaction bound, transport admission and low-space retry. Reusing it would deliberately choose the less complete range contract. Its notification and writeback commits are retained in the newer lineage. |
+| `origin/claude-next` (`de3ed529`) | Reuse | Its only unmerged commit gives DMA-bounce refusal the actual mask, memory flags, size and pointer. Apply the narrow diagnostic hunk; it changes no successful mount or storage publication. The complete handler cross-compiles for AArch64 AROS. |
+
+A separate confirmed leak is in AROS's async shell setup. `SystemTagList`
+selects `NP_Cli` for `CLI_ASYSTEM`; `CreateNewProc` copies the command-path
+locks, then `CliInitRun` copies them again and overwrites the first owned list.
+Only the second list is freed when the process exits. The native service's
+inherited current-directory lock does have an explicit release. Core
+`internal_FreePath` releases the first list before replacement and also serves
+`FreeDosObject(DOS_CLI)`. Reused boot shells preserve a self-referenced CLI;
+a failed path lock duplication frees its newly allocated node.
+
+The production-source host reproducer
+`developer/debug/test/dos/cli_path_host.py` in the AROS core passes 256 async
+shell launches, a reused boot CLI and 22 allocation/lock failures with zero
+retained nodes or locks. Removing the release reproduces 1,024 orphan locks
+and nodes with an eleven-component path. This diagnoses the generic leak;
+it does not prove that the installed M1's approximately 93-operation failure
+has this cause. That requires the installed generation's path count and the
+same USB-service workload after deployment.
+
+The four-task ceiling was real: `KEY_OWNERS=4` in
+`native/aros/afsplus_bootthread.c` represented every handler task using one
+resident segment, not four tasks per mounted volume. Owner entries were never
+released. Task-local tables are Exec allocations released on every handler
+exit, including mount failure; registered emutls destructors run before release.
+On EXECSMP, Forbid protects only the local CPU, so an atomic guard publishes
+registry changes and lazy emutls semaphore initialization. A real semaphore
+serializes once routines, and completion is published after the routine.
+
+The [sequential TLS test](native/aros/tests/bootthread_tls_host.py) passes four
+waves of 64 task owners, 1,024 destructor calls and allocation refusal/key
+removal; an imposed four-owner ceiling fails the same workload. The
+[concurrent TLS test](native/aros/tests/bootthread_smp_host.py) passes 64 real
+host threads, 6,400 table lifetimes/destructors, one semaphore initializer and
+one once initializer; publishing completion before initialization fails its
+negative control. Both use AddressSanitizer and UndefinedBehaviorSanitizer.
+The complete handler and bootthread cross-compile for `aarch64-unknown-aros`;
+the three affected DOS units cross-compile with the current Apple SDK.
+
+Evidence is retained in the integration checkout under
+`artifacts/runs/20261018-afs-diagnostics/`: `cli-path-host.log`,
+`tls-host-smp.log`, `tls-concurrent-host.log`, `main-device-unit/result.json`,
+`main-hostdisk/result.json`, `branch-posix-ffi.log`, `branch-mmap-ffi.log` and
+the five AArch64 object/build logs. The first old SDK compile failed for missing
+security/task headers and is retained separately. No target was accessed.
+
+The local backup/restore consumer added under
+[ADR-127](adr/ADR-127-aros-snapshot-file-restore.md) is deliberately explicit:
+`AFSPlusBackup <volume>` captures a local volume snapshot and `LIST` enumerates
+it; `AFSPlusRestore <volume> <id> <path> <directory> <new-name>` restores one
+regular file into fresh storage on that same volume. It requires separate
+historical-read and destination-restore admission. External archive transport
+and complete directory-tree restoration are outside this command's boundary.
+
+The VFS preserves captured bytes, all three timestamps, every protection bit,
+owner, comment, opaque attributes, sparse holes and unwritten reservations,
+including reservations beyond EOF. It refuses directories, multiply-linked
+objects and captured security descriptors before creating a target or stage;
+the descriptor's projection-diverged state cannot be normalized silently.
+Copy buffers are 64 KiB, attribute inventory is bounded to 4 MiB, and allocation
+inventory to 4,096 ranges. A staged name stays inside the selected destination
+directory. Its comparison key cannot equal the final target, including Unicode
+casefold aliases. After byte/metadata/allocation readback and sync, a trusted
+non-replacing core publication retains the archived file change timestamp
+while advancing the parent's live timestamps. Failed cleanup identifies the
+stage; an uncertain publication returns an error and preserves a completed
+target for inspection rather than deleting it.
+
+Seven [host restore scenarios](crates/afsplus-vfs/tests/snapshot_restore.rs)
+pass, including captured content after live mutation and remount, metadata,
+sparse reservations, unsupported descriptor refusal, a long-s stage-name alias
+and every one of 26 injected flush failures. Each fault's remounted final name
+is absent or contains the entire verified file and metadata, and snapshot bytes
+are unchanged. This is a transient I/O-failure model, not physical power loss.
+An isolated negative control disabling change-time preservation fails with
+the live publication time 900 instead of captured 300. The commands and client
+cross-compile with `-Wall -Wextra -Werror`; no command VM or native acceptance is
+claimed. Evidence is in `snapshot-restore-host-007.log`,
+`restore-flush-faults.log`, `restore-negative-changed-run.log` and the command
+object/build logs under the same integration artifact directory.
+
+The subsequent [ADR-128](adr/ADR-128-confined-snapshot-tree-restore.md)
+consumer extends the command to captured directories, including the captured
+root `/`, while retaining an explicit live destination and a new final name.
+Its caller supplies node, depth and aggregate metadata budgets; CLI defaults
+are 4,096 nodes, 64 levels and 4 MiB. Complete preflight rejects unsupported
+links, security descriptors and over-budget trees before any write. Directory
+metadata is restored after children, then the entire verified stage is
+published with one non-replacing rename. Eight tree tests pass, including empty
+and Unicode directories, sparse reservations, exact budget boundaries and
+both 67-flush-failure matrices after remount. A negative control removing the
+stage/final comparison-key exclusion exposes a partial tree and fails the
+same assertions. Evidence: `tree-host-008.log` and
+`tree-negative-stage-filter.log` in the integration diagnostic run. The guest
+probe now exercises tree restore and a node-budget refusal; runtime VM and
+native results remain separate acceptance gates. External archives remain
+outside these local snapshot commands.
+
+The reported native Delete "not found" has no failing pathname, packet trace
+or image in the supplied journal/TODO evidence. Current core deletion uses the
+volume comparison key, and the host DOS held-object/delete baseline passes.
+No speculative Delete fix is made. Capture PACKET/TRACE counters around the
+failing operation and its exact generation/image before attributing it to a
+name lookup, exhausted resources or a stale object.
 
 ## 2026-10-08 — Share AROS handler claims across SMP module instances
 

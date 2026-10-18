@@ -110,6 +110,8 @@ struct AfsplusArosPacketContext {
     AfsplusArosPacketComplete complete;
     AfsplusArosPacketTraceTake trace_take;
     AfsplusArosPacketFormat format;
+    AfsplusArosPacketAuthorizeBackup authorize_backup;
+    AfsplusArosPacketAuthorizeBackup authorize_restore;
     struct AfsplusArosCountTable by_action;
     struct AfsplusArosCountTable by_error;
     struct AfsplusArosParked parked[AFSPLUS_AROS_PARKED_MAX];
@@ -734,8 +736,10 @@ static uint32_t exall_append(uint8_t **cursor, uint8_t *end, LONG type,
     }
     if (type >= ED_OWNER)
     {
-        entry->ed_OwnerUID = 0;
-        entry->ed_OwnerGID = 0;
+        entry->ed_OwnerUID = source->info.owner_uid > UINT16_MAX
+            ? 0 : (UWORD)source->info.owner_uid;
+        entry->ed_OwnerGID = source->info.owner_gid > UINT16_MAX
+            ? 0 : (UWORD)source->info.owner_gid;
     }
     if (*last != NULL)
         (*last)->ed_Next = entry;
@@ -775,6 +779,10 @@ static int32_t fill_fib64(struct FileInfoBlock64 *fib,
         ? INTPTR_MAX : (IPTR)info->disk_key;
     fib->fib_DirEntryType = (LONG)info->directory_entry_type;
     fib->fib_Protection = (LONG)info->protection;
+    fib->fib_OwnerUID = info->owner_uid > UINT16_MAX
+        ? 0 : (UWORD)info->owner_uid;
+    fib->fib_OwnerGID = info->owner_gid > UINT16_MAX
+        ? 0 : (UWORD)info->owner_gid;
     fib->fib_EntryType = (LONG)info->entry_type;
     fib->fib_Size = info->size;
     fib->fib_NumBlocks = info->blocks;
@@ -802,6 +810,10 @@ static int32_t fill_fib32(struct FileInfoBlock32 *fib,
         ? INTPTR_MAX : (IPTR)info->disk_key;
     fib->fib_DirEntryType = (LONG)info->directory_entry_type;
     fib->fib_Protection = (LONG)info->protection;
+    fib->fib_OwnerUID = info->owner_uid > UINT16_MAX
+        ? 0 : (UWORD)info->owner_uid;
+    fib->fib_OwnerGID = info->owner_gid > UINT16_MAX
+        ? 0 : (UWORD)info->owner_gid;
     fib->fib_EntryType = (LONG)info->entry_type;
     fib->fib_Size = info->size > INT32_MAX ? INT32_MAX : (LONG)info->size;
     fib->fib_NumBlocks = info->blocks > INT32_MAX
@@ -1100,6 +1112,8 @@ int32_t afsplus_aros_packet_create(
     context->complete = config->complete;
     context->trace_take = config->trace_take;
     context->format = config->format;
+    context->authorize_backup = config->authorize_backup;
+    context->authorize_restore = config->authorize_restore;
     {
         struct AfsplusArosInterface interface;
 
@@ -1726,6 +1740,91 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
         request->output_value = dropped;
         return 0;
     }
+    case AFSPLUS_EXT_SNAPSHOT_CREATE:
+    case AFSPLUS_EXT_SNAPSHOT_DELETE:
+        error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
+        if (error == 0) error = packet_now(context, &seconds, &nanoseconds);
+        if (error != 0) return error;
+        if (request->operation == AFSPLUS_EXT_SNAPSHOT_CREATE)
+            return afsplus_aros_snapshot_create(context->filesystem, seconds,
+                nanoseconds, &request->output_value);
+        return afsplus_aros_snapshot_delete(context->filesystem,
+            request->object[0], seconds, nanoseconds);
+    case AFSPLUS_EXT_SNAPSHOT_LIST:
+        error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
+        if (error != 0) return error;
+        if (request->length == 0 || request->length > 64) return ERROR_BAD_NUMBER;
+        return afsplus_aros_snapshot_list(context->filesystem, request->offset[0],
+            request->buffer, request->buffer_size, (uint32_t)request->length,
+            &request->output_count, &request->output_value);
+    case AFSPLUS_EXT_SNAPSHOT_OPEN:
+        error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
+        if (error != 0) return error;
+        return afsplus_aros_snapshot_open(context->filesystem, request->object[0],
+            &request->output_value);
+    case AFSPLUS_EXT_SNAPSHOT_CLOSE:
+        return afsplus_aros_snapshot_close(context->filesystem, request->offset[0]);
+    case AFSPLUS_EXT_SNAPSHOT_LOOKUP:
+        error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
+        if (error != 0) return error;
+        error = extension_name(request->name0, request->name_length[0]);
+        if (error != 0) return error;
+        return afsplus_aros_snapshot_lookup(context->filesystem, request->offset[0],
+            request->object[0], request->name0, request->name_length[0],
+            &request->output_value);
+    case AFSPLUS_EXT_SNAPSHOT_READ:
+        error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
+        if (error != 0) return error;
+        return afsplus_aros_snapshot_read(context->filesystem, request->offset[0],
+            request->object[0], request->offset[1], request->buffer,
+            request->buffer_size, &request->output_count);
+    case AFSPLUS_EXT_SNAPSHOT_STAT:
+        error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
+        if (error == 0) error = report_begin(request, sizeof(report.stat), &report);
+        if (error == 0) error = afsplus_aros_snapshot_stat(context->filesystem,
+            request->offset[0], request->object[0], &report.stat);
+        if (error == 0) report_end(request, &report);
+        return error;
+    case AFSPLUS_EXT_SNAPSHOT_DIR_OPEN:
+        error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
+        if (error != 0) return error;
+        return afsplus_aros_snapshot_dir_open(context->filesystem,
+            request->offset[0], request->object[0], &request->output_value);
+    case AFSPLUS_EXT_SNAPSHOT_DIR_READ:
+        error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
+        if (error != 0) return error;
+        if (request->length == 0 || request->length > 64) return ERROR_BAD_NUMBER;
+        return afsplus_aros_snapshot_dir_read(context->filesystem,
+            request->offset[0], request->buffer, request->buffer_size,
+            (uint32_t)request->length, &request->output_count, &request->output_flags);
+    case AFSPLUS_EXT_SNAPSHOT_DIR_CLOSE:
+        return afsplus_aros_snapshot_dir_close(context->filesystem, request->offset[0]);
+    case AFSPLUS_EXT_SNAPSHOT_RESTORE_FILE:
+        if (request->object[1] == 0) return ERROR_INVALID_LOCK;
+        error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
+        if (error == 0) error = extension_lock(context, request->object[1], &second);
+        if (error == 0) error = extension_name(request->name0, request->name_length[0]);
+        if (error == 0) error = packet_now(context, &seconds, &nanoseconds);
+        if (error != 0) return error;
+        return afsplus_aros_snapshot_restore_file(context->filesystem,
+            request->offset[0], request->object[0], second, request->name0,
+            request->name_length[0], seconds, nanoseconds, &request->output_value);
+    case AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE:
+        if (request->object[1] == 0) return ERROR_INVALID_LOCK;
+        if (request->length == 0 || request->length > UINT32_MAX
+            || request->offset[1] == 0 || request->offset[1] > UINT32_MAX
+            || request->buffer_size == 0 || request->buffer != NULL)
+            return ERROR_BAD_NUMBER;
+        error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
+        if (error == 0) error = extension_lock(context, request->object[1], &second);
+        if (error == 0) error = extension_name(request->name0, request->name_length[0]);
+        if (error == 0) error = packet_now(context, &seconds, &nanoseconds);
+        if (error != 0) return error;
+        return afsplus_aros_snapshot_restore_tree(context->filesystem,
+            request->offset[0], request->object[0], second, request->name0,
+            request->name_length[0], (uint32_t)request->length,
+            (uint32_t)request->offset[1], request->buffer_size, seconds,
+            nanoseconds, &request->output_value);
     case AFSPLUS_EXT_COMMIT_POLICY:
         error = report_begin(request, sizeof(report.commit), &report);
         if (error == 0)
@@ -1784,7 +1883,7 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
  * here. It is copied once; every check and every use reads the copy, and
  * only the three output fields are written back. */
 static int32_t process_extension(struct AfsplusArosPacketContext *context,
-    struct AfsplusExtRequest *shared)
+    struct AfsplusExtRequest *shared, const struct DosPacket *packet)
 {
     struct AfsplusExtRequest request;
     int32_t error;
@@ -1813,6 +1912,22 @@ static int32_t process_extension(struct AfsplusArosPacketContext *context,
     request.output_count = 0;
     request.output_flags = 0;
     request.output_value = 0;
+    if (request.operation >= AFSPLUS_EXT_SNAPSHOT_CREATE
+        && request.operation <= AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE
+        && request.operation != AFSPLUS_EXT_SNAPSHOT_CLOSE
+        && request.operation != AFSPLUS_EXT_SNAPSHOT_DIR_CLOSE)
+    {
+        error = context->authorize_backup == NULL ? ERROR_READ_PROTECTED
+            : context->authorize_backup(context->callback_context, packet);
+        if (error != 0) return error;
+    }
+    if (request.operation == AFSPLUS_EXT_SNAPSHOT_RESTORE_FILE
+        || request.operation == AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE)
+    {
+        error = context->authorize_restore == NULL ? ERROR_READ_PROTECTED
+            : context->authorize_restore(context->callback_context, packet);
+        if (error != 0) return error;
+    }
     error = run_extension(context, &request);
     /* ERROR_ACTION_NOT_KNOWN is what a handler without this packet answers,
      * and a client falls back on it. From here it would be a lie: the packet
@@ -2373,6 +2488,7 @@ int32_t afsplus_aros_packet_process(
         break;
     }
     case ACTION_RENAME_OBJECT:
+    case ACTION_REPLACE_OBJECT:
     {
         const uint8_t *source_path;
         const uint8_t *target_path;
@@ -2408,7 +2524,13 @@ int32_t afsplus_aros_packet_process(
         }
         if (error == 0)
             error = packet_now(context, &seconds, &nanoseconds);
-        if (error == 0)
+        if (error == 0 && packet->dp_Type == ACTION_REPLACE_OBJECT)
+            error = require_group(context, AFSPLUS_AROS_GROUP_API_V2);
+        if (error == 0 && packet->dp_Type == ACTION_REPLACE_OBJECT)
+            error = afsplus_aros_replace(context->filesystem, source.id,
+                source.leaf, source.leaf_length, target.id, target.leaf,
+                target.leaf_length, seconds, nanoseconds);
+        else if (error == 0)
             error = afsplus_aros_rename(context->filesystem, source.id,
                 source.leaf, source.leaf_length, target.id, target.leaf,
                 target.leaf_length, seconds, nanoseconds);
@@ -2510,6 +2632,7 @@ int32_t afsplus_aros_packet_process(
         break;
     }
     case ACTION_SET_PROTECT:
+    case ACTION_SET_OWNER:
     case ACTION_SET_DATE:
     {
         const uint8_t *path;
@@ -2543,6 +2666,11 @@ int32_t afsplus_aros_packet_process(
             error = afsplus_aros_set_protection(context->filesystem,
                 object.id, object.leaf, object.leaf_length,
                 (uint32_t)packet->dp_Arg4, seconds, nanoseconds);
+        else if (error == 0 && packet->dp_Type == ACTION_SET_OWNER)
+            error = afsplus_aros_set_owner(context->filesystem,
+                object.id, object.leaf, object.leaf_length,
+                ((uint32_t)packet->dp_Arg4 >> 16) & UINT16_MAX,
+                (uint32_t)packet->dp_Arg4 & UINT16_MAX, seconds, nanoseconds);
         else if (error == 0)
             error = afsplus_aros_set_modified(context->filesystem,
                 object.id, object.leaf, object.leaf_length, modified_seconds,
@@ -2844,6 +2972,8 @@ int32_t afsplus_aros_packet_process(
             error = afsplus_aros_disk_info(context->filesystem, &info);
             if (error == 0 && info.write_protected)
                 error = ERROR_DISK_WRITE_PROTECTED;
+            if (error == 0 && info.in_use)
+                error = ERROR_OBJECT_IN_USE;
         }
         if (error == 0)
             error = bstr_view(packet->dp_Arg1, &name, &length);
@@ -2933,7 +3063,12 @@ int32_t afsplus_aros_packet_process(
         else
         {
             if (context->filesystem != NULL)
-                error = afsplus_aros_flush(context->filesystem);
+            {
+                struct AfsplusArosDiskInfo info;
+                error = afsplus_aros_disk_info(context->filesystem, &info);
+                if (error == 0 && info.in_use) error = ERROR_OBJECT_IN_USE;
+                if (error == 0) error = afsplus_aros_flush(context->filesystem);
+            }
             if (error == 0)
             {
                 context->quit = 1;
@@ -3014,7 +3149,7 @@ int32_t afsplus_aros_packet_process(
     }
     case ACTION_AFSPLUS_EXT:
         error = process_extension(context,
-            (struct AfsplusExtRequest *)packet->dp_Arg1);
+            (struct AfsplusExtRequest *)packet->dp_Arg1, packet);
         if (error == 0)
             result = DOSTRUE;
         break;

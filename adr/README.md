@@ -153,6 +153,10 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-122](ADR-122-aros-partition-identity.md) | An AFS+ partition is an AROS GPT partition of DosType AFS+ | Accepted | amends [ADR-045](ADR-045-native-aros-handler-shell.md) |
 | [ADR-123](ADR-123-deployed-image-compatibility.md) | Preserve registered deployed images before the global format freeze | Superseded | amends [ADR-104](ADR-104-volume-label-in-checkpoint.md), [ADR-115](ADR-115-retire-unwritten-surface.md); superseded by [ADR-124](ADR-124-pre-release-format-evolution.md) |
 | [ADR-124](ADR-124-pre-release-format-evolution.md) | Prefer coordinated format changes over pre-release compatibility debt | Accepted | supersedes [ADR-123](ADR-123-deployed-image-compatibility.md) |
+| [ADR-125](ADR-125-aros-backup-authority.md) | Admit historical operations through the AROS host authority | Accepted | amends [ADR-075](ADR-075-revocable-backup-capability.md) |
+| [ADR-126](ADR-126-aros-owner-id-projection.md) | AROS owner identifiers preserve the disk values | Accepted Related: ADR-031, ADR-101, ADR-118, ADR-125 | — |
+| [ADR-127](ADR-127-aros-snapshot-file-restore.md) | Restore a snapshot file into an explicit fresh destination | Accepted | amends [ADR-071](ADR-071-snapshot-lifetime-prototype.md), [ADR-077](ADR-077-separate-restore-authority.md), [ADR-119](ADR-119-backup-carries-comment-and-owner.md), [ADR-125](ADR-125-aros-backup-authority.md) |
+| [ADR-128](ADR-128-confined-snapshot-tree-restore.md) | Publish a restored snapshot tree through one fresh directory | Accepted | amends [ADR-127](ADR-127-aros-snapshot-file-restore.md) |
 
 <!-- /adr-index -->
 

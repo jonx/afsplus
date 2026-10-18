@@ -69,7 +69,7 @@ the unresolved [Tool Contract proposal](../proposals/tool-contract.md).
 ```text
 mkafsplus [--size-mib N] [--label NAME] [--profile PROFILE]
            [--case-sensitive|--case-insensitive] [--uuid HEX]
-           [--timestamp-seconds N] [--json] [--force] <image>
+           [--timestamp-seconds N] [--snapshots] [--json] [--force] <image>
 ```
 
 The defaults are 64 MiB, label `AFSPlus`, profile `workstation` and
@@ -77,6 +77,11 @@ case-sensitive Unicode names. `--uuid` accepts 32 hexadecimal digits with
 optional hyphens. `--timestamp-seconds` supplies a reproducible signed Unix
 timestamp with zero nanoseconds. Those two switches are intended for image
 builders and conformance fixtures; ordinary use generates both from the host.
+
+`--snapshots` enables the immutable persistent-snapshots feature at formatting.
+Mount supplies explicit edit, view and reclaim budgets. Enabling this feature
+on an existing volume requires migration or reformatting; mount configuration
+changes no disk feature bit.
 
 The formatter writes a same-directory temporary image, flushes its complete
 logical length, and publishes it only after formatting succeeds. It refuses

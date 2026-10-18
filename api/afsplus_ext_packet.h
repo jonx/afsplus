@@ -69,6 +69,20 @@
 #define AFSPLUS_EXT_WATCH_REMOVE UINT32_C(28)    /* NOTIFY */
 #define AFSPLUS_EXT_COMMIT_POLICY UINT32_C(29)   /* always */
 
+#define AFSPLUS_EXT_SNAPSHOT_CREATE UINT32_C(30) /* SNAPSHOTS */
+#define AFSPLUS_EXT_SNAPSHOT_LIST UINT32_C(31) /* SNAPSHOTS */
+#define AFSPLUS_EXT_SNAPSHOT_DELETE UINT32_C(32) /* SNAPSHOTS */
+#define AFSPLUS_EXT_SNAPSHOT_OPEN UINT32_C(33) /* SNAPSHOTS */
+#define AFSPLUS_EXT_SNAPSHOT_CLOSE UINT32_C(34) /* SNAPSHOTS */
+#define AFSPLUS_EXT_SNAPSHOT_LOOKUP UINT32_C(35) /* SNAPSHOTS */
+#define AFSPLUS_EXT_SNAPSHOT_READ UINT32_C(36) /* SNAPSHOTS */
+#define AFSPLUS_EXT_SNAPSHOT_STAT UINT32_C(37) /* SNAPSHOTS */
+#define AFSPLUS_EXT_SNAPSHOT_DIR_OPEN UINT32_C(38) /* SNAPSHOTS */
+#define AFSPLUS_EXT_SNAPSHOT_DIR_READ UINT32_C(39) /* SNAPSHOTS */
+#define AFSPLUS_EXT_SNAPSHOT_DIR_CLOSE UINT32_C(40) /* SNAPSHOTS */
+#define AFSPLUS_EXT_SNAPSHOT_RESTORE_FILE UINT32_C(41) /* SNAPSHOTS */
+#define AFSPLUS_EXT_SNAPSHOT_RESTORE_TREE UINT32_C(42) /* SNAPSHOTS */
+
 /* The commit policy the mount runs under (ADR-121). policy is 0 for SYNC
  * and 1 for delayed; seconds is the longest a change then waits, and 0 under
  * SYNC. late is 1 when the mount started SYNC and took the delayed policy
@@ -186,6 +200,25 @@ struct AfsplusExtPacketCount {
  * A struct buffer must be at least as large as the struct_size it declares.
  * Names are single components in the mount's name encoding, exactly as the
  * entry points of afsplus_aros.h take them; the transport resolves no path.
+ */
+/* Snapshot requests:
+ * CREATE -> output_value ID; DELETE object[0] ID; OPEN object[0] ID -> reader.
+ * LIST offset[0] inclusive low ID, length limit1..64, buffer array of
+ * AfsplusArosSnapshotInfo -> output_count, output_value next low ID or0EOF.
+ * CLOSE offset[0] reader. LOOKUP offset[0] reader, object[0] directory,
+ * name0 component -> output_value object ID. READ offset[0] reader,
+ * object[0] object ID, offset[1] byte position, buffer -> output_count bytes.
+ * STAT offset[0] reader, object[0] object ID, buffer sized AfsplusArosStat.
+ * DIR_OPEN offset[0] reader, object[0] directory ID -> output_value walk.
+ * DIR_READ offset[0] walk, length limit, buffer packed AfsplusArosDirEntry
+ * records -> output_count entries, output_flags EOF. DIR_CLOSE offset[0] walk.
+ * Every operation requires current host authority except CLOSE and DIR_CLOSE.
+ * RESTORE_FILE offset[0] reader, object[0] source, object[1] live directory
+ * lock, name0 fresh target -> output_value new object ID. RESTORE_TREE uses
+ * the same scope plus length max nodes, offset[1] max depth, buffer_size
+ * aggregate metadata budget (buffer NULL). Both need independent restore
+ * authority at admission and never overwrite an existing target.
+ * Root object ID is1. Historical views expose no mutation operation.
  */
 struct AfsplusExtRequest {
     uint32_t magic;
