@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-10-18 — Observe snapshot commands on disposable AROS volumes](#2026-10-18--observe-snapshot-commands-on-disposable-aros-volumes)
 - [2026-10-18 — Pass snapshot admission budgets to AFSSYS automount](#2026-10-18--pass-snapshot-admission-budgets-to-afssys-automount)
 - [2026-10-18 — Build the snapshot client with strict AROS conversions](#2026-10-18--build-the-snapshot-client-with-strict-aros-conversions)
 - [2026-10-18 — Keep retained historical restore stages private](#2026-10-18--keep-retained-historical-restore-stages-private)
@@ -234,6 +235,47 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+
+## 2026-10-18 — Observe snapshot commands on disposable AROS volumes
+
+The integration run `20261018-afs-snapshot-vm-010` observes passing fixture,
+snapshot, four-command and Settings filesystem probes. The actual handler
+reads historical bytes and metadata, rejects deletion of pinned snapshots,
+restores fresh files and trees, enforces the tree budget and write protection,
+and exposes owners. The real Snapshot, Backup, Restore and Clone programs
+preserve existing destinations and unrelated root names. Settings consumes
+capacity, health and identity packets, lists and deletes snapshots, and
+captures/restores eight preferences by both clone and copy.
+
+The whole run is FAIL: its final live Settings probe restores all five
+Input/ASL/Zune values but fails its local-override control. The probe used a
+fixed preference filename while the application base gained the normal
+`.1` suffix. Earlier failed runs retain the absent GUI assigns, class/schema
+closure and forwarding-container lookup diagnoses. No isolated success
+marker qualifies the whole package. All runs, hashes, screenshots and
+normal-QMP verdicts are retained in `aros-apple-silicon/artifacts/runs/`.
+
+The subsequent run `20261018-afs-snapshot-vm-011` passes all five probes in
+17.52 seconds, with normal QMP exit, a retained screenshot and no fault.
+Independent qualification in `afs-settings-20261018/024-final-qualification`
+checks fourteen filesystem and eighteen live-applier gate records. The guest
+JSON records copy restoration of three files, five settings and three editors,
+all three live consumers restored, in 240 ms. Local override, global-file
+precedence and missing-capture refusal also pass. Earlier FAIL verdicts stay
+unchanged. GUI Storage interaction, general Settings acceptance and native
+M1 behavior remain unqualified.
+
+[ADR-132](adr/ADR-132-aros-snapshot-boot-roots.md) is a Proposed SAFE7 design
+and 20–35 engineering-day estimate after these A–C host/VM proofs. It requires
+separate agreement before implementation; no boot-root rollback was started.
+
+The handler package is source `d58444bb`, unchanged executable code through
+`6eb5d9f1`; later changes are documentation. Core DOS fixes `57dfc8c147`,
+`a611ffdf9f` and `0b4059c14e` align relative directory-assign packet names
+with Open/Lock and preserve IoErr during cleanup. SDK result012 rebuilds the
+actual corrected DOS library. The original M1 error103 and Delete workloads
+remain unqualified; no AFSSYS partition was formatted or migrated. Local
+snapshot backup does not provide a separate-device disaster archive.
 
 ## 2026-10-18 — Pass snapshot admission budgets to AFSSYS automount
 

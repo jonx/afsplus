@@ -160,6 +160,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-129](ADR-129-private-restore-stages.md) | Keep retained restore stages private until publication | Superseded | amends [ADR-127](ADR-127-aros-snapshot-file-restore.md), [ADR-128](ADR-128-confined-snapshot-tree-restore.md); superseded by [ADR-130](ADR-130-bounded-private-restore-stages.md) |
 | [ADR-130](ADR-130-bounded-private-restore-stages.md) | Guard restore stages through bounded per-object metadata | Accepted | amends [ADR-129](ADR-129-private-restore-stages.md) |
 | [ADR-131](ADR-131-afssys-automount-snapshot-policy.md) | Supply AFSSYS snapshot budgets through its deployment Control | Accepted References: ADR-071, ADR-073, ADR-125 | — |
+| [ADR-132](ADR-132-aros-snapshot-boot-roots.md) | Proposed snapshot boot roots and system update lifetime | Proposed | — |
 
 <!-- /adr-index -->
 
