@@ -153,7 +153,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-122](ADR-122-aros-partition-identity.md) | An AFS+ partition is an AROS GPT partition of DosType AFS+ | Accepted | amends [ADR-045](ADR-045-native-aros-handler-shell.md) |
 | [ADR-123](ADR-123-deployed-image-compatibility.md) | Preserve registered deployed images before the global format freeze | Superseded | amends [ADR-104](ADR-104-volume-label-in-checkpoint.md), [ADR-115](ADR-115-retire-unwritten-surface.md); superseded by [ADR-124](ADR-124-pre-release-format-evolution.md) |
 | [ADR-124](ADR-124-pre-release-format-evolution.md) | Prefer coordinated format changes over pre-release compatibility debt | Accepted | supersedes [ADR-123](ADR-123-deployed-image-compatibility.md) |
-| [ADR-125](ADR-125-aros-backup-authority.md) | Admit historical operations through the AROS host authority | Accepted | amends [ADR-075](ADR-075-revocable-backup-capability.md) |
+| [ADR-125](ADR-125-aros-backup-authority.md) | Admit historical operations through the AROS host authority | Accepted | amended by [ADR-134](ADR-134-loaded-aros-authority-lifetime.md); amends [ADR-075](ADR-075-revocable-backup-capability.md) |
 | [ADR-126](ADR-126-aros-owner-id-projection.md) | AROS owner identifiers preserve the disk values | Accepted Related: ADR-031, ADR-101, ADR-118, ADR-125 | — |
 | [ADR-127](ADR-127-aros-snapshot-file-restore.md) | Restore a snapshot file into an explicit fresh destination | Accepted | amended by [ADR-133](ADR-133-restore-stage-lifetime-and-recovery.md); amends [ADR-071](ADR-071-snapshot-lifetime-prototype.md), [ADR-077](ADR-077-separate-restore-authority.md), [ADR-119](ADR-119-backup-carries-comment-and-owner.md), [ADR-125](ADR-125-aros-backup-authority.md) |
 | [ADR-128](ADR-128-confined-snapshot-tree-restore.md) | Publish a restored snapshot tree through one fresh directory | Accepted | amended by [ADR-133](ADR-133-restore-stage-lifetime-and-recovery.md); amends [ADR-127](ADR-127-aros-snapshot-file-restore.md) |
@@ -162,6 +162,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-131](ADR-131-afssys-automount-snapshot-policy.md) | Supply AFSSYS snapshot budgets through its deployment Control | Accepted References: ADR-071, ADR-073, ADR-125 | — |
 | [ADR-132](ADR-132-aros-snapshot-boot-roots.md) | Proposed snapshot boot roots and system update lifetime | Proposed | — |
 | [ADR-133](ADR-133-restore-stage-lifetime-and-recovery.md) | Create private restore stages atomically and reclaim them explicitly | Accepted | amends [ADR-127](ADR-127-aros-snapshot-file-restore.md), [ADR-128](ADR-128-confined-snapshot-tree-restore.md), [ADR-130](ADR-130-bounded-private-restore-stages.md) |
+| [ADR-134](ADR-134-loaded-aros-authority-lifetime.md) | Query a permanently loaded AROS authority service | Accepted | amends [ADR-125](ADR-125-aros-backup-authority.md) |
 
 <!-- /adr-index -->
 

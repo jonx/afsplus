@@ -5,6 +5,8 @@
 #include <aros/libcall.h>
 #include <libraries/security.h>
 
+#include "afsplus_security_abi.h"
+
 /* Public security.library ABI: GetTaskOwner is vector 7, Task* in D0,
  * returning uid<<16|gid. Some SDK distributions ship libraries/security.h
  * without its generated proto/inline headers. Bind that same ABI directly;
@@ -13,7 +15,8 @@ static inline ULONG afsplus_security_task_owner(struct Library *base,
     struct Task *task)
 {
     return AROS_LC1(ULONG, secGetTaskOwner,
-        AROS_LCA(struct Task *, task, D0), struct Library *, base, 7, Security);
+        AROS_LCA(struct Task *, task, D0), struct Library *, base,
+        AFSPLUS_SECURITY_GET_TASK_OWNER_LVO, Security);
 }
 
 #endif

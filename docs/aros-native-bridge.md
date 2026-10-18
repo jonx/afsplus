@@ -868,12 +868,16 @@ reformat. A mounted reader keeps formatting and orderly dismount busy.
 host authority policies. Each defaults to DENY. ROOT queries security.library's
 current task owner at admission; SINGLEUSER admits a configured administrator
 trust domain when that library is absent. A signal reply port with a task is
-required. Reader close remains available after revocation. The handler borrows
-an already loaded security library under Exec's library-list exclusion, opens
-that pinned library through its normal hooks, then drops the temporary pin.
-No disk load is attempted when the library is absent: ROOT fails closed and
-only explicit SINGLEUSER admits that case. The ownership query and library
-hooks run without the list lock held. File and tree restoration require both
+required. Reader close remains available after revocation. The handler admits only an already loaded security.library 45.17+ service
+with the permanent, non-expungeable lifetime of
+[ADR-134](../adr/ADR-134-loaded-aros-authority-lifetime.md). Unknown major versions
+or older revisions fail closed, even under SINGLEUSER when a library is present.
+The supported ABI defines ROOT as 65535 and nobody as zero; older build SDK
+identity constants do not select runtime authority. Normal Open/Close hooks and
+the ownership query run without the list lock, and no adapter changes the
+library's reference count by hand. No disk load is attempted when the library
+is absent: ROOT fails closed and only explicit SINGLEUSER admits that case.
+File and tree restoration require both
 BACKUP and RESTORE authority; stage reclamation requires RESTORE only.
 
 The SNAPSHOTS C group and `FSV2_CAP_SNAPSHOTS` distinguish implementation and

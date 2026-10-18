@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-10-18 — Remove the temporary authority pin before native testing](#2026-10-18--remove-the-temporary-authority-pin-before-native-testing)
 - [2026-10-18 — Repair restore-stage lifetime and qualify actual crash cuts](#2026-10-18--repair-restore-stage-lifetime-and-qualify-actual-crash-cuts)
 - [2026-10-18 — Observe snapshot commands on disposable AROS volumes](#2026-10-18--observe-snapshot-commands-on-disposable-aros-volumes)
 - [2026-10-18 — Pass snapshot admission budgets to AFSSYS automount](#2026-10-18--pass-snapshot-admission-budgets-to-afssys-automount)
@@ -236,6 +237,25 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+
+## 2026-10-18 — Remove the temporary authority pin before native testing
+
+Independent review 112 found that my temporary library pin used a list lock
+which real library Open/Close counter changes do not share. This introduced an
+SMP lost-update risk. No M1 snapshot test used that candidate. ADR-134 replaces
+that pin with an explicit host contract: the supported loaded security.library
+45.17+ service cannot expunge, so its identity survives lookup through normal
+Open. Unknown loaded versions fail closed. Normal hooks and query run outside
+the list lock, the returned base must match, and the adapter never changes
+lib_OpenCnt itself. The existing core already supplies this no-expunge service;
+no new core runtime is required.
+
+The regression shares the ABI constants with production and deliberately
+supplies an old SDK ROOT constant of zero. It verifies actual high-bit ROOT
+65535, nobody zero, revocation, older/unknown versions, failed Open, a different
+returned base and balanced real lifecycle hooks under ASan/UBSan. The library
+stub has no reference-count field, rejecting a reintroduced manual pin at
+compile time. This is a handler correction, not a generic Exec SMP fix.
 
 ## 2026-10-18 — Repair restore-stage lifetime and qualify actual crash cuts
 
