@@ -418,3 +418,51 @@ fn depth_one_reclaims_standalone_file_and_empty_stage_directory() {
     reclaim_full_admitted_depth(1, true);
     reclaim_full_admitted_depth(1, false);
 }
+
+#[test]
+fn forged_cursor_cannot_enter_a_stage_below_its_root() {
+    let mut volume = fixture().into_volume();
+    let stage = volume
+        .create_directory(OBJECT_ROOT, "stage", Timespec::default())
+        .unwrap();
+    let plain = volume
+        .create_directory(OBJECT_ROOT, "plain", Timespec::default())
+        .unwrap();
+    // A marked descendant outside its stage: a scan blocks it.
+    let child = volume
+        .create_file_in_directory(plain, "child", b"secret", Timespec::default())
+        .unwrap();
+    mark(&mut volume, stage, stage);
+    mark(&mut volume, child, stage);
+    let mut vfs = mount(volume.into_device());
+    let mut one = limits();
+    one.scan_entries = 1;
+    let r = vfs
+        .restore_reclaim_step(OBJECT_ROOT, &[], one, Timespec::default())
+        .unwrap();
+    let generation = r.cursor[28..36].to_vec();
+    let mut forged = b"RRC1".to_vec();
+    forged.extend([0x93; 16]);
+    forged.extend(OBJECT_ROOT.to_le_bytes());
+    forged.extend(&generation);
+    for value in [0u64, 3] {
+        forged.extend(value.to_le_bytes());
+    }
+    for value in [0, OBJECT_ROOT, 2, 0, 0] {
+        forged.extend(value.to_le_bytes());
+    }
+    for value in [OBJECT_ROOT, plain, 0, 0, 5] {
+        forged.extend(value.to_le_bytes());
+    }
+    forged.extend(b"plain");
+    for value in [plain, child, 0, stage, 5] {
+        forged.extend(value.to_le_bytes());
+    }
+    forged.extend(b"child");
+    forged.extend(afsplus_format::crc32c::crc32c(&forged).to_le_bytes());
+    assert!(matches!(
+        vfs.restore_reclaim_step(OBJECT_ROOT, &forged, one, Timespec::default()),
+        Err(VfsError::Invalid)
+    ));
+    assert!(vfs.into_volume().stat(child).unwrap().is_some());
+}

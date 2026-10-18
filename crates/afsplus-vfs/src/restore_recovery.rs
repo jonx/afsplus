@@ -3,6 +3,11 @@ use super::*;
 
 pub const RESTORE_RECOVERY_CURSOR_MAX: usize = 24 * 1024;
 const MAX_DEPTH: usize = 64;
+// The deepest cursor, every frame with a maximal name, fits the transport.
+const _: () = assert!(
+    4 + 16 + 4 * 8 + (MAX_DEPTH + 1) * (5 * 8 + NAME_MAX_UTF8_BYTES) + 4
+        <= RESTORE_RECOVERY_CURSOR_MAX
+);
 
 #[derive(Debug, Clone, Copy)]
 pub struct RestoreRecoveryLimits {
@@ -111,6 +116,10 @@ impl Cursor {
                 return Err(VfsError::Invalid);
             }
             if pair[0].stage != 0 && pair[1].stage != pair[0].stage {
+                return Err(VfsError::Invalid);
+            }
+            // A stage is entered only at its own root.
+            if pair[0].stage == 0 && pair[1].stage != 0 && pair[1].stage != pair[1].object {
                 return Err(VfsError::Invalid);
             }
         }
@@ -349,13 +358,18 @@ impl<D: BlockDevice> Vfs<D> {
                 if child.object_type == ObjectType::Directory
                     || (stage != 0 && child.object_type == ObjectType::File)
                 {
+                    // A directory below the depth bound is reported, not
+                    // skipped: its id is the deeper scope to select next.
                     if cursor.frames.len() > limits.max_depth
                         || cursor.frames.iter().any(|f| f.object == entry.child_id)
                     {
                         cursor.block(entry.child_id, &mut report);
                         continue;
                     }
-                    let name = String::from_utf8(entry.name).map_err(|_| VfsError::Invalid)?;
+                    let Ok(name) = String::from_utf8(entry.name) else {
+                        cursor.block(entry.child_id, &mut report);
+                        continue;
+                    };
                     cursor.frames.push(Frame {
                         parent: frame.object,
                         object: entry.child_id,
