@@ -24,7 +24,8 @@ int main(int argc,char **argv)
     BPTR scope=BNULL,in=BNULL,out=BNULL,cursor_parent=BNULL,old_dir=BNULL;
     const char *cursor=argc>=4?argv[3]:"RAM:AFSPlusReclaim.cursor";
     char *temporary=NULL,*parent_path=NULL,*cursor_name=NULL;
-    LONG error=0,n;
+    intptr_t error=0;
+    LONG n;
     int result=RETURN_FAIL,owned_temp=0,changed_dir=0;
     if(argc!=3&&argc!=4&&argc!=7) {
         fprintf(stderr,"usage: AFSPlusReclaim <volume> <directory> [cursor-file [scan work depth]]\n"
