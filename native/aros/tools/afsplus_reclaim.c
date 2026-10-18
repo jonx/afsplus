@@ -68,10 +68,11 @@ int main(int argc,char **argv)
         if(r->blocked_object)blocked_object=r->blocked_object;
         if(r->flags&AFSPLUS_RESTORE_RECOVERY_DONE) {complete=1;break;}
     }
-    printf("AFSPlusReclaim: calls=%lu scanned=%llu removed=%llu advanced=%llu blocked=%lu blocked-id=%llu complete=%lu restarts=%lu\n",
-        (unsigned long)calls,(unsigned long long)scanned,(unsigned long long)removed,
+    /* Callers match the line's end: new fields go after calls=. */
+    printf("AFSPlusReclaim: calls=%lu restarts=%lu scanned=%llu removed=%llu advanced=%llu blocked=%lu blocked-id=%llu complete=%lu\n",
+        (unsigned long)calls,(unsigned long)restarts,(unsigned long long)scanned,(unsigned long long)removed,
         (unsigned long long)advanced,(unsigned long)blocked,(unsigned long long)blocked_object,
-        (unsigned long)complete,(unsigned long)restarts);
+        (unsigned long)complete);
     if(!error) {
         result=complete&&!blocked?RETURN_OK:RETURN_WARN;
         if(interrupted)fprintf(stderr,"Partial: interrupted; durable progress is retained. A later invocation rescans.\n");

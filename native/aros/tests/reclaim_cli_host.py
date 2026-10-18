@@ -116,7 +116,7 @@ with tempfile.TemporaryDirectory(prefix='reclaim-cli-') as directory:
         runs += 1
         return result
     result = run()
-    assert 'calls=3 scanned=3 removed=3 advanced=0 blocked=0 blocked-id=0 complete=1 restarts=0\n' in result.stdout
+    assert 'calls=3 restarts=0 scanned=3 removed=3 advanced=0 blocked=0 blocked-id=0 complete=1\n' in result.stdout
     run(args=('AFS:', 'AFS:scope', '1', '1', '64', '128'))
     run(args=('AFS:', 'AFS:scope', '1', '1', '64', str(2**32-1)))
     result = run('endless', ('AFS:', 'AFS:scope', '1', '1', '64', '2'), 5, 2)
@@ -130,7 +130,7 @@ with tempfile.TemporaryDirectory(prefix='reclaim-cli-') as directory:
     assert 'blocked=2 blocked-id=99 complete=1' in result.stdout  # cumulative, not summed
     # A stale cursor restarts a fresh scan, which completes.
     result = run('stale', expected=0, calls=5)
-    assert 'complete=1 restarts=1' in result.stdout and 'scanned=4' in result.stdout
+    assert 'restarts=1 scanned=4' in result.stdout and 'complete=1\n' in result.stdout
     # A volume that keeps changing stops after the bounded restarts.
     result = run('stale-always', expected=20, calls=18)
     assert 'restarts=8' in result.stdout and '8 fresh scans went stale' in result.stderr
