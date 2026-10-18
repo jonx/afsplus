@@ -197,7 +197,11 @@ pub extern "C" fn afsplus_aros_snapshot_open(
     })
 }
 #[no_mangle]
-pub extern "C" fn afsplus_aros_snapshot_close(fs: *mut AfsplusAros, reader: u64, owner: u64) -> i32 {
+pub extern "C" fn afsplus_aros_snapshot_close(
+    fs: *mut AfsplusAros,
+    reader: u64,
+    owner: u64,
+) -> i32 {
     bridge_status(fs, || bridge_mut(fs)?.adapter.snapshot_close(reader, owner))
 }
 #[no_mangle]
@@ -294,11 +298,13 @@ pub extern "C" fn afsplus_aros_snapshot_dir_open(
     })
 }
 #[no_mangle]
-pub extern "C" fn afsplus_aros_snapshot_dir_close(fs: *mut AfsplusAros, dir: u64, owner: u64) -> i32 {
+pub extern "C" fn afsplus_aros_snapshot_dir_close(
+    fs: *mut AfsplusAros,
+    dir: u64,
+    owner: u64,
+) -> i32 {
     bridge_status(fs, || {
-        bridge_mut(fs)?
-            .adapter
-            .snapshot_directory_close(dir, owner)
+        bridge_mut(fs)?.adapter.snapshot_directory_close(dir, owner)
     })
 }
 #[no_mangle]

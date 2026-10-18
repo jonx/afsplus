@@ -105,7 +105,11 @@ impl<D: BlockDevice> ArosAdapter<D> {
                     .collect(),
             })?)
     }
-    pub fn snapshot_directory_close(&mut self, directory: u64, owner: u64) -> Result<(), ArosError> {
+    pub fn snapshot_directory_close(
+        &mut self,
+        directory: u64,
+        owner: u64,
+    ) -> Result<(), ArosError> {
         self.snapshot_owned(directory, owner)?;
         self.vfs.snapshot_directory_close(directory)?;
         self.snapshot_owners.remove(&directory);
