@@ -24,13 +24,16 @@ lookup/open unload race. Require the returned base to equal the validated
 base; otherwise close the acquired reference and refuse admission.
 
 Open the service once, at the first admission, and keep that open for the
-life of the loaded handler. The service's Open and Close vectors push and pop
-a context under its task-owner semaphore: opening per packet would block the
-handler behind a root tool that holds the semaphore while it uses the same
-volume. Later packets only query the task owner. Handler processes that share
-the loaded code publish the base under Forbid; one that loses closes its own
-open. The open is never returned, which the permanent lifetime makes
-harmless. No adapter operation changes `lib_OpenCnt` directly. The list lock
+life of the loaded handler. The service's Open and Close vectors take its
+task-owner semaphore exclusively to push and pop a context: opening per packet
+blocks the handler behind a root tool that holds the semaphore shared while it
+uses the same volume. Later packets only query the task owner, which takes the
+semaphore shared and joins such a holder. Admission relies on no exclusive
+holder doing I/O on an AFS+ volume; every exclusive section of 45.17 is short
+and does none. Handler processes that share the loaded code publish the base
+with a compare-and-swap, or under Forbid where exec runs one CPU without one
+(m68k); one that loses closes its own open. The open is never returned: one
+per loaded handler, which the permanent lifetime makes harmless. No adapter operation changes `lib_OpenCnt` directly. The list lock
 does not serialize generated library Open/Close counter updates, so a temporary
 manual pin is not a valid SMP lifetime primitive. This decision does not claim
 to repair generic library lifecycle synchronization in Exec or the loader.

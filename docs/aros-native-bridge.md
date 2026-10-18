@@ -873,10 +873,11 @@ with the permanent, non-expungeable lifetime of
 [ADR-134](../adr/ADR-134-loaded-aros-authority-lifetime.md). Unknown major versions
 or older revisions fail closed, even under SINGLEUSER when a library is present.
 The supported ABI defines ROOT as 65535 and nobody as zero; older build SDK
-identity constants do not select runtime authority. The service is opened once, at
-the first admission, and kept for the loaded handler's life; later packets
-only query the owner. Open and the ownership query run without the list lock,
-and no adapter changes the library's reference count by hand. No disk load is attempted when the library
+identity constants do not select runtime authority. The service is opened
+once, at the first admission, and kept for the loaded handler's life; later
+packets only query the owner. Open and the ownership query run without the
+list lock, and no adapter changes the library's reference count by hand. No
+disk load is attempted when the library
 is absent: ROOT fails closed and only explicit SINGLEUSER admits that case.
 File and tree restoration require both
 BACKUP and RESTORE authority; stage reclamation requires RESTORE only.

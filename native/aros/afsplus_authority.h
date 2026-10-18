@@ -7,13 +7,37 @@
  * reference-count changes. No library hook or owner query holds a list lock.
  *
  * The first admission opens the service once and keeps that open for the
- * life of the loaded handler: security's Open and Close vectors push and pop
- * a context under TaskOwnerSem, so opening per packet could block the handler
- * behind a root tool that holds the semaphore while it touches this volume.
- * Every later packet only asks for the task owner. Handler processes that
- * share the loaded code race for the slot under Forbid; a loser closes its
- * own open. The open is never returned: the service is never expunged. */
+ * life of the loaded handler: security's Open and Close vectors take
+ * TaskOwnerSem exclusively to push and pop a context, so opening per packet
+ * blocks the handler behind a root tool that holds the semaphore shared while
+ * it touches this volume. Every later packet only asks for the task owner,
+ * which takes the semaphore shared and joins such a holder; admission relies
+ * on no exclusive holder doing I/O on an AFS+ volume, true of 45.17.
+ * Handler processes that share the loaded code publish the base with a
+ * compare-and-swap (Forbid where exec has one CPU and no CAS, as on m68k);
+ * a loser closes its own open. The open is never returned, once per loaded
+ * handler: the service is never expunged. */
 static struct Library *volatile afsplus_aros_security_base;
+
+static int afsplus_aros_publish_security(struct ExecBase *SysBase, struct Library *secBase)
+{
+    (void)SysBase; /* Forbid() names it on AROS */
+#if defined(__aarch64__) || defined(__AROSEXEC_SMP__)
+    struct Library *expected = NULL;
+    return __atomic_compare_exchange_n((struct Library **)&afsplus_aros_security_base,
+        &expected, secBase, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+#else
+    int published = 0;
+    Forbid();
+    if (afsplus_aros_security_base == NULL)
+    {
+        afsplus_aros_security_base = secBase;
+        published = 1;
+    }
+    Permit();
+    return published;
+#endif
+}
 
 static int32_t afsplus_aros_authorize_owner(struct Library *secBase,
     const struct DosPacket *packet)
@@ -62,16 +86,9 @@ static int32_t afsplus_aros_authorize_policy(struct ExecBase *SysBase,
         CloseLibrary(secBase);
         return ERROR_READ_PROTECTED;
     }
-    Forbid();
-    if (afsplus_aros_security_base == NULL)
-    {
-        afsplus_aros_security_base = secBase;
-        library = NULL;
-    }
-    Permit();
-    if (library != NULL)
+    if (!afsplus_aros_publish_security(SysBase, secBase))
         CloseLibrary(secBase);
-    return afsplus_aros_authorize_owner(afsplus_aros_security_base, packet);
+    return afsplus_aros_authorize_owner(secBase, packet);
 }
 
 #endif
