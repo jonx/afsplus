@@ -219,7 +219,7 @@ echo "[aros-ffi] adapter error numbers against the target's dos/dos.h"
 "$aros_clang" --target="$aros_target" $aros_arch_flags \
     -std=c11 -Wall -Wextra -Werror \
     -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
-    -I native/aros/tests -c native/aros/tests/error_numbers.c \
+    -I api -I native/aros/tests -c native/aros/tests/error_numbers.c \
     -o "$task_dir/error-numbers.o"
 
 echo "[aros-ffi] AROS AArch64 DosPacket translator"
