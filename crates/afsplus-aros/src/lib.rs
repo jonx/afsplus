@@ -371,6 +371,9 @@ pub struct ArosAdapter<D: BlockDevice> {
     /// `ACTION_WRITE_PROTECT` state: the pass key while protected.
     write_protect: Option<u32>,
     watches: BTreeMap<WatchId, Watch>,
+    /// The task that opened each snapshot reader or directory: only it may
+    /// close the handle without fresh authority (ADR-125).
+    snapshot_owners: BTreeMap<u64, u64>,
     next_lock: LockId,
     next_file: FileHandleId,
     next_watch: WatchId,
@@ -420,6 +423,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
             next_enumerator: 1,
             write_protect: None,
             watches: BTreeMap::new(),
+            snapshot_owners: BTreeMap::new(),
             next_lock: 1,
             next_file: 1,
             next_watch: 1,

@@ -6,6 +6,11 @@ impl<D: BlockDevice> Vfs<D> {
     pub fn snapshot_readers_active(&self) -> bool {
         !self.snapshot_readers.is_empty()
     }
+    /// A reader or snapshot directory handle that is still open.
+    pub fn snapshot_handle_open(&self, handle: Handle) -> bool {
+        self.snapshot_readers.contains_key(&handle)
+            || self.snapshot_directories.contains_key(&handle)
+    }
     pub fn snapshot_create(&mut self, now: Timespec) -> Result<u64, VfsError> {
         self.sync_filesystem()?;
         Ok(self.volume.snapshot_create(now)?)

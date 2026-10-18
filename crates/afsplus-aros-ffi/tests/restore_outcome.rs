@@ -109,7 +109,7 @@ fn fixture() -> (Box<Device>, *mut AfsplusAros, u64, u64) {
     let mut snapshot = 0;
     assert_eq!(afsplus_aros_snapshot_create(fs, 0, 0, &mut snapshot), 0);
     let mut reader = 0;
-    assert_eq!(afsplus_aros_snapshot_open(fs, snapshot, &mut reader), 0);
+    assert_eq!(afsplus_aros_snapshot_open(fs, snapshot, 1, &mut reader), 0);
     let mut source = 0;
     assert_eq!(
         afsplus_aros_snapshot_lookup(fs, reader, 1, b"source".as_ptr(), 6, &mut source),
@@ -137,7 +137,7 @@ fn callback_publication_failure_is_50001_and_prepublication_io_is_100() {
     let (device, fs, reader, source) = fixture();
     assert_eq!(restore(fs, reader, source), 0);
     let total = device.flushes;
-    assert_eq!(afsplus_aros_snapshot_close(fs, reader), 0);
+    assert_eq!(afsplus_aros_snapshot_close(fs, reader, 1), 0);
     assert_eq!(afsplus_aros_unmount(fs), 0);
     for (ordinal, expected) in [
         (1, 100),
@@ -153,7 +153,7 @@ fn callback_publication_failure_is_50001_and_prepublication_io_is_100() {
             "flush {ordinal}/{total}"
         );
         device.fail = 0;
-        assert_eq!(afsplus_aros_snapshot_close(fs, reader), 0);
+        assert_eq!(afsplus_aros_snapshot_close(fs, reader, 1), 0);
         // Unmount consumes the bridge even if its poisoned state refuses sync.
         let _ = afsplus_aros_unmount(fs);
     }

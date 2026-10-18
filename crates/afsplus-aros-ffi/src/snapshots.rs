@@ -68,6 +68,9 @@ fn reclaim_request(
         },
         timestamp(seconds, nanos)?,
     )?;
+    if result.cursor.len() > afsplus_vfs::RESTORE_RECOVERY_CURSOR_MAX {
+        return Err(ArosError::BadNumber);
+    }
     unsafe {
         (*report).cursor_size = result.cursor.len() as u32;
         (*report).flags = u32::from(result.done);
@@ -181,16 +184,21 @@ pub extern "C" fn afsplus_aros_snapshot_list(
     })
 }
 #[no_mangle]
-pub extern "C" fn afsplus_aros_snapshot_open(fs: *mut AfsplusAros, id: u64, out: *mut u64) -> i32 {
+pub extern "C" fn afsplus_aros_snapshot_open(
+    fs: *mut AfsplusAros,
+    id: u64,
+    owner: u64,
+    out: *mut u64,
+) -> i32 {
     bridge_status(fs, || {
         require_output(out)?;
-        let reader = bridge_mut(fs)?.adapter.snapshot_open(id)?;
+        let reader = bridge_mut(fs)?.adapter.snapshot_open(id, owner)?;
         write_output(out, reader)
     })
 }
 #[no_mangle]
-pub extern "C" fn afsplus_aros_snapshot_close(fs: *mut AfsplusAros, reader: u64) -> i32 {
-    bridge_status(fs, || bridge_mut(fs)?.adapter.snapshot_close(reader))
+pub extern "C" fn afsplus_aros_snapshot_close(fs: *mut AfsplusAros, reader: u64, owner: u64) -> i32 {
+    bridge_status(fs, || bridge_mut(fs)?.adapter.snapshot_close(reader, owner))
 }
 #[no_mangle]
 pub extern "C" fn afsplus_aros_snapshot_lookup(
@@ -274,19 +282,24 @@ pub extern "C" fn afsplus_aros_snapshot_dir_open(
     fs: *mut AfsplusAros,
     reader: u64,
     object: u64,
+    owner: u64,
     out: *mut u64,
 ) -> i32 {
     bridge_status(fs, || {
         require_output(out)?;
         let dir = bridge_mut(fs)?
             .adapter
-            .snapshot_directory_open(reader, object)?;
+            .snapshot_directory_open(reader, object, owner)?;
         write_output(out, dir)
     })
 }
 #[no_mangle]
-pub extern "C" fn afsplus_aros_snapshot_dir_close(fs: *mut AfsplusAros, dir: u64) -> i32 {
-    bridge_status(fs, || bridge_mut(fs)?.adapter.snapshot_directory_close(dir))
+pub extern "C" fn afsplus_aros_snapshot_dir_close(fs: *mut AfsplusAros, dir: u64, owner: u64) -> i32 {
+    bridge_status(fs, || {
+        bridge_mut(fs)?
+            .adapter
+            .snapshot_directory_close(dir, owner)
+    })
 }
 #[no_mangle]
 pub extern "C" fn afsplus_aros_snapshot_dir_read(

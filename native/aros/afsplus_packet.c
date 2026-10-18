@@ -1357,9 +1357,19 @@ static int32_t extension_name(const uint8_t *name, uint32_t length)
     return length != 0 && name == NULL ? ERROR_BAD_NUMBER : 0;
 }
 
+/* The task that sent the packet, as the authority callbacks see it; it owns
+ * the snapshot readers and directories it opens. Zero when none is named. */
+static uint64_t packet_owner(const struct DosPacket *packet)
+{
+    const struct MsgPort *port = packet->dp_Port;
+    if (port == NULL || (port->mp_Flags & PF_ACTION) != PA_SIGNAL)
+        return 0;
+    return (uint64_t)(uintptr_t)port->mp_SigTask;
+}
+
 /* One operation on the handler's own copy of the request. */
 static int32_t run_extension(struct AfsplusArosPacketContext *context,
-    struct AfsplusExtRequest *request)
+    struct AfsplusExtRequest *request, uint64_t owner)
 {
     union AfsplusExtReport report;
     uint64_t first = 0;
@@ -1761,9 +1771,11 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
         error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
         if (error != 0) return error;
         return afsplus_aros_snapshot_open(context->filesystem, request->object[0],
-            &request->output_value);
+            owner, &request->output_value);
     case AFSPLUS_EXT_SNAPSHOT_CLOSE:
-        return afsplus_aros_snapshot_close(context->filesystem, request->offset[0]);
+        /* No authority: the opener closes after a revocation. */
+        return afsplus_aros_snapshot_close(context->filesystem, request->offset[0],
+            owner);
     case AFSPLUS_EXT_SNAPSHOT_LOOKUP:
         error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
         if (error != 0) return error;
@@ -1789,7 +1801,7 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
         error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
         if (error != 0) return error;
         return afsplus_aros_snapshot_dir_open(context->filesystem,
-            request->offset[0], request->object[0], &request->output_value);
+            request->offset[0], request->object[0], owner, &request->output_value);
     case AFSPLUS_EXT_SNAPSHOT_DIR_READ:
         error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
         if (error != 0) return error;
@@ -1798,7 +1810,8 @@ static int32_t run_extension(struct AfsplusArosPacketContext *context,
             request->offset[0], request->buffer, request->buffer_size,
             (uint32_t)request->length, &request->output_count, &request->output_flags);
     case AFSPLUS_EXT_SNAPSHOT_DIR_CLOSE:
-        return afsplus_aros_snapshot_dir_close(context->filesystem, request->offset[0]);
+        return afsplus_aros_snapshot_dir_close(context->filesystem, request->offset[0],
+            owner);
     case AFSPLUS_EXT_SNAPSHOT_RESTORE_FILE:
         if (request->object[1] == 0) return ERROR_INVALID_LOCK;
         error = require_group(context, AFSPLUS_AROS_GROUP_SNAPSHOTS);
@@ -1940,7 +1953,7 @@ static int32_t process_extension(struct AfsplusArosPacketContext *context,
             : context->authorize_restore(context->callback_context, packet);
         if (error != 0) return error;
     }
-    error = run_extension(context, &request);
+    error = run_extension(context, &request, packet_owner(packet));
     /* ERROR_ACTION_NOT_KNOWN is what a handler without this packet answers,
      * and a client falls back on it. From here it would be a lie: the packet
      * is known, and what is missing is a group of the library, the volume's

@@ -354,7 +354,7 @@ fn snapshot_format_requires_explicit_mount_budgets_and_preserves_feature() {
     assert_eq!(afsplus_aros_snapshot_create(fs, 1, 0, &mut snapshot), 0);
     assert_ne!(snapshot, 0);
     let mut reader = 0;
-    assert_eq!(afsplus_aros_snapshot_open(fs, snapshot, &mut reader), 0);
+    assert_eq!(afsplus_aros_snapshot_open(fs, snapshot, 1, &mut reader), 0);
     let mut object = 0;
     assert_eq!(
         afsplus_aros_snapshot_lookup(fs, reader, 1, b"PREFS".as_ptr(), 5, &mut object),
@@ -372,7 +372,7 @@ fn snapshot_format_requires_explicit_mount_budgets_and_preserves_feature() {
     assert_eq!(stat.kind, 2);
     let mut directory = 0;
     assert_eq!(
-        afsplus_aros_snapshot_dir_open(fs, reader, 1, &mut directory),
+        afsplus_aros_snapshot_dir_open(fs, reader, 1, 1, &mut directory),
         0
     );
     let mut records = [0u8; 512];
@@ -392,7 +392,9 @@ fn snapshot_format_requires_explicit_mount_budgets_and_preserves_feature() {
     );
     assert_eq!(count, 1);
     assert_eq!(u32::from_ne_bytes(records[8..12].try_into().unwrap()), 1);
-    assert_eq!(afsplus_aros_snapshot_dir_close(fs, directory), 0);
+    // Only the opening task closes a snapshot handle.
+    assert_ne!(afsplus_aros_snapshot_dir_close(fs, directory, 2), 0);
+    assert_eq!(afsplus_aros_snapshot_dir_close(fs, directory, 1), 0);
     let mut bytes = [0u8; 4];
     assert_eq!(
         afsplus_aros_snapshot_read(fs, reader, object, 0, bytes.as_mut_ptr(), 4, &mut count),
@@ -462,7 +464,8 @@ fn snapshot_format_requires_explicit_mount_budgets_and_preserves_feature() {
     assert_eq!(afsplus_aros_disk_info(fs, &mut info), 0);
     assert_eq!(info.in_use, 1);
     assert_eq!(afsplus_aros_snapshot_delete(fs, snapshot, 2, 0), 202);
-    assert_eq!(afsplus_aros_snapshot_close(fs, reader), 0);
+    assert_ne!(afsplus_aros_snapshot_close(fs, reader, 2), 0);
+    assert_eq!(afsplus_aros_snapshot_close(fs, reader, 1), 0);
     assert_eq!(afsplus_aros_unmount(fs), 0);
     assert_eq!(afsplus_aros_mount(&cb, &cfg, &mut fs), 0);
     let mut record = [0u8; 24];

@@ -29,11 +29,25 @@ impl<D: BlockDevice> ArosAdapter<D> {
     ) -> Result<SnapshotListPage, ArosError> {
         Ok(self.vfs.snapshot_list(after, limit)?)
     }
-    pub fn snapshot_open(&mut self, id: u64) -> Result<u64, ArosError> {
-        Ok(self.vfs.snapshot_open(id, self.config.max_file_handles)?)
+    pub fn snapshot_open(&mut self, id: u64, owner: u64) -> Result<u64, ArosError> {
+        let reader = self.vfs.snapshot_open(id, self.config.max_file_handles)?;
+        self.snapshot_owners.insert(reader, owner);
+        Ok(reader)
     }
-    pub fn snapshot_close(&mut self, reader: u64) -> Result<(), ArosError> {
-        Ok(self.vfs.snapshot_close(reader)?)
+    /// Closes a reader for the task that opened it, and its directories.
+    pub fn snapshot_close(&mut self, reader: u64, owner: u64) -> Result<(), ArosError> {
+        self.snapshot_owned(reader, owner)?;
+        self.vfs.snapshot_close(reader)?;
+        let vfs = &self.vfs;
+        self.snapshot_owners
+            .retain(|handle, _| vfs.snapshot_handle_open(*handle));
+        Ok(())
+    }
+    fn snapshot_owned(&self, handle: u64, owner: u64) -> Result<(), ArosError> {
+        match self.snapshot_owners.get(&handle) {
+            Some(&opener) if opener == owner => Ok(()),
+            _ => Err(ArosError::InvalidLock),
+        }
     }
     pub fn snapshot_lookup(
         &mut self,
@@ -60,10 +74,17 @@ impl<D: BlockDevice> ArosAdapter<D> {
     ) -> Result<afsplus_vfs::Stat, ArosError> {
         Ok(self.vfs.snapshot_stat(reader, object)?)
     }
-    pub fn snapshot_directory_open(&mut self, reader: u64, object: u64) -> Result<u64, ArosError> {
-        Ok(self
+    pub fn snapshot_directory_open(
+        &mut self,
+        reader: u64,
+        object: u64,
+        owner: u64,
+    ) -> Result<u64, ArosError> {
+        let directory = self
             .vfs
-            .snapshot_directory_open(reader, object, self.config.max_locks)?)
+            .snapshot_directory_open(reader, object, self.config.max_locks)?;
+        self.snapshot_owners.insert(directory, owner);
+        Ok(directory)
     }
     pub fn snapshot_directory_read(
         &mut self,
@@ -84,8 +105,11 @@ impl<D: BlockDevice> ArosAdapter<D> {
                     .collect(),
             })?)
     }
-    pub fn snapshot_directory_close(&mut self, directory: u64) -> Result<(), ArosError> {
-        Ok(self.vfs.snapshot_directory_close(directory)?)
+    pub fn snapshot_directory_close(&mut self, directory: u64, owner: u64) -> Result<(), ArosError> {
+        self.snapshot_owned(directory, owner)?;
+        self.vfs.snapshot_directory_close(directory)?;
+        self.snapshot_owners.remove(&directory);
+        Ok(())
     }
 }
 

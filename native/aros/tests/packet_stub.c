@@ -1260,22 +1260,24 @@ int32_t afsplus_aros_snapshot_delete(struct AfsplusAros *f, uint64_t id, int64_t
 { (void)f; (void)s; (void)n; assert(id == 7); snapshot_calls++; return 0; }
 int32_t afsplus_aros_snapshot_list(struct AfsplusAros *f, uint64_t low, uint8_t *b, uint32_t c, uint32_t l, uint32_t *out, uint64_t *next)
 { struct AfsplusArosSnapshotInfo info = {7, 12, 11}; (void)f; (void)low; assert(l == 1 && c >= sizeof(info)); memcpy(b, &info, sizeof(info)); *out = 1; *next = 0; snapshot_calls++; return 0; }
-int32_t afsplus_aros_snapshot_open(struct AfsplusAros *f, uint64_t id, uint64_t *out)
-{ (void)f; assert(id == 7); *out = 99; stub_disk_in_use=1; snapshot_calls++; return 0; }
-int32_t afsplus_aros_snapshot_close(struct AfsplusAros *f, uint64_t id)
-{ (void)f; assert(id == 99); stub_disk_in_use=0; snapshot_calls++; return 0; }
+/* The bridge refuses a close by any task but the opener. */
+static uint64_t snapshot_opener;
+int32_t afsplus_aros_snapshot_open(struct AfsplusAros *f, uint64_t id, uint64_t owner, uint64_t *out)
+{ (void)f; assert(id == 7); snapshot_opener = owner; *out = 99; stub_disk_in_use=1; snapshot_calls++; return 0; }
+int32_t afsplus_aros_snapshot_close(struct AfsplusAros *f, uint64_t id, uint64_t owner)
+{ (void)f; assert(id == 99); if (owner != snapshot_opener) return ERROR_INVALID_LOCK; stub_disk_in_use=0; snapshot_calls++; return 0; }
 int32_t afsplus_aros_snapshot_lookup(struct AfsplusAros *f, uint64_t r, uint64_t d, const uint8_t *n, uint32_t l, uint64_t *out)
 { (void)f; (void)r; (void)d; (void)n; (void)l; *out = 3; snapshot_calls++; return 0; }
 int32_t afsplus_aros_snapshot_read(struct AfsplusAros *f, uint64_t r, uint64_t o, uint64_t off, uint8_t *b, uint32_t c, uint32_t *out)
 { (void)f; (void)r; (void)o; (void)off; assert(c >= 4); memcpy(b,"boot",4); *out = 4; snapshot_calls++; return 0; }
 int32_t afsplus_aros_snapshot_stat(struct AfsplusAros *f, uint64_t r, uint64_t o, struct AfsplusArosStat *out)
 { (void)r; return afsplus_aros_stat_id(f,o,out); }
-int32_t afsplus_aros_snapshot_dir_open(struct AfsplusAros *f, uint64_t r, uint64_t o, uint64_t *out)
-{ (void)r; return afsplus_aros_dir_open(f,o,out); }
+int32_t afsplus_aros_snapshot_dir_open(struct AfsplusAros *f, uint64_t r, uint64_t o, uint64_t owner, uint64_t *out)
+{ (void)r; (void)owner; return afsplus_aros_dir_open(f,o,out); }
 int32_t afsplus_aros_snapshot_dir_read(struct AfsplusAros *f, uint64_t d, uint8_t *b, uint32_t c, uint32_t l, uint32_t *out, uint32_t *eof)
 { return afsplus_aros_dir_read(f,d,b,c,l,out,eof); }
-int32_t afsplus_aros_snapshot_dir_close(struct AfsplusAros *f, uint64_t d)
-{ return afsplus_aros_dir_close(f,d); }
+int32_t afsplus_aros_snapshot_dir_close(struct AfsplusAros *f, uint64_t d, uint64_t owner)
+{ (void)owner; return afsplus_aros_dir_close(f,d); }
 int32_t afsplus_aros_snapshot_restore_file(struct AfsplusAros *f, uint64_t r, uint64_t s, uint64_t d, const uint8_t *name, uint32_t len, int64_t sec, uint32_t ns, uint64_t *out)
 { (void)f; (void)r; (void)s; (void)d; (void)name; (void)len; (void)sec; (void)ns; *out=71; snapshot_calls++; return restore_result; }
 int32_t afsplus_aros_snapshot_restore_tree(struct AfsplusAros *f, uint64_t r, uint64_t s, uint64_t d, const uint8_t *name, uint32_t len, uint32_t nodes, uint32_t depth, uint32_t metadata, int64_t sec, uint32_t ns, uint64_t *out)
@@ -1305,7 +1307,14 @@ static void snapshot_packets(struct AfsplusArosPacketConfig config)
     snapshot_allow=0; r.operation=AFSPLUS_EXT_SNAPSHOT_OPEN; r.object[0]=7;
     { uint32_t before=snapshot_calls; assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_READ_PROTECTED); assert(snapshot_calls==before); }
     snapshot_allow=1;
+    /* Opened by one task's signal port; another task cannot close it. */
+    static struct Task opener_task, other_task;
+    static struct MsgPort opener_port, other_port;
+    opener_port.mp_Flags=PA_SIGNAL; opener_port.mp_SigTask=&opener_task;
+    other_port.mp_Flags=PA_SIGNAL; other_port.mp_SigTask=&other_task;
+    p.dp_Port=&opener_port;
     assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0 && r.output_value==99);
+    assert(snapshot_opener==(uint64_t)(uintptr_t)&opener_task);
     { struct DosPacket die; initialize_packet(&die,ACTION_DIE);
       assert(afsplus_aros_packet_process(ctx,&die)==0 && die.dp_Res2==ERROR_OBJECT_IN_USE);
       initialize_packet(&die,ACTION_FORMAT); die.dp_Arg1=packet_bstr("Fresh"); die.dp_Arg2=UINT32_C(0x4146532b);
@@ -1315,7 +1324,12 @@ static void snapshot_packets(struct AfsplusArosPacketConfig config)
     snapshot_allow=0; memset(buffer,0xcc,sizeof(buffer));
     assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_READ_PROTECTED && buffer[0]==0xcc);
     r.operation=AFSPLUS_EXT_SNAPSHOT_CLOSE;
+    p.dp_Port=&other_port;
+    assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==ERROR_INVALID_LOCK);
+    /* The opener closes without authority, as after a revocation. */
+    p.dp_Port=&opener_port;
     assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0);
+    p.dp_Port=NULL;
     snapshot_allow=1; r.operation=AFSPLUS_EXT_SNAPSHOT_LIST; r.offset[0]=0; r.length=1; r.buffer_size=sizeof(buffer);
     assert(afsplus_aros_packet_process(ctx,&p)==0 && p.dp_Res2==0 && r.output_count==1);
     r.operation=AFSPLUS_EXT_SNAPSHOT_DELETE; r.object[0]=7;
