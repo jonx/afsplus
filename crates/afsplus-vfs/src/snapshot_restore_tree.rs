@@ -27,6 +27,13 @@ impl<D: BlockDevice> Vfs<D> {
         source: ObjectId,
         limits: TreeRestoreLimits,
     ) -> Result<Vec<Node>, VfsError> {
+        // Deeper stages could never be reclaimed after a failure (ADR-133).
+        if limits.max_depth > super::restore_recovery::MAX_DEPTH {
+            return Err(VfsError::Limit("restore tree depth above 64 levels"));
+        }
+        if self.snapshot_stage_private(view, source)? {
+            return Err(VfsError::NotFound);
+        }
         let mut pending = vec![(source, None, String::new(), 1usize)];
         let mut nodes: Vec<Node> = Vec::new();
         let mut seen = BTreeSet::new();
@@ -91,6 +98,7 @@ impl<D: BlockDevice> Vfs<D> {
                 }
                 attributes.push((key, value));
             }
+            super::snapshot_restore::stage_attributes_fit(&attributes)?;
             let index = nodes.len();
             if metadata.object_type == ObjectType::Directory {
                 let mut cursor = None;
@@ -99,6 +107,10 @@ impl<D: BlockDevice> Vfs<D> {
                         .volume
                         .snapshot_read_directory_page(view, source, cursor, 64)?;
                     for entry in page.entries {
+                        // A stage captured mid-restore stays private.
+                        if self.snapshot_stage_private(view, entry.child_id)? {
+                            continue;
+                        }
                         if nodes.len() + pending.len() + 1 >= limits.max_nodes {
                             return Err(VfsError::Limit("restore tree node budget exhausted"));
                         }

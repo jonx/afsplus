@@ -27,6 +27,25 @@ fn normalized_ranges(ranges: &[FileAllocationRange]) -> Vec<FileAllocationRange>
     out
 }
 
+/// The stage carries its marker beside the captured attributes, in the one
+/// set an object holds: a captured set with no room for the marker cannot be
+/// staged, and is refused before anything is written (ADR-128).
+pub(crate) fn stage_attributes_fit(attributes: &[(String, Vec<u8>)]) -> Result<(), VfsError> {
+    let entry = |name: &str, value: usize| 4 + name.len() + value;
+    let total = attributes
+        .iter()
+        .map(|(name, value)| entry(name, value.len()))
+        .sum::<usize>()
+        + 4
+        + entry(STAGE_ATTRIBUTE, 8);
+    if total > afsplus_format::attrs::MAX_ATTRIBUTE_SET_BYTES as usize {
+        return Err(VfsError::Limit(
+            "captured attributes leave no room for the restore stage marker",
+        ));
+    }
+    Ok(())
+}
+
 impl<D: BlockDevice> Vfs<D> {
     /// Restore into a new name only. A private stage belongs to the selected
     /// directory. Failures before publication remove it when storage
@@ -70,6 +89,9 @@ impl<D: BlockDevice> Vfs<D> {
             .get(&reader)
             .ok_or(VfsError::Stale)?
             .clone();
+        if self.snapshot_stage_private(&view, source)? {
+            return Err(VfsError::NotFound);
+        }
         let captured = self
             .volume
             .snapshot_stat(&view, source)?
@@ -114,6 +136,7 @@ impl<D: BlockDevice> Vfs<D> {
             }
             attributes.push((key, value));
         }
+        stage_attributes_fit(&attributes)?;
         let mut allocations = Vec::new();
         let mut cursor = 0;
         let block_size = self.volume.ident().geometry().block_size as u64;

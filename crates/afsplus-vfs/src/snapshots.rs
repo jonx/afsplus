@@ -53,6 +53,39 @@ impl<D: BlockDevice> Vfs<D> {
             .retain(|_, state| state.0 != reader);
         Ok(())
     }
+    /// An object that was a private restore stage when the view was
+    /// captured: the view lists, reads and restores it no more than the live
+    /// volume did (ADR-130). A marker the view cannot decode hides it too.
+    pub(crate) fn snapshot_stage_private(
+        &mut self,
+        view: &afsplus_core::volume::SnapshotHandle,
+        object: ObjectId,
+    ) -> Result<bool, VfsError> {
+        let marker = snapshot_restore::STAGE_ATTRIBUTE;
+        let Some(Some(value)) = self.volume.snapshot_attribute(view, object, marker)? else {
+            return Ok(false);
+        };
+        let Ok(bytes) = <[u8; 8]>::try_from(value.as_slice()) else {
+            return Ok(true);
+        };
+        let root = u64::from_le_bytes(bytes);
+        Ok(match self.volume.snapshot_attribute(view, root, marker)? {
+            // The root has no self marker: the stage was published.
+            None | Some(None) => false,
+            Some(Some(root_marker)) => root_marker == bytes || root_marker.len() != 8,
+        })
+    }
+    fn snapshot_visible(&mut self, reader: Handle, object: ObjectId) -> Result<(), VfsError> {
+        let view = self
+            .snapshot_readers
+            .get(&reader)
+            .ok_or(VfsError::Stale)?
+            .clone();
+        if self.snapshot_stage_private(&view, object)? {
+            return Err(VfsError::NotFound);
+        }
+        Ok(())
+    }
     pub fn snapshot_info(&self, reader: Handle) -> Result<SnapshotInfo, VfsError> {
         Ok(self
             .snapshot_readers
@@ -61,6 +94,7 @@ impl<D: BlockDevice> Vfs<D> {
             .info())
     }
     pub fn snapshot_stat(&mut self, reader: Handle, object: ObjectId) -> Result<Stat, VfsError> {
+        self.snapshot_visible(reader, object)?;
         let view = self.snapshot_readers.get(&reader).ok_or(VfsError::Stale)?;
         Ok(self
             .volume
@@ -74,10 +108,14 @@ impl<D: BlockDevice> Vfs<D> {
         directory: ObjectId,
         name: &str,
     ) -> Result<ObjectId, VfsError> {
+        self.snapshot_visible(reader, directory)?;
         let view = self.snapshot_readers.get(&reader).ok_or(VfsError::Stale)?;
-        self.volume
+        let object = self
+            .volume
             .snapshot_lookup(view, directory, name)?
-            .ok_or(VfsError::NotFound)
+            .ok_or(VfsError::NotFound)?;
+        self.snapshot_visible(reader, object)?;
+        Ok(object)
     }
     pub fn snapshot_read(
         &mut self,
@@ -86,6 +124,7 @@ impl<D: BlockDevice> Vfs<D> {
         offset: u64,
         out: &mut [u8],
     ) -> Result<usize, VfsError> {
+        self.snapshot_visible(reader, object)?;
         let view = self.snapshot_readers.get(&reader).ok_or(VfsError::Stale)?;
         Ok(self
             .volume
@@ -137,15 +176,22 @@ impl<D: BlockDevice> Vfs<D> {
             .snapshot_directories
             .get(&directory)
             .ok_or(VfsError::Stale)?;
-        let view = self.snapshot_readers.get(&reader).ok_or(VfsError::Stale)?;
+        let view = self
+            .snapshot_readers
+            .get(&reader)
+            .ok_or(VfsError::Stale)?
+            .clone();
         let page = self
             .volume
-            .snapshot_read_directory_page(view, object, cursor, limit)?;
+            .snapshot_read_directory_page(&view, object, cursor, limit)?;
         let mut entries = Vec::with_capacity(page.entries.len());
         for entry in page.entries {
+            if self.snapshot_stage_private(&view, entry.child_id)? {
+                continue;
+            }
             let stat = self
                 .volume
-                .snapshot_stat(view, entry.child_id)?
+                .snapshot_stat(&view, entry.child_id)?
                 .ok_or(VfsError::NotFound)?;
             entries.push(DirectoryEntry {
                 object_id: entry.child_id,

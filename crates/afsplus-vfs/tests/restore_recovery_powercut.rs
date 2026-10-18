@@ -211,24 +211,43 @@ fn neighbors(vfs: &mut Vfs<MemoryBackend>, f: &Fixture) {
     public_bytes(vfs, f.ordinary, ORDINARY);
     public_bytes(vfs, f.published_child, PUBLISHED);
 }
-fn historical(vfs: &mut Vfs<MemoryBackend>, f: &Fixture) {
-    let reader = vfs.snapshot_open(f.snapshot, 8).unwrap();
+/// The captured stage stays private in the snapshot view (ADR-136): its
+/// historical bytes are checked through trusted core access, and the vfs is
+/// mounted again, as after a crash.
+fn historical(vfs: Vfs<MemoryBackend>, f: &Fixture) -> Vfs<MemoryBackend> {
+    let mut volume = vfs.into_volume();
+    let view = volume.snapshot_open(f.snapshot).unwrap();
     assert_eq!(
-        vfs.snapshot_stat(reader, f.file).unwrap().size,
+        volume
+            .snapshot_stat(&view, f.file)
+            .unwrap()
+            .unwrap()
+            .size_bytes,
         f.payload.len() as u64
     );
     let mut bytes = vec![0; f.payload.len() + 1];
     assert_eq!(
-        vfs.snapshot_read(reader, f.file, 0, &mut bytes).unwrap(),
+        volume
+            .snapshot_read_file_at(&view, f.file, 0, &mut bytes)
+            .unwrap(),
         f.payload.len()
     );
     assert_eq!(&bytes[..f.payload.len()], f.payload);
     assert_eq!(
-        vfs.snapshot_lookup(reader, OBJECT_ROOT, "Retained")
+        volume
+            .snapshot_lookup(&view, OBJECT_ROOT, "Retained")
             .unwrap(),
-        f.stage
+        Some(f.stage)
+    );
+    drop(view);
+    let mut vfs = mount(volume.into_device());
+    let reader = vfs.snapshot_open(f.snapshot, 8).unwrap();
+    assert_eq!(
+        vfs.snapshot_lookup(reader, OBJECT_ROOT, "Retained"),
+        Err(VfsError::NotFound)
     );
     vfs.snapshot_close(reader).unwrap();
+    vfs
 }
 #[derive(Default)]
 struct Counts {
@@ -280,7 +299,7 @@ fn verify(image: MemoryBackend, f: &Fixture, description: &str, counts: &mut Cou
         );
     }
     neighbors(&mut vfs, f);
-    historical(&mut vfs, f);
+    vfs = historical(vfs, f);
     // Cursor loss is explicitly safe. Restart on every crash image, and
     // prove bounded recovery reaches completion for every modeled state.
     let mut cursor = Vec::new();
@@ -303,7 +322,7 @@ fn verify(image: MemoryBackend, f: &Fixture, description: &str, counts: &mut Cou
     assert!(done, "resume did not complete: {description}");
     counts.resumed += 1;
     neighbors(&mut vfs, f);
-    historical(&mut vfs, f);
+    vfs = historical(vfs, f);
     let mut raw = vfs.into_volume();
     for object in &f.nodes {
         assert!(

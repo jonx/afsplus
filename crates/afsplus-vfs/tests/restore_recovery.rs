@@ -98,11 +98,13 @@ fn bounded_reclaim_resumes_after_remount_and_keeps_snapshot_data() {
     assert!(volume.stat(stage).unwrap().is_none());
     assert!(volume.stat(file).unwrap().is_none());
     assert_eq!(volume.read_file(visible).unwrap(), b"public");
-    let mut vfs = mount(volume.into_device());
-    let reader = vfs.snapshot_open(snapshot, 8).unwrap();
+    // The snapshot keeps the stage's bytes; its view keeps the stage private
+    // (ADR-136), so trusted core access reads them.
+    let view = volume.snapshot_open(snapshot).unwrap();
     let mut bytes = [0; 4096];
     assert_eq!(
-        vfs.snapshot_read(reader, file, 11 * 8192, &mut bytes)
+        volume
+            .snapshot_read_file_at(&view, file, 11 * 8192, &mut bytes)
             .unwrap(),
         4096
     );

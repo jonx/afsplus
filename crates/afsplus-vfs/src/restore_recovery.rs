@@ -2,7 +2,7 @@
 use super::*;
 
 pub const RESTORE_RECOVERY_CURSOR_MAX: usize = 24 * 1024;
-const MAX_DEPTH: usize = 64;
+pub(crate) const MAX_DEPTH: usize = 64;
 // The deepest cursor, every frame with a maximal name, fits the transport.
 const _: () = assert!(
     4 + 16 + 4 * 8 + (MAX_DEPTH + 1) * (5 * 8 + NAME_MAX_UTF8_BYTES) + 4
@@ -332,7 +332,8 @@ impl<D: BlockDevice> Vfs<D> {
                     frame.ordinal.checked_add(1).ok_or(VfsError::Invalid)?;
                 let marker = match self.recovery_marker(entry.child_id) {
                     Ok(m) => m,
-                    Err(VfsError::Invalid) => {
+                    // An unreadable marker blocks this entry; siblings go on.
+                    Err(VfsError::Invalid | VfsError::Corrupt(_)) => {
                         cursor.block(entry.child_id, &mut report);
                         continue;
                     }
