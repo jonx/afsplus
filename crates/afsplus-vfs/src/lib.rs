@@ -1056,6 +1056,13 @@ impl<D: BlockDevice> Vfs<D> {
             .try_into()
             .map_err(|_| VfsError::Corrupt("invalid restore stage marker".into()))?;
         let root = u64::from_le_bytes(bytes);
+        if !(afsplus_format::OBJECT_FIRST_DYNAMIC..self.volume.checkpoint().next_object_id)
+            .contains(&root)
+        {
+            return Err(VfsError::Corrupt(
+                "restore root identifier was never allocated".into(),
+            ));
+        }
         let root_marker = match self
             .volume
             .attribute(root, snapshot_restore::STAGE_ATTRIBUTE)

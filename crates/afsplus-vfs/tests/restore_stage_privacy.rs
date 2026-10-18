@@ -338,3 +338,70 @@ fn per_object_root_gate_blocks_tree_children_by_id_and_hides_derived_markers_aft
     assert_eq!(v.read(h, 0, &mut bytes).unwrap(), 6);
     assert_eq!(&bytes, b"secret");
 }
+
+#[test]
+fn malformed_root_identifiers_fail_closed_but_a_deleted_allocated_root_is_inactive() {
+    let (v, _, _, _, _) = fixture();
+    let mut volume = v.into_volume();
+    let object = volume
+        .create_file_in_root("Marked", b"payload", Timespec::default())
+        .unwrap();
+    let limits = SnapshotWorkLimits {
+        max_edit_records: 4096,
+        max_views: 8,
+        reclaim_records: 64,
+    };
+    let never_allocated = volume.checkpoint().next_object_id;
+    for root in [
+        0,
+        OBJECT_ROOT,
+        afsplus_format::OBJECT_FIRST_DYNAMIC - 1,
+        never_allocated,
+        u64::MAX,
+    ] {
+        volume
+            .set_attributes(
+                object,
+                &[("system.restore.stage", Some(root.to_le_bytes().as_slice()))],
+                AttributeWriteMode::Upsert,
+                Timespec::default(),
+            )
+            .unwrap();
+        let mut v =
+            Vfs::mount_with_snapshot_limits(volume.into_device(), MountOptions::default(), limits)
+                .unwrap();
+        assert!(
+            matches!(v.stat(object), Err(VfsError::Corrupt(_))),
+            "root {root} must fail closed"
+        );
+        assert!(matches!(
+            v.open_file(object, afsplus_vfs::AccessMode::ReadOnly),
+            Err(VfsError::Corrupt(_))
+        ));
+        volume = v.into_volume();
+    }
+    let root = volume
+        .create_directory(OBJECT_ROOT, "ExpiredRoot", Timespec::default())
+        .unwrap();
+    volume
+        .set_attributes(
+            object,
+            &[("system.restore.stage", Some(root.to_le_bytes().as_slice()))],
+            AttributeWriteMode::Upsert,
+            Timespec::default(),
+        )
+        .unwrap();
+    volume
+        .remove_directory(OBJECT_ROOT, "ExpiredRoot", Timespec::default())
+        .unwrap();
+    let mut v =
+        Vfs::mount_with_snapshot_limits(volume.into_device(), MountOptions::default(), limits)
+            .unwrap();
+    let h = v
+        .open_file(object, afsplus_vfs::AccessMode::ReadOnly)
+        .unwrap();
+    let mut bytes = [0; 7];
+    assert_eq!(v.read(h, 0, &mut bytes).unwrap(), 7);
+    assert_eq!(&bytes, b"payload");
+    assert!(v.attribute_names(object).unwrap().is_empty());
+}

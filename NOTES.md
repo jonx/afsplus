@@ -244,7 +244,8 @@ prevent it. Recorded the exposing controls in the integration repository's
 [ADR-130](adr/ADR-130-bounded-private-restore-stages.md) supersedes the initial
 [ADR-129](adr/ADR-129-private-restore-stages.md) root-only proposal. Each staged
 object now carries a managed marker identifying its root. Ordinary VFS reads
-that marker and the root marker without scanning the volume, refuses access
+that marker and the root marker without scanning the volume, rejects reserved
+or never-allocated root identifiers before querying them, refuses access
 while the stage is private, and skips it during normal directory enumeration.
 Publication atomically clears the root marker; descendants retain inactive
 managed references omitted from public attributes. Captured public attributes,
