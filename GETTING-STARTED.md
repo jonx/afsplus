@@ -42,7 +42,7 @@ cd target/release
 ./afsplus-extract work.img out/                     # recover every object and a manifest, read-only
 ```
 
-Every tool but `mkafsplus` and `afsplus-populate` opens the image read-only,
+Every tool but `mkafsplus`, `afsplus-populate` and `afsplus-copy` (which writes only its destination) opens the image read-only,
 and every one speaks `--json` ([tools-spec](tools/tools-spec.md)).
 
 ## 4. Mount it on the host (optional)
