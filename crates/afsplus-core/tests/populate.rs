@@ -8,7 +8,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use afsplus_block::{BlockDevice, FileBackend};
-use afsplus_core::{mkfs, mount, MkfsParams, NamePolicy};
+use afsplus_core::volume::SnapshotWorkLimits;
+use afsplus_core::{
+    mkfs, mkfs_with_options, mount, mount_with_snapshot_limits, MkfsOptions, MkfsParams,
+    MountOptions, NamePolicy,
+};
 use afsplus_format::{Timespec, DEFAULT_BLOCK_SIZE, OBJECT_ROOT};
 
 fn scratch(name: &str) -> PathBuf {
@@ -100,7 +104,6 @@ fn a_sparse_file_a_symlink_and_a_hard_link_come_across_as_they_are() {
     let b = volume.lookup_root("hard").unwrap().expect("hard");
     assert_eq!(a, b, "a hard link must not become a copy");
     assert_eq!(volume.stat(a).unwrap().unwrap().link_count, 2);
-    let _ = OBJECT_ROOT;
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -135,4 +138,57 @@ fn a_file_over_the_extent_cap_needs_the_chunked_path() {
         17 * 1024 * 1024
     );
     fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_snapshot_volume_is_populated_with_its_feature_kept() {
+    let dir = scratch("snapshots");
+    let drawer = dir.join("drawer");
+    fs::create_dir_all(drawer.join("S")).unwrap();
+    fs::write(drawer.join("S/Startup-Sequence"), b"Echo hello\n").unwrap();
+    let image = dir.join("volume.afsp");
+    fs::File::create(&image).unwrap();
+    let mut device = FileBackend::open(&image, DEFAULT_BLOCK_SIZE, 64 * 256).unwrap();
+    mkfs_with_options(
+        &mut device,
+        &MkfsParams {
+            uuid: [0x5B; 16],
+            label: "SYS".into(),
+            region_size: 4096,
+            reclaim_caps: Default::default(),
+            log_slots: 8,
+            shared_extents: true,
+            data_policy: true,
+            name_policy: NamePolicy::Insensitive,
+            timestamp: Timespec::default(),
+        },
+        MkfsOptions {
+            persistent_snapshots: true,
+        },
+    )
+    .unwrap();
+    device.flush().unwrap();
+    drop(device);
+    let status = Command::new(env!("CARGO_BIN_EXE_afsplus-populate"))
+        .arg(&image)
+        .arg(&drawer)
+        .status()
+        .unwrap();
+    assert!(status.success(), "populate must accept a snapshot volume");
+    let mut device = FileBackend::open_sized_by_file(&image, DEFAULT_BLOCK_SIZE).unwrap();
+    device.set_total_blocks(64 * 256);
+    // Still a snapshot volume: an ordinary mount refuses it.
+    assert!(mount(FileBackend::open_sized_by_file(&image, DEFAULT_BLOCK_SIZE).unwrap()).is_err());
+    let limits = SnapshotWorkLimits {
+        max_edit_records: 4096,
+        max_views: 8,
+        reclaim_records: 64,
+    };
+    let mut volume = mount_with_snapshot_limits(device, MountOptions::default(), limits).unwrap();
+    let s = volume.lookup_root("S").unwrap().expect("S");
+    let startup = volume
+        .lookup_in_directory(s, "Startup-Sequence")
+        .unwrap()
+        .expect("Startup-Sequence");
+    assert_eq!(volume.read_file(startup).unwrap(), b"Echo hello\n");
 }

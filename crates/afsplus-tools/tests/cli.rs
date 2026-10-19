@@ -6,7 +6,8 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use afsplus_block::{BlockDevice, FileBackend};
-use afsplus_core::mount;
+use afsplus_core::volume::SnapshotWorkLimits;
+use afsplus_core::{mount, mount_with_snapshot_limits, MountOptions};
 use afsplus_format::ident::Identification;
 use afsplus_format::{Timespec, DEFAULT_BLOCK_SIZE, OBJECT_ROOT};
 
@@ -396,6 +397,38 @@ fn extraction_preserves_bytes_names_and_hard_links_without_source_writes() {
     assert_status(
         &run("afsplus-extract", [image.as_os_str(), image.as_os_str()]),
         2,
+    );
+    assert_eq!(fs::read(&image).unwrap(), before);
+}
+
+#[test]
+fn extraction_of_a_snapshot_volume_reads_the_live_tree() {
+    let temp = TempDir::new("extract-snapshots");
+    let image = temp.join("snapshots.afsplus");
+    assert_status(&format_image(&image, &["--snapshots"]), 0);
+    let limits = SnapshotWorkLimits {
+        max_edit_records: 64,
+        max_views: 4,
+        reclaim_records: 8,
+    };
+    let device = FileBackend::open(&image, DEFAULT_BLOCK_SIZE, 512).unwrap();
+    let mut volume = mount_with_snapshot_limits(device, MountOptions::default(), limits).unwrap();
+    let now = Timespec::default();
+    let file = volume.create_file_in_root("file", b"before", now).unwrap();
+    volume.snapshot_create(now).unwrap();
+    volume.write_file_at(file, 0, b"after!", now).unwrap();
+    drop(volume);
+    let before = fs::read(&image).unwrap();
+    let destination = temp.join("extracted");
+    let result = run(
+        "afsplus-extract",
+        [image.as_os_str(), destination.as_os_str()],
+    );
+    assert_status(&result, 0);
+    // The live content, not the snapshot's; the image is not written.
+    assert_eq!(
+        fs::read(destination.join(format!("object-{file}.bin"))).unwrap(),
+        b"after!"
     );
     assert_eq!(fs::read(&image).unwrap(), before);
 }

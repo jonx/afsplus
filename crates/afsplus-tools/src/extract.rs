@@ -7,8 +7,13 @@ use std::path::{Path, PathBuf};
 
 use afsplus_block::BlockDevice;
 use afsplus_core::mount::{SUPPORTED_INCOMPAT_FEATURES, SUPPORTED_RO_COMPAT_FEATURES};
-use afsplus_core::{mount_with_options, MountMode, MountOptions, Volume};
-use afsplus_format::ident::{COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG_DATA_UPDATES};
+use afsplus_core::volume::SnapshotWorkLimits;
+use afsplus_core::{
+    mount_with_options, mount_with_snapshot_limits, MountMode, MountOptions, Volume,
+};
+use afsplus_format::ident::{
+    COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG_DATA_UPDATES, INCOMPAT_PERSISTENT_SNAPSHOTS,
+};
 use afsplus_format::object::{ObjectRecord, ObjectType};
 use afsplus_format::OBJECT_ROOT;
 
@@ -103,7 +108,8 @@ fn execute(options: &Options) -> Result<usize, Failure> {
     let (mut device, header) = read_header(&options.image)?;
     let features = header.ident.features;
     // An extractor must not silently drop metadata it cannot represent.
-    if features.incompat & !SUPPORTED_INCOMPAT_FEATURES != 0
+    // Snapshots are history, not live content: the live tree is extracted.
+    if features.incompat & !(SUPPORTED_INCOMPAT_FEATURES | INCOMPAT_PERSISTENT_SNAPSHOTS) != 0
         || features.ro_compat & !SUPPORTED_RO_COMPAT_FEATURES != 0
         || features.compat & !COMPAT_DATA_POLICY != 0
     {
@@ -121,14 +127,24 @@ fn execute(options: &Options) -> Result<usize, Failure> {
         features.incompat & INCOMPAT_INTENT_LOG_DATA_UPDATES != 0,
     )
     .map_err(|e| core_failure("E_INTENT_LOG", "cannot inspect log tail", e))?;
-    let mut volume = mount_with_options(
-        device,
-        MountOptions {
-            mode: MountMode::NoChanges,
-            ..Default::default()
-        },
-    )
-    .map_err(|e| core_failure("E_MOUNT", "cannot inspect selected checkpoint", e))?;
+    let options_no_changes = MountOptions {
+        mode: MountMode::NoChanges,
+        ..Default::default()
+    };
+    let mounted = if features.incompat & INCOMPAT_PERSISTENT_SNAPSHOTS != 0 {
+        // Read-only: no edit or reclaim work runs, and any number of
+        // registered views is admitted.
+        let limits = SnapshotWorkLimits {
+            max_edit_records: 1,
+            max_views: usize::MAX,
+            reclaim_records: 1,
+        };
+        mount_with_snapshot_limits(device, options_no_changes, limits)
+    } else {
+        mount_with_options(device, options_no_changes)
+    };
+    let mut volume =
+        mounted.map_err(|e| core_failure("E_MOUNT", "cannot inspect selected checkpoint", e))?;
     fs::create_dir(&options.destination)
         .map_err(|e| Failure::host_io(format!("destination must be new: {e}")))?;
     extract(

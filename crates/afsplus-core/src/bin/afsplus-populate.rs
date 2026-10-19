@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use afsplus_block::{BlockDevice, FileBackend};
-use afsplus_core::{mount, Volume};
-use afsplus_format::ident::Identification;
+use afsplus_core::volume::SnapshotWorkLimits;
+use afsplus_core::{mount, mount_with_snapshot_limits, MountOptions, Volume};
+use afsplus_format::ident::{Identification, INCOMPAT_PERSISTENT_SNAPSHOTS};
 use afsplus_format::{Timespec, DEFAULT_BLOCK_SIZE, OBJECT_ROOT};
 
 #[derive(Default)]
@@ -142,7 +143,8 @@ fn import_directory(
     Ok(())
 }
 
-fn open_image(path: &Path) -> Result<FileBackend, String> {
+/// The device, and whether its format carries persistent snapshots.
+fn open_image(path: &Path) -> Result<(FileBackend, bool), String> {
     let mut device = FileBackend::open_sized_by_file(path, DEFAULT_BLOCK_SIZE)
         .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
     let mut block = vec![0; DEFAULT_BLOCK_SIZE];
@@ -152,15 +154,27 @@ fn open_image(path: &Path) -> Result<FileBackend, String> {
     let ident = Identification::decode(&block)
         .map_err(|error| format!("cannot decode {} identification: {error}", path.display()))?;
     device.set_total_blocks(ident.total_blocks);
-    Ok(device)
+    let snapshots = ident.features.incompat & INCOMPAT_PERSISTENT_SNAPSHOTS != 0;
+    Ok((device, snapshots))
 }
 
 fn run(image: &Path, source: &Path) -> Result<(), String> {
     if !source.is_dir() {
         return Err(format!("source is not a directory: {}", source.display()));
     }
-    let device = open_image(image)?;
-    let mut volume = mount(device).map_err(|error| format!("cannot mount image: {error}"))?;
+    let (device, snapshots) = open_image(image)?;
+    // A fresh image holds no snapshot yet; these are the AFSSYS budgets.
+    let mounted = if snapshots {
+        let limits = SnapshotWorkLimits {
+            max_edit_records: 4096,
+            max_views: 8,
+            reclaim_records: 64,
+        };
+        mount_with_snapshot_limits(device, MountOptions::default(), limits)
+    } else {
+        mount(device)
+    };
+    let mut volume = mounted.map_err(|error| format!("cannot mount image: {error}"))?;
     if !volume
         .list_root()
         .map_err(|error| format!("cannot inspect image root: {error}"))?
