@@ -74,7 +74,7 @@ The script performs these independent gates:
 4. a release staticlib build with MacAROS's `aarch64-unknown-aros.json`, plus
    exported-symbol checks;
 5. compilation of the public headers, packet translator, trackdisk adapter and
-   native handler shell under AArch64 Clang, both packet DOS alias modes, plus
+   native handler shell under AArch64 Clang, plus
    m68k GCC, including the generated handler entry; and
 6. an intermediate AArch64 link which rejects unresolved AFS+ symbols, followed
    by `genmodule`, compilation of the MacAROS Rust platform glues and a complete
@@ -488,6 +488,11 @@ with a match string or match hook is answered `ERROR_ACTION_NOT_KNOWN`,
 because matching needs dos.library, and dos.library then emulates `ExAll`
 through `ExNext`.
 
+ED_OWNER's fixed prefix ends before ed_Size64. ED_SIZE64 includes the 64-bit
+field and reports ed_Size as zero above INT32_MAX. Lower detail levels keep
+unsigned 32-bit saturation. Strings follow the selected fixed prefix; their
+bytes and the exact-fit rule apply at both detail levels.
+
 `ACTION_FH_FROM_LOCK` turns a lock on a file into a file handle: the lock
 identifier dies, its shared or exclusive hold continues as the handle's, and
 a refused conversion leaves the lock usable. `ACTION_CHANGE_MODE` accepts
@@ -664,9 +669,9 @@ The table holds sixteen waiters; one more, a zero timeout, or a handler
 without the `complete` callback answers `ERROR_LOCK_TIMEOUT` at once. The
 queue orders waiters among themselves: a later immediate request can take a
 range before an older waiter is retried. `ACTION_FREE_RECORD` needs the owning handle and the exact range.
-`ACTION_LOCK_RECORD64` and `ACTION_FREE_RECORD64`, which dos64.library sends
-where packet arguments are 64 bits wide, carry full-width ranges; the classic
-packets stop at 4 GiB.
+`ACTION_LOCK_RECORD64` and `ACTION_FREE_RECORD64` read unsigned 64-bit
+ranges through Arg2/Arg3 pointers at both packet widths. Lock mode and timeout
+use Arg4/Arg5. Classic record packets use unsigned 32-bit scalar ranges.
 
 `ACTION_SET_COMMENT` stores the object comment of
 [ADR-106](../adr/ADR-106-stored-object-comment.md). The bytes are text in the
@@ -795,14 +800,28 @@ order is fixed; a reader keyed on names survives a new counter, so an addition
 leaves the version alone and a rename or a removal raises it. A target tool is a thin
 client that prints this document.
 
-`ACTION_SEEK64`, size/position variants and `DosPacket64.dp_Res0 == DP64_INIT`
-are decoded and encoded in the C packet layer. The Rust ABI always receives the
-already reconstructed `int64_t`/`uint64_t` value.
+`ACTION_SEEK64` and `ACTION_SET_FILE_SIZE64` read a signed 64-bit offset
+through Arg2 and write the old position or resulting size through Arg4, with
+the origin in Arg3. Both reply DOSTRUE or DOSFALSE/Res2. NULL required pointers
+return ERROR_BAD_NUMBER before state changes; error replies preserve output
+storage. The AmigaOS 4 position/size actions keep their scalar arguments on
+64-bit targets and DosPacket64 overlay with DP64_INIT on 32-bit targets. The
+Rust ABI receives reconstructed int64_t/uint64_t values.
 
-`__WORDSIZE` and `__DOS64` are intentionally handled separately. Standard
-examine/info actions use the structure selected by the native DOS headers;
-explicit `ACTION_EXAMINE_*64` and `ACTION_INFO64` always use the wide form.
-Legacy 32-bit counters saturate at `INT32_MAX` rather than wrapping.
+The standard FileInfoBlock holds fib_Size64 and fib_NumBlocks64 in its reserved
+area. Explicit 64-bit examine actions fill them and set classic counters to
+zero above INT32_MAX; classic examine counters saturate instead. InfoData64
+starts with standard InfoData, saturates its classic counters and appends full
+id_NumBlocks64/id_NumBlocksUsed64. INFO/INFO64 validate the volume-lock token
+before writing. INFO64 rejects file tokens as ERROR_ACTION_NOT_KNOWN, protecting
+the proposed console-geometry request that shares action number 2020 but sends
+a raw pointer to a small output structure.
+
+The host development matrix uses exported source headers. End-to-end
+qualification requires a matching generated SDK and real dos64.library. In
+the upstream implementation, 32-bit Info64 calls classic Info followed by
+ACTION_QUERY_ATTR. AFS+ does not implement that query, so that caller path
+retains clamped block counts; direct ACTION_INFO64 returns full counters.
 
 ## Native handler shell
 

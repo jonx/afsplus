@@ -11,11 +11,10 @@ versioned C ABI. A native handler still needs to translate AROS `DosPacket`,
 inside Rust.
 
 The translation cannot treat a numeric Rust lock or file ID as an `IPTR`.
-That would truncate identifiers on m68k. It also cannot assume that a 64-bit
-AROS target selects the 64-bit `FileInfoBlock`: `__WORDSIZE` controls packet
-field width, while `__DOS64` independently selects the default DOS structure
-aliases. Explicit `ACTION_EXAMINE_*64` and `ACTION_INFO64` packets always carry
-the wide structures.
+That would truncate identifiers on m68k. Packet width and structure layout
+are separate contracts: the MorphOS-compatible FIB has classic counters and
+64-bit size/block fields in its reserved area, while InfoData64 appends full
+block counts to the standard InfoData prefix.
 
 ## Decision
 
@@ -50,13 +49,35 @@ translator supports the Alpha-0 lock, open, read/write, seek/truncate,
 namespace, examine, disk-info, flush and lifecycle actions. Unsupported
 actions return `ERROR_ACTION_NOT_KNOWN`.
 
+The MorphOS-compatible seek and resize actions take a pointer to a signed
+64-bit offset in Arg2, the origin in Arg3 and a pointer to the signed old
+position or resulting size in Arg4. Record lock/free actions take pointers to
+unsigned 64-bit offset and length in Arg2/Arg3; lock mode and timeout retain
+Arg4/Arg5. These packets work at either pointer width. Success is DOSTRUE,
+failure is DOSFALSE with Res2 set; seek/resize results go through Arg4 only on
+success. NULL required pointers return ERROR_BAD_NUMBER before changing file
+state. Byte copies accept the two-byte alignment used by 32-bit DOS structures
+and load inputs before writing potentially aliased outputs.
+
 On 32-bit targets, the four AmigaOS 4 compatible position/size actions require
-`DosPacket64.dp_Res0 == DP64_INIT` and preserve that overlay while writing the
-wide result. `ACTION_SEEK64` and `ACTION_SET_FILE_SIZE64` are rejected there
-because their MorphOS-style arguments do not fit the standard packet. On all
-targets, explicit 64-bit examine/info actions use the wide structures. Legacy
-32-bit `FileInfoBlock` and `InfoData` counters are saturated rather than
-silently wrapped.
+DosPacket64.dp_Res0 == DP64_INIT and preserve that overlay while writing the
+wide result. On 64-bit targets those four actions retain their scalar form.
+
+Explicit 64-bit examine actions fill fib_Size64 and fib_NumBlocks64 in the
+standard FileInfoBlock, and clear each classic counter to zero when its value
+exceeds INT32_MAX. Classic examine counters saturate at INT32_MAX. INFO64
+fills the appended id_NumBlocks64/id_NumBlocksUsed64; its classic prefix and
+classic info packets saturate their counters. ExAll ED_OWNER stops immediately
+before ed_Size64. ED_SIZE64 includes the full structure and writes zero to
+ed_Size when the size exceeds INT32_MAX; lower detail levels retain unsigned
+32-bit saturation.
+
+INFO and INFO64 accept a context-owned lock or the null root lock. INFO64
+rejects a live file-handle token with ERROR_ACTION_NOT_KNOWN before interpreting
+its output pointer. This refuses the console-geometry packet proposed with the
+same action number 2020, whose Arg1 is fh_Arg1 and whose Arg2 is a raw pointer
+to a smaller structure. Other invalid locks return ERROR_INVALID_LOCK. This
+validation does not allocate distinct action numbers for the two interfaces.
 
 The handler supplies an allocation callback returning suitably aligned public
 memory, its matching free callback, and a UTC Unix time callback. Stored AFS+
@@ -70,11 +91,10 @@ The packet logic has a runnable host matrix using the real AROS AArch64
 layouts and stubbed C-boundary operations. It covers path reset/parent
 semantics, BPTR wrappers, failed-allocation non-mutation, invalid-output
 non-advancement, 64-bit seek/size, 32/64-bit FIB and disk-info presentation,
-durable close and `ACTION_DIE`. The same source compiles with `-Werror` as:
-
-- AROS AArch64 using the normal DOS structure aliases;
-- AROS AArch64 with `__DOS64=1`; and
-- AROS m68k using `DosPacket64` compatibility layouts.
+durable close and `ACTION_DIE`. The source-header development matrix exercises AArch64 layouts. Target
+qualification compiles the translator against generated AArch64 and m68k SDK
+headers, including DosPacket64 compatibility layouts on m68k. It requires an
+SDK with the MorphOS-compatible structures and pointer packet convention.
 
 This still does not prove a native mount. The remaining MacAROS work is the
 small handler shell and block-device adapter, link integration, then the

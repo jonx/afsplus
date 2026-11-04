@@ -36,6 +36,9 @@ static uint64_t created_lock_id;
 /* Negative: examine_next yields "entry" forever (the single-entry cases).
  * Otherwise a directory of that many entries named e0, e1, ... */
 static int32_t stub_directory_size = -1;
+static uint32_t stub_directory_wide;
+static uint64_t stub_info_size = UINT64_C(0x100000002);
+static uint64_t stub_info_blocks = UINT64_C(0x100000003);
 static int32_t stub_directory_at;
 static uint32_t rewind_count;
 /* Index at which examine_next fails once with ERROR_SEEK_ERROR, or -1. */
@@ -416,8 +419,8 @@ static int32_t examine_common(struct AfsplusArosFileInfo *output,
     memset(output, 0, sizeof(*output));
     memcpy(name, filename, sizeof(filename) - 1);
     output->disk_key = UINT64_C(0x12345678);
-    output->size = UINT64_C(0x100000002);
-    output->blocks = UINT64_C(0x100001);
+    output->size = stub_info_size;
+    output->blocks = stub_info_blocks;
     output->modified_seconds = INT64_C(252547261);
     output->modified_nanoseconds = UINT32_C(40000000);
     output->directory_entry_type = ST_FILE;
@@ -471,7 +474,9 @@ int32_t afsplus_aros_examine_next(struct AfsplusAros *filesystem,
          * ExAll must agree with it; the two fields differ on purpose. */
         output->directory_entry_type = ST_LINKFILE;
         output->entry_type = ST_FILE;
-        output->size = (uint64_t)stub_directory_at + 10;
+        output->size = stub_directory_wide == 2 ? UINT64_C(2147483648)
+            : stub_directory_wide ? UINT64_C(0x100000007)
+            : (uint64_t)stub_directory_at + 10;
         output->protection = UINT32_C(0x40) + (uint32_t)stub_directory_at;
         output->owner_uid = stub_owner_uid;
         output->owner_gid = stub_owner_gid;
@@ -497,7 +502,7 @@ int32_t afsplus_aros_disk_info(struct AfsplusAros *filesystem,
     assert(filesystem == STUB_FILESYSTEM);
     memset(output, 0, sizeof(*output));
     output->total_blocks = UINT64_C(0x100000005);
-    output->used_blocks = 12;
+    output->used_blocks = UINT64_C(0x100000004);
     output->bytes_per_block = 4096;
     output->disk_type = (int32_t)UINT32_C(0x4146532b);
     output->in_use = stub_disk_in_use;
@@ -1183,6 +1188,12 @@ static void blank_medium_format_packets(struct AfsplusArosPacketConfig config)
     config.volume_node = BNULL;
     config.format = packet_format;
     assert(afsplus_aros_packet_create(&config, &context) == 0);
+    initialize_packet(&packet, ACTION_INFO64);
+    packet.dp_Arg1 = (SIPTR)UINT32_C(0x12345);
+    packet.dp_Arg2 = 1;
+    packet.dp_Arg3 = 16;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_INVALID_LOCK);
     initialize_packet(&packet, ACTION_DISK_INFO);
     packet.dp_Arg1 = (SIPTR)MKBADDR(&disk);
     assert(afsplus_aros_packet_process(context, &packet) == 0);
@@ -1574,26 +1585,97 @@ int main(void)
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res1 == (SIPTR)sizeof(write_data));
 
-    initialize_packet(&packet, ACTION_SEEK64);
-    packet.dp_Arg1 = public_file.fh_Arg1;
-    packet.dp_Arg2 = INT64_C(8589934592);
-    packet.dp_Arg3 = OFFSET_BEGINNING;
-    assert(afsplus_aros_packet_process(context, &packet) == 0);
-    assert(packet.dp_Res1 == 4 && packet.dp_Res2 == 0);
+    /* MorphOS pointer packets: addresses must never become offsets. */
+    {
+        QUAD position = INT64_C(8589934592), old = -77;
+        QUAD size = INT64_C(4294967301), actual = -88;
+        initialize_packet(&packet, ACTION_SEEK64);
+        packet.dp_Arg1 = public_file.fh_Arg1;
+        packet.dp_Arg2 = (SIPTR)&position;
+        packet.dp_Arg3 = OFFSET_BEGINNING;
+        packet.dp_Arg4 = (SIPTR)&old;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(old == 4 && position == INT64_C(8589934592));
+        assert(file_position == UINT64_C(8589934592));
 
-    initialize_packet(&packet, ACTION_SET_FILE_SIZE64);
-    packet.dp_Arg1 = public_file.fh_Arg1;
-    packet.dp_Arg2 = INT64_C(4294967301);
-    packet.dp_Arg3 = OFFSET_BEGINNING;
-    assert(afsplus_aros_packet_process(context, &packet) == 0);
-    assert(packet.dp_Res1 == INT64_C(4294967301) && packet.dp_Res2 == 0);
+        initialize_packet(&packet, ACTION_SET_FILE_SIZE64);
+        packet.dp_Arg1 = public_file.fh_Arg1;
+        packet.dp_Arg2 = (SIPTR)&size;
+        packet.dp_Arg3 = OFFSET_BEGINNING;
+        packet.dp_Arg4 = (SIPTR)&actual;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(actual == INT64_C(4294967301) && size == actual);
+        assert(file_size == UINT64_C(4294967301));
 
-    initialize_packet(&packet, ACTION_SEEK64);
-    packet.dp_Arg1 = public_file.fh_Arg1;
-    packet.dp_Arg2 = 0;
-    packet.dp_Arg3 = OFFSET_BEGINNING;
-    assert(afsplus_aros_packet_process(context, &packet) == 0);
-    assert(packet.dp_Res1 == INT64_C(8589934592) && packet.dp_Res2 == 0);
+        /* NULL input/output fails before any state change, leaving outputs. */
+        {
+            LONG actions[] = { ACTION_SEEK64, ACTION_SET_FILE_SIZE64 };
+            size_t i;
+            for (i = 0; i < sizeof(actions)/sizeof(actions[0]); i++)
+            {
+                initialize_packet(&packet, actions[i]);
+                packet.dp_Arg1 = public_file.fh_Arg1;
+                packet.dp_Arg3 = OFFSET_BEGINNING;
+                actual = -99;
+                packet.dp_Arg4 = (SIPTR)&actual;
+                assert(afsplus_aros_packet_process(context, &packet) == 0);
+                assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_BAD_NUMBER);
+                assert(actual == -99);
+                packet.dp_Arg2 = (SIPTR)&position;
+                packet.dp_Arg4 = 0;
+                assert(afsplus_aros_packet_process(context, &packet) == 0);
+                assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_BAD_NUMBER);
+                assert(file_position == UINT64_C(8589934592));
+                assert(file_size == UINT64_C(4294967301));
+            }
+        }
+        /* A two-byte-aligned argument is valid on MorphOS 32-bit ABIs.
+         * Input and output can also alias: read before publishing a result. */
+        {
+            uint8_t bytes[18];
+            QUAD observed;
+            position = -1;
+            memcpy(bytes + 2, &position, sizeof(position));
+            packet.dp_Type = ACTION_SEEK64;
+            packet.dp_Arg2 = (SIPTR)(bytes + 2);
+            packet.dp_Arg3 = OFFSET_CURRENT;
+            packet.dp_Arg4 = (SIPTR)(bytes + 2);
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            memcpy(&observed, bytes + 2, sizeof(observed));
+            assert(packet.dp_Res1 == DOSTRUE && observed == INT64_C(8589934592));
+            assert(file_position == UINT64_C(8589934591));
+        }
+#if (__WORDSIZE == 64)
+        /* OS4 actions still carry values directly on 64-bit targets. */
+        initialize_packet(&packet, ACTION_CHANGE_FILE_POSITION64);
+        packet.dp_Arg1 = public_file.fh_Arg1;
+        packet.dp_Arg2 = INT64_C(8589934592);
+        packet.dp_Arg3 = OFFSET_BEGINNING;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        packet.dp_Type = ACTION_GET_FILE_POSITION64;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == INT64_C(8589934592));
+        packet.dp_Type = ACTION_CHANGE_FILE_SIZE64;
+        packet.dp_Arg2 = INT64_C(4294967301);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        packet.dp_Type = ACTION_GET_FILE_SIZE64;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == INT64_C(4294967301));
+#endif
+        position = 0;
+        initialize_packet(&packet, ACTION_SEEK64);
+        packet.dp_Arg1 = public_file.fh_Arg1;
+        packet.dp_Arg2 = (SIPTR)&position;
+        packet.dp_Arg3 = OFFSET_BEGINNING;
+        packet.dp_Arg4 = (SIPTR)&old;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(old == INT64_C(8589934592) && file_position == 0);
+    }
     memset(read_data, 0, sizeof(read_data));
     initialize_packet(&packet, ACTION_READ);
     packet.dp_Arg1 = public_file.fh_Arg1;
@@ -1622,8 +1704,44 @@ int main(void)
     packet.dp_Arg2 = (SIPTR)MKBADDR(&fib64);
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
-    assert(fib64.fib_Size == UINT64_C(0x100000002));
+    assert(fib64.fib_Size64 == UINT64_C(0x100000002));
+    assert(fib64.fib_NumBlocks64 == UINT64_C(0x100000003));
+    assert(fib64.fib_Size == 0 && fib64.fib_NumBlocks == 0);
+    assert(fib64.fib_ActExtFlags == 0);
     assert(fib64.fib_OwnerUID == 501 && fib64.fib_OwnerGID == 0);
+
+    /* 31-bit compatibility boundary, all three explicit examine packets. */
+    {
+        uint64_t values[] = { INT32_MAX, UINT64_C(2147483648), UINT64_C(4294967297) };
+        LONG actions[] = { ACTION_EXAMINE_OBJECT64, ACTION_EXAMINE_NEXT64, ACTION_EXAMINE_FH64 };
+        size_t i, j;
+        for (i = 0; i < sizeof(values)/sizeof(values[0]); i++)
+        {
+            stub_info_size = stub_info_blocks = values[i];
+            for (j = 0; j < sizeof(actions)/sizeof(actions[0]); j++)
+            {
+                memset(&fib64, 0x7b, sizeof(fib64));
+                fib64.fib_ReqExtFlags = 0;
+                initialize_packet(&packet, actions[j]);
+                packet.dp_Arg1 = actions[j] == ACTION_EXAMINE_FH64
+                    ? public_file.fh_Arg1 : (SIPTR)root;
+                packet.dp_Arg2 = (SIPTR)MKBADDR(&fib64);
+                assert(afsplus_aros_packet_process(context, &packet) == 0);
+                assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+                assert(fib64.fib_Size64 == values[i] && fib64.fib_NumBlocks64 == values[i]);
+                assert(fib64.fib_Size == (i == 0 ? INT32_MAX : 0));
+                assert(fib64.fib_NumBlocks == (i == 0 ? INT32_MAX : 0));
+                assert(fib64.fib_ActExtFlags == 0);
+            }
+            initialize_packet(&packet, ACTION_EXAMINE_FH);
+            packet.dp_Arg1 = public_file.fh_Arg1;
+            packet.dp_Arg2 = (SIPTR)MKBADDR(&fib);
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE && fib.fib_Size == INT32_MAX && fib.fib_NumBlocks == INT32_MAX);
+        }
+        stub_info_size = UINT64_C(0x100000002);
+        stub_info_blocks = UINT64_C(0x100000003);
+    }
 
     memset(&disk, 0, sizeof(disk));
     initialize_packet(&packet, ACTION_DISK_INFO);
@@ -1638,7 +1756,42 @@ int main(void)
     packet.dp_Arg2 = (SIPTR)MKBADDR(&disk64);
     assert(afsplus_aros_packet_process(context, &packet) == 0);
     assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
-    assert(disk64.id_NumBlocks == UINT64_C(0x100000005));
+    assert(disk64.id_NumBlocks64 == UINT64_C(0x100000005));
+    assert(disk64.id_NumBlocksUsed64 == UINT64_C(0x100000004));
+    assert(disk64.id_NumBlocks == INT32_MAX && disk64.id_NumBlocksUsed == INT32_MAX);
+
+    /* 2020 also names a proposed console packet. A live file token is
+     * never an Info lock. Allocate a full block to expose an old overwrite
+     * without actually overflowing the small console structure. */
+    {
+        union { struct InfoData64 align; uint8_t bytes[sizeof(struct InfoData64) + 32]; } arena;
+        uint8_t expected[sizeof(arena.bytes)];
+        SIPTR extras[] = { 0, 8, 16 };
+        size_t i;
+        memset(&arena, 0x6b, sizeof(arena));
+        memcpy(expected, arena.bytes, sizeof(expected));
+        for (i = 0; i < sizeof(extras)/sizeof(extras[0]); i++)
+        {
+            initialize_packet(&packet, ACTION_INFO64);
+            packet.dp_Arg1 = public_file.fh_Arg1;
+            packet.dp_Arg2 = (SIPTR)arena.bytes; /* Raw console pointer. */
+            packet.dp_Arg3 = extras[i];
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(memcmp(expected, arena.bytes, sizeof(expected)) == 0);
+            assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+        }
+        /* An invalid token must fail before attempting the poison output. */
+        packet.dp_Arg1 = (SIPTR)UINT32_C(0x12345);
+        packet.dp_Arg2 = 1;
+        packet.dp_Arg3 = 0;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_INVALID_LOCK);
+        initialize_packet(&packet, ACTION_INFO64);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = (SIPTR)MKBADDR(&disk64);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && disk64.id_NumBlocks64 == UINT64_C(0x100000005));
+    }
 
     /* A close of a written file closes it and nothing more: ADR-121 does
      * not make Close() a durability point, so the packet layer asks for no
@@ -2225,7 +2378,12 @@ int main(void)
             }
         }
 
-        /* A filesystem error travels in dp_Res2 and clears the outputs. */
+        /* A filesystem error travels in dp_Res2 and clears the outputs.
+         * Start a request whose buffer outlives this call; the preceding
+         * trace-counter buffer belonged to a completed inner scope. */
+        EXT_BEGIN(AFSPLUS_EXT_CLONE_RANGE);
+        request.object[0] = file_object;
+        request.object[1] = file_object;
         ext_error = ERROR_OBJECT_NOT_FOUND;
         request.output_value = 5;
         EXT_SEND(DOSFALSE, ERROR_OBJECT_NOT_FOUND);
@@ -2422,6 +2580,42 @@ int main(void)
         assert(entry->ed_OwnerUID == 501 && entry->ed_OwnerGID == 0);
         assert(entry->ed_Next->ed_OwnerUID == 501);
 
+        /* ED_OWNER ends immediately before ed_Size64, even with a buffer
+         * that fits exactly the old prefix plus its two strings. */
+        stub_directory_size = 1;
+        memset(&control, 0, sizeof(control));
+        memset(&buffer, 0x7e, sizeof(buffer));
+        packet.dp_Arg4 = ED_OWNER;
+        first = offsetof(struct ExAllData, ed_Size64) + 3 + 5;
+        packet.dp_Arg3 = (SIPTR)first;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(control.eac_Entries == 1 && packet.dp_Res2 == ERROR_NO_MORE_ENTRIES);
+        entry = (struct ExAllData *)buffer.bytes;
+        assert(entry->ed_Name == buffer.bytes + offsetof(struct ExAllData, ed_Size64));
+        assert(buffer.bytes[first] == 0x7e);
+
+        memset(&control, 0, sizeof(control));
+        memset(&buffer, 0x7e, sizeof(buffer));
+        packet.dp_Arg4 = ED_SIZE64;
+        stub_directory_wide = 1;
+        packet.dp_Arg3 = (SIPTR)(sizeof(struct ExAllData) + 3 + 5 - 1);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(control.eac_Entries == 0 && packet.dp_Res2 == ERROR_BUFFER_OVERFLOW);
+        packet.dp_Arg3++;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(control.eac_Entries == 1);
+        assert(entry->ed_Size64 == UINT64_C(0x100000007) && entry->ed_Size == 0);
+        assert(entry->ed_OwnerUID == 501 && entry->ed_OwnerGID == 0);
+        assert(strcmp((char *)entry->ed_Name, "e0") == 0);
+        assert(buffer.bytes[packet.dp_Arg3] == 0x7e);
+        memset(&control, 0, sizeof(control));
+        stub_directory_wide = 2;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(control.eac_Entries == 1 && entry->ed_Size64 == UINT64_C(2147483648) && entry->ed_Size == 0);
+        memset(&control, 0, sizeof(control));
+        stub_directory_wide = 0;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(control.eac_Entries == 1 && entry->ed_Size64 == 10 && entry->ed_Size == 10);
         stub_comment_length = 0;
         stub_directory_size = -1;
     }
@@ -2513,7 +2707,7 @@ int main(void)
         assert(packet.dp_Res1 == DOSFALSE
             && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
         control.eac_MatchString = NULL;
-        packet.dp_Arg4 = ED_OWNER + 1;
+        packet.dp_Arg4 = ED_SIZE64 + 1;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res2 == ERROR_BAD_NUMBER);
 
@@ -2532,7 +2726,7 @@ int main(void)
 
         /* An error return reports zero entries, never the previous count. */
         control.eac_Entries = 7;
-        packet.dp_Arg4 = ED_OWNER + 1;
+        packet.dp_Arg4 = ED_SIZE64 + 1;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res2 == ERROR_BAD_NUMBER && control.eac_Entries == 0);
 
@@ -2714,10 +2908,12 @@ int main(void)
         assert(packet.dp_Res2 == ERROR_BAD_NUMBER && event_count == 0);
         /* The 64-bit packets carry full-width ranges; the classic packet
          * given the same bits keeps only the low 32. */
+        UQUAD wide_offset = UINT64_C(0x500000010);
+        UQUAD wide_length = UINT64_C(0x200000000);
         initialize_packet(&packet, ACTION_LOCK_RECORD64);
         packet.dp_Arg1 = from_lock.fh_Arg1;
-        packet.dp_Arg2 = (SIPTR)INT64_C(0x500000010);
-        packet.dp_Arg3 = (SIPTR)INT64_C(0x200000000);
+        packet.dp_Arg2 = (SIPTR)&wide_offset;
+        packet.dp_Arg3 = (SIPTR)&wide_length;
         packet.dp_Arg4 = REC_SHARED_IMMED;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res1 == DOSTRUE);
@@ -2725,18 +2921,39 @@ int main(void)
         assert(stub_record_offset == UINT64_C(0x500000010));
         assert(stub_record_length == UINT64_C(0x200000000));
         packet.dp_Type = ACTION_LOCK_RECORD;
+        packet.dp_Arg2 = (SIPTR)INT64_C(0x500000010);
+        packet.dp_Arg3 = (SIPTR)INT64_C(0x200000000);
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(stub_record_offset == UINT64_C(0x10));
         assert(stub_record_length == 0);
         initialize_packet(&packet, ACTION_FREE_RECORD64);
         packet.dp_Arg1 = from_lock.fh_Arg1;
-        packet.dp_Arg2 = (SIPTR)INT64_C(0x500000010);
-        packet.dp_Arg3 = (SIPTR)INT64_C(0x200000000);
+        packet.dp_Arg2 = (SIPTR)&wide_offset;
+        packet.dp_Arg3 = (SIPTR)&wide_length;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
-        assert(packet.dp_Res1 == DOSTRUE);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(stub_record_length == UINT64_C(0x200000000));
         assert(events[event_count - 1].operation == 'u');
         assert(stub_record_offset == UINT64_C(0x500000010));
 
+        {
+            LONG actions[] = { ACTION_LOCK_RECORD64, ACTION_FREE_RECORD64 };
+            size_t i;
+            uint32_t before = event_count;
+            for (i = 0; i < sizeof(actions)/sizeof(actions[0]); i++)
+            {
+                initialize_packet(&packet, actions[i]);
+                packet.dp_Arg1 = from_lock.fh_Arg1;
+                packet.dp_Arg3 = (SIPTR)&wide_length;
+                packet.dp_Arg4 = REC_SHARED_IMMED;
+                assert(afsplus_aros_packet_process(context, &packet) == 0);
+                assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_BAD_NUMBER);
+                packet.dp_Arg2 = (SIPTR)&wide_offset;
+                packet.dp_Arg3 = 0;
+                assert(afsplus_aros_packet_process(context, &packet) == 0);
+                assert(packet.dp_Res2 == ERROR_BAD_NUMBER && event_count == before);
+            }
+        }
         initialize_packet(&packet, ACTION_FREE_RECORD);
         packet.dp_Arg1 = from_lock.fh_Arg1;
         packet.dp_Arg2 = 8;

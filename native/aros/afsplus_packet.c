@@ -679,6 +679,7 @@ static const size_t exall_fixed_size[] =
     offsetof(struct ExAllData, ed_Days),
     offsetof(struct ExAllData, ed_Comment),
     offsetof(struct ExAllData, ed_OwnerUID),
+    offsetof(struct ExAllData, ed_Size64),
     sizeof(struct ExAllData)
 };
 
@@ -710,8 +711,9 @@ static uint32_t exall_append(uint8_t **cursor, uint8_t *end, LONG type,
     if (type >= ED_SIZE)
     {
         /* ed_Size is unsigned: a 32-bit record saturates at its maximum. */
-        if (sizeof(entry->ed_Size) == sizeof(uint32_t)
-            && source->info.size > (uint64_t)UINT32_MAX)
+        if (type == ED_SIZE64 && source->info.size > INT32_MAX)
+            entry->ed_Size = 0;
+        else if (source->info.size > (uint64_t)UINT32_MAX)
             entry->ed_Size = UINT32_MAX;
         else
             entry->ed_Size = source->info.size;
@@ -741,6 +743,8 @@ static uint32_t exall_append(uint8_t **cursor, uint8_t *end, LONG type,
         entry->ed_OwnerGID = source->info.owner_gid > UINT16_MAX
             ? 0 : (UWORD)source->info.owner_gid;
     }
+    if (type == ED_SIZE64)
+        entry->ed_Size64 = source->info.size;
     if (*last != NULL)
         (*last)->ed_Next = entry;
     *last = entry;
@@ -761,7 +765,7 @@ static int32_t fill_fib_name(UBYTE *destination, size_t capacity,
     return 0;
 }
 
-static int32_t fill_fib64(struct FileInfoBlock64 *fib,
+static int32_t fill_fib(struct FileInfoBlock *fib, uint32_t wide,
     const struct AfsplusArosFileInfo *info, const uint8_t *name,
     const uint8_t *comment, uint32_t comment_length)
 {
@@ -784,45 +788,19 @@ static int32_t fill_fib64(struct FileInfoBlock64 *fib,
     fib->fib_OwnerGID = info->owner_gid > UINT16_MAX
         ? 0 : (UWORD)info->owner_gid;
     fib->fib_EntryType = (LONG)info->entry_type;
-    fib->fib_Size = info->size;
-    fib->fib_NumBlocks = info->blocks;
-    unix_to_datestamp(info->modified_seconds, info->modified_nanoseconds,
-        &fib->fib_Date);
-    return 0;
-}
-
-#if !(__DOS64)
-static int32_t fill_fib32(struct FileInfoBlock32 *fib,
-    const struct AfsplusArosFileInfo *info, const uint8_t *name,
-    const uint8_t *comment, uint32_t comment_length)
-{
-    int32_t error;
-
-    memset(fib, 0, sizeof(*fib));
-    error = fill_fib_name(fib->fib_FileName, sizeof(fib->fib_FileName),
-        name, info->name_length);
-    if (error == 0)
-        error = fill_fib_name(fib->fib_Comment, sizeof(fib->fib_Comment),
-            comment, comment_length);
-    if (error != 0)
-        return error;
-    fib->fib_DiskKey = info->disk_key > (uint64_t)INTPTR_MAX
-        ? INTPTR_MAX : (IPTR)info->disk_key;
-    fib->fib_DirEntryType = (LONG)info->directory_entry_type;
-    fib->fib_Protection = (LONG)info->protection;
-    fib->fib_OwnerUID = info->owner_uid > UINT16_MAX
-        ? 0 : (UWORD)info->owner_uid;
-    fib->fib_OwnerGID = info->owner_gid > UINT16_MAX
-        ? 0 : (UWORD)info->owner_gid;
-    fib->fib_EntryType = (LONG)info->entry_type;
-    fib->fib_Size = info->size > INT32_MAX ? INT32_MAX : (LONG)info->size;
+    fib->fib_Size = info->size > INT32_MAX
+        ? (wide ? 0 : INT32_MAX) : (LONG)info->size;
     fib->fib_NumBlocks = info->blocks > INT32_MAX
-        ? INT32_MAX : (LONG)info->blocks;
+        ? (wide ? 0 : INT32_MAX) : (LONG)info->blocks;
+    if (wide)
+    {
+        fib->fib_Size64 = info->size;
+        fib->fib_NumBlocks64 = info->blocks;
+    }
     unix_to_datestamp(info->modified_seconds, info->modified_nanoseconds,
         &fib->fib_Date);
     return 0;
 }
-#endif
 
 static int32_t fill_packet_fib(LONG action, BPTR raw,
     const struct AfsplusArosFileInfo *info, const uint8_t *name,
@@ -833,18 +811,10 @@ static int32_t fill_packet_fib(LONG action, BPTR raw,
     if (raw == BNULL)
         return ERROR_INVALID_LOCK;
     destination = BADDR(raw);
-    if (action == ACTION_EXAMINE_OBJECT64
-        || action == ACTION_EXAMINE_NEXT64
-        || action == ACTION_EXAMINE_FH64)
-        return fill_fib64((struct FileInfoBlock64 *)destination, info, name,
-            comment, comment_length);
-#if (__DOS64)
-    return fill_fib64((struct FileInfoBlock64 *)destination, info, name,
-            comment, comment_length);
-#else
-    return fill_fib32((struct FileInfoBlock32 *)destination, info, name,
-        comment, comment_length);
-#endif
+    return fill_fib((struct FileInfoBlock *)destination,
+        action == ACTION_EXAMINE_OBJECT64 || action == ACTION_EXAMINE_NEXT64
+            || action == ACTION_EXAMINE_FH64,
+        info, name, comment, comment_length);
 }
 
 static void fill_info64(struct AfsplusArosPacketContext *context,
@@ -853,8 +823,12 @@ static void fill_info64(struct AfsplusArosPacketContext *context,
     memset(destination, 0, sizeof(*destination));
     destination->id_DiskState = info->write_protected
         ? ID_WRITE_PROTECTED : ID_VALIDATED;
-    destination->id_NumBlocks = info->total_blocks;
-    destination->id_NumBlocksUsed = info->used_blocks;
+    destination->id_NumBlocks = info->total_blocks > INT32_MAX
+        ? INT32_MAX : (LONG)info->total_blocks;
+    destination->id_NumBlocksUsed = info->used_blocks > INT32_MAX
+        ? INT32_MAX : (LONG)info->used_blocks;
+    destination->id_NumBlocks64 = info->total_blocks;
+    destination->id_NumBlocksUsed64 = info->used_blocks;
     destination->id_BytesPerBlock = info->bytes_per_block > INT32_MAX
         ? INT32_MAX : (LONG)info->bytes_per_block;
     destination->id_DiskType = (LONG)info->disk_type;
@@ -862,7 +836,6 @@ static void fill_info64(struct AfsplusArosPacketContext *context,
     destination->id_InUse = info->in_use ? DOSTRUE : DOSFALSE;
 }
 
-#if !(__DOS64)
 static void fill_info32(struct AfsplusArosPacketContext *context,
     struct InfoData32 *destination, const struct AfsplusArosDiskInfo *info)
 {
@@ -879,7 +852,6 @@ static void fill_info32(struct AfsplusArosPacketContext *context,
     destination->id_VolumeNode = context->volume_node;
     destination->id_InUse = info->in_use ? DOSTRUE : DOSFALSE;
 }
-#endif
 
 static int32_t fill_packet_info(struct AfsplusArosPacketContext *context,
     LONG action, BPTR raw, const struct AfsplusArosDiskInfo *info)
@@ -891,13 +863,8 @@ static int32_t fill_packet_info(struct AfsplusArosPacketContext *context,
     destination = BADDR(raw);
     if (action == ACTION_INFO64)
         fill_info64(context, (struct InfoData64 *)destination, info);
-#if (__DOS64)
-    else
-        fill_info64(context, (struct InfoData64 *)destination, info);
-#else
     else
         fill_info32(context, (struct InfoData32 *)destination, info);
-#endif
     return 0;
 }
 
@@ -2294,17 +2261,24 @@ int32_t afsplus_aros_packet_process(
 
         if (file == NULL)
             error = ERROR_INVALID_LOCK;
+        if (packet->dp_Type == ACTION_SEEK64)
+        {
+            offset = 0;
+            native_mode = (LONG)packet->dp_Arg3;
+            if (error == 0 && (packet->dp_Arg2 == 0 || packet->dp_Arg4 == 0))
+                error = ERROR_BAD_NUMBER;
+            if (error == 0)
+                memcpy(&offset, (const void *)packet->dp_Arg2, sizeof(offset));
+        }
 #if (__WORDSIZE != 64)
-        if (error == 0 && packet->dp_Type == ACTION_SEEK64)
-            error = ERROR_ACTION_NOT_KNOWN;
-        if (packet64)
+        else if (packet64)
         {
             struct DosPacket64 *wide = (struct DosPacket64 *)packet;
             offset = (int64_t)wide->dp_Arg2;
             native_mode = (LONG)wide->dp_Arg3;
         }
-        else
 #endif
+        else
         {
             offset = (int64_t)packet->dp_Arg2;
             native_mode = (LONG)packet->dp_Arg3;
@@ -2328,12 +2302,18 @@ int32_t afsplus_aros_packet_process(
         {
             result64 = packet->dp_Type == ACTION_CHANGE_FILE_POSITION64
                 ? DOSTRUE : (int64_t)old;
-            result = (SIPTR)result64;
+            if (packet->dp_Type == ACTION_SEEK64)
+            {
+                memcpy((void *)packet->dp_Arg4, &result64, sizeof(result64));
+                result = DOSTRUE;
+            }
+            else
+                result = (SIPTR)result64;
         }
         else
         {
             result64 = -1;
-            result = -1;
+            result = packet->dp_Type == ACTION_SEEK64 ? DOSFALSE : -1;
         }
         break;
     }
@@ -2354,17 +2334,24 @@ int32_t afsplus_aros_packet_process(
             error = ERROR_INVALID_LOCK;
         else if (!file->writable)
             error = ERROR_DISK_WRITE_PROTECTED;
+        if (packet->dp_Type == ACTION_SET_FILE_SIZE64)
+        {
+            offset = 0;
+            native_mode = (LONG)packet->dp_Arg3;
+            if (error == 0 && (packet->dp_Arg2 == 0 || packet->dp_Arg4 == 0))
+                error = ERROR_BAD_NUMBER;
+            if (error == 0)
+                memcpy(&offset, (const void *)packet->dp_Arg2, sizeof(offset));
+        }
 #if (__WORDSIZE != 64)
-        if (error == 0 && packet->dp_Type == ACTION_SET_FILE_SIZE64)
-            error = ERROR_ACTION_NOT_KNOWN;
-        if (packet64)
+        else if (packet64)
         {
             struct DosPacket64 *wide = (struct DosPacket64 *)packet;
             offset = (int64_t)wide->dp_Arg2;
             native_mode = (LONG)wide->dp_Arg3;
         }
-        else
 #endif
+        else
         {
             offset = (int64_t)packet->dp_Arg2;
             native_mode = (LONG)packet->dp_Arg3;
@@ -2391,12 +2378,18 @@ int32_t afsplus_aros_packet_process(
         {
             result64 = packet->dp_Type == ACTION_CHANGE_FILE_SIZE64
                 ? DOSTRUE : (int64_t)size;
-            result = (SIPTR)result64;
+            if (packet->dp_Type == ACTION_SET_FILE_SIZE64)
+            {
+                memcpy((void *)packet->dp_Arg4, &result64, sizeof(result64));
+                result = DOSTRUE;
+            }
+            else
+                result = (SIPTR)result64;
         }
         else
         {
             result64 = -1;
-            result = -1;
+            result = packet->dp_Type == ACTION_SET_FILE_SIZE64 ? DOSFALSE : -1;
         }
         break;
     }
@@ -2849,7 +2842,7 @@ int32_t afsplus_aros_packet_process(
             error = ERROR_INVALID_LOCK;
         else if (cursor == NULL || control == NULL || packet->dp_Arg3 <= 0)
             error = ERROR_REQUIRED_ARG_MISSING;
-        else if (type < ED_NAME || type > ED_OWNER)
+        else if (type < ED_NAME || type > ED_SIZE64)
             error = ERROR_BAD_NUMBER;
         /* Pattern and hook matching need dos.library, which this layer never
          * calls; dos.library then emulates ExAll through ExNext. */
@@ -2961,13 +2954,25 @@ int32_t afsplus_aros_packet_process(
         BPTR destination = (BPTR)(packet->dp_Type == ACTION_DISK_INFO
             ? packet->dp_Arg1 : packet->dp_Arg2);
 
-        if (context->filesystem == NULL)
+        /* 2020 is also used by proposed console geometry packets. They
+         * carry fh_Arg1 and a raw small buffer, not a volume lock and BPTR.
+         * Refuse file tokens before interpreting or touching that buffer. */
+        if (packet->dp_Type != ACTION_DISK_INFO)
+        {
+            uint64_t ignored;
+            if (packet->dp_Type == ACTION_INFO64
+                && find_file(context, (BPTR)packet->dp_Arg1) != NULL)
+                error = ERROR_ACTION_NOT_KNOWN;
+            else
+                error = lock_id(context, (BPTR)packet->dp_Arg1, &ignored);
+        }
+        if (error == 0 && context->filesystem == NULL)
         {
             memset(&info, 0, sizeof(info));
             info.disk_type = ID_NOT_REALLY_DOS;
             info.bytes_per_block = 4096;
         }
-        else
+        else if (error == 0)
             error = afsplus_aros_disk_info(context->filesystem, &info);
         if (error == 0)
             error = fill_packet_info(context, packet->dp_Type, destination,
@@ -3106,12 +3111,8 @@ int32_t afsplus_aros_packet_process(
             }
         }
         break;
-#if (__WORDSIZE == 64)
-    /* dos64.library sends these only where dp_Arg# is 64 bits wide; a 32-bit
-     * build delegates LockRecord64 to the classic packets instead. */
     case ACTION_LOCK_RECORD64:
     case ACTION_FREE_RECORD64:
-#endif
     case ACTION_LOCK_RECORD:
     case ACTION_FREE_RECORD:
     {
@@ -3122,15 +3123,23 @@ int32_t afsplus_aros_packet_process(
         uint32_t freeing = packet->dp_Type == ACTION_FREE_RECORD
             || packet->dp_Type == ACTION_FREE_RECORD64;
         /* Classic arguments are unsigned 32-bit values in a signed slot. */
-        uint64_t offset = wide ? (uint64_t)packet->dp_Arg2
-            : (uint64_t)(ULONG)packet->dp_Arg2;
-        uint64_t length = wide ? (uint64_t)packet->dp_Arg3
-            : (uint64_t)(ULONG)packet->dp_Arg3;
+        uint64_t offset = (uint64_t)(ULONG)packet->dp_Arg2;
+        uint64_t length = (uint64_t)(ULONG)packet->dp_Arg3;
         LONG mode = (LONG)packet->dp_Arg4;
 
         error = require_group(context, AFSPLUS_AROS_GROUP_DOS_RECORDS);
         if (error == 0 && file == NULL)
             error = ERROR_INVALID_LOCK;
+        if (error == 0 && wide)
+        {
+            if (packet->dp_Arg2 == 0 || packet->dp_Arg3 == 0)
+                error = ERROR_BAD_NUMBER;
+            else
+            {
+                memcpy(&offset, (const void *)packet->dp_Arg2, sizeof(offset));
+                memcpy(&length, (const void *)packet->dp_Arg3, sizeof(length));
+            }
+        }
         if (error == 0 && freeing)
         {
             error = afsplus_aros_free_record(context->filesystem, file->id,

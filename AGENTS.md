@@ -19,6 +19,7 @@ story is in [NOTES.md](NOTES.md).
 - [Read first](#read-first)
 - [One-sentence resume](#one-sentence-resume)
 - [Team board (MCP server "board")](#team-board-mcp-server-board)
+- [Publishing and attribution](#publishing-and-attribution)
 
 <!-- /toc -->
 

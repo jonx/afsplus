@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-11-04 — Port the MorphOS DOS64 packet contract](#2026-11-04--port-the-morphos-dos64-packet-contract)
 - [2026-10-18 — Second review pass over snapshots, restore and their commands](#2026-10-18--second-review-pass-over-snapshots-restore-and-their-commands)
 - [2026-10-18 — Close the restore review findings left open](#2026-10-18--close-the-restore-review-findings-left-open)
 - [2026-10-18 — Remove the temporary authority pin before native testing](#2026-10-18--remove-the-temporary-authority-pin-before-native-testing)
@@ -238,6 +239,56 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+
+## 2026-11-04 — Port the MorphOS DOS64 packet contract
+
+The source-header development check reproduces two compile errors in the
+unported tests: the FIB size and info block count had become LONG while their
+assertions expected values above 4 GiB. The unchanged sync source passes.
+The trial tree is f580117c35272777ebda9baebabca928cfd38be3, composed from
+fed9e79be2249ad1b9c69d7ce9ca68997febe893 and upstream
+6fabae71cb3fb74acf0cbd9aff78da8035eab4b6. Updated pointer tests compile and
+abort on the unported seek result before the translator is changed.
+
+The translator follows upstream 29019867d8: seek/resize results use Arg4,
+record ranges are pointed values, the standard FIB has full size/block fields,
+InfoData64 appends full counters, and ExAll supports ED_SIZE64 with the
+ED_OWNER prefix preserved. Tests cover the 31-bit boundary, values above
+4 GiB, NULL inputs/outputs before mutation, two-byte-aligned aliased pointers,
+scalar OS4 actions, exact-fit buffers and sentinel bytes. The retired DOS
+structure switch is removed from the bridge and the compile recipe.
+
+The proposed console geometry action in PRs 1920 and 1989 also uses 2020.
+Its regular-file path sends a raw pointer to 16 bytes, while INFO64 writes a
+64-byte structure with the trial headers. A live-file token is refused before
+output conversion; tests use a full-size sentinel arena so the unported
+behavior can be exposed without causing an actual small-buffer overflow.
+An invalid token with a poison output is refused on mounted and blank media.
+The global number collision still requires renumbering before those proposals
+are combined. No upstream comment or source change was made.
+
+The development matrix and the actual packet matrix under ASan/UBSan pass.
+Seven deliberately wrong translator variants compile and fail their runtime
+assertions. A source-header i386 syntax check covers the 32-bit packet paths;
+it is not a 32-bit execution test. The sanitizer also found an existing test
+request retaining an expired trace-counter buffer; that error-path test starts
+a fresh request. The documentation check needed the inherited publishing
+section added to AGENTS.md's table of contents.
+
+The independent source review approves the translator and identifies the
+32-bit Info64 library limitation: it asks classic Info then QUERY_ATTR rather
+than INFO64, so its full counters require separate core/query work. QUERY_ATTR
+is outside this port. dos_compat_probe uses the classic structure and lower
+ExAll levels; the tour's used-byte measurement intentionally uses classic Info
+and retains its clamping. Neither consumer needs a layout change here.
+
+The branch stays separate from main and changes no disk format. The full
+AROS FFI gate awaits an SDK from the merged core; no target or native
+qualification was attempted. Retained local evidence is in
+`Build/afsplus-dos64-evidence` beside the checkout. The branch worktree is
+separate because a native package build without an explicit revision uses the
+selected source checkout's HEAD rather than selecting main itself.
 
 
 ## 2026-10-18 — Second review pass over snapshots, restore and their commands
