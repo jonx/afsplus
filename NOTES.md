@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-11-05 — Integrate DOS64 and remove superseded branches](#2026-11-05--integrate-dos64-and-remove-superseded-branches)
 - [2026-11-04 — Port the MorphOS DOS64 packet contract](#2026-11-04--port-the-morphos-dos64-packet-contract)
 - [2026-10-18 — Second review pass over snapshots, restore and their commands](#2026-10-18--second-review-pass-over-snapshots-restore-and-their-commands)
 - [2026-10-18 — Close the restore review findings left open](#2026-10-18--close-the-restore-review-findings-left-open)
@@ -239,6 +240,24 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+
+## 2026-11-05 — Integrate DOS64 and remove superseded branches
+
+Main fast-forwards to dcdef38, integrating the MorphOS DOS64 packet port and
+its regressions. The temporary upstream-dos64-packets branch is removed both
+locally and from origin, together with its clean worktree. The matching-SDK
+requirement and the development-check scope remain those of the preceding
+entry; this integration performs no target installation or additional runtime
+qualification.
+
+The origin claude/writeback-dirty branch is removed because its complete
+history is retained by migration/codex-mmap. The redundant local remote-tracking
+refs migration/claude/writeback-dirty, migration/codex-posix-files and
+migration/main are also removed after verifying ancestry: the POSIX-files
+history is retained by migration/codex-posix-hostdisk and migration/main by
+main. The mmap, hostdisk and stash-20261016 references retain work absent from
+main and are kept. Origin has only main; the primary checkout is clean.
 
 
 ## 2026-11-04 — Port the MorphOS DOS64 packet contract
