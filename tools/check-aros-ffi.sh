@@ -153,6 +153,14 @@ clang -std=c11 -Wall -Wextra -Werror \
     -o "$task_dir/control-stub"
 "$task_dir/control-stub"
 
+echo "[aros-ffi] host small-block heap, four threads, address and thread sanitizers"
+for sanitizer in address,undefined thread; do
+    clang -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=$sanitizer \
+        -I native/aros native/aros/tests/smallheap_host.c \
+        -o "$task_dir/smallheap-host"
+    "$task_dir/smallheap-host"
+done
+
 echo "[aros-ffi] host one-instance claim matrix"
 clang -std=c11 -Wall -Wextra -Werror \
     -D__WORDSIZE=64 -DAROS_FAST_BPTR=1 -DAROS_FAST_BSTR=1 \

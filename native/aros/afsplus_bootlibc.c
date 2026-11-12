@@ -55,11 +55,20 @@ static void *allocate(size_t size, ULONG flags)
  * costing more than the block it described.
  *
  * malloc below keeps its header, because the C shell frees without a size.
+ *
+ * Small blocks do not reach exec at all: afsplus_smallheap.h keeps them on
+ * lists of its own, because an AllocMem and FreeMem pair costs half a
+ * microsecond and the library makes hundreds of them for one path lookup.
  */
+#define SMALLHEAP_SYSTEM_ALLOC(bytes) AllocMem((bytes), MEMF_ANY)
+#include "afsplus_smallheap.h"
+
 void *afsplus_exec_alloc(size_t size, int clear)
 {
     if (size == 0)
         return NULL;
+    if (size <= SMALLHEAP_MAX)
+        return smallheap_alloc(size, clear);
     return AllocMem(size, clear ? (MEMF_ANY | MEMF_CLEAR) : MEMF_ANY);
 }
 
@@ -67,7 +76,10 @@ void afsplus_exec_free(void *pointer, size_t size)
 {
     if (pointer == NULL || size == 0)
         return;
-    FreeMem(pointer, size);
+    if (size <= SMALLHEAP_MAX)
+        smallheap_free(pointer, size);
+    else
+        FreeMem(pointer, size);
 }
 
 void *malloc(size_t size)
