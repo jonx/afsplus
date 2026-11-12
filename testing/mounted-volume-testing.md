@@ -255,8 +255,10 @@ error, the channel closes, and the volume is unmounted with nothing recorded.
 macFUSE 5.3 delivered every write of one to fourteen bytes to the driver as
 zeros (macFUSE issue 1188). The file looked right while the volume was
 mounted, because the kernel served it from its own cache, and held zeros once
-the volume came back. macFUSE 5.4.0 fixes it and is required; the usage
-battery rereads twenty small files after the remount to hold it. The same
+the volume came back. macFUSE 5.4.0 fixes it and is required: the usage
+battery rereads twenty small files after the remount to hold it, and
+`afsplus-mount` reads the release from the installed macFUSE bundle and
+refuses an older one before loading it. The same
 release turns an empty reply to a read into a read that reports every byte and
 fills none (issue 1196), so the driver answers such a read, which only a race
 with a truncation can produce, with an I/O error.
@@ -292,6 +294,13 @@ case-insensitive volume;
 [tools/check-mount-name-policy.py](../tools/check-mount-name-policy.py)
 mounts one volume of each policy and requires the answer and the behaviour to
 agree.
+
+**A write-only handle is read through.** A program that opens a file
+write-only and writes part of a page, as `>>` does, makes the kernel read the
+rest of that page through the program's handle before it writes. The driver
+refused reads on a write-only handle, so every append failed with `EINVAL`.
+It opens every writable handle read-write; the kernel still keeps the program
+from reading through a write-only descriptor.
 
 ## What belongs below the mount
 

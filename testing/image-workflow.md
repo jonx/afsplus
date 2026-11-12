@@ -22,6 +22,50 @@ Mounting follows [mounted-volume-testing](mounted-volume-testing.md): a
 mountpoint outside `/Volumes`, `umount` and never `diskutil`, and a mount
 table read that cannot block.
 
+## Copying files in and out of a stopped image
+
+An image a VM uses as a disk, such as the Wine prefix of the AROS lab, is
+edited on the Mac while the VM is stopped, the way `mtools` edits a FAT
+image: mount it, copy with `cp`, `rsync` or the Finder, unmount.
+[tools/afsplus-image-mount.sh](../tools/afsplus-image-mount.sh) wraps
+`afsplus-mount` for this and builds it on first use.
+
+| Step | Command |
+|---|---|
+| mount read-write | `tools/afsplus-image-mount.sh mount Wine.afs ~/mnt/wine` |
+| mount read-only | `tools/afsplus-image-mount.sh mount --read-only Wine.afs ~/mnt/wine` |
+| copy | `rsync -a ~/payload/ ~/mnt/wine/drive_c/` or `cp`, or `open ~/mnt/wine` for the Finder |
+| unmount | `tools/afsplus-image-mount.sh unmount ~/mnt/wine` |
+
+`mount` refuses an image that any process holds open, a mountpoint under
+`/Volumes` and a non-empty mountpoint, runs `afsplus-check` first and
+refuses an image that is not clean, then starts `afsplus-mount` in the
+background and returns once the volume is in the mount table. The volume
+stays mounted after the terminal closes. `unmount` unmounts, waits for the
+driver to commit its last state and exit, and runs `afsplus-check` again;
+it refuses while a program still uses the volume, and `unmount --force`
+unmounts anyway at the cost of I/O errors in those programs.
+
+Prerequisites on macOS: macFUSE 5.4.0 or later with its FSKit module enabled
+([macos-fskit-activation](../docs/macos-fskit-activation.md)).
+`afsplus-mount` refuses an older macFUSE: 5.3.x stores writes of one to
+fourteen bytes as zeros and lists entries several times
+([mounted-volume-testing](mounted-volume-testing.md#macfuse-releases)).
+Installing or upgrading macFUSE asks for an administrator password, and a
+first install also asks for the module to be enabled in System Settings.
+
+Never mount an image a running VM has open, read-only included. QEMU and
+the driver would each write blocks the other believes it owns, and a
+read-only mount of an image being written reads a torn state. The lock
+check catches a VM that is running; it cannot know about a VM started while
+the volume is mounted, so start the VM only after `unmount` has reported the
+image clean. Never stop the driver with `kill -9`: unmount it.
+
+A case-insensitive volume (`mkafsplus --case-insensitive`, every AROS
+volume) behaves like APFS: `Name.txt` and `NAME.TXT` are one file, the
+spelling first written is kept, and a rename that changes only case renames
+it. `pathconf(_PC_CASE_SENSITIVE)` answers 0.
+
 ## What the gate checks
 
 `tools/check-image-workflow.sh` (`make image-workflow`) runs the six steps

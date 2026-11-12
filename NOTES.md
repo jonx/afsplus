@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-11-12 — Mount a stopped lab image from the Mac](#2026-11-12--mount-a-stopped-lab-image-from-the-mac)
 - [2026-11-12 — Hold ACTION_REPLACE_OBJECT to the neutral DOS contract](#2026-11-12--hold-actionreplaceobject-to-the-neutral-dos-contract)
 - [2026-11-05 — Integrate DOS64 and remove superseded branches](#2026-11-05--integrate-dos64-and-remove-superseded-branches)
 - [2026-11-04 — Port the MorphOS DOS64 packet contract](#2026-11-04--port-the-morphos-dos64-packet-contract)
@@ -242,6 +243,28 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+
+## 2026-11-12 — Mount a stopped lab image from the Mac
+
+The AROS lab VM keeps its Wine prefix on an AFS+ image, and the host must
+edit that image while the VM is stopped, as it did with `mtools` on FAT.
+`afsplus-mount` already did the job; trying it on the M5 found three things.
+
+The M5 runs macFUSE 5.3.3, below the 5.4.0 the mount requires. A real
+session there stored every file of one to fourteen bytes as zeros (seen
+through `afsplus-extract` after the unmount, with the checker clean) and
+listed directory entries several times. Nothing stopped the mount, so
+`afsplus-mount` now reads the release from the macFUSE bundle and refuses an
+older one. The upgrade needs an administrator password.
+
+`echo >> file` failed with `EINVAL`: the kernel reads the partial page
+through the program's write-only handle before writing it, and the driver
+refused reads on such a handle. Writable opens now get a read-write handle.
+
+`tools/afsplus-image-mount.sh` wraps the mount for this use: it refuses an
+image another process holds open, checks the image before and after, and
+returns once the volume is in the mount table
+([image-workflow](testing/image-workflow.md#copying-files-in-and-out-of-a-stopped-image)).
 
 ## 2026-11-12 — Hold ACTION_REPLACE_OBJECT to the neutral DOS contract
 
