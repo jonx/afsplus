@@ -408,6 +408,11 @@ fn load_library() -> io::Result<Library> {
     };
     let mut failures = Vec::new();
     for path in candidates {
+        // Before the library is loaded: a release that corrupts data is
+        // refused without running any of its code.
+        if path.exists() {
+            check_release(&path)?;
+        }
         // SAFETY: loading MFMount is the purpose of this audited boundary and
         // a successful library remains retained by ChannelInner.
         match unsafe { Library::new(&path) } {
@@ -422,6 +427,73 @@ fn load_library() -> io::Result<Library> {
             failures.join("; ")
         ),
     ))
+}
+
+/// The oldest macFUSE release whose FSKit relay delivers every byte.
+///
+/// Releases before 5.4.0 deliver every write of one to fourteen bytes to the
+/// driver as zeros (macFUSE issue 1188): the file looks right while mounted,
+/// because the kernel serves it from its cache, and holds zeros on the image.
+/// They also hand each listed entry to the kernel several times. Neither can
+/// be repaired in the driver, so the mount is refused.
+const MINIMUM_RELEASE: (u32, u32, u32) = (5, 4, 0);
+
+/// Refuses a library that belongs to a macFUSE bundle older than
+/// [`MINIMUM_RELEASE`]. A library outside a `macfuse.fs` bundle, which only
+/// a test supplies through the environment, has no release to check.
+fn check_release(library: &Path) -> io::Result<()> {
+    let Some(bundle) = library
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == "macfuse.fs"))
+    else {
+        return Ok(());
+    };
+    let plist = bundle.join("Contents/version.plist");
+    let text = std::fs::read_to_string(&plist).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "cannot read the macFUSE release from {}: {error}",
+                plist.display()
+            ),
+        )
+    })?;
+    let release = bundle_release(&text).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("no macFUSE release found in {}", plist.display()),
+        )
+    })?;
+    if release < MINIMUM_RELEASE {
+        let (major, minor, patch) = release;
+        let (want_major, want_minor, want_patch) = MINIMUM_RELEASE;
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "macFUSE {major}.{minor}.{patch} is installed; AFS+ needs {want_major}.{want_minor}.{want_patch} or later, \
+                 because older releases store writes of up to fourteen bytes as zeros \
+                 (upgrade with: brew upgrade --cask macfuse)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The `CFBundleShortVersionString` of an XML property list, as numbers.
+fn bundle_release(plist: &str) -> Option<(u32, u32, u32)> {
+    let after_key = plist
+        .split("<key>CFBundleShortVersionString</key>")
+        .nth(1)?;
+    let value = after_key.trim_start().strip_prefix("<string>")?;
+    let value = &value[..value.find("</string>")?];
+    let mut parts = value.trim().split('.').map(|part| {
+        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u32>().ok()
+    });
+    let major = parts.next()??;
+    let minor = parts.next().unwrap_or(Some(0))?;
+    let patch = parts.next().unwrap_or(Some(0))?;
+    Some((major, minor, patch))
 }
 
 fn resolve_mountpoint(mountpoint: &Path) -> io::Result<PathBuf> {
@@ -489,4 +561,57 @@ fn reply_header(buffers: &[IoSlice<'_>]) -> Option<[u8; 16]> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bundle_release, check_release};
+    use std::path::Path;
+
+    fn plist(version: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\"?>\n<plist version=\"1.0\">\n<dict>\n\
+             \t<key>CFBundleShortVersionString</key>\n\t<string>{version}</string>\n\
+             \t<key>CFBundleVersion</key>\n\t<string>{version}</string>\n</dict>\n</plist>\n"
+        )
+    }
+
+    #[test]
+    fn the_release_is_read_from_the_bundle_plist() {
+        assert_eq!(bundle_release(&plist("5.3.3")), Some((5, 3, 3)));
+        assert_eq!(bundle_release(&plist("5.4.0")), Some((5, 4, 0)));
+        assert_eq!(bundle_release(&plist("5.5")), Some((5, 5, 0)));
+        assert_eq!(bundle_release(&plist("6.0.1b2")), Some((6, 0, 1)));
+        assert_eq!(bundle_release("<dict></dict>"), None);
+        assert_eq!(bundle_release(&plist("five")), None);
+    }
+
+    #[test]
+    fn an_old_bundle_is_refused_and_a_current_one_accepted() {
+        let root =
+            std::env::temp_dir().join(format!("afsplus-macfuse-release-{}", std::process::id()));
+        let library = root.join("macfuse.fs/Contents/Frameworks/MFMount.framework/MFMount");
+        std::fs::create_dir_all(library.parent().unwrap()).unwrap();
+        let version = root.join("macfuse.fs/Contents/version.plist");
+
+        std::fs::write(&version, plist("5.3.3")).unwrap();
+        let refused = check_release(&library).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+        assert!(refused.to_string().contains("5.3.3"), "{refused}");
+
+        std::fs::write(&version, plist("5.4.0")).unwrap();
+        check_release(&library).unwrap();
+
+        std::fs::remove_file(&version).unwrap();
+        assert!(
+            check_release(&library).is_err(),
+            "an unreadable release is not assumed good"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_library_outside_a_bundle_has_no_release_to_check() {
+        check_release(Path::new("/nonexistent/libMFMountStub.dylib")).unwrap();
+    }
 }
