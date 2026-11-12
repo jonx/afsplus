@@ -724,11 +724,21 @@ fn empty_reply(result: Result<(), Errno>, reply: ReplyEmpty) {
     }
 }
 
+/// The access a FUSE file handle needs, which is not always what the program
+/// asked for.
+///
+/// A program that opens a file write-only and writes part of a page makes the
+/// kernel read the rest of that page first, through the same handle: macOS
+/// does so for an append or any write that does not start on a page boundary.
+/// A write-only handle refused that read, and the program's write failed with
+/// `EINVAL`, so `echo >> file` could not append. The handle belongs to the
+/// kernel, which never lets the program read through a write-only
+/// descriptor, so a write-only open is a read-write handle here. A read-only
+/// mount still refuses it.
 fn access_mode(flags: OpenFlags) -> AccessMode {
     match flags.acc_mode() {
         OpenAccMode::O_RDONLY => AccessMode::ReadOnly,
-        OpenAccMode::O_WRONLY => AccessMode::WriteOnly,
-        OpenAccMode::O_RDWR => AccessMode::ReadWrite,
+        OpenAccMode::O_WRONLY | OpenAccMode::O_RDWR => AccessMode::ReadWrite,
     }
 }
 
@@ -921,6 +931,20 @@ fn system_time(time: Timespec) -> SystemTime {
 #[cfg(test)]
 mod xattr_tests {
     use super::*;
+
+    #[test]
+    fn a_write_only_open_lets_the_kernel_fill_a_partial_page() {
+        assert_eq!(access_mode(OpenFlags(libc::O_RDONLY)), AccessMode::ReadOnly);
+        assert_eq!(
+            access_mode(OpenFlags(libc::O_WRONLY)),
+            AccessMode::ReadWrite
+        );
+        assert_eq!(
+            access_mode(OpenFlags(libc::O_WRONLY | libc::O_APPEND)),
+            AccessMode::ReadWrite
+        );
+        assert_eq!(access_mode(OpenFlags(libc::O_RDWR)), AccessMode::ReadWrite);
+    }
 
     #[test]
     fn setxattr_flags_follow_the_host_and_nothing_is_ignored() {
