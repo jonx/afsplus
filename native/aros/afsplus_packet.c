@@ -768,6 +768,7 @@ static int32_t fill_fib_name(UBYTE *destination, size_t capacity,
 /* dos/dos64.h positional transfer packets, for SDKs that do not name them */
 #define AFSPLUS_ACTION_READ_AT64 2021
 #define AFSPLUS_ACTION_WRITE_AT64 2022
+#define AFSPLUS_ACTION_EXAMINE_NAME64 2023
 
 /* dos/dos.h FIBEXTF_OBJECTKEY: fib_ObjectKey identifies the object. */
 #define AFSPLUS_FIBEXTF_OBJECTKEY 2
@@ -2030,6 +2031,37 @@ int32_t afsplus_aros_packet_process(
             (void)afsplus_aros_free_lock(context->filesystem, id);
         if (error == 0)
             result = (SIPTR)MKBADDR(lock);
+        break;
+    }
+    case AFSPLUS_ACTION_EXAMINE_NAME64:
+    {
+        /* dos/dos64.h: find the object and describe it, in one packet. */
+        struct AfsplusArosFileInfo info;
+        uint8_t name[MAXFILENAMELENGTH];
+        const uint8_t *path;
+        uint32_t path_length = 0;
+        uint64_t base;
+        uint64_t id = 0;
+
+        if ((BPTR)packet->dp_Arg3 == BNULL)
+            error = ERROR_INVALID_LOCK;
+        if (error == 0)
+            error = lock_id(context, (BPTR)packet->dp_Arg1, &base);
+        if (error == 0)
+            error = bstr_view(packet->dp_Arg2, &path, &path_length);
+        if (error == 0)
+            error = resolve_path_lock(context, base, path, path_length,
+                AFSPLUS_AROS_LOCK_SHARED, &id);
+        if (error == 0)
+            error = afsplus_aros_examine_lock(context->filesystem, id,
+                &info, name, sizeof(name));
+        if (error == 0)
+            error = fill_fib((struct FileInfoBlock *)BADDR(
+                (BPTR)packet->dp_Arg3), 1, &info, name, NULL, 0);
+        if (id != 0)
+            (void)afsplus_aros_free_lock(context->filesystem, id);
+        if (error == 0)
+            result = DOSTRUE;
         break;
     }
     case ACTION_FREE_LOCK:
