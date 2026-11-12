@@ -110,3 +110,63 @@ fn a_symlink_is_listed_as_one_and_deleting_it_leaves_its_target() {
         .unwrap();
     assert!(adapter.lookup(OBJECT_ROOT, b"kept.txt").is_ok());
 }
+
+/// `cp -R` on macOS copies a link's extended attributes, mode and times
+/// through a descriptor opened with `O_SYMLINK`, which reaches the driver as
+/// an open of the link itself. That open answered "Is a directory" and `cp`
+/// reported every symlink it copied, whether its target was a file, a
+/// directory or nothing at all.
+#[test]
+fn a_symlink_opened_itself_takes_attributes_and_gives_no_data() {
+    let mut adapter = mounted();
+    adapter
+        .create_directory(OBJECT_ROOT, b"sub", None, at(1))
+        .unwrap();
+    for (name, target) in [
+        (&b"to-dir"[..], &b"sub"[..]),
+        (b"to-file", b"sub/t.txt"),
+        (b"dangling", b"nowhere"),
+    ] {
+        let link = adapter
+            .create_symlink(OBJECT_ROOT, name, target, at(2))
+            .unwrap()
+            .object_id;
+        let handle = adapter
+            .open_file(link, afsplus_vfs::AccessMode::ReadWrite, false, at(3))
+            .expect("a symlink opens as itself");
+        assert!(adapter.is_symlink_handle(handle));
+        adapter
+            .set_attribute(
+                link,
+                b"com.example.tag",
+                b"value",
+                afsplus_fuse::AttributeWriteMode::Upsert,
+                at(4),
+            )
+            .unwrap();
+        assert_eq!(
+            adapter.get_attribute(link, b"com.example.tag").unwrap(),
+            b"value".to_vec()
+        );
+        adapter.set_posix_mode(link, 0o700, at(5)).unwrap();
+        assert_eq!(
+            adapter.read(handle, 0, 16),
+            Err(afsplus_vfs::VfsError::NotSupported)
+        );
+        assert_eq!(
+            adapter.write(handle, 0, b"x", at(6)),
+            Err(afsplus_vfs::VfsError::NotSupported)
+        );
+        adapter.fsync(handle).unwrap();
+        adapter.close(handle).unwrap();
+        assert!(!adapter.is_symlink_handle(handle));
+        assert_eq!(adapter.read_link(link).unwrap(), target.to_vec());
+        assert_eq!(
+            adapter
+                .open_file(link, afsplus_vfs::AccessMode::ReadOnly, true, at(7))
+                .err(),
+            Some(afsplus_vfs::VfsError::Invalid),
+            "a symlink has no data to truncate"
+        );
+    }
+}

@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use afsplus_block::BlockDevice;
+use afsplus_core::MountMode;
 use afsplus_format::attrs::ATTRIBUTE_VALUE_MAX_BYTES;
 use afsplus_format::posix;
 use afsplus_format::{Timespec, OBJECT_ROOT};
@@ -236,7 +237,15 @@ pub struct FuseAdapter<D: BlockDevice> {
     vfs: Vfs<D>,
     config: FuseConfig,
     parents: BTreeMap<ObjectId, ObjectId>,
+    /// Handles on symlinks themselves, see [`FuseAdapter::open_file`]. They
+    /// hold no VFS handle and are numbered from [`SYMLINK_HANDLE_BASE`], a
+    /// range the VFS's counter, which starts at one, never reaches.
+    symlink_handles: BTreeMap<Handle, ObjectId>,
+    next_symlink_handle: Handle,
 }
+
+/// The first handle number of a handle on a symlink.
+const SYMLINK_HANDLE_BASE: Handle = 1 << 63;
 
 impl<D: BlockDevice> FuseAdapter<D> {
     pub fn new(vfs: Vfs<D>, config: FuseConfig) -> Self {
@@ -246,6 +255,8 @@ impl<D: BlockDevice> FuseAdapter<D> {
             vfs,
             config,
             parents,
+            symlink_handles: BTreeMap::new(),
+            next_symlink_handle: SYMLINK_HANDLE_BASE,
         }
     }
 
@@ -328,6 +339,16 @@ impl<D: BlockDevice> FuseAdapter<D> {
         self.vfs.maintenance_step(now).unwrap_or(false)
     }
 
+    /// Opens a file, or a symlink itself.
+    ///
+    /// macOS opens the link and not its target when a program passes
+    /// `O_SYMLINK`, and `copyfile(3)`, which `cp` uses, does exactly that to
+    /// copy a link's extended attributes, mode and times through the
+    /// descriptor. This answered "Is a directory", the VFS's word for "not a
+    /// file", and `cp -R` reported every symlink it copied. A handle on a
+    /// symlink carries no data: attribute and metadata requests address the
+    /// object by inode and work as on any object, and a read or write through
+    /// it is refused with [`VfsError::NotSupported`], as APFS refuses one.
     pub fn open_file(
         &mut self,
         object_id: ObjectId,
@@ -335,6 +356,20 @@ impl<D: BlockDevice> FuseAdapter<D> {
         truncate: bool,
         now: Timespec,
     ) -> Result<Handle, VfsError> {
+        if self.vfs.stat(object_id)?.kind == NodeKind::Symlink {
+            if truncate {
+                return Err(VfsError::Invalid);
+            }
+            if access != AccessMode::ReadOnly && self.vfs.mount_mode() != MountMode::ReadWrite {
+                return Err(VfsError::ReadOnly);
+            }
+            let handle = self.next_symlink_handle;
+            self.next_symlink_handle = handle
+                .checked_add(1)
+                .ok_or(VfsError::Limit("handle space exhausted"))?;
+            self.symlink_handles.insert(handle, object_id);
+            return Ok(handle);
+        }
         let handle = self.vfs.open_file(object_id, access)?;
         if truncate {
             let result = self
@@ -354,10 +389,28 @@ impl<D: BlockDevice> FuseAdapter<D> {
     }
 
     pub fn close(&mut self, handle: Handle) -> Result<(), VfsError> {
+        if self.symlink_handles.remove(&handle).is_some() {
+            return Ok(());
+        }
         self.vfs.close(handle)
     }
 
+    /// Whether `handle` is open on a symlink rather than on a file.
+    pub fn is_symlink_handle(&self, handle: Handle) -> bool {
+        self.symlink_handles.contains_key(&handle)
+    }
+
+    /// A handle on a symlink has no data to read or write.
+    fn data_handle(&self, handle: Handle) -> Result<(), VfsError> {
+        if self.is_symlink_handle(handle) {
+            Err(VfsError::NotSupported)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn read(&mut self, handle: Handle, offset: u64, size: u32) -> Result<Vec<u8>, VfsError> {
+        self.data_handle(handle)?;
         let mut data = vec![0; size as usize];
         let read = self.vfs.read(handle, offset, &mut data)?;
         data.truncate(read);
@@ -371,6 +424,7 @@ impl<D: BlockDevice> FuseAdapter<D> {
         data: &[u8],
         now: Timespec,
     ) -> Result<usize, VfsError> {
+        self.data_handle(handle)?;
         let written = self.vfs.write(handle, offset, data, now)?;
         self.finish_data_mutation(handle)?;
         Ok(written)
@@ -383,7 +437,7 @@ impl<D: BlockDevice> FuseAdapter<D> {
         size: u64,
         now: Timespec,
     ) -> Result<FuseAttributes, VfsError> {
-        if let Some(handle) = handle {
+        if let Some(handle) = handle.filter(|handle| !self.is_symlink_handle(*handle)) {
             self.vfs.truncate(handle, size, now)?;
             self.finish_data_mutation(handle)?;
         } else {
@@ -758,6 +812,11 @@ impl<D: BlockDevice> FuseAdapter<D> {
     }
 
     pub fn fsync(&mut self, handle: Handle) -> Result<(), VfsError> {
+        if self.is_symlink_handle(handle) {
+            // What a symlink holds is metadata, which the volume makes
+            // durable as a whole.
+            return self.vfs.sync_filesystem();
+        }
         self.vfs.fsync(handle)
     }
 
