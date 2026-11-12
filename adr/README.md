@@ -149,7 +149,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-118](ADR-118-posix-permission-projection.md) | The POSIX mode is a projection of the protection word | Accepted | — |
 | [ADR-119](ADR-119-backup-carries-comment-and-owner.md) | A backup carries the comment and the owner | Accepted | amends [ADR-082](ADR-082-backup-object-metadata.md); amended by [ADR-127](ADR-127-aros-snapshot-file-restore.md) |
 | [ADR-120](ADR-120-comment-and-protection-as-host-attributes.md) | The comment and the protection word are host attributes | Accepted | amends [ADR-108](ADR-108-extended-attributes.md) |
-| [ADR-121](ADR-121-delayed-group-commit.md) | Changes are durable within seconds, or at once on request | Accepted | amends [ADR-063](ADR-063-intent-log-epoch1.md) |
+| [ADR-121](ADR-121-delayed-group-commit.md) | Changes are durable within seconds, or at once on request | Accepted | amends [ADR-063](ADR-063-intent-log-epoch1.md); amended by [ADR-137](ADR-137-host-mount-delayed-commit-option.md) |
 | [ADR-122](ADR-122-aros-partition-identity.md) | An AFS+ partition is an AROS GPT partition of DosType AFS+ | Accepted | amends [ADR-045](ADR-045-native-aros-handler-shell.md) |
 | [ADR-123](ADR-123-deployed-image-compatibility.md) | Preserve registered deployed images before the global format freeze | Superseded | amends [ADR-104](ADR-104-volume-label-in-checkpoint.md), [ADR-115](ADR-115-retire-unwritten-surface.md); superseded by [ADR-124](ADR-124-pre-release-format-evolution.md) |
 | [ADR-124](ADR-124-pre-release-format-evolution.md) | Prefer coordinated format changes over pre-release compatibility debt | Accepted | supersedes [ADR-123](ADR-123-deployed-image-compatibility.md) |
@@ -165,6 +165,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-134](ADR-134-loaded-aros-authority-lifetime.md) | Query a permanently loaded AROS authority service | Accepted | amends [ADR-125](ADR-125-aros-backup-authority.md) |
 | [ADR-135](ADR-135-anyone-snapshot-policy.md) | Admit every local task to AFSSYS snapshots | Accepted | amends [ADR-125](ADR-125-aros-backup-authority.md), [ADR-131](ADR-131-afssys-automount-snapshot-policy.md) |
 | [ADR-136](ADR-136-snapshot-handle-ownership-and-stage-bounds.md) | Bind snapshot handles to their opener and keep captured stages private | Accepted | amends [ADR-125](ADR-125-aros-backup-authority.md), [ADR-127](ADR-127-aros-snapshot-file-restore.md), [ADR-128](ADR-128-confined-snapshot-tree-restore.md), [ADR-130](ADR-130-bounded-private-restore-stages.md), [ADR-133](ADR-133-restore-stage-lifetime-and-recovery.md) |
+| [ADR-137](ADR-137-host-mount-delayed-commit-option.md) | A host mount may delay commits when its user asks | Proposed | amends [ADR-121](ADR-121-delayed-group-commit.md) |
 
 <!-- /adr-index -->
 

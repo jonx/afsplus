@@ -37,6 +37,58 @@ fn chain_ref(reference: AttributeRef) -> ChainRef {
     }
 }
 
+/// The set `changes` makes of `before`: `Some(value)` writes under `mode`,
+/// `None` removes and is `NotFound` when the attribute is absent. Changes
+/// apply in order, so a later entry sees an earlier one.
+fn apply_attribute_changes(
+    before: &AttributeMap,
+    changes: &[(&str, Option<&[u8]>)],
+    mode: AttributeWriteMode,
+) -> Result<AttributeMap, CoreError> {
+    let mut after = before.clone();
+    for (name, value) in changes {
+        validate_attribute_name(name)
+            .map_err(|_| CoreError::InvalidMetadata("attribute name out of range"))?;
+        match value {
+            None => {
+                after.remove(*name).ok_or(CoreError::NotFound)?;
+            }
+            Some(value) => {
+                if value.len() > ATTRIBUTE_VALUE_MAX_BYTES {
+                    return Err(CoreError::InvalidMetadata("attribute value out of range"));
+                }
+                match (mode, after.contains_key(*name)) {
+                    (AttributeWriteMode::Create, true) => return Err(CoreError::AlreadyExists),
+                    (AttributeWriteMode::Replace, false) => return Err(CoreError::NotFound),
+                    _ => {}
+                }
+                after.insert((*name).to_owned(), value.to_vec());
+            }
+        }
+    }
+    Ok(after)
+}
+
+/// The stored form of a set and the segments it takes; `None` for an empty
+/// set, which an object stores as no chain at all.
+fn encode_attributes(
+    set: &AttributeMap,
+    block_size: usize,
+) -> Result<Option<(Vec<u8>, u16)>, CoreError> {
+    if set.is_empty() {
+        return Ok(None);
+    }
+    let entries: Vec<(&str, &[u8])> = set
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_slice()))
+        .collect();
+    let bytes = encode_attribute_set(&entries)
+        .map_err(|_| CoreError::InvalidMetadata("attribute set out of range"))?;
+    let count = segment_count(bytes.len() as u32, block_size)
+        .ok_or(CoreError::InvalidMetadata("attribute set out of range"))?;
+    Ok(Some((bytes, count)))
+}
+
 /// Blocks and entries of one attribute chain, validated against its
 /// reference and as a set. Anything short of a whole valid set is `Corrupt`.
 pub(crate) fn load_attribute_chain<D: BlockDevice>(
@@ -70,11 +122,24 @@ pub(crate) fn load_attribute_chain<D: BlockDevice>(
 
 impl<D: BlockDevice> Volume<D> {
     fn load_attributes(&mut self, record: &ObjectRecord) -> Result<AttributeMap, CoreError> {
+        // A record the open window staged may name a chain that window
+        // wrote, stamped with its generation; nothing else carries it.
+        let generation = self
+            .window
+            .as_ref()
+            .map_or(self.checkpoint.generation, |window| window.generation);
+        self.load_attributes_up_to(record, generation)
+    }
+
+    fn load_attributes_up_to(
+        &mut self,
+        record: &ObjectRecord,
+        generation: u64,
+    ) -> Result<AttributeMap, CoreError> {
         let Some(reference) = record.attributes else {
             return Ok(AttributeMap::new());
         };
         let geometry = self.ident.geometry();
-        let generation = self.checkpoint.generation;
         let (_, entries) = load_attribute_chain(
             &mut self.dev,
             &geometry,
@@ -129,48 +194,11 @@ impl<D: BlockDevice> Volume<D> {
             metadata::validate_time(now)?;
             let record = volume.attribute_target(object_id)?;
             let before = volume.load_attributes(&record)?;
-            let mut after = before.clone();
-            for (name, value) in changes {
-                validate_attribute_name(name)
-                    .map_err(|_| CoreError::InvalidMetadata("attribute name out of range"))?;
-                match value {
-                    None => {
-                        after.remove(*name).ok_or(CoreError::NotFound)?;
-                    }
-                    Some(value) => {
-                        if value.len() > ATTRIBUTE_VALUE_MAX_BYTES {
-                            return Err(CoreError::InvalidMetadata("attribute value out of range"));
-                        }
-                        match (mode, after.contains_key(*name)) {
-                            (AttributeWriteMode::Create, true) => {
-                                return Err(CoreError::AlreadyExists)
-                            }
-                            (AttributeWriteMode::Replace, false) => {
-                                return Err(CoreError::NotFound)
-                            }
-                            _ => {}
-                        }
-                        after.insert((*name).to_owned(), value.to_vec());
-                    }
-                }
-            }
+            let after = apply_attribute_changes(&before, changes, mode)?;
             if after == before {
                 return Ok(());
             }
-            let block_size = volume.dev.block_size();
-            let encoded = if after.is_empty() {
-                None
-            } else {
-                let entries: Vec<(&str, &[u8])> = after
-                    .iter()
-                    .map(|(name, value)| (name.as_str(), value.as_slice()))
-                    .collect();
-                let bytes = encode_attribute_set(&entries)
-                    .map_err(|_| CoreError::InvalidMetadata("attribute set out of range"))?;
-                let count = segment_count(bytes.len() as u32, block_size)
-                    .ok_or(CoreError::InvalidMetadata("attribute set out of range"))?;
-                Some((bytes, count))
-            };
+            let encoded = encode_attributes(&after, volume.dev.block_size())?;
             let old = record.attributes.map(chain_ref);
             volume.replace_chain(
                 record,
@@ -193,6 +221,172 @@ impl<D: BlockDevice> Volume<D> {
                 },
             )
         })
+    }
+
+    /// [`Self::set_attributes`] staged in the open window (ADR-121): the
+    /// new set is written to fresh blocks now and published by the window's
+    /// commit, together with everything else the window holds, so a power
+    /// cut leaves every staged change of the window or none. The window
+    /// becomes one an fsync must commit rather than log, as for a directory.
+    /// A symlink and the root are [`CoreError::PrototypeLimit`]: the caller
+    /// commits the window and uses the immediate path.
+    pub fn window_set_attributes(
+        &mut self,
+        object_id: u64,
+        changes: &[(&str, Option<&[u8]>)],
+        mode: AttributeWriteMode,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WindowSetAttributes, |volume| {
+            metadata::validate_time(now)?;
+            volume.ensure_public_object_id(object_id)?;
+            let mut window = volume.take_or_open_window()?;
+            match volume.window_set_attributes_in(&mut window, object_id, changes, mode, now) {
+                Ok(()) => {
+                    volume.window = Some(window);
+                    Ok(())
+                }
+                // Nothing was allocated or written: the window stands.
+                Err((false, error)) => {
+                    volume.window = Some(window);
+                    Err(error)
+                }
+                Err((true, error)) => {
+                    volume.window_poisoned = true;
+                    volume.flight_window_event(
+                        window.generation,
+                        crate::flight::EventKind::WindowFailed,
+                        None,
+                    );
+                    volume.flight_window_event(
+                        window.generation,
+                        crate::flight::EventKind::WindowClosed,
+                        None,
+                    );
+                    Err(error)
+                }
+            }
+        })
+    }
+
+    /// The error says whether the window was changed before it happened.
+    fn window_set_attributes_in(
+        &mut self,
+        window: &mut OpenWindow,
+        object_id: u64,
+        changes: &[(&str, Option<&[u8]>)],
+        mode: AttributeWriteMode,
+        now: Timespec,
+    ) -> Result<(), (bool, CoreError)> {
+        let untouched = |error: CoreError| (false, error);
+        let record = self
+            .window_editable_record(window, object_id)
+            .map_err(untouched)?;
+        let generation = window.generation;
+        let before = self
+            .load_attributes_up_to(&record, generation)
+            .map_err(untouched)?;
+        let after = apply_attribute_changes(&before, changes, mode).map_err(untouched)?;
+        if after == before {
+            return Ok(());
+        }
+        let encoded = encode_attributes(&after, self.dev.block_size()).map_err(untouched)?;
+        let changed = |error: CoreError| (true, error);
+        let mut writes = Vec::new();
+        let staged = match &encoded {
+            Some((bytes, count)) => {
+                let first_block = stage_chain(
+                    &mut self.dev,
+                    &mut window.tx,
+                    &ATTRIBUTE_CHAIN,
+                    object_id,
+                    (ATTRIBUTE_SET_FORMAT, ATTRIBUTE_SET_VERSION, bytes),
+                    *count,
+                    generation,
+                    &mut writes,
+                )
+                .map_err(changed)?;
+                Some(AttributeRef {
+                    first_block,
+                    total_len: bytes.len() as u32,
+                    segment_count: *count,
+                })
+            }
+            None => None,
+        };
+        // Written now, like the window's file data, and covered by the
+        // barrier of the commit that first names them.
+        for (lba, block) in &writes {
+            self.dev
+                .write_block(*lba, block)
+                .map_err(|e| changed(e.into()))?;
+        }
+        // A chain this window staged before is released; the committed one
+        // it replaced was retired then. Otherwise the committed chain is
+        // retired now, as the immediate path does.
+        if window
+            .pending
+            .staged_attribute_chains
+            .contains_key(&object_id)
+        {
+            self.release_staged_attributes(&mut window.tx, &mut window.pending, object_id)
+                .map_err(changed)?;
+        } else if let Some(previous) = record.attributes {
+            let geometry = self.ident.geometry();
+            retire_chain(
+                &mut self.dev,
+                &mut window.tx,
+                &geometry,
+                &ATTRIBUTE_CHAIN,
+                object_id,
+                chain_ref(previous),
+                self.checkpoint.generation,
+            )
+            .map_err(changed)?;
+        }
+        if staged.is_some() {
+            window
+                .pending
+                .staged_attribute_chains
+                .insert(object_id, writes.iter().map(|(lba, _)| *lba).collect());
+        }
+        let mut record = record.with_attributes(staged);
+        record.changed = now;
+        self.window_stage_record(window, record).map_err(changed)
+    }
+
+    /// Releases the attribute chain the batch staged for `object_id`, if it
+    /// staged one. Nothing durable names those blocks.
+    pub(super) fn release_staged_attributes(
+        &mut self,
+        tx: &mut TxAllocator,
+        pending: &mut PendingBatch,
+        object_id: u64,
+    ) -> Result<(), CoreError> {
+        if let Some(blocks) = pending.staged_attribute_chains.remove(&object_id) {
+            for lba in blocks {
+                tx.release_uncommitted(&mut self.dev, lba)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Self::retire_attributes`] inside a batch: a chain the batch staged
+    /// is released, and the committed chain it replaced was retired when it
+    /// was staged.
+    pub(super) fn retire_attributes_in_batch(
+        &mut self,
+        tx: &mut TxAllocator,
+        pending: &mut PendingBatch,
+        record: &ObjectRecord,
+    ) -> Result<(), CoreError> {
+        if pending
+            .staged_attribute_chains
+            .contains_key(&record.object_id)
+        {
+            return self.release_staged_attributes(tx, pending, record.object_id);
+        }
+        self.retire_attributes(tx, record)
     }
 
     /// Stage the initial managed marker alongside a new object record.

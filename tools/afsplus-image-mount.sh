@@ -1,13 +1,19 @@
 #!/bin/sh
 # Mount a stopped AFS+ image on this Mac, and unmount it again.
 #
-#   tools/afsplus-image-mount.sh mount [--read-only] IMAGE MOUNTPOINT
+#   tools/afsplus-image-mount.sh mount [--read-only] [--commit=delayed|SECONDS] IMAGE MOUNTPOINT
 #   tools/afsplus-image-mount.sh unmount [--force] MOUNTPOINT
 #
 # `mount` refuses an image that any process holds open (a running VM), checks
 # the image, starts afsplus-mount in the background and returns once the
 # volume is in the mount table. `unmount` unmounts, waits for the driver to
 # write its last state and runs the checker on the image again.
+#
+# --commit=delayed (or a maximum age of 1 to 60 seconds) gathers operations
+# and commits them together, which is what populating an image with many
+# small files needs; unmount is then the durability point, and a crash loses
+# the operations not yet committed, whole and in order (ADR-121). Without it
+# every operation is durable before it is answered.
 #
 # Needs macOS with macFUSE 5.4.0 or later and its FSKit module enabled
 # (docs/macos-fskit-activation.md). The how-to is in
@@ -21,7 +27,7 @@ state_dir=${AFSPLUS_MOUNT_STATE:-$HOME/.cache/afsplus-mount}
 say() { printf 'afsplus-image-mount: %s\n' "$*" >&2; }
 die() { say "$*"; exit 1; }
 usage() {
-    die "usage: $0 mount [--read-only] IMAGE MOUNTPOINT | unmount [--force] MOUNTPOINT"
+    die "usage: $0 mount [--read-only] [--commit=delayed|SECONDS] IMAGE MOUNTPOINT | unmount [--force] MOUNTPOINT"
 }
 
 [ "$(uname -s)" = Darwin ] || die "this helper drives macFUSE and needs macOS; on Linux run afsplus-mount directly"
@@ -73,10 +79,15 @@ check_image() {
 
 do_mount() {
     mode=
-    if [ "${1:-}" = --read-only ]; then
-        mode=--read-only
+    commit=
+    while [ $# -gt 2 ]; do
+        case "$1" in
+        --read-only) mode=--read-only ;;
+        --commit=*) commit=$1 ;;
+        *) usage ;;
+        esac
         shift
-    fi
+    done
     [ $# -eq 2 ] || usage
     image=$1
     [ -f "$image" ] || die "not an image file: $image"
@@ -122,11 +133,8 @@ do_mount() {
     log=$(mktemp "${tmp%/}/afsplus-mount.XXXXXX")
     # nohup: the volume stays mounted after this shell closes. Stopping it is
     # always an unmount, never a kill.
-    if [ -n "$mode" ]; then
-        nohup "$bin/afsplus-mount" "$mode" "$image" "$mountpoint" >"$log" 2>&1 &
-    else
-        nohup "$bin/afsplus-mount" "$image" "$mountpoint" >"$log" 2>&1 &
-    fi
+    # shellcheck disable=SC2086 # each is one word or empty
+    nohup "$bin/afsplus-mount" $mode $commit "$image" "$mountpoint" >"$log" 2>&1 &
     pid=$!
     printf '%s\n%s\n%s\n' "$pid" "$image" "$log" >"$state"
 
@@ -146,7 +154,7 @@ do_mount() {
         fi
         perl -e 'select(undef, undef, undef, 0.2)'
     done
-    say "mounted ${mode:+read-only }$image at $mountpoint (afsplus-mount pid $pid, log $log)"
+    say "mounted ${mode:+read-only }$image at $mountpoint${commit:+ with $commit} (afsplus-mount pid $pid, log $log)"
     say "unmount with: $0 unmount $mountpoint"
 }
 

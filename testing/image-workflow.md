@@ -34,6 +34,7 @@ image: mount it, copy with `cp`, `rsync` or the Finder, unmount.
 |---|---|
 | mount read-write | `tools/afsplus-image-mount.sh mount Wine.afs ~/mnt/wine` |
 | mount read-only | `tools/afsplus-image-mount.sh mount --read-only Wine.afs ~/mnt/wine` |
+| mount to populate | `tools/afsplus-image-mount.sh mount --commit=delayed Wine.afs ~/mnt/wine` |
 | copy | `rsync -a ~/payload/ ~/mnt/wine/drive_c/` or `cp`, or `open ~/mnt/wine` for the Finder |
 | unmount | `tools/afsplus-image-mount.sh unmount ~/mnt/wine` |
 
@@ -60,6 +61,51 @@ read-only mount of an image being written reads a torn state. The lock
 check catches a VM that is running; it cannot know about a VM started while
 the volume is mounted, so start the VM only after `unmount` has reported the
 image clean. Never stop the driver with `kill -9`: unmount it.
+
+### Populating an image with many files
+
+By default the mount makes every operation durable before it answers it, and
+every data write too, because macFUSE does not pass a program's `fsync(2)` or
+`F_FULLFSYNC` to the driver (checked on macFUSE 5.5.0: only the file's dirty
+pages arrive, as `WRITE` requests, and no `FSYNC`). A copy pays for that per
+file: `rsync -a` sends about ten changing requests per file (create, owner,
+`com.apple.provenance`, data, size, rename, times, mode) and `cp -R` about
+eight, which cost 8 to 9 commits and 19 device flushes per file.
+
+`mount --commit=delayed` (or `--commit=SECONDS`, 1 to 60) mounts the image
+with [ADR-121](../adr/ADR-121-delayed-group-commit.md)'s delayed commit, as
+the AROS handler runs: operations, metadata edits included, gather in one
+window committed after a second of idleness, at the maximum age (5 seconds
+for `delayed`), every 512 operations and at unmount
+([ADR-137](../adr/ADR-137-host-mount-delayed-commit-option.md)). On macOS a
+program's fsync is not a durability point under it; the unmount is. A crash
+or a killed driver loses the operations not yet committed, whole and in
+order, and leaves the image clean: a file `rsync` was copying is absent or
+complete under its final name, possibly with its temporary name left beside
+it; a file `cp` was copying can be present and shorter than its source, as
+after any interrupted copy. Run the copy again after such a crash.
+
+Measured on the M5 (macOS, macFUSE 5.5.0), files of 20 KB or empty, copied
+from APFS into a fresh 2 GiB image:
+
+| Workload | sync (default) | `--commit=delayed` |
+|---|---|---|
+| 500 × 20 KB, `rsync -a` | 11 files/s, 8.2 commits per file | 134 files/s, 0.03 commits per file |
+| 500 × 20 KB, `cp -R` | 10 files/s, 9.3 commits per file | 113 files/s, 0.04 commits per file |
+| 5,000 × 20 KB, `rsync -a` | 12 files/s | not measured |
+| 5,000 × 20 KB, `cp -R` | 10 files/s | not measured |
+| 5,000 empty, `rsync -a` | 20 files/s | not measured |
+| 5,000 empty, `cp -R` | 14 files/s | not measured |
+
+With delayed commit the per-file cost is the driver's request round trips
+through macFUSE, not the disk.
+[crates/afsplus-fuse/tests/delayed_population.rs](../crates/afsplus-fuse/tests/delayed_population.rs)
+replays both copy patterns through the adapter, cuts the image after every
+block write, and requires a clean checker and exactly the state after some
+earlier request, never less than the last sync;
+[crates/afsplus-vfs/tests/delayed_metadata.rs](../crates/afsplus-vfs/tests/delayed_metadata.rs)
+counts the flushes: 12 for 200 files with their mode, owner, times, comment
+and an attribute.
 
 A case-insensitive volume (`mkafsplus --case-insensitive`, every AROS
 volume) behaves like APFS: `Name.txt` and `NAME.TXT` are one file, the

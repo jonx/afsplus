@@ -379,6 +379,15 @@ struct PendingBatch {
     /// destructive/recovery work and may consume the runtime emergency floor;
     /// ordinary window growth remains floor-limited until materialization.
     uses_emergency_headroom: bool,
+    /// Attribute-chain blocks the open window allocated, by owning object.
+    /// Neither a published checkpoint nor a log record names them, so a
+    /// later change or a delete in the same window releases them; the
+    /// committed chain they replace was retired when they were staged.
+    staged_attribute_chains: BTreeMap<u64, Vec<u64>>,
+    /// Directories whose modification time a caller set in this window
+    /// after their last entry change: materialization keeps the staged
+    /// times instead of stamping the commit time.
+    dir_times_set: BTreeSet<u64>,
     next_object_id: u64,
 }
 
@@ -5479,6 +5488,8 @@ impl<D: BlockDevice> Volume<D> {
             logged_created: BTreeSet::new(),
             sacrificed: Vec::new(),
             uses_emergency_headroom: false,
+            staged_attribute_chains: BTreeMap::new(),
+            dir_times_set: BTreeSet::new(),
             next_object_id: self.checkpoint.next_object_id,
         };
         let mut results = Vec::with_capacity(ops.len());
@@ -6643,6 +6654,7 @@ impl<D: BlockDevice> Volume<D> {
         }
         if let Some((data_start, data_blocks)) = pending.created_data.remove(&object_id) {
             pending.records.remove(&object_id);
+            self.release_staged_attributes(tx, pending, object_id)?;
             if pending.logged_created.contains(&object_id) {
                 // A durable log record's content CRC still covers these
                 // blocks: never reuse them in this window; quarantine them
@@ -6719,7 +6731,7 @@ impl<D: BlockDevice> Volume<D> {
         tx.retire(&mut self.dev, committed_lba)?;
         pending.committed_record_lbas.remove(&object_id);
         self.retire_security_descriptor(tx, &victim)?;
-        self.retire_attributes(tx, &victim)?;
+        self.retire_attributes_in_batch(tx, pending, &victim)?;
         self.retire_file_storage(tx, generation, &victim)?;
         pending.records.insert(object_id, None);
         Ok(())
@@ -6810,9 +6822,11 @@ impl<D: BlockDevice> Volume<D> {
         // changes staged in it so materialization does not walk it.
         pending.dir_changes.remove(&victim_id);
         pending.dir_timestamps.remove(&victim_id);
+        pending.dir_times_set.remove(&victim_id);
         if created_here {
             pending.created_directories.remove(&victim_id);
             pending.records.remove(&victim_id);
+            self.release_staged_attributes(tx, pending, victim_id)?;
             // The root block was reserved by this batch and nothing published
             // ever named it.
             tx.release_uncommitted(&mut self.dev, victim.data_root)?;
@@ -6822,7 +6836,7 @@ impl<D: BlockDevice> Volume<D> {
             tx.retire(&mut self.dev, committed_lba)?;
             pending.committed_record_lbas.remove(&victim_id);
             self.retire_security_descriptor(tx, &victim)?;
-            self.retire_attributes(tx, &victim)?;
+            self.retire_attributes_in_batch(tx, pending, &victim)?;
             for lba in tree_blocks {
                 tx.retire(&mut self.dev, lba)?;
             }
@@ -7097,6 +7111,8 @@ impl<D: BlockDevice> Volume<D> {
                 logged_created: BTreeSet::new(),
                 sacrificed: Vec::new(),
                 uses_emergency_headroom: false,
+                staged_attribute_chains: BTreeMap::new(),
+                dir_times_set: BTreeSet::new(),
                 next_object_id: self.checkpoint.next_object_id,
             },
             generation,
@@ -7986,6 +8002,8 @@ impl<D: BlockDevice> Volume<D> {
             logged_created: BTreeSet::new(),
             sacrificed: Vec::new(),
             uses_emergency_headroom: false,
+            staged_attribute_chains: BTreeMap::new(),
+            dir_times_set: BTreeSet::new(),
             next_object_id: self.checkpoint.next_object_id,
         };
         let records = scanned.records;
@@ -8385,12 +8403,18 @@ impl<D: BlockDevice> Volume<D> {
             if !is_new {
                 self.note_committed_record(&mut pending, dir_id)?;
             }
-            let directory_timestamp = pending.dir_timestamps.remove(&dir_id).unwrap_or(now);
+            // A modification time a caller set after the last entry change
+            // stands; otherwise the directory takes the time of that change.
+            let (modified, changed) = match pending.dir_timestamps.remove(&dir_id) {
+                Some(timestamp) => (timestamp, timestamp),
+                None if pending.dir_times_set.contains(&dir_id) => (base.modified, base.changed),
+                None => (now, now),
+            };
             pending.records.insert(
                 dir_id,
                 Some(ObjectRecord {
-                    modified: directory_timestamp,
-                    changed: directory_timestamp,
+                    modified,
+                    changed,
                     protection: archive_cleared(base.protection),
                     content_generation: generation,
                     data_root: mutation.root_lba,

@@ -550,6 +550,15 @@ They have no wire command;
 own their proof, power-cut matrices included; no generated family carries
 attributes yet.
 
+`WindowSetObjectProtection`, `WindowSetObjectOwner`, `WindowSetObjectTimes`,
+`WindowSetObjectComment` and `WindowSetAttributes` stage the same edits in the
+open window of a delayed mount, published by its commit
+([ADR-121](../adr/ADR-121-delayed-group-commit.md) decision 8,
+[ADR-137](../adr/ADR-137-host-mount-delayed-commit-option.md)). They have no
+wire command; [the delayed metadata test](../crates/afsplus-vfs/tests/delayed_metadata.rs)
+and [the delayed population test](../crates/afsplus-fuse/tests/delayed_population.rs)
+own their proof, the second at every block-write cut of a population.
+
 The remaining twenty-three methods read: `FileAllocationPage`,
 `FileDataPolicy`, `FirstOrphan`, `ListDirectory`, `ListRoot`,
 `LookupInDirectory`, `LookupRoot`, `OrphanCount`, `OrphanObject`,

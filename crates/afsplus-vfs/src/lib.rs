@@ -2069,10 +2069,32 @@ impl<D: BlockDevice> Vfs<D> {
         now: Timespec,
     ) -> Result<(), VfsError> {
         self.stat(object_id)?;
+        self.stage_or_commit(
+            now,
+            |volume| volume.window_set_object_protection(object_id, protection, now),
+            |volume| volume.set_object_protection(object_id, protection, now),
+        )
+    }
+
+    /// A metadata edit on a delayed mount joins the open window (ADR-121
+    /// decision 8) and is published by its next commit; one the window
+    /// cannot stage, and every edit of a mount that is not delayed, commits
+    /// the window and then itself, as before.
+    fn stage_or_commit(
+        &mut self,
+        now: Timespec,
+        stage: impl FnOnce(&mut Volume<D>) -> Result<(), CoreError>,
+        immediate: impl FnOnce(&mut Volume<D>) -> Result<(), CoreError>,
+    ) -> Result<(), VfsError> {
+        if self.delayed() {
+            match stage(&mut self.volume) {
+                Ok(()) => return self.note_change(now),
+                Err(CoreError::PrototypeLimit(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         self.checkpoint_data_window(now)?;
-        Ok(self
-            .volume
-            .set_object_protection(object_id, protection, now)?)
+        Ok(immediate(&mut self.volume)?)
     }
 
     /// Writes the POSIX permission bits of `mode` into the object's
@@ -2116,8 +2138,11 @@ impl<D: BlockDevice> Vfs<D> {
         let current = self.stat(object_id)?;
         let uid = owner_uid.unwrap_or(current.owner_uid);
         let gid = owner_gid.unwrap_or(current.owner_gid);
-        self.checkpoint_data_window(now)?;
-        Ok(self.volume.set_object_owner(object_id, uid, gid, now)?)
+        self.stage_or_commit(
+            now,
+            |volume| volume.window_set_object_owner(object_id, uid, gid, now),
+            |volume| volume.set_object_owner(object_id, uid, gid, now),
+        )
     }
 
     /// Sets the modification time, as `utimes` does.
@@ -2134,8 +2159,11 @@ impl<D: BlockDevice> Vfs<D> {
         now: Timespec,
     ) -> Result<(), VfsError> {
         self.stat(object_id)?;
-        self.checkpoint_data_window(now)?;
-        Ok(self.volume.set_object_times(object_id, modified, now)?)
+        self.stage_or_commit(
+            now,
+            |volume| volume.window_set_object_times(object_id, modified, now),
+            |volume| volume.set_object_times(object_id, modified, now),
+        )
     }
 
     /// The value of the attribute `name`, or `None` when the object has no
@@ -2183,8 +2211,11 @@ impl<D: BlockDevice> Vfs<D> {
         }) {
             return Err(VfsError::Invalid);
         }
-        self.checkpoint_data_window(now)?;
-        Ok(self.volume.set_attributes(object_id, changes, mode, now)?)
+        self.stage_or_commit(
+            now,
+            |volume| volume.window_set_attributes(object_id, changes, mode, now),
+            |volume| volume.set_attributes(object_id, changes, mode, now),
+        )
     }
 
     /// Largest stored comment, in UTF-8 bytes.
@@ -2209,8 +2240,11 @@ impl<D: BlockDevice> Vfs<D> {
         if comment.len() > Self::COMMENT_MAX_BYTES {
             return Err(VfsError::Limit("comment exceeds the stored bound"));
         }
-        self.checkpoint_data_window(now)?;
-        Ok(self.volume.set_object_comment(object_id, comment, now)?)
+        self.stage_or_commit(
+            now,
+            |volume| volume.window_set_object_comment(object_id, comment, now),
+            |volume| volume.set_object_comment(object_id, comment, now),
+        )
     }
 
     /// Sets the modification time chosen by the caller. Creation time,

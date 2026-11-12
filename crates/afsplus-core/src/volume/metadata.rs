@@ -268,6 +268,173 @@ impl<D: BlockDevice> Volume<D> {
         )
     }
 
+    /// [`Self::set_object_protection`] staged in the open window (ADR-121).
+    /// See [`Self::window_edit_record`].
+    pub fn window_set_object_protection(
+        &mut self,
+        object_id: u64,
+        protection: u32,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(
+            crate::flight::ApiMethod::WindowSetObjectProtection,
+            |volume| {
+                volume.window_edit_record(object_id, now, false, |volume, record| {
+                    if record.protection == protection {
+                        return Ok(false);
+                    }
+                    volume.project_protection(record, protection)?;
+                    Ok(true)
+                })
+            },
+        )
+    }
+
+    /// [`Self::set_object_owner`] staged in the open window.
+    pub fn window_set_object_owner(
+        &mut self,
+        object_id: u64,
+        owner_uid: u32,
+        owner_gid: u32,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WindowSetObjectOwner, |volume| {
+            volume.window_edit_record(object_id, now, false, |_, record| {
+                if record.owner_uid == owner_uid && record.owner_gid == owner_gid {
+                    return Ok(false);
+                }
+                record.owner_uid = owner_uid;
+                record.owner_gid = owner_gid;
+                Ok(true)
+            })
+        })
+    }
+
+    /// [`Self::set_object_times`] staged in the open window.
+    pub fn window_set_object_times(
+        &mut self,
+        object_id: u64,
+        modified: Timespec,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WindowSetObjectTimes, |volume| {
+            validate_time(modified)?;
+            volume.window_edit_record(object_id, now, true, |_, record| {
+                if record.modified == modified {
+                    return Ok(false);
+                }
+                record.modified = modified;
+                Ok(true)
+            })
+        })
+    }
+
+    /// [`Self::set_object_comment`] staged in the open window.
+    pub fn window_set_object_comment(
+        &mut self,
+        object_id: u64,
+        comment: &str,
+        now: Timespec,
+    ) -> Result<(), CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WindowSetObjectComment, |volume| {
+            let comment = afsplus_format::object::Comment::new(comment)
+                .map_err(|_| CoreError::InvalidMetadata("object comment out of range"))?;
+            volume.window_edit_record(object_id, now, false, |_, record| {
+                if record.comment == comment {
+                    return Ok(false);
+                }
+                *record = record.with_comment(comment);
+                Ok(true)
+            })
+        })
+    }
+
+    /// Stages one edit of an object record in the open window, opening it
+    /// if needed (ADR-121 decision 8). The record is rewritten in memory
+    /// only; the window's commit publishes it with everything else the
+    /// window holds, so a power cut leaves every staged change of the window
+    /// or none, and a later operation never survives an earlier one. No log
+    /// record describes the edit, so an fsync commits the window instead of
+    /// logging it. `edit` answers whether it changed anything; an unchanged
+    /// record stages nothing. A symlink, whose record block also holds its
+    /// target, and the root are [`CoreError::PrototypeLimit`]: the caller
+    /// commits the window and edits immediately. So is a time edit of a
+    /// directory with no settable record yet.
+    fn window_edit_record(
+        &mut self,
+        object_id: u64,
+        now: Timespec,
+        sets_time: bool,
+        edit: impl FnOnce(&Self, &mut ObjectRecord) -> Result<bool, CoreError>,
+    ) -> Result<(), CoreError> {
+        validate_time(now)?;
+        self.ensure_public_object_id(object_id)?;
+        let mut window = self.take_or_open_window()?;
+        // Nothing below writes to the device or the allocator, so any
+        // refusal leaves the window exactly as it was.
+        let result = (|| {
+            let mut record = self.window_editable_record(&window, object_id)?;
+            if !edit(self, &mut record)? {
+                return Ok(());
+            }
+            record.changed = now;
+            if sets_time && record.object_type == ObjectType::Directory {
+                // The staged time must outlast the entry changes before it,
+                // which materialization would otherwise stamp over it.
+                window.pending.dir_timestamps.remove(&object_id);
+                window.pending.dir_times_set.insert(object_id);
+            }
+            self.window_stage_record(&mut window, record)
+        })();
+        self.window = Some(window);
+        result
+    }
+
+    /// The record of `object_id` as the window leaves it, if the window may
+    /// stage an edit of it.
+    pub(super) fn window_editable_record(
+        &mut self,
+        window: &OpenWindow,
+        object_id: u64,
+    ) -> Result<ObjectRecord, CoreError> {
+        let record = self
+            .batch_record(&window.pending, object_id)?
+            .ok_or(CoreError::NotFound)?;
+        let record = Self::as_window_leaves_it(window, object_id, record);
+        match record.object_type {
+            ObjectType::Internal => Err(CoreError::NotFound),
+            ObjectType::Symlink => Err(CoreError::PrototypeLimit(
+                "a symlink record is rewritten with its target, outside the window",
+            )),
+            _ if object_id == OBJECT_ROOT => Err(CoreError::PrototypeLimit(
+                "the root record is edited outside the window",
+            )),
+            _ => Ok(record),
+        }
+    }
+
+    /// Puts an edited record into the window, remembering the committed
+    /// block it replaces so that the commit retires exactly that one.
+    pub(super) fn window_stage_record(
+        &mut self,
+        window: &mut OpenWindow,
+        record: ObjectRecord,
+    ) -> Result<(), CoreError> {
+        PreservedMetadata::from(ObjectMetadata::from(record)).validate()?;
+        let object_id = record.object_id;
+        if let std::collections::btree_map::Entry::Vacant(slot) =
+            window.pending.committed_record_lbas.entry(object_id)
+        {
+            // An object the window created has no committed block.
+            if let Some(lba) = self.object_record_lba(object_id)? {
+                slot.insert(lba);
+            }
+        }
+        window.pending.records.insert(object_id, Some(record));
+        window.unloggable = true;
+        Ok(())
+    }
+
     fn metadata_target(&mut self, object_id: u64) -> Result<ObjectRecord, CoreError> {
         let record = self.visible_record(object_id)?.ok_or(CoreError::NotFound)?;
         if record.object_type == ObjectType::Internal {

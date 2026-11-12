@@ -12,7 +12,9 @@ use afsplus_format::attrs::ATTRIBUTE_VALUE_MAX_BYTES;
 use afsplus_format::posix;
 use afsplus_format::{Timespec, OBJECT_ROOT};
 pub use afsplus_vfs::AttributeWriteMode;
-use afsplus_vfs::{AccessMode, Handle, NodeKind, ObjectId, Stat, StatFs, Vfs, VfsError};
+use afsplus_vfs::{
+    AccessMode, Durability, Handle, NodeKind, ObjectId, Stat, StatFs, Vfs, VfsError,
+};
 
 pub mod diagnostics;
 #[cfg(feature = "fuser-adapter")]
@@ -335,8 +337,34 @@ impl<D: BlockDevice> FuseAdapter<D> {
     /// either, because the macOS driver answers one request at a time and
     /// every other program waits behind whatever a request does. The driver
     /// calls this from a thread of its own.
+    ///
+    /// On a delayed mount (ADR-121) this is also the clock that commits the
+    /// window once the volume has been idle for a second or its oldest
+    /// change reaches the maximum age; deleted files are cleaned only when
+    /// no window is open, so that cleanup does not commit a window early.
     pub fn maintenance_step(&mut self, now: Timespec) -> bool {
+        if matches!(self.vfs.durability(), Durability::Delayed { .. }) {
+            // A failed commit has already been reported to nobody: the next
+            // request that needs the window answers the error.
+            let _ = self.vfs.commit_if_due(now);
+            if self.vfs.changes_pending() {
+                return false;
+            }
+        }
         self.vfs.maintenance_step(now).unwrap_or(false)
+    }
+
+    /// When changes reach the disk; see [`Vfs::set_durability`]. A delayed
+    /// mount makes no data write durable before answering it, whatever
+    /// [`FuseConfig::durable_data_replies`] says: the window's commit, an
+    /// fsync that reaches the driver and the unmount are its durability
+    /// points.
+    pub fn set_durability(&mut self, durability: Durability) -> Result<(), VfsError> {
+        self.vfs.set_durability(durability)
+    }
+
+    pub fn durability(&self) -> Durability {
+        self.vfs.durability()
     }
 
     /// Opens a file, or a symlink itself.
@@ -437,6 +465,13 @@ impl<D: BlockDevice> FuseAdapter<D> {
         size: u64,
         now: Timespec,
     ) -> Result<FuseAttributes, VfsError> {
+        // macOS announces the size of every file it has written, after the
+        // writes; a truncation to the size the file has changes nothing,
+        // and doing it anyway rewrote a new file's data a second time.
+        let current = self.attributes(object_id)?;
+        if current.kind == NodeKind::File && current.size == size {
+            return Ok(current);
+        }
         if let Some(handle) = handle.filter(|handle| !self.is_symlink_handle(*handle)) {
             self.vfs.truncate(handle, size, now)?;
             self.finish_data_mutation(handle)?;
@@ -829,7 +864,7 @@ impl<D: BlockDevice> FuseAdapter<D> {
     }
 
     fn finish_data_mutation(&mut self, handle: Handle) -> Result<(), VfsError> {
-        if self.config.durable_data_replies {
+        if self.config.durable_data_replies && self.vfs.durability() == Durability::Sync {
             self.vfs.fsync(handle)
         } else {
             Ok(())

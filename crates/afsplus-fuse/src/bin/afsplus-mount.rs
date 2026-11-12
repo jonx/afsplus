@@ -11,7 +11,7 @@ use afsplus_format::DEFAULT_BLOCK_SIZE;
 use afsplus_fuse::diagnostics::{self, Diagnostics};
 use afsplus_fuse::fuser_adapter::FuserFilesystem;
 use afsplus_fuse::{host_names, FuseConfig};
-use afsplus_vfs::Vfs;
+use afsplus_vfs::{Durability, Vfs};
 use fuser::{Config, MountOption, SessionACL};
 use nix::unistd::{getegid, geteuid};
 
@@ -71,7 +71,13 @@ fn init_logging() {
 }
 
 fn run() -> Result<(), String> {
-    let (mode, image, mountpoint, diagnostics_path) = arguments()?;
+    let Arguments {
+        mode,
+        image,
+        mountpoint,
+        diagnostics: diagnostics_path,
+        commit,
+    } = arguments()?;
     let (uid, gid) = mount_ownership(&mountpoint)?;
 
     let device = open_image(&image)?;
@@ -95,15 +101,26 @@ fn run() -> Result<(), String> {
     };
     // Named after the committed label, read from the mounted volume.
     let names = host_names(&vfs);
+    if mode == MountMode::ReadWrite {
+        if let Commit::Delayed { max_age_seconds } = commit {
+            vfs.set_durability(Durability::Delayed {
+                idle_ms: 1_000,
+                max_age_ms: max_age_seconds * 1_000,
+            })
+            .map_err(|error| format!("--commit: this volume cannot delay commits: {error}"))?;
+        }
+    }
     let filesystem = FuserFilesystem::new(
         vfs,
         FuseConfig {
             uid,
             gid,
             // macFUSE's FSKit backend can return from host fsync without
-            // forwarding FUSE_FSYNC. Complete every data mutation durably so
-            // that the missing transport notification cannot lose an
-            // acknowledged host durability point.
+            // forwarding FUSE_FSYNC (still so in 5.5.0). Complete every data
+            // mutation durably so that the missing transport notification
+            // cannot lose an acknowledged host durability point. A delayed
+            // mount (--commit) gives this up by request; the adapter then
+            // ignores it.
             durable_data_replies: cfg!(all(target_os = "macos", feature = "macfuse-mount")),
             // The same backend sends removexattr(2) as a SETXATTR without
             // bytes and never sends REMOVEXATTR.
@@ -311,9 +328,51 @@ fn mount_session(
     fuser::mount(filesystem, mountpoint, &config)
 }
 
-fn arguments() -> Result<(MountMode, PathBuf, PathBuf, Option<PathBuf>), String> {
+/// When changes reach the image (ADR-121).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Commit {
+    /// Every operation is durable before it is answered. The default.
+    Sync,
+    /// Operations gather in the open window and are committed together
+    /// after a second of idleness, at this age, at the window's bound, at
+    /// an fsync that reaches the driver and at unmount.
+    Delayed { max_age_seconds: u32 },
+}
+
+/// ADR-121's default maximum age, and the range the AROS `COMMIT=` option
+/// takes.
+const DELAYED_MAX_AGE_DEFAULT: u32 = 5;
+const DELAYED_MAX_AGE_RANGE: std::ops::RangeInclusive<u32> = 1..=60;
+
+fn parse_commit(value: &str) -> Result<Commit, String> {
+    match value {
+        "sync" => Ok(Commit::Sync),
+        "delayed" => Ok(Commit::Delayed {
+            max_age_seconds: DELAYED_MAX_AGE_DEFAULT,
+        }),
+        seconds => match seconds.parse::<u32>() {
+            Ok(seconds) if DELAYED_MAX_AGE_RANGE.contains(&seconds) => Ok(Commit::Delayed {
+                max_age_seconds: seconds,
+            }),
+            _ => Err(format!(
+                "--commit takes sync, delayed or a maximum age of 1 to 60 seconds, not {value:?}"
+            )),
+        },
+    }
+}
+
+struct Arguments {
+    mode: MountMode,
+    image: PathBuf,
+    mountpoint: PathBuf,
+    diagnostics: Option<PathBuf>,
+    commit: Commit,
+}
+
+fn arguments() -> Result<Arguments, String> {
     let mut mode = MountMode::ReadWrite;
     let mut diagnostics = None;
+    let mut commit = Commit::Sync;
     let mut paths = Vec::new();
     for argument in std::env::args().skip(1) {
         match argument.as_str() {
@@ -328,6 +387,9 @@ fn arguments() -> Result<(MountMode, PathBuf, PathBuf, Option<PathBuf>), String>
                 }
                 diagnostics = Some(PathBuf::from(path));
             }
+            value if value.starts_with("--commit=") => {
+                commit = parse_commit(value.trim_start_matches("--commit="))?;
+            }
             value if value.starts_with('-') => {
                 return Err(format!("unknown option {value}\n{}", usage()));
             }
@@ -337,12 +399,23 @@ fn arguments() -> Result<(MountMode, PathBuf, PathBuf, Option<PathBuf>), String>
     if paths.len() != 2 {
         return Err(usage().into());
     }
-    Ok((mode, paths.remove(0), paths.remove(0), diagnostics))
+    Ok(Arguments {
+        mode,
+        image: paths.remove(0),
+        mountpoint: paths.remove(0),
+        diagnostics,
+        commit,
+    })
 }
 
 fn usage() -> &'static str {
     "usage: afsplus-mount [--read-only|--no-changes|--recovery] \
-     [--diagnostics=<file>] <image> <mountpoint>"
+     [--commit=sync|delayed|<seconds>] [--diagnostics=<file>] <image> <mountpoint>\n\
+     --commit=sync (default): every operation is durable before it is answered.\n\
+     --commit=delayed or 1-60: operations are committed together after a second\n\
+     of idleness, at that age (5 s for delayed), at fsync and at unmount; a crash\n\
+     loses the uncommitted operations whole and in order. macOS does not pass\n\
+     fsync(2) to the driver, so there only unmount and the timer are durability points."
 }
 
 fn open_image(path: &Path) -> Result<FileBackend, String> {
@@ -402,7 +475,7 @@ mod supervisor {
             return ExitCode::from(1);
         }
         let mountpoint: PathBuf = match super::arguments() {
-            Ok((_, _, mountpoint, _)) => mountpoint,
+            Ok(arguments) => arguments.mountpoint,
             Err(error) => {
                 eprintln!("afsplus-mount: {error}");
                 return ExitCode::from(1);

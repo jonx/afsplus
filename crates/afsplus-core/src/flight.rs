@@ -520,6 +520,11 @@ pub enum ApiMethod {
     CreateRestoreStage = 89,
     ValidateRestoreStageParent = 90,
     DiscardRestoreFileStep = 91,
+    WindowSetObjectProtection = 92,
+    WindowSetObjectOwner = 93,
+    WindowSetObjectTimes = 94,
+    WindowSetObjectComment = 95,
+    WindowSetAttributes = 96,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
