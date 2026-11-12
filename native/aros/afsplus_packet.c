@@ -765,6 +765,13 @@ static int32_t fill_fib_name(UBYTE *destination, size_t capacity,
     return 0;
 }
 
+/* dos/dos64.h positional transfer packets, for SDKs that do not name them */
+#define AFSPLUS_ACTION_READ_AT64 2021
+#define AFSPLUS_ACTION_WRITE_AT64 2022
+
+/* dos/dos.h FIBEXTF_OBJECTKEY: fib_ObjectKey identifies the object. */
+#define AFSPLUS_FIBEXTF_OBJECTKEY 2
+
 static int32_t fill_fib(struct FileInfoBlock *fib, uint32_t wide,
     const struct AfsplusArosFileInfo *info, const uint8_t *name,
     const uint8_t *comment, uint32_t comment_length)
@@ -796,6 +803,15 @@ static int32_t fill_fib(struct FileInfoBlock *fib, uint32_t wide,
     {
         fib->fib_Size64 = info->size;
         fib->fib_NumBlocks64 = info->blocks;
+        /* The object's identity, for st_ino. fib_DiskKey holds the scan
+           position. Written by offset: the handler also builds against
+           SDKs whose FileInfoBlock does not name the field yet. */
+        if (info->object_id != 0)
+        {
+            memcpy((uint8_t *)&fib->fib_Size64 + 16, &info->object_id,
+                sizeof(info->object_id));
+            fib->fib_ActExtFlags |= AFSPLUS_FIBEXTF_OBJECTKEY;
+        }
     }
     unix_to_datestamp(info->modified_seconds, info->modified_nanoseconds,
         &fib->fib_Date);
@@ -2211,6 +2227,42 @@ int32_t afsplus_aros_packet_process(
             public_file->fh_Port = DOSFALSE;
             result = DOSTRUE;
         }
+        break;
+    }
+    case AFSPLUS_ACTION_READ_AT64:
+    case AFSPLUS_ACTION_WRITE_AT64:
+    {
+        /* dos/dos64.h: transfer at *dp_Arg4, the handle's position is
+           neither used nor changed. */
+        struct AfsplusArosNativeFile *file = find_file(context,
+            (BPTR)packet->dp_Arg1);
+        const int64_t *at = (const int64_t *)packet->dp_Arg4;
+        uint32_t count = 0;
+
+        if (file == NULL)
+            error = ERROR_INVALID_LOCK;
+        if (error == 0 && (at == NULL || *at < 0 || packet->dp_Arg3 < 0
+            || (uint64_t)packet->dp_Arg3 > UINT32_MAX
+            || (packet->dp_Arg3 != 0 && packet->dp_Arg2 == 0)))
+            error = ERROR_BAD_NUMBER;
+        if (error == 0 && packet->dp_Type == AFSPLUS_ACTION_READ_AT64)
+            error = afsplus_aros_read_at(context->filesystem, file->id,
+                (uint64_t)*at, (uint8_t *)packet->dp_Arg2,
+                (uint32_t)packet->dp_Arg3, &count);
+        else if (error == 0)
+        {
+            int64_t seconds;
+            uint32_t nanoseconds;
+            if (!file->writable)
+                error = ERROR_DISK_WRITE_PROTECTED;
+            if (error == 0)
+                error = packet_now(context, &seconds, &nanoseconds);
+            if (error == 0)
+                error = afsplus_aros_write_at(context->filesystem, file->id,
+                    (uint64_t)*at, (const uint8_t *)packet->dp_Arg2,
+                    (uint32_t)packet->dp_Arg3, seconds, nanoseconds, &count);
+        }
+        result = error == 0 ? (SIPTR)count : (SIPTR)-1;
         break;
     }
     case ACTION_READ:
